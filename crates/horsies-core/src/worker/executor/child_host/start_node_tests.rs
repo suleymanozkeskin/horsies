@@ -4,9 +4,7 @@
 //! for a plain task, and misses with `NODE_NOT_LINKED` when the node is not
 //! open; the child's stop before start then cancels the owned orphan when
 //! the orphan self-heal of the run is on, and leaves the row CLAIMED when it
-//! is off (Python `test_workflow_node_handoff.py`, `child_runner.py`
-//! `_confirm_ownership_and_set_running`, `_after_missed_start`,
-//! `test_lifecycle_classification.py::TestOrphanedWorkflowTask`).
+//! is off (Python `test_workflow_node_handoff.py`).
 //!
 //! These tests drove the worker's in-process start before it was removed
 //! (#764); they now drive the start of the child.
@@ -16,7 +14,6 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::host::{ChildApp, ChildLogSetup, ChildStartHook};
@@ -24,23 +21,28 @@ use super::link::FrameWriter;
 use super::run::{start_attempt, HostContext, RunFacts, Started};
 use crate::broker::{OrphanSelfHeal, PostgresBroker};
 use crate::core::registry::task::TaskRegistry;
+use crate::test_support::sql::{self, TestPool};
 use crate::worker::executor::protocol::StopReason;
 
 const WORKER_ID: &str = "w1";
 const TASK_NAME: &str = "p1_task";
 
 /// A child context on `pool`; its frames go to a socket no one reads.
-fn context(pool: PgPool) -> (HostContext, UnixStream) {
+fn context(pool: TestPool) -> (HostContext, UnixStream) {
     let (ours, theirs) = UnixStream::pair().expect("a socket pair");
     let writer = FrameWriter::start(ours, 16).expect("the frame writer starts");
     let context = HostContext {
-        broker: Arc::new(PostgresBroker::from_pool(pool)),
+        broker: Arc::new(PostgresBroker::from_test_url(
+            pool.url(),
+            crate::ClientFamily::Rust,
+        )),
         app: Arc::new(ChildApp {
             registry: Arc::new(TaskRegistry::new()),
             hostname: "h1".to_owned(),
             start_hook: ChildStartHook::NoHook,
             producer_manifest: super::producer::test_producer_manifest(),
             log_setup: ChildLogSetup::NoSetup,
+            family: crate::ClientFamily::Rust,
         }),
         pid: 1,
         writer,
@@ -50,8 +52,8 @@ fn context(pool: PgPool) -> (HostContext, UnixStream) {
 
 /// A CLAIMED row of [`WORKER_ID`]; a workflow task carries no command
 /// fingerprint. Returns the claim generation.
-async fn seed_claimed(pool: &PgPool, task_id: Uuid, is_workflow_task: bool) -> DateTime<Utc> {
-    sqlx::query_scalar(
+async fn seed_claimed(pool: &TestPool, task_id: Uuid, is_workflow_task: bool) -> DateTime<Utc> {
+    sql::query_scalar(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -81,8 +83,8 @@ async fn seed_claimed(pool: &PgPool, task_id: Uuid, is_workflow_task: bool) -> D
     .expect("seed a CLAIMED row")
 }
 
-async fn seed_workflow(pool: &PgPool, workflow_id: Uuid) {
-    sqlx::query(
+async fn seed_workflow(pool: &TestPool, workflow_id: Uuid) {
+    sql::query(
         "INSERT INTO horsies_workflows (
             id, name, status, on_error, output_task_index, definition_key, depth,
             root_workflow_id, sent_at, created_at, started_at, updated_at
@@ -97,14 +99,14 @@ async fn seed_workflow(pool: &PgPool, workflow_id: Uuid) {
 
 /// The node of `task_id` at index 0 in `status`, with `started_at`.
 async fn seed_node(
-    pool: &PgPool,
+    pool: &TestPool,
     node_id: Uuid,
     workflow_id: Uuid,
     task_id: Uuid,
     status: &str,
     started_at: Option<DateTime<Utc>>,
 ) {
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
             queue_name, priority, dependencies, allow_failed_deps, join_type, status,
@@ -143,9 +145,9 @@ fn facts(task_id: Uuid, claimed_at: DateTime<Utc>) -> RunFacts {
     facts_with(task_id, claimed_at, OrphanSelfHeal::On)
 }
 
-async fn remove_case(pool: &PgPool, workflow_id: Option<Uuid>, task_id: Uuid) {
+async fn remove_case(pool: &TestPool, workflow_id: Option<Uuid>, task_id: Uuid) {
     if let Some(workflow_id) = workflow_id {
-        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+        sql::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
             .bind(workflow_id)
             .execute(pool)
             .await
@@ -156,14 +158,14 @@ async fn remove_case(pool: &PgPool, workflow_id: Option<Uuid>, task_id: Uuid) {
         "DELETE FROM horsies_tasks WHERE id = $1",
         "DELETE FROM horsies_task_history WHERE task_id = $1",
     ] {
-        sqlx::query(statement)
+        sql::query(statement)
             .bind(task_id)
             .execute(pool)
             .await
             .expect("remove the task");
     }
     if let Some(workflow_id) = workflow_id {
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
             .execute(pool)
             .await
@@ -176,7 +178,7 @@ async fn remove_case(pool: &PgPool, workflow_id: Option<Uuid>, task_id: Uuid) {
 #[tokio::test]
 #[serial]
 async fn workflow_task_still_transitions_node_to_running() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let workflow_id = Uuid::new_v4();
     let task_id = Uuid::new_v4();
     seed_workflow(&pool, workflow_id).await;
@@ -195,7 +197,7 @@ async fn workflow_task_still_transitions_node_to_running() {
     let started = start_attempt(&context, &facts(task_id, claimed_at)).await;
 
     assert!(matches!(started, Started::Running));
-    let (node_status, node_started_at): (String, Option<DateTime<Utc>>) = sqlx::query_as(
+    let (node_status, node_started_at): (String, Option<DateTime<Utc>>) = sql::query_as(
         "SELECT status, started_at FROM horsies_workflow_tasks WHERE workflow_id = $1",
     )
     .bind(workflow_id)
@@ -218,7 +220,7 @@ async fn workflow_task_still_transitions_node_to_running() {
 #[tokio::test]
 #[serial]
 async fn running_replay_preserves_the_first_node_start() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let workflow_id = Uuid::new_v4();
     let task_id = Uuid::new_v4();
     let first_started_at =
@@ -236,7 +238,7 @@ async fn running_replay_preserves_the_first_node_start() {
     .await;
     let claimed_at = seed_claimed(&pool, task_id, true).await;
     let before: String =
-        sqlx::query_scalar("SELECT ctid::text FROM horsies_workflow_tasks WHERE workflow_id = $1")
+        sql::query_scalar("SELECT ctid::text FROM horsies_workflow_tasks WHERE workflow_id = $1")
             .bind(workflow_id)
             .fetch_one(&pool)
             .await
@@ -247,14 +249,14 @@ async fn running_replay_preserves_the_first_node_start() {
 
     assert!(matches!(started, Started::Running));
     let persisted: DateTime<Utc> =
-        sqlx::query_scalar("SELECT started_at FROM horsies_workflow_tasks WHERE workflow_id = $1")
+        sql::query_scalar("SELECT started_at FROM horsies_workflow_tasks WHERE workflow_id = $1")
             .bind(workflow_id)
             .fetch_one(&pool)
             .await
             .expect("read the node start");
     assert_eq!(persisted, first_started_at);
     let after: String =
-        sqlx::query_scalar("SELECT ctid::text FROM horsies_workflow_tasks WHERE workflow_id = $1")
+        sql::query_scalar("SELECT ctid::text FROM horsies_workflow_tasks WHERE workflow_id = $1")
             .bind(workflow_id)
             .fetch_one(&pool)
             .await
@@ -270,7 +272,7 @@ async fn running_replay_preserves_the_first_node_start() {
 #[tokio::test]
 #[serial]
 async fn plain_task_starts_running_without_workflow_update() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let task_id = Uuid::new_v4();
     let claimed_at = seed_claimed(&pool, task_id, false).await;
     let (context, _peer) = context(pool.clone());
@@ -278,7 +280,7 @@ async fn plain_task_starts_running_without_workflow_update() {
     let started = start_attempt(&context, &facts(task_id, claimed_at)).await;
 
     assert!(matches!(started, Started::Running));
-    let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+    let status: String = sql::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(&pool)
         .await
@@ -296,7 +298,7 @@ async fn plain_task_starts_running_without_workflow_update() {
 #[tokio::test]
 #[serial]
 async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     for status in [
         Some("ENQUEUED"),
         Some("READY"),
@@ -326,19 +328,19 @@ async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
         };
 
         let persisted: Option<String> =
-            sqlx::query_scalar("SELECT status FROM horsies_workflow_tasks WHERE id = $1")
+            sql::query_scalar("SELECT status FROM horsies_workflow_tasks WHERE id = $1")
                 .bind(node_id)
                 .fetch_optional(&pool)
                 .await
                 .expect("read the node");
         let task_state: Option<String> =
-            sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+            sql::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
                 .bind(task_id)
                 .fetch_optional(&pool)
                 .await
                 .expect("read the row");
         let history: Option<String> =
-            sqlx::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
+            sql::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
                 .bind(task_id)
                 .fetch_optional(&pool)
                 .await
@@ -367,9 +369,9 @@ async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
     seed_node(&pool, node_id, workflow_id, task_id, "ENQUEUED", None).await;
     let claimed_at = seed_claimed(&pool, task_id, true).await;
     let mut held = pool.begin().await.expect("begin the node update");
-    sqlx::query("UPDATE horsies_workflow_tasks SET status = 'FAILED' WHERE id = $1")
+    sql::query("UPDATE horsies_workflow_tasks SET status = 'FAILED' WHERE id = $1")
         .bind(node_id)
-        .execute(held.as_mut())
+        .execute(&mut *held)
         .await
         .expect("update the node");
     let (context, _peer) = context(pool.clone());
@@ -377,7 +379,7 @@ async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
         tokio::spawn(async move { start_attempt(&context, &facts(task_id, claimed_at)).await });
     let mut waited = false;
     for _ in 0..500 {
-        waited = sqlx::query_scalar(
+        waited = sql::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM pg_stat_activity
                            WHERE datname = current_database()
                              AND wait_event_type = 'Lock' AND pid <> pg_backend_pid())",
@@ -398,7 +400,7 @@ async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
         Started::Stopped(StopReason::OrphanCancelled)
     ));
     let node_status: String =
-        sqlx::query_scalar("SELECT status FROM horsies_workflow_tasks WHERE id = $1")
+        sql::query_scalar("SELECT status FROM horsies_workflow_tasks WHERE id = $1")
             .bind(node_id)
             .fetch_one(&pool)
             .await
@@ -407,15 +409,14 @@ async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
     remove_case(&pool, Some(workflow_id), task_id).await;
 }
 
-/// Python `test_lifecycle_classification.py::TestOrphanedWorkflowTask::test_self_heal_enabled_cancels_the_orphan`:
-/// with the orphan self-heal of the run on, the start of a workflow task
+/// With the orphan self-heal of the run on, the start of a workflow task
 /// that no node links ends `ORPHAN_CANCELLED`, and the stop before start
 /// moved the row to history as CANCELLED with `WORKFLOW_CHECK_FAILED`, in
 /// the child.
 #[tokio::test]
 #[serial]
 async fn an_unlinked_task_is_cancelled_in_the_child_when_the_self_heal_is_on() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let task_id = Uuid::new_v4();
     let claimed_at = seed_claimed(&pool, task_id, true).await;
     let (context, _peer) = context(pool.clone());
@@ -430,7 +431,7 @@ async fn an_unlinked_task_is_cancelled_in_the_child_when_the_self_heal_is_on() {
         started,
         Started::Stopped(StopReason::OrphanCancelled)
     ));
-    let (status, error_code): (String, Option<String>) = sqlx::query_as(
+    let (status, error_code): (String, Option<String>) = sql::query_as(
         "SELECT status::text, error_code FROM horsies_task_history WHERE task_id = $1",
     )
     .bind(task_id)
@@ -442,14 +443,13 @@ async fn an_unlinked_task_is_cancelled_in_the_child_when_the_self_heal_is_on() {
     remove_case(&pool, None, task_id).await;
 }
 
-/// Python `test_lifecycle_classification.py::TestOrphanedWorkflowTask::test_self_heal_disabled_leaves_it_claimed`:
-/// with the orphan self-heal of the run off, the start ends
+/// With the orphan self-heal of the run off, the start ends
 /// `NODE_NOT_LINKED`, and the row stays CLAIMED by this claim with no
 /// history row.
 #[tokio::test]
 #[serial]
 async fn an_unlinked_task_stays_claimed_when_the_self_heal_is_off() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let task_id = Uuid::new_v4();
     let claimed_at = seed_claimed(&pool, task_id, true).await;
     let (context, _peer) = context(pool.clone());
@@ -464,17 +464,16 @@ async fn an_unlinked_task_stays_claimed_when_the_self_heal_is_off() {
         started,
         Started::Stopped(StopReason::NodeNotLinked)
     ));
-    let (status, holder): (String, Option<String>) = sqlx::query_as(
-        "SELECT status::text, claimed_by_worker_id FROM horsies_tasks WHERE id = $1",
-    )
-    .bind(task_id)
-    .fetch_one(&pool)
-    .await
-    .expect("read the row");
+    let (status, holder): (String, Option<String>) =
+        sql::query_as("SELECT status::text, claimed_by_worker_id FROM horsies_tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the row");
     assert_eq!(status, "CLAIMED");
     assert_eq!(holder.as_deref(), Some(WORKER_ID));
     let history: Option<String> =
-        sqlx::query_scalar("SELECT status::text FROM horsies_task_history WHERE task_id = $1")
+        sql::query_scalar("SELECT status::text FROM horsies_task_history WHERE task_id = $1")
             .bind(task_id)
             .fetch_optional(&pool)
             .await

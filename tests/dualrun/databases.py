@@ -1,4 +1,4 @@
-"""Fresh ``dualrun_`` databases with the baseline schema, for the integration tests.
+"""Fresh ``dualrun_`` databases with the schema of the core's install, for the integration tests.
 
 The server comes from ``tests.session_database.base_database_url`` (the
 ``HORSIES_TEST_DATABASE_URL`` override, else the local default). These
@@ -8,19 +8,24 @@ functions create and drop only databases whose name matches
 
 from __future__ import annotations
 
-import asyncio
 import re
 import uuid
 from dataclasses import dataclass
 from enum import Enum
-from typing import Final
+from typing import Final, assert_never
 
 import psycopg
 from psycopg import sql
+from pydantic import SecretStr
 from sqlalchemy.engine import make_url
 
-from horsies.core.baseline.install import install_baseline
-from horsies.core.baseline.migration import load_baseline_migration
+from horsies._catalog.broker_errors import BrokerOperationFailed
+from horsies._catalog.manifest import dump_producer_manifest
+from horsies._core import CoreHandle, SchemaInstalled, SchemaInstallNotRun
+from horsies.core.history.identity.keys import IDEMPOTENCY_WINDOW_DEFAULT
+from horsies.core.manifest import install_coverage_of, to_producer_manifest
+from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.retention import RetentionConfig
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.utils.url import to_psycopg_url
 
@@ -38,7 +43,7 @@ class SetupStep(Enum):
 
 @dataclass(frozen=True, slots=True)
 class DatabaseSetupFailed:
-    """A setup step failed. After CREATE or DROP nothing is known to have changed; after INSTALL the database exists and is empty."""
+    """A setup step failed. After CREATE or DROP nothing is known to have changed; after INSTALL the database exists and holds what the core's install committed before it failed."""
 
     step: SetupStep
     database: str
@@ -84,39 +89,54 @@ def create_database(base_url: str) -> Result[DualRunDatabase, DatabaseSetupFaile
     return Ok(DualRunDatabase(name=name, url=_url_for(base_url, name)))
 
 
-async def _install(url: str) -> Result[None, str]:
-    migration = load_baseline_migration()
-    async with await psycopg.AsyncConnection.connect(
-        url, autocommit=True
-    ) as connection:
-        match await install_baseline(connection, migration):
-            case Err(failed):
-                return Err(f'{failed.step}: {failed.cause}')
-            case Ok():
-                return Ok(None)
-
-
 def install_baseline_schema(
     database: DualRunDatabase,
 ) -> Result[None, DatabaseSetupFailed]:
-    """Install the baseline migration with its bookkeeping and client family rows."""
+    """Install the schema through the core: ``CoreHandle.install_schema`` of a
+    producer handle on ``database``, built as the broker of an app with the
+    default retention builds its handle.
+
+    The core runs the migrations with their bookkeeping row and the
+    ``PYTHON`` family row, publishes the history readers, and ends with the
+    startup coverage pass: the daily history leaves of the current UTC day
+    and of the lookahead for the default classes, and the hourly heartbeat
+    leaves. Leaf names hold the day or the hour of the install; a snapshot
+    reads them as offsets from the start of its run window (``DatedName``).
+    The handle is closed before the return.
+
+    Raises:
+        AssertionError: the install ran nothing, which a handle in the
+            ``MIGRATE_AND_VALIDATE`` mode never answers (a defect).
+    """
+    handle = CoreHandle(
+        dump_producer_manifest(
+            to_producer_manifest(
+                PostgresConfig(database_url=SecretStr(database.url)),
+                schema='MIGRATE_AND_VALIDATE',
+                idempotency_reservation_window=IDEMPOTENCY_WINDOW_DEFAULT,
+            ),
+        ),
+        pool_profile='PRODUCER',
+    ).with_install_coverage(install_coverage_of(RetentionConfig()))
     try:
-        outcome = asyncio.run(_install(database.url))
-    except psycopg.Error as exc:
-        return Err(
-            DatabaseSetupFailed(
-                step=SetupStep.INSTALL, database=database.name, cause=str(exc)
-            )
-        )
+        outcome = handle.install_schema()
+    finally:
+        _ = handle.close()
     match outcome:
-        case Err(cause):
+        case SchemaInstalled():
+            return Ok(None)
+        case SchemaInstallNotRun():
+            raise AssertionError(
+                f'the install of {database.name} ran nothing, but its handle migrates',
+            )
+        case BrokerOperationFailed(message=message):
             return Err(
                 DatabaseSetupFailed(
-                    step=SetupStep.INSTALL, database=database.name, cause=cause
-                )
+                    step=SetupStep.INSTALL, database=database.name, cause=message,
+                ),
             )
-        case Ok():
-            return Ok(None)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def drop_database(

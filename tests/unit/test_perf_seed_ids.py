@@ -12,21 +12,24 @@ import uuid
 
 import pytest
 
+from tests.perf.public_calls import SEND_TASK_NAME, WORKFLOW_TASK_NAME
 from tests.perf.scenarios import (
     ID_BIRTH,
     MAX_SEEDED_INDEX,
+    SCENARIOS,
     Role,
     RowKind,
     SeedIds,
     seed_ids,
     seed_rows,
 )
+from tests.perf.worker_drain import DRAIN_TASK_NAME
 
 pytestmark = [pytest.mark.unit]
 
 
 def _ids() -> SeedIds:
-    return seed_ids('fused-completion-small-result', Role.BASELINE, RowKind.TASK)
+    return seed_ids('seed-ids-first', Role.BASELINE, RowKind.TASK)
 
 
 class TestSeededId:
@@ -67,7 +70,7 @@ class TestIdRange:
         """One run's delete never removes another role's or scenario's rows."""
         ranges = [
             seed_ids(scenario, role, kind)
-            for scenario in ('fused-completion-small-result', 'owned-claim-expiry')
+            for scenario in ('seed-ids-first', 'seed-ids-second')
             for role in Role
             for kind in RowKind
         ]
@@ -79,16 +82,53 @@ class TestIdRange:
 
 class TestSeedRows:
     def test_seed_rows_names_one_range_per_kind_of_its_role(self) -> None:
-        rows = seed_rows('workflow-success-phase2', Role.BALLAST)
+        rows = seed_rows('seed-ids-workflow', Role.BALLAST)
         assert rows.tasks == seed_ids(
-            'workflow-success-phase2', Role.BALLAST, RowKind.TASK
+            'seed-ids-workflow', Role.BALLAST, RowKind.TASK
         )
         assert rows.workflows == seed_ids(
-            'workflow-success-phase2', Role.BALLAST, RowKind.WORKFLOW
+            'seed-ids-workflow', Role.BALLAST, RowKind.WORKFLOW
         )
         assert rows.nodes == seed_ids(
-            'workflow-success-phase2', Role.BALLAST, RowKind.WORKFLOW_NODE
+            'seed-ids-workflow', Role.BALLAST, RowKind.WORKFLOW_NODE
         )
         assert rows.dependent_nodes == seed_ids(
-            'workflow-success-phase2', Role.BALLAST, RowKind.DEPENDENT_NODE
+            'seed-ids-workflow', Role.BALLAST, RowKind.DEPENDENT_NODE
         )
+
+
+class TestScenarioRanges:
+    """Each scenario seeds its ballast under its own name; ``run_scenario``
+    deletes the ballast range of its scenario before and after the run."""
+
+    def test_scenario_names_are_unique(self) -> None:
+        names = [scenario.name for scenario in SCENARIOS]
+        assert len(names) == len(set(names))
+
+    def test_the_ballast_ranges_of_the_scenarios_are_disjoint(self) -> None:
+        """The run of one scenario never deletes the ballast of another."""
+        ranges = sorted(
+            (seed_rows(scenario.name, Role.BALLAST).tasks for scenario in SCENARIOS),
+            key=lambda ids: uuid.UUID(ids.lower),
+        )
+        assert len({ids.prefix for ids in ranges}) == len(SCENARIOS)
+        for earlier, later in zip(ranges, ranges[1:]):
+            assert uuid.UUID(earlier.upper) < uuid.UUID(later.lower)
+
+
+class TestNamedRows:
+    """The library mints the ids of the rows that a public call or a drain
+    writes, so their cleanups delete by task name. A name that two scenarios
+    share would let one cleanup delete the rows of the other."""
+
+    SEEDED_TASK_NAME = 'perf.task'
+    """The task name that the seeds write (``_INSERT_RUNNING_SQL``)."""
+
+    def test_the_task_names_of_the_cleanups_are_distinct(self) -> None:
+        names = [
+            SEND_TASK_NAME,
+            WORKFLOW_TASK_NAME,
+            DRAIN_TASK_NAME,
+            self.SEEDED_TASK_NAME,
+        ]
+        assert len(set(names)) == len(names)

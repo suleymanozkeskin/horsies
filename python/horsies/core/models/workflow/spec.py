@@ -409,8 +409,6 @@ class WorkflowSpec(Generic[OutT]):
         # Phase B: freeze copies in-place (after back-propagation).
         self._freeze_graph()
 
-        self._register_for_subworkflows()
-
     def _isolate_inputs(self) -> list[TaskNode[Any] | SubWorkflowNode[Any]]:
         """Copy input node graph so each spec has independent nodes.
 
@@ -1720,14 +1718,6 @@ class WorkflowSpec(Generic[OutT]):
 
         return errors
 
-    def _register_for_subworkflows(self) -> None:
-        """Register this spec for subworkflow dispatch at runtime."""
-        has_subworkflow = any(isinstance(t, SubWorkflowNode) for t in self.tasks)
-        if has_subworkflow:
-            from horsies.core.workflows.registry import register_workflow_spec
-
-            register_workflow_spec(self)
-
     def _require_definition_key(self) -> str:
         """Require a stable non-empty definition key for top-level workflows."""
         definition_key = self.definition_key
@@ -1743,7 +1733,8 @@ class WorkflowSpec(Generic[OutT]):
         return definition_key
 
     def start(self, workflow_id: str | None = None) -> WorkflowStartResult[WorkflowHandle[OutT]]:
-        """Start workflow execution.
+        """Start workflow execution: ``start_workflow``, a blocking call of the
+        core on the calling thread with the GIL released.
 
         Args:
             workflow_id: Optional custom workflow ID. Auto-generated if not provided.
@@ -1846,9 +1837,8 @@ class WorkflowSpec(Generic[OutT]):
     ) -> 'Result[str, WorkflowStartValidationFailed]':
         """Check that a retryable start error belongs to this workflow.
 
-        The parameter type admits ``WorkflowStartEnqueueFailed``,
-        ``WorkflowStartAsyncContext`` and ``WorkflowStartLoopRunnerFailed``;
-        each carries the id of its start. Another variant, passed by a caller
+        The parameter type admits ``WorkflowStartEnqueueFailed`` and
+        ``WorkflowStartAsyncContext``; each carries the id of its start. Another variant, passed by a caller
         without a type checker, fails an assertion that names it. Refused: an
         error of another workflow. Returns ``Ok(workflow_id)``.
         """
@@ -1856,17 +1846,12 @@ class WorkflowSpec(Generic[OutT]):
         from horsies.core.workflows.start_types import (
             WorkflowStartAsyncContext,
             WorkflowStartEnqueueFailed,
-            WorkflowStartLoopRunnerFailed,
             WorkflowStartValidationFailed,
         )
         from horsies.core.types.result import Ok as _Ok, Err as _Err
 
         match error:
-            case (
-                WorkflowStartEnqueueFailed()
-                | WorkflowStartAsyncContext()
-                | WorkflowStartLoopRunnerFailed()
-            ):
+            case WorkflowStartEnqueueFailed() | WorkflowStartAsyncContext():
                 pass
             case _ as refused:
                 assert_never(refused)
@@ -1891,10 +1876,8 @@ class WorkflowSpec(Generic[OutT]):
         Safe for transient DB retries within the same deploy.  Cannot
         detect spec changes on collision.
 
-        Accepts ``ENQUEUE_FAILED``, ``ASYNC_CONTEXT`` and
-        ``LOOP_RUNNER_FAILED`` errors (``WorkflowStartRetryable``). On a
-        stopped sync runner it returns ``LOOP_RUNNER_FAILED`` again; use
-        ``retry_start_async()``.
+        Accepts ``ENQUEUE_FAILED`` and ``ASYNC_CONTEXT`` errors
+        (``WorkflowStartRetryable``). The start runs as in ``start()``.
 
         Args:
             error: The retryable error from a previous ``start()`` call.
@@ -1917,8 +1900,8 @@ class WorkflowSpec(Generic[OutT]):
     ) -> 'WorkflowStartResult[WorkflowHandle[OutT]]':
         """Async variant of ``retry_start()``.
 
-        It completes the start of an ``ASYNC_CONTEXT`` or ``LOOP_RUNNER_FAILED``
-        error with the error's id.
+        It completes the start of an ``ASYNC_CONTEXT`` error with the error's
+        id.
 
         Args:
             error: The retryable error from a previous ``start()`` or

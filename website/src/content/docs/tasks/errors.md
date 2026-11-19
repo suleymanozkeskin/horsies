@@ -69,7 +69,6 @@ Errors from `handle.get()` / `get_async()`. These indicate issues retrieving the
 | `WORKFLOW_NOT_FOUND` | Workflow ID doesn't exist in database, or retention removed the workflow after `get()` read its terminal status | No |
 | `RESULT_NOT_AVAILABLE` | Result cache was never set | No |
 | `RESULT_NOT_READY` | Result not yet available; task is still running | No |
-| `EVENT_LOOP_LIMIT` | Not returned: `get()` and `get_async()` read on the core of the process, which has no event loop limit. The member stays in the enum | No |
 | `ASYNC_CONTEXT` | Sync `get()` / `result_for()` was called on a thread that runs an event loop; nothing ran; not cached. Call `await handle.get_async()` / `result_for_async()` | No |
 | `INVALID_INPUT` | An argument of `get()` / `get_async()` was refused before any read, for example a `timeout_ms` that is negative, not an int, or above `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms); not cached | No |
 | `WAIT_INSIDE_TASK` | A result wait was called inside a worker child, where task bodies run; it waited for nothing; not cached. Compose the tasks with a workflow: see [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task) | No |
@@ -122,8 +121,6 @@ The codes of the client calls. The error types that carry them are on the client
 | `PAYLOAD_MISMATCH` | The task id exists, and the command or the idempotency key differs from the original send -- the payload was altered between send and retry | Refused |
 | `PAYLOAD_TOO_LARGE` | The serialized input exceeds `payload.reject_bytes` bytes of UTF-8 text; nothing was enqueued | Refused |
 | `IDEMPOTENCY_KEY_CONFLICT` | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. A retry after the reservation ends is accepted | Accepted |
-| `EVENT_LOOP_LIMIT` | Not returned: a send runs on the core of the process, which has no event loop limit. The variant stays in `TaskSendError` | Refused |
-| `LOOP_RUNNER_FAILED` | Not returned: a sync send calls the core on the calling thread, not on the broker's sync runner. The variant stays in `TaskSendError` and in `TaskSendRetryable` | Accepted |
 
 ### Workflow Start Error Codes
 
@@ -134,8 +131,6 @@ The codes of the client calls. The error types that carry them are on the client
 | `VALIDATION_FAILED` | No | A start check (`WorkflowValidationError`) refused the start, or a retry of another workflow's error. Any other exception in the start checks is a defect and propagates. In the start transaction, an exception that is not a database or driver error is a defect and propagates, also a `SerializationError` |
 | `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written. Use another id |
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error. Any other exception in the start transaction propagates |
-| `LOOP_RUNNER_FAILED` | No | Sync `spec.start()` could not run the call on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was written. A stopped runner does not start again: call `await spec.retry_start_async(err)` or use a new broker |
-| `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing was written |
 | `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` was called on a thread that runs an event loop; nothing was written. Call `await spec.retry_start_async(err)` to complete the start with the error's id |
 
 ### Workflow Handle Error Codes
@@ -147,8 +142,6 @@ The codes of the client calls. The error types that carry them are on the client
 | `DB_OPERATION_FAILED` | `HandleDbOperationFailed` | `exception: BaseException` | Driver classification of the cause | A database or driver error. A read changed nothing; `cancel()`, `pause()` and `resume()` before its commit rolled back, or the commit outcome is unknown |
 | `STORED_DATA_INVALID` | `HandleStoredDataInvalid` | `exception: BaseException` | No | A stored workflow status that is not a `WorkflowStatus` (`status()`, `cancel()`), or a subworkflow summary that is not valid (`tasks()`); nothing changed, and a repeat returns the same error |
 | `RESUME_RECOVERY_FAILED` | `HandleResumeRecoveryFailed` | `exception: BaseException` | No | `resume()` committed, and the recovery pass for the workflow tree, which runs after the commit, failed with a database error. The workflow is `RUNNING`; the worker reaper runs the same pass over all workflows. A repeated `resume()` returns `Ok(False)` |
-| `LOOP_RUNNER_FAILED` | `HandleLoopRunnerFailed` | `exception: BaseException` (the `LoopRunnerError`) | No | A sync method could not run the call on the broker's sync runner; nothing ran |
-| `EVENT_LOOP_LIMIT` | `HandleEventLoopLimit` | `loop_limit: EventLoopLimit` | No | `resume()`, `resume_async()`, `resume_workflow()` or `resume_workflow_sync()` ran on a new event loop while the broker serves its limit of open event loops; nothing ran. The other handle methods run on the core and do not return it |
 | `ASYNC_CONTEXT` | `HandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran. Call the `*_async` form (sync `get()` / `result_for()` return `RetrievalCode.ASYNC_CONTEXT` instead) |
 
 `get()` folds a status read failure into its `TaskResult`: `WORKFLOW_NOT_FOUND` becomes `RetrievalCode.WORKFLOW_NOT_FOUND`, and `DB_OPERATION_FAILED` and `STORED_DATA_INVALID` become `BROKER_ERROR`.

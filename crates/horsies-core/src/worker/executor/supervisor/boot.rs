@@ -1,5 +1,5 @@
 //! Boot failure causes and the restart rules of a slot (Python
-//! `core/worker/slots.py`, `_boot_child`; `core/models/boot_failure.py`).
+//! `core/models/boot_failure.py`).
 //!
 //! Pure: the slot keeps the counts, and these functions decide.
 
@@ -117,9 +117,8 @@ impl fmt::Display for BootFailureCause {
                 f.write_str("the child could not create the event loop for async tasks")
             }
             Self::SpawnFailed => f.write_str("the OS refused to start the child process"),
-            // Python `describe_failure_cause`
-            // (`python/horsies/core/worker/slots.py:781`) names no loss: the
-            // detail of the boot failure carries the loss and the exit.
+            // The cause names no loss: the detail of the boot failure carries
+            // the loss and the exit.
             Self::LostBeforeReady { .. } => f.write_str("the child ended before it was ready"),
             Self::NotReadyInTime => f.write_str("the child was not ready in time"),
             Self::ProtocolMismatch(MismatchSeen::ReadyNamed(received)) => write!(
@@ -205,8 +204,7 @@ pub fn boot_end_of(reply: BootReply) -> BootEnd {
 
 /// The detail of the failure is the text of `lost`. A forked child that did
 /// not reach the worker puts `the forked child did not reach the worker: `
-/// before that text (Python `boot_failure_of`,
-/// `python/horsies/core/worker/slots.py:2356-2362`).
+/// before that text.
 fn boot_end_of_loss(lost: &ChildLost) -> BootEnd {
     let exit_code = match lost.exit {
         ChildExit::Reaped(ReapedExit::ExitedWith(code)) => ChildExitCode::from_code(code),
@@ -236,7 +234,8 @@ fn boot_end_of_loss(lost: &ChildLost) -> BootEnd {
                 | ChildExitCode::BadParentFrame
                 | ChildExitCode::BadArguments
                 | ChildExitCode::StoppedWithExecutorThreads
-                | ChildExitCode::BootFailed,
+                | ChildExitCode::BootFailed
+                | ChildExitCode::CoreStopped,
             )
             | None,
         ) => BootFailure::new(

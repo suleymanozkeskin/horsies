@@ -3,50 +3,28 @@
 //! A workflow start pre-builds the child of each sub-workflow root
 //! (`start_statement.rs`), and a step that promotes a sub-workflow node owes
 //! its child start (`child_start.rs`). Both ask the client's
-//! [`ChildSpecSource`] for the child's spec
-//! ([`crate::workflow_engine::steps::ChildBuild`]): the client builds the
-//! child in its own language, such as the `build_with` of the Python client,
-//! which the bridge runs on its callback thread. The answer is a
-//! [`ClientSpec`], the spec that the client sent as data, with the retention
-//! class of each task queue that the client resolved.
+//! [`ChildSpecSource`] for the child's spec: the client builds the child in
+//! its own language, such as the `build_with` of the Python client, which
+//! the bridge runs on its callback thread. A worker, a handle or a reaper
+//! holds the source as `Arc<dyn ChildSpecSource>` and lends it to each step
+//! as `&dyn ChildSpecSource`. The answer is a [`ClientSpec`], the spec that
+//! the client sent as data, with the retention class of each task queue that
+//! the client resolved.
 //!
 //! The core checks the depth limit before it asks: a child past
 //! [`crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH`] fails its node,
 //! and no source runs.
 
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use uuid::Uuid;
 
 use crate::core::workflow::node::SubWorkflowParams;
 use crate::core::{TaskError, WorkflowSpec};
 use crate::workflow_engine::error::WorkflowError;
-use crate::workflow_engine::steps::ChildBuild;
 pub use crate::workflow_engine::steps::ChildStartSource;
-
-/// Where the child builds of one process get their specs: the client's
-/// [`ChildSpecSource`]. A worker, a handle or a reaper holds one and lends
-/// it to each step.
-#[derive(Clone)]
-pub enum ChildSpecs {
-    /// A client that builds each child in its own language and sends its
-    /// spec as data, with the class of each task queue.
-    Client(Arc<dyn ChildSpecSource>),
-}
-
-impl ChildSpecs {
-    /// The build that a step takes: a client child carries the classes of
-    /// its task queues.
-    pub(crate) fn build(&self) -> ChildBuild<'_> {
-        match self {
-            Self::Client(source) => ChildBuild::Client(source.as_ref()),
-        }
-    }
-}
 
 /// The future of one answer of a [`ChildSpecSource`].
 pub type ChildSpecFuture<'a> =
@@ -170,30 +148,22 @@ impl ChildSpecUnavailable {
     }
 }
 
-/// Where the retention class of a task queue of one spec comes from.
-#[derive(Debug, Clone)]
-pub(crate) enum QueueClasses<'a> {
-    /// The classes that the client resolved for the spec, by queue name
-    /// ([`ClientSpec`]).
-    Client(Cow<'a, BTreeMap<String, String>>),
-}
-
-impl QueueClasses<'_> {
-    /// The retention class key that a task node on `queue` stores: the
-    /// client's key as the client wrote it.
-    ///
-    /// Errors: [`WorkflowError::Validation`] for a client queue with no
-    /// class. The parse of the spec data refuses such a spec, so this names
-    /// a spec that did not come from that parse.
-    pub(crate) fn class_key(&self, queue: &str) -> Result<&str, WorkflowError> {
-        match self {
-            Self::Client(classes) => match classes.get(queue) {
-                Some(key) => Ok(key.as_str()),
-                None => Err(WorkflowError::Validation(format!(
-                    "the client resolved no retention class for queue {queue:?} of the spec"
-                ))),
-            },
-        }
+/// The retention class key that a task node on `queue` stores: the key that
+/// the client resolved for the queue (`classes`, by queue name, from
+/// [`ClientSpec`]), as the client wrote it. Pure.
+///
+/// Errors: [`WorkflowError::Validation`] for a queue with no class. The
+/// parse of the spec data refuses such a spec, so this names a spec that did
+/// not come from that parse.
+pub(crate) fn queue_class_key<'c>(
+    classes: &'c BTreeMap<String, String>,
+    queue: &str,
+) -> Result<&'c str, WorkflowError> {
+    match classes.get(queue) {
+        Some(key) => Ok(key.as_str()),
+        None => Err(WorkflowError::Validation(format!(
+            "the client resolved no retention class for queue {queue:?} of the spec"
+        ))),
     }
 }
 
@@ -276,10 +246,12 @@ mod tests {
     #[test]
     fn a_client_queue_without_a_class_is_refused() {
         let classes = BTreeMap::from([("default".to_owned(), "standard_30d".to_owned())]);
-        let client = QueueClasses::Client(Cow::Owned(classes));
-        assert_eq!(client.class_key("default").expect("mapped"), "standard_30d");
+        assert_eq!(
+            queue_class_key(&classes, "default").expect("mapped"),
+            "standard_30d"
+        );
         assert!(matches!(
-            client.class_key("bulk"),
+            queue_class_key(&classes, "bulk"),
             Err(WorkflowError::Validation(message)) if message.contains("\"bulk\"")
         ));
     }

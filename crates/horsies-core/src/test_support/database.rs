@@ -5,7 +5,7 @@
 //!   this process, which holds the installed schema (the whole migration
 //!   chain, Rust family); [`TestDatabase::create_empty`] creates an empty one
 //!   (install tests). [`database_of_this_test`] gives the tests of the
-//!   sqlx-pool helpers one copied database per test runtime.
+//!   shared-pool helpers one copied database per test runtime.
 //! - The template is built once per process, by `super::install_template`,
 //!   which the including module supplies: the library's tests install on the
 //!   core pools; an integration test installs through its public API.
@@ -411,7 +411,7 @@ impl RuntimeDatabase {
     }
 
     /// A setup that the first caller in the test runs once on this database
-    /// (the coverage pass of the sqlx-pool helpers).
+    /// (the coverage pass of the shared-pool helpers).
     pub(crate) fn setup(&self) -> &OnceCell<()> {
         &self.setup
     }

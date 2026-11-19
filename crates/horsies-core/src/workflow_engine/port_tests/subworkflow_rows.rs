@@ -5,12 +5,11 @@
 use std::sync::Arc;
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
     advance_parent_of, child_of, child_specs_of, code, err, execute, finish_node, node,
-    node_status, ok, shared_pool, spec, start, stored_result, stored_result_error,
+    node_status, node_task_input, ok, shared_pool, spec, start, stored_result, stored_result_error,
     sub_workflow_node, task_node, try_finish_task, workflow, workflow_status, IsolatedDatabase,
 };
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
@@ -18,6 +17,7 @@ use crate::core::{
     AnyNode, HorsiesError, SubWorkflowSummary, TaskError, TaskResult, WorkflowSpec, WorkflowStatus,
 };
 use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
+use crate::test_support::sql::{self, TestPool};
 use crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH;
 
 /// A child with one task node that is its output (Python `StartChildWorkflow`).
@@ -27,7 +27,7 @@ fn start_child() -> WorkflowSpec {
     child
 }
 
-/// A second one-node child (Python `ImportableChildWorkflow`).
+/// A second one-node child.
 fn importable_child() -> WorkflowSpec {
     let mut child = spec(
         "importable_child_workflow",
@@ -75,7 +75,7 @@ fn dynamic_node(
 /// Finishes node 0 of the child that node `task_index` of `parent_id` started,
 /// and returns the child id (Python `_complete_child_workflow`).
 async fn complete_child(
-    pool: &PgPool,
+    pool: &TestPool,
     parent_id: Uuid,
     task_index: i32,
     outcome: &TaskResult<serde_json::Value>,
@@ -86,8 +86,8 @@ async fn complete_child(
     child_id
 }
 
-async fn children_of(pool: &PgPool, parent_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_workflows WHERE parent_workflow_id = $1")
+async fn children_of(pool: &TestPool, parent_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_workflows WHERE parent_workflow_id = $1")
         .bind(parent_id)
         .fetch_one(pool)
         .await
@@ -122,7 +122,7 @@ async fn a_dependency_completion_starts_the_child_and_links_it() {
         Option<Uuid>,
         Option<i32>,
         Option<chrono::DateTime<chrono::Utc>>,
-    ) = sqlx::query_as(
+    ) = sql::query_as(
         "SELECT parent_workflow_id, parent_task_index, sent_at FROM horsies_workflows WHERE id = $1",
     )
     .bind(child_id)
@@ -151,7 +151,7 @@ async fn a_replayed_child_completion_does_not_rewrite_a_terminal_parent_node() {
         let parent_id = start(&pool, &parent, &child_specs).await;
         let child_id = child_of(&pool, parent_id, 0).await;
         let preserved = serde_json::to_string(&ok(serde_json::json!(11))).expect("encode");
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_workflow_tasks
              SET status = 'COMPLETED', result = $2,
                  completed_at = TIMESTAMPTZ '2026-01-01 00:00:00+00'
@@ -179,7 +179,7 @@ async fn a_replayed_child_completion_does_not_rewrite_a_terminal_parent_node() {
             ),
             _ => None,
         };
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_workflows
              SET status = $2, result = $3, error = $4, completed_at = NOW()
              WHERE id = $1",
@@ -285,23 +285,23 @@ fn nesting_level(input: &str) -> Result<i64, TestBuildRefused> {
         })
 }
 
-async fn workflows_at_depth(pool: &PgPool, depth: i32) -> Vec<Uuid> {
-    sqlx::query_scalar("SELECT id FROM horsies_workflows WHERE depth = $1")
+async fn workflows_at_depth(pool: &TestPool, depth: i32) -> Vec<Uuid> {
+    sql::query_scalar("SELECT id FROM horsies_workflows WHERE depth = $1")
         .bind(depth)
         .fetch_all(pool)
         .await
         .expect("read the workflows at a depth")
 }
 
-async fn deeper_workflow_count(pool: &PgPool, depth: i32) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_workflows WHERE depth > $1")
+async fn deeper_workflow_count(pool: &TestPool, depth: i32) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_workflows WHERE depth > $1")
         .bind(depth)
         .fetch_one(pool)
         .await
         .expect("count the deeper workflows")
 }
 
-async fn failed_node_code(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> Option<String> {
+async fn failed_node_code(pool: &TestPool, workflow_id: Uuid, task_index: i32) -> Option<String> {
     let failed = node(pool, workflow_id, task_index).await;
     assert_eq!(failed.status, "FAILED");
     code(&stored_result_error(
@@ -776,4 +776,202 @@ async fn a_child_node_with_two_args_from_keys_starts() {
     let started = node(&pool, parent_id, 2).await;
     assert_eq!(started.status, "RUNNING");
     assert!(started.sub_workflow_id.is_some());
+}
+
+/// `TestSubworkflowIntegration.test_subworkflow_build_with_args_from`: the
+/// child builder gets the result of its `args_from` dependency (Python
+/// `ParamChildWorkflow`) and builds its task with the value; the child's
+/// output then completes the parent node with that value.
+#[tokio::test]
+#[serial]
+async fn a_child_builder_gets_its_args_from_result_and_the_child_output_completes_the_node() {
+    let pool = shared_pool().await;
+    let key = "tests.port.param_child.v1";
+    let child_specs = TestChildSpecs::empty().with_build(
+        key,
+        Arc::new(
+            move |input: &str| -> Result<WorkflowSpec, TestBuildRefused> {
+                let params: serde_json::Value = serde_json::from_str(input).map_err(|error| {
+                    TestBuildRefused::Failed(HorsiesError::new(format!(
+                        "params do not decode: {error}"
+                    )))
+                })?;
+                let value = match serde_json::from_value::<TaskResult<serde_json::Value>>(
+                    params["value"].clone(),
+                ) {
+                    Ok(TaskResult::Ok(value)) => value,
+                    other => {
+                        return Err(TestBuildRefused::Failed(HorsiesError::new(format!(
+                            "'value' is not an ok result: {other:?}"
+                        ))))
+                    }
+                };
+                let mut child_task = task_node(0, "param_child_task");
+                child_task.input_json = serde_json::json!({ "value": value }).to_string();
+                let mut child = spec("param_child_workflow", vec![child_task]);
+                child.definition_key = Some(key.to_owned());
+                child.output_index = Some(0);
+                Ok(child)
+            },
+        ),
+    );
+    let mut sub = after(
+        dynamic_node(1, "param_child_workflow", key, serde_json::json!({})),
+        &[0],
+    );
+    sub.args_from.insert("value".to_owned(), 0);
+    let mut parent = spec(
+        "parent_workflow_params",
+        vec![task_node(0, "sub_value_producer"), sub],
+    );
+    parent.output_index = Some(1);
+    let parent_id = start(&pool, &parent, &child_specs).await;
+
+    let _a = finish_node(&pool, parent_id, 0, &ok(serde_json::json!(7)), &child_specs).await;
+    let child_id = child_of(&pool, parent_id, 1).await;
+    assert_eq!(
+        node_task_input(&pool, child_id, 0).await["value"],
+        serde_json::json!(7)
+    );
+    let _child = complete_child(&pool, parent_id, 1, &ok(serde_json::json!(7)), &child_specs).await;
+
+    let completed = node(&pool, parent_id, 1).await;
+    assert_eq!(completed.status, "COMPLETED");
+    match stored_result(&completed.result.expect("the node stores the child output")) {
+        TaskResult::Ok(value) => assert_eq!(value, serde_json::json!(7)),
+        TaskResult::Err(error) => panic!("the node failed: {error:?}"),
+    }
+}
+
+/// `TestSubworkflowIntegration.test_multiple_parallel_subworkflows`: two
+/// sub-workflow roots start their children together; once both children
+/// complete, the node that waits on both is ENQUEUED.
+#[tokio::test]
+#[serial]
+async fn two_root_children_run_together_and_their_join_is_enqueued() {
+    let pool = shared_pool().await;
+    let child_specs = subworkflow_children();
+    let mut parent = spec(
+        "parent_parallel_subworkflows",
+        vec![
+            sub_workflow_node(0, &start_child()),
+            sub_workflow_node(1, &importable_child()),
+            after(task_node(2, "parallel_post_task"), &[0, 1]),
+        ],
+    );
+    parent.output_index = Some(2);
+    let parent_id = start(&pool, &parent, &child_specs).await;
+
+    for task_index in [0, 1] {
+        let sub = node(&pool, parent_id, task_index).await;
+        assert_eq!(sub.status, "RUNNING", "node {task_index}");
+        assert!(sub.sub_workflow_id.is_some(), "node {task_index}");
+    }
+    let _c1 = complete_child(&pool, parent_id, 0, &ok(serde_json::json!(1)), &child_specs).await;
+    let _c2 = complete_child(&pool, parent_id, 1, &ok(serde_json::json!(5)), &child_specs).await;
+
+    assert_eq!(node_status(&pool, parent_id, 2).await, "ENQUEUED");
+    super::support::end_workflows(&pool, &[parent_id]).await;
+}
+
+/// Root task options that do not parse or are not an object, alone or
+/// merged with a deadline: a child
+/// whose root task options do not read refuses its child start before any
+/// child row. The phase 2 that promotes the sub-workflow node fails, and the
+/// step rolls back: the upstream node is not written, the sub-workflow node
+/// stays PENDING with no child, and the parent has no child row. The control
+/// of the Python file (`test_valid_options_of_a_fast_root_reach_the_insert`)
+/// is [`a_dependency_completion_starts_the_child_and_links_it`].
+#[tokio::test]
+#[serial]
+async fn a_child_whose_root_options_do_not_read_refuses_its_start_and_the_step_rolls_back() {
+    let db = IsolatedDatabase::create().await;
+    let deadline = chrono::Utc::now() + chrono::Duration::hours(1);
+    for (name, options, good_until) in [
+        ("child_options_unparseable", "{not-json", None),
+        ("child_options_not_an_object", "\"just a string\"", None),
+        ("child_options_with_deadline", "{not-json", Some(deadline)),
+    ] {
+        let mut child_task = task_node(0, "child_task");
+        child_task.task_options_json = Some(options.to_owned());
+        child_task.good_until = good_until;
+        let mut child = spec(name, vec![child_task]);
+        child.output_index = Some(0);
+        let child_specs = child_specs_of(std::slice::from_ref(&child));
+        let parent = spec(
+            &format!("parent_{name}"),
+            vec![
+                task_node(0, "child_options_upstream"),
+                after(sub_workflow_node(1, &child), &[0]),
+            ],
+        );
+        let parent_id = start(&db.pool, &parent, &child_specs).await;
+        let upstream_task = node(&db.pool, parent_id, 0)
+            .await
+            .task_id
+            .expect("the upstream node is enqueued");
+
+        let phase2 = try_finish_task(
+            &db.pool,
+            upstream_task,
+            &ok(serde_json::json!(1)),
+            &child_specs,
+        )
+        .await;
+
+        assert!(phase2.is_err(), "{name}: {phase2:?}");
+        assert_ne!(
+            node_status(&db.pool, parent_id, 0).await,
+            "COMPLETED",
+            "{name}"
+        );
+        let sub = node(&db.pool, parent_id, 1).await;
+        assert_eq!(sub.status, "PENDING", "{name}");
+        assert_eq!(sub.sub_workflow_id, None, "{name}");
+        assert_eq!(children_of(&db.pool, parent_id).await, 0, "{name}");
+    }
+    db.drop().await;
+}
+
+/// A child whose root task has a deadline starts at promotion; the deadline
+/// is merged into the task options of the child's root node and set on its
+/// task row.
+#[tokio::test]
+#[serial]
+async fn a_child_whose_root_task_has_a_deadline_starts_with_the_deadline_merged() {
+    let pool = shared_pool().await;
+    let mut child_task = task_node(0, "child_deadline_task");
+    child_task.good_until = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+    let mut child = spec("child_deadline_workflow", vec![child_task]);
+    child.output_index = Some(0);
+    let child_specs = child_specs_of(std::slice::from_ref(&child));
+    let mut parent = spec(
+        "parent_child_deadline",
+        vec![
+            task_node(0, "child_deadline_upstream"),
+            after(sub_workflow_node(1, &child), &[0]),
+        ],
+    );
+    parent.output_index = Some(1);
+    let parent_id = start(&pool, &parent, &child_specs).await;
+
+    let _a = finish_node(&pool, parent_id, 0, &ok(serde_json::json!(1)), &child_specs).await;
+
+    let child_id = child_of(&pool, parent_id, 1).await;
+    let (options, task_deadline): (Option<String>, Option<chrono::DateTime<chrono::Utc>>) =
+        sql::query_as(
+            "SELECT wt.task_options, t.good_until
+             FROM horsies_workflow_tasks wt JOIN horsies_tasks t ON t.id = wt.task_id
+             WHERE wt.workflow_id = $1 AND wt.task_index = 0",
+        )
+        .bind(child_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the child root node and its task");
+    super::support::end_workflows(&pool, &[parent_id, child_id]).await;
+    let options: serde_json::Value =
+        serde_json::from_str(&options.expect("the child root stores its options"))
+            .expect("the stored options are JSON");
+    assert!(options["good_until"].is_string(), "{options}");
+    assert!(task_deadline.is_some());
 }

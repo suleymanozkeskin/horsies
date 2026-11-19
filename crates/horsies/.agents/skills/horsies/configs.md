@@ -83,7 +83,7 @@ The other fields have the names and meanings of the shared page
 | Config | Refusal of `Horsies::new` |
 |---|---|
 | `broker.pool_size` outside 1 to 10,000, or `broker.max_overflow` above 10,000 | `HorsiesError` "invalid broker config: broker.<field>: ..." with no code |
-| A worker profile whose `preload` is `ChildPreload::Library` (the default) or `ChildPreload::App` | `HRS-218` with the path `worker_profiles.<name>.preload`. A Rust worker starts each child with `exec` of its own binary. Set `ChildPreload::NoPreload` |
+| A worker profile whose `preload` is `ChildPreload::Library` or `ChildPreload::App` | `HRS-218` with the path `worker_profiles.<name>.preload`. A Rust worker starts each child with `exec` of its own binary. Do not set `preload`: the default is `ChildPreload::NoPreload` |
 
 ### Queues
 
@@ -108,7 +108,7 @@ recycling, the pools, the claim limits and the drain timeout.
 use std::collections::BTreeMap;
 
 use horsies::{
-    AppConfig, ChildPreload, IsolatedChildCount, IsolatedChildren, IsolatedRecycle,
+    AppConfig, IsolatedChildCount, IsolatedChildren, IsolatedRecycle,
     IsolatedSetting, MemoryLimitSetting, MemoryMb, SharedAsyncChildCount, SharedAsyncChildren,
     SharedAsyncSeats, SharedAsyncSetting, TaskCount, TaskLimitSetting, WorkerProfile,
 };
@@ -127,7 +127,6 @@ fn with_profiles(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Err
             SharedAsyncChildCount::try_from(4)?,
             SharedAsyncSeats::try_from(25)?,
         )),
-        preload: ChildPreload::NoPreload,
         ..WorkerProfile::default()
     };
     Ok(AppConfig {
@@ -145,7 +144,7 @@ fn with_profiles(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Err
 | `pool` | `ParentPool` (`max_size: PoolSizeSetting`) |
 | `claim` | `ClaimLimits` (`per_queue_per_pass`, `claimed_per_worker`: `TaskLimitSetting`) |
 | `drain_timeout` | `DrainTimeout`: `DrainTimeout::try_from(Duration)`, above 0 and at most 24 hours, default 300 s |
-| `preload` | `ChildPreload`: set `NoPreload` in a Rust app |
+| `preload` | `ChildPreload`, default `NoPreload`: the only value that a Rust app takes |
 | `parent_cpu` | `ParentCpu::Shared` (default) or `OwnCore` (Linux) |
 
 - `WorkerProfile::default()` has no children. A profile needs at least one
@@ -440,11 +439,15 @@ fn run_worker(app: Horsies) -> ExitCode {
   that `main` installed.
 - `run_worker` and `run_scheduler` stop at `SIGTERM` or `SIGINT`.
 - `WorkerRunError`: `CheckRefused`, `ManifestBound`, `ChildCommandRefused`,
-  `ProfileRefused`, `ConnectionSettingsRefused`, `RuntimeUnavailable`,
-  `BootFailed { cause }`, `Failed { cause }`.
+  `ProfileRefused`, `ConnectionSettingsRefused`,
+  `RuntimeUnavailable(RuntimeStartFailed)`, `BootFailed { cause }`,
+  `Failed { cause }`.
 - `SchedulerRunError`: `NotConfigured`, `Disabled`, `CheckRefused`,
   `ManifestRefused`, `StartRefused`, `StartFailed { retryable }`,
-  `RuntimeUnavailable`.
+  `RuntimeUnavailable(RuntimeStartFailed)`.
+- `RuntimeStartFailed`: the operating system refused the threads of the
+  core's process runtime; a later run tries again. A fork is not one: the
+  run panics (`SKILL.md`, Result Types).
 
 ### The shipped `horsies` binary
 
@@ -467,8 +470,8 @@ thread and refuses inside a runtime with exit code 1.
 **Do not start servers, threads or loops in `main` before `run`.** Each
 worker child runs `main` again.
 
-**Do not keep the default `preload`.** `Horsies::new` refuses
-`ChildPreload::Library` and `App` with `HRS-218`.
+**Do not set `preload` to `Library` or `App`.** `Horsies::new` refuses
+them with `HRS-218`. Leave `preload` at its default, `ChildPreload::NoPreload`.
 
 ## All Key Imports
 

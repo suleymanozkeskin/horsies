@@ -14,7 +14,7 @@ Tests cover:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -32,15 +32,7 @@ from horsies.core.worker.child_runner import (
     StartWithin,
     _confirm_ownership_and_set_running,
 )
-from horsies.core.worker.run_return import StoppedBeforeRunning
-from horsies.core.worker.sql import (
-    CLAIM_SQL,
-    COUNT_CLAIMED_FOR_WORKER_SQL,
-    COUNT_GLOBAL_IN_FLIGHT_SQL,
-    COUNT_IN_FLIGHT_FOR_WORKER_SQL,
-    COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
-)
-from tests.baseline_sql import baseline_function
+from horsies.core.worker.run_return import CoreStoppedBeforeStart, StoppedBeforeRunning
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
@@ -49,125 +41,6 @@ BROKER = PostgresConfig(
     pool_size=5,
     max_overflow=5,
 )
-
-
-# ---------------------------------------------------------------------------
-# 1. CLAIM_SQL structure: RETURNING includes dispatch payload
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestClaimSqlReturningPayload:
-    """CLAIM_SQL RETURNING clause includes dispatch and lifecycle metadata."""
-
-    def test_returning_clause_has_dispatch_columns(self) -> None:
-        """The compiled RETURNING clause must include all dispatch-needed columns."""
-        sql_text = CLAIM_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert (
-            'RETURNING t.id, t.task_name, t.input, '
-            't.queue_name, t.is_workflow_task, t.task_options, t.claimed_at;'
-        ) in normalised
-
-    def test_claim_sql_reclaims_expired_leases(self) -> None:
-        """CLAIM_SQL WHERE includes reclaim branch for expired claim_expires_at."""
-        sql_text = CLAIM_SQL.text
-        assert 'claim_expires_at' in sql_text
-        assert 'claim_expires_at < now()' in sql_text
-
-
-# ---------------------------------------------------------------------------
-# 2. Lease always bounded: no NULL claim_expires_at
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestLeaseAlwaysBounded:
-    """All claimed tasks receive a finite lease — never NULL claim_expires_at."""
-
-    def test_hard_cap_claim_expires_at_is_datetime(self) -> None:
-        """Hard-cap mode (claim_lease_ms=None) still produces a bounded lease."""
-        from horsies.core.worker.worker import Worker, WorkerConfig
-
-        cfg = WorkerConfig(
-            dsn='postgresql://u:p@localhost/db',
-            psycopg_dsn='postgresql://u:p@localhost/db',
-            queues=['default'],
-            claim_lease_ms=None,
-        )
-        worker = Worker(
-            session_factory=MagicMock(),
-            listener=MagicMock(),
-            cfg=cfg,
-        )
-
-        result = worker._compute_claim_expires_at()
-        assert isinstance(result, datetime)
-        delta = result - datetime.now(timezone.utc)
-        assert timedelta(seconds=55) < delta < timedelta(seconds=65)
-
-    def test_soft_cap_uses_explicit_lease(self) -> None:
-        """Soft-cap mode uses user-configured claim_lease_ms."""
-        from horsies.core.worker.worker import Worker, WorkerConfig
-
-        cfg = WorkerConfig(
-            dsn='postgresql://u:p@localhost/db',
-            psycopg_dsn='postgresql://u:p@localhost/db',
-            queues=['default'],
-            prefetch_buffer=2,
-            claim_lease_ms=500,
-        )
-        worker = Worker(
-            session_factory=MagicMock(),
-            listener=MagicMock(),
-            cfg=cfg,
-        )
-
-        result = worker._compute_claim_expires_at()
-        delta = result - datetime.now(timezone.utc)
-        assert timedelta(milliseconds=400) < delta < timedelta(milliseconds=600)
-
-
-# ---------------------------------------------------------------------------
-# 3. Cap-check SQL excludes expired CLAIMED tasks
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestCapCheckExcludesExpiredClaims:
-    """Hard-cap counting SQL must not count expired CLAIMED tasks as in-flight.
-
-    Without this, expired CLAIMED tasks consume cap budget and block
-    the reclaim branch in CLAIM_SQL from ever running.
-    """
-
-    def _assert_excludes_expired(self, sql_text: str) -> None:
-        """Verify SQL counts only active claims (non-expired)."""
-        normalised = ' '.join(sql_text.split())
-        # Must count RUNNING always
-        assert 'RUNNING' in normalised
-        # Must NOT use plain IN ('RUNNING', 'CLAIMED') which includes expired
-        assert "IN ('RUNNING', 'CLAIMED')" not in normalised
-        # Must filter CLAIMED by active lease
-        assert 'claim_expires_at IS NULL OR claim_expires_at > now()' in normalised
-
-    def test_global_in_flight_excludes_expired(self) -> None:
-        """COUNT_GLOBAL_IN_FLIGHT_SQL must exclude expired CLAIMED."""
-        self._assert_excludes_expired(COUNT_GLOBAL_IN_FLIGHT_SQL.text)
-
-    def test_queue_hard_cap_excludes_expired(self) -> None:
-        """COUNT_QUEUE_IN_FLIGHT_HARD_SQL must exclude expired CLAIMED."""
-        self._assert_excludes_expired(COUNT_QUEUE_IN_FLIGHT_HARD_SQL.text)
-
-    def test_worker_in_flight_excludes_expired(self) -> None:
-        """COUNT_IN_FLIGHT_FOR_WORKER_SQL must exclude expired CLAIMED."""
-        self._assert_excludes_expired(COUNT_IN_FLIGHT_FOR_WORKER_SQL.text)
-
-    def test_worker_claimed_count_excludes_expired(self) -> None:
-        """COUNT_CLAIMED_FOR_WORKER_SQL must exclude expired CLAIMED."""
-        sql_text = COUNT_CLAIMED_FOR_WORKER_SQL.text
-        normalised = ' '.join(sql_text.split())
-        assert 'claim_expires_at IS NULL OR claim_expires_at > now()' in normalised
 
 
 # ---------------------------------------------------------------------------
@@ -310,11 +183,24 @@ class TestOwnershipGateBehavioral:
     def test_exception_returns_ownership_unconfirmed(self) -> None:
         """When the core cannot run the call, returns OWNERSHIP_UNCONFIRMED."""
         handle = MagicMock()
-        handle.start_attempt.side_effect = core.CoreStopped('subject', 'cause')
+        handle.start_attempt.side_effect = core.CoreCallTimedOut(
+            'start_attempt', 40.0, 'outcome_unknown'
+        )
 
         result = _start(handle)
 
         assert result == StoppedBeforeRunning('OWNERSHIP_UNCONFIRMED')
+
+    def test_a_stopped_core_is_a_core_stop_before_start(self) -> None:
+        """A stopped core does not clear in the process: the child reports
+        the release, then ends itself (``test_child_core_refusals``)."""
+        stopped = core.CoreStopped('subject', 'cause')
+        handle = MagicMock()
+        handle.start_attempt.side_effect = stopped
+
+        result = _start(handle)
+
+        assert result == CoreStoppedBeforeStart(stopped)
 
     def test_a_deadline_before_start_runs_no_statement(self) -> None:
         """The start check runs right before the start. A deadline that fired
@@ -358,110 +244,3 @@ class TestOwnershipGateBehavioral:
         result = _start(handle, start_check=lambda: StartWithin(milliseconds=1))
 
         assert result == DeadlineBeforeStart()
-
-
-# ---------------------------------------------------------------------------
-# 6. Lease renewal SQL structure
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestLeaseRenewalSql:
-    """RENEW_CLAIM_LEASE_SQL extends claim_expires_at for owned CLAIMED tasks."""
-
-    def test_renewal_sql_updates_claim_expires_at(self) -> None:
-        from horsies.core.worker.sql import RENEW_CLAIM_LEASE_SQL
-
-        sql_text = RENEW_CLAIM_LEASE_SQL.text
-        assert 'claim_expires_at' in sql_text
-        assert ':claim_lease_ms' in sql_text
-        assert 'NOW() +' in sql_text
-        assert "status = 'CLAIMED'" in sql_text
-        assert 'claimed_by_worker_id' in sql_text
-
-    def test_renewal_sql_scoped_to_worker(self) -> None:
-        """Renewal must only affect tasks owned by the calling worker."""
-        from horsies.core.worker.sql import RENEW_CLAIM_LEASE_SQL
-
-        sql_text = RENEW_CLAIM_LEASE_SQL.text
-        assert ':wid' in sql_text
-
-    def test_renewal_sql_has_no_expiry_guard(self) -> None:
-        """Renewal must NOT check claim_expires_at > NOW().
-
-        This ensures renewal works even after a brief transient delay
-        that might have let the lease lapse momentarily.
-        """
-        from horsies.core.worker.sql import RENEW_CLAIM_LEASE_SQL
-
-        sql_text = RENEW_CLAIM_LEASE_SQL.text
-        normalised = ' '.join(sql_text.split())
-        # The WHERE clause should only have status + worker_id, not an expiry check
-        assert 'claim_expires_at > now()' not in normalised
-        assert 'claim_expires_at >' not in normalised
-
-
-# ---------------------------------------------------------------------------
-# 7. Unclaim SQL normalisation: claim_expires_at cleared
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestUnclaimSqlClearsLeaseExpiry:
-    """The paused-task cleanup must clear claim_expires_at, so no stale
-    lease timestamp persists on a re-queued task.
-    """
-
-    def test_paused_task_cleanup_ends_the_claim(self) -> None:
-        """Paused-task cleanup moves the claimed row to history as CANCELLED
-        with TASK_CANCELLED and deletes the live row with its lease."""
-        normalised = ' '.join(
-            baseline_function('horsies_abandon_owned_nodes').split()
-        )
-        assert (
-            "horsies_move_tasks_to_history( v_applied_ids, 'CANCELLED', "
-            "'PAUSE_ABANDON_CLAIM_BATCH', v_terminal_at, NULL, 'TASK_CANCELLED',"
-        ) in normalised
-        stage = ' '.join(baseline_function('horsies_move_tasks_to_history').split())
-        assert 'DELETE FROM horsies_tasks AS t WHERE t.id = ANY(p_task_ids)' in stage
-
-    def test_paused_task_cleanup_matches_only_current_worker_claims(self) -> None:
-        """Paused workflow cleanup must only cancel rows owned by this worker."""
-        normalised = ' '.join(baseline_function('horsies_abandon_owned_nodes').split())
-        assert "t.status = 'CLAIMED'" in normalised
-        assert (
-            't.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)'
-            in normalised
-        )
-
-    def test_cancel_cancelled_workflow_tasks_matches_only_current_worker_claims(self) -> None:
-        """Cancelled workflow cleanup must only cancel rows owned by this worker."""
-        normalised = ' '.join(baseline_function('horsies_cancel_owned_nodes').split())
-        assert "t.status = 'CLAIMED'" in normalised
-        assert (
-            't.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)'
-            in normalised
-        )
-
-    def test_post_claim_guards_fence_on_the_claim_generation(self) -> None:
-        """Both post-claim guards carry a pairwise claim-generation fence.
-
-        The guard runs in its own transaction after the claim committed, so a
-        lapsed-and-re-claimed row is CLAIMED by this worker again and the
-        (status, worker) pair alone cannot reject it. Generations travel
-        alongside ids because one batch can span claim transactions. A NULL
-        generation is refused before any row is read, so the fence has no
-        NULL arm.
-        """
-        for name in ('horsies_abandon_owned_nodes', 'horsies_cancel_owned_nodes'):
-            normalised = ' '.join(baseline_function(name).split())
-            assert 'unnest(' in normalised
-            assert (
-                'FROM unnest(p_ids, p_claimed_ats) '
-                'AS input(task_id, expected_claimed_at)' in normalised
-            )
-            assert 'AND t.claimed_at = input.expected_claimed_at' in normalised
-            assert 'expected_claimed_at IS NULL' not in normalised
-            assert normalised.index('batch claim generations must be non-NULL') < (
-                normalised.index('FOR UPDATE')
-            )

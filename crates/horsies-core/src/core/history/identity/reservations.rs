@@ -1,12 +1,13 @@
 //! Typed clients for the reservation program installed by migration 0034.
 
-use sqlx::{FromRow, PgConnection};
 use uuid::Uuid;
 
 use crate::broker::core_rows::{one_row, query_on, scalar, StatementLog};
 use crate::core::history::errors::HistoryError;
 use crate::core::history::maintenance::coverage::maintenance_connection;
 use crate::db::{CorePool, ParameterType, TypedStatement};
+#[cfg(test)]
+use crate::test_support::sql::{self, CallError, TestConnection};
 
 pub const KEY_RESERVATION_OUTCOME_TYPE: &str = "horsies_key_reservation_outcome";
 pub const KEY_RESERVATION_CLAIM_FUNCTION: &str = "horsies_key_reservation_claim";
@@ -29,17 +30,11 @@ pub enum ReservationClaim {
     },
 }
 
-#[derive(FromRow)]
-struct ReservationRow {
-    outcome: Option<String>,
-    task_id: Option<Uuid>,
-    observed_fingerprint_version: Option<i16>,
-}
-
 /// The key reservation claim: `$1` key digest, `$2` key scope version, `$3`
 /// reservation window in microseconds (made into the exact `interval`), `$4`
 /// fingerprint version, `$5` fingerprint, `$6` task id. One row: `outcome`,
 /// `task_id`, `observed_fingerprint_version`.
+#[cfg(test)]
 pub(crate) fn key_reservation_claim_sql() -> String {
     format!(
         "SELECT outcome, task_id, observed_fingerprint_version
@@ -49,17 +44,29 @@ pub(crate) fn key_reservation_claim_sql() -> String {
     )
 }
 
-pub async fn claim_key_reservation(
-    connection: &mut PgConnection,
+/// `horsies_key_reservation_claim` on a test session: the claim of
+/// [`key_reservation_claim_sql`], decoded as the enqueue decodes it. The core
+/// claims keys inside its SQL functions; the tests of the claim function
+/// call it here.
+///
+/// Errors: [`CallError`].
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn claim_key_reservation(
+    connection: &mut TestConnection,
     key_digest: &[u8],
     key_scope_version: i16,
     reservation_window_micros: i64,
     fingerprint_version: i16,
     fingerprint: &[u8],
     task_id: Uuid,
-) -> Result<ReservationClaim, HistoryError> {
+) -> Result<ReservationClaim, CallError> {
     let claim_sql = key_reservation_claim_sql();
-    let row: ReservationRow = sqlx::query_as(&claim_sql)
+    let (outcome, claimed_task_id, observed_fingerprint_version): (
+        Option<String>,
+        Option<Uuid>,
+        Option<i16>,
+    ) = sql::query_as(&claim_sql)
         .bind(key_digest)
         .bind(key_scope_version)
         .bind(reservation_window_micros)
@@ -67,47 +74,72 @@ pub async fn claim_key_reservation(
         .bind(fingerprint)
         .bind(task_id)
         .fetch_one(&mut *connection)
-        .await?;
+        .await
+        .map_err(CallError::Database)?;
     decode_reservation_row(
-        row.outcome.as_deref(),
-        row.task_id,
-        row.observed_fingerprint_version,
+        outcome.as_deref(),
+        claimed_task_id,
+        observed_fingerprint_version,
     )
+    .map_err(CallError::Contract)
 }
 
-pub async fn terminalize_key_reservation(
-    connection: &mut PgConnection,
+/// `horsies_key_reservation_terminalize` as of `statement_timestamp()` on a
+/// test session. The core's moves call the function in SQL; the tests of
+/// the function call it here.
+///
+/// Errors: [`CallError`]; `Contract` when the function returns NULL.
+#[cfg(test)]
+pub(crate) async fn terminalize_key_reservation(
+    connection: &mut TestConnection,
     key_digest: &[u8],
     task_id: Uuid,
-) -> Result<bool, HistoryError> {
+) -> Result<bool, CallError> {
     let terminalize_sql = format!(
         "SELECT {KEY_RESERVATION_TERMINALIZE_FUNCTION}(
              $1, $2, statement_timestamp()
          )"
     );
-    let updated: Option<bool> = sqlx::query_scalar(&terminalize_sql)
+    let updated: Option<bool> = sql::query_scalar(&terminalize_sql)
         .bind(key_digest)
         .bind(task_id)
         .fetch_one(&mut *connection)
-        .await?;
-    updated.ok_or_else(|| HistoryError::contract("reservation terminalize did not return boolean"))
+        .await
+        .map_err(CallError::Database)?;
+    updated.ok_or_else(|| {
+        CallError::Contract(HistoryError::contract(
+            "reservation terminalize did not return boolean",
+        ))
+    })
 }
 
-pub async fn cleanup_expired_reservations(
-    connection: &mut PgConnection,
+/// One `horsies_key_reservation_cleanup` statement on a test session. The
+/// reaper runs [`cleanup_expired_reservations_pass`]; the tests of the
+/// function call it here.
+///
+/// Errors: [`CallError`]; `Contract` for a batch size below 1 (nothing is
+/// sent) or a NULL count.
+#[cfg(test)]
+pub(crate) async fn cleanup_expired_reservations(
+    connection: &mut TestConnection,
     batch_size: i32,
-) -> Result<i32, HistoryError> {
+) -> Result<i32, CallError> {
     if batch_size <= 0 {
-        return Err(HistoryError::contract(
+        return Err(CallError::Contract(HistoryError::contract(
             "cleanup batch size must be positive",
-        ));
+        )));
     }
     let cleanup_sql = format!("SELECT {KEY_RESERVATION_CLEANUP_FUNCTION}($1)");
-    let deleted: Option<i32> = sqlx::query_scalar(&cleanup_sql)
+    let deleted: Option<i32> = sql::query_scalar(&cleanup_sql)
         .bind(batch_size)
         .fetch_one(&mut *connection)
-        .await?;
-    deleted.ok_or_else(|| HistoryError::contract("reservation cleanup did not return a count"))
+        .await
+        .map_err(CallError::Database)?;
+    deleted.ok_or_else(|| {
+        CallError::Contract(HistoryError::contract(
+            "reservation cleanup did not return a count",
+        ))
+    })
 }
 
 /// Cleanup statements one maintenance pass runs at most. Each statement
@@ -179,6 +211,7 @@ pub async fn cleanup_expired_reservations_pass(
 }
 
 /// The claim outcome of one reservation row. Pure.
+#[cfg(test)]
 pub(crate) fn decode_reservation_row(
     outcome: Option<&str>,
     task_id: Option<Uuid>,
@@ -214,6 +247,7 @@ pub(crate) fn decode_reservation_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::sql;
     use serial_test::serial;
 
     #[test]
@@ -231,11 +265,11 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn cleanup_wrapper_deletes_only_expired_terminal_rows_with_the_requested_bound() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let expired = [vec![31_u8; 32], vec![32_u8; 32]];
         let retained = vec![33_u8; 32];
         for (index, digest) in expired.iter().enumerate() {
-            sqlx::query(
+            sql::query(
                 "INSERT INTO horsies_key_reservations (
                     idempotency_key_digest, key_scope_version, fingerprint_version,
                     command_fingerprint, task_id, disposition, reservation_window, expires_at
@@ -249,7 +283,7 @@ mod tests {
             .await
             .expect("seed expired reservation");
         }
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_key_reservations (
                 idempotency_key_digest, key_scope_version, fingerprint_version,
                 command_fingerprint, task_id, disposition, reservation_window, expires_at
@@ -287,7 +321,7 @@ mod tests {
             .is_err());
         drop(connection);
 
-        let remaining: i64 = sqlx::query_scalar(
+        let remaining: i64 = sql::query_scalar(
             "SELECT count(*) FROM horsies_key_reservations
              WHERE idempotency_key_digest = $1",
         )
@@ -296,7 +330,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(remaining, 1, "unexpired TERMINAL evidence is retained");
-        sqlx::query("DELETE FROM horsies_key_reservations WHERE idempotency_key_digest = $1")
+        sql::query("DELETE FROM horsies_key_reservations WHERE idempotency_key_digest = $1")
             .bind(&retained)
             .execute(&pool)
             .await
@@ -306,15 +340,15 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn cleanup_pass_stops_at_its_batch_bound_and_reports_truncation() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let core = crate::broker::pools::core_pool_for_test_pool(&pool);
+        let pool = crate::test_support::migrated_pool().await;
+        let core = crate::broker::pools::core_pool_for_test_url(pool.url());
         // Start from no expired row of other tests in the shared database.
         cleanup_expired_reservations_pass(&core, StatementLog::Off, 10_000, 100)
             .await
             .expect("clear expired reservations");
         let expired: Vec<Vec<u8>> = (0..3_u8).map(|index| vec![41 + index; 32]).collect();
         for digest in &expired {
-            sqlx::query(
+            sql::query(
                 "INSERT INTO horsies_key_reservations (
                     idempotency_key_digest, key_scope_version, fingerprint_version,
                     command_fingerprint, task_id, disposition, reservation_window, expires_at

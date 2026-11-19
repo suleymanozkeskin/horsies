@@ -27,6 +27,7 @@ pub use function::{
     start_workflow, start_workflow_with, WorkflowCheckBuilderRegistration, WorkflowFunction,
     WorkflowTemplate,
 };
+pub(crate) use function::{start_workflow_as, start_workflow_with_as};
 pub use handle::{NodeResult, WorkflowHandle, WorkflowNodeInfo, WorkflowReadError};
 pub use node::{InputField, JoinType, NodeKey, NodeRef, TaskNode, TypedNodeRef};
 pub use spec::{SuccessCase, SuccessPolicy, WorkflowSpec, WorkflowSpecBuilder};
@@ -56,7 +57,8 @@ pub(crate) use spec_data::task_options_text;
 /// The start errors and the handle errors of the core's catalogs, with
 /// Python's codes.
 pub use horsies_core::{
-    HandleErrorCode, HandleOperationError, HandleResult, WorkflowStartError, WorkflowStartErrorCode,
+    HandleErrorCode, HandleOperationError, HandleResult, StartRefusalCause, WorkflowStartError,
+    WorkflowStartErrorCode,
 };
 
 /// The workflow types of the core: the error policy, the statuses, the

@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -22,6 +21,7 @@ use crate::core::workflow::node::SubWorkflowParams;
 use crate::core::workflow::policy::{SuccessCase, SuccessPolicy};
 use crate::core::{AnyNode, TaskResult, WorkflowSpec};
 use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
+use crate::test_support::sql::{self, TestPool};
 
 fn after(index: usize, task_name: &str, dependencies: &[usize]) -> AnyNode {
     let mut node = task_node(index, task_name);
@@ -29,11 +29,11 @@ fn after(index: usize, task_name: &str, dependencies: &[usize]) -> AnyNode {
     node
 }
 
-async fn run(pool: &PgPool, workflow_spec: &WorkflowSpec) -> Uuid {
+async fn run(pool: &TestPool, workflow_spec: &WorkflowSpec) -> Uuid {
     start(pool, workflow_spec, &TestChildSpecs::empty()).await
 }
 
-async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32, value: serde_json::Value) {
+async fn succeed(pool: &TestPool, workflow_id: Uuid, index: i32, value: serde_json::Value) {
     let _task = finish_node(
         pool,
         workflow_id,
@@ -44,7 +44,7 @@ async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32, value: serde_json
     .await;
 }
 
-async fn fail(pool: &PgPool, workflow_id: Uuid, index: i32, error_code: &str, message: &str) {
+async fn fail(pool: &TestPool, workflow_id: Uuid, index: i32, error_code: &str, message: &str) {
     let _task = finish_node(
         pool,
         workflow_id,
@@ -679,7 +679,7 @@ async fn a_workflow_task_past_its_deadline_is_not_claimed() {
 
     assert!(claimed.is_empty(), "the expired task was claimed");
     let live: Option<(String, Option<chrono::DateTime<chrono::Utc>>)> =
-        sqlx::query_as("SELECT status, good_until FROM horsies_tasks WHERE id = $1")
+        sql::query_as("SELECT status, good_until FROM horsies_tasks WHERE id = $1")
             .bind(task_id)
             .fetch_optional(&db.pool)
             .await

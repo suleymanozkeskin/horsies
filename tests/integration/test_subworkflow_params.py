@@ -134,7 +134,7 @@ class TestSubWorkflowParams:
         )
         handle = await start_ok(spec, broker)
 
-        assert await _params(session, handle.workflow_id) == {
+        assert await _params(session, str(handle.workflow_id)) == {
             0: None,
             1: 'GIVEN',
             2: 'NOT_GIVEN',
@@ -170,5 +170,5 @@ class TestSubWorkflowParams:
             )
         ).scalar_one()
 
-        assert await _params(session, handle.workflow_id) == {0: 'NOT_GIVEN'}
+        assert await _params(session, str(handle.workflow_id)) == {0: 'NOT_GIVEN'}
         assert await _params(session, str(child_id)) == {0: None, 1: 'GIVEN'}

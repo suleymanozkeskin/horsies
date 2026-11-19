@@ -497,6 +497,19 @@ mod tests {
         assert_eq!(parse_cpu_list("5"), Ok(cpus(&[5])));
     }
 
+    /// The refusal names the text.
+    #[test]
+    fn the_refusal_of_a_cpu_list_names_its_text() {
+        for text in ["", "a", "3-1", "1-", "-2", "70000", "1,,2"] {
+            let refused = parse_cpu_list(text).expect_err(text);
+            assert_eq!(refused.text, text);
+            assert!(
+                refused.to_string().contains(&format!("{text:?}")),
+                "{refused}"
+            );
+        }
+    }
+
     #[test]
     fn a_text_that_is_not_a_cpu_list_is_refused() {
         for text in ["", "a", "3-1", "1-", "-1", "1,,2", "65536", "0-65536", "+1"] {
@@ -534,7 +547,18 @@ mod tests {
         let refused = split_own_core(&cpus(&[0, 2]), &smt_siblings()).unwrap_err();
 
         assert_eq!(refused.cores, 1);
+        assert_eq!(refused.allowed, cpus(&[0, 2]));
         assert!(refused.to_string().contains("at least 2 physical cores"));
+    }
+
+    #[test]
+    fn cpus_without_smt_siblings_are_one_core_each() {
+        let alone: BTreeMap<u32, CpuIds> = (0..3).map(|cpu| (cpu, cpus(&[cpu]))).collect();
+
+        let split = split_own_core(&cpus(&[0, 1, 2]), &alone).unwrap();
+
+        assert_eq!(split.parent(), &cpus(&[0]));
+        assert_eq!(split.children(), &cpus(&[1, 2]));
     }
 
     #[test]
@@ -587,7 +611,59 @@ mod tests {
         assert!(omits.cause.contains("omits it"), "{}", omits.cause);
         assert_eq!(garbage.cpu, 1);
         assert_eq!(missing.cpu, 7);
+        assert!(
+            missing.cause.contains("cpu7/topology/thread_siblings_list"),
+            "{}",
+            missing.cause
+        );
+        assert!(
+            missing.cause.contains("No such file or directory"),
+            "{}",
+            missing.cause
+        );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn each_refusal_names_its_cause() {
+        let refusals = [
+            (
+                PlacementRefused::NotLinux { platform: "macos" },
+                "Linux only",
+            ),
+            (
+                PlacementRefused::TooFewCores(TooFewCores {
+                    allowed: cpus(&[6, 7]),
+                    cores: 1,
+                }),
+                "at least 2 physical cores",
+            ),
+            (
+                PlacementRefused::TopologyUnreadable(TopologyUnreadable {
+                    cpu: 3,
+                    cause: "gone".to_owned(),
+                }),
+                "CPU 3",
+            ),
+        ];
+        for (refused, phrase) in refusals {
+            assert!(refused.to_string().contains(phrase), "{refused}");
+        }
+    }
+
+    /// On Linux the plan is the split of the CPUs that this process may use
+    /// by the SMT siblings that the host topology lists.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn own_core_on_linux_splits_the_allowed_cpus() {
+        let allowed = allowed_cpus().unwrap();
+        let expected = read_siblings(&allowed, Path::new(CPU_TOPOLOGY_DIR))
+            .map_err(PlacementRefused::TopologyUnreadable)
+            .and_then(|siblings| {
+                split_own_core(&allowed, &siblings).map_err(PlacementRefused::TooFewCores)
+            });
+
+        assert_eq!(plan_own_core(), expected);
     }
 
     /// Python `test_a_refused_placement_stops_the_worker_start`, the plan:
@@ -704,6 +780,31 @@ mod tests {
         }
         .to_string()
         .contains(&format!("worker thread {thread_id}"))
+    }
+
+    /// Every thread of the listing gets the CPUs, and the count is the count
+    /// of the listing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn every_listed_thread_gets_the_cpus() {
+        let threads: Vec<OwnThread> = (0..3).map(|_| OwnThread::start()).collect();
+        let dir =
+            std::env::temp_dir().join(format!("horsies-threads-{}", uuid::Uuid::new_v4().simple()));
+        for thread in &threads {
+            std::fs::create_dir_all(dir.join(thread.thread_id.to_string())).unwrap();
+        }
+        let lowest = cpus(&[allowed_cpus().unwrap().lowest()]);
+
+        let placed = place_worker_threads(&lowest, &WorkerThreads::listed_in(dir.clone()));
+
+        assert_eq!(placed, Ok(3));
+        for thread in &threads {
+            assert_eq!(thread.cpus(), lowest);
+        }
+        for thread in threads {
+            thread.end();
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A thread that ended between the listing and the call is skipped.

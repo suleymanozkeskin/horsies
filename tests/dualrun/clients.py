@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -11,11 +12,6 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import Err, Ok
 from tests.dualrun.databases import DualRunDatabase
-
-
-def sqlalchemy_url(database: DualRunDatabase) -> str:
-    """The database URL with the psycopg driver of SQLAlchemy."""
-    return database.url.replace('postgresql://', 'postgresql+psycopg://', 1)
 
 
 @asynccontextmanager
@@ -34,3 +30,22 @@ async def open_broker(database: DualRunDatabase) -> AsyncGenerator[PostgresBroke
         yield broker
     finally:
         _ = await broker.close_async()
+
+
+def install_as_a_client(database: DualRunDatabase) -> None:
+    """The schema install that a client's broker runs before its first operation.
+
+    The install ends with the coverage pass of the default retention config
+    (``PostgresBroker.ensure_schema_initialized``). A side that runs raw
+    statements runs it first, when the other side runs its operation through
+    a broker of ``open_broker``: both sides then start their operation from
+    the state that the install leaves, and the pair compares the operation.
+
+    Raises ``AssertionError`` when the broker refuses the schema.
+    """
+
+    async def install() -> None:
+        async with open_broker(database):
+            pass
+
+    asyncio.run(install())

@@ -255,7 +255,6 @@ run_test_suite "e2e_layer5" "tests/e2e/test_layer5_workflow_dataflow.py" 10 || O
 kill_orphaned_workers
 run_test_suite "e2e_layer6" "tests/e2e/test_layer6_workflow_advanced.py" 10 || OVERALL_EXIT_CODE=1
 kill_orphaned_workers
-run_test_suite "e2e_fanout" "tests/e2e/test_fanout_saturation.py" 0 || OVERALL_EXIT_CODE=1
 
 # Generate final summary
 {

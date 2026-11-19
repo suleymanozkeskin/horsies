@@ -46,14 +46,9 @@ _ERROR_BUILDERS = frozenset(
         'RegistryError',
         'TaskDefinitionError',
         'WorkflowValidationError',
-        'task_definition_error',
-        'workflow_validation_error',
     },
 )
-"""The classes and helpers that build a startup error."""
-
-_HELPERS_FILE = Path('core/errors.py')
-"""The one file that the walk skips. Other files named errors.py stay in it."""
+"""The classes that build a startup error."""
 
 _NOT_BUILT_AT_A_SITE = frozenset({'MultipleValidationErrors'})
 """Wraps errors that are built elsewhere, so it adds no message of its own."""
@@ -120,8 +115,6 @@ def _library_sites() -> list[_Site]:
     sites: list[_Site] = []
     for path in sorted(root.rglob('*.py')):
         where = path.relative_to(root)
-        if where == _HELPERS_FILE:
-            continue  # The helpers forward `code` and `help_text`.
         sites.extend(_sites_in(path.read_text(), where=str(where)))
     return sites
 

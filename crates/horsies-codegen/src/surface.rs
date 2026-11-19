@@ -8,8 +8,7 @@
 //! the type comes from the core catalog itself.
 
 use horsies_core::catalog::{CodeCatalog, CodeEnum};
-use horsies_core::monitoring::MonitoringQueryErrorCode;
-use horsies_core::{BrokerErrorCode, TaskAbsenceReason, TaskAttemptOutcome, TaskStatus};
+use horsies_core::{TaskAbsenceReason, TaskAttemptOutcome, TaskStatus};
 
 /// The type text of an annotation.
 #[derive(Clone, Copy, Debug)]
@@ -103,9 +102,19 @@ pub struct StubStaticMethod {
     pub function: StubFunction,
 }
 
+/// A `from <module> import <names>` line of the stub: classes of the
+/// package that the annotations name, for example the generated error
+/// classes that an operation returns.
+#[derive(Clone, Copy, Debug)]
+pub struct StubImport {
+    pub module: &'static str,
+    pub names: &'static [&'static str],
+}
+
 /// The whole module.
 #[derive(Clone, Copy, Debug)]
 pub struct ModuleSurface {
+    pub imports: &'static [StubImport],
     pub exceptions: &'static [StubException],
     pub classes: &'static [StubClass],
     pub static_methods: &'static [StubStaticMethod],
@@ -405,13 +414,14 @@ const CORE_SCHEDULER_PARAMETERS: &[StubParameter] = &[
     positional("manifest_json", "str"),
 ];
 
-const PING_OUTCOME: &str = "DatabasePingRecord | BrokerFailure";
-const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | BrokerFailure";
-const SEND_OUTCOME: &str = "Enqueued | SendSuppressed | SendAsyncContext | \
-     SendValidationFailed | SendEnqueueFailed | SendPayloadMismatch | SendPayloadTooLarge | \
-     SendKeyConflict";
-const TASK_INFO_OUTCOME: &str = "TaskInfoRecord | TaskInfoNotFound | BrokerFailure";
-const RAW_RESULT_OUTCOME: &str = "RawResultRecordRecord | RawResultAbsent | BrokerFailure";
+const PING_OUTCOME: &str = "DatabasePingRecord | BrokerOperationFailed";
+const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | BrokerOperationFailed";
+/// A refused or failed send is a generated class of
+/// `horsies._catalog.broker_errors`, built in Rust.
+const SEND_OUTCOME: &str = "Enqueued | BrokerCoreEnqueueError";
+const TASK_INFO_OUTCOME: &str =
+    "TaskInfoRecord | TaskInfoNotFound | BrokerOperationFailed | BrokerInvalidJsonPayload";
+const RAW_RESULT_OUTCOME: &str = "RawResultRecordRecord | RawResultAbsent | BrokerOperationFailed | BrokerInvalidJsonPayload | BrokerInvalidInput";
 const REQUEUE_STALE_CLAIMED_OUTCOME: &str =
     "StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed";
 const RELEASE_CLAIMS_OUTCOME: &str = "ClaimsReleased | ReleaseFailed";
@@ -433,8 +443,9 @@ const MARK_STALE_RUNNING_OUTCOME: &str =
 const ENSURE_PARTITION_COVERAGE_OUTCOME: &str =
     "CoverageEnsuredRecord | CoverageEnsureFailedRecord | CoverageFailed";
 const PRUNE_EXPIRED_PARTITIONS_OUTCOME: &str = "PrunePassRecord | PruneFailed";
-const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | CancelRefusedWorkflowTask | \
-     CancelRefusedStatus | CancelTaskAbsent | CancelFailed | CancelStoredDataInvalid";
+/// A refused or failed cancel is a generated class of
+/// `horsies._catalog.monitoring_errors`, built in Rust.
+const CANCEL_TASK_OUTCOME: &str = "TaskCancelledRecord | TaskActionCoreError";
 const EXPIRE_PENDING_TASKS_OUTCOME: &str =
     "PendingExpiryDrained | PendingExpiryBoundReached | PendingExpiryFailed";
 const AUDIT_ORPHANED_WORKFLOW_TASKS_OUTCOME: &str =
@@ -442,8 +453,10 @@ const AUDIT_ORPHANED_WORKFLOW_TASKS_OUTCOME: &str =
 const TASK_ROW_END_OUTCOME: &str = "TaskRowEnded | AttemptAlreadyApplied | AttemptLostClaim | \
      AttemptSourceStateConflict | AttemptTaskAbsent | AttemptWriteFailed";
 
+/// A refused or failed start is a generated class of
+/// `horsies._catalog.workflow_start_errors`, built in Rust.
 const START_WORKFLOW_OUTCOME: &str =
-    "WorkflowStarted | WorkflowExists | WorkflowIdTaken | WorkflowStartFailed";
+    "WorkflowStarted | WorkflowExists | WorkflowStartIdConflict | WorkflowStartEnqueueFailed";
 const START_WORKFLOW_PARAMETERS: &[StubParameter] =
     &[positional("request", "WorkflowStartRequest")];
 const REGISTER_CHILD_SPEC_SOURCE_PARAMETERS: &[StubParameter] = &[positional(
@@ -459,8 +472,10 @@ const WORKFLOW_START_REQUEST_PARAMETERS: &[StubParameter] = &[
 const CHILD_SPEC_BUILT_PARAMETERS: &[StubParameter] = &[keyword("spec_json", "str")];
 const CHILD_SPEC_REFUSED_PARAMETERS: &[StubParameter] =
     &[keyword("message", "str"), keyword("failure_result", "str")];
-const RESUME_WORKFLOW_OUTCOME: &str = "WorkflowResumed | WorkflowNotPaused | \
-     WorkflowResumeRecoveryFailed | WorkflowAbsent | HandleFailed";
+/// A failed handle operation is a generated class of
+/// `horsies._catalog.workflow_handle_errors`, built in Rust.
+const RESUME_WORKFLOW_OUTCOME: &str = "WorkflowResumed | WorkflowNotPaused | WorkflowAbsent | \
+     HandleDbOperationFailed | HandleStoredDataInvalid | HandleResumeRecoveryFailed";
 const FINISH_WORKFLOW_NODE_PARAMETERS: &[StubParameter] =
     &[positional("request", "NodeFinishRequest")];
 const ADVANCE_WORKFLOW_PARENTS_PARAMETERS: &[StubParameter] =
@@ -482,18 +497,21 @@ const RECOVER_WORKFLOW_PHASE2_PARAMETERS: &[StubParameter] = &[
     keyword("max_rows", "int"),
     keyword("quarantine_after_attempts", "int"),
 ];
-const PAUSE_WORKFLOW_OUTCOME: &str =
-    "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | HandleFailed";
-const CANCEL_WORKFLOW_OUTCOME: &str =
-    "WorkflowCancelled | WorkflowNotCancellable | WorkflowAbsent | HandleFailed";
-const WORKFLOW_STATUS_OUTCOME: &str = "WorkflowStatusRead | WorkflowAbsent | HandleFailed";
+const PAUSE_WORKFLOW_OUTCOME: &str = "WorkflowPaused | WorkflowNotRunning | WorkflowAbsent | \
+     HandleDbOperationFailed | HandleStoredDataInvalid";
+const CANCEL_WORKFLOW_OUTCOME: &str = "WorkflowCancelled | WorkflowNotCancellable | \
+     WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid";
+const WORKFLOW_STATUS_OUTCOME: &str =
+    "WorkflowStatusRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid";
 const WAIT_WORKFLOW_RESULT_OUTCOME: &str = "WorkflowCompletedRead | WorkflowEndedRead | \
-     WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleFailed";
-const WORKFLOW_NODE_RESULTS_OUTCOME: &str =
-    "WorkflowNodeResultsRead | WorkflowAbsent | HandleFailed";
-const WORKFLOW_NODE_RESULT_OUTCOME: &str =
-    "StoredNodeResultRecord | NodeResultNotStored | HandleFailed";
-const WORKFLOW_NODES_OUTCOME: &str = "WorkflowNodesRead | WorkflowAbsent | HandleFailed";
+     WorkflowPausedRead | WaitTimedOut | WorkflowAbsent | HandleDbOperationFailed | \
+     HandleStoredDataInvalid";
+const WORKFLOW_NODE_RESULTS_OUTCOME: &str = "WorkflowNodeResultsRead | WorkflowAbsent | \
+     HandleDbOperationFailed | HandleStoredDataInvalid";
+const WORKFLOW_NODE_RESULT_OUTCOME: &str = "StoredNodeResultRecord | NodeResultNotStored | \
+     HandleDbOperationFailed | HandleStoredDataInvalid";
+const WORKFLOW_NODES_OUTCOME: &str =
+    "WorkflowNodesRead | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid";
 
 const START_ATTEMPT_OUTCOME: &str =
     "AttemptStarted | AttemptMissed | DeadlineBeforeStart | StartFailed";
@@ -755,16 +773,28 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
         doc: "Register the child spec source of the handle's workflow operations. The core calls it\non the callback thread for each sub-workflow child that an operation builds. A second\nregistration raises RuntimeError. Starts nothing.",
     },
     StubFunction {
+        name: "start_workflow",
+        parameters: START_WORKFLOW_PARAMETERS,
+        returns: TypeText::Plain(START_WORKFLOW_OUTCOME),
+        doc: "Start one workflow. Writes; a caller that leaves does not stop it. The children of its\nsub-workflow roots come from the child spec source. A build that raised (KeyboardInterrupt,\nSystemExit, or an Exception such as SerializationError) rolls the start back and raises it\nagain. With no child spec source it raises RuntimeError.",
+    },
+    StubFunction {
         name: "start_workflow_async",
         parameters: START_WORKFLOW_PARAMETERS,
         returns: TypeText::FutureOf(START_WORKFLOW_OUTCOME),
-        doc: "Start one workflow. Writes; the children of its sub-workflow roots come from the child\nspec source. A build that raised (KeyboardInterrupt, SystemExit, or an Exception such as\nSerializationError) rolls the start back and raises it again. With no child spec source it\nraises RuntimeError.",
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "resume_workflow",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::Plain(RESUME_WORKFLOW_OUTCOME),
+        doc: "Resume one workflow tree. Writes; a caller that leaves does not stop it. The child starts\nit owes build their children through the child spec source. A build that raised\nKeyboardInterrupt or SystemExit raises it again; one that raised an Exception raises it\nagain when the resume failed with it. With no child spec source it raises RuntimeError.",
     },
     StubFunction {
         name: "resume_workflow_async",
         parameters: WORKFLOW_ID_PARAMETERS,
         returns: TypeText::FutureOf(RESUME_WORKFLOW_OUTCOME),
-        doc: "Resume one workflow tree. Writes; the child starts it owes build their children through\nthe child spec source. A build that raised KeyboardInterrupt or SystemExit raises it\nagain; one that raised an Exception raises it again when the resume failed with it. With\nno child spec source it raises RuntimeError.",
+        doc: "The awaitable form of the method above.",
     },
     StubFunction {
         name: "finish_workflow_node_async",
@@ -797,16 +827,28 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
         doc: "Settle the claimed workflow tasks of one claim pass. Writes, one statement per 1000\nclaims. A request with no claim sends nothing.",
     },
     StubFunction {
+        name: "pause_workflow",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::Plain(PAUSE_WORKFLOW_OUTCOME),
+        doc: "Pause one workflow tree. Writes, in one statement; a caller that leaves does not stop\nit. A row outside the function's contract raises PanicException.",
+    },
+    StubFunction {
         name: "pause_workflow_async",
         parameters: WORKFLOW_ID_PARAMETERS,
         returns: TypeText::FutureOf(PAUSE_WORKFLOW_OUTCOME),
-        doc: "Pause one workflow tree. Writes, in one statement. A row outside the function's contract\nraises PanicException.",
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "cancel_workflow",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::Plain(CANCEL_WORKFLOW_OUTCOME),
+        doc: "Cancel one workflow tree. Writes, in one statement; a caller that leaves does not stop\nit. A row outside the function's contract raises PanicException.",
     },
     StubFunction {
         name: "cancel_workflow_async",
         parameters: WORKFLOW_ID_PARAMETERS,
         returns: TypeText::FutureOf(CANCEL_WORKFLOW_OUTCOME),
-        doc: "Cancel one workflow tree. Writes, in one statement. A row outside the function's contract\nraises PanicException.",
+        doc: "The awaitable form of the method above.",
     },
     StubFunction {
         name: "delete_expired_workflows_async",
@@ -821,34 +863,64 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
         doc: "Expire the PAUSED workflows older than older_than_us microseconds, at most batch_size,\noldest first. Writes; each candidate commits alone.",
     },
     StubFunction {
+        name: "workflow_status",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::Plain(WORKFLOW_STATUS_OUTCOME),
+        doc: "The status of one workflow. Reads only.",
+    },
+    StubFunction {
         name: "workflow_status_async",
         parameters: WORKFLOW_ID_PARAMETERS,
         returns: TypeText::FutureOf(WORKFLOW_STATUS_OUTCOME),
-        doc: "The status of one workflow. Reads only.",
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "wait_workflow_result",
+        parameters: WAIT_WORKFLOW_RESULT_PARAMETERS,
+        returns: TypeText::Plain(WAIT_WORKFLOW_RESULT_OUTCOME),
+        doc: "Wait for the end of one workflow, up to timeout_ms (no limit for None). Reads only; a\ncaller that leaves drops the wait and its subscription. Bounded by the limit plus the bound\nof a blocking call; not bounded with no limit. A negative timeout raises OverflowError.",
     },
     StubFunction {
         name: "wait_workflow_result_async",
         parameters: WAIT_WORKFLOW_RESULT_PARAMETERS,
         returns: TypeText::FutureOf(WAIT_WORKFLOW_RESULT_OUTCOME),
-        doc: "Wait for the end of one workflow, up to timeout_ms (no limit for None). Reads only; a\ncancelled await drops the wait and its subscription. A negative timeout raises\nOverflowError.",
+        doc: "The awaitable form of the method above. A cancelled await drops the wait and its\nsubscription.",
+    },
+    StubFunction {
+        name: "workflow_node_results",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::Plain(WORKFLOW_NODE_RESULTS_OUTCOME),
+        doc: "The nodes of one workflow that store a result. Reads only.",
     },
     StubFunction {
         name: "workflow_node_results_async",
         parameters: WORKFLOW_ID_PARAMETERS,
         returns: TypeText::FutureOf(WORKFLOW_NODE_RESULTS_OUTCOME),
-        doc: "The nodes of one workflow that store a result. Reads only.",
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "workflow_node_result",
+        parameters: WORKFLOW_NODE_RESULT_PARAMETERS,
+        returns: TypeText::Plain(WORKFLOW_NODE_RESULT_OUTCOME),
+        doc: "The stored result of one node. Reads only.",
     },
     StubFunction {
         name: "workflow_node_result_async",
         parameters: WORKFLOW_NODE_RESULT_PARAMETERS,
         returns: TypeText::FutureOf(WORKFLOW_NODE_RESULT_OUTCOME),
-        doc: "The stored result of one node. Reads only.",
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "workflow_nodes",
+        parameters: WORKFLOW_ID_PARAMETERS,
+        returns: TypeText::Plain(WORKFLOW_NODES_OUTCOME),
+        doc: "The nodes of one workflow in index order. Reads only.",
     },
     StubFunction {
         name: "workflow_nodes_async",
         parameters: WORKFLOW_ID_PARAMETERS,
         returns: TypeText::FutureOf(WORKFLOW_NODES_OUTCOME),
-        doc: "The nodes of one workflow in index order. Reads only.",
+        doc: "The awaitable form of the method above.",
     },
     StubFunction {
         name: "task_info",
@@ -876,9 +948,20 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
     },
 ];
 
-const MONITORING_READ_OUTCOME: &str = "MonitoringJson | MonitoringFailed";
-const TASK_LIST_OUTCOME: &str = "TaskListComplete | TaskListTruncated | BrokerFailure";
-const MONITORING_DETAIL_OUTCOME: &str = "MonitoringJson | TaskDetailAbsent | MonitoringFailed";
+/// A failed monitoring read is a generated class of
+/// `horsies._catalog.monitoring_errors`, built in Rust.
+const MONITORING_READ_OUTCOME: &str = "MonitoringJson | MonitoringQueryCoreError";
+const PING_WORKERS_OUTCOME: &str =
+    "WorkerPongsRecord | BrokerOperationFailed | BrokerInvalidInput | BrokerListenerDisabled";
+const WORKER_STATES_OUTCOME: &str =
+    "WorkerStatesRecord | BrokerOperationFailed | BrokerInvalidInput";
+const WORKER_STATE_OUTCOME: &str = "WorkerStateRecord | WorkerStateAbsent | BrokerOperationFailed";
+const CLASS_COVERAGE_OUTCOME: &str = "ClassCoverageRecord | BrokerOperationFailed";
+const CLASS_REPORT_OUTCOME: &str = "ClassReportRecord | BrokerOperationFailed";
+const TASK_LIST_OUTCOME: &str =
+    "TaskListComplete | TaskListTruncated | BrokerOperationFailed | BrokerInvalidInput";
+const MONITORING_DETAIL_OUTCOME: &str =
+    "MonitoringJson | TaskDetailAbsent | MonitoringQueryCoreError";
 
 /// The monitoring methods of `CoreHandle`.
 const MONITORING_HANDLE_METHODS: &[StubFunction] = &[
@@ -955,41 +1038,76 @@ const MONITORING_HANDLE_METHODS: &[StubFunction] = &[
         doc: "The PENDING tasks whose good_until passed before a worker took them. Reads only, in\none statement.",
     },
     StubFunction {
+        name: "ping_workers",
+        parameters: PING_WORKERS_PARAMETERS,
+        returns: TypeText::Plain(PING_WORKERS_OUTCOME),
+        doc: "Ping the workers and collect the distinct replies within the window, on the process\nlistener. A refused argument is INVALID_INPUT before any core call; a handle with no\nlistener is LISTENER_DISABLED. Sends one NOTIFY; writes no row. Bounded by the window plus\nthe bound of a blocking call; not bounded for an infinite window.",
+    },
+    StubFunction {
         name: "ping_workers_async",
         parameters: PING_WORKERS_PARAMETERS,
-        returns: TypeText::FutureOf("WorkerPongsRecord | BrokerFailure"),
-        doc: "Ping the workers and collect the distinct replies within the window, on the process\nlistener. A refused argument is INVALID_INPUT before any core call; a handle with no\nlistener is LISTENER_DISABLED. Sends one NOTIFY; writes no row.",
+        returns: TypeText::FutureOf(PING_WORKERS_OUTCOME),
+        doc: "The awaitable form of the method above. A cancelled await drops the wait and the reply\nsubscription.",
     },
-
+    StubFunction {
+        name: "worker_states",
+        parameters: &[],
+        returns: TypeText::Plain(WORKER_STATES_OUTCOME),
+        doc: "The latest state snapshot per worker, idle workers included. Reads only, in one\nstatement.",
+    },
     StubFunction {
         name: "worker_states_async",
         parameters: &[],
-        returns: TypeText::FutureOf("WorkerStatesRecord | BrokerFailure"),
-        doc: "The latest state snapshot per worker, idle workers included. Reads only, in one\nstatement. A cancelled await drops the read.",
+        returns: TypeText::FutureOf(WORKER_STATES_OUTCOME),
+        doc: "The awaitable form of the method above. A cancelled await drops the read.",
+    },
+    StubFunction {
+        name: "worker_state",
+        parameters: WORKER_STATE_PARAMETERS,
+        returns: TypeText::Plain(WORKER_STATE_OUTCOME),
+        doc: "The latest state snapshot of one worker, or WorkerStateAbsent when it wrote none. Reads\nonly, in one statement.",
     },
     StubFunction {
         name: "worker_state_async",
         parameters: WORKER_STATE_PARAMETERS,
-        returns: TypeText::FutureOf("WorkerStateRecord | WorkerStateAbsent | BrokerFailure"),
-        doc: "The latest state snapshot of one worker, or WorkerStateAbsent when it wrote none. Reads\nonly, in one statement.",
+        returns: TypeText::FutureOf(WORKER_STATE_OUTCOME),
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "worker_state_history",
+        parameters: WORKER_STATE_HISTORY_PARAMETERS,
+        returns: TypeText::Plain(WORKER_STATES_OUTCOME),
+        doc: "The state snapshots of one worker, newest first: at most limit, or every retained one for\nNone. A limit of 0 or less is INVALID_INPUT; a limit that PostgreSQL refuses as a bigint\nis MONITORING_QUERY_FAILED, not retryable; both before any core call. Reads only, in one\nstatement.",
     },
     StubFunction {
         name: "worker_state_history_async",
         parameters: WORKER_STATE_HISTORY_PARAMETERS,
-        returns: TypeText::FutureOf("WorkerStatesRecord | BrokerFailure"),
-        doc: "The state snapshots of one worker, newest first: at most limit, or every retained one for\nNone. A limit of 0 or less is INVALID_INPUT; a limit that PostgreSQL refuses as a bigint\nis MONITORING_QUERY_FAILED, not retryable; both before any core call. Reads only, in one\nstatement.",
+        returns: TypeText::FutureOf(WORKER_STATES_OUTCOME),
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "class_coverage",
+        parameters: &[],
+        returns: TypeText::Plain(CLASS_COVERAGE_OUTCOME),
+        doc: "The fleet check: for each (queue, class) with PENDING rows, whether a live worker serves\nit. Reads only, in one statement.",
     },
     StubFunction {
         name: "class_coverage_async",
         parameters: &[],
-        returns: TypeText::FutureOf("ClassCoverageRecord | BrokerFailure"),
-        doc: "The fleet check: for each (queue, class) with PENDING rows, whether a live worker serves\nit. Reads only, in one statement.",
+        returns: TypeText::FutureOf(CLASS_COVERAGE_OUTCOME),
+        doc: "The awaitable form of the method above.",
+    },
+    StubFunction {
+        name: "class_report",
+        parameters: &[],
+        returns: TypeText::Plain(CLASS_REPORT_OUTCOME),
+        doc: "The pending streams with their oldest wait and coverage, and the budget load of each\nlive worker. Reads only, in one statement.",
     },
     StubFunction {
         name: "class_report_async",
         parameters: &[],
-        returns: TypeText::FutureOf("ClassReportRecord | BrokerFailure"),
-        doc: "The pending streams with their oldest wait and coverage, and the budget load of each\nlive worker. Reads only, in one statement.",
+        returns: TypeText::FutureOf(CLASS_REPORT_OUTCOME),
+        doc: "The awaitable form of the method above.",
     },
 ];
 
@@ -1242,21 +1360,6 @@ const ARGUMENT_CLASSES: &[StubClass] = &[
 
 const RECORD_CLASSES: &[StubClass] = &[
     StubClass {
-        name: "BrokerFailure",
-        doc: "An expected failure of a broker operation.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            StubProperty {
-                name: "code",
-                annotation: TypeText::WireValuesOf(<BrokerErrorCode as CodeEnum>::CATALOG),
-            },
-            property("message", "str"),
-            property("retryable", "bool"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
-        methods: &[],
-    },
-    StubClass {
         name: "DatabasePingRecord",
         doc: "The round trip of one database ping.",
         constructor: Constructor::NoConstructor,
@@ -1342,72 +1445,6 @@ const RECORD_CLASSES: &[StubClass] = &[
         doc: "The task is stored, or it already was under the same command.",
         constructor: Constructor::NoConstructor,
         properties: &[property("task_id", "uuid.UUID")],
-        methods: &[],
-    },
-    StubClass {
-        name: "SendSuppressed",
-        doc: "Sends are suppressed. Nothing was written.",
-        constructor: Constructor::NoConstructor,
-        properties: &[property("message", "str")],
-        methods: &[],
-    },
-    StubClass {
-        name: "SendAsyncContext",
-        doc: "A blocking send ran on a thread that runs an event loop or a tokio runtime. Nothing was\nwritten. A client produces it before the send, never the core's enqueue.",
-        constructor: Constructor::NoConstructor,
-        properties: &[property("task_id", "uuid.UUID"), property("message", "str")],
-        methods: &[],
-    },
-    StubClass {
-        name: "SendValidationFailed",
-        doc: "The core refused the send before any statement. Nothing was written. cause_text is the\nJSON reader's error when the refused text does not read.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("code", "Literal['INVALID_INPUT', 'INVALID_TASK_OPTIONS']"),
-            property("message", "str"),
-            property("cause_text", "str | None"),
-        ],
-        methods: &[],
-    },
-    StubClass {
-        name: "SendEnqueueFailed",
-        doc: "The enqueue failed; the row may or may not exist. A retention class key that no class\nderives is this record too, built before any statement: nothing was written, and\nretryable is False.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("task_id", "uuid.UUID"),
-            property("message", "str"),
-            property("retryable", "bool"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
-        methods: &[],
-    },
-    StubClass {
-        name: "SendPayloadMismatch",
-        doc: "The task id exists with another command or idempotency key. Nothing was written.",
-        constructor: Constructor::NoConstructor,
-        properties: &[property("task_id", "uuid.UUID"), property("message", "str")],
-        methods: &[],
-    },
-    StubClass {
-        name: "SendPayloadTooLarge",
-        doc: "The input is larger than the configured limit. Nothing was written.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("message", "str"),
-            property("size_bytes", "int"),
-            property("limit_bytes", "int"),
-        ],
-        methods: &[],
-    },
-    StubClass {
-        name: "SendKeyConflict",
-        doc: "The idempotency key is reserved by owner_task_id with another command.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("task_id", "uuid.UUID"),
-            property("owner_task_id", "uuid.UUID"),
-            property("message", "str"),
-        ],
         methods: &[],
     },
     StubClass {
@@ -2007,58 +2044,6 @@ const RECORD_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "CancelRefusedWorkflowTask",
-        doc: "The task belongs to a workflow, live or finished. Nothing changed.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("task_id", "uuid.UUID"),
-            StubProperty {
-                name: "current_status",
-                annotation: TypeText::WireValuesOf(<TaskStatus as CodeEnum>::CATALOG),
-            },
-        ],
-        methods: &[],
-    },
-    StubClass {
-        name: "CancelRefusedStatus",
-        doc: "The task's status does not admit the cancel: a terminal status (an earlier cancel\nincluded), or RUNNING without the opt-in. Nothing changed.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("task_id", "uuid.UUID"),
-            StubProperty {
-                name: "current_status",
-                annotation: TypeText::WireValuesOf(<TaskStatus as CodeEnum>::CATALOG),
-            },
-        ],
-        methods: &[],
-    },
-    StubClass {
-        name: "CancelTaskAbsent",
-        doc: "Neither the live table nor history holds the task. Nothing changed.",
-        constructor: Constructor::NoConstructor,
-        properties: &[property("task_id", "uuid.UUID")],
-        methods: &[],
-    },
-    StubClass {
-        name: "CancelFailed",
-        doc: "The connect, the client family check or the statement failed. The statement wrote\nnothing, or it committed and its reply was lost.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("task_id", "uuid.UUID"),
-            property("message", "str"),
-            property("retryable", "bool"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
-        methods: &[],
-    },
-    StubClass {
-        name: "CancelStoredDataInvalid",
-        doc: "Stored task data does not parse. The cancel refused the task; nothing changed.",
-        constructor: Constructor::NoConstructor,
-        properties: &[property("task_id", "uuid.UUID"), property("message", "str")],
-        methods: &[],
-    },
-    StubClass {
         name: "SchedulerStarted",
         doc: "The start of the scheduler completed.",
         constructor: Constructor::NoConstructor,
@@ -2209,21 +2194,6 @@ const MONITORING_CLASSES: &[StubClass] = &[
         doc: "The JSON text of the core model of one monitoring read.",
         constructor: Constructor::NoConstructor,
         properties: &[property("json", "str")],
-        methods: &[],
-    },
-    StubClass {
-        name: "MonitoringFailed",
-        doc: "An expected failure of a monitoring read. Nothing changed: a read writes nothing.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            StubProperty {
-                name: "code",
-                annotation: TypeText::WireValuesOf(<MonitoringQueryErrorCode as CodeEnum>::CATALOG),
-            },
-            property("message", "str"),
-            property("retryable", "bool"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
         methods: &[],
     },
     StubClass {
@@ -2644,19 +2614,6 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "HandleFailed",
-        doc: "The connect, the client family check or the statement failed (DB_OPERATION_FAILED), or a\nstored value of the workflow does not parse (STORED_DATA_INVALID, not retryable). After\nDB_OPERATION_FAILED the statement wrote nothing, or it committed and its reply was lost.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("workflow_id", "uuid.UUID"),
-            property("code", "Literal['DB_OPERATION_FAILED', 'STORED_DATA_INVALID']"),
-            property("message", "str"),
-            property("retryable", "bool"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
-        methods: &[],
-    },
-    StubClass {
         name: "WorkflowsDeleted",
         doc: "The workflow retention pass ended: a batch deleted no workflow, or the budget passed\nafter a batch.",
         constructor: Constructor::NoConstructor,
@@ -2869,16 +2826,6 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "WorkflowIdTaken",
-        doc: "A workflow with this id exists under another name. Nothing was written.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("workflow_id", "uuid.UUID"),
-            property("existing_name", "str"),
-        ],
-        methods: &[],
-    },
-    StubClass {
         name: "NodeFinishRequest",
         doc: "One frozen phase 2. Another facts or wake value raises ValueError.",
         constructor: Constructor::Parameters(NODE_FINISH_REQUEST_PARAMETERS),
@@ -3039,29 +2986,6 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
         doc: "The workflow exists and is not PAUSED. Nothing was written.",
         constructor: Constructor::NoConstructor,
         properties: &[property("workflow_id", "uuid.UUID")],
-        methods: &[],
-    },
-    StubClass {
-        name: "WorkflowResumeRecoveryFailed",
-        doc: "The resume committed; the parent advance or the recovery pass of the tree after it\nfailed. The workflow is RUNNING, and workflow recovery finishes the work. Not retryable.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("workflow_id", "uuid.UUID"),
-            property("message", "str"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
-        methods: &[],
-    },
-    StubClass {
-        name: "WorkflowStartFailed",
-        doc: "The connect, the schema install, the client family check, the statement or an owed\nchild start failed, or a child build did not run. Nothing committed, or the commit\noutcome is unknown: a resend with the same id then finds the workflow.",
-        constructor: Constructor::NoConstructor,
-        properties: &[
-            property("workflow_id", "uuid.UUID"),
-            property("message", "str"),
-            property("retryable", "bool"),
-            property("exception", CORE_FAILURE_EXCEPTION),
-        ],
         methods: &[],
     },
 ];
@@ -3241,6 +3165,13 @@ const HISTORY_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
+        name: "RerunUnknownStoredFamily",
+        doc: "The family row of the database holds a value that is not a client family (stored):\ncorrupt stored data. Nothing written. message names the table, the column and the\nvalue; exception is a CoreContractViolation with the subject rerun_task.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("stored", "str"), property("message", "str"), property("exception", CORE_FAILURE_EXCEPTION)],
+        methods: &[],
+    },
+    StubClass {
         name: "RerunCallerKeyRefused",
         doc: "The caller key is not a valid idempotency key; cause names why. Nothing written.",
         constructor: Constructor::NoConstructor,
@@ -3389,7 +3320,7 @@ const FRAME_CLASSES: &[StubClass] = &[
         name: "ProtocolNumbers",
         doc: "The protocol version, the exit codes of a child, the spawn request byte, and the bounds\nthat a child applies before it builds a frame: the names of a report of left work, and the\nbytes of a body.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("protocol_version", "int"), property("parent_gone_exit_code", "int"), property("bad_parent_frame_exit_code", "int"), property("bad_arguments_exit_code", "int"), property("stopped_with_executor_threads_exit_code", "int"), property("boot_failed_exit_code", "int"), property("reparent_failed_exit_code", "int"), property("protocol_mismatch_exit_code", "int"), property("child_hook_failed_exit_code", "int"), property("spawn_request_byte", "int"), property("max_leftover_task_names", "int"), property("max_body_bytes", "int")],
+        properties: &[property("protocol_version", "int"), property("parent_gone_exit_code", "int"), property("bad_parent_frame_exit_code", "int"), property("bad_arguments_exit_code", "int"), property("stopped_with_executor_threads_exit_code", "int"), property("boot_failed_exit_code", "int"), property("reparent_failed_exit_code", "int"), property("protocol_mismatch_exit_code", "int"), property("core_stopped_exit_code", "int"), property("child_hook_failed_exit_code", "int"), property("spawn_request_byte", "int"), property("max_leftover_task_names", "int"), property("max_body_bytes", "int")],
         methods: &[],
     },
     StubClass {
@@ -3472,7 +3403,7 @@ const FRAME_CLASSES: &[StubClass] = &[
     StubClass {
         name: "ResultFrame",
         doc: "An isolated task ended and left no work on a task loop.",
-        constructor: Constructor::Parameters(&[keyword("task_id", "uuid.UUID"), keyword("end", "TaskResult | StoppedBeforeRunning | WorkerFailure"), keyword("rss_mb", "float | Literal['UNREADABLE']"), keyword("task_loop", "Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK']")]),
+        constructor: Constructor::Parameters(&[keyword("task_id", "uuid.UUID"), keyword("end", "TaskResult | StoppedBeforeRunning | WorkerFailure"), keyword("rss_mb", "float | Literal['UNREADABLE']"), keyword("task_loop", "Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK']"), keyword("child", "Literal['SERVES_ON', 'ENDS_ITSELF']")]),
         properties: &[],
         methods: &[],
     },
@@ -3500,7 +3431,7 @@ const FRAME_CLASSES: &[StubClass] = &[
     StubClass {
         name: "SharedResultFrame",
         doc: "A run of a shared child ended; its seat is free.",
-        constructor: Constructor::Parameters(&[keyword("dispatch", "int"), keyword("task_id", "uuid.UUID"), keyword("end", "TaskResult | StoppedBeforeRunning | WorkerFailure | Literal['TIMED_OUT']"), keyword("rss_mb", "float | Literal['UNREADABLE']")]),
+        constructor: Constructor::Parameters(&[keyword("dispatch", "int"), keyword("task_id", "uuid.UUID"), keyword("end", "TaskResult | StoppedBeforeRunning | WorkerFailure | Literal['TIMED_OUT']"), keyword("rss_mb", "float | Literal['UNREADABLE']"), keyword("child", "Literal['SERVES_ON', 'ENDS_ITSELF']")]),
         properties: &[],
         methods: &[],
     },
@@ -3758,7 +3689,7 @@ const FUNCTIONS: &[StubFunction] = &[
     StubFunction {
         name: "prepare_rerun_write",
         parameters: &[positional("read", "PreparedStatement"), positional("row", "tuple[object, ...]"), positional("command", "RerunCommandRecord"), positional("policy", "RerunPolicyRecord"), keyword("sent_at", "datetime.datetime")],
-        returns: TypeText::Plain("RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunCallerKeyRefused | IdMintRefused"),
+        returns: TypeText::Plain("RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunCallerKeyRefused | IdMintRefused"),
         doc: "Decide the rerun from the row of its read (a tuple in column order): the write, or the\nanswer that ends it with nothing written. Pure apart from the id mint. A row that does not\nfit the columns raises CoreDefect.",
     },
     StubFunction {
@@ -3810,7 +3741,38 @@ const STATIC_METHODS: &[StubStaticMethod] = &[StubStaticMethod {
     },
 }];
 
+/// The generated classes of `horsies._catalog` that the annotations name.
+const IMPORTS: &[StubImport] = &[
+    StubImport {
+        module: "horsies._catalog.broker_errors",
+        names: &[
+            "BrokerCoreEnqueueError",
+            "BrokerInvalidInput",
+            "BrokerInvalidJsonPayload",
+            "BrokerListenerDisabled",
+            "BrokerOperationFailed",
+        ],
+    },
+    StubImport {
+        module: "horsies._catalog.monitoring_errors",
+        names: &["MonitoringQueryCoreError", "TaskActionCoreError"],
+    },
+    StubImport {
+        module: "horsies._catalog.workflow_handle_errors",
+        names: &[
+            "HandleDbOperationFailed",
+            "HandleResumeRecoveryFailed",
+            "HandleStoredDataInvalid",
+        ],
+    },
+    StubImport {
+        module: "horsies._catalog.workflow_start_errors",
+        names: &["WorkflowStartEnqueueFailed", "WorkflowStartIdConflict"],
+    },
+];
+
 pub const CORE_MODULE: ModuleSurface = ModuleSurface {
+    imports: IMPORTS,
     exceptions: EXCEPTIONS,
     classes: &CLASSES,
     static_methods: STATIC_METHODS,

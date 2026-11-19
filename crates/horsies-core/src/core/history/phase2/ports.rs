@@ -1,35 +1,29 @@
-//! Ports of the Python phase-2 tests: consumption from history, the caller's
-//! plan setting, the quarantine copy and the locator keys.
+//! The phase-2 rules: consumption from history, the caller's plan setting,
+//! the quarantine copy and the locator keys.
 //!
-//! Python specification: `tests/integration/test_task_history_phase2_consumption.py`,
-//! `test_phase2_consume_plan.py`, `test_task_history_phase2_quarantine.py` and
-//! the core rows of `test_task_history_workflow_recovery_prototypes.py`. Each
-//! test runs in one transaction that it rolls back, on the shared migrated
-//! database.
+//! Python specification: `tests/integration/test_phase2_consume_plan.py` and
+//! `test_task_history_phase2_quarantine.py`. Each test runs in one
+//! transaction that it rolls back, on the shared migrated database.
 
 use serial_test::serial;
-use sqlx::{Acquire, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use super::consumption::{consume_phase2, Phase2DispositionKind};
+use super::consumption::{consume_phase2, Phase2CallError, Phase2DispositionKind};
 use super::quarantine::{quarantine_one, QuarantineVerdict};
 use crate::core::history::errors::HistoryError;
 use crate::core::lifecycle::TerminalizationOutcome;
+use crate::test_support::sql::{self, TestPool, TestTransaction};
 use crate::test_support::terminal_writes::{self, TerminalFailure};
 
 const PORT_WORKER: &str = "port-phase2-worker";
 const CLASS_KEY: &str = "standard_30d";
 
-async fn shared_pool() -> PgPool {
-    crate::broker::terminalization_matrix::migrated_pool().await
+async fn shared_pool() -> TestPool {
+    crate::test_support::migrated_pool().await
 }
 
-async fn seed_workflow(
-    transaction: &mut Transaction<'_, Postgres>,
-    workflow_id: Uuid,
-    status: &str,
-) {
-    sqlx::query(
+async fn seed_workflow(transaction: &mut TestTransaction<'_>, workflow_id: Uuid, status: &str) {
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, definition_key, status, on_error, output_task_index,
              success_policy, result, error, parent_workflow_id, parent_task_index,
@@ -44,18 +38,18 @@ async fn seed_workflow(
     )
     .bind(workflow_id)
     .bind(status)
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("insert workflow");
 }
 
 async fn seed_node(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut TestTransaction<'_>,
     node_id: Uuid,
     workflow_id: Uuid,
     task_id: Uuid,
 ) {
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow,
              id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
@@ -77,13 +71,13 @@ async fn seed_node(
     .bind(workflow_id)
     .bind(task_id)
     .bind(CLASS_KEY)
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("insert workflow node");
 }
 
-async fn seed_running_workflow_task(transaction: &mut Transaction<'_, Postgres>, task_id: Uuid) {
-    sqlx::query(
+async fn seed_running_workflow_task(transaction: &mut TestTransaction<'_>, task_id: Uuid) {
+    sql::query(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, task_options, execution,
              retention_class_key, sent_at, created_at,
@@ -107,7 +101,7 @@ async fn seed_running_workflow_task(transaction: &mut Transaction<'_, Postgres>,
     .bind(task_id)
     .bind(CLASS_KEY)
     .bind(PORT_WORKER)
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("insert running workflow task");
 }
@@ -121,7 +115,7 @@ struct PendingEvidence {
 }
 
 async fn seed_pending(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut TestTransaction<'_>,
     workflow_status: &str,
 ) -> PendingEvidence {
     let evidence = PendingEvidence {
@@ -139,7 +133,7 @@ async fn seed_pending(
     )
     .await;
     let outcomes = terminal_writes::fail_running_task(
-        transaction.as_mut(),
+        &mut *transaction,
         evidence.task_id,
         PORT_WORKER,
         &TerminalFailure::of_task(
@@ -166,36 +160,33 @@ async fn seed_pending(
     evidence
 }
 
-async fn pending_source(
-    transaction: &mut Transaction<'_, Postgres>,
-    task_id: Uuid,
-) -> Option<String> {
-    sqlx::query_scalar(
+async fn pending_source(transaction: &mut TestTransaction<'_>, task_id: Uuid) -> Option<String> {
+    sql::query_scalar(
         "SELECT recovery_source FROM horsies_workflow_phase2_pending WHERE task_id = $1",
     )
     .bind(task_id)
-    .fetch_optional(transaction.as_mut())
+    .fetch_optional(&mut *transaction)
     .await
     .expect("read pending row")
 }
 
-async fn history_result_text(transaction: &mut Transaction<'_, Postgres>, task_id: Uuid) -> String {
-    sqlx::query_scalar(
+async fn history_result_text(transaction: &mut TestTransaction<'_>, task_id: Uuid) -> String {
+    sql::query_scalar(
         "SELECT convert_from(result_payload, 'UTF8') FROM horsies_task_history WHERE task_id = $1",
     )
     .bind(task_id)
-    .fetch_one(transaction.as_mut())
+    .fetch_one(&mut *transaction)
     .await
     .expect("read history result")
 }
 
 async fn node_state(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut TestTransaction<'_>,
     node_id: Uuid,
 ) -> (String, Option<String>) {
-    sqlx::query_as("SELECT status, result FROM horsies_workflow_tasks WHERE id = $1")
+    sql::query_as("SELECT status, result FROM horsies_workflow_tasks WHERE id = $1")
         .bind(node_id)
-        .fetch_one(transaction.as_mut())
+        .fetch_one(&mut *transaction)
         .await
         .expect("read node")
 }
@@ -207,8 +198,8 @@ async fn node_state(
 async fn the_caller_plan_setting_survives_the_consume_call() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
-    sqlx::query("SET LOCAL plan_cache_mode = force_custom_plan")
-        .execute(transaction.as_mut())
+    sql::query("SET LOCAL plan_cache_mode = force_custom_plan")
+        .execute(&mut *transaction)
         .await
         .expect("set the caller plan mode");
     let disposition = consume_phase2(&mut transaction, Uuid::new_v4(), "FAILED")
@@ -218,8 +209,8 @@ async fn the_caller_plan_setting_survives_the_consume_call() {
         disposition.disposition,
         Phase2DispositionKind::PendingAbsent
     );
-    let setting: String = sqlx::query_scalar("SHOW plan_cache_mode")
-        .fetch_one(transaction.as_mut())
+    let setting: String = sql::query_scalar("SHOW plan_cache_mode")
+        .fetch_one(&mut *transaction)
         .await
         .expect("read the caller plan mode");
     assert_eq!(setting, "force_custom_plan");
@@ -250,6 +241,33 @@ async fn consumption_applies_the_history_result_to_the_node() {
         pending_source(&mut transaction, evidence.task_id).await,
         None
     );
+    transaction.rollback().await.expect("rollback");
+}
+
+/// `TestDurableDispositions.test_replay_after_evidence_is_gone_is_already_applied`:
+/// a second consumption, after the first deleted the pending row, is
+/// `ALREADY_APPLIED` and reports the node status that the first wrote.
+#[tokio::test]
+#[serial]
+async fn a_replay_after_the_evidence_is_gone_is_already_applied() {
+    let pool = shared_pool().await;
+    let mut transaction = pool.begin().await.expect("begin");
+    let evidence = seed_pending(&mut transaction, "RUNNING").await;
+    let first = consume_phase2(&mut transaction, evidence.task_id, "FAILED")
+        .await
+        .expect("consume");
+    assert_eq!(first.disposition, Phase2DispositionKind::AppliedToNode);
+    assert_eq!(
+        pending_source(&mut transaction, evidence.task_id).await,
+        None
+    );
+
+    let replay = consume_phase2(&mut transaction, evidence.task_id, "FAILED")
+        .await
+        .expect("consume again");
+
+    assert_eq!(replay.disposition, Phase2DispositionKind::AlreadyApplied);
+    assert_eq!(replay.node_status.as_deref(), Some("FAILED"));
     transaction.rollback().await.expect("rollback");
 }
 
@@ -286,7 +304,7 @@ async fn deleting_a_workflow_removes_the_pending_row_and_the_quarantine_copy() {
     let evidence = seed_pending(&mut transaction, "RUNNING").await;
     // The repoint that `horsies_phase2_quarantine_one` performs, written out:
     // copy the history row, then point the pending row at the copy.
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_phase2_quarantine (
              task_id, workflow_id, workflow_node_row_id, terminalization_kind, terminal_at,
              retention_class_key, history_schema_version, result_envelope_version,
@@ -301,33 +319,33 @@ async fn deleting_a_workflow_removes_the_pending_row_and_the_quarantine_copy() {
          WHERE p.task_id = $1",
     )
     .bind(evidence.task_id)
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("copy the evidence");
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_workflow_phase2_pending
          SET recovery_source = 'QUARANTINE', quarantine_task_id = task_id,
              history_class = NULL, history_anchor = NULL
          WHERE task_id = $1",
     )
     .bind(evidence.task_id)
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("repoint the pending row");
 
-    sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+    sql::query("DELETE FROM horsies_workflows WHERE id = $1")
         .bind(evidence.workflow_id)
-        .execute(transaction.as_mut())
+        .execute(&mut *transaction)
         .await
         .expect("delete the workflow");
 
-    let (pending, copies): (i64, i64) = sqlx::query_as(
+    let (pending, copies): (i64, i64) = sql::query_as(
         "SELECT
              (SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1),
              (SELECT count(*) FROM horsies_workflow_phase2_quarantine WHERE task_id = $1)",
     )
     .bind(evidence.task_id)
-    .fetch_one(transaction.as_mut())
+    .fetch_one(&mut *transaction)
     .await
     .expect("count evidence");
     assert_eq!((pending, copies), (0, 0));
@@ -345,12 +363,12 @@ async fn the_pending_locator_pins_its_node_to_its_workflow() {
     let evidence = seed_pending(&mut transaction, "RUNNING").await;
     let other_workflow = Uuid::new_v4();
     seed_workflow(&mut transaction, other_workflow, "RUNNING").await;
-    let refused = sqlx::query(
+    let refused = sql::query(
         "UPDATE horsies_workflow_phase2_pending SET workflow_id = $2 WHERE task_id = $1",
     )
     .bind(evidence.task_id)
     .bind(other_workflow)
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect_err("a node of another workflow is refused");
     assert_eq!(
@@ -375,7 +393,7 @@ async fn a_locator_is_copied_verified_and_repointed() {
         .await
         .expect("quarantine");
     assert_eq!(outcome.verdict, QuarantineVerdict::Repointed);
-    let copy_matches: bool = sqlx::query_scalar(
+    let copy_matches: bool = sql::query_scalar(
         "SELECT q.terminalization_kind = h.terminalization_kind
                 AND q.retention_class_key = h.retention_class_key
                 AND q.result_payload = h.result_payload
@@ -385,7 +403,7 @@ async fn a_locator_is_copied_verified_and_repointed() {
          WHERE q.task_id = $1",
     )
     .bind(evidence.task_id)
-    .fetch_one(transaction.as_mut())
+    .fetch_one(&mut *transaction)
     .await
     .expect("compare the copy");
     assert!(copy_matches);
@@ -407,13 +425,13 @@ async fn a_broken_locator_refuses_and_keeps_its_history_source() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
     let evidence = seed_pending(&mut transaction, "RUNNING").await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_workflow_phase2_pending
          SET history_anchor = history_anchor + interval '1 second'
          WHERE task_id = $1",
     )
     .bind(evidence.task_id)
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("break the locator");
     let outcome = quarantine_one(&mut transaction, evidence.task_id)
@@ -442,10 +460,35 @@ async fn an_unknown_task_is_pending_gone() {
     transaction.rollback().await.expect("rollback");
 }
 
+/// `TestEvidenceRetention.test_invalid_node_status_raises_typed`: consumption
+/// refuses a node status other than COMPLETED and FAILED. The database
+/// refuses it with `invalid_parameter_value` (22023) before it reads
+/// anything, and the client returns that refusal.
+#[tokio::test]
+#[serial]
+async fn consumption_refuses_a_node_status_that_is_not_terminal() {
+    let pool = shared_pool().await;
+    let mut transaction = pool.begin().await.expect("begin");
+
+    let refused = consume_phase2(&mut transaction, Uuid::new_v4(), "RUNNING")
+        .await
+        .expect_err("RUNNING is not a terminal node status");
+
+    assert_eq!(
+        refusal_message(&refused),
+        "terminal node status must be COMPLETED or FAILED"
+    );
+    match &refused {
+        Phase2CallError::Database(error) => assert_eq!(error.sqlstate(), Some("22023")),
+        other => panic!("expected a database refusal, got {other:?}"),
+    }
+    transaction.rollback().await.expect("rollback");
+}
+
 /// The primary message of a database refusal.
-fn refusal_message(error: &HistoryError) -> String {
+fn refusal_message(error: &Phase2CallError) -> String {
     match error {
-        HistoryError::Database(error) => error
+        Phase2CallError::Database(error) => error
             .as_database_error()
             .map(|database| database.message().to_owned())
             .expect("the refusal comes from the database"),
@@ -473,38 +516,38 @@ impl PendingWrite {
 /// touches and `condition` (the trigger's `WHEN` clause) selects, until
 /// `transaction` ends.
 async fn refuse_pending_rows(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut TestTransaction<'_>,
     name: &str,
     write: PendingWrite,
     condition: &str,
     message: &str,
 ) {
-    sqlx::query(&format!(
+    sql::query(&format!(
         "CREATE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $function$
          BEGIN
              RAISE EXCEPTION '{message}';
          END
          $function$"
     ))
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("create the refusing function");
-    sqlx::query(&format!(
+    sql::query(&format!(
         "CREATE TRIGGER {name}
          BEFORE {} ON horsies_workflow_phase2_pending
          FOR EACH ROW WHEN ({condition})
          EXECUTE FUNCTION {name}()",
         write.event()
     ))
-    .execute(transaction.as_mut())
+    .execute(&mut *transaction)
     .await
     .expect("create the refusing trigger");
 }
 
-async fn quarantine_copies(transaction: &mut Transaction<'_, Postgres>, task_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_workflow_phase2_quarantine WHERE task_id = $1")
+async fn quarantine_copies(transaction: &mut TestTransaction<'_>, task_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_workflow_phase2_quarantine WHERE task_id = $1")
         .bind(task_id)
-        .fetch_one(transaction.as_mut())
+        .fetch_one(&mut *transaction)
         .await
         .expect("count quarantine copies")
 }
@@ -593,4 +636,170 @@ async fn a_refused_pending_delete_leaves_the_node_and_both_recovery_rows() {
         1
     );
     transaction.rollback().await.expect("rollback");
+}
+
+/// The text of `horsies_phase2_consume` in the baseline, from its
+/// `CREATE FUNCTION` to the end of its body.
+fn consume_function_text() -> &'static str {
+    let sql = crate::broker::migrations::BASELINE_INTERIM_FUNCTIONS_SQL;
+    let start = sql
+        .find("CREATE FUNCTION horsies_phase2_consume(")
+        .expect("the baseline defines horsies_phase2_consume");
+    let length = sql[start..]
+        .find("\n$$;")
+        .expect("the body of horsies_phase2_consume ends");
+    &sql[start..start + length]
+}
+
+/// The first 400 characters of `text` from byte `start`.
+fn span_from(text: &str, start: usize) -> String {
+    text[start..].chars().take(400).collect()
+}
+
+/// On its main path the consumption locks the workflow row, then the node
+/// row, then the pending row, each `FOR UPDATE` (the lock order of the
+/// engine).
+#[test]
+fn consumption_locks_the_workflow_then_the_node_then_the_pending_row() {
+    let body = consume_function_text();
+    let order = body
+        .find("Lock order:")
+        .expect("the body states its lock order");
+    let workflow = order
+        + body[order..]
+            .find("FROM horsies_workflows w")
+            .expect("the workflow lock");
+    let node = workflow
+        + body[workflow..]
+            .find("FROM horsies_workflow_tasks wt")
+            .expect("the node lock");
+    let pending = node
+        + body[node..]
+            .find("FROM horsies_workflow_phase2_pending")
+            .expect("the pending lock");
+    assert!(workflow < node && node < pending);
+    for start in [workflow, node, pending] {
+        let span = span_from(body, start);
+        assert!(span.contains("FOR UPDATE"), "{span}");
+    }
+}
+
+/// The history read of the consumption names both partition keys of the one
+/// leaf that holds the row (class and terminal time) and the task id, after
+/// the comment that rejects the fan-out over every leaf.
+#[test]
+fn the_history_read_names_both_partition_keys_of_its_leaf() {
+    let body = consume_function_text();
+    let probe = body
+        .find("h.retention_class_key = v_pending.history_class")
+        .expect("the read names the class");
+    assert!(body.contains("h.terminal_at = v_pending.history_anchor"));
+    assert!(body.contains("h.task_id = p_task_id"));
+    let comment = body
+        .find("NOT the rejected fan-out")
+        .expect("the comment of the one-leaf probe");
+    assert!(comment < probe);
+}
+
+/// The node lock of the consumption names the node row id and its workflow,
+/// so a locator cannot reach a node of another workflow.
+#[test]
+fn the_node_lock_is_pinned_by_its_row_id_and_its_workflow() {
+    let body = consume_function_text();
+    assert!(body.contains("wt.id = v_pending.workflow_node_row_id"));
+    assert!(body.contains("wt.workflow_id = v_pending.workflow_id"));
+}
+
+/// Every disposition that the decoder reads.
+const EVERY_DISPOSITION: [Phase2DispositionKind; 8] = [
+    Phase2DispositionKind::AppliedToNode,
+    Phase2DispositionKind::AlreadyApplied,
+    Phase2DispositionKind::SupersededByWorkflowTerminal,
+    Phase2DispositionKind::SourceStateConflict,
+    Phase2DispositionKind::PendingAbsent,
+    Phase2DispositionKind::SourceAbsent,
+    Phase2DispositionKind::SourceVersionConflict,
+    Phase2DispositionKind::SourceDigestMismatch,
+];
+
+/// The place of `kind` in [`EVERY_DISPOSITION`]. A new disposition fails
+/// this match until it is listed there.
+fn listed_place(kind: Phase2DispositionKind) -> usize {
+    match kind {
+        Phase2DispositionKind::AppliedToNode => 0,
+        Phase2DispositionKind::AlreadyApplied => 1,
+        Phase2DispositionKind::SupersededByWorkflowTerminal => 2,
+        Phase2DispositionKind::SourceStateConflict => 3,
+        Phase2DispositionKind::PendingAbsent => 4,
+        Phase2DispositionKind::SourceAbsent => 5,
+        Phase2DispositionKind::SourceVersionConflict => 6,
+        Phase2DispositionKind::SourceDigestMismatch => 7,
+    }
+}
+
+/// Each disposition of the
+/// decoder is a text that the baseline body of `horsies_phase2_consume`
+/// returns, and it reads back as its kind; the durable dispositions are among
+/// them; any other text is a contract error that names it.
+#[test]
+fn each_disposition_of_the_consume_function_reads_and_an_unknown_one_is_refused() {
+    let body = consume_function_text();
+    for kind in EVERY_DISPOSITION {
+        assert_eq!(EVERY_DISPOSITION[listed_place(kind)], kind);
+        assert!(body.contains(&format!("'{}'", kind.as_str())), "{kind:?}");
+        assert!(
+            matches!(Phase2DispositionKind::try_from(kind.as_str()), Ok(read) if read == kind),
+            "{kind:?}"
+        );
+    }
+    assert!(Phase2DispositionKind::DURABLE
+        .iter()
+        .all(|kind| EVERY_DISPOSITION.contains(kind)));
+    match Phase2DispositionKind::try_from("EXPLODED") {
+        Err(HistoryError::Contract(detail)) => {
+            assert!(detail.contains("unknown phase-2 disposition"), "{detail}");
+            assert!(detail.contains("EXPLODED"), "{detail}");
+        }
+        other => panic!("an unknown disposition must be a contract error, got {other:?}"),
+    }
+}
+
+/// The body of `horsies_phase2_consume` deletes the pending row in two
+/// statements, on its durable paths: the workflow is already terminal, and
+/// the node write.
+#[test]
+fn the_consumption_deletes_the_pending_row_in_two_statements() {
+    assert_eq!(
+        consume_function_text()
+            .matches("DELETE FROM horsies_workflow_phase2_pending")
+            .count(),
+        2
+    );
+}
+
+/// The baseline creates
+/// the row type `horsies_phase2_disposition` before `horsies_phase2_consume`,
+/// and the type carries the workflow status, depth, root and `on_error`.
+#[test]
+fn the_disposition_type_precedes_the_function_and_carries_the_progression_context() {
+    let sql = crate::broker::migrations::BASELINE_INTERIM_FUNCTIONS_SQL;
+    let type_start = sql
+        .find("CREATE TYPE horsies_phase2_disposition AS (")
+        .expect("the baseline defines horsies_phase2_disposition");
+    let function_start = sql
+        .find("CREATE FUNCTION horsies_phase2_consume(")
+        .expect("the baseline defines horsies_phase2_consume");
+    assert!(type_start < function_start);
+    let type_length = sql[type_start..]
+        .find(");")
+        .expect("the type definition ends");
+    let type_text = &sql[type_start..type_start + type_length];
+    for column in [
+        "workflow_status text",
+        "workflow_depth integer",
+        "root_workflow_id uuid",
+        "on_error text",
+    ] {
+        assert!(type_text.contains(column), "{column}: {type_text}");
+    }
 }

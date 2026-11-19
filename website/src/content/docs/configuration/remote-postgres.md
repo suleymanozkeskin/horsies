@@ -24,6 +24,7 @@ pool max_size                                           # pool of the worker pro
 + pool max_size                                         # session pool, when session_database_url differs from database_url
 + 1                                                     # listener: every LISTEN of the worker process
 + 1                                                     # runner heartbeat connection
++ 1                                                     # liveness lock connection, on the session URL
 + isolated children × isolated.pool max_size            # isolated child pools
 + shared async children × shared_async.pool max_size    # shared async child pools
 + shared thread children × shared_thread.pool max_size  # shared thread child pools
@@ -38,12 +39,11 @@ At defaults (a pool of the worker process of 5 for 8 seats, an isolated pool
 `session_database_url`:
 
 ```text
-5 + 1 + 1 + 8 × 1 = 15 connections per worker
+5 + 1 + 1 + 1 + 8 × 1 = 16 connections per worker
 ```
 
 Task code that sends through the app adds the `task_send_pool` of its child
-kind (default 2) in its child for each event loop that it sends from:
-`8 × 2 = 16` more with one sending loop per child, `31` in all. See
+kind (default 2) in its child: `8 × 2 = 16` more, `32` in all. See
 [Worker Profiles](/horsies/workers/worker-profiles/#connections).
 
 The pool of the worker process writes the outcome of each task. At a high RTT
@@ -128,9 +128,9 @@ Soft-cap semantics and fairness trade-offs are covered in
 
 Three settings can check a pooled connection at checkout, at one round trip
 each. The two pre-ping settings check a connection only when it waited in the
-pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`). A connection checked in more
-recently is used with no check, so a burst of statements pays no checks. The
-`check` of a child pool runs at every checkout.
+pool for more than 1 s. A connection checked in more recently is used with no
+check, so a burst of statements pays no checks. The `check` of a child pool
+runs at every checkout.
 
 | Setting | Default | Scope |
 |---------|---------|-------|

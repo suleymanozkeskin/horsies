@@ -1,7 +1,7 @@
 ---
 title: Heartbeats & Recovery
 section: shared
-summary: Detecting and recovering from worker crashes via heartbeats.
+summary: Detecting and recovering from worker crashes via heartbeats and the worker liveness lock.
 related: [../../configuration/recovery-config, worker-architecture]
 tags: [workers, heartbeats, recovery, crash-detection]
 ---
@@ -13,6 +13,8 @@ When a worker dies mid-task, the task would be stuck forever without detection. 
 1. Workers send periodic heartbeats for their tasks
 2. A reaper checks for missing heartbeats
 3. Stale tasks are automatically recovered
+
+Each worker process also holds a liveness lock. When its process ends, the reaper recovers its tasks without waiting for the heartbeat thresholds (see [Worker Liveness Lock](#worker-liveness-lock)).
 
 ## Heartbeat Types
 
@@ -60,6 +62,35 @@ Each killed task takes the [child crash](#child-process-crash) path when the wor
 With `auto_fail_stale_running=False`, or with no recovery config, no reaper fails a RUNNING row, so a missing heartbeat puts no running task at risk. The worker keeps running. It logs failed writes and late heartbeats, and a dead heartbeat thread once.
 
 Failed writes are logged at the first failure of a run, then at most once per 60 seconds.
+
+## Worker Liveness Lock
+
+Each worker process holds a session advisory lock on one connection of its own to the session URL (`session_database_url`, else `database_url`). The key comes from the worker id, which is new at each process start. The worker takes the lock before its first claim and holds it until its stop ends. The server releases the lock when the session of the process ends: when the process exits or is killed, its operating system closes the connection.
+
+Each acquisition of the lock writes a new generation for the worker id, in the same transaction, to the table `horsies_worker_liveness`. The worker counts the lock as held again only after that transaction committed.
+
+The worker confirms the lock every 5 seconds. After a lost connection, it opens a new one and takes the lock again. A lock that another session of the worker still holds, because the server has not yet ended the lost session, counts as held. After a lock statement of the worker failed or did not end, such a lock does not count until the worker takes the lock itself: the session of that statement can hold the lock with no generation. When the lock is not held for 60 seconds:
+
+- With `auto_fail_stale_running=True` (the default) and a task held, the worker fails closed: it kills every child that holds a task and exits with code 79 at once, with no drain. A supervisor restarts it.
+- With no task held, no task is at risk. The worker logs it, runs on, and keeps taking the lock again. A task that it starts before the lock is held again makes it fail closed.
+- With `auto_fail_stale_running=False`, no reaper recovers a RUNNING row, so the worker logs it and runs on.
+
+A worker that is alive but stalled, for example a process paused by `SIGSTOP`, keeps its connection and so keeps its lock.
+
+Each reaper pass reads the owners of CLAIMED and RUNNING rows whose lock no session holds, each with the generation of its last acquisition. The read takes no lock. An owner is gone when all of these are true:
+
+- Two passes of one reaper find its lock free at least 75 seconds apart (60 seconds and a margin of 15 seconds), both at the same generation.
+- No pass of that reaper between them finds the lock held, or finds another generation.
+- A read of the generation after the second pass still finds that generation.
+
+A worker that takes its lock again between two passes writes a new generation, so the reaper never counts two losses of the lock, with a hold between them, as one loss. An owner with no recorded generation is not judged gone by this rule: the heartbeat thresholds apply to its rows. At each retention sweep (`retention_sweep_interval_s`), the reaper deletes the generation rows of workers that own no CLAIMED or RUNNING row and whose lock no session holds.
+
+The reaper then recovers the rows that the gone worker claimed before the first of the two passes:
+
+- Its RUNNING rows, with `auto_fail_stale_running=True`, as [Stale RUNNING Recovery](#stale-running-recovery) states, whatever their heartbeats and their `finalizing_at`. The `WORKER_CRASHED` error names the time from which the lock was free.
+- Its CLAIMED rows, with `auto_requeue_stale_claimed=True`, back to PENDING as [Stale CLAIMED → PENDING](#stale-claimed--pending) states, whatever their heartbeats.
+
+Each statement checks again, under the row lock, that the row still belongs to the gone worker: at the claim generation that the reaper read for a RUNNING row, and claimed before the first of the two passes for a CLAIMED row. The lock takes one connection per worker; see [Connections](/horsies/workers/worker-profiles/#connections).
 
 ## Heartbeat Flow
 
@@ -191,7 +222,13 @@ Fast tasks can use tighter detection: for example, `runner_heartbeat_interval_ms
 
 ### Recovery Time After a Worker Stops
 
-A child process crash is detected at once (see [Child Process Crash](#child-process-crash)). When the whole worker process or its machine stops, its children stop too, and its RUNNING tasks are recovered by the reaper, which runs inside workers. The reaper treats a task as stale `running_stale_threshold_ms` after its last runner heartbeat and acts on it at its next pass (`check_interval_ms`). With the defaults (heartbeat every 30 s, threshold 300 s, reaper pass every 30 s), recovery happens 4.5 to 5.5 minutes after the worker stops. A `WORKER_CRASHED` retry then waits its retry policy delay, counted from recovery. If no worker is running, recovery waits until a worker starts.
+A child process crash is detected at once (see [Child Process Crash](#child-process-crash)). When the whole worker process or its machine stops, its children stop too, and its CLAIMED and RUNNING tasks are recovered by the reaper, which runs inside workers.
+
+When the worker process ends and its machine runs on, the server releases its [liveness lock](#worker-liveness-lock) at once. A reaper finds the lock free at its next pass (`check_interval_ms`), and recovers the tasks at its first pass 75 seconds or more after that. With the default reaper pass every 30 s, the passes are 90 seconds apart, so recovery happens about 1.5 to 2 minutes after the worker stops.
+
+When the server does not see the session end, for example when the machine of the worker lost power or its network, the lock stays held until the server's TCP keepalive or `tcp_user_timeout` ends the session. Set `tcp_keepalives_idle`, `tcp_keepalives_interval` and `tcp_keepalives_count`, or `tcp_user_timeout`, on the server to bound that time. Until then the heartbeat thresholds apply: the reaper treats a task as stale `running_stale_threshold_ms` after its last runner heartbeat and acts on it at its next pass. With the defaults (heartbeat every 30 s, threshold 300 s, reaper pass every 30 s), recovery happens 4.5 to 5.5 minutes after the worker stops.
+
+A `WORKER_CRASHED` retry then waits its retry policy delay, counted from recovery. If no worker is running, recovery waits until a worker starts.
 
 Until then, the `RUNNING` rows of the dead worker count against each queue's `max_concurrency`. A new worker has free children, but a queue at its limit waits for the reaper.
 
@@ -269,6 +306,12 @@ With `auto_fail_stale_running` on, a worker that cannot write runner heartbeats 
 - C code in the worker process, such as a C extension call in a workflow's `build_with()`, holds the GIL for longer than `running_stale_threshold_ms` minus one heartbeat interval. Python code does not: it lets other threads run
 
 Raise `running_stale_threshold_ms`, for example to 600,000 (10 minutes).
+
+The [liveness lock](#worker-liveness-lock) does not recover the tasks of a paused worker: it keeps its lock. With `auto_fail_stale_running=True`, it does not recover the tasks of a live worker either. A worker whose lock is not held for 60 seconds ends before a reaper can judge it gone. A worker that takes its lock again writes a new generation, so two losses of its lock do not count as one.
+
+### Worker Exits With Code 79
+
+The worker held a task, and its liveness lock was not held for 60 seconds. The log names the last cause: a connection that ended, or a new connection or lock statement that failed. Check the connectivity of the worker host to the session URL.
 
 ### Worker Exits With a Runner Heartbeat Error
 

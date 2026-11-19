@@ -38,6 +38,7 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies import _core as core
+from horsies._catalog.child_bounds import CANCELLED_WRITE_END_SECONDS
 from horsies.core.worker import shared_lifecycle
 from horsies.core.worker.child_frames import (
     ChildFrame,
@@ -54,7 +55,6 @@ from horsies.core.worker.run_return import ResultEnvelope
 from horsies.core.worker.shared_child import StoppedBeforeRunning
 from horsies.core.worker.thread_child import ThreadRunTable, ThreadSeats
 from horsies.core.worker.thread_runner import PostgresThreadSeats, run_thread_seat_task
-from tests.broker_resources_support import listener_of
 from tests.fixtures.child_core import (
     TEST_CHILD_POOL,
     child_core_handle_for,
@@ -74,8 +74,9 @@ LOCK_HELD_S = 0.5
 """How long a test holds a row lock before it reads what the seat did."""
 STATEMENTS_S = shared_lifecycle.RUNNING_STATEMENTS_TIMEOUT_S
 """The time after which the core sends the cancel request of a start."""
-CANCEL_END_S = shared_lifecycle.CANCELLED_WRITE_END_S
-"""The longest end of a start after its cancel request."""
+CANCEL_END_S = CANCELLED_WRITE_END_SECONDS
+"""The longest end of a start after its cancel request (the core's
+``CANCELLED_WRITE_END``)."""
 ATTEMPT_END_S = shared_lifecycle.RUNNING_ATTEMPT_TIMEOUT_S + CANCEL_END_S
 """The longest time of one start attempt in the core."""
 REFUSAL = refusal(
@@ -414,7 +415,7 @@ async def test_a_seat_that_gets_its_connection_after_the_deadline_leaves_the_row
     deadlines.start()
     seats = ThreadSeats(2, table, PostgresThreadSeats(), lambda: RssMb(1.0))
     one_connection = ResolvedPool(min_size=0, max_size=1, check=False)
-    with child_core_handle_for(listener_of(broker).database_url, one_connection):
+    with child_core_handle_for(broker.config.effective_session_database_url, one_connection):
         assert seats.start().is_ok()
         try:
             table.add(blocker, blocker_work)

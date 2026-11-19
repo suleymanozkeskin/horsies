@@ -1,9 +1,7 @@
 //! The finalize decision of a child report: what the worker writes for each
-//! end that a child reported (Python `python/horsies/core/lifecycle/classify.py`,
-//! `classify` and `terminalization_for_refused_retry`, and
-//! `python/horsies/core/worker/finalize.py`, `_attempt_failure_of`).
+//! end that a child reported.
 //!
-//! Python decides on typed reports first and writes after. The core builds
+//! The core builds
 //! the write of each failure with a pure function of the report and the
 //! claim (`outcome::worker_failure_write`, `task_error_write`,
 //! `killed_child_write`, `timeout_write`); those are tested here without a
@@ -17,7 +15,6 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::outcome::{
@@ -28,13 +25,15 @@ use super::*;
 use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, RetryPlacement, RetryRequest,
 };
-use crate::broker::terminalization_matrix::migrated_pool;
 use crate::broker::{PostgresBroker, PrestartExpiry};
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::history::archive::attempts::{decode_attempt_snapshot, AttemptRecord};
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
+use crate::core::lifecycle::OwnedClaim;
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
+use crate::test_support::migrated_pool;
+use crate::test_support::sql::{self, TestListener, TestPool};
 use crate::worker::executor::protocol::{
     FailureDetail, ProcessId, ResultEnvelopeText, RunEnd, StopReason, TaskTimeoutMs,
 };
@@ -69,8 +68,7 @@ fn error_envelope(error: &TaskError) -> ResultEnvelopeText {
     )
 }
 
-/// Python `test_lifecycle_classification.py::TestFailures::test_worker_failure_manufactures_its_own_payload`:
-/// the task produced nothing, so the worker writes its own account as the
+/// The task produced nothing, so the worker writes its own account as the
 /// result: a `BROKER_ERROR` error whose message is the detail and whose
 /// data names the task. The detail is the reason of the task and of its
 /// attempt, and the write never retries.
@@ -104,9 +102,7 @@ fn a_worker_failure_records_its_detail_as_the_result_and_the_reason() {
     }
 }
 
-/// Python `TestFailures::test_worker_failure_without_detail_still_records_a_reason`
-/// and `test_failed_attempt.py::TestAttemptOfAReport::test_a_worker_failure`:
-/// a worker failure with no detail records `Worker failure` as the reason of
+/// A worker failure with no detail records `Worker failure` as the reason of
 /// the task, and as the message and the reason of its attempt.
 #[test]
 fn a_worker_failure_without_detail_records_the_fallback_text() {
@@ -231,9 +227,7 @@ fn a_timeout_records_its_text_as_the_attempt_reason() {
     }
 }
 
-/// Python `TestFailures::test_string_error_codes_survive_unchanged` and
-/// `test_failed_attempt.py::TestAttemptOfAReport::test_a_task_error`: a task
-/// error with a code of its own keeps that code, the task's own envelope is
+/// A task error with a code of its own keeps that code, the task's own envelope is
 /// the stored result, and the attempt carries the task's message and no
 /// reason.
 #[test]
@@ -256,8 +250,7 @@ fn a_task_error_keeps_its_own_code_payload_and_message() {
     );
 }
 
-/// Python `test_failed_attempt.py::TestErrorCodeText::test_the_stored_spelling`:
-/// the stored code of an outcome code, of an operational code and of a code
+/// The stored code of an outcome code, of an operational code and of a code
 /// of the task's own is its spelling.
 #[test]
 fn each_failure_stores_the_spelling_of_its_code() {
@@ -332,6 +325,33 @@ fn the_write_of_a_report_is_the_same_for_the_same_report() {
     );
 }
 
+/// The failure writes: the write of a worker failure and of a task error
+/// carries the worker and the claim generation of this dispatch, to the
+/// microsecond. Its statement refuses a row that a later claim holds
+/// (`a_reported_end_on_a_later_claim_of_the_row_writes_nothing`).
+#[test]
+fn each_failure_write_carries_the_claim_of_its_dispatch() {
+    let first = claimed_plain();
+    let claimed = ClaimedTask {
+        claimed_at: first.claimed_at + chrono::Duration::microseconds(1),
+        ..first
+    };
+    let dispatched = OwnedClaim {
+        worker_id: WORKER.to_owned(),
+        claimed_at: claimed.claimed_at,
+    };
+    let error = TaskError::new("MY_OWN_CODE", "x").expect("a code of the task's own");
+
+    assert_eq!(
+        worker_failure_write(&claimed, WORKER, "pool died").fence,
+        dispatched
+    );
+    assert_eq!(
+        task_error_write(&claimed, WORKER, &error, &error_envelope(&error)).fence,
+        dispatched
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Database: the statement that each end takes
 // ---------------------------------------------------------------------------
@@ -387,13 +407,19 @@ const CLAIMED_WORKFLOW_TASK_PAST_ITS_DEADLINE: Seed = Seed {
     deadline: Deadline::Passed,
 };
 
+const CLAIMED_WORKFLOW_TASK: Seed = Seed {
+    held: Held::Claimed,
+    kind: TaskKind::WorkflowTask,
+    deadline: Deadline::NotSet,
+};
+
 /// A row on `queue` held by [`WORKER`], with every baseline column named. A
 /// workflow task has no command fingerprint (baseline
 /// `horsies_tasks_command_fingerprint_by_origin`). Returns the id and the
 /// claim generation.
-async fn seed_task(pool: &PgPool, queue: &str, seed: Seed) -> (Uuid, DateTime<Utc>) {
+async fn seed_task(pool: &TestPool, queue: &str, seed: Seed) -> (Uuid, DateTime<Utc>) {
     let task_id = Uuid::new_v4();
-    let generation = sqlx::query_scalar(
+    let generation = sql::query_scalar(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -434,9 +460,9 @@ async fn seed_task(pool: &PgPool, queue: &str, seed: Seed) -> (Uuid, DateTime<Ut
 
 /// A RUNNING workflow with one task node in `node_status`, linked to
 /// `task_id`. Returns the workflow id.
-async fn seed_workflow(pool: &PgPool, task_id: Uuid, queue: &str, node_status: &str) -> Uuid {
+async fn seed_workflow(pool: &TestPool, task_id: Uuid, queue: &str, node_status: &str) -> Uuid {
     let workflow_id = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, definition_key, status, on_error, depth, root_workflow_id,
              sent_at, created_at, started_at, updated_at
@@ -447,7 +473,7 @@ async fn seed_workflow(pool: &PgPool, task_id: Uuid, queue: &str, node_status: &
     .execute(pool)
     .await
     .expect("seed the workflow");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps, join_type, max_retries,
@@ -488,8 +514,11 @@ fn claimed(task_id: Uuid, queue: &str, generation: DateTime<Utc>, kind: TaskKind
 }
 
 /// The outcome writer of [`WORKER`] on `pool`.
-fn writer(pool: &PgPool) -> OutcomeWriter {
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+fn writer(pool: &TestPool) -> OutcomeWriter {
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    ));
     let successes = test_successes(&broker, WORKER);
     OutcomeWriter::new(
         broker,
@@ -514,8 +543,8 @@ fn test_queue() -> String {
 /// code and final failed reason.
 type HistoryFacts = (String, String, Option<String>, Option<String>);
 
-async fn history_facts(pool: &PgPool, task_id: Uuid) -> Option<HistoryFacts> {
-    sqlx::query_as(
+async fn history_facts(pool: &TestPool, task_id: Uuid) -> Option<HistoryFacts> {
+    sql::query_as(
         "SELECT status::text, terminalization_kind::text, error_code, final_failed_reason
          FROM horsies_task_history WHERE task_id = $1",
     )
@@ -526,8 +555,8 @@ async fn history_facts(pool: &PgPool, task_id: Uuid) -> Option<HistoryFacts> {
 }
 
 /// The attempts that the history row of `task_id` archived.
-async fn archived_attempts(pool: &PgPool, task_id: Uuid) -> Vec<AttemptRecord> {
-    let (version, payload, digest): (i16, Vec<u8>, Vec<u8>) = sqlx::query_as(
+async fn archived_attempts(pool: &TestPool, task_id: Uuid) -> Vec<AttemptRecord> {
+    let (version, payload, digest): (i16, Vec<u8>, Vec<u8>) = sql::query_as(
         "SELECT attempt_archive_version, attempt_snapshot, attempt_snapshot_digest
          FROM horsies_task_history WHERE task_id = $1",
     )
@@ -548,11 +577,11 @@ async fn archived_attempts(pool: &PgPool, task_id: Uuid) -> Vec<AttemptRecord> {
 /// The status of the one node of `workflow_id`, and whether a phase-2
 /// record waits for `task_id`.
 async fn node_and_phase_two_record(
-    pool: &PgPool,
+    pool: &TestPool,
     workflow_id: Uuid,
     task_id: Uuid,
 ) -> (String, bool) {
-    sqlx::query_as(
+    sql::query_as(
         "SELECT
              (SELECT status::text FROM horsies_workflow_tasks WHERE workflow_id = $1),
              EXISTS (SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = $2)",
@@ -564,8 +593,8 @@ async fn node_and_phase_two_record(
     .expect("read the node and the phase-2 record")
 }
 
-async fn listen_on_queue(pool: &PgPool, queue: &str) -> sqlx::postgres::PgListener {
-    let mut listener = sqlx::postgres::PgListener::connect_with(pool)
+async fn listen_on_queue(pool: &TestPool, queue: &str) -> TestListener {
+    let mut listener = TestListener::connect_with(pool)
         .await
         .expect("open a listener");
     listener
@@ -578,12 +607,12 @@ async fn listen_on_queue(pool: &PgPool, queue: &str) -> sqlx::postgres::PgListen
 /// Every payload on the channel of `queue` committed before a sentinel that
 /// this call commits. PostgreSQL delivers notifications in commit order.
 async fn wakes_before_sentinel(
-    listener: &mut sqlx::postgres::PgListener,
-    pool: &PgPool,
+    listener: &mut TestListener,
+    pool: &TestPool,
     queue: &str,
 ) -> Vec<String> {
     let sentinel = format!("sentinel:{}", Uuid::new_v4());
-    sqlx::query("SELECT pg_notify($1, $2)")
+    sql::query("SELECT pg_notify($1, $2)")
         .bind(format!("task_queue_{queue}"))
         .bind(&sentinel)
         .execute(pool)
@@ -603,7 +632,7 @@ async fn wakes_before_sentinel(
     panic!("the sentinel did not come; payloads {payloads:?}");
 }
 
-async fn remove_task(pool: &PgPool, task_id: Uuid) {
+async fn remove_task(pool: &TestPool, task_id: Uuid) {
     for statement in [
         "DELETE FROM horsies_workflow_phase2_pending WHERE task_id = $1",
         "DELETE FROM horsies_task_attempts WHERE task_id = $1",
@@ -611,7 +640,7 @@ async fn remove_task(pool: &PgPool, task_id: Uuid) {
         "DELETE FROM horsies_tasks WHERE id = $1",
         "DELETE FROM horsies_task_history WHERE task_id = $1",
     ] {
-        sqlx::query(statement)
+        sql::query(statement)
             .bind(task_id)
             .execute(pool)
             .await
@@ -619,18 +648,15 @@ async fn remove_task(pool: &PgPool, task_id: Uuid) {
     }
 }
 
-async fn remove_workflow(pool: &PgPool, workflow_id: Uuid) {
-    sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+async fn remove_workflow(pool: &TestPool, workflow_id: Uuid) {
+    sql::query("DELETE FROM horsies_workflows WHERE id = $1")
         .bind(workflow_id)
         .execute(pool)
         .await
         .expect("remove the test workflow");
 }
 
-/// Python `TestFailures::test_undecodable_payload_fails_as_a_serialization_error`,
-/// `::test_undecodable_payload_leaves_the_reason_column_alone` and
-/// `test_failed_attempt.py::TestAttemptOfAReport::test_an_undecodable_result`:
-/// a result that does not read as an envelope fails the task with
+/// A result that does not read as an envelope fails the task with
 /// `WORKER_SERIALIZATION_ERROR` and no failed reason; its attempt is FAILED,
 /// with the decode diagnosis as its message and no reason.
 #[tokio::test]
@@ -682,7 +708,7 @@ async fn an_expired_workflow_task_replays_its_phase_two() {
     let (task_id, generation) =
         seed_task(&pool, &queue, CLAIMED_WORKFLOW_TASK_PAST_ITS_DEADLINE).await;
     let workflow_id = seed_workflow(&pool, task_id, &queue, "ENQUEUED").await;
-    let expired = PostgresBroker::from_pool(pool.clone())
+    let expired = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust)
         .expire_claimed_task_before_start(
             task_id,
             WORKER,
@@ -708,6 +734,83 @@ async fn an_expired_workflow_task_replays_its_phase_two() {
         node_and_phase_two_record(&pool, workflow_id, task_id).await,
         ("FAILED".to_owned(), false)
     );
+    remove_task(&pool, task_id).await;
+    remove_workflow(&pool, workflow_id).await;
+}
+
+/// The child expired the claimed task of node 0 before it started; node 1
+/// waits for node 0. The worker writes no task row and replays phase 2
+/// alone, with no recovery: node 0 fails with the `TASK_EXPIRED` result,
+/// node 1 is skipped, and the workflow (`on_error` `fail`) fails.
+#[tokio::test]
+#[serial]
+async fn an_expired_workflow_task_fails_its_node_skips_its_dependent_and_fails_the_workflow() {
+    let pool = migrated_pool().await;
+    let queue = test_queue();
+    let (task_id, generation) =
+        seed_task(&pool, &queue, CLAIMED_WORKFLOW_TASK_PAST_ITS_DEADLINE).await;
+    let workflow_id = seed_workflow(&pool, task_id, &queue, "ENQUEUED").await;
+    sql::query(
+        "INSERT INTO horsies_workflow_tasks (
+             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+             queue_name, priority, dependencies, allow_failed_deps, join_type, max_retries,
+             execution, retention_class_key, status, task_id, is_subworkflow, created_at,
+             started_at
+         ) VALUES ('NONE', $1, $2, 1, 'dependent', $3, '{}', $4, 100,
+                   '{0}', FALSE, 'all', 0, 'ISOLATED',
+                   'forever', 'PENDING', NULL, FALSE, NOW(), NULL)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(workflow_id)
+    .bind(TASK_NAME)
+    .bind(&queue)
+    .execute(&pool)
+    .await
+    .expect("seed the dependent node");
+    let expired = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust)
+        .expire_claimed_task_before_start(
+            task_id,
+            WORKER,
+            crate::broker::child_writes::WriteDeadline::start_attempt(),
+        )
+        .await
+        .expect("the expiry that the child writes");
+    assert_eq!(expired, PrestartExpiry::Expired);
+
+    let settled = writer(&pool)
+        .settle(
+            &claimed(task_id, &queue, generation, TaskKind::WorkflowTask),
+            stopped(StopReason::TaskExpired),
+        )
+        .await;
+
+    assert_eq!(settled, Settlement::NothingOwed);
+    let nodes: Vec<(i32, String, Option<String>)> = sql::query_as(
+        "SELECT task_index, status::text, result FROM horsies_workflow_tasks
+         WHERE workflow_id = $1 ORDER BY task_index",
+    )
+    .bind(workflow_id)
+    .fetch_all(&pool)
+    .await
+    .expect("read the nodes");
+    let [(0, first_status, first_result), (1, second_status, _)] = nodes.as_slice() else {
+        panic!("expected nodes 0 and 1, got {nodes:?}");
+    };
+    assert_eq!(first_status, "FAILED");
+    assert!(
+        first_result
+            .as_deref()
+            .is_some_and(|result| result.contains("TASK_EXPIRED")),
+        "{first_result:?}"
+    );
+    assert_eq!(second_status, "SKIPPED");
+    let workflow_status: String =
+        sql::query_scalar("SELECT status::text FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the workflow");
+    assert_eq!(workflow_status, "FAILED");
     remove_task(&pool, task_id).await;
     remove_workflow(&pool, workflow_id).await;
 }
@@ -777,6 +880,142 @@ async fn a_workflow_success_completes_in_the_locked_write_and_finishes_its_node(
     );
     remove_task(&pool, task_id).await;
     remove_workflow(&pool, workflow_id).await;
+}
+
+/// The live row of `task_id` as JSON; `None` when the row left the live
+/// table.
+async fn live_snapshot(pool: &TestPool, task_id: Uuid) -> Option<serde_json::Value> {
+    sql::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .expect("read the live row")
+}
+
+/// The attempt rows of `task_id` in the live attempt table.
+async fn attempt_rows(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("count the attempt rows")
+}
+
+/// The reported ends of Python `TestEveryRowEndingCommandCarriesTheDispatchedClaim`,
+/// each with the seed of the row it ends: a plain and a workflow success, a
+/// plain and a workflow worker failure, a result that is not an envelope,
+/// and a task error that no retry policy admits (Python
+/// `terminalization_for_refused_retry`).
+fn row_ending_reports() -> Vec<(&'static str, Seed, AttemptEnd)> {
+    let error = TaskError::new("MY_OWN_CODE", "x").expect("a code of the task's own");
+    vec![
+        (
+            "plain-success",
+            RUNNING_PLAIN,
+            AttemptEnd::Reported(RunEnd::Result(ok_envelope(42))),
+        ),
+        (
+            "workflow-success",
+            RUNNING_WORKFLOW_TASK,
+            AttemptEnd::Reported(RunEnd::Result(ok_envelope(42))),
+        ),
+        (
+            "plain-worker-failure",
+            RUNNING_PLAIN,
+            AttemptEnd::Reported(RunEnd::WorkerFailure(FailureDetail::cut("pool died"))),
+        ),
+        (
+            "workflow-worker-failure",
+            RUNNING_WORKFLOW_TASK,
+            AttemptEnd::Reported(RunEnd::WorkerFailure(FailureDetail::cut("pool died"))),
+        ),
+        (
+            "undecodable",
+            RUNNING_PLAIN,
+            AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
+                "{not an envelope".to_owned(),
+            ))),
+        ),
+        (
+            "refused-retry",
+            RUNNING_PLAIN,
+            AttemptEnd::Reported(RunEnd::Result(error_envelope(&error))),
+        ),
+    ]
+}
+
+/// Every write that ends the row is fenced
+/// on the worker and the claim generation of this dispatch. The row is
+/// RUNNING under a claim of the same worker one microsecond after the
+/// dispatch, as after a lapsed lease and a new claim. Each reported end
+/// writes nothing and settles as not held: the live row is unchanged, and
+/// no attempt row and no history row exist. A workflow task has its node,
+/// so only the fence refuses the write.
+#[tokio::test]
+#[serial]
+async fn a_reported_end_on_a_later_claim_of_the_row_writes_nothing() {
+    let pool = migrated_pool().await;
+    let mut workflows = Vec::new();
+    for (case, seed, end) in row_ending_reports() {
+        let queue = test_queue();
+        let (task_id, generation) = seed_task(&pool, &queue, seed).await;
+        match seed.kind {
+            TaskKind::WorkflowTask => {
+                workflows.push(seed_workflow(&pool, task_id, &queue, "RUNNING").await);
+            }
+            TaskKind::Plain => {}
+        }
+        let before = live_snapshot(&pool, task_id).await;
+        let dispatched = generation - chrono::Duration::microseconds(1);
+
+        let settled = writer(&pool)
+            .settle(&claimed(task_id, &queue, dispatched, seed.kind), end)
+            .await;
+
+        assert_eq!(settled, Settlement::NotHeld, "{case}");
+        assert_eq!(live_snapshot(&pool, task_id).await, before, "{case}");
+        assert_eq!(attempt_rows(&pool, task_id).await, 0, "{case}");
+        assert_eq!(history_facts(&pool, task_id).await, None, "{case}");
+        remove_task(&pool, task_id).await;
+    }
+    for workflow_id in workflows {
+        remove_workflow(&pool, workflow_id).await;
+    }
+}
+
+/// The stops `ORPHAN_CANCELLED`, `NODE_NOT_LINKED` (version 1 spelled it
+/// `WORKFLOW_CHECK_FAILED`) and the aborts of a workflow task: the child's
+/// stop before start wrote what each of these stops needs, the orphan cancel
+/// included, so the worker writes nothing. Each
+/// stop settles as nothing owed; the live row is unchanged, and no attempt
+/// row and no history row exist.
+#[tokio::test]
+#[serial]
+async fn the_stops_that_the_child_wrote_owe_nothing_for_a_workflow_task() {
+    let pool = migrated_pool().await;
+    for reason in [
+        StopReason::ClaimLost,
+        StopReason::WorkflowStopped,
+        StopReason::OrphanCancelled,
+        StopReason::NodeNotLinked,
+    ] {
+        let queue = test_queue();
+        let (task_id, generation) = seed_task(&pool, &queue, CLAIMED_WORKFLOW_TASK).await;
+        let before = live_snapshot(&pool, task_id).await;
+
+        let settled = writer(&pool)
+            .settle(
+                &claimed(task_id, &queue, generation, TaskKind::WorkflowTask),
+                stopped(reason),
+            )
+            .await;
+
+        assert_eq!(settled, Settlement::NothingOwed, "{reason:?}");
+        assert_eq!(live_snapshot(&pool, task_id).await, before, "{reason:?}");
+        assert_eq!(attempt_rows(&pool, task_id).await, 0, "{reason:?}");
+        assert_eq!(history_facts(&pool, task_id).await, None, "{reason:?}");
+        remove_task(&pool, task_id).await;
+    }
 }
 
 /// Settle `end` on a RUNNING plain row with no retry policy, and read what
@@ -874,7 +1113,7 @@ struct AttemptInsertRefusal {
 }
 
 impl AttemptInsertRefusal {
-    async fn remove(self, pool: &PgPool) {
+    async fn remove(self, pool: &TestPool) {
         for statement in [
             format!(
                 "DROP TRIGGER IF EXISTS {} ON horsies_task_attempts",
@@ -883,7 +1122,7 @@ impl AttemptInsertRefusal {
             format!("DROP FUNCTION IF EXISTS {}()", self.function),
             format!("DROP SEQUENCE IF EXISTS {}", self.counter),
         ] {
-            sqlx::query(&statement)
+            sql::query(&statement)
                 .execute(pool)
                 .await
                 .expect("remove the attempt insert refusal");
@@ -896,7 +1135,7 @@ impl AttemptInsertRefusal {
 /// of the failed-attempt write fails, and the outcome writer sends the
 /// write again. A sequence counts the inserts: `nextval` is not rolled back
 /// with the refused statement.
-async fn refuse_first_attempt_insert(pool: &PgPool, task_id: Uuid) -> AttemptInsertRefusal {
+async fn refuse_first_attempt_insert(pool: &TestPool, task_id: Uuid) -> AttemptInsertRefusal {
     let suffix = Uuid::new_v4().simple().to_string();
     let refusal = AttemptInsertRefusal {
         counter: format!("report_attempt_inserts_{suffix}"),
@@ -926,7 +1165,7 @@ async fn refuse_first_attempt_insert(pool: &PgPool, task_id: Uuid) -> AttemptIns
             function = refusal.function,
         ),
     ] {
-        sqlx::query(&statement)
+        sql::query(&statement)
             .execute(pool)
             .await
             .expect("create the attempt insert refusal");
@@ -936,8 +1175,8 @@ async fn refuse_first_attempt_insert(pool: &PgPool, task_id: Uuid) -> AttemptIns
 
 /// The `err.message` of the result that the history row of `task_id`
 /// stores.
-async fn stored_error_message(pool: &PgPool, task_id: Uuid) -> Option<String> {
-    sqlx::query_scalar(
+async fn stored_error_message(pool: &TestPool, task_id: Uuid) -> Option<String> {
+    sql::query_scalar(
         "SELECT convert_from(result_payload, 'UTF8')::jsonb -> 'err' ->> 'message'
          FROM horsies_task_history WHERE task_id = $1",
     )
@@ -947,8 +1186,7 @@ async fn stored_error_message(pool: &PgPool, task_id: Uuid) -> Option<String> {
     .expect("read the stored error message")
 }
 
-/// Python `_retry_finalize_future` (`python/horsies/core/worker/finalize.py:1957`):
-/// the crash-recovery write of a lost child fails once with a database
+/// The crash-recovery write of a lost child fails once with a database
 /// error that may clear; the write sent again stores
 /// `Retry after future-stage finalize error: ` and the first message as the
 /// task's error message, and as the attempt's message and failed reason.

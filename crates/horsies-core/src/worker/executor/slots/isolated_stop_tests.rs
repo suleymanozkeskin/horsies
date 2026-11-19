@@ -1,6 +1,4 @@
-//! Ports of Python `tests/unit/test_slot_pool.py` rows of `TestChildFaults`,
-//! `TestSlotDefects`, `TestBootKills`, `TestStopDuringBoot`, `TestStop`,
-//! `TestPoolFailure` and `TestChaos`: faults of a child or of a frame, kills
+//! Faults of a child or of a frame, kills
 //! from outside during a boot, the stop of the pool, a pool failure in a
 //! running pool, and a mixed run.
 

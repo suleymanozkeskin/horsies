@@ -1,35 +1,32 @@
 //! P4 staged-read parity and disposable-database tests.
 
+use crate::test_support::history::{create_history_leaf_of, database_now, register_period_class};
+use crate::test_support::sql::{self, CallError, TestConnection, TestPool, TestPoolOptions};
 use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::broker::core_rows::StatementLog;
 use crate::broker::error::BrokerError;
+use crate::broker::pools::core_pool_for_test_url;
 use crate::core::history::archive::attempts::{
     encode_attempt_snapshot, AttemptRecord, StoredAttemptSnapshot,
 };
 use crate::core::history::archive::versions::{archive_digest, ArchiveDecodeError, ArchiveDomain};
 use crate::core::history::commands::{
-    CreateDailyHistoryLeaf, DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf, LeafBounds, LeafRef,
+    DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf, LeafBounds, LeafRef,
 };
-use crate::core::history::ddl::classes::{
-    finite_class_parent_name, register_period_class, ClassRegistration,
-};
+use crate::core::history::ddl::classes::finite_class_parent_name;
 use crate::core::history::ddl::runtime_names::daily_leaf_name;
 use crate::core::history::errors::HistoryError;
-use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
+use crate::core::history::maintenance::coverage::{
+    ensure_partition_coverage_in_pool, CoverageOutcome,
+};
 use crate::core::history::names::{
     LEAF_CATALOG, TASK_DETAIL_FUNCTION, TASK_HISTORY_PARENT, TASK_RESULT_FUNCTION,
 };
 use crate::core::history::outcomes::{LeafCreation, LeafDrop};
-use crate::core::history::partitions::catalog::database_now;
-use crate::core::history::partitions::manager::{
-    create_daily_leaf, detach_expired_leaf, drop_detached_leaf,
-};
-use crate::core::history::partitions::publication::LoaderPublication;
+use crate::core::history::partitions::manager::{detach_expired_leaf, drop_detached_leaf_in_pool};
 use crate::core::history::periods::RetentionDays;
 use crate::db::StatementFailure;
 
@@ -86,16 +83,16 @@ fn plan_rows_from_explain_text_reads_the_top_plan_rows_and_fails_closed() {
 }
 
 /// A copy of the installed test template (`crate::test_support`) with a
-/// sqlx pool for the history reads that still take a sqlx connection.
+/// test-client pool for the fixtures and the reads of the tests.
 struct TestDatabase {
-    pool: PgPool,
+    pool: TestPool,
     database: crate::test_support::TestDatabase,
 }
 
 impl TestDatabase {
     async fn create() -> Self {
         let database = crate::test_support::TestDatabase::create().await;
-        let pool = PgPoolOptions::new()
+        let pool = TestPoolOptions::new()
             .max_connections(5)
             .connect(database.url())
             .await
@@ -119,7 +116,7 @@ fn v7_with_birth(birth: DateTime<Utc>) -> Uuid {
 }
 
 async fn register_test_class(
-    connection: &mut PgConnection,
+    connection: &mut TestConnection,
     class_key: &str,
     duration_days: i64,
 ) -> String {
@@ -130,18 +127,16 @@ async fn register_test_class(
         class_key,
         "a class key is derived from its period"
     );
-    let outcome = register_period_class(connection, days)
-        .await
-        .expect("register P4 retention class");
-    assert!(matches!(
-        outcome,
-        ClassRegistration::Registered { .. } | ClassRegistration::AlreadyRegistered { .. }
-    ));
+    let outcome = register_period_class(&mut *connection, days).await;
+    assert!(
+        matches!(outcome.as_str(), "REGISTERED" | "VERIFIED"),
+        "{outcome}"
+    );
     finite_class_parent_name(class_key).expect("finite parent name")
 }
 
 async fn create_test_leaf(
-    connection: &mut PgConnection,
+    connection: &mut TestConnection,
     parent: &str,
     class_key: &str,
     lower: DateTime<Utc>,
@@ -152,17 +147,21 @@ async fn create_test_leaf(
         LeafBounds::new(lower, lower + Duration::days(1)).expect("daily leaf bounds"),
     )
     .expect("daily leaf ref");
-    let outcome = create_daily_leaf(
-        connection,
-        &CreateDailyHistoryLeaf::new(leaf.clone()).expect("create daily command"),
-        &StagedLoaderPublisher,
-    )
-    .await
-    .expect("create P4 leaf");
-    assert!(matches!(
-        outcome,
-        LeafCreation::Created { .. } | LeafCreation::AlreadyConformant { .. }
-    ));
+    let outcome = create_history_leaf_of(&mut *connection, &leaf)
+        .await
+        .expect("create P4 leaf");
+    // A created leaf publishes the readers, as the coverage pass does after
+    // its leaves.
+    match outcome {
+        LeafCreation::Created { .. } => {
+            let _republished = StagedLoaderPublisher
+                .republish(connection)
+                .await
+                .expect("publish the readers over the new leaf");
+        }
+        LeafCreation::AlreadyConformant { .. } => {}
+        other => panic!("P4 leaf creation: {other:?}"),
+    }
     leaf
 }
 
@@ -186,7 +185,7 @@ fn attempt_snapshot(anchor: DateTime<Utc>) -> StoredAttemptSnapshot {
 }
 
 async fn seed_history_row(
-    connection: &mut PgConnection,
+    connection: &mut TestConnection,
     task_id: Uuid,
     class_key: &str,
     anchor: DateTime<Utc>,
@@ -206,7 +205,7 @@ async fn seed_history_row(
 }
 
 async fn seed_history_row_with_payload(
-    connection: &mut PgConnection,
+    connection: &mut TestConnection,
     task_id: Uuid,
     class_key: &str,
     anchor: DateTime<Utc>,
@@ -236,7 +235,7 @@ async fn seed_history_row_with_payload(
              FALSE, 1, $9, $10, $11, 'NEVER_ELIGIBLE'
          )"
     );
-    sqlx::query(&sql)
+    sql::query(&sql)
         .bind(task_id)
         .bind(vec![7_u8; 32])
         .bind(status)
@@ -255,12 +254,12 @@ async fn seed_history_row_with_payload(
 }
 
 async fn seed_live_row(
-    connection: &mut PgConnection,
+    connection: &mut TestConnection,
     task_id: Uuid,
     class_key: &str,
     anchor: DateTime<Utc>,
 ) {
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, task_options, execution,
              retention_class_key, sent_at, created_at,
@@ -286,8 +285,8 @@ async fn seed_live_row(
 
 /// One row of the provenance reader for `task_id`: history holds the id. The
 /// reader has no live probe.
-async fn provenance_found(connection: &mut PgConnection, task_id: Uuid) -> bool {
-    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM horsies_task_provenance_staged($1))")
+async fn provenance_found(connection: &mut TestConnection, task_id: Uuid) -> bool {
+    sql::query_scalar("SELECT EXISTS (SELECT 1 FROM horsies_task_provenance_staged($1))")
         .bind(task_id)
         .fetch_one(connection)
         .await
@@ -304,7 +303,7 @@ async fn publisher_installs_the_four_readers_and_resolves_live_history_and_absen
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
     let mut transaction = database.pool.begin().await.expect("begin P4 lookup setup");
-    let now = database_now(&mut transaction).await.expect("database now");
+    let now = database_now(&mut transaction).await;
     let today = utc_day(now);
     let parent = register_test_class(&mut transaction, class_key, 30).await;
     let leaf = create_test_leaf(&mut transaction, &parent, class_key, today).await;
@@ -396,7 +395,7 @@ async fn publisher_installs_the_four_readers_and_resolves_live_history_and_absen
         .references_leaf(&mut connection, other_leaf.leaf_name())
         .await
         .expect("other-class published leaf reference"));
-    let manifest_positions: Vec<(String, i32)> = sqlx::query_as(
+    let manifest_positions: Vec<(String, i32)> = sql::query_as(
         "SELECT leaf_name, probe_position FROM horsies_task_lookup_manifest
          ORDER BY probe_position",
     )
@@ -414,7 +413,7 @@ async fn publisher_installs_the_four_readers_and_resolves_live_history_and_absen
         .enumerate()
         .all(|(position, (_, stored))| *stored == position as i32));
 
-    let signatures: Vec<(String, String)> = sqlx::query_as(
+    let signatures: Vec<(String, String)> = sql::query_as(
         "SELECT procedure.proname,
                 pg_get_function_identity_arguments(procedure.oid)
          FROM pg_proc AS procedure
@@ -458,8 +457,8 @@ async fn publisher_installs_the_four_readers_and_resolves_live_history_and_absen
 }
 
 /// Whether the detail reader `horsies_task_detail_staged(uuid)` exists.
-async fn detail_reader_exists(connection: &mut PgConnection) -> bool {
-    sqlx::query_scalar("SELECT to_regprocedure($1) IS NOT NULL")
+async fn detail_reader_exists(connection: &mut TestConnection) -> bool {
+    sql::query_scalar("SELECT to_regprocedure($1) IS NOT NULL")
         .bind(format!("{TASK_DETAIL_FUNCTION}(uuid)"))
         .fetch_one(connection)
         .await
@@ -470,24 +469,22 @@ async fn detail_reader_exists(connection: &mut PgConnection) -> bool {
 #[serial]
 async fn coverage_republishes_the_triple_when_only_the_detail_function_is_missing() {
     let database = TestDatabase::create().await;
-    let mut transaction = database.pool.begin().await.expect("begin initial coverage");
-    let initial = ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
+    let core = core_pool_for_test_url(database.pool.url());
+    let initial = ensure_partition_coverage_in_pool(&core, StatementLog::Off, 2, 2, &[])
         .await
         .expect("establish steady coverage");
     assert!(matches!(initial, CoverageOutcome::Ensured(_)));
-    transaction.commit().await.expect("commit initial coverage");
 
-    sqlx::query("DROP FUNCTION horsies_task_detail_staged(uuid)")
+    sql::query("DROP FUNCTION horsies_task_detail_staged(uuid)")
         .execute(&database.pool)
         .await
         .expect("drop only staged detail function");
-    let mut transaction = database.pool.begin().await.expect("begin healing coverage");
-    assert!(!detail_reader_exists(&mut transaction).await);
-    assert!(published_manifest_absent_leaves(&mut transaction)
+    let mut connection = database.pool.acquire().await.expect("acquire probe");
+    assert!(!detail_reader_exists(&mut connection).await);
+    assert!(published_manifest_absent_leaves(&mut connection)
         .await
-        .expect("healthy manifest probe")
         .is_empty());
-    let healed = ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
+    let healed = ensure_partition_coverage_in_pool(&core, StatementLog::Off, 2, 2, &[])
         .await
         .expect("heal missing staged detail");
     let CoverageOutcome::Ensured(healed) = healed else {
@@ -497,8 +494,9 @@ async fn coverage_republishes_the_triple_when_only_the_detail_function_is_missin
     assert_eq!(healed.created_heartbeat_leaves, 0);
     assert!(healed.republished);
     assert!(healed.absent_leaves.is_empty());
-    assert!(detail_reader_exists(&mut transaction).await);
-    transaction.commit().await.expect("commit healing coverage");
+    assert!(detail_reader_exists(&mut connection).await);
+    drop(connection);
+    core.close();
     database.drop().await;
 }
 
@@ -508,7 +506,7 @@ async fn missing_relation_is_detected_excluded_reported_and_not_misclassified_as
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
     let mut transaction = database.pool.begin().await.expect("begin missing setup");
-    let now = database_now(&mut transaction).await.expect("database now");
+    let now = database_now(&mut transaction).await;
     let today = utc_day(now);
     let parent = register_test_class(&mut transaction, class_key, 30).await;
     let leaf = create_test_leaf(&mut transaction, &parent, class_key, today).await;
@@ -528,7 +526,7 @@ async fn missing_relation_is_detected_excluded_reported_and_not_misclassified_as
         .expect("publish before missing relation");
     transaction.commit().await.expect("commit missing setup");
 
-    sqlx::query(&format!("DROP TABLE {}", leaf.leaf_name()))
+    sql::query(&format!("DROP TABLE {}", leaf.leaf_name()))
         .execute(&database.pool)
         .await
         .expect("drop leaf out of band");
@@ -542,12 +540,10 @@ async fn missing_relation_is_detected_excluded_reported_and_not_misclassified_as
         .expect_err("published missing leaf must break execution");
     assert!(matches!(
         broken,
-        HistoryError::Database(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("42P01")
+        CallError::Database(ref error) if error.sqlstate() == Some("42P01")
     ));
     assert_eq!(
-        published_manifest_absent_leaves(&mut connection)
-            .await
-            .expect("published absent leaves"),
+        published_manifest_absent_leaves(&mut connection).await,
         vec![leaf.leaf_name().to_owned()]
     );
     let republished = StagedLoaderPublisher
@@ -557,7 +553,6 @@ async fn missing_relation_is_detected_excluded_reported_and_not_misclassified_as
     assert_eq!(republished.absent_leaves, vec![leaf.leaf_name().to_owned()]);
     assert!(published_manifest_absent_leaves(&mut connection)
         .await
-        .expect("healed manifest divergence")
         .is_empty());
     assert!(!StagedLoaderPublisher
         .references_leaf(&mut connection, leaf.leaf_name())
@@ -572,7 +567,7 @@ async fn missing_relation_is_detected_excluded_reported_and_not_misclassified_as
             reason: TaskAbsenceReason::WithinRetainedHistory,
         } if found == task_id
     ));
-    let catalog_still_attached: bool = sqlx::query_scalar(&format!(
+    let catalog_still_attached: bool = sql::query_scalar(&format!(
         "SELECT detached_at IS NULL AND dropped_at IS NULL FROM {LEAF_CATALOG}
          WHERE leaf_name = $1"
     ))
@@ -591,7 +586,7 @@ async fn detail_refuses_a_stored_status_that_is_not_a_task_status() {
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
     let mut transaction = database.pool.begin().await.expect("begin status setup");
-    let today = utc_day(database_now(&mut transaction).await.expect("database now"));
+    let today = utc_day(database_now(&mut transaction).await);
     let parent = register_test_class(&mut transaction, class_key, 30).await;
     let _leaf = create_test_leaf(&mut transaction, &parent, class_key, today).await;
     let task_id = v7_with_birth(today + Duration::hours(1));
@@ -608,7 +603,7 @@ async fn detail_refuses_a_stored_status_that_is_not_a_task_status() {
         .republish(&mut transaction)
         .await
         .expect("publish status setup");
-    sqlx::query(&format!(
+    sql::query(&format!(
         "UPDATE {TASK_HISTORY_PARENT} SET status = 'BOGUS' WHERE task_id = $1"
     ))
     .bind(task_id)
@@ -619,7 +614,7 @@ async fn detail_refuses_a_stored_status_that_is_not_a_task_status() {
         read_task_detail(&mut transaction, task_id)
             .await
             .expect_err("an unknown status must refuse detail"),
-        HistoryError::Contract(ref detail) if detail.contains("'BOGUS'")
+        CallError::Contract(HistoryError::Contract(ref detail)) if detail.contains("'BOGUS'")
     ));
     transaction
         .rollback()
@@ -634,7 +629,7 @@ async fn detail_refuses_attempt_digest_corruption_and_purged_floor_is_typed() {
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
     let mut transaction = database.pool.begin().await.expect("begin purged setup");
-    let now = database_now(&mut transaction).await.expect("database now");
+    let now = database_now(&mut transaction).await;
     let today = utc_day(now);
     let old_day = today - Duration::days(40);
     let parent = register_test_class(&mut transaction, class_key, 30).await;
@@ -670,7 +665,7 @@ async fn detail_refuses_attempt_digest_corruption_and_purged_floor_is_typed() {
             .expect("read old detail"),
         TaskDetailResult::History(_)
     ));
-    sqlx::query(&format!(
+    sql::query(&format!(
         "UPDATE {TASK_HISTORY_PARENT} SET attempt_snapshot_digest = $1 WHERE task_id = $2"
     ))
     .bind(vec![0_u8; 32])
@@ -682,11 +677,13 @@ async fn detail_refuses_attempt_digest_corruption_and_purged_floor_is_typed() {
         read_task_detail(&mut transaction, old_id)
             .await
             .expect_err("digest corruption must refuse detail"),
-        HistoryError::ArchiveDecode(ArchiveDecodeError::DigestMismatch {
-            domain: ArchiveDomain::Attempts
-        })
+        CallError::Contract(HistoryError::ArchiveDecode(
+            ArchiveDecodeError::DigestMismatch {
+                domain: ArchiveDomain::Attempts
+            }
+        ))
     ));
-    sqlx::query(&format!(
+    sql::query(&format!(
         "UPDATE {TASK_HISTORY_PARENT} SET attempt_snapshot_digest = $1 WHERE task_id = $2"
     ))
     .bind(old_snapshot.digest.to_vec())
@@ -697,22 +694,23 @@ async fn detail_refuses_attempt_digest_corruption_and_purged_floor_is_typed() {
     transaction.commit().await.expect("commit purged setup");
 
     detach_expired_leaf(
-        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         StatementLog::Off,
         &DetachExpiredHistoryLeaf::new(old_leaf.clone(), Some(5_000)).expect("detach command"),
     )
     .await
     .expect("detach old P4 leaf");
-    let mut transaction = database.pool.begin().await.expect("begin old leaf drop");
     assert!(matches!(
-        drop_detached_leaf(
-            &mut transaction,
+        drop_detached_leaf_in_pool(
+            &core_pool_for_test_url(database.pool.url()),
+            StatementLog::Off,
             &DropDetachedHistoryLeaf::new(old_leaf.clone()),
         )
         .await
         .expect("drop old P4 leaf"),
         LeafDrop::Dropped { .. }
     ));
+    let mut transaction = database.pool.begin().await.expect("begin purged read");
     assert!(matches!(
         read_task_detail(&mut transaction, old_id)
             .await
@@ -722,7 +720,7 @@ async fn detail_refuses_attempt_digest_corruption_and_purged_floor_is_typed() {
             reason: TaskAbsenceReason::PredatesRetainedHistory,
         } if task_id == old_id
     ));
-    transaction.commit().await.expect("commit old leaf drop");
+    transaction.commit().await.expect("commit purged read");
     database.drop().await;
 }
 
@@ -730,20 +728,22 @@ async fn detail_refuses_attempt_digest_corruption_and_purged_floor_is_typed() {
 #[serial]
 async fn duplicate_guard_finds_a_recorded_clock_exception() {
     let database = TestDatabase::create().await;
-    let mut transaction = database.pool.begin().await.expect("begin exception setup");
-    let coverage = ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
+    let core = core_pool_for_test_url(database.pool.url());
+    let coverage = ensure_partition_coverage_in_pool(&core, StatementLog::Off, 2, 2, &[])
         .await
         .expect("publish the readers");
+    core.close();
     assert!(
         matches!(coverage, CoverageOutcome::Ensured(_)),
         "{coverage:?}"
     );
-    let now = database_now(&mut transaction).await.expect("database now");
+    let mut transaction = database.pool.begin().await.expect("begin exception setup");
+    let now = database_now(&mut transaction).await;
     // Born an hour after its terminal time: a client clock ahead of the
     // database. The move records such an id; the guard finds it there.
     let recorded = v7_with_birth(now + Duration::hours(1));
     let unrecorded = v7_with_birth(now + Duration::hours(2));
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_task_history_clock_exceptions (
              task_id, retention_class_key, terminal_at
          ) VALUES ($1, 'standard_30d', $2)",
@@ -763,11 +763,11 @@ async fn duplicate_guard_finds_a_recorded_clock_exception() {
 }
 
 /// The stamp comment of every published reader, in signature order.
-async fn reader_stamps(connection: &mut PgConnection) -> Vec<Option<String>> {
+async fn reader_stamps(connection: &mut TestConnection) -> Vec<Option<String>> {
     let mut stamps = Vec::new();
     for signature in super::publisher::rendered_reader_signatures() {
         let stamp: Option<String> =
-            sqlx::query_scalar("SELECT obj_description(to_regprocedure($1), 'pg_proc')")
+            sql::query_scalar("SELECT obj_description(to_regprocedure($1), 'pg_proc')")
                 .bind(&signature)
                 .fetch_one(&mut *connection)
                 .await
@@ -785,28 +785,30 @@ async fn reader_stamps(connection: &mut PgConnection) -> Vec<Option<String>> {
 #[serial]
 async fn publication_stamps_every_rendered_reader_independent_of_the_time_zone() {
     let database = TestDatabase::create().await;
-    let mut transaction = database.pool.begin().await.expect("begin stamp setup");
-    let coverage = ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
+    let core = core_pool_for_test_url(database.pool.url());
+    let coverage = ensure_partition_coverage_in_pool(&core, StatementLog::Off, 2, 2, &[])
         .await
         .expect("publish the readers");
+    core.close();
     assert!(
         matches!(coverage, CoverageOutcome::Ensured(_)),
         "{coverage:?}"
     );
+    let mut transaction = database.pool.begin().await.expect("begin stamp setup");
     let stamps = reader_stamps(&mut transaction).await;
-    let expected: String = sqlx::query_scalar("SELECT horsies_history_reader_stamp()")
+    let expected: String = sql::query_scalar("SELECT horsies_history_reader_stamp()")
         .fetch_one(&mut *transaction)
         .await
         .expect("compute manifest stamp");
     assert!(expected.starts_with("horsies:manifest:"));
     assert_eq!(stamps, vec![Some(expected.clone()); 4]);
     for timezone in ["Etc/GMT+12", "Etc/GMT-12"] {
-        sqlx::query("SELECT set_config('timezone', $1, true)")
+        sql::query("SELECT set_config('timezone', $1, true)")
             .bind(timezone)
             .execute(&mut *transaction)
             .await
             .expect("set session time zone");
-        let stamp: String = sqlx::query_scalar("SELECT horsies_history_reader_stamp()")
+        let stamp: String = sql::query_scalar("SELECT horsies_history_reader_stamp()")
             .fetch_one(&mut *transaction)
             .await
             .expect("compute manifest stamp");
@@ -818,7 +820,7 @@ async fn publication_stamps_every_rendered_reader_independent_of_the_time_zone()
         .expect("stamped readers are current"));
     // A reader without the stamp of the published manifest needs a
     // republication, whichever reader it is.
-    sqlx::query("COMMENT ON FUNCTION horsies_task_detail_staged(uuid) IS 'stale'")
+    sql::query("COMMENT ON FUNCTION horsies_task_detail_staged(uuid) IS 'stale'")
         .execute(&mut *transaction)
         .await
         .expect("stale detail stamp");
@@ -830,16 +832,16 @@ async fn publication_stamps_every_rendered_reader_independent_of_the_time_zone()
     database.drop().await;
 }
 
-async fn duplicate_guard(connection: &mut PgConnection, task_id: Uuid) -> bool {
-    sqlx::query_scalar("SELECT horsies_task_history_duplicate_staged($1)")
+async fn duplicate_guard(connection: &mut TestConnection, task_id: Uuid) -> bool {
+    sql::query_scalar("SELECT horsies_task_history_duplicate_staged($1)")
         .bind(task_id)
         .fetch_one(connection)
         .await
         .expect("call duplicate guard")
 }
 
-async fn guard_marker(connection: &mut PgConnection) -> Option<String> {
-    sqlx::query_scalar(
+async fn guard_marker(connection: &mut TestConnection) -> Option<String> {
+    sql::query_scalar(
         "SELECT obj_description(to_regprocedure('horsies_task_history_duplicate_staged(uuid)'), 'pg_proc')",
     )
     .fetch_one(connection)
@@ -860,7 +862,7 @@ async fn duplicate_guard_probes_the_pruned_set_and_a_dropped_guard_is_published_
     assert!(guard_marker(&mut transaction)
         .await
         .is_some_and(|stamp| stamp.starts_with("horsies:manifest:")));
-    let now = database_now(&mut transaction).await.expect("database now");
+    let now = database_now(&mut transaction).await;
     let today = utc_day(now);
     let parent = register_test_class(&mut transaction, class_key, 30).await;
     let _today_leaf = create_test_leaf(&mut transaction, &parent, class_key, today).await;
@@ -912,7 +914,7 @@ async fn duplicate_guard_probes_the_pruned_set_and_a_dropped_guard_is_published_
         .needs_republication(&mut connection)
         .await
         .expect("republication probe after publish"));
-    sqlx::query("DROP FUNCTION horsies_task_history_duplicate_staged(uuid)")
+    sql::query("DROP FUNCTION horsies_task_history_duplicate_staged(uuid)")
         .execute(&mut *connection)
         .await
         .expect("drop rendered guard");
@@ -1060,6 +1062,9 @@ fn stored_ok(record: &crate::broker::RawResultRecord) -> serde_json::Value {
     envelope["ok"].clone()
 }
 
+/// Python `tests/integration/test_task_result_history_fallback.py::TestStagedResultReader::test_an_absence_from_a_stale_reader_is_confirmed_by_detail`:
+/// a result reader published before a leaf existed misses a row of that
+/// leaf; the detail reader finds the COMPLETED row and its result.
 #[tokio::test]
 #[serial]
 async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
@@ -1073,7 +1078,7 @@ async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
         .begin()
         .await
         .expect("begin stale reader setup");
-    let now = database_now(&mut transaction).await.expect("database now");
+    let now = database_now(&mut transaction).await;
     let today = utc_day(now);
     let parent = register_test_class(&mut transaction, class_key, 30).await;
     let _leaf = create_test_leaf(&mut transaction, &parent, class_key, today).await;
@@ -1093,7 +1098,7 @@ async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
     // A result reader of a publication that ran before the leaf existed: it
     // probes the live table and no leaf (Python `_STALE_RESULT_READER_SQL`,
     // `tests/integration/test_task_result_history_fallback.py`).
-    sqlx::query(
+    sql::query(
         "CREATE OR REPLACE FUNCTION horsies_task_result_staged(p_task_id uuid)
          RETURNS TABLE(location text, status text, failed_reason text,
                        result_envelope_version smallint, result_payload bytea,
@@ -1118,12 +1123,16 @@ async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
             .expect("stale result read"),
         TaskResultRead::Absent
     );
-    let broker = PostgresBroker::from_pool(database.pool.clone());
+    let broker = PostgresBroker::from_test_url(database.pool.url(), crate::ClientFamily::Rust);
     let confirmed = broker
         .get_raw_result_record(completed_id, None)
         .await
         .expect("the detail reader confirms the history row")
         .expect_found();
+    assert_eq!(
+        confirmed.status,
+        crate::core::types::status::TaskStatus::Completed
+    );
     assert_eq!(stored_ok(&confirmed), serde_json::json!(7));
     database.drop().await;
 }
@@ -1137,7 +1146,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
     let mut transaction = database.pool.begin().await.expect("begin result setup");
-    let now = database_now(&mut transaction).await.expect("database now");
+    let now = database_now(&mut transaction).await;
     let today = utc_day(now);
     let parent = register_test_class(&mut transaction, class_key, 30).await;
     let _leaf = create_test_leaf(&mut transaction, &parent, class_key, today).await;
@@ -1210,7 +1219,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
         );
     }
 
-    let broker = PostgresBroker::from_pool(database.pool.clone());
+    let broker = PostgresBroker::from_test_url(database.pool.url(), crate::ClientFamily::Rust);
     let staged = broker
         .get_raw_result_record(completed_id, None)
         .await
@@ -1218,7 +1227,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
         .expect_found();
     assert_eq!(stored_ok(&staged), serde_json::json!(7));
 
-    sqlx::query("DROP FUNCTION horsies_task_result_staged(uuid)")
+    sql::query("DROP FUNCTION horsies_task_result_staged(uuid)")
         .execute(&mut *connection)
         .await
         .expect("drop only staged result function");
@@ -1236,11 +1245,14 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
         .await
         .expect_err("the first broker call after the drop fails");
     assert_eq!(
-        refused.code,
+        refused.code(),
         crate::broker::BrokerErrorCode::TaskInfoQueryFailed,
         "{refused:?}"
     );
-    assert!(refused.message.contains(TASK_RESULT_FUNCTION), "{refused}");
+    assert!(
+        refused.message().contains(TASK_RESULT_FUNCTION),
+        "{refused}"
+    );
     let fallback = broker
         .get_raw_result_record(completed_id, None)
         .await
@@ -1263,7 +1275,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
         TaskResultRead::History(_)
     ));
 
-    sqlx::query(
+    sql::query(
         "CREATE OR REPLACE FUNCTION horsies_task_result_staged(p_task_id uuid)
          RETURNS TABLE (location text, status text, failed_reason text,
                         result_envelope_version smallint, result_payload bytea,

@@ -25,7 +25,7 @@ mod test_database;
 /// Installs the schema into the test template of this process through the
 /// public API.
 async fn install_template(url: &str) {
-    let broker = PostgresBroker::connect(url)
+    let broker = PostgresBroker::connect(url, horsies_core::ClientFamily::Rust)
         .await
         .expect("connect the template broker");
     broker
@@ -304,7 +304,7 @@ async fn v35_catalog_has_only_move_program_terminal_writers_and_a_live_only_chec
             false,
         ),
         (
-            "horsies_finish_stale_attempt(uuid,integer,integer,text,integer,double precision,text,text,text,text,text)",
+            "horsies_finish_stale_attempt(uuid,text,integer,integer,text,timestamp with time zone,text,integer,double precision,text,text,text,text,text)",
             true,
             false,
         ),

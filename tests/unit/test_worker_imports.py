@@ -10,74 +10,11 @@ import pytest
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.utils.imports import (
     _compute_synthetic_module_name,
-    compute_package_path_from_fs,
     import_file_path,
     import_module_path,
     find_project_root,
-    unload_file_path,
 )
-from horsies.core.worker.worker import _locate_app
-
-
-@pytest.mark.unit
-class TestComputePackagePathFromFs:
-    """Tests for compute_package_path_from_fs function."""
-
-    def test_returns_none_for_non_package_file(self, tmp_path: Path) -> None:
-        """File without __init__.py in parent should return (None, None)."""
-        standalone = tmp_path / 'standalone.py'
-        standalone.write_text('x = 1')
-
-        dotted, root = compute_package_path_from_fs(str(standalone))
-
-        assert dotted is None
-        assert root is None
-
-    def test_computes_single_level_package(self, tmp_path: Path) -> None:
-        """File in a single-level package should return correct path."""
-        pkg = tmp_path / 'pkg'
-        pkg.mkdir()
-        (pkg / '__init__.py').write_text('')
-        module = pkg / 'module.py'
-        module.write_text('x = 1')
-
-        dotted, root = compute_package_path_from_fs(str(module))
-
-        assert dotted == 'pkg.module'
-        assert root == str(tmp_path)
-
-    def test_computes_nested_package(self, tmp_path: Path) -> None:
-        """File in nested package should return full dotted path."""
-        a = tmp_path / 'a'
-        b = a / 'b'
-        c = b / 'c'
-        c.mkdir(parents=True)
-
-        (a / '__init__.py').write_text('')
-        (b / '__init__.py').write_text('')
-        (c / '__init__.py').write_text('')
-        deep = c / 'deep.py'
-        deep.write_text('x = 1')
-
-        dotted, root = compute_package_path_from_fs(str(deep))
-
-        assert dotted == 'a.b.c.deep'
-        assert root == str(tmp_path)
-
-    def test_stops_at_missing_init(self, tmp_path: Path) -> None:
-        """Should stop walking up when __init__.py is missing."""
-        outer = tmp_path / 'outer'
-        inner = outer / 'inner'
-        inner.mkdir(parents=True)
-
-        (inner / '__init__.py').write_text('')
-        mod = inner / 'mod.py'
-        mod.write_text('x = 1')
-
-        dotted, root = compute_package_path_from_fs(str(mod))
-
-        assert dotted == 'inner.mod'
-        assert root == str(outer)
+from horsies.core.worker.child_runner import _locate_app
 
 
 @pytest.mark.unit
@@ -229,24 +166,6 @@ class TestImportFilePath:
         assert not hasattr(stdlib_wave, 'VALUE'), (
             'import_file_path must not register a stdlib-shadowing alias'
         )
-
-    def test_unload_file_path_removes_registered_module_keys(self, tmp_path: Path) -> None:
-        """unload_file_path should remove synthetic and basename aliases."""
-        mod_file = tmp_path / 'to_unload.py'
-        mod_file.write_text('VALUE = 7')
-
-        realpath = str(mod_file.resolve())
-        synthetic_name = _compute_synthetic_module_name(realpath)
-        sys.modules.pop(synthetic_name, None)
-        sys.modules.pop('to_unload', None)
-
-        import_file_path(str(mod_file))
-        removed = unload_file_path(str(mod_file))
-
-        assert synthetic_name in removed
-        assert 'to_unload' in removed
-        assert synthetic_name not in sys.modules
-        assert 'to_unload' not in sys.modules
 
 
 @pytest.mark.unit

@@ -319,6 +319,7 @@ Workers wait up to the `drain_timeout` of their profile for running tasks. See [
 | 1 | Error (check logs), including a missing or unknown `--profile` |
 | 2 | Invalid `horsies web` arguments, a removed worker flag, or an argparse error |
 | 77 | `horsies worker`: the worker could not write runner heartbeats, and it had not stopped 120 seconds after it started to stop. See [When the Worker Cannot Write Heartbeats](/horsies/workers/heartbeats-recovery/#when-the-worker-cannot-write-heartbeats) |
+| 79 | `horsies worker`: the worker held a task, and its liveness lock was not held for 60 seconds. See [Worker Liveness Lock](/horsies/workers/heartbeats-recovery/#worker-liveness-lock) |
 
 A worker child exits with one of these codes; the worker reads it to name how the child ended.
 

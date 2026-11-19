@@ -50,9 +50,10 @@ use crate::db::{
 use crate::workflow_engine::args_merge::{
     args_from_inner_text, object_members, object_text, ARGS_FROM_ENVELOPE_KEY,
 };
+use crate::workflow_engine::child_spec::ChildSpecSource;
 use crate::workflow_engine::phase2_recovery::Phase2Wake;
 use crate::workflow_engine::steps::{
-    advance_parents, node_finish_alone, node_finish_in_transaction, ChildBuild, Dependents,
+    advance_parents, node_finish_alone, node_finish_in_transaction, Dependents,
     NodeFinishDisposition, OwedParentAdvances,
 };
 
@@ -98,8 +99,7 @@ pub(crate) enum FinalizeOutcome {
     Finalized,
     /// The fenced write found the row not held by this attempt (another
     /// claim generation, another state, or no row) and wrote nothing. Nothing
-    /// is owed; the writer logged what it saw. Python returns `Ok(None)` for
-    /// these refusals (`core/worker/finalize.py`).
+    /// is owed; the writer logged what it saw.
     Refused,
 }
 
@@ -364,7 +364,7 @@ fn input_refused(refusal: &InputRefused) -> TaskError {
 /// attempt row from the locked row on the database clock. A database error
 /// never decides between a retry and a failure: it is a phase-1 error,
 /// retryable when the connection failed, and the next try sends the same
-/// statement (Python `core/worker/finalize.py`, `_persist_failed_attempt`).
+/// statement.
 /// A refusal is an outcome ([`FinalizeOutcome::Refused`]), not an error.
 ///
 /// `task` is the claimed task as the claim returned it: its claim generation
@@ -535,8 +535,8 @@ async fn persist_plain_success(
     }
 }
 
-/// The success of a workflow task, in one statement (Python
-/// `core/worker/workflow_success.py`). Phase 2 is owed after it applies.
+/// The success of a workflow task, in one statement. Phase 2 is owed after
+/// it applies.
 async fn persist_workflow_success(
     broker: &PostgresBroker,
     task_id: Uuid,
@@ -634,9 +634,7 @@ pub(crate) enum UnreportedAttemptWrite {
 
 /// Write the failed attempt of a child that ended without a report (a
 /// timeout, a loop kill or a crash) in one statement, with the claimed-row
-/// rule `RELEASE` (Python `_write_ended_attempt`,
-/// `python/horsies/core/worker/dispatch.py:357-423`, which sends the release and
-/// the failed attempt as two statements).
+/// rule `RELEASE`.
 ///
 /// Errors: a phase-1 [`FinalizeError`], retryable when the database error
 /// is. After an unknown outcome a released row reads as not held when the
@@ -796,8 +794,7 @@ fn envelope_error(task_id: Uuid, error: serde_json::Error) -> FinalizeError {
 // ---------------------------------------------------------------------------
 
 /// Phase 2 of finalization: the node finish of a workflow task, or the
-/// capacity wake of a plain task (Python `_finalize_workflow_phase`,
-/// `core/worker/finalize.py:1619-1674`).
+/// capacity wake of a plain task.
 ///
 /// Separate from phase 1. If this fails after phase 1 committed, the terminal
 /// task result and its phase-2 record are durable and phase-2 recovery
@@ -808,8 +805,7 @@ fn envelope_error(task_id: Uuid, error: serde_json::Error) -> FinalizeError {
 /// not. A plain task sends the wake as one statement on the main core pool,
 /// on the reserve, when phase 1 did not; an error of the wake is a phase-2
 /// error, never dropped, retryable when the database error is transient
-/// (`BrokerError::is_retryable`, Python `_phase2_error`,
-/// `core/worker/finalize.py:1676-1697`). Returns the parent advances that the
+/// (`BrokerError::is_retryable`). Returns the parent advances that the
 /// step owes after its commit.
 ///
 /// The node finish builds the child of each sub-workflow node that it
@@ -819,7 +815,7 @@ fn envelope_error(task_id: Uuid, error: serde_json::Error) -> FinalizeError {
 /// when the failure may clear.
 pub(crate) async fn finalize_workflow_phase(
     broker: &PostgresBroker,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
     task_id: Uuid,
     queue_name: &str,
     is_workflow_task: bool,
@@ -905,8 +901,7 @@ const CAPACITY_WAKE_PAYLOAD: &str = "capacity";
 
 /// The capacity wake of `queue_name`: the workers of the queue check their
 /// capacity and backlog. It goes only to the queue's channel
-/// `task_queue_<queue>`; workers do not listen on `task_new` (Python
-/// `core/worker/finalize.py:1657-1660`).
+/// `task_queue_<queue>`; workers do not listen on `task_new`.
 pub(crate) fn capacity_wake(queue_name: &str) -> Phase2Wake {
     Phase2Wake::Queue {
         channel: format!("task_queue_{queue_name}"),
@@ -933,7 +928,7 @@ pub(crate) fn capacity_wake(queue_name: &str) -> Phase2Wake {
 /// counts the record.
 async fn finish_workflow_node(
     broker: &PostgresBroker,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
     task_id: Uuid,
     capacity_notified: bool,
     phase_two: PhaseTwoForm,
@@ -1178,7 +1173,11 @@ pub(crate) async fn mark_task_finalizing(
 /// owes run after it, one transaction per level, with their own retries
 /// ([`retry_parent_advances`]). Both build the child of each sub-workflow
 /// node that they promote with `build`.
-pub(crate) async fn run_phase2(broker: &PostgresBroker, build: ChildBuild<'_>, work: Phase2Work) {
+pub(crate) async fn run_phase2(
+    broker: &PostgresBroker,
+    build: &dyn ChildSpecSource,
+    work: Phase2Work,
+) {
     let finished = Box::pin(retry_phase2(broker, build, &work)).await;
     match finished {
         Ok(owed) if !owed.is_empty() => {
@@ -1203,7 +1202,7 @@ pub(crate) async fn run_phase2(broker: &PostgresBroker, build: ChildBuild<'_>, w
 /// (already logged).
 async fn retry_phase2(
     broker: &PostgresBroker,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
     work: &Phase2Work,
 ) -> Result<OwedParentAdvances, FinalizeError> {
     let mut attempt: u32 = 0;
@@ -1272,13 +1271,12 @@ async fn retry_phase2(
 /// Advances the parents above the child workflows that phase 2 ended
 /// ([`advance_parents`], one transaction per level, on the worker reserve),
 /// with up to [`PHASE2_MAX_RETRIES`] retries that go on from the level that
-/// failed (Python's parent-propagation stage, `_retry_finalize_parent`,
-/// `core/worker/finalize.py:2248-2310`). A non-retryable failure, or spent
+/// failed. A non-retryable failure, or spent
 /// retries, leave the rest to workflow recovery (case 1.6: a terminal child
 /// under a live parent node). Logs every failure.
 async fn retry_parent_advances(
     broker: &PostgresBroker,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
     task_id: Uuid,
     first_owed: OwedParentAdvances,
 ) {

@@ -160,6 +160,28 @@ fn a_database_of_another_family_or_of_none_is_refused_first() {
     );
 }
 
+/// A family value that is not a client family is corrupt stored data: the
+/// rerun ends with the stored value before the class check, and nothing is
+/// written. No panic.
+#[test]
+fn a_family_value_that_is_no_client_family_is_refused_as_corrupt_first() {
+    let corrupt = with(
+        with(
+            history_values(),
+            "class_registered",
+            StatementValue::Bool(false),
+        ),
+        "client_family",
+        StatementValue::Text("GO".to_owned()),
+    );
+    assert_eq!(
+        prepare_values(corrupt, None),
+        RerunPreparation::UnknownStoredFamily(UnknownStoredFamily {
+            stored: "GO".to_owned(),
+        })
+    );
+}
+
 #[test]
 fn an_unregistered_class_is_refused_before_the_source() {
     let unregistered = with(

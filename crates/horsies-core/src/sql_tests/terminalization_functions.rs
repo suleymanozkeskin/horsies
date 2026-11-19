@@ -13,11 +13,6 @@
 //!   with one coverage pass ([`covered`]) and seeds its rows. It calls the
 //!   writer with its own SQL and decodes the one outcome row with the
 //!   decoder of the core ([`decode_outcome_row`]).
-//!
-//! The other tests of `tests/integration/test_terminalization_functions.py`
-//! stay in Python. Each runs a call through the Python lifecycle
-//! (`apply_async`, `apply_batch_async`, `apply_sync`, `call_for`,
-//! `batch_call_for`).
 
 use chrono::{DateTime, TimeZone, Utc};
 use tokio_postgres::error::SqlState;
@@ -215,7 +210,7 @@ const STALE_ATTEMPT_SQL: &str = "
            observed_status, observed_worker_id, observed_claimed_at,
            guard_kind, observed_guard
     FROM horsies_finish_stale_attempt(
-        CAST($1 AS uuid), CAST($2 AS INTEGER), CAST($3 AS INTEGER),
+        CAST($1 AS uuid), 'BEAT_AGE', CAST($2 AS INTEGER), CAST($3 AS INTEGER), NULL, NULL,
         'NONE', NULL, NULL,
         $4, $5, $6, $6, $6
     )
@@ -480,7 +475,7 @@ fn assert_refused<T: std::fmt::Debug>(
 /// broker fixture does: a terminal move writes a history row. The database
 /// is dropped when the runtime of the test shuts down.
 async fn covered() -> Session {
-    let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+    let url = crate::test_support::migrated_database_url().await;
     Session::open(&url).await
 }
 

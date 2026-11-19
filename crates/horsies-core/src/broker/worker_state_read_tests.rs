@@ -9,20 +9,25 @@ use std::sync::Arc;
 use chrono::TimeZone;
 use chrono::Utc;
 use serde_json::{json, Value};
-use sqlx::PgPool;
 
 use crate::broker::monitoring_test_database::MonitoringTestDatabase;
 use crate::broker::result_types::BrokerErrorCode;
 use crate::broker::slot_health::{ClearableBootCause, DownSlot, ShortageErrno, SlotHealth};
 use crate::core::config::worker_profile::WorkerProfile;
 use crate::core::task::Execution;
+use crate::test_support::sql::{self, TestPool};
 use crate::worker::children::{child_layout, ChildrenView, SeatsPerChild};
 use crate::worker::executor::slots::board::PoolBoard;
 use crate::worker::worker_state::class_capacity_of;
 
 /// One snapshot of a worker with 2 processes on queue `default`, written now.
-async fn insert_snapshot(pool: &PgPool, worker_id: &str, slots_down: Value, class_capacity: Value) {
-    sqlx::query(
+async fn insert_snapshot(
+    pool: &TestPool,
+    worker_id: &str,
+    slots_down: Value,
+    class_capacity: Value,
+) {
+    sql::query(
         "INSERT INTO horsies_worker_states (
             worker_id, snapshot_at, hostname, pid, processes,
             max_claim_batch, max_claim_per_worker, queues,
@@ -159,13 +164,13 @@ async fn an_unreadable_slot_health_fails_the_read() {
         .expect_err("the list read meets the same row");
 
     for error in [failed, listed] {
-        assert_eq!(error.code, BrokerErrorCode::MonitoringQueryFailed);
-        assert!(!error.retryable);
-        assert!(error.message.contains("w-odd"), "{}", error.message);
+        assert_eq!(error.code(), BrokerErrorCode::MonitoringQueryFailed);
+        assert!(!error.retryable());
+        assert!(error.message().contains("w-odd"), "{}", error.message());
         assert!(
-            error.message.contains("slots_down is unreadable"),
+            error.message().contains("slots_down is unreadable"),
             "{}",
-            error.message
+            error.message()
         );
     }
     database.drop().await;
@@ -190,23 +195,32 @@ async fn an_unreadable_class_capacity_fails_the_read() {
         .await
         .expect_err("an unreadable class_capacity fails the read");
 
-    assert_eq!(failed.code, BrokerErrorCode::MonitoringQueryFailed);
-    assert!(!failed.retryable);
-    assert!(failed.message.contains("w-odd"), "{}", failed.message);
+    assert_eq!(failed.code(), BrokerErrorCode::MonitoringQueryFailed);
+    assert!(!failed.retryable());
+    assert!(failed.message().contains("w-odd"), "{}", failed.message());
     assert!(
-        failed.message.contains("class_capacity is unreadable"),
+        failed.message().contains("class_capacity is unreadable"),
         "{}",
-        failed.message
+        failed.message()
     );
-    assert!(failed.message.contains("'EXCLUSIVE'"), "{}", failed.message);
+    assert!(
+        failed.message().contains("'EXCLUSIVE'"),
+        "{}",
+        failed.message()
+    );
     database.drop().await;
 }
 
 /// One snapshot of `worker_id` taken `seconds_ago` before the database clock,
 /// with `tasks_running` rows running; every other column as
 /// [`insert_snapshot`] writes it, with all slots serving and no budget.
-async fn insert_snapshot_at(pool: &PgPool, worker_id: &str, seconds_ago: f64, tasks_running: i32) {
-    sqlx::query(
+async fn insert_snapshot_at(
+    pool: &TestPool,
+    worker_id: &str,
+    seconds_ago: f64,
+    tasks_running: i32,
+) {
+    sql::query(
         "INSERT INTO horsies_worker_states (
             worker_id, snapshot_at, hostname, pid, processes,
             max_claim_batch, max_claim_per_worker, queues,

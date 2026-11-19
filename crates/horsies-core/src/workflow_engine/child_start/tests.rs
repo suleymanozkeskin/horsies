@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serial_test::serial;
-use sqlx::PgPool;
 
 use super::*;
 use crate::broker::workflow_start::ClientStartOutcome;
@@ -21,8 +20,9 @@ use crate::core::workflow::node::{JoinType, SubWorkflowParams};
 use crate::core::{AnyNode, OnError, TaskResult, WorkflowSpec};
 use crate::db::CheckoutClass;
 use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
+use crate::test_support::sql::{self, TestPool};
 use crate::test_support::terminal_writes;
-use crate::workflow_engine::child_spec::ChildSpecRequest;
+use crate::workflow_engine::child_spec::{ChildSpecRequest, ChildSpecSource};
 use crate::workflow_engine::lifecycle::{pause_workflow, resume_client_workflow};
 use crate::workflow_engine::start_statement::{merged_child_input, NodeInput};
 use crate::workflow_engine::steps::{
@@ -44,7 +44,7 @@ const WORKER: &str = "child-start-worker";
 /// made, so the future ends on its first poll.
 fn host_build(
     owed: &OwedChildStart,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
 ) -> Result<ChildStartKind, WorkflowError> {
     futures::executor::block_on(child_start_kind(owed, build))
 }
@@ -156,18 +156,21 @@ fn failure_error(kind: ChildStartKind) -> crate::core::TaskError {
 }
 
 async fn test_broker() -> PostgresBroker {
-    PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await)
+    PostgresBroker::from_test_url(
+        crate::test_support::migrated_pool().await.url(),
+        crate::ClientFamily::Rust,
+    )
 }
 
 /// A workflow row; a child names its parent, the node index 0 and depth 1.
 async fn seed_workflow(
-    pool: &PgPool,
+    pool: &TestPool,
     id: Uuid,
     status: &str,
     parent: Option<Uuid>,
     result: Option<&str>,
 ) {
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, status, on_error, definition_key, depth, result,
              root_workflow_id, parent_workflow_id, parent_task_index,
@@ -192,7 +195,7 @@ async fn seed_workflow(
 /// A sub-workflow node at `index` of `workflow_id` whose child is registered
 /// under `definition_key`.
 async fn seed_subworkflow_node(
-    pool: &PgPool,
+    pool: &TestPool,
     workflow_id: Uuid,
     index: i32,
     status: &str,
@@ -200,7 +203,7 @@ async fn seed_subworkflow_node(
     child: Option<Uuid>,
     definition_key: &str,
 ) {
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps, join_type, status,
@@ -229,8 +232,8 @@ async fn seed_subworkflow_node(
 /// A RUNNING task claimed by [`WORKER`], with the process facts of its start,
 /// behind the RUNNING task node 0 of `workflow_id`, from which a sub-workflow
 /// node is reachable.
-async fn seed_running_task_node(pool: &PgPool, workflow_id: Uuid, task_id: Uuid) {
-    sqlx::query(
+async fn seed_running_task_node(pool: &TestPool, workflow_id: Uuid, task_id: Uuid) {
+    sql::query(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
              started_at, claimed_at, claimed_by_worker_id, is_workflow_task, retry_count,
@@ -248,7 +251,7 @@ async fn seed_running_task_node(pool: &PgPool, workflow_id: Uuid, task_id: Uuid)
     .execute(pool)
     .await
     .expect("seed task");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps, join_type, status,
@@ -268,7 +271,7 @@ async fn seed_running_task_node(pool: &PgPool, workflow_id: Uuid, task_id: Uuid)
 }
 
 /// Completes the task: phase 1 of a worker, which writes its phase-2 record.
-async fn complete_task(pool: &PgPool, task_id: Uuid) {
+async fn complete_task(pool: &TestPool, task_id: Uuid) {
     let result = serde_json::to_string(&TaskResult::Ok(serde_json::json!({"value": 7}))).unwrap();
     let outcomes = terminal_writes::complete_workflow_task(pool, task_id, WORKER, &result)
         .await
@@ -280,8 +283,8 @@ async fn complete_task(pool: &PgPool, task_id: Uuid) {
 }
 
 /// The status and child of the node at `index`.
-async fn node(pool: &PgPool, workflow_id: Uuid, index: i32) -> (String, Option<Uuid>) {
-    sqlx::query_as(
+async fn node(pool: &TestPool, workflow_id: Uuid, index: i32) -> (String, Option<Uuid>) {
+    sql::query_as(
         "SELECT status, sub_workflow_id FROM horsies_workflow_tasks
          WHERE workflow_id = $1 AND task_index = $2",
     )
@@ -295,12 +298,12 @@ async fn node(pool: &PgPool, workflow_id: Uuid, index: i32) -> (String, Option<U
 /// The node at `index` is RUNNING and linked to a RUNNING child of depth
 /// `parent_depth + 1` under that node, whose root task node is ENQUEUED with
 /// a PENDING task row.
-async fn assert_child_started(pool: &PgPool, workflow_id: Uuid, index: i32, parent_depth: i32) {
+async fn assert_child_started(pool: &TestPool, workflow_id: Uuid, index: i32, parent_depth: i32) {
     let (status, child) = node(pool, workflow_id, index).await;
     assert_eq!(status, "RUNNING");
     let child = child.expect("the sub-workflow node links its child");
     let (child_status, parent, parent_index, depth): (String, Option<Uuid>, Option<i32>, i32) =
-        sqlx::query_as(
+        sql::query_as(
             "SELECT status, parent_workflow_id, parent_task_index, depth
              FROM horsies_workflows WHERE id = $1",
         )
@@ -312,7 +315,7 @@ async fn assert_child_started(pool: &PgPool, workflow_id: Uuid, index: i32, pare
         (child_status.as_str(), parent, parent_index, depth),
         ("RUNNING", Some(workflow_id), Some(index), parent_depth + 1)
     );
-    let (child_node_status, task_status): (String, String) = sqlx::query_as(
+    let (child_node_status, task_status): (String, String) = sql::query_as(
         "SELECT n.status, t.status FROM horsies_workflow_tasks n
          JOIN horsies_tasks t ON t.id = n.task_id
          WHERE n.workflow_id = $1 AND n.task_index = 0",
@@ -353,7 +356,7 @@ fn every_child_start_disposition_text_reads_and_others_do_not() {
 fn a_registered_child_is_a_tree_under_its_node() {
     let workflow_id = Uuid::new_v4();
     let children = children_with_child();
-    let build = ChildBuild::Client(&children);
+    let build: &dyn ChildSpecSource = &children;
 
     let kind = host_build(&owed(workflow_id, 3, CHILD_KEY), build).expect("host build");
 
@@ -376,7 +379,7 @@ fn a_registered_child_is_a_tree_under_its_node() {
 fn a_child_that_cannot_load_or_is_too_deep_fails_its_node() {
     let workflow_id = Uuid::new_v4();
     let children = children_with_child();
-    let build = ChildBuild::Client(&children);
+    let build: &dyn ChildSpecSource = &children;
 
     let missing = failure_error(
         host_build(&owed(workflow_id, 0, "tests.child_start.missing.v1"), build)
@@ -429,7 +432,7 @@ fn a_child_that_cannot_load_or_is_too_deep_fails_its_node() {
 fn the_depth_limit_is_checked_before_the_child_definition_is_resolved() {
     let workflow_id = Uuid::new_v4();
     let children = children_with_child();
-    let build = ChildBuild::Client(&children);
+    let build: &dyn ChildSpecSource = &children;
     let missing_key = "tests.child_start.missing.v1";
     let depth_limit = crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH;
 
@@ -457,7 +460,7 @@ fn an_args_from_key_that_names_a_static_member_fails_the_node() {
     conflicting.node_input = r#"{"value": 1}"#.to_owned();
     conflicting.args_from = Some(r#"{"value": 0}"#.to_owned());
 
-    let kind = host_build(&conflicting, ChildBuild::Client(&children)).expect("host build");
+    let kind = host_build(&conflicting, &children).expect("host build");
 
     let error = failure_error(kind);
     assert_eq!(error.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
@@ -487,7 +490,7 @@ fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
             }
         });
     let children = TestChildSpecs::empty().with_build(CHILD_KEY, builder);
-    let build = ChildBuild::Client(&children);
+    let build: &dyn ChildSpecSource = &children;
     let mut merged = owed(workflow_id, 0, CHILD_KEY);
     merged.sub_workflow_params = SubWorkflowParams::Given;
     merged.args_from = Some(r#"{"value": 0}"#.to_owned());
@@ -547,8 +550,7 @@ fn a_static_member_that_the_builder_refuses_fails_the_node_as_a_serialization_er
     refused.node_input = r#"{"count": "x"}"#.to_owned();
     refused.sub_workflow_params = SubWorkflowParams::Given;
 
-    let error =
-        failure_error(host_build(&refused, ChildBuild::Client(&children)).expect("host build"));
+    let error = failure_error(host_build(&refused, &children).expect("host build"));
 
     assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
     assert_eq!(
@@ -599,8 +601,7 @@ fn an_args_from_value_that_the_builder_refuses_fails_the_node_as_a_serialization
         result: Some(r#"{"__h_task_result__":true,"ok":"seven","err":null}"#.to_owned()),
     }];
 
-    let error =
-        failure_error(host_build(&refused, ChildBuild::Client(&children)).expect("host build"));
+    let error = failure_error(host_build(&refused, &children).expect("host build"));
 
     assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
     assert_eq!(
@@ -870,7 +871,7 @@ fn a_step_past_the_node_bound_fails_closed() {
 #[serial]
 async fn phase_two_commits_the_child_of_the_node_it_promotes() {
     let broker = test_broker().await;
-    let pool = broker.pool().clone();
+    let pool = crate::test_support::migrated_pool().await;
     let workflow_id = Uuid::new_v4();
     let task_id = Uuid::new_v4();
     seed_workflow(&pool, workflow_id, "RUNNING", None, None).await;
@@ -879,10 +880,9 @@ async fn phase_two_commits_the_child_of_the_node_it_promotes() {
     complete_task(&pool, task_id).await;
     let children = children_with_child();
 
-    let committed =
-        node_finish_in_transaction(&broker, task_id, false, ChildBuild::Client(&children))
-            .await
-            .expect("phase 2");
+    let committed = node_finish_in_transaction(&broker, task_id, false, &children)
+        .await
+        .expect("phase 2");
 
     assert_eq!(committed.disposition, NodeFinishDisposition::Applied);
     assert!(committed.parent_advances.is_empty());
@@ -896,7 +896,7 @@ async fn phase_two_commits_the_child_of_the_node_it_promotes() {
 #[serial]
 async fn phase_two_fails_a_promoted_node_whose_child_cannot_load() {
     let broker = test_broker().await;
-    let pool = broker.pool().clone();
+    let pool = crate::test_support::migrated_pool().await;
     let workflow_id = Uuid::new_v4();
     let task_id = Uuid::new_v4();
     seed_workflow(&pool, workflow_id, "RUNNING", None, None).await;
@@ -905,17 +905,16 @@ async fn phase_two_fails_a_promoted_node_whose_child_cannot_load() {
     complete_task(&pool, task_id).await;
     let children = TestChildSpecs::empty();
 
-    let committed =
-        node_finish_in_transaction(&broker, task_id, false, ChildBuild::Client(&children))
-            .await
-            .expect("phase 2");
+    let committed = node_finish_in_transaction(&broker, task_id, false, &children)
+        .await
+        .expect("phase 2");
 
     assert_eq!(committed.disposition, NodeFinishDisposition::Applied);
     assert_eq!(
         node(&pool, workflow_id, 1).await,
         ("FAILED".to_owned(), None)
     );
-    let (status, result): (String, Option<String>) = sqlx::query_as(
+    let (status, result): (String, Option<String>) = sql::query_as(
         "SELECT w.status, n.result FROM horsies_workflows w
          JOIN horsies_workflow_tasks n ON n.workflow_id = w.id AND n.task_index = 1
          WHERE w.id = $1",
@@ -947,7 +946,7 @@ async fn phase_two_fails_a_promoted_node_whose_child_cannot_load() {
 #[serial]
 async fn a_parent_advance_commits_the_child_of_the_node_it_promotes() {
     let broker = test_broker().await;
-    let pool = broker.pool().clone();
+    let pool = crate::test_support::migrated_pool().await;
     let parent = Uuid::new_v4();
     let ended_child = Uuid::new_v4();
     seed_workflow(&pool, parent, "RUNNING", None, None).await;
@@ -978,7 +977,7 @@ async fn a_parent_advance_commits_the_child_of_the_node_it_promotes() {
         OwedParentAdvances::of(ParentAdvance::Owed {
             child_workflow_id: ended_child,
         }),
-        ChildBuild::Client(&children),
+        &children,
     )
     .await
     .expect("parent advance");
@@ -993,8 +992,11 @@ async fn a_parent_advance_commits_the_child_of_the_node_it_promotes() {
 #[tokio::test]
 #[serial]
 async fn a_start_with_a_failed_root_commits_the_child_its_progression_owes() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    ));
     let workflow_id = Uuid::new_v4();
     let unloadable = sub_workflow_node(0, "child_start_missing", "tests.child_start.missing.v1");
     let mut dependent = sub_workflow_node(1, CHILD_NAME, CHILD_KEY);
@@ -1022,7 +1024,7 @@ async fn a_start_with_a_failed_root_commits_the_child_its_progression_owes() {
         .expect("start");
     assert_eq!(started, ClientStartOutcome::Started);
 
-    let (status, result): (String, Option<String>) = sqlx::query_as(
+    let (status, result): (String, Option<String>) = sql::query_as(
         "SELECT status, result FROM horsies_workflow_tasks
          WHERE workflow_id = $1 AND task_index = 0",
     )
@@ -1054,7 +1056,7 @@ async fn a_start_with_a_failed_root_commits_the_child_its_progression_owes() {
 #[serial]
 async fn a_resume_commits_the_child_of_a_ready_subworkflow_node() {
     let broker = test_broker().await;
-    let pool = broker.pool().clone();
+    let pool = crate::test_support::migrated_pool().await;
     let workflow_id = Uuid::new_v4();
     seed_workflow(&pool, workflow_id, "RUNNING", None, None).await;
     seed_subworkflow_node(&pool, workflow_id, 1, "READY", "{}", None, CHILD_KEY).await;

@@ -15,8 +15,6 @@
 //! than a task outcome, and it errors.
 
 use chrono::{DateTime, Utc};
-use sqlx::postgres::PgRow;
-use sqlx::{Column, Row};
 use uuid::Uuid;
 
 use crate::core::python_text::python_repr;
@@ -314,41 +312,12 @@ pub fn decode_outcome_row(row: &CoreRow) -> Result<TerminalizationOutcome, Outco
     decode_raw(raw)
 }
 
-/// Decode one row read in a sqlx transaction (`terminalize_in_tx`, whose
-/// callers still hold sqlx transactions) into its typed outcome. The same
-/// contract as [`decode_outcome_row`].
-pub fn decode_outcome_pg_row(row: &PgRow) -> Result<TerminalizationOutcome, OutcomeDecodeError> {
-    let present: Vec<&str> = row.columns().iter().map(|c| c.name()).collect();
-    require_exact_columns(&present)?;
-    let raw = RawOutcomeRow {
-        task_id: get(row, "task_id")?,
-        ordinality: get(row, "ordinality")?,
-        outcome: get(row, "outcome")?,
-        terminal_at: get(row, "terminal_at")?,
-        terminalization_kind: get(row, "terminalization_kind")?,
-        observed_status: get(row, "observed_status")?,
-        observed_worker_id: get(row, "observed_worker_id")?,
-        observed_claimed_at: get(row, "observed_claimed_at")?,
-        guard_kind: get(row, "guard_kind")?,
-        observed_guard: get(row, "observed_guard")?,
-    };
-    decode_raw(raw)
-}
-
 fn core_column<'r, T: FromSql<'r>>(
     row: &'r CoreRow,
     column: &str,
 ) -> Result<T, OutcomeDecodeError> {
     row.try_get(column)
         .map_err(|error| OutcomeDecodeError(format!("column {column}: {error}")))
-}
-
-fn get<'r, T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>>(
-    row: &'r PgRow,
-    column: &str,
-) -> Result<T, OutcomeDecodeError> {
-    row.try_get(column)
-        .map_err(|e| OutcomeDecodeError(format!("column {column}: {e}")))
 }
 
 /// The row has exactly the ten columns of the wire contract.
@@ -1012,8 +981,7 @@ mod tests {
         raw
     }
 
-    /// Python `test_lifecycle_outcomes.py::TestBatchOrdinality::test_ordinality_travels_with_the_outcome`:
-    /// each outcome keeps the ordinality of its row, so a caller matches the
+    /// Each outcome keeps the ordinality of its row, so a caller matches the
     /// outcomes of a batch to its inputs by position, not by row order.
     #[test]
     fn the_ordinality_of_each_row_travels_with_its_outcome() {
@@ -1053,9 +1021,9 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn a_non_integer_ordinality_is_refused() {
-        let broker = crate::broker::PostgresBroker::from_pool(
-            crate::broker::terminalization_matrix::migrated_pool().await,
-        );
+        let pool = crate::test_support::migrated_pool().await;
+        let broker =
+            crate::broker::PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
         let rows = broker
             .query_main(&TEXT_ORDINALITY_ROW.bind().finish())
             .await

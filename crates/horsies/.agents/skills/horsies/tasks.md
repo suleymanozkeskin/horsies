@@ -381,14 +381,17 @@ fn invoice_options(invoice_id: u64) -> TaskSendOptions {
 |---|---|---|---|
 | `SendSuppressed` | `SEND_SUPPRESSED` | `message` | Refused |
 | `AsyncContext` | `ASYNC_CONTEXT` | `task_id`, `payload`, `message` | Accepted |
-| `ValidationFailed` | `VALIDATION_FAILED` | `message` | Refused |
-| `EnqueueFailed` | `ENQUEUE_FAILED` | `task_id`, `payload`, `message`, `retryable` | Accepted |
+| `ValidationFailed` | `VALIDATION_FAILED` | `message`, `cause` | Refused |
+| `EnqueueFailed` | `ENQUEUE_FAILED` | `task_id`, `payload`, `message`, `retryable`, `cause` | Accepted |
 | `PayloadMismatch` | `PAYLOAD_MISMATCH` | `task_id`, `payload`, `message` | Refused |
 | `PayloadTooLarge` | `PAYLOAD_TOO_LARGE` | `message`, `size_bytes`, `limit_bytes` | Refused |
 | `IdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` | Accepted |
 
 - `EnqueueFailed`: the row may or may not exist. `retryable` is the
   classification of the cause.
+- `cause` (`failure_cause()` on every variant): what the send met, a
+  `FailureCause`: the server's error, no answer, a broken read contract, or
+  a failed precondition.
 - `AsyncContext`: a blocking send on a thread that runs a tokio runtime.
   Nothing was written. The async sends never return it.
 - `PayloadMismatch`: the task id exists with another command or key.
@@ -396,6 +399,8 @@ fn invoice_options(invoice_id: u64) -> TaskSendOptions {
 - `IdempotencyKeyConflict`: another task (`owner_task_id`) holds the key
   with another command. Nothing was written.
 - `error.code()` returns the `TaskSendErrorCode`.
+- A send in a fork panics, as every call that runs on the core: see
+  `SKILL.md`, Result Types.
 
 ```rust
 use horsies::{task, TaskError, TaskFunction, TaskHandle, TaskSendError};
@@ -516,11 +521,11 @@ The process-wide starts have the blocking functions
   returns the `ASYNC_CONTEXT` member of its catalog:
   `TaskSendError::AsyncContext` (with the prepared task id and payload, so
   `retry_send(&error).await` completes the same send),
-  `ReadError::AsyncContext`, a `BrokerOperationError` with
-  `BrokerErrorCode::AsyncContext`, a `CheckReport` with `HRS-217`,
-  `WorkflowStartErrorCode::AsyncContext` (with the `workflow_id` of the
-  start; `retry_start` refuses it, so call `start_with_id` with that id
-  from async code), `HandleErrorCode::AsyncContext`, or
+  `ReadError::AsyncContext`, `BrokerOperationError::AsyncContext`, a
+  `CheckReport` with `HRS-217`,
+  `WorkflowStartError::AsyncContext` (with the `workflow_id` of the
+  start; `retry_start(&error).await` completes the same start from async
+  code), `HandleOperationError::AsyncContext`, or
   `WorkflowReadError::AsyncContext`.
 - The thread of a `#[blocking_task]` body in a worker child drives no async
   task, so a blocking send or workflow start works there. A result wait in
@@ -604,7 +609,8 @@ async fn rerun_with_audit(
 - `AppRerunError`: `Connect(BrokerError)` (nothing ran) or
   `Rerun(RerunError)`.
 - `CallerRerunError<E>`: `Driver(E)`, `ClassNotRegistered { key }`,
-  `ClientFamilyMismatch { stored }`, `CallerKeyRefused`, `IdMintRefused`,
+  `ClientFamilyMismatch { stored }`, `UnknownStoredFamily` (a family row
+  that holds no client family), `CallerKeyRefused`, `IdMintRefused`,
   `Row`.
 
 | `RerunOutcome` | Meaning |

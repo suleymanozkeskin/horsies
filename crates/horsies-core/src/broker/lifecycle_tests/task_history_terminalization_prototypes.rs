@@ -9,10 +9,9 @@
 //!   `task_history_terminalization_move::duplicate_identity_fails_closed`.
 //! - `test_workflow_cancel_preserves_coherent_prior_attempt_summary` pins a
 //!   prototype rule (the cancel record keeps the prior attempt's summary)
-//!   that production replaced: Python's
-//!   `test_terminalization_functions.py::TestCancelOwnedNode::test_the_terminal_record_carries_its_own_summary`
-//!   pins the opposite, and the core follows it
-//!   (`terminalization_functions::cancel_owned_node::the_terminal_record_carries_its_own_summary`).
+//!   that production replaced: the core test
+//!   `terminalization_functions::cancel_owned_node::the_terminal_record_carries_its_own_summary`
+//!   pins the opposite.
 //!   The summary half of `test_pairwise_cancel_batch_preserves_summary_and_skips_node`
 //!   is left out for the same reason.
 //! - `test_archive_maintenance_also_refuses_history_replay` and
@@ -22,17 +21,17 @@
 
 use chrono::Duration;
 use serial_test::serial;
-use sqlx::Connection;
 use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::attempt_writes::FinishWorkflowSuccess;
 use crate::broker::core_rows::StatementLog;
-use crate::broker::error::BrokerError;
-use crate::broker::pools::core_pool_for_test_pool;
+use crate::broker::pools::core_pool_for_test_url;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::broker::terminalization::terminalize_in_tx;
+use crate::broker::terminalization::on_test_pool::{
+    terminalize_in_transaction, InTransactionError,
+};
 use crate::broker::workflow_stop_before_start::{stop_before_start, OrphanSelfHeal};
 use crate::core::history::archive::attempts::{encode_attempt_snapshot, AttemptRecord};
 use crate::core::history::errors::HISTORY_LEAF_MISSING_SQLSTATE;
@@ -40,6 +39,7 @@ use crate::core::lifecycle::{
     BatchSize, OwnedClaim, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
     WorkflowSuccessOutcome,
 };
+use crate::test_support::sql;
 
 const RESULT: &str = r#"{"ok": "done"}"#;
 
@@ -66,11 +66,11 @@ fn running_workflow_task() -> TaskSeed {
     }
 }
 
-/// The sqlx error of a command run in a sqlx transaction
-/// (`terminalize_in_tx`).
-fn database_error(result: Result<Vec<TerminalizationOutcome>, BrokerError>) -> sqlx::Error {
+/// The database error of a command run in a test transaction
+/// (`terminalize_in_transaction`).
+fn database_error(result: Result<Vec<TerminalizationOutcome>, InTransactionError>) -> sql::Error {
     match result {
-        Err(BrokerError::Database(error)) => error,
+        Err(InTransactionError::Database(error)) => error,
         other => panic!("expected a database error, got {other:?}"),
     }
 }
@@ -86,7 +86,7 @@ async fn sql_attempt_encoder_matches_archive_codec_bytes() {
     let special = "retry, quoted \"value\" with \\ and \u{e9}";
     let started_at = generation();
     let finished_at = generation() + Duration::seconds(1);
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_task_attempts (
             task_id, attempt, outcome, will_retry, started_at, finished_at,
             error_code, error_message, failed_reason, worker_id,
@@ -103,7 +103,7 @@ async fn sql_attempt_encoder_matches_archive_codec_bytes() {
     .await
     .expect("seed the attempt");
 
-    let encoded: Vec<u8> = sqlx::query_scalar("SELECT horsies_encode_task_attempts($1)")
+    let encoded: Vec<u8> = sql::query_scalar("SELECT horsies_encode_task_attempts($1)")
         .bind(task_id)
         .fetch_one(&pool)
         .await
@@ -146,7 +146,7 @@ async fn terminalization_copies_request_and_last_worker_attribution() {
     .await;
     set_deadline(&pool, task_id, Deadline::AheadSeconds(3_600.0)).await;
     let good_until: chrono::DateTime<chrono::Utc> =
-        sqlx::query_scalar("SELECT good_until FROM horsies_tasks WHERE id = $1")
+        sql::query_scalar("SELECT good_until FROM horsies_tasks WHERE id = $1")
             .bind(task_id)
             .fetch_one(&pool)
             .await
@@ -173,7 +173,7 @@ async fn terminalization_copies_request_and_last_worker_attribution() {
         Option<String>,
         Option<i32>,
         Option<String>,
-    ) = sqlx::query_as(
+    ) = sql::query_as(
         "SELECT command_fingerprint_version, command_fingerprint, good_until, max_retries,
                 last_claimed_worker_id::text, last_worker_hostname::text, last_worker_pid,
                 last_worker_process_name::text
@@ -337,7 +337,7 @@ async fn coupled_node_failure_rolls_back_history_and_live_delete() {
     let workflow_id = link_workflow_task(&pool, task_id, "COMPLETED", "PAUSED").await;
 
     let _stopped = stop_before_start(
-        &core_pool_for_test_pool(&pool),
+        &core_pool_for_test_url(pool.url()),
         StatementLog::Off,
         task_id,
         &OwnedClaim {
@@ -361,8 +361,7 @@ async fn coupled_node_failure_rolls_back_history_and_live_delete() {
 /// The node half of `coupled_node_failure_rolls_back_history_and_live_delete`
 /// on the post-claim path: the post-claim abandon of a task of a PAUSED
 /// workflow whose node is already COMPLETED leaves the node COMPLETED with
-/// its task link (#785; Python `RESET_PAUSED_WORKFLOW_TASKS_SQL`,
-/// `python/horsies/core/worker/sql.py:291-296`).
+/// its task link (#785).
 #[tokio::test]
 #[serial]
 async fn post_claim_abandon_keeps_a_finished_node() {
@@ -377,7 +376,7 @@ async fn post_claim_abandon_keeps_a_finished_node() {
     .await;
     let workflow_id = link_workflow_task(&pool, task_id, "COMPLETED", "PAUSED").await;
 
-    PostgresBroker::from_pool(pool.clone())
+    PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust)
         .filter_non_runnable_workflow_tasks(&[(task_id, generation())], WORKER)
         .await
         .expect("post-claim workflow check");
@@ -407,7 +406,7 @@ async fn pairwise_cancel_batch_skips_the_node() {
     .await;
     let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "CANCELLED").await;
 
-    PostgresBroker::from_pool(pool.clone())
+    PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust)
         .filter_non_runnable_workflow_tasks(&[(task_id, generation())], WORKER)
         .await
         .expect("post-claim workflow check");
@@ -516,30 +515,30 @@ async fn terminalization_boundary_failure_rolls_back_every_relation() {
         record_failed_first_attempt(&pool, task_id, "attempt one crashed").await;
 
         let mut transaction = pool.begin().await.expect("begin");
-        sqlx::query(
+        sql::query(
             "CREATE FUNCTION lifecycle_test_fault() RETURNS trigger LANGUAGE plpgsql AS $f$
              BEGIN RAISE EXCEPTION 'injected terminalization fault'; END $f$",
         )
         .execute(&mut *transaction)
         .await
         .expect("create the fault function");
-        sqlx::query(boundary.fault())
+        sql::query(boundary.fault())
             .execute(&mut *transaction)
             .await
             .expect("install the fault");
         let mut savepoint = transaction.begin().await.expect("savepoint");
-        let refused = terminalize_in_tx(&mut savepoint, &command).await;
+        let refused = terminalize_in_transaction(&mut savepoint, &command).await;
         savepoint
             .rollback()
             .await
             .expect("roll back to the savepoint");
-        let live: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
+        let live: i64 = sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
             .bind(task_id)
             .fetch_one(&mut *transaction)
             .await
             .expect("count live rows");
         let attempts: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
+            sql::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
                 .bind(task_id)
                 .fetch_one(&mut *transaction)
                 .await
@@ -574,7 +573,7 @@ async fn capacity_notification_failure_rolls_back_fused_completion() {
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
     let before = live_row(&pool, task_id).await;
 
-    let refused = sqlx::query("UPDATE horsies_tasks SET queue_name = $2 WHERE id = $1")
+    let refused = sql::query("UPDATE horsies_tasks SET queue_name = $2 WHERE id = $1")
         .bind(task_id)
         .bind("q".repeat(53))
         .execute(&pool)
@@ -772,7 +771,7 @@ async fn task_done_notification_is_transactional_raw_task_id() {
     let raw_id = task_id.to_string();
 
     let mut transaction = pool.begin().await.expect("begin");
-    let rolled_back = terminalize_in_tx(&mut transaction, &fused(task_id))
+    let rolled_back = terminalize_in_transaction(&mut transaction, &fused(task_id))
         .await
         .expect("completion in a transaction");
     assert!(

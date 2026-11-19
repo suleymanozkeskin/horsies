@@ -36,9 +36,17 @@ async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
 | `get_class_coverage()` | `ClassCoverage`: whether a live worker can run each pending execution class |
 | `get_class_report()` | `ClassReport`: the load of each execution class |
 
-- Every read returns `Result<_, BrokerOperationError>` (`code`, `message`,
-  `retryable`). Each read connects the app's handle and installs the schema
-  once per handle, as a send does.
+- Every read returns `Result<_, BrokerOperationError>`: one variant per
+  state, with `code()`, `message()` and `retryable()`. A failed read is
+  `OperationFailed` with its `BrokerOperationFailedCode`; a refused
+  argument is `InvalidInput`; an app with no listener is
+  `ListenerDisabled`. The message is Python's: `ping_database failed:
+  <cause>`, `ping_workers failed: <cause>`, `<read> failed: <cause>`.
+  `OperationFailed` carries its `cause`, a `BrokerOperationSource` (the
+  `BrokerError`, a refused class read, a snapshot that does not read, a
+  refused subscription); `InvalidInput` carries `BrokerRefusalCause::Check`.
+  Each read connects the app's handle and installs the schema once per
+  handle, as a send does.
 - `ping_workers` stops at the first of: the target worker replied,
   `min_responses` workers replied, `timeout` passed. A zero `timeout` is
   `INVALID_INPUT`. An app with no listener (`SchemaMode::AssumeInitialized`)
@@ -87,11 +95,11 @@ async fn failed_tasks_of_last_day(app: &Horsies) -> Result<(), Box<dyn std::erro
 | `task_breakdown(&app, &TaskBreakdownQuery)` | `Breakdown`: counts per `TaskGroupBy` (`Worker`, `TaskName`, `Queue`) |
 | `list_tasks(&app, &TaskListQuery)` | `TaskListPage` (`rows: Vec<TaskSummary>`, `total`) |
 | `get_task_detail(&app, task_id)` | `TaskDetailRead`: `Found(TaskDetail)` or `NotFound(TaskDetailNotFound { task_id, reason })` |
-| `list_workflow_names(&app)` | `Vec<String>`, at most 10,000 |
+| `list_workflow_names(&app)` | `Vec<String>`, at most `LIST_ROW_BOUND` (10,000) |
 | `list_workflow_runs(&app, &WorkflowRunsQuery)` | `Vec<WorkflowRunSummary>`, newest first |
 | `get_workflow_run(&app, workflow_id)` | `Option<WorkflowRunDetail>`: nodes and edges; `None` when no run has the id |
 | `get_workflow_node(&app, workflow_id, task_index)` | `Option<WorkflowTaskDetail>` |
-| `list_schedules(&app)` | `Vec<ScheduleStateInfo>`, soonest next run first, at most 10,000 |
+| `list_schedules(&app)` | `Vec<ScheduleStateInfo>`, soonest next run first, at most `LIST_ROW_BOUND` (10,000) |
 
 Query builders:
 
@@ -118,31 +126,31 @@ Query builders:
   ended still answers. `TaskDetailNotFound.reason` is a
   `TaskAbsenceReason` (see `tasks.md`).
 
-`MonitoringQueryError` has `code`, `message`, `retryable` and `source`:
+`MonitoringQueryError` is an enum, one variant per state, each with
+`message` and `source`; `code()`, `message()`, `retryable()`,
+`error_source()` and `failure_cause()` read them:
 
-| `MonitoringQueryErrorCode` | When |
+| Variant | When |
 |---|---|
-| `DbOperationFailed` | The database or the connect failed. `retryable` is the classification of the cause |
-| `HistoryContractViolation` | A history row does not decode (`task_stats`, `list_tasks`, `get_task_detail`, `get_workflow_node`). Not retryable |
-| `EventLoopLimit` | Python client only. The Rust client never returns it |
+| `DbOperationFailed { retryable, .. }` | The database or the connect failed. `retryable` is the classification of the cause |
+| `HistoryContractViolation` | A history row does not decode (`task_stats`, `list_tasks`, `get_task_detail`, `get_workflow_node`); `source` is a `HistoryContractSource` that holds the error. Not retryable |
 
 ## Task Cancel
 
 ```rust
-use horsies::monitoring::{cancel_task, TaskActionErrorCode};
+use horsies::monitoring::{cancel_task, TaskActionError};
 use horsies::Horsies;
 use uuid::Uuid;
 
 async fn cancel_pending(app: &Horsies, task_id: Uuid) -> Result<bool, String> {
     match cancel_task(app, task_id, false).await {
         Ok(_cancelled) => Ok(true),
-        Err(error) => match error.code {
-            TaskActionErrorCode::TaskNotCancellable | TaskActionErrorCode::TaskNotFound => Ok(false),
-            TaskActionErrorCode::TaskIsWorkflowTask
-            | TaskActionErrorCode::DbOperationFailed
-            | TaskActionErrorCode::StoredDataInvalid
-            | TaskActionErrorCode::EventLoopLimit => Err(error.message),
-        },
+        Err(TaskActionError::NotCancellable { .. } | TaskActionError::NotFound { .. }) => Ok(false),
+        Err(
+            error @ (TaskActionError::WorkflowTask { .. }
+            | TaskActionError::DbOperationFailed { .. }
+            | TaskActionError::StoredDataInvalid { .. }),
+        ) => Err(error.message().to_owned()),
     }
 }
 ```
@@ -160,17 +168,17 @@ async fn cancel_pending(app: &Horsies, task_id: Uuid) -> Result<bool, String> {
 - A workflow task is refused: use `WorkflowHandle::cancel`, `pause` and
   `resume`.
 
-`TaskActionError` has `code`, `message`, `retryable`, `task_id`,
-`current_status`:
+`TaskActionError` is an enum, one variant per state, each with `message`
+and `task_id`; `code()`, `message()`, `retryable()`, `task_id()` and
+`failure_cause()` read them:
 
-| `TaskActionErrorCode` | HTTP | When |
+| Variant | HTTP | When |
 |---|---|---|
-| `TaskNotFound` | 404 | No live or history row has the id. Nothing changed |
-| `TaskNotCancellable` | 409 | Terminal, or RUNNING without `include_running`. `current_status` is set. Nothing changed |
-| `TaskIsWorkflowTask` | 400 | The task belongs to a workflow. Nothing changed |
-| `DbOperationFailed` | 503 | The statement or the connect failed: nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `TaskNotCancellable` with `CANCELLED` |
-| `StoredDataInvalid` | 500 | Stored data does not parse. Nothing changed |
-| `EventLoopLimit` | 503 | Python client only. The Rust client never returns it |
+| `NotFound` | 404 | No live or history row has the id. Nothing changed |
+| `NotCancellable { current_status, .. }` | 409 | Terminal, or RUNNING without `include_running`; `current_status` is the status found. Nothing changed |
+| `WorkflowTask { current_status, .. }` | 400 | The task belongs to a workflow. Nothing changed |
+| `DbOperationFailed { retryable, cause, .. }` | 503 | The statement or the connect failed; `cause` is the `BrokerError`. Nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `NotCancellable` with `CANCELLED` |
+| `StoredDataInvalid { cause, .. }` | 500 | Stored data does not parse; `cause` is the `OutcomeDecodeError`. Nothing changed |
 
 There is no manual retry action. Re-execution is a rerun (see `tasks.md`).
 

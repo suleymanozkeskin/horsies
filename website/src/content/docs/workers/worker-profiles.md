@@ -383,11 +383,10 @@ Worker profile 'remote': isolated=4 (recycle after 100 tasks, above no limit; po
 
 ### The Task-Send Pool
 
-Task code that sends through the app (`task.send()`, `app.get_broker()`) opens the app's broker in its child. That broker holds up to `task_send_pool.connections` connections, with no overflow, for each event loop that the task code sends from. Each child kind has its own `task_send_pool: PoolSize`. The default is `PoolSize(connections=2)` for every kind. The pool of `PostgresConfig` (`pool_size`, `max_overflow`) does not apply in a child; its `pool_pre_ping` does.
+Task code that sends through the app (`task.send()`, `app.get_broker()`) opens the app's broker in its child. The core pool of that broker holds up to `task_send_pool.connections` connections, with no overflow, for every thread and event loop of the child. Each child kind has its own `task_send_pool: PoolSize`. The default is `PoolSize(connections=2)` for every kind. The pool of `PostgresConfig` (`pool_size`, `max_overflow`) does not apply in a child; its `pool_pre_ping` does.
 
-- A sync task sends from the runner loop of the broker. The seat threads of a shared thread child share that loop, and so they share one pool.
-- An async task sends from the task loop of its child. The seats of a shared async child share that loop, and so they share one pool.
-- An isolated child that runs both kinds opens two pools.
+- The seats of a shared child share the one pool.
+- The sync and the async tasks of an isolated child share the one pool.
 
 Raise `task_send_pool` for a shared child whose seats send often at the same time:
 
@@ -584,7 +583,7 @@ A pool opens a connection only when a write finds none free, so a worker can ope
 | `count` | `int` | required | Number of isolated children, 1 to 1024 |
 | `recycle` | `IsolatedRecycle` | `IsolatedRecycle()` | When a child is replaced |
 | `pool` | `IsolatedPool` | `IsolatedPool()` | The connection pool of each child |
-| `task_send_pool` | `PoolSize` | `PoolSize(connections=2)` | The pool that task code opens in each child when it sends, for each event loop. See [The Task-Send Pool](#the-task-send-pool) |
+| `task_send_pool` | `PoolSize` | `PoolSize(connections=2)` | The pool that task code opens in each child when it sends. See [The Task-Send Pool](#the-task-send-pool) |
 
 `NoIsolatedChildren()` states that the profile starts no isolated children.
 
@@ -742,18 +741,19 @@ pool max_size                                           # pool of the worker pro
 + pool max_size                                         # session pool, when session_database_url differs from database_url
 + 1                                                     # listener
 + 1                                                     # runner heartbeat
++ 1                                                     # liveness lock
 + isolated children × isolated.pool max_size            # isolated child pools
 + shared async children × shared_async.pool max_size    # shared async child pools
 + shared thread children × shared_thread.pool max_size  # shared thread child pools
 ```
 
-The worker process writes the runner heartbeats of its RUNNING tasks over one connection of its own. One listener connection carries every `LISTEN` of the worker process. When `session_database_url` differs from `database_url`, the worker process opens a session pool there for schema work and partition maintenance, of the size of its own pool. Each `max_size` is the resolved value: a `PoolSize`, or the size that `PoolSizeFromSeats()` derives from the seats. An isolated child and a shared thread child open a sync pool; a shared async child opens an async pool. At the defaults and with no `session_database_url`, a profile of 8 isolated children needs `5 + 1 + 1 + 8 × 1 = 15`. A profile of 2 isolated children, 2 shared async children with 50 seats and 1 shared thread child with 16 seats has 118 seats and needs `12 + 1 + 1 + 2 × 1 + 2 × 5 + 1 × 2 = 28`. Each `HRS-219` error and the boot log state the formula of the profile, one term per mode, with a `session pool max_size N` term after the parent pool when the session pool is separate:
+The worker process writes the runner heartbeats of its RUNNING tasks over one connection of its own. One listener connection carries every `LISTEN` of the worker process. One connection on the session URL holds the [liveness lock](/horsies/workers/heartbeats-recovery/#worker-liveness-lock) of the worker process. When `session_database_url` differs from `database_url`, the worker process opens a session pool there for schema work and partition maintenance, of the size of its own pool. Each `max_size` is the resolved value: a `PoolSize`, or the size that `PoolSizeFromSeats()` derives from the seats. An isolated child and a shared thread child open a sync pool; a shared async child opens an async pool. At the defaults and with no `session_database_url`, a profile of 8 isolated children needs `5 + 1 + 1 + 1 + 8 × 1 = 16`. A profile of 2 isolated children, 2 shared async children with 50 seats and 1 shared thread child with 16 seats has 118 seats and needs `12 + 1 + 1 + 1 + 2 × 1 + 2 × 5 + 1 × 2 = 29`. Each `HRS-219` error and the boot log state the formula of the profile, one term per mode, with a `session pool max_size N` term after the parent pool when the session pool is separate:
 
 ```text
-parent pool max_size 12 + listener 1 + runner heartbeat 1 + 2 isolated children x isolated.pool max_size 1 + 2 shared async children x shared_async.pool max_size 5 + 1 shared thread children x shared_thread.pool max_size 2 = 28
+parent pool max_size 12 + listener 1 + runner heartbeat 1 + liveness lock 1 + 2 isolated children x isolated.pool max_size 1 + 2 shared async children x shared_async.pool max_size 5 + 1 shared thread children x shared_thread.pool max_size 2 = 29
 ```
 
-Task code that sends through the app opens more: the `task_send_pool` of its child kind for each event loop that it sends from (see [The Task-Send Pool](#the-task-send-pool)). With one sending loop in each child, this is a ceiling for the children whose tasks send:
+Task code that sends through the app opens more: the `task_send_pool` of its child kind in each child (see [The Task-Send Pool](#the-task-send-pool)). This is a ceiling for the children whose tasks send:
 
 ```text
 isolated children × isolated.task_send_pool
@@ -761,10 +761,10 @@ isolated children × isolated.task_send_pool
 + shared thread children × shared_thread.task_send_pool
 ```
 
-With one sending loop in each child, 8 isolated children at the defaults add `8 × 2 = 16`, so `31` in all. The comparison below does not count these connections, because only the run time shows whether a task sends. Each `HRS-219` error and the boot log state them next to the compared number, term by term:
+8 isolated children at the defaults add `8 × 2 = 16`, so `32` in all. The comparison below does not count these connections, because only the run time shows whether a task sends. Each `HRS-219` error and the boot log state them next to the compared number, term by term:
 
 ```text
-not counted: task code that sends opens a pool of the task_send_pool of its child kind in its child, for each event loop that it sends from; with one such loop in each child, 8 isolated children x isolated.task_send_pool 2 = 16 more, 31 in all
+not counted: task code that sends opens a pool of the task_send_pool of its child kind in its child, for each event loop that it sends from; with one such loop in each child, 8 isolated children x isolated.task_send_pool 2 = 16 more, 32 in all
 ```
 
 The server has `max_connections` minus `superuser_reserved_connections` minus `reserved_connections` (PostgreSQL 16 and later) usable slots. `horsies check --live` reports `HRS-219` for each profile whose worker opens more than that number itself. At boot the worker reads the same settings before it builds its children and logs a warning. With `pgbouncer_transaction_mode=True` the pooled connections do not map to server connections, and nothing is compared; see [PgBouncer pool size](/horsies/troubleshooting/pgbouncer/#pool-size) for the PgBouncer side. See [Remote PostgreSQL](/horsies/configuration/remote-postgres/#connection-budget).

@@ -29,14 +29,14 @@ use super::shared::{SharedPool, SharedPoolConfig};
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     encode_child_frame, encode_parent_frame, AsyncSeats, BlockedWhere, BodyEnd, BootDetail,
-    BootErrorName, BootFailedFrame, CancelGraceMs, ChildConnection, ChildFrame, ChildKind,
-    ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, DispatchNumber, ExecutorThreads,
-    InitFrame, IsolatedChild, IsolatedWork, LeftoverCancelFrame, LeftoverName, LeftoverStuckFrame,
-    LoopBlockedFrame, LoopCulprit, NoLeftWork, ParentFrame, PoolMaxSize, PoolMinSize, ProcessId,
-    ReadyFrame, ReportedBootCause, ResultEnvelopeText, ResultFrame, RssReading, RunEnd, RunFrame,
-    RunRef, RunStuckFrame, SeatEnd, SharedAsyncChild, SharedResultFrame, SharedRunFrame,
-    SharedThreadChild, SharedWork, ShortageErrno, StuckWork, TaskInputText, TaskSendPool,
-    TaskTimeoutMs, ThreadSeats, HEADER_BYTES,
+    BootErrorName, BootFailedFrame, CancelGraceMs, ChildAfterFrame, ChildConnection, ChildFrame,
+    ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, DispatchNumber,
+    ExecutorThreads, InitFrame, IsolatedChild, IsolatedWork, LeftoverCancelFrame, LeftoverName,
+    LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit, NoLeftWork, ParentFrame, PoolMaxSize,
+    PoolMinSize, ProcessId, ReadyFrame, ReportedBootCause, ResultEnvelopeText, ResultFrame,
+    RssReading, RunEnd, RunFrame, RunRef, RunStuckFrame, SeatEnd, SharedAsyncChild,
+    SharedResultFrame, SharedRunFrame, SharedThreadChild, SharedWork, ShortageErrno, StuckWork,
+    TaskInputText, TaskSendPool, TaskTimeoutMs, ThreadSeats, HEADER_BYTES,
 };
 use crate::worker::executor::supervisor::{ChildCommand, Spawner, CHILD_KILL_WAIT};
 use crate::worker::retry::read_stored_options;
@@ -197,6 +197,7 @@ pub(super) fn result_frame(task: &ClaimedTask, value: u32) -> ChildFrame {
         end: RunEnd::Result(ok_envelope(value)),
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
+        child: ChildAfterFrame::ServesOn,
     })
 }
 
@@ -215,6 +216,7 @@ pub(super) fn shared_result_with_rss(run: RunRef, value: u32, rss: RssReading) -
         run,
         end: SeatEnd::Finished(RunEnd::Result(ok_envelope(value))),
         rss,
+        child: ChildAfterFrame::ServesOn,
     })
 }
 
@@ -224,6 +226,7 @@ pub(super) fn shared_timed_out(run: RunRef) -> ChildFrame {
         run,
         end: SeatEnd::TimedOut,
         rss: RssReading::Unreadable,
+        child: ChildAfterFrame::ServesOn,
     })
 }
 
@@ -438,6 +441,19 @@ pub(crate) fn idle_child_recording_pid(pid_file: &Path) -> ChildCommand {
         "echo $$ > '{}'; {}{}exit 3",
         pid_file.display(),
         boot_any_kind(),
+        read_frame()
+    ))
+}
+
+/// A child of any kind that writes its pid to `pid_file`, boots, then holds
+/// its first run: it reads the run frame and answers nothing. It exits 0 at
+/// the stop frame, 3 at any other frame after the run, or when it is killed.
+pub(crate) fn child_holding_its_first_run(pid_file: &Path) -> ChildCommand {
+    shell(&format!(
+        "echo $$ > '{}'; {}{}{}exit 3",
+        pid_file.display(),
+        boot_any_kind(),
+        read_frame(),
         read_frame()
     ))
 }

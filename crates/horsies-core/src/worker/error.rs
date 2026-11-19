@@ -1,7 +1,8 @@
-use crate::broker::{is_retryable_sqlx_error, BrokerError, ListenError, SessionCheckFailure};
+use crate::broker::{BrokerError, ListenError, SessionCheckFailure};
 use crate::worker::executor::placement::PlacementRefused;
 use crate::worker::executor::slots::{BaselineOverLimit, ChildrenStartFailed, PoolFailure};
 use crate::worker::executor::supervisor::SpawnerStartError;
+use crate::worker::liveness::LivenessStartError;
 
 /// Errors produced by worker operations.
 #[derive(Debug, thiserror::Error)]
@@ -9,10 +10,6 @@ pub enum WorkerError {
     /// Broker or database error.
     #[error("broker error: {0}")]
     Broker(#[from] BrokerError),
-
-    /// Direct database error from worker-owned queries.
-    #[error("database error: {0}")]
-    Database(#[from] sqlx::Error),
 
     /// Task-history coverage or partition contract error.
     #[error("task-history error: {0}")]
@@ -93,6 +90,11 @@ pub enum WorkerError {
     /// worker. Retryable when the refusal is transient.
     #[error("listener subscription failed: {0}")]
     Listener(ListenError),
+
+    /// The worker could not take its liveness lock at the start
+    /// ([`crate::worker::liveness`]). Retryable when the failure can clear.
+    #[error("worker liveness lock failed: {0}")]
+    LivenessLock(LivenessStartError),
 }
 
 impl From<crate::broker::CoveragePassError> for WorkerError {
@@ -109,7 +111,6 @@ impl WorkerError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Broker(e) => e.is_retryable(),
-            Self::Database(e) => is_retryable_sqlx_error(e),
             Self::History(error) => error.is_retryable(),
             Self::Config(_) => false,
             Self::ServiceLoopDied { .. } => false,
@@ -124,6 +125,7 @@ impl WorkerError {
             | Self::BaselineOverLimit(_) => false,
             Self::SessionCheck(failure) => failure.is_retryable(),
             Self::Listener(refused) => refused.is_retryable(),
+            Self::LivenessLock(failed) => failed.is_retryable(),
         }
     }
 }

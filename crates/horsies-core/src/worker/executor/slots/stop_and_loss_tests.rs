@@ -1,8 +1,7 @@
-//! Ports of Python unit tests of the worker parent: a lost child whose exit
-//! was or was not seen (`tests/unit/test_child_loss_exit_unknown.py`), the
-//! retry of a run that timed out (`test_shared_stop.py`), a start hook that
-//! fails in a replacement child (`test_child_process_start_hooks.py`), and
-//! the drain of the pool at the stop (`test_worker_stop_ordering.py`).
+//! The worker parent: a lost child whose exit was or was not seen, the
+//! retry of a run that timed out, a start hook that fails in a replacement
+//! child (Python `tests/unit/test_child_process_start_hooks.py`), and the
+//! drain of the pool at the stop.
 
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
@@ -10,8 +9,6 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::scripted::{
@@ -24,9 +21,11 @@ use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
+use crate::test_support::sql::{self, TestPool, TestPoolOptions};
+use crate::test_support::{CapturedEvent, LogCapture};
 use crate::worker::executor::protocol::{
-    CancelGraceMs, DispatchNumber, FailureDetail, IsolatedWork, ProcessId, RssReading, RunRef,
-    SeatEnd, SharedResultFrame, TaskTimeoutMs,
+    CancelGraceMs, ChildAfterFrame, DispatchNumber, FailureDetail, IsolatedWork, ProcessId,
+    RssReading, RunRef, SeatEnd, SharedResultFrame, TaskTimeoutMs,
 };
 use crate::worker::executor::supervisor::{ChildExit, ChildLost, LossCause, PartialFrame, Spawner};
 
@@ -34,8 +33,7 @@ use crate::worker::executor::supervisor::{ChildExit, ChildLost, LossCause, Parti
 // The retry of a run that timed out
 // ---------------------------------------------------------------------------
 
-/// Python `test_shared_stop.py::test_a_run_that_ends_after_it_was_stuck_retries_isolated`,
-/// the `NOT_STUCK` case: a run that timed out without a stuck report
+/// The `NOT_STUCK` case: a run that timed out without a stuck report
 /// retries in its class. The stuck case is
 /// `shared_rules_tests::an_async_run_reports_its_stop_in_order`.
 #[test]
@@ -73,6 +71,7 @@ fn a_timed_out_run_that_was_not_stuck_retries_in_its_class() {
                 run,
                 end: SeatEnd::TimedOut,
                 rss: RssReading::Unreadable,
+                child: ChildAfterFrame::ServesOn,
             })
             .unwrap();
         assert_eq!(
@@ -91,8 +90,7 @@ fn a_timed_out_run_that_was_not_stuck_retries_in_its_class() {
 // A loss whose exit was not seen
 // ---------------------------------------------------------------------------
 
-/// Python `test_child_loss_exit_unknown.py::TestLossWithNoExitSeen`: a lost
-/// channel, a bad frame and a cleared slot, each with no exit seen, give
+/// A lost channel, a bad frame and a cleared slot, each with no exit seen, give
 /// no verdict; the attempt may still run.
 #[test]
 fn a_loss_whose_exit_was_not_seen_gives_no_verdict_for_any_cause() {
@@ -119,12 +117,14 @@ fn a_loss_whose_exit_was_not_seen_gives_no_verdict_for_any_cause() {
 /// after the acquire timeout and settle as a failed write, not as left to
 /// recovery.
 fn unreachable_writer() -> OutcomeWriter {
-    let pool = PgPoolOptions::new()
+    let pool = TestPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(Duration::from_secs(1))
-        .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
-        .expect("a lazy pool opens no connection");
-    let broker = Arc::new(PostgresBroker::from_pool(pool));
+        .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies");
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    ));
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
     OutcomeWriter::new(
         broker,
@@ -135,13 +135,15 @@ fn unreachable_writer() -> OutcomeWriter {
     )
 }
 
-/// Python `test_child_loss_exit_unknown.py::TestLossWithNoExitSeen` (the
-/// finalizer half): crash recovery writes nothing, and the row is left to
-/// stale recovery.
+/// A loss with no exit seen, at the writer, with the log line: crash recovery writes nothing, and
+/// the row is left to stale recovery. One line names the task and the pid
+/// of its child (Python logs it at `CRITICAL`; the core at warning).
 #[tokio::test]
 async fn an_end_whose_exit_was_not_seen_is_left_to_recovery_with_no_write() {
     let writer = unreachable_writer();
     let claimed = task(1, ExecutionClass::Isolated);
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
     let settled = tokio::time::timeout(
         Duration::from_millis(500),
         writer.settle(
@@ -154,6 +156,14 @@ async fn an_end_whose_exit_was_not_seen_is_left_to_recovery_with_no_write() {
     .await
     .expect("no statement is sent, so the settle does not wait for the pool");
     assert_eq!(settled, Settlement::LeftToRecovery);
+    let task_id = claimed.task_id.to_string();
+    let lines: Vec<CapturedEvent> = capture.lines_starting(
+        tracing::Level::WARN,
+        "the exit of the task's child was not seen",
+    );
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0].field("task_id"), Some(task_id.as_str()));
+    assert_eq!(lines[0].field("pid"), Some("4242"));
 }
 
 // ---------------------------------------------------------------------------
@@ -162,9 +172,9 @@ async fn an_end_whose_exit_was_not_seen_is_left_to_recovery_with_no_write() {
 
 /// A RUNNING plain task held by [`WORKER_ID`] on queue `queue`. Returns the
 /// id and the claim generation.
-async fn seed_running(pool: &PgPool, queue: &str) -> (Uuid, DateTime<Utc>) {
+async fn seed_running(pool: &TestPool, queue: &str) -> (Uuid, DateTime<Utc>) {
     let id = Uuid::new_v4();
-    let generation = sqlx::query_scalar(
+    let generation = sql::query_scalar(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -196,22 +206,22 @@ async fn seed_running(pool: &PgPool, queue: &str) -> (Uuid, DateTime<Utc>) {
     (id, generation)
 }
 
-async fn history_row(pool: &PgPool, task_id: Uuid) -> serde_json::Value {
-    sqlx::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
+async fn history_row(pool: &TestPool, task_id: Uuid) -> serde_json::Value {
+    sql::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
         .expect("read the history row")
 }
 
-async fn remove_task(pool: &PgPool, task_id: Uuid) {
+async fn remove_task(pool: &TestPool, task_id: Uuid) {
     for statement in [
         "DELETE FROM horsies_task_attempts WHERE task_id = $1",
         "DELETE FROM horsies_heartbeats WHERE task_id = $1",
         "DELETE FROM horsies_tasks WHERE id = $1",
         "DELETE FROM horsies_task_history WHERE task_id = $1",
     ] {
-        sqlx::query(statement)
+        sql::query(statement)
             .bind(task_id)
             .execute(pool)
             .await
@@ -219,16 +229,19 @@ async fn remove_task(pool: &PgPool, task_id: Uuid) {
     }
 }
 
-/// Python `test_child_loss_exit_unknown.py::TestLossWithTheExitSeen::test_crash_recovery_writes_the_row`:
-/// the crash path of a loss whose exit was seen fails the row with
-/// `WORKER_CRASHED`.
+/// The crash path of a loss whose exit was seen fails the row with
+/// `WORKER_CRASHED`. The live row is gone, and the history row keeps the
+/// claimant and the process that ran the task as provenance.
 #[tokio::test]
 #[serial]
 async fn a_crash_whose_exit_was_seen_fails_the_row_with_worker_crashed() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = format!("slots_{}", &Uuid::new_v4().simple().to_string()[..8]);
     let (task_id, generation) = seed_running(&pool, &queue).await;
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    ));
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
     let writer = OutcomeWriter::new(
         broker,
@@ -254,9 +267,20 @@ async fn a_crash_whose_exit_was_seen_fails_the_row_with_worker_crashed() {
         .await;
 
     assert_eq!(settled, Settlement::Written);
+    let live: Option<i64> = sql::query_scalar("SELECT 1::bigint FROM horsies_tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("read the live row");
+    assert_eq!(live, None);
     let history = history_row(&pool, task_id).await;
     assert_eq!(history["status"], "FAILED");
     assert_eq!(history["error_code"], "WORKER_CRASHED");
+    assert_eq!(history["last_claimed_worker_id"], WORKER_ID);
+    assert!(!history["started_at"].is_null(), "{history}");
+    assert_eq!(history["last_worker_hostname"], "slots-host");
+    assert_eq!(history["last_worker_pid"], 4242);
+    assert_eq!(history["last_worker_process_name"], "slots-process");
     remove_task(&pool, task_id).await;
 }
 
@@ -319,8 +343,7 @@ async fn a_failed_start_hook_of_a_replacement_fails_the_pool_with_no_restart_loo
 // The drain at the stop
 // ---------------------------------------------------------------------------
 
-/// Python `test_worker_stop_ordering.py::test_stop_persists_results_of_late_finishing_tasks`
-/// (the pool half; the order of the outcome writes after the drain is the
+/// The pool half of the stop (the order of the outcome writes after the drain is the
 /// worker loop's): a task that ends during the drain gets its result, and
 /// the stop reports a drained pool.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -347,12 +370,10 @@ async fn a_task_that_ends_during_the_drain_keeps_its_result() {
     let _ = spawner.stop(SPAWNER_STOP_WAIT);
 }
 
-/// Python `test_worker_stop_ordering.py::test_stop_drains_for_the_configured_time`
-/// and `test_slot_pool.py::TestStop::test_drain_deadline_kills_and_reports`:
-/// the stop gives a busy child its drain timeout, then kills it; its task
-/// takes the crash path. The kill is the worker's (`KILLED_BY_PARENT`,
-/// Python `_kill_at_deadline`), so the reason is Python's text of a lost
-/// child (`_finalize_child_loss`, `python/horsies/core/worker/finalize.py:1057`).
+/// The stop gives a busy child its drain timeout, then kills it; its task
+/// takes the crash path. The kill is the worker's (`KILLED_BY_PARENT`), so
+/// the reason is the text of a lost child
+/// (`dispatch::LOST_CHILD_REASON_PREFIX`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_drain_deadline_kills_a_busy_child_and_its_task_takes_the_crash_path() {
     let first = task(1, ExecutionClass::Isolated);

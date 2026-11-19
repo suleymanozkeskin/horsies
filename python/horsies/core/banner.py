@@ -67,9 +67,6 @@ LOGO_TEXT = r"""
 /_/ /_/\____/_/  /____/_/\___/____/        and workflow engine
 """
 
-# Full banner combining horse and logo
-BANNER = HORSE_BRAILLE + LOGO_TEXT
-
 
 def get_version() -> str:
     """Get horsies version from package metadata."""
@@ -79,13 +76,6 @@ def get_version() -> str:
         return version('horsies')
     except Exception:
         return 'dev'
-
-
-def format_banner(version: str | None = None) -> str:
-    """Format the banner string with version."""
-    if version is None:
-        version = get_version()
-    return BANNER.format(version=f'v{version}')
 
 
 # ---------------------------------------------------------------------------

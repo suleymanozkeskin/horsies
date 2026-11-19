@@ -18,7 +18,7 @@ mod time_text;
 pub use actions::{
     cancel_task_action, cancel_workflow_action, connect_failed_action, pause_workflow_action,
     resume_workflow_action, task_action_outcome, ActionBody, ActionConflictCode, ActionOutcome,
-    ResumeChildren, INTERNAL_SERVER_ERROR_TEXT, RESUME_RECOVERY_WARNING, STATE_CONFLICT,
+    INTERNAL_SERVER_ERROR_TEXT, RESUME_RECOVERY_WARNING, STATE_CONFLICT,
 };
 
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
@@ -26,7 +26,8 @@ pub use crate::core::history::reads::detail::TaskAbsenceReason;
 /// window resolver builds it.
 pub use crate::core::history::reads::pages::HistoryWindow;
 pub use errors::{
-    MonitoringQueryError, MonitoringQueryErrorCode, MonitoringQueryErrorSource, MonitoringResult,
+    HistoryContractSource, MonitoringQueryError, MonitoringQueryErrorCode,
+    MonitoringQueryErrorSource, MonitoringResult,
 };
 pub use execution_classes::{class_report_info, slot_health_info};
 pub use history_window::{
@@ -48,7 +49,7 @@ pub use queries::{
     list_schedules, list_tasks, list_workflow_names, list_workflow_runs, normalize_optional_text,
     span_s, task_breakdown, task_facets, task_stats, PaginationRefused, SortDirection,
     TaskBreakdownQuery, TaskFacetsQuery, TaskFilters, TaskGroupBy, TaskListQuery, TaskSortField,
-    TaskStatsQuery, WorkflowRunsQuery, MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT,
+    TaskStatsQuery, WorkflowRunsQuery, LIST_ROW_BOUND, MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT,
     MAX_TASK_PAGE_REACH, MAX_WORKFLOW_RUNS_LIMIT,
 };
 pub use task_actions::{

@@ -18,10 +18,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::time::Duration;
 
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -33,13 +31,13 @@ use crate::broker::PostgresBroker;
 use crate::core::WorkflowSpec;
 use crate::monitoring::{
     cancel_workflow_action, pause_workflow_action, resume_workflow_action, ActionBody,
-    ActionOutcome, ActionResponse, ResumeChildren,
+    ActionOutcome, ActionResponse,
 };
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::TestPool;
 use crate::test_support::{database_name_prefix, is_valid_prefix, DATABASE_PREFIX_VARIABLE};
 use crate::worker::execution::{run_phase2, Phase2Work};
 use crate::workflow_engine::recovery::recover_stuck_workflows_observed_with;
-use crate::workflow_engine::steps::ChildBuild;
 
 /// The stack of the thread that runs the paths: 1.5 MiB, 512 KiB under the
 /// 2 MiB of a libtest thread and of a tokio worker thread.
@@ -186,7 +184,7 @@ async fn every_path() {
 /// The global recovery pass with a case-0 candidate: node 1 waits for the
 /// FAILED node 0, so the step skips it and promotes and enqueues its three
 /// dependents, which allow failed dependencies.
-async fn recovery_pass_with_a_case_zero_candidate(pool: &PgPool) {
+async fn recovery_pass_with_a_case_zero_candidate(pool: &TestPool) {
     let workflow_id = seed_workflow(pool, &WorkflowSeed::running()).await;
     let failure =
         serde_json::to_string(&err("STACK_MARGIN_FAIL", "forced")).expect("encode the failure");
@@ -206,16 +204,12 @@ async fn recovery_pass_with_a_case_zero_candidate(pool: &PgPool) {
         )
         .await;
     }
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let child_specs = TestChildSpecs::empty();
 
     let report = probe_step(
         "recover_stuck_workflows",
-        recover_stuck_workflows_observed_with(
-            &broker,
-            ChildBuild::Client(&child_specs),
-            RECOVERY_FAILURE_LIMIT,
-        ),
+        recover_stuck_workflows_observed_with(&broker, &child_specs, RECOVERY_FAILURE_LIMIT),
     )
     .await
     .expect("the recovery pass returns its report");
@@ -239,7 +233,7 @@ async fn recovery_pass_with_a_case_zero_candidate(pool: &PgPool) {
 /// (node 1, its child built at the start) and a sub-workflow node that waits
 /// for node 0 (node 2). Returns the parent.
 async fn start_with_a_child_and_a_late_child(
-    pool: &PgPool,
+    pool: &TestPool,
     child: &WorkflowSpec,
     child_specs: &TestChildSpecs,
 ) -> Uuid {
@@ -259,19 +253,19 @@ async fn start_with_a_child_and_a_late_child(
 
 /// The worker's phase 1, then its phase 2 ([`run_phase2`]) of `task`.
 async fn finish_through_the_worker(
-    pool: &PgPool,
+    pool: &TestPool,
     task: &RunningNodeTask,
     child_specs: &TestChildSpecs,
     name: &str,
 ) {
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let done = worker_phase_one(&broker, task, NodeReport::Success).await;
 
     probe_step(
         name,
         run_phase2(
             &broker,
-            ChildBuild::Client(child_specs),
+            child_specs,
             Phase2Work {
                 task_id: task.task_id,
                 queue_name: task.queue_name.clone(),
@@ -287,7 +281,7 @@ async fn finish_through_the_worker(
 /// Phase 2 of node 0 of the parent: the node finish in a transaction, which
 /// promotes node 2 and starts its child.
 async fn phase_two_with_a_child_start(
-    pool: &PgPool,
+    pool: &TestPool,
     parent_id: Uuid,
     child_specs: &TestChildSpecs,
 ) {
@@ -308,7 +302,7 @@ async fn phase_two_with_a_child_start(
 /// Phase 2 of the root of the child of node 1: the child ends, and the
 /// parent advance that it owes completes node 1.
 async fn phase_two_with_a_parent_advance(
-    pool: &PgPool,
+    pool: &TestPool,
     parent_id: Uuid,
     child_specs: &TestChildSpecs,
 ) {
@@ -329,9 +323,8 @@ async fn phase_two_with_a_parent_advance(
 
 /// The monitoring pause, resume and cancel of the parent: the resume runs its
 /// step, the parent advances and the recovery pass of the tree.
-async fn monitoring_actions(pool: &PgPool, parent_id: Uuid, child_specs: TestChildSpecs) {
-    let broker = PostgresBroker::from_pool(pool.clone());
-    let children = ResumeChildren::Client(Arc::new(child_specs));
+async fn monitoring_actions(pool: &TestPool, parent_id: Uuid, child_specs: TestChildSpecs) {
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
 
     let paused = probe_step(
         "pause_workflow_action",
@@ -343,7 +336,7 @@ async fn monitoring_actions(pool: &PgPool, parent_id: Uuid, child_specs: TestChi
 
     let resumed = probe_step(
         "resume_workflow_action",
-        resume_workflow_action(&broker, parent_id, &children),
+        resume_workflow_action(&broker, parent_id, &child_specs),
     )
     .await;
     assert_success(&resumed, "resumed");

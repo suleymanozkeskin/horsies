@@ -98,9 +98,5 @@ class TaskRegistry(MutableMapping[str, T], Generic[T]):
             self._sources[name] = source
         return task
 
-    def unregister(self, name: str) -> None:
-        self._data.pop(name, None)
-        self._sources.pop(name, None)
-
     def keys_list(self) -> list[str]:
         return list(self._data.keys())

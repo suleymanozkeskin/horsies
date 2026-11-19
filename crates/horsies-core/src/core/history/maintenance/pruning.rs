@@ -1,8 +1,7 @@
 //! Contained finalize-first pruning driver, on the core pools.
 //!
-//! Python: `python/horsies/core/history/maintenance/pruning.py`. The pass
-//! report names each refusal by the class name of the Python outcome and
-//! counts a leaf as Python does, so both clients report the same facts.
+//! The pass report names each refusal by its outcome name
+//! (`LeafInspection::outcome_name`).
 
 use crate::broker::core_rows::StatementLog;
 use crate::core::history::commands::{
@@ -341,20 +340,34 @@ pub(crate) async fn prune_expired_partitions(
     pool: &CorePool,
     log: StatementLog,
 ) -> Result<PrunePass, HistoryError> {
+    prune_expired_partitions_within(pool, log, MAX_PRUNE_LEAVES_PER_PASS).await
+}
+
+/// The pruning pass of [`prune_expired_partitions`] with `max_acted_leaves`
+/// in place of `MAX_PRUNE_LEAVES_PER_PASS`: the heartbeat sweep acts first,
+/// and the period-class sweep gets what the heartbeat sweep left of the
+/// bound.
+///
+/// Errors: as [`prune_expired_partitions`].
+pub(crate) async fn prune_expired_partitions_within(
+    pool: &CorePool,
+    log: StatementLog,
+    max_acted_leaves: usize,
+) -> Result<PrunePass, HistoryError> {
     let candidates = pass_candidates(pool, log).await?;
     let finalized = finalize_interrupted_detaches(pool, log, &candidates).await;
     let heartbeat = sweep_heartbeat_leaves(
         pool,
         log,
         &candidates.of_kind(RetiredClassKind::Heartbeat),
-        MAX_PRUNE_LEAVES_PER_PASS,
+        max_acted_leaves,
     )
     .await;
     let history = sweep_history_leaves(
         pool,
         log,
         &candidates.of_kind(RetiredClassKind::Period),
-        MAX_PRUNE_LEAVES_PER_PASS.saturating_sub(heartbeat.acted),
+        max_acted_leaves.saturating_sub(heartbeat.acted),
     )
     .await;
     let mut refusals = finalized.refusals;
@@ -395,8 +408,6 @@ pub(crate) async fn prune_expired_partitions(
 
 #[cfg(test)]
 mod tests {
-    //! Python specification: `tests/integration/test_history_catalog_active_index.py`.
-
     use std::collections::BTreeSet;
     use std::sync::PoisonError;
 
@@ -424,6 +435,15 @@ mod tests {
          SET LOCAL auto_explain.log_analyze = on;
          SET LOCAL auto_explain.log_format = 'json';
          SET LOCAL client_min_messages = log;";
+
+    /// The bounds of one pass: 512 candidates per candidate read and 64
+    /// acted leaves. Both are `usize` constants, so a pass always reads at
+    /// least one candidate and a leaf bound is never negative.
+    #[test]
+    fn the_prune_bounds_are_the_values_of_a_pass() {
+        assert_eq!(MAX_PRUNE_CANDIDATES_PER_PASS, 512);
+        assert_eq!(super::MAX_PRUNE_LEAVES_PER_PASS, 64);
+    }
 
     /// Every node of the plan tree under `root`.
     fn plan_nodes(root: &Value) -> Vec<&Value> {
@@ -489,7 +509,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn the_candidate_read_scans_only_active_catalog_records() {
-        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let url = crate::test_support::migrated_database_url().await;
         let (client, notices) = connect_collecting_notices(&url).await;
         client.batch_execute("BEGIN").await.expect("begin");
         client

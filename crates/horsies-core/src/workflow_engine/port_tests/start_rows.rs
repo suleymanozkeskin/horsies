@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, SubsecRound, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -18,10 +17,10 @@ use super::support::{
 use crate::broker::workflow_start::{ClientStartError, ClientStartOutcome};
 use crate::core::{HorsiesError, OnError, WorkflowSpec};
 use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
+use crate::test_support::sql::{self, TestPool};
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::lifecycle::resume_client_workflow;
 use crate::workflow_engine::recovery::recover_stuck_workflows_observed_with;
-use crate::workflow_engine::steps::ChildBuild;
 
 /// Whether `error` is a start refused for its spec: the spec, a child spec
 /// or a value that the start cannot store (the class that a client names
@@ -50,7 +49,7 @@ fn retry_options(max_retries: usize) -> String {
 }
 
 /// The node columns that a start writes from the spec.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 struct StoredNode {
     dependencies: Vec<i32>,
     args_from: Option<serde_json::Value>,
@@ -60,8 +59,21 @@ struct StoredNode {
     max_retries: Option<i32>,
 }
 
-async fn stored_node(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> StoredNode {
-    sqlx::query_as(
+impl sql::FromTestRow for StoredNode {
+    fn from_row(row: &tokio_postgres::Row) -> Result<Self, sql::Error> {
+        Ok(Self {
+            dependencies: sql::named(row, "dependencies")?,
+            args_from: sql::named(row, "args_from")?,
+            workflow_ctx_from: sql::named(row, "workflow_ctx_from")?,
+            allow_failed_deps: sql::named(row, "allow_failed_deps")?,
+            task_options: sql::named(row, "task_options")?,
+            max_retries: sql::named(row, "max_retries")?,
+        })
+    }
+}
+
+async fn stored_node(pool: &TestPool, workflow_id: Uuid, task_index: i32) -> StoredNode {
+    sql::query_as(
         "SELECT dependencies, args_from, workflow_ctx_from::text[] AS workflow_ctx_from,
                 allow_failed_deps, task_options, max_retries
          FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = $2",
@@ -74,15 +86,25 @@ async fn stored_node(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> Store
 }
 
 /// The workflow columns that a start writes from the spec.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 struct StoredWorkflow {
     on_error: String,
     output_task_index: Option<i32>,
     sent_at: DateTime<Utc>,
 }
 
-async fn stored_workflow(pool: &PgPool, workflow_id: Uuid) -> StoredWorkflow {
-    sqlx::query_as(
+impl sql::FromTestRow for StoredWorkflow {
+    fn from_row(row: &tokio_postgres::Row) -> Result<Self, sql::Error> {
+        Ok(Self {
+            on_error: sql::named(row, "on_error")?,
+            output_task_index: sql::named(row, "output_task_index")?,
+            sent_at: sql::named(row, "sent_at")?,
+        })
+    }
+}
+
+async fn stored_workflow(pool: &TestPool, workflow_id: Uuid) -> StoredWorkflow {
+    sql::query_as(
         "SELECT on_error, output_task_index, sent_at FROM horsies_workflows WHERE id = $1",
     )
     .bind(workflow_id)
@@ -93,11 +115,11 @@ async fn stored_workflow(pool: &PgPool, workflow_id: Uuid) -> StoredWorkflow {
 
 /// The live task row of a node: (status, max_retries, good_until, task_options).
 async fn node_task_row(
-    pool: &PgPool,
+    pool: &TestPool,
     workflow_id: Uuid,
     task_index: i32,
 ) -> (String, i32, Option<DateTime<Utc>>, Option<String>) {
-    sqlx::query_as(
+    sql::query_as(
         "SELECT t.status, t.max_retries, t.good_until, t.task_options
          FROM horsies_tasks t
          JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
@@ -110,16 +132,16 @@ async fn node_task_row(
     .expect("the node has a live task")
 }
 
-async fn workflow_rows_named(pool: &PgPool, name: &str) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_workflows WHERE name = $1")
+async fn workflow_rows_named(pool: &TestPool, name: &str) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_workflows WHERE name = $1")
         .bind(name)
         .fetch_one(pool)
         .await
         .expect("count the workflow rows")
 }
 
-async fn node_count(pool: &PgPool, workflow_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_workflow_tasks WHERE workflow_id = $1")
+async fn node_count(pool: &TestPool, workflow_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_workflow_tasks WHERE workflow_id = $1")
         .bind(workflow_id)
         .fetch_one(pool)
         .await
@@ -410,7 +432,7 @@ async fn two_concurrent_starts_with_one_id_make_one_workflow() {
         outcomes,
         vec![ClientStartOutcome::Started, ClientStartOutcome::Exists]
     );
-    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_workflows WHERE id = $1")
+    let rows: i64 = sql::query_scalar("SELECT count(*) FROM horsies_workflows WHERE id = $1")
         .bind(workflow_id)
         .fetch_one(&pool)
         .await
@@ -457,7 +479,7 @@ async fn plain_roots_start_enqueued_with_linked_pending_tasks_and_a_dependent_wa
         assert!(root.started_at.is_some(), "a node starts at its enqueue");
         let task_id = root.task_id.expect("a root is linked to its task");
         let (status, fingerprint): (String, Option<Vec<u8>>) =
-            sqlx::query_as("SELECT status, command_fingerprint FROM horsies_tasks WHERE id = $1")
+            sql::query_as("SELECT status, command_fingerprint FROM horsies_tasks WHERE id = $1")
                 .bind(task_id)
                 .fetch_one(&pool)
                 .await
@@ -512,7 +534,7 @@ async fn a_restart_with_the_same_id_writes_nothing_more() {
 
     assert_eq!(again.expect("restart"), ClientStartOutcome::Exists);
     assert_eq!(node_count(&pool, workflow_id).await, 4);
-    let tasks: i64 = sqlx::query_scalar(
+    let tasks: i64 = sql::query_scalar(
         "SELECT count(*) FROM horsies_tasks t
          JOIN horsies_workflow_tasks wt ON wt.task_id = t.id WHERE wt.workflow_id = $1",
     )
@@ -606,8 +628,8 @@ fn broken_build() -> TestChildBuild {
 }
 
 /// Live task rows of a workflow's nodes.
-async fn linked_task_count(pool: &PgPool, workflow_id: Uuid) -> i64 {
-    sqlx::query_scalar(
+async fn linked_task_count(pool: &TestPool, workflow_id: Uuid) -> i64 {
+    sql::query_scalar(
         "SELECT count(*) FROM horsies_tasks t
          JOIN horsies_workflow_tasks wt ON wt.task_id = t.id WHERE wt.workflow_id = $1",
     )
@@ -621,7 +643,7 @@ async fn linked_task_count(pool: &PgPool, workflow_id: Uuid) -> i64 {
 /// slow root is FAILED, its plain root is READY with no task, and no task
 /// row exists; a resume then enqueues the plain root.
 async fn assert_paused_before_plain_roots_got_tasks(
-    pool: &PgPool,
+    pool: &TestPool,
     workflow_id: Uuid,
     plain_root: i32,
     failed_root: i32,
@@ -939,8 +961,8 @@ async fn recovery_enqueues_a_ready_node_with_its_input() {
     .await;
 
     let report = recover_stuck_workflows_observed_with(
-        &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &crate::broker::PostgresBroker::from_test_url(db.pool.url(), crate::ClientFamily::Rust),
+        &TestChildSpecs::empty(),
         3,
     )
     .await
@@ -1003,7 +1025,7 @@ async fn a_child_built_by_its_builder_binds_the_queue_priority_on_node_and_task(
     .await;
     let child_id = child_of(&db.pool, parent_id, 0).await;
 
-    let (task_queue, task_priority, node_priority): (String, i32, i32) = sqlx::query_as(
+    let (task_queue, task_priority, node_priority): (String, i32, i32) = sql::query_as(
         "SELECT t.queue_name, t.priority, wt.priority
          FROM horsies_workflow_tasks wt JOIN horsies_tasks t ON t.id = wt.task_id
          WHERE wt.workflow_id = $1 AND wt.node_id = 'scrape'",
@@ -1039,7 +1061,7 @@ async fn a_built_child_task_keeps_fifo_order_with_a_later_send_on_its_queue() {
         .task_id
         .expect("the scrape node has its task");
     let direct_task = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, task_options, execution,
              retention_class_key, sent_at, created_at, command_fingerprint_version,
@@ -1071,7 +1093,7 @@ async fn a_built_child_task_keeps_fifo_order_with_a_later_send_on_its_queue() {
     let ids: Vec<Uuid> = claimed.iter().map(|row| row.id).collect();
     assert_eq!(ids, vec![scrape_task]);
     let direct_priority: i32 =
-        sqlx::query_scalar("SELECT priority FROM horsies_tasks WHERE id = $1")
+        sql::query_scalar("SELECT priority FROM horsies_tasks WHERE id = $1")
             .bind(direct_task)
             .fetch_one(&db.pool)
             .await

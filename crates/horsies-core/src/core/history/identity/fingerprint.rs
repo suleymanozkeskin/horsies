@@ -30,8 +30,13 @@ pub struct EnqueueCommandV1 {
     task_name: String,
     queue_name: String,
     priority: i32,
-    args_json: Option<String>,
-    kwargs_json: Option<String>,
+    /// The version-1 element of the positional arguments. A task takes
+    /// keyword arguments only, so every send passes `None`. (In 0.6 and 0.7
+    /// a workflow node passed its stored args text, `"[]"` for a node that
+    /// those versions wrote.) The field keeps its place in the canonical
+    /// array, so no version-1 digest changes.
+    positional_args_json: Option<String>,
+    input_json: Option<String>,
     good_until: Option<DateTime<Utc>>,
     enqueue_delay_seconds: Option<i64>,
     task_options_json: Option<String>,
@@ -47,8 +52,8 @@ impl EnqueueCommandV1 {
         task_name: impl Into<String>,
         queue_name: impl Into<String>,
         priority: i32,
-        args_json: Option<String>,
-        kwargs_json: Option<String>,
+        positional_args_json: Option<String>,
+        input_json: Option<String>,
         good_until: Option<DateTime<Utc>>,
         enqueue_delay_seconds: Option<i64>,
         task_options_json: Option<String>,
@@ -61,8 +66,8 @@ impl EnqueueCommandV1 {
             task_name: task_name.into(),
             queue_name: queue_name.into(),
             priority,
-            args_json,
-            kwargs_json,
+            positional_args_json,
+            input_json,
             good_until,
             enqueue_delay_seconds,
             task_options_json,
@@ -107,8 +112,8 @@ impl EnqueueCommandV1 {
             Value::from(self.task_name.clone()),
             Value::from(self.queue_name.clone()),
             Value::from(self.priority),
-            option_string_value(&self.args_json),
-            option_string_value(&self.kwargs_json),
+            option_string_value(&self.positional_args_json),
+            option_string_value(&self.input_json),
             self.good_until
                 .map(|value| Value::from(value.format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string()))
                 .unwrap_or(Value::Null),

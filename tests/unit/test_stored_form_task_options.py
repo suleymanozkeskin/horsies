@@ -4,9 +4,9 @@ A task stores ``serialize_task_options`` of its ``TaskOptions``; a send with
 a deadline stores the send's options with ``good_until``
 (``python/horsies/core/task_decorator.py:2067-2087``); a workflow node stores
 its task's options with its deadline merged as ``good_until``
-(``python/horsies/core/workflows/child_build.py:574``,
-``python/horsies/core/workflows/engine.py:464``). The enqueue reads the text
-with ``stored_retry_policy`` and ``stored_execution``. The core and the Rust
+(``python/horsies/core/workflows/child_build.py``). The core reads the text
+at enqueue. Python reads it back with the public ``RetryPolicy`` model and
+``stored_execution`` (the class read of a child). The core and the Rust
 client test the same file.
 """
 
@@ -19,10 +19,8 @@ import pytest
 
 from horsies.core.codec.json_io import Json, dumps_json, loads_json
 from horsies.core.codec.task_options import (
-    NoRetryPolicy,
     serialize_task_options,
     stored_execution,
-    stored_retry_policy,
 )
 from horsies.core.models.tasks import Execution, RetryPolicy, TaskOptions
 from horsies.core.types.result import Err, Ok, Result
@@ -111,9 +109,9 @@ def test_each_text_reads_back_to_its_options(vector: dict[str, object]) -> None:
     options = cast('dict[str, Json]', stored)
     match _retry_policy(vector):
         case None:
-            assert stored_retry_policy(options) == Ok(NoRetryPolicy())
+            assert options.get('retry_policy') is None
         case policy:
-            assert stored_retry_policy(options) == Ok(policy)
+            assert RetryPolicy.model_validate(options['retry_policy'], strict=True) == policy
     expected = _options(vector)
     assert stored_execution(stored) == Ok(Execution(expected['execution']))
     assert options['timeout_ms'] == expected['timeout_ms']

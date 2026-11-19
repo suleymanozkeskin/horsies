@@ -1,6 +1,6 @@
 //! The manifest types as static data for clients.
 //!
-//! `#[derive(horsies_macros::ManifestSchema)]` on a manifest struct or enum
+//! `#[derive(horsies_core_derive::ManifestSchema)]` on a manifest struct or enum
 //! records its Python form from the type itself:
 //! - a struct of named fields is a frozen dataclass;
 //! - an enum with a serde `tag` is one frozen dataclass per variant, with a

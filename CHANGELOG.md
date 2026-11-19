@@ -9,7 +9,23 @@ and there is no migration contract between pre-1.0 versions.
 ## [Unreleased]
 
 Draft notes of 0.8.0. The Python client and the Rust client run on one core,
-written in Rust, on a new baseline schema.
+written in Rust, on a new baseline schema. Read the
+[migration guide to 0.8.0](https://suleymanozkeskin.github.io/horsies/migrations/migration-to-0-8-0/)
+before you upgrade a 0.7 deployment.
+
+### Added
+
+- **`SendKind` and the core error classes are exported from `horsies`.**
+  `SendKind` is the type of the required `send_kind` of
+  `PostgresBroker.enqueue` and `enqueue_async`: `SendKind.FIRST` for the
+  first send of a task id, `SendKind.REPEAT` for a resend. The core error
+  classes are `CoreServerError`, `CoreConnectionError`,
+  `CoreContractViolation` and `CorePreconditionFailed` (the `exception` of
+  a failed core call), `TooManyPendingCalls`, `CoreCallTimedOut` and
+  `CoreStartFailed` (the `exception` when the core cannot run a call), and
+  `ForkedAfterCoreStart` and `CoreStopped` (raised). Import them from
+  `horsies`. They are defined in `horsies.core.brokers.enqueue_task` and in
+  the extension `horsies._core`.
 
 ### Changed
 
@@ -29,22 +45,36 @@ written in Rust, on a new baseline schema.
   sends, `PostgresBroker.enqueue` and `enqueue_async`, `get_task_info`,
   `get_raw_result_record` (and `TaskHandle.get()`), `ping_database_async`,
   `ping_workers_async` and `ensure_schema_initialized` use one set of core
-  pools per broker, for every thread and event loop. They return no
-  `EVENT_LOOP_LIMIT`, and the sync `send()`, `enqueue()`, `get_task_info()`
-  and `get_raw_result_record()` return no `LOOP_RUNNER_FAILED`; the error
-  types keep both variants. When the core cannot run a call, the call
+  pools per broker, for every thread and event loop. When the core cannot
+  run a call, the call
   returns its failure code with the core error as `exception`:
   `TooManyPendingCalls` (65,536 calls in flight on one event loop) and
   `CoreCallTimedOut` (a sync call over 30 minutes) are retryable;
-  `CoreStopped`, `CoreStartFailed` and `ForkedAfterCoreStart` are not. Only
-  a workflow start and a workflow resume keep a resource set per event loop.
-  The sync send pool is gone.
+  `CoreStartFailed` is not. `CoreStopped` and `ForkedAfterCoreStart` are
+  raised instead (see below). The sync send pool is gone.
+
+- **Every sync call runs on the calling thread.** The sync methods of
+  `Horsies` (`get_result`, `get_task_info`, `ping_database`,
+  `ping_workers`, `list_worker_states`, `get_worker_state`,
+  `get_worker_state_history`, `get_class_coverage`, `get_class_report`) and
+  of `WorkflowHandle` (`status`, `get`, `result_for`, `results`, `tasks`,
+  `cancel`, `pause`, `resume`), `start_workflow`, `WorkflowSpec.start`,
+  `pause_workflow_sync`, `resume_workflow_sync` and `PostgresBroker.close`
+  call the core's blocking form on the calling thread, with the GIL
+  released and signals checked every 100 ms: Ctrl+C ends a blocking wait,
+  `WorkflowHandle.get()` with no limit included. Their outcomes are those of
+  the async forms. No sync call starts a `horsies-loop` thread.
+  A sync call that does not end within 30 minutes returns its failure code
+  with `CoreCallTimedOut`; a wait (`get()`, `get_result()`, `ping_workers()`)
+  is bounded by its limit plus 30 minutes, and a wait with no limit is not
+  bounded.
 
 - **The `exception` of a database failure is the core's class of the
   cause.** Where a call ran on the core and failed, the `exception` field of
   its error (for example `BrokerOperationFailed.exception`,
   `TaskActionDbOperationFailed.exception`,
-  `HandleDbOperationFailed.exception`) holds one class of `horsies._core`:
+  `HandleDbOperationFailed.exception`) holds one class of the core,
+  exported from `horsies`:
   `CoreServerError` (the server answered with an error: `sqlstate` and the
   server's primary `message`), `CoreConnectionError` (no answer from the
   server), `CoreContractViolation` (a row or a stored value broke the
@@ -53,12 +83,181 @@ written in Rust, on a new baseline schema.
   Each has `subject`, the core operation, and `message`; all but
   `CoreContractViolation` have `retryable`. The declared types do not
   change. `rerun_task` raises `CorePreconditionFailed` for a database of the
-  other client family. A refused orphan cursor is `CoreServerError` with
-  `sqlstate` `'55P03'`.
+  other client family. A family row that holds neither `PYTHON` nor `RUST`
+  is corrupt stored data: the install, each write and `rerun_task` fail with
+  `CoreContractViolation`, whose message names the stored value, and write
+  nothing. A refused orphan cursor is `CoreServerError` with `sqlstate`
+  `'55P03'`.
+
+- **`PostgresBroker.mark_stale_tasks_as_failed` reads at most 1,000 stale
+  tasks per call.** It runs the core's stale RUNNING pass, the pass that the
+  reaper runs when `RecoveryConfig.auto_fail_stale_running` is on. When a
+  call reads 1,000 tasks, it logs a warning, and the next call or the next
+  reaper pass recovers the rest; 0.7 recovered every stale task in one call.
+  A threshold outside 0 to 2,147,483,647 ms is `CLEANUP_FAILED`, not
+  retryable.
 
 - **A process forked without exec after the core started cannot call
   horsies.** Its next core call raises `ForkedAfterCoreStart`. Start child
   processes that call horsies with the `spawn` or `forkserver` start method.
+
+- **The core's error classes are generated from the core.** The classes
+  of the broker, workflow handle, monitoring query and task action catalogs
+  that the core produces (for example `BrokerOperationFailed`,
+  `HandleDbOperationFailed`, `MonitoringQueryDbOperationFailed`,
+  `TaskActionNotFound`) and `NoCause` are rendered into `horsies._catalog`
+  from the core's records. Their names, fields, defaults and docs do not
+  change, and the old import paths re-export them. `BrokerOperationError`,
+  `BrokerEnqueueError`, `HandleOperationError`, `MonitoringQueryError` and
+  `TaskActionError` are the generated union of the catalog plus the classes
+  that only the Python client produces.
+
+- **The send error classes and the send payload are generated from the
+  core.** The seven classes of the core's send catalog
+  (`TaskSendSuppressed`, `TaskSendAsyncContext`,
+  `TaskSendValidationFailed`, `TaskSendEnqueueFailed`,
+  `TaskSendPayloadMismatch`, `TaskSendPayloadTooLarge`,
+  `TaskSendIdempotencyKeyConflict`), `TaskSendPayload`, `RetentionClassKey`
+  and `DEFAULT_RETENTION_CLASS_KEY` are rendered into `horsies._catalog`
+  from the core's records. Their names, fields, defaults and docs do not
+  change, and the old import paths re-export them. `TaskSendError` is the
+  generated union `TaskSendCoreError`.
+
+- **`OutcomeDecodeError` is generated from the core, and the core builds
+  the error classes of `cancel_task`.** `OutcomeDecodeError` is rendered
+  into `horsies._catalog.lifecycle_errors`, and
+  `horsies.core.lifecycle.outcomes` re-exports it; its name, base, doc and
+  text do not change. A refused or failed `cancel_task` returns the
+  `TaskActionError` class that the core builds, with the same messages.
+  `TaskActionDbOperationFailed.exception` keeps the text of its cause, and
+  `TaskActionStoredDataInvalid.exception` is an `OutcomeDecodeError`.
+
+- **The core builds the error classes of the workflow handle.** A failed
+  pause, cancel, resume or handle read returns the
+  `HandleDbOperationFailed`, `HandleStoredDataInvalid` or
+  `HandleResumeRecoveryFailed` class that the core builds, with Python's
+  message: the operation's label, the workflow id and the cause's text
+  (`Status failed for workflow <id>: <cause>`). The records `HandleFailed`
+  and `WorkflowResumeRecoveryFailed` of `horsies._core` are removed.
+  `workflow_id` and the id in the message are the canonical text of the
+  UUID.
+  `HandleResumeRecoveryFailed.exception` holds the failure of the work
+  after the commit alone, as in 0.7, and its `retryable` is the rule of that
+  failure. A failed `result_for` read keeps the `BROKER_ERROR` message of
+  0.7, which names the node: `DB query failed for result_for node
+  <node_id> in workflow <id>: <cause>`.
+- **`HistoryContractError` is generated from the core, and the core builds
+  the error classes of the monitoring reads.** `HistoryContractError` is
+  rendered into `horsies._catalog.history_errors`, and
+  `horsies.core.history.errors` re-exports it; its name, base, doc and its
+  subclasses do not change. A failed monitoring read returns the
+  `MonitoringQueryError` class that the core builds, with the same
+  messages. The `exception` of `MonitoringQueryDbOperationFailed` is the
+  core's class of the cause with the cause's own text (the read is its
+  subject); the `exception` of `MonitoringQueryHistoryContractViolation` is
+  a `HistoryContractError` with the cause's own text, as in 0.7.
+
+- **`WorkflowHandle.workflow_id` is a `uuid.UUID`, and
+  `WorkflowHandle.for_id(text, broker)` parses a workflow id text.**
+  `for_id` returns `Ok(handle)` for every spelling that `uuid.UUID` accepts
+  (upper case, braces, `urn:uuid:`, no hyphens), or
+  `Err(HandleInvalidWorkflowId)` (new, exported from `horsies`: `message`,
+  `workflow_id_text`, `exception`) for text that is not a UUID; it reads
+  nothing. pyright refuses a `str` id in `WorkflowHandle(...)`, and
+  `pause_workflow`, `resume_workflow`, `pause_workflow_sync` and
+  `resume_workflow_sync` take a `uuid.UUID`. A handle that a start returns
+  holds the UUID that the start sent. The handle methods no longer parse the
+  id at each call: in 0.7 a handle made from text that is not a UUID
+  returned `DB_OPERATION_FAILED` from each call. The `workflow_id` of the
+  handle error classes stays a `str`, the canonical text of the UUID.
+
+- **The workflow start classes are generated from the core, and the core
+  builds the error classes of a start.** The four classes of the core's
+  start catalog (`WorkflowStartValidationFailed`, `WorkflowStartIdConflict`,
+  `WorkflowStartEnqueueFailed`, `WorkflowStartAsyncContext`) are rendered
+  into `horsies._catalog.workflow_start_errors` from the core's records.
+  Their names, fields and docs do not change, and
+  `horsies.core.workflows.start_types` re-exports them.
+  `WorkflowStartError` is the generated union `WorkflowStartCoreError` plus
+  `WorkflowStartBrokerNotConfigured`, which only the Python client
+  produces. A start whose id belongs to another workflow name, and a start
+  that failed, return the `WorkflowStartIdConflict` or
+  `WorkflowStartEnqueueFailed` that the core builds, with the same
+  messages. The records `WorkflowIdTaken` and `WorkflowStartFailed` of
+  `horsies._core` are removed. The `workflow_id` of these two classes and
+  the id in the conflict message are the canonical text of the UUID. The
+  `exception` of a failed schema install is the core's class of the cause
+  with the cause's own text; the message keeps `Schema initialization
+  failed: <cause>`.
+
+- **The core builds the error classes of the broker.** A failed ping,
+  task info read, result read, worker state read, class read, task list
+  or schema install returns the `BrokerOperationFailed`,
+  `BrokerInvalidInput`, `BrokerInvalidJsonPayload` or
+  `BrokerListenerDisabled` class that the core builds, with the message of
+  0.7: `ping_database failed: <cause>`, `ping_workers failed: <cause>`,
+  `get_task_info failed for <task_id>: <cause>`, `Broker error while
+  retrieving task <task_id>: <cause>`, `<read> failed: <cause>`. The
+  record `BrokerFailure` of `horsies._core` is removed. `exception` is the
+  core's class of the cause with its own text, or `NoCause()` for a check
+  of the core; a refused class read and a worker snapshot that does not
+  read give `CoreContractViolation` (0.7: `ValueError`).
+
+- **The core builds the error classes of an enqueue.** `PostgresBroker.enqueue`
+  and `enqueue_async` return the `BrokerInvalidInput`,
+  `BrokerInvalidTaskOptions`, `BrokerEnqueueFailed`, `BrokerPayloadMismatch`
+  or `BrokerIdempotencyKeyConflict` class that the core builds, and the task
+  sends map it to their `TaskSend*` class with the payload of the send, as
+  in 0.7 (`input_json` is `None` for a send with no keyword arguments). The
+  `exception` of a refusal is the one of 0.7: the `ValueError` of a rule of
+  the version-1 command or of the idempotency key, with the rule as its
+  text; a `SerializationError` with the reader's error for a JSON text that
+  does not read; `NoCause()` for another rule. `ENQUEUE_FAILED` has the
+  message of 0.7, `Failed to enqueue task <name>: <cause>`, and the core's
+  class of the cause with its own text (0.7: the driver's exception); a
+  retention class key that no class derives gives `CorePreconditionFailed`,
+  not retryable (0.7: the check violation of the insert). A conflicting row
+  that was gone before the compare keeps the message of 0.7 and `NoCause()`,
+  not retryable. `PAYLOAD_MISMATCH` has the core's message, `payload
+  mismatch for task_id <task_id>: the existing task has a different command
+  or idempotency key` (0.7 named the task and the part that differs). The
+  records `SendValidationFailed`, `SendRefusalUnreadableJson`,
+  `SendRefusalByRule`, `SendRefusalByValueRule`, `SendEnqueueFailed`,
+  `SendPayloadMismatch`, `SendKeyConflict`, `SendPayloadTooLarge`,
+  `SendSuppressed` and `SendAsyncContext` of `horsies._core` are removed.
+
+- **Every core call raises `ForkedAfterCoreStart` and `CoreStopped`.**
+  Both are states of the process: the core refuses every later call in it.
+  Every call that runs on the core raises them, in its sync and async
+  forms: the sends and their retry methods, `PostgresBroker.enqueue`, the
+  task, result and health reads, the broker's task lists and recovery
+  passes, `ensure_schema_initialized`, `close`, `check(live=True)`, the
+  workflow start, `WorkflowHandle`, `pause_workflow` and `resume_workflow`,
+  the reads and `cancel_task` of `horsies.monitoring`, and the schema probe
+  of `horsies web`. No call returns them as a result: they are no longer
+  the `exception` of `ENQUEUE_FAILED`, `TASK_INFO_QUERY_FAILED`,
+  `MONITORING_QUERY_FAILED`, `DB_OPERATION_FAILED` or another failure
+  code. The result types do not change. For a fork, use the `spawn` or
+  `forkserver` start method, or fork before the parent's first call that
+  runs on the core. `CoreStopped` means that a background task of the core
+  panicked, a defect in horsies: restart the process.
+
+- **A worker child whose core stopped ends itself.** It never serves on
+  with a stopped core (`CoreStopped`) or as a fork of a child
+  (`ForkedAfterCoreStart`). The child exits with code 80, and the worker
+  starts a new child; the frame that the child sends last says that it
+  ends itself, so the worker sends it no other task. At the start of a
+  task, before task code ran, the
+  worker releases the claim with no attempt charged, and the new child runs
+  the task. After a body that finished, the child reports the result and
+  the worker writes it as for any task: the task keeps its result, with no
+  second run. A body that the refusal ended (a core call of the body raised
+  it) has no result: the child reports nothing, and the task takes the
+  crashed-child path (`WORKER_CRASHED`) and its retry policy, as does every
+  other run of a shared child whose body still runs at the exit. A fork
+  exits at once and writes nothing to the worker. The last log line of the
+  child names the cause; the worker logs the replacement of a child that
+  held no task at error level.
 
 - **Every task id of the public API is a `uuid.UUID`.** This covers
   `TaskHandle.task_id`; the task ids of the send errors and of
@@ -70,7 +269,7 @@ written in Rust, on a new baseline schema.
   and the rerun outcomes; `mint_task_id()`; and in `horsies.monitoring`,
   `get_task_detail`, `cancel_task` and the task ids of their models. Text
   becomes a task id only at the web API path. Workflow ids keep their text
-  type.
+  type, except `WorkflowHandle.workflow_id`.
 
 - **One `input_json` holds the task input.** `TaskSendPayload.input_json`
   (the keyword arguments as one JSON object, or `None` for none) replaces
@@ -123,13 +322,13 @@ written in Rust, on a new baseline schema.
   `stale_threshold_minutes` that is not an `int` from 0 to 525,600 is
   `INVALID_INPUT` before any statement; 0.7 ran the read with any value.
 
-- **A JSON object that repeats a key is refused.** `loads_json` and
-  `loads_json_bytes` refuse it at any depth; at enqueue it is
-  `INVALID_INPUT` and nothing is written. 0.7 kept the last value.
+- **A JSON object that repeats a key is refused.** `loads_json` refuses
+  it at any depth; at enqueue it is `INVALID_INPUT` and nothing is written.
+  0.7 kept the last value.
 
 - **Breaking: `loads_json` refuses an empty text and takes no `None`.** An
-  empty text is not JSON: `loads_json('')` and `loads_json_bytes(b'')` are
-  `Err(EmptyJsonTextError)`, a `SerializationError` with the text
+  empty text is not JSON: `loads_json('')` is `Err(EmptyJsonTextError)`, a
+  `SerializationError` with the text
   `JSON parse failed: the text is empty`. 0.7 read `''` and `None` as the
   JSON value `null`. A caller with a nullable value checks `None` before the
   call. A send whose kwargs text or task options text is empty gets
@@ -180,6 +379,27 @@ written in Rust, on a new baseline schema.
 - **The worker list measures ages to the database clock.** `snapshot_age_s`,
   `stale` and `uptime_s` of `GET /api/workers` are measured to the time of
   the database read; 0.7 measured them to the clock of the web host.
+
+- **A task breakdown keeps the unclaimed tasks apart from a worker named
+  `unknown`.** Each `GroupRow.group` of `horsies.monitoring.task_breakdown`
+  is `BreakdownValueGroup(value=...)` (a worker id, a task name or a queue
+  name) or, for `group_by='worker'` only, `BreakdownUnclaimedGroup()` (the
+  tasks that no worker claimed); it was a `str`. `GroupRow` derives from the
+  new `BreakdownCounts`, and `Breakdown.total` is a `BreakdownCounts` with no
+  `group`; it was a `GroupRow` with the group `'TOTAL'`.
+  `GET /api/tasks/breakdown` writes a group as
+  `{"kind": "value", "value": ...}` or `{"kind": "unclaimed"}`, and `total`
+  with no `group` key. 0.7 labelled the unclaimed tasks and a worker with
+  the id `unknown` both `'unknown'` and kept one row of the two, so the
+  groups summed to less than the total. Match `row.group` on the two
+  classes.
+
+- **The maps of a worker snapshot are a `dict`, never `None`.**
+  `WorkerStateSnapshot.queue_priorities`, `queue_max_concurrency` and
+  `recovery_config`, and `horsies.monitoring.WorkerStateInfo.queue_max_concurrency`
+  (`GET /api/workers`), are `{}` when the worker had none set; 0.7 gave
+  `None` (`null` on the web). The baseline columns are NOT NULL. Test for
+  `{}` where the code tested `None`.
 
 - **Monitoring and web times are in UTC.** The times of the
   `horsies.monitoring` reads and of the web API answers are UTC (`Z` in
@@ -264,6 +484,20 @@ written in Rust, on a new baseline schema.
   core worker write the same key. An isolated or `SHARED_THREAD` timeout
   has no `cancel_end`. The `data` keeps `task_id` and `timeout_ms`.
 
+- **A workflow whose start did not finish fails with
+  `WORKFLOW_START_INCOMPLETE`.** `OperationalErrorCode` has the new member
+  `WORKFLOW_START_INCOMPLETE`. When recovery finds a RUNNING workflow with
+  no node rows, it fails the workflow and stores a `TaskError` with this
+  code, the message `Orphaned workflow '<name>': no workflow_tasks found.
+  Workflow task insertion did not complete.` and the `data` keys
+  `workflow_id` and `recovery` (`case_4`). `WorkflowHandle.get()` returns
+  this error. 0.7 stored an error object with the code `E400` that is not a
+  `TaskError`, and `WorkflowHandle.get()` returned
+  `RESULT_DESERIALIZATION_ERROR`. `TaskError` refuses the text
+  `'WORKFLOW_START_INCOMPLETE'` as a user code; 0.7 accepted it. Add the
+  member to an exhaustive `match` on `OperationalErrorCode`, and rename a
+  user code with this name.
+
 - **`paused_workflow_auto_cancel_after` is at most 365,000 days.** A
   longer age is refused when the config is built: Python raises
   `ConfigurationError` with `CONFIG_INVALID_RETENTION` (HRS-216), and the
@@ -302,8 +536,9 @@ written in Rust, on a new baseline schema.
   (`CoreHandle.check_worker_connections`, the rule of the Python and Rust
   clients) on the handle of the connectivity phase; the live check opens no
   SQLAlchemy engine. The count is that of the core's worker: its listener
-  opens one connection (before: 2), and a `session_database_url` that
-  differs from `database_url` adds a session pool of the parent pool's size.
+  opens one connection (before: 2), its liveness lock one more, and a
+  `session_database_url` that differs from `database_url` adds a session pool
+  of the parent pool's size.
   The errors keep `CHECK_WORKER_CONNECTIONS` (`HRS-219`) and their texts; a
   limit that is not read, or a core that cannot run the call, is one error
   with the cause as its note, as before.
@@ -336,6 +571,39 @@ written in Rust, on a new baseline schema.
   handler, adds one stdout handler per process, as SQLAlchemy's `echo` does
   for `sqlalchemy.engine.Engine`. The Rust client logs the same events on the
   `tracing` target `horsies.sql`.
+
+- **A worker holds a liveness lock; the tasks of an ended worker are
+  recovered in about 1.5 to 2 minutes.** Each worker process holds a session
+  advisory lock (key `hashtextextended('horsies-worker-liveness:' ||
+  worker_id, 0)`) on one connection of its own to the session URL, from
+  before its first claim to the end of its stop. Each acquisition of the
+  lock writes a new generation for the worker id in the same transaction,
+  and the worker counts the lock as held again only after that transaction
+  committed. When two reaper passes find the lock of a worker free at least
+  75 seconds apart at one generation, with no pass between them that finds
+  it held or at another generation, and a read after the second pass still
+  finds that generation, the reaper recovers that worker's RUNNING tasks
+  (`WORKER_CRASHED`, with a retry when the retry policy allows it) and
+  returns its CLAIMED tasks to PENDING, whatever their heartbeats; before,
+  they waited for `running_stale_threshold_ms` (default 300 s) and
+  `claimed_stale_threshold_ms`. A worker that takes its lock again between
+  two passes writes a new generation, so two losses of its lock never count
+  as one loss. Only rows that the worker claimed before the first of the two
+  passes are recovered this way, and each statement checks under the row
+  lock that the row is still that worker's claim. A worker that holds a task
+  and whose lock is not held for 60 seconds kills every child that holds a
+  task and exits with the new code 79 (with `auto_fail_stale_running=True`).
+  The lock adds one connection per worker: `check(live=True)`, `HRS-219` and
+  the boot log count it as `liveness lock 1`. The baseline functions
+  `horsies_stale_running_scan`, `horsies_finish_stale_attempt` and
+  `horsies_requeue_stale_claims` take an evidence argument (`BEAT_AGE` or
+  `OWNER_GONE`). New in the baseline: the table `horsies_worker_liveness`
+  (one generation per worker id), the sequence
+  `horsies_worker_liveness_generation`, and the functions
+  `horsies_worker_liveness_key`, `horsies_take_worker_liveness`,
+  `horsies_unheld_worker_owners`, `horsies_worker_liveness_generations` and
+  `horsies_forget_ended_worker_liveness` (the reaper deletes the generation
+  rows of ended workers at each retention sweep).
 
 ### Fixed
 
@@ -398,6 +666,13 @@ written in Rust, on a new baseline schema.
   `slot_health` (`GET /api/workers`). On the baseline schema every snapshot
   records these facts.
 
+- **`RerunInputUnavailable.reference_locator`.** `RerunInputUnavailable`
+  keeps `task_id` and `disposition`. The baseline history row stores no
+  input reference: a row without a stored input holds only its disposition
+  (`DECLINED_BY_POLICY`, `OVER_BOUND` or `NEVER_ELIGIBLE`). In 0.7 no
+  writer stored a reference, so the field was always `None`. Remove the
+  read.
+
 - **The Python route modules of the web app.** `horsies.web.routes`,
   `horsies.web.events`, `horsies.web.read_cache`,
   `horsies.web.auth.view_guard`, `horsies.web.auth.act_guard` and
@@ -406,6 +681,97 @@ written in Rust, on a new baseline schema.
 
 - **Syce, the terminal monitoring tool, is removed; the web UI is the
   monitoring tool.**
+
+- **The Python implementation of the core is removed.** The internal
+  modules that the core replaced had no caller and are deleted: the worker
+  parent (`horsies.core.worker.worker`, `slots`, `dispatch`, `claiming`,
+  `finalize`, `reaper` and the modules they used), the state and calculator
+  of the scheduler, the workflow engine (`horsies.core.workflows.functions`,
+  `node_finish`, `phase2_recovery`, `recovery`, `recovery_limit`, `steps`,
+  `stored_success_policy`), the history maintenance
+  (`horsies.core.history.commands`, `outcomes`, `heartbeats`, `phase2`,
+  `identity.uuid7`, `identity.reservations`, `maintenance.coverage`,
+  `maintenance.pruning`, `partitions.catalog`, `health`, `locks`,
+  `manager`, `retirement`), the stored result decoder
+  (`horsies.core.history.archive.results`), the terminal writes
+  (`horsies.core.lifecycle.classify`, `commands`, `fences`, `persistence`,
+  `horsies.core.history.terminalization`, `horsies.core.brokers.stale_running`,
+  `horsies.core.utils.retry`), `horsies.monitoring.execution_classes`, the
+  ORM models (`horsies.core.models.task_pg` with `Base`, `TaskModel`,
+  `TaskAttemptModel`, `TaskHeartbeatModel`, `WorkerStateModel`,
+  `ScheduleStateModel`; `horsies.core.models.workflow_pg` with
+  `WorkflowModel`, `WorkflowTaskModel`), the schema install
+  (`horsies.core.baseline`, `baseline.install`, `baseline.migration`), the
+  history reads (`horsies.core.history.reads.detail`, `reads.result`,
+  `reads.publisher`, `horsies.core.history.names`,
+  `horsies.core.history.partitions`), the attempt snapshot decoder
+  (`horsies.core.history.archive`, `archive.attempts`, `archive.versions`),
+  `horsies.core.utils.time` and the statement helpers of
+  `horsies.core.utils.db`. The re-exports `recover_stuck_workflow_tree` and
+  `recover_stuck_workflows_global` of `horsies.core.workflows` go with
+  them. Removed methods: `PostgresListener.listen_payload`,
+  `unsubscribe_payload`, `listen_many`, `unlisten` and `unsubscribe`;
+  `PostgresBroker.validate_worker_database_paths` and `send_route`;
+  `PartitionMaintenanceDatabase.coverage_gate_enabled`.
+
+- **`PostgresBroker.create_single_connection_engine` and
+  `BrokerResources.session_async_engine` are removed.**
+
+- **The Python listener, the per-loop resource sets, the sync runner and
+  the event loop limit are removed.** Every call of the broker runs on the
+  core: one pool for every thread and event loop of the process, and one
+  listener per process. A sync call runs on the calling thread, so no
+  `horsies-loop` thread starts, and a web process builds no SQLAlchemy
+  engine. Removed: `PostgresBroker.select_resources`, `run_sync` and
+  `discard_inherited_resources`; `SyncSendRoute`;
+  `horsies.core.brokers.resources` (`BrokerResources`, `EventLoopLimit`),
+  `horsies.core.brokers.listener` (`PostgresListener`),
+  `horsies.core.brokers.session_capability`,
+  `horsies.core.history.maintenance` (`PartitionMaintenanceDatabase`),
+  `horsies.core.utils.db`, and `LoopRunner` and `LoopRunnerError` of
+  `horsies.core.utils.loop_runner`. The member `EVENT_LOOP_LIMIT` of
+  `BrokerErrorCode`, `TaskSendErrorCode`, `WorkflowStartErrorCode`,
+  `HandleErrorCode`, `MonitoringQueryErrorCode`, `TaskActionErrorCode` and
+  `RetrievalCode`, and `LOOP_RUNNER_FAILED` of `BrokerErrorCode`,
+  `TaskSendErrorCode`, `WorkflowStartErrorCode` and `HandleErrorCode`, are
+  removed with their classes: `BrokerEventLoopLimit`,
+  `BrokerLoopRunnerFailed`, `TaskSendEventLoopLimit`,
+  `TaskSendLoopRunnerFailed`, `WorkflowStartEventLoopLimit`,
+  `WorkflowStartLoopRunnerFailed`, `HandleEventLoopLimit`,
+  `HandleLoopRunnerFailed`, `MonitoringQueryEventLoopLimit` and
+  `TaskActionEventLoopLimit`. `TaskSendRetryable` and
+  `WorkflowStartRetryable` no longer hold a `LOOP_RUNNER_FAILED` class;
+  `BrokerSyncCallError` is `BrokerAsyncContext`, and
+  `ensure_schema_initialized` returns `Result[None, BrokerOperationFailed]`.
+  `TaskError` accepts `'EVENT_LOOP_LIMIT'` as a user code.
+
+- **Client helpers with no caller in the library.** From
+  `horsies.core.types.result`: `do`, `do_async`, `as_result`,
+  `as_async_result` and `OkErr`. From `horsies.core.errors`:
+  `workflow_validation_error` and `task_definition_error` (construct
+  `WorkflowValidationError` or `TaskDefinitionError`). From
+  `horsies.core.utils.imports`: `unload_file_path` and
+  `compute_package_path_from_fs`. From `horsies.core.workflows.registry`:
+  `get_task_node`, `get_subworkflow_node`, `get_node`,
+  `is_workflow_registered`, `register_workflow_spec`,
+  `unregister_workflow_spec` and `clear_workflow_registry`: a `WorkflowSpec`
+  is no longer registered by its name, and the child build of a sub-workflow
+  node loads its definition by `definition_key`. Also
+  `TaskRegistry.unregister` (use `del app.tasks[name]`, which raises
+  `NotRegistered` for a name that is not
+  registered), `WF_TASK_TERMINAL_VALUES` of `horsies.core.models.workflow`
+  (use `WORKFLOW_TASK_TERMINAL_STATES`), and `BANNER` and `format_banner`
+  of `horsies.core.banner`. From `horsies.core.codec.json_io`:
+  `loads_json_bytes` and `dumps_canonical_json`. The enqueue statement
+  helpers of `horsies.core.brokers.enqueue_task` (everything but
+  `SendKind`), the command fingerprint module
+  `horsies.core.history.identity.fingerprint` and `ScopedIdempotencyKey` of
+  `horsies.core.history.identity.keys`: the core runs the send. From
+  `horsies.core.codec.task_options`: `stored_retry_policy`,
+  `stored_max_retries`, `InvalidRetryPolicy` and `NoRetryPolicy` (the core
+  reads the stored retry policy). From `horsies.web.schema`:
+  `classify_without_migrations` and `classify_stored_version` (the core
+  classifies the schema). The package `horsies` exports none of them.
 
 ### Rust client (crate `horsies`)
 
@@ -452,10 +818,33 @@ unless it starts with "Added".
 - **A pool size outside the core's bounds is refused.** `Horsies::new`
   refuses `broker.pool_size` outside 1 to 10,000 and `broker.max_overflow`
   above 10,000, with the field name.
-- **A worker profile with a preload is refused.** A Rust worker starts each
-  child with `exec` of its own binary, so `Horsies::new` refuses a profile
-  whose `preload` is `Library` (the default) or `App`, with the path
-  `worker_profiles.<name>.preload`. Set `preload: ChildPreload::NoPreload`.
+- **The core reads only the connection settings that it supports.** These
+  are the URL and its supported query parameters (`host`, `port`, `user`,
+  `password`, `dbname`, `application_name`, `options`, `connect_timeout`,
+  `sslmode`, `sslrootcert`, `sslcert`, `sslkey`, `sslnegotiation`,
+  `channel_binding`, `target_session_attrs`, `load_balance_hosts`), the TLS
+  files that the URL names, `PGPASSWORD` and `~/.pgpass`, as in the Python
+  client. Another libpq parameter (for example `hostaddr`), a parameter of
+  sqlx (`ssl-mode`, `ssl-root-cert`, `ssl-ca`, `ssl-cert`, `ssl-key`,
+  `statement-cache-capacity`), an unknown parameter, a parameter given
+  twice, a URL with no host, and a libpq environment variable that libpq
+  would apply are refused by name when the first pool opens; `check_live`
+  reports the refusal. The keepalive parameters and `tcp_user_timeout` are
+  refused in the URL: set them in `PostgresConfig`. The alpha opened its
+  connections with sqlx 0.8: it applied `PGHOST`, `PGHOSTADDR`, `PGPORT`,
+  `PGUSER`, `PGDATABASE`, `PGSSLMODE`, `PGSSLROOTCERT`, `PGSSLCERT`,
+  `PGSSLKEY`, `PGAPPNAME`, `PGOPTIONS` and `PGPASSFILE` when the URL did
+  not set the parameter, read the sqlx parameters, and ignored every other
+  parameter with a warning, `connect_timeout`, `target_session_attrs`,
+  `channel_binding`, `sslnegotiation` and `load_balance_hosts` included.
+  Those five now apply.
+- **A worker profile with a preload is refused, and no preload is the
+  default.** A Rust worker starts each child with `exec` of its own binary,
+  so `Horsies::new` refuses a profile whose `preload` is `Library` or `App`,
+  with the path `worker_profiles.<name>.preload`. `ChildPreload::default()`
+  is `NoPreload`, so a profile that does not set `preload` starts: one built
+  with `..WorkerProfile::default()`, or one read from a config text without
+  the key. The Python client keeps its own default, `ChildPreload.LIBRARY`.
 - **`role` and `set_role` use `AppRole`** (`Producer`, `Worker`,
   `Scheduler`) in place of a string.
 - **Added: send suppression on the app.** `suppress_sends(bool)` and
@@ -503,8 +892,8 @@ unless it starts with "Added".
   `SEND_SUPPRESSED` are no longer task codes. Added:
   `WORKFLOW_RECOVERY_LIMIT_REACHED`, `SUBWORKFLOW_DEPTH_LIMIT_REACHED`,
   `TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`,
-  `WORKFLOW_START_INCOMPLETE`, `NO_TYPE_AVAILABLE`, `EVENT_LOOP_LIMIT`,
-  `ASYNC_CONTEXT`, `INVALID_INPUT`, `WAIT_INSIDE_TASK` and
+  `WORKFLOW_START_INCOMPLETE`, `NO_TYPE_AVAILABLE`, `ASYNC_CONTEXT`,
+  `INVALID_INPUT`, `WAIT_INSIDE_TASK` and
   `WORKFLOW_OUTPUT_SKIPPED`. `ExceptionRecord` and `SubWorkflowFailure`
   (the failed child workflow as top-level fields) replace
   `SubWorkflowError`.
@@ -576,10 +965,11 @@ unless it starts with "Added".
 - **`TaskSendError` is the closed catalog of Python's send codes:**
   `SendSuppressed`, `AsyncContext { task_id, payload }` (a blocking send on
   a thread that runs a tokio runtime; nothing was written),
-  `ValidationFailed`, `EnqueueFailed { retryable }` (the row may or may not
-  exist), `PayloadMismatch`, `IdempotencyKeyConflict { owner_task_id }` and
-  `PayloadTooLarge { size_bytes, limit_bytes }`, each with only the facts of
-  its state. `retry_send` and `retry_schedule` accept only `AsyncContext`,
+  `ValidationFailed { cause }`, `EnqueueFailed { retryable, cause }` (the
+  row may or may not exist), `PayloadMismatch`, `IdempotencyKeyConflict {
+  owner_task_id }` and `PayloadTooLarge { size_bytes, limit_bytes }`, each
+  with only the facts of its state. `cause` is what the send met
+  (`failure_cause()`, Python's `exception`). `retry_send` and `retry_schedule` accept only `AsyncContext`,
   `EnqueueFailed` and `IdempotencyKeyConflict`, send the same task id and
   payload, and refuse the error of another task or of the other method.
 - **A resend is a repeat.** With `resend_on_transient_err`, a retryable
@@ -724,11 +1114,100 @@ unless it starts with "Added".
   that runs a tokio runtime it runs nothing and answers `ASYNC_CONTEXT`:
   `TaskSendError::AsyncContext` with the prepared task id and payload (an
   async retry sends them), `ReadError::AsyncContext` (added; not kept by
-  the handle), `BrokerErrorCode::AsyncContext`, `HRS-217` in the check
-  report, `WorkflowStartErrorCode::AsyncContext` with the workflow id of
-  the start, `HandleErrorCode::AsyncContext`, or
+  the handle), `BrokerOperationError::AsyncContext`, `HRS-217` in the check
+  report, `WorkflowStartError::AsyncContext` with the workflow id of
+  the start, `HandleOperationError::AsyncContext`, or
   `WorkflowReadError::AsyncContext` (added). The body of a `fn` task in a
   worker child may call them.
+- **Every call that runs on the core panics in a fork.** In a process that
+  was forked without `exec` after the core's process runtime started in its
+  parent, every public call that runs on the core panics with the call,
+  both process ids and the fix, async and blocking forms alike: the sends
+  and retries, the reads, the health reads, `check_live`, the workflow
+  starts, the methods of `WorkflowHandle`, `horsies::monitoring`,
+  `rerun_task`, `run_worker`, `run_scheduler` and the monitoring mount. No
+  call returns the fork as an error value; Python raises
+  `ForkedAfterCoreStart` in the same state. A runtime whose threads the
+  operating system refused to start is still the retryable database failure
+  of the call. `WorkerRunError::RuntimeUnavailable` and
+  `SchedulerRunError::RuntimeUnavailable` hold `RuntimeStartFailed` (new)
+  in place of `ProcessRuntimeRefusal`, which had the fork case too.
+- **`BrokerOperationError` is an enum with one variant per state.** The
+  variants are Python's classes that the core produces: `OperationFailed`
+  (with a `BrokerOperationFailedCode`, the nine operation codes),
+  `EnqueueFailed`, `PayloadMismatch`, `IdempotencyKeyConflict` (with
+  `owner_task_id`), `InvalidJsonPayload`, `InvalidTaskOptions`,
+  `InvalidInput`, `AsyncContext`, `ListenerDisabled` and `WaitInsideTask`.
+  Each has only the facts of its state; `retryable` is a field of
+  `OperationFailed` and `EnqueueFailed` only. The fields `code`, `message`,
+  `retryable` and `cause` become the methods `code()`, `message()`,
+  `retryable()` and `failure_cause()`.
+- **`WorkflowStartError` is an enum with one variant per state.**
+  `ValidationFailed` (with `workflow_id` and `cause`), `IdConflict` (with
+  `workflow_id` and `existing_workflow_name`, the name that holds the id),
+  `EnqueueFailed` (with `workflow_id`, `retryable` and `cause`) and
+  `AsyncContext` (with `workflow_id`); each has `message` and
+  `workflow_name`. The fields become the methods `code()`, `message()`,
+  `retryable()`, `workflow_name()`, `workflow_id()` and `failure_cause()`.
+  Every variant has the id of its start, as in Python: a start mints its id
+  before its checks, so `start_workflow::<D>()` before the registration of
+  `D` names the id it minted.
+- **`HandleOperationError` is an enum with one variant per state.**
+  `WorkflowNotFound`, `DbOperationFailed` (with `retryable` and `cause`),
+  `StoredDataInvalid` and `ResumeRecoveryFailed` (with `cause`), and
+  `AsyncContext`; each has `message` and `workflow_id`. The fields become
+  the methods `code()`, `message()`, `retryable()`, `workflow_id()` and
+  `failure_cause()`.
+- **The `cause` of `HandleOperationError` is the `WorkflowError`.**
+  `DbOperationFailed`, `StoredDataInvalid` and `ResumeRecoveryFailed` carry
+  the `WorkflowError` that failed the operation (a failed connect is
+  `WorkflowError::Broker`), and `HandleOperationError` is no longer
+  `Clone`. The message of a failure starts with the operation's label, as
+  Python's: `Status failed for workflow <id>: <cause>`, and `Workflow <id>
+  not found` for `WorkflowNotFound`. The `WorkflowReadError::Database`
+  message of a failed `result_for` names the node: `DB query failed for
+  result_for node <node_id> in workflow <id>: <cause>`; the
+  `HandleOperation::ResultFor` variant holds the `node_id`. A blocking form
+  whose process runtime did not start has the cause
+  `BrokerError::ProcessRuntime` (new).
+- **`WorkflowStartError` carries typed causes.** `ValidationFailed` has
+  `cause: StartRefusalCause` (new: `Error(WorkflowError)` for a refusal of
+  the engine, `Check` for a refusal that a check found), and
+  `EnqueueFailed` has `cause: WorkflowError` (a failed connect or schema
+  install is `WorkflowError::Broker`). `WorkflowStartError` is no longer
+  `Clone`. A blocking start whose process runtime did not start has the
+  cause `BrokerError::ProcessRuntime`.
+- **`BrokerOperationError` carries typed causes.** `OperationFailed` has
+  `cause: BrokerOperationSource` (new: `Broker(BrokerError)`,
+  `ClassRead(ClassReadRefused)`, `Snapshot(WorkerStateUnreadable)`,
+  `Listen(ListenError)`, `TaskInfoMoved { task_id, passes }`,
+  `ArgumentUnreadable`); `EnqueueFailed` and `InvalidJsonPayload` have
+  `cause: BrokerCheckCause` (new: `Error(BrokerError)` or `Check`);
+  `InvalidTaskOptions` and `InvalidInput` have `cause: BrokerRefusalCause`
+  (new: `Check`, `JsonUnreadable(String)` or `ValueRule(String)`).
+  `BrokerOperationError` is no longer `Clone`, and its `Error::source` is
+  the cause. Constructors per operation code build Python's message:
+  `schema_init_failed`, `task_info_query_failed`, `task_info_invalid_json`,
+  `raw_result_query_failed`, `monitoring_query_failed`,
+  `monitoring_query_refused`, `db_ping_failed`, `worker_ping_failed`
+  (with `WorkerPingStep`, new), `invalid_input`, `operation_failed`,
+  `enqueue_error` (the code of a failed enqueue), `enqueue_refused`,
+  `enqueue_failed`. The messages of the health reads, `get_task_info` and
+  the result reads gain the operation's prefix, as Python's.
+  `BrokerError::RetentionClassKey` (new) is a retention class key that no
+  class derives, which a client that takes the key as text refuses before
+  any statement.
+- **`MonitoringQueryError` and `TaskActionError` are enums with one
+  variant per state.** `MonitoringQueryError` (`horsies::monitoring`):
+  `DbOperationFailed` (with `retryable`) and `HistoryContractViolation`,
+  each with `message` and `source`; the fields become the methods
+  `code()`, `message()`, `retryable()`, `error_source()` and
+  `failure_cause()`. `TaskActionError`: `NotFound`, `NotCancellable` and
+  `WorkflowTask` (each with `current_status`, a `TaskStatus`, not an
+  `Option`), `DbOperationFailed` (with `retryable` and `cause`) and
+  `StoredDataInvalid`; each has `message` and `task_id`. The fields become
+  the methods `code()`, `message()`, `retryable()`, `task_id()` and
+  `failure_cause()`.
 - **`check` and `check_live` return `Result<CheckPassed, CheckReport>`.**
   The report holds the refusals of the first phase that refused: the task
   options of a task registered by hand, then the schedules (not for a
@@ -888,6 +1367,8 @@ unless it starts with "Added".
   `SourceAbsent { reason }` (a `TaskAbsenceReason` in place of
   `predates_retained_floor: Option<bool>`), `SourceCorrupt`, `NotEligible`,
   `InputUnavailable`, `InputCorrupt`, `KeyConflict`, `KeyReplay`.
+  `InputUnavailable` has `task_id` and `disposition`: its field
+  `reference_locator`, which was always `None`, is removed.
 - **Added: `rerun::rerun_task_in(&mut transaction, &command, &policy,
   sent_at)`**, the rerun in a transaction that the caller owns (Python
   `rerun_task(connection, ...)`): the core builds each statement and
@@ -897,7 +1378,8 @@ unless it starts with "Added".
   `rerun::TokioPostgresCaller` (feature `tokio-postgres`) and
   `rerun::SqlxCaller` (feature `sqlx`). Errors are `CallerRerunError<E>`:
   `Driver(E)`, `ClassNotRegistered { key }`, `ClientFamilyMismatch
-  { stored }`, `CallerKeyRefused`, `IdMintRefused`, `Row`.
+  { stored }`, `UnknownStoredFamily` (a family row that holds no client
+  family), `CallerKeyRefused`, `IdMintRefused`, `Row`.
 - **The client writes each stored form as Python writes it**, as the shared
   vectors of `crates/horsies-core/tests/fixtures/stored_forms/` pin it:
   - Task input: a send of a task with no parameters, and a schedule

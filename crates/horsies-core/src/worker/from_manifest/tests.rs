@@ -7,6 +7,7 @@ use serde_json::json;
 
 use super::*;
 use crate::core::config::worker_profile::ProfileSelectionRefused;
+use crate::test_support::TestDatabase;
 use crate::worker_manifest::parse_worker_manifest;
 use crate::worker_manifest::tests::{full_profile, manifest, named, parsed};
 
@@ -143,5 +144,34 @@ async fn the_worker_broker_is_of_the_family_of_its_caller() {
             Err(refused) => panic!("the batch plan's broker config is valid: {refused}"),
         };
         assert_eq!(broker.client_family(), family);
+    }
+}
+
+/// The install of the worker process's broker on an empty database records
+/// the family of its caller: `PYTHON` for the Python CLI's worker, `RUST` for
+/// the Rust client's. A worker broker that took a default family instead
+/// recorded `RUST` for the Python worker.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_install_of_the_worker_broker_records_the_family_of_its_caller() {
+    for family in [ClientFamily::Python, ClientFamily::Rust] {
+        let database = TestDatabase::create_empty().await;
+        let broker = match worker_broker(&PostgresConfig::from_url(database.url()), family).await {
+            Ok(broker) => broker,
+            Err(refused) => panic!("the config of a test database is valid: {refused}"),
+        };
+        if let Err(error) = broker.migrate().await {
+            panic!("the install on an empty database: {error}");
+        }
+        let recorded: String = database
+            .client()
+            .query_one("SELECT family FROM horsies_client_family", &[])
+            .await
+            .expect("the install wrote one family row")
+            .get(0);
+        assert_eq!(recorded, family.as_str());
+        broker.close().await;
+        drop(broker);
+        database.drop().await;
     }
 }

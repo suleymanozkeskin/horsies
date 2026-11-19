@@ -23,6 +23,7 @@ use crate::broker::postgres::PostgresBroker;
 use crate::core::lifecycle::{
     AfterFailure, AttemptWriteRefusal, FailedAttemptOutcome, TerminalizationKind,
 };
+use crate::test_support::sql::{self, TestPool};
 use crate::worker::recovery::on_test_pool::mark_stale_running_as_failed;
 use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
 use crate::workflow_engine::lifecycle::pause_workflow;
@@ -324,12 +325,12 @@ async fn finalizer_row_lock_wins_reaper_race() {
     set_started(&pool, task_id, Since::SecondsAgo(120.0)).await;
 
     let mut finalizer = pool.begin().await.expect("begin the finalizer");
-    sqlx::query(TASK_LOCK_SQL)
+    sql::query(TASK_LOCK_SQL)
         .bind(task_id)
         .execute(&mut *finalizer)
         .await
         .expect("hold the task lock");
-    sqlx::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
+    sql::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
         .bind(task_id)
         .execute(&mut *finalizer)
         .await
@@ -343,7 +344,7 @@ async fn finalizer_row_lock_wins_reaper_race() {
     // The success takes the task lock again in the finalizer's session and
     // reads the row the finalizer holds.
     let outcome: String =
-        sqlx::query_scalar("SELECT outcome FROM horsies_finish_workflow_success($1, $2, $3, $4)")
+        sql::query_scalar("SELECT outcome FROM horsies_finish_workflow_success($1, $2, $3, $4)")
             .bind(task_id)
             .bind(WORKER)
             .bind(generation())
@@ -373,9 +374,9 @@ async fn finalizer_row_lock_wins_reaper_race() {
 }
 
 /// Return once a backend whose query names `function` waits on a lock.
-async fn until_a_backend_waits_on_a_lock(pool: &sqlx::PgPool, function: &str) {
+async fn until_a_backend_waits_on_a_lock(pool: &TestPool, function: &str) {
     for _ in 0..LOCK_WAIT_POLLS {
-        let waiting: bool = sqlx::query_scalar(
+        let waiting: bool = sql::query_scalar(
             "SELECT EXISTS(
                  SELECT 1 FROM pg_stat_activity
                  WHERE datname = current_database()
@@ -412,7 +413,7 @@ async fn pause_resets_retry_window_claimed_workflow_task() {
         },
     )
     .await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_tasks SET next_retry_at = NOW() - interval '1 second' WHERE id = $1",
     )
     .bind(task_id)
@@ -421,13 +422,16 @@ async fn pause_resets_retry_window_claimed_workflow_task() {
     .expect("open the retry window");
     let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "RUNNING").await;
 
-    let paused = pause_workflow(&PostgresBroker::from_pool(pool.clone()), workflow_id)
-        .await
-        .expect("pause");
+    let paused = pause_workflow(
+        &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
+        workflow_id,
+    )
+    .await
+    .expect("pause");
 
     assert!(paused);
     let workflow_status: String =
-        sqlx::query_scalar("SELECT status::text FROM horsies_workflows WHERE id = $1")
+        sql::query_scalar("SELECT status::text FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
             .fetch_one(&pool)
             .await
@@ -452,7 +456,7 @@ async fn reaper_recovers_stale_runner_when_owner_worker_state_is_fresh() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &running(Origin::Send)).await;
     set_started(&pool, task_id, Since::SecondsAgo(120.0)).await;
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_worker_states (
             worker_id, snapshot_at, hostname, pid, processes, max_claim_batch,
             max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
@@ -483,7 +487,7 @@ async fn reaper_recovers_stale_runner_when_owner_worker_state_is_fresh() {
     assert_eq!(image.terminalization_kind, "FAIL_STALE");
     assert_eq!(image.error_code.as_deref(), Some("WORKER_CRASHED"));
     assert!(image.result_payload.is_some());
-    sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+    sql::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
         .bind(WORKER)
         .execute(&pool)
         .await

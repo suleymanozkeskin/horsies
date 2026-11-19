@@ -28,11 +28,9 @@ from horsies import (
     BrokerEnqueueError,
     BrokerEnqueueFailed,
     BrokerErrorCode,
-    BrokerEventLoopLimit,
     BrokerIdempotencyKeyConflict,
     BrokerInvalidInput,
     BrokerInvalidTaskOptions,
-    BrokerLoopRunnerFailed,
     BrokerOperationError,
     BrokerOperationFailed,
     BrokerPayloadMismatch,
@@ -43,20 +41,16 @@ from horsies import (
     TaskSendPayload,
     broker_error_cause,
 )
-from horsies.core.brokers.enqueue_task import Inserted, SendKind, enqueue_result
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import (
     PostgresBroker,
-    SendCommand,
     _async_context_err,  # pyright: ignore[reportPrivateUsage]
-    _command_fingerprint,  # pyright: ignore[reportPrivateUsage]
-    _loop_runner_err,  # pyright: ignore[reportPrivateUsage]
     _parse_enqueue_input,  # pyright: ignore[reportPrivateUsage]
 )
 from horsies.core.task_decorator import (
     _map_broker_err,  # pyright: ignore[reportPrivateUsage]
 )
 from horsies.core.types.result import Result
-from horsies.core.utils.loop_runner import LoopRunnerError
 
 TASK_ID = UUID('0198c0de-0000-7000-8000-000000000001')
 
@@ -143,10 +137,10 @@ def enqueue_returns_only_enqueue_and_sync_call_errors(broker: PostgresBroker) ->
                     pass
 
 
-async def schema_init_returns_only_operation_and_loop_limit(
+async def schema_init_returns_only_the_operation_failure(
     broker: PostgresBroker,
 ) -> None:
-    declared: Result[None, BrokerOperationFailed | BrokerEventLoopLimit] = (
+    declared: Result[None, BrokerOperationFailed] = (
         await broker.ensure_schema_initialized()
     )
     _ = declared
@@ -175,54 +169,20 @@ def every_enqueue_variant_is_matched(
             return 'task options refused'
         case BrokerInvalidInput():
             return 'input refused'
-        case BrokerEventLoopLimit():
-            return 'loop limit'
         case BrokerAsyncContext():
             return 'async context'
-        case BrokerLoopRunnerFailed():
-            return 'loop runner failed'
         case _ as unreachable:
             assert_never(unreachable)
 
 
-def enqueue_helpers_return_their_subsets(good_until: datetime) -> None:
+def enqueue_helpers_return_their_subsets() -> None:
     stored_input: Result[str, BrokerInvalidInput] = _parse_enqueue_input(
         'report', None,
     )
-    fingerprint: Result[bytes, BrokerInvalidInput] = _command_fingerprint(
-        task_name='report',
-        queue_name='default',
-        priority=100,
-        stored_input='{}',
-        good_until=good_until,
-        enqueue_delay_seconds=None,
-        task_options=None,
-        retention_class_key='default',
-        retain_rerun_input=True,
-    )
-    answered: Result[
-        UUID, BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict
-    ] = enqueue_result(Inserted(), task_id=TASK_ID, task_name='report')
     async_context: Err[BrokerAsyncContext] = _async_context_err(
         'PostgresBroker.enqueue()', 'broker.enqueue_async(...)',
     )
-    loop_runner: Err[BrokerLoopRunnerFailed] = _loop_runner_err(
-        'PostgresBroker.enqueue()', LoopRunnerError('stopped'),
-    )
-    _ = (stored_input, fingerprint, answered, async_context, loop_runner)
-
-
-def send_command_returns_only_the_input_refusals(broker: PostgresBroker) -> None:
-    built: Result[SendCommand, BrokerInvalidInput | BrokerInvalidTaskOptions] = (
-        broker.prepare_send_command(
-            task_name='report',
-            queue_name='default',
-            priority=100,
-            kwargs_json=None,
-            task_options=None,
-        )
-    )
-    _ = built
+    _ = (stored_input, async_context)
 
 
 def send_mapping_refuses_the_operation_error(

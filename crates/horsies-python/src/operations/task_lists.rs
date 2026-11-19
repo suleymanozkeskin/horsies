@@ -3,7 +3,7 @@
 //! (`PostgresBroker::get_stale_tasks`, `PostgresBroker::get_expired_tasks`).
 //!
 //! The outcome is `TaskListComplete`, `TaskListTruncated` (the first `bound`
-//! rows; more rows match), or `BrokerFailure` with `INVALID_INPUT` (a stale
+//! rows; more rows match), or the generated broker error class with `INVALID_INPUT` (a stale
 //! threshold that the rule refuses; nothing ran) or `MONITORING_QUERY_FAILED`.
 //! Each row is the `dict` of Python's public API, with its keys in Python's
 //! order and the task id as `uuid.UUID`. Each list sends one statement in
@@ -11,14 +11,13 @@
 
 use chrono::TimeDelta;
 use horsies_core::{
-    BoundedTaskList, BrokerError, BrokerErrorCode, ExpiredTaskRow, StaleMinutes, StaleTaskRow,
-    StaleThresholdRefusal,
+    BoundedTaskList, BrokerError, BrokerOperationError, BrokerOperationSource, ExpiredTaskRow,
+    StaleMinutes, StaleTaskRow, StaleThresholdRefusal,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyInt, PyList};
 use pyo3::IntoPyObjectExt;
 
-use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
 use crate::records::BrokerFailure;
 
@@ -133,15 +132,16 @@ pub fn stale_threshold(
 }
 
 /// The failure of a list whose broker did not connect: no statement ran.
-/// The message names the read, as the core's read failures do; the read is
-/// the subject of the exception.
-pub(crate) fn connect_failed(operation: &'static str, error: &BrokerError) -> BrokerFailure {
-    BrokerFailure {
-        code: BrokerErrorCode::MonitoringQueryFailed.to_string(),
-        message: format!("{operation} failed: {error}"),
-        retryable: error.is_retryable(),
-        exception: FailureException::of(operation, error),
-    }
+/// `MONITORING_QUERY_FAILED` with Python's message of the read (`{operation}
+/// failed: {error}`); the read is the subject of the exception.
+pub(crate) fn connect_failed(operation: &'static str, error: BrokerError) -> BrokerFailure {
+    BrokerFailure::of_operation_error(
+        operation,
+        BrokerOperationError::monitoring_query_failed(
+            operation,
+            BrokerOperationSource::Broker(error),
+        ),
+    )
 }
 
 /// The RUNNING tasks whose latest runner beat, or their start, is older
@@ -152,7 +152,7 @@ pub async fn stale_tasks_operation(
 ) -> TaskListOutcome<StaleTaskRow> {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
-        Err(error) => return TaskListOutcome::Failed(connect_failed("get_stale_tasks", &error)),
+        Err(error) => return TaskListOutcome::Failed(connect_failed("get_stale_tasks", error)),
     };
     match broker.get_stale_tasks(threshold.minutes()).await {
         Ok(list) => TaskListOutcome::Listed(list),
@@ -168,7 +168,7 @@ pub async fn expired_tasks_operation(
 ) -> TaskListOutcome<ExpiredTaskRow> {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
-        Err(error) => return TaskListOutcome::Failed(connect_failed("get_expired_tasks", &error)),
+        Err(error) => return TaskListOutcome::Failed(connect_failed("get_expired_tasks", error)),
     };
     match broker.get_expired_tasks().await {
         Ok(list) => TaskListOutcome::Listed(list),
@@ -234,14 +234,127 @@ mod tests {
     fn a_connect_failure_names_the_list_and_is_a_monitoring_failure() {
         let failed = connect_failed(
             "get_expired_tasks",
-            &BrokerError::ClaimContract("planned failure".to_owned()),
+            BrokerError::ClaimContract("planned failure".to_owned()),
         );
-        assert_eq!(failed.code, "MONITORING_QUERY_FAILED");
-        assert!(
-            failed.message.starts_with("get_expired_tasks failed: "),
-            "{}",
-            failed.message
+        assert_eq!(failed.subject, "get_expired_tasks");
+        assert_eq!(
+            failed.error.code(),
+            horsies_core::BrokerErrorCode::MonitoringQueryFailed
         );
-        assert!(!failed.retryable);
+        assert_eq!(
+            failed.error.message(),
+            "get_expired_tasks failed: claim contract violation: planned failure"
+        );
+        assert!(!failed.error.retryable());
+    }
+
+    /// The task id of the list rows of these tests.
+    const TASK_ID: &str = "0198c0de-0000-7000-8000-000000000001";
+
+    /// 2026-01-01T00:00:00Z, the time columns of the list rows.
+    fn started() -> chrono::DateTime<chrono::Utc> {
+        use chrono::TimeZone;
+        chrono::Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("a valid instant")
+    }
+
+    /// Run the Python `checks` with `entry` bound to the dict of `row`, and
+    /// the modules `uuid` and `datetime`.
+    fn check_entry(row: &impl TaskListEntry, checks: &std::ffi::CStr) {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let globals = PyDict::new(py);
+            globals.set_item("entry", row.entry(py)?)?;
+            globals.set_item("uuid", py.import("uuid")?)?;
+            globals.set_item("datetime", py.import("datetime")?)?;
+            py.run(checks, Some(&globals), None)
+        })
+        .expect("the checks pass");
+    }
+
+    /// A stale row is the dict of Python's public API, with its keys in
+    /// Python's order and the task id as `uuid.UUID`.
+    #[test]
+    fn a_stale_row_is_the_dict_of_the_python_api() {
+        let row = StaleTaskRow {
+            id: uuid::Uuid::parse_str(TASK_ID).expect("a valid task id"),
+            task_name: "slow_task".to_owned(),
+            worker_hostname: Some("host-1".to_owned()),
+            worker_pid: Some(1234),
+            worker_process_name: Some("child-1".to_owned()),
+            started_at: started(),
+            last_heartbeat: None,
+        };
+
+        check_entry(
+            &row,
+            c"started = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+assert entry == {
+    'id': uuid.UUID('0198c0de-0000-7000-8000-000000000001'),
+    'worker_hostname': 'host-1',
+    'worker_pid': 1234,
+    'worker_process_name': 'child-1',
+    'last_heartbeat': None,
+    'started_at': started,
+    'task_name': 'slow_task',
+}, entry
+assert list(entry) == [
+    'id',
+    'worker_hostname',
+    'worker_pid',
+    'worker_process_name',
+    'last_heartbeat',
+    'started_at',
+    'task_name',
+], list(entry)
+assert type(entry['id']) is uuid.UUID, type(entry['id'])
+",
+        );
+    }
+
+    /// An expired row is the dict of Python's public API, with its keys in
+    /// Python's order, the task id as `uuid.UUID` and `expired_for` as a
+    /// `timedelta`.
+    #[test]
+    fn an_expired_row_is_the_dict_of_the_python_api() {
+        let row = ExpiredTaskRow {
+            id: uuid::Uuid::parse_str(TASK_ID).expect("a valid task id"),
+            task_name: "slow_task".to_owned(),
+            queue_name: "default".to_owned(),
+            priority: 100,
+            sent_at: started(),
+            enqueued_at: started(),
+            good_until: started(),
+            expired_for_us: 300_000_000,
+        };
+
+        check_entry(
+            &row,
+            c"started = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+assert list(entry) == [
+    'id',
+    'task_name',
+    'queue_name',
+    'priority',
+    'sent_at',
+    'enqueued_at',
+    'good_until',
+    'expired_for',
+], list(entry)
+assert entry == {
+    'id': uuid.UUID('0198c0de-0000-7000-8000-000000000001'),
+    'task_name': 'slow_task',
+    'queue_name': 'default',
+    'priority': 100,
+    'sent_at': started,
+    'enqueued_at': started,
+    'good_until': started,
+    'expired_for': datetime.timedelta(minutes=5),
+}, entry
+assert type(entry['id']) is uuid.UUID, type(entry['id'])
+",
+        );
     }
 }

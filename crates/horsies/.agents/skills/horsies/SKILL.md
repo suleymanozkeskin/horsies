@@ -92,7 +92,7 @@ use std::convert::Infallible;
 use std::process::ExitCode;
 
 use horsies::{
-    task, AppConfig, ChildPreload, Horsies, IsolatedChildCount, IsolatedChildren,
+    task, AppConfig, Horsies, IsolatedChildCount, IsolatedChildren,
     IsolatedSetting, TaskError, WorkerProfile,
 };
 
@@ -106,7 +106,6 @@ fn build_app() -> Result<Horsies, Box<dyn std::error::Error>> {
         isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
             IsolatedChildCount::try_from(4)?,
         )),
-        preload: ChildPreload::NoPreload,
         ..WorkerProfile::default()
     };
     let config = AppConfig {
@@ -136,8 +135,9 @@ fn main() -> ExitCode {
 ```
 
 - `Horsies::new` does no I/O. The app connects at its first operation.
-- A Rust worker profile needs `preload: ChildPreload::NoPreload`.
-  `Horsies::new` refuses another value with `HRS-218`.
+- A Rust worker profile does not set `preload`. The default,
+  `ChildPreload::NoPreload`, is the only value that a Rust worker takes;
+  `Horsies::new` refuses `Library` and `App` with `HRS-218`.
 - `run` blocks its thread. Inside a tokio runtime it prints why and
   returns exit code 1.
 
@@ -299,6 +299,17 @@ Every error type is a closed catalog. Match on the variant or on the code.
 `retryable: true` means the cause may clear; it does not mean that a repeat
 is safe. The codes and their meaning are on the shared docs page
 `tasks/errors`.
+
+A fork is never an error value. Every public call that runs on the core,
+async or blocking, panics in a process that was forked without `exec`
+after the core's process runtime started in its parent: the sends, the
+reads, `check_live`, the workflow starts, `WorkflowHandle`,
+`horsies::monitoring`, `rerun_task`, `run_worker` and `run_scheduler`.
+The panic names the call, both process ids and the fix; nothing ran. Start
+child processes with `exec` (`std::process::Command`), or fork before the
+parent's first call that runs on the core. Python raises
+`ForkedAfterCoreStart` in the same state. `rerun_task_in` runs on the
+caller's transaction, not on the core's runtime, so it runs in a fork.
 
 ## Rerun a Terminal Task
 

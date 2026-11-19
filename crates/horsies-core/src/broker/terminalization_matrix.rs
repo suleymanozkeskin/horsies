@@ -13,21 +13,21 @@
 
 use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
-use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
-use crate::core::history::reads::publisher::StagedLoaderPublisher;
+use crate::broker::terminalization::on_test_pool::{terminalize, terminalize_in_transaction};
+use crate::core::history::identity::reservations::{
+    decode_reservation_row, key_reservation_claim_sql, ReservationClaim,
+};
 use crate::core::lifecycle::outcomes::GuardEvidence;
 use crate::core::lifecycle::{
     BatchSize, OwnedClaim, OwnedClaimBatch, TerminalizationCommand, TerminalizationKind,
     TerminalizationOutcome, WorkerOwned,
 };
 use crate::core::types::status::TaskStatus;
+use crate::test_support::sql::{self, TestListener, TestPool, TestPoolOptions};
 use crate::test_support::terminal_writes::{self, StaleFailure, TerminalFailure};
+use crate::test_support::{cover_partitions, migrated_database_url, migrated_pool};
 
 pub(super) const WIRE_PHASE2_EXPECTATIONS: [(&str, bool); 15] = [
     ("COMPLETE_LOCKED", true),
@@ -128,18 +128,18 @@ fn relation_rows_examined(plan: &serde_json::Value, relation: &str) -> f64 {
 /// the test (`crate::test_support`).
 struct IsolatedTerminalizationTestDatabase {
     database: crate::test_support::TestDatabase,
-    pool: PgPool,
+    pool: TestPool,
 }
 
 impl IsolatedTerminalizationTestDatabase {
     async fn create() -> Self {
         let database = crate::test_support::TestDatabase::create().await;
-        let pool = PgPoolOptions::new()
+        let pool = TestPoolOptions::new()
             .max_connections(5)
             .connect(database.url())
             .await
             .expect("connect isolated terminalization database");
-        run_coverage_pass(&pool).await;
+        cover_partitions(database.url()).await;
         Self { database, pool }
     }
 
@@ -147,49 +147,6 @@ impl IsolatedTerminalizationTestDatabase {
         self.pool.close().await;
         self.database.drop().await;
     }
-}
-
-/// One coverage pass (history leaves for two days, heartbeat leaves for two
-/// hours) with the reader publication.
-async fn run_coverage_pass(pool: &PgPool) {
-    let mut transaction = pool.begin().await.expect("coverage transaction");
-    let coverage = ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
-        .await
-        .expect("partition coverage");
-    assert!(
-        matches!(coverage, CoverageOutcome::Ensured(_)),
-        "{coverage:?}"
-    );
-    transaction.commit().await.expect("commit coverage");
-}
-
-/// The database of the running test (`crate::test_support::database_of_this_test`):
-/// a copy of the test template, with one coverage pass at the first call in
-/// the test, as a sqlx pool for the tests of the sqlx broker paths. Every
-/// call in one test gets the same database; it is dropped when the test's
-/// runtime shuts down.
-pub(crate) async fn migrated_pool() -> PgPool {
-    let database = crate::test_support::database_of_this_test().await;
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(database.url())
-        .await
-        .expect("connect the database of this test");
-    let _covered = database
-        .setup()
-        .get_or_init(|| run_coverage_pass(&pool))
-        .await;
-    pool
-}
-
-/// The URL of the database of the running test ([`migrated_pool`]), accepted
-/// by sqlx and by the core's URL parser.
-pub(crate) async fn migrated_database_url() -> String {
-    migrated_pool().await.close().await;
-    crate::test_support::database_of_this_test()
-        .await
-        .url()
-        .to_owned()
 }
 
 struct Seed {
@@ -219,9 +176,9 @@ impl Default for Seed {
 /// One live task with every column of the baseline task row named. A
 /// CLAIMED row carries a lease; a RUNNING row carries its worker fields; a
 /// workflow task carries no command fingerprint.
-async fn seed_task(pool: &PgPool, id: &str, seed: Seed) {
+async fn seed_task(pool: &TestPool, id: &str, seed: Seed) {
     let task_id = Uuid::parse_str(id).expect("UUID task id");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -258,8 +215,8 @@ async fn seed_task(pool: &PgPool, id: &str, seed: Seed) {
     .expect("seed task");
 }
 
-async fn seed_workflow(pool: &PgPool, id: &str, status: &str) {
-    sqlx::query(
+async fn seed_workflow(pool: &TestPool, id: &str, status: &str) {
+    sql::query(
         "INSERT INTO horsies_workflows (
             id, name, status, on_error, output_task_index,
             definition_key, depth, root_workflow_id,
@@ -276,8 +233,8 @@ async fn seed_workflow(pool: &PgPool, id: &str, status: &str) {
     .expect("seed workflow");
 }
 
-async fn seed_wf_task(pool: &PgPool, wf_id: &str, task_id: &str, status: &str) {
-    sqlx::query(
+async fn seed_wf_task(pool: &TestPool, wf_id: &str, task_id: &str, status: &str) {
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
             dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
@@ -300,7 +257,7 @@ async fn seed_wf_task(pool: &PgPool, wf_id: &str, task_id: &str, status: &str) {
 }
 
 async fn seed_linked_workflow_task_at(
-    pool: &PgPool,
+    pool: &TestPool,
     workflow_id: &str,
     task_id: &str,
     created_at: DateTime<Utc>,
@@ -315,7 +272,7 @@ async fn seed_linked_workflow_task_at(
         },
     )
     .await;
-    sqlx::query("UPDATE horsies_tasks SET created_at = $2 WHERE id = $1")
+    sql::query("UPDATE horsies_tasks SET created_at = $2 WHERE id = $1")
         .bind(uuid(task_id))
         .bind(created_at)
         .execute(pool)
@@ -324,7 +281,7 @@ async fn seed_linked_workflow_task_at(
     seed_wf_task(pool, workflow_id, task_id, "PENDING").await;
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 struct PostImage {
     status: String,
     terminal_at: Option<DateTime<Utc>>,
@@ -334,8 +291,21 @@ struct PostImage {
     claimed_by_worker_id: Option<String>,
 }
 
-async fn post_image(pool: &PgPool, id: &str) -> PostImage {
-    sqlx::query_as(
+impl sql::FromTestRow for PostImage {
+    fn from_row(row: &tokio_postgres::Row) -> Result<Self, sql::Error> {
+        Ok(Self {
+            status: sql::named(row, "status")?,
+            terminal_at: sql::named(row, "terminal_at")?,
+            terminalization_kind: sql::named(row, "terminalization_kind")?,
+            error_code: sql::named(row, "error_code")?,
+            failed_reason: sql::named(row, "failed_reason")?,
+            claimed_by_worker_id: sql::named(row, "claimed_by_worker_id")?,
+        })
+    }
+}
+
+async fn post_image(pool: &TestPool, id: &str) -> PostImage {
+    sql::query_as(
         "SELECT status::text, NULL::timestamptz AS terminal_at,
                 NULL::text AS terminalization_kind, NULL::text AS error_code,
                 NULL::text AS failed_reason, claimed_by_worker_id
@@ -352,8 +322,8 @@ async fn post_image(pool: &PgPool, id: &str) -> PostImage {
     .expect("post image")
 }
 
-async fn assert_phase2_presence(pool: &PgPool, id: &str, expected: bool) {
-    let present: bool = sqlx::query_scalar(
+async fn assert_phase2_presence(pool: &TestPool, id: &str, expected: bool) {
+    let present: bool = sql::query_scalar(
         "SELECT EXISTS (
              SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = $1
          )",
@@ -365,35 +335,35 @@ async fn assert_phase2_presence(pool: &PgPool, id: &str, expected: bool) {
     assert_eq!(present, expected, "phase2 presence for task {id}");
 }
 
-async fn cleanup(pool: &PgPool, ids: &[&str]) {
+async fn cleanup(pool: &TestPool, ids: &[&str]) {
     for id in ids {
         let task_id = Uuid::parse_str(id).expect("UUID task id");
-        sqlx::query("DELETE FROM horsies_workflow_phase2_pending WHERE task_id = $1")
+        sql::query("DELETE FROM horsies_workflow_phase2_pending WHERE task_id = $1")
             .bind(task_id)
             .execute(pool)
             .await
             .ok();
-        sqlx::query("DELETE FROM horsies_task_attempts WHERE task_id = $1")
+        sql::query("DELETE FROM horsies_task_attempts WHERE task_id = $1")
             .bind(task_id)
             .execute(pool)
             .await
             .ok();
-        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE task_id = $1")
+        sql::query("DELETE FROM horsies_workflow_tasks WHERE task_id = $1")
             .bind(task_id)
             .execute(pool)
             .await
             .ok();
-        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+        sql::query("DELETE FROM horsies_tasks WHERE id = $1")
             .bind(task_id)
             .execute(pool)
             .await
             .ok();
-        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+        sql::query("DELETE FROM horsies_task_history WHERE task_id = $1")
             .bind(task_id)
             .execute(pool)
             .await
             .ok();
-        sqlx::query("DELETE FROM horsies_key_reservations WHERE task_id = $1")
+        sql::query("DELETE FROM horsies_key_reservations WHERE task_id = $1")
             .bind(task_id)
             .execute(pool)
             .await
@@ -401,14 +371,14 @@ async fn cleanup(pool: &PgPool, ids: &[&str]) {
     }
 }
 
-async fn cleanup_workflow(pool: &PgPool, wf_id: &str) {
+async fn cleanup_workflow(pool: &TestPool, wf_id: &str) {
     let workflow_id = Uuid::parse_str(wf_id).expect("UUID workflow id");
-    sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+    sql::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
         .bind(workflow_id)
         .execute(pool)
         .await
         .ok();
-    sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+    sql::query("DELETE FROM horsies_workflows WHERE id = $1")
         .bind(workflow_id)
         .execute(pool)
         .await
@@ -423,8 +393,8 @@ fn owned(worker: &str, claimed_at: DateTime<Utc>) -> OwnedClaim {
 }
 
 /// The claim generation a seeded live row carries.
-async fn seeded_generation(pool: &PgPool, id: &str) -> DateTime<Utc> {
-    sqlx::query_scalar("SELECT claimed_at FROM horsies_tasks WHERE id = $1")
+async fn seeded_generation(pool: &TestPool, id: &str) -> DateTime<Utc> {
+    sql::query_scalar("SELECT claimed_at FROM horsies_tasks WHERE id = $1")
         .bind(uuid(id))
         .fetch_one(pool)
         .await
@@ -583,9 +553,7 @@ async fn fused_applies_with_attempt_notify_and_generation_fence() {
     // The function builds the wake from the locked row: the queue of the
     // matrix seed and the constant payload.
     let channel = "task_queue_default";
-    let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
-        .await
-        .expect("listener");
+    let mut listener = TestListener::connect_with(&pool).await.expect("listener");
     listener
         .listen("task_done")
         .await
@@ -620,7 +588,7 @@ async fn fused_applies_with_attempt_notify_and_generation_fence() {
 
     // The baseline stores no codec or content type: archive format version 1
     // implies the json-utf8 codec and the application/json content type.
-    let (version, snapshot, digest): (i16, Vec<u8>, Vec<u8>) = sqlx::query_as(
+    let (version, snapshot, digest): (i16, Vec<u8>, Vec<u8>) = sql::query_as(
         "SELECT attempt_archive_version, attempt_snapshot, attempt_snapshot_digest
          FROM horsies_task_history WHERE task_id = $1",
     )
@@ -640,7 +608,7 @@ async fn fused_applies_with_attempt_notify_and_generation_fence() {
     assert_eq!(attempts[0].attempt(), 1);
     assert_eq!(attempts[0].outcome(), "COMPLETED");
     let live_attempts: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1")
+        sql::query_scalar("SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1")
             .bind(Uuid::parse_str(&id).unwrap())
             .fetch_one(&pool)
             .await
@@ -685,20 +653,21 @@ async fn move_terminalizes_the_key_reservation_at_the_history_anchor() {
     )
     .await;
 
-    let mut connection = pool.acquire().await.expect("reservation connection");
-    let claim = claim_key_reservation(
-        &mut connection,
-        &key_digest,
-        1,
-        3_600_000_000,
-        1,
-        &[7_u8; 32],
-        task_uuid,
-    )
-    .await
-    .expect("claim reservation");
+    let claim_sql = key_reservation_claim_sql();
+    let (outcome, claimed_task, observed_version): (Option<String>, Option<Uuid>, Option<i16>) =
+        sql::query_as(&claim_sql)
+            .bind(key_digest.as_slice())
+            .bind(1_i16)
+            .bind(3_600_000_000_i64)
+            .bind(1_i16)
+            .bind([7_u8; 32].as_slice())
+            .bind(task_uuid)
+            .fetch_one(&pool)
+            .await
+            .expect("claim reservation");
+    let claim = decode_reservation_row(outcome.as_deref(), claimed_task, observed_version)
+        .expect("decode the reservation claim");
     assert!(matches!(claim, ReservationClaim::Applied { task_id } if task_id == task_uuid));
-    drop(connection);
 
     terminalize(
         &pool,
@@ -712,7 +681,7 @@ async fn move_terminalizes_the_key_reservation_at_the_history_anchor() {
     .expect("terminalize");
 
     let (disposition, expires_at, terminal_at): (String, DateTime<Utc>, DateTime<Utc>) =
-        sqlx::query_as(
+        sql::query_as(
             "SELECT r.disposition, r.expires_at, h.terminal_at
              FROM horsies_key_reservations r
              JOIN horsies_task_history h ON h.task_id = r.task_id
@@ -760,7 +729,7 @@ async fn fused_stale_generation_is_lost_claim() {
     ));
     assert_eq!(post_image(&pool, &id).await.status, "RUNNING");
     let attempts: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1")
+        sql::query_scalar("SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1")
             .bind(Uuid::parse_str(&id).unwrap())
             .fetch_one(&pool)
             .await
@@ -921,7 +890,7 @@ async fn fail_stale_applies_on_silence_and_refuses_on_heartbeat() {
         },
     )
     .await;
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid)
          VALUES ($1, 'w1', 'runner', NOW(), 'h', 1)",
     )
@@ -966,7 +935,7 @@ async fn fail_stale_applies_on_silence_and_refuses_on_heartbeat() {
     assert!(staleness.last_heartbeat_at.is_some());
     assert_eq!(post_image(&pool, &alive).await.status, "RUNNING");
 
-    sqlx::query("DELETE FROM horsies_heartbeats WHERE task_id = $1")
+    sql::query("DELETE FROM horsies_heartbeats WHERE task_id = $1")
         .bind(Uuid::parse_str(&alive).unwrap())
         .execute(&pool)
         .await
@@ -1066,7 +1035,7 @@ async fn expire_owned_claim_applies_for_any_generation_and_reports_deadline() {
     cleanup(&pool, &[&expired, &not_due]).await;
 }
 
-async fn drain_pending_expiry(pool: &PgPool) {
+async fn drain_pending_expiry(pool: &TestPool) {
     loop {
         let drained = terminalize(
             pool,
@@ -1091,7 +1060,7 @@ async fn expire_pending_batch_is_bounded_and_deadline_ordered() {
     assert_pending_expiry_order(&pool).await;
 }
 
-async fn assert_pending_expiry_order(pool: &PgPool) {
+async fn assert_pending_expiry_order(pool: &TestPool) {
     drain_pending_expiry(pool).await;
 
     let mut ids: Vec<String> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
@@ -1180,11 +1149,11 @@ async fn discovery_bounds_raise_in_function_too() {
         "SELECT * FROM horsies_cancel_orphaned_tasks(NULL::integer)",
         "SELECT * FROM horsies_cancel_orphaned_tasks(0)",
     ] {
-        let err = sqlx::query(sql).fetch_all(&pool).await.expect_err(sql);
-        let sqlx::Error::Database(db_err) = err else {
+        let err = sql::query(sql).fetch_all(&pool).await.expect_err(sql);
+        let sql::Error::Database(db_err) = err else {
             panic!("{sql}: expected database error");
         };
-        assert_eq!(db_err.code().as_deref(), Some("22023"), "{sql}");
+        assert_eq!(Some(db_err.code().code()), Some("22023"), "{sql}");
     }
 }
 
@@ -1264,8 +1233,8 @@ async fn phase2_expectation_table_matches_every_installed_wire_projection() {
 }
 
 /// The installed definition of `function` (a `regprocedure` text).
-async fn function_definition(pool: &PgPool, function: &str) -> String {
-    sqlx::query_scalar("SELECT pg_get_functiondef($1::regprocedure)")
+async fn function_definition(pool: &TestPool, function: &str) -> String {
+    sql::query_scalar("SELECT pg_get_functiondef($1::regprocedure)")
         .bind(function)
         .fetch_one(pool)
         .await
@@ -1482,8 +1451,8 @@ async fn cancel_owned_orphan_applies_only_without_runnable_linkage() {
     cleanup_workflow(&pool, &wf_id).await;
 }
 
-async fn drain_orphan_sweep(pool: &PgPool) {
-    let initial_cycles: i64 = sqlx::query_scalar(
+async fn drain_orphan_sweep(pool: &TestPool) {
+    let initial_cycles: i64 = sql::query_scalar(
         "SELECT completed_cycles FROM horsies_recovery_scan_cursors
          WHERE scan_name = 'orphan_workflow_tasks'",
     )
@@ -1499,7 +1468,7 @@ async fn drain_orphan_sweep(pool: &PgPool) {
         )
         .await
         .expect("drain");
-        let (completed_cycles, scanned): (i64, i32) = sqlx::query_as(
+        let (completed_cycles, scanned): (i64, i32) = sql::query_as(
             "SELECT completed_cycles, last_scan_rows
              FROM horsies_recovery_scan_cursors
              WHERE scan_name = 'orphan_workflow_tasks'",
@@ -1580,26 +1549,26 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
     let pool = database.pool.clone();
     let workflow_id = Uuid::parse_str("30000000-0000-7000-8000-000000000001").unwrap();
     let orphan_id = Uuid::parse_str("40000000-0000-7000-8000-00000000c351").unwrap();
-    sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+    sql::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
         .bind(workflow_id)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+    sql::query("DELETE FROM horsies_workflows WHERE id = $1")
         .bind(workflow_id)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'bounded_recovery_cursor_task'")
+    sql::query("DELETE FROM horsies_tasks WHERE task_name = 'bounded_recovery_cursor_task'")
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+    sql::query("DELETE FROM horsies_task_history WHERE task_id = $1")
         .bind(orphan_id)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_recovery_scan_cursors
          SET last_created_at = NULL, last_id = NULL,
              cycle_upper_created_at = NULL, cycle_upper_id = NULL,
@@ -1612,7 +1581,7 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, status, on_error, output_task_index,
              definition_key, depth, root_workflow_id,
@@ -1627,7 +1596,7 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query(
+    sql::query(
         "WITH generated AS (
              SELECT g,
                     ('40000000-0000-7000-8000-' ||
@@ -1657,7 +1626,7 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query(
+    sql::query(
         "WITH generated AS (
              SELECT g,
                     ('40000000-0000-7000-8000-' ||
@@ -1682,7 +1651,7 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query("ANALYZE horsies_tasks, horsies_workflow_tasks")
+    sql::query("ANALYZE horsies_tasks, horsies_workflow_tasks")
         .execute(&pool)
         .await
         .unwrap();
@@ -1692,7 +1661,7 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
     };
     let first = terminalize(&pool, &command).await.unwrap();
     assert!(first.is_empty());
-    let first_stats: (i32, i32) = sqlx::query_as(
+    let first_stats: (i32, i32) = sql::query_as(
         "SELECT last_scan_rows, last_candidate_rows
          FROM horsies_recovery_scan_cursors
          WHERE scan_name = 'orphan_workflow_tasks'",
@@ -1703,7 +1672,7 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
     assert_eq!(first_stats, (500, 0));
 
     let mut explain_transaction = pool.begin().await.unwrap();
-    sqlx::query(
+    sql::query(
         "WITH lower_bound AS (
              SELECT created_at, id
              FROM horsies_tasks
@@ -1728,14 +1697,14 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
          FROM lower_bound, upper_bound
          WHERE cursor.scan_name = 'orphan_workflow_tasks'",
     )
-    .execute(explain_transaction.as_mut())
+    .execute(&mut *explain_transaction)
     .await
     .unwrap();
-    let production_plan: serde_json::Value = sqlx::query_scalar(
+    let production_plan: serde_json::Value = sql::query_scalar(
         "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
          SELECT * FROM horsies_cancel_orphaned_tasks(500)",
     )
-    .fetch_one(explain_transaction.as_mut())
+    .fetch_one(&mut *explain_transaction)
     .await
     .unwrap();
     assert!(
@@ -1745,7 +1714,7 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
     explain_transaction.rollback().await.unwrap();
 
     let mut discovery_transaction = pool.begin().await.unwrap();
-    let plan: serde_json::Value = sqlx::query_scalar(
+    let plan: serde_json::Value = sql::query_scalar(
         "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
          WITH cursor_row AS MATERIALIZED (
              SELECT last_created_at, last_id,
@@ -1875,7 +1844,7 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
          SELECT * FROM advance",
     )
     .bind(500_i32)
-    .fetch_one(discovery_transaction.as_mut())
+    .fetch_one(&mut *discovery_transaction)
     .await
     .unwrap();
     assert!(
@@ -1916,7 +1885,7 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
         }
     }
     assert!(found, "the cyclic audit must reach the final orphan");
-    let linked_live: i64 = sqlx::query_scalar(
+    let linked_live: i64 = sql::query_scalar(
         "SELECT count(*) FROM horsies_tasks
          WHERE task_name = 'bounded_recovery_cursor_task'",
     )
@@ -1925,26 +1894,26 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
     .unwrap();
     assert_eq!(linked_live, 50_000);
 
-    sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+    sql::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
         .bind(workflow_id)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+    sql::query("DELETE FROM horsies_workflows WHERE id = $1")
         .bind(workflow_id)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'bounded_recovery_cursor_task'")
+    sql::query("DELETE FROM horsies_tasks WHERE task_name = 'bounded_recovery_cursor_task'")
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+    sql::query("DELETE FROM horsies_task_history WHERE task_id = $1")
         .bind(orphan_id)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("ANALYZE horsies_tasks, horsies_workflow_tasks")
+    sql::query("ANALYZE horsies_tasks, horsies_workflow_tasks")
         .execute(&pool)
         .await
         .unwrap();
@@ -1958,7 +1927,7 @@ async fn orphan_sweep_rollback_keeps_the_candidate_for_the_next_audit() {
     let pool = migrated_pool().await;
     let task_id = "00000000-0000-7000-8000-000000000001";
     cleanup(&pool, &[task_id]).await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_recovery_scan_cursors
          SET last_created_at = NULL, last_id = NULL,
              cycle_upper_created_at = NULL, cycle_upper_id = NULL,
@@ -1986,12 +1955,15 @@ async fn orphan_sweep_rollback_keeps_the_candidate_for_the_next_audit() {
     };
 
     let mut interrupted = pool.begin().await.unwrap();
-    let first = crate::broker::terminalization::terminalize_in_tx(&mut interrupted, &command)
-        .await
-        .unwrap();
+    let first = crate::broker::terminalization::on_test_pool::terminalize_in_transaction(
+        &mut interrupted,
+        &command,
+    )
+    .await
+    .unwrap();
     assert_eq!(first.len(), 1);
     interrupted.rollback().await.unwrap();
-    let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+    let status: String = sql::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
         .bind(uuid(task_id))
         .fetch_one(&pool)
         .await
@@ -2010,11 +1982,11 @@ async fn orphan_sweep_rollback_keeps_the_candidate_for_the_next_audit() {
 async fn orphan_sweep_cursor_lock_refuses_a_concurrent_audit() {
     let pool = migrated_pool().await;
     let mut holder = pool.begin().await.unwrap();
-    sqlx::query(
+    sql::query(
         "SELECT last_id FROM horsies_recovery_scan_cursors
          WHERE scan_name = 'orphan_workflow_tasks' FOR UPDATE",
     )
-    .execute(holder.as_mut())
+    .execute(&mut *holder)
     .await
     .unwrap();
     let command = TerminalizationCommand::CancelOrphanedTasks {
@@ -2046,7 +2018,7 @@ async fn orphan_cycle_watermark_revisits_old_rows_while_new_rows_arrive() {
     )
     .await;
     seed_workflow(&pool, &workflow_id, "RUNNING").await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_recovery_scan_cursors
          SET last_created_at = NULL, last_id = NULL,
              cycle_upper_created_at = NULL, cycle_upper_id = NULL,
@@ -2074,7 +2046,7 @@ async fn orphan_cycle_watermark_revisits_old_rows_while_new_rows_arrive() {
     };
     assert!(terminalize(&pool, &command).await.unwrap().is_empty());
 
-    sqlx::query("DELETE FROM horsies_workflow_tasks WHERE task_id = $1")
+    sql::query("DELETE FROM horsies_workflow_tasks WHERE task_id = $1")
         .bind(uuid(&task_ids[0]))
         .execute(&pool)
         .await
@@ -2091,7 +2063,7 @@ async fn orphan_cycle_watermark_revisits_old_rows_while_new_rows_arrive() {
     }
 
     assert!(terminalize(&pool, &command).await.unwrap().is_empty());
-    let second_rows: i32 = sqlx::query_scalar(
+    let second_rows: i32 = sql::query_scalar(
         "SELECT last_scan_rows FROM horsies_recovery_scan_cursors
          WHERE scan_name = 'orphan_workflow_tasks'",
     )
@@ -2312,11 +2284,11 @@ async fn batch_input_contracts_raise_22023_in_function() {
             "NULL array",
         ),
     ] {
-        let err = sqlx::query(sql).fetch_all(&pool).await.expect_err(label);
-        let sqlx::Error::Database(db_err) = err else {
+        let err = sql::query(sql).fetch_all(&pool).await.expect_err(label);
+        let sql::Error::Database(db_err) = err else {
             panic!("{label}: expected database error");
         };
-        assert_eq!(db_err.code().as_deref(), Some("22023"), "{label}");
+        assert_eq!(Some(db_err.code().code()), Some("22023"), "{label}");
     }
 }
 
@@ -2693,7 +2665,7 @@ async fn deferred_projection_table_mints_phase2_for_all_five_deferred_wire_kinds
     .await
     .expect("nondeferred pause abandonment");
 
-    let pending: Vec<(Uuid, String)> = sqlx::query_as(
+    let pending: Vec<(Uuid, String)> = sql::query_as(
         "SELECT task_id, terminalization_kind
          FROM horsies_workflow_phase2_pending
          WHERE workflow_id = $1
@@ -2741,21 +2713,21 @@ async fn batch_terminalization_encodes_each_attempt_snapshot_once() {
     database.drop().await;
 }
 
-async fn assert_batch_snapshot_encoding(pool: &PgPool) {
-    let definition: String = sqlx::query_scalar(
+async fn assert_batch_snapshot_encoding(pool: &TestPool) {
+    let definition: String = sql::query_scalar(
         "SELECT pg_get_functiondef('horsies_encode_task_attempts(uuid)'::regprocedure)",
     )
     .fetch_one(pool)
     .await
     .unwrap();
-    sqlx::raw_sql(&definition.replace(
+    sql::raw_sql(&definition.replace(
         "horsies_encode_task_attempts",
         "test_encode_task_attempts_original",
     ))
     .execute(pool)
     .await
     .unwrap();
-    sqlx::raw_sql(
+    sql::raw_sql(
         "CREATE TABLE test_attempt_encoding_calls (task_id uuid NOT NULL);
      CREATE OR REPLACE FUNCTION horsies_encode_task_attempts(p_task_id uuid)
      RETURNS bytea LANGUAGE plpgsql VOLATILE STRICT AS $$
@@ -2813,7 +2785,7 @@ async fn assert_batch_snapshot_encoding(pool: &PgPool) {
             for attempt in 1..=index * 3 {
                 // Every column of the baseline attempt table: the worker
                 // identity is NOT NULL.
-                sqlx::query(
+                sql::query(
                     "INSERT INTO horsies_task_attempts (
                         task_id, attempt, outcome, will_retry, started_at, finished_at,
                         error_code, error_message, failed_reason, worker_id,
@@ -2831,7 +2803,7 @@ async fn assert_batch_snapshot_encoding(pool: &PgPool) {
                 .unwrap();
             }
             let expected: Vec<u8> =
-                sqlx::query_scalar("SELECT test_encode_task_attempts_original($1)")
+                sql::query_scalar("SELECT test_encode_task_attempts_original($1)")
                     .bind(id)
                     .fetch_one(pool)
                     .await
@@ -2847,7 +2819,7 @@ async fn assert_batch_snapshot_encoding(pool: &PgPool) {
                     }
                     _ => "SELECT outcome FROM horsies_cancel_owned_nodes($1, $2, 'w1')",
                 };
-                sqlx::query_scalar(query)
+                sql::query_scalar(query)
                     .bind(&ids)
                     .bind(vec![claimed_at; 2])
                     .fetch_all(pool)
@@ -2859,17 +2831,17 @@ async fn assert_batch_snapshot_encoding(pool: &PgPool) {
                     "paused" => "SELECT outcome FROM horsies_abandon_nodes_of_paused_workflows($1)",
                     _ => "SELECT outcome FROM horsies_cancel_nodes_of_cancelled_workflow($1)",
                 };
-                sqlx::query_scalar(query)
+                sql::query_scalar(query)
                     .bind(vec![workflow])
                     .fetch_all(pool)
                     .await
                     .unwrap()
             }
-            "orphan" => sqlx::query_scalar("SELECT outcome FROM horsies_cancel_orphaned_tasks(10)")
+            "orphan" => sql::query_scalar("SELECT outcome FROM horsies_cancel_orphaned_tasks(10)")
                 .fetch_all(pool)
                 .await
                 .unwrap(),
-            "expiry" => sqlx::query_scalar(
+            "expiry" => sql::query_scalar(
                 "SELECT outcome FROM horsies_expire_pending_tasks(10, 'expired', 'EXPIRED')",
             )
             .fetch_all(pool)
@@ -2883,7 +2855,7 @@ async fn assert_batch_snapshot_encoding(pool: &PgPool) {
             "{operation}"
         );
         for (id, expected) in ids.iter().zip(snapshots) {
-            let calls: i64 = sqlx::query_scalar(
+            let calls: i64 = sql::query_scalar(
                 "SELECT count(*) FROM test_attempt_encoding_calls WHERE task_id=$1",
             )
             .bind(id)
@@ -2891,12 +2863,12 @@ async fn assert_batch_snapshot_encoding(pool: &PgPool) {
             .await
             .unwrap();
             assert_eq!(calls, 1, "{operation}: {id}");
-            let (actual, valid_digest): (Vec<u8>, bool) = sqlx::query_as("SELECT attempt_snapshot, attempt_snapshot_digest = sha256(attempt_snapshot) FROM horsies_task_history WHERE task_id=$1")
+            let (actual, valid_digest): (Vec<u8>, bool) = sql::query_as("SELECT attempt_snapshot, attempt_snapshot_digest = sha256(attempt_snapshot) FROM horsies_task_history WHERE task_id=$1")
             .bind(id).fetch_one(pool).await.unwrap();
             assert_eq!(actual, expected, "{operation}: {id}");
             assert!(valid_digest);
             let attempts: i64 =
-                sqlx::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id=$1")
+                sql::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id=$1")
                     .bind(id)
                     .fetch_one(pool)
                     .await
@@ -2924,7 +2896,7 @@ async fn terminal_result_digest_preserves_null_prior_and_deferred_payloads() {
     assert_terminal_result_digests(&pool).await;
 }
 
-async fn assert_terminal_result_digests(pool: &PgPool) {
+async fn assert_terminal_result_digests(pool: &TestPool) {
     for admin in [false, true] {
         for payload in [None, Some("stored result".repeat(10000))] {
             let deferred = !admin && payload.is_some();
@@ -2945,7 +2917,7 @@ async fn assert_terminal_result_digests(pool: &PgPool) {
             }
             let mut tx = pool.begin().await.unwrap();
             // The move takes the live row that its caller locked.
-            sqlx::query(
+            sql::query(
                 "SELECT horsies_move_task_to_history(
                      (SELECT t FROM horsies_tasks AS t WHERE t.id = $1 FOR UPDATE),
                      $2, $3, NOW(), $4, NULL, NULL
@@ -2961,14 +2933,14 @@ async fn assert_terminal_result_digests(pool: &PgPool) {
                 false => "COMPLETE_LOCKED",
             })
             .bind(&payload)
-            .execute(tx.as_mut())
+            .execute(&mut *tx)
             .await
             .unwrap();
-            let (result, digest): (Option<Vec<u8>>, Option<Vec<u8>>) = sqlx::query_as(
+            let (result, digest): (Option<Vec<u8>>, Option<Vec<u8>>) = sql::query_as(
                 "SELECT result_payload, result_digest FROM horsies_task_history WHERE task_id=$1",
             )
             .bind(id)
-            .fetch_one(tx.as_mut())
+            .fetch_one(&mut *tx)
             .await
             .unwrap();
             let expected_payload = match admin {
@@ -2976,18 +2948,18 @@ async fn assert_terminal_result_digests(pool: &PgPool) {
                 false => payload.as_ref().map(|v| v.as_bytes().to_vec()),
             };
             assert_eq!(result, expected_payload);
-            let expected_digest: Option<Vec<u8>> = sqlx::query_scalar("SELECT sha256($1::bytea)")
+            let expected_digest: Option<Vec<u8>> = sql::query_scalar("SELECT sha256($1::bytea)")
                 .bind(&expected_payload)
-                .fetch_one(tx.as_mut())
+                .fetch_one(&mut *tx)
                 .await
                 .unwrap();
             assert_eq!(digest, expected_digest);
             if deferred {
-                let deferred: Option<Vec<u8>> = sqlx::query_scalar(
+                let deferred: Option<Vec<u8>> = sql::query_scalar(
                     "SELECT result_digest FROM horsies_workflow_phase2_pending WHERE task_id=$1",
                 )
                 .bind(id)
-                .fetch_one(tx.as_mut())
+                .fetch_one(&mut *tx)
                 .await
                 .unwrap();
                 assert_eq!(deferred, expected_digest);

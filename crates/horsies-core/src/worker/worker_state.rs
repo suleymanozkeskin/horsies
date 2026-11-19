@@ -92,8 +92,7 @@ pub struct BudgetColumn {
 }
 
 /// The `class_capacity` column: each budget class maps to its capacity in
-/// service and the classes whose rows it claims (Python
-/// `core/worker/claim_plan.py`, `class_capacity_json`). A class that no
+/// service and the classes whose rows it claims. A class that no
 /// `serves` list names is not served by the worker. Pure.
 pub fn class_capacity_json(budgets: &[BudgetColumn]) -> serde_json::Value {
     let mut capacity = serde_json::Map::new();
@@ -131,8 +130,7 @@ pub fn class_capacity_of(service: &PoolService) -> serde_json::Value {
 }
 
 /// The columns of a worker snapshot that the children and the claim limits
-/// of the worker decide (Python `core/worker/health.py:233-239`, from the
-/// `WorkerConfig` that `execution_settings(profile)` builds).
+/// of the worker decide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClaimColumns {
     /// `processes`: the children of the worker.
@@ -524,9 +522,9 @@ pub fn spawn_worker_state_loop(
 
 #[cfg(test)]
 mod tests {
-    use sqlx::PgPool;
 
     use super::*;
+    use crate::test_support::sql::{self, TestPool};
     use crate::worker::children::SeatsPerChild;
     use crate::worker::executor::slots::{ChildLayout, PoolBoard, SlotService};
 
@@ -563,7 +561,7 @@ mod tests {
         use serde_json::json;
         use std::time::Duration;
 
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let worker_id = uuid::Uuid::new_v4().to_string();
         let health = new_reaper_health();
         let phase2 = json!({"applied": 2, "failed": 0});
@@ -573,7 +571,10 @@ mod tests {
         let worker_config = WorkerConfig::default();
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
-            Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
+            Arc::new(crate::broker::PostgresBroker::from_test_url(
+                pool.url(),
+                crate::ClientFamily::Rust,
+            )),
             worker_id.clone(),
             "snapshot-test".to_owned(),
             std::process::id() as i32,
@@ -599,7 +600,7 @@ mod tests {
                     value => Some(value.clone()),
                 };
                 loop {
-                    let snapshot: Option<serde_json::Value> = sqlx::query_scalar(
+                    let snapshot: Option<serde_json::Value> = sql::query_scalar(
                         "SELECT recovery_config FROM horsies_worker_states
                          WHERE worker_id = $1 ORDER BY snapshot_at DESC LIMIT 1",
                     )
@@ -622,7 +623,7 @@ mod tests {
         .await;
         cancel.cancel();
         task.await.unwrap();
-        sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+        sql::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
             .bind(&worker_id)
             .execute(&pool)
             .await
@@ -695,6 +696,157 @@ mod tests {
         );
     }
 
+    /// Python `test_health_models.py::TestSlotHealth::test_each_cause_that_can_clear_round_trips`:
+    /// a down slot of each cause that can clear reads back from the written
+    /// column as it was written.
+    #[test]
+    fn each_cause_that_can_clear_round_trips_through_the_column() {
+        use crate::broker::slot_health::{
+            parse_slot_health, ClearableBootCause, DownSlot, SlotHealth,
+        };
+        use crate::worker::executor::protocol::ShortageErrno;
+        use chrono::TimeZone;
+        use std::num::{NonZeroU32, NonZeroU64};
+
+        let down_since = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("a valid test instant");
+        for (written, read) in [
+            (
+                BootFailureCause::ResourceShortage(ShortageErrno::Enomem),
+                ClearableBootCause::ResourceShortage(ShortageErrno::Enomem),
+            ),
+            (
+                BootFailureCause::ThreadStartRefused,
+                ClearableBootCause::ThreadStartRefused,
+            ),
+        ] {
+            let column = slots_down_json(&[(
+                2,
+                DownState {
+                    cause: written,
+                    detail: "x".to_owned(),
+                    down_since,
+                    failed_boots: NonZeroU32::new(1).expect("1"),
+                },
+            )]);
+
+            let Ok(SlotHealth::SlotsDown(slots)) = parse_slot_health(&column, 4) else {
+                panic!("the written down slot reads back: {column}");
+            };
+
+            assert_eq!(
+                slots.as_slice(),
+                [DownSlot {
+                    slot: 2,
+                    cause: read,
+                    detail: "x".to_owned(),
+                    down_since,
+                    failed_boots: NonZeroU64::new(1).expect("1"),
+                }]
+            );
+        }
+    }
+
+    /// Python `test_health_models.py::TestSlotHealth::test_the_writer_covers_every_down_slot_field`:
+    /// each field of the read `DownSlot` reaches the stored entry, so a new
+    /// field cannot be read without a writer. The pattern names every field
+    /// with no rest: a new field does not compile here until it is checked
+    /// and named in the written keys.
+    #[test]
+    fn the_writer_covers_every_down_slot_field() {
+        use crate::broker::slot_health::{
+            parse_slot_health, ClearableBootCause, DownSlot, SlotHealth,
+        };
+        use crate::worker::executor::protocol::ShortageErrno;
+        use chrono::TimeZone;
+        use std::collections::BTreeSet;
+        use std::num::NonZeroU32;
+
+        let written_since = Utc
+            .with_ymd_and_hms(2026, 1, 1, 12, 0, 0)
+            .single()
+            .expect("a valid test instant");
+        let column = slots_down_json(&[(
+            1,
+            DownState {
+                cause: BootFailureCause::ResourceShortage(ShortageErrno::Emfile),
+                detail: "OSError: [Errno 24] Too many open files".to_owned(),
+                down_since: written_since,
+                failed_boots: NonZeroU32::new(3).expect("3"),
+            },
+        )]);
+        let Ok(SlotHealth::SlotsDown(slots)) = parse_slot_health(&column, 4) else {
+            panic!("the written down slot reads back: {column}");
+        };
+        let [DownSlot {
+            slot,
+            cause,
+            detail,
+            down_since,
+            failed_boots,
+        }] = slots.as_slice()
+        else {
+            panic!("one down slot: {:?}", slots.as_slice());
+        };
+
+        assert_eq!(*slot, 1);
+        assert_eq!(
+            *cause,
+            ClearableBootCause::ResourceShortage(ShortageErrno::Emfile)
+        );
+        assert_eq!(detail, "OSError: [Errno 24] Too many open files");
+        assert_eq!(*down_since, written_since);
+        assert_eq!(failed_boots.get(), 3);
+        let keys: BTreeSet<&str> = column[0]
+            .as_object()
+            .expect("an entry is a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            BTreeSet::from(["slot", "cause", "detail", "down_since", "failed_boots"])
+        );
+    }
+
+    /// Python `test_health_models.py::TestClassCapacity::test_the_writer_covers_every_read_field`:
+    /// each field of the read `ClassBudget` but the budget (the key of its
+    /// entry) reaches the stored entry, so a new field cannot be read
+    /// without a writer. The pattern names every field with no rest.
+    #[test]
+    fn the_writer_covers_every_read_field_of_a_budget() {
+        use crate::broker::class_budgets::{parse_class_capacity, ClassBudget};
+        use std::collections::BTreeSet;
+
+        let column = class_capacity_json(&[BudgetColumn {
+            budget: Execution::Isolated,
+            capacity: 1,
+            serves: vec![Execution::Isolated],
+        }]);
+        let budgets = parse_class_capacity(&column).expect("the written column reads back");
+        let [ClassBudget {
+            budget,
+            capacity,
+            serves,
+        }] = budgets.as_slice()
+        else {
+            panic!("one budget: {:?}", budgets.as_slice());
+        };
+
+        assert_eq!(*budget, Execution::Isolated);
+        assert_eq!(*capacity, 1);
+        assert_eq!(serves.as_slice(), [Execution::Isolated]);
+        let keys: BTreeSet<&str> = column["ISOLATED"]
+            .as_object()
+            .expect("an entry is a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, BTreeSet::from(["capacity", "serves"]));
+    }
+
     /// Python `test_claim_plan.py::test_budgets_and_worker_state_capacity`:
     /// each budget maps to its capacity and the classes it serves.
     #[test]
@@ -722,8 +874,7 @@ mod tests {
         assert_eq!(class_capacity_json(&[]), serde_json::json!({}));
     }
 
-    /// Python `core/worker/health.py:233-239` with the `WorkerConfig` of
-    /// `execution_settings(profile)`: `processes` is the child count,
+    /// `processes` is the child count,
     /// `max_claim_batch` the per-queue limit or 0, and `max_claim_per_worker`
     /// the claimed limit or else the seat count.
     #[test]
@@ -788,9 +939,8 @@ mod tests {
 
     /// A worker with no queue priorities and no queue caps writes its
     /// snapshot on the baseline: the empty maps are `{}`, and the slot
-    /// health and class capacity columns hold the worker's values (Python
-    /// `core/worker/health.py`, `_update_worker_state`). The old statement
-    /// named neither column and bound NULL for the empty maps, so every
+    /// health and class capacity columns hold the worker's values. The old
+    /// statement named neither column and bound NULL for the empty maps, so every
     /// insert failed and no row landed.
     #[tokio::test]
     #[serial_test::serial]
@@ -798,7 +948,7 @@ mod tests {
         use crate::worker::recovery::new_reaper_health;
         use std::time::Duration;
 
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let worker_id = uuid::Uuid::new_v4().to_string();
         let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
@@ -807,7 +957,10 @@ mod tests {
         assert!(worker_config.queue_max_concurrency.is_empty());
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
-            Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
+            Arc::new(crate::broker::PostgresBroker::from_test_url(
+                pool.url(),
+                crate::ClientFamily::Rust,
+            )),
             worker_id.clone(),
             "baseline-columns-test".to_owned(),
             std::process::id() as i32,
@@ -828,7 +981,7 @@ mod tests {
         );
         let written = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let row: Option<Columns> = sqlx::query_as(
+                let row: Option<Columns> = sql::query_as(
                     "SELECT queue_priorities, queue_max_concurrency, slots_down, class_capacity,
                             max_claim_per_worker
                      FROM horsies_worker_states WHERE worker_id = $1",
@@ -846,7 +999,7 @@ mod tests {
         .await;
         cancel.cancel();
         task.await.expect("the snapshot loop joins");
-        sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+        sql::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
             .bind(&worker_id)
             .execute(&pool)
             .await
@@ -889,8 +1042,8 @@ mod tests {
     }
 
     /// The snapshot rows of `worker_id`.
-    async fn snapshot_rows(pool: &PgPool, worker_id: &str) -> i64 {
-        sqlx::query_scalar("SELECT count(*) FROM horsies_worker_states WHERE worker_id = $1")
+    async fn snapshot_rows(pool: &TestPool, worker_id: &str) -> i64 {
+        sql::query_scalar("SELECT count(*) FROM horsies_worker_states WHERE worker_id = $1")
             .bind(worker_id)
             .fetch_one(pool)
             .await
@@ -905,19 +1058,18 @@ mod tests {
         &[],
     );
 
-    /// A failed count of claimed rows writes no snapshot (Python counts and
-    /// inserts under one `try`, `core/worker/health.py:201-291`). The old
+    /// A failed count of claimed rows writes no snapshot. The old
     /// loop wrote the snapshot with `tasks_claimed = 0`.
     #[tokio::test]
     #[serial_test::serial]
     async fn a_failed_claimed_count_writes_no_snapshot() {
-        let migrated = crate::broker::terminalization_matrix::migrated_pool().await;
+        let migrated = crate::test_support::migrated_pool().await;
         // On the one connection of this pool a temporary `horsies_tasks`
         // without the counted columns hides the table of that name, so the
         // count fails; the snapshot table is untouched, so the insert alone
         // would succeed.
         let shadowed =
-            crate::broker::pools::unpinged_single_connection_core_pool(&migrated.connect_options());
+            crate::broker::pools::unpinged_single_connection_core_pool_for_url(migrated.url());
         {
             let mut connection = shadowed
                 .checkout(CheckoutClass::Batch)
@@ -931,7 +1083,7 @@ mod tests {
                 .await
                 .expect("create the shadow table");
         }
-        let control = crate::broker::pools::core_pool_for_test_pool(&migrated);
+        let control = crate::broker::pools::core_pool_for_test_url(migrated.url());
         let control_worker = uuid::Uuid::new_v4().to_string();
         let failing_worker = uuid::Uuid::new_v4().to_string();
 
@@ -950,7 +1102,7 @@ mod tests {
         let control_rows = snapshot_rows(&migrated, &control_worker).await;
         let written = snapshot_rows(&migrated, &failing_worker).await;
 
-        sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = ANY($1)")
+        sql::query("DELETE FROM horsies_worker_states WHERE worker_id = ANY($1)")
             .bind(vec![control_worker, failing_worker])
             .execute(&migrated)
             .await
@@ -995,14 +1147,17 @@ mod tests {
         use crate::worker::recovery::new_reaper_health;
         use std::time::Duration;
 
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let worker_id = uuid::Uuid::new_v4().to_string();
         let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
         app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
         let worker_config = WorkerConfig::default();
         let cancel = CancellationToken::new();
         let task = spawn_worker_state_loop(
-            Arc::new(crate::broker::PostgresBroker::from_pool(pool.clone())),
+            Arc::new(crate::broker::PostgresBroker::from_test_url(
+                pool.url(),
+                crate::ClientFamily::Rust,
+            )),
             worker_id.clone(),
             "first-snapshot-test".to_owned(),
             std::process::id() as i32,
@@ -1016,7 +1171,7 @@ mod tests {
         );
         let written = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let count: i64 = sqlx::query_scalar(
+                let count: i64 = sql::query_scalar(
                     "SELECT count(*) FROM horsies_worker_states WHERE worker_id = $1",
                 )
                 .bind(&worker_id)
@@ -1032,7 +1187,7 @@ mod tests {
         .await;
         cancel.cancel();
         task.await.unwrap();
-        sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+        sql::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
             .bind(&worker_id)
             .execute(&pool)
             .await

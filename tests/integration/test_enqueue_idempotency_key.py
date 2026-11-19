@@ -28,7 +28,7 @@ from horsies.core.brokers.result_types import (
     BrokerIdempotencyKeyConflict,
     BrokerResult,
 )
-from horsies.core.history.identity.uuid7 import mint_task_id
+from tests.task_ids import mint_task_id
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import Err, Ok, is_ok
 from tests.broker_resources_support import current_resources
@@ -46,14 +46,14 @@ class Send:
     """One send of one command: the id, the input and the call-site time."""
 
     task_id: str
-    kwargs_json: str
+    input_json: str
     sent_at: datetime
 
 
-def make_send(kwargs_json: str = '{"order":"order-1"}') -> Send:
+def make_send(input_json: str = '{"order":"order-1"}') -> Send:
     return Send(
         task_id=mint_task_id(),
-        kwargs_json=kwargs_json,
+        input_json=input_json,
         sent_at=datetime.now(timezone.utc),
     )
 
@@ -62,7 +62,7 @@ def resend_with_a_fresh_id(send: Send) -> Send:
     """The same command and call-site time under a new task id."""
     return Send(
         task_id=mint_task_id(),
-        kwargs_json=send.kwargs_json,
+        input_json=send.input_json,
         sent_at=send.sent_at,
     )
 
@@ -74,7 +74,7 @@ async def enqueue(
         TASK_NAME,
         task_id=send.task_id,
         send_kind=SendKind.FIRST,
-        input_json=send.kwargs_json,
+        input_json=send.input_json,
         sent_at=send.sent_at,
         idempotency_key=key,
     )
@@ -304,7 +304,7 @@ async def test_concurrent_sends_with_two_commands_classify_against_the_winner(
     sends = tuple(
         Send(
             task_id=mint_task_id(),
-            kwargs_json=commands[index % 2],
+            input_json=commands[index % 2],
             sent_at=sent_at,
         )
         for index in range(CONCURRENT_SENDS)
@@ -322,10 +322,10 @@ async def test_concurrent_sends_with_two_commands_classify_against_the_winner(
     for send, outcome in zip(sends, outcomes, strict=True):
         match outcome:
             case Ok(task_id):
-                assert send.kwargs_json == winner.kwargs_json
+                assert send.input_json == winner.input_json
                 assert task_id == winner.task_id
             case Err(BrokerIdempotencyKeyConflict(owner_task_id=owner)):
-                assert send.kwargs_json != winner.kwargs_json
+                assert send.input_json != winner.input_json
                 assert owner == winner.task_id
             case Err(other):
                 raise AssertionError(f'{send.task_id}: {other!r}')

@@ -34,8 +34,7 @@ static CLAIMER_HEARTBEAT: TypedStatement = TypedStatement::new(
 /// Extends `claim_expires_at` to keep active claims from expiring while the
 /// worker is alive. The new expiry is the database time plus the lease, so it
 /// does not move with the worker clock. The `claimed_at` age guard ($3)
-/// prevents renewing claims that are unreasonably old. Python:
-/// `RENEW_CLAIM_LEASE_SQL` (`core/worker/sql.py`).
+/// prevents renewing claims that are unreasonably old.
 const RENEW_CLAIM_LEASE_SQL: &str = "\
 UPDATE horsies_tasks
 SET claim_expires_at = NOW() + $2 * INTERVAL '1 millisecond',
@@ -68,11 +67,10 @@ const MAX_CONSECUTIVE_HEARTBEAT_FAILURES: u32 = 5;
 ///
 /// In addition to inserting heartbeat rows, this also renews claim leases
 /// (extending `claim_expires_at`) so the reaper does not reclaim tasks that
-/// belong to a live worker. Matches Python's combined heartbeat + lease renewal.
+/// belong to a live worker.
 ///
 /// `claim_lease_ms`: lease duration used to compute new `claim_expires_at`.
-///     Every claim has a lease (Python `claiming.py:697-708`), so every beat
-///     renews.
+///     Every claim has a lease, so every beat renews.
 /// `max_claim_renew_age_ms`: safety cap — claims older than this are NOT renewed.
 ///
 /// The first beat runs at start, then one per `interval` (Python
@@ -147,8 +145,8 @@ pub fn spawn_claimer_heartbeat(
 
 /// Write the claimer beats and renew the lease of every claim this worker
 /// holds, in one transaction on the main core pool of `broker`
-/// ([`CheckoutClass::Reserved`]) (Python `core/worker/health.py`: the beat
-/// insert, then the lease update on the database clock with the age guard).
+/// ([`CheckoutClass::Reserved`]): the beat insert, then the lease update on
+/// the database clock with the age guard.
 ///
 /// Errors: [`BrokerError::PoolSettings`] when a closed handle cannot open
 /// its pools again; [`BrokerError::Statement`] for a failed checkout,
@@ -196,39 +194,43 @@ async fn send_claimer_heartbeat(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::sql::{self, TestPool};
     use chrono::{DateTime, Utc};
     use serial_test::serial;
-    use sqlx::PgPool;
     use uuid::Uuid;
 
     const BEAT_WORKER: &str = "beat-worker";
 
     /// The shared test database, with heartbeat leaves for the current hours.
-    async fn covered_pool() -> PgPool {
-        use crate::core::history::heartbeats::partitioning::{
-            ensure_heartbeat_coverage, EnsureHeartbeatCoverage,
+    async fn covered_pool() -> TestPool {
+        use crate::core::history::maintenance::coverage::{
+            ensure_partition_coverage_in_pool, CoverageOutcome,
         };
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let mut connection = pool.acquire().await.expect("acquire");
-        ensure_heartbeat_coverage(
-            &mut connection,
-            &EnsureHeartbeatCoverage::new(2).expect("coverage command"),
+        let pool = crate::test_support::migrated_pool().await;
+        let coverage = ensure_partition_coverage_in_pool(
+            &crate::broker::pools::core_pool_for_test_url(pool.url()),
+            crate::broker::core_rows::StatementLog::Off,
+            2,
+            2,
+            &[],
         )
         .await
         .expect("heartbeat leaves");
-        drop(connection);
+        assert!(
+            matches!(coverage, CoverageOutcome::Ensured(_)),
+            "{coverage:?}"
+        );
         pool
     }
 
-    /// Python `core/worker/health.py`: the claimer beat and the lease renewal
-    /// run in one transaction, and the new lease is the database time plus
-    /// the lease length.
+    /// The claimer beat and the lease renewal run in one transaction, and the
+    /// new lease is the database time plus the lease length.
     #[tokio::test]
     #[serial]
     async fn the_claimer_beat_renews_the_lease_on_the_database_clock() {
         let pool = covered_pool().await;
         let task_id = Uuid::new_v4();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, input, task_options, execution,
                 retention_class_key, sent_at, created_at,
@@ -255,28 +257,28 @@ mod tests {
         .await
         .expect("seed CLAIMED task");
 
-        let before: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        let before: DateTime<Utc> = sql::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&pool)
             .await
             .expect("clock");
-        let broker = PostgresBroker::from_pool(pool.clone());
+        let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
         send_claimer_heartbeat(&broker, BEAT_WORKER, "h", 1, 60_000, 180_000)
             .await
             .expect("beat and renew");
-        let after: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        let after: DateTime<Utc> = sql::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&pool)
             .await
             .expect("clock");
 
         let expires: DateTime<Utc> =
-            sqlx::query_scalar("SELECT claim_expires_at FROM horsies_tasks WHERE id = $1")
+            sql::query_scalar("SELECT claim_expires_at FROM horsies_tasks WHERE id = $1")
                 .bind(task_id)
                 .fetch_one(&pool)
                 .await
                 .expect("lease");
         assert!(before + chrono::Duration::seconds(60) <= expires);
         assert!(expires <= after + chrono::Duration::seconds(60));
-        let beats: i64 = sqlx::query_scalar(
+        let beats: i64 = sql::query_scalar(
             "SELECT COUNT(*) FROM horsies_heartbeats WHERE task_id = $1 AND role = 'claimer'",
         )
         .bind(task_id)
@@ -285,12 +287,12 @@ mod tests {
         .expect("count beats");
         assert_eq!(beats, 1);
 
-        sqlx::query("DELETE FROM horsies_heartbeats WHERE task_id = $1")
+        sql::query("DELETE FROM horsies_heartbeats WHERE task_id = $1")
             .bind(task_id)
             .execute(&pool)
             .await
             .expect("delete beats");
-        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+        sql::query("DELETE FROM horsies_tasks WHERE id = $1")
             .bind(task_id)
             .execute(&pool)
             .await
@@ -298,8 +300,8 @@ mod tests {
     }
 
     /// Seconds from the database clock to the lease of `task_id`.
-    async fn lease_left_s(pool: &PgPool, task_id: Uuid) -> f64 {
-        sqlx::query_scalar(
+    async fn lease_left_s(pool: &TestPool, task_id: Uuid) -> f64 {
+        sql::query_scalar(
             "SELECT EXTRACT(EPOCH FROM claim_expires_at - NOW())::float8
              FROM horsies_tasks WHERE id = $1",
         )
@@ -326,7 +328,7 @@ mod tests {
             (other, "other-worker", 5.0),
         ];
         for (task_id, owner, age_s) in claims {
-            sqlx::query(
+            sql::query(
                 "INSERT INTO horsies_tasks (
                     id, task_name, queue_name, priority, input, task_options, execution,
                     retention_class_key, sent_at, created_at,
@@ -358,7 +360,10 @@ mod tests {
 
         let cancel = CancellationToken::new();
         let beats = spawn_claimer_heartbeat(
-            Arc::new(PostgresBroker::from_pool(pool.clone())),
+            Arc::new(PostgresBroker::from_test_url(
+                pool.url(),
+                crate::ClientFamily::Rust,
+            )),
             BEAT_WORKER.to_owned(),
             "h".to_owned(),
             1,
@@ -389,12 +394,12 @@ mod tests {
         );
 
         let ids = vec![young, old, other];
-        sqlx::query("DELETE FROM horsies_heartbeats WHERE task_id = ANY($1)")
+        sql::query("DELETE FROM horsies_heartbeats WHERE task_id = ANY($1)")
             .bind(&ids)
             .execute(&pool)
             .await
             .expect("delete beats");
-        sqlx::query("DELETE FROM horsies_tasks WHERE id = ANY($1)")
+        sql::query("DELETE FROM horsies_tasks WHERE id = ANY($1)")
             .bind(&ids)
             .execute(&pool)
             .await

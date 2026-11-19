@@ -1,13 +1,11 @@
 //! What phase 2 writes for one finished node of a chain A -> B: the node
 //! write is idempotent, `on_error` decides between failing and pausing, a
 //! paused workflow stores the result and promotes nothing, and a task with no
-//! node changes nothing. Python: the behaviour rows of
-//! `tests/integration/test_workflow_completion_path.py`.
+//! node changes nothing.
 //!
 //! Each node's task finishes as a worker finishes it (phase 1, then phase 2).
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -17,11 +15,11 @@ use super::support::{
 use crate::broker::PostgresBroker;
 use crate::core::OnError;
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::{self, TestPool};
 use crate::workflow_engine::engine::on_workflow_task_complete_with;
-use crate::workflow_engine::steps::ChildBuild;
 
 /// A -> B with `on_error` (Python's `_chain_spec`).
-async fn start_chain(pool: &PgPool, name: &str, on_error: OnError) -> Uuid {
+async fn start_chain(pool: &TestPool, name: &str, on_error: OnError) -> Uuid {
     let mut dependent = task_node(1, &format!("{name}_dep"));
     dependent.dependencies = vec![0];
     let mut chain = spec(name, vec![task_node(0, &format!("{name}_root")), dependent]);
@@ -48,9 +46,9 @@ async fn a_second_completion_of_a_node_keeps_the_first_result() {
     assert_eq!(first.status, "COMPLETED");
 
     on_workflow_task_complete_with(
-        &PostgresBroker::from_pool(pool.clone()),
+        &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
         task_id,
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &TestChildSpecs::empty(),
     )
     .await
     .expect("a second phase 2 of the task");
@@ -124,7 +122,7 @@ async fn a_failure_under_on_error_pause_pauses_and_leaves_the_dependent_pending(
 async fn a_node_of_a_paused_workflow_stores_its_result_and_promotes_nothing() {
     let pool = shared_pool().await;
     let workflow_id = start_chain(&pool, "completion_paused", OnError::Fail).await;
-    sqlx::query("UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = $1")
+    sql::query("UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = $1")
         .bind(workflow_id)
         .execute(&pool)
         .await
@@ -159,9 +157,9 @@ async fn phase_two_of_a_task_with_no_node_changes_nothing() {
     let task_id = Uuid::new_v4();
 
     on_workflow_task_complete_with(
-        &PostgresBroker::from_pool(pool.clone()),
+        &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
         task_id,
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &TestChildSpecs::empty(),
     )
     .await
     .expect("phase 2 of a task with no node returns");

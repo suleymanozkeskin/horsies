@@ -51,14 +51,14 @@ if TYPE_CHECKING:
 class PreparedSchedule:
     """The wire text that every slot of one schedule sends.
 
-    ``kwargs_json`` is the encoded kwargs, or None when the schedule has no
+    ``input_json`` is the encoded kwargs, or None when the schedule has no
     kwargs. ``task_options_json`` is the text that the task decorator encoded
     from the task's options when the task was defined: the text that a plain
     ``.send()`` of the task stores. It is None only for a task that has no
     options.
     """
 
-    kwargs_json: str | None
+    input_json: str | None
     task_options_json: str | None
 
 
@@ -120,10 +120,10 @@ def _prepare_schedule(
     match _encode_schedule_kwargs(app, schedule):
         case Err(kwargs_error):
             return Err(kwargs_error)
-        case Ok(kwargs_json):
+        case Ok(input_json):
             return Ok(
                 PreparedSchedule(
-                    kwargs_json=kwargs_json,
+                    input_json=input_json,
                     task_options_json=app.tasks[schedule.task_name].task_options_json,
                 ),
             )
@@ -249,22 +249,22 @@ def _encode_schedule_kwargs(
             notes=[f'serialization error: {ser.err_value}'],
             help_text='ensure all scheduled kwargs serialize to JSON',
         ))
-    kwargs_json = ser.ok_value
-    size_error = _payload_size_error(app, schedule, kwargs_json=kwargs_json)
+    input_json = ser.ok_value
+    size_error = _payload_size_error(app, schedule, input_json=input_json)
     if size_error is not None:
         return Err(size_error)
-    return Ok(kwargs_json)
+    return Ok(input_json)
 
 
 def _payload_size_error(
     app: Horsies,
     schedule: TaskSchedule,
     *,
-    kwargs_json: str,
+    input_json: str,
 ) -> ConfigurationError | None:
     """Refuse kwargs whose UTF-8 text is longer than ``payload.reject_bytes``;
     the limit is exclusive."""
-    match check_payload_size(app.config.payload, payload_text=kwargs_json):
+    match check_payload_size(app.config.payload, payload_text=input_json):
         case PayloadWithinLimit():
             return None
         case PayloadOverLimit(size_bytes=size_bytes, limit_bytes=limit_bytes):

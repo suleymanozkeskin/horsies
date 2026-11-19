@@ -87,15 +87,15 @@ A blocking call on a thread where a tokio runtime is current (`tokio::runtime::H
 |------|-------|
 | A send or a retry | `TaskSendError::AsyncContext` with the prepared `task_id` and `payload`, and nothing written |
 | `get`, `info`, `get_result`, `get_raw_result`, `get_task_info` | `ReadError::AsyncContext { message }` |
-| A health read | `BrokerOperationError` with `BrokerErrorCode::AsyncContext`, not retryable |
+| A health read | `BrokerOperationError::AsyncContext`, not retryable |
 | `check_live` | `CheckReport` with `HRS-217` (`CheckLiveAsyncContext`), after the static check passed |
-| A workflow start or `retry_start` | `WorkflowStartError` with `WorkflowStartErrorCode::AsyncContext`, the `workflow_id` of the start, not retryable, and nothing written |
-| `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `HandleOperationError` with `HandleErrorCode::AsyncContext`, not retryable |
+| A workflow start or `retry_start` | `WorkflowStartError::AsyncContext` with the `workflow_id` of the start, not retryable, and nothing written |
+| `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `HandleOperationError::AsyncContext`, not retryable |
 | `WorkflowHandleView::get`, `result_for` | `WorkflowReadError::AsyncContext { message }` |
 
 `retry_send(&error).await` with a `TaskSendError::AsyncContext` completes the same send from async code, with the same task id and payload. See [Retry a Failed Send](/horsies/rust/tasks/sending-tasks/#retry-a-failed-send).
 
-`retry_start` refuses a `WorkflowStartErrorCode::AsyncContext` error with `ValidationFailed`. To run the same start from async code, call `start_with_id` with the error's `workflow_id`.
+`retry_start(&error).await` with a `WorkflowStartError::AsyncContext` error completes the same start from async code, with the error's `workflow_id`.
 
 ## Order of the Checks
 
@@ -106,21 +106,21 @@ A blocking call on a thread where a tokio runtime is current (`tokio::runtime::H
 - `WorkflowHandleView::get` refuses a wait in a worker child with `WaitInsideTask` first. `result_for` is not a wait.
 - The thread of a `#[horsies::blocking_task]` body in a worker child drives no async task, so a blocking send or a blocking workflow start works there. A result wait in a worker child is `WaitInsideTask`.
 
-## When the Process Runtime Cannot Run
+## When the Process Runtime Did Not Start
 
-When the process runtime of the core cannot run the call, the call returns the database failure of its catalog with the cause, and nothing was sent or started:
+When the operating system refused the threads of the core's process runtime, the call returns the database failure of its catalog with the cause, `retryable` (the next call tries the start again). Nothing was sent or started:
 
 | Call | Error |
 |------|-------|
 | A send or a retry | `TaskSendError::EnqueueFailed` with the task id and payload |
 | A read | `ReadError::Database` |
-| A health read | `BrokerOperationError` with the code of the read |
+| A health read | `BrokerOperationError::OperationFailed` with the code of the read |
 | `check_live` | `CheckReport` with the connectivity refusal |
-| A workflow start | `WorkflowStartError` with `EnqueueFailed` and the `workflow_id` of the start |
-| `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `HandleOperationError` with `DbOperationFailed` |
+| A workflow start | `WorkflowStartError::EnqueueFailed` with the `workflow_id` of the start |
+| `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `HandleOperationError::DbOperationFailed` |
 | `WorkflowHandleView::get`, `result_for` | `WorkflowReadError::Database` with `DbOperationFailed` |
 
-The process runtime cannot run in a process that was forked after it started (not retryable), and when the operating system refused its threads (retryable: the next call tries again).
+In a process that was forked without `exec` after the process runtime started, every call panics: see [Process-State Refusals](/horsies/tasks/error-types/#process-state-refusals).
 
 ## Things to Avoid
 

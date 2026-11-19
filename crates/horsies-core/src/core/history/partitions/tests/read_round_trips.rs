@@ -10,17 +10,18 @@
 use super::*;
 use crate::broker::core_rows::StatementLog;
 use crate::broker::history_reads::{read_task_result, ResultReaderSeen};
-use crate::broker::pools::unpinged_single_connection_core_pool;
+use crate::broker::pools::unpinged_single_connection_core_pool_for_url;
 use crate::core::history::reads::result::TaskResultRead;
 use crate::core::lifecycle::TerminalizationOutcome;
+use crate::test_support::sql::{self, TestPool};
 use crate::test_support::terminal_writes;
 
 const PORT_WORKER: &str = "port-round-trip-worker";
 
 /// A plain task of `status`, claimed by `PORT_WORKER` with the process facts
 /// of its start when RUNNING. Every baseline column is named.
-async fn seed_task(pool: &PgPool, task_id: Uuid, status: &str) {
-    sqlx::query(
+async fn seed_task(pool: &TestPool, task_id: Uuid, status: &str) {
+    sql::query(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, task_options, execution,
              retention_class_key, sent_at, created_at,
@@ -76,7 +77,7 @@ async fn counted_result_read(
 async fn published_database() -> TestDatabase {
     let database = TestDatabase::create_with_connections(3).await;
     let coverage = ensure_partition_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         2,
         2,
@@ -110,7 +111,7 @@ async fn a_history_result_read_is_one_statement() {
         "{outcomes:?}"
     );
     let (proxy, pool) = proxied_pool(&database, 0, 1).await;
-    let reader = unpinged_single_connection_core_pool(&pool.connect_options());
+    let reader = unpinged_single_connection_core_pool_for_url(pool.url());
     let read = counted_result_read(&proxy, &reader, task_id).await;
     assert!(matches!(read, TaskResultRead::History(_)), "{read:?}");
     assert_eq!(proxy.statement_count(), 1, "{:?}", proxy.sql());
@@ -128,7 +129,7 @@ async fn a_live_result_read_is_one_statement() {
     let task_id = Uuid::new_v4();
     seed_task(&database.pool, task_id, "PENDING").await;
     let (proxy, pool) = proxied_pool(&database, 0, 1).await;
-    let reader = unpinged_single_connection_core_pool(&pool.connect_options());
+    let reader = unpinged_single_connection_core_pool_for_url(pool.url());
     let read = counted_result_read(&proxy, &reader, task_id).await;
     assert!(matches!(read, TaskResultRead::Live(_)), "{read:?}");
     assert_eq!(proxy.statement_count(), 1, "{:?}", proxy.sql());

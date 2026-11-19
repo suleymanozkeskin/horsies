@@ -2,29 +2,28 @@
 //! gets, the parent node of an ended parent, the stored output, and workflows
 //! with no node. The completion check runs as the tree recovery pass runs it
 //! (`horsies_workflow_try_complete` under the workflow row lock), and the
-//! parent node advances through `horsies_workflow_child_finish`. Python:
-//! `tests/integration/test_success_policy_completion_repro.py`,
-//! `tests/integration/test_workflow_finalization_contract.py`,
-//! `tests/integration/test_workflow_sql_equivalence.py`.
+//! parent node advances through `horsies_workflow_child_finish`.
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    advance_parent_of, code, complete_workflow, node, ok, required, seed_node, seed_workflow,
-    shared_pool, stored_error, stored_result, workflow, IsolatedDatabase, NodeSeed, ParentLink,
-    WorkflowSeed,
+    advance_parent_of, broker, code, complete_workflow, err, node, ok, required, seed_node,
+    seed_workflow, shared_pool, stored_error, stored_result, workflow, IsolatedDatabase, NodeSeed,
+    ParentLink, WorkflowSeed,
 };
 use crate::core::{SubWorkflowSummary, TaskError, TaskResult, WorkflowStatus};
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::{self, TestListener, TestPool};
+use crate::workflow_engine::recovery::{complete_in_tree, TreeCompletion};
+use crate::workflow_engine::steps::ParentAdvance;
 
-async fn complete(pool: &PgPool, workflow_id: Uuid) {
+async fn complete(pool: &TestPool, workflow_id: Uuid) {
     complete_workflow(pool, workflow_id, &TestChildSpecs::empty()).await;
 }
 
 /// The summary stored on node 0 of `parent_id`.
-async fn parent_summary(pool: &PgPool, parent_id: Uuid) -> SubWorkflowSummary {
+async fn parent_summary(pool: &TestPool, parent_id: Uuid) -> SubWorkflowSummary {
     let text = node(pool, parent_id, 0)
         .await
         .sub_workflow_summary
@@ -33,7 +32,7 @@ async fn parent_summary(pool: &PgPool, parent_id: Uuid) -> SubWorkflowSummary {
 }
 
 /// A RUNNING parent with node 0 linked to `child`, and its child row.
-async fn seed_parent_and_child(pool: &PgPool, child: WorkflowSeed) -> (Uuid, Uuid) {
+async fn seed_parent_and_child(pool: &TestPool, child: WorkflowSeed) -> (Uuid, Uuid) {
     let parent_id = seed_workflow(pool, &WorkflowSeed::running()).await;
     let mut child = child;
     child.parent = Some(ParentLink::of_root(parent_id, 0));
@@ -74,6 +73,51 @@ async fn a_met_success_case_waits_for_a_live_node_that_it_does_not_require() {
     assert_eq!(row.status, "RUNNING");
     assert_eq!(row.completed_at, None);
     db.drop().await;
+}
+
+/// `test_success_policy_subworkflow_node.py::TestEvaluateSuccess::test_the_status_of_a_subworkflow_node_row_decides_the_case`:
+/// a success case that requires a sub-workflow node reads the status of that
+/// node as it reads the status of a task node: COMPLETED meets the case and
+/// the workflow completes; FAILED or SKIPPED does not, and the workflow fails.
+#[tokio::test]
+#[serial]
+async fn the_status_of_a_required_sub_workflow_node_decides_the_success_case() {
+    let pool = shared_pool().await;
+    let done = serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the output");
+    let failed =
+        serde_json::to_string(&err("CHILD_FAILED", "the child failed")).expect("encode the error");
+    for (status, result, expected) in [
+        ("COMPLETED", Some(done.clone()), "COMPLETED"),
+        ("FAILED", Some(failed), "FAILED"),
+        ("SKIPPED", None, "FAILED"),
+    ] {
+        let workflow_id = seed_workflow(
+            &pool,
+            &WorkflowSeed::running()
+                .policy(serde_json::to_value(required(&[&[0, 1]])).expect("encode the policy")),
+        )
+        .await;
+        seed_node(
+            &pool,
+            &NodeSeed::task(workflow_id, 0, "COMPLETED").result(done.clone()),
+        )
+        .await;
+        let sub_workflow_node =
+            NodeSeed::sub_workflow(workflow_id, 1, status, "tests.port.child.v1", None);
+        let sub_workflow_node = match result {
+            Some(text) => sub_workflow_node.result(text),
+            None => sub_workflow_node,
+        };
+        seed_node(&pool, &sub_workflow_node).await;
+
+        complete(&pool, workflow_id).await;
+
+        assert_eq!(
+            workflow(&pool, workflow_id).await.status,
+            expected,
+            "{status}"
+        );
+    }
 }
 
 /// `test_a_failed_child_gives_its_parent_a_summary_without_output`: the
@@ -263,7 +307,7 @@ async fn the_parent_node_of_an_ended_parent_is_written_once() {
             .result(serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the output")),
     )
     .await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_workflows SET status = 'CANCELLED', completed_at = NOW() WHERE id = $1",
     )
     .bind(parent_id)
@@ -278,7 +322,7 @@ async fn the_parent_node_of_an_ended_parent_is_written_once() {
     assert!(written.completed_at.is_some());
     assert_eq!(workflow(&pool, parent_id).await.status, "CANCELLED");
 
-    sqlx::query("UPDATE horsies_workflows SET result = $2 WHERE id = $1")
+    sql::query("UPDATE horsies_workflows SET result = $2 WHERE id = $1")
         .bind(child_id)
         .bind(serde_json::to_string(&ok(serde_json::json!(2))).expect("encode the output"))
         .execute(&pool)
@@ -372,7 +416,7 @@ async fn a_completion_with_a_stored_error_and_no_failed_node_keeps_that_error() 
     assert_eq!(row.error, Some(first_error));
 }
 
-/// `test_workflow_finalization_contract.py`: a workflow with eight terminal
+/// A workflow with eight terminal
 /// nodes completes with its explicit output copied unchanged, or with
 /// Python's outputless result (`python/horsies/core/workflows/engine.py:3973-3983`), for a
 /// small and a 64 KiB result; with a FAILED node it fails and stores no
@@ -382,7 +426,7 @@ async fn a_completion_with_a_stored_error_and_no_failed_node_keeps_that_error() 
 #[serial]
 async fn finalization_preserves_explicit_and_default_outputs() {
     let pool = shared_pool().await;
-    let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
+    let mut listener = TestListener::connect_with(&pool)
         .await
         .expect("connect the listener");
     listener
@@ -595,7 +639,7 @@ async fn a_completion_check_does_not_resurrect_a_cancelled_workflow() {
             .result(serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the output")),
     )
     .await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_workflows SET status = 'CANCELLED', completed_at = NULL WHERE id = $1",
     )
     .bind(workflow_id)
@@ -646,7 +690,7 @@ async fn a_child_end_under_a_paused_parent_writes_the_node_and_promotes_nothing(
     )
     .await;
     seed_node(&pool, &NodeSeed::task(parent_id, 1, "PENDING").deps(&[0])).await;
-    sqlx::query("UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = $1")
+    sql::query("UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = $1")
         .bind(parent_id)
         .execute(&pool)
         .await
@@ -740,7 +784,7 @@ async fn the_outputless_result_skips_a_node_without_an_id_and_reads_other_text_a
         &NodeSeed::task(workflow_id, 2, "COMPLETED").result(two.clone()),
     )
     .await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_workflow_tasks SET node_id = NULL WHERE workflow_id = $1 AND task_index = 0",
     )
     .bind(workflow_id)
@@ -767,4 +811,82 @@ async fn the_outputless_result_skips_a_node_without_an_id_and_reads_other_text_a
         stored["ok"]["task_name_by_id"],
         serde_json::json!({"node_1": "port_task", "node_2": "port_task"})
     );
+}
+
+/// The completion check reads the parent link under the workflow row lock and
+/// owes the parent advance of a child workflow that it ends, never of a root.
+#[tokio::test]
+#[serial]
+async fn the_completion_of_a_child_owes_its_parent_advance_and_a_root_owes_none() {
+    let pool = shared_pool().await;
+    let done = serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the result");
+    for is_child in [false, true] {
+        let mut seed = WorkflowSeed::running();
+        let parent_id = if is_child {
+            let parent_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
+            seed.parent = Some(ParentLink::of_root(parent_id, 0));
+            Some(parent_id)
+        } else {
+            None
+        };
+        let workflow_id = seed_workflow(&pool, &seed).await;
+        seed_node(
+            &pool,
+            &NodeSeed::task(workflow_id, 0, "COMPLETED").result(done.clone()),
+        )
+        .await;
+
+        let completion = complete_in_tree(&broker(&pool), workflow_id)
+            .await
+            .expect("the completion check");
+
+        let advance = if is_child {
+            ParentAdvance::Owed {
+                child_workflow_id: workflow_id,
+            }
+        } else {
+            ParentAdvance::NotOwed
+        };
+        assert_eq!(
+            completion,
+            TreeCompletion::Written { advance },
+            "is_child = {is_child}"
+        );
+        assert_eq!(workflow(&pool, workflow_id).await.status, "COMPLETED");
+        if let Some(parent_id) = parent_id {
+            super::support::end_workflows(&pool, &[parent_id]).await;
+        }
+    }
+}
+
+/// `TestOnChildWorkflowComplete::test_not_a_child_workflow_returns`: the
+/// parent advance of a workflow that has no parent writes nothing:
+/// `horsies_workflow_child_finish` answers `NOT_A_CHILD`, and the driver of
+/// the advances ends without an error.
+#[tokio::test]
+#[serial]
+async fn a_parent_advance_of_a_workflow_with_no_parent_is_not_a_child() {
+    let pool = shared_pool().await;
+    let done = serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the result");
+    let root = seed_workflow(&pool, &WorkflowSeed::running().status("COMPLETED")).await;
+    seed_node(
+        &pool,
+        &NodeSeed::task(root, 0, "COMPLETED").result(done.clone()),
+    )
+    .await;
+
+    let disposition: String = sql::query_scalar(
+        "SELECT disposition FROM horsies_workflow_child_finish($1) WHERE row_kind = 'OUTCOME'",
+    )
+    .bind(root)
+    .fetch_one(&pool)
+    .await
+    .expect("the child finish of a root");
+    advance_parent_of(&pool, root, &TestChildSpecs::empty()).await;
+
+    assert_eq!(disposition, "NOT_A_CHILD");
+    assert_eq!(workflow(&pool, root).await.status, "COMPLETED");
+    let row = node(&pool, root, 0).await;
+    assert_eq!(row.status, "COMPLETED");
+    assert_eq!(row.result, Some(done));
 }

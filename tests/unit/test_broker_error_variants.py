@@ -15,20 +15,17 @@ from uuid import UUID
 
 import pytest
 
-from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.brokers.result_types import (
     BrokerAsyncContext,
     BrokerEnqueueError,
     BrokerEnqueueFailed,
     BrokerErrorCode,
-    BrokerEventLoopLimit,
     BrokerIdempotencyKeyConflict,
     BrokerInvalidInput,
     BrokerInvalidJsonPayload,
     BrokerInvalidTaskOptions,
     BrokerListenerDisabled,
     BrokerWaitInsideTask,
-    BrokerLoopRunnerFailed,
     BrokerNoTypeAvailable,
     BrokerNotAttached,
     BrokerOperationError,
@@ -44,9 +41,7 @@ from horsies.core.models.task_send_types import (
     TaskSendAsyncContext,
     TaskSendEnqueueFailed,
     TaskSendError,
-    TaskSendEventLoopLimit,
     TaskSendIdempotencyKeyConflict,
-    TaskSendLoopRunnerFailed,
     TaskSendPayloadMismatch,
     TaskSendValidationFailed,
 )
@@ -61,8 +56,7 @@ from horsies.core.models.tasks import (
 from horsies.core.task_decorator import TaskHandle, create_task_wrapper
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, is_err
-from horsies.core.utils.loop_runner import LoopRunnerError
-from horsies.core.worker.reaper import _operation_sqlstate  # pyright: ignore[reportPrivateUsage]
+from tests.union_members import union_members
 
 pytestmark = [pytest.mark.unit]
 
@@ -70,14 +64,6 @@ MESSAGE_MARKER = 'message-marker-7d3e'
 CAUSE_MARKER = 'cause-marker-7d3e'
 OWNER_TASK_ID = UUID('0198c0de-0000-7000-8000-00000000000a')
 HANDLE_TASK_ID = UUID('0198c0de-0000-7000-8000-00000000000b')
-
-
-def _loop_limit() -> EventLoopLimit:
-    return EventLoopLimit(
-        limit=5,
-        held_thread_names=('MainThread',),
-        current_thread_name='worker-1',
-    )
 
 
 def _every_variant(cause: BaseException) -> list[BrokerOperationError]:
@@ -98,17 +84,15 @@ def _every_variant(cause: BaseException) -> list[BrokerOperationError]:
         BrokerInvalidJsonPayload(message=message, exception=cause),
         BrokerInvalidTaskOptions(message=message, exception=cause),
         BrokerInvalidInput(message=message, exception=cause),
-        BrokerEventLoopLimit(message=message, loop_limit=_loop_limit()),
         BrokerAsyncContext(message=message),
-        BrokerLoopRunnerFailed(message=message, exception=cause),
         BrokerListenerDisabled(message=message),
         BrokerWaitInsideTask(message=message),
     ]
 
 
 ENQUEUE_VARIANTS: frozenset[type[Any]] = frozenset(
-    get_args(BrokerEnqueueError.__value__)
-    + get_args(BrokerSyncCallError.__value__)
+    union_members(BrokerEnqueueError)
+    + union_members(BrokerSyncCallError)
 )
 
 
@@ -134,7 +118,6 @@ CAUSED_VARIANTS = (
     BrokerInvalidJsonPayload,
     BrokerInvalidTaskOptions,
     BrokerInvalidInput,
-    BrokerLoopRunnerFailed,
 )
 
 
@@ -145,7 +128,7 @@ def _variant_id(error: BrokerOperationError) -> str:
 class TestVariantCatalog:
     def test_each_code_names_exactly_one_state(self) -> None:
         codes: list[BrokerErrorCode] = []
-        for variant in get_args(BrokerOperationError.__value__):
+        for variant in union_members(BrokerOperationError):
             if variant is BrokerOperationFailed:
                 codes.extend(get_args(BrokerOperationFailedCode.__value__))
             else:
@@ -157,14 +140,14 @@ class TestVariantCatalog:
     def test_the_fixture_builds_every_variant(self) -> None:
         built = {type(error) for error in _every_variant(RuntimeError('x'))}
 
-        assert built == set(get_args(BrokerOperationError.__value__))
+        assert built == set(union_members(BrokerOperationError))
 
     def test_the_enqueue_errors_are_disjoint_broker_errors(self) -> None:
-        enqueue = set(get_args(BrokerEnqueueError.__value__))
-        sync_call = set(get_args(BrokerSyncCallError.__value__))
+        enqueue = set(union_members(BrokerEnqueueError))
+        sync_call = set(union_members(BrokerSyncCallError))
 
         assert enqueue.isdisjoint(sync_call)
-        assert enqueue | sync_call <= set(get_args(BrokerOperationError.__value__))
+        assert enqueue | sync_call <= set(union_members(BrokerOperationError))
 
     @pytest.mark.parametrize(
         'error', _every_variant(RuntimeError(CAUSE_MARKER)), ids=_variant_id
@@ -202,11 +185,7 @@ class TestBrokerErrorCause:
                 BrokerOperationFailed()
                 | BrokerEnqueueFailed()
                 | BrokerInvalidJsonPayload()
-                | (
-                    BrokerInvalidTaskOptions()
-                    | BrokerInvalidInput()
-                    | BrokerLoopRunnerFailed()
-                )
+                | (BrokerInvalidTaskOptions() | BrokerInvalidInput())
             ):
                 assert cause is error.exception
                 assert isinstance(cause, RuntimeError)
@@ -248,12 +227,10 @@ def _send_with_broker_error(error: BrokerOperationError) -> TaskSendError:
 SEND_VARIANT_OF: dict[type[Any], type[Any]] = {
     BrokerEnqueueFailed: TaskSendEnqueueFailed,
     BrokerPayloadMismatch: TaskSendPayloadMismatch,
-    BrokerEventLoopLimit: TaskSendEventLoopLimit,
     BrokerIdempotencyKeyConflict: TaskSendIdempotencyKeyConflict,
     BrokerAsyncContext: TaskSendAsyncContext,
     BrokerInvalidTaskOptions: TaskSendValidationFailed,
     BrokerInvalidInput: TaskSendValidationFailed,
-    BrokerLoopRunnerFailed: TaskSendLoopRunnerFailed,
 }
 
 
@@ -336,7 +313,6 @@ def _handle(broker: MagicMock) -> TaskHandle[int]:
 RESULT_CODE_OF: dict[type[Any], tuple[BuiltInTaskCode, bool]] = {
     BrokerNoTypeAvailable: (ContractCode.NO_TYPE_AVAILABLE, True),
     BrokerInvalidJsonPayload: (OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, True),
-    BrokerEventLoopLimit: (RetrievalCode.EVENT_LOOP_LIMIT, False),
     BrokerWaitInsideTask: (RetrievalCode.WAIT_INSIDE_TASK, False),
 }
 
@@ -403,35 +379,9 @@ class TestProcessBoundaries:
         assert raised.value.__cause__ is cause
 
     def test_cli_schema_error_without_a_cause_is_not_chained(self) -> None:
-        error = BrokerEventLoopLimit(message='loop limit', loop_limit=_loop_limit())
+        error = BrokerNotAttached(message='no broker')
 
-        with pytest.raises(RuntimeError, match='loop limit') as raised:
+        with pytest.raises(RuntimeError, match='no broker') as raised:
             _raise_schema_error(error)
 
         assert raised.value.__cause__ is None
-
-    def test_reaper_sqlstate_reads_the_driver_cause(self) -> None:
-        driver_error = MagicMock()
-        driver_error.sqlstate = '55P03'
-        wrapper = RuntimeError('lock not available')
-        wrapper.orig = driver_error  # type: ignore[attr-defined]
-        error = BrokerOperationFailed(
-            code=BrokerErrorCode.CLEANUP_FAILED,
-            message='audit refused',
-            retryable=False,
-            exception=wrapper,
-        )
-
-        assert _operation_sqlstate(error) == '55P03'
-
-    def test_reaper_sqlstate_of_an_error_without_a_cause_is_none(self) -> None:
-        error = BrokerListenerDisabled(message='no listener')
-
-        assert _operation_sqlstate(error) is None
-
-    def test_a_loop_runner_failure_keeps_the_runner_error(self) -> None:
-        runner_error = LoopRunnerError('Loop runner is not running')
-        error = BrokerLoopRunnerFailed(message='runner stopped', exception=runner_error)
-
-        assert broker_error_cause(error) is runner_error
-        assert error.retryable is False

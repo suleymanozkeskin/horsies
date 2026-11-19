@@ -27,6 +27,7 @@ mod stored_form_vectors;
 mod check;
 mod child;
 mod handle;
+mod process_state;
 mod reads;
 mod scheduler;
 mod send;
@@ -57,6 +58,7 @@ pub use horsies_core::handle::CoreHandle;
 pub use crate::check::*;
 pub use crate::child::*;
 pub use crate::handle::*;
+pub use crate::process_state::RuntimeStartFailed;
 pub use crate::reads::*;
 pub use crate::scheduler::*;
 pub use crate::send::*;
@@ -146,6 +148,7 @@ pub mod __private {
                 "task '{task_name}' is not registered in this process; call \
                  {task_name}::register(&mut app) when main builds the app"
             ),
+            cause: horsies_core::FailureCause::PreconditionFailed,
         }
     }
 

@@ -28,7 +28,7 @@ use tokio_postgres::error::{DbError, SqlState};
 use crate::broker::partition_maintenance::{CoveragePassError, PrunePassError};
 use crate::broker::process_listener::ListenError;
 use crate::broker::workflow_start::ClientStartError;
-use crate::broker::BrokerError;
+use crate::broker::{BrokerError, BrokerOperationSource};
 use crate::core::history::errors::HistoryError;
 use crate::db::{
     CheckoutFailure, ConnectError, ConnectFailure, ListenerStartFailure, NotSentCause,
@@ -103,37 +103,6 @@ impl FailureCause {
         match error.as_db_error() {
             Some(server_error) => Self::of_server_error(server_error),
             None => Self::Connection,
-        }
-    }
-
-    /// An error of the sqlx driver. Pure.
-    ///
-    /// - A database error with a SQLSTATE: [`FailureCause::Server`]. A
-    ///   database error without one breaks the PostgreSQL protocol:
-    ///   [`FailureCause::ContractViolation`].
-    /// - A lost or failed connection, a pool wait that timed out, a closed
-    ///   pool: [`FailureCause::Connection`].
-    /// - A configuration error: [`FailureCause::PreconditionFailed`].
-    /// - Every other driver error (`sqlx::Error` is non-exhaustive): a value
-    ///   or a row that does not encode or decode, a missing row, column or
-    ///   type, a migration error: [`FailureCause::ContractViolation`].
-    pub fn of_sqlx_error(error: &sqlx::Error) -> Self {
-        match error {
-            sqlx::Error::Database(database_error) => match database_error.code() {
-                Some(code) => Self::Server(ServerErrorFacts::new(
-                    SqlState::from_code(code.as_ref()),
-                    database_error.message().to_owned(),
-                )),
-                None => Self::ContractViolation,
-            },
-            sqlx::Error::Io(_)
-            | sqlx::Error::Tls(_)
-            | sqlx::Error::Protocol(_)
-            | sqlx::Error::PoolTimedOut
-            | sqlx::Error::PoolClosed
-            | sqlx::Error::WorkerCrashed => Self::Connection,
-            sqlx::Error::Configuration(_) => Self::PreconditionFailed,
-            _ => Self::ContractViolation,
         }
     }
 }
@@ -269,11 +238,12 @@ impl BrokerError {
     /// - A lost connection or a stopped listener: [`FailureCause::Connection`].
     /// - Stored data or rows that break their reader: [`FailureCause::ContractViolation`].
     /// - Refused settings, a database of another family or schema, a send
-    ///   that another command holds, a claim argument out of range, a held
-    ///   install lock: [`FailureCause::PreconditionFailed`].
+    ///   that another command holds, a retention class key that no class
+    ///   derives, a claim argument out of range, a held install lock, a
+    ///   process runtime that refused the call:
+    ///   [`FailureCause::PreconditionFailed`].
     pub fn failure_cause(&self) -> FailureCause {
         match self {
-            Self::Database(error) => FailureCause::of_sqlx_error(error),
             Self::Statement(failure) => failure.failure_cause(),
             Self::InstallCoverage(error) => error.failure_cause(),
             Self::ConnectionFailed(_) | Self::ListenerClosed => FailureCause::Connection,
@@ -283,6 +253,7 @@ impl BrokerError {
             | Self::TerminalizationContract(_)
             | Self::HistoryReadContract(_)
             | Self::ClaimContract(_)
+            | Self::UnknownStoredFamily(_)
             | Self::RowDecode(_) => FailureCause::ContractViolation,
             Self::InvalidWorkflowNodeStatus
             | Self::IncompleteTaskHistoryCutover
@@ -291,29 +262,49 @@ impl BrokerError {
             | Self::EnqueueConflictUnverifiable { .. }
             | Self::IdempotencyKeyConflict { .. }
             | Self::EnqueueContract(_)
+            | Self::RetentionClassKey(_)
             | Self::InvalidIdempotencyReservationWindow(_)
             | Self::ClientFamilyMismatch { .. }
             | Self::SchemaRefused(_)
             | Self::InstallLock(_)
             | Self::InvalidClaimArgument(_)
-            | Self::PoolSettings(_) => FailureCause::PreconditionFailed,
+            | Self::PoolSettings(_)
+            | Self::ProcessRuntime(_) => FailureCause::PreconditionFailed,
+        }
+    }
+}
+
+impl BrokerOperationSource {
+    /// The cause of what a failed broker operation met. Pure.
+    ///
+    /// - A broker error or a refused subscription: its own cause.
+    /// - Stored data that a class read or a snapshot read cannot read:
+    ///   [`FailureCause::ContractViolation`].
+    /// - A task that moved between the two reads of a task info on every
+    ///   pass, and an argument that a client could not read:
+    ///   [`FailureCause::PreconditionFailed`].
+    pub fn failure_cause(&self) -> FailureCause {
+        match self {
+            Self::Broker(error) => error.failure_cause(),
+            Self::Listen(error) => error.failure_cause(),
+            Self::ClassRead(_) | Self::Snapshot(_) => FailureCause::ContractViolation,
+            Self::TaskInfoMoved { .. } | Self::ArgumentUnreadable(_) => {
+                FailureCause::PreconditionFailed
+            }
         }
     }
 }
 
 impl HistoryError {
-    /// The cause of a history error. A leaf lock that is busy or not held
-    /// and an absent history parent are preconditions. Pure.
+    /// The cause of a history error. A leaf lock that is not held is a
+    /// precondition. Pure.
     pub fn failure_cause(&self) -> FailureCause {
         match self {
-            Self::Database(error) => FailureCause::of_sqlx_error(error),
             Self::Statement(failure) => failure.failure_cause(),
             Self::RowDecode(_) | Self::ArchiveDecode(_) | Self::Contract(_) => {
                 FailureCause::ContractViolation
             }
-            Self::LeafLockNotHeld | Self::LeafLockBusy { .. } | Self::HistoryParentAbsent(_) => {
-                FailureCause::PreconditionFailed
-            }
+            Self::LeafLockNotHeld => FailureCause::PreconditionFailed,
         }
     }
 }
@@ -335,7 +326,6 @@ impl WorkflowError {
     /// refused workflow value are preconditions. Pure.
     pub fn failure_cause(&self) -> FailureCause {
         match self {
-            Self::Database(error) => FailureCause::of_sqlx_error(error),
             Self::Broker(error) => error.failure_cause(),
             Self::ChildSpecSource(unavailable) => unavailable.failure_cause(),
             Self::Serialization(_) | Self::InvalidStatus(_) | Self::StepContract(_) => {
@@ -389,14 +379,20 @@ impl PrunePassError {
     }
 }
 
+impl MonitoringQueryErrorSource {
+    /// The cause of the error that a monitoring read met. Pure.
+    pub fn failure_cause(&self) -> FailureCause {
+        match self {
+            Self::History(error) => error.failure_cause(),
+            Self::Broker(error) => error.failure_cause(),
+        }
+    }
+}
+
 impl MonitoringQueryError {
     /// The cause of a failed monitoring read: the cause of its source. Pure.
     pub fn failure_cause(&self) -> FailureCause {
-        match &self.source {
-            MonitoringQueryErrorSource::Database(error) => FailureCause::of_sqlx_error(error),
-            MonitoringQueryErrorSource::History(error) => error.failure_cause(),
-            MonitoringQueryErrorSource::Broker(error) => error.failure_cause(),
-        }
+        self.error_source().failure_cause()
     }
 }
 
@@ -447,18 +443,6 @@ mod tests {
         assert_eq!(
             BrokerError::ListenerClosed.failure_cause(),
             FailureCause::Connection
-        );
-    }
-
-    #[test]
-    fn a_closed_sqlx_pool_is_a_connection_failure_and_a_missing_row_a_contract_violation() {
-        assert_eq!(
-            FailureCause::of_sqlx_error(&sqlx::Error::PoolClosed),
-            FailureCause::Connection
-        );
-        assert_eq!(
-            FailureCause::of_sqlx_error(&sqlx::Error::RowNotFound),
-            FailureCause::ContractViolation
         );
     }
 

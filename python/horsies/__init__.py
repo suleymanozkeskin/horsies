@@ -48,8 +48,7 @@ from .core.models.workflow import (
     HandleAsyncContext,
     HandleDbOperationFailed,
     HandleErrorCode,
-    HandleEventLoopLimit,
-    HandleLoopRunnerFailed,
+    HandleInvalidWorkflowId,
     HandleOperationError,
     HandleResult,
     HandleResumeRecoveryFailed,
@@ -70,9 +69,7 @@ from .core.workflows.start_types import (
     WorkflowStartEnqueueFailed,
     WorkflowStartError,
     WorkflowStartErrorCode,
-    WorkflowStartEventLoopLimit,
     WorkflowStartIdConflict,
-    WorkflowStartLoopRunnerFailed,
     WorkflowStartResult,
     WorkflowStartRetryable,
     WorkflowStartValidationFailed,
@@ -154,8 +151,18 @@ from .core.models.task_send_types import (
     TaskSendPayloadMismatch,
     TaskSendPayloadTooLarge,
     TaskSendIdempotencyKeyConflict,
-    TaskSendEventLoopLimit,
-    TaskSendLoopRunnerFailed,
+)
+from .core.brokers.enqueue_task import SendKind
+from ._core import (
+    CoreCallTimedOut,
+    CoreConnectionError,
+    CoreContractViolation,
+    CorePreconditionFailed,
+    CoreServerError,
+    CoreStartFailed,
+    CoreStopped,
+    ForkedAfterCoreStart,
+    TooManyPendingCalls,
 )
 from .core.brokers.result_types import (
     BrokerErrorCode,
@@ -173,9 +180,7 @@ from .core.brokers.result_types import (
     BrokerInvalidJsonPayload,
     BrokerInvalidTaskOptions,
     BrokerInvalidInput,
-    BrokerEventLoopLimit,
     BrokerAsyncContext,
-    BrokerLoopRunnerFailed,
     BrokerListenerDisabled,
     BrokerWaitInsideTask,
     broker_error_cause,
@@ -217,7 +222,7 @@ from .core.models.boot_failure import (
     TaskLoopCreateFailed,
     ThreadStartRefused,
 )
-from .core.history.reads.detail import TaskAbsenceReason
+from ._catalog.history import TaskAbsenceReason
 from .core.history.rerun.operations import (
     NotEligibleReason,
     RerunEnqueued,
@@ -293,8 +298,7 @@ __all__ = [
     'HandleAsyncContext',
     'HandleDbOperationFailed',
     'HandleErrorCode',
-    'HandleEventLoopLimit',
-    'HandleLoopRunnerFailed',
+    'HandleInvalidWorkflowId',
     'HandleOperationError',
     'HandleResult',
     'HandleResumeRecoveryFailed',
@@ -311,9 +315,7 @@ __all__ = [
     'WorkflowStartEnqueueFailed',
     'WorkflowStartError',
     'WorkflowStartErrorCode',
-    'WorkflowStartEventLoopLimit',
     'WorkflowStartIdConflict',
-    'WorkflowStartLoopRunnerFailed',
     'WorkflowStartResult',
     'WorkflowStartRetryable',
     'WorkflowStartValidationFailed',
@@ -393,8 +395,6 @@ __all__ = [
     'TaskSendPayloadMismatch',
     'TaskSendPayloadTooLarge',
     'TaskSendIdempotencyKeyConflict',
-    'TaskSendEventLoopLimit',
-    'TaskSendLoopRunnerFailed',
     'NoCause',
     # Broker result types
     'BrokerErrorCode',
@@ -412,12 +412,22 @@ __all__ = [
     'BrokerInvalidJsonPayload',
     'BrokerInvalidTaskOptions',
     'BrokerInvalidInput',
-    'BrokerEventLoopLimit',
     'BrokerAsyncContext',
-    'BrokerLoopRunnerFailed',
     'BrokerListenerDisabled',
     'BrokerWaitInsideTask',
     'broker_error_cause',
+    'SendKind',
+    # Core errors: the exception of a failed database call, and the errors of a
+    # call that the core of the process cannot run
+    'CoreServerError',
+    'CoreConnectionError',
+    'CoreContractViolation',
+    'CorePreconditionFailed',
+    'ForkedAfterCoreStart',
+    'CoreStopped',
+    'TooManyPendingCalls',
+    'CoreCallTimedOut',
+    'CoreStartFailed',
     # Health / liveness API
     'DatabasePing',
     'WorkerPong',

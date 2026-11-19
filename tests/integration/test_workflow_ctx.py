@@ -195,9 +195,9 @@ class TestWorkflowCtx:
         handle = await start_ok(spec, broker)
 
         # Complete A
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
 
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         ctx = self._build_ctx_from_kwargs(kwargs)
 
         result = ctx.result_for(node_a)
@@ -205,7 +205,7 @@ class TestWorkflowCtx:
         assert result.unwrap() == 10
 
         # Validate metadata too
-        assert ctx.workflow_id == handle.workflow_id
+        assert ctx.workflow_id == str(handle.workflow_id)
         assert ctx.task_index == 1
         assert ctx.task_name == 'ctx_inject_b'
 
@@ -236,9 +236,9 @@ class TestWorkflowCtx:
         )
 
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
 
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         assert '__h_workflow_ctx__' not in kwargs
 
     async def test_workflow_meta_injected_without_ctx_from(
@@ -267,12 +267,12 @@ class TestWorkflowCtx:
             broker=broker, name='meta_only', tasks=[node_a, node_b]
         )
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
 
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         meta_raw = kwargs.get('__h_workflow_meta__')
         assert isinstance(meta_raw, dict)
-        assert meta_raw['workflow_id'] == handle.workflow_id
+        assert meta_raw['workflow_id'] == str(handle.workflow_id)
         assert meta_raw['task_index'] == 1
         assert meta_raw['task_name'] == 'meta_only_b'
 
@@ -308,10 +308,10 @@ class TestWorkflowCtx:
         )
 
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
-        await finish_task(session, broker, handle.workflow_id, 1, TaskResult(ok=20))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=20))
 
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 2)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 2)
         ctx = self._build_ctx_from_kwargs(kwargs)
 
         assert ctx.result_for(node_a).unwrap() == 10
@@ -360,12 +360,12 @@ class TestWorkflowCtx:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='A_FAILED', message='A failed')),
         )
 
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 2)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 2)
         ctx = self._build_ctx_from_kwargs(kwargs)
 
         result = ctx.result_for(node_b)
@@ -415,12 +415,12 @@ class TestWorkflowCtx:
         await finish_task(
             session,
             broker,
-            handle.workflow_id,
+            str(handle.workflow_id),
             0,
             TaskResult(err=TaskError(error_code='A_FAILED', message='A failed')),
         )
 
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         ctx = self._build_ctx_from_kwargs(kwargs)
 
         result = ctx.result_for(node_a)
@@ -483,7 +483,7 @@ class TestWorkflowCtx:
         handle = await start_ok(spec, broker)
 
         # Complete A to enqueue B
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
 
         task_row_result = await session.execute(
             text("""
@@ -497,10 +497,10 @@ class TestWorkflowCtx:
         task_row = task_row_result.fetchone()
         assert task_row is not None
 
-        task_id, task_name, kwargs_json = task_row
+        task_id, task_name, input_json = task_row
         assert isinstance(task_id, str)
         assert isinstance(task_name, str)
-        assert isinstance(kwargs_json, str)
+        assert isinstance(input_json, str)
 
         # Claim the task before running (required by ownership check)
         claimed_at = await self._claim_task(session, task_id, 'test-worker')
@@ -509,7 +509,7 @@ class TestWorkflowCtx:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                input_json=kwargs_json,
+                input_json=input_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
                 work=RunTheTask(),
@@ -553,7 +553,7 @@ class TestWorkflowCtx:
         handle = await start_ok(spec, broker)
 
         # Complete A to enqueue B
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
 
         task_row_result = await session.execute(
             text("""
@@ -567,10 +567,10 @@ class TestWorkflowCtx:
         task_row = task_row_result.fetchone()
         assert task_row is not None
 
-        task_id, task_name, kwargs_json = task_row
+        task_id, task_name, input_json = task_row
         assert isinstance(task_id, str)
         assert isinstance(task_name, str)
-        assert isinstance(kwargs_json, str)
+        assert isinstance(input_json, str)
 
         # Claim the task before running (required by ownership check)
         claimed_at = await self._claim_task(session, task_id, 'test-worker')
@@ -579,7 +579,7 @@ class TestWorkflowCtx:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                input_json=kwargs_json,
+                input_json=input_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
                 work=RunTheTask(),
@@ -626,7 +626,7 @@ class TestWorkflowCtx:
         )
         handle = await start_ok(spec, broker)
 
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
 
         task_row_result = await session.execute(
             text("""
@@ -640,10 +640,10 @@ class TestWorkflowCtx:
         task_row = task_row_result.fetchone()
         assert task_row is not None
 
-        task_id, task_name, kwargs_json = task_row
+        task_id, task_name, input_json = task_row
         assert isinstance(task_id, str)
         assert isinstance(task_name, str)
-        assert isinstance(kwargs_json, str)
+        assert isinstance(input_json, str)
 
         # Claim the task before running (required by ownership check)
         claimed_at = await self._claim_task(session, task_id, 'test-worker')
@@ -652,7 +652,7 @@ class TestWorkflowCtx:
         ok, result_json, worker_failure = wire_of(
             _run_task_entry(
                 task_name=task_name,
-                input_json=kwargs_json,
+                input_json=input_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
                 work=RunTheTask(),
@@ -723,9 +723,9 @@ class TestWorkflowCtx:
             broker=broker, name='key_err', tasks=[node_a, node_b],
         )
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
 
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         ctx = self._build_ctx_from_kwargs(kwargs)
 
         # node_c was never part of this workflow — its node_id won't be in context
@@ -762,9 +762,9 @@ class TestWorkflowCtx:
             broker=broker, name='has_res', tasks=[node_a, node_b],
         )
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=42))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=42))
 
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         ctx = self._build_ctx_from_kwargs(kwargs)
 
         assert ctx.has_result(node_a) is True
@@ -794,9 +794,9 @@ class TestWorkflowCtx:
             broker=broker, name='has_res_false', tasks=[node_a, node_b],
         )
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=1))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=1))
 
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         ctx = self._build_ctx_from_kwargs(kwargs)
 
         # node_id is set but not in context
@@ -834,9 +834,9 @@ class TestWorkflowCtx:
             broker=broker, name='nodekey', tasks=[node_a, node_b],
         )
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=77))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=77))
 
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         ctx = self._build_ctx_from_kwargs(kwargs)
 
         # Use NodeKey with the same node_id that WorkflowSpec assigned to node_a
@@ -871,9 +871,9 @@ class TestWorkflowCtx:
             broker=broker, name='empty_ctx', tasks=[node_a, node_b],
         )
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
 
-        kwargs = await self._get_task_kwargs(session, handle.workflow_id, 1)
+        kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         assert '__h_workflow_ctx__' not in kwargs
 
     async def test_worker_skips_ctx_when_function_lacks_param(
@@ -903,7 +903,7 @@ class TestWorkflowCtx:
             broker=broker, name='skip_ctx', tasks=[node_a, node_b],
         )
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=5))
+        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=5))
 
         # Fetch task B's row and manually inject __h_workflow_ctx__ into kwargs
         task_row_result = await session.execute(
@@ -918,16 +918,16 @@ class TestWorkflowCtx:
         task_row = task_row_result.fetchone()
         assert task_row is not None
 
-        task_id, task_name, kwargs_json = task_row
+        task_id, task_name, input_json = task_row
         assert isinstance(task_id, str)
         assert isinstance(task_name, str)
-        assert isinstance(kwargs_json, str)
+        assert isinstance(input_json, str)
 
         # Inject ctx data into kwargs to simulate the engine path
-        original_kwargs = loads_json(kwargs_json).unwrap()
+        original_kwargs = loads_json(input_json).unwrap()
         assert isinstance(original_kwargs, dict)
         original_kwargs['__h_workflow_ctx__'] = {
-            'workflow_id': handle.workflow_id,
+            'workflow_id': str(handle.workflow_id),
             'task_index': 1,
             'task_name': 'skip_ctx_b',
             'results_by_id': {},

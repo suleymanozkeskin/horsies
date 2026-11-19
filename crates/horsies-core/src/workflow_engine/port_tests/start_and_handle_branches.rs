@@ -8,7 +8,6 @@
 //! Python tests that it ports.
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -19,6 +18,7 @@ use super::support::{
 use crate::broker::workflow_start::ClientStartError;
 use crate::core::{AnyNode, WorkflowTaskStatus};
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::{self, TestPool};
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::query::{NodeResultsRead, NodesRead};
 
@@ -68,8 +68,8 @@ fn stored_status(status: WorkflowTaskStatus) -> &'static str {
 }
 
 /// Rows of a start: the workflow rows with `workflow_id`, and the task rows of `task_name`.
-async fn start_rows(pool: &PgPool, workflow_id: Uuid, task_name: &str) -> (i64, i64) {
-    sqlx::query_as(
+async fn start_rows(pool: &TestPool, workflow_id: Uuid, task_name: &str) -> (i64, i64) {
+    sql::query_as(
         "SELECT (SELECT count(*) FROM horsies_workflows WHERE id = $1),
                 (SELECT count(*) FROM horsies_tasks WHERE task_name = $2)",
     )
@@ -92,7 +92,7 @@ const CORRUPT_OPTIONS_TASK: &str = "start_branch_corrupt_options";
 /// do not parse. Returns per case: its name, the refusal, and the rows the
 /// start left (workflow rows, task rows of [`CORRUPT_OPTIONS_TASK`]).
 async fn starts_with_corrupt_options(
-    pool: &PgPool,
+    pool: &TestPool,
 ) -> Vec<(&'static str, ClientStartError, (i64, i64))> {
     let mut root = task_node(0, CORRUPT_OPTIONS_TASK);
     root.task_options_json = Some("{not-json".to_owned());
@@ -218,7 +218,7 @@ async fn the_start_stores_a_success_policy_that_names_sub_workflow_nodes() {
     let workflow_id = start(&pool, &parent, &child_specs).await;
 
     let stored: Option<serde_json::Value> =
-        sqlx::query_scalar("SELECT success_policy FROM horsies_workflows WHERE id = $1")
+        sql::query_scalar("SELECT success_policy FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
             .fetch_one(&pool)
             .await
@@ -234,6 +234,59 @@ async fn the_start_stores_a_success_policy_that_names_sub_workflow_nodes() {
         serde_json::json!([{"required_indices": [0, 1]}])
     );
     assert_eq!(stored["optional_indices"], serde_json::json!([2]));
+}
+
+/// `TestChildStartSerialization::test_child_start_stores_the_index_of_a_subworkflow_node`
+/// (`test_success_policy_subworkflow_node.py`): the child start stores the
+/// success policy of the child, whose case and optional list name
+/// sub-workflow nodes of the child.
+#[tokio::test]
+#[serial]
+async fn the_child_start_stores_a_success_policy_that_names_sub_workflow_nodes() {
+    let pool = shared_pool().await;
+    let grandchild = spec(
+        "child_branch_policy_grandchild",
+        vec![task_node(0, "child_branch_policy_grandchild_task")],
+    );
+    let mut child = spec(
+        "child_branch_policy_child",
+        vec![
+            sub_workflow_node(0, &grandchild),
+            sub_workflow_node(1, &grandchild),
+        ],
+    );
+    let mut policy = required(&[&[0]]);
+    policy.optional_indices = Some(vec![1]);
+    child.success_policy = Some(policy);
+    let child_specs = child_specs_of(&[grandchild, child.clone()]);
+    let parent = spec(
+        "child_branch_policy_parent",
+        vec![sub_workflow_node(0, &child)],
+    );
+
+    let workflow_id = start(&pool, &parent, &child_specs).await;
+
+    let child_id = child_of(&pool, workflow_id, 0).await;
+    let stored: Option<serde_json::Value> =
+        sql::query_scalar("SELECT success_policy FROM horsies_workflows WHERE id = $1")
+            .bind(child_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the stored policy of the child");
+    let tree: Vec<Uuid> = sql::query_scalar(
+        "SELECT id FROM horsies_workflows WHERE id = $1 OR root_workflow_id = $1",
+    )
+    .bind(workflow_id)
+    .fetch_all(&pool)
+    .await
+    .expect("read the workflow tree");
+    end_workflows(&pool, &tree).await;
+    let stored = stored.expect("the child stores its policy");
+    assert_eq!(
+        stored["cases"],
+        serde_json::json!([{"required_indices": [0]}])
+    );
+    assert_eq!(stored["optional_indices"], serde_json::json!([1]));
 }
 
 /// `TestResults::test_no_workflow_row_is_workflow_not_found`
@@ -321,7 +374,7 @@ async fn a_summary_past_the_depth_bound_is_read_as_stored() {
 
 /// A workflow with one task node per status of the enum, in the order of
 /// [`every_node_status`].
-async fn seed_one_node_per_status(pool: &PgPool) -> Uuid {
+async fn seed_one_node_per_status(pool: &TestPool) -> Uuid {
     let workflow_id = seed_workflow(pool, &WorkflowSeed::running()).await;
     for (task_index, status) in (0_i32..).zip(every_node_status()) {
         let _node = seed_node(
@@ -342,7 +395,7 @@ async fn the_node_status_check_accepts_each_status_of_the_enum_and_refuses_anoth
     let pool = shared_pool().await;
     let workflow_id = seed_one_node_per_status(&pool).await;
 
-    let refused = sqlx::query(
+    let refused = sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps, join_type, status,
@@ -358,7 +411,7 @@ async fn the_node_status_check_accepts_each_status_of_the_enum_and_refuses_anoth
     .await;
 
     let stored: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM horsies_workflow_tasks WHERE workflow_id = $1")
+        sql::query_scalar("SELECT count(*) FROM horsies_workflow_tasks WHERE workflow_id = $1")
             .bind(workflow_id)
             .fetch_one(&pool)
             .await

@@ -1,6 +1,5 @@
 //! The pool of isolated children: the FIFO of tasks, the answer of each
-//! task, and the stop (Python `core/worker/slots.py`, the isolated half of
-//! `SlotPool`). The state of each slot, the failure and the stop live on
+//! task, and the stop. The state of each slot, the failure and the stop live on
 //! the [`PoolBoard`], which every pool of the worker shares.
 
 use std::collections::VecDeque;

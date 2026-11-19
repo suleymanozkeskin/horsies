@@ -1,8 +1,8 @@
-//! Port of Python `tests/integration/test_terminalization_functions.py`.
+//! The terminalization functions of 0004.
 //!
 //! The rows that a matrix test of `broker/terminalization_matrix.rs` already
-//! checks in full are not repeated here. The Python file drives the interim
-//! writers; the rows run against the 0004 writers that keep their kinds:
+//! checks in full are not repeated here. The rows run against the 0004
+//! writers that keep their kinds:
 //! `horsies_finish_workflow_success` writes `COMPLETE_LOCKED`,
 //! `horsies_finish_failed_attempt` writes `FAIL_RUNNING`,
 //! `horsies_finish_stale_attempt` (with no retry) writes `FAIL_STALE` and
@@ -17,7 +17,7 @@ use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryRequest,
 };
 use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::broker::terminalization::terminalize_in_tx;
+use crate::broker::terminalization::on_test_pool::terminalize_in_transaction;
 use crate::core::lifecycle::outcomes::{ObservedClaim, ObservedWorkflowLink};
 use crate::core::lifecycle::{
     AttemptWriteRefusal, BatchSize, FailedAttemptOutcome, GuardEvidence, OwnedClaim,
@@ -25,6 +25,7 @@ use crate::core::lifecycle::{
     WorkerOwned, WorkflowSuccessOutcome,
 };
 use crate::core::types::status::TaskStatus;
+use crate::test_support::sql;
 use crate::test_support::terminal_writes::{self, StaleFailure};
 
 const STALE_AFTER_MS: i32 = 60_000;
@@ -124,7 +125,7 @@ mod terminal_at_invariant {
         let task_id = seed_task(&pool, &TaskSeed::pending()).await;
 
         let terminal_in_live_table =
-            sqlx::query("UPDATE horsies_tasks SET status = 'CANCELLED' WHERE id = $1")
+            sql::query("UPDATE horsies_tasks SET status = 'CANCELLED' WHERE id = $1")
                 .bind(task_id)
                 .execute(&pool)
                 .await
@@ -339,6 +340,43 @@ mod kind_vocabulary {
 
         cleanup_tasks(&pool, &[task_id]).await;
     }
+
+    /// Two kinds share a class of `horsies_terminalization_family` exactly
+    /// when they share a class of `equivalence_class_of`. A terminal write
+    /// that missed answers `AlreadyApplied` by the database class; the core
+    /// judges a replay by its own.
+    #[tokio::test]
+    #[serial]
+    async fn the_miss_classes_of_the_database_are_the_equivalence_classes() {
+        let pool = pool().await;
+        let mut families: Vec<(TerminalizationKind, String)> = Vec::new();
+        for kind in TerminalizationKind::ALL {
+            let family: Option<String> =
+                sql::query_scalar("SELECT horsies_terminalization_family($1)")
+                    .bind(kind.as_str())
+                    .fetch_one(&pool)
+                    .await
+                    .expect("read the database class");
+            let Some(family) = family else {
+                panic!("{} has no database class", kind.as_str());
+            };
+            families.push((kind, family));
+        }
+        for (kind, family) in &families {
+            let mut same: Vec<&str> = families
+                .iter()
+                .filter(|(_, other)| other == family)
+                .map(|(other, _)| other.as_str())
+                .collect();
+            same.sort_unstable();
+            let mut expected: Vec<&str> = crate::core::lifecycle::equivalence_class_of(*kind)
+                .iter()
+                .map(|member| member.as_str())
+                .collect();
+            expected.sort_unstable();
+            assert_eq!(same, expected, "{}", kind.as_str());
+        }
+    }
 }
 
 mod fail_locked {
@@ -499,7 +537,7 @@ mod fail_stale {
         ensure_recent_heartbeat_leaves(&pool).await;
 
         let mut transaction = pool.begin().await.expect("begin");
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_tasks SET started_at = NOW() - interval '10 seconds' WHERE id = $1",
         )
         .bind(task_id)
@@ -508,7 +546,7 @@ mod fail_stale {
         .expect("age the start");
         insert_beat(&mut *transaction, task_id, BeatRole::Runner, 1.25).await;
         let outcomes = terminal_writes::fail_stale_task(
-            transaction.as_mut(),
+            &mut *transaction,
             task_id,
             &StaleFailure {
                 stale_after_ms: 1_500,
@@ -779,19 +817,17 @@ mod expire_owned_claim {
 
         let mut mutator = pool.begin().await.expect("begin mutator");
         let mutator_pid = backend_pid(&mut *mutator).await;
-        sqlx::query(
-            "UPDATE horsies_tasks SET good_until = NOW() - interval '1 hour' WHERE id = $1",
-        )
-        .bind(task_id)
-        .execute(&mut *mutator)
-        .await
-        .expect("move the deadline under the row lock");
+        sql::query("UPDATE horsies_tasks SET good_until = NOW() - interval '1 hour' WHERE id = $1")
+            .bind(task_id)
+            .execute(&mut *mutator)
+            .await
+            .expect("move the deadline under the row lock");
 
         let mut applier = pool.begin().await.expect("begin applier");
         let applier_pid = backend_pid(&mut *applier).await;
         let command = expire_claim(task_id);
         let application = tokio::spawn(async move {
-            let outcomes = terminalize_in_tx(&mut applier, &command).await;
+            let outcomes = terminalize_in_transaction(&mut applier, &command).await;
             applier.commit().await.expect("commit applier");
             outcomes
         });
@@ -840,6 +876,39 @@ mod expire_owned_claim {
             panic!("expected a deadline refusal, got {outcomes:?}");
         };
         assert_eq!(deadline.good_until, None);
+        assert_eq!(
+            live_row(&pool, task_id).await.expect("live row")["status"],
+            "CLAIMED"
+        );
+        cleanup_tasks(&pool, &[task_id]).await;
+    }
+
+    /// Python `TestExpireOwnedClaim::test_another_workers_claim_is_lost`: the
+    /// deadline has passed, but another worker holds the claim, so the
+    /// expiry is a lost claim that names that worker, and the row stays
+    /// CLAIMED.
+    #[tokio::test]
+    #[serial]
+    async fn another_workers_claim_is_lost() {
+        let pool = pool().await;
+        let task_id = seed_task(
+            &pool,
+            &TaskSeed {
+                holder: Holder::other_worker(),
+                ..TaskSeed::claimed()
+            },
+        )
+        .await;
+        set_deadline(&pool, task_id, Deadline::PassedSecondsAgo(60.0)).await;
+
+        let outcomes = terminalize(&pool, &expire_claim(task_id))
+            .await
+            .expect("expire claim");
+
+        let [TerminalizationOutcome::LostClaim { observed, .. }] = outcomes.as_slice() else {
+            panic!("expected a lost claim, got {outcomes:?}");
+        };
+        assert_eq!(observed.worker_id.as_deref(), Some(OTHER_WORKER));
         assert_eq!(
             live_row(&pool, task_id).await.expect("live row")["status"],
             "CLAIMED"
@@ -1040,7 +1109,7 @@ mod expire_pending_tasks {
         set_deadline(&pool, free, Deadline::PassedSecondsAgo(60.0)).await;
 
         let mut holder = pool.begin().await.expect("begin holder");
-        sqlx::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
+        sql::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
             .bind(held)
             .execute(&mut *holder)
             .await
@@ -1338,7 +1407,7 @@ mod cancel_orphaned_tasks {
         let free = seed_task(&pool, &claimed_workflow_task()).await;
 
         let mut holder = pool.begin().await.expect("begin holder");
-        sqlx::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
+        sql::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE")
             .bind(held)
             .execute(&mut *holder)
             .await
@@ -1368,7 +1437,7 @@ mod abandon_owned_node {
         let task_id = seed_task(&pool, &claimed_workflow_task()).await;
         let before = live_row(&pool, task_id).await;
 
-        let refused = sqlx::query("SELECT * FROM horsies_abandon_owned_node($1, $2, NULL)")
+        let refused = sql::query("SELECT * FROM horsies_abandon_owned_node($1, $2, NULL)")
             .bind(task_id)
             .bind(WORKER)
             .fetch_all(&pool)
@@ -1745,7 +1814,7 @@ mod id_keyed_workflow_batches {
             let task_id = seed_task(&pool, &claimed_workflow_task()).await;
             let before = live_row(&pool, task_id).await;
 
-            let refused = sqlx::query(&format!(
+            let refused = sql::query(&format!(
                 "SELECT * FROM {function}(ARRAY[$1]::uuid[], ARRAY[NULL]::timestamptz[], $2)"
             ))
             .bind(task_id)
@@ -1979,8 +2048,7 @@ mod workflow_scoped_batches {
         cleanup_workflows(&pool, &[live_workflow_id, ready_link_workflow]).await;
     }
 
-    /// Python `test_lifecycle_commands.py::TestIllegalStatesAreUnrepresentable::test_required_workflow_status_is_implied_by_the_variant`:
-    /// no command names the workflow status that its guard needs; the variant
+    /// No command names the workflow status that its guard needs; the variant
     /// means it. The pause sweep acts only under a PAUSED workflow and the
     /// cancel sweep only under a CANCELLED one, so neither acts for the other.
     #[tokio::test]

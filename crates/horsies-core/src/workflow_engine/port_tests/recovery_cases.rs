@@ -3,26 +3,27 @@
 //! `test_orphaned_workflow_task_repro.py`.
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
-    child_specs_of, node, node_status, ok, required, seed_node, seed_node_task, seed_workflow,
-    spec, start_claimed_task, task_node, workflow, workflow_status, IsolatedDatabase, LiveStatus,
-    NodeSeed, ParentLink, WorkflowSeed,
+    args_from_inner, child_specs_of, code, error_of, finish_phase1, node, node_status,
+    node_task_input, ok, required, seed_node, seed_node_task, seed_workflow, spec, start,
+    start_claimed_task, task_node, workflow, workflow_error_code, workflow_status,
+    IsolatedDatabase, LiveStatus, NodeSeed, ParentLink, WorkflowSeed,
 };
-use crate::core::{TaskError, WorkflowSpec};
+use crate::core::{OperationalErrorCode, TaskError, TaskResult, WorkflowSpec};
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::{self, TestPool};
+use crate::workflow_engine::phase2_recovery::drive_phase2_recovery_with;
 use crate::workflow_engine::recovery::{recover_stuck_workflows_observed_with, RecoveryReport};
-use crate::workflow_engine::steps::ChildBuild;
 
 /// `workflow_recovery_failure_limit` of each pass.
 const LIMIT: u32 = 3;
 
-async fn pass(pool: &PgPool, child_specs: &TestChildSpecs) -> RecoveryReport {
+async fn pass(pool: &TestPool, child_specs: &TestChildSpecs) -> RecoveryReport {
     recover_stuck_workflows_observed_with(
-        &crate::broker::PostgresBroker::from_pool(pool.clone()),
-        ChildBuild::Client(child_specs),
+        &crate::broker::PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
+        child_specs,
         LIMIT,
     )
     .await
@@ -114,7 +115,9 @@ async fn recovery_completes_a_workflow_whose_nodes_all_ended_and_sets_completed_
     db.drop().await;
 }
 
-/// `test_recover_respects_success_policy` and `test_recover_success_policy_not_satisfied`
+/// `test_recover_respects_success_policy` and `test_recover_success_policy_not_satisfied`:
+/// each workflow counts one recovery; the workflow whose case is not met ends
+/// FAILED with the error of its failed required node.
 #[tokio::test]
 #[serial]
 async fn recovery_decides_by_the_success_policy() {
@@ -142,12 +145,19 @@ async fn recovery_decides_by_the_success_policy() {
         .await;
         cases.push((workflow_id, expected));
     }
+    let cases_failed = cases[1];
 
-    let _report = pass(&db.pool, &TestChildSpecs::empty()).await;
+    let report = pass(&db.pool, &TestChildSpecs::empty()).await;
 
+    assert_eq!(report.total(), 2, "{report:?}");
     for (workflow_id, expected) in cases {
         assert_eq!(workflow_status(&db.pool, workflow_id).await, expected);
     }
+    let (failed, _) = cases_failed;
+    assert_eq!(
+        workflow_error_code(&db.pool, failed).await.as_deref(),
+        Some("TEST")
+    );
     db.drop().await;
 }
 
@@ -245,7 +255,7 @@ async fn a_ready_sub_workflow_node_with_no_child_starts_its_child() {
 /// A RUNNING parent whose sub-workflow node 0 is RUNNING and linked to a
 /// child that ended with `child_status`.
 async fn seed_parent_of_an_ended_child(
-    pool: &PgPool,
+    pool: &TestPool,
     child_status: &'static str,
     child_result: Option<String>,
 ) -> (Uuid, Uuid) {
@@ -364,11 +374,257 @@ async fn an_orphan_stays_claimed_when_self_heal_is_off() {
             crate::broker::claims::StartMiss::NodeNotLinked
         )
     );
-    let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+    let status: String = sql::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(&db.pool)
         .await
         .expect("the orphan keeps its live row");
     assert_eq!(status, "CLAIMED");
+    db.drop().await;
+}
+
+/// `test_recover_completed_not_marked` (case 2+3): a RUNNING workflow whose
+/// only node COMPLETED ends COMPLETED and stores its result.
+#[tokio::test]
+#[serial]
+async fn recovery_completes_a_workflow_whose_node_completed_and_stores_its_result() {
+    let db = IsolatedDatabase::create().await;
+    let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
+    seed_node(
+        &db.pool,
+        &NodeSeed::task(workflow_id, 0, "COMPLETED").result(ok_text(serde_json::json!(10))),
+    )
+    .await;
+
+    let report = pass(&db.pool, &TestChildSpecs::empty()).await;
+
+    assert_eq!(report.total(), 1, "{report:?}");
+    let row = workflow(&db.pool, workflow_id).await;
+    assert_eq!(row.status, "COMPLETED");
+    assert!(row.result.is_some(), "{row:?}");
+    db.drop().await;
+}
+
+/// `test_recover_failed_not_marked` (case 2+3): a RUNNING workflow whose only
+/// node FAILED, with no stored workflow error, ends FAILED with the node's
+/// error and no result.
+#[tokio::test]
+#[serial]
+async fn recovery_fails_a_workflow_whose_node_failed_with_its_error_and_no_result() {
+    let db = IsolatedDatabase::create().await;
+    let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
+    seed_node(
+        &db.pool,
+        &NodeSeed::task(workflow_id, 0, "FAILED").result(err_text("TEST_ERROR")),
+    )
+    .await;
+
+    let report = pass(&db.pool, &TestChildSpecs::empty()).await;
+
+    assert_eq!(report.total(), 1, "{report:?}");
+    let row = workflow(&db.pool, workflow_id).await;
+    assert_eq!(row.status, "FAILED");
+    assert_eq!(row.result, None);
+    assert_eq!(
+        workflow_error_code(&db.pool, workflow_id).await.as_deref(),
+        Some("TEST_ERROR")
+    );
+    db.drop().await;
+}
+
+/// `test_recover_failed_recomputes_first_failed_error` (case 2+3): a RUNNING
+/// workflow that stores the error of its second failed node is finalized
+/// FAILED with the error of its first failed node by index, and no result.
+#[tokio::test]
+#[serial]
+async fn recovery_fails_a_workflow_with_the_error_of_its_first_failed_node() {
+    let db = IsolatedDatabase::create().await;
+    let later = serde_json::to_string(
+        &TaskError::new("SECOND_ERROR", "Second failure").expect("a user error code"),
+    )
+    .expect("encode the stored error");
+    let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running().error(later)).await;
+    seed_node(
+        &db.pool,
+        &NodeSeed::task(workflow_id, 0, "FAILED").result(err_text("FIRST_ERROR")),
+    )
+    .await;
+    seed_node(
+        &db.pool,
+        &NodeSeed::task(workflow_id, 1, "FAILED").result(err_text("SECOND_ERROR")),
+    )
+    .await;
+
+    let report = pass(&db.pool, &TestChildSpecs::empty()).await;
+
+    assert_eq!(report.total(), 1, "{report:?}");
+    let row = workflow(&db.pool, workflow_id).await;
+    assert_eq!(row.status, "FAILED");
+    assert_eq!(row.result, None);
+    let error = row.error.expect("the workflow stores an error");
+    assert!(error.contains("FIRST_ERROR"), "{error}");
+    assert!(!error.contains("SECOND_ERROR"), "{error}");
+    db.drop().await;
+}
+
+/// `test_recover_pending_dep_without_stored_result_injects_the_error`
+/// (case 0): a COMPLETED dependency with no stored result gives its
+/// `args_from` consumer `RESULT_DESERIALIZATION_ERROR` naming the node, its
+/// index, its task and its status, with the dependency index in `data`; the
+/// envelope names the source task.
+#[tokio::test]
+#[serial]
+async fn a_dependency_with_no_stored_result_gives_its_consumer_the_missing_result_error() {
+    let db = IsolatedDatabase::create().await;
+    let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
+    let mut source = NodeSeed::task(workflow_id, 0, "COMPLETED");
+    source.task_name = "recover_pend_nores_a".to_owned();
+    seed_node(&db.pool, &source).await;
+    seed_node(
+        &db.pool,
+        &NodeSeed::task(workflow_id, 1, "PENDING")
+            .deps(&[0])
+            .args_from("input_result", 0),
+    )
+    .await;
+
+    let report = pass(&db.pool, &TestChildSpecs::empty()).await;
+
+    assert_eq!(report.total(), 1, "{report:?}");
+    let input = node_task_input(&db.pool, workflow_id, 1).await;
+    assert_eq!(
+        input["input_result"]["source_task_name"],
+        serde_json::json!("recover_pend_nores_a")
+    );
+    let injected = args_from_inner(&input, "input_result");
+    let error = error_of(&injected);
+    assert_eq!(code(error).as_deref(), Some("RESULT_DESERIALIZATION_ERROR"));
+    assert_eq!(
+        error.message.as_deref(),
+        Some(
+            "Dependency node node_0 (index 0, task recover_pend_nores_a) \
+             is COMPLETED with no stored result"
+        )
+    );
+    assert_eq!(
+        error.data_value(),
+        Some(serde_json::json!({"dependency_index": 0}))
+    );
+    db.drop().await;
+}
+
+/// One phase-2 recovery pass with no grace, as the reaper runs it. Returns
+/// the nodes it advanced.
+async fn phase2_pass(pool: &TestPool) -> u64 {
+    drive_phase2_recovery_with(
+        &crate::broker::PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
+        &TestChildSpecs::empty(),
+        0,
+        100,
+        25,
+    )
+    .await
+    .expect("the phase-2 pass")
+    .applied
+}
+
+/// The task of node 0 of `workflow_id` ends FAILED with `WORKER_CRASHED` in
+/// phase 1 alone (Python `force_terminal`): the node stays RUNNING and its
+/// phase 2 stays owed. The phase-2 record is aged past any grace.
+async fn crash_the_task_of_node_0(pool: &TestPool, workflow_id: Uuid) {
+    let task_id = node(pool, workflow_id, 0)
+        .await
+        .task_id
+        .expect("node 0 has a task");
+    let crashed: TaskResult<serde_json::Value> = TaskResult::Err(TaskError::builtin(
+        OperationalErrorCode::WorkerCrashed,
+        "Worker died",
+    ));
+    let _stored = finish_phase1(pool, task_id, &crashed).await;
+    assert_eq!(node_status(pool, workflow_id, 0).await, "RUNNING");
+    sql::query(
+        "UPDATE horsies_workflow_phase2_pending
+         SET created_at = NOW() - INTERVAL '1 hour'
+         WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .expect("age the phase-2 record");
+}
+
+/// `test_recover_crashed_worker_workflow_task` (case 1.7): a RUNNING node
+/// whose task already FAILED with `WORKER_CRASHED` is FAILED by the phase-2
+/// pass, and the workflow ends FAILED.
+#[tokio::test]
+#[serial]
+async fn a_crashed_task_of_a_running_node_fails_the_node_and_the_workflow() {
+    let db = IsolatedDatabase::create().await;
+    let workflow_id = start(
+        &db.pool,
+        &spec("recover_crash", vec![task_node(0, "recover_crash_a")]),
+        &TestChildSpecs::empty(),
+    )
+    .await;
+    crash_the_task_of_node_0(&db.pool, workflow_id).await;
+
+    let applied = phase2_pass(&db.pool).await;
+
+    assert_eq!(applied, 1);
+    assert_eq!(node_status(&db.pool, workflow_id, 0).await, "FAILED");
+    assert_eq!(workflow_status(&db.pool, workflow_id).await, "FAILED");
+    db.drop().await;
+}
+
+/// `test_recover_crashed_worker_idempotent` (case 1.7): a second phase-2
+/// pass after the pass that failed the crashed node advances nothing.
+#[tokio::test]
+#[serial]
+async fn a_second_pass_after_a_crashed_task_advances_nothing() {
+    let db = IsolatedDatabase::create().await;
+    let workflow_id = start(
+        &db.pool,
+        &spec(
+            "recover_idem_crash",
+            vec![task_node(0, "recover_idem_crash_a")],
+        ),
+        &TestChildSpecs::empty(),
+    )
+    .await;
+    crash_the_task_of_node_0(&db.pool, workflow_id).await;
+
+    let first = phase2_pass(&db.pool).await;
+    let second = phase2_pass(&db.pool).await;
+
+    assert_eq!(first, 1);
+    assert_eq!(second, 0);
+    assert_eq!(node_status(&db.pool, workflow_id, 0).await, "FAILED");
+    db.drop().await;
+}
+
+/// `test_recover_crashed_worker_dependent_propagation` (case 1.7): after the
+/// phase-2 pass fails the crashed node, its dependent is SKIPPED.
+#[tokio::test]
+#[serial]
+async fn a_crashed_task_fails_its_node_and_skips_the_dependent() {
+    let db = IsolatedDatabase::create().await;
+    let mut dependent = task_node(1, "recover_dep_b");
+    dependent.dependencies = vec![0];
+    let workflow_id = start(
+        &db.pool,
+        &spec(
+            "recover_dep",
+            vec![task_node(0, "recover_dep_a"), dependent],
+        ),
+        &TestChildSpecs::empty(),
+    )
+    .await;
+    crash_the_task_of_node_0(&db.pool, workflow_id).await;
+
+    let applied = phase2_pass(&db.pool).await;
+
+    assert_eq!(applied, 1);
+    assert_eq!(node_status(&db.pool, workflow_id, 0).await, "FAILED");
+    assert_eq!(node_status(&db.pool, workflow_id, 1).await, "SKIPPED");
     db.drop().await;
 }

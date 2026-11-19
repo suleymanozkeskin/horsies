@@ -39,7 +39,7 @@ use test_database::TestDatabase;
 /// Installs the schema into a test template through the public API, with
 /// the Rust client family.
 async fn install_template(url: &str) {
-    let broker = PostgresBroker::connect(url)
+    let broker = PostgresBroker::connect(url, horsies_core::ClientFamily::Rust)
         .await
         .expect("connect the template broker");
     broker
@@ -91,7 +91,7 @@ async fn answer() -> Result<u32, TaskError<Infallible>> {
 /// into.
 async fn covered_database() -> (TestDatabase, PostgresBroker) {
     let database = TestDatabase::create().await;
-    let worker = PostgresBroker::connect(database.url())
+    let worker = PostgresBroker::connect(database.url(), horsies_core::ClientFamily::Rust)
         .await
         .expect("connect the worker broker");
     let request = CoverageRequest::new(COVERAGE_HISTORY_DAYS, COVERAGE_HEARTBEAT_HOURS, &[])

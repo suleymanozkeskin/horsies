@@ -1,8 +1,5 @@
 //! Whether phase 1 of a node's finalize names dependents, and the phase-2
-//! form that the worker takes from it. Python:
-//! `tests/integration/test_workflow_node_dependents.py`, with the three rows
-//! that read `has_dependents` of the node write before phase 1 returned the
-//! fact.
+//! form that the worker takes from it.
 //!
 //! Phase 1 reads whether a node of the same workflow lists the node in its
 //! dependencies (`horsies_node_has_dependents`). Dependencies are written at
@@ -13,7 +10,6 @@
 //! phase 2 in the form that phase 1 named.
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -23,6 +19,7 @@ use super::support::{
 use crate::broker::PostgresBroker;
 use crate::core::lifecycle::PhaseTwoStep;
 use crate::core::{AnyNode, WorkflowSpec};
+use crate::test_support::sql::TestPool;
 use crate::worker::execution::PhaseTwoForm;
 
 /// The form of phase 2 of a node that another node of its workflow waits for.
@@ -68,14 +65,14 @@ fn chain_of_two() -> WorkflowSpec {
 }
 
 /// Starts `workflow_spec` with no child specs and returns its id.
-async fn start_plain(pool: &PgPool, workflow_spec: &WorkflowSpec) -> Uuid {
+async fn start_plain(pool: &TestPool, workflow_spec: &WorkflowSpec) -> Uuid {
     start(pool, workflow_spec, &child_specs_of(&[])).await
 }
 
 /// The worker's finalize of node `task_index` with a success on `broker`.
 /// Returns the phase-2 form that phase 1 named.
 async fn finalize_success(
-    pool: &PgPool,
+    pool: &TestPool,
     broker: &PostgresBroker,
     workflow_id: Uuid,
     task_index: i32,

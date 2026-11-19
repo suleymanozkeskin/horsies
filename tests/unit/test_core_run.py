@@ -1,14 +1,19 @@
 """`horsies worker` on the core (`horsies.core.worker.core_run`): the startup
-errors before the run and the host that the core calls. No database: each
-test ends before `PreparedWorker.run`, and `set_panic_rule` is replaced so
-the test process keeps its panic rule.
+errors before the run, the manifest of the worker process, and the host that
+the core calls. No database: each test ends before `PreparedWorker.run`, and
+`set_panic_rule` is replaced so the test process keeps its panic rule.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import logging
+import sys
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,6 +30,7 @@ from horsies.core.worker.core_run import (
     CoreWorkerHost,
     WorkerLaunch,
     run_core_worker,
+    worker_manifest_json,
 )
 
 LOGGER = logging.getLogger('tests.core_run')
@@ -97,6 +103,58 @@ def test_a_profile_that_the_core_refuses_is_reported_with_its_lines() -> None:
         assert isinstance(error, ConfigurationError)
         assert error.code is ErrorCode.CONFIG_INVALID_WORKER_PROFILE
     assert any('missing' in error.message for error in reported.errors)
+
+
+def test_a_locator_in_main_is_a_startup_error_before_any_core_call() -> None:
+    """The Python worker of 0.7.0 refused `__main__:app` at its start: a
+    child is a new program with its own `__main__`."""
+    reported = _Reported()
+    launch = dataclasses.replace(_launch('small'), app_locator='__main__:app')
+    with (
+        _no_panic_rule() as set_panic_rule,
+        patch.object(_core, 'prepare_worker') as prepare_worker,
+        patch.object(Horsies, 'get_broker') as get_broker,
+    ):
+        exit_code = run_core_worker(_app(), launch, LOGGER, reported)
+    assert exit_code == EXIT_FAILED
+    assert len(reported.errors) == 1
+    error = reported.errors[0]
+    assert isinstance(error, ConfigurationError)
+    assert error.code is ErrorCode.WORKER_INVALID_LOCATOR
+    assert "'__main__:app'" in error.message
+    set_panic_rule.assert_not_called()
+    get_broker.assert_not_called()
+    prepare_worker.assert_not_called()
+
+
+def test_the_core_takes_the_manifest_of_entries_that_python_skips(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression of #1950: a `Path` on `sys.path` stopped the dump, a
+    number reached the manifest where the core reads text, and a lone
+    surrogate on `sys.path` or `sys.argv` reached it as an escape that the
+    core's JSON parser refuses."""
+    kept = list(sys.path)
+    monkeypatch.setattr(sys, 'path', [Path('/srv/app'), 7, 'bad\udcff', '/srv/lib', *kept])
+    monkeypatch.setattr(sys, 'argv', ['horsies', 'worker', 'bad\udcff'])
+    with caplog.at_level(logging.WARNING, logger='tests.core_run'):
+        manifest_json = worker_manifest_json(_app(), _launch('small'), LOGGER).unwrap()
+    monkeypatch.undo()
+
+    prepared = _core.prepare_worker(manifest_json, host=CoreWorkerHost(MagicMock(), LOGGER))
+    assert isinstance(prepared, _core.PreparedWorker)
+    program = cast('dict[str, Any]', json.loads(manifest_json))['child_launch']['program']
+    assert program['parent_sys_path'][:2] == ['/srv/app', '/srv/lib']
+    assert program['parent_argv'] == ['horsies', 'worker', 'bad\\udcff']
+    assert [
+        record.getMessage() for record in caplog.records if record.name == 'tests.core_run'
+    ] == [
+        'Leaving sys.path entry 7 out of worker children: '
+        'it is not a str, bytes or os.PathLike path',
+        "Leaving sys.path entry 'bad\\udcff' out of worker children: "
+        'it is not valid UTF-8',
+    ]
 
 
 def test_the_host_builds_each_child_with_the_app_of_its_broker() -> None:

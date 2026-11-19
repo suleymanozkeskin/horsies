@@ -294,7 +294,7 @@ info = await broker.get_task_info_async("task-uuid", include_result=True)
 info = broker.get_task_info("task-uuid", include_result=True)  # sync
 ```
 
-**Monitoring** (async only): `get_stale_tasks()`, `get_expired_tasks()`, `mark_stale_tasks_as_failed()`, `requeue_stale_claimed()`. See website docs `monitoring/broker-methods` for full signatures.
+**Monitoring** (async only): `get_stale_tasks()`, `get_expired_tasks()`, `mark_stale_tasks_as_failed()`, `requeue_stale_claimed()`, `terminate_orphaned_workflow_tasks()`. See website docs `monitoring/broker-methods` for full signatures.
 
 **Health/liveness** (app, async + sync): `ping_database_async()` (DatabasePing latency), `ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None)` (list[WorkerPong] — active ping-pong; min_responses=1 = fast liveness gate, returns on first reply), `list_worker_states_async()` / `get_worker_state_async(worker_id)` / `get_worker_state_history_async(worker_id, limit=None)` (WorkerStateSnapshot, includes idle workers). `get_class_coverage_async()` (ClassCoverage — fleet check: each (queue, class) with PENDING rows is StreamServed / StreamWithoutCapacity / StreamUnserved by live workers; the reaper logs unserved at error), `get_class_report_async()` (ClassReport — oldest wait per pending (queue, class), budget capacity/in_flight/free per live worker). Replaces the retired `get_worker_stats()`. `WorkerStateSnapshot.memory_usage_mb` is the parent process only; `children_memory_mb` is the summed RSS of executor children (the memory-quota driver — use it to size `IsolatedRecycle.after` / `IsolatedRecycle.above`, and `SharedRecycle` for shared children). See website docs `monitoring/health-reads` (the methods) and `monitoring/worker-health` (what each read means). 
 
@@ -320,7 +320,7 @@ config = PostgresConfig(
 | `retain_rerun_input_default` | `bool` | `False` | – | App-level default for enqueue-time rerun-input retention; a per-task value overrides it and the resolved value is snapshotted at enqueue. A task enqueued without a retained input cannot be rerun later |
 | `pool_timeout` | `int` | `30` | 0 to 4,294,967,295; `0`: a checkout does not wait | Seconds to wait for a connection |
 | `pool_recycle` | `int` | `1800` | `-1` (never) or 0 to 4,294,967,295 | Seconds before connections are recycled |
-| `pool_pre_ping` | `bool` | `True` | – | Ping a pooled connection at checkout when it waited in the pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`), in every engine but the worker process's |
+| `pool_pre_ping` | `bool` | `True` | – | Ping a pooled connection at checkout when it waited in the pool for more than 1 s, in every engine but the worker process's |
 | `worker_pool_pre_ping` | `bool` | `False` | – | Ping a pooled connection of the worker process at checkout when it waited in the pool for more than 1 s. Off: a one-statement write is one round trip, and a dead connection fails its first statement as a retryable connection error |
 | `tcp_keepalives` | `bool` | `True` | – | Enable libpq TCP keepalives on broker and child-process connections |
 | `tcp_keepalives_idle` | `int` | `30` | 1 to 32,767 | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
@@ -390,22 +390,23 @@ Direct Postgres budget for one worker is approximately:
 pool max_size (the pool of the worker process)
   + 2 listener/session connections
   + 1 runner heartbeat connection (the worker process writes the beats)
+  + 1 liveness lock connection (on the session URL)
   + isolated children * isolated.pool max_size
   + shared async children * shared_async.pool max_size
   + shared thread children * shared_thread.pool max_size
   + task-code database connections
 ```
 
-Task code that sends through the app opens the app's broker in its child: a
-pool of the `task_send_pool` of its child kind for each event loop it sends
-from (the broker's runner loop for sync tasks, the child's task loop for async
-tasks). `horsies check --live` compares the number without task-code
+Task code that sends through the app opens the app's broker in its child: one
+core pool of the `task_send_pool` of its child kind, for every thread and event
+loop of the child. `horsies check --live` compares the number without task-code
 connections for each worker profile with `max_connections` less the reserved
 slots and reports `HRS-219`; the error states the task-send term with one
 sending loop per child. A worker logs the same comparison at boot, as a
 warning when it is above the usable slots.
 Nothing is compared with `pgbouncer_transaction_mode=True`; then each worker
-opens the sum above less the 2 listener connections as clients of the pooler,
+opens the sum above less the 2 listener connections and the liveness lock
+connection as clients of the pooler,
 and PgBouncer `max_client_conn` must hold the sum over workers.
 
 Child DB connections are lazy by default (`min_size=0` in each pool). A child
@@ -679,6 +680,8 @@ to `AppConfig.retention` — see RetentionConfig below.
 | `phase2_quarantine_after_attempts` | `int` | `25` | 3–1000 | Recovery passes an unresolvable workflow-progression row may retain before its evidence moves to the quarantine table and discovery stops retrying it. A persistent raise counts too, and at the bound the workflow fails closed |
 | `workflow_recovery_failure_limit` | `int` | `25` | 3–1000 | Reaper passes in which the recovery of a workflow may raise a persistent error before the workflow fails with `WORKFLOW_RECOVERY_LIMIT_REACHED`. A connection, lock or timeout error does not count. The count is stored. The count has no reset, so a later unrelated raise after a repair reaches the limit sooner |
 
+**Manual passes:** four recovery passes of the reaper also have a `PostgresBroker` method that runs the pass on demand, also when its setting is off: `requeue_stale_claimed()` (`auto_requeue_stale_claimed`), `mark_stale_tasks_as_failed()` (`auto_fail_stale_running`), `terminate_orphaned_workflow_tasks()` (`auto_terminate_orphaned_workflow_tasks`; one page), and `expire_pending_tasks()` (no setting: the reaper runs it on every pass).
+
 **Removed in 0.5.0 — setting either fails config construction naming the
 successor:** `heartbeat_retention_hours` (heartbeats live in hourly partitions
 that drop whole) and `queue_terminal_record_retention_hours` (terminal task
@@ -708,6 +711,7 @@ The 2x factor ensures a task can miss one full heartbeat cycle without being inc
 ### What the reaper does
 
 Runs on `check_interval_ms` cadence:
+0. Workers whose liveness lock no session holds: when two passes of one reaper find the lock of a worker free at least 75 s apart at the same generation (no pass between them finds it held or at another generation, and a read after the second pass finds the same generation), its RUNNING tasks are recovered as in 2 (if enabled) and its CLAIMED tasks requeued as in 1 (if enabled), whatever their heartbeats.
 1. CLAIMED tasks without heartbeat for `claimed_stale_threshold_ms` → requeued to PENDING (if enabled).
 2. RUNNING tasks without heartbeat for `running_stale_threshold_ms` → retry on `WORKER_CRASHED` policy or mark FAILED (if enabled). Recent `finalizing_at` suppresses this recovery.
 3. Retention pruning every `retention_sweep_interval_s` seconds (default 5 min): deletes old worker_state rows (`worker_state_retention_hours`) and terminal workflow rows with their workflow task rows (`terminal_record_retention_hours`). Heartbeat rows and terminal task records are not deleted here; partition maintenance drops their expired partitions every `partition_maintenance_interval_s` seconds (default 15 min). Deletes run in `retention_delete_batch_size`-row batches (default 500, one transaction each) under a 60s per-pass budget; a larger backlog drains across consecutive passes.
@@ -715,6 +719,8 @@ Runs on `check_interval_ms` cadence:
 **Runner heartbeats:** the worker process writes them for each RUNNING task whose child process runs and holds it, fenced on the worker and the claim generation; the child writes only the first one, in the RUNNING transaction. A task that holds the GIL does not delay them, so CPU-bound tasks need no extra margin. Beats end at the kill of the child, its exit, its finalizing mark, or the read of its result. The stale threshold is based on missing runner heartbeats, not total task duration.
 
 **Fail-closed exit:** with `auto_fail_stale_running=True` (default), if the heartbeat thread dies, or no heartbeat lands for half of `running_stale_threshold_ms`, the worker kills every child that holds a task, stops, and exits with code 1 (code 77 if it has not stopped within 120 s). So the reaper does not fail a task that still runs. The half counts from when the last heartbeat landed. Under a slow database, raise `running_stale_threshold_ms`. With `auto_fail_stale_running=False`, or no recovery config, no reaper fails a RUNNING row: the worker logs failed writes (at most once per 60 s) and keeps running.
+
+**Liveness lock:** each worker process holds a session advisory lock on one connection to the session URL, from before its first claim to the end of its stop, and confirms it every 5 s. Each acquisition writes a new generation for the worker id, so two losses of the lock with a hold between them do not count as one loss. A process that ends releases it, so the reaper recovers the tasks of a killed worker in about 1.5 to 2 minutes instead of `running_stale_threshold_ms`. With `auto_fail_stale_running=True`, a worker that holds a task and whose lock is not held for 60 s kills every child that holds a task and exits with code 79 at once. A paused worker keeps its connection and its lock.
 
 
 ## RetentionConfig

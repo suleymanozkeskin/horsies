@@ -1,7 +1,6 @@
 //! The promotion of dependents: the join on the promotion path, what a
 //! promoted node and its task row store, the guards of the promotion write,
-//! and a run across levels. Python:
-//! `tests/integration/test_workflow_promotion_batched.py`.
+//! and a run across levels.
 //!
 //! Each node's task finishes as a worker finishes it (phase 1, then phase 2),
 //! so a dependent is promoted by the core's phase 2. The nodes run on
@@ -11,7 +10,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -24,10 +22,10 @@ use crate::broker::PostgresBroker;
 use crate::core::workflow::node::JoinType;
 use crate::core::{AnyNode, OnError, TaskResult, WorkflowSpec};
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::{self, TestPool};
 use crate::workflow_engine::engine::on_workflow_task_complete_with;
 use crate::workflow_engine::lifecycle::{pause_workflow, resume_client_workflow};
 use crate::workflow_engine::recovery::recover_stuck_workflows_observed_with;
-use crate::workflow_engine::steps::ChildBuild;
 
 /// Stored task options that do not parse (Python's `_corrupt_stored_options`).
 const CORRUPT_TASK_OPTIONS: &str = "{not-json";
@@ -51,11 +49,11 @@ fn after(index: usize, task_name: &str, dependencies: &[usize]) -> AnyNode {
     node
 }
 
-async fn run(pool: &PgPool, workflow_spec: &WorkflowSpec) -> Uuid {
+async fn run(pool: &TestPool, workflow_spec: &WorkflowSpec) -> Uuid {
     start(pool, workflow_spec, &TestChildSpecs::empty()).await
 }
 
-async fn succeed(pool: &PgPool, workflow_id: Uuid, index: i32, value: serde_json::Value) {
+async fn succeed(pool: &TestPool, workflow_id: Uuid, index: i32, value: serde_json::Value) {
     let _task = finish_node(
         pool,
         workflow_id,
@@ -81,7 +79,7 @@ fn root_with_three_dependents(name: &str) -> WorkflowSpec {
 }
 
 /// A node row and the live task row it links, if any.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 struct NodeAndTask {
     task_index: i32,
     status: String,
@@ -96,9 +94,27 @@ struct NodeAndTask {
     updated_at: Option<DateTime<Utc>>,
 }
 
+impl sql::FromTestRow for NodeAndTask {
+    fn from_row(row: &tokio_postgres::Row) -> Result<Self, sql::Error> {
+        Ok(Self {
+            task_index: sql::named(row, "task_index")?,
+            status: sql::named(row, "status")?,
+            task_id: sql::named(row, "task_id")?,
+            started_at: sql::named(row, "started_at")?,
+            completed_at: sql::named(row, "completed_at")?,
+            task_name: sql::named(row, "task_name")?,
+            queue_name: sql::named(row, "queue_name")?,
+            task_status: sql::named(row, "task_status")?,
+            enqueued_at: sql::named(row, "enqueued_at")?,
+            created_at: sql::named(row, "created_at")?,
+            updated_at: sql::named(row, "updated_at")?,
+        })
+    }
+}
+
 /// Every node of `workflow_id` by index (Python's `_node_rows`).
-async fn node_rows(pool: &PgPool, workflow_id: Uuid) -> BTreeMap<i32, NodeAndTask> {
-    let rows: Vec<NodeAndTask> = sqlx::query_as(
+async fn node_rows(pool: &TestPool, workflow_id: Uuid) -> BTreeMap<i32, NodeAndTask> {
+    let rows: Vec<NodeAndTask> = sql::query_as(
         "SELECT wt.task_index, wt.status, wt.task_id, wt.started_at, wt.completed_at,
                 t.task_name, t.queue_name, t.status AS task_status, t.enqueued_at,
                 t.created_at, t.updated_at
@@ -115,8 +131,8 @@ async fn node_rows(pool: &PgPool, workflow_id: Uuid) -> BTreeMap<i32, NodeAndTas
 }
 
 /// The live task rows of the database.
-async fn live_task_count(pool: &PgPool) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_tasks")
+async fn live_task_count(pool: &TestPool) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_tasks")
         .fetch_one(pool)
         .await
         .expect("count the live task rows")
@@ -215,9 +231,9 @@ async fn promoted_nodes_and_their_tasks_carry_the_transaction_time_and_each_inse
     .await;
 
     on_workflow_task_complete_with(
-        &PostgresBroker::from_pool(db.pool.clone()),
+        &PostgresBroker::from_test_url(db.pool.url(), crate::ClientFamily::Rust),
         root_task,
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &TestChildSpecs::empty(),
     )
     .await
     .expect("phase 2 of the root");
@@ -271,7 +287,7 @@ async fn the_promotion_moves_only_pending_nodes() {
         ),
     )
     .await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_workflow_tasks SET status = 'SKIPPED'
          WHERE workflow_id = $1 AND task_index = 3",
     )
@@ -317,9 +333,9 @@ async fn the_promotion_moves_only_pending_nodes() {
 ///
 /// Panics when no backend waits within the bound, or when more than one
 /// backend waits.
-async fn sole_waiter_on(pool: &PgPool, holder_pid: i32) -> i32 {
+async fn sole_waiter_on(pool: &TestPool, holder_pid: i32) -> i32 {
     for _ in 0..BLOCK_POLLS {
-        let waiters: Vec<i32> = sqlx::query_scalar(
+        let waiters: Vec<i32> = sql::query_scalar(
             "SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) ORDER BY pid",
         )
         .bind(holder_pid)
@@ -335,11 +351,8 @@ async fn sole_waiter_on(pool: &PgPool, holder_pid: i32) -> i32 {
     panic!("no backend waits on backend {holder_pid}");
 }
 
-/// Replaces the port of
-/// `TestPromotionWrite.test_the_promotion_write_leaves_a_node_ready_when_the_workflow_is_not_running`
-/// (`tests/integration/test_workflow_promotion_batched.py:578`). That test
-/// covers a promotion whose caller does not hold the workflow row lock: a
-/// pause can land after its dependents read, and the promoted nodes stay
+/// A promotion whose caller does not hold the workflow row lock lets a
+/// pause land after its dependents read, and the promoted nodes stay
 /// READY with no task. Recovery case 0 runs
 /// `horsies_workflow_node_reevaluate`, which locks the workflow row
 /// `FOR UPDATE` before it reads or writes a node, so that interleaving
@@ -399,17 +412,17 @@ async fn a_pause_during_the_case_zero_step_applies_after_its_commit() {
     )
     .await;
     let mut holder = db.pool.begin().await.expect("begin the step holder");
-    let _held = sqlx::query("SELECT pg_advisory_xact_lock($1)")
+    let _held = sql::query("SELECT pg_advisory_xact_lock($1)")
         .bind(STEP_HOLD_LOCK)
         .execute(&mut *holder)
         .await
         .expect("take the lock that holds the step");
-    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+    let holder_pid: i32 = sql::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *holder)
         .await
         .expect("read the backend pid of the holder");
-    let recovery_broker = PostgresBroker::from_pool(db.pool.clone());
-    let pause_broker = PostgresBroker::from_pool(db.pool.clone());
+    let recovery_broker = PostgresBroker::from_test_url(db.pool.url(), crate::ClientFamily::Rust);
+    let pause_broker = PostgresBroker::from_test_url(db.pool.url(), crate::ClientFamily::Rust);
     let child_specs = TestChildSpecs::empty();
 
     // On the heap. In a debug build, with the pass future inline in the join
@@ -417,7 +430,7 @@ async fn a_pause_during_the_case_zero_step_applies_after_its_commit() {
     // test thread has 2 MiB); boxed, it needs 1.75 to 1.875 MiB.
     let recovery = Box::pin(recover_stuck_workflows_observed_with(
         &recovery_broker,
-        ChildBuild::Client(&child_specs),
+        &child_specs,
         RECOVERY_FAILURE_LIMIT,
     ));
     let pause_during_the_step = async {
@@ -584,7 +597,7 @@ async fn a_fan_out_and_fan_in_across_levels_enqueues_each_node_once_and_complete
 /// Starts a root with a good and a bad dependent (Python's
 /// `test_build_failure_fails_only_its_node` shape) and makes the stored
 /// options of node 2 text that does not parse.
-async fn start_with_a_corrupt_dependent(pool: &PgPool, on_error: OnError) -> Uuid {
+async fn start_with_a_corrupt_dependent(pool: &TestPool, on_error: OnError) -> Uuid {
     let mut workflow_spec = spec(
         "promotion_isolation",
         vec![
@@ -595,7 +608,7 @@ async fn start_with_a_corrupt_dependent(pool: &PgPool, on_error: OnError) -> Uui
     );
     workflow_spec.on_error = on_error;
     let workflow_id = run(pool, &workflow_spec).await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_workflow_tasks SET task_options = $2
          WHERE workflow_id = $1 AND task_index = 2",
     )
@@ -608,7 +621,7 @@ async fn start_with_a_corrupt_dependent(pool: &PgPool, on_error: OnError) -> Uui
 }
 
 /// Finishes the root with success and checks that phase 2 applied.
-async fn complete_the_root(pool: &PgPool, workflow_id: Uuid) {
+async fn complete_the_root(pool: &TestPool, workflow_id: Uuid) {
     let root_task = node(pool, workflow_id, 0)
         .await
         .task_id
@@ -684,10 +697,9 @@ async fn a_dependent_whose_options_do_not_parse_pauses_and_its_sibling_stays_rea
     db.drop().await;
 }
 
-/// `test_workflow_recovery_limit.py` (`BAD_GOOD_UNTIL`): a stored deadline
-/// that does not parse is refused at promotion. Python passes the stored text
-/// to the database, which refuses it, so the promotion raises; the dependent
-/// never gets a task without its deadline.
+/// A stored deadline (`BAD_GOOD_UNTIL`) that does not parse is refused at
+/// promotion: the database refuses the stored text, so the promotion raises;
+/// the dependent never gets a task without its deadline.
 #[tokio::test]
 #[serial]
 async fn a_dependent_whose_stored_deadline_does_not_parse_gets_no_task() {
@@ -704,7 +716,7 @@ async fn a_dependent_whose_stored_deadline_does_not_parse_gets_no_task() {
             ),
         )
         .await;
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_workflow_tasks SET task_options = $2
              WHERE workflow_id = $1 AND task_index = 1",
         )

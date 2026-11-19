@@ -1,8 +1,6 @@
 //! The finalize of a workflow node from the worker's side: phase 1 of a
 //! success and its replay, the start check of a claimed node, and phase 2
-//! with its capacity wake. Python:
-//! `tests/integration/test_workflow_node_finalize.py`,
-//! `test_workflow_node_handoff.py`, `test_worker_finalize_workflow_phase.py`.
+//! with its capacity wake. Python: `tests/integration/test_workflow_node_handoff.py`.
 //!
 //! The worker's finalize of a result is phase 1 (`persist_terminal_state`),
 //! then phase 2 (`finalize_workflow_phase`) when phase 1 owes it, as the
@@ -11,7 +9,6 @@
 
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -22,16 +19,15 @@ use super::support::{
 use crate::broker::attempt_writes::{finish_workflow_success, FinishWorkflowSuccess};
 use crate::broker::claims::{StartMiss, StartOutcome};
 use crate::broker::core_rows::StatementLog;
-use crate::broker::lifecycle_tests::support::{
-    database_options, unpinged_single_connection_pool, WireProxy,
-};
-use crate::broker::pools::core_pool_for_test_pool;
+use crate::broker::lifecycle_tests::support::{single_session_pool, WireProxy};
+use crate::broker::pools::core_pool_for_test_url;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::lifecycle::{AttemptWriteRefusal, OwnedClaim, WorkflowSuccessOutcome};
 use crate::core::task::Execution;
 use crate::core::TaskResult;
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::{self, TestPool};
 use crate::worker::execution::{
     finalize_workflow_phase, persist_terminal_state, FinalizeError, FinalizeOutcome, FinalizeStage,
     PhaseTwoForm,
@@ -39,7 +35,6 @@ use crate::worker::execution::{
 use crate::worker::executor::slots::{ClaimedTask, RetryFacts, TaskKind};
 use crate::worker::retry::read_stored_options;
 use crate::workflow_engine::lifecycle::cancel_workflow;
-use crate::workflow_engine::steps::ChildBuild;
 
 /// The process facts that the start write records for [`WORKER`].
 const WORKER_PID: i32 = 4242;
@@ -74,7 +69,7 @@ impl RunningNode {
 
 /// Starts a workflow A -> B: A is enqueued, B waits for it (Python's
 /// `_start_chain`).
-async fn start_chain(pool: &PgPool, name: &str) -> Uuid {
+async fn start_chain(pool: &TestPool, name: &str) -> Uuid {
     let mut dependent = task_node(1, &format!("{name}_task"));
     dependent.dependencies = vec![0];
     start(
@@ -87,12 +82,12 @@ async fn start_chain(pool: &PgPool, name: &str) -> Uuid {
 
 /// Node A and its task RUNNING under [`WORKER`], as a claim and the start
 /// write leave them (Python's `_run_node_a`).
-async fn run_node_a(pool: &PgPool, workflow_id: Uuid) -> RunningNode {
+async fn run_node_a(pool: &TestPool, workflow_id: Uuid) -> RunningNode {
     let task_id = node(pool, workflow_id, 0)
         .await
         .task_id
         .expect("node A has a task");
-    let held = sqlx::query(
+    let held = sql::query(
         "UPDATE horsies_tasks
          SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $2,
              claim_expires_at = NULL, started_at = NOW(), worker_pid = $3,
@@ -124,7 +119,7 @@ async fn run_node_a(pool: &PgPool, workflow_id: Uuid) -> RunningNode {
         i32,
         i32,
         Option<String>,
-    ) = sqlx::query_as(
+    ) = sql::query_as(
         "SELECT task_name, queue_name, claimed_at, execution, retry_count, max_retries,
                 task_options
          FROM horsies_tasks WHERE id = $1",
@@ -165,11 +160,16 @@ fn ok_json() -> String {
 /// `claimed_at`, on a broker of `pool` (Python's `_finalize`). Returns the
 /// outcome of phase 1, or the error of the phase that failed.
 async fn finalize(
-    pool: &PgPool,
+    pool: &TestPool,
     node_a: &RunningNode,
     claimed_at: DateTime<Utc>,
 ) -> Result<FinalizeOutcome, FinalizeError> {
-    finalize_on(&PostgresBroker::from_pool(pool.clone()), node_a, claimed_at).await
+    finalize_on(
+        &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
+        node_a,
+        claimed_at,
+    )
+    .await
 }
 
 /// [`finalize`] on `broker`: phase 1 and phase 2 run on its core pools.
@@ -201,7 +201,7 @@ async fn finalize_on(
     if let Some((capacity_notified, form)) = owed {
         finalize_workflow_phase(
             broker,
-            ChildBuild::Client(&TestChildSpecs::empty()),
+            &TestChildSpecs::empty(),
             claimed.task_id,
             &claimed.queue_name,
             claimed.kind.is_workflow_task(),
@@ -236,8 +236,8 @@ fn is_a_finalized_success(result: &Result<FinalizeOutcome, FinalizeError>) -> bo
 }
 
 /// (task_index, status, linked to a task) of each node (Python's `_nodes`).
-async fn nodes(pool: &PgPool, workflow_id: Uuid) -> Vec<(i32, String, bool)> {
-    sqlx::query_as(
+async fn nodes(pool: &TestPool, workflow_id: Uuid) -> Vec<(i32, String, bool)> {
+    sql::query_as(
         "SELECT task_index, status, task_id IS NOT NULL
          FROM horsies_workflow_tasks WHERE workflow_id = $1 ORDER BY task_index",
     )
@@ -255,8 +255,8 @@ fn completed_then_enqueued() -> Vec<(i32, String, bool)> {
 }
 
 /// The phase-2 records of a task.
-async fn pending_rows(pool: &PgPool, task_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1")
+async fn pending_rows(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
@@ -268,11 +268,10 @@ fn completed_locked() -> Option<(String, String)> {
 }
 
 // ---------------------------------------------------------------------------
-// test_workflow_node_finalize.py
+// Node finalize
 // ---------------------------------------------------------------------------
 
-/// `test_workflow_node_finalize.py::test_a_replay_of_a_committed_success_runs_phase_two`:
-/// phase 1 committed and phase 2 never ran. The worker's finalize gets
+/// Phase 1 committed and phase 2 never ran. The worker's finalize gets
 /// `AlreadyApplied`, reads the phase-2 record and runs phase 2.
 #[tokio::test]
 #[serial]
@@ -280,7 +279,7 @@ async fn a_replay_of_a_committed_success_runs_phase_two() {
     let pool = shared_pool().await;
     let node_a = run_node_a(&pool, start_chain(&pool, "finalize_replay").await).await;
     let committed = finish_workflow_success(
-        &core_pool_for_test_pool(&pool),
+        &core_pool_for_test_url(pool.url()),
         StatementLog::Off,
         &FinishWorkflowSuccess {
             task_id: node_a.task_id(),
@@ -321,13 +320,12 @@ async fn a_replay_of_a_committed_success_runs_phase_two() {
     assert_eq!(pending_rows(&pool, node_a.task_id()).await, 0);
 }
 
-/// `test_workflow_node_finalize.py::test_a_lost_reply_is_retried_and_the_replay_runs_phase_two`:
-/// the success commits and its reply never reaches the worker. Phase 1 is a
+/// The success commits and its reply never reaches the worker. Phase 1 is a
 /// retryable error; its retry, the same statement on a new connection, is
 /// `AlreadyApplied` and runs phase 2.
 ///
 /// The proxy drops the reply to the next request of any connection. A broker
-/// opens its own core pool from the URL of its sqlx pool, so the first
+/// opens its own core pool from the URL of its test pool, so the first
 /// finalize runs on the broker whose main core pool the warm-up used: its one
 /// connection is open and the success statement is prepared on it, and the
 /// success write is the next request, with one reply (Python's
@@ -337,11 +335,11 @@ async fn a_replay_of_a_committed_success_runs_phase_two() {
 #[serial]
 async fn a_lost_reply_is_retried_and_the_replay_runs_phase_two() {
     let pool = shared_pool().await;
-    let upstream = database_options(&pool);
-    let proxy = WireProxy::start(&upstream).await;
-    let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
+    let upstream = pool.url();
+    let proxy = WireProxy::start(upstream).await;
+    let proxied = single_session_pool(&proxy.url(upstream)).await;
     let node_a = run_node_a(&pool, start_chain(&pool, "finalize_lost_reply").await).await;
-    let proxied_broker = PostgresBroker::from_pool(proxied.clone());
+    let proxied_broker = PostgresBroker::from_test_url(proxied.url(), crate::ClientFamily::Rust);
     let warm_up = {
         let (open, _write) = proxied_broker
             .core_pools_for_write()
@@ -407,8 +405,7 @@ enum WorkflowEnd {
     Failed,
 }
 
-/// `test_workflow_node_finalize.py::test_a_node_of_an_ended_workflow_completes_and_enqueues_nothing`
-/// (CANCELLED, FAILED): the workflow ended while node A ran. Phase 1
+/// CANCELLED and FAILED: the workflow ended while node A ran. Phase 1
 /// completes the task; phase 2 writes the node and consumes the phase-2
 /// record, and the ended workflow promotes no dependent: B keeps the status
 /// the end left it.
@@ -479,7 +476,7 @@ async fn a_node_of_an_ended_workflow_completes_and_enqueues_nothing() {
 
 /// A RUNNING workflow whose COMPLETED node links a task that [`WORKER`]
 /// claimed. Returns the workflow, the task and its claim generation.
-async fn seed_claimed_task_of_a_completed_node(pool: &PgPool) -> (Uuid, Uuid, DateTime<Utc>) {
+async fn seed_claimed_task_of_a_completed_node(pool: &TestPool) -> (Uuid, Uuid, DateTime<Utc>) {
     let workflow_id = seed_workflow(pool, &WorkflowSeed::running()).await;
     let task_id = Uuid::new_v4();
     let claimed_at = seed_node_task(pool, task_id, LiveStatus::Claimed)
@@ -496,8 +493,8 @@ async fn seed_claimed_task_of_a_completed_node(pool: &PgPool) -> (Uuid, Uuid, Da
 }
 
 /// The runner beats of a task (Python's `_beat_count`).
-async fn runner_beats(pool: &PgPool, task_id: Uuid) -> i64 {
-    sqlx::query_scalar(
+async fn runner_beats(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar(
         "SELECT count(*) FROM horsies_heartbeats WHERE task_id = $1 AND role = 'runner'",
     )
     .bind(task_id)
@@ -507,8 +504,8 @@ async fn runner_beats(pool: &PgPool, task_id: Uuid) -> i64 {
 }
 
 /// The status of a task's live row, or `None` when it has none.
-async fn live_status(pool: &PgPool, task_id: Uuid) -> Option<String> {
-    sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+async fn live_status(pool: &TestPool, task_id: Uuid) -> Option<String> {
+    sql::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_optional(pool)
         .await
@@ -541,14 +538,14 @@ async fn a_failed_workflow_check_keeps_the_claim_and_writes_no_runner_beat() {
 }
 
 // ---------------------------------------------------------------------------
-// test_worker_finalize_workflow_phase.py
+// The workflow phase of the worker's finalize
 // ---------------------------------------------------------------------------
 
 /// A RUNNING workflow (with `success_policy`, if any) whose one RUNNING node
 /// has a task that finished phase 1 with a success: phase 2 is owed. Returns
 /// the workflow and the task.
 async fn seed_owed_phase_two(
-    pool: &PgPool,
+    pool: &TestPool,
     success_policy: Option<serde_json::Value>,
 ) -> (Uuid, Uuid) {
     let seed = match success_policy {
@@ -571,15 +568,15 @@ async fn seed_owed_phase_two(
 /// The phase-1 outcome is not at hand, so the step reads the dependents in a
 /// transaction (`PhaseTwoForm::NotKnown`).
 async fn phase_two(
-    pool: &PgPool,
+    pool: &TestPool,
     task_id: Uuid,
     queue_name: &str,
     is_workflow_task: bool,
 ) -> Result<(), FinalizeError> {
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     finalize_workflow_phase(
         &broker,
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &TestChildSpecs::empty(),
         task_id,
         queue_name,
         is_workflow_task,
@@ -600,8 +597,7 @@ fn assert_a_phase_two_error(result: &Result<(), FinalizeError>) -> &FinalizeErro
     }
 }
 
-/// `test_worker_finalize_workflow_phase.py::test_workflow_handler_exception_returns_err`:
-/// a failure in the workflow advancement that is not a connection error is a
+/// A failure in the workflow advancement that is not a connection error is a
 /// phase-2 error that is not retryable. The advancement fails on the stored
 /// success policy, which does not parse (the completion check reads it).
 #[tokio::test]
@@ -619,8 +615,7 @@ async fn a_failure_in_the_advancement_is_a_phase_two_error_that_is_not_retryable
     db.drop().await;
 }
 
-/// `test_worker_finalize_workflow_phase.py::test_workflow_handler_exception_returns_err`,
-/// for a database error: a refused node write (SQLSTATE `XX000`, not a
+/// A database error: a refused node write (SQLSTATE `XX000`, not a
 /// connection error) is a phase-2 error that is not retryable.
 #[tokio::test]
 #[serial]
@@ -660,8 +655,7 @@ enum WakeCase {
     NoNode,
 }
 
-/// `test_worker_finalize_workflow_phase.py::test_phase_two_wakes_the_queue_of_the_task_once`
-/// (`node`, `no_node`): phase 2 sends one capacity wake on the channel of
+/// Phase 2 sends one capacity wake on the channel of
 /// the task's queue, whether or not the task has a node. As in Python, the
 /// node and its task are on the queue that phase 2 is given: the node finish
 /// wakes the queue of the node row (`horsies_workflow_node_apply`). The wake
@@ -704,9 +698,7 @@ async fn phase_two_wakes_the_queue_of_the_task_once() {
     }
 }
 
-/// `test_worker_finalize_workflow_phase.py::test_phase_two_that_fails_after_its_wake_sends_no_wake`
-/// (`tests/integration/test_worker_finalize_workflow_phase.py:198`): a
-/// phase 2 that fails after the node write rolls the write back, keeps the
+/// A phase 2 that fails after the node write rolls the write back, keeps the
 /// phase-2 record and sends no wake. The node finish wakes the queue of the
 /// node row (`horsies_workflow_node_apply`), so the listener is on the
 /// channel of the seeded node's queue. Control: after the stored success
@@ -744,8 +736,8 @@ async fn a_phase_two_that_fails_sends_no_wake() {
 }
 
 /// Every column of node `task_index` of `workflow_id`, as JSON.
-async fn node_image(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> serde_json::Value {
-    sqlx::query_scalar(
+async fn node_image(pool: &TestPool, workflow_id: Uuid, task_index: i32) -> serde_json::Value {
+    sql::query_scalar(
         "SELECT to_jsonb(n) FROM horsies_workflow_tasks n
          WHERE n.workflow_id = $1 AND n.task_index = $2",
     )
@@ -756,9 +748,7 @@ async fn node_image(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> serde_
     .unwrap_or_else(|error| panic!("read node {task_index} of {workflow_id}: {error}"))
 }
 
-/// `test_worker_finalize_workflow_phase.py::test_phase_two_that_fails_after_its_wake_sends_no_wake`
-/// (`tests/integration/test_worker_finalize_workflow_phase.py:198`), with the
-/// failure at the step: the node write and the wake share one transaction. A
+/// A failure at the step: the node write and the wake share one transaction. A
 /// phase 2 whose connection is lost after the server ran the step is a
 /// phase-2 error; the node row is unchanged, the phase-2 record stays, and no
 /// wake is delivered.
@@ -779,16 +769,16 @@ async fn a_phase_two_lost_after_its_step_ran_commits_neither_the_wake_nor_the_no
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id) = seed_owed_phase_two(&db.pool, None).await;
     let before = node_image(&db.pool, workflow_id, 0).await;
-    let upstream = database_options(&db.pool);
-    let proxy = WireProxy::start(&upstream).await;
+    let upstream = db.pool.url();
+    let proxy = WireProxy::start(upstream).await;
     let proxied_broker =
-        PostgresBroker::from_pool(unpinged_single_connection_pool(proxy.options(&upstream)).await);
+        PostgresBroker::from_test_url(&proxy.url(upstream), crate::ClientFamily::Rust);
     let mut listener = Notifications::listen(&db.pool, &[SEEDED_NODE_CHANNEL]).await;
 
     proxy.drop_reply_to_request_carrying(task_id.as_bytes());
     let result = finalize_workflow_phase(
         &proxied_broker,
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &TestChildSpecs::empty(),
         task_id,
         SEEDED_NODE_QUEUE,
         true,

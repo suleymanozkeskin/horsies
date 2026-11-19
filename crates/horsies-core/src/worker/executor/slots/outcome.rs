@@ -51,7 +51,7 @@ use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd, StopReason, 
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
 use crate::worker::finalize_batch::{FinalizeBatcher, PlainSuccess, RowNotWritten};
 use crate::worker::retry::{admit_retry, RetryAdmission};
-use crate::workflow_engine::child_spec::ChildSpecs;
+use crate::workflow_engine::child_spec::ChildSpecSource;
 
 /// The text of a worker failure with no detail (Python
 /// `_WORKER_FAILURE_FALLBACK`).
@@ -62,8 +62,9 @@ pub const TIMEOUT_WRITE_MAX_RETRIES: u32 = 3;
 /// Retries of a crash-recovery write (Python `_FINALIZE_FUTURE_MAX_RETRIES`).
 pub const CRASH_RECOVERY_MAX_RETRIES: u32 = 3;
 /// The start of the message of a crash-recovery write that is sent again
-/// after a database error; the message of the first send follows (Python
-/// `_retry_finalize_future`, `python/horsies/core/worker/finalize.py:1957`).
+/// after a database error; the message of the first send follows. The
+/// text is the one of `_retry_finalize_future` in
+/// `core/worker/finalize.py` of the `v0.7.0` package.
 pub const CRASH_RECOVERY_RETRY_PREFIX: &str = "Retry after future-stage finalize error: ";
 /// Sends of the release of a claim that no child took, the first included.
 pub const RELEASE_SENDS: u32 = 3;
@@ -272,9 +273,7 @@ pub struct CrashRecoveryWrites {
 /// The crash-recovery writes of a child the worker killed or lost: two
 /// [`killed_child_write`]s, with `message` on the first send and with
 /// `Retry after future-stage finalize error: <message>` on each send after
-/// a database error (Python `_finalize_child_loss` and
-/// `_retry_finalize_future`, `python/horsies/core/worker/finalize.py:1942-1985`).
-/// Pure.
+/// a database error. Pure.
 pub fn crash_recovery_writes(
     task: &ClaimedTask,
     worker_id: &str,
@@ -446,7 +445,7 @@ fn release_failed(
 pub struct OutcomeWriter {
     broker: Arc<PostgresBroker>,
     /// Where phase 2 gets the spec of a sub-workflow child that it starts.
-    child_specs: ChildSpecs,
+    child_specs: Arc<dyn ChildSpecSource>,
     worker_id: String,
     payload_policy: PayloadPolicy,
     successes: FinalizeBatcher<WorkerPoolSuccessWrite>,
@@ -455,7 +454,7 @@ pub struct OutcomeWriter {
 impl OutcomeWriter {
     pub fn new(
         broker: Arc<PostgresBroker>,
-        child_specs: ChildSpecs,
+        child_specs: Arc<dyn ChildSpecSource>,
         worker_id: String,
         payload_policy: PayloadPolicy,
         successes: FinalizeBatcher<WorkerPoolSuccessWrite>,
@@ -638,8 +637,7 @@ impl OutcomeWriter {
     }
 
     /// The success of a plain task: its row joins the next batch of the
-    /// finalize batcher (Python `_complete_plain_success`,
-    /// `python/horsies/core/worker/finalize.py:1386-1436`). Returns after the
+    /// finalize batcher. Returns after the
     /// statement of the row's batch returned. A plain success owes no phase
     /// 2: its capacity wake commits with the row.
     ///
@@ -831,7 +829,7 @@ impl OutcomeWriter {
     ) {
         Box::pin(run_phase2(
             &self.broker,
-            self.child_specs.build(),
+            self.child_specs.as_ref(),
             Phase2Work {
                 task_id: task.task_id,
                 queue_name: task.queue_name.clone(),
@@ -843,8 +841,7 @@ impl OutcomeWriter {
         .await;
     }
 
-    /// Release a claim that no child took (Python `_requeue_claimed_task`,
-    /// `python/horsies/core/worker/dispatch.py:254-295`): `horsies_release_claims`
+    /// Release a claim that no child took: `horsies_release_claims`
     /// with placement `SAME_CLASS`, fenced to this worker and this claim
     /// generation. The row goes back to the queue in its class; a row in any
     /// other state is left alone. A database error that may clear sends the
@@ -889,8 +886,7 @@ impl OutcomeWriter {
         }
     }
 
-    /// The child stopped before RUNNING; no task code ran (Python
-    /// `python/horsies/core/lifecycle/classify.py:260-300`, `_classify_abort`).
+    /// The child stopped before RUNNING; no task code ran.
     ///
     /// - An expired workflow task replays phase 2.
     /// - An unconfirmed start releases the claim at once with the fenced

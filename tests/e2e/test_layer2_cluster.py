@@ -749,13 +749,13 @@ async def test_retry_works_across_multiple_workers(broker: PostgresBroker) -> No
             # move archives into the record's snapshot as it purges the
             # live rows — so it is read from wherever it now lives.
             attempt_counts = {
-                task_id: len(await read_attempt_history(session, str(task_id)))
+                task_id: len(await read_attempt_history(broker, str(task_id)))
                 for task_id in task_ids
             }
 
             worker_ids_seen: set[str] = set()
             for task_id in task_ids:
-                worker_ids_seen |= await read_attempt_workers(session, str(task_id))
+                worker_ids_seen |= await read_attempt_workers(broker, str(task_id))
 
         expected_attempts_per_task = 4  # initial attempt + 3 retries
         assert attempt_counts == {

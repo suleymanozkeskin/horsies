@@ -1,7 +1,5 @@
 //! The preload fork path of the spawner thread (Linux): one preload process
-//! imports code once and forks a child for each spawn request (Python
-//! `core/worker/preload.py`; `core/worker/slots.py`, `_start_preload`,
-//! `_watch_preload`, `Child._start_forked`).
+//! imports code once and forks a child for each spawn request.
 //!
 //! The two waits of the path are states of the spawner loop with a
 //! deadline, not blocking calls: the start waits at most
@@ -879,6 +877,28 @@ fn send_init(socket: &mut UnixStream, init: &InitFrame) -> io::Result<()> {
 /// subreaper flag (Python `preload_support`).
 #[cfg(target_os = "linux")]
 fn preload_support() -> Result<(), PreloadUnsupported> {
+    kernel_support(open_own_pidfd(), || set_subreaper(false))
+}
+
+/// The preload path of a Linux kernel, from the result of a `pidfd_open` of
+/// this process. `clear_subreaper` clears the subreaper flag; it runs only
+/// after the pidfd opened (Python `preload_support`).
+#[cfg(target_os = "linux")]
+fn kernel_support(
+    pidfd_open: io::Result<()>,
+    clear_subreaper: impl FnOnce() -> io::Result<()>,
+) -> Result<(), PreloadUnsupported> {
+    pidfd_open.map_err(|error| PreloadUnsupported::MissingKernelSupport {
+        reason: format!("pidfd_open: {error}"),
+    })?;
+    clear_subreaper().map_err(|error| PreloadUnsupported::MissingKernelSupport {
+        reason: format!("prctl is refused: {error}"),
+    })
+}
+
+/// Open a pidfd of this process and close it again.
+#[cfg(target_os = "linux")]
+fn open_own_pidfd() -> io::Result<()> {
     // SAFETY: pidfd_open of this process's own pid; it returns a new
     // descriptor or -1 and touches no memory of this process.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, libc::getpid(), 0) };
@@ -887,16 +907,10 @@ fn preload_support() -> Result<(), PreloadUnsupported> {
             // SAFETY: the kernel returned a new descriptor that nothing else
             // owns.
             drop(unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) });
+            Ok(())
         }
-        _ => {
-            return Err(PreloadUnsupported::MissingKernelSupport {
-                reason: format!("pidfd_open: {}", io::Error::last_os_error()),
-            })
-        }
+        _ => Err(io::Error::last_os_error()),
     }
-    set_subreaper(false).map_err(|error| PreloadUnsupported::MissingKernelSupport {
-        reason: format!("prctl is refused: {error}"),
-    })
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1061,3 +1075,6 @@ fn next_exited_child() -> Option<ProcessId> {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
+
+#[cfg(all(test, not(target_os = "linux")))]
+mod other_platform_tests;

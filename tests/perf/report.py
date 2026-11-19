@@ -15,12 +15,18 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from typing import cast
+from typing import assert_never, cast
 
 from tests.perf.runner import (
     WAL_RECORD_DELTA_PER_TERMINAL_ROW,
     Measurement,
     RunResult,
+)
+from tests.perf.scenarios import (
+    BatchScenario,
+    PublicCallScenario,
+    SingleRowScenario,
+    WorkerDrainScenario,
 )
 from tests.perf.statistics import Comparison, ThroughputComparison
 
@@ -48,7 +54,7 @@ def render_summary(result: RunResult) -> str:
         f'| observations per side | {conditions.observations_per_side} |',
         f'| block size | {conditions.block_size} |',
         f'| pre-existing terminal rows | {conditions.ballast_rows} |',
-        f'| result payload | {conditions.payload_bytes} bytes |',
+        f'| payload per operation | {conditions.payload_bytes} bytes |',
         f'| batch | {batch} |',
         f'| fsync | {conditions.fsync} |',
         f'| full_page_writes | {conditions.full_page_writes} |',
@@ -58,17 +64,25 @@ def render_summary(result: RunResult) -> str:
         f'| bootstrap seed | {conditions.seed} |',
         f'| demo units quiesced | {_yes_no(conditions.demo_quiesced)} |',
     ]
-    if result.throughput is None:
-        lines += [
-            '',
-            '## Latency',
-            '',
-            '| percentile | baseline | candidate | delta | 95% interval | budget | verdict |',
-            '|---|---|---|---|---|---|---|',
-            *[_latency_row(c) for c in result.comparisons],
-        ]
-    else:
-        lines += _batch_performance(result.throughput, result.comparisons)
+    match result.scenario:
+        case SingleRowScenario() | PublicCallScenario():
+            lines += [
+                '',
+                '## Latency',
+                '',
+                '| percentile | baseline | candidate | delta | 95% interval | budget | verdict |',
+                '|---|---|---|---|---|---|---|',
+                *[_latency_row(c) for c in result.comparisons],
+            ]
+        case BatchScenario():
+            lines += _batch_performance(
+                _required_throughput(result),
+                result.comparisons,
+            )
+        case WorkerDrainScenario():
+            lines += _drain_performance(_required_throughput(result))
+        case _ as unreachable:
+            assert_never(unreachable)
     if result.plans is not None:
         lines += [
             '',
@@ -199,6 +213,41 @@ def _batch_performance(
         'The duration envelope starts before the statement can acquire its '
         'first row lock and ends after commit releases every lock. It includes '
         'result decoding and outcome logging performed before commit.',
+    ]
+
+
+def _required_throughput(result: RunResult) -> ThroughputComparison:
+    """The throughput of a batch or drain result, which the runner computes
+    for every such result."""
+    if result.throughput is None:
+        raise RuntimeError(
+            f'{result.conditions.scenario}: a batch or drain result has no '
+            'throughput comparison'
+        )
+    return result.throughput
+
+
+def _drain_performance(throughput: ThroughputComparison) -> list[str]:
+    return [
+        '',
+        '## Drain throughput',
+        '',
+        '| metric | baseline | candidate | comparison | 95% interval | budget | verdict |',
+        '|---|---|---|---|---|---|---|',
+        '| tasks per second '
+        f'| {throughput.baseline_rows_per_second:.0f} tasks/s '
+        f'| {throughput.candidate_rows_per_second:.0f} tasks/s '
+        f'| {throughput.ratio:.3f}x '
+        f'| {throughput.ci_low_ratio:.3f}x to '
+        f'{throughput.ci_high_ratio:.3f}x '
+        f'| >= {throughput.minimum_ratio:.2f}x '
+        f'| {throughput.verdict.value} |',
+        '',
+        'Throughput is the sent tasks of the drains divided by their total '
+        'time. The time of a drain includes the start of the worker process, '
+        'and ends at the start of the count that read every task terminal. '
+        'The server counts include the statements of the worker from its '
+        'start until that count, without the counts of the harness.',
     ]
 
 

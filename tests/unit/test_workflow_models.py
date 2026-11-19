@@ -4021,14 +4021,13 @@ class TestWorkflowPackageExports:
     def test_explicit_reexports_are_in_all(self) -> None:
         """Names using the `X as X` explicit-re-export idiom must appear in
         __all__ (regression for prior drift: OkT/OkT_co/OutT,
-        WF_TASK_TERMINAL_VALUES, NODE_ID_PATTERN, WorkflowDefinitionMeta)."""
+        NODE_ID_PATTERN, WorkflowDefinitionMeta)."""
         import horsies.core.models.workflow as wf
 
         for name in (
             'OkT',
             'OkT_co',
             'OutT',
-            'WF_TASK_TERMINAL_VALUES',
             'NODE_ID_PATTERN',
             'WorkflowDefinitionMeta',
         ):

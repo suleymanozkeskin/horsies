@@ -9,15 +9,14 @@ __all__ = ['MonitoringQueryErrorCode', 'TaskActionErrorCode']
 
 
 class MonitoringQueryErrorCode(str, Enum):
+    """Failure category for a monitoring read.
+
+    Each member names one variant of `MonitoringQueryError`.
+    """
+
     DB_OPERATION_FAILED = 'DB_OPERATION_FAILED'
     """The read failed with a database or driver error. `retryable` is the
     driver classification of the cause.
-    """
-
-    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
-    """The broker already holds resource sets for its limit of open event
-    loops, and this call ran on a new one. Nothing ran. Python client
-    only; removed before 0.8.0.
     """
 
     HISTORY_CONTRACT_VIOLATION = 'HISTORY_CONTRACT_VIOLATION'
@@ -29,6 +28,11 @@ class MonitoringQueryErrorCode(str, Enum):
 
 
 class TaskActionErrorCode(str, Enum):
+    """Why a task action did not apply.
+
+    Each member names one variant of `TaskActionError`.
+    """
+
     TASK_NOT_FOUND = 'TASK_NOT_FOUND'
 
     TASK_NOT_CANCELLABLE = 'TASK_NOT_CANCELLABLE'
@@ -36,12 +40,6 @@ class TaskActionErrorCode(str, Enum):
     TASK_IS_WORKFLOW_TASK = 'TASK_IS_WORKFLOW_TASK'
 
     DB_OPERATION_FAILED = 'DB_OPERATION_FAILED'
-
-    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
-    """The broker already holds resource sets for its limit of open event
-    loops, and this call ran on a new one. Nothing changed. Python client
-    only; removed before 0.8.0.
-    """
 
     STORED_DATA_INVALID = 'STORED_DATA_INVALID'
     """Stored task data does not parse: a history status that is not a task

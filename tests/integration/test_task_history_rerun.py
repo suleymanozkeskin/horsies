@@ -24,22 +24,17 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
+from horsies._core import CoreContractViolation
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.periods import period_class_key
-from horsies.core.history.identity.keys import ScopedIdempotencyKey
-from horsies.core.history.reads.detail import TaskAbsenceReason
-from horsies.core.history.identity.reservations import (
-    ReservationApplied,
-    claim_key_reservation,
-)
+from horsies import TaskAbsenceReason
 from horsies.core.history.rerun.operations import (
     NotEligibleReason,
     RerunEnqueued,
     RerunEnqueuePolicy,
     RerunInputCorrupt,
     RerunInputUnavailable,
-    RerunKeyConflict,
     RerunKeyReplay,
     RerunNotEligible,
     RerunSourceAbsent,
@@ -643,51 +638,6 @@ class TestKeyedRerun:
             ).scalar_one()
             assert count == 1
 
-    @pytest.mark.asyncio
-    async def test_key_reserved_by_the_source_conflicts_by_contract(
-        self, terminalization_schema: HistorySchema
-    ) -> None:
-        """The frozen fingerprint covers rerun lineage, so the source's
-        own reservation cannot alias its rerun — the conflict is the
-        contract working."""
-        async with terminalization_schema.engine.begin() as connection:
-            await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
-            source = await seed_failed_source(connection)
-            scoped = ScopedIdempotencyKey(
-                task_name='it.move', key='original-key'
-            )
-            claimed = await claim_key_reservation(
-                connection,
-                key_digest=scoped.digest,
-                key_scope_version=1,
-                reservation_window=timedelta(days=1),
-                fingerprint_version=1,
-                fingerprint=sha256(b'the original command').digest(),
-                task_id=UUID(source),
-            )
-            assert isinstance(claimed, ReservationApplied)
-            outcome = await rerun_task(
-                connection,
-                RerunTask(
-                    source_task_id=UUID(source),
-                    deadline=None,
-                    caller_key='original-key',
-                ),
-                policy(),
-            )
-            assert outcome == RerunKeyConflict(
-                task_id=UUID(source), reserved_by_task_id=UUID(source)
-            )
-            new_rows = (
-                await connection.execute(
-                    text(
-                        'SELECT count(*) FROM horsies_tasks '
-                        'WHERE rerun_of_task_id IS NOT NULL'
-                    )
-                )
-            ).scalar_one()
-            assert new_rows == 0
-
 
 class TestStoredSourceDoesNotDecode:
     """Stored data that does not parse is an outcome with its cause.
@@ -725,3 +675,44 @@ class TestStoredSourceDoesNotDecode:
         assert isinstance(outcome.exception, HistoryContractError)
         assert "'UNKNOWN'" in str(outcome.exception)
         assert tasks_after == tasks_before
+
+
+@pytest.mark.asyncio
+async def test_a_family_row_that_holds_no_client_family_raises_a_contract_violation(
+    terminalization_schema: HistorySchema,
+) -> None:
+    """A family value outside PYTHON and RUST is corrupt stored data.
+
+    The test writes it past the CHECK ``horsies_client_family_family_known``,
+    which it drops first. The core answers ``RerunUnknownStoredFamily`` with
+    the stored value, and ``rerun_task`` raises its ``CoreContractViolation``
+    (subject ``rerun_task``) before any write.
+    """
+    async with terminalization_schema.engine.begin() as connection:
+        await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
+        source = await seed_failed_source(connection)
+        _ = await connection.execute(
+            text(
+                'ALTER TABLE horsies_client_family '
+                'DROP CONSTRAINT horsies_client_family_family_known'
+            )
+        )
+        _ = await connection.execute(
+            text(
+                'INSERT INTO horsies_client_family (only_row, family, recorded_at) '
+                "VALUES (TRUE, 'GO', now())"
+            )
+        )
+        count_tasks = text('SELECT count(*) FROM horsies_tasks')
+        before = (await connection.execute(count_tasks)).scalar_one()
+
+        with pytest.raises(CoreContractViolation) as raised:
+            _ = await rerun_task(
+                connection,
+                RerunTask(source_task_id=UUID(source), deadline=None),
+                policy(),
+            )
+
+        assert raised.value.subject == 'rerun_task'
+        assert 'horsies_client_family.family holds "GO"' in raised.value.message
+        assert (await connection.execute(count_tasks)).scalar_one() == before

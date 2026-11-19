@@ -9,6 +9,8 @@ answers ``WorkflowAbsent`` when no workflow has the id, or the node records
 
 from __future__ import annotations
 
+import uuid
+
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -36,7 +38,7 @@ def _handle(method: str, answer: object) -> WorkflowHandle[Any]:
     """A handle whose core handle answers ``method`` with ``answer``."""
     broker = MagicMock()
     setattr(broker._core_handle, method, AsyncMock(return_value=answer))
-    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
+    return WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker)
 
 
 class TestResults:

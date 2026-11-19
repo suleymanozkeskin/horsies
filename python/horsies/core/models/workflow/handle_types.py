@@ -14,146 +14,48 @@ Two error strategies by return type:
    ``TaskResult(err=TaskError(...))`` with a ``RetrievalCode`` or
    ``BROKER_ERROR``.
 
+``WorkflowHandle.for_id`` returns ``HandleInvalidWorkflowId`` for a workflow
+id text that is not a UUID.
+
 ``asyncio.CancelledError`` and programmer defects propagate.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar
 
 from horsies._catalog.workflow_handle import (
     HandleErrorCode as HandleErrorCode,
 )
+from horsies._catalog.workflow_handle_errors import (
+    HandleAsyncContext as HandleAsyncContext,
+    HandleCoreError as HandleCoreError,
+    HandleDbOperationFailed as HandleDbOperationFailed,
+    HandleResumeRecoveryFailed as HandleResumeRecoveryFailed,
+    HandleStoredDataInvalid as HandleStoredDataInvalid,
+    HandleWorkflowNotFound as HandleWorkflowNotFound,
+)
 from horsies.core.types.result import Result
 
 
-if TYPE_CHECKING:
-    from horsies.core.brokers.resources import EventLoopLimit
+type HandleOperationError = HandleCoreError
+"""Every failure of a handle operation: one variant per ``HandleErrorCode``,
+each a class of the core's catalog."""
 
 
 @dataclass(slots=True, frozen=True)
-class HandleWorkflowNotFound:
-    """No workflow has this id. Nothing changed.
+class HandleInvalidWorkflowId:
+    """The workflow id text of ``WorkflowHandle.for_id`` is not a UUID. No handle was built.
 
-    The same call returns this error while no workflow has this id.
+    ``workflow_id_text`` is the text as given; ``exception`` is the
+    ``ValueError`` of ``uuid.UUID``. The same text gives this error again.
+    It is not a handle operation failure: no ``HandleErrorCode`` names it,
+    and ``HandleOperationError`` does not hold it.
     """
 
-    code: ClassVar[HandleErrorCode] = HandleErrorCode.WORKFLOW_NOT_FOUND
-    retryable: ClassVar[bool] = False
     message: str = field(repr=False)
-    workflow_id: str
+    workflow_id_text: str
+    exception: ValueError = field(repr=False)
 
-
-@dataclass(slots=True, frozen=True)
-class HandleDbOperationFailed:
-    """The operation failed with a database or driver error.
-
-    ``retryable`` is the driver classification of the cause: ``True`` when
-    the condition may clear, for example a lost connection. A read changed
-    nothing. A write (``cancel``, ``pause``, or ``resume`` before its commit)
-    rolled back, or its commit outcome is unknown.
-    """
-
-    code: ClassVar[HandleErrorCode] = HandleErrorCode.DB_OPERATION_FAILED
-    message: str = field(repr=False)
-    retryable: bool
-    workflow_id: str
-    exception: BaseException = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class HandleStoredDataInvalid:
-    """A stored value of the workflow does not parse. Nothing changed.
-
-    The value is a workflow status that is not a ``WorkflowStatus``
-    (``status``), or a subworkflow summary that is not valid (``tasks``). ``exception`` is the parse error. The same call returns this
-    error until the stored value changes.
-    """
-
-    code: ClassVar[HandleErrorCode] = HandleErrorCode.STORED_DATA_INVALID
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    workflow_id: str
-    exception: BaseException = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class HandleResumeRecoveryFailed:
-    """``resume`` committed, and the recovery pass for the workflow tree failed.
-
-    The workflow is ``RUNNING`` and the resume enqueued its ready nodes. The
-    recovery pass runs after the commit, in a second transaction. It
-    completes the propagation for a task that finished while the resume
-    transaction ran, when the completion callback saw the workflow as
-    ``PAUSED``. That pass rolled back, or its commit outcome is unknown.
-    ``exception`` is the database or driver error. The worker reaper runs
-    the same pass over all workflows. A repeated ``resume`` returns
-    ``Ok(False)``.
-    """
-
-    code: ClassVar[HandleErrorCode] = HandleErrorCode.RESUME_RECOVERY_FAILED
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    workflow_id: str
-    exception: BaseException = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class HandleLoopRunnerFailed:
-    """A sync method could not run the call on the broker's sync runner. Nothing ran.
-
-    ``exception`` is the ``LoopRunnerError``. A stopped runner does not start
-    again (``close()`` and ``close_async()`` stop it); call the ``*_async``
-    form.
-    """
-
-    code: ClassVar[HandleErrorCode] = HandleErrorCode.LOOP_RUNNER_FAILED
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    workflow_id: str
-    exception: BaseException = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class HandleEventLoopLimit:
-    """The broker holds resource sets for its limit of open event loops. Nothing ran.
-
-    The call ran on one more loop. ``loop_limit`` names the limit and the
-    threads of the held loops. A call from this loop returns the same error
-    until one of the held loops closes.
-    """
-
-    code: ClassVar[HandleErrorCode] = HandleErrorCode.EVENT_LOOP_LIMIT
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    workflow_id: str
-    loop_limit: EventLoopLimit
-
-
-@dataclass(slots=True, frozen=True)
-class HandleAsyncContext:
-    """A sync method was called on a thread that runs an event loop. Nothing ran.
-
-    Its wait would stall that loop. Call the ``*_async`` form; a sync call on
-    that thread returns this error again.
-    """
-
-    code: ClassVar[HandleErrorCode] = HandleErrorCode.ASYNC_CONTEXT
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    workflow_id: str
-
-
-type HandleOperationError = (
-    HandleWorkflowNotFound
-    | HandleDbOperationFailed
-    | HandleStoredDataInvalid
-    | HandleResumeRecoveryFailed
-    | HandleLoopRunnerFailed
-    | HandleEventLoopLimit
-    | HandleAsyncContext
-)
-"""Every failure of a handle operation: one variant per ``HandleErrorCode``."""
 
 type HandleResult[T] = Result[T, HandleOperationError]

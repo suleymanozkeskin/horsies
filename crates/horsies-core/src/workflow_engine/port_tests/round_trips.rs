@@ -1,9 +1,6 @@
 //! Round trips of the workflow operations, counted at the wire. Python:
-//! `tests/integration/test_workflow_node_round_trips.py`,
-//! `test_workflow_completion_path.py` (`TestCompletionStatementBudget`),
-//! `test_workflow_promotion_batched.py::TestBatchedPromotionShape::test_fanout_statement_count_flat_in_f`,
-//! `test_workflow_start_batched.py::TestBatchedStartShape::test_statement_count_flat_in_root_count`,
-//! `test_subworkflow_start_batched.py::TestBulkChildStart::test_statement_count_flat_in_children_and_shape`.
+//! `tests/integration/test_workflow_start_batched.py::TestBatchedStartShape::test_statement_count_flat_in_root_count`
+//! and `test_subworkflow_start_batched.py::TestBulkChildStart::test_statement_count_flat_in_children_and_shape`.
 //!
 //! Each case runs on a [`CountedBroker`], whose core pools connect through a
 //! proxy that counts round trips. The core sends one round trip per
@@ -19,7 +16,6 @@
 use std::sync::Arc;
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -31,6 +27,7 @@ use crate::broker::workflow_start::ClientStartOutcome;
 use crate::broker::PostgresBroker;
 use crate::core::{AnyNode, WorkflowSpec};
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::{self, TestPool};
 
 /// The round trips of a step in autocommit.
 const ONE_STATEMENT: u32 = 1;
@@ -39,11 +36,10 @@ const ONE_STATEMENT: u32 = 1;
 /// `horsies_workflow_child_start`, `COMMIT`.
 const STEP_WITH_CHILD_START: u32 = 4;
 
-/// The dependents of node A in the `fanout` shape of
-/// `test_workflow_node_round_trips.py`.
+/// The dependents of node A in the `fanout` shape.
 const FANOUT: usize = 5;
 
-/// The fan-outs of `test_fanout_statement_count_flat_in_f`.
+/// The fan-outs of the promotion statement count.
 const SMALL_FAN_OUT: usize = 5;
 const LARGE_FAN_OUT: usize = 20;
 
@@ -133,7 +129,7 @@ async fn finalize_counted(
 /// statements, the second for the counted run. Both are set up before
 /// either runs, so the counted run follows the first with no wait.
 async fn two_running_node_a(
-    pool: &PgPool,
+    pool: &TestPool,
     child_specs: &TestChildSpecs,
     shape: Shape,
 ) -> [(Uuid, RunningNodeTask); 2] {
@@ -149,7 +145,7 @@ async fn two_running_node_a(
 /// steady state: one run on a new [`CountedBroker`], then the counted run.
 /// Returns the workflow of the counted run and its round trips.
 async fn measure_node_a(
-    pool: &PgPool,
+    pool: &TestPool,
     shape: Shape,
     report: NodeReport,
 ) -> (Uuid, FinalizeRoundTrips) {
@@ -195,8 +191,8 @@ async fn start_on(
 }
 
 /// The statuses of the nodes of `workflow_id`, by index.
-async fn node_statuses(pool: &PgPool, workflow_id: Uuid) -> Vec<String> {
-    sqlx::query_scalar(
+async fn node_statuses(pool: &TestPool, workflow_id: Uuid) -> Vec<String> {
+    sql::query_scalar(
         "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 ORDER BY task_index",
     )
     .bind(workflow_id)
@@ -206,7 +202,7 @@ async fn node_statuses(pool: &PgPool, workflow_id: Uuid) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// test_workflow_node_round_trips.py
+// Node operations
 // ---------------------------------------------------------------------------
 
 /// `test_phase_one_of_a_success_is_one_statement` (`chain`, `single`): phase 1
@@ -293,7 +289,7 @@ async fn phase_two_round_trips_follow_the_shape() {
 }
 
 // ---------------------------------------------------------------------------
-// test_workflow_completion_path.py
+// Completion
 // ---------------------------------------------------------------------------
 
 /// `TestCompletionStatementBudget.test_success_completion_statement_count`:
@@ -337,7 +333,7 @@ async fn a_failed_completion_under_on_error_fail_is_one_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
-// test_workflow_promotion_batched.py
+// Promotion
 // ---------------------------------------------------------------------------
 
 /// `TestBatchedPromotionShape.test_fanout_statement_count_flat_in_f`: phase 2

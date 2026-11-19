@@ -1,8 +1,7 @@
 //! The retry rule and the stored run limits of a claimed task.
 //!
-//! One rule serves the worker and the reaper. Python reference:
-//! `python/horsies/core/utils/retry.py` (the admission and the delay) and
-//! `python/horsies/core/worker/stored_timeout.py` (the stored timeout).
+//! One rule serves the worker and the reaper. Python reference for the
+//! stored timeout: `python/horsies/core/worker/stored_timeout.py`.
 //!
 //! The stored `task_options` text is read once, when the task is dispatched,
 //! into [`StoredOptions`]. A value that does not fit the rule that wrote it is

@@ -1,6 +1,5 @@
 //! The runner beats with real children, writes that fail on demand, and the
-//! isolated slots that hold their tasks (Python
-//! `tests/unit/test_runner_heartbeat.py`).
+//! isolated slots that hold their tasks.
 //!
 //! - A write fails on demand on a pool whose server refuses the connection.
 //! - A write does not return within a test on a pool whose server accepts
@@ -22,10 +21,11 @@ use crate::core::config::recovery::RecoveryConfigError;
 use crate::test_support::{CapturedEvent, LogCapture};
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
-    encode_child_frame, encode_parent_frame, ChildConnection, ChildFrame, ChildKind, ChildLogLevel,
-    ChildPool, ChildProgram, DatabaseUrl, InitFrame, IsolatedChild, IsolatedWork, NoLeftWork,
-    ParentFrame, PoolMaxSize, PoolMinSize, ReadyFrame, ResultEnvelopeText, ResultFrame, RssReading,
-    RunEnd, RunFrame, TaskInputText, TaskSendPool, TaskTimeoutMs,
+    encode_child_frame, encode_parent_frame, ChildAfterFrame, ChildConnection, ChildFrame,
+    ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, InitFrame, IsolatedChild,
+    IsolatedWork, NoLeftWork, ParentFrame, PoolMaxSize, PoolMinSize, ReadyFrame,
+    ResultEnvelopeText, ResultFrame, RssReading, RunEnd, RunFrame, TaskInputText, TaskSendPool,
+    TaskTimeoutMs,
 };
 use crate::worker::executor::slots::{
     AttemptEnd, ChildLayout, ClaimedTask, ExecutionClass, ExitNotSeen, IsolatedDeadline,
@@ -366,17 +366,14 @@ async fn a_dead_writer_stops_the_worker() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn a_failed_write_inside_the_window_recovers() {
-    let database = crate::broker::terminalization_matrix::migrated_pool().await;
-    let options = database.connect_options();
+    let database = crate::test_support::migrated_pool().await;
+    let (host, port) = crate::test_support::sql::endpoint_of(database.url());
     let refuse_until = Instant::now() + Duration::from_millis(700);
-    let gate = ClosingGate::start(
-        options.get_host().to_owned(),
-        options.get_port(),
-        refuse_until,
-    )
-    .await;
-    let pool = test_beat_pool(&crate::broker::pools::test_url_of(
-        &(*options).clone().host("127.0.0.1").port(gate.port),
+    let gate = ClosingGate::start(host, port, refuse_until).await;
+    let pool = test_beat_pool(&crate::test_support::sql::with_endpoint(
+        database.url(),
+        "127.0.0.1",
+        gate.port,
     ));
     let spawner = Spawner::start().expect("the spawner starts");
     let (spawned, child) = sleeping_child(&spawner).await;
@@ -1096,6 +1093,7 @@ fn answer_after_a_second(claimed: &ClaimedTask) -> String {
         )),
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
+        child: ChildAfterFrame::ServesOn,
     }))
     .expect("the result frame encodes")
     .to_bytes();

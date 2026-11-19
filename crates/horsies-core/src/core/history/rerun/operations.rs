@@ -195,6 +195,11 @@ pub enum RerunError {
         stored: crate::broker::client_family::RecordedFamily,
         own: crate::broker::client_family::ClientFamily,
     },
+    /// The family row holds a value that is not a client family: corrupt
+    /// stored data. Nothing was written. Not retryable: the same row is
+    /// refused again until it is repaired.
+    #[error("rerun refused: {0}")]
+    UnknownStoredFamily(crate::broker::client_family::UnknownStoredFamily),
     /// The client-family check before the rerun could not read the family
     /// row. Nothing was read or written. Retryable when
     /// [`FamilyCheckFailure::transience`] is `Transient`: the check keeps no
@@ -280,7 +285,8 @@ pub(super) static RERUN_ENQUEUE: TypedStatement = TypedStatement::new(
 /// another family is refused before the write.
 ///
 /// Errors: [`RerunError::UnknownRetentionClass`],
-/// [`RerunError::ClientFamilyMismatch`], [`RerunError::Idempotency`] (the
+/// [`RerunError::ClientFamilyMismatch`], [`RerunError::UnknownStoredFamily`],
+/// [`RerunError::Idempotency`] (the
 /// caller key) and [`RerunError::Identity`] before any write;
 /// [`RerunError::Statement`] (a missing history reader is refused with
 /// `42883`); [`RerunError::RowDecode`] and [`RerunError::CallerRow`]. After
@@ -307,6 +313,9 @@ pub(crate) async fn rerun_task_in_transaction(
         }
         RerunPreparation::ClientFamilyMismatch { stored, own } => {
             return Err(RerunError::ClientFamilyMismatch { stored, own });
+        }
+        RerunPreparation::UnknownStoredFamily(unknown) => {
+            return Err(RerunError::UnknownStoredFamily(unknown));
         }
         RerunPreparation::CallerKeyRefused(refused) => {
             return Err(RerunError::Idempotency(refused));

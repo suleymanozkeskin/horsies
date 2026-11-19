@@ -4,8 +4,10 @@
 //!
 //! Each read returns the stored values as text, one record class per answer.
 //! The Python `WorkflowHandle` decodes a result envelope with its own output
-//! type, as before the switch. A failed read is `HandleFailed` (in
-//! `workflow_lifecycle`); no workflow is `WorkflowAbsent`. A row that does not
+//! type, as before the switch. A failed read is the generated class of the
+//! core's `HandleOperationError` (`HandleDbOperationFailed` or
+//! `HandleStoredDataInvalid`, `HandleFailure` in `workflow_lifecycle`) with
+//! the core's message; no workflow is `WorkflowAbsent`. A row that does not
 //! decode panics in the core and raises `PanicException`.
 
 use std::time::Duration;
@@ -13,7 +15,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use horsies_core::catalog::CodeEnum;
 use horsies_core::{
-    BrokerError, HandleErrorCode, HandleOperationError, HandleResult, NodeResultsRead, NodesRead,
+    BrokerError, HandleOperation, HandleOperationError, HandleResult, NodeResultsRead, NodesRead,
     StoredNode, StoredNodeResult, WorkflowEnd, WorkflowStatus, WorkflowWait,
 };
 use pyo3::prelude::*;
@@ -21,7 +23,7 @@ use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
 use crate::handle::BrokerConnection;
-use crate::operations::workflow_lifecycle::{HandleFailed, WorkflowAbsent};
+use crate::operations::workflow_lifecycle::{HandleFailure, WorkflowAbsent};
 
 /// The stored status of a workflow.
 #[pyclass(module = "horsies._core", frozen, get_all)]
@@ -180,7 +182,7 @@ pub enum WorkflowReadOutcome {
     NodeResultNotStored(NodeResultNotStored),
     Nodes(WorkflowNodesRead),
     Absent(WorkflowAbsent),
-    Failed(HandleFailed),
+    Failed(HandleFailure),
 }
 
 impl<'py> IntoPyObject<'py> for WorkflowReadOutcome {
@@ -200,7 +202,7 @@ impl<'py> IntoPyObject<'py> for WorkflowReadOutcome {
             Self::NodeResultNotStored(read) => read.into_bound_py_any(py),
             Self::Nodes(read) => read.into_bound_py_any(py),
             Self::Absent(absent) => absent.into_bound_py_any(py),
-            Self::Failed(failed) => failed.into_bound_py_any(py),
+            Self::Failed(failed) => failed.into_pyobject(py),
         }
     }
 }
@@ -208,45 +210,38 @@ impl<'py> IntoPyObject<'py> for WorkflowReadOutcome {
 /// The record of a handle error of a read. Pure.
 ///
 /// Panics: a code that a read never gives (`RESUME_RECOVERY_FAILED`) or that
-/// only Python gives (`LOOP_RUNNER_FAILED`, `EVENT_LOOP_LIMIT`,
-/// `ASYNC_CONTEXT`): a defect of the core.
+/// only a sync or blocking form gives (`ASYNC_CONTEXT`): a defect of the
+/// core.
 fn failed_read(
-    subject: &'static str,
+    operation: HandleOperation,
     workflow_id: Uuid,
-    error: &HandleOperationError,
+    error: HandleOperationError,
 ) -> WorkflowReadOutcome {
-    match error.code {
-        HandleErrorCode::WorkflowNotFound => {
+    match error {
+        HandleOperationError::WorkflowNotFound { .. } => {
             WorkflowReadOutcome::Absent(WorkflowAbsent { workflow_id })
         }
-        HandleErrorCode::DbOperationFailed | HandleErrorCode::StoredDataInvalid => {
-            WorkflowReadOutcome::Failed(HandleFailed::of_handle_error(subject, workflow_id, error))
+        HandleOperationError::DbOperationFailed { .. }
+        | HandleOperationError::StoredDataInvalid { .. } => {
+            WorkflowReadOutcome::Failed(HandleFailure { operation, error })
         }
-        HandleErrorCode::ResumeRecoveryFailed
-        | HandleErrorCode::LoopRunnerFailed
-        | HandleErrorCode::EventLoopLimit
-        | HandleErrorCode::AsyncContext => panic!(
+        HandleOperationError::ResumeRecoveryFailed { .. }
+        | HandleOperationError::AsyncContext { .. } => panic!(
             "a read of workflow {workflow_id} answered {} (a defect): {}",
-            error.code, error.message
+            error.code(),
+            error.message()
         ),
     }
 }
 
-/// The record of a failed connect of the read `subject`. Pure.
+/// The record of a failed connect of the read `operation`. Pure.
 fn connect_failed(
-    subject: &'static str,
+    operation: HandleOperation,
     workflow_id: Uuid,
-    error: &BrokerError,
+    error: BrokerError,
 ) -> WorkflowReadOutcome {
-    WorkflowReadOutcome::Failed(HandleFailed::of_connect_error(subject, workflow_id, error))
+    WorkflowReadOutcome::Failed(HandleFailure::connect_failed(operation, workflow_id, error))
 }
-
-/// The subjects of the exceptions of the reads.
-const STATUS_SUBJECT: &str = "workflow_status";
-const WAIT_SUBJECT: &str = "wait_workflow_result";
-const NODE_RESULTS_SUBJECT: &str = "workflow_node_results";
-const NODE_RESULT_SUBJECT: &str = "workflow_node_result";
-const NODES_SUBJECT: &str = "workflow_nodes";
 
 /// The record of a status read. Pure.
 fn status_outcome(workflow_id: Uuid, answer: HandleResult<WorkflowStatus>) -> WorkflowReadOutcome {
@@ -255,7 +250,7 @@ fn status_outcome(workflow_id: Uuid, answer: HandleResult<WorkflowStatus>) -> Wo
             workflow_id,
             status: status.wire_value().to_owned(),
         }),
-        Err(error) => failed_read(STATUS_SUBJECT, workflow_id, &error),
+        Err(error) => failed_read(HandleOperation::Status, workflow_id, error),
     }
 }
 
@@ -280,7 +275,7 @@ fn wait_outcome(workflow_id: Uuid, answer: HandleResult<WorkflowWait>) -> Workfl
         }
         Ok(WorkflowWait::NotFound) => WorkflowReadOutcome::Absent(WorkflowAbsent { workflow_id }),
         Ok(WorkflowWait::TimedOut) => WorkflowReadOutcome::TimedOut(WaitTimedOut { workflow_id }),
-        Err(error) => failed_read(WAIT_SUBJECT, workflow_id, &error),
+        Err(error) => failed_read(HandleOperation::Get, workflow_id, error),
     }
 }
 
@@ -302,7 +297,7 @@ fn node_results_outcome(
                     .collect(),
             })
         }
-        Err(error) => failed_read(NODE_RESULTS_SUBJECT, workflow_id, &error),
+        Err(error) => failed_read(HandleOperation::Results, workflow_id, error),
     }
 }
 
@@ -318,7 +313,7 @@ fn node_result_outcome(
             workflow_id,
             node_id,
         }),
-        Err(error) => failed_read(NODE_RESULT_SUBJECT, workflow_id, &error),
+        Err(error) => failed_read(HandleOperation::ResultFor { node_id }, workflow_id, error),
     }
 }
 
@@ -332,7 +327,7 @@ fn nodes_outcome(workflow_id: Uuid, answer: HandleResult<NodesRead>) -> Workflow
             workflow_id,
             nodes: nodes.into_iter().map(StoredNodeRecord::from).collect(),
         }),
-        Err(error) => failed_read(NODES_SUBJECT, workflow_id, &error),
+        Err(error) => failed_read(HandleOperation::Tasks, workflow_id, error),
     }
 }
 
@@ -343,7 +338,7 @@ pub async fn workflow_status_operation(
 ) -> WorkflowReadOutcome {
     match connection.broker().await {
         Ok(broker) => status_outcome(workflow_id, broker.workflow_status(workflow_id).await),
-        Err(error) => connect_failed(STATUS_SUBJECT, workflow_id, &error),
+        Err(error) => connect_failed(HandleOperation::Status, workflow_id, error),
     }
 }
 
@@ -360,7 +355,7 @@ pub async fn wait_workflow_result_operation(
             workflow_id,
             broker.wait_workflow_end(workflow_id, timeout).await,
         ),
-        Err(error) => connect_failed(WAIT_SUBJECT, workflow_id, &error),
+        Err(error) => connect_failed(HandleOperation::Get, workflow_id, error),
     }
 }
 
@@ -373,7 +368,7 @@ pub async fn workflow_node_results_operation(
         Ok(broker) => {
             node_results_outcome(workflow_id, broker.workflow_node_results(workflow_id).await)
         }
-        Err(error) => connect_failed(NODE_RESULTS_SUBJECT, workflow_id, &error),
+        Err(error) => connect_failed(HandleOperation::Results, workflow_id, error),
     }
 }
 
@@ -388,7 +383,7 @@ pub async fn workflow_node_result_operation(
             let answer = broker.workflow_node_result(workflow_id, &node_id).await;
             node_result_outcome(workflow_id, node_id, answer)
         }
-        Err(error) => connect_failed(NODE_RESULT_SUBJECT, workflow_id, &error),
+        Err(error) => connect_failed(HandleOperation::ResultFor { node_id }, workflow_id, error),
     }
 }
 
@@ -399,26 +394,50 @@ pub async fn workflow_nodes_operation(
 ) -> WorkflowReadOutcome {
     match connection.broker().await {
         Ok(broker) => nodes_outcome(workflow_id, broker.workflow_nodes(workflow_id).await),
-        Err(error) => connect_failed(NODES_SUBJECT, workflow_id, &error),
+        Err(error) => connect_failed(HandleOperation::Tasks, workflow_id, error),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horsies_core::TerminalErrorStatus;
+    use horsies_core::{HandleErrorCode, TerminalErrorStatus};
 
     fn workflow() -> Uuid {
         Uuid::from_u128(11)
     }
 
     fn handle_error(code: HandleErrorCode, retryable: bool) -> HandleOperationError {
-        HandleOperationError {
-            code,
-            message: format!("planned {code}"),
-            retryable,
-            workflow_id: workflow(),
-            cause: horsies_core::FailureCause::Connection,
+        let message = format!("planned {code}");
+        let workflow_id = workflow();
+        let cause = || {
+            horsies_core::WorkflowError::Broker(BrokerError::ConnectionFailed("refused".to_owned()))
+        };
+        match code {
+            HandleErrorCode::WorkflowNotFound => HandleOperationError::WorkflowNotFound {
+                message,
+                workflow_id,
+            },
+            HandleErrorCode::DbOperationFailed => HandleOperationError::DbOperationFailed {
+                message,
+                retryable,
+                workflow_id,
+                cause: cause(),
+            },
+            HandleErrorCode::StoredDataInvalid => HandleOperationError::StoredDataInvalid {
+                message,
+                workflow_id,
+                cause: horsies_core::WorkflowError::InvalidStatus("BOGUS".to_owned()),
+            },
+            HandleErrorCode::ResumeRecoveryFailed => HandleOperationError::ResumeRecoveryFailed {
+                message,
+                workflow_id,
+                cause: cause(),
+            },
+            HandleErrorCode::AsyncContext => HandleOperationError::AsyncContext {
+                message,
+                workflow_id,
+            },
         }
     }
 
@@ -497,16 +516,48 @@ mod tests {
         assert_eq!(read.node_id, "a");
     }
 
+    /// A failure stays the core's value, with the read's operation: Python
+    /// reads its generated class with the operation's subject.
     #[test]
-    fn a_failure_keeps_its_code_cause_and_retry_rule() {
+    fn a_failure_keeps_the_core_s_value_and_its_operation() {
         let WorkflowReadOutcome::Failed(failed) = status_outcome(
             workflow(),
             Err(handle_error(HandleErrorCode::StoredDataInvalid, false)),
         ) else {
-            panic!("a stored status outside the enum gives HandleFailed");
+            panic!("a stored status outside the enum gives a failure");
         };
-        assert_eq!(failed.code, "STORED_DATA_INVALID");
-        assert!(!failed.retryable);
+        assert_eq!(failed.operation, HandleOperation::Status);
+        assert_eq!(failed.error.code(), HandleErrorCode::StoredDataInvalid);
+        assert!(!failed.error.retryable());
+        let WorkflowReadOutcome::Failed(failed) = node_result_outcome(
+            workflow(),
+            "a".to_owned(),
+            Err(handle_error(HandleErrorCode::DbOperationFailed, true)),
+        ) else {
+            panic!("a failed read gives a failure");
+        };
+        assert_eq!(
+            failed.operation,
+            HandleOperation::ResultFor {
+                node_id: "a".to_owned()
+            }
+        );
+        assert!(failed.error.retryable());
+        let WorkflowReadOutcome::Failed(failed) = connect_failed(
+            HandleOperation::Get,
+            workflow(),
+            BrokerError::ConnectionFailed("refused".to_owned()),
+        ) else {
+            panic!("a failed connect gives a failure");
+        };
+        assert_eq!(failed.operation, HandleOperation::Get);
+        assert_eq!(
+            failed.error.message(),
+            format!(
+                "Get failed for workflow {}: connection failed: refused",
+                workflow()
+            )
+        );
         assert!(matches!(
             status_outcome(
                 workflow(),
@@ -514,6 +565,31 @@ mod tests {
             ),
             WorkflowReadOutcome::Absent(_)
         ));
+    }
+
+    /// A failed connect of a node result read names the node, in Python
+    /// 0.7's text, and keeps the read's subject.
+    #[test]
+    fn a_failed_node_result_connect_names_the_node() {
+        let WorkflowReadOutcome::Failed(failed) = connect_failed(
+            HandleOperation::ResultFor {
+                node_id: "fetch".to_owned(),
+            },
+            workflow(),
+            BrokerError::ConnectionFailed("refused".to_owned()),
+        ) else {
+            panic!("a failed connect gives a failure");
+        };
+        assert_eq!(failed.operation.subject(), "workflow_node_result");
+        assert_eq!(
+            failed.error.message(),
+            format!(
+                "DB query failed for result_for node fetch in workflow {}: connection failed: \
+                 refused",
+                workflow()
+            )
+        );
+        assert!(failed.error.retryable());
     }
 
     #[test]

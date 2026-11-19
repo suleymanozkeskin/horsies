@@ -7,18 +7,21 @@
 //! as a send does, and reads only. A failure is the core's
 //! `BrokerOperationError` with Python's broker code: a failed connect or
 //! install has the code of the read (`DB_PING_FAILED`, `WORKER_PING_FAILED`,
-//! `MONITORING_QUERY_FAILED`).
+//! `MONITORING_QUERY_FAILED`). In a process that was forked without `exec`
+//! after the core's process runtime started, each read panics before it
+//! connects (`process_state::refuse_in_a_fork`).
 
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 use std::time::Duration;
 
 use horsies_core::{
-    BoundedTaskList, BrokerError, BrokerErrorCode, BrokerOperationError, ClassCoverage,
-    ClassReport, DatabasePing, ExpiredTaskRow, PostgresBroker, StaleMinutes, StaleTaskRow,
-    WorkerPong, WorkerStateSnapshot,
+    BoundedTaskList, BrokerError, BrokerOperationError, BrokerOperationFailedCode,
+    BrokerOperationSource, ClassCoverage, ClassReport, DatabasePing, ExpiredTaskRow,
+    PostgresBroker, StaleMinutes, StaleTaskRow, WorkerPong, WorkerStateSnapshot,
 };
 
+use crate::process_state::refuse_in_a_fork;
 use crate::Horsies;
 
 /// Which workers a ping asks.
@@ -44,7 +47,7 @@ impl Horsies {
     ///
     /// Errors: `DB_PING_FAILED` with the retry classification of the cause.
     pub async fn ping_database(&self) -> Result<DatabasePing, BrokerOperationError> {
-        self.health_broker(BrokerErrorCode::DbPingFailed)
+        self.health_broker(BrokerOperationFailedCode::DbPingFailed, "ping_database")
             .await?
             .ping_database()
             .await
@@ -68,7 +71,7 @@ impl Horsies {
             PingTarget::EveryWorker => None,
             PingTarget::Worker(worker_id) => Some(worker_id.as_str()),
         };
-        self.health_broker(BrokerErrorCode::WorkerPingFailed)
+        self.health_broker(BrokerOperationFailedCode::WorkerPingFailed, "ping_workers")
             .await?
             .ping_workers(
                 target_worker_id,
@@ -86,7 +89,10 @@ impl Horsies {
     pub async fn list_worker_states(
         &self,
     ) -> Result<Vec<WorkerStateSnapshot>, BrokerOperationError> {
-        self.monitoring_broker().await?.list_worker_states().await
+        self.monitoring_broker("list_worker_states")
+            .await?
+            .list_worker_states()
+            .await
     }
 
     /// The latest state snapshot of worker `worker_id`, or `None` when it
@@ -97,7 +103,7 @@ impl Horsies {
         &self,
         worker_id: &str,
     ) -> Result<Option<WorkerStateSnapshot>, BrokerOperationError> {
-        self.monitoring_broker()
+        self.monitoring_broker("get_worker_state")
             .await?
             .get_worker_state(worker_id)
             .await
@@ -115,7 +121,7 @@ impl Horsies {
             WorkerHistoryLimit::AllRetained => None,
             WorkerHistoryLimit::Newest(count) => Some(i64::from(count.get())),
         };
-        self.monitoring_broker()
+        self.monitoring_broker("get_worker_state_history")
             .await?
             .get_worker_state_history(worker_id, limit)
             .await
@@ -131,7 +137,7 @@ impl Horsies {
         &self,
         threshold: StaleMinutes,
     ) -> Result<BoundedTaskList<StaleTaskRow>, BrokerOperationError> {
-        self.monitoring_broker()
+        self.monitoring_broker("get_stale_tasks")
             .await?
             .get_stale_tasks(threshold.minutes())
             .await
@@ -145,7 +151,10 @@ impl Horsies {
     pub async fn get_expired_tasks(
         &self,
     ) -> Result<BoundedTaskList<ExpiredTaskRow>, BrokerOperationError> {
-        self.monitoring_broker().await?.get_expired_tasks().await
+        self.monitoring_broker("get_expired_tasks")
+            .await?
+            .get_expired_tasks()
+            .await
     }
 
     /// For each pending stream of an execution class, whether a live worker
@@ -153,42 +162,64 @@ impl Horsies {
     ///
     /// Errors: `MONITORING_QUERY_FAILED`.
     pub async fn get_class_coverage(&self) -> Result<ClassCoverage, BrokerOperationError> {
-        self.monitoring_broker().await?.get_class_coverage().await
+        self.monitoring_broker("get_class_coverage")
+            .await?
+            .get_class_coverage()
+            .await
     }
 
     /// The load of each execution class over the live workers.
     ///
     /// Errors: `MONITORING_QUERY_FAILED`.
     pub async fn get_class_report(&self) -> Result<ClassReport, BrokerOperationError> {
-        self.monitoring_broker().await?.get_class_report().await
+        self.monitoring_broker("get_class_report")
+            .await?
+            .get_class_report()
+            .await
     }
 
-    async fn monitoring_broker(&self) -> Result<Arc<PostgresBroker>, BrokerOperationError> {
-        self.health_broker(BrokerErrorCode::MonitoringQueryFailed)
+    async fn monitoring_broker(
+        &self,
+        read: &str,
+    ) -> Result<Arc<PostgresBroker>, BrokerOperationError> {
+        self.health_broker(BrokerOperationFailedCode::MonitoringQueryFailed, read)
             .await
     }
 
     /// The connected broker of the read handle, with the schema installed
-    /// once per handle. A failure has the broker code `code` of the read.
+    /// once per handle, for the read `Horsies::<read>`. A failure has the
+    /// broker code `code` of the read.
+    ///
+    /// # Panics
+    ///
+    /// In a fork, without `exec`, of the process that started the core's
+    /// process runtime. Nothing ran.
     async fn health_broker(
         &self,
-        code: BrokerErrorCode,
+        code: BrokerOperationFailedCode,
+        read: &str,
     ) -> Result<Arc<PostgresBroker>, BrokerOperationError> {
+        refuse_in_a_fork(format_args!("Horsies::{read}"));
         self.reads_handle()
             .initialized_broker()
             .await
-            .map_err(|error| connect_failure(code, &error))
+            .map_err(|error| connect_failure(code, read, error))
     }
 }
 
-/// The failure of a connect or an install before a health read. Pure.
-fn connect_failure(code: BrokerErrorCode, error: &BrokerError) -> BrokerOperationError {
-    BrokerOperationError {
+/// The failure of a connect or an install before the health read `read`,
+/// with Python's message (`{read} failed: {error}`) and the broker error as
+/// its cause. Pure.
+fn connect_failure(
+    code: BrokerOperationFailedCode,
+    read: &str,
+    error: BrokerError,
+) -> BrokerOperationError {
+    BrokerOperationError::operation_failed(
         code,
-        message: error.to_string(),
-        retryable: error.is_retryable(),
-        cause: error.failure_cause(),
-    }
+        format!("{read} failed: {error}"),
+        BrokerOperationSource::Broker(error),
+    )
 }
 
 #[cfg(test)]
@@ -197,13 +228,24 @@ mod tests {
 
     #[test]
     fn a_connect_failure_has_the_code_of_the_read_and_the_retry_rule_of_the_cause() {
-        let failure = connect_failure(BrokerErrorCode::DbPingFailed, &BrokerError::ListenerClosed);
-        assert_eq!(failure.code, BrokerErrorCode::DbPingFailed);
+        let failure = connect_failure(
+            BrokerOperationFailedCode::DbPingFailed,
+            "ping_database",
+            BrokerError::ListenerClosed,
+        );
+        assert_eq!(failure.code(), horsies_core::BrokerErrorCode::DbPingFailed);
         assert_eq!(
-            failure.retryable,
+            failure.retryable(),
             BrokerError::ListenerClosed.is_retryable()
         );
-        assert!(!failure.message.is_empty());
+        assert_eq!(
+            failure.message(),
+            "ping_database failed: the broker's listener stopped"
+        );
+        assert_eq!(
+            failure.failure_cause(),
+            horsies_core::FailureCause::Connection
+        );
     }
 
     #[test]

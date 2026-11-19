@@ -2,26 +2,22 @@
 //! RUNNING, and for a reported result that is not a result envelope, on a
 //! migrated database.
 //!
-//! Python specification: `tests/unit/test_unconfirmed_start_release.py` and
-//! the unconfirmed-start cases of
-//! `tests/integration/test_worker_persist_terminal_state.py` (an
-//! `OWNERSHIP_UNCONFIRMED` stop releases the claim of its dispatch
-//! generation at once; a later claim of the row is not touched), and
-//! `test_worker_persist_terminal_state.py::test_invalid_task_result_structure_marks_error`.
+//! An `OWNERSHIP_UNCONFIRMED` stop releases the claim of its dispatch
+//! generation at once; a later claim of the row is not touched.
 
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::*;
-use crate::broker::terminalization_matrix::migrated_pool;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::task::error::{OperationalErrorCode, TaskErrorCode};
 use crate::core::task::result::{read_task_result_text, TaskResultText};
+use crate::test_support::migrated_pool;
+use crate::test_support::sql::{self, TestPool};
 use crate::test_support::{CapturedEvent, LogCapture};
 use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd, StopReason};
 use crate::worker::retry::read_stored_options;
@@ -30,8 +26,8 @@ const WORKER: &str = "outcome-stop-worker";
 
 /// A CLAIMED plain row of `WORKER` whose claim lease runs one more minute.
 /// Every baseline column is named. Returns the claim generation.
-async fn seed_claimed(pool: &PgPool, task_id: Uuid) -> DateTime<Utc> {
-    sqlx::query_scalar(
+async fn seed_claimed(pool: &TestPool, task_id: Uuid) -> DateTime<Utc> {
+    sql::query_scalar(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -80,13 +76,16 @@ fn dispatched(task_id: Uuid, generation: DateTime<Utc>) -> ClaimedTask {
 /// The writer of `WORKER`, with the orphan self-heal off: a stop for a node
 /// that is not linked then writes nothing (`settle_tests` covers the
 /// self-heal).
-fn writer(pool: &PgPool) -> OutcomeWriter {
+fn writer(pool: &TestPool) -> OutcomeWriter {
     writer_with_payload(pool, PayloadPolicy::default())
 }
 
 /// The writer of [`writer`] with the payload policy `payload`.
-fn writer_with_payload(pool: &PgPool, payload: PayloadPolicy) -> OutcomeWriter {
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+fn writer_with_payload(pool: &TestPool, payload: PayloadPolicy) -> OutcomeWriter {
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    ));
     let successes = super::outcome::test_successes(&broker, WORKER);
     OutcomeWriter::new(
         broker,
@@ -101,24 +100,24 @@ fn stopped(reason: StopReason) -> AttemptEnd {
     AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(reason))
 }
 
-async fn snapshot(pool: &PgPool, task_id: Uuid) -> serde_json::Value {
-    sqlx::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
+async fn snapshot(pool: &TestPool, task_id: Uuid) -> serde_json::Value {
+    sql::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
         .expect("read the row")
 }
 
-async fn attempts(pool: &PgPool, task_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
+async fn attempts(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
         .expect("count the attempts")
 }
 
-async fn remove(pool: &PgPool, task_id: Uuid) {
-    sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+async fn remove(pool: &TestPool, task_id: Uuid) {
+    sql::query("DELETE FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .execute(pool)
         .await
@@ -216,8 +215,8 @@ async fn other_stops_of_a_plain_task_write_nothing() {
 
 /// A RUNNING plain row of `WORKER`, as the child's start leaves it. Every
 /// baseline column is named. Returns the claim generation.
-async fn seed_running(pool: &PgPool, task_id: Uuid) -> DateTime<Utc> {
-    sqlx::query_scalar(
+async fn seed_running(pool: &TestPool, task_id: Uuid) -> DateTime<Utc> {
+    sql::query_scalar(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -250,8 +249,8 @@ async fn seed_running(pool: &PgPool, task_id: Uuid) -> DateTime<Utc> {
 /// the stored result as text.
 type HistoryResult = (String, Option<String>, i32, Option<String>);
 
-async fn history_result(pool: &PgPool, task_id: Uuid) -> Option<HistoryResult> {
-    sqlx::query_as(
+async fn history_result(pool: &TestPool, task_id: Uuid) -> Option<HistoryResult> {
+    sql::query_as(
         "SELECT status::text, error_code, retry_count, convert_from(result_payload, 'UTF8')
          FROM horsies_task_history WHERE task_id = $1",
     )
@@ -261,8 +260,8 @@ async fn history_result(pool: &PgPool, task_id: Uuid) -> Option<HistoryResult> {
     .expect("read the history row")
 }
 
-async fn phase_two_record_waits(pool: &PgPool, task_id: Uuid) -> bool {
-    sqlx::query_scalar(
+async fn phase_two_record_waits(pool: &TestPool, task_id: Uuid) -> bool {
+    sql::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = $1)",
     )
     .bind(task_id)
@@ -271,16 +270,15 @@ async fn phase_two_record_waits(pool: &PgPool, task_id: Uuid) -> bool {
     .expect("read the phase-2 record")
 }
 
-async fn remove_history(pool: &PgPool, task_id: Uuid) {
-    sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+async fn remove_history(pool: &TestPool, task_id: Uuid) {
+    sql::query("DELETE FROM horsies_task_history WHERE task_id = $1")
         .bind(task_id)
         .execute(pool)
         .await
         .expect("remove the history row");
 }
 
-/// Python `test_worker_persist_terminal_state.py::test_invalid_task_result_structure_marks_error`:
-/// a reported result that is valid JSON but not a result envelope
+/// A reported result that is valid JSON but not a result envelope
 /// (`{"random": 1}`) fails the task with `WORKER_SERIALIZATION_ERROR`, with
 /// no retry. A plain task owes no phase 2: the row moves to history and no
 /// phase-2 record waits for it.
@@ -314,7 +312,7 @@ async fn a_result_that_is_json_but_not_an_envelope_fails_the_task_as_a_serializa
         ),
         other => panic!("the stored result is the worker's error envelope, got {other:?}"),
     }
-    let live: Option<String> = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+    let live: Option<String> = sql::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_optional(&pool)
         .await

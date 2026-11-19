@@ -25,7 +25,6 @@ import horsies._catalog.task_send
 import horsies._catalog.workflow_handle
 import horsies._catalog.workflow_start
 from horsies.core.brokers import result_types
-from horsies.core.history.reads import detail
 from horsies.core.models import task_send_types, tasks
 from horsies.core.models.workflow import enums, handle_types
 from horsies.core.types import status
@@ -57,9 +56,7 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
             'NO_TYPE_AVAILABLE',
             'INVALID_JSON_PAYLOAD',
             'INVALID_TASK_OPTIONS',
-            'EVENT_LOOP_LIMIT',
             'ASYNC_CONTEXT',
-            'LOOP_RUNNER_FAILED',
             'INVALID_INPUT',
             'LISTENER_DISABLED',
             'WAIT_INSIDE_TASK',
@@ -76,8 +73,6 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
             'PAYLOAD_MISMATCH',
             'IDEMPOTENCY_KEY_CONFLICT',
             'PAYLOAD_TOO_LARGE',
-            'EVENT_LOOP_LIMIT',
-            'LOOP_RUNNER_FAILED',
         ),
     ),
     (
@@ -88,8 +83,6 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
             'VALIDATION_FAILED',
             'WORKFLOW_ID_CONFLICT',
             'ENQUEUE_FAILED',
-            'LOOP_RUNNER_FAILED',
-            'EVENT_LOOP_LIMIT',
             'ASYNC_CONTEXT',
         ),
     ),
@@ -101,15 +94,13 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
             'DB_OPERATION_FAILED',
             'STORED_DATA_INVALID',
             'RESUME_RECOVERY_FAILED',
-            'LOOP_RUNNER_FAILED',
-            'EVENT_LOOP_LIMIT',
             'ASYNC_CONTEXT',
         ),
     ),
     (
         errors.MonitoringQueryErrorCode,
         horsies._catalog.monitoring.MonitoringQueryErrorCode,
-        ('DB_OPERATION_FAILED', 'EVENT_LOOP_LIMIT', 'HISTORY_CONTRACT_VIOLATION'),
+        ('DB_OPERATION_FAILED', 'HISTORY_CONTRACT_VIOLATION'),
     ),
     (
         task_actions.TaskActionErrorCode,
@@ -119,7 +110,6 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
             'TASK_NOT_CANCELLABLE',
             'TASK_IS_WORKFLOW_TASK',
             'DB_OPERATION_FAILED',
-            'EVENT_LOOP_LIMIT',
             'STORED_DATA_INVALID',
         ),
     ),
@@ -157,7 +147,6 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
             'WORKFLOW_NOT_FOUND',
             'RESULT_NOT_AVAILABLE',
             'RESULT_NOT_READY',
-            'EVENT_LOOP_LIMIT',
             'ASYNC_CONTEXT',
             'INVALID_INPUT',
             'WAIT_INSIDE_TASK',
@@ -201,7 +190,7 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
         ('PENDING', 'READY', 'ENQUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'SKIPPED'),
     ),
     (
-        detail.TaskAbsenceReason,
+        horsies.TaskAbsenceReason,
         horsies._catalog.history.TaskAbsenceReason,
         ('PREDATES_RETAINED_HISTORY', 'WITHIN_RETAINED_HISTORY', 'NOT_CLASSIFIED'),
     ),
@@ -289,10 +278,6 @@ def test_is_terminal_holds_exactly_for_the_terminal_members(
 ) -> None:
     for member in status_class:
         assert getattr(member, 'is_terminal') is (member in public), member
-
-
-def test_workflow_task_terminal_values_are_the_terminal_member_values() -> None:
-    assert sorted(enums.WF_TASK_TERMINAL_VALUES) == ['COMPLETED', 'FAILED', 'SKIPPED']
 
 
 def test_the_built_in_registry_holds_every_generated_member() -> None:

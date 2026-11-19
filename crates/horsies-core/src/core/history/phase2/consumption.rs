@@ -1,9 +1,9 @@
 //! One transaction from pending workflow evidence to a durable disposition.
 
-use sqlx::{FromRow, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::core::history::errors::HistoryError;
+use crate::test_support::sql::{self, TestTransaction};
 
 const CONSUME_SQL: &str = "SELECT * FROM horsies_phase2_consume($1, $2)";
 
@@ -64,7 +64,7 @@ impl TryFrom<&str> for Phase2DispositionKind {
     }
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug)]
 struct Phase2DispositionRow {
     disposition: String,
     workflow_id: Option<Uuid>,
@@ -77,6 +77,26 @@ struct Phase2DispositionRow {
     node_status: Option<String>,
     detail: Option<String>,
 }
+
+impl sql::FromTestRow for Phase2DispositionRow {
+    fn from_row(row: &tokio_postgres::Row) -> Result<Self, sql::Error> {
+        Ok(Self {
+            disposition: sql::named(row, "disposition")?,
+            workflow_id: sql::named(row, "workflow_id")?,
+            node_row_id: sql::named(row, "node_row_id")?,
+            task_index: sql::named(row, "task_index")?,
+            workflow_status: sql::named(row, "workflow_status")?,
+            workflow_depth: sql::named(row, "workflow_depth")?,
+            root_workflow_id: sql::named(row, "root_workflow_id")?,
+            on_error: sql::named(row, "on_error")?,
+            node_status: sql::named(row, "node_status")?,
+            detail: sql::named(row, "detail")?,
+        })
+    }
+}
+
+/// Why a test call of a phase-2 function failed.
+pub(crate) type Phase2CallError = sql::CallError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Phase2Disposition {
@@ -92,18 +112,26 @@ pub struct Phase2Disposition {
     pub detail: Option<String>,
 }
 
-pub async fn consume_phase2(
-    transaction: &mut Transaction<'_, Postgres>,
+/// `horsies_phase2_consume` in a test's open transaction: the disposition
+/// of the pending row of `task_id`. The core's phase-2 path runs the
+/// workflow step functions instead; the tests of the function call it here.
+/// Does not commit.
+///
+/// Errors: [`Phase2CallError`].
+pub(crate) async fn consume_phase2(
+    transaction: &mut TestTransaction<'_>,
     task_id: Uuid,
     terminal_node_status: &str,
-) -> Result<Phase2Disposition, HistoryError> {
-    let row: Phase2DispositionRow = sqlx::query_as(CONSUME_SQL)
+) -> Result<Phase2Disposition, Phase2CallError> {
+    let row: Phase2DispositionRow = sql::query_as(CONSUME_SQL)
         .bind(task_id)
         .bind(terminal_node_status)
-        .fetch_one(transaction.as_mut())
-        .await?;
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(Phase2CallError::Database)?;
     Ok(Phase2Disposition {
-        disposition: Phase2DispositionKind::try_from(row.disposition.as_str())?,
+        disposition: Phase2DispositionKind::try_from(row.disposition.as_str())
+            .map_err(Phase2CallError::Contract)?,
         workflow_id: row.workflow_id,
         node_row_id: row.node_row_id,
         task_index: row.task_index,

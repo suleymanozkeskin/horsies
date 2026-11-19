@@ -8,6 +8,7 @@ use super::*;
 use crate::workflow::node::tests::task_node;
 use crate::workflow::{OutputlessResults, WorkflowDefConfig, WorkflowSpecBuilder};
 use crate::AppConfig;
+use horsies_core::WorkflowStartErrorCode;
 
 fn app() -> Horsies {
     Horsies::new(AppConfig::for_database_url(
@@ -191,9 +192,9 @@ async fn a_spec_without_a_definition_key_is_refused_before_any_io() {
     builder.output(tick);
     let spec = builder.build().unwrap();
     let refused = app.start::<u32>(&spec).await.unwrap_err();
-    assert_eq!(refused.code, WorkflowStartErrorCode::ValidationFailed);
-    assert!(!refused.retryable);
-    assert_eq!(refused.workflow_name, "keyless");
+    assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);
+    assert!(!refused.retryable());
+    assert_eq!(refused.workflow_name(), "keyless");
 }
 
 #[tokio::test]
@@ -201,8 +202,8 @@ async fn an_output_type_that_is_not_the_handle_s_is_refused_before_any_io() {
     let app = app();
     let spec = Daily::build().unwrap();
     let refused = app.start::<String>(&spec).await.unwrap_err();
-    assert_eq!(refused.code, WorkflowStartErrorCode::ValidationFailed);
-    assert!(refused.message.contains("HRS-025"), "{refused}");
+    assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);
+    assert!(refused.message().contains("HRS-025"), "{refused}");
 }
 
 #[tokio::test]
@@ -213,29 +214,44 @@ async fn a_spec_with_an_unregistered_child_is_refused_before_any_io() {
     builder.sub_workflow(Daily::node(SubWorkflowParams::NotGiven).unwrap());
     let spec = builder.build().unwrap();
     let refused = app.start::<OutputlessResults>(&spec).await.unwrap_err();
-    assert_eq!(refused.code, WorkflowStartErrorCode::ValidationFailed);
+    assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);
 }
 
 #[tokio::test]
 async fn a_retry_of_an_error_that_is_not_enqueue_failed_is_refused() {
     let mut app = app();
     let function = app.register_workflow_definition::<Daily>().unwrap();
-    let error = WorkflowStartError {
-        code: WorkflowStartErrorCode::ValidationFailed,
+    let error = WorkflowStartError::ValidationFailed {
         message: "earlier".to_owned(),
-        retryable: false,
         workflow_name: "daily".to_owned(),
-        workflow_id: Some(Uuid::nil()),
+        workflow_id: Uuid::nil(),
+        cause: horsies_core::StartRefusalCause::Check,
     };
     let refused = function.retry_start(&error).await.unwrap_err();
-    assert_eq!(refused.code, WorkflowStartErrorCode::ValidationFailed);
+    assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);
 }
 
 #[tokio::test]
 async fn a_process_wide_start_before_registration_is_refused() {
     let refused = start_workflow::<Unregistered>().await.unwrap_err();
-    assert_eq!(refused.code, WorkflowStartErrorCode::ValidationFailed);
-    assert!(refused.message.contains("register_workflow_definition"));
+    assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);
+    assert!(refused.message().contains("register_workflow_definition"));
+    assert_eq!(
+        refused.failure_cause(),
+        horsies_core::FailureCause::PreconditionFailed
+    );
+}
+
+/// Python mints the id of a start before its checks: the refusal before the
+/// registration carries the id of its start.
+#[tokio::test]
+async fn a_process_wide_start_before_registration_names_the_id_of_its_start() {
+    let workflow_id = Uuid::from_u128(21);
+    let refused = start_workflow_as::<Unregistered>(workflow_id)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);
+    assert_eq!(refused.workflow_id(), workflow_id);
 }
 
 #[test]
@@ -261,12 +277,12 @@ async fn a_template_start_whose_build_refuses_is_validation_failed_before_any_io
         })
         .await
         .unwrap_err();
-    assert_eq!(refused.code, WorkflowStartErrorCode::ValidationFailed);
-    assert_eq!(refused.workflow_name, "refusing_regional");
-    assert!(!refused.retryable);
+    assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);
+    assert_eq!(refused.workflow_name(), "refusing_regional");
+    assert!(!refused.retryable());
     assert!(
-        refused.message.contains("bad region: antarctica"),
+        refused.message().contains("bad region: antarctica"),
         "{}",
-        refused.message
+        refused.message()
     );
 }

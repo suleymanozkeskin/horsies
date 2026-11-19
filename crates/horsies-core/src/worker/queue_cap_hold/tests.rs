@@ -1,5 +1,5 @@
-//! The soft-cap start check: which held rows of a capped queue may start
-//! (Python `tests/unit/test_queue_cap_hold.py`). A held row starts while its
+//! The soft-cap start check: which held rows of a capped queue may start.
+//! A held row starts while its
 //! queue's count is under the cap and a child of its budget is free at that
 //! moment. The count statement runs in
 //! `broker::lifecycle_tests::soft_cap_start_check`; its row contract in

@@ -17,7 +17,9 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use crate::broker::client_family::{recorded_family_from, ClientFamily, RecordedFamily};
+use crate::broker::client_family::{
+    recorded_family_from, ClientFamily, RecordedFamily, UnknownStoredFamily,
+};
 use crate::broker::enqueue_task::{decode_enqueue_outcome, EnqueueKey, EnqueueTaskOutcome};
 use crate::core::history::archive::attempts::decode_attempt_snapshot;
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
@@ -171,6 +173,9 @@ pub enum RerunPreparation {
         stored: RecordedFamily,
         own: ClientFamily,
     },
+    /// The family row holds a value that is not a client family: corrupt
+    /// stored data, not retryable. Nothing is written.
+    UnknownStoredFamily(UnknownStoredFamily),
     /// The caller key is not a valid idempotency key (Python raises
     /// `ValueError`). Nothing is written.
     CallerKeyRefused(IdempotencyKeyError),
@@ -278,7 +283,8 @@ enum SourceRead {
 }
 
 /// Decide the rerun from the row of `read` (Python `rerun_task` after its
-/// read): the client family (refused unless it is `own`), the class check,
+/// read): the client family (refused unless it is `own`, and refused as
+/// corrupt when it is not a client family), the class check,
 /// the location, the eligibility (workflow task, completed source), the
 /// input envelope, the stored options; then the write with a minted task
 /// id, sent at `sent_at`. Pure apart from the id mint.
@@ -293,7 +299,10 @@ pub fn prepare_rerun_write(
     own: ClientFamily,
     sent_at: DateTime<Utc>,
 ) -> Result<RerunPreparation, RerunRowError> {
-    let stored = recorded_family_from(text(row, read, "client_family")?);
+    let stored = match recorded_family_from(text(row, read, "client_family")?) {
+        Ok(stored) => stored,
+        Err(unknown) => return Ok(RerunPreparation::UnknownStoredFamily(unknown)),
+    };
     match stored {
         RecordedFamily::Recorded(family) if family == own => {}
         RecordedFamily::Recorded(_) | RecordedFamily::NotRecorded => {

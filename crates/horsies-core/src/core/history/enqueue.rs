@@ -87,8 +87,7 @@ pub enum EnqueuePreparationError {
     },
     /// The task options hold an integer outside [`MIN_OPTIONS_INTEGER`] to
     /// [`MAX_OPTIONS_INTEGER`]. No count, delay or limit of that size has a
-    /// meaning. Python's send refuses it with the same text
-    /// (`options_integer_out_of_range`, `python/horsies/core/codec/task_options.py`).
+    /// meaning.
     #[error(
         "task_options JSON holds an integer outside {MIN_OPTIONS_INTEGER} to {MAX_OPTIONS_INTEGER}"
     )]
@@ -450,6 +449,36 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Python `test_broker_postgres.py::TestEnqueueAsync::test_empty_task_options_text_is_refused`:
+    /// an empty options text is not JSON and is not "no options": the send
+    /// refuses it before any statement.
+    #[test]
+    fn an_empty_task_options_text_is_refused() {
+        let error = prepare_enqueue_facts(
+            "task",
+            "default",
+            50,
+            "{}",
+            None,
+            None,
+            Some(""),
+            None,
+            false,
+            None,
+        )
+        .expect_err("an empty options text must not reach storage");
+        assert!(
+            matches!(
+                error,
+                EnqueuePreparationError::StrictJson {
+                    field: SendPart::TaskOptions,
+                    ..
+                }
+            ),
+            "{error}"
+        );
     }
 
     #[test]

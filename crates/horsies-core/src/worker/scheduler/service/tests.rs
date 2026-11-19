@@ -1,5 +1,6 @@
 use super::*;
 use crate::scheduler_manifest::{parse_scheduler_manifest, ScheduleTaskOptions};
+use crate::test_support::sql::{self, TestPool};
 use chrono::{TimeZone, Utc};
 use serde_json::json;
 use serial_test::serial;
@@ -82,8 +83,10 @@ async fn a_handle_of_the_other_family_starts_no_scheduler_and_writes_no_state() 
     use crate::broker::BrokerError;
 
     let pool = test_pool().await;
-    let broker =
-        Arc::new(PostgresBroker::from_pool(pool.clone()).with_client_family(ClientFamily::Python));
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        ClientFamily::Python,
+    ));
     let name = format!("scheduler_family_{}", uuid::Uuid::new_v4().simple());
     let manifest = manifest_for(&[interval_schedule_secs(&name, 60)]);
 
@@ -199,13 +202,13 @@ fn calculate_missed_runs_returns_empty_when_first_due_is_in_the_future() {
 }
 
 /// The main core pool on the test database of `pool`.
-fn core_pool_of(pool: &sqlx::PgPool) -> CorePool {
-    crate::broker::pools::core_pool_for_test_pool(pool)
+fn core_pool_of(pool: &TestPool) -> CorePool {
+    crate::broker::pools::core_pool_for_test_url(pool.url())
 }
 
 /// The database time, read in its own statement.
-async fn database_time(pool: &sqlx::PgPool) -> DateTime<Utc> {
-    sqlx::query_scalar("SELECT statement_timestamp()")
+async fn database_time(pool: &TestPool) -> DateTime<Utc> {
+    sql::query_scalar("SELECT statement_timestamp()")
         .fetch_one(pool)
         .await
         .expect("read the database time")
@@ -214,7 +217,7 @@ async fn database_time(pool: &sqlx::PgPool) -> DateTime<Utc> {
 /// Fire `schedule` once as a tick does: its row is due at `first_due`, and
 /// the due read ran at `database_now`.
 async fn fire_once(
-    pool: &sqlx::PgPool,
+    pool: &TestPool,
     schedule: &TestSchedule,
     first_due: DateTime<Utc>,
     database_now: DateTime<Utc>,
@@ -239,8 +242,8 @@ async fn fire_once(
 }
 
 /// The task rows of `task_name`.
-async fn task_count(pool: &sqlx::PgPool, task_name: &str) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
+async fn task_count(pool: &TestPool, task_name: &str) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
         .bind(task_name)
         .fetch_one(pool)
         .await
@@ -248,8 +251,8 @@ async fn task_count(pool: &sqlx::PgPool, task_name: &str) -> i64 {
 }
 
 /// Delete the task rows of `task_name` and the state row of `schedule_name`.
-async fn cleanup(pool: &sqlx::PgPool, task_name: &str, schedule_name: &str) {
-    let _deleted = sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
+async fn cleanup(pool: &TestPool, task_name: &str, schedule_name: &str) {
+    let _deleted = sql::query("DELETE FROM horsies_tasks WHERE task_name = $1")
         .bind(task_name)
         .execute(pool)
         .await
@@ -260,8 +263,8 @@ async fn cleanup(pool: &sqlx::PgPool, task_name: &str, schedule_name: &str) {
 /// A trigger that refuses every task row of `task_name` with SQLSTATE
 /// P0001: a database refusal of the fire that repeats on every try (as a
 /// CHECK violation of the slot rows). [`drop_slot_refusal`] removes it.
-async fn refuse_slot_rows(pool: &sqlx::PgPool, task_name: &str) {
-    let _created = sqlx::raw_sql(&format!(
+async fn refuse_slot_rows(pool: &TestPool, task_name: &str) {
+    let _created = sql::raw_sql(&format!(
         "CREATE FUNCTION test_refuse_slot_rows() RETURNS trigger LANGUAGE plpgsql AS $$
          BEGIN
              IF NEW.task_name = '{task_name}' THEN
@@ -277,8 +280,8 @@ async fn refuse_slot_rows(pool: &sqlx::PgPool, task_name: &str) {
     .expect("create the refusal trigger");
 }
 
-async fn drop_slot_refusal(pool: &sqlx::PgPool) {
-    let _dropped = sqlx::raw_sql(
+async fn drop_slot_refusal(pool: &TestPool) {
+    let _dropped = sql::raw_sql(
         "DROP TRIGGER test_refuse_slot_rows ON horsies_tasks;
          DROP FUNCTION test_refuse_slot_rows();",
     )
@@ -287,8 +290,8 @@ async fn drop_slot_refusal(pool: &sqlx::PgPool) {
     .expect("drop the refusal trigger");
 }
 
-async fn test_pool() -> sqlx::PgPool {
-    crate::broker::terminalization_matrix::migrated_pool().await
+async fn test_pool() -> TestPool {
+    crate::test_support::migrated_pool().await
 }
 
 /// One enabled schedule of a test manifest: an interval in whole seconds,
@@ -443,7 +446,7 @@ async fn scheduled_enqueue_persists_the_class_and_shared_facts_of_its_send() {
     fire_once(&pool, &schedule, slot, database_now)
         .await
         .expect("the fire");
-    let row: (String, String, i32, bool, String) = sqlx::query_as(
+    let row: (String, String, i32, bool, String) = sql::query_as(
         "SELECT id::text, retention_class_key,
                 octet_length(command_fingerprint), retain_rerun_input, input
          FROM horsies_tasks WHERE task_name = $1",
@@ -452,7 +455,7 @@ async fn scheduled_enqueue_persists_the_class_and_shared_facts_of_its_send() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let slot_id: Uuid = sqlx::query_scalar("SELECT horsies_schedule_slot_task_id($1, $2)")
+    let slot_id: Uuid = sql::query_scalar("SELECT horsies_schedule_slot_task_id($1, $2)")
         .bind(&schedule.name)
         .bind(slot)
         .fetch_one(&pool)
@@ -469,8 +472,7 @@ async fn scheduled_enqueue_persists_the_class_and_shared_facts_of_its_send() {
     cleanup(&pool, task_name, &schedule.name).await;
 }
 
-/// Python `test_scheduler_task_options.py::test_a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task`:
-/// a fired slot stores the task's options text and the retry limit it
+/// A fired slot stores the task's options text and the retry limit it
 /// sets, as a send of the task does (#480). The policy names
 /// `TASK_EXCEPTION`, as the Python task does: a policy with no code does
 /// not validate as Python `RetryPolicy`, and the send refuses it.
@@ -504,7 +506,7 @@ async fn a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task() {
     fire_once(&pool, &schedule, slot, database_now)
         .await
         .expect("the fire");
-    let (stored, max_retries, queue): (Option<String>, i32, String) = sqlx::query_as(
+    let (stored, max_retries, queue): (Option<String>, i32, String) = sql::query_as(
         "SELECT task_options, max_retries, queue_name FROM horsies_tasks WHERE task_name = $1",
     )
     .bind(&name)
@@ -515,6 +517,61 @@ async fn a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task() {
     assert_eq!(max_retries, 2);
     assert_eq!(queue, "default");
     cleanup(&pool, &name, &name).await;
+}
+
+/// The shared-async and shared-thread cases (the isolated case is the test
+/// above): a fired slot stores the options text of its task and the
+/// task's execution class, and a shared async task keeps its cancel grace.
+#[tokio::test]
+#[serial]
+async fn a_scheduled_run_stores_the_execution_and_cancel_grace_of_its_task() {
+    let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+    for (execution, cancel_grace_ms, stored_execution) in [
+        (
+            crate::core::task::Execution::SharedAsync,
+            Some(crate::core::CancelGraceMs::new(2_000).expect("2000 ms is a grace")),
+            "SHARED_ASYNC",
+        ),
+        (
+            crate::core::task::Execution::SharedThread,
+            None,
+            "SHARED_THREAD",
+        ),
+    ] {
+        let name = format!("fired_execution_{}", Uuid::new_v4().simple());
+        let mut schedule = interval_schedule_secs(&name, 60);
+        schedule.task_name = name.clone();
+        let options = crate::core::TaskOptions {
+            task_name: name.clone(),
+            queue_name: None,
+            good_until: None,
+            auto_retry_for: None,
+            retry_policy: None,
+            timeout_ms: Some(5_000),
+            execution,
+            cancel_grace_ms,
+        };
+        let options_text = options.stored_options_text();
+        schedule.task_options = ScheduleTaskOptions::Encoded {
+            json: options_text.clone(),
+        };
+        let database_now = database_time(&pool).await;
+        let slot = database_now - chrono::Duration::seconds(1);
+        state::test_rows::seed_state(&pool, &name, slot).await;
+
+        fire_once(&pool, &schedule, slot, database_now)
+            .await
+            .expect("the fire");
+        let (stored, stored_class): (Option<String>, String) =
+            sql::query_as("SELECT task_options, execution FROM horsies_tasks WHERE task_name = $1")
+                .bind(&name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, Some(options_text), "{stored_execution}");
+        assert_eq!(stored_class, stored_execution);
+        cleanup(&pool, &name, &name).await;
+    }
 }
 
 /// A late tick still within one period fires the stored slot and advances
@@ -547,7 +604,7 @@ async fn a_single_late_tick_fires_the_stored_slot_and_anchors_the_next_run_to_it
     );
     assert_eq!(row.run_count, 1);
     let sent_at: DateTime<Utc> =
-        sqlx::query_scalar("SELECT sent_at FROM horsies_tasks WHERE task_name = $1")
+        sql::query_scalar("SELECT sent_at FROM horsies_tasks WHERE task_name = $1")
             .bind(task_name)
             .fetch_one(&pool)
             .await
@@ -584,7 +641,7 @@ async fn a_backlog_without_catch_up_fires_only_the_latest_due_slot() {
         "next_run must skip past the due read to the latest slot's successor",
     );
     assert!(row.next_run_at > now);
-    let slots: Vec<DateTime<Utc>> = sqlx::query_scalar(
+    let slots: Vec<DateTime<Utc>> = sql::query_scalar(
         "SELECT sent_at FROM horsies_tasks WHERE task_name = $1 ORDER BY sent_at",
     )
     .bind(task_name)
@@ -630,6 +687,265 @@ fn advance_to_latest_due_slot_no_skip_within_one_period() {
     assert_eq!(skipped, 0);
 }
 
+/// 2025-06-01 12:00 UTC plus `second` seconds.
+fn noon_plus(second: u32) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap()
+        + chrono::Duration::seconds(i64::from(second))
+}
+
+/// Python `test_scheduler_service.py::TestAdvanceToLatestDueSlot::test_scan_cap_returns_partial_progress`:
+/// the latest-slot scan of one tick stops at its bound and returns its
+/// progress with a next run that is still due.
+#[test]
+fn the_latest_slot_scan_stops_at_its_bound_with_its_progress() {
+    let schedule = interval_schedule_secs("deep_backlog_scan", 1);
+    let bound = i64::from(MAX_SKIP_SCAN_PER_TICK);
+    let first_due = noon_plus(0);
+    let now = first_due + chrono::Duration::seconds(2 * bound);
+
+    let (slot, next, skipped) = advance_to_latest_due_slot(&enabled(&schedule), first_due, now);
+
+    assert_eq!(skipped, MAX_SKIP_SCAN_PER_TICK);
+    assert_eq!(slot, first_due + chrono::Duration::seconds(bound));
+    let next = next.expect("an interval has a next run");
+    assert_eq!(next, slot + chrono::Duration::seconds(1));
+    assert!(next <= now, "the bound leaves the backlog due");
+}
+
+/// Python `test_scheduler_service.py::TestCheckScheduleSkipsMissedRuns::test_deep_backlog_persists_progress_without_firing`:
+/// a fire plan at the scan bound sends no slot and moves the row to where
+/// the scan stopped.
+#[test]
+fn a_fire_plan_at_the_scan_bound_sends_no_slot_and_moves_the_row_to_its_progress() {
+    let schedule = interval_schedule_secs("deep_backlog_plan", 1);
+    let bound = i64::from(MAX_SKIP_SCAN_PER_TICK);
+    let first_due = noon_plus(0);
+    let now = first_due + chrono::Duration::seconds(2 * bound);
+
+    let plan = fire_plan(&enabled(&schedule), first_due, now).expect("an interval has a next run");
+
+    assert!(plan.slots.is_empty(), "{plan:?}");
+    assert_eq!(
+        plan.next_run_at,
+        first_due + chrono::Duration::seconds(bound + 1)
+    );
+    assert_eq!(plan.skip_to, plan.next_run_at);
+}
+
+/// A catch-up fire sends every due slot, moves the row past the last one,
+/// and moves it past the first one when the fire is refused.
+#[test]
+fn a_catch_up_fire_plan_sends_every_due_slot_and_moves_past_the_last() {
+    let mut schedule = interval_schedule_secs("catch_up_plan", 5);
+    schedule.catch_up_missed = true;
+
+    let plan = fire_plan(&enabled(&schedule), noon_plus(0), noon_plus(12))
+        .expect("an interval has a next run");
+
+    assert_eq!(
+        plan,
+        FirePlan {
+            slots: vec![noon_plus(0), noon_plus(5), noon_plus(10)],
+            next_run_at: noon_plus(15),
+            skip_to: noon_plus(5),
+        }
+    );
+}
+
+/// Python `test_scheduler_service.py::TestCheckScheduleOutcomes::test_a_catch_up_sends_at_most_max_catch_up_runs_slots`:
+/// a catch-up fire sends at most `max_catch_up_runs` slots; the row moves
+/// to the slot after the last one sent, so the rest stays due.
+#[test]
+fn a_catch_up_fire_plan_sends_at_most_max_catch_up_runs_slots() {
+    let mut schedule = interval_schedule_secs("capped_catch_up_plan", 5);
+    schedule.catch_up_missed = true;
+    schedule.max_catch_up_runs = 2;
+
+    let plan = fire_plan(&enabled(&schedule), noon_plus(0), noon_plus(12))
+        .expect("an interval has a next run");
+
+    assert_eq!(
+        plan,
+        FirePlan {
+            slots: vec![noon_plus(0), noon_plus(5)],
+            next_run_at: noon_plus(10),
+            skip_to: noon_plus(5),
+        }
+    );
+}
+
+/// Python `test_scheduler_service.py::TestCheckScheduleOutcomes::test_each_slot_of_an_advanced_fire_is_logged_by_its_outcome`:
+/// each slot of an advanced fire is logged with its task id at the level
+/// of its outcome.
+#[test]
+fn each_slot_of_an_advanced_fire_is_logged_by_its_outcome() {
+    use crate::test_support::{CapturedEvent, LogCapture};
+
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
+    let schedule = interval_schedule_secs("logged_fire", 5);
+    let slots = [
+        (SlotOutcome::SameCommand, Uuid::from_u128(1)),
+        (SlotOutcome::ConflictUnverifiable, Uuid::from_u128(2)),
+        (SlotOutcome::Inserted, Uuid::from_u128(3)),
+        (SlotOutcome::PayloadMismatch, Uuid::from_u128(4)),
+    ];
+    let fired: Vec<FiredSlot> = slots
+        .iter()
+        .zip([0, 5, 10, 15])
+        .map(|(&(outcome, task_id), second)| FiredSlot {
+            slot_at: noon_plus(second),
+            task_id,
+            outcome,
+        })
+        .collect();
+
+    log_fired(&enabled(&schedule), &command_for(&schedule), &fired);
+
+    let one_line = |level: tracing::Level, start: &str, task_id: Uuid| {
+        let lines: Vec<CapturedEvent> = capture.lines_starting(level, start);
+        assert_eq!(lines.len(), 1, "{start}: {lines:?}");
+        assert_eq!(lines[0].field("schedule"), Some("logged_fire"));
+        assert_eq!(
+            lines[0].field("task_id"),
+            Some(task_id.to_string().as_str())
+        );
+        lines[0].clone()
+    };
+    let _same = one_line(
+        tracing::Level::INFO,
+        "the slot already has its task; recorded as fired",
+        Uuid::from_u128(1),
+    );
+    let _unverifiable = one_line(
+        tracing::Level::ERROR,
+        "the slot's task finished while the fire read it",
+        Uuid::from_u128(2),
+    );
+    let inserted = one_line(
+        tracing::Level::INFO,
+        "scheduled task enqueued",
+        Uuid::from_u128(3),
+    );
+    assert_eq!(inserted.field("task_name"), Some("my_task"));
+    let _mismatch = one_line(
+        tracing::Level::WARN,
+        "the slot's task id already holds a task with a different command",
+        Uuid::from_u128(4),
+    );
+}
+
+/// Python `test_scheduler_service.py::TestInitializeSchedules::test_first_runs_come_from_the_database_time`:
+/// the start write of a new schedule computes its first run from the
+/// database time of the start read, not from the host clock, and stores the
+/// schedule's digest.
+#[test]
+fn the_start_write_computes_each_first_run_from_the_database_time_of_its_read() {
+    let schedule = interval_schedule_secs("first_run_of_the_read", 10);
+    let enabled_schedule = enabled(&schedule);
+    // A database time far from the host clock of the test.
+    let database_now = Utc.with_ymd_and_hms(2020, 1, 1, 12, 0, 0).unwrap();
+    let first_run = next_run_at(
+        &enabled_schedule.pattern,
+        database_now,
+        &enabled_schedule.timezone,
+    )
+    .expect("an interval has a next run");
+
+    let writes = start_writes(
+        std::slice::from_ref(&enabled_schedule),
+        &HashMap::new(),
+        database_now,
+    );
+
+    assert!(database_now < first_run);
+    assert!(first_run <= database_now + chrono::Duration::seconds(10));
+    assert_eq!(
+        writes,
+        vec![state::ScheduleStateWrite {
+            schedule_name: "first_run_of_the_read".to_owned(),
+            next_run_at: first_run,
+            config_hash: compute_config_hash(&enabled_schedule).to_vec(),
+        }]
+    );
+}
+
+/// Python `test_scheduler_service.py::TestInitializeSchedulesAdditionalPaths::test_config_hash_changed_recalculates_next_run`
+/// and `::test_unchanged_digest_is_not_written`: the start write holds a
+/// schedule whose stored digest differs, with its digest and its first run
+/// after the database time of the read, and leaves out a schedule whose
+/// stored digest is its own.
+#[test]
+fn the_start_write_holds_the_changed_digests_and_not_the_unchanged_ones() {
+    let changed = enabled(&interval_schedule_secs("digest_changed", 10));
+    let unchanged = enabled(&interval_schedule_secs("digest_unchanged", 10));
+    let stale_digest = [0_u8; 32];
+    let own_digest = compute_config_hash(&unchanged);
+    let stored: HashMap<&str, &[u8]> = HashMap::from([
+        ("digest_changed", stale_digest.as_slice()),
+        ("digest_unchanged", own_digest.as_slice()),
+    ]);
+    let database_now = Utc.with_ymd_and_hms(2020, 1, 1, 12, 0, 0).unwrap();
+
+    let writes = start_writes(&[changed.clone(), unchanged], &stored, database_now);
+
+    assert_eq!(
+        writes,
+        vec![state::ScheduleStateWrite {
+            schedule_name: "digest_changed".to_owned(),
+            next_run_at: next_run_at(&changed.pattern, database_now, &changed.timezone)
+                .expect("an interval has a next run"),
+            config_hash: compute_config_hash(&changed).to_vec(),
+        }]
+    );
+    assert_ne!(writes[0].config_hash, stale_digest.to_vec());
+}
+
+/// The send command of a schedule is the command of a send of the same
+/// texts, and its fingerprint covers the options text: the same schedule
+/// with no options has another fingerprint.
+#[test]
+fn the_command_of_a_schedule_is_the_send_command_of_its_texts() {
+    let options_text = crate::core::TaskOptions {
+        task_name: "my_task".to_owned(),
+        queue_name: None,
+        good_until: None,
+        auto_retry_for: None,
+        retry_policy: None,
+        timeout_ms: Some(30_000),
+        execution: crate::core::task::Execution::Isolated,
+        cancel_grace_ms: None,
+    }
+    .stored_options_text();
+    let mut with_options = interval_schedule_secs("fingerprinted", 60);
+    with_options.input_json = json!({"value": 5}).to_string();
+    with_options.task_options = ScheduleTaskOptions::Encoded {
+        json: options_text.clone(),
+    };
+    let mut without_options = with_options.clone();
+    without_options.task_options = ScheduleTaskOptions::NoOptions;
+
+    let command = command_for(&with_options);
+
+    let expected = SendCommand::prepare(
+        "my_task",
+        "default",
+        100,
+        &with_options.input_json,
+        Some(options_text.as_str()),
+        crate::core::EnqueueRetention::Forever,
+        false,
+    )
+    .expect("the send command of the texts builds");
+    assert_eq!(command, expected);
+    assert_eq!(command.stored_input, "{\"value\":5}");
+    assert_eq!(command.task_options.as_deref(), Some(options_text.as_str()));
+    assert_ne!(
+        command.fingerprint,
+        command_for(&without_options).fingerprint
+    );
+}
+
 /// The self-heal creates a state row for an enabled schedule that has none
 /// (with a strictly-future next_run), leaves an existing row's next_run
 /// untouched, and skips disabled schedules. Parity with horsies PR #123.
@@ -656,6 +972,20 @@ async fn ensure_states_exist_heals_missing_and_preserves_existing() {
         healed.next_run_at > now,
         "healed next_run must be strictly future"
     );
+    // The first run after the database time, the schedule's digest, no run.
+    assert_eq!(
+        healed.next_run_at,
+        next_run_at(&schedules[0].pattern, now, &schedules[0].timezone)
+            .expect("an interval has a next run")
+    );
+    assert_eq!(
+        healed.config_hash,
+        compute_config_hash(&schedules[0]).to_vec()
+    );
+    assert_eq!(
+        (healed.last_run_at, healed.last_task_id, healed.run_count),
+        (None, None, 0)
+    );
     assert!(state::test_rows::state_row(&pool, &disabled)
         .await
         .is_none());
@@ -677,9 +1007,7 @@ async fn ensure_states_exist_heals_missing_and_preserves_existing() {
 }
 
 /// The start computes a new schedule's first run from the database time
-/// of its read, and stores the schedule's digest (Python
-/// `tests/integration/test_schedule_state_rows.py`,
-/// `test_start_computes_the_first_run_from_the_database_time`).
+/// of its read, and stores the schedule's digest.
 #[tokio::test]
 #[serial]
 async fn initialize_schedules_computes_first_runs_from_the_database_time() {
@@ -708,6 +1036,8 @@ async fn initialize_schedules_computes_first_runs_from_the_database_time() {
         compute_config_hash(&enabled(&schedule)).to_vec()
     );
     assert_eq!(row.run_count, 0);
+    // The start writes no last run.
+    assert_eq!((row.last_run_at, row.last_task_id), (None, None));
 
     core.close();
     state::test_rows::delete_state(&pool, &name).await;
@@ -766,3 +1096,6 @@ mod fire_tests;
 
 #[cfg(test)]
 mod manifest_tests;
+
+#[cfg(test)]
+mod run_loop_tests;

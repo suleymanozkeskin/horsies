@@ -9,9 +9,13 @@ use serial_test::serial;
 use super::*;
 use crate::broker::workflow_start::ClientStartOutcome;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
+use crate::core::{SuccessCase, SuccessPolicy};
 use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
+use crate::test_support::sql;
 
 const CHILD_KEY: &str = "tests.start_statement.child.v1";
+/// The key of a child whose one root is a sub-workflow node of [`CHILD_KEY`].
+const NESTING_KEY: &str = "tests.start_statement.nesting.v1";
 
 /// The start arguments of `spec` as a client sends it, with the children of
 /// its sub-workflow roots from `children`. The test source answers when its
@@ -134,6 +138,9 @@ fn a_task_chain_gives_one_workflow_row_and_one_row_per_node() {
         .node_retention_class_keys
         .iter()
         .all(Option::is_some));
+    // No sub-workflow root: no failed-node record.
+    assert!(!arguments.has_failed_records());
+    assert!(arguments.failed_workflow_ids.is_empty());
 }
 
 /// A node defined with an empty `workflow_ctx_from` takes no context: its row stores NULL, as for
@@ -184,6 +191,174 @@ fn a_subworkflow_root_gets_a_prebuilt_child_after_its_parent() {
     // A sub-workflow node has no task facts.
     assert_eq!(arguments.node_max_retries[0], None);
     assert_eq!(arguments.node_executions[0], None);
+}
+
+/// A pre-built child whose root is a sub-workflow node gets its own
+/// pre-built child: each child row names its parent workflow and the node
+/// above it, one level deeper.
+#[test]
+fn a_prebuilt_child_with_a_subworkflow_root_gets_its_own_child() {
+    let workflow_id = Uuid::new_v4();
+    let nesting = WorkflowSpec {
+        name: "start_statement_nesting".to_owned(),
+        definition_key: Some(NESTING_KEY.to_owned()),
+        tasks: vec![subworkflow_root(0)],
+        on_error: OnError::Fail,
+        output_index: None,
+        success_policy: None,
+    };
+    let children = children_with_child().with_spec(nesting);
+    let nesting_root = AnyNode {
+        task_name: "start_statement_nesting".to_owned(),
+        sub_definition_key: Some(NESTING_KEY.to_owned()),
+        ..subworkflow_root(0)
+    };
+    let spec = spec_of("nesting_parent", vec![nesting_root]);
+
+    let arguments = arguments_of(&spec, workflow_id, &children).expect("arguments");
+
+    assert_eq!(arguments.workflow_ids.len(), 3);
+    assert_eq!(arguments.workflow_ids[0], workflow_id);
+    let child_id = arguments.workflow_ids[1];
+    assert_eq!(
+        arguments.parent_workflow_ids,
+        vec![None, Some(workflow_id), Some(child_id)]
+    );
+    assert_eq!(arguments.parent_task_indexes, vec![None, Some(0), Some(0)]);
+    assert_eq!(arguments.depths, vec![0, 1, 2]);
+    assert!(!arguments.has_failed_records());
+}
+
+/// A sub-workflow node that waits for another node is not built at the
+/// start, even when its child could not be built: no child row and no
+/// failed-node record. Its node row is written as a sub-workflow node.
+#[test]
+fn a_dependent_subworkflow_node_is_not_built_at_the_start() {
+    let workflow_id = Uuid::new_v4();
+    let dependent = AnyNode {
+        dependencies: vec![0],
+        ..subworkflow_root(1)
+    };
+    let spec = spec_of(
+        "dependent_sub_parent",
+        vec![task_node(0, vec![]), dependent],
+    );
+
+    // No child spec under CHILD_KEY: a build would give a failed-node record.
+    let arguments = arguments_of(&spec, workflow_id, &TestChildSpecs::empty()).expect("arguments");
+
+    assert_eq!(arguments.workflow_ids, vec![workflow_id]);
+    assert!(!arguments.has_failed_records());
+    assert_eq!(arguments.node_workflow_ids, vec![workflow_id, workflow_id]);
+    assert_eq!(arguments.node_is_subworkflow, vec![false, true]);
+}
+
+/// Each workflow array holds one element per workflow row and each node
+/// array one element per node row, in the same order: the top workflow and
+/// its nodes, then the pre-built child and its node. The failure policy,
+/// the output index and the success policy stay with their own workflow.
+#[test]
+fn the_arguments_hold_one_aligned_element_per_row() {
+    let workflow_id = Uuid::new_v4();
+    let mut spec = spec_of(
+        "aligned_parent",
+        vec![
+            task_node(0, vec![]),
+            subworkflow_root(1),
+            task_node(2, vec![0, 1]),
+        ],
+    );
+    spec.on_error = OnError::Pause;
+    spec.output_index = Some(2);
+    let policy = SuccessPolicy {
+        cases: vec![SuccessCase {
+            required_indices: vec![2],
+        }],
+        optional_indices: None,
+    };
+    spec.success_policy = Some(policy.clone());
+
+    let arguments = arguments_of(&spec, workflow_id, &children_with_child()).expect("arguments");
+
+    let workflow_lengths = [
+        arguments.workflow_ids.len(),
+        arguments.names.len(),
+        arguments.definition_keys.len(),
+        arguments.on_errors.len(),
+        arguments.output_task_indexes.len(),
+        arguments.success_policies.len(),
+        arguments.parent_workflow_ids.len(),
+        arguments.parent_task_indexes.len(),
+        arguments.depths.len(),
+    ];
+    assert_eq!(workflow_lengths, [2; 9]);
+    let node_lengths = [
+        arguments.node_workflow_ids.len(),
+        arguments.node_task_indexes.len(),
+        arguments.node_ids.len(),
+        arguments.node_task_names.len(),
+        arguments.node_inputs.len(),
+        arguments.node_queue_names.len(),
+        arguments.node_priorities.len(),
+        arguments.node_dependencies.len(),
+        arguments.node_args_from.len(),
+        arguments.node_workflow_ctx_from.len(),
+        arguments.node_allow_failed_deps.len(),
+        arguments.node_join_types.len(),
+        arguments.node_min_successes.len(),
+        arguments.node_task_options.len(),
+        arguments.node_max_retries.len(),
+        arguments.node_executions.len(),
+        arguments.node_good_untils.len(),
+        arguments.node_retention_class_keys.len(),
+        arguments.node_is_subworkflow.len(),
+        arguments.node_sub_workflow_names.len(),
+        arguments.node_sub_definition_keys.len(),
+        arguments.node_sub_workflow_params.len(),
+    ];
+    assert_eq!(node_lengths, [4; 22]);
+    let child_id = arguments.workflow_ids[1];
+    assert_eq!(
+        arguments.on_errors,
+        vec!["pause".to_owned(), "fail".to_owned()]
+    );
+    assert_eq!(arguments.output_task_indexes, vec![Some(2), Some(0)]);
+    assert_eq!(
+        arguments.success_policies,
+        vec![Some(policy.to_json().expect("the policy encodes")), None]
+    );
+    assert_eq!(arguments.depths, vec![0, 1]);
+    assert_eq!(
+        arguments.node_workflow_ids,
+        vec![workflow_id, workflow_id, workflow_id, child_id]
+    );
+    assert_eq!(arguments.node_task_indexes, vec![0, 1, 2, 0]);
+    assert_eq!(
+        arguments.node_dependencies,
+        vec![
+            "[]".to_owned(),
+            "[]".to_owned(),
+            "[0,1]".to_owned(),
+            "[]".to_owned()
+        ]
+    );
+    assert_eq!(
+        arguments.node_is_subworkflow,
+        vec![false, true, false, false]
+    );
+    assert_eq!(
+        arguments.node_sub_workflow_params,
+        vec![None, Some("NOT_GIVEN".to_owned()), None, None]
+    );
+    assert_eq!(
+        arguments
+            .node_max_retries
+            .iter()
+            .map(Option::is_some)
+            .collect::<Vec<bool>>(),
+        vec![true, false, true, true]
+    );
+    assert!(!arguments.has_failed_records());
 }
 
 /// A sub-workflow root whose child has no registration under its key gets
@@ -477,8 +652,11 @@ fn a_build_that_the_client_did_not_run_refuses_the_start() {
 #[tokio::test]
 #[serial]
 async fn the_start_writes_the_tree_in_one_statement() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    ));
     let workflow_id = Uuid::new_v4();
     let spec = spec_of("one_statement_parent", vec![subworkflow_root(0)]);
 
@@ -495,7 +673,7 @@ async fn the_start_writes_the_tree_in_one_statement() {
         .expect("start");
     assert_eq!(started, ClientStartOutcome::Started);
 
-    let (node_status, child_id): (String, Option<Uuid>) = sqlx::query_as(
+    let (node_status, child_id): (String, Option<Uuid>) = sql::query_as(
         "SELECT status, sub_workflow_id FROM horsies_workflow_tasks
          WHERE workflow_id = $1 AND task_index = 0",
     )
@@ -505,7 +683,7 @@ async fn the_start_writes_the_tree_in_one_statement() {
     .expect("parent node");
     assert_eq!(node_status, "RUNNING");
     let child_id = child_id.expect("the sub-workflow node links its child");
-    let (child_status, parent_id, depth): (String, Option<Uuid>, i32) = sqlx::query_as(
+    let (child_status, parent_id, depth): (String, Option<Uuid>, i32) = sql::query_as(
         "SELECT status, parent_workflow_id, depth FROM horsies_workflows WHERE id = $1",
     )
     .bind(child_id)
@@ -516,7 +694,7 @@ async fn the_start_writes_the_tree_in_one_statement() {
         (child_status.as_str(), parent_id, depth),
         ("RUNNING", Some(workflow_id), 1)
     );
-    let (child_node_status, task_status): (String, String) = sqlx::query_as(
+    let (child_node_status, task_status): (String, String) = sql::query_as(
         "SELECT n.status, t.status FROM horsies_workflow_tasks n
          JOIN horsies_tasks t ON t.id = n.task_id
          WHERE n.workflow_id = $1 AND n.task_index = 0",

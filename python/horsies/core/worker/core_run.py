@@ -8,7 +8,8 @@ own threads. This module:
 
 - builds the worker manifest of the app (`to_worker_manifest`,
   `python_child_launch`); AppConfig validation already refused every value
-  above a manifest bound;
+  above a manifest bound, and an app locator in `__main__` is a startup
+  error;
 - sets the panic rule of a worker process before the first core call;
 - calls `prepare_worker` with a `CoreWorkerHost`, then `PreparedWorker.run`
   on the main thread, with `SIGTERM` and `SIGINT` handlers that ask the run
@@ -20,6 +21,7 @@ own threads. This module:
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import sys
 from collections.abc import Callable, Sequence
@@ -37,6 +39,12 @@ from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.gc_policy import freeze_startup_objects
 from horsies.core.worker.row_class import registered_task_classes
 from horsies.core.worker_manifest import (
+    CurrentDirectory,
+    CurrentDirectoryRead,
+    CurrentDirectoryUnreadable,
+    MainModuleLocator,
+    child_argv,
+    child_sys_path,
     current_interpreter_flags,
     log_level_of,
     python_child_launch,
@@ -101,22 +109,57 @@ class WorkerLaunch:
     loglevel: str
 
 
-def worker_manifest_json(app: Horsies, launch: WorkerLaunch) -> str:
-    """The JSON text of the worker manifest of `app`. Reads `sys.executable`,
-    the interpreter flags, `sys.path` and `sys.argv`; no other I/O. The
-    config of `app` passed AppConfig validation, so every value is within
-    its manifest bound (`to_worker_manifest`).
+def read_current_directory() -> CurrentDirectoryRead:
+    """The current directory of this process (`os.getcwd`).
+
+    `CurrentDirectoryUnreadable`: `os.getcwd` raised `OSError`; the
+    directory was removed, or a part of its path cannot be read.
     """
-    child_launch = python_child_launch(
+    try:
+        return CurrentDirectory(os.getcwd())
+    except OSError as error:
+        return CurrentDirectoryUnreadable(f'{type(error).__name__}: {error}')
+
+
+def worker_manifest_json(
+    app: Horsies,
+    launch: WorkerLaunch,
+    logger: logging.Logger,
+) -> Result[str, MainModuleLocator]:
+    """The JSON text of the worker manifest of `app`. Reads
+    `sys.executable`, the interpreter flags, `sys.path`, `sys.argv` and the
+    current directory, and logs a warning for each `sys.path` entry that no
+    child gets (`child_sys_path`); no other I/O. The config of `app` passed
+    AppConfig validation, so every value is within its manifest bound
+    (`to_worker_manifest`).
+
+    Err: `MainModuleLocator`, the app locator is in `__main__`
+    (`python_child_launch`).
+    """
+    sys_path = child_sys_path(tuple(sys.path), read_current_directory())
+    for left in sys_path.left_out:
+        logger.warning(
+            'Leaving sys.path entry %s out of worker children: %s',
+            left.entry,
+            left.reason,
+        )
+    launched = python_child_launch(
         executable=sys.executable,
         interpreter_flags=current_interpreter_flags(),
         app_locator=launch.app_locator,
         imports=launch.imports,
         sys_path_roots=launch.sys_path_roots,
-        parent_sys_path=tuple(sys.path),
-        parent_argv=tuple(sys.argv),
+        parent_sys_path=sys_path,
+        parent_argv=child_argv(tuple(sys.argv)),
         log_level=log_level_of(launch.loglevel),
     )
+    match launched:
+        case Ok(child_launch):
+            pass
+        case Err(refused):
+            return Err(refused)
+        case _ as unreachable:
+            assert_never(unreachable)
     tasks = registered_task_classes(
         (name, task.task_options_json) for name, task in app.tasks.items()
     )
@@ -127,7 +170,7 @@ def worker_manifest_json(app: Horsies, launch: WorkerLaunch) -> str:
         child_launch=child_launch,
         idempotency_reservation_window=_reservation_window(),
     )
-    return wire.dump_worker_manifest(manifest)
+    return Ok(wire.dump_worker_manifest(manifest))
 
 
 PROFILE_REFUSED_HELP: Final = (
@@ -143,6 +186,27 @@ def profile_refused_error(refusal: str) -> ConfigurationError:
         message=refusal,
         code=ErrorCode.CONFIG_INVALID_WORKER_PROFILE,
         help_text=PROFILE_REFUSED_HELP,
+    )
+    error.location = None
+    return error
+
+
+MAIN_MODULE_LOCATOR_HELP: Final = (
+    'start the worker with the module path or the file path of the app: '
+    'horsies worker <module>:<app>, or horsies worker <path/to/file.py>:<app>'
+)
+"""The help of the startup error of an app locator in `__main__`."""
+
+
+def main_module_locator_error(refused: MainModuleLocator) -> ConfigurationError:
+    """The startup error of an app locator in `__main__`."""
+    error = ConfigurationError(
+        message=(
+            f'app locator {refused.app_locator!r} cannot work: a child is a new '
+            'program with its own __main__'
+        ),
+        code=ErrorCode.WORKER_INVALID_LOCATOR,
+        help_text=MAIN_MODULE_LOCATOR_HELP,
     )
     error.location = None
     return error
@@ -210,10 +274,17 @@ def run_core_worker(
     """Build the manifest, prepare the worker and run it on the main thread.
     Returns the exit code of `horsies worker`.
 
-    `report` prints the startup report of a broker that does not build or
-    of a profile that the core refuses.
+    `report` prints the startup report of an app locator in `__main__`, of
+    a broker that does not build, or of a profile that the core refuses.
     """
-    manifest_json = worker_manifest_json(app, launch)
+    match worker_manifest_json(app, launch, logger):
+        case Ok(manifest_json):
+            pass
+        case Err(refused):
+            report((main_module_locator_error(refused),))
+            return EXIT_FAILED
+        case _ as unreachable:
+            assert_never(unreachable)
     # A panic in a core background task aborts the worker process; its
     # supervisor restarts it. Set before the first core call.
     _core.set_panic_rule('ABORT_PROCESS')

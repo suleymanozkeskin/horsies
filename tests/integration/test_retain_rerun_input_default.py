@@ -21,11 +21,11 @@ from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import is_err
-from tests.integration.test_task_history_schema_emission import (
+from tests.integration.isolated_database import (
     MakeDatabase,
     make_database,
 )
-from horsies.core.utils.url import sqlalchemy_url
+from tests.sqlalchemy_url import sqlalchemy_url
 
 __all__ = ['make_database']
 

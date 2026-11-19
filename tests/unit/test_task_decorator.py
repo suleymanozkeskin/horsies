@@ -24,7 +24,6 @@ from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
     BrokerErrorCode,
     BrokerIdempotencyKeyConflict,
-    BrokerLoopRunnerFailed,
     BrokerPayloadMismatch,
 )
 from horsies.core.types.error_detail import NoCause
@@ -55,7 +54,6 @@ from horsies.core.models.task_send_types import (
     TaskSendAsyncContext,
     TaskSendEnqueueFailed,
     TaskSendIdempotencyKeyConflict,
-    TaskSendLoopRunnerFailed,
     TaskSendPayload,
     TaskSendPayloadMismatch,
     TaskSendPayloadTooLarge,
@@ -63,7 +61,6 @@ from horsies.core.models.task_send_types import (
     TaskSendValidationFailed,
 )
 from horsies.core.types.result import Err, Ok, is_ok, is_err
-from horsies.core.utils.loop_runner import LoopRunnerError
 
 
 # =============================================================================
@@ -469,30 +466,6 @@ class TestTaskHandleGet:
         assert handle._result_fetched is True
         broker.get_raw_result_record.assert_called_once_with('t-4', 5000)
 
-    def test_broker_mode_loop_runner_failure_returns_broker_error(self) -> None:
-        """Broker mode: a LOOP_RUNNER_FAILED broker error gives BROKER_ERROR, not cached."""
-        app = _make_app()
-        broker = MagicMock()
-        broker.get_raw_result_record.return_value = Err(BrokerLoopRunnerFailed(
-            message='Loop runner failed for PostgresBroker.get_raw_result_record()',
-            exception=LoopRunnerError('Loop runner is not running'),
-        ))
-        app.get_broker.return_value = broker
-
-        handle: TaskHandle[int] = TaskHandle(
-            't-5', app=app, broker_mode=True, ok_type=int,
-        )
-
-        result = handle.get()
-        handle.get()
-
-        assert result.is_err()
-        assert result.err is not None
-        assert result.err.error_code == OperationalErrorCode.BROKER_ERROR
-        assert 'Loop runner failed' in (result.err.message or '')
-        # Not cached: the second get() reads the broker again.
-        assert broker.get_raw_result_record.call_count == 2
-
     def test_broker_mode_exception_propagates(self) -> None:
         """Broker mode: an exception from the sync broker read propagates unchanged."""
         app = _make_app()
@@ -772,28 +745,45 @@ class TestTaskHandleRecordToTaskResult:
             raw_result=raw_result,
         )
 
-    def test_stored_result_past_the_depth_bound_is_a_deserialization_error(
+    @pytest.mark.asyncio
+    async def test_stored_result_past_the_depth_bound_is_a_deserialization_error(
         self,
     ) -> None:
-        """Before, `RecursionError` left the read. The broker refuses the text,
-        and the handle folds the refusal."""
-        from horsies.core.brokers.postgres import PostgresBroker
-        from horsies.core.types.status import TaskStatus
+        """Before, `RecursionError` left the read. The broker's result read
+        refuses the stored text, and the handle folds the refusal. The core
+        handle of the broker is faked."""
+        import uuid
 
-        handle: TaskHandle[int] = TaskHandle('task-x', ok_type=int)
-        broker_result = PostgresBroker._build_raw_result_record(  # pyright: ignore[reportPrivateUsage]
-            MagicMock(),
-            task_id='task-x',
+        from pydantic import SecretStr
+
+        from horsies._core import RawResultRecordRecord
+        from horsies.core.brokers.postgres import PostgresBroker
+        from horsies.core.models.broker import PostgresConfig
+
+        task_id = uuid.UUID('0195b4a0-0000-7000-8000-000000000001')
+        broker = PostgresBroker(
+            PostgresConfig(database_url=SecretStr('postgresql://u:p@localhost:5432/db')),
+        )
+        core_handle = MagicMock()
+        core_handle.raw_result_record_async = AsyncMock(return_value=MagicMock(
+            spec=RawResultRecordRecord,
+            task_id=task_id,
             task_name='my_task',
-            status=TaskStatus.COMPLETED,
+            status='COMPLETED',
             result_json=(
                 '{"__h_task_result__":true,"ok":'
                 + '[' * 1_100 + ']' * 1_100
                 + ',"err":null}'
             ),
+        ))
+        broker._core_handle = core_handle  # pyright: ignore[reportPrivateUsage]
+        app = _make_app()
+        app.get_broker.return_value = broker
+        handle: TaskHandle[int] = TaskHandle(
+            task_id, app=app, broker_mode=True, ok_type=int,
         )
 
-        result = handle._record_to_task_result(broker_result, timeout_ms=None)  # pyright: ignore[reportPrivateUsage]
+        result = await handle.get_async()
 
         assert result.is_err()
         assert result.err is not None
@@ -2845,28 +2835,6 @@ class TestAutoRetry:
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendPayloadMismatch)
         assert broker.enqueue.call_count == 1
-
-    def test_loop_runner_failure_is_its_own_variant_and_not_resent(self) -> None:
-        """A LOOP_RUNNER_FAILED broker error is TaskSendLoopRunnerFailed; no resend."""
-        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=x)
-
-        app = _make_app(resend_on_transient_err=True)
-        broker = MagicMock()
-        runner_error = LoopRunnerError('Loop runner is not running')
-        broker.enqueue.return_value = Err(BrokerLoopRunnerFailed(
-            message='Loop runner failed for PostgresBroker.enqueue()',
-            exception=runner_error,
-        ))
-        app.get_broker.return_value = broker
-        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
-
-        result = wrapper.send(x=1)
-
-        assert is_err(result)
-        assert isinstance(result.err_value, TaskSendLoopRunnerFailed)
-        assert result.err_value.exception is runner_error
-        assert broker.enqueue.call_count == 1  # no resend
 
     def test_exception_from_sync_broker_enqueue_propagates(self) -> None:
         """An exception raised by the sync broker enqueue propagates; no resend."""

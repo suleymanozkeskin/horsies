@@ -10,15 +10,16 @@
 
 use chrono::{TimeZone, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::*;
 use crate::broker::expiry_and_orphans::transitioned_count;
-use crate::broker::pools::core_pool_for_test_pool;
-use crate::broker::terminalization_matrix::migrated_pool;
+use crate::broker::pools::core_pool_for_test_url;
 use crate::broker::BrokerError;
 use crate::core::lifecycle::TerminalizationOutcome;
+use crate::test_support::migrated_pool;
+use crate::test_support::sql::{self, TestPool};
+use crate::test_support::{CapturedEvent, LogCapture};
 
 /// The policy that retries a crash, as Python's test stores it, with the
 /// limit `max_retries` and a fixed 60 s interval per retry.
@@ -118,8 +119,8 @@ impl Seed {
 /// Insert `count` live rows of `seed` with every baseline column named, and
 /// return their ids. A sent row carries a command fingerprint; a workflow
 /// task carries none.
-async fn seed_tasks(pool: &PgPool, seed: &Seed, count: i32) -> Vec<Uuid> {
-    sqlx::query_scalar(
+async fn seed_tasks(pool: &TestPool, seed: &Seed, count: i32) -> Vec<Uuid> {
+    sql::query_scalar(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -165,14 +166,14 @@ async fn seed_tasks(pool: &PgPool, seed: &Seed, count: i32) -> Vec<Uuid> {
     .expect("seed live task rows")
 }
 
-async fn seed_task(pool: &PgPool, seed: &Seed) -> Uuid {
+async fn seed_task(pool: &TestPool, seed: &Seed) -> Uuid {
     seed_tasks(pool, seed, 1).await[0]
 }
 
 /// Set the finalizing marker of `worker-1`, `seconds_ago` before the
 /// database clock.
-async fn set_finalizing(pool: &PgPool, task_id: Uuid, seconds_ago: f64) {
-    sqlx::query(
+async fn set_finalizing(pool: &TestPool, task_id: Uuid, seconds_ago: f64) {
+    sql::query(
         "UPDATE horsies_tasks
          SET finalizing_at = NOW() - make_interval(secs => $2::float8),
              finalizing_by_worker_id = 'worker-1'
@@ -186,8 +187,8 @@ async fn set_finalizing(pool: &PgPool, task_id: Uuid, seconds_ago: f64) {
 }
 
 /// The live status of a task, or `None` when it left the live table.
-async fn live_status(pool: &PgPool, task_id: Uuid) -> Option<String> {
-    sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+async fn live_status(pool: &TestPool, task_id: Uuid) -> Option<String> {
+    sql::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_optional(pool)
         .await
@@ -198,8 +199,8 @@ async fn live_status(pool: &PgPool, task_id: Uuid) -> Option<String> {
 /// error code, and the stored result as text.
 type HistoryFacts = (String, String, Option<String>, Option<String>);
 
-async fn history_facts(pool: &PgPool, task_id: Uuid) -> Option<HistoryFacts> {
-    sqlx::query_as(
+async fn history_facts(pool: &TestPool, task_id: Uuid) -> Option<HistoryFacts> {
+    sql::query_as(
         "SELECT status::text, terminalization_kind::text, error_code,
                 convert_from(result_payload, 'UTF8')
          FROM horsies_task_history WHERE task_id = $1",
@@ -210,8 +211,8 @@ async fn history_facts(pool: &PgPool, task_id: Uuid) -> Option<HistoryFacts> {
     .expect("read the history row")
 }
 
-async fn live_attempt_count(pool: &PgPool, task_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
+async fn live_attempt_count(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
@@ -234,7 +235,7 @@ fn a_candidate_without_a_crash_retry_fails_with_the_crash_code_reason_and_result
 
     let reason = "Worker process crashed (no runner heartbeat for 300000ms = 300.0s)";
     assert_eq!(command.task_id, Uuid::from_u128(1));
-    assert_eq!(command.thresholds, thresholds);
+    assert_eq!(command.evidence, StaleEvidence::BeatAge(thresholds));
     assert_eq!(command.retry, StaleRetry::NoRetry);
     assert_eq!(command.error_code, "WORKER_CRASHED");
     assert_eq!(command.failed_reason, reason);
@@ -290,6 +291,89 @@ fn a_candidate_whose_crash_retries_are_spent_fails() {
     assert_eq!(command.retry, StaleRetry::NoRetry);
 }
 
+/// The stored options of the stale recovery tests: a fixed
+/// policy of 3 retries after 5, 10 and 20 s, with no jitter, for the codes
+/// `auto_retry_for`.
+fn fixed_policy_for(auto_retry_for: &[&str]) -> String {
+    serde_json::json!({
+        "retry_policy": {
+            "max_retries": 3,
+            "intervals": [5, 10, 20],
+            "backoff_strategy": "fixed",
+            "jitter": false,
+            "auto_retry_for": auto_retry_for
+        }
+    })
+    .to_string()
+}
+
+/// A policy that names the crash retries from the scanned count after the
+/// interval of the next attempt (count 1: the second interval, 10 s). No
+/// policy, or a policy for other codes, does not retry while retries
+/// remain.
+#[test]
+fn the_crash_retry_of_a_candidate_follows_its_stored_policy() {
+    let thresholds = thresholds_ms(300_000, 300_000);
+    let retry_of = |retry_count: i32, task_options: Option<String>| {
+        stale_attempt_command(&candidate(retry_count, 3, task_options), thresholds)
+            .expect("the crash result encodes")
+            .retry
+    };
+
+    assert_eq!(
+        retry_of(1, Some(fixed_policy_for(&["WORKER_CRASHED"]))),
+        StaleRetry::RetryAfter {
+            expected_retry_count: 1,
+            delay_seconds: 10.0,
+        }
+    );
+    assert_eq!(retry_of(0, None), StaleRetry::NoRetry);
+    let python_options_for_timeout = serde_json::json!({
+        "retry_policy": {
+            "max_retries": 3,
+            "intervals": [5],
+            "auto_retry_for": ["TIMEOUT"]
+        }
+    })
+    .to_string();
+    assert_eq!(
+        retry_of(0, Some(python_options_for_timeout)),
+        StaleRetry::NoRetry
+    );
+    assert_eq!(
+        retry_of(0, Some(fixed_policy_for(&["TIMEOUT"]))),
+        StaleRetry::NoRetry
+    );
+}
+
+/// The crash result is a `WORKER_CRASHED` error whose message is the crash
+/// reason and whose data are the facts of the silent attempt, the
+/// threshold in ms and in s, and the scan's clock.
+#[test]
+fn the_crash_result_names_the_silent_attempt() {
+    let command = stale_attempt_command(&candidate(0, 0, None), thresholds_ms(30_000, 60_000))
+        .expect("the crash result encodes");
+
+    let result: serde_json::Value =
+        serde_json::from_str(&command.result_json).expect("the crash result is JSON");
+    assert_eq!(
+        result["err"]["message"],
+        "Worker process crashed (no runner heartbeat for 30000ms = 30.0s)"
+    );
+    assert_eq!(
+        result["err"]["data"],
+        serde_json::json!({
+            "stale_threshold_ms": 30_000,
+            "stale_threshold_seconds": 30.0,
+            "worker_pid": 1234,
+            "worker_hostname": "host-1",
+            "worker_id": "worker-1",
+            "started_at": "2025-01-01T00:00:00+00:00",
+            "detected_at": "2025-01-01T00:10:00+00:00"
+        })
+    );
+}
+
 /// Python `TestMarkStaleTasksAsFailed::test_fractional_second_thresholds_keep_millisecond_precision`
 /// (now `test_the_scan_takes_the_thresholds_in_ms_and_the_batch_size`): the
 /// pass judges both thresholds to the millisecond. With 1.9 s and 2.75 s, a
@@ -300,7 +384,7 @@ fn a_candidate_whose_crash_retries_are_spent_fails() {
 #[serial]
 async fn the_stale_pass_judges_its_thresholds_to_the_millisecond() {
     let pool = migrated_pool().await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let fresh = seed_task(
         &pool,
         &Seed {
@@ -348,7 +432,7 @@ async fn the_stale_pass_judges_its_thresholds_to_the_millisecond() {
 #[serial]
 async fn a_stale_pass_with_no_stale_row_recovers_none_and_writes_nothing() {
     let pool = migrated_pool().await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let running = seed_task(
         &pool,
         &Seed {
@@ -383,7 +467,7 @@ async fn a_stale_pass_with_no_stale_row_recovers_none_and_writes_nothing() {
 #[serial]
 async fn a_stale_pass_fails_each_stale_row_and_counts_it() {
     let pool = migrated_pool().await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let stale = seed_tasks(&pool, &Seed::stale_running(), 2).await;
 
     let recovered = mark_stale_running_as_failed(
@@ -406,6 +490,98 @@ async fn a_stale_pass_fails_each_stale_row_and_counts_it() {
     core.close();
 }
 
+/// A row whose finalizing marker is older than the finalizing threshold is
+/// stale: the pass fails it with `WORKER_CRASHED`, and its live row, with
+/// the marker, moves to history.
+#[tokio::test]
+#[serial]
+async fn a_stale_pass_fails_a_row_whose_finalizing_marker_is_past_its_threshold() {
+    let pool = migrated_pool().await;
+    let core = core_pool_for_test_url(pool.url());
+    let finalizing = seed_task(&pool, &Seed::stale_running()).await;
+    set_finalizing(&pool, finalizing, 10.0).await;
+
+    let recovered = mark_stale_running_as_failed(
+        &core,
+        StatementLog::Off,
+        thresholds_ms(300_000, 5_000),
+        whole_scan(),
+    )
+    .await
+    .expect("the stale pass");
+
+    assert_eq!(recovered, 1);
+    assert_eq!(live_status(&pool, finalizing).await, None);
+    let (status, kind, error_code, _) = history_facts(&pool, finalizing)
+        .await
+        .expect("the stale row moved to history");
+    assert_eq!(
+        (status.as_str(), kind.as_str(), error_code.as_deref()),
+        ("FAILED", "FAIL_STALE", Some("WORKER_CRASHED"))
+    );
+    core.close();
+}
+
+/// A stale pass whose scan reads its whole batch warns on `horsies.broker`
+/// that the rest is recovered next pass, and counts the rows it recovered.
+#[tokio::test]
+#[serial]
+async fn a_stale_pass_whose_scan_reads_its_whole_batch_warns_that_the_rest_waits() {
+    let pool = migrated_pool().await;
+    let core = core_pool_for_test_url(pool.url());
+    let _stale = seed_tasks(&pool, &Seed::stale_running(), 2).await;
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
+
+    let recovered = mark_stale_running_as_failed(
+        &core,
+        StatementLog::Off,
+        thresholds_ms(300_000, 300_000),
+        RecoveryBatch::new(1).expect("1 row is a recovery batch"),
+    )
+    .await
+    .expect("the stale pass");
+
+    assert_eq!(recovered, 1);
+    let [warning]: [CapturedEvent; 1] = capture
+        .lines_starting(
+            tracing::Level::WARN,
+            "mark_stale_tasks_as_failed read a full scan batch",
+        )
+        .try_into()
+        .expect("one full-batch warning");
+    assert_eq!(warning.target, "horsies.broker");
+    assert_eq!(
+        warning.message,
+        "mark_stale_tasks_as_failed read a full scan batch of 1 candidates; the rest is \
+         recovered next pass",
+    );
+    core.close();
+}
+
+/// A stale pass whose scan cannot run (its pool is closed) is an error, not
+/// a count; nothing is written.
+#[tokio::test]
+#[serial]
+async fn a_stale_pass_whose_scan_cannot_run_is_an_error() {
+    let pool = migrated_pool().await;
+    let core = core_pool_for_test_url(pool.url());
+    core.close();
+
+    let failed = mark_stale_running_as_failed(
+        &core,
+        StatementLog::Off,
+        thresholds_ms(300_000, 300_000),
+        whole_scan(),
+    )
+    .await;
+
+    assert!(
+        matches!(failed, Err(BrokerError::Statement(_))),
+        "{failed:?}"
+    );
+}
+
 /// Python `TestMarkStaleTasksAsFailed::test_update_includes_worker_crashed_error_code`,
 /// at the database: the failed task stores `WORKER_CRASHED` as its code and
 /// in its result, and its archived attempt 1 is FAILED with that code.
@@ -413,7 +589,7 @@ async fn a_stale_pass_fails_each_stale_row_and_counts_it() {
 #[serial]
 async fn a_stale_failure_stores_the_crash_code_in_the_task_and_its_attempt() {
     let pool = migrated_pool().await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let task_id = seed_task(&pool, &Seed::stale_running()).await;
 
     let recovered = mark_stale_running_as_failed(
@@ -432,7 +608,7 @@ async fn a_stale_failure_stores_the_crash_code_in_the_task_and_its_attempt() {
     assert_eq!(error_code.as_deref(), Some("WORKER_CRASHED"));
     let result = result.expect("the failure stores its result");
     assert!(result.contains("\"WORKER_CRASHED\""), "{result}");
-    let (version, payload, digest): (i16, Vec<u8>, Vec<u8>) = sqlx::query_as(
+    let (version, payload, digest): (i16, Vec<u8>, Vec<u8>) = sql::query_as(
         "SELECT attempt_archive_version, attempt_snapshot, attempt_snapshot_digest
          FROM horsies_task_history WHERE task_id = $1",
     )
@@ -464,7 +640,7 @@ async fn a_stale_failure_stores_the_crash_code_in_the_task_and_its_attempt() {
 #[serial]
 async fn a_pending_expiry_pass_with_no_due_row_expires_none() {
     let pool = migrated_pool().await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let not_due = seed_task(
         &pool,
         &Seed {
@@ -493,7 +669,7 @@ async fn a_pending_expiry_pass_with_no_due_row_expires_none() {
 #[serial]
 async fn a_pending_expiry_pass_expires_each_due_row_with_task_expired() {
     let pool = migrated_pool().await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let due = seed_tasks(&pool, &Seed::due_pending(), 3).await;
 
     let expired = expire_pending_pass(&core, StatementLog::Off)
@@ -520,7 +696,7 @@ async fn a_pending_expiry_pass_expires_each_due_row_with_task_expired() {
 #[serial]
 async fn a_pending_expiry_pass_runs_batches_until_a_short_one() {
     let pool = migrated_pool().await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let _due = seed_tasks(&pool, &Seed::due_pending(), 502).await;
 
     let expired = expire_pending_pass(&core, StatementLog::Off)
@@ -528,7 +704,7 @@ async fn a_pending_expiry_pass_runs_batches_until_a_short_one() {
         .expect("the expiry pass");
 
     assert_eq!(expired, PendingExpiryPass::Drained { expired: 502 });
-    let left: i64 = sqlx::query_scalar(
+    let left: i64 = sql::query_scalar(
         "SELECT count(*) FROM horsies_tasks WHERE task_name = 'reaper_port' AND status = 'PENDING'",
     )
     .fetch_one(&pool)
@@ -563,7 +739,7 @@ fn a_pending_expiry_batch_with_an_outcome_other_than_applied_is_a_contract_error
 #[serial]
 async fn a_pending_expiry_batch_with_an_outcome_other_than_applied_commits_nothing() {
     let pool = migrated_pool().await;
-    sqlx::raw_sql(
+    sql::raw_sql(
         "CREATE TABLE expiry_batch_marker (written boolean NOT NULL);
          DROP FUNCTION horsies_expire_pending_tasks(integer, text, text);
          CREATE FUNCTION horsies_expire_pending_tasks(
@@ -581,7 +757,7 @@ async fn a_pending_expiry_batch_with_an_outcome_other_than_applied_commits_nothi
     .execute(&pool)
     .await
     .expect("replace the expiry batch function");
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
 
     let refused = expire_pending_pass(&core, StatementLog::Off).await;
 
@@ -595,7 +771,7 @@ async fn a_pending_expiry_batch_with_an_outcome_other_than_applied_commits_nothi
         ),
         "{refused:?}"
     );
-    let markers: i64 = sqlx::query_scalar("SELECT count(*) FROM expiry_batch_marker")
+    let markers: i64 = sql::query_scalar("SELECT count(*) FROM expiry_batch_marker")
         .fetch_one(&pool)
         .await
         .expect("count the marker rows");
@@ -609,7 +785,7 @@ async fn a_pending_expiry_batch_with_an_outcome_other_than_applied_commits_nothi
 #[serial]
 async fn a_pending_expiry_pass_whose_batch_cannot_run_is_an_error() {
     let pool = migrated_pool().await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     core.close();
 
     let failed = expire_pending_pass(&core, StatementLog::Off).await;
@@ -634,7 +810,7 @@ async fn a_pending_expiry_pass_whose_batch_cannot_run_is_an_error() {
 #[serial]
 async fn an_orphan_audit_with_no_orphan_cancels_none() {
     let pool = migrated_pool().await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
     let _sent = seed_task(&pool, &Seed::due_pending()).await;
 
     let page = cancel_orphan_page(&core, StatementLog::Off)
@@ -666,7 +842,7 @@ async fn an_orphan_audit_cancels_and_counts_only_unlinked_workflow_tasks() {
     )
     .await;
 
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
 
     let report = cancel_orphan_page(&core, StatementLog::Off)
         .await
@@ -694,7 +870,7 @@ async fn an_orphan_audit_cancels_and_counts_only_unlinked_workflow_tasks() {
 #[serial]
 async fn an_orphan_audit_with_an_outcome_other_than_applied_fails_and_commits_nothing() {
     let pool = migrated_pool().await;
-    sqlx::raw_sql(
+    sql::raw_sql(
         "DROP FUNCTION horsies_cancel_orphaned_tasks(integer);
          CREATE FUNCTION horsies_cancel_orphaned_tasks(p_batch_size integer)
          RETURNS SETOF horsies_terminalization_outcome
@@ -713,7 +889,7 @@ async fn an_orphan_audit_with_an_outcome_other_than_applied_fails_and_commits_no
     .await
     .expect("replace the orphan page function");
 
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
 
     let refused = cancel_orphan_page(&core, StatementLog::Off).await;
 
@@ -722,7 +898,7 @@ async fn an_orphan_audit_with_an_outcome_other_than_applied_fails_and_commits_no
         matches!(refused, Err(BrokerError::TerminalizationContract(_))),
         "{refused:?}"
     );
-    let candidates: i32 = sqlx::query_scalar(
+    let candidates: i32 = sql::query_scalar(
         "SELECT last_candidate_rows FROM horsies_recovery_scan_cursors
          WHERE scan_name = 'orphan_workflow_tasks'",
     )
@@ -742,7 +918,7 @@ async fn an_orphan_audit_with_an_outcome_other_than_applied_fails_and_commits_no
 async fn an_orphan_audit_whose_page_cannot_run_is_an_error() {
     let pool = migrated_pool().await;
     let orphan = seed_task(&pool, &Seed::unlinked_workflow_task("PENDING")).await;
-    let closed = core_pool_for_test_pool(&pool);
+    let closed = core_pool_for_test_url(pool.url());
     closed.close();
 
     let failed = cancel_orphan_page(&closed, StatementLog::Off).await;

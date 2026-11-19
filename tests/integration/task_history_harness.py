@@ -16,22 +16,23 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Final
 
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
-from horsies.core.baseline.migration import load_baseline_migration
-from horsies.core.history.ddl.classes import (
-    ClassAlreadyRegistered,
-    ClassRegistered,
-    finite_class_parent_name,
-    register_finite_retention_class,
-)
-from horsies.core.history.names import FOREVER_LEAF
 from tests.attempt_snapshot_support import encode_attempt_snapshot
-from horsies.core.utils.url import sqlalchemy_url
+from tests.baseline_sql import baseline_sql
+from tests.integration.history_seeding import publish_history_readers
+from tests.task_ids import mint_task_id
+from tests.sqlalchemy_url import sqlalchemy_url
+
+TASK_HISTORY_PARENT: Final = 'horsies_task_history'
+"""The history parent table of the baseline."""
+
+FOREVER_LEAF: Final = 'horsies_task_history_forever_open'
+"""The static leaf of the forever class of the baseline."""
 
 
 def _database_url() -> str:
@@ -58,11 +59,10 @@ async def install_baseline_schema(connection: AsyncConnection) -> None:
     psycopg sends it with the simple query protocol and reads no
     placeholders in it. It joins the caller's transaction.
     """
-    migration = load_baseline_migration()
     raw = await connection.get_raw_connection()
     driver = raw.driver_connection
     assert driver is not None, 'the engine has a driver connection'
-    await driver.execute(migration.sql.encode('utf-8'))
+    await driver.execute(baseline_sql().encode('utf-8'))
 
 
 def task_history_schema_fixture(schema_name: str):  # type: ignore[no-untyped-def]
@@ -112,25 +112,39 @@ def task_history_schema_fixture(schema_name: str):  # type: ignore[no-untyped-de
     return history_schema
 
 
+HEARTBEAT_CLASS_HORIZON_HOURS = 3
+"""The heartbeat horizon that a class registration stores."""
+
+_REGISTER_CLASSES_SQL = text(
+    'SELECT class_key, outcome FROM horsies_register_retention_classes('
+    'CAST(:days AS smallint[]), CAST(:hours AS smallint))'
+)
+_CREATE_HISTORY_LEAF_SQL = text(
+    'SELECT outcome, leaf_name, conflict_kind FROM horsies_create_history_leaf('
+    'CAST(:class_key AS text), CAST(:lower_anchor AS timestamptz))'
+)
+
+
 async def register_class(
     connection: AsyncConnection,
     class_key: str,
     *,
     duration_days: int = 30,
 ) -> str:
-    """Register one finite class and return its parent relation name."""
-    outcome = await register_finite_retention_class(
-        connection,
-        class_key=class_key,
-        duration=timedelta(days=duration_days),
+    """Register the finite class of ``duration_days`` days
+    (``horsies_register_retention_classes``) and return its parent relation
+    name. ``class_key`` must be the key of that period."""
+    rows = (
+        await connection.execute(
+            _REGISTER_CLASSES_SQL,
+            {'days': [duration_days], 'hours': HEARTBEAT_CLASS_HORIZON_HOURS},
+        )
+    ).all()
+    outcomes = {row.class_key: row.outcome for row in rows}
+    assert outcomes.get(class_key) in ('REGISTERED', 'VERIFIED'), (
+        f'class registration of {class_key} ({duration_days} days) failed: {outcomes}'
     )
-    match outcome:
-        case ClassRegistered(finite_parent_name=parent_name):
-            return parent_name
-        case ClassAlreadyRegistered(class_key=registered_key):
-            return finite_class_parent_name(registered_key)
-        case _:
-            raise AssertionError(f'class registration failed: {outcome!r}')
+    return f'{TASK_HISTORY_PARENT}_{class_key}'
 
 
 async def current_forever_leaf(connection: AsyncConnection) -> str:
@@ -257,18 +271,27 @@ async def prepare_move_storage(
     *,
     duration_days: int = 30,
 ) -> None:
-    """Register a class and publish coverage for terminalization tests."""
-    from horsies.core.history.commands import EnsureLeafCoverage
-    from horsies.core.history.partitions.manager import ensure_leaf_coverage
-    from horsies.core.history.reads.publisher import StagedLoaderPublisher
-
-    await register_class(connection, class_key, duration_days=duration_days)
-    outcomes = await ensure_leaf_coverage(
-        connection,
-        EnsureLeafCoverage(class_key=class_key, horizon_days=2),
-        StagedLoaderPublisher(),
+    """Register a class and publish coverage for terminalization tests: the
+    daily leaves of today and the next 2 days (``horsies_create_history_leaf``),
+    then the readers."""
+    _ = await register_class(connection, class_key, duration_days=duration_days)
+    database_now = (await connection.execute(text('SELECT now()'))).scalar_one()
+    assert isinstance(database_now, datetime), database_now
+    today = database_now.astimezone(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0,
     )
-    assert len(outcomes) == 3
+    for day_offset in range(3):
+        leaf = (
+            await connection.execute(
+                _CREATE_HISTORY_LEAF_SQL,
+                {'class_key': class_key, 'lower_anchor': today + timedelta(days=day_offset)},
+            )
+        ).one()
+        assert leaf.outcome in ('CREATED', 'ALREADY_CONFORMANT', 'INDEX_REPAIRED'), (
+            f'leaf coverage of {class_key} refused: {leaf.outcome} {leaf.leaf_name} '
+            f'{leaf.conflict_kind}'
+        )
+    await publish_history_readers(connection)
 
 
 async def insert_live_task(
@@ -293,8 +316,6 @@ async def insert_live_task(
     A CLAIMED row carries a lease. With `retain` the move builds the rerun
     envelope from `input_text` and `task_options`.
     """
-    from horsies.core.history.identity.uuid7 import mint_task_id
-
     task_id = task_id if task_id is not None else str(mint_task_id())
     now = datetime.now(timezone.utc)
     await connection.execute(

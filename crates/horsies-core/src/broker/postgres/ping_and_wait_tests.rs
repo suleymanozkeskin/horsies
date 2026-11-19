@@ -1,6 +1,7 @@
 //! Ports of Python `tests/unit/test_broker_postgres.py` rows of the worker
 //! ping and of the result wait: the pong decode, the early return at
-//! `min_responses`, and the end of a result wait that its caller drops.
+//! `min_responses`, and the end of a result wait that its caller drops (with
+//! the workflow result wait of `tests/unit/test_workflow_handle_async_cleanup.py`).
 //!
 //! The database tests run on the database of their test runtime
 //! (`terminalization_matrix::migrated_pool`), with the broker's listener on
@@ -10,14 +11,15 @@
 use std::time::{Duration, Instant};
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{decode_pong, PostgresBroker};
 use crate::broker::health::{WorkerPingRequest, WorkerPongPayload, WORKER_PING_CHANNEL};
-use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
 use crate::broker::SendKind;
 use crate::core::config::EnqueueRetention;
+use crate::test_support::sql::{self, TestListener, TestPool};
+use crate::test_support::{migrated_database_url, migrated_pool};
+use crate::workflow_engine::query::wait_workflow_end;
 
 /// The polls of [`wait_for_listener_statement`], 20 ms apart: at most 5 s.
 const LISTENER_STATEMENT_POLLS: u32 = 250;
@@ -29,6 +31,10 @@ const LISTENER_STATEMENT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// sends them (a quoted identifier).
 const LISTEN_TASK_DONE: &str = "LISTEN \"task_done\"";
 const UNLISTEN_TASK_DONE: &str = "UNLISTEN \"task_done\"";
+
+/// The LISTEN and UNLISTEN of the workflow result wait's channel.
+const LISTEN_WORKFLOW_DONE: &str = "LISTEN \"workflow_done\"";
+const UNLISTEN_WORKFLOW_DONE: &str = "UNLISTEN \"workflow_done\"";
 
 fn pong_payload(correlation_id: &str) -> String {
     serde_json::to_string(&WorkerPongPayload {
@@ -42,13 +48,14 @@ fn pong_payload(correlation_id: &str) -> String {
 
 /// A broker on the database of this test whose listener connects with
 /// `application_name`.
-async fn listener_broker(application_name: &str) -> (PostgresBroker, PgPool) {
+async fn listener_broker(application_name: &str) -> (PostgresBroker, TestPool) {
     let url = migrated_database_url().await;
     let separator = if url.contains('?') { '&' } else { '?' };
     let pool = migrated_pool().await;
-    let broker = PostgresBroker::from_pool_and_session_url(
-        pool.clone(),
+    let broker = PostgresBroker::from_test_url_and_session_url(
+        pool.url(),
         &format!("{url}{separator}application_name={application_name}"),
+        crate::ClientFamily::Rust,
     );
     (broker, pool)
 }
@@ -56,13 +63,13 @@ async fn listener_broker(application_name: &str) -> (PostgresBroker, PgPool) {
 /// Whether the last statement of the backend of `application_name` became
 /// `statement` within [`LISTENER_STATEMENT_POLLS`] polls.
 async fn wait_for_listener_statement(
-    pool: &PgPool,
+    pool: &TestPool,
     application_name: &str,
     statement: &str,
 ) -> bool {
     for _ in 0..LISTENER_STATEMENT_POLLS {
         let last: Option<String> =
-            sqlx::query_scalar("SELECT query FROM pg_stat_activity WHERE application_name = $1")
+            sql::query_scalar("SELECT query FROM pg_stat_activity WHERE application_name = $1")
                 .bind(application_name)
                 .fetch_optional(pool)
                 .await
@@ -109,7 +116,7 @@ fn a_pong_of_another_round_is_dropped() {
 #[serial]
 async fn the_ping_returns_at_the_first_pong_when_one_is_enough() {
     let (broker, pool) = listener_broker("ping_min_responses").await;
-    let mut requests = sqlx::postgres::PgListener::connect_with(&pool)
+    let mut requests = TestListener::connect_with(&pool)
         .await
         .expect("connect the responder");
     requests
@@ -121,7 +128,7 @@ async fn the_ping_returns_at_the_first_pong_when_one_is_enough() {
         let notification = requests.recv().await.expect("a ping request");
         let request: WorkerPingRequest =
             serde_json::from_str(notification.payload()).expect("a ping request decodes");
-        sqlx::query("SELECT pg_notify($1, $2)")
+        sql::query("SELECT pg_notify($1, $2)")
             .bind(&request.reply_channel)
             .bind(pong_payload(&request.correlation_id))
             .execute(&replies)
@@ -183,4 +190,50 @@ async fn a_result_wait_dropped_while_it_waits_unlistens_its_channel() {
         wait_for_listener_statement(&pool, &application_name, UNLISTEN_TASK_DONE).await,
         "the dropped wait left its LISTEN behind"
     );
+}
+
+/// Python `tests/unit/test_workflow_handle_async_cleanup.py::TestWorkflowHandleAsyncCleanup::test_get_async_cancellation_still_completes_unsubscribe`:
+/// a workflow result wait (`wait_workflow_end`, the wait of
+/// `WorkflowHandle.get`) that its caller drops while it waits leaves no
+/// LISTEN behind. The drop of its subscription is synchronous, so no second
+/// cancel can interrupt it; the listener then UNLISTENs `workflow_done`.
+#[tokio::test]
+#[serial]
+async fn a_workflow_wait_dropped_while_it_waits_unlistens_its_channel() {
+    let application_name = format!("workflow_wait_drop_{}", Uuid::new_v4().simple());
+    let (broker, pool) = listener_broker(&application_name).await;
+    let workflow_id = Uuid::new_v4();
+    sql::query(
+        "INSERT INTO horsies_workflows (
+             id, name, status, on_error, definition_key, depth,
+             root_workflow_id, sent_at, created_at, started_at, updated_at
+         ) VALUES ($1, 'workflow_wait_drop', 'RUNNING', 'fail', $2, 0, $1,
+                   NOW(), NOW(), NOW(), NOW())",
+    )
+    .bind(workflow_id)
+    .bind(format!("test.workflow-wait-drop.{workflow_id}"))
+    .execute(&pool)
+    .await
+    .expect("seed a RUNNING workflow");
+    let mut wait = Box::pin(wait_workflow_end(
+        &broker,
+        workflow_id,
+        Some(Duration::from_secs(60)),
+    ));
+
+    let listened = tokio::select! {
+        _ended = &mut wait => panic!("the wait for a RUNNING workflow ended before its limit"),
+        listened = wait_for_listener_statement(&pool, &application_name, LISTEN_WORKFLOW_DONE) => listened,
+    };
+    assert!(listened, "the wait subscribed on workflow_done");
+    drop(wait);
+
+    let unlistened =
+        wait_for_listener_statement(&pool, &application_name, UNLISTEN_WORKFLOW_DONE).await;
+    sql::query("DELETE FROM horsies_workflows WHERE id = $1")
+        .bind(workflow_id)
+        .execute(&pool)
+        .await
+        .expect("delete the workflow");
+    assert!(unlistened, "the dropped wait left its LISTEN behind");
 }

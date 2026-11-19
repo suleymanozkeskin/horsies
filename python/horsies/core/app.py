@@ -68,7 +68,6 @@ from fnmatch import fnmatch
 from uuid import UUID
 from horsies.core.utils.imports import import_by_path
 from horsies.core.utils.loop_runner import (
-    LoopRunnerError,
     async_context_message,
     in_running_event_loop,
 )
@@ -94,6 +93,7 @@ from horsies.core.models.workflow.nesting_check import (
 )
 from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.codec.validation_errors import ValueValidationError, exception_text
+from horsies.core.types.core_failure import call_refusal_or_raise
 from horsies.core.types.result import is_err
 from horsies.core.models.broker import PostgresConfig
 from horsies._catalog.manifest import dump_producer_manifest
@@ -118,7 +118,7 @@ if TYPE_CHECKING:
         TaskFunction,
     )
     from horsies.core.models.tasks import TaskInfo, TaskResult, TaskError
-    from horsies.core.brokers.result_types import BrokerResult
+    from horsies.core.brokers.result_types import BrokerResult, RawResultRecord
     from horsies.core.models.class_coverage import ClassCoverage, ClassReport
     from horsies.core.models.health import (
         DatabasePing,
@@ -855,6 +855,10 @@ class Horsies:
                 __getattr__ raising during member scans) — propagates to
                 the CLI command (traceback, non-zero exit) rather than
                 being masked as a validation error.
+            ForkedAfterCoreStart, CoreStopped: a live phase called the
+                core in a process that was forked without exec after the
+                core started, or whose core stopped
+                (``call_refusal_or_raise``).
         """
         all_errors: list[HorsiesError] = []
 
@@ -1399,12 +1403,13 @@ class Horsies:
         Returns at most one error, ``BROKER_INVALID_URL``: "broker listener
         capability check failed" for the probe, "broker connectivity check
         failed" for every other step and for a core that cannot run the
-        call. Nothing is written but the probe's one NOTIFY.
+        call. Nothing is written but the probe's one NOTIFY. Raises
+        ``ForkedAfterCoreStart`` and ``CoreStopped``.
         """
         try:
             outcome = handle.check_connectivity()
         except CoreError as exc:
-            return [_connectivity_failed(str(exc))]
+            return [_connectivity_failed(str(call_refusal_or_raise(exc)))]
         match outcome:
             case ConnectivityPassed():
                 return []
@@ -1434,12 +1439,14 @@ class Horsies:
     def _close_check_handle(self, handle: CoreHandle) -> None:
         """Close the core handle of a live check. A core that cannot run the
         close is logged: the check's answer stands, and the process holds the
-        handle's pools until it ends."""
+        handle's pools until it ends. Raises ``ForkedAfterCoreStart`` and
+        ``CoreStopped``."""
         try:
             _ = handle.close()
         except CoreError as exc:
             self.logger.warning(
-                'the core handle of the live check did not close: %s', exc,
+                'the core handle of the live check did not close: %s',
+                call_refusal_or_raise(exc),
             )
 
     def _check_worker_connections(self, handle: CoreHandle) -> list[HorsiesError]:
@@ -1458,13 +1465,14 @@ class Horsies:
 
         Returns one ``CHECK_WORKER_CONNECTIONS`` error per profile that does
         not fit, in name order, or one when the limit was not read or the
-        core could not run the call. Writes nothing.
+        core could not run the call. Writes nothing. Raises
+        ``ForkedAfterCoreStart`` and ``CoreStopped``.
         """
         profiles_json = dump_worker_profiles(self.config.worker_profiles)
         try:
             refusals = handle.check_worker_connections(profiles_json)
         except CoreError as exc:
-            return [_worker_connections_unchecked(str(exc))]
+            return [_worker_connections_unchecked(str(call_refusal_or_raise(exc)))]
         return [_worker_connection_error(refusal) for refusal in refusals]
 
     def list_tasks(self) -> list[str]:
@@ -1606,6 +1614,21 @@ class Horsies:
         """
         if process_role() is ProcessRole.RUNS_TASK_BODIES:
             return self._wait_inside_task_ok('get_result_async', task_id)
+        record_result = await self.get_broker().get_raw_result_record_async(
+            task_id, timeout_ms,
+        )
+        return self._task_result_of_record(task_id, timeout_ms, record_result)
+
+    def _task_result_of_record(
+        self,
+        task_id: UUID,
+        timeout_ms: int | None,
+        record_result: 'BrokerResult[RawResultRecord | None]',
+    ) -> 'BrokerResult[TaskResult[Any, TaskError]]':
+        """The answer of ``get_result`` and ``get_result_async`` for the
+        broker's result read. Pure apart from the lookup of the task's
+        ``task_ok_type`` in the registry.
+        """
         from horsies.core.brokers.result_types import (
             BrokerInvalidJsonPayload,
             BrokerNoTypeAvailable,
@@ -1625,10 +1648,6 @@ class Horsies:
         from horsies.core.types.result import Err, Ok, is_err
         from horsies.core.types.status import TaskStatus
 
-        broker = self.get_broker()
-        record_result = await broker.get_raw_result_record_async(
-            task_id, timeout_ms,
-        )
         if is_err(record_result):
             return Err(record_result.err_value)
         record = record_result.ok_value
@@ -1737,24 +1756,22 @@ class Horsies:
         task_id: UUID,
         timeout_ms: int | None = None,
     ) -> 'BrokerResult[TaskResult[Any, TaskError]]':
-        """Synchronous version of ``get_result_async``.
+        """Synchronous version of ``get_result_async``: the broker's blocking
+        result read (``PostgresBroker.get_raw_result_record``) on the calling
+        thread, with the GIL released and signals checked every 100 ms.
 
         In a process that runs task bodies it returns
         ``Ok(TaskResult(err=RetrievalCode.WAIT_INSIDE_TASK))`` at once. On a
         thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``.
-        Neither does I/O.
+        Neither does I/O. A raised signal handler (Ctrl+C) ends the wait with
+        its exception; nothing changed.
         """
         if process_role() is ProcessRole.RUNS_TASK_BODIES:
             return self._wait_inside_task_ok('get_result', task_id)
         if in_running_event_loop():
             return self._async_context_err('get_result')
-        broker = self.get_broker()
-        try:
-            return broker.run_sync(
-                self.get_result_async, task_id, timeout_ms,
-            )
-        except LoopRunnerError as exc:
-            return self._loop_runner_err('get_result', exc)
+        record_result = self.get_broker().get_raw_result_record(task_id, timeout_ms)
+        return self._task_result_of_record(task_id, timeout_ms, record_result)
 
     async def get_task_info_async(
         self,
@@ -1770,6 +1787,26 @@ class Horsies:
         ``decoded_result`` / ``result_decoded`` fields when the task is
         registered locally and decode succeeds.
         """
+        info_result = await self.get_broker().get_task_info_async(
+            task_id,
+            include_result=include_result,
+            include_failed_reason=include_failed_reason,
+            include_attempts=include_attempts,
+        )
+        return self._decoded_task_info(task_id, include_result, info_result)
+
+    def _decoded_task_info(
+        self,
+        task_id: UUID,
+        include_result: bool,
+        info_result: 'BrokerResult[TaskInfo | None]',
+    ) -> 'BrokerResult[TaskInfo | None]':
+        """The answer of ``get_task_info`` and ``get_task_info_async`` for the
+        broker's task info read: the info with its result decoded when
+        ``include_result`` asked for it. Sets ``decoded_result`` and
+        ``result_decoded`` on the broker's new ``TaskInfo``; otherwise pure
+        apart from the lookup of the task's ``task_ok_type`` in the registry.
+        """
         from horsies.core.brokers.result_types import (
             BrokerInvalidJsonPayload,
         )
@@ -1781,13 +1818,6 @@ class Horsies:
         )
         from horsies.core.types.result import Err, Ok, is_err
 
-        broker = self.get_broker()
-        info_result = await broker.get_task_info_async(
-            task_id,
-            include_result=include_result,
-            include_failed_reason=include_failed_reason,
-            include_attempts=include_attempts,
-        )
         if is_err(info_result):
             return Err(info_result.err_value)
         info = info_result.ok_value
@@ -1857,43 +1887,24 @@ class Horsies:
         include_failed_reason: bool = False,
         include_attempts: bool = False,
     ) -> 'BrokerResult[TaskInfo | None]':
-        """Synchronous version of ``get_task_info_async``.
+        """Synchronous version of ``get_task_info_async``: the broker's
+        blocking read (``PostgresBroker.get_task_info``) on the calling
+        thread, with the GIL released.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
         if in_running_event_loop():
             return self._async_context_err('get_task_info')
-        broker = self.get_broker()
-        try:
-            return broker.run_sync(
-                self.get_task_info_async,
-                task_id,
-                include_result=include_result,
-                include_failed_reason=include_failed_reason,
-                include_attempts=include_attempts,
-            )
-        except LoopRunnerError as exc:
-            return self._loop_runner_err('get_task_info', exc)
+        info_result = self.get_broker().get_task_info(
+            task_id,
+            include_result=include_result,
+            include_failed_reason=include_failed_reason,
+            include_attempts=include_attempts,
+        )
+        return self._decoded_task_info(task_id, include_result, info_result)
 
     # ------------- Health / liveness API -------------
-
-    def _loop_runner_err(
-        self, label: str, exc: LoopRunnerError,
-    ) -> 'BrokerResult[Any]':
-        """The broker's sync runner could not run the call. Nothing ran.
-
-        Not retryable: a stopped runner does not start again.
-        """
-        from horsies.core.brokers.result_types import (
-            BrokerLoopRunnerFailed,
-        )
-        from horsies.core.types.result import Err
-
-        return Err(BrokerLoopRunnerFailed(
-            message=f'Loop runner failed for app.{label}(): {exc}',
-            exception=exc,
-        ))
 
     def _wait_inside_task_ok(
         self, label: str, task_id: UUID,
@@ -1937,18 +1948,15 @@ class Horsies:
         return await self.get_broker().ping_database_async()
 
     def ping_database(self) -> 'BrokerResult[DatabasePing]':
-        """Synchronous version of ``ping_database_async``.
+        """Synchronous version of ``ping_database_async``: the core's blocking
+        ping on the calling thread, with the GIL released.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
         if in_running_event_loop():
             return self._async_context_err('ping_database')
-        broker = self.get_broker()
-        try:
-            return broker.run_sync(self.ping_database_async)
-        except LoopRunnerError as exc:
-            return self._loop_runner_err('ping_database', exc)
+        return self.get_broker()._ping_database_blocking()  # pyright: ignore[reportPrivateUsage]
 
     async def ping_workers_async(
         self,
@@ -1975,23 +1983,21 @@ class Horsies:
         timeout_seconds: float = 2.0,
         min_responses: int | None = None,
     ) -> 'BrokerResult[list[WorkerPong]]':
-        """Synchronous version of ``ping_workers_async``.
+        """Synchronous version of ``ping_workers_async``: the core's blocking
+        ping on the calling thread, with the GIL released, and the same
+        outcomes. The call is bounded by the window plus the core's bound of a
+        blocking call, and not bounded for an infinite ``timeout_seconds``.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
         if in_running_event_loop():
             return self._async_context_err('ping_workers')
-        broker = self.get_broker()
-        try:
-            return broker.run_sync(
-                self.ping_workers_async,
-                target_worker_id=target_worker_id,
-                timeout_seconds=timeout_seconds,
-                min_responses=min_responses,
-            )
-        except LoopRunnerError as exc:
-            return self._loop_runner_err('ping_workers', exc)
+        return self.get_broker()._ping_workers_blocking(  # pyright: ignore[reportPrivateUsage]
+            target_worker_id=target_worker_id,
+            timeout_seconds=timeout_seconds,
+            min_responses=min_responses,
+        )
 
     async def list_worker_states_async(
         self,
@@ -2000,18 +2006,16 @@ class Horsies:
         return await self.get_broker().list_worker_states_async()
 
     def list_worker_states(self) -> 'BrokerResult[list[WorkerStateSnapshot]]':
-        """Synchronous version of ``list_worker_states_async``.
+        """Synchronous version of ``list_worker_states_async``: the core's blocking
+        read on the calling thread, with the GIL released, and the same
+        outcomes.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
         if in_running_event_loop():
             return self._async_context_err('list_worker_states')
-        broker = self.get_broker()
-        try:
-            return broker.run_sync(self.list_worker_states_async)
-        except LoopRunnerError as exc:
-            return self._loop_runner_err('list_worker_states', exc)
+        return self.get_broker()._list_worker_states_blocking()  # pyright: ignore[reportPrivateUsage]
 
     async def get_worker_state_async(
         self,
@@ -2024,18 +2028,16 @@ class Horsies:
         self,
         worker_id: str,
     ) -> 'BrokerResult[WorkerStateSnapshot | None]':
-        """Synchronous version of ``get_worker_state_async``.
+        """Synchronous version of ``get_worker_state_async``: the core's blocking
+        read on the calling thread, with the GIL released, and the same
+        outcomes.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
         if in_running_event_loop():
             return self._async_context_err('get_worker_state')
-        broker = self.get_broker()
-        try:
-            return broker.run_sync(self.get_worker_state_async, worker_id)
-        except LoopRunnerError as exc:
-            return self._loop_runner_err('get_worker_state', exc)
+        return self.get_broker()._get_worker_state_blocking(worker_id)  # pyright: ignore[reportPrivateUsage]
 
     async def get_worker_state_history_async(
         self,
@@ -2054,20 +2056,18 @@ class Horsies:
         *,
         limit: int | None = None,
     ) -> 'BrokerResult[list[WorkerStateSnapshot]]':
-        """Synchronous version of ``get_worker_state_history_async``.
+        """Synchronous version of ``get_worker_state_history_async``: the core's blocking
+        read on the calling thread, with the GIL released, and the same
+        outcomes.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
         if in_running_event_loop():
             return self._async_context_err('get_worker_state_history')
-        broker = self.get_broker()
-        try:
-            return broker.run_sync(
-                self.get_worker_state_history_async, worker_id, limit=limit
-            )
-        except LoopRunnerError as exc:
-            return self._loop_runner_err('get_worker_state_history', exc)
+        return self.get_broker()._get_worker_state_history_blocking(  # pyright: ignore[reportPrivateUsage]
+            worker_id, limit=limit,
+        )
 
     async def get_class_coverage_async(self) -> 'BrokerResult[ClassCoverage]':
         """For each (queue, class) with PENDING rows, whether a live worker serves it.
@@ -2077,18 +2077,16 @@ class Horsies:
         return await self.get_broker().get_class_coverage_async()
 
     def get_class_coverage(self) -> 'BrokerResult[ClassCoverage]':
-        """Synchronous version of ``get_class_coverage_async``.
+        """Synchronous version of ``get_class_coverage_async``: the core's blocking
+        read on the calling thread, with the GIL released, and the same
+        outcomes.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
         if in_running_event_loop():
             return self._async_context_err('get_class_coverage')
-        broker = self.get_broker()
-        try:
-            return broker.run_sync(self.get_class_coverage_async)
-        except LoopRunnerError as exc:
-            return self._loop_runner_err('get_class_coverage', exc)
+        return self.get_broker()._get_class_coverage_blocking()  # pyright: ignore[reportPrivateUsage]
 
     async def get_class_report_async(self) -> 'BrokerResult[ClassReport]':
         """Pending streams with their oldest wait and coverage, and the budget
@@ -2099,18 +2097,16 @@ class Horsies:
         return await self.get_broker().get_class_report_async()
 
     def get_class_report(self) -> 'BrokerResult[ClassReport]':
-        """Synchronous version of ``get_class_report_async``.
+        """Synchronous version of ``get_class_report_async``: the core's blocking
+        read on the calling thread, with the GIL released, and the same
+        outcomes.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
         if in_running_event_loop():
             return self._async_context_err('get_class_report')
-        broker = self.get_broker()
-        try:
-            return broker.run_sync(self.get_class_report_async)
-        except LoopRunnerError as exc:
-            return self._loop_runner_err('get_class_report', exc)
+        return self.get_broker()._get_class_report_blocking()  # pyright: ignore[reportPrivateUsage]
 
     def discover_tasks(
         self,

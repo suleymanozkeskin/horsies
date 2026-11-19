@@ -123,24 +123,25 @@ class PostgresConfig(BaseModel):
         description='Disable prepared statements for transaction-pooled PgBouncer URLs',
     )
     # The ping runs at checkout only for a connection that waited in the
-    # pool for longer than PRE_PING_AFTER_IDLE_S (register_idle_ping). A
-    # connection that dies within that time of its check-in fails the next
-    # statement on it, as one that dies after a ping does.
+    # pool for longer than 1 s (the core's idle ping, DEFAULT_IDLE_PING_AFTER
+    # of crates/horsies-core/src/db/pool.rs). A connection that dies within
+    # that time of its check-in fails the next statement on it, as one that
+    # dies after a ping does.
     pool_pre_ping: bool = Field(
         default=True,
         description=(
             'Whether to ping a pooled connection at checkout when it waited '
-            'in the pool for longer than PRE_PING_AFTER_IDLE_S (1 s)'
+            'in the pool for longer than 1 s'
         ),
     )
     # The pre-ping of the worker process's engine (worker_process_config).
     # The worker sends most of its writes as one statement in autocommit:
     # one round trip each. A pre-ping adds a round trip to a checkout of a
-    # connection that waited in the pool for longer than
-    # PRE_PING_AFTER_IDLE_S. With it off, a dead pooled connection shows at the first
-    # statement instead, as a connection error: finalize retries its phase
-    # and classifies the replay, the claim loop retries the pass. TCP
-    # keepalives and tcp_user_timeout_ms still apply.
+    # connection that waited in the pool for longer than 1 s. With it off,
+    # a dead pooled connection shows at the first statement instead, as a
+    # connection error: finalize retries its phase and classifies the
+    # replay, the claim loop retries the pass. TCP keepalives and
+    # tcp_user_timeout_ms still apply.
     worker_pool_pre_ping: bool = Field(
         default=False,
         description=(
@@ -149,11 +150,11 @@ class PostgresConfig(BaseModel):
         ),
     )
     # The producer defaults match SQLAlchemy's (5 + 10) for each pool. A
-    # producer can hold several pools of this size: one in the resource set
-    # of each event loop that calls the broker (two when
-    # session_database_url differs), and the sync send pool. See Connection
-    # Ceiling in the broker config docs. Raise them for producers that send
-    # at a high rate. A worker process sizes its own pool in its worker
+    # producer's broker holds one core pool of this size on database_url for
+    # every thread and event loop that calls it, and one more on
+    # session_database_url when that URL differs. See Connection Ceiling in
+    # the broker config docs. Raise them for producers that send at a high
+    # rate. A worker process sizes its own pool in its worker
     # profile (WorkerProfile.pool), and task code in a worker child opens
     # the task_send_pool of its child kind.
     # The pool values keep each SQLAlchemy meaning that the core can honor,
@@ -265,6 +266,13 @@ class PostgresConfig(BaseModel):
 
     @field_validator('pool_size')
     def validate_pool_size(cls, v: int) -> int:
+        """Accept a pool size from ``POOL_SIZE_MIN`` to ``POOL_SIZE_MAX``.
+
+        Any other value raises ``ConfigurationError``
+        (``CONFIG_INVALID_BROKER_POOL``). ``0`` is refused with its own cause:
+        SQLAlchemy reads it as no size limit, and the core always bounds its
+        connections.
+        """
         match v:
             case _ if POOL_SIZE_MIN <= v <= POOL_SIZE_MAX:
                 return v
@@ -286,6 +294,13 @@ class PostgresConfig(BaseModel):
 
     @field_validator('max_overflow')
     def validate_max_overflow(cls, v: int) -> int:
+        """Accept an overflow from ``POOL_CONNECTIONS_MIN`` to ``POOL_CONNECTIONS_MAX``.
+
+        Any other value raises ``ConfigurationError``
+        (``CONFIG_INVALID_BROKER_POOL``). ``-1`` is refused with its own cause:
+        SQLAlchemy reads it as no overflow limit, and the core always bounds
+        its connections.
+        """
         match v:
             case _ if POOL_CONNECTIONS_MIN <= v <= POOL_CONNECTIONS_MAX:
                 return v
@@ -307,6 +322,11 @@ class PostgresConfig(BaseModel):
 
     @field_validator('pool_timeout')
     def validate_pool_timeout(cls, v: int) -> int:
+        """Accept whole seconds from ``WHOLE_SECONDS_MIN`` to ``WHOLE_SECONDS_MAX``.
+
+        ``0`` means that a checkout does not wait. Any other value raises
+        ``ConfigurationError`` (``CONFIG_INVALID_BROKER_POOL``).
+        """
         match v:
             case _ if WHOLE_SECONDS_MIN <= v <= WHOLE_SECONDS_MAX:
                 return v
@@ -321,6 +341,11 @@ class PostgresConfig(BaseModel):
 
     @field_validator('pool_recycle')
     def validate_pool_recycle(cls, v: int) -> int:
+        """Accept ``-1`` or whole seconds from ``WHOLE_SECONDS_MIN`` to ``WHOLE_SECONDS_MAX``.
+
+        ``-1`` means that a connection is never replaced by age. Any other
+        value raises ``ConfigurationError`` (``CONFIG_INVALID_BROKER_POOL``).
+        """
         match v:
             case _ if WHOLE_SECONDS_MIN <= v <= WHOLE_SECONDS_MAX:
                 return v

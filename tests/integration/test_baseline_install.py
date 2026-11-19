@@ -7,6 +7,7 @@ database is checked to be unchanged.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
 from typing import Final, LiteralString
@@ -15,17 +16,17 @@ import psycopg
 import pytest
 import pytest_asyncio
 from pydantic import SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from horsies.core.baseline.migration import BaselineMigration, load_baseline_migration
+from horsies._core import (
+    CoreContractViolation,
+    IdMintRefused,
+    mint_task_id as core_mint_task_id,
+)
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.history.identity.uuid7 import mint_task_id
 from horsies.core.history.periods import RetentionDays, period_class_key
-from horsies.core.history.reads.publisher import (
-    PUBLISHED_READER_SIGNATURES,
-    StagedLoaderPublisher,
-)
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.retention import RetentionConfig
@@ -33,7 +34,8 @@ from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.monitoring import cancel_task
 from horsies.core.utils.url import to_psycopg_url
-from horsies.core.utils.url import sqlalchemy_url
+from tests.sqlalchemy_url import sqlalchemy_url
+from tests.baseline_sql import baseline_checksum
 from tests.integration.conftest import DB_URL
 from tests.integration.isolated_database import isolated_test_database
 
@@ -50,8 +52,13 @@ _OBJECT_COUNT_SQL: Final[LiteralString] = """
 """
 
 
-def _migration() -> BaselineMigration:
-    return load_baseline_migration()
+def mint_task_id() -> uuid.UUID:
+    """A new task id from the core's UUIDv7 source, as a send mints it."""
+    match core_mint_task_id():
+        case uuid.UUID() as task_id:
+            return task_id
+        case IdMintRefused(cause=cause):
+            pytest.fail(f'the core refused to mint a task id: {cause}')
 
 
 @pytest_asyncio.fixture
@@ -94,6 +101,15 @@ async def _installed(url: str) -> None:
     assert await _initialize(url) == Ok(None)
 
 
+PUBLISHED_READER_SIGNATURES: Final = (
+    'horsies_task_history_duplicate_staged(uuid)',
+    'horsies_task_provenance_staged(uuid)',
+    'horsies_task_detail_staged(uuid)',
+    'horsies_task_result_staged(uuid)',
+)
+"""The readers that ``horsies_publish_history_readers`` publishes, as
+``to_regprocedure`` names them."""
+
 _MISSING_READERS_SQL: Final[LiteralString] = """
     SELECT array_agg(reader.signature ORDER BY reader.signature)
     FROM unnest(CAST(%(readers)s AS text[])) AS reader(signature)
@@ -111,26 +127,30 @@ async def _missing_readers(connection: Connection) -> object:
 
 
 async def _publication_is_current(url: str) -> bool:
-    """The publisher's own check: the manifest equals the catalog and every reader is stamped."""
+    """The baseline's freshness check (``horsies_history_readers_current``):
+    the manifest equals the catalog and every reader is stamped."""
     engine = create_async_engine(sqlalchemy_url(url))
     try:
         async with engine.connect() as connection:
-            return await StagedLoaderPublisher().is_current(connection)
+            current = (
+                await connection.execute(text('SELECT horsies_history_readers_current()'))
+            ).scalar_one()
     finally:
         await engine.dispose()
+    assert isinstance(current, bool), current
+    return current
 
 
 @pytest.mark.asyncio(loop_scope='function')
 async def test_fresh_database_reaches_version_1000(database_url: str) -> None:
     await _installed(database_url)
-    migration = _migration()
     connection = await _connect(database_url)
     try:
         cursor = await connection.execute(
             'SELECT version, description, success, checksum FROM horsies_migrations'
         )
         assert await cursor.fetchall() == [
-            (1000, 'baseline', True, migration.checksum),
+            (1000, 'baseline', True, baseline_checksum()),
         ]
         assert await _fetch_one(connection, 'SELECT only_row, family FROM horsies_client_family') == (
             True,
@@ -418,6 +438,46 @@ async def test_installed_database_with_another_state_is_refused(
             case Ok():
                 pytest.fail(f'install accepted the database after: {change}')
         assert await _fetch_one(connection, _OBJECT_COUNT_SQL) == before
+    finally:
+        await connection.close()
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_family_row_that_holds_no_client_family_fails_closed(database_url: str) -> None:
+    """A family value outside PYTHON and RUST is corrupt stored data.
+
+    The test writes it past the CHECK ``horsies_client_family_family_known``,
+    which it drops first. The install fails with the core's contract
+    violation, which names the table, the column and the stored value, and
+    changes nothing. The process does not crash.
+    """
+    await _installed(database_url)
+    connection = await _connect(database_url)
+    try:
+        await connection.execute(
+            'ALTER TABLE horsies_client_family '
+            'DROP CONSTRAINT horsies_client_family_family_known'
+        )
+        await connection.execute("UPDATE horsies_client_family SET family = 'GO'")
+        before = await _fetch_one(connection, _OBJECT_COUNT_SQL)
+        broker = PostgresBroker(PostgresConfig(database_url=SecretStr(database_url)))
+        try:
+            match await broker.ensure_schema_initialized():
+                case Err(
+                    BrokerOperationFailed(
+                        code=BrokerErrorCode.SCHEMA_INIT_FAILED,
+                        retryable=False,
+                        exception=CoreContractViolation() as exception,
+                    )
+                ):
+                    assert exception.subject == 'install_schema'
+                    assert 'horsies_client_family.family holds "GO"' in exception.message
+                case other:
+                    pytest.fail(f'expected the contract violation of the family row: {other!r}')
+        finally:
+            _ = await broker.close_async()
+        assert await _fetch_one(connection, _OBJECT_COUNT_SQL) == before
+        assert await _fetch_one(connection, 'SELECT family FROM horsies_client_family') == ('GO',)
     finally:
         await connection.close()
 

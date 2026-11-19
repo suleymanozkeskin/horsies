@@ -37,7 +37,6 @@ from horsies.core.models.boot_failure import (
 )
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.utils.loop_runner import in_running_event_loop
-from horsies.core.utils.task_loop_registry import register_task_loop, unregister_task_loop
 from horsies.core.worker.child_frames import (
     MAX_LEFTOVER_NAME_CHARS,
     MAX_LEFTOVER_TASK_NAMES,
@@ -50,9 +49,10 @@ from horsies.core.worker.child_frames import (
 
 logger = get_logger('worker')
 
-# The child closes its loop after a stop frame. The parent kills a child that
-# has not exited CHILD_STOP_TIMEOUT_S (10 s) after that frame, so the close
-# must end before that time: LOOP_CLOSE_TIMEOUT_S plus
+# The child closes its loop after a stop frame. The worker kills a child that
+# has not exited CHILD_STOP_TIMEOUT (10 s, horsies-core
+# worker/executor/supervisor/channel.rs) after that frame, so the close must
+# end before that time: LOOP_CLOSE_TIMEOUT_S plus
 # ASYNCGEN_SHUTDOWN_MIN_TIMEOUT_S plus EXECUTOR_SHUTDOWN_MIN_TIMEOUT_S stays
 # under it.
 LOOP_CLOSE_TIMEOUT_S: Final = 5.0
@@ -323,10 +323,7 @@ class TaskLoop:
                 # A step that raises still leaves the loop closed. Until the
                 # executor step ends, its threads can still run.
                 self._state = LoopClosed(ExecutorThreadsLeft())
-                try:
-                    self._state = LoopClosed(_close_loop(loop))
-                finally:
-                    unregister_task_loop(loop)
+                self._state = LoopClosed(_close_loop(loop))
             case LoopClosed():
                 pass
             case _ as unreachable:
@@ -421,9 +418,6 @@ def _new_loop() -> Result[asyncio.AbstractEventLoop, LoopCreateFailed]:
     failure path: the child reports it and exits before it is ready.
     ``KeyboardInterrupt`` and ``SystemExit`` are not ``Exception`` and stay
     uncaught.
-
-    A created loop is registered as a task loop, so a broker does not count
-    it against its limit of caller loops.
     """
     try:
         loop = asyncio.new_event_loop()
@@ -435,7 +429,6 @@ def _new_loop() -> Result[asyncio.AbstractEventLoop, LoopCreateFailed]:
         )
         logger.error('%s', failed.describe())
         return Err(failed)
-    register_task_loop(loop)
     return Ok(loop)
 
 

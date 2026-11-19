@@ -11,10 +11,13 @@
 //!   spawn request byte, so the Python side defines none of them.
 //!
 //! Every call is pure: no runtime starts, no thread, no connection. The calls
-//! that decode or encode check only the fork rule of every core call, so the
-//! preload process, where the core never starts, may call them before it
-//! forks. A refused frame is a value; a defect of the caller (a constructor
-//! value outside its bound) raises `ValueError`.
+//! that decode or encode check only the fork rule of every core call
+//! (`process_core::fork_refusal`): the preload process, where the core never
+//! starts, may call them before it forks, and a worker child whose core
+//! stopped still reports its last frames to the worker before it ends itself
+//! (the release of a start it refused). A fork of a child cannot speak on the
+//! channel of its parent. A refused frame is a value; a defect of the caller
+//! (a constructor value outside its bound) raises `ValueError`.
 
 mod child;
 mod parent;
@@ -28,17 +31,17 @@ use horsies_core::frame_protocol::{
     decode_parent_frame as core_decode_parent_frame, encode_child_frame as core_encode_child_frame,
     encode_preload_frame as core_encode_preload_frame, EncodedFrame, FrameEncodeError,
     FrameOverBound, FrameReader, ParentFrame, ParentFrameRefusal, BAD_ARGUMENTS_EXIT_CODE,
-    BAD_PARENT_FRAME_EXIT_CODE, BOOT_FAILED_EXIT_CODE, CHILD_HOOK_FAILED_EXIT_CODE, MAX_BODY_BYTES,
-    MAX_LEFTOVER_TASK_NAMES, MAX_META_BYTES, PARENT_GONE_EXIT_CODE, PROTOCOL_MISMATCH_EXIT_CODE,
-    PROTOCOL_VERSION, REPARENT_FAILED_EXIT_CODE, SPAWN_REQUEST_BYTE,
-    STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
+    BAD_PARENT_FRAME_EXIT_CODE, BOOT_FAILED_EXIT_CODE, CHILD_HOOK_FAILED_EXIT_CODE,
+    CORE_STOPPED_EXIT_CODE, MAX_BODY_BYTES, MAX_LEFTOVER_TASK_NAMES, MAX_META_BYTES,
+    PARENT_GONE_EXIT_CODE, PROTOCOL_MISMATCH_EXIT_CODE, PROTOCOL_VERSION,
+    REPARENT_FAILED_EXIT_CODE, SPAWN_REQUEST_BYTE, STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3::IntoPyObjectExt;
 
 use crate::errors::refusal_error;
-use crate::process_core::pure_call_refusal;
+use crate::process_core::fork_refusal;
 
 use child::ChildFrameArgument;
 use parent::{parent_frame_object, parent_refusal_object};
@@ -58,6 +61,9 @@ pub struct ProtocolNumbers {
     boot_failed_exit_code: i32,
     reparent_failed_exit_code: i32,
     protocol_mismatch_exit_code: i32,
+    /// The core of the child stopped, or the process is a fork of the
+    /// child: the child ends itself with this code.
+    core_stopped_exit_code: i32,
     child_hook_failed_exit_code: i32,
     spawn_request_byte: u8,
     /// A report of left work names `min(count, max_leftover_task_names)`
@@ -112,9 +118,9 @@ impl FrameTooLarge {
 }
 
 /// Refuse a call in a process forked without `exec` after the core started
-/// in its parent, or in a process whose core stopped.
+/// in its parent. A process whose core stopped is not refused.
 fn refuse_by_fork_rule() -> PyResult<()> {
-    match pure_call_refusal() {
+    match fork_refusal() {
         Some(refusal) => Err(refusal_error(refusal)),
         None => Ok(()),
     }
@@ -145,6 +151,7 @@ fn protocol_numbers() -> ProtocolNumbers {
         boot_failed_exit_code: BOOT_FAILED_EXIT_CODE,
         reparent_failed_exit_code: REPARENT_FAILED_EXIT_CODE,
         protocol_mismatch_exit_code: PROTOCOL_MISMATCH_EXIT_CODE,
+        core_stopped_exit_code: CORE_STOPPED_EXIT_CODE,
         child_hook_failed_exit_code: CHILD_HOOK_FAILED_EXIT_CODE,
         spawn_request_byte: SPAWN_REQUEST_BYTE,
         max_leftover_task_names: MAX_LEFTOVER_TASK_NAMES,

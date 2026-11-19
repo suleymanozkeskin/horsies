@@ -147,19 +147,39 @@ elif result.ok_value is not None:
 
 ### `mark_stale_tasks_as_failed(stale_threshold_ms: int = 300_000, finalizing_stale_threshold_ms: int = 300_000) -> BrokerResult[int]`
 
-Handle RUNNING tasks with no heartbeat within the threshold. Tasks with a retry policy listing `WORKER_CRASHED` in `auto_retry_for` (and retries remaining) are scheduled for retry; all others are marked FAILED with `WORKER_CRASHED` error code.
+Run the stale RUNNING recovery pass once. The reaper of each worker runs the same pass every `check_interval_ms` when `RecoveryConfig.auto_fail_stale_running` is on. Use this method to run the pass when that setting is off, or between two reaper passes.
+
+The pass recovers each RUNNING task with no runner heartbeat within the threshold, as [Stale RUNNING Recovery](/horsies/workers/heartbeats-recovery/#stale-running-recovery) states. A task with a retry policy that lists `WORKER_CRASHED` in `auto_retry_for`, and with retries left, is scheduled for retry. Each other task goes to FAILED with the `WORKER_CRASHED` error code.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `stale_threshold_ms` | `int` | `300_000` (5 min) | Milliseconds without heartbeat to consider crashed |
-| `finalizing_stale_threshold_ms` | `int` | `300_000` (5 min) | Milliseconds a completed child may remain finalizing before recovery |
+| `stale_threshold_ms` | `int` | `300_000` (5 min) | Milliseconds without a runner heartbeat to consider the task crashed. 0 to 2,147,483,647 |
+| `finalizing_stale_threshold_ms` | `int` | `300_000` (5 min) | Milliseconds a completed child may remain finalizing before recovery. 0 to 2,147,483,647 |
 
-**Returns:** `Ok(int)` — number of tasks processed (retried or failed).
+**Returns:** `Ok(int)`: the number of tasks retried or failed. One call reads at most 1,000 stale tasks. When it reads 1,000, it logs a warning on `horsies.broker`, and the next pass recovers the rest: the next call, or the next reaper pass.
+
+**Errors:** `CLEANUP_FAILED`, with nothing written, when the scan, the connection or the client family check fails, or when a threshold is outside 0 to 2,147,483,647 ms (not retryable). A task whose write fails is logged and skipped; the pass goes on with the next task.
 
 ```python
 result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
 if is_ok(result):
-    print(f"Marked {result.ok_value} crashed tasks as FAILED")
+    print(f"Retried or failed {result.ok_value} crashed tasks")
+```
+
+### `terminate_orphaned_workflow_tasks() -> BrokerResult[int]`
+
+Run one page of the orphan workflow-task pass. The reaper of each worker runs one page every `orphan_task_audit_interval_ms` when `RecoveryConfig.auto_terminate_orphaned_workflow_tasks` is on. Use this method to run a page when that setting is off.
+
+A page scans at most 500 PENDING and CLAIMED workflow tasks, from where the previous page stopped. Each scanned task that no runnable workflow node links moves to history as CANCELLED. The page is one transaction. `audit_orphaned_workflow_tasks()` runs the same page and returns its scan counts.
+
+**Returns:** `Ok(int)`: the number of tasks cancelled.
+
+**Errors:** `CLEANUP_FAILED` when the page fails. Nothing is committed; after a lost `COMMIT` reply, the outcome is unknown. When another sweep holds the scan cursor, the page is refused at once: the `exception` is `CoreServerError` with `sqlstate` `'55P03'`, and the error is retryable.
+
+```python
+result = await broker.terminate_orphaned_workflow_tasks()
+if is_ok(result):
+    print(f"Cancelled {result.ok_value} orphaned workflow tasks")
 ```
 
 ### `requeue_stale_claimed(stale_threshold_ms: int = 120_000) -> BrokerResult[int]`

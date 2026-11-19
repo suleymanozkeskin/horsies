@@ -24,18 +24,21 @@
 //!   its catalog, as a Python sync call inside a running event loop does:
 //!   `TaskSendError::AsyncContext` (with the prepared task id and payload,
 //!   so `retry_send(&error).await` completes the same send),
-//!   `ReadError::AsyncContext`, `BrokerOperationError` with
-//!   `BrokerErrorCode::AsyncContext`, a `CheckReport` with `HRS-217`,
+//!   `ReadError::AsyncContext`, `BrokerOperationError::AsyncContext`, a
+//!   `CheckReport` with `HRS-217`,
 //!   `WorkflowStartErrorCode::AsyncContext` with the workflow id of the
 //!   start, `HandleErrorCode::AsyncContext`, or
 //!   `WorkflowReadError::AsyncContext`.
 //! - The thread of a blocking task body in a worker child (a `fn` task)
 //!   drives no async task: a blocking call works there, also where the
 //!   child runtime's handle is set.
-//! - When the process runtime cannot run the call (this process is a fork
-//!   of the one that started it, or the OS refused its threads), the call
-//!   answers the database failure of its catalog with the cause; nothing
-//!   was sent.
+//! - When the OS refused the threads of the process runtime, the call
+//!   answers the retryable database failure of its catalog with the cause;
+//!   nothing ran, and a later call tries the start again.
+//! - In a process that was forked without `exec` after the process runtime
+//!   started, every call panics before it runs anything: a fork is a state
+//!   of the process, never a result, as every Python core call raises
+//!   `ForkedAfterCoreStart`.
 
 mod workflow;
 
@@ -44,14 +47,16 @@ pub use workflow::{
     WorkflowTemplateView,
 };
 
+use std::fmt;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use horsies_core::process_runtime::{process_runtime, ProcessRuntimeRefusal};
+use horsies_core::process_runtime::ProcessRuntimeRefusal;
 use horsies_core::{
-    process_role, thread_role, BrokerErrorCode, BrokerOperationError, ClassCoverage, ClassReport,
-    DatabasePing, ProcessRole, SendKind, TaskSendError, ThreadRole, WorkerPong,
+    process_role, thread_role, BrokerError, BrokerErrorCode, BrokerOperationError,
+    BrokerOperationFailedCode, BrokerOperationSource, ClassCoverage, ClassReport, DatabasePing,
+    FailureCause, ProcessRole, SendKind, TaskSendError, ThreadRole, WorkerPong,
     WorkerStateSnapshot,
 };
 use serde::de::DeserializeOwned;
@@ -60,6 +65,7 @@ use tokio::runtime::{Handle, Runtime};
 use uuid::Uuid;
 
 use crate::check::{connectivity_report, CHECK};
+use crate::process_state::{runtime_for, RuntimeStartFailed};
 use crate::send::{RetryOf, SendStart};
 use crate::{
     CheckPassed, CheckReport, ErrorCode, Horsies, HorsiesError, PingTarget, ReadError,
@@ -73,28 +79,26 @@ enum Place {
     Runs(&'static Runtime),
     /// This thread runs a tokio runtime: a wait would stall it.
     AsyncContext,
-    /// The process runtime cannot run the call.
-    RuntimeRefused(ProcessRuntimeRefusal),
+    /// The OS refused the threads of the process runtime. A later call
+    /// tries the start again, so the call's failure is retryable.
+    RuntimeStartFailed(RuntimeStartFailed),
 }
 
-/// Where a blocking call from this thread runs. Starts the process runtime
-/// at its first use.
-fn place() -> Place {
+/// Where the blocking call `call` from this thread runs. Starts the process
+/// runtime at its first use.
+///
+/// # Panics
+///
+/// In a fork, without `exec`, of the process that started the process
+/// runtime (`process_state::runtime_for`), on a thread that is not a
+/// runtime thread. Nothing ran.
+fn place(call: fmt::Arguments<'_>) -> Place {
     match (Handle::try_current().is_ok(), thread_role()) {
         (true, ThreadRole::Other) => Place::AsyncContext,
-        (false, _) | (true, ThreadRole::BlockingTaskBody) => match process_runtime() {
+        (false, _) | (true, ThreadRole::BlockingTaskBody) => match runtime_for(call) {
             Ok(runtime) => Place::Runs(runtime.runtime()),
-            Err(refusal) => Place::RuntimeRefused(refusal),
+            Err(failed) => Place::RuntimeStartFailed(failed),
         },
-    }
-}
-
-/// Whether a runtime refusal may clear: a start that the OS refused is
-/// tried again at the next use; a fork never gets a runtime. Pure.
-fn refusal_retryable(refusal: &ProcessRuntimeRefusal) -> bool {
-    match refusal {
-        ProcessRuntimeRefusal::StartFailed { .. } => true,
-        ProcessRuntimeRefusal::ForkedAfterStart { .. } => false,
     }
 }
 
@@ -199,6 +203,11 @@ where
     }
 
     /// The enqueue with resends of a prepared send, on the process runtime.
+    ///
+    /// # Panics
+    ///
+    /// In a fork, without `exec`, of the process that started the process
+    /// runtime ([`place`]). Nothing was sent.
     fn enqueue(
         &self,
         task_id: Uuid,
@@ -206,7 +215,10 @@ where
         kind: SendKind,
         call: &str,
     ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        match place() {
+        match place(format_args!(
+            "blocking {call} of task '{}'",
+            self.function.task_name()
+        )) {
             Place::Runs(runtime) => {
                 runtime.block_on(self.function.enqueue_with_resends(task_id, payload, kind))
             }
@@ -221,13 +233,25 @@ where
                     self.function.task_name()
                 ),
             }),
-            Place::RuntimeRefused(refusal) => Err(TaskSendError::EnqueueFailed {
-                task_id,
-                payload: Box::new(payload),
-                message: format!("the send did not start: {refusal}"),
-                retryable: refusal_retryable(&refusal),
-            }),
+            Place::RuntimeStartFailed(failed) => Err(start_failed_send(task_id, payload, &failed)),
         }
+    }
+}
+
+/// The answer of a blocking send whose process runtime the OS refused to
+/// start: `EnqueueFailed` with the prepared task id and payload, retryable,
+/// since the next use tries the start again. Nothing was sent. Pure.
+fn start_failed_send(
+    task_id: Uuid,
+    payload: horsies_core::TaskSendPayload,
+    failed: &RuntimeStartFailed,
+) -> TaskSendError {
+    TaskSendError::EnqueueFailed {
+        task_id,
+        payload: Box::new(payload),
+        message: format!("the send did not start: {failed}"),
+        retryable: true,
+        cause: FailureCause::PreconditionFailed,
     }
 }
 
@@ -310,46 +334,56 @@ where
 }
 
 /// Run a read on the process runtime, or answer why it cannot run.
+///
+/// # Panics
+///
+/// In a fork ([`place`]).
 fn block_read<V>(
     read: impl Future<Output = Result<V, ReadError>>,
     blocking_call: &str,
     async_call: &str,
 ) -> Result<V, ReadError> {
-    match place() {
+    match place(format_args!("blocking {blocking_call}")) {
         Place::Runs(runtime) => runtime.block_on(read),
         Place::AsyncContext => Err(ReadError::AsyncContext {
             message: async_context_message(blocking_call, async_call),
         }),
-        Place::RuntimeRefused(refusal) => Err(ReadError::Database {
+        Place::RuntimeStartFailed(failed) => Err(ReadError::Database {
             code: BrokerErrorCode::TaskInfoQueryFailed,
-            message: format!("the read did not start: {refusal}"),
-            retryable: refusal_retryable(&refusal),
+            message: format!("the read did not start: {failed}"),
+            retryable: true,
         }),
     }
 }
 
 /// Run a health read on the process runtime, or answer why it cannot run.
-/// A runtime refusal has the broker code `code` of the read.
+/// A runtime that did not start has the broker code `code` of the read,
+/// retryable, with the refusal as its cause.
+///
+/// # Panics
+///
+/// In a fork ([`place`]).
 fn block_health<V>(
     read: impl Future<Output = Result<V, BrokerOperationError>>,
-    code: BrokerErrorCode,
+    code: BrokerOperationFailedCode,
     blocking_call: &str,
     async_call: &str,
 ) -> Result<V, BrokerOperationError> {
-    match place() {
+    match place(format_args!("blocking {blocking_call}")) {
         Place::Runs(runtime) => runtime.block_on(read),
-        Place::AsyncContext => Err(BrokerOperationError {
-            code: BrokerErrorCode::AsyncContext,
+        Place::AsyncContext => Err(BrokerOperationError::AsyncContext {
             message: async_context_message(blocking_call, async_call),
-            retryable: false,
-            cause: horsies_core::FailureCause::PreconditionFailed,
         }),
-        Place::RuntimeRefused(refusal) => Err(BrokerOperationError {
+        Place::RuntimeStartFailed(failed) => Err(BrokerOperationError::operation_failed(
             code,
-            message: format!("the read did not start: {refusal}"),
-            retryable: refusal_retryable(&refusal),
-            cause: horsies_core::FailureCause::PreconditionFailed,
-        }),
+            format!("the read did not start: {failed}"),
+            BrokerOperationSource::Broker(BrokerError::ProcessRuntime(
+                ProcessRuntimeRefusal::StartFailed {
+                    cause: failed.cause,
+                    os_error: failed.os_error,
+                },
+            )),
+        )),
     }
 }
 
@@ -417,7 +451,7 @@ impl HorsiesView<'_> {
     pub fn ping_database(&self) -> Result<DatabasePing, BrokerOperationError> {
         block_health(
             self.app.ping_database(),
-            BrokerErrorCode::DbPingFailed,
+            BrokerOperationFailedCode::DbPingFailed,
             "Horsies::ping_database()",
             "app.ping_database()",
         )
@@ -432,7 +466,7 @@ impl HorsiesView<'_> {
     ) -> Result<Vec<WorkerPong>, BrokerOperationError> {
         block_health(
             self.app.ping_workers(target, timeout, min_responses),
-            BrokerErrorCode::WorkerPingFailed,
+            BrokerOperationFailedCode::WorkerPingFailed,
             "Horsies::ping_workers()",
             "app.ping_workers(target, timeout, min_responses)",
         )
@@ -442,7 +476,7 @@ impl HorsiesView<'_> {
     pub fn list_worker_states(&self) -> Result<Vec<WorkerStateSnapshot>, BrokerOperationError> {
         block_health(
             self.app.list_worker_states(),
-            BrokerErrorCode::MonitoringQueryFailed,
+            BrokerOperationFailedCode::MonitoringQueryFailed,
             "Horsies::list_worker_states()",
             "app.list_worker_states()",
         )
@@ -455,7 +489,7 @@ impl HorsiesView<'_> {
     ) -> Result<Option<WorkerStateSnapshot>, BrokerOperationError> {
         block_health(
             self.app.get_worker_state(worker_id),
-            BrokerErrorCode::MonitoringQueryFailed,
+            BrokerOperationFailedCode::MonitoringQueryFailed,
             "Horsies::get_worker_state()",
             "app.get_worker_state(worker_id)",
         )
@@ -469,7 +503,7 @@ impl HorsiesView<'_> {
     ) -> Result<Vec<WorkerStateSnapshot>, BrokerOperationError> {
         block_health(
             self.app.get_worker_state_history(worker_id, limit),
-            BrokerErrorCode::MonitoringQueryFailed,
+            BrokerOperationFailedCode::MonitoringQueryFailed,
             "Horsies::get_worker_state_history()",
             "app.get_worker_state_history(worker_id, limit)",
         )
@@ -479,7 +513,7 @@ impl HorsiesView<'_> {
     pub fn get_class_coverage(&self) -> Result<ClassCoverage, BrokerOperationError> {
         block_health(
             self.app.get_class_coverage(),
-            BrokerErrorCode::MonitoringQueryFailed,
+            BrokerOperationFailedCode::MonitoringQueryFailed,
             "Horsies::get_class_coverage()",
             "app.get_class_coverage()",
         )
@@ -489,7 +523,7 @@ impl HorsiesView<'_> {
     pub fn get_class_report(&self) -> Result<ClassReport, BrokerOperationError> {
         block_health(
             self.app.get_class_report(),
-            BrokerErrorCode::MonitoringQueryFailed,
+            BrokerOperationFailedCode::MonitoringQueryFailed,
             "Horsies::get_class_report()",
             "app.get_class_report()",
         )
@@ -500,11 +534,11 @@ impl HorsiesView<'_> {
     /// `HRS-217` (Python `CHECK_LIVE_ASYNC_CONTEXT`).
     pub fn check_live(&self) -> Result<CheckPassed, CheckReport> {
         let _static_passed = self.app.check()?;
-        match place() {
+        match place(format_args!("blocking Horsies::check_live()")) {
             Place::Runs(runtime) => runtime.block_on(self.app.check_live()),
             Place::AsyncContext => Err(live_check_in_async_context()),
-            Place::RuntimeRefused(refusal) => Err(connectivity_report(&format!(
-                "the live check did not start: {refusal}"
+            Place::RuntimeStartFailed(failed) => Err(connectivity_report(&format!(
+                "the live check did not start: {failed}"
             ))),
         }
     }
@@ -623,8 +657,8 @@ mod tests {
     #[tokio::test]
     async fn a_blocking_health_read_on_a_runtime_thread_has_the_async_context_code() {
         let refused = app().blocking().ping_database().unwrap_err();
-        assert_eq!(refused.code, BrokerErrorCode::AsyncContext);
-        assert!(!refused.retryable);
+        assert_eq!(refused.code(), BrokerErrorCode::AsyncContext);
+        assert!(!refused.retryable());
     }
 
     #[tokio::test]
@@ -636,18 +670,40 @@ mod tests {
         );
     }
 
+    /// A runtime start that the OS refused is a retryable `ENQUEUE_FAILED`
+    /// with the prepared task id and payload: the next use tries again.
     #[test]
-    fn a_refused_start_may_clear_and_a_fork_never_does() {
-        assert!(refusal_retryable(&ProcessRuntimeRefusal::StartFailed {
-            cause: "EAGAIN".to_owned(),
-            os_error: horsies_core::process_runtime::OsErrorCode::Code(11),
-        }));
-        assert!(!refusal_retryable(
-            &ProcessRuntimeRefusal::ForkedAfterStart {
-                core_pid: 1,
-                this_pid: 2,
-            }
-        ));
+    fn a_send_whose_runtime_did_not_start_is_a_retryable_enqueue_failed() {
+        let app = app();
+        let (task_id, payload) = function(&app)
+            .prepare(SendStart::Now, &TaskSendOptions::new(), &Invoice { id: 3 })
+            .unwrap();
+        let refused = start_failed_send(
+            task_id,
+            payload,
+            &RuntimeStartFailed {
+                cause: "EAGAIN".to_owned(),
+                os_error: horsies_core::process_runtime::OsErrorCode::Code(11),
+            },
+        );
+        let TaskSendError::EnqueueFailed {
+            task_id: failed_id,
+            payload,
+            message,
+            retryable,
+            cause,
+        } = &refused
+        else {
+            panic!("expected ENQUEUE_FAILED, got {refused}");
+        };
+        assert_eq!(*failed_id, task_id);
+        assert_eq!(payload.input_json, r#"{"id":3}"#);
+        assert!(
+            message.contains("the send did not start: the core runtime could not start: EAGAIN"),
+            "{message}"
+        );
+        assert!(*retryable);
+        assert_eq!(*cause, FailureCause::PreconditionFailed);
     }
 
     #[test]

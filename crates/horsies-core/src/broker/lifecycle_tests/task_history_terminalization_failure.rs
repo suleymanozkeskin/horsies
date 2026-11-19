@@ -14,6 +14,7 @@ use crate::broker::attempt_writes::{
 };
 use crate::core::history::rerun::input_envelope::decode_framed_rerun_input;
 use crate::core::lifecycle::FailedAttemptOutcome;
+use crate::test_support::sql::TestPool;
 
 const FAILURE_RESULT: &str = r#"{"error":{"code":"BOOM"}}"#;
 
@@ -33,7 +34,7 @@ fn failure(task_id: Uuid) -> FinishFailedAttempt {
     }
 }
 
-async fn fail(pool: &sqlx::PgPool, task_id: Uuid) {
+async fn fail(pool: &TestPool, task_id: Uuid) {
     let outcome = write_failed_attempt(pool, &failure(task_id))
         .await
         .expect("failure write");

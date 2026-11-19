@@ -377,8 +377,7 @@ async fn read_task(
     }
 }
 
-/// The 404 detail text for a task id that no table holds (Python
-/// `tests/dualrun/reference/web_routes/tasks.py`, `task_not_found_text`).
+/// The 404 detail text for a task id that no table holds.
 pub(super) fn task_not_found_text(reason: TaskAbsenceReason) -> &'static str {
     match reason {
         TaskAbsenceReason::PredatesRetainedHistory => {
@@ -530,7 +529,7 @@ async fn read_worker_ping(
         .broker
         .ping_workers(None, Duration::from_secs_f64(params.timeout_seconds), None)
         .await
-        .map_err(|error| ApiError::unavailable(format!("Worker ping failed: {}", error.message)))?
+        .map_err(|error| ApiError::unavailable(format!("Worker ping failed: {}", error.message())))?
         .into_iter()
         .map(|pong| WorkerPingInfo {
             worker_id: pong.worker_id,
@@ -556,29 +555,25 @@ async fn read_schedules(
 }
 
 /// Pending streams per (queue, class) with their oldest wait and coverage,
-/// and the budget load of each live worker (Python `read_class_report`,
-/// `tests/dualrun/reference/web_routes/workers.py:84-94`). A failed or refused read is 503.
+/// and the budget load of each live worker. A failed or refused read is 503.
 async fn read_class_report(
     State(state): State<WebState>,
 ) -> Result<Json<ClassReportInfo>, ApiError> {
     let report = state.broker.get_class_report().await.map_err(|error| {
-        ApiError::unavailable(format!("Class report query failed: {}", error.message))
+        ApiError::unavailable(format!("Class report query failed: {}", error.message()))
     })?;
     Ok(Json(class_report_info(&report)))
 }
 
 /// A snapshot older than this is stale: the worker stopped reporting. The
-/// fleet check counts the same workers as live (Python
-/// `STALE_SNAPSHOT_THRESHOLD_S`, `tests/dualrun/reference/web_routes/workers.py:31-35`).
+/// fleet check counts the same workers as live.
 const STALE_SNAPSHOT_THRESHOLD_S: i64 = WORKER_STATE_LIVE_WINDOW_S as i64;
 
-/// One entry of the worker list (Python `read_workers`,
-/// `tests/dualrun/reference/web_routes/workers.py:96-133`).
+/// One entry of the worker list.
 ///
 /// The snapshot age, the staleness and the uptime are measured to `read_at`,
 /// the database clock of the list statement: `snapshot_at` and
-/// `worker_started_at` are database times too. Python measures them to the
-/// web host clock (`workers.py:108-119`).
+/// `worker_started_at` are database times too.
 pub(super) fn worker_state(listed: ListedWorkerState) -> WorkerStateInfo {
     let ListedWorkerState { snapshot, read_at } = listed;
     let age = elapsed_s(Some(snapshot.snapshot_at), Some(read_at));
@@ -614,7 +609,7 @@ async fn read_workers(
         .list_worker_states_with_read_time()
         .await
         .map_err(|error| {
-            ApiError::unavailable(format!("Worker state query failed: {}", error.message))
+            ApiError::unavailable(format!("Worker state query failed: {}", error.message()))
         })?;
     Ok(Json(listed.into_iter().map(worker_state).collect()))
 }
@@ -645,7 +640,7 @@ async fn read_worker_history(
         .get_worker_state_history(&worker_id, Some(params.limit))
         .await
         .map_err(|error| {
-            ApiError::unavailable(format!("Worker history query failed: {}", error.message))
+            ApiError::unavailable(format!("Worker history query failed: {}", error.message()))
         })
         .map(|snapshots| {
             Json(
@@ -688,8 +683,7 @@ async fn read_events(State(state): State<WebState>) -> Response {
         .into_response()
 }
 
-/// The response of an action, with its log line (Python `_respond`,
-/// `tests/dualrun/reference/web_routes/actions.py`): `monitoring action route=...
+/// The response of an action, with its log line: `monitoring action route=...
 /// id=... http=... result=...`, at INFO on `horsies.web`. Every body is JSON
 /// but [`ActionBody::InternalServerError`], which is
 /// [`INTERNAL_SERVER_ERROR_TEXT`] as `text/plain; charset=utf-8`.
@@ -794,7 +788,7 @@ async fn resume_workflow(
     action_response(
         "workflows.resume",
         workflow_id,
-        resume_workflow_action(&state.broker, workflow_id, &state.children).await,
+        resume_workflow_action(&state.broker, workflow_id, state.children.as_ref()).await,
     )
 }
 

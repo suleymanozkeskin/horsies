@@ -320,8 +320,8 @@ BLOCKED_TIME: Final = RunMeasure(
 """The time that a task held the event loop of its shared async child, as the
 worker measured it, in the ``TASK_BLOCKED_LOOP`` and ``NEIGHBOUR_BLOCKED_LOOP``
 reports: ``... held the event loop of its shared async child for <n> ms, past
-the block limit, ...`` (``python/horsies/core/worker/shared_finalize.py``,
-``crates/horsies-core/src/worker/executor/slots/seat_runs.rs``)."""
+the block limit, ...``
+(``crates/horsies-core/src/worker/executor/slots/seat_runs.rs``)."""
 
 KILLED_CHILD_PID: Final = RunMeasure(
     name='killed_child_pid',
@@ -697,6 +697,24 @@ _WORKER_STATES: Final = TableRules(
     identity=('worker_id', 'snapshot_at'),
 )
 
+_WORKER_LIVENESS: Final = TableRules(
+    name='horsies_worker_liveness',
+    columns=_columns(
+        ('worker_id', WORKER_ID),
+        (
+            'generation',
+            Ignored(
+                reason=(
+                    'a value of the sequence horsies_worker_liveness_generation, which no '
+                    'seed reset rewinds: it counts the lock acquisitions of every earlier run'
+                ),
+            ),
+        ),
+    ),
+    order_by=('worker_id',),
+    identity=('worker_id',),
+)
+
 _PHASE2_QUARANTINE: Final = TableRules(
     name='horsies_workflow_phase2_quarantine',
     columns=_columns(
@@ -839,6 +857,7 @@ BASELINE_CATALOG: Final = SnapshotCatalog(
         _TASK_ATTEMPTS,
         _HEARTBEATS,
         _WORKER_STATES,
+        _WORKER_LIVENESS,
         _PHASE2_QUARANTINE,
         _PHASE2_PENDING,
         _RECOVERY_FAILURES,
@@ -848,7 +867,7 @@ BASELINE_CATALOG: Final = SnapshotCatalog(
         _SCHEDULE_STATE,
     ),
 )
-"""The rules of the 20 baseline tables, in labelling order."""
+"""The rules of the 21 baseline tables, in labelling order."""
 
 
 # ---- Notifications ----
@@ -874,7 +893,7 @@ QUEUE_CHANNEL_PREFIX: Final = 'task_queue_'
 
 RETRY_WAKE_PREFIX: Final = 'retry:'
 """The prefix of the wake that a retry sends on the queue of its task:
-``retry:<task id>`` (the worker's retry, ``python/horsies/core/worker/retrying.py``;
+``retry:<task id>`` (the worker's retry, ``crates/horsies-core/src/worker/execution.rs``;
 the stale recovery's retry, ``crates/horsies-core/src/broker/stale_recovery.rs``)."""
 
 

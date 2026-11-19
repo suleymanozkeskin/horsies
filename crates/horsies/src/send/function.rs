@@ -15,6 +15,11 @@
 //! In a worker child the send goes through the child's producer handle
 //! (`child_producer`), whose pool the worker sizes; anywhere else through
 //! the app's handle.
+//!
+//! A send in a process that was forked without `exec` after the core's
+//! process runtime started panics (`process_state::refuse_in_a_fork`): a
+//! fork is a state of the process, never a send result, as Python's sends
+//! raise `ForkedAfterCoreStart`.
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -26,8 +31,8 @@ use horsies_core::core::task::send_types::send_error_from_enqueue;
 use horsies_core::handle::CoreHandle;
 use horsies_core::manifest::WholeSeconds;
 use horsies_core::{
-    child_producer, mint_task_id, ChildProducer, Execution, PayloadPolicy, RetentionConfig,
-    SendKind, TaskOptions, TaskSendError, TaskSendPayload,
+    child_producer, mint_task_id, ChildProducer, Execution, FailureCause, PayloadPolicy,
+    RetentionConfig, SendKind, TaskOptions, TaskSendError, TaskSendPayload,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -35,6 +40,7 @@ use uuid::Uuid;
 
 use super::options::{send_retention, TaskSendOptions};
 use crate::app::SendSuppression;
+use crate::process_state::refuse_in_a_fork;
 use crate::task::body::encode_send_input;
 use crate::{ErrorCode, Horsies, HorsiesError, TaskHandle, UserErrorCode};
 
@@ -88,6 +94,13 @@ pub(crate) enum SendStart {
 /// The typed function of a registered task: input `A`, output `T`, code
 /// type `E`. `#[horsies::task]` returns one from `register`; clones share
 /// one app.
+///
+/// # Panics
+///
+/// Every send, schedule and retry method, and their blocking forms, panic
+/// in a process that was forked without `exec` after the core's process
+/// runtime started in its parent. The fork is a state of the process: no
+/// send in it can run, so it is never a [`TaskSendError`].
 pub struct TaskFunction<A, T, E> {
     task_name: String,
     queue_name: String,
@@ -424,12 +437,18 @@ where
     /// Enqueue `payload` as `task_id`, and resend a retryable
     /// `ENQUEUE_FAILED` when the app asks for it. Every call after the first
     /// is `SendKind::Repeat`.
+    ///
+    /// # Panics
+    ///
+    /// In a fork, without `exec`, of the process that started the core's
+    /// process runtime ([`refuse_in_a_fork`]). Nothing was sent.
     pub(crate) async fn enqueue_with_resends(
         &self,
         task_id: Uuid,
         payload: TaskSendPayload,
         first: SendKind,
     ) -> Result<TaskHandle<T, E>, TaskSendError> {
+        refuse_in_a_fork(format_args!("send of task '{}'", self.task_name));
         let resends = match self.context.resend_on_transient_err {
             true => RESEND_COUNT,
             false => 0,
@@ -447,6 +466,7 @@ where
     fn validation_failed(&self, message: String) -> TaskSendError {
         TaskSendError::ValidationFailed {
             message: format!("{message} (task {})", self.task_name),
+            cause: FailureCause::PreconditionFailed,
         }
     }
 }
@@ -657,7 +677,7 @@ mod tests {
 
     fn validation_message(error: TaskSendError) -> String {
         match error {
-            TaskSendError::ValidationFailed { message } => message,
+            TaskSendError::ValidationFailed { message, .. } => message,
             other => panic!("expected VALIDATION_FAILED, got {other}"),
         }
     }
@@ -849,6 +869,7 @@ mod tests {
             payload: Box::new(payload),
             message: "connection refused".to_owned(),
             retryable: true,
+            cause: FailureCause::Connection,
         }
     }
 
@@ -891,6 +912,7 @@ mod tests {
             (
                 TaskSendError::ValidationFailed {
                     message: "bad".to_owned(),
+                    cause: FailureCause::PreconditionFailed,
                 },
                 RetryOf::Send,
                 "VALIDATION_FAILED",
@@ -969,12 +991,14 @@ mod tests {
                 task_id,
                 payload,
                 message,
+                cause,
                 ..
             } => TaskSendError::EnqueueFailed {
                 task_id,
                 payload,
                 message,
                 retryable,
+                cause,
             },
             other => panic!("expected ENQUEUE_FAILED, got {other}"),
         }
@@ -1019,6 +1043,7 @@ mod tests {
             failed_enqueue(false),
             TaskSendError::ValidationFailed {
                 message: "bad input".to_owned(),
+                cause: FailureCause::PreconditionFailed,
             },
         ] {
             let mut kinds = Vec::new();

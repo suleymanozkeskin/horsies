@@ -8,7 +8,6 @@ marker is not in the text that the library writes: error messages, stored
 from __future__ import annotations
 
 import json
-import logging
 import string
 import traceback
 import uuid
@@ -32,10 +31,6 @@ from pydantic_core import PydanticCustomError
 from pydantic_core._pydantic_core import list_all_errors  # pyright: ignore[reportPrivateImportUsage]
 
 from horsies.core.app import Horsies
-from horsies.core.brokers.postgres import (
-    _operation_failed,  # pyright: ignore[reportPrivateUsage]
-)
-from horsies.core.brokers.result_types import BrokerErrorCode
 from horsies.core.codec.error_payload import MAX_EXCEPTION_CHAIN_LINKS, flatten_exception
 from horsies.core.codec.json_io import SerializationError
 from horsies.core.codec.kwargs import decode_subworkflow_kwargs
@@ -51,7 +46,6 @@ from horsies.core.codec.validation_errors import (
     without_validation_input,
 )
 from horsies.core.errors import ErrorCode, TaskDefinitionError
-from horsies.core.logging import get_logger
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.payload import PayloadPolicy
@@ -60,10 +54,6 @@ from horsies.core.models.tasks import ContractCode, TaskError, TaskResult
 from horsies.core.models.workflow import WorkflowDefinition, WorkflowSpec
 from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.result import is_err
-from horsies.core.worker.health import HealthMixin
-from tests.dualrun.reference.broker_monitoring import (
-    _decode_pong as reference_decode_pong,  # pyright: ignore[reportPrivateUsage]
-)
 
 pytestmark = pytest.mark.unit
 
@@ -502,18 +492,6 @@ class TestSubworkflowKwargs:
         assert MARKER not in str(caught.value)
 
 
-class TestBrokerErrorCause:
-    def test_a_validation_error_cause_is_stored_without_input(self) -> None:
-        error = _refusal(TypeAdapter(int), MARKER)
-
-        result = _operation_failed(BrokerErrorCode.WORKER_PING_FAILED, 'ping failed', error)
-
-        cause = result.err_value.exception
-        assert isinstance(cause, ValueValidationError)
-        assert MARKER not in str(cause)
-        assert result.err_value.retryable is False
-
-
 class TestDefinitionTimeOptions:
     def test_a_refused_decorator_option_holds_no_value(self) -> None:
         app = object.__new__(Horsies)
@@ -549,34 +527,3 @@ class TestDefinitionTimeOptions:
         notes = ' '.join(refused[0].notes)
         assert MARKER not in notes
         assert 'max_retries: Input should be a valid integer' in notes
-
-
-class TestHealthPayloadLogs:
-    @pytest.mark.asyncio
-    async def test_a_refused_ping_payload_is_logged_without_values(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        payload = json.dumps({'correlation_id': 'c-1', 'reply_channel': {'secret': MARKER}})
-
-        with caplog.at_level(logging.WARNING):
-            await HealthMixin._handle_ping(cast(Any, MagicMock()), payload)  # pyright: ignore[reportPrivateUsage]
-
-        assert 'Discarding invalid ping payload' in caplog.text
-        assert MARKER not in caplog.text
-
-    def test_a_refused_pong_payload_is_logged_without_values(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        payload = json.dumps({
-            'correlation_id': 'c-1', 'worker_id': 'w-1', 'hostname': 'h', 'pid': MARKER,
-        })
-        broker_like = cast(Any, SimpleNamespace(logger=get_logger('broker')))
-
-        with caplog.at_level(logging.WARNING):
-            pong = reference_decode_pong(broker_like, payload, 'c-1', 0.0)
-
-        assert pong is None
-        assert 'Discarding invalid pong payload' in caplog.text
-        assert MARKER not in caplog.text

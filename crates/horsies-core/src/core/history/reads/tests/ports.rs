@@ -2,45 +2,45 @@
 //! move, the detail read of a moved task, one republish against a stale
 //! reader body, and the reader settings and failure rules.
 //!
-//! Python specification: `tests/integration/test_duplicate_identity_guard.py`,
-//! `test_task_history_detail_reads.py`, `test_task_history_staged_lookup_function.py`,
-//! `test_reader_publication_stamps.py` and `test_task_result_history_fallback.py`.
+//! Python specification: `tests/integration/test_duplicate_identity_guard.py`
+//! and `test_task_result_history_fallback.py`.
 
 use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::broker::history_reads::{read_history_detail, read_task_result, ResultReaderSeen};
-use crate::broker::pools::unpinged_single_connection_core_pool;
+use crate::broker::pools::unpinged_single_connection_core_pool_for_url;
 use crate::core::history::names::{TASK_DETAIL_FUNCTION, TASK_RESULT_FUNCTION};
 use crate::core::history::reads::publisher::rendered_reader_signatures;
 use crate::core::lifecycle::TerminalizationOutcome;
+use crate::test_support::sql::{self, TestConnection, TestPool};
 use crate::test_support::terminal_writes::{self, TerminalFailure};
 
 const PORT_WORKER: &str = "port-reads-worker";
 
 /// Publish the readers over the default class leaves and commit.
-async fn publish_readers(pool: &PgPool) {
-    let mut transaction = pool.begin().await.expect("begin publication");
-    let coverage = ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
+async fn publish_readers(pool: &TestPool) {
+    let core = core_pool_for_test_url(pool.url());
+    let coverage = ensure_partition_coverage_in_pool(&core, StatementLog::Off, 2, 2, &[])
         .await
         .expect("publish the readers");
+    core.close();
     assert!(
         matches!(coverage, CoverageOutcome::Ensured(_)),
         "{coverage:?}"
     );
-    transaction.commit().await.expect("commit publication");
 }
 
 /// A RUNNING plain task claimed by `PORT_WORKER`. Every baseline column is
 /// named.
 async fn seed_running_task(
-    pool: &PgPool,
+    pool: &TestPool,
     task_id: Uuid,
     class_key: &str,
     input: &str,
     retain_rerun_input: bool,
 ) {
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, task_options, execution,
              retention_class_key, sent_at, created_at,
@@ -71,7 +71,7 @@ async fn seed_running_task(
     .expect("insert running task");
 }
 
-async fn complete(pool: &PgPool, task_id: Uuid) {
+async fn complete(pool: &TestPool, task_id: Uuid) {
     let outcomes =
         terminal_writes::complete_plain_task(pool, task_id, PORT_WORKER, "{\"Ok\":true}")
             .await
@@ -85,8 +85,8 @@ async fn complete(pool: &PgPool, task_id: Uuid) {
     );
 }
 
-async fn clock_exception_count(pool: &PgPool, task_id: Uuid) -> i64 {
-    sqlx::query_scalar(
+async fn clock_exception_count(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar(
         "SELECT count(*) FROM horsies_task_history_clock_exceptions WHERE task_id = $1",
     )
     .bind(task_id)
@@ -105,7 +105,7 @@ async fn a_clock_ahead_move_is_recorded_and_the_guard_finds_it() {
     let database = TestDatabase::create().await;
     publish_readers(&database.pool).await;
     let mut connection = database.pool.acquire().await.expect("acquire clock");
-    let now = database_now(&mut connection).await.expect("database now");
+    let now = database_now(&mut connection).await;
     drop(connection);
     let ahead = v7_with_birth(now + Duration::hours(1));
     let normal = v7_with_birth(now - Duration::minutes(1));
@@ -194,9 +194,9 @@ async fn an_absent_id_that_is_not_a_uuid7_is_not_classified() {
 
 /// Two period classes, one history row in each, in yesterday's leaves. The
 /// readers are published over both. Returns the row of each class.
-async fn seed_two_classes(pool: &PgPool) -> (Uuid, Uuid) {
+async fn seed_two_classes(pool: &TestPool) -> (Uuid, Uuid) {
     let mut transaction = pool.begin().await.expect("begin two-class seed");
-    let now = database_now(&mut transaction).await.expect("database now");
+    let now = database_now(&mut transaction).await;
     let yesterday = utc_day(now - Duration::days(1));
     let mut rows = Vec::new();
     for (sequence, (class_key, days)) in [("standard_30d", 30), ("standard_7d", 7)]
@@ -233,8 +233,8 @@ async fn seed_two_classes(pool: &PgPool) -> (Uuid, Uuid) {
 /// Marks one reader as written by another renderer: its comment is not the
 /// stamp of the published manifest, so `horsies_history_readers_current()`
 /// answers FALSE and the next publication replaces it.
-async fn mark_reader_stale(connection: &mut PgConnection, signature: &str) {
-    sqlx::query(&format!("COMMENT ON FUNCTION {signature} IS 'stale'"))
+async fn mark_reader_stale(connection: &mut TestConnection, signature: &str) {
+    sql::query(&format!("COMMENT ON FUNCTION {signature} IS 'stale'"))
         .execute(connection)
         .await
         .expect("mark the reader stale");
@@ -251,7 +251,7 @@ async fn one_republish_heals_a_stale_provenance_body() {
     let (row_a, row_b) = seed_two_classes(&database.pool).await;
     let mut transaction = database.pool.begin().await.expect("begin divergence");
     assert!(provenance_found(&mut transaction, row_b).await);
-    sqlx::query(
+    sql::query(
         "CREATE OR REPLACE FUNCTION horsies_task_provenance_staged(p_task_id uuid)
          RETURNS TABLE(task_id uuid, status text, terminal_at timestamp with time zone,
                        terminalization_kind text, is_workflow_task boolean,
@@ -287,7 +287,7 @@ async fn one_republish_heals_a_stale_detail_body() {
     let database = TestDatabase::create().await;
     let (_, row_b) = seed_two_classes(&database.pool).await;
     let mut transaction = database.pool.begin().await.expect("begin divergence");
-    sqlx::query(
+    sql::query(
         "CREATE OR REPLACE FUNCTION horsies_task_detail_staged(p_task_id uuid)
          RETURNS TABLE(location text, task_row horsies_task_history)
          LANGUAGE sql STABLE STRICT AS $$
@@ -333,7 +333,7 @@ async fn every_rendered_reader_runs_without_sequential_scans() {
     publish_readers(&database.pool).await;
     for signature in rendered_reader_signatures() {
         let settings: Option<Vec<String>> =
-            sqlx::query_scalar("SELECT proconfig FROM pg_proc WHERE oid = to_regprocedure($1)")
+            sql::query_scalar("SELECT proconfig FROM pg_proc WHERE oid = to_regprocedure($1)")
                 .bind(&signature)
                 .fetch_one(&database.pool)
                 .await
@@ -369,13 +369,13 @@ async fn a_result_reader_dropped_after_it_was_seen_fails_once() {
         Utc::now(),
     )
     .await;
-    let reader = unpinged_single_connection_core_pool(&database.pool.connect_options());
+    let reader = unpinged_single_connection_core_pool_for_url(database.pool.url());
     let reader_state = ResultReaderSeen::default();
     let seen = read_task_result(&reader, StatementLog::Off, &reader_state, task_id)
         .await
         .expect("read through the published reader");
     assert!(matches!(seen, TaskResultRead::Live(_)), "{seen:?}");
-    sqlx::query("DROP FUNCTION horsies_task_result_staged(uuid)")
+    sql::query("DROP FUNCTION horsies_task_result_staged(uuid)")
         .execute(&database.pool)
         .await
         .expect("drop the result reader out of band");
@@ -419,12 +419,12 @@ async fn a_dropped_detail_reader_fails_the_call_until_the_readers_are_published(
         Utc::now(),
     )
     .await;
-    let reader = unpinged_single_connection_core_pool(&database.pool.connect_options());
+    let reader = unpinged_single_connection_core_pool_for_url(database.pool.url());
     let seen = read_history_detail(&reader, StatementLog::Off, task_id)
         .await
         .expect("read through the published reader");
     assert!(matches!(seen, TaskDetailResult::Live { .. }), "{seen:?}");
-    sqlx::query("DROP FUNCTION horsies_task_detail_staged(uuid)")
+    sql::query("DROP FUNCTION horsies_task_detail_staged(uuid)")
         .execute(&database.pool)
         .await
         .expect("drop the detail reader out of band");

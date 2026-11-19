@@ -7,10 +7,6 @@ use crate::workflow_engine::steps::StepContractError;
 /// Errors produced by workflow engine operations.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkflowError {
-    /// Database connection or query error.
-    #[error("database error: {0}")]
-    Database(#[from] sqlx::Error),
-
     /// Broker-level error (enqueue, claim, etc.), and the failures of the
     /// workflow steps on the core statement layer (`BrokerError::Statement`,
     /// `BrokerError::PoolSettings`).
@@ -47,7 +43,6 @@ pub enum WorkflowError {
 impl WorkflowError {
     /// Whether the condition may clear, so the same call can succeed later. Pure.
     ///
-    /// - `Database`: the core's SQLSTATE rule ([`crate::broker::is_retryable_sqlx_error`]).
     /// - `Broker`: the broker error's rule ([`BrokerError::is_retryable`]).
     /// - `ChildSpecSource`: a build that did not run, yes; an interrupted
     ///   build or one that raised, no ([`ChildSpecUnavailable::is_retryable`]).
@@ -55,7 +50,6 @@ impl WorkflowError {
     ///   the same refused argument or the same contract break again.
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Database(error) => crate::broker::is_retryable_sqlx_error(error),
             Self::Broker(error) => error.is_retryable(),
             Self::ChildSpecSource(error) => error.is_retryable(),
             Self::Serialization(_)

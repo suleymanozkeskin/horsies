@@ -24,10 +24,8 @@
 //!    [`PooledConnection::run_partition_ddl`].
 //!
 //! The listener ([`Listener`]) holds one dedicated connection on the session
-//! URL for every LISTEN of the process.
-//!
-//! The module stands next to the sqlx broker; call sites move to it module by
-//! module.
+//! URL for every LISTEN of the process. A lock session ([`LockSession`])
+//! holds one dedicated connection with a session advisory lock.
 
 mod connect;
 mod ddl;
@@ -36,6 +34,7 @@ mod failure;
 mod listener;
 mod pool;
 mod pooling_check;
+mod session_lock;
 mod statement;
 mod tls;
 mod transaction;
@@ -72,6 +71,10 @@ pub use pool::{
     WORKER_RESERVED_CONNECTIONS,
 };
 pub use pooling_check::STATEMENT_POOLING_CHECK_BOUND;
+pub use session_lock::{
+    LockSession, LockTake, SessionEnd, SessionLockFailure, SESSION_LOCK_RECONNECT_FIRST,
+    SESSION_LOCK_RECONNECT_LIMIT, SESSION_LOCK_STATEMENT_BOUND,
+};
 pub use statement::{
     BoundStatement, ParameterBinder, ParameterType, SqlScript, StatementBound, StatementProtocol,
     TypedStatement, CANCEL_GRACE, CANCEL_REQUEST_BOUND,

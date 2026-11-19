@@ -8,18 +8,14 @@ import os
 import signal
 import types
 from collections.abc import Callable
-from datetime import timedelta
 from typing import Any, Final
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from horsies.core.worker.config import ChildPreload
-from horsies.core.worker.cpu_placement import ParentCpu
 from horsies.core.app import Horsies
 from horsies.core.cli import (
     REMOVED_WORKER_FLAGS,
-    ExecutionSettings,
     ProfileNotGiven,
     ProfileUnknown,
     SelectedProfile,
@@ -29,7 +25,6 @@ from horsies.core.cli import (
     _resolve_module_argument,
     check_command,
     discover_app,
-    execution_settings,
     get_docs_command,
     main,
     scheduler_command,
@@ -48,36 +43,11 @@ from horsies.core.errors import (
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
-from horsies.core.models.child_sizing import (
-    DEFAULT_TASK_SEND_POOL_CONNECTIONS,
-    parent_pool_connections,
-    shared_async_executor_threads,
-    shared_async_pool_connections,
-)
 from horsies.core.models.worker_profile import (
-    ClaimLimits,
     IsolatedChildren,
-    IsolatedPool,
-    IsolatedRecycle,
-    MemoryLimit,
-    NoMemoryLimit,
-    NoSharedAsyncChildren,
-    NoSharedThreadChildren,
-    NoTaskLimit,
-    ParentPool,
-    PoolSize,
-    ResolvedPool,
-    SharedAsyncChildren,
-    SharedPool,
-    SharedThreadChildren,
-    TaskLimit,
     WorkerProfile,
 )
 from horsies.core.types.result import Err, Ok
-from tests.broker_resources_support import (
-    attach_resources,
-    fake_resources,
-)
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
 
 
@@ -608,7 +578,6 @@ def _make_mock_broker() -> MagicMock:
     broker = MagicMock()
     broker.config = MagicMock()
     broker.config.database_url = 'postgresql://localhost/test'
-    attach_resources(broker, fake_resources())
     broker.close_async = AsyncMock(return_value=Ok(None))
     broker.ensure_schema_initialized = AsyncMock(return_value=Ok(None))
     return broker
@@ -1853,198 +1822,6 @@ class TestRemovedWorkerFlags:
         assert '--profile' in out
         for flag in REMOVED_WORKER_FLAGS:
             assert flag not in out
-
-
-@pytest.mark.unit
-class TestExecutionSettings:
-    """The named variants of a profile reach the WorkerConfig encoding."""
-
-    def test_limits_become_their_numbers(self) -> None:
-        settings = execution_settings(
-            WorkerProfile(
-                isolated=IsolatedChildren(
-                    count=6,
-                    recycle=IsolatedRecycle(
-                        after=TaskLimit(tasks=25),
-                        above=MemoryLimit(mb=768),
-                    ),
-                    pool=IsolatedPool(
-                        min_size=1,
-                        max_size=PoolSize(connections=3),
-                        check=False,
-                    ),
-                    task_send_pool=PoolSize(connections=5),
-                ),
-                claim=ClaimLimits(
-                    per_queue_per_pass=TaskLimit(tasks=2),
-                    claimed_per_worker=TaskLimit(tasks=4),
-                ),
-                drain_timeout=timedelta(seconds=45),
-                preload=ChildPreload.NONE,
-            ),
-        )
-        assert settings == ExecutionSettings(
-            parent_pool=parent_pool_connections(6),
-            processes=6,
-            max_tasks_per_child=25,
-            max_memory_per_child_mb=768,
-            isolated_pool=ResolvedPool(min_size=1, max_size=3, check=False),
-            isolated_task_send_pool=5,
-            max_claim_batch=2,
-            max_claim_per_worker=4,
-            drain_timeout_s=45.0,
-            child_preload=ChildPreload.NONE,
-            parent_cpu=ParentCpu.SHARED,
-            shared_async=NoSharedAsyncChildren(),
-            shared_thread=NoSharedThreadChildren(),
-        )
-
-    @pytest.mark.parametrize(
-        ('profile', 'parent_pool'),
-        [
-            (WorkerProfile(isolated=IsolatedChildren(count=8)), 5),
-            (WorkerProfile(shared_async=SharedAsyncChildren(count=1, seats=100)), 10),
-            (WorkerProfile(shared_async=SharedAsyncChildren(count=2, seats=500)), 20),
-            (
-                WorkerProfile(
-                    shared_async=SharedAsyncChildren(count=2, seats=500),
-                    pool=ParentPool(max_size=PoolSize(connections=3)),
-                ),
-                3,
-            ),
-        ],
-    )
-    def test_the_parent_pool_is_the_resolved_profile_pool(
-        self,
-        profile: WorkerProfile,
-        parent_pool: int,
-    ) -> None:
-        assert execution_settings(profile).parent_pool == parent_pool
-
-    def test_shared_async_children_keep_their_typed_form(self) -> None:
-        shared = SharedAsyncChildren(count=3, seats=20)
-        settings = execution_settings(
-            WorkerProfile(isolated=IsolatedChildren(count=1), shared_async=shared),
-        )
-        assert settings.processes == 1
-        assert settings.shared_async == shared
-
-    def test_a_profile_with_only_shared_children_has_no_isolated_child(self) -> None:
-        settings = execution_settings(
-            WorkerProfile(shared_async=SharedAsyncChildren(count=2, seats=5)),
-        )
-        assert settings.processes == 0
-        assert settings.max_tasks_per_child == 0
-        assert settings.max_memory_per_child_mb is None
-        assert settings.isolated_pool == IsolatedPool().resolved()
-        assert settings.isolated_task_send_pool == DEFAULT_TASK_SEND_POOL_CONNECTIONS
-
-    def test_no_limit_variants_become_the_no_limit_encoding(self) -> None:
-        settings = execution_settings(
-            WorkerProfile(
-                isolated=IsolatedChildren(
-                    count=1,
-                    recycle=IsolatedRecycle(
-                        after=NoTaskLimit(),
-                        above=NoMemoryLimit(),
-                    ),
-                ),
-            ),
-        )
-        assert settings.max_tasks_per_child == 0
-        assert settings.max_memory_per_child_mb is None
-        assert settings.max_claim_batch == 0
-        assert settings.max_claim_per_worker == 0
-
-    def test_a_profile_with_no_children_is_a_defect(self) -> None:
-        with pytest.raises(AssertionError, match='no children'):
-            execution_settings(WorkerProfile())
-
-
-def _start_worker_with(profile: WorkerProfile) -> MagicMock:
-    """Run worker_command with one profile up to the core run, which ends
-    at an operator stop."""
-    app = _make_mock_app()
-    app.config.worker_profiles = {'default': profile}
-    with (
-        patch('horsies.core.cli.setup_logging', autospec=True),
-        patch(
-            'horsies.core.cli.discover_app',
-            autospec=True,
-            return_value=(app, 'app', 'my.mod', '/project'),
-        ),
-        patch('horsies.core.cli.print_banner', autospec=True),
-        patch(
-            'horsies.core.cli.run_core_worker',
-            autospec=True,
-            return_value=EXIT_STOPPED,
-        ) as mock_run,
-    ):
-        worker_command(_make_worker_namespace())
-    return mock_run
-
-
-@pytest.mark.unit
-class TestWorkerStartLog:
-    """The start log line of the worker states the resolved pool and the
-    task-send pool of each child kind, the executor size of the shared async
-    children, and the resolved pool of the worker process."""
-
-    def test_the_resolved_sizes_of_each_kind_are_logged(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        profile = WorkerProfile(
-            isolated=IsolatedChildren(count=2),
-            shared_async=SharedAsyncChildren(count=1, seats=25),
-            shared_thread=SharedThreadChildren(
-                count=1,
-                seats=8,
-                pool=SharedPool(max_size=PoolSize(connections=5), check=True),
-            ),
-        )
-        with caplog.at_level(logging.INFO, logger='horsies'):
-            mock_run = _start_worker_with(profile)
-
-        mock_run.assert_called_once()
-        [line] = [
-            r.getMessage()
-            for r in caplog.records
-            if r.getMessage().startswith("Worker profile 'default': isolated=")
-        ]
-        assert 'isolated=2 (' in line
-        assert (
-            'pool 0 to 1 connections, check off; task_send_pool 2 connections)'
-        ) in line
-        assert (
-            f'pool 0 to {shared_async_pool_connections(25)} connections, '
-            'derived from seats, check off; '
-            f'executor {shared_async_executor_threads(25)} threads, derived '
-            'from seats; task_send_pool 2 connections)'
-        ) in line
-        assert 'shared_thread=1x8 seats' in line
-        assert (
-            'pool 0 to 5 connections, check on; task_send_pool 2 connections)'
-        ) in line
-        assert ', pool=5 connections (derived from 35 seats), ' in line
-
-    def test_a_set_parent_pool_is_logged_without_its_origin(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        profile = WorkerProfile(
-            isolated=IsolatedChildren(count=2),
-            pool=ParentPool(max_size=PoolSize(connections=12)),
-        )
-        with caplog.at_level(logging.INFO, logger='horsies'):
-            _ = _start_worker_with(profile)
-
-        [line] = [
-            r.getMessage()
-            for r in caplog.records
-            if r.getMessage().startswith("Worker profile 'default': isolated=")
-        ]
-        assert ', pool=12 connections, claim per queue per pass: ' in line
 
 
 @pytest.mark.unit

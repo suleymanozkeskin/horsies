@@ -19,9 +19,9 @@ import pytest
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from horsies._core import PanicException
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.codec.json_io import SerializationError
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import SubWorkflowNode, TaskNode, WorkflowDefinition
 from horsies.core.types.result import is_err
@@ -108,7 +108,7 @@ async def _start_parent(
     )
     r = await start_workflow_async(spec, broker)
     assert not is_err(r), r
-    return r.ok_value.workflow_id
+    return str(r.ok_value.workflow_id)
 
 
 async def _child_id(session: AsyncSession, parent_id: str) -> str:
@@ -201,11 +201,12 @@ class TestBulkChildStart:
         session: AsyncSession,
     ) -> None:
         """Task options of a child ROOT that do not parse are a defect: they
-        come from the task function, not from a stored row. The child start
-        raises SerializationError, as the workflow start transaction does,
-        and the parent start rolls back: no parent or child row is left.
-        The promotion path, which reads stored rows, fails only the node
-        (see test_workflow_promotion_batched)."""
+        come from the task function, not from a stored row. The core's node
+        fact parse refuses the child's node, the bridge raises
+        PanicException, and the parent start rolls back: no parent or child
+        row is left. The promotion path, which reads stored rows, fails only
+        the node (see
+        crates/horsies-core/src/workflow_engine/port_tests/promotion_branches.rs)."""
         child_def = _child_def(app, 2, shape='flat', corrupt_root=True)
         parent_name = f'bulk_parent_corrupt_{uuid.uuid4().hex[:6]}'
         spec = app.workflow(
@@ -213,7 +214,10 @@ class TestBulkChildStart:
             definition_key=f'bulk-parent-corrupt-{uuid.uuid4().hex[:6]}',
         )
 
-        with pytest.raises(SerializationError, match='root node'):
+        with pytest.raises(
+            PanicException,
+            match=r'workflow node 0 \(bulk_child_corrupt_\w+\) refused: task_options JSON is refused',
+        ):
             await start_workflow_async(spec, broker)
 
         leftover = (
@@ -283,7 +287,7 @@ class TestBulkChildStart:
 
         from horsies.core.workflows.lifecycle import resume_workflow
 
-        resume_r = await resume_workflow(broker, child_id)
+        resume_r = await resume_workflow(broker, uuid.UUID(child_id))
         assert not is_err(resume_r), resume_r
         good_status = (
             await session.execute(
@@ -381,7 +385,7 @@ class TestBulkChildStart:
 
         from horsies.core.workflows.lifecycle import resume_workflow
 
-        resume_r = await resume_workflow(broker, child_id)
+        resume_r = await resume_workflow(broker, uuid.UUID(child_id))
         assert not is_err(resume_r), resume_r
         fast_status = (
             await session.execute(

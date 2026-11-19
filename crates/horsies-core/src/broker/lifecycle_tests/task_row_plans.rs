@@ -8,6 +8,7 @@
 //! as in Python. Its row read is planned here from the installed function
 //! body.
 
+use crate::test_support::sql;
 use serial_test::serial;
 
 use super::support::*;
@@ -76,7 +77,7 @@ fn start_row_read(definition: &str, task_id: uuid::Uuid) -> String {
 async fn the_start_reads_its_row_through_the_primary_key() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::claimed()).await;
-    let definition: String = sqlx::query_scalar("SELECT pg_get_functiondef($1::regprocedure)")
+    let definition: String = sql::query_scalar("SELECT pg_get_functiondef($1::regprocedure)")
         .bind(START_FUNCTION)
         .fetch_one(&pool)
         .await
@@ -84,11 +85,11 @@ async fn the_start_reads_its_row_through_the_primary_key() {
     let statement = start_row_read(&definition, task_id);
 
     let mut transaction = pool.begin().await.expect("begin");
-    sqlx::query("SET LOCAL enable_seqscan = off")
+    sql::query("SET LOCAL enable_seqscan = off")
         .execute(&mut *transaction)
         .await
         .expect("turn sequential scans off");
-    let plan: serde_json::Value = sqlx::query_scalar(&format!("EXPLAIN (FORMAT JSON) {statement}"))
+    let plan: serde_json::Value = sql::query_scalar(&format!("EXPLAIN (FORMAT JSON) {statement}"))
         .fetch_one(&mut *transaction)
         .await
         .expect("explain the start row read");

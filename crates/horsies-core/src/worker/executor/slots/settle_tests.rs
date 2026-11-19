@@ -1,5 +1,4 @@
-//! Ports of Python `tests/unit/test_shared_dispatch.py` and
-//! `test_thread_dispatch.py` rows of the worker side of shared tasks: the
+//! The worker side of shared tasks: the
 //! route of a shared row, the capacity of a worker with shared children,
 //! and the write of each end of a run (`OutcomeWriter::settle`) on the
 //! database.
@@ -9,8 +8,6 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::scripted::{ok_envelope, task, timeout_ms, WORKER_ID};
@@ -18,8 +15,14 @@ use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
+use crate::core::history::archive::attempts::decode_attempt_snapshot;
+use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
+use crate::core::task::error::TaskError;
+use crate::core::task::result::TaskResult;
+use crate::test_support::sql::{self, TestPool, TestPoolOptions};
+use crate::test_support::{CapturedEvent, LogCapture};
 use crate::worker::executor::protocol::{
-    CancelGraceMs, FailureDetail, IsolatedWork, RunEnd, SharedWork, StopReason,
+    CancelGraceMs, FailureDetail, IsolatedWork, ResultEnvelopeText, RunEnd, SharedWork, StopReason,
     StoredOptionsRefusal,
 };
 use crate::worker::retry::read_stored_options;
@@ -80,9 +83,8 @@ fn unusable_shared_async_rows() -> Vec<Unusable> {
     ]
 }
 
-/// Python `test_shared_dispatch.py::TestRoute::test_a_shared_row_with_no_usable_timeout_or_grace_is_refused_on_a_seat`
-/// (both plans) and `TestDispatch::test_a_refused_shared_row_goes_to_a_seat_on_either_shape`
-/// (the route half): the refusal runs on a seat, never on an isolated
+/// A shared row with no usable timeout or grace, on both plans: the refusal
+/// runs on a seat, never on an isolated
 /// child and never back to the queue.
 #[test]
 fn every_unusable_shared_async_row_is_refused_on_a_seat_on_either_plan() {
@@ -108,9 +110,8 @@ fn every_unusable_shared_async_row_is_refused_on_a_seat_on_either_plan() {
     }
 }
 
-/// Python `test_shared_dispatch.py::TestRoute::test_a_worker_with_no_shared_children_refuses_it_in_an_isolated_child`
-/// and `TestDispatch::test_a_worker_with_no_shared_children_sends_the_refusal_isolated`
-/// (the route half).
+/// A worker with no shared children refuses a shared row in an isolated
+/// child.
 #[test]
 fn a_worker_with_only_isolated_children_refuses_an_unusable_shared_row_in_an_isolated_child() {
     let plan = ClaimPlan::for_children(1, 0, 0);
@@ -132,9 +133,7 @@ fn a_worker_with_only_isolated_children_refuses_an_unusable_shared_row_in_an_iso
     }
 }
 
-/// Python `test_shared_dispatch.py::TestCapacityAndConfig::test_a_worker_with_only_shared_children_is_valid`
-/// and `test_thread_dispatch.py::TestCapacityAndConfig::test_a_worker_with_only_thread_children_is_valid`:
-/// a worker with only shared children has one budget per kind, and its
+/// A worker with only shared children has one budget per kind, and its
 /// seats are its capacity.
 #[test]
 fn a_worker_with_only_shared_children_has_their_seats_as_its_capacity() {
@@ -185,7 +184,7 @@ enum Held {
 /// A plain task row of `execution` on `queue`, held by [`WORKER_ID`].
 /// Returns the id and the claim generation.
 async fn seed(
-    pool: &PgPool,
+    pool: &TestPool,
     queue: &str,
     execution: ExecutionClass,
     held: Held,
@@ -240,7 +239,7 @@ async fn seed(
              ) RETURNING claimed_at"
         }
     };
-    let generation = sqlx::query_scalar(statement)
+    let generation = sql::query_scalar(statement)
         .bind(id)
         .bind(queue)
         .bind(task_options)
@@ -253,30 +252,30 @@ async fn seed(
     (id, generation)
 }
 
-async fn live_row(pool: &PgPool, task_id: Uuid) -> Option<serde_json::Value> {
-    sqlx::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
+async fn live_row(pool: &TestPool, task_id: Uuid) -> Option<serde_json::Value> {
+    sql::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
         .bind(task_id)
         .fetch_optional(pool)
         .await
         .expect("read the live row")
 }
 
-async fn history_row(pool: &PgPool, task_id: Uuid) -> serde_json::Value {
-    sqlx::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
+async fn history_row(pool: &TestPool, task_id: Uuid) -> serde_json::Value {
+    sql::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
         .expect("read the history row")
 }
 
-async fn remove_task(pool: &PgPool, task_id: Uuid) {
+async fn remove_task(pool: &TestPool, task_id: Uuid) {
     for statement in [
         "DELETE FROM horsies_task_attempts WHERE task_id = $1",
         "DELETE FROM horsies_heartbeats WHERE task_id = $1",
         "DELETE FROM horsies_tasks WHERE id = $1",
         "DELETE FROM horsies_task_history WHERE task_id = $1",
     ] {
-        sqlx::query(statement)
+        sql::query(statement)
             .bind(task_id)
             .execute(pool)
             .await
@@ -288,8 +287,11 @@ fn test_queue() -> String {
     format!("settle_{}", &Uuid::new_v4().simple().to_string()[..8])
 }
 
-fn writer(pool: PgPool) -> OutcomeWriter {
-    let broker = Arc::new(PostgresBroker::from_pool(pool));
+fn writer(pool: TestPool) -> OutcomeWriter {
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    ));
     let successes = super::outcome::test_successes(&broker, WORKER_ID);
     OutcomeWriter::new(
         broker,
@@ -327,14 +329,11 @@ const RETRY_ON_TIMEOUT: &str = r#"{"timeout_ms": 1000, "cancel_grace_ms": 500, "
     "max_retries": 2, "intervals": [5, 5], "backoff_strategy": "fixed", "jitter": false,
     "max_delay_seconds": null, "auto_retry_for": ["TASK_TIMEOUT"]}}"#;
 
-/// Python `test_shared_dispatch.py::TestFinalizeShared::test_a_result_takes_the_path_of_an_isolated_result`,
-/// `::test_the_result_of_a_refusal_takes_the_path_of_an_isolated_result` and
-/// `TestFinalizeKilledRun::test_a_run_that_returned_before_the_kill_writes_its_result`:
-/// a reported result of a shared run completes its row.
+/// A reported result of a shared run completes its row.
 #[tokio::test]
 #[serial]
 async fn a_reported_result_of_a_shared_run_completes_the_row() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(
         &pool,
@@ -366,15 +365,13 @@ async fn a_reported_result_of_a_shared_run_completes_the_row() {
     remove_task(&pool, task_id).await;
 }
 
-/// Python `test_shared_dispatch.py::TestFinalizeShared::test_a_reported_deadline_writes_the_timeout`
-/// and `TestFinalizeKilledRun::test_a_run_past_its_deadline_writes_the_timeout`,
-/// and `test_thread_dispatch.py::TestFinalizeThread::test_a_task_past_its_deadline_writes_the_timeout`:
-/// the timeout retries by the policy at the placement of the end; an
-/// isolated placement moves the row to the `ISOLATED` class.
+/// The timeout retries by the policy at the placement of the end; an
+/// isolated placement moves the row to the `ISOLATED` class. The attempt
+/// records `TASK_TIMEOUT` and will retry.
 #[tokio::test]
 #[serial]
 async fn a_timeout_retries_the_row_at_the_placement_of_its_end() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     for (execution, placement, cancel, class_after) in [
         (
             ExecutionClass::SharedAsync,
@@ -432,6 +429,18 @@ async fn a_timeout_retries_the_row_at_the_placement_of_its_end() {
         assert_eq!(row["status"], "PENDING", "{execution} {placement:?}");
         assert_eq!(row["execution"], class_after, "{execution} {placement:?}");
         assert_eq!(row["retry_count"], 1, "{execution} {placement:?}");
+        let attempts: Vec<(bool, Option<String>)> = sql::query_as(
+            "SELECT will_retry, error_code FROM horsies_task_attempts WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_all(&pool)
+        .await
+        .expect("read the attempt rows");
+        assert_eq!(
+            attempts,
+            vec![(true, Some("TASK_TIMEOUT".to_owned()))],
+            "{execution} {placement:?}"
+        );
         remove_task(&pool, task_id).await;
     }
 }
@@ -440,7 +449,7 @@ async fn a_timeout_retries_the_row_at_the_placement_of_its_end() {
 #[tokio::test]
 #[serial]
 async fn a_timeout_with_no_retry_fails_the_row_with_task_timeout() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(
         &pool,
@@ -478,13 +487,12 @@ async fn a_timeout_with_no_retry_fails_the_row_with_task_timeout() {
     remove_task(&pool, task_id).await;
 }
 
-/// Python `test_shared_dispatch.py::TestFinalizeKilledRun::test_the_run_that_blocked_the_loop_retries_isolated`
-/// and `::test_a_neighbour_of_a_blocked_loop_gets_its_own_code`: each run
+/// Each run
 /// of a child killed for a blocked loop fails with its own code.
 #[tokio::test]
 #[serial]
 async fn a_loop_kill_fails_the_row_with_its_code() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     for (code, retry, name) in [
         (
             LoopKillCode::TaskBlockedLoop,
@@ -535,11 +543,219 @@ async fn a_loop_kill_fails_the_row_with_its_code() {
     }
 }
 
-/// Python `test_shared_dispatch.py::TestFinalizeShared::test_a_task_that_reached_no_child_is_requeued`.
+/// The stored options of a shared async task whose policy retries `code`
+/// twice, 5 s apart.
+fn retrying(code: &str) -> String {
+    format!(
+        r#"{{"timeout_ms": 1000, "cancel_grace_ms": 500, "retry_policy": {{
+    "max_retries": 2, "intervals": [5, 5], "backoff_strategy": "fixed", "jitter": false,
+    "max_delay_seconds": null, "auto_retry_for": ["{code}"]}}}}"#
+    )
+}
+
+/// What one settle of a seeded RUNNING `SHARED_ASYNC` row must leave.
+#[derive(Debug)]
+enum Left {
+    /// The row is PENDING again with retry count 1 in `class`; its attempt
+    /// will retry and records `code`.
+    Retried {
+        class: &'static str,
+        code: &'static str,
+    },
+    /// The row failed with `code`; its one attempt does not retry.
+    Failed { code: &'static str },
+}
+
+/// The live attempt rows of a task: will_retry and error code.
+async fn live_attempts(pool: &TestPool, task_id: Uuid) -> Vec<(bool, Option<String>)> {
+    sql::query_as(
+        "SELECT will_retry, error_code FROM horsies_task_attempts
+         WHERE task_id = $1 ORDER BY attempt",
+    )
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+    .expect("read the attempt rows")
+}
+
+/// The archived attempts of a task that moved to history: number,
+/// will_retry and error code.
+async fn archived_attempts(pool: &TestPool, task_id: Uuid) -> Vec<(i32, bool, Option<String>)> {
+    let (version, payload, digest): (i16, Vec<u8>, Vec<u8>) = sql::query_as(
+        "SELECT attempt_archive_version, attempt_snapshot, attempt_snapshot_digest
+         FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read the archived attempt snapshot");
+    decode_attempt_snapshot(
+        version,
+        JSON_UTF8_CODEC,
+        JSON_CONTENT_TYPE,
+        &payload,
+        &digest,
+    )
+    .expect("decode the archived attempt snapshot")
+    .iter()
+    .map(|record| {
+        (
+            record.attempt(),
+            record.will_retry(),
+            record.error_code().map(str::to_owned),
+        )
+    })
+    .collect()
+}
+
+/// Seed a RUNNING `SHARED_ASYNC` row whose policy retries `retried_code`,
+/// settle `end` on it, and check what it left.
+async fn settle_a_shared_run(pool: &TestPool, retried_code: &str, end: AttemptEnd, left: &Left) {
+    let options = retrying(retried_code);
+    let queue = test_queue();
+    let (task_id, generation) = seed(
+        pool,
+        &queue,
+        ExecutionClass::SharedAsync,
+        Held::Running,
+        Some(options.as_str()),
+        2,
+    )
+    .await;
+    let claimed = claimed_row(
+        task_id,
+        &queue,
+        generation,
+        ExecutionClass::SharedAsync,
+        Some(options.as_str()),
+        2,
+    );
+
+    let settled = writer(pool.clone()).settle(&claimed, end).await;
+
+    assert_eq!(settled, Settlement::Written, "{left:?}");
+    match left {
+        Left::Retried { class, code } => {
+            let row = live_row(pool, task_id)
+                .await
+                .expect("a retried row stays live");
+            assert_eq!(row["status"], "PENDING", "{left:?}");
+            assert_eq!(row["retry_count"], 1, "{left:?}");
+            assert_eq!(row["execution"], *class, "{left:?}");
+            assert_eq!(
+                live_attempts(pool, task_id).await,
+                vec![(true, Some((*code).to_owned()))],
+                "{left:?}"
+            );
+        }
+        Left::Failed { code } => {
+            let history = history_row(pool, task_id).await;
+            assert_eq!(history["status"], "FAILED", "{left:?}");
+            assert_eq!(history["error_code"], *code, "{left:?}");
+            assert_eq!(
+                archived_attempts(pool, task_id).await,
+                vec![(1, false, Some((*code).to_owned()))],
+                "{left:?}"
+            );
+        }
+    }
+    remove_task(pool, task_id).await;
+}
+
+fn loop_kill(code: LoopKillCode, retry: RetryPlacement) -> AttemptEnd {
+    AttemptEnd::KilledForLoop {
+        code,
+        retry,
+        reason: FailureDetail::cut("app.py:3 in fetch"),
+    }
+}
+
+/// The writes of a kill for a blocked loop (the verdict of each run at the kill is
+/// `shared_rules_tests::a_run_of_a_lost_child_gets_the_verdict_of_its_kill`):
+/// the run that blocked the loop retries in an isolated child when its
+/// policy names `TASK_BLOCKED_LOOP`; a neighbour fails with
+/// `NEIGHBOUR_BLOCKED_LOOP` when its policy retries timeouts only, and
+/// retries in its class when its policy names its code.
+#[tokio::test]
+#[serial]
+async fn the_runs_of_a_child_killed_for_a_blocked_loop_retry_by_their_own_code() {
+    let pool = crate::test_support::migrated_pool().await;
+    for (retried_code, end, left) in [
+        (
+            "TASK_BLOCKED_LOOP",
+            loop_kill(LoopKillCode::TaskBlockedLoop, RetryPlacement::Isolated),
+            Left::Retried {
+                class: "ISOLATED",
+                code: "TASK_BLOCKED_LOOP",
+            },
+        ),
+        (
+            "TASK_TIMEOUT",
+            loop_kill(
+                LoopKillCode::NeighbourBlockedLoop,
+                RetryPlacement::SameClass,
+            ),
+            Left::Failed {
+                code: "NEIGHBOUR_BLOCKED_LOOP",
+            },
+        ),
+        (
+            "NEIGHBOUR_BLOCKED_LOOP",
+            loop_kill(
+                LoopKillCode::NeighbourBlockedLoop,
+                RetryPlacement::SameClass,
+            ),
+            Left::Retried {
+                class: "SHARED_ASYNC",
+                code: "NEIGHBOUR_BLOCKED_LOOP",
+            },
+        ),
+    ] {
+        settle_a_shared_run(&pool, retried_code, end, &left).await;
+    }
+}
+
+/// The writes of a run that returned before the kill (a run that returned
+/// before the kill ends with what it returned:
+/// `shared_rules_tests::a_death_the_worker_did_not_cause_takes_the_crash_path`,
+/// `::a_kill_past_deadlines_isolates_only_the_culprit`): the run returned
+/// `UPSTREAM_DOWN`. A policy that retries timeouts only fails it with that
+/// code and one attempt that does not retry; a policy that names the code
+/// retries it in its class, not in an isolated child.
+#[tokio::test]
+#[serial]
+async fn a_run_that_returned_before_the_kill_writes_what_it_returned() {
+    let pool = crate::test_support::migrated_pool().await;
+    let error = TaskError::new("UPSTREAM_DOWN", "upstream down").expect("a code of the task's own");
+    let returned = || {
+        AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
+            serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error.clone()))
+                .expect("the error envelope encodes"),
+        )))
+    };
+    for (retried_code, left) in [
+        (
+            "TASK_TIMEOUT",
+            Left::Failed {
+                code: "UPSTREAM_DOWN",
+            },
+        ),
+        (
+            "UPSTREAM_DOWN",
+            Left::Retried {
+                class: "SHARED_ASYNC",
+                code: "UPSTREAM_DOWN",
+            },
+        ),
+    ] {
+        settle_a_shared_run(&pool, retried_code, returned(), &left).await;
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn a_task_that_reached_no_child_goes_back_to_the_queue() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(
         &pool,
@@ -573,14 +789,13 @@ async fn a_task_that_reached_no_child_goes_back_to_the_queue() {
     remove_task(&pool, task_id).await;
 }
 
-/// Python `tests/integration/test_soft_cap_start_check.py::test_stop_returns_the_held_rows_to_their_queue`:
-/// at the stop, a row that waited for its queue cap goes back to the queue
+/// At the stop, a row that waited for its queue cap goes back to the queue
 /// with the claim fence (`worker::worker::return_held_rows` settles each
 /// held row so).
 #[tokio::test]
 #[serial]
 async fn a_row_held_for_its_queue_cap_goes_back_to_the_queue_at_the_stop() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(
         &pool,
@@ -616,8 +831,8 @@ async fn a_row_held_for_its_queue_cap_goes_back_to_the_queue_at_the_stop() {
 }
 
 /// The number of attempt rows of a task.
-async fn attempt_count(pool: &PgPool, task_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
+async fn attempt_count(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
@@ -632,7 +847,7 @@ async fn attempt_count(pool: &PgPool, task_id: Uuid) -> i64 {
 #[tokio::test]
 #[serial]
 async fn an_unreported_end_of_a_row_still_claimed_puts_it_back_with_no_attempt_row() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let ends = [
         AttemptEnd::Crashed {
             reason: FailureDetail::cut("the child was lost"),
@@ -691,7 +906,7 @@ async fn an_unreported_end_of_a_row_still_claimed_puts_it_back_with_no_attempt_r
 #[tokio::test]
 #[serial]
 async fn a_task_that_reached_no_child_leaves_a_row_of_another_claim_alone() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
     let (task_id, generation) = seed(
         &pool,
@@ -731,7 +946,7 @@ async fn a_task_that_reached_no_child_leaves_a_row_of_another_claim_alone() {
 /// A CLAIMED workflow task held by [`WORKER_ID`] with no workflow node
 /// linked to it. Returns the claimed task. A workflow task row has no
 /// command fingerprint (baseline `horsies_tasks_command_fingerprint_by_origin`).
-async fn seed_unlinked_workflow_task(pool: &PgPool, queue: &str) -> ClaimedTask {
+async fn seed_unlinked_workflow_task(pool: &TestPool, queue: &str) -> ClaimedTask {
     let (task_id, generation) = seed(
         pool,
         queue,
@@ -741,7 +956,7 @@ async fn seed_unlinked_workflow_task(pool: &PgPool, queue: &str) -> ClaimedTask 
         0,
     )
     .await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_tasks
          SET is_workflow_task = TRUE,
              command_fingerprint = NULL,
@@ -765,15 +980,14 @@ async fn seed_unlinked_workflow_task(pool: &PgPool, queue: &str) -> ClaimedTask 
     }
 }
 
-/// Python `test_lifecycle_classification.py::TestOrphanedWorkflowTask::test_self_heal_disabled_leaves_it_claimed`:
-/// a child reports `NODE_NOT_LINKED` only when its stop before start left
+/// A child reports `NODE_NOT_LINKED` only when its stop before start left
 /// the orphan, with the self-heal off; the worker writes nothing, and the
 /// row stays CLAIMED by this claim. The cancel with the self-heal on runs in
 /// the child (`child_host::start_node_tests`).
 #[tokio::test]
 #[serial]
 async fn a_task_whose_node_is_not_linked_stays_claimed() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
     let claimed = seed_unlinked_workflow_task(&pool, &queue).await;
 
@@ -796,29 +1010,29 @@ async fn a_task_whose_node_is_not_linked_stays_claimed() {
 /// No server listens on port 1, so every write fails with a retryable pool
 /// timeout after 100 ms.
 fn unreachable_writer() -> OutcomeWriter {
-    let pool = PgPoolOptions::new()
+    let pool = TestPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(Duration::from_millis(100))
-        .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
-        .expect("a lazy pool opens no connection");
+        .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies");
     writer(pool)
 }
 
 /// The retry waits of one write stage: 0.5 s, 1 s and 2 s.
 const ONE_STAGE_OF_WAITS: Duration = Duration::from_millis(3_500);
 
-/// Python `test_shared_dispatch.py::TestFinalizeShared::test_a_failed_timeout_write_is_retried_as_the_timeout_write`,
-/// `TestFinalizeKilledRun::test_a_database_error_of_the_write_is_retryable`,
-/// `::test_the_retry_of_a_failed_kill_write_writes_the_same_verdict`,
-/// `::test_a_crash_error_retries_as_a_crash`, `TestTimeoutWriteRetry::*`,
-/// and `test_thread_dispatch.py::TestFinalizeThread::test_a_failed_timeout_write_after_the_kill_is_retried_as_that_write`:
+/// The write and its log lines (the order is
+/// `exit_not_seen_tests::a_deadline_kill_gives_no_end_before_the_exit_is_seen`):
 /// a write that keeps failing is sent again up to its bound; a timeout
 /// runs its crash recovery stage after the last retry of its own write, a
 /// loop kill or a crash has one stage only. Each settles as spent retries.
+/// Each failed send of the `TASK_TIMEOUT` write is logged with the task and
+/// the stage, and the end of its retries at error with the task.
 #[tokio::test]
 async fn a_failing_timeout_write_runs_crash_recovery_after_its_own_retries() {
     let claimed = task(1, ExecutionClass::SharedAsync);
     let writer = unreachable_writer();
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
 
     let started = Instant::now();
     let loop_kill = writer
@@ -850,6 +1064,67 @@ async fn a_failing_timeout_write_runs_crash_recovery_after_its_own_retries() {
     assert!(one_stage >= ONE_STAGE_OF_WAITS, "{one_stage:?}");
     assert!(one_stage < 2 * ONE_STAGE_OF_WAITS, "{one_stage:?}");
     assert!(two_stages >= 2 * ONE_STAGE_OF_WAITS, "{two_stages:?}");
+    let timeout_write_retries = capture.lines_starting(
+        tracing::Level::WARN,
+        &format!(
+            "Finalize retry scheduled for task {} stage=timeout_write",
+            claimed.task_id
+        ),
+    );
+    assert_eq!(
+        timeout_write_retries.len(),
+        usize::try_from(super::outcome::WriteStage::TimeoutWrite.max_retries()).unwrap(),
+        "{timeout_write_retries:?}"
+    );
+    let task_id = claimed.task_id.to_string();
+    let spent: Vec<CapturedEvent> = capture.lines_starting(
+        tracing::Level::ERROR,
+        "every retry of the TASK_TIMEOUT write failed",
+    );
+    assert_eq!(spent.len(), 1, "{spent:?}");
+    assert_eq!(spent[0].field("task_id"), Some(task_id.as_str()));
+}
+
+/// The text that the result of [`a_failed_success_write_logs_the_task_and_not_the_result`]
+/// carries, to find it in any log line.
+const RESULT_MARKER: &str = "result-marker-7f3c";
+
+/// Python `test_worker_helpers.py::TestFinalizeErrorLogOmitsResult::test_log_line_has_result_length_not_result`
+/// (case `retries_exhausted`; the line of a write that is not tried again
+/// has the same form): the success write of a plain task fails on every
+/// retry, and its log lines name the task and leave out the result text.
+/// The length of the result has no counterpart: Python logs the `data` dict
+/// of its finalize error with the result replaced by its length; the core's
+/// error is typed and carries no result.
+#[tokio::test]
+async fn a_failed_success_write_logs_the_task_and_not_the_result() {
+    let claimed = task(1, ExecutionClass::Isolated);
+    let writer = unreachable_writer();
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
+    let envelope = format!(r#"{{"__h_task_result__":true,"ok":"{RESULT_MARKER}","err":null}}"#);
+
+    let settled = writer
+        .settle(
+            &claimed,
+            AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(envelope))),
+        )
+        .await;
+
+    assert_eq!(settled, Settlement::RetriesExhausted);
+    let task_id = claimed.task_id.to_string();
+    let exhausted = capture.lines_starting(
+        tracing::Level::ERROR,
+        &format!("Finalize retries exhausted for task {task_id}"),
+    );
+    assert_eq!(exhausted.len(), 1, "{exhausted:?}");
+    assert_eq!(exhausted[0].field("task_id"), Some(task_id.as_str()));
+    for event in capture.events() {
+        assert!(!event.message.contains(RESULT_MARKER), "{event:?}");
+        for (name, value) in &event.fields {
+            assert!(!value.contains(RESULT_MARKER), "{name}: {event:?}");
+        }
+    }
 }
 
 /// The work of a shared async run with its stored timeout and grace, as
@@ -870,10 +1145,9 @@ fn a_shared_async_row_runs_on_a_seat_with_its_stored_grace() {
     );
 }
 
-/// Python `test_thread_dispatch.py::TestRoute::test_a_row_of_the_thread_budget_runs_on_a_thread_seat`,
-/// `::test_a_thread_row_with_no_usable_timeout_is_refused_on_a_seat`,
-/// `::test_a_worker_with_no_thread_children_runs_it_isolated` and
-/// `::test_an_isolated_row_is_not_served_by_thread_children_only`.
+/// A row of the thread budget runs on a thread seat; one with no usable
+/// timeout is refused on a seat; a worker with no thread children runs it
+/// isolated; thread children alone do not serve an isolated row.
 #[test]
 fn a_shared_thread_row_runs_on_a_thread_seat_or_is_refused_there() {
     let with_threads = ClaimPlan::for_children(1, 0, 1);
@@ -922,8 +1196,7 @@ fn a_shared_thread_row_runs_on_a_thread_seat_or_is_refused_there() {
     );
 }
 
-/// Python `test_thread_dispatch.py::TestRequest::test_a_timeout_out_of_bounds_is_a_defect`:
-/// the bound is in the type of the timeout, so a run cannot carry one out
+/// The bound is in the type of the timeout, so a run cannot carry one out
 /// of bounds.
 #[test]
 fn a_seat_timeout_out_of_its_bounds_cannot_be_built() {

@@ -15,16 +15,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryRequest,
 };
-use crate::broker::lifecycle_tests::support::{
-    database_options, unpinged_single_connection_pool, WireProxy,
-};
+use crate::broker::lifecycle_tests::support::{single_session_pool, WireProxy};
 use crate::broker::workflow_start::{ClientStartError, ClientStartOutcome};
 use crate::broker::PostgresBroker;
 use crate::core::history::maintenance::coverage::{
@@ -41,6 +37,7 @@ use crate::core::{
 };
 use crate::db::CheckoutClass;
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::{self, TestListener, TestPool, TestPoolOptions};
 use crate::test_support::terminal_writes::{self, TerminalFailure};
 use crate::test_support::{server_url, with_database, TestDatabase};
 use crate::worker::execution::{
@@ -57,9 +54,7 @@ use crate::workflow_engine::query::{
     TerminalErrorStatus, WorkflowEnd, WorkflowWait,
 };
 use crate::workflow_engine::recovery::{complete_in_tree, TreeCompletion};
-use crate::workflow_engine::steps::{
-    advance_parents, ChildBuild, OwedParentAdvances, ParentAdvance,
-};
+use crate::workflow_engine::steps::{advance_parents, OwedParentAdvances, ParentAdvance};
 
 /// The worker that holds every task a test runs.
 pub(super) const WORKER: &str = "workflow-port-worker";
@@ -96,8 +91,8 @@ pub(super) fn poison_success_policy() -> serde_json::Value {
 
 /// The shared migrated database. A test on it must not leave a RUNNING
 /// workflow with stuck work, because other tests run global passes on it.
-pub(super) async fn shared_pool() -> PgPool {
-    crate::broker::terminalization_matrix::migrated_pool().await
+pub(super) async fn shared_pool() -> TestPool {
+    crate::test_support::migrated_pool().await
 }
 
 /// Connections of one test pool.
@@ -126,7 +121,7 @@ const ADMIN_DATABASE: &str = "postgres";
 /// the Python tests do (`isolated_test_database`).
 pub(super) struct IsolatedDatabase {
     admin: tokio_postgres::Client,
-    pub(super) pool: PgPool,
+    pub(super) pool: TestPool,
     database: TestDatabase,
 }
 
@@ -137,7 +132,7 @@ impl IsolatedDatabase {
         let database = TestDatabase::create().await;
         let pool = connect(database.url()).await;
         let coverage = ensure_partition_coverage_in_pool(
-            &crate::broker::pools::core_pool_for_test_pool(&pool),
+            &crate::broker::pools::core_pool_for_test_url(pool.url()),
             crate::broker::core_rows::StatementLog::Off,
             COVERAGE_HISTORY_DAYS,
             COVERAGE_HEARTBEAT_HOURS,
@@ -160,7 +155,7 @@ impl IsolatedDatabase {
 
     /// A second pool on the same database: a process that did not share any
     /// state in memory with the first one.
-    pub(super) async fn other_process_pool(&self) -> PgPool {
+    pub(super) async fn other_process_pool(&self) -> TestPool {
         connect(self.database.url()).await
     }
 
@@ -202,8 +197,8 @@ impl IsolatedDatabase {
     }
 }
 
-async fn connect(url: &str) -> PgPool {
-    PgPoolOptions::new()
+async fn connect(url: &str) -> TestPool {
+    TestPoolOptions::new()
         .max_connections(TEST_POOL_CONNECTIONS)
         .connect(url)
         .await
@@ -310,7 +305,7 @@ impl WorkflowSeed {
 }
 
 /// Inserts the workflow row and returns its id.
-pub(super) async fn seed_workflow(pool: &PgPool, seed: &WorkflowSeed) -> Uuid {
+pub(super) async fn seed_workflow(pool: &TestPool, seed: &WorkflowSeed) -> Uuid {
     let (parent_id, parent_index, root, depth) = match seed.parent {
         None => (None, None, seed.id, 0),
         Some(link) => (
@@ -320,7 +315,7 @@ pub(super) async fn seed_workflow(pool: &PgPool, seed: &WorkflowSeed) -> Uuid {
             link.depth,
         ),
     };
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, definition_key, status, on_error, output_task_index,
              success_policy, result, error, parent_workflow_id, parent_task_index,
@@ -482,7 +477,7 @@ impl NodeSeed {
 }
 
 /// Inserts the node row and returns its row id.
-pub(super) async fn seed_node(pool: &PgPool, seed: &NodeSeed) -> Uuid {
+pub(super) async fn seed_node(pool: &TestPool, seed: &NodeSeed) -> Uuid {
     let row_id = Uuid::new_v4();
     let (max_retries, execution, retention_class_key) = match &seed.kind {
         NodeKind::Task {
@@ -515,7 +510,7 @@ pub(super) async fn seed_node(pool: &PgPool, seed: &NodeSeed) -> Uuid {
         JoinType::Quorum => Some(seed.min_success.expect("a quorum node names min_success")),
         JoinType::All | JoinType::Any => None,
     };
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
              dependencies, args_from, workflow_ctx_from, allow_failed_deps, join_type,
@@ -591,11 +586,11 @@ impl LiveStatus {
 /// [`SEEDED_WORKER_PROCESS_NAME`]).
 /// Returns the claim generation (`claimed_at`), `None` for a PENDING row.
 pub(super) async fn seed_node_task(
-    pool: &PgPool,
+    pool: &TestPool,
     task_id: Uuid,
     status: LiveStatus,
 ) -> Option<DateTime<Utc>> {
-    sqlx::query_scalar(
+    sql::query_scalar(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, task_options, execution,
              retention_class_key, sent_at, created_at, command_fingerprint_version,
@@ -639,7 +634,7 @@ const START_WORKER_PID: i32 = 4343;
 /// `worker::executor::child_host::run::start_attempt`). Every task start of
 /// the worker goes through it.
 pub(super) async fn start_claimed_task(
-    pool: &PgPool,
+    pool: &TestPool,
     task_id: Uuid,
     claimed_at: DateTime<Utc>,
 ) -> crate::broker::claims::StartOutcome {
@@ -741,8 +736,11 @@ pub(super) fn child_specs_of(children: &[WorkflowSpec]) -> TestChildSpecs {
 }
 
 /// A broker on `pool` for the start and the reads.
-pub(super) fn broker(pool: &PgPool) -> Arc<PostgresBroker> {
-    Arc::new(PostgresBroker::from_pool(pool.clone()))
+pub(super) fn broker(pool: &TestPool) -> Arc<PostgresBroker> {
+    Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    ))
 }
 
 /// Starts `spec` through the core's start of a client spec
@@ -750,7 +748,7 @@ pub(super) fn broker(pool: &PgPool) -> Arc<PostgresBroker> {
 /// id, the children of its sub-workflow roots from `child_specs`, and no
 /// resend. Returns the id with the outcome.
 pub(super) async fn try_start(
-    pool: &PgPool,
+    pool: &TestPool,
     spec: &WorkflowSpec,
     workflow_id: Option<Uuid>,
     child_specs: &TestChildSpecs,
@@ -772,7 +770,7 @@ pub(super) async fn try_start(
 ///
 /// Panics: a start that is refused or finds an existing workflow.
 pub(super) async fn start(
-    pool: &PgPool,
+    pool: &TestPool,
     spec: &WorkflowSpec,
     child_specs: &TestChildSpecs,
 ) -> Uuid {
@@ -792,19 +790,13 @@ pub(super) async fn start(
 /// The time an unreachable pool waits for a connection.
 const UNREACHABLE_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// A pool that connects to a port that refuses connections: every database
-/// call fails with a retryable connection error (`PoolTimedOut` after
-/// [`UNREACHABLE_ACQUIRE_TIMEOUT`]).
-pub(super) fn unreachable_pool() -> PgPool {
-    PgPoolOptions::new()
+/// A pool on a port that refuses connections: every database call through
+/// it, or through a broker on its URL, fails with a retryable connection
+/// error.
+pub(super) fn unreachable_pool() -> TestPool {
+    TestPoolOptions::new()
         .acquire_timeout(UNREACHABLE_ACQUIRE_TIMEOUT)
-        .connect_lazy_with(
-            PgConnectOptions::new()
-                .host("127.0.0.1")
-                .port(1)
-                .username("postgres")
-                .database("horsies_unreachable"),
-        )
+        .connect_lazy("postgresql://postgres@127.0.0.1:1/horsies_unreachable")
 }
 
 /// The reads and operations of one workflow through the core functions
@@ -1041,7 +1033,7 @@ pub(super) fn unreachable_handle(workflow_id: Uuid) -> WorkflowOps {
 }
 
 /// The reads and operations of `workflow_id` on a broker of `pool`.
-pub(super) fn handle(pool: &PgPool, workflow_id: Uuid) -> WorkflowOps {
+pub(super) fn handle(pool: &TestPool, workflow_id: Uuid) -> WorkflowOps {
     WorkflowOps {
         workflow_id,
         broker: broker(pool),
@@ -1052,8 +1044,8 @@ pub(super) fn handle(pool: &PgPool, workflow_id: Uuid) -> WorkflowOps {
 /// facts of its start ([`SEEDED_WORKER_PID`], [`SEEDED_WORKER_HOSTNAME`],
 /// [`SEEDED_WORKER_PROCESS_NAME`]), as the claim and the start handoff do, and
 /// the node to RUNNING with it.
-async fn hold_running(pool: &PgPool, task_id: Uuid) {
-    let held = sqlx::query(
+async fn hold_running(pool: &TestPool, task_id: Uuid) {
+    let held = sql::query(
         "UPDATE horsies_tasks
          SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $2,
              claim_expires_at = NULL, started_at = NOW(), worker_pid = $3,
@@ -1069,7 +1061,7 @@ async fn hold_running(pool: &PgPool, task_id: Uuid) {
     .await
     .expect("hold the task row");
     assert_eq!(held.rows_affected(), 1, "task {task_id} has no live row");
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_workflow_tasks SET status = 'RUNNING'
          WHERE task_id = $1 AND status = 'ENQUEUED'",
     )
@@ -1083,7 +1075,7 @@ async fn hold_running(pool: &PgPool, task_id: Uuid) {
 /// the task to history with `outcome`, then phase 2 (`on_workflow_task_complete`)
 /// writes the node and advances the workflow.
 pub(super) async fn finish_task(
-    pool: &PgPool,
+    pool: &TestPool,
     task_id: Uuid,
     outcome: &TaskResult<serde_json::Value>,
     child_specs: &TestChildSpecs,
@@ -1095,16 +1087,16 @@ pub(super) async fn finish_task(
 
 /// [`finish_task`] that returns the outcome of phase 2. Phase 1 must apply.
 pub(super) async fn try_finish_task(
-    pool: &PgPool,
+    pool: &TestPool,
     task_id: Uuid,
     outcome: &TaskResult<serde_json::Value>,
     child_specs: &TestChildSpecs,
 ) -> Result<WorkflowTaskCompletion, WorkflowTaskCompletionError> {
     let _ = finish_phase1(pool, task_id, outcome).await;
     on_workflow_task_complete_with(
-        &PostgresBroker::from_pool(pool.clone()),
+        &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
         task_id,
-        ChildBuild::Client(child_specs),
+        child_specs,
     )
     .await
 }
@@ -1112,7 +1104,7 @@ pub(super) async fn try_finish_task(
 /// Phase 1 of [`finish_task`] alone: the task moves to history with
 /// `outcome` and phase 2 stays owed. Returns the stored result text.
 pub(super) async fn finish_phase1(
-    pool: &PgPool,
+    pool: &TestPool,
     task_id: Uuid,
     outcome: &TaskResult<serde_json::Value>,
 ) -> String {
@@ -1147,7 +1139,7 @@ pub(super) async fn finish_phase1(
 /// Finishes the task of node `task_index` of `workflow_id` (see [`finish_task`])
 /// and returns the task id.
 pub(super) async fn finish_node(
-    pool: &PgPool,
+    pool: &TestPool,
     workflow_id: Uuid,
     task_index: i32,
     outcome: &TaskResult<serde_json::Value>,
@@ -1168,7 +1160,7 @@ pub(super) async fn finish_node(
 /// `check_workflow_completion`, which queues the parent propagation of a
 /// child that it ends.
 pub(super) async fn complete_workflow(
-    pool: &PgPool,
+    pool: &TestPool,
     workflow_id: Uuid,
     child_specs: &TestChildSpecs,
 ) {
@@ -1188,7 +1180,7 @@ pub(super) async fn complete_workflow(
 /// one transaction per level (`steps::advance_parents`), as phase 2 and
 /// recovery case 1.6 run it. Python: `on_subworkflow_complete`.
 pub(super) async fn advance_parent_of(
-    pool: &PgPool,
+    pool: &TestPool,
     child_workflow_id: Uuid,
     child_specs: &TestChildSpecs,
 ) {
@@ -1205,19 +1197,14 @@ async fn drive_parent_advances(
     owed: OwedParentAdvances,
     child_specs: &TestChildSpecs,
 ) {
-    advance_parents(
-        broker,
-        CheckoutClass::Reserved,
-        owed,
-        ChildBuild::Client(child_specs),
-    )
-    .await
-    .unwrap_or_else(|failure| {
-        panic!(
-            "the parent advance of child workflow {} failed: {:?}",
-            failure.failed_child_workflow_id, failure.error
-        )
-    });
+    advance_parents(broker, CheckoutClass::Reserved, owed, child_specs)
+        .await
+        .unwrap_or_else(|failure| {
+            panic!(
+                "the parent advance of child workflow {} failed: {:?}",
+                failure.failed_child_workflow_id, failure.error
+            )
+        });
 }
 
 /// A failure outcome with a user error code.
@@ -1250,11 +1237,11 @@ pub(super) struct RunningNodeTask {
 /// [`SEEDED_WORKER_PROCESS_NAME`]), and the node to RUNNING, as the claim and
 /// the start write leave them (Python's `_run_node_a`).
 pub(super) async fn run_node_task(
-    pool: &PgPool,
+    pool: &TestPool,
     workflow_id: Uuid,
     task_index: i32,
 ) -> RunningNodeTask {
-    let (task_id, queue_name, claimed_at): (Uuid, String, DateTime<Utc>) = sqlx::query_as(
+    let (task_id, queue_name, claimed_at): (Uuid, String, DateTime<Utc>) = sql::query_as(
         "UPDATE horsies_tasks t
          SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $3,
              claim_expires_at = NULL, started_at = NOW(), worker_pid = $4,
@@ -1275,7 +1262,7 @@ pub(super) async fn run_node_task(
     .unwrap_or_else(|error| {
         panic!("node {task_index} of {workflow_id} has no PENDING task: {error}")
     });
-    let started = sqlx::query(
+    let started = sql::query(
         "UPDATE horsies_workflow_tasks SET status = 'RUNNING', started_at = NOW()
          WHERE workflow_id = $1 AND task_index = $2 AND status = 'ENQUEUED'",
     )
@@ -1377,7 +1364,7 @@ pub(super) async fn worker_phase_two(
 ) {
     let owed = finalize_workflow_phase(
         broker,
-        ChildBuild::Client(child_specs),
+        child_specs,
         task.task_id,
         &task.queue_name,
         true,
@@ -1398,17 +1385,20 @@ pub(super) async fn worker_phase_two(
 /// that the broker opens.
 pub(super) struct CountedBroker {
     proxy: WireProxy,
-    proxied: PgPool,
+    proxied: TestPool,
     pub(super) broker: Arc<PostgresBroker>,
 }
 
 impl CountedBroker {
     /// A broker on the database of `pool`, through a new proxy.
-    pub(super) async fn open(pool: &PgPool) -> Self {
-        let upstream = database_options(pool);
-        let proxy = WireProxy::start(&upstream).await;
-        let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
-        let broker = Arc::new(PostgresBroker::from_pool(proxied.clone()));
+    pub(super) async fn open(pool: &TestPool) -> Self {
+        let upstream = pool.url();
+        let proxy = WireProxy::start(upstream).await;
+        let proxied = single_session_pool(&proxy.url(upstream)).await;
+        let broker = Arc::new(PostgresBroker::from_test_url(
+            proxied.url(),
+            crate::ClientFamily::Rust,
+        ));
         Self {
             proxy,
             proxied,
@@ -1424,7 +1414,7 @@ impl CountedBroker {
         (self.proxy.round_trips(), output)
     }
 
-    /// Closes the sqlx pool that the broker was built from.
+    /// Closes the test pool that the broker was built from.
     pub(super) async fn close(self) {
         self.proxied.close().await;
     }
@@ -1435,7 +1425,7 @@ impl CountedBroker {
 // ---------------------------------------------------------------------------
 
 /// The columns of a node row that the ports assert on.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 pub(super) struct NodeRow {
     pub(super) status: String,
     pub(super) task_id: Option<Uuid>,
@@ -1447,8 +1437,23 @@ pub(super) struct NodeRow {
     pub(super) completed_at: Option<DateTime<Utc>>,
 }
 
-pub(super) async fn node(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> NodeRow {
-    sqlx::query_as(
+impl sql::FromTestRow for NodeRow {
+    fn from_row(row: &tokio_postgres::Row) -> Result<Self, sql::Error> {
+        Ok(Self {
+            status: sql::named(row, "status")?,
+            task_id: sql::named(row, "task_id")?,
+            input: sql::named(row, "input")?,
+            result: sql::named(row, "result")?,
+            sub_workflow_id: sql::named(row, "sub_workflow_id")?,
+            sub_workflow_summary: sql::named(row, "sub_workflow_summary")?,
+            started_at: sql::named(row, "started_at")?,
+            completed_at: sql::named(row, "completed_at")?,
+        })
+    }
+}
+
+pub(super) async fn node(pool: &TestPool, workflow_id: Uuid, task_index: i32) -> NodeRow {
+    sql::query_as(
         "SELECT status, task_id, input, result, sub_workflow_id, sub_workflow_summary,
                 started_at, completed_at
          FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = $2",
@@ -1460,12 +1465,12 @@ pub(super) async fn node(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> N
     .unwrap_or_else(|error| panic!("read node {task_index} of {workflow_id}: {error}"))
 }
 
-pub(super) async fn node_status(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> String {
+pub(super) async fn node_status(pool: &TestPool, workflow_id: Uuid, task_index: i32) -> String {
     node(pool, workflow_id, task_index).await.status
 }
 
 /// The columns of a workflow row that the ports assert on.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 pub(super) struct WorkflowRow {
     pub(super) status: String,
     pub(super) result: Option<String>,
@@ -1473,22 +1478,31 @@ pub(super) struct WorkflowRow {
     pub(super) completed_at: Option<DateTime<Utc>>,
 }
 
-pub(super) async fn workflow(pool: &PgPool, workflow_id: Uuid) -> WorkflowRow {
-    sqlx::query_as(
-        "SELECT status, result, error, completed_at FROM horsies_workflows WHERE id = $1",
-    )
-    .bind(workflow_id)
-    .fetch_one(pool)
-    .await
-    .unwrap_or_else(|error| panic!("read workflow {workflow_id}: {error}"))
+impl sql::FromTestRow for WorkflowRow {
+    fn from_row(row: &tokio_postgres::Row) -> Result<Self, sql::Error> {
+        Ok(Self {
+            status: sql::named(row, "status")?,
+            result: sql::named(row, "result")?,
+            error: sql::named(row, "error")?,
+            completed_at: sql::named(row, "completed_at")?,
+        })
+    }
 }
 
-pub(super) async fn workflow_status(pool: &PgPool, workflow_id: Uuid) -> String {
+pub(super) async fn workflow(pool: &TestPool, workflow_id: Uuid) -> WorkflowRow {
+    sql::query_as("SELECT status, result, error, completed_at FROM horsies_workflows WHERE id = $1")
+        .bind(workflow_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|error| panic!("read workflow {workflow_id}: {error}"))
+}
+
+pub(super) async fn workflow_status(pool: &TestPool, workflow_id: Uuid) -> String {
     workflow(pool, workflow_id).await.status
 }
 
 /// The child workflow that node `task_index` of `workflow_id` started.
-pub(super) async fn child_of(pool: &PgPool, workflow_id: Uuid, task_index: i32) -> Uuid {
+pub(super) async fn child_of(pool: &TestPool, workflow_id: Uuid, task_index: i32) -> Uuid {
     node(pool, workflow_id, task_index)
         .await
         .sub_workflow_id
@@ -1497,7 +1511,7 @@ pub(super) async fn child_of(pool: &PgPool, workflow_id: Uuid, task_index: i32) 
 
 /// The input of the live task row of node `task_index`, as JSON.
 pub(super) async fn node_task_input(
-    pool: &PgPool,
+    pool: &TestPool,
     workflow_id: Uuid,
     task_index: i32,
 ) -> serde_json::Value {
@@ -1505,7 +1519,7 @@ pub(super) async fn node_task_input(
         .await
         .task_id
         .unwrap_or_else(|| panic!("node {task_index} of {workflow_id} has no task"));
-    let input: String = sqlx::query_scalar("SELECT input FROM horsies_tasks WHERE id = $1")
+    let input: String = sql::query_scalar("SELECT input FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
@@ -1568,7 +1582,7 @@ pub(super) fn stored_result_error(text: &str) -> TaskError {
 }
 
 /// The error code of the stored workflow error, or `None` when it has none.
-pub(super) async fn workflow_error_code(pool: &PgPool, workflow_id: Uuid) -> Option<String> {
+pub(super) async fn workflow_error_code(pool: &TestPool, workflow_id: Uuid) -> Option<String> {
     workflow(pool, workflow_id)
         .await
         .error
@@ -1580,8 +1594,8 @@ pub(super) async fn workflow_error_code(pool: &PgPool, workflow_id: Uuid) -> Opt
 
 /// The status and the terminalization kind of a task's history row, or `None`
 /// when the task has no history row.
-pub(super) async fn history_row(pool: &PgPool, task_id: Uuid) -> Option<(String, String)> {
-    sqlx::query_as(
+pub(super) async fn history_row(pool: &TestPool, task_id: Uuid) -> Option<(String, String)> {
+    sql::query_as(
         "SELECT status, terminalization_kind FROM horsies_task_history WHERE task_id = $1",
     )
     .bind(task_id)
@@ -1622,10 +1636,10 @@ pub(super) fn claim_pass(queue: &str, budget: u32) -> crate::broker::claims::Cla
 /// Run one claim pass of `request` on a core pool of `pool`, and return the
 /// claimed rows in claim order.
 pub(super) async fn claim_once(
-    pool: &PgPool,
+    pool: &TestPool,
     request: &crate::broker::claims::ClaimPassRequest,
 ) -> Vec<crate::broker::claims::ClaimedRow> {
-    let core = crate::broker::pools::core_pool_for_test_pool(pool);
+    let core = crate::broker::pools::core_pool_for_test_url(pool.url());
     let pass = crate::broker::claims::claim_pass(
         &core,
         crate::broker::core_rows::StatementLog::Off,
@@ -1644,12 +1658,12 @@ const NOTIFICATION_LIMIT: usize = 100;
 
 /// A connection that listens on `workflow_done` (Python's fixture of the same name).
 pub(super) struct WorkflowDoneListener {
-    listener: sqlx::postgres::PgListener,
+    listener: TestListener,
 }
 
 impl WorkflowDoneListener {
-    pub(super) async fn listen(pool: &PgPool) -> Self {
-        let mut listener = sqlx::postgres::PgListener::connect_with(pool)
+    pub(super) async fn listen(pool: &TestPool) -> Self {
+        let mut listener = TestListener::connect_with(pool)
             .await
             .expect("connect the workflow_done listener");
         listener
@@ -1677,12 +1691,12 @@ impl WorkflowDoneListener {
 /// A connection that listens on several channels and keeps each
 /// notification as (channel, payload).
 pub(super) struct Notifications {
-    listener: sqlx::postgres::PgListener,
+    listener: TestListener,
 }
 
 impl Notifications {
-    pub(super) async fn listen(pool: &PgPool, channels: &[&str]) -> Self {
-        let mut listener = sqlx::postgres::PgListener::connect_with(pool)
+    pub(super) async fn listen(pool: &TestPool, channels: &[&str]) -> Self {
+        let mut listener = TestListener::connect_with(pool)
             .await
             .expect("connect the notification listener");
         listener
@@ -1713,8 +1727,8 @@ impl Notifications {
 
 /// Ends seeded workflows that a test leaves RUNNING or PAUSED on the shared
 /// database, so no global pass of another test works on them.
-pub(super) async fn end_workflows(pool: &PgPool, workflow_ids: &[Uuid]) {
-    sqlx::query(
+pub(super) async fn end_workflows(pool: &TestPool, workflow_ids: &[Uuid]) {
+    sql::query(
         "UPDATE horsies_workflows
          SET status = 'CANCELLED', completed_at = NOW(), updated_at = NOW()
          WHERE id = ANY($1) AND status IN ('PENDING', 'RUNNING', 'PAUSED')",
@@ -1726,8 +1740,8 @@ pub(super) async fn end_workflows(pool: &PgPool, workflow_ids: &[Uuid]) {
 }
 
 /// Runs `statement` on its own and checks that it succeeded.
-pub(super) async fn execute(pool: &PgPool, statement: &str) {
-    sqlx::query(statement)
+pub(super) async fn execute(pool: &TestPool, statement: &str) {
+    sql::query(statement)
         .execute(pool)
         .await
         .unwrap_or_else(|error| panic!("test statement failed: {error}: {statement}"));

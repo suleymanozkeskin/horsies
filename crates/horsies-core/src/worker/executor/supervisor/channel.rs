@@ -1,5 +1,4 @@
-//! The parent side of one child: its socket, its frames and its process
-//! (Python `core/worker/slots.py`, `Child` and `FrameProtocol`).
+//! The parent side of one child: its socket, its frames and its process.
 //!
 //! Verdict rules, in this order:
 //! - A result is a complete frame, and nothing else.
@@ -678,6 +677,24 @@ impl ChildChannel {
             let _ = self.kill_group().await;
         }
         self.dispose().await
+    }
+
+    /// Wait for a child that said it ends itself once its last frame is
+    /// written (its core stopped). No stop frame is sent: the child is
+    /// already ending. A child that has not exited after
+    /// [`CHILD_STOP_TIMEOUT`] is killed. Then the session of the child is
+    /// killed and the channel closed, as for a child that ended by itself
+    /// ([`Self::dispose_lost`]).
+    pub async fn await_own_end(mut self) -> ChildExit {
+        let exit = self.wait_exit(CHILD_STOP_TIMEOUT).await;
+        if exit == ChildExit::ExitUnknown {
+            tracing::warn!(
+                pid = self.pid.get(),
+                "a child that said it ends itself did not exit within {}s; killing it",
+                CHILD_STOP_TIMEOUT.as_secs()
+            );
+        }
+        self.dispose_lost().await
     }
 
     /// Close the socket and wait for the exit, bounded. A process that has

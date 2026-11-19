@@ -1,5 +1,4 @@
-//! Port of Python `tests/integration/test_task_lock_order.py`: the task
-//! advisory lock goes before the row lock, on every path.
+//! The task advisory lock goes before the row lock, on every path.
 //!
 //! A transaction that takes the row lock first and the advisory lock later
 //! can deadlock against one that took the advisory lock first (SQLSTATE
@@ -12,7 +11,6 @@ use std::time::Duration as StdDuration;
 
 use chrono::Duration;
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::*;
@@ -21,7 +19,7 @@ use crate::broker::attempt_writes::{
 };
 use crate::broker::claims::{start_attempt, StartAttempt, StartMiss, StartOutcome};
 use crate::broker::core_rows::StatementLog;
-use crate::broker::pools::core_pool_for_test_pool;
+use crate::broker::pools::core_pool_for_test_url;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{
@@ -29,6 +27,7 @@ use crate::core::lifecycle::{
     TerminalizationKind, TerminalizationOutcome, WorkerOwned, WorkflowSuccessOutcome,
 };
 use crate::monitoring::cancel_task;
+use crate::test_support::sql::{self, TestConnection, TestPool};
 use crate::test_support::terminal_writes::{self, StaleFailure};
 
 const TASK_LOCK_SQL: &str = "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 731))";
@@ -42,9 +41,9 @@ const BLOCK_POLL_INTERVAL: StdDuration = StdDuration::from_millis(10);
 const RACE_ROUNDS: u32 = 10;
 
 /// Whether some backend waits on a lock that `holder_pid` holds.
-async fn a_backend_waits_on(pool: &PgPool, holder_pid: i32) -> bool {
+async fn a_backend_waits_on(pool: &TestPool, holder_pid: i32) -> bool {
     for _ in 0..BLOCK_POLLS {
-        let waiting: bool = sqlx::query_scalar(
+        let waiting: bool = sql::query_scalar(
             "SELECT EXISTS (
                  SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))
              )",
@@ -62,7 +61,7 @@ async fn a_backend_waits_on(pool: &PgPool, holder_pid: i32) -> bool {
 }
 
 /// A silent RUNNING task of `WORKER`, stale for the stale move.
-async fn stale_task(pool: &PgPool, origin: Origin) -> (Uuid, Option<Uuid>) {
+async fn stale_task(pool: &TestPool, origin: Origin) -> (Uuid, Option<Uuid>) {
     let task_id = seed_task(
         pool,
         &TaskSeed {
@@ -117,7 +116,7 @@ fn stale_failure() -> StaleFailure {
 
 /// The stale move of the holder, in the holder's transaction.
 async fn stale_move_in(
-    connection: &mut sqlx::PgConnection,
+    connection: &mut TestConnection,
     task_id: Uuid,
 ) -> Vec<TerminalizationOutcome> {
     terminal_writes::fail_stale_task(connection, task_id, &stale_failure())
@@ -125,8 +124,8 @@ async fn stale_move_in(
         .expect("stale move")
 }
 
-async fn history_kinds(pool: &PgPool, task_id: Uuid) -> Vec<(String, String)> {
-    sqlx::query_as(
+async fn history_kinds(pool: &TestPool, task_id: Uuid) -> Vec<(String, String)> {
+    sql::query_as(
         "SELECT status::text, terminalization_kind::text FROM horsies_task_history
          WHERE task_id = $1",
     )
@@ -148,7 +147,7 @@ fn foreign_kind_of_failure(outcome: &FailedAttemptOutcome) -> Option<Terminaliza
     }
 }
 
-async fn cleanup(pool: &PgPool, task_id: Uuid, workflow_id: Option<Uuid>) {
+async fn cleanup(pool: &TestPool, task_id: Uuid, workflow_id: Option<Uuid>) {
     cleanup_tasks(pool, &[task_id]).await;
     if let Some(workflow_id) = workflow_id {
         cleanup_workflows(pool, &[workflow_id]).await;
@@ -163,7 +162,7 @@ async fn a_failure_finalize_waits_for_a_stale_recovery_that_holds_its_locks() {
     let (task_id, workflow_id) = stale_task(&pool, Origin::Send).await;
     let mut recovery = pool.begin().await.expect("begin the recovery");
     let recovery_pid = backend_pid(&mut *recovery).await;
-    sqlx::query(TASK_LOCK_SQL)
+    sql::query(TASK_LOCK_SQL)
         .bind(task_id)
         .execute(&mut *recovery)
         .await
@@ -206,7 +205,7 @@ async fn a_workflow_success_waits_for_a_stale_recovery_that_holds_its_locks() {
     let (task_id, workflow_id) = stale_task(&pool, Origin::WorkflowNode).await;
     let mut recovery = pool.begin().await.expect("begin the recovery");
     let recovery_pid = backend_pid(&mut *recovery).await;
-    sqlx::query(TASK_LOCK_SQL)
+    sql::query(TASK_LOCK_SQL)
         .bind(task_id)
         .execute(&mut *recovery)
         .await
@@ -259,7 +258,7 @@ async fn the_stale_move_waits_for_a_workflow_success_that_holds_its_locks() {
     let mut holder = pool.begin().await.expect("begin the success");
     let holder_pid = backend_pid(&mut *holder).await;
     let applied: String =
-        sqlx::query_scalar("SELECT outcome FROM horsies_finish_workflow_success($1, $2, $3, $4)")
+        sql::query_scalar("SELECT outcome FROM horsies_finish_workflow_success($1, $2, $3, $4)")
             .bind(task_id)
             .bind(WORKER)
             .bind(generation())
@@ -310,17 +309,17 @@ async fn a_failure_finalize_waits_for_a_monitoring_cancel_that_holds_its_locks()
     let (task_id, workflow_id) = stale_task(&pool, Origin::Send).await;
     let mut finalizer = pool.begin().await.expect("begin the failure write");
     let finalizer_pid = backend_pid(&mut *finalizer).await;
-    sqlx::query(TASK_LOCK_SQL)
+    sql::query(TASK_LOCK_SQL)
         .bind(task_id)
         .execute(&mut *finalizer)
         .await
         .expect("take the task lock");
 
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let cancel = tokio::spawn(async move { cancel_task(&broker, task_id, true).await });
     let waited = a_backend_waits_on(&pool, finalizer_pid).await;
     let mut probe = pool.begin().await.expect("begin the probe");
-    let row_free = sqlx::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE NOWAIT")
+    let row_free = sql::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE NOWAIT")
         .bind(task_id)
         .execute(&mut *probe)
         .await
@@ -328,7 +327,7 @@ async fn a_failure_finalize_waits_for_a_monitoring_cancel_that_holds_its_locks()
     probe.rollback().await.expect("release the probe");
     // The baseline argument list: no retry, the REFUSE rule (the child
     // reported a result) and the capacity wake of a plain task.
-    let applied: String = sqlx::query_scalar(
+    let applied: String = sql::query_scalar(
         "SELECT outcome FROM horsies_finish_failed_attempt($1, $2, $3, 'NONE', NULL, NULL, NULL,
                 $4, 'BOOM', NULL, 'FAILED', 'boom', NULL, 'REFUSE', TRUE)",
     )
@@ -384,7 +383,7 @@ async fn the_row_lock_of_a_start_ends_before_its_miss_path() {
     let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "RUNNING").await;
     let mut holder = pool.begin().await.expect("begin the holder");
     let holder_pid = backend_pid(&mut *holder).await;
-    sqlx::query(TASK_LOCK_SQL)
+    sql::query(TASK_LOCK_SQL)
         .bind(task_id)
         .execute(&mut *holder)
         .await
@@ -393,7 +392,7 @@ async fn the_row_lock_of_a_start_ends_before_its_miss_path() {
     let started = tokio::time::timeout(
         SIDE_WAIT,
         start_attempt(
-            &core_pool_for_test_pool(&pool),
+            &core_pool_for_test_url(pool.url()),
             StatementLog::Off,
             &StartAttempt::of_process(
                 task_id,
@@ -410,7 +409,7 @@ async fn the_row_lock_of_a_start_ends_before_its_miss_path() {
     .await
     .expect("the start does not wait")
     .expect("start");
-    sqlx::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE NOWAIT")
+    sql::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE NOWAIT")
         .bind(task_id)
         .execute(&mut *holder)
         .await
@@ -466,7 +465,7 @@ async fn an_abandon_waits_for_the_workflow_without_task_locks() {
     let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "PAUSED").await;
     let mut holder = pool.begin().await.expect("begin the workflow holder");
     let holder_pid = backend_pid(&mut *holder).await;
-    sqlx::query("SELECT id FROM horsies_workflows WHERE id = $1 FOR UPDATE")
+    sql::query("SELECT id FROM horsies_workflows WHERE id = $1 FOR UPDATE")
         .bind(workflow_id)
         .execute(&mut *holder)
         .await
@@ -486,12 +485,12 @@ async fn an_abandon_waits_for_the_workflow_without_task_locks() {
     let waited = a_backend_waits_on(&pool, holder_pid).await;
     let mut probe = pool.begin().await.expect("begin the probe");
     let task_lock_free: bool =
-        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 731))")
+        sql::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 731))")
             .bind(task_id)
             .fetch_one(&mut *probe)
             .await
             .expect("try the task lock");
-    let row_free = sqlx::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE NOWAIT")
+    let row_free = sql::query("SELECT id FROM horsies_tasks WHERE id = $1 FOR UPDATE NOWAIT")
         .bind(task_id)
         .execute(&mut *probe)
         .await

@@ -26,8 +26,8 @@
 
 use horsies_core::monitoring::MonitoringQueryError;
 use horsies_core::{
-    BatchWriteError, BrokerError, BrokerOperationError, ClientStartError, CoveragePassError,
-    FailureCause, HandleOperationError, PrunePassError, WorkflowError,
+    BatchWriteError, BrokerError, ClientStartError, CoveragePassError, FailureCause,
+    PrunePassError, WorkflowError,
 };
 use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
@@ -212,7 +212,7 @@ impl CoreFailureSource for MonitoringQueryError {
         self.failure_cause()
     }
     fn exception_retryable(&self) -> bool {
-        self.retryable
+        self.retryable()
     }
 }
 
@@ -258,27 +258,6 @@ impl FailureException {
             error.to_string(),
             error.exception_retryable(),
             error.exception_cause(),
-        )
-    }
-
-    /// The exception of a broker operation error of `subject`: its message,
-    /// its retry rule and its cause. Pure.
-    pub fn of_operation_error(subject: &'static str, error: &BrokerOperationError) -> Self {
-        Self::new(
-            subject,
-            error.message.clone(),
-            error.retryable,
-            error.cause.clone(),
-        )
-    }
-
-    /// The exception of a workflow handle error of `subject`. Pure.
-    pub fn of_handle_error(subject: &'static str, error: &HandleOperationError) -> Self {
-        Self::new(
-            subject,
-            error.message.clone(),
-            error.retryable,
-            error.cause.clone(),
         )
     }
 }
@@ -329,8 +308,6 @@ pub fn add_failure_classes(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::ServerErrorFacts;
-
     use super::*;
 
     #[test]
@@ -355,22 +332,5 @@ mod tests {
                 FailureCause::ContractViolation,
             )
         );
-    }
-
-    #[test]
-    fn an_operation_error_keeps_its_message_not_its_display() {
-        let error = BrokerOperationError {
-            code: horsies_core::BrokerErrorCode::TaskInfoQueryFailed,
-            message: "read failed".to_owned(),
-            retryable: true,
-            cause: FailureCause::Server(ServerErrorFacts::of_code(
-                "57014",
-                "canceling statement due to statement timeout".to_owned(),
-            )),
-        };
-        let exception = FailureException::of_operation_error("task_info", &error);
-        assert_eq!(exception.message, "read failed");
-        assert!(exception.retryable);
-        assert_eq!(exception.cause, error.cause);
     }
 }

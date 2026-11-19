@@ -94,13 +94,11 @@ from horsies.core.brokers.result_types import (
     BrokerAsyncContext,
     BrokerEnqueueError,
     BrokerEnqueueFailed,
-    BrokerEventLoopLimit,
     BrokerIdempotencyKeyConflict,
     BrokerInvalidInput,
     BrokerInvalidJsonPayload,
     BrokerInvalidTaskOptions,
     BrokerListenerDisabled,
-    BrokerLoopRunnerFailed,
     BrokerNoTypeAvailable,
     BrokerNotAttached,
     BrokerOperationFailed,
@@ -114,9 +112,7 @@ from horsies.core.brokers.result_types import (
 from horsies.core.models.task_send_types import (
     TaskSendAsyncContext,
     TaskSendEnqueueFailed,
-    TaskSendEventLoopLimit,
     TaskSendIdempotencyKeyConflict,
-    TaskSendLoopRunnerFailed,
     TaskSendPayload,
     TaskSendPayloadMismatch,
     TaskSendPayloadTooLarge,
@@ -165,7 +161,6 @@ from horsies.core.errors import (
 
 P = ParamSpec('P')
 T = TypeVar('T')
-E = TypeVar('E')
 _UNSET: Final[object] = object()
 
 
@@ -223,7 +218,8 @@ def _mint_send_task_id() -> UUID:
 
     Raises ``ValueError`` with the source's cause when it refuses (the
     millisecond clock is outside the 48-bit range), as the Python generator
-    raised.
+    raised. Raises ``ForkedAfterCoreStart`` and ``CoreStopped``, the
+    refusals of every core call in this process.
     """
     match core_mint_task_id():
         case UUID() as task_id:
@@ -251,9 +247,7 @@ type _BrokerSendError = (
     | TaskSendEnqueueFailed
     | TaskSendPayloadMismatch
     | TaskSendIdempotencyKeyConflict
-    | TaskSendEventLoopLimit
     | TaskSendAsyncContext
-    | TaskSendLoopRunnerFailed
 )
 
 
@@ -504,9 +498,8 @@ class TaskHandle(Generic[T]):
         Folds:
         - ``Err(BrokerOperationError)`` → ``TaskResult(err=BROKER_ERROR)``
           (or NO_TYPE_AVAILABLE / RESULT_DESERIALIZATION_ERROR for the
-          two strict-serde codes when surfaced by the broker layer;
-          ``RetrievalCode.EVENT_LOOP_LIMIT`` at the event loop limit, never
-          cached). A broker ``ASYNC_CONTEXT`` fails an assertion: ``get()``
+          two strict-serde codes when surfaced by the broker layer). A
+          broker ``ASYNC_CONTEXT`` fails an assertion: ``get()``
           refuses a running event loop before it calls the broker.
         - ``Ok(None)`` → ``TASK_NOT_FOUND``.
         - ``Ok(record)`` with cancellation status → ``TASK_CANCELLED``.
@@ -525,8 +518,7 @@ class TaskHandle(Generic[T]):
             broker_err = broker_result.err_value
             # The strict-serde codes are properties of the stored payload /
             # handle, so they are cached. A generic broker error is
-            # transient, and EVENT_LOOP_LIMIT is a property of the calling
-            # loop: caching either would replay it after the condition
+            # transient: caching it would replay it after the condition
             # cleared.
             err_code: BuiltInTaskCode
             cache: bool
@@ -537,8 +529,6 @@ class TaskHandle(Generic[T]):
                     err_code, cache = (
                         OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, True,
                     )
-                case BrokerEventLoopLimit():
-                    err_code, cache = RetrievalCode.EVENT_LOOP_LIMIT, False
                 case BrokerWaitInsideTask():
                     err_code, cache = RetrievalCode.WAIT_INSIDE_TASK, False
                 case BrokerAsyncContext():
@@ -556,7 +546,6 @@ class TaskHandle(Generic[T]):
                     | BrokerNotAttached()
                     | BrokerInvalidTaskOptions()
                     | BrokerInvalidInput()
-                    | BrokerLoopRunnerFailed()
                     | BrokerListenerDisabled()
                 ):
                     err_code, cache = OperationalErrorCode.BROKER_ERROR, False
@@ -1057,6 +1046,12 @@ class _TaskFunctionMembers(Protocol[P, T]):
 
     `TaskFunction` and `AsyncTaskFunction` add the direct call. The generic
     parameter T represents the success type in TaskResult[T, TaskError].
+
+    The sends, the schedules and the four retry methods raise
+    `ForkedAfterCoreStart` (this process was forked without `exec` after
+    the core started) and `CoreStopped` (a core background task panicked).
+    These are states of the process: nothing was sent, and no send result
+    names them.
     """
 
     task_name: str
@@ -1288,8 +1283,6 @@ def _map_broker_err(
                 payload=payload,
                 message=message,
             )
-        case BrokerEventLoopLimit(message=message):
-            return TaskSendEventLoopLimit(message=message)
         case BrokerIdempotencyKeyConflict(
             message=message,
             owner_task_id=owner_task_id,
@@ -1305,13 +1298,6 @@ def _map_broker_err(
                 task_id=task_id,
                 payload=payload,
                 message=message,
-            )
-        case BrokerLoopRunnerFailed(message=message, exception=exception):
-            return TaskSendLoopRunnerFailed(
-                task_id=task_id,
-                payload=payload,
-                message=message,
-                exception=exception,
             )
         case (
             BrokerInvalidTaskOptions(message=message, exception=exception)
@@ -2420,7 +2406,7 @@ def create_task_wrapper(
             ))
 
         # Serialize kwargs against the receiver's declared parameter types.
-        kwargs_json: str | None = None
+        input_json: str | None = None
         if kwargs_dict:
             try:
                 encoded_kwargs = encode_kwargs_read_back(fn, kwargs_dict)
@@ -2435,17 +2421,17 @@ def create_task_wrapper(
                     message=f'Failed to serialize encoded kwargs for {task_name}: {kwargs_r.err_value}',
                     exception=kwargs_r.err_value,
                 ))
-            kwargs_json = kwargs_r.ok_value
+            input_json = kwargs_r.ok_value
 
             warn_if_payload_large(
                 app.config.payload,
                 task_name=task_name,
                 kind='kwargs',
-                payload_text=kwargs_json,
+                payload_text=input_json,
             )
             match check_payload_size(
                 app.config.payload,
-                payload_text=kwargs_json,
+                payload_text=input_json,
             ):
                 case PayloadWithinLimit():
                     pass
@@ -2471,7 +2457,7 @@ def create_task_wrapper(
             task_name=task_name,
             queue_name=validated_queue_name,
             priority=priority,
-            input_json=kwargs_json,
+            input_json=input_json,
             sent_at=sent_at,
             good_until=good_until,
             enqueue_delay_seconds=enqueue_delay_seconds,
@@ -2907,8 +2893,8 @@ def create_task_wrapper(
         """Check that a retryable error's payload fits this retry method.
 
         The parameter type admits ``TaskSendEnqueueFailed``,
-        ``TaskSendAsyncContext``, ``TaskSendIdempotencyKeyConflict`` and
-        ``TaskSendLoopRunnerFailed``; each carries its task id and payload. Another variant, passed by a caller
+        ``TaskSendAsyncContext`` and ``TaskSendIdempotencyKeyConflict``; each
+        carries its task id and payload. Another variant, passed by a caller
         without a type checker, fails an assertion that names it. Refused: a
         payload of another task, a payload without a delay when
         ``require_delay``, and a payload with a delay when ``reject_delay``.
@@ -2919,7 +2905,6 @@ def create_task_wrapper(
                 TaskSendEnqueueFailed()
                 | TaskSendAsyncContext()
                 | TaskSendIdempotencyKeyConflict()
-                | TaskSendLoopRunnerFailed()
             ):
                 pass
             case _ as refused:

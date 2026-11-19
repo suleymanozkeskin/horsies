@@ -29,10 +29,10 @@ use std::ffi::OsString;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use horsies_core::process_runtime::process_runtime;
 use horsies_core::{ChildHostExit, ChildLogSetup, ChildMode};
 
 use crate::child::exit_byte;
+use crate::process_state::runtime_for;
 use crate::{
     AppRole, CheckPassed, CheckReport, Horsies, SchedulerRunError, WorkerLogLevel, WorkerRunError,
     WorkerStart,
@@ -172,12 +172,17 @@ fn run_command(mut app: Horsies, command: Command) -> ExitCode {
 }
 
 /// Run `future` to its end on the core's process runtime from this thread.
-/// `None` when the runtime cannot start; the cause is printed.
+/// `None` when the OS refused the runtime's threads; the cause is printed.
+///
+/// # Panics
+///
+/// In a process that was forked without `exec` after the core's process
+/// runtime started. Nothing ran.
 fn block_on_process_runtime<F: std::future::Future>(future: F) -> Option<F::Output> {
-    match process_runtime() {
+    match runtime_for(format_args!("horsies::cli::run")) {
         Ok(runtime) => Some(runtime.runtime().block_on(future)),
-        Err(refusal) => {
-            eprintln!("horsies: {refusal}");
+        Err(failed) => {
+            eprintln!("horsies: {failed}");
             None
         }
     }

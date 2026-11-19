@@ -1,5 +1,4 @@
-//! Slot defects of shared slots (Python `core/worker/slots.py`,
-//! `_serve_slot`, `_clear_slot`, `SlotDefectsRepeated`): a run frame that
+//! Slot defects of shared slots: a run frame that
 //! cannot be encoded costs the child and every run of it, and three
 //! defects in a row fail the pools. The isolated rows are in
 //! `isolated_stop_tests.rs`.

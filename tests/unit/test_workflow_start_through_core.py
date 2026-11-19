@@ -1,10 +1,11 @@
 """``start_workflow_async`` on the core: what it sends and how it maps each answer.
 
 The spec crosses as workflow spec data in a ``WorkflowStartRequest``; the
-core answers ``WorkflowStarted``, ``WorkflowExists``, ``WorkflowIdTaken`` or
-``WorkflowStartFailed``. Prevalidation stays in Python, before any core
-call. The Python start statements are tested on the reference caller
-(``test_workflow_start_catches.py``, ``test_workflow_start_retry_loop.py``).
+core answers ``WorkflowStarted`` or ``WorkflowExists``, or the generated
+``WorkflowStartIdConflict`` or ``WorkflowStartEnqueueFailed`` that it built,
+which the start returns as they are. Prevalidation stays in Python, before
+any core call. The core writes the start and resends it
+(``crates/horsies-core/src/broker/workflow_start.rs``).
 """
 
 from __future__ import annotations
@@ -207,7 +208,7 @@ class TestStartAnswers:
             )
 
         assert is_ok(result)
-        assert result.ok_value.workflow_id == WORKFLOW_ID
+        assert result.ok_value.workflow_id == uuid.UUID(WORKFLOW_ID)
         arguments = request_class.call_args.kwargs
         assert arguments['workflow_id'] == uuid.UUID(WORKFLOW_ID)
         assert arguments['sent_at'] == SENT_AT
@@ -230,30 +231,41 @@ class TestStartAnswers:
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_an_id_taken_by_another_name_is_the_id_conflict(self) -> None:
-        broker = _broker(_record(core.WorkflowIdTaken, existing_name='other.flow'))
+        conflict = WorkflowStartIdConflict(
+            message=(
+                f"workflow_id '{WORKFLOW_ID}' already exists for workflow name "
+                "'other.flow', cannot start workflow name 'start_core.flow' with the same id"
+            ),
+            workflow_name='start_core.flow',
+            workflow_id=WORKFLOW_ID,
+            existing_workflow_name='other.flow',
+        )
+        broker = _broker(conflict)
         result = await start_workflow_async(_spec(), broker, WORKFLOW_ID, SENT_AT)
 
         assert is_err(result)
         error = result.err_value
+        assert error is conflict
         assert isinstance(error, WorkflowStartIdConflict)
         assert error.existing_workflow_name == 'other.flow'
         assert error.workflow_id == WORKFLOW_ID
 
     @pytest.mark.asyncio(loop_scope='function')
-    async def test_a_failure_record_is_the_enqueue_failure_with_its_retry_rule(self) -> None:
+    async def test_a_failed_start_is_the_enqueue_failure_with_its_retry_rule(self) -> None:
         cause = core.CoreConnectionError('start_workflow', 'connection refused', True)
-        broker = _broker(
-            _record(
-                core.WorkflowStartFailed,
-                message='connection refused',
-                retryable=True,
-                exception=cause,
-            ),
+        failed = WorkflowStartEnqueueFailed(
+            message='connection refused',
+            retryable=True,
+            workflow_name='start_core.flow',
+            workflow_id=WORKFLOW_ID,
+            exception=cause,
         )
+        broker = _broker(failed)
         result = await start_workflow_async(_spec(), broker, WORKFLOW_ID, SENT_AT)
 
         assert is_err(result)
         error = result.err_value
+        assert error is failed
         assert isinstance(error, WorkflowStartEnqueueFailed)
         assert error.retryable is True
         assert error.message == 'connection refused'
@@ -292,4 +304,49 @@ class TestStartAnswers:
 
         assert is_err(result)
         assert isinstance(result.err_value, WorkflowStartValidationFailed)
+        broker._core_handle.start_workflow_async.assert_not_awaited()  # pyright: ignore[reportPrivateUsage]
+
+
+class TestNodeRowAsserts:
+    """The node rows assert what spec construction guarantees, before any core
+    call (``top_node_rows``)."""
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_a_task_node_with_positional_args_fails_an_assert_that_names_it(
+        self,
+    ) -> None:
+        broker = _broker(_record(core.WorkflowStarted))
+        node = TaskNode(fn=value_task, kwargs={'value': 1})
+        spec = APP.workflow(
+            'start_core.task_args', [node], output=node,
+            definition_key='start_core.task_args.v1',
+        )
+        object.__setattr__(spec.tasks[0], 'args', (1,))
+
+        with pytest.raises(AssertionError) as exc_info:
+            await start_workflow_async(spec, broker, WORKFLOW_ID, SENT_AT)
+
+        message = str(exc_info.value)
+        assert "TaskNode 'start_core.value'" in message
+        assert '1 positional args' in message
+        broker._core_handle.start_workflow_async.assert_not_awaited()  # pyright: ignore[reportPrivateUsage]
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_a_subworkflow_node_with_positional_args_fails_an_assert_that_names_it(
+        self,
+    ) -> None:
+        broker = _broker(_record(core.WorkflowStarted))
+        spec = APP.workflow(
+            'start_core.subworkflow_args',
+            [SubWorkflowNode(workflow_def=StartCoreChild)],
+            definition_key='start_core.subworkflow_args.v1',
+        )
+        object.__setattr__(spec.tasks[0], 'args', (1, 2))
+
+        with pytest.raises(AssertionError) as exc_info:
+            await start_workflow_async(spec, broker, WORKFLOW_ID, SENT_AT)
+
+        message = str(exc_info.value)
+        assert "SubWorkflowNode 'start_core.child'" in message
+        assert '2 positional args' in message
         broker._core_handle.start_workflow_async.assert_not_awaited()  # pyright: ignore[reportPrivateUsage]

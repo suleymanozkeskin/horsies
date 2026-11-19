@@ -18,10 +18,9 @@ fail on, and runs the strict walker on the claim path. Each one sets
 Known limits:
 
 - The database driver parses JSONB columns, and this scan cannot see that.
-  ``test_jsonb_columns_are_frozen`` lists the columns, which hold library-built
-  config. A new JSONB column with task input must go through review here. Task
-  input and results are ``Text`` columns, so they reach ``loads_json``. Only
-  columns declared through ``mapped_column`` are listed.
+  ``test_jsonb_columns_are_frozen`` lists the JSONB columns that the package
+  declares through ``mapped_column``: none, since the core owns the schema.
+  A new one must go through review here.
 - A dynamic access such as ``getattr(json, 'loads')`` is not seen.
 """
 
@@ -53,29 +52,17 @@ _PYDANTIC_PARSE_METHODS: Final = frozenset(
 _FROZEN_DUMPS: Final = Counter(
     {
         (_CODEC_MODULE, 'dumps_json'): 1,
-        (_CODEC_MODULE, 'dumps_canonical_json'): 1,
         # The manifest of the core holds only text, integers and booleans.
         ('python/horsies/_catalog/manifest.py', 'dump_producer_manifest'): 1,
         ('python/horsies/_catalog/worker_manifest.py', 'dump_worker_manifest'): 1,
         # The profiles member of the worker manifest, for the live check.
         ('python/horsies/core/worker_manifest.py', 'dump_worker_profiles'): 1,
         ('python/horsies/_catalog/scheduler_manifest.py', 'dump_scheduler_manifest'): 1,
-        ('python/horsies/core/lifecycle/persistence.py', '_fused_batch_parameters'): 1,
-        ('python/horsies/core/worker/claiming.py', 'ClaimMixin._claim_params'): 6,
     }
 )
 
-_FROZEN_JSONB_COLUMNS: Final = frozenset(
-    {
-        ('python/horsies/core/models/task_pg.py', 'queue_priorities'),
-        ('python/horsies/core/models/task_pg.py', 'queue_max_concurrency'),
-        ('python/horsies/core/models/task_pg.py', 'recovery_config'),
-        ('python/horsies/core/models/task_pg.py', 'slots_down'),
-        ('python/horsies/core/models/task_pg.py', 'class_capacity'),
-        ('python/horsies/core/models/workflow_pg.py', 'success_policy'),
-        ('python/horsies/core/models/workflow_pg.py', 'args_from'),
-    }
-)
+_FROZEN_JSONB_COLUMNS: Final[frozenset[tuple[str, str]]] = frozenset()
+"""The package declares no ORM column: the core owns the schema."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,6 +239,8 @@ class TestRuntimeInventory:
         )
         assert parsing == Counter({
             (_CODEC_MODULE, 'loads_json', 'loads'): 1,
+            # The JSON text that the core writes from its model of a monitoring read.
+            (_CODEC_MODULE, 'validate_core_model_json', 'validate_json'): 1,
             ('python/horsies/core/codec/typed.py', '_validate_wire', 'validate_json'): 1,
         })
 

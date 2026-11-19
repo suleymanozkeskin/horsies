@@ -1,5 +1,4 @@
-//! The scheduler's statements on `horsies_schedule_state` (Python
-//! `python/horsies/core/scheduler/state.py`, `ScheduleStateManager`):
+//! The scheduler's statements on `horsies_schedule_state`:
 //!
 //! - the due read, the start read and write, the existence heal;
 //! - the fire: the slot tasks and the state move in one statement
@@ -607,16 +606,16 @@ fn fired_slot(fire: &ScheduleFire<'_>, row: &Row) -> Result<FiredSlot, RowDecode
     })
 }
 
-/// Test rows of `horsies_schedule_state`, written and read with sqlx on the
-/// test database (seeds and checks of the tests, not scheduler statements).
+/// Test rows of `horsies_schedule_state`, written and read with the test
+/// client on the test database (seeds and checks of the tests, not scheduler statements).
 #[cfg(test)]
 pub(crate) mod test_rows {
+    use crate::test_support::sql::{self, TestPool};
     use chrono::{DateTime, Utc};
-    use sqlx::PgPool;
     use uuid::Uuid;
 
     /// A row of `horsies_schedule_state`.
-    #[derive(Debug, sqlx::FromRow)]
+    #[derive(Debug)]
     pub(crate) struct StateRow {
         pub next_run_at: DateTime<Utc>,
         pub last_run_at: Option<DateTime<Utc>>,
@@ -625,9 +624,21 @@ pub(crate) mod test_rows {
         pub config_hash: Vec<u8>,
     }
 
+    impl sql::FromTestRow for StateRow {
+        fn from_row(row: &tokio_postgres::Row) -> Result<Self, sql::Error> {
+            Ok(Self {
+                next_run_at: sql::named(row, "next_run_at")?,
+                last_run_at: sql::named(row, "last_run_at")?,
+                last_task_id: sql::named(row, "last_task_id")?,
+                run_count: sql::named(row, "run_count")?,
+                config_hash: sql::named(row, "config_hash")?,
+            })
+        }
+    }
+
     /// The row of `schedule_name`, if any.
-    pub(crate) async fn state_row(pool: &PgPool, schedule_name: &str) -> Option<StateRow> {
-        sqlx::query_as(
+    pub(crate) async fn state_row(pool: &TestPool, schedule_name: &str) -> Option<StateRow> {
+        sql::query_as(
             "SELECT next_run_at, last_run_at, last_task_id, run_count, config_hash
              FROM horsies_schedule_state WHERE schedule_name = $1",
         )
@@ -638,8 +649,8 @@ pub(crate) mod test_rows {
     }
 
     /// Delete the row of `schedule_name`.
-    pub(crate) async fn delete_state(pool: &PgPool, schedule_name: &str) {
-        let _deleted = sqlx::query("DELETE FROM horsies_schedule_state WHERE schedule_name = $1")
+    pub(crate) async fn delete_state(pool: &TestPool, schedule_name: &str) {
+        let _deleted = sql::query("DELETE FROM horsies_schedule_state WHERE schedule_name = $1")
             .bind(schedule_name)
             .execute(pool)
             .await
@@ -648,9 +659,13 @@ pub(crate) mod test_rows {
 
     /// Replace the row of `schedule_name` with a fresh one due at
     /// `next_run_at`: no run recorded, a zero digest.
-    pub(crate) async fn seed_state(pool: &PgPool, schedule_name: &str, next_run_at: DateTime<Utc>) {
+    pub(crate) async fn seed_state(
+        pool: &TestPool,
+        schedule_name: &str,
+        next_run_at: DateTime<Utc>,
+    ) {
         delete_state(pool, schedule_name).await;
-        let _inserted = sqlx::query(
+        let _inserted = sql::query(
             "INSERT INTO horsies_schedule_state (
                  schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash,
                  updated_at
@@ -666,13 +681,13 @@ pub(crate) mod test_rows {
 
     /// Record one run on the row of `schedule_name`.
     pub(crate) async fn record_run(
-        pool: &PgPool,
+        pool: &TestPool,
         schedule_name: &str,
         run_at: DateTime<Utc>,
         next_run_at: DateTime<Utc>,
         task_id: Uuid,
     ) {
-        let _updated = sqlx::query(
+        let _updated = sql::query(
             "UPDATE horsies_schedule_state
              SET last_run_at = $2, next_run_at = $3, last_task_id = $4,
                  run_count = run_count + 1, updated_at = statement_timestamp()

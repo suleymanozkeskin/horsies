@@ -1590,27 +1590,235 @@ END
 $$;
 
 ------------------------------------------------------------------------------------------------------------------------
+-- Worker liveness
+------------------------------------------------------------------------------------------------------------------------
+
+-- horsies_worker_liveness_key: the key of the session advisory lock that a worker process holds while it lives.
+--
+-- Guarantee: hashtextextended('horsies-worker-liveness:' || p_worker_id, 0); one key for one worker id. A worker id
+-- is a new UUIDv4 at each process start, so a restarted worker never takes the key of its earlier process. A NULL id
+-- gives NULL (STRICT).
+-- Locks: none. Reads nothing.
+CREATE FUNCTION horsies_worker_liveness_key(p_worker_id text) RETURNS bigint
+    LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+    AS $$ SELECT hashtextextended('horsies-worker-liveness:' || p_worker_id, 0) $$;
+
+-- horsies_take_worker_liveness: one acquisition of the liveness lock of p_worker_id by this session, with its
+-- generation.
+--
+-- Guarantee:
+-- - It tries the session advisory lock on horsies_worker_liveness_key(p_worker_id), with no wait. Taken: it writes a
+--   new generation for p_worker_id (the next value of horsies_worker_liveness_generation) into
+--   horsies_worker_liveness and returns true, so the generation commits with the caller's transaction. Held by
+--   another session: it writes nothing and returns false.
+-- - The lock is a session lock, and a rollback keeps it: a session whose call failed, or whose transaction did not
+--   commit, can hold the lock with no new generation. The caller ends that session.
+-- - A worker counts an acquisition only after this call committed. Each hold that a live worker counts then has a
+--   generation that commits while the hold lasts, so a regain between two reaper reads changes the generation that
+--   the later reads see.
+-- Arguments: p_worker_id not NULL (else 22023).
+-- Locks: the session advisory lock of the key, until the session ends; the row of p_worker_id in
+--   horsies_worker_liveness, until the transaction ends. It waits for a concurrent write of that row.
+-- It does not commit.
+-- Python: none (a core addition).
+CREATE FUNCTION horsies_take_worker_liveness(p_worker_id text) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF p_worker_id IS NULL THEN
+        RAISE EXCEPTION 'horsies_take_worker_liveness: the worker id must not be NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF NOT pg_try_advisory_lock(horsies_worker_liveness_key(p_worker_id)) THEN
+        RETURN false;
+    END IF;
+    INSERT INTO horsies_worker_liveness (worker_id, generation)
+    VALUES (p_worker_id, nextval('horsies_worker_liveness_generation'))
+    ON CONFLICT (worker_id) DO UPDATE SET generation = EXCLUDED.generation;
+    RETURN true;
+END
+$$;
+
+-- horsies_unheld_worker_owners: the liveness read of one reaper pass. The owners of CLAIMED and RUNNING rows whose
+-- liveness lock no session of this database holds, with the generation of their latest acquisition.
+--
+-- Guarantee:
+-- - Each returned owner owns at least one CLAIMED or RUNNING row, and the lock table (one read of pg_locks for the
+--   whole statement) shows no granted advisory lock on its key (horsies_worker_liveness_key) in this database.
+-- - generation is the owner's row of horsies_worker_liveness in the snapshot of this statement, which is taken
+--   before the lock table read. It is NULL when the owner has no row: no acquisition is recorded, or the row was
+--   deleted (horsies_forget_ended_worker_liveness).
+-- - A worker takes its lock with a generation (horsies_take_worker_liveness) before its first claim, and holds it on
+--   its own session until it ends; after a lost session it takes the lock again, with a new generation, within its
+--   regain bound, or it fails closed. So a returned owner has ended, or is inside that bound, or took the lock again
+--   since a read that saw an earlier generation.
+-- - The caller judges an owner gone when two reads at least the regain bound plus a margin apart return it at one
+--   generation, no read between them left it out or returned another generation, and a read of the generations
+--   after the later one (horsies_worker_liveness_generations) still shows that generation. It then recovers the
+--   owner's RUNNING and CLAIMED rows with the evidence OWNER_GONE (horsies_stale_running_scan,
+--   horsies_finish_stale_attempt, horsies_requeue_stale_claims). An owner with a NULL generation is never judged.
+-- - At most p_batch_size owners, in worker id order (C collation), so a cut list is cut at the same place by the
+--   next read.
+-- Arguments: p_batch_size 1..10000 (else 22023).
+-- Locks: none. It takes no lock and waits for none.
+-- Returns one row per owner: worker_id, generation, and db_now (clock_timestamp() after the lock table read).
+-- Python: none (a core addition; Python recovers the rows of an ended worker by the beat age only).
+CREATE FUNCTION horsies_unheld_worker_owners(p_batch_size integer)
+RETURNS TABLE(worker_id text, generation bigint, db_now timestamp with time zone)
+    LANGUAGE plpgsql
+    AS $$
+#variable_conflict use_column
+BEGIN
+    IF p_batch_size IS NULL OR p_batch_size < 1 OR p_batch_size > 10000 THEN
+        RAISE EXCEPTION 'horsies_unheld_worker_owners: the batch size must be 1 to 10000'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    RETURN QUERY
+    WITH held AS MATERIALIZED (
+        -- A bigint advisory key is (classid << 32) | objid, with objsubid 1.
+        SELECT (l.classid::bigint << 32) | l.objid::bigint AS lock_key
+        FROM pg_locks l
+        WHERE l.locktype = 'advisory'
+          AND l.objsubid = 1
+          AND l.granted
+          AND l.database = (SELECT d.oid FROM pg_database d WHERE d.datname = current_database())
+    ),
+    owners AS (
+        SELECT DISTINCT t.claimed_by_worker_id::text AS owner_id
+        FROM horsies_tasks t
+        WHERE t.status IN ('CLAIMED', 'RUNNING')
+          AND t.claimed_by_worker_id IS NOT NULL
+    )
+    SELECT o.owner_id, r.generation, clock_timestamp()
+    FROM owners o
+    LEFT JOIN horsies_worker_liveness r ON r.worker_id = o.owner_id
+    WHERE NOT EXISTS (
+        SELECT 1 FROM held h WHERE h.lock_key = horsies_worker_liveness_key(o.owner_id)
+    )
+    ORDER BY o.owner_id COLLATE "C"
+    LIMIT p_batch_size;
+END
+$$;
+
+-- horsies_worker_liveness_generations: the current generation of each given worker.
+--
+-- Guarantee: one row for each distinct worker id of p_worker_ids that has a row in horsies_worker_liveness, with its
+-- generation in the snapshot of this statement. A worker with no row is not returned. A reaper runs it as a
+-- statement of its own after a liveness read (horsies_unheld_worker_owners): its snapshot then follows that read's
+-- lock table read, so it shows each generation that committed before that read found the lock free.
+-- Arguments: p_worker_ids not NULL, with at most 10000 elements (else 22023).
+-- Locks: none. It takes no lock and waits for none.
+-- Returns one row per worker: worker_id, generation, in worker id order (C collation).
+-- Python: none (a core addition).
+CREATE FUNCTION horsies_worker_liveness_generations(p_worker_ids text[])
+RETURNS TABLE(worker_id text, generation bigint)
+    LANGUAGE plpgsql
+    AS $$
+#variable_conflict use_column
+BEGIN
+    IF p_worker_ids IS NULL OR cardinality(p_worker_ids) > 10000 THEN
+        RAISE EXCEPTION 'horsies_worker_liveness_generations: the worker ids must be an array of at most 10000'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    RETURN QUERY
+    SELECT r.worker_id, r.generation
+    FROM horsies_worker_liveness r
+    WHERE r.worker_id = ANY (p_worker_ids)
+    ORDER BY r.worker_id COLLATE "C";
+END
+$$;
+
+-- horsies_forget_ended_worker_liveness: delete the liveness rows of ended workers.
+--
+-- Guarantee:
+-- - It deletes at most p_batch_size rows of horsies_worker_liveness, in worker id order (C collation): rows of
+--   workers that own no CLAIMED or RUNNING row and whose liveness lock no session of this database holds (one read
+--   of pg_locks for the whole statement).
+-- - A row whose generation changed after the snapshot of this statement is kept: the delete checks the generation
+--   again on the row version that it locks, so a new acquisition stays recorded.
+-- - A deleted row makes no reaper judge an owner gone: an owner with no row has a NULL generation in
+--   horsies_unheld_worker_owners. A worker that takes its lock again writes a new row with a new generation.
+-- Arguments: p_batch_size 1..10000 (else 22023).
+-- Locks: the rows it deletes, until the transaction ends. It waits for a concurrent write of such a row.
+-- Returns the number of deleted rows. It does not commit.
+-- Python: none (a core addition).
+CREATE FUNCTION horsies_forget_ended_worker_liveness(p_batch_size integer) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_deleted integer;
+BEGIN
+    IF p_batch_size IS NULL OR p_batch_size < 1 OR p_batch_size > 10000 THEN
+        RAISE EXCEPTION 'horsies_forget_ended_worker_liveness: the batch size must be 1 to 10000'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    WITH held AS MATERIALIZED (
+        -- A bigint advisory key is (classid << 32) | objid, with objsubid 1.
+        SELECT (l.classid::bigint << 32) | l.objid::bigint AS lock_key
+        FROM pg_locks l
+        WHERE l.locktype = 'advisory'
+          AND l.objsubid = 1
+          AND l.granted
+          AND l.database = (SELECT d.oid FROM pg_database d WHERE d.datname = current_database())
+    ),
+    owners AS MATERIALIZED (
+        SELECT DISTINCT t.claimed_by_worker_id::text AS owner_id
+        FROM horsies_tasks t
+        WHERE t.status IN ('CLAIMED', 'RUNNING')
+          AND t.claimed_by_worker_id IS NOT NULL
+    ),
+    ended AS (
+        SELECT r.worker_id, r.generation
+        FROM horsies_worker_liveness r
+        WHERE NOT EXISTS (SELECT 1 FROM owners o WHERE o.owner_id = r.worker_id)
+          AND NOT EXISTS (
+              SELECT 1 FROM held h WHERE h.lock_key = horsies_worker_liveness_key(r.worker_id)
+          )
+        ORDER BY r.worker_id COLLATE "C"
+        LIMIT p_batch_size
+    )
+    DELETE FROM horsies_worker_liveness r
+    USING ended e
+    WHERE r.worker_id = e.worker_id
+      AND r.generation = e.generation;
+    GET DIAGNOSTICS v_deleted = ROW_COUNT;
+    RETURN v_deleted;
+END
+$$;
+
+------------------------------------------------------------------------------------------------------------------------
 -- Stale RUNNING recovery
 ------------------------------------------------------------------------------------------------------------------------
 
 -- horsies_stale_running_scan: the candidates of one stale RUNNING pass. No locks.
 --
--- Guarantee: returns at most p_batch_size RUNNING rows with a start, no finalizing marker newer than
--- p_finalizing_stale_after_ms, and no runner beat newer than p_stale_after_ms (the latest beat, or the start when
--- there is none). The beat probe reads only beats newer than the larger threshold: an older beat satisfies the
--- staleness test for every value, so the bound cannot change the verdict, and it keeps the probe on the current
--- hourly leaves. Each candidate is judged again under its locks by horsies_finish_stale_attempt; the scan is only
--- a hint.
--- Arguments: thresholds in ms (>= 0), p_batch_size 1..10000 (else 22023).
+-- p_evidence names what makes a RUNNING row a candidate, a closed set:
+-- - BEAT_AGE (both thresholds, >= 0; no owner and no claim bound): a row with a start, no finalizing marker newer
+--   than p_finalizing_stale_after_ms, and no runner beat newer than p_stale_after_ms (the latest beat, or the start
+--   when there is none). The beat probe reads only beats newer than the larger threshold: an older beat satisfies
+--   the staleness test for every value, so the bound cannot change the verdict, and it keeps the probe on the
+--   current hourly leaves.
+-- - OWNER_GONE (p_owner_worker_id and p_claimed_before; no threshold): a row with a start that p_owner_worker_id
+--   claimed before p_claimed_before. The caller judged the owner gone: horsies_unheld_worker_owners returned it in
+--   two reads far enough apart, at one generation. A gone owner writes no beat and finalizes nothing, so the beat
+--   age and the finalizing marker are not read. The claim bound is the database time of the first of those reads:
+--   a row claimed after it is not judged by that evidence.
+-- Guarantee: at most p_batch_size rows. Each candidate is judged again under its locks by
+-- horsies_finish_stale_attempt with the same evidence; the scan is only a hint.
+-- Arguments: an evidence of the set with exactly its arguments, thresholds of 0 ms or more, p_batch_size 1..10000;
+-- anything else is refused with 22023.
 -- Locks: none.
 -- Returns one row per candidate: the facts the caller needs for the retry decision (retry_count, max_retries,
--- task_options, good_until) and for the crash result (claimed_by_worker_id, worker_pid, worker_hostname,
--- worker_process_name, started_at), and db_now (clock_timestamp()).
+-- task_options, good_until), for the crash result (claimed_by_worker_id, worker_pid, worker_hostname,
+-- worker_process_name, started_at) and for the fence of OWNER_GONE (claimed_at), and db_now (clock_timestamp()).
 -- Python: SELECT_STALE_RUNNING_TASKS_SQL (core/brokers/postgres.py:766-788) and its session
--- (core/brokers/postgres.py:3972-3984).
+-- (core/brokers/postgres.py:3972-3984), for BEAT_AGE. OWNER_GONE is a core addition.
 CREATE FUNCTION horsies_stale_running_scan(
+    p_evidence text,
     p_stale_after_ms integer,
     p_finalizing_stale_after_ms integer,
+    p_owner_worker_id text,
+    p_claimed_before timestamp with time zone,
     p_batch_size integer
 ) RETURNS TABLE(
     task_id uuid,
@@ -1619,6 +1827,7 @@ CREATE FUNCTION horsies_stale_running_scan(
     task_options text,
     good_until timestamp with time zone,
     claimed_by_worker_id text,
+    claimed_at timestamp with time zone,
     worker_pid integer,
     worker_hostname text,
     worker_process_name text,
@@ -1629,52 +1838,91 @@ CREATE FUNCTION horsies_stale_running_scan(
     AS $$
 #variable_conflict use_column
 BEGIN
-    IF p_stale_after_ms IS NULL OR p_stale_after_ms < 0
-       OR p_finalizing_stale_after_ms IS NULL OR p_finalizing_stale_after_ms < 0 THEN
-        RAISE EXCEPTION 'horsies_stale_running_scan: thresholds must be 0 ms or more'
-            USING ERRCODE = 'invalid_parameter_value';
-    END IF;
+    CASE p_evidence
+        WHEN 'BEAT_AGE' THEN
+            IF p_stale_after_ms IS NULL OR p_stale_after_ms < 0
+               OR p_finalizing_stale_after_ms IS NULL OR p_finalizing_stale_after_ms < 0
+               OR num_nulls(p_owner_worker_id, p_claimed_before) <> 2 THEN
+                RAISE EXCEPTION
+                    'horsies_stale_running_scan: BEAT_AGE takes two thresholds of 0 ms or more and no owner'
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+        WHEN 'OWNER_GONE' THEN
+            IF num_nulls(p_stale_after_ms, p_finalizing_stale_after_ms) <> 2
+               OR num_nulls(p_owner_worker_id, p_claimed_before) <> 0 THEN
+                RAISE EXCEPTION
+                    'horsies_stale_running_scan: OWNER_GONE takes an owner and a claim bound and no threshold'
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+        ELSE
+            RAISE EXCEPTION 'horsies_stale_running_scan: unknown evidence'
+                USING ERRCODE = 'invalid_parameter_value';
+    END CASE;
     IF p_batch_size IS NULL OR p_batch_size < 1 OR p_batch_size > 10000 THEN
         RAISE EXCEPTION 'horsies_stale_running_scan: the batch size must be 1 to 10000'
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
-    RETURN QUERY
-    SELECT t.id, t.retry_count, t.max_retries, t.task_options, t.good_until,
-           t.claimed_by_worker_id::text, t.worker_pid, t.worker_hostname::text, t.worker_process_name::text,
-           t.started_at, clock_timestamp()
-    FROM horsies_tasks t
-    WHERE t.status = 'RUNNING'
-      AND t.started_at IS NOT NULL
-      AND (
-          t.finalizing_at IS NULL
-          OR t.finalizing_at < NOW() - make_interval(secs => p_finalizing_stale_after_ms / 1000.0)
-      )
-      AND COALESCE(
-          (
-              SELECT h.sent_at
-              FROM horsies_heartbeats h
-              WHERE h.task_id = t.id
-                AND h.role = 'runner'
-                AND h.sent_at >= NOW() - make_interval(
-                    secs => GREATEST(p_stale_after_ms, p_finalizing_stale_after_ms) / 1000.0
-                )
-              ORDER BY h.sent_at DESC
-              LIMIT 1
-          ),
-          t.started_at
-      ) < NOW() - make_interval(secs => p_stale_after_ms / 1000.0)
-    LIMIT p_batch_size;
+    CASE p_evidence
+        WHEN 'BEAT_AGE' THEN
+            RETURN QUERY
+            SELECT t.id, t.retry_count, t.max_retries, t.task_options, t.good_until,
+                   t.claimed_by_worker_id::text, t.claimed_at, t.worker_pid, t.worker_hostname::text,
+                   t.worker_process_name::text, t.started_at, clock_timestamp()
+            FROM horsies_tasks t
+            WHERE t.status = 'RUNNING'
+              AND t.started_at IS NOT NULL
+              AND (
+                  t.finalizing_at IS NULL
+                  OR t.finalizing_at < NOW() - make_interval(secs => p_finalizing_stale_after_ms / 1000.0)
+              )
+              AND COALESCE(
+                  (
+                      SELECT h.sent_at
+                      FROM horsies_heartbeats h
+                      WHERE h.task_id = t.id
+                        AND h.role = 'runner'
+                        AND h.sent_at >= NOW() - make_interval(
+                            secs => GREATEST(p_stale_after_ms, p_finalizing_stale_after_ms) / 1000.0
+                        )
+                      ORDER BY h.sent_at DESC
+                      LIMIT 1
+                  ),
+                  t.started_at
+              ) < NOW() - make_interval(secs => p_stale_after_ms / 1000.0)
+            LIMIT p_batch_size;
+        WHEN 'OWNER_GONE' THEN
+            RETURN QUERY
+            SELECT t.id, t.retry_count, t.max_retries, t.task_options, t.good_until,
+                   t.claimed_by_worker_id::text, t.claimed_at, t.worker_pid, t.worker_hostname::text,
+                   t.worker_process_name::text, t.started_at, clock_timestamp()
+            FROM horsies_tasks t
+            WHERE t.status = 'RUNNING'
+              AND t.started_at IS NOT NULL
+              AND t.claimed_by_worker_id = p_owner_worker_id
+              AND t.claimed_at < p_claimed_before
+            LIMIT p_batch_size;
+    END CASE;
 END
 $$;
 
 -- horsies_finish_stale_attempt: the stale RUNNING recovery of one task: crash retry by policy, or failure.
 --
+-- p_evidence names why the row is recovered, a closed set (the evidence of horsies_stale_running_scan):
+-- - BEAT_AGE (both thresholds, >= 0; no owner and no claim generation): the runner stopped beating.
+-- - OWNER_GONE (p_owner_worker_id and p_owner_claimed_at; no threshold): the owner is gone (its liveness lock was
+--   free in two reaper reads far enough apart, at one generation, horsies_unheld_worker_owners), in place of the
+--   beat age.
+--
 -- Guarantee:
 -- - Judged under the task advisory lock and the row lock, on one capture of the row, its latest runner beat (inside
---   the recency bound of horsies_stale_running_scan) and NOW(): RUNNING, started, no finalizing marker newer than
---   p_finalizing_stale_after_ms, no runner beat newer than p_stale_after_ms. A fresh row is SOURCE_STATE_CONFLICT
---   with guard STALENESS and its evidence; a row that is not RUNNING is classified by horsies_terminalization_miss
---   (FAIL_STALE). A refusal writes nothing.
+--   the recency bound of horsies_stale_running_scan; BEAT_AGE only) and NOW().
+-- - BEAT_AGE: RUNNING, started, no finalizing marker newer than p_finalizing_stale_after_ms, no runner beat newer
+--   than p_stale_after_ms. A fresh row is SOURCE_STATE_CONFLICT with guard STALENESS and its evidence; a row that is
+--   not RUNNING is classified by horsies_terminalization_miss (FAIL_STALE, fence NONE).
+-- - OWNER_GONE: RUNNING and started under p_owner_worker_id at the claim generation p_owner_claimed_at, whatever its
+--   beats and its finalizing marker. Any other row is classified by horsies_terminalization_miss (FAIL_STALE, fence
+--   OWNER_AND_GENERATION): another owner or generation is LOST_CLAIM.
+-- - A refusal writes nothing.
 -- - A retry request carries the retry count it was computed from; a row whose count differs is
 --   SOURCE_STATE_CONFLICT with guard RETRY_COUNT and writes nothing (the next pass decides again).
 -- - One FAILED attempt with the caller's error code (WORKER_CRASHED) is written with will_retry.
@@ -1685,20 +1933,25 @@ $$;
 -- - Failure: the move (FAIL_STALE). No capacity wake, as Python. A workflow task gets node_has_dependents and
 --   downstream_subworkflow; phase-2 recovery runs its phase 2.
 --
--- Arguments: thresholds in ms (>= 0); p_retry_kind NONE | RETRY (p_expected_retry_count, p_retry_delay_s finite
--- and >= 0; NULL for NONE); the terminal result, error code and failed reason; the attempt message and reason.
--- Refused (22023): a NULL task, threshold or kind, a retry slot that does not fit its kind, a NULL error code. A
--- NULL result is refused with 23502.
+-- Arguments: the evidence and its arguments (thresholds in ms, >= 0); p_retry_kind NONE | RETRY
+-- (p_expected_retry_count, p_retry_delay_s finite and >= 0; NULL for NONE); the terminal result, error code and
+-- failed reason; the attempt message and reason.
+-- Refused (22023): a NULL task, evidence or retry kind, an evidence or retry slot that does not fit its kind, a
+-- negative threshold, a NULL error code. A NULL result is refused with 23502.
 -- Locks: the task advisory lock, then the row by id alone (FOR UPDATE), then (the move of a workflow task) the node.
 -- Returns one row with the columns of horsies_finish_failed_attempt (outcome APPLIED, RETRY_SCHEDULED, or a
 -- refusal; never RELEASED). observed_worker_id and observed_claimed_at are those of the silent claim.
 -- Python: mark_stale_tasks_as_failed (core/brokers/postgres.py:3932-4215) with SELECT_STALE_TASK_FOR_UPDATE_SQL
 -- (:790-817), UPSERT_TASK_ATTEMPT_SQL (core/worker/sql.py:502-527), SCHEDULE_STALE_TASK_RETRY_SQL
--- (core/worker/sql.py:316-353) and horsies_fail_stale_task (core/history/terminalization/move.py:901-1014).
+-- (core/worker/sql.py:316-353) and horsies_fail_stale_task (core/history/terminalization/move.py:901-1014), for
+-- BEAT_AGE. OWNER_GONE is a core addition.
 CREATE FUNCTION horsies_finish_stale_attempt(
     p_task_id uuid,
+    p_evidence text,
     p_stale_after_ms integer,
     p_finalizing_stale_after_ms integer,
+    p_owner_worker_id text,
+    p_owner_claimed_at timestamp with time zone,
     p_retry_kind text,
     p_expected_retry_count integer,
     p_retry_delay_s double precision,
@@ -1740,12 +1993,30 @@ DECLARE
     v_good_until timestamptz;
     v_terminal_at timestamptz;
 BEGIN
-    IF num_nulls(p_task_id, p_stale_after_ms, p_finalizing_stale_after_ms, p_retry_kind, p_error_code) <> 0
-       OR p_stale_after_ms < 0 OR p_finalizing_stale_after_ms < 0 THEN
-        RAISE EXCEPTION
-            'horsies_finish_stale_attempt: the task, thresholds (0 ms or more), retry kind and error code are required'
+    IF num_nulls(p_task_id, p_retry_kind, p_error_code) <> 0 THEN
+        RAISE EXCEPTION 'horsies_finish_stale_attempt: the task, retry kind and error code are required'
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
+    CASE p_evidence
+        WHEN 'BEAT_AGE' THEN
+            IF p_stale_after_ms IS NULL OR p_stale_after_ms < 0
+               OR p_finalizing_stale_after_ms IS NULL OR p_finalizing_stale_after_ms < 0
+               OR num_nulls(p_owner_worker_id, p_owner_claimed_at) <> 2 THEN
+                RAISE EXCEPTION
+                    'horsies_finish_stale_attempt: BEAT_AGE takes two thresholds of 0 ms or more and no owner'
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+        WHEN 'OWNER_GONE' THEN
+            IF num_nulls(p_stale_after_ms, p_finalizing_stale_after_ms) <> 2
+               OR num_nulls(p_owner_worker_id, p_owner_claimed_at) <> 0 THEN
+                RAISE EXCEPTION
+                    'horsies_finish_stale_attempt: OWNER_GONE takes an owner and its claim generation and no threshold'
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+        ELSE
+            RAISE EXCEPTION 'horsies_finish_stale_attempt: unknown evidence'
+                USING ERRCODE = 'invalid_parameter_value';
+    END CASE;
     CASE p_retry_kind
         WHEN 'NONE' THEN
             IF num_nulls(p_expected_retry_count, p_retry_delay_s) <> 2 THEN
@@ -1771,13 +2042,13 @@ BEGIN
     END IF;
 
     PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
-    -- One capture: the locked row, the beat read beside it, and the instant both thresholds are judged at. Nothing
-    -- is read again after a refusal, so the evidence cannot show a beat that the judgement did not see. The whole
-    -- locked row (task) is the row that the move takes.
+    -- One capture: the locked row, the beat read beside it (BEAT_AGE), and the instant both thresholds are judged
+    -- at. Nothing is read again after a refusal, so the evidence cannot show a beat that the judgement did not see.
+    -- The whole locked row (task) is the row that the move takes.
     SELECT t.id, t.status, t.retry_count, t.started_at, t.finalizing_at, t.claimed_by_worker_id, t.claimed_at,
            t.worker_hostname, t.worker_pid, t.worker_process_name, t.good_until, t.is_workflow_task,
            t.queue_name, t.task_name,
-           (
+           CASE p_evidence WHEN 'BEAT_AGE' THEN (
                SELECT h.sent_at
                FROM horsies_heartbeats h
                WHERE h.task_id = t.id
@@ -1787,7 +2058,7 @@ BEGIN
                  )
                ORDER BY h.sent_at DESC
                LIMIT 1
-           ) AS last_heartbeat,
+           ) END AS last_heartbeat,
            NOW() AS evaluated_at,
            clock_timestamp() AS db_now,
            t AS task
@@ -1796,19 +2067,29 @@ BEGIN
     WHERE t.id = p_task_id
     FOR UPDATE OF t;
 
-    IF NOT FOUND OR v_ctx.status <> 'RUNNING' THEN
+    -- OWNER_GONE fences on the owner and the claim generation that the scan read; BEAT_AGE on no claim. A NOT FOUND
+    -- capture leaves every field NULL, so the first test decides it.
+    IF NOT FOUND OR v_ctx.status <> 'RUNNING' OR (
+        p_evidence = 'OWNER_GONE' AND NOT (
+            v_ctx.claimed_by_worker_id IS NOT DISTINCT FROM p_owner_worker_id::varchar
+            AND v_ctx.claimed_at IS NOT DISTINCT FROM p_owner_claimed_at
+            AND v_ctx.started_at IS NOT NULL
+        )
+    ) THEN
         RETURN QUERY
         SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
                m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard,
                NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
                NULL::boolean, NULL::text, NULL::text, NULL::boolean, NULL::text
         FROM horsies_terminalization_miss(
-            p_task_id, 'FAIL_STALE', 'NONE', NULL::text, NULL::timestamptz
+            p_task_id, 'FAIL_STALE',
+            CASE p_evidence WHEN 'OWNER_GONE' THEN 'OWNER_AND_GENERATION' ELSE 'NONE' END,
+            p_owner_worker_id, p_owner_claimed_at
         ) AS m;
         RETURN;
     END IF;
 
-    IF NOT (
+    IF p_evidence = 'BEAT_AGE' AND NOT (
         v_ctx.started_at IS NOT NULL
         AND (
             v_ctx.finalizing_at IS NULL
@@ -1925,60 +2206,110 @@ $$;
 
 -- horsies_requeue_stale_claims: one bounded batch of the stale CLAIMED requeue.
 --
+-- p_evidence names what makes a CLAIMED row stale, a closed set:
+-- - BEAT_AGE (p_stale_after_ms >= 0; no owner and no claim bound): no claimer beat newer than p_stale_after_ms, and
+--   claimed longer ago than that. The claimed_at test keeps a fresh claim of a row whose earlier claim generation
+--   left old beats; Python's "latest beat older than the threshold" requeued such a row.
+-- - OWNER_GONE (p_owner_worker_id and p_claimed_before; no threshold): claimed by p_owner_worker_id before
+--   p_claimed_before. The caller judged the owner gone (horsies_unheld_worker_owners, as for
+--   horsies_stale_running_scan); the claim bound is the database time of the first read that found its lock free.
 -- Guarantee:
--- - A CLAIMED row whose worker stopped beating goes back to PENDING with every claim and run field cleared: no
---   claimer beat newer than p_stale_after_ms, and claimed longer ago than that. The claimed_at test keeps a fresh
---   claim of a row whose earlier claim generation left old beats; Python's "latest beat older than the threshold"
---   requeued such a row.
+-- - A stale row goes back to PENDING with every claim and run field cleared.
 -- - A workflow task with no node in a runnable status (ENQUEUED, READY, PENDING, RUNNING) is never requeued: it
 --   can only fail its start again; the orphan sweep cancels it.
--- - At most p_batch_size rows (1..10000, else 22023); rows that another transaction holds are skipped. The caller
---   repeats the statement until a batch is short.
+-- - The test is judged again under the row lock: a row whose status, owner or claim changed before its lock was
+--   taken is judged on its new version.
+-- - At most p_batch_size rows; rows that another transaction holds are skipped. The caller repeats the statement
+--   until a batch is short.
 -- - The status change sends horsies_task_status (update trigger). No queue wake, as Python.
+-- Arguments: an evidence of the set with exactly its arguments, a threshold of 0 ms or more, p_batch_size
+-- 1..10000; anything else is refused with 22023.
 -- Locks: the candidate rows only (FOR UPDATE SKIP LOCKED); no advisory lock, never waits.
 -- Returns the number of rows requeued.
--- Python: REQUEUE_STALE_CLAIMED_SQL (core/brokers/postgres.py:852-903) and requeue_stale_claimed (:4308-4333).
-CREATE FUNCTION horsies_requeue_stale_claims(p_stale_after_ms integer, p_batch_size integer) RETURNS integer
+-- Python: REQUEUE_STALE_CLAIMED_SQL (core/brokers/postgres.py:852-903) and requeue_stale_claimed (:4308-4333), for
+-- BEAT_AGE. OWNER_GONE is a core addition.
+CREATE FUNCTION horsies_requeue_stale_claims(
+    p_evidence text,
+    p_stale_after_ms integer,
+    p_owner_worker_id text,
+    p_claimed_before timestamp with time zone,
+    p_batch_size integer
+) RETURNS integer
     LANGUAGE plpgsql
     AS $$
 DECLARE
+    v_stale uuid[];
     v_requeued integer;
 BEGIN
-    IF p_stale_after_ms IS NULL OR p_stale_after_ms < 0 THEN
-        RAISE EXCEPTION 'horsies_requeue_stale_claims: the threshold must be 0 ms or more'
-            USING ERRCODE = 'invalid_parameter_value';
-    END IF;
+    CASE p_evidence
+        WHEN 'BEAT_AGE' THEN
+            IF p_stale_after_ms IS NULL OR p_stale_after_ms < 0
+               OR num_nulls(p_owner_worker_id, p_claimed_before) <> 2 THEN
+                RAISE EXCEPTION 'horsies_requeue_stale_claims: BEAT_AGE takes a threshold of 0 ms or more and no owner'
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+        WHEN 'OWNER_GONE' THEN
+            IF p_stale_after_ms IS NOT NULL OR num_nulls(p_owner_worker_id, p_claimed_before) <> 0 THEN
+                RAISE EXCEPTION
+                    'horsies_requeue_stale_claims: OWNER_GONE takes an owner and a claim bound and no threshold'
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+        ELSE
+            RAISE EXCEPTION 'horsies_requeue_stale_claims: unknown evidence'
+                USING ERRCODE = 'invalid_parameter_value';
+    END CASE;
     IF p_batch_size IS NULL OR p_batch_size < 1 OR p_batch_size > 10000 THEN
         RAISE EXCEPTION 'horsies_requeue_stale_claims: the batch size must be 1 to 10000'
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
     -- The probes are scalar subqueries, so each candidate reads the heartbeat leaf index and the node index once,
     -- whatever the size of those tables; the update finds its targets by id.
-    WITH stale AS (
-        SELECT t.id
-        FROM horsies_tasks t
-        WHERE t.status = 'CLAIMED'
-          AND t.claimed_at < NOW() - make_interval(secs => p_stale_after_ms / 1000.0)
-          AND (
-              SELECT h.sent_at
-              FROM horsies_heartbeats h
-              WHERE h.task_id = t.id
-                AND h.role = 'claimer'
-                AND h.sent_at >= NOW() - make_interval(secs => p_stale_after_ms / 1000.0)
-              ORDER BY h.sent_at DESC
-              LIMIT 1
-          ) IS NULL
-          AND (
-              NOT t.is_workflow_task
-              OR (
-                  SELECT wt.status
-                  FROM horsies_workflow_tasks wt
-                  WHERE wt.task_id = t.id
-              ) IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
-          )
-        LIMIT p_batch_size
-        FOR UPDATE OF t SKIP LOCKED
-    )
+    CASE p_evidence
+        WHEN 'BEAT_AGE' THEN
+            v_stale := ARRAY(
+                SELECT t.id
+                FROM horsies_tasks t
+                WHERE t.status = 'CLAIMED'
+                  AND t.claimed_at < NOW() - make_interval(secs => p_stale_after_ms / 1000.0)
+                  AND (
+                      SELECT h.sent_at
+                      FROM horsies_heartbeats h
+                      WHERE h.task_id = t.id
+                        AND h.role = 'claimer'
+                        AND h.sent_at >= NOW() - make_interval(secs => p_stale_after_ms / 1000.0)
+                      ORDER BY h.sent_at DESC
+                      LIMIT 1
+                  ) IS NULL
+                  AND (
+                      NOT t.is_workflow_task
+                      OR (
+                          SELECT wt.status
+                          FROM horsies_workflow_tasks wt
+                          WHERE wt.task_id = t.id
+                      ) IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
+                  )
+                LIMIT p_batch_size
+                FOR UPDATE OF t SKIP LOCKED
+            );
+        WHEN 'OWNER_GONE' THEN
+            v_stale := ARRAY(
+                SELECT t.id
+                FROM horsies_tasks t
+                WHERE t.status = 'CLAIMED'
+                  AND t.claimed_by_worker_id = p_owner_worker_id
+                  AND t.claimed_at < p_claimed_before
+                  AND (
+                      NOT t.is_workflow_task
+                      OR (
+                          SELECT wt.status
+                          FROM horsies_workflow_tasks wt
+                          WHERE wt.task_id = t.id
+                      ) IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
+                  )
+                LIMIT p_batch_size
+                FOR UPDATE OF t SKIP LOCKED
+            );
+    END CASE;
     UPDATE horsies_tasks t
     SET status = 'PENDING',
         claimed_at = NULL,
@@ -1991,7 +2322,7 @@ BEGIN
         finalizing_at = NULL,
         finalizing_by_worker_id = NULL,
         updated_at = NOW()
-    WHERE t.id = ANY (ARRAY(SELECT s.id FROM stale s));
+    WHERE t.id = ANY (v_stale);
     GET DIAGNOSTICS v_requeued = ROW_COUNT;
     RETURN v_requeued;
 END

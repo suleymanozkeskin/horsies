@@ -10,13 +10,20 @@ use std::time::Duration;
 
 use tracing::instrument::WithSubscriber;
 
-use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
 use crate::broker::PostgresBroker;
+use crate::core::config::child_sizing::DEFAULT_ISOLATED_POOL_CONNECTIONS;
 use crate::core::config::worker_profile::SelectedProfile;
 use crate::core::config::AppConfig;
+use crate::test_support::migrated_database_url;
+use crate::test_support::migrated_pool;
+use crate::test_support::sql;
 use crate::worker::children::ChildLaunch;
 use crate::worker::claim_pass::RegisteredClasses;
 use crate::worker::config::WorkerConfig;
+use crate::worker::connection_fit::{
+    LISTENER_CONNECTIONS_PER_WORKER, LIVENESS_LOCK_CONNECTIONS_PER_WORKER,
+    RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER,
+};
 use crate::worker::executor::protocol::{
     ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
 };
@@ -124,7 +131,7 @@ impl tracing::Subscriber for EventLog {
 /// The usable slots of the test server, read here and not through the code
 /// under test.
 async fn usable_slots_of_the_test_server() -> i64 {
-    let usable: i32 = sqlx::query_scalar(
+    let usable: i32 = sql::query_scalar(
         "SELECT current_setting('max_connections')::int
                 - current_setting('superuser_reserved_connections')::int
                 - COALESCE(current_setting('reserved_connections', true), '0')::int",
@@ -143,7 +150,13 @@ async fn usable_slots_of_the_test_server() -> i64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn the_boot_logs_the_memory_fit_then_the_connection_fit_and_the_worker_starts() {
-    let need = i64::from(OVERSIZED_WORKER_POOL) + 1 + 1 + 1;
+    // The parent pool, the listener, the runner heartbeat, the liveness lock,
+    // and the pool of the one isolated child.
+    let need = i64::from(OVERSIZED_WORKER_POOL)
+        + i64::from(LISTENER_CONNECTIONS_PER_WORKER)
+        + i64::from(RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER)
+        + i64::from(LIVENESS_LOCK_CONNECTIONS_PER_WORKER)
+        + i64::from(DEFAULT_ISOLATED_POOL_CONNECTIONS);
     let usable = usable_slots_of_the_test_server().await;
     assert!(
         need > usable,
@@ -151,7 +164,7 @@ async fn the_boot_logs_the_memory_fit_then_the_connection_fit_and_the_worker_sta
     );
     let app_config = AppConfig::for_database_url(migrated_database_url().await);
     let broker = Arc::new(
-        PostgresBroker::connect_worker_with(&app_config.broker)
+        PostgresBroker::connect_worker_with(&app_config.broker, crate::ClientFamily::Rust)
             .await
             .expect("connect the worker broker to the test server"),
     );

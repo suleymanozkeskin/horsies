@@ -1,7 +1,4 @@
-//! Ports of Python `tests/unit/test_shared_slot_pool.py` rows of
-//! `TestPlacement`, `TestRecycleReason`, `TestSeats`, `TestRecycle`,
-//! `TestDeadline`, `TestTheStopOfARun`, `TestWorkLeftAfterAReturn` and
-//! `TestBlockedLoop`: a shared async pool driven by scripted children that
+//! A shared async pool driven by scripted children that
 //! report the stop of each run with frames.
 //!
 //! Python's child cancels a run at its deadline and reports each step; the
@@ -18,9 +15,10 @@ use uuid::Uuid;
 
 use super::scripted::{
     act_on_runs, answer_of, boot, ended, layout, leftover_cancel, leftover_stuck, loop_blocked,
-    process_ended, reported, run_ref, run_stuck, send, send_later, serving, shared_async_init,
-    shared_config, shared_result, shared_result_with_rss, shared_timed_out, shell, start_shared,
-    submit_shared, task, ticket, tickets, until, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
+    process_ended, read_frame, reported, run_ref, run_stuck, send, send_later, serving,
+    shared_async_init, shared_config, shared_result, shared_result_with_rss, shared_timed_out,
+    shell, start_shared, submit_shared, task, ticket, tickets, until, TestDir, SPAWNER_STOP_WAIT,
+    STATE_WAIT,
 };
 use super::seat_runs::{
     backstop_step, end_at_loss, place_on_shared_child, shared_recycle, Backstop, BackstopStep,
@@ -30,8 +28,9 @@ use super::shared_stop::ChildKill;
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::worker::executor::protocol::{
-    ChildFrame, LoopCulprit, ProcessId, RefusalReason, RssMb, RssReading, SharedWork,
-    StoredOptionsRefusal,
+    ChildAfterFrame, ChildFrame, LoopCulprit, ProcessId, RefusalReason, RssMb, RssReading, RunEnd,
+    SeatEnd, SharedResultFrame, SharedWork, StopReason, StoredOptionsRefusal,
+    CORE_STOPPED_EXIT_CODE,
 };
 use crate::worker::executor::supervisor::{
     ChildExit, ChildLost, LossCause, PartialFrame, ReapedExit, Spawner,
@@ -422,6 +421,55 @@ async fn a_closing_child_finishes_its_runs_before_it_retires() {
     let child_of = |index: usize| by_task[&tasks[index].task_id].clone();
     assert_eq!(child_of(0), child_of(2));
     assert_ne!(child_of(0), child_of(3));
+    stop_shared(pool, spawner).await;
+}
+
+/// A shared result frame that says the child ends itself (its core
+/// stopped) answers its run and closes the child to new runs: the second
+/// task, queued at once, runs on a new child. The first child waits 0.5 s
+/// after the frame, notes its end in a file and exits with the core-stopped
+/// code. A run frame sent to it in that time is never read, and its task
+/// would take the crash path; a kill in that time would leave no note.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shared_child_that_ends_itself_gets_no_next_run() {
+    let dir = TestDir::new();
+    let first = shared_task(1);
+    let second = shared_task(2);
+    let init = shared_async_init(1);
+    let released = ChildFrame::SharedResult(SharedResultFrame {
+        run: run_ref(&first, 1),
+        end: SeatEnd::Finished(RunEnd::StoppedBeforeRunning(
+            StopReason::OwnershipUnconfirmed,
+        )),
+        rss: RssReading::Unreadable,
+        child: ChildAfterFrame::EndsItself,
+    });
+    let second_result = send(&[shared_result(run_ref(&second, 2), 2)]);
+    let script = format!(
+        r#"{}case $n in 1) {}{}{}sleep 0.5; echo ended >> "{}"; exit {CORE_STOPPED_EXIT_CODE};; *) {}{};; esac"#,
+        ticket(&dir),
+        boot(&init),
+        read_frame(),
+        send(&[released]),
+        dir.file("first-child"),
+        boot(&init),
+        act_on_runs(&[(&second, second_result)], 1),
+    );
+    let spawner = Spawner::start().unwrap();
+    let (pool, _board) = async_pool(&spawner, 1, shared_config(shell(&script), init));
+
+    let first_answer = submit_shared(&pool, &first, long_work());
+    let second_answer = submit_shared(&pool, &second, long_work());
+
+    assert_eq!(
+        answer_of(first_answer).await,
+        AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(
+            StopReason::OwnershipUnconfirmed
+        ))
+    );
+    assert_eq!(answer_of(second_answer).await, reported(2));
+    assert_eq!(dir.lines("first-child"), vec!["ended".to_owned()]);
+    assert_eq!(tickets(&dir), 2);
     stop_shared(pool, spawner).await;
 }
 

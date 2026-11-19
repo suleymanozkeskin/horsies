@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -27,6 +26,7 @@ use crate::core::{
     WorkflowTaskStatus,
 };
 use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
+use crate::test_support::sql::{self, TestPool};
 
 /// How long `get()` waits; every workflow here is terminal or PAUSED before the call.
 pub(super) const GET_WAIT: Duration = Duration::from_secs(2);
@@ -261,8 +261,8 @@ fn worker_outcome(task_name: &str, input: &serde_json::Value) -> TaskResult<serd
 }
 
 /// The next ENQUEUED node task of the tree under `root_id`, deepest first.
-async fn next_enqueued(pool: &PgPool, root_id: Uuid) -> Option<(Uuid, String, String)> {
-    sqlx::query_as(
+async fn next_enqueued(pool: &TestPool, root_id: Uuid) -> Option<(Uuid, String, String)> {
+    sql::query_as(
         "SELECT n.task_id, n.task_name, t.input
          FROM horsies_workflow_tasks n
          JOIN horsies_workflows w ON w.id = n.workflow_id
@@ -281,7 +281,7 @@ async fn next_enqueued(pool: &PgPool, root_id: Uuid) -> Option<(Uuid, String, St
 
 /// Finishes every ENQUEUED node task of the RUNNING workflows under
 /// `root_id`, as a worker would, until none is left.
-pub(super) async fn drive(pool: &PgPool, root_id: Uuid, child_specs: &TestChildSpecs) {
+pub(super) async fn drive(pool: &TestPool, root_id: Uuid, child_specs: &TestChildSpecs) {
     for _step in 0..DRIVE_STEPS {
         match next_enqueued(pool, root_id).await {
             None => return,
@@ -302,7 +302,7 @@ pub(super) async fn drive(pool: &PgPool, root_id: Uuid, child_specs: &TestChildS
 }
 
 /// Starts `parent_spec` with [`matrix_children`] and drives it to its end.
-async fn run(pool: &PgPool, parent_spec: &WorkflowSpec) -> Uuid {
+async fn run(pool: &TestPool, parent_spec: &WorkflowSpec) -> Uuid {
     let child_specs = matrix_children();
     let workflow_id = super::support::start(pool, parent_spec, &child_specs).await;
     drive(pool, workflow_id, &child_specs).await;
@@ -343,7 +343,7 @@ pub(super) fn assert_ok_value(result: &TaskResult<serde_json::Value>, expected: 
     }
 }
 
-pub(super) async fn get(pool: &PgPool, workflow_id: Uuid) -> TaskResult<serde_json::Value> {
+pub(super) async fn get(pool: &TestPool, workflow_id: Uuid) -> TaskResult<serde_json::Value> {
     handle(pool, workflow_id)
         .get(Some(GET_WAIT))
         .await
@@ -372,7 +372,7 @@ pub(super) fn outputless_entry(
 }
 
 /// A row of a workflow tree.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 pub(super) struct TreeRow {
     pub(super) id: Uuid,
     pub(super) parent_workflow_id: Option<Uuid>,
@@ -382,8 +382,21 @@ pub(super) struct TreeRow {
     pub(super) status: String,
 }
 
-pub(super) async fn tree(pool: &PgPool, root_id: Uuid) -> Vec<TreeRow> {
-    sqlx::query_as(
+impl sql::FromTestRow for TreeRow {
+    fn from_row(row: &tokio_postgres::Row) -> Result<Self, sql::Error> {
+        Ok(Self {
+            id: sql::named(row, "id")?,
+            parent_workflow_id: sql::named(row, "parent_workflow_id")?,
+            parent_task_index: sql::named(row, "parent_task_index")?,
+            root_workflow_id: sql::named(row, "root_workflow_id")?,
+            depth: sql::named(row, "depth")?,
+            status: sql::named(row, "status")?,
+        })
+    }
+}
+
+pub(super) async fn tree(pool: &TestPool, root_id: Uuid) -> Vec<TreeRow> {
+    sql::query_as(
         "SELECT id, parent_workflow_id, parent_task_index, root_workflow_id, depth, status
          FROM horsies_workflows WHERE id = $1 OR root_workflow_id = $1 ORDER BY depth",
     )
@@ -749,7 +762,7 @@ async fn an_allow_failed_deps_child_builder_receives_the_failed_upstream_result(
 // Joins and skips
 // ---------------------------------------------------------------------------
 
-async fn statuses(pool: &PgPool, workflow_id: Uuid, count: i32) -> HashMap<String, String> {
+async fn statuses(pool: &TestPool, workflow_id: Uuid, count: i32) -> HashMap<String, String> {
     let mut read = HashMap::new();
     for index in 0..count {
         let _replaced = read.insert(

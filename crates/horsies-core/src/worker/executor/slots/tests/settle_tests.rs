@@ -16,15 +16,13 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::PgPool;
 
 use super::*;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
+use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 use crate::worker::execution::{phase_retry_delay, run_phase2, Phase2Work, PhaseTwoForm};
 use crate::worker::executor::protocol::FailureDetail;
-use crate::workflow_engine::steps::ChildBuild;
 
 const WORKER: &str = "worker-1";
 const OTHER_WORKER: &str = "worker-2";
@@ -40,19 +38,13 @@ fn writer(broker: Arc<PostgresBroker>) -> OutcomeWriter {
     )
 }
 
-/// A broker on a port where no server listens: each statement fails after
-/// 100 ms with a retryable pool timeout.
+/// A broker on a port where no server listens: each statement fails before
+/// it is sent, with a failure that may clear.
 fn unreachable_broker() -> Arc<PostgresBroker> {
-    let options = PgConnectOptions::new()
-        .host("127.0.0.1")
-        .port(1)
-        .username("horsies")
-        .database("horsies");
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(Duration::from_millis(100))
-        .connect_lazy_with(options);
-    Arc::new(PostgresBroker::from_pool(pool))
+    Arc::new(PostgresBroker::from_test_url(
+        "postgresql://horsies@127.0.0.1:1/horsies",
+        crate::ClientFamily::Rust,
+    ))
 }
 
 /// A claimed task with its own id and claim generation, no retry policy.
@@ -65,8 +57,8 @@ fn claimed_now() -> ClaimedTask {
 }
 
 /// A CLAIMED row of `owner` at the claim generation `claimed_at`.
-async fn seed_claimed(pool: &PgPool, task_id: Uuid, owner: &str, claimed_at: DateTime<Utc>) {
-    sqlx::query(
+async fn seed_claimed(pool: &TestPool, task_id: Uuid, owner: &str, claimed_at: DateTime<Utc>) {
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at, command_fingerprint_version,
@@ -96,8 +88,8 @@ async fn seed_claimed(pool: &PgPool, task_id: Uuid, owner: &str, claimed_at: Dat
 }
 
 /// A RUNNING row of `owner` at the claim generation `claimed_at`.
-async fn seed_running(pool: &PgPool, task_id: Uuid, owner: &str, claimed_at: DateTime<Utc>) {
-    sqlx::query(
+async fn seed_running(pool: &TestPool, task_id: Uuid, owner: &str, claimed_at: DateTime<Utc>) {
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at, command_fingerprint_version,
@@ -130,13 +122,13 @@ async fn seed_running(pool: &PgPool, task_id: Uuid, owner: &str, claimed_at: Dat
 /// the one node of a RUNNING workflow whose failure policy is `fail`. A
 /// workflow task has no command fingerprint. Returns the workflow id.
 async fn seed_running_workflow_task(
-    pool: &PgPool,
+    pool: &TestPool,
     task_id: Uuid,
     owner: &str,
     claimed_at: DateTime<Utc>,
 ) -> Uuid {
     let workflow_id = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflows (
             id, name, status, on_error, output_task_index,
             definition_key, depth, root_workflow_id,
@@ -149,7 +141,7 @@ async fn seed_running_workflow_task(
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at, command_fingerprint_version,
@@ -176,7 +168,7 @@ async fn seed_running_workflow_task(
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
             queue_name, priority, dependencies, allow_failed_deps, join_type, status,
@@ -206,8 +198,8 @@ struct NodeUpdateRefusal {
 impl NodeUpdateRefusal {
     /// The node updates of the task that reached the trigger: the refused
     /// ones and the ones after them.
-    async fn updates_seen(&self, pool: &PgPool) -> i64 {
-        sqlx::query_scalar(&format!(
+    async fn updates_seen(&self, pool: &TestPool) -> i64 {
+        sql::query_scalar(&format!(
             "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM {}",
             self.counter
         ))
@@ -216,7 +208,7 @@ impl NodeUpdateRefusal {
         .unwrap()
     }
 
-    async fn remove(self, pool: &PgPool) {
+    async fn remove(self, pool: &TestPool) {
         for statement in [
             format!(
                 "DROP TRIGGER IF EXISTS {} ON horsies_workflow_tasks",
@@ -225,7 +217,7 @@ impl NodeUpdateRefusal {
             format!("DROP FUNCTION IF EXISTS {}()", self.function),
             format!("DROP SEQUENCE IF EXISTS {}", self.counter),
         ] {
-            sqlx::query(&statement).execute(pool).await.unwrap();
+            sql::query(&statement).execute(pool).await.unwrap();
         }
     }
 }
@@ -234,7 +226,7 @@ impl NodeUpdateRefusal {
 /// 40001 (`serialization_failure`, class 40: may clear). Phase 1 of a
 /// workflow task does not update its node; phase 2 does. A sequence counts
 /// the updates: `nextval` is not rolled back with the refused statement.
-async fn refuse_node_updates(pool: &PgPool, task_id: Uuid, refused: i64) -> NodeUpdateRefusal {
+async fn refuse_node_updates(pool: &TestPool, task_id: Uuid, refused: i64) -> NodeUpdateRefusal {
     let suffix = Uuid::new_v4().simple().to_string();
     let refusal = NodeUpdateRefusal {
         counter: format!("settle_node_updates_{suffix}"),
@@ -264,14 +256,14 @@ async fn refuse_node_updates(pool: &PgPool, task_id: Uuid, refused: i64) -> Node
             function = refusal.function,
         ),
     ] {
-        sqlx::query(&statement).execute(pool).await.unwrap();
+        sql::query(&statement).execute(pool).await.unwrap();
     }
     refusal
 }
 
 /// The status of the node of `task_id`, and of its workflow.
-async fn node_and_workflow(pool: &PgPool, task_id: Uuid) -> (String, String) {
-    sqlx::query_as(
+async fn node_and_workflow(pool: &TestPool, task_id: Uuid) -> (String, String) {
+    sql::query_as(
         "SELECT n.status, w.status
          FROM horsies_workflow_tasks n
          JOIN horsies_workflows w ON w.id = n.workflow_id
@@ -284,8 +276,8 @@ async fn node_and_workflow(pool: &PgPool, task_id: Uuid) -> (String, String) {
 }
 
 /// The phase-2 records of `task_id` that are still owed.
-async fn phase_two_records(pool: &PgPool, task_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1")
+async fn phase_two_records(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
@@ -293,8 +285,8 @@ async fn phase_two_records(pool: &PgPool, task_id: Uuid) -> i64 {
 }
 
 /// The status and owner of a live row.
-async fn live_row(pool: &PgPool, task_id: Uuid) -> (String, Option<String>) {
-    sqlx::query_as("SELECT status, claimed_by_worker_id FROM horsies_tasks WHERE id = $1")
+async fn live_row(pool: &TestPool, task_id: Uuid) -> (String, Option<String>) {
+    sql::query_as("SELECT status, claimed_by_worker_id FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
@@ -302,16 +294,16 @@ async fn live_row(pool: &PgPool, task_id: Uuid) -> (String, Option<String>) {
 }
 
 /// The status and error code of the history row of a task that ended.
-async fn history_row(pool: &PgPool, task_id: Uuid) -> (String, Option<String>) {
-    sqlx::query_as("SELECT status, error_code FROM horsies_task_history WHERE task_id = $1")
+async fn history_row(pool: &TestPool, task_id: Uuid) -> (String, Option<String>) {
+    sql::query_as("SELECT status, error_code FROM horsies_task_history WHERE task_id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
         .unwrap()
 }
 
-async fn live_row_count(pool: &PgPool, task_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
+async fn live_row_count(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
@@ -330,16 +322,19 @@ fn crashed() -> AttemptEnd {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_task_that_never_reached_a_child_goes_back_to_the_queue() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let claimed = claimed_now();
     seed_claimed(&pool, claimed.task_id, WORKER, claimed.claimed_at).await;
 
-    let settled = writer(Arc::new(PostgresBroker::from_pool(pool.clone())))
-        .settle(
-            &claimed,
-            AttemptEnd::NotDispatched(NotRunCause::PoolStopping),
-        )
-        .await;
+    let settled = writer(Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    )))
+    .settle(
+        &claimed,
+        AttemptEnd::NotDispatched(NotRunCause::PoolStopping),
+    )
+    .await;
 
     assert_eq!(settled, Settlement::Written);
     assert_eq!(
@@ -369,18 +364,21 @@ async fn a_release_that_cannot_reach_the_database_is_not_written() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_reported_value_completes_the_task() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let claimed = claimed_now();
     seed_running(&pool, claimed.task_id, WORKER, claimed.claimed_at).await;
 
-    let settled = writer(Arc::new(PostgresBroker::from_pool(pool.clone())))
-        .settle(
-            &claimed,
-            AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
-                r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned(),
-            ))),
-        )
-        .await;
+    let settled = writer(Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    )))
+    .settle(
+        &claimed,
+        AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
+            r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned(),
+        ))),
+    )
+    .await;
 
     assert_eq!(settled, Settlement::Written);
     assert_eq!(live_row_count(&pool, claimed.task_id).await, 0);
@@ -396,13 +394,16 @@ async fn a_reported_value_completes_the_task() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_lost_child_fails_its_running_task_as_crashed() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let claimed = claimed_now();
     seed_running(&pool, claimed.task_id, WORKER, claimed.claimed_at).await;
 
-    let settled = writer(Arc::new(PostgresBroker::from_pool(pool.clone())))
-        .settle(&claimed, crashed())
-        .await;
+    let settled = writer(Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    )))
+    .settle(&claimed, crashed())
+    .await;
 
     assert_eq!(settled, Settlement::Written);
     assert_eq!(
@@ -420,7 +421,7 @@ async fn a_lost_child_fails_its_running_task_as_crashed() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_phase_two_error_after_a_lost_child_write_is_tried_again() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let claimed = ClaimedTask {
         kind: TaskKind::WorkflowTask,
         ..claimed_now()
@@ -428,9 +429,12 @@ async fn a_phase_two_error_after_a_lost_child_write_is_tried_again() {
     seed_running_workflow_task(&pool, claimed.task_id, WORKER, claimed.claimed_at).await;
     let refusal = refuse_node_updates(&pool, claimed.task_id, 2).await;
 
-    let settled = writer(Arc::new(PostgresBroker::from_pool(pool.clone())))
-        .settle(&claimed, crashed())
-        .await;
+    let settled = writer(Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    )))
+    .settle(&claimed, crashed())
+    .await;
     let updates_seen = refusal.updates_seen(&pool).await;
     refusal.remove(&pool).await;
 
@@ -457,13 +461,16 @@ async fn a_phase_two_error_after_a_lost_child_write_is_tried_again() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_crash_write_on_a_row_this_claim_does_not_hold_writes_nothing() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     let claimed = claimed_now();
     seed_running(&pool, claimed.task_id, OTHER_WORKER, claimed.claimed_at).await;
 
-    let settled = writer(Arc::new(PostgresBroker::from_pool(pool.clone())))
-        .settle(&claimed, crashed())
-        .await;
+    let settled = writer(Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    )))
+    .settle(&claimed, crashed())
+    .await;
 
     assert_eq!(settled, Settlement::NotHeld);
     assert_eq!(
@@ -516,18 +523,22 @@ async fn a_write_that_cannot_reach_the_database_is_sent_three_more_times() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_write_error_that_cannot_clear_is_not_sent_again() {
-    let url = crate::broker::terminalization_matrix::migrated_database_url().await;
-    let missing = PgConnectOptions::from_str(&url)
-        .unwrap()
-        .database(&format!("horsies_missing_{}", Uuid::new_v4().simple()));
-    let pool = PgPoolOptions::new()
+    let url = crate::test_support::migrated_database_url().await;
+    let missing = crate::test_support::with_database(
+        &url,
+        &format!("horsies_missing_{}", Uuid::new_v4().simple()),
+    );
+    let pool = TestPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(Duration::from_secs(10))
-        .connect_lazy_with(missing);
+        .connect_lazy(&missing);
     let started = std::time::Instant::now();
-    let settled = writer(Arc::new(PostgresBroker::from_pool(pool)))
-        .settle(&claimed_now(), crashed())
-        .await;
+    let settled = writer(Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    )))
+    .settle(&claimed_now(), crashed())
+    .await;
     assert_ne!(settled, Settlement::Written);
     assert!(
         started.elapsed() < Duration::from_secs_f64(phase_retry_delay(1)),
@@ -546,7 +557,7 @@ async fn a_phase_two_that_cannot_reach_the_database_is_tried_five_more_times() {
     let started = std::time::Instant::now();
     run_phase2(
         &broker,
-        ChildBuild::Client(&crate::test_support::child_specs::TestChildSpecs::empty()),
+        &crate::test_support::child_specs::TestChildSpecs::empty(),
         Phase2Work {
             task_id: Uuid::new_v4(),
             queue_name: "default".to_owned(),

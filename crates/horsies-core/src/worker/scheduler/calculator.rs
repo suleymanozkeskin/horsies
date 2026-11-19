@@ -388,8 +388,7 @@ mod tests {
         assert_eq!(next, utc(2025, 2, 5, 10, 0, 0));
     }
 
-    /// Python `test_schedule_calculator.py::test_day_doesnt_exist_skips_to_next_valid_month`:
-    /// day=31 in February skips to March 31.
+    /// Day=31 in February skips to March 31.
     #[test]
     fn monthly_day_doesnt_exist_skips_to_next_valid_month() {
         let pattern = SchedulePattern::Monthly(MonthlySchedule {
@@ -401,7 +400,6 @@ mod tests {
         assert_eq!(next, utc(2025, 3, 31, 0, 0, 0));
     }
 
-    /// Python `test_schedule_calculator.py::test_day_30_skips_february_lands_on_march`.
     #[test]
     fn monthly_day_30_skips_february_lands_on_march() {
         let pattern = SchedulePattern::Monthly(MonthlySchedule {

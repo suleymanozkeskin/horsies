@@ -7,18 +7,14 @@ Lives next to the other codec helpers and routes through the strict
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final, assert_never
-
-from pydantic import ValidationError
+from typing import assert_never
 
 from horsies.core.codec.json_io import Json, SerdeResult, dumps_json
-from horsies.core.codec.validation_errors import validation_summary
 from horsies.core.models.tasks import (
     DEFAULT_CANCEL_GRACE_MS,
     MAX_CANCEL_GRACE_MS,
     MIN_CANCEL_GRACE_MS,
     Execution,
-    RetryPolicy,
     TaskOptions,
 )
 from horsies.core.types.result import Err, Ok, Result
@@ -65,110 +61,6 @@ def _stored_cancel_grace_ms(task_options: TaskOptions) -> int | None:
                     return declared
         case Execution.ISOLATED | Execution.SHARED_THREAD:
             return None
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
-MIN_OPTIONS_INTEGER: Final = -(2**63)
-"""The smallest integer that the task options of a send may hold."""
-
-MAX_OPTIONS_INTEGER: Final = 2**64 - 1
-"""The largest integer that the task options of a send may hold."""
-
-OPTIONS_INTEGER_OUT_OF_RANGE: Final = (
-    'task_options JSON holds an integer outside '
-    f'{MIN_OPTIONS_INTEGER} to {MAX_OPTIONS_INTEGER}'
-)
-"""The refusal of a send whose options hold an integer outside the range.
-The core refuses the same options with the same text."""
-
-
-def options_integer_out_of_range(options: Json) -> bool:
-    """Whether decoded task options hold an int outside ``MIN_OPTIONS_INTEGER``
-    to ``MAX_OPTIONS_INTEGER``, at any depth.
-
-    No count, delay or limit of that size has a meaning, so a send refuses
-    such options. A bool is not an int here, and a dict key is text. The walk
-    visits each value of the decoded document once. Pure.
-    """
-    pending: list[Json] = [options]
-    while pending:
-        match pending.pop():
-            case bool():
-                pass
-            case int() as number if not (
-                MIN_OPTIONS_INTEGER <= number <= MAX_OPTIONS_INTEGER
-            ):
-                return True
-            case list() as items:
-                pending.extend(items)
-            case dict() as mapping:
-                pending.extend(mapping.values())
-            case _:
-                pass
-    return False
-
-
-@dataclass(frozen=True, slots=True)
-class InvalidRetryPolicy:
-    """A `retry_policy` that does not validate as `RetryPolicy`. `detail`
-    names each failing field and its cause."""
-
-    detail: str
-
-
-@dataclass(frozen=True, slots=True)
-class NoRetryPolicy:
-    """The options hold no `retry_policy`: the key is absent or null."""
-
-
-def stored_retry_policy(
-    options: dict[str, Json],
-) -> Result[RetryPolicy | NoRetryPolicy, InvalidRetryPolicy]:
-    """The `retry_policy` of decoded task options, read as enqueue reads it.
-
-    An absent or null `retry_policy` is `NoRetryPolicy`. Any other value must
-    validate as `RetryPolicy` in strict mode (no type coercion). Other option
-    fields are not checked. Does no I/O.
-    """
-    policy = options.get('retry_policy')
-    match policy:
-        case None:
-            return Ok(NoRetryPolicy())
-        case dict():
-            pass
-        case _:
-            return Err(
-                InvalidRetryPolicy(
-                    f'retry_policy is not an object: {type(policy).__name__}'
-                )
-            )
-    try:
-        return Ok(RetryPolicy.model_validate(policy, strict=True))
-    except ValidationError as error:
-        return Err(InvalidRetryPolicy(validation_summary(error)))
-
-
-def stored_max_retries(options: Json) -> Result[int, InvalidRetryPolicy]:
-    """The `max_retries` value that enqueue stores for decoded task options.
-
-    Options that are not an object, and a `retry_policy` that is absent or
-    null, store 0 retries. Any other `retry_policy` must validate as
-    `RetryPolicy` (`stored_retry_policy`); its `max_retries` is stored.
-    """
-    if not isinstance(options, dict):
-        return Ok(0)
-    match stored_retry_policy(options):
-        case Ok(ok_value=read):
-            match read:
-                case NoRetryPolicy():
-                    return Ok(0)
-                case RetryPolicy():
-                    return Ok(read.max_retries)
-                case _ as unreachable:
-                    assert_never(unreachable)
-        case Err() as refused:
-            return refused
         case _ as unreachable:
             assert_never(unreachable)
 

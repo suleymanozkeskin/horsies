@@ -3,8 +3,7 @@
 //!
 //! Python specification: `tests/integration/test_monitoring_queries.py`
 //! (`TestWorkflowNames`, `TestListWorkflowRuns`, `TestGetWorkflowRun`,
-//! `TestGetWorkflowNode`, `TestListSchedules`) and
-//! `tests/integration/test_monitoring_query_plans.py`, baseline versions on
+//! `TestGetWorkflowNode`, `TestListSchedules`), baseline versions on
 //! `program/0.8.0`. Each test runs on a database of its own
 //! ([`SpecDatabase`]).
 
@@ -12,7 +11,6 @@ use std::collections::BTreeMap;
 use std::sync::PoisonError;
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::spec_support::{
@@ -26,6 +24,7 @@ use crate::monitoring::{
     MonitoringQueryErrorCode, WorkflowNodeInfo, WorkflowRunsQuery,
 };
 use crate::test_support::connect_collecting_notices;
+use crate::test_support::sql::{self, TestPool};
 
 /// Upper bound of a span that counts up to now (Python
 /// `_LIVE_SPAN_CEILING_S`).
@@ -52,7 +51,7 @@ fn nodes_by_index(nodes: &[WorkflowNodeInfo]) -> BTreeMap<i32, &WorkflowNodeInfo
 /// Insert one schedule state row. A schedule that ran carries its last run
 /// fields and a positive run count, as the baseline CHECK requires.
 async fn seed_schedule(
-    pool: &PgPool,
+    pool: &TestPool,
     schedule_name: &str,
     next_run_in_seconds: i64,
     last_run: Option<(Uuid, i32)>,
@@ -61,7 +60,7 @@ async fn seed_schedule(
         Some((task_id, run_count)) => (Some(task_id), run_count),
         None => (None, 0),
     };
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_schedule_state (
             schedule_name, next_run_at, last_run_at, last_task_id, run_count,
             config_hash, updated_at
@@ -414,11 +413,11 @@ async fn an_unknown_status_of_the_backing_history_row_is_a_contract_violation() 
         .expect_err("an unknown status is refused");
 
     assert_eq!(
-        error.code,
+        error.code(),
         MonitoringQueryErrorCode::HistoryContractViolation
     );
-    assert!(!error.retryable);
-    assert!(error.message.contains("NOT_KNOWN"), "{}", error.message);
+    assert!(!error.retryable());
+    assert!(error.message().contains("NOT_KNOWN"), "{}", error.message());
     database.drop().await;
 }
 
@@ -538,12 +537,12 @@ const DEFAULT_SORT_LIST: &str = "SELECT * FROM horsies_monitoring_task_list(
 /// own enqueue time, then sampled. With only a few PENDING rows, a sort over
 /// another index costs the same as the ordered index and the planner's pick
 /// between them is arbitrary.
-async fn seed_plan_population(pool: &PgPool) {
+async fn seed_plan_population(pool: &TestPool) {
     for (status, task_name, started_at, rows) in [
         ("RUNNING", "'plan_task_' || (g % 5)", "NOW()", 500_i32),
         ("PENDING", "'plan_task_pending'", "NULL", 2_000_i32),
     ] {
-        sqlx::query(&format!(
+        sql::query(&format!(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, input, task_options, execution,
                 retention_class_key, sent_at, created_at,
@@ -569,14 +568,13 @@ async fn seed_plan_population(pool: &PgPool) {
         .await
         .unwrap_or_else(|error| panic!("seed the {status} rows of the plan test: {error}"));
     }
-    sqlx::query("ANALYZE horsies_tasks")
+    sql::query("ANALYZE horsies_tasks")
         .execute(pool)
         .await
         .expect("sample the live table");
 }
 
-/// Python `test_monitoring_query_plans.py::test_list_default_sort_plans_on_enqueued_at_index`:
-/// in both directions of the default sort, the page statement inside
+/// In both directions of the default sort, the page statement inside
 /// `horsies_monitoring_task_list` reads the live side on
 /// `idx_horsies_tasks_enqueued_at`, with no sequential scan of the live
 /// table. The task id tie-break is an incremental sort on the index order
@@ -631,8 +629,8 @@ async fn the_task_list_page_reads_the_live_enqueue_index_in_both_directions() {
 
 /// Creates the `standard_30d` leaf of the UTC day `days_back` days before
 /// today, or finds it when it exists, and returns its name.
-async fn standard_leaf(pool: &PgPool, days_back: i32) -> String {
-    sqlx::query_scalar(
+async fn standard_leaf(pool: &TestPool, days_back: i32) -> String {
+    sql::query_scalar(
         "SELECT leaf_name FROM horsies_create_history_leaf(
              'standard_30d', date_trunc('day', now(), 'UTC') - make_interval(days => $1)
          )
@@ -650,8 +648,8 @@ async fn standard_leaf(pool: &PgPool, days_back: i32) -> String {
 /// and stops at the reach instead of sorting every row. The live rows are
 /// inserted RUNNING and moved in one statement through
 /// `horsies_move_task_to_history`, which takes the locked live row.
-async fn seed_history_population(pool: &PgPool) {
-    sqlx::query(
+async fn seed_history_population(pool: &TestPool) {
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -676,7 +674,7 @@ async fn seed_history_population(pool: &PgPool) {
     .execute(pool)
     .await
     .expect("seed the running rows of the history plan test");
-    let moved: i64 = sqlx::query_scalar(
+    let moved: i64 = sql::query_scalar(
         "SELECT count(*) FROM (
              SELECT horsies_move_task_to_history(
                  t, 'COMPLETED', 'COMPLETE_FUSED', now(), '{\"ok\": true}', NULL, NULL
@@ -688,7 +686,7 @@ async fn seed_history_population(pool: &PgPool) {
     .await
     .expect("move the seeded rows to history");
     assert_eq!(moved, 600);
-    sqlx::query("ANALYZE horsies_task_history")
+    sql::query("ANALYZE horsies_task_history")
         .execute(pool)
         .await
         .expect("sample the history");
@@ -764,6 +762,57 @@ async fn the_task_list_page_reads_the_history_leaves_on_the_enqueue_index_and_pr
         );
         assert!(!page_plan.contains(&old_leaf), "{direction}: {page_plan}");
     }
+    drop(client);
+    database.drop().await;
+}
+
+/// The task stats of the last day with no filter
+/// (`horsies_monitoring_task_stats`).
+const LAST_DAY_STATS: &str = "SELECT * FROM horsies_monitoring_task_stats(
+         now() - interval '1 day', now(), '{}', '{}', '{}', '{}', '{}', FALSE, '{}', '{}'
+     )";
+
+/// The status counts of `horsies_monitoring_task_stats`: the count
+/// statement is planned with the window bounds as values, so a leaf outside
+/// the window is pruned and the plan does not name it. The current
+/// `standard_30d` leaf and the forever leaf are in the window and read; the
+/// leaf of ten days back is not.
+#[tokio::test]
+#[serial]
+async fn the_task_stats_read_prunes_the_history_leaves_outside_the_window() {
+    let database = SpecDatabase::create().await;
+    let current_leaf = standard_leaf(&database.pool, 0).await;
+    let old_leaf = standard_leaf(&database.pool, 10).await;
+    seed_history_population(&database.pool).await;
+    let (client, notices) = connect_collecting_notices(database.url()).await;
+
+    client.batch_execute("BEGIN").await.expect("begin");
+    client
+        .batch_execute(NESTED_PLAN_SETTINGS)
+        .await
+        .expect("send the nested plans as notices");
+    let rows = client
+        .query(LAST_DAY_STATS, &[])
+        .await
+        .expect("read the task stats");
+    client.batch_execute("ROLLBACK").await.expect("rollback");
+    let plans =
+        std::mem::take(&mut *notices.lock().unwrap_or_else(PoisonError::into_inner)).join("\n");
+
+    assert_eq!(rows.len(), 7, "one row per task status");
+    let count_plan = plans
+        .split("duration:")
+        .find(|plan| plan.contains("WITH side_counts AS"))
+        .unwrap_or_else(|| panic!("no plan of the count statement: {plans}"));
+    assert!(
+        count_plan.contains(&format!(" on {current_leaf} ")),
+        "{count_plan}"
+    );
+    assert!(
+        count_plan.contains(" on horsies_task_history_forever_open "),
+        "{count_plan}"
+    );
+    assert!(!count_plan.contains(&old_leaf), "{count_plan}");
     drop(client);
     database.drop().await;
 }

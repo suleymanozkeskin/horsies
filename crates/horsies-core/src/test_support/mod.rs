@@ -1,12 +1,14 @@
 //! Test support of the library's tests: the test databases
-//! ([`database`]), the core handle on one of them, the terminal writes of
-//! seeds ([`terminal_writes`]), the capture of the `tracing` events of a
-//! test ([`log_capture`]), and the child spec source of the workflow tests
-//! ([`child_specs`]).
+//! ([`database`]), the statements of the tests ([`sql`]), the core handle on
+//! one of them, the terminal writes of seeds ([`terminal_writes`]), the
+//! capture of the `tracing` events of a test ([`log_capture`]), and the
+//! child spec source of the workflow tests ([`child_specs`]).
 
 pub(crate) mod child_specs;
 mod database;
+pub(crate) mod history;
 mod log_capture;
+pub(crate) mod sql;
 pub(crate) mod terminal_writes;
 
 pub(crate) use database::{
@@ -22,12 +24,68 @@ use tokio_postgres::AsyncMessage;
 use crate::broker::client_family::ClientFamily;
 use crate::broker::core_rows::StatementLog;
 use crate::broker::migrations::{install_schema_on, InstallLockPlan};
-use crate::broker::pools::{CoreHandle, PoolProfile};
+use crate::broker::pools::{core_pool_for_test_url, CoreHandle, PoolProfile};
+use crate::core::history::maintenance::coverage::{
+    ensure_partition_coverage_in_pool, CoverageOutcome,
+};
 use crate::core::PostgresConfig;
 use crate::db::{
     open_connection, parse_connection_url, ConnectPlan, ConnectionEnvironment,
     DEFAULT_SOCKET_SETTINGS,
 };
+
+/// The sessions of the pool that [`migrated_pool`] returns.
+const MIGRATED_POOL_CONNECTIONS: u32 = 5;
+
+/// The history horizon (days) and the heartbeat horizon (hours) of the
+/// coverage pass of [`migrated_pool`].
+const MIGRATED_HISTORY_DAYS: u32 = 2;
+const MIGRATED_HEARTBEAT_HOURS: u32 = 2;
+
+/// The database of the running test ([`database_of_this_test`]): a copy of
+/// the test template, with one coverage pass at the first call in the test
+/// (history leaves for two days, heartbeat leaves for two hours, on the core
+/// pool, as a worker's pass). Every call in one test gets the same database;
+/// it is dropped when the test's runtime shuts down.
+pub(crate) async fn migrated_pool() -> sql::TestPool {
+    let database = database_of_this_test().await;
+    let pool = sql::TestPoolOptions::new()
+        .max_connections(MIGRATED_POOL_CONNECTIONS)
+        .connect(database.url())
+        .await
+        .expect("connect the database of this test");
+    let _covered = database
+        .setup()
+        .get_or_init(|| cover_partitions(database.url()))
+        .await;
+    pool
+}
+
+/// The URL of the database of the running test ([`migrated_pool`]), after
+/// its coverage pass.
+pub(crate) async fn migrated_database_url() -> String {
+    migrated_pool().await.close().await;
+    database_of_this_test().await.url().to_owned()
+}
+
+/// One coverage pass on a core pool of `url`.
+pub(crate) async fn cover_partitions(url: &str) {
+    let core = core_pool_for_test_url(url);
+    let coverage = ensure_partition_coverage_in_pool(
+        &core,
+        StatementLog::Off,
+        MIGRATED_HISTORY_DAYS,
+        MIGRATED_HEARTBEAT_HOURS,
+        &[],
+    )
+    .await
+    .expect("partition coverage of the test database");
+    core.close();
+    assert!(
+        matches!(coverage, CoverageOutcome::Ensured(_)),
+        "partition coverage of the test database: {coverage:?}"
+    );
+}
 
 /// A core handle (producer pools) on the database of `url`. The caller
 /// closes it ([`CoreHandle::close`]) before the database is dropped, or
@@ -82,17 +140,30 @@ pub(crate) async fn connect_collecting_notices(
     (client, notices)
 }
 
-/// A broker on the database of `pool` whose sqlx adapter pools are closed:
-/// every call that borrows them fails. A path that runs to its end on this
-/// broker runs on the core pools alone. The core pools connect at their first
-/// checkout.
-pub(crate) async fn broker_with_closed_sqlx_pools(
-    pool: &sqlx::PgPool,
-) -> crate::broker::PostgresBroker {
-    let adapter =
-        sqlx::postgres::PgPoolOptions::new().connect_lazy_with((*pool.connect_options()).clone());
-    adapter.close().await;
-    crate::broker::PostgresBroker::from_pool(adapter)
+/// The server error of a statement that raises SQLSTATE `code` with the
+/// primary message `message`, on the test database of this test. `code` is
+/// five characters of `[0-9A-Z]` and `message` holds no quote.
+///
+/// # Panics
+///
+/// When the server does not raise: the test cannot run.
+pub(crate) async fn raised_server_error(
+    code: &str,
+    message: &str,
+) -> tokio_postgres::error::DbError {
+    let pool = migrated_pool().await;
+    let refused = sql::raw_sql(&format!(
+        "DO $$ BEGIN RAISE EXCEPTION '{message}' USING ERRCODE = '{code}'; END $$"
+    ))
+    .execute(&pool)
+    .await
+    .expect_err("the server raises the SQLSTATE");
+    let error = refused
+        .as_database_error()
+        .expect("the refusal is a server error")
+        .clone();
+    pool.close().await;
+    error
 }
 
 /// Installs the schema into the template of this process: the

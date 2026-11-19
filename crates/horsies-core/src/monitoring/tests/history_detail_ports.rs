@@ -16,7 +16,7 @@ async fn a_moved_task_detail_carries_the_end_stamp_of_its_status() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("end_stamp");
     clean_w2(&pool, &scope).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
 
     let completed = scope.running("completed");
     seed_task(&pool, &completed).await;

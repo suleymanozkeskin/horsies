@@ -18,11 +18,11 @@ use crate::broker::attempt_writes::{AttemptFailureKind, RetryPlacement, RetryReq
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
-    encode_child_frame, encode_parent_frame, CancelGraceMs, ChildConnection, ChildFrame, ChildKind,
-    ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, InitFrame, IsolatedChild, IsolatedWork,
-    NoLeftWork, ParentFrame, PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame, ResultEnvelopeText,
-    ResultFrame, RssReading, RunEnd, RunFrame, SharedWork, StoredOptionsRefusal, TaskInputText,
-    TaskSendPool, TaskTimeoutMs,
+    encode_child_frame, encode_parent_frame, CancelGraceMs, ChildAfterFrame, ChildConnection,
+    ChildFrame, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, InitFrame,
+    IsolatedChild, IsolatedWork, NoLeftWork, ParentFrame, PoolMaxSize, PoolMinSize, ProcessId,
+    ReadyFrame, ResultEnvelopeText, ResultFrame, RssReading, RunEnd, RunFrame, SharedWork,
+    StoredOptionsRefusal, TaskInputText, TaskSendPool, TaskTimeoutMs,
 };
 use crate::worker::executor::supervisor::{ChildCommand, Spawner, CHILD_KILL_WAIT};
 use crate::worker::retry::{read_stored_options, StoredOptions};
@@ -455,6 +455,45 @@ fn a_timeout_retries_when_the_policy_names_it() {
     );
 }
 
+/// One retry of `TASK_TIMEOUT` after 30 s.
+const ONE_TIMEOUT_RETRY_AFTER_30_S: &str = r#"{"retry_policy": {"max_retries": 1,
+    "intervals": [30], "backoff_strategy": "fixed", "jitter": false,
+    "max_delay_seconds": null, "auto_retry_for": ["TASK_TIMEOUT"]}}"#;
+
+/// The command of a retry after a timeout (the order is
+/// `exit_not_seen_tests::a_deadline_kill_gives_no_end_before_the_exit_is_seen`):
+/// the timeout write of a task whose policy lists `TASK_TIMEOUT` is a
+/// `TASK_TIMEOUT` failure that asks for the retry: the retry count of the
+/// claim, the delay of the policy, in the class of the end.
+#[test]
+fn a_timeout_write_asks_for_the_retry_of_its_policy() {
+    let claimed = ClaimedTask {
+        retry: RetryFacts {
+            retry_count: 0,
+            max_retries: 1,
+        },
+        ..task(ExecutionClass::Isolated, ONE_TIMEOUT_RETRY_AFTER_30_S)
+    };
+
+    let write = timeout_write(
+        &claimed,
+        "worker-1",
+        TaskTimeoutMs::new(1_000).unwrap(),
+        RetryPlacement::SameClass,
+        TimeoutCancel::NoSignal,
+    );
+
+    assert_eq!(write.error_code.as_deref(), Some("TASK_TIMEOUT"));
+    assert_eq!(
+        write.retry,
+        RetryRequest::RetryAfter {
+            expected_retry_count: 0,
+            delay_seconds: 30.0,
+            placement: RetryPlacement::SameClass,
+        }
+    );
+}
+
 #[test]
 fn a_killed_child_write_names_its_code() {
     let claimed = task(ExecutionClass::Isolated, RETRY_ON_TIMEOUT);
@@ -643,8 +682,7 @@ fn stored_error_message(result_json: &str) -> serde_json::Value {
     stored["err"]["message"].clone()
 }
 
-/// Python `_retry_finalize_future` (`python/horsies/core/worker/finalize.py:1957`):
-/// a crash-recovery write sent again after a database error stores
+/// A crash-recovery write sent again after a database error stores
 /// `Retry after future-stage finalize error: ` and the message of the first
 /// send, as the error message and as the attempt's message and failed
 /// reason. The code, the retry, the fence and the error `data` are those of
@@ -883,6 +921,7 @@ async fn an_isolated_slot_reports_the_result_of_its_child() {
         )),
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
+        child: ChildAfterFrame::ServesOn,
     }))
     .unwrap()
     .to_bytes();
@@ -922,8 +961,7 @@ async fn a_child_that_dies_with_a_task_takes_the_crash_path() {
     }
 }
 
-/// The free slots of an isolated pool, for the soft-cap start check (Python
-/// `test_queue_cap_hold.py::TestFreeChildren`): a ready child that waits for
+/// The free slots of an isolated pool, for the soft-cap start check: a ready child that waits for
 /// a task is one free slot; a submitted task takes it at once, before the
 /// slot takes the task from the queue; a stopping pool has none.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

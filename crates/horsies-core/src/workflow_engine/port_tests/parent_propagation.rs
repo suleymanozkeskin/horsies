@@ -1,16 +1,12 @@
 //! The advance of a parent from its finished child: from a child that is
 //! already COMPLETED, in a recovery pass where one parent's write fails, and
 //! in a phase 2 whose parent write fails once with a connection error.
-//! Python: `tests/integration/test_workflow_denest_propagation.py`.
 //!
-//! Python drives the parent advance after the child's transaction
-//! (`_drive_parent_propagations`), with a retry stage of its own. The core
-//! advances the parent after the commit that ends the child, one
+//! The core advances the parent after the commit that ends the child, one
 //! transaction per level (`horsies_workflow_child_finish`, from phase 2 and
 //! from recovery case 1.6).
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -21,9 +17,9 @@ use super::support::{
 use crate::broker::PostgresBroker;
 use crate::core::TaskResult;
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::{self, TestPool};
 use crate::worker::execution::{run_phase2, Phase2Work, PhaseTwoForm};
 use crate::workflow_engine::recovery::recover_stuck_workflows_observed_with;
-use crate::workflow_engine::steps::ChildBuild;
 
 /// The definition key that the parent nodes name (the tests resolve no child).
 const CHILD_KEY: &str = "tests.port.denest_child.v1";
@@ -39,7 +35,7 @@ fn child_result() -> String {
 /// A RUNNING parent whose node 0 is a RUNNING sub-workflow node of a child
 /// that is COMPLETED with [`child_result`] as its output. Returns the parent
 /// and the child.
-async fn seed_parent_of_a_completed_child(pool: &PgPool) -> (Uuid, Uuid) {
+async fn seed_parent_of_a_completed_child(pool: &TestPool) -> (Uuid, Uuid) {
     let parent = seed_workflow(pool, &WorkflowSeed::running()).await;
     let child = seed_workflow(
         pool,
@@ -58,7 +54,7 @@ async fn seed_parent_of_a_completed_child(pool: &PgPool) -> (Uuid, Uuid) {
 }
 
 /// (status of node 0, status of the workflow) of `workflow_id`.
-async fn statuses(pool: &PgPool, workflow_id: Uuid) -> (String, String) {
+async fn statuses(pool: &TestPool, workflow_id: Uuid) -> (String, String) {
     (
         node(pool, workflow_id, 0).await.status,
         workflow_status(pool, workflow_id).await,
@@ -90,6 +86,51 @@ async fn a_completed_child_advances_and_completes_its_parent() {
         TaskResult::Ok(value) => assert_eq!(value, serde_json::json!(7)),
         TaskResult::Err(error) => panic!("the parent node failed: {error:?}"),
     }
+}
+
+/// `test_chain_drives_every_ancestor_level`: grandparent <- parent <- child,
+/// with the child already COMPLETED. Its completion call advances the parent
+/// node and completes the parent; the advance that this completion owes
+/// then advances the grandparent node and completes the grandparent, each
+/// level in its own transaction.
+#[tokio::test]
+#[serial]
+async fn a_completed_child_advances_every_ancestor_level() {
+    let pool = shared_pool().await;
+    let grandparent = seed_workflow(&pool, &WorkflowSeed::running()).await;
+    let parent = seed_workflow(
+        &pool,
+        &WorkflowSeed::child(ParentLink::of_root(grandparent, 0)).output(0),
+    )
+    .await;
+    let child = seed_workflow(
+        &pool,
+        &WorkflowSeed::child(ParentLink {
+            workflow_id: parent,
+            task_index: 0,
+            root_workflow_id: grandparent,
+            depth: 2,
+        })
+        .status("COMPLETED")
+        .output(0)
+        .result(child_result()),
+    )
+    .await;
+    seed_node(
+        &pool,
+        &NodeSeed::sub_workflow(grandparent, 0, "RUNNING", CHILD_KEY, Some(parent)),
+    )
+    .await;
+    seed_node(
+        &pool,
+        &NodeSeed::sub_workflow(parent, 0, "RUNNING", CHILD_KEY, Some(child)),
+    )
+    .await;
+
+    advance_parent_of(&pool, child, &TestChildSpecs::empty()).await;
+
+    assert_eq!(statuses(&pool, parent).await, completed_twice());
+    assert_eq!(statuses(&pool, grandparent).await, completed_twice());
 }
 
 /// `test_recovery_isolates_poison_child_and_continues`: two parents of
@@ -125,8 +166,8 @@ async fn recovery_contains_a_failing_parent_advance_and_completes_the_next_paren
     .await;
 
     let report = recover_stuck_workflows_observed_with(
-        &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &crate::broker::PostgresBroker::from_test_url(db.pool.url(), crate::ClientFamily::Rust),
+        &TestChildSpecs::empty(),
         RECOVERY_FAILURE_LIMIT,
     )
     .await
@@ -199,8 +240,8 @@ async fn a_transient_failure_of_the_parent_advance_is_retried_and_completes_the_
     .await;
 
     run_phase2(
-        &PostgresBroker::from_pool(db.pool.clone()),
-        ChildBuild::Client(&TestChildSpecs::empty()),
+        &PostgresBroker::from_test_url(db.pool.url(), crate::ClientFamily::Rust),
+        &TestChildSpecs::empty(),
         Phase2Work {
             task_id: child_task,
             queue_name: "default".to_owned(),
@@ -213,12 +254,12 @@ async fn a_transient_failure_of_the_parent_advance_is_retried_and_completes_the_
 
     assert_eq!(workflow_status(&db.pool, child).await, "COMPLETED");
     assert_eq!(statuses(&db.pool, parent).await, completed_twice());
-    let parent_writes: i64 = sqlx::query_scalar("SELECT last_value FROM port_test_parent_writes")
+    let parent_writes: i64 = sql::query_scalar("SELECT last_value FROM port_test_parent_writes")
         .fetch_one(&db.pool)
         .await
         .expect("read the parent write count");
     assert_eq!(parent_writes, 2, "the refused write and its retry");
-    let records: i64 = sqlx::query_scalar(
+    let records: i64 = sql::query_scalar(
         "SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1",
     )
     .bind(child_task)

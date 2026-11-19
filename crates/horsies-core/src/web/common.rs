@@ -6,8 +6,8 @@ use axum::Json;
 use serde::Serialize;
 
 use crate::monitoring::{
-    ErrorCategory, MonitoringQueryError, MonitoringQueryErrorCode, PaginationRefused,
-    SortDirection, TaskGroupBy, TaskSortField,
+    ErrorCategory, MonitoringQueryError, PaginationRefused, SortDirection, TaskGroupBy,
+    TaskSortField,
 };
 use crate::TaskStatus;
 
@@ -25,8 +25,7 @@ pub(crate) struct CodeBody {
     pub detail: String,
 }
 
-/// The `code` of a 400 body for request text refused before any read
-/// (Python `tests.dualrun.reference.web_routes._common.INVALID_INPUT`).
+/// The `code` of a 400 body for request text refused before any read.
 pub(crate) const INVALID_INPUT: &str = "INVALID_INPUT";
 
 /// The mark of a response that refused request text as `INVALID_INPUT`, in
@@ -386,18 +385,15 @@ pub(crate) fn parse_group_by(value: &str) -> Result<TaskGroupBy, ApiError> {
     }
 }
 
-/// Map a monitoring read failure to its response, as Python
-/// (`tests/dualrun/reference/web_routes/_common.py:103-127`): a database failure is 503, the
+/// Map a monitoring read failure to its response: a database failure is 503, the
 /// dependency failed and the state can clear; stored history data that does
 /// not decode is 500, the request was valid and a repeat gives the same
 /// answer until the stored row changes.
 pub(crate) fn query_failed(surface: &str, error: MonitoringQueryError) -> ApiError {
-    let detail = format!("{surface} query failed: {}", error.message);
-    match error.code {
-        MonitoringQueryErrorCode::DbOperationFailed => ApiError::unavailable(detail),
-        // Python answers it with 503 too; the core never produces it.
-        MonitoringQueryErrorCode::EventLoopLimit => ApiError::unavailable(detail),
-        MonitoringQueryErrorCode::HistoryContractViolation => {
+    let detail = format!("{surface} query failed: {}", error.message());
+    match error {
+        MonitoringQueryError::DbOperationFailed { .. } => ApiError::unavailable(detail),
+        MonitoringQueryError::HistoryContractViolation { .. } => {
             ApiError::detail(StatusCode::INTERNAL_SERVER_ERROR, detail)
         }
     }
@@ -523,13 +519,16 @@ mod tests {
     use super::*;
     use crate::monitoring::MonitoringQueryErrorSource;
 
-    fn query_error(code: MonitoringQueryErrorCode) -> MonitoringQueryError {
-        MonitoringQueryError {
-            code,
-            message: "read failed".to_owned(),
-            retryable: false,
-            source: MonitoringQueryErrorSource::Database(sqlx::Error::PoolTimedOut),
-        }
+    fn read_source() -> MonitoringQueryErrorSource {
+        MonitoringQueryErrorSource::Broker(crate::broker::BrokerError::Statement(
+            crate::db::StatementFailure::NotSent {
+                statement: "monitoring_task_list",
+                cause: crate::db::NotSentCause::Checkout(crate::db::CheckoutFailure::TimedOut {
+                    role: crate::db::PoolRole::Main,
+                    waited: std::time::Duration::from_secs(30),
+                }),
+            },
+        ))
     }
 
     #[test]
@@ -580,22 +579,25 @@ mod tests {
 
     #[test]
     fn a_query_failure_maps_to_python_s_status() {
-        let status = |code| match query_failed("Task list", query_error(code)) {
+        let status = |error| match query_failed("Task list", error) {
             ApiError::Detail(status, _) => status,
             ApiError::InvalidInput(_) | ApiError::Validation(_) => {
                 panic!("a query failure is always a detail body")
             }
         };
         assert_eq!(
-            status(MonitoringQueryErrorCode::DbOperationFailed),
+            status(MonitoringQueryError::DbOperationFailed {
+                message: "read failed".to_owned(),
+                retryable: false,
+                source: read_source(),
+            }),
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert_eq!(
-            status(MonitoringQueryErrorCode::EventLoopLimit),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
-        assert_eq!(
-            status(MonitoringQueryErrorCode::HistoryContractViolation),
+            status(MonitoringQueryError::HistoryContractViolation {
+                message: "read failed".to_owned(),
+                source: crate::monitoring::HistoryContractSource(read_source()),
+            }),
             StatusCode::INTERNAL_SERVER_ERROR
         );
     }

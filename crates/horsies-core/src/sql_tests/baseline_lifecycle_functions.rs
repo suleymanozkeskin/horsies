@@ -125,7 +125,7 @@ const COMPLETE_SQL: &str =
 const FAIL_SQL: &str = "SELECT outcome FROM horsies_finish_failed_attempt(
     $1::uuid, 'w1', $2::timestamptz, 'NONE', NULL, NULL, NULL, '{}', 'E', 'r', 'FAILED', 'm', 'r', 'REFUSE', TRUE)";
 const FAIL_STALE_SQL: &str = "SELECT outcome FROM horsies_finish_stale_attempt(
-    $1::uuid, 60000, 60000, 'NONE', NULL, NULL, '{}', 'WORKER_CRASHED', 'r', 'm', 'r')";
+    $1::uuid, 'BEAT_AGE', 60000, 60000, NULL, NULL, 'NONE', NULL, NULL, '{}', 'WORKER_CRASHED', 'r', 'm', 'r')";
 
 const BATCH_SUCCESS_SQL: &str = "SELECT string_agg(outcome, ',' ORDER BY ordinality)
     FROM horsies_complete_tasks_fused(
@@ -172,6 +172,10 @@ const RELEASE_SAME_CLASS_SQL: &str = "SELECT * FROM horsies_release_claims(
     ARRAY[$1::uuid]::uuid[], ARRAY[$2::timestamptz]::timestamptz[], 'w1', 'SAME_CLASS')";
 const START_ROWS_SQL: &str =
     "SELECT * FROM horsies_start_attempt($1::uuid, 'w1', $2::timestamptz, 7, 'h', 'p', 's')";
+
+const TAKE_LIVENESS_SQL: &str = "SELECT horsies_take_worker_liveness($1::text)";
+const LIVENESS_GENERATION_SQL: &str =
+    "SELECT generation FROM horsies_worker_liveness WHERE worker_id = $1::text";
 
 /// A failed case raises with its label, which fails this test with the case
 /// in the error.
@@ -221,6 +225,7 @@ async fn two_session_case() {
     repeat_send_during_a_move_never_runs_twice(&prepared().await).await;
     claim_skips_a_locked_row(&prepared().await).await;
     wakes_and_events(&prepared().await).await;
+    liveness_take_of_a_lock_held_elsewhere_writes_nothing(&prepared().await).await;
 }
 
 /// A database with the baseline and the run-time fixtures of
@@ -523,6 +528,34 @@ async fn claim_skips_a_locked_row(database: &BaselineDatabase) {
         vec![(Some("SHORT".to_owned()), Some(1))],
         "{case}: expected one SHORT row of 1"
     );
+}
+
+/// The liveness take of a lock that another session holds answers false
+/// and writes no generation: the generation stays the one of the session
+/// that holds the lock.
+async fn liveness_take_of_a_lock_held_elsewhere_writes_nothing(database: &BaselineDatabase) {
+    let case = "liveness take of a lock held elsewhere";
+    let worker_id = "w-liveness";
+    let (holder, taker) = (connect(database).await, connect(database).await);
+    let taken: bool = first_row(&holder, TAKE_LIVENESS_SQL, &[&worker_id])
+        .await
+        .get(0);
+    let held_generation: i64 = first_row(&taker, LIVENESS_GENERATION_SQL, &[&worker_id])
+        .await
+        .get(0);
+    let answer: bool = first_row(&taker, TAKE_LIVENESS_SQL, &[&worker_id])
+        .await
+        .get(0);
+    let generation_after: i64 = first_row(&taker, LIVENESS_GENERATION_SQL, &[&worker_id])
+        .await
+        .get(0);
+    assert!(taken, "{case}: the first session takes the free lock");
+    assert!(!answer, "{case}: the second session finds the lock held");
+    assert_eq!(
+        generation_after, held_generation,
+        "{case}: the refused take writes no generation"
+    );
+    drop(holder);
 }
 
 // ---------------------------------------------------------------------------

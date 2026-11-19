@@ -13,7 +13,7 @@ The schema is one migration, version 1000: the SQL files in
 
 | File | Holds |
 | ---- | ----- |
-| `0001_tables.sql` | Tables, constraints, seed rows, `horsies_uuidv7()`, the notification triggers |
+| `0001_tables.sql` | Tables, constraints, the liveness generation sequence, seed rows, `horsies_uuidv7()`, the notification triggers |
 | `0002_indexes.sql` | The indexes that no constraint creates |
 | `0003_interim_functions.sql` | The SQL functions the client calls, and their composite types |
 | `0004_lifecycle_functions.sql` | The task lifecycle functions: enqueue, claim, start, attempt finish, stale recovery, requeue, release, cancel |
@@ -40,6 +40,9 @@ enqueue, result wait, task info read, workflow start or scheduler start):
    database holds: a horsies 0.x schema, `horsies_` tables with no bookkeeping, a newer version, a migration
    recorded as failed, a migration applied from another text (checksum), migration versions this build does not
    ship, or the other client family.
+5. A family row whose value is neither `PYTHON` nor `RUST` is corrupt stored data: the CHECK
+   `horsies_client_family_family_known` refuses such a value. The install, every write and a rerun are refused
+   with `CoreContractViolation`, whose message names the stored value, and nothing is changed.
 
 There is no upgrade from a 0.x database. Drain it and point the fleet at a new database.
 
@@ -207,6 +210,18 @@ Worker monitoring snapshots (timeseries). Each worker inserts one row per `worke
 | `slots_down` | `jsonb` | Each slot that is down for a cause that can clear: `{slot, cause, detail, down_since, failed_boots}`; an empty array when none is |
 | `class_capacity` | `jsonb` | Each claim budget class to `{"capacity": N, "serves": [classes]}` |
 
+## horsies_worker_liveness
+
+The generation of the last acquisition of each worker's liveness lock: one row per worker id, written in the
+transaction of each acquisition (`horsies_take_worker_liveness`). The values come from the sequence
+`horsies_worker_liveness_generation`, so no value is used twice. A reaper judges a worker gone only when its passes
+see one generation; see [Worker Liveness Lock](/horsies/workers/heartbeats-recovery/#worker-liveness-lock).
+
+| Column | Type | Description |
+| ------ | ---- | ----------- |
+| `worker_id` | `text` PK | Worker identifier |
+| `generation` | `bigint` | Generation of the last acquisition |
+
 ## horsies_schedule_state
 
 Scheduler execution tracking.
@@ -249,6 +264,7 @@ ahead of writes. A deployment that withholds it must run an external coverage jo
 | Heartbeats | Hourly partition drop | none |
 | Terminal workflow records (`horsies_workflows`, `horsies_workflow_tasks`) | Batched row delete by the reaper sweep | `terminal_record_retention_hours` |
 | Worker states | Batched row delete, same sweep | `worker_state_retention_hours` |
+| Worker liveness generations (`horsies_worker_liveness`) | Batched row delete, same sweep: rows of workers that own no CLAIMED or RUNNING row and whose lock no session holds | none |
 
 Workflow-record deletes run in batches of `retention_delete_batch_size` rows (default 500), one transaction per
 batch; deleting a workflow also removes its unconsumed progression evidence and its recovery count (the cascades
@@ -270,5 +286,4 @@ byte-identical.)
 
 ## File Location
 
-`crates/horsies-core/baseline/` (the schema); `python/horsies/core/baseline/install.py` (the install);
-`python/horsies/core/models/task_pg.py` and `python/horsies/core/models/workflow_pg.py` (query models).
+`crates/horsies-core/baseline/` (the schema); `crates/horsies-core/src/broker/migrations.rs` (the install).

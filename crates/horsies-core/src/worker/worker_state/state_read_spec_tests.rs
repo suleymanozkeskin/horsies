@@ -4,14 +4,14 @@
 //! worker named, instead of reading as a default.
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::broker::{BrokerErrorCode, PostgresBroker};
+use crate::test_support::sql::{self, TestPool};
 
 /// One snapshot row with every NOT NULL column of the baseline named.
-async fn seed_snapshot(pool: &PgPool, worker_id: &str, slots_down: &str, class_capacity: &str) {
-    sqlx::query(
+async fn seed_snapshot(pool: &TestPool, worker_id: &str, slots_down: &str, class_capacity: &str) {
+    sql::query(
         "INSERT INTO horsies_worker_states (
             worker_id, snapshot_at, hostname, pid, processes,
             max_claim_batch, max_claim_per_worker, cluster_wide_cap, queues,
@@ -34,8 +34,8 @@ async fn seed_snapshot(pool: &PgPool, worker_id: &str, slots_down: &str, class_c
     .expect("seed a worker snapshot");
 }
 
-async fn delete_snapshots(pool: &PgPool, worker_id: &str) {
-    sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+async fn delete_snapshots(pool: &TestPool, worker_id: &str) {
+    sql::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
         .bind(worker_id)
         .execute(pool)
         .await
@@ -46,8 +46,8 @@ async fn delete_snapshots(pool: &PgPool, worker_id: &str) {
 #[tokio::test]
 #[serial]
 async fn an_unreadable_slot_health_fails_the_read() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let worker_id = format!("itest-{}", Uuid::new_v4().simple());
     seed_snapshot(&pool, &worker_id, r#"{"slot": 1}"#, "{}").await;
 
@@ -55,12 +55,12 @@ async fn an_unreadable_slot_health_fails_the_read() {
 
     delete_snapshots(&pool, &worker_id).await;
     let error = result.expect_err("a slot health of another shape fails the read");
-    assert_eq!(error.code, BrokerErrorCode::MonitoringQueryFailed);
-    assert!(error.message.contains(&worker_id), "{}", error.message);
+    assert_eq!(error.code(), BrokerErrorCode::MonitoringQueryFailed);
+    assert!(error.message().contains(&worker_id), "{}", error.message());
     assert!(
-        error.message.contains("slots_down is unreadable"),
+        error.message().contains("slots_down is unreadable"),
         "{}",
-        error.message
+        error.message()
     );
 }
 
@@ -69,8 +69,8 @@ async fn an_unreadable_slot_health_fails_the_read() {
 #[tokio::test]
 #[serial]
 async fn an_unreadable_class_capacity_fails_the_read() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let worker_id = format!("itest-{}", Uuid::new_v4().simple());
     seed_snapshot(
         &pool,
@@ -84,12 +84,16 @@ async fn an_unreadable_class_capacity_fails_the_read() {
 
     delete_snapshots(&pool, &worker_id).await;
     let error = result.expect_err("an unknown budget name fails the read");
-    assert_eq!(error.code, BrokerErrorCode::MonitoringQueryFailed);
-    assert!(error.message.contains(&worker_id), "{}", error.message);
+    assert_eq!(error.code(), BrokerErrorCode::MonitoringQueryFailed);
+    assert!(error.message().contains(&worker_id), "{}", error.message());
     assert!(
-        error.message.contains("class_capacity is unreadable"),
+        error.message().contains("class_capacity is unreadable"),
         "{}",
-        error.message
+        error.message()
     );
-    assert!(error.message.contains("'EXCLUSIVE'"), "{}", error.message);
+    assert!(
+        error.message().contains("'EXCLUSIVE'"),
+        "{}",
+        error.message()
+    );
 }

@@ -1,7 +1,6 @@
 //! Full frozen history detail over the staged detail function.
 
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgConnection, Row};
 use uuid::Uuid;
 
 use crate::core::history::archive::attempts::{decode_attempt_snapshot, AttemptRecord};
@@ -9,6 +8,8 @@ use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::TASK_DETAIL_FUNCTION;
 use crate::core::types::status::TaskStatus;
+#[cfg(test)]
+use crate::test_support::sql::{self, CallError, TestConnection};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryTaskDetail {
@@ -59,7 +60,7 @@ pub struct HistoryTaskDetail {
 
 /// What a read knows about a task id that neither the live table nor the
 /// task history holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, horsies_macros::CodeCatalog)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, horsies_core_derive::CodeCatalog)]
 #[code_catalog(module = "history", base = "str_enum")]
 pub enum TaskAbsenceReason {
     /// The UUIDv7 birth, plus the clock bound, is before the latest upper
@@ -107,7 +108,6 @@ pub enum TaskDetailResult {
 }
 
 /// The history columns of a staged detail row, as stored.
-#[derive(FromRow)]
 pub(crate) struct HistoryDetailWireRow {
     pub(crate) task_id: Uuid,
     pub(crate) task_name: String,
@@ -160,28 +160,46 @@ pub(crate) fn task_detail_sql() -> String {
 /// monitoring task detail and the rerun read call the same function.
 pub(crate) const TASK_ABSENCE_REASON_SQL: &str = "SELECT horsies_task_absence_reason($1)";
 
-pub async fn read_task_detail(
-    connection: &mut PgConnection,
+/// The detail read on a test session, with the statements of
+/// [`crate::broker::history_reads::read_history_detail`]: the staged detail
+/// read and, for a task that neither the live table nor the history holds,
+/// the absence reason. The tests that read inside their own transaction call
+/// it here; the core reads on its pools.
+///
+/// Errors: [`CallError`]; `Contract` for a row that breaks the read
+/// contract or a history row that does not decode.
+#[cfg(test)]
+pub(crate) async fn read_task_detail(
+    connection: &mut TestConnection,
     task_id: Uuid,
-) -> Result<TaskDetailResult, HistoryError> {
-    let sql = task_detail_sql();
-    let Some(row) = sqlx::query(&sql)
+) -> Result<TaskDetailResult, CallError> {
+    let detail_sql = task_detail_sql();
+    let row = sql::query(&detail_sql)
         .bind(task_id)
         .fetch_optional(&mut *connection)
-        .await?
-    else {
+        .await
+        .map_err(CallError::Database)?;
+    let Some(row) = row else {
+        let reason: String = sql::query_scalar(TASK_ABSENCE_REASON_SQL)
+            .bind(task_id)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(CallError::Database)?;
         return Ok(TaskDetailResult::Absent {
             task_id,
-            reason: classify_absence(connection, task_id).await?,
+            reason: TaskAbsenceReason::parse(&reason).map_err(CallError::Contract)?,
         });
     };
-    let location: String = row.try_get("location")?;
+    let location: String = sql::named(&row, "location").map_err(CallError::Database)?;
     match location.as_str() {
         "LIVE" => Ok(TaskDetailResult::Live { task_id }),
-        "HISTORY" => decode_history_detail(&row).map(TaskDetailResult::History),
-        other => Err(HistoryError::contract(format!(
+        "HISTORY" => crate::broker::history_reads::history_detail_wire_row(&row)
+            .map_err(|error| CallError::Contract(HistoryError::from(error)))
+            .and_then(|wire| history_detail_from_wire(wire).map_err(CallError::Contract))
+            .map(TaskDetailResult::History),
+        other => Err(CallError::Contract(HistoryError::contract(format!(
             "staged detail returned unknown location {other:?}"
-        ))),
+        )))),
     }
 }
 
@@ -194,10 +212,6 @@ fn history_status(task_id: Uuid, value: &str) -> Result<TaskStatus, HistoryError
             crate::core::python_text::python_repr(value)
         ))
     })
-}
-
-fn decode_history_detail(row: &sqlx::postgres::PgRow) -> Result<HistoryTaskDetail, HistoryError> {
-    history_detail_from_wire(HistoryDetailWireRow::from_row(row)?)
 }
 
 /// The detail of a history row from its stored columns: reads the stored
@@ -260,16 +274,4 @@ pub(crate) fn history_detail_from_wire(
         rerun_input_inline: row.rerun_input_inline,
         attempts,
     })
-}
-
-/// Reads only; one statement.
-async fn classify_absence(
-    connection: &mut PgConnection,
-    task_id: Uuid,
-) -> Result<TaskAbsenceReason, HistoryError> {
-    let reason: String = sqlx::query_scalar(TASK_ABSENCE_REASON_SQL)
-        .bind(task_id)
-        .fetch_one(connection)
-        .await?;
-    TaskAbsenceReason::parse(&reason)
 }

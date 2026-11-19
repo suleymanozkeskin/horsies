@@ -1,7 +1,5 @@
 //! One isolated slot: boot a child, serve tasks on it one at a time, hold
-//! the deadline of each, recycle or replace the child (Python
-//! `core/worker/slots.py`, `_run_generation`, `_read_answer`,
-//! `_end_after_return`; `core/worker/dispatch.py`, the deadline kill).
+//! the deadline of each, recycle or replace the child.
 //!
 //! Rules of one task:
 //! - The deadline starts when the run frame is sent. At the deadline the
@@ -11,6 +9,9 @@
 //!   returned: the deadline no longer applies, and every later end of the
 //!   child whose exit is seen writes what the body returned.
 //! - A child lost with its exit seen takes the crash path.
+//! - A result frame that says the child ends itself (its core stopped)
+//!   answers the task, and the slot sends that child no other task: it
+//!   waits for the exit of the child, then boots a new one.
 //! - A child whose exit is not seen 30 s after the kill: the end is not
 //!   known (stale recovery on), or the slot waits for the exit (off).
 //! - The runner beats of the task stop when its end is read or a kill is
@@ -42,11 +43,12 @@ use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::child_writes::{longer, FINALIZING_MARKER_END};
 use crate::db::CANCEL_REQUEST_BOUND;
 use crate::worker::executor::protocol::{
-    BodyEnd, ChildFrame, ParentFrame, ProcessId, RssReading, RunEnd, RunFrame, TaskTimeoutMs,
-    ISOLATED_LEFTOVER_GRACE, STUCK_REPORT_DELAY,
+    BodyEnd, ChildAfterFrame, ChildFrame, ParentFrame, ProcessId, RssReading, RunEnd, RunFrame,
+    TaskTimeoutMs, ISOLATED_LEFTOVER_GRACE, STUCK_REPORT_DELAY,
 };
 use crate::worker::executor::supervisor::{
-    ChildChannel, ChildExit, ChildLost, ExitState, FrameWait, LossCause, MailboxBound, SendFailure,
+    log_core_stopped_child, ChildChannel, ChildExit, ChildLost, EndWithoutTask, ExitState,
+    FrameWait, LossCause, MailboxBound, SendFailure,
 };
 use crate::worker::runner_beats::{DispatchRunner, HeldChild, HeldDispatch, RegistryClosed};
 
@@ -110,6 +112,10 @@ enum AfterRun {
     /// The task finished, and the child stops after a clean end (left work
     /// was cancelled in it).
     Retire,
+    /// The task finished, and its result frame said that the child ends
+    /// itself (its core stopped): the slot sends it no task and waits for
+    /// its exit.
+    EndsItself,
     /// The child is lost or killed. The task finished when its body
     /// returned before.
     ChildGone(TasksFinished),
@@ -251,9 +257,19 @@ async fn boot_and_serve(shared: &PoolShared, index: usize, defects: &mut SlotDef
     }
 }
 
-/// Serve tasks on one child until it is lost, retires, or the pool stops.
-/// A panic while a task runs is a defect: the child is killed and the task
-/// answered here.
+/// How a child that takes no more tasks leaves the slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildLeaves {
+    /// The slot retires the child with the stop frame, or disposes of a
+    /// child that already ended.
+    Retired,
+    /// The child said that it ends itself: the slot waits for its exit.
+    EndsItself,
+}
+
+/// Serve tasks on one child until it is lost, retires, ends itself, or the
+/// pool stops. A panic while a task runs is a defect: the child is killed
+/// and the task answered here.
 async fn serve_generation(
     shared: &PoolShared,
     index: usize,
@@ -262,9 +278,9 @@ async fn serve_generation(
 ) -> GenerationEnd {
     let mut tasks_done: u64 = 0;
     let mut notice = ReadyNotice::AtFirstWait;
-    loop {
+    let leaves = loop {
         let Some(run) = next_run(shared, &channel, notice).await else {
-            break;
+            break ChildLeaves::Retired;
         };
         notice = ReadyNotice::Quiet;
         tasks_done = tasks_done.saturating_add(1);
@@ -294,12 +310,16 @@ async fn serve_generation(
                         reason,
                         "retiring a child"
                     );
-                    break;
+                    break ChildLeaves::Retired;
                 }
             }
             AfterRun::Retire => {
                 defects.task_finished();
-                break;
+                break ChildLeaves::Retired;
+            }
+            AfterRun::EndsItself => {
+                defects.task_finished();
+                break ChildLeaves::EndsItself;
             }
             AfterRun::ChildGone(finished) => {
                 defects.note(finished);
@@ -313,17 +333,32 @@ async fn serve_generation(
                 return GenerationEnd::Defect(defect);
             }
         }
-    }
+    };
     shared.board.set(index, SlotPhase::Retiring);
-    match channel.has_exited() || channel.channel_closed() {
-        true => {
-            let _ = channel.dispose_lost().await;
+    let pid = channel.pid();
+    let ended = channel.has_exited() || channel.channel_closed();
+    match (leaves, ended) {
+        (ChildLeaves::EndsItself, _) => {
+            log_end_without_task(pid, channel.await_own_end().await);
         }
-        false => {
+        (ChildLeaves::Retired, true) => {
+            // The child ended by itself while it held no task.
+            log_end_without_task(pid, channel.dispose_lost().await);
+        }
+        (ChildLeaves::Retired, false) => {
             let _ = channel.retire().await;
         }
     }
     GenerationEnd::Ended
+}
+
+/// Log the end of a child that held no task when it ended with the
+/// core-stopped code. Every other end needs no log of its own.
+fn log_end_without_task(pid: ProcessId, exit: ChildExit) {
+    match EndWithoutTask::of(exit) {
+        EndWithoutTask::CoreStopped => log_core_stopped_child(pid),
+        EndWithoutTask::Other => {}
+    }
 }
 
 /// Why a child that served a task retires, if it does.
@@ -474,7 +509,10 @@ async fn run_one(
         {
             drop(held);
             answer.send(AttemptEnd::Reported(result.end));
-            AfterRun::Serve { rss: result.rss }
+            match result.child {
+                ChildAfterFrame::ServesOn => AfterRun::Serve { rss: result.rss },
+                ChildAfterFrame::EndsItself => AfterRun::EndsItself,
+            }
         }
         FirstAnswer::Wait(FrameWait::Frame(ChildFrame::BodyReturned(returned)))
             if returned.task_id == task_id =>
@@ -675,3 +713,6 @@ async fn end_after_return(
         }
     }
 }
+
+#[cfg(test)]
+mod answer_tests;

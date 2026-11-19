@@ -31,7 +31,9 @@ pub const MAX_POOL_CONNECTIONS: u32 = 10_000;
 pub const MAX_RESERVATION_WINDOW_MICROS: u64 = 30 * 24 * 60 * 60 * 1_000_000;
 
 /// The manifest of a process that sends tasks and reads their state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct ProducerManifest {
     /// Always `PRODUCER_MANIFEST_VERSION`, the one version this core reads.
@@ -85,7 +87,9 @@ impl ManifestValue for ManifestVersion {
 }
 
 /// Connection settings of the main pool and the session pool.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct DatabaseManifest {
     pub database_url: DatabaseUrl,
@@ -117,7 +121,9 @@ pub struct DatabaseManifest {
 }
 
 /// Where the session pool (schema work, LISTEN/NOTIFY) connects.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum SessionDatabase {
     /// The session pool uses `database_url`.
@@ -253,7 +259,7 @@ impl WholeSeconds {
 /// When the pool replaces a connection by its age (SQLAlchemy's
 /// `pool_recycle`).
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum PoolRecycle {
@@ -288,7 +294,7 @@ impl ManifestValue for WholeSeconds {
 /// `run_schema_migrations=True` is `MIGRATE_AND_VALIDATE` and `False` is
 /// `OBSERVE_ONLY`.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SchemaMode {
@@ -304,7 +310,7 @@ pub enum SchemaMode {
 
 /// Send policy of a handle.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
 #[serde(deny_unknown_fields)]
 pub struct SendManifest {

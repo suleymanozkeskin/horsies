@@ -8,10 +8,10 @@
 //!
 //! - On a thread that runs a tokio runtime the call runs nothing and
 //!   answers the `ASYNC_CONTEXT` member of its catalog: a start answers
-//!   `WorkflowStartErrorCode::AsyncContext` with the workflow id of the
+//!   `WorkflowStartError::AsyncContext` with the workflow id of the
 //!   start, nothing written (Python `WorkflowStartAsyncContext`); `status`,
 //!   `results`, `tasks`, `cancel`, `pause` and `resume` answer
-//!   `HandleErrorCode::AsyncContext` (Python `HandleAsyncContext`); `get`
+//!   `HandleOperationError::AsyncContext` (Python `HandleAsyncContext`); `get`
 //!   and `result_for` answer `WorkflowReadError::AsyncContext` (Python's
 //!   `RetrievalCode.ASYNC_CONTEXT`).
 //! - The thread check comes first, as in Python's `WorkflowSpec.start`: a
@@ -20,25 +20,28 @@
 //!   checks its error (`VALIDATION_FAILED` for an error that the start
 //!   cannot retry), and `get` refuses a wait in a process that runs task
 //!   bodies (`WaitInsideTask`).
-//! - When the process runtime cannot run the call, a start answers
-//!   `ENQUEUE_FAILED` with the workflow id, a handle method
-//!   `DB_OPERATION_FAILED`, and `get` and `result_for` `Database`; nothing
-//!   ran.
+//! - When the OS refused the threads of the process runtime, a start
+//!   answers `ENQUEUE_FAILED` with the workflow id, a handle method
+//!   `DB_OPERATION_FAILED`, and `get` and `result_for` `Database`, each
+//!   retryable; nothing ran.
+//! - In a process that was forked without `exec` after the process runtime
+//!   started, every call panics before it runs anything.
 
 use std::collections::BTreeMap;
 use std::future::Future;
 
 use horsies_core::core::workflow::validate_start_retry;
+use horsies_core::process_runtime::ProcessRuntimeRefusal;
 use horsies_core::{
-    process_role, wait_inside_task_message, FailureCause, HandleErrorCode, HandleOperationError,
-    HandleResult, ProcessRole, UserCode, WorkflowStartError, WorkflowStartErrorCode,
+    process_role, wait_inside_task_message, BrokerError, HandleErrorCode, HandleOperation,
+    HandleOperationError, HandleResult, ProcessRole, UserCode, WorkflowError, WorkflowStartError,
     WorkflowStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use uuid::Uuid;
 
-use super::{async_context_message, place, refusal_retryable, HorsiesView, Place};
+use super::{async_context_message, place, HorsiesView, Place};
 use crate::workflow::new_workflow_id;
 use crate::{
     NodeKey, NodeResult, TaskOutcome, UserErrorCode, WaitLimit, WorkflowDefinition,
@@ -57,31 +60,34 @@ struct StartNames<'a> {
 /// Run a start on the process runtime, or answer why it cannot run, with
 /// `workflow_id`: the id that the start would have used, so
 /// `start_with_id` or `retry_start` can run the same start later.
+///
+/// # Panics
+///
+/// In a fork ([`place`]).
 fn block_start<H>(
     start: impl Future<Output = Result<H, WorkflowStartError>>,
     workflow_id: Uuid,
     names: &StartNames<'_>,
 ) -> Result<H, WorkflowStartError> {
-    let refused =
-        |code: WorkflowStartErrorCode, message: String, retryable: bool| WorkflowStartError {
-            code,
-            message,
-            retryable,
-            workflow_name: names.workflow_name.to_owned(),
-            workflow_id: Some(workflow_id),
-        };
-    match place() {
+    match place(format_args!("blocking {}", names.blocking_call)) {
         Place::Runs(runtime) => runtime.block_on(start),
-        Place::AsyncContext => Err(refused(
-            WorkflowStartErrorCode::AsyncContext,
-            async_context_message(&names.blocking_call, names.async_call),
-            false,
-        )),
-        Place::RuntimeRefused(refusal) => Err(refused(
-            WorkflowStartErrorCode::EnqueueFailed,
-            format!("the start did not run: {refusal}"),
-            refusal_retryable(&refusal),
-        )),
+        Place::AsyncContext => Err(WorkflowStartError::AsyncContext {
+            message: async_context_message(&names.blocking_call, names.async_call),
+            workflow_name: names.workflow_name.to_owned(),
+            workflow_id,
+        }),
+        Place::RuntimeStartFailed(failed) => Err(WorkflowStartError::EnqueueFailed {
+            message: format!("the start did not run: {failed}"),
+            retryable: true,
+            workflow_name: names.workflow_name.to_owned(),
+            workflow_id,
+            cause: WorkflowError::Broker(BrokerError::ProcessRuntime(
+                ProcessRuntimeRefusal::StartFailed {
+                    cause: failed.cause,
+                    os_error: failed.os_error,
+                },
+            )),
+        }),
     }
 }
 
@@ -261,9 +267,10 @@ where
     D: WorkflowDefinition<Params = ()>,
     D::Output: DeserializeOwned + Send + Sync,
 {
+    let workflow_id = new_workflow_id();
     block_start(
-        crate::workflow::start_workflow::<D>(),
-        new_workflow_id(),
+        crate::workflow::start_workflow_as::<D>(workflow_id),
+        workflow_id,
         &definition_names::<D>("start_workflow()", "start_workflow::<D>()"),
     )
 }
@@ -281,9 +288,10 @@ where
     D::Params: Send + Sync,
     D::Output: DeserializeOwned + Send + Sync,
 {
+    let workflow_id = new_workflow_id();
     block_start(
-        crate::workflow::start_workflow_with::<D>(params),
-        new_workflow_id(),
+        crate::workflow::start_workflow_with_as::<D>(params, workflow_id),
+        workflow_id,
         &definition_names::<D>("start_workflow_with()", "start_workflow_with::<D>(params)"),
     )
 }
@@ -314,32 +322,32 @@ impl<T> WorkflowHandle<T> {
 impl<T> WorkflowHandleView<'_, T> {
     /// `WorkflowHandle::status`, blocking.
     pub fn status(&self) -> HandleResult<WorkflowStatus> {
-        self.block_handle(self.handle.status(), "status()")
+        self.block_handle(self.handle.status(), "status()", HandleOperation::Status)
     }
 
     /// `WorkflowHandle::results`, blocking.
     pub fn results(&self) -> HandleResult<BTreeMap<String, NodeResult>> {
-        self.block_handle(self.handle.results(), "results()")
+        self.block_handle(self.handle.results(), "results()", HandleOperation::Results)
     }
 
     /// `WorkflowHandle::tasks`, blocking.
     pub fn tasks(&self) -> HandleResult<Vec<WorkflowNodeInfo>> {
-        self.block_handle(self.handle.tasks(), "tasks()")
+        self.block_handle(self.handle.tasks(), "tasks()", HandleOperation::Tasks)
     }
 
     /// `WorkflowHandle::cancel`, blocking.
     pub fn cancel(&self) -> HandleResult<()> {
-        self.block_handle(self.handle.cancel(), "cancel()")
+        self.block_handle(self.handle.cancel(), "cancel()", HandleOperation::Cancel)
     }
 
     /// `WorkflowHandle::pause`, blocking.
     pub fn pause(&self) -> HandleResult<bool> {
-        self.block_handle(self.handle.pause(), "pause()")
+        self.block_handle(self.handle.pause(), "pause()", HandleOperation::Pause)
     }
 
     /// `WorkflowHandle::resume`, blocking.
     pub fn resume(&self) -> HandleResult<bool> {
-        self.block_handle(self.handle.resume(), "resume()")
+        self.block_handle(self.handle.resume(), "resume()", HandleOperation::Resume)
     }
 
     /// `WorkflowHandle::result_for`, blocking. Not a wait: it runs in a
@@ -357,41 +365,54 @@ impl<T> WorkflowHandleView<'_, T> {
     }
 
     /// Run a handle method on the process runtime, or answer why it cannot
-    /// run.
+    /// run. A process runtime that did not start is `DB_OPERATION_FAILED`
+    /// of `operation`, retryable, with the refusal as its cause.
+    ///
+    /// # Panics
+    ///
+    /// In a fork ([`place`]).
     fn block_handle<V>(
         &self,
         call: impl Future<Output = HandleResult<V>>,
         method: &str,
+        operation: HandleOperation,
     ) -> HandleResult<V> {
         let workflow_id = self.handle.workflow_id();
-        let refused =
-            |code: HandleErrorCode, message: String, retryable: bool| HandleOperationError {
-                code,
-                message,
-                retryable,
-                workflow_id,
-                cause: FailureCause::PreconditionFailed,
-            };
-        match place() {
+        match place(format_args!(
+            "blocking WorkflowHandle::{method} for workflow {workflow_id}"
+        )) {
             Place::Runs(runtime) => runtime.block_on(call),
-            Place::AsyncContext => Err(refused(
-                HandleErrorCode::AsyncContext,
-                async_context_message(
+            Place::AsyncContext => Err(HandleOperationError::AsyncContext {
+                message: async_context_message(
                     &format!("WorkflowHandle::{method} for workflow {workflow_id}"),
                     &format!("handle.{method}"),
                 ),
-                false,
-            )),
-            Place::RuntimeRefused(refusal) => Err(refused(
-                HandleErrorCode::DbOperationFailed,
-                format!("the call did not run: {refusal}"),
-                refusal_retryable(&refusal),
-            )),
+                workflow_id,
+            }),
+            Place::RuntimeStartFailed(failed) => {
+                let message = operation
+                    .failure_message(workflow_id, &format!("the call did not run: {failed}"));
+                Err(HandleOperationError::DbOperationFailed {
+                    message,
+                    retryable: true,
+                    workflow_id,
+                    cause: WorkflowError::Broker(BrokerError::ProcessRuntime(
+                        ProcessRuntimeRefusal::StartFailed {
+                            cause: failed.cause,
+                            os_error: failed.os_error,
+                        },
+                    )),
+                })
+            }
         }
     }
 
     /// Run a read of the outcome on the process runtime, or answer why it
     /// cannot run.
+    ///
+    /// # Panics
+    ///
+    /// In a fork ([`place`]).
     fn block_read<V>(
         &self,
         read: impl Future<Output = Result<V, WorkflowReadError>>,
@@ -399,7 +420,9 @@ impl<T> WorkflowHandleView<'_, T> {
         async_method: &str,
     ) -> Result<V, WorkflowReadError> {
         let workflow_id = self.handle.workflow_id();
-        match place() {
+        match place(format_args!(
+            "blocking WorkflowHandle::{method} for workflow {workflow_id}"
+        )) {
             Place::Runs(runtime) => runtime.block_on(read),
             Place::AsyncContext => Err(WorkflowReadError::AsyncContext {
                 message: async_context_message(
@@ -407,10 +430,10 @@ impl<T> WorkflowHandleView<'_, T> {
                     &format!("handle.{async_method}"),
                 ),
             }),
-            Place::RuntimeRefused(refusal) => Err(WorkflowReadError::Database {
+            Place::RuntimeStartFailed(failed) => Err(WorkflowReadError::Database {
                 code: HandleErrorCode::DbOperationFailed,
-                message: format!("the read did not run: {refusal}"),
-                retryable: refusal_retryable(&refusal),
+                message: format!("the read did not run: {failed}"),
+                retryable: true,
             }),
         }
     }

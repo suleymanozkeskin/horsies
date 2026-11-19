@@ -18,6 +18,7 @@ applies migrations). Coverage:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -72,8 +73,7 @@ from horsies._core import CoreConnectionError
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.history.errors import HistoryContractError
-from horsies.core.history.reads.aggregates import plan_rows_from_explain
-from horsies.monitoring.queries import LIST_ROW_BOUND
+from horsies._catalog.monitoring_bounds import LIST_ROW_BOUND
 from horsies.monitoring import (
     Breakdown,
     BreakdownLimit,
@@ -466,6 +466,13 @@ class TestTaskStats:
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
         assert isinstance(error.exception, HistoryContractError)
         assert 'NOT_KNOWN' in error.message
+        # Python's texts: the message names the read and holds the error's
+        # text, and the exception is a HistoryContractError with that text.
+        assert type(error.exception) is HistoryContractError
+        cause_text = str(error.exception)
+        assert 'NOT_KNOWN' in cause_text
+        assert error.exception.args == (cause_text,)
+        assert error.message.endswith(f' failed: {cause_text}')
 
 
 # --------------------------------------------------------------------------- #
@@ -3036,6 +3043,19 @@ class TestDatabaseFailure:
         # The driver error of Python's read, or the core's class of the cause
         # of the read on the core: no answer from the server.
         assert isinstance(error.exception, SQLAlchemyError | CoreConnectionError)
+        match error.exception:
+            case CoreConnectionError():
+                # Python's texts: the message names the read and holds the
+                # cause's text; the exception is that text with the read as
+                # its subject.
+                assert error.message.startswith('task list query failed: ')
+                cause_text = error.message.removeprefix('task list query failed: ')
+                assert cause_text != ''
+                assert error.exception.subject == 'task list query'
+                assert error.exception.message == cause_text
+                assert str(error.exception) == f'task list query: {cause_text}'
+            case _:
+                pass
 
     async def test_detail_failure_is_not_confused_with_absence(
         self, unreachable_broker: PostgresBroker
@@ -3121,6 +3141,19 @@ async def _unfiltered_list(
     )
 
 
+def _plan_rows(payload: object) -> int:
+    """The row estimate of the top plan node of EXPLAIN (FORMAT JSON) output,
+    as text or as parsed JSON."""
+    loaded: object = json.loads(payload) if isinstance(payload, str) else payload
+    match loaded:
+        case [{'Plan': {'Plan Rows': bool()}}, *_]:
+            raise AssertionError(f'a boolean row estimate: {payload!r}')
+        case [{'Plan': {'Plan Rows': int() | float() as rows}}, *_]:
+            return int(rows)
+        case _:
+            raise AssertionError(f'not EXPLAIN (FORMAT JSON) output: {payload!r}')
+
+
 @pytest.mark.usefixtures('clean_monitoring_tables')
 class TestUnfilteredHistoryTotalContract:
     """The documented total contract holds on the history side.
@@ -3175,7 +3208,7 @@ class TestUnfilteredHistoryTotalContract:
         assert totals.total_kind == 'ESTIMATE_HISTORY_PLAN'
         assert totals.live_total == 2
         assert str(totals.history_estimate_plan).startswith('[')
-        assert result.ok_value.total == 2 + plan_rows_from_explain(totals.history_estimate_plan)
+        assert result.ok_value.total == 2 + _plan_rows(totals.history_estimate_plan)
 
     async def test_filtered_total_counts_history_exactly(
         self,

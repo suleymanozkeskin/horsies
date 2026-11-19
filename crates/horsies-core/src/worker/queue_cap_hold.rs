@@ -1,5 +1,4 @@
-//! Soft-cap mode: a capped queue's count is checked before each start
-//! (Python `python/horsies/core/worker/queue_cap_hold.py`).
+//! Soft-cap mode: a capped queue's count is checked before each start.
 //!
 //! In soft-cap mode (`prefetch_buffer > 0`) `horsies_claim` counts only the
 //! RUNNING rows of a queue against its `max_concurrency`, so a worker can

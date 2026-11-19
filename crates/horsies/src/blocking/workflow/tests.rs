@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::*;
 use crate::workflow::tests_support::unit_task_node;
 use crate::{AppConfig, Horsies, HorsiesError, WorkflowDefConfig, WorkflowSpecBuilder};
+use horsies_core::WorkflowStartErrorCode;
 
 fn app() -> Horsies {
     Horsies::new(AppConfig::for_database_url(
@@ -103,13 +104,12 @@ fn region() -> Region {
 /// the workflow name and the id of the start.
 fn assert_async_context(refused: &WorkflowStartError, workflow_name: &str) {
     assert_eq!(
-        refused.code,
+        refused.code(),
         WorkflowStartErrorCode::AsyncContext,
         "{refused}"
     );
-    assert!(!refused.retryable, "{refused}");
-    assert_eq!(refused.workflow_name, workflow_name);
-    assert!(refused.workflow_id.is_some(), "{refused}");
+    assert!(!refused.retryable(), "{refused}");
+    assert_eq!(refused.workflow_name(), workflow_name);
 }
 
 #[tokio::test]
@@ -119,14 +119,14 @@ async fn a_blocking_start_on_a_runtime_thread_writes_nothing_and_keeps_its_id() 
     let refused = function.blocking().start().unwrap_err();
     assert_async_context(&refused, "blocking_nightly");
     assert!(
-        refused.message.contains("`function.start().await`"),
+        refused.message().contains("`function.start().await`"),
         "{}",
-        refused.message
+        refused.message()
     );
     let workflow_id = Uuid::from_u128(7);
     let with_id = function.blocking().start_with_id(workflow_id).unwrap_err();
     assert_async_context(&with_id, "blocking_nightly");
-    assert_eq!(with_id.workflow_id, Some(workflow_id));
+    assert_eq!(with_id.workflow_id(), workflow_id);
 }
 
 /// Python's order: the error is checked first, on any thread; a valid retry
@@ -136,24 +136,41 @@ async fn a_blocking_retry_checks_its_error_before_the_thread() {
     let mut app = app();
     let function = app.register_workflow_definition::<Nightly>().unwrap();
     let workflow_id = Uuid::from_u128(11);
-    let failed = |workflow_name: &str| WorkflowStartError {
-        code: WorkflowStartErrorCode::EnqueueFailed,
+    let failed = |workflow_name: &str| WorkflowStartError::EnqueueFailed {
         message: "the commit reply was lost".to_owned(),
         retryable: true,
         workflow_name: workflow_name.to_owned(),
-        workflow_id: Some(workflow_id),
+        workflow_id,
+        cause: horsies_core::WorkflowError::Broker(horsies_core::BrokerError::ConnectionFailed(
+            "the commit reply was lost".to_owned(),
+        )),
     };
     let other = function
         .blocking()
         .retry_start(&failed("another"))
         .unwrap_err();
-    assert_eq!(other.code, WorkflowStartErrorCode::ValidationFailed);
+    assert_eq!(other.code(), WorkflowStartErrorCode::ValidationFailed);
     let retried = function
         .blocking()
         .retry_start(&failed("blocking_nightly"))
         .unwrap_err();
     assert_async_context(&retried, "blocking_nightly");
-    assert_eq!(retried.workflow_id, Some(workflow_id));
+    assert_eq!(retried.workflow_id(), workflow_id);
+}
+
+/// Python's `_validate_start_retry` takes an `ASYNC_CONTEXT` error: the
+/// retry passes the error check and, on a runtime thread, answers
+/// `ASYNC_CONTEXT` with the id of the error, not `VALIDATION_FAILED`.
+#[tokio::test]
+async fn a_blocking_retry_takes_an_async_context_error_of_its_workflow() {
+    let mut app = app();
+    let function = app.register_workflow_definition::<Nightly>().unwrap();
+    let workflow_id = Uuid::from_u128(12);
+    let earlier = function.blocking().start_with_id(workflow_id).unwrap_err();
+    assert_async_context(&earlier, "blocking_nightly");
+    let retried = function.blocking().retry_start(&earlier).unwrap_err();
+    assert_async_context(&retried, "blocking_nightly");
+    assert_eq!(retried.workflow_id(), workflow_id);
 }
 
 #[tokio::test]
@@ -170,7 +187,7 @@ async fn a_blocking_template_start_on_a_runtime_thread_runs_no_build() {
         .start_with_id(region(), workflow_id)
         .unwrap_err();
     assert_async_context(&with_id, "blocking_regional");
-    assert_eq!(with_id.workflow_id, Some(workflow_id));
+    assert_eq!(with_id.workflow_id(), workflow_id);
 }
 
 #[tokio::test]
@@ -202,7 +219,7 @@ async fn a_blocking_spec_start_on_a_runtime_thread_writes_nothing() {
         .blocking()
         .start_with_id::<u32>(&spec, workflow_id)
         .unwrap_err();
-    assert_eq!(with_id.workflow_id, Some(workflow_id));
+    assert_eq!(with_id.workflow_id(), workflow_id);
 }
 
 /// Python `HandleAsyncContext`: each handle method answers
@@ -222,14 +239,14 @@ async fn a_blocking_handle_method_on_a_runtime_thread_is_async_context() {
         view.resume().map(|_resumed| ()).unwrap_err(),
     ];
     for refused in &refusals {
-        assert_eq!(refused.code, HandleErrorCode::AsyncContext, "{refused}");
-        assert!(!refused.retryable, "{refused}");
-        assert_eq!(refused.workflow_id, workflow_id);
+        assert_eq!(refused.code(), HandleErrorCode::AsyncContext, "{refused}");
+        assert!(!refused.retryable(), "{refused}");
+        assert_eq!(refused.workflow_id(), workflow_id);
     }
     assert!(
-        refusals[0].message.contains("`handle.status().await`"),
+        refusals[0].message().contains("`handle.status().await`"),
         "{}",
-        refusals[0].message
+        refusals[0].message()
     );
 }
 

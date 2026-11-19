@@ -20,7 +20,7 @@ use crate::core::workflow::summary::SubWorkflowSummary;
 /// Members, wire values and order are Python's (`python/horsies/core/models/tasks.py`), plus
 /// `WORKFLOW_START_INCOMPLETE`, which both catalogs hold.
 #[derive(
-    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
 #[code_catalog(module = "task_codes", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -76,7 +76,7 @@ impl OperationalErrorCode {
 ///
 /// Typical caller behavior: fix code or type assumptions, do not blindly retry.
 #[derive(
-    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
 #[code_catalog(module = "task_codes", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -101,7 +101,7 @@ impl ContractCode {
 ///
 /// Typical caller behavior: wait, poll again, handle missing value as normal flow.
 #[derive(
-    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
 #[code_catalog(module = "task_codes", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -111,9 +111,6 @@ pub enum RetrievalCode {
     WorkflowNotFound,
     ResultNotAvailable,
     ResultNotReady,
-    /// The broker already holds resource sets for its limit of open event loops, so this new loop
-    /// cannot read the value now. Never cached: it clears when one of those loops closes.
-    EventLoopLimit,
     /// A sync get was called on a thread that runs an event loop, so this call site cannot wait for
     /// the value. Never cached: the async form, or a sync call from a thread without a running loop,
     /// reads it.
@@ -129,13 +126,12 @@ pub enum RetrievalCode {
 }
 
 impl RetrievalCode {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 8] = [
         Self::WaitTimeout,
         Self::TaskNotFound,
         Self::WorkflowNotFound,
         Self::ResultNotAvailable,
         Self::ResultNotReady,
-        Self::EventLoopLimit,
         Self::AsyncContext,
         Self::InvalidInput,
         Self::WaitInsideTask,
@@ -146,7 +142,7 @@ impl RetrievalCode {
 ///
 /// Typical caller behavior: branch on outcome, continue control flow.
 #[derive(
-    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
 )]
 #[code_catalog(module = "task_codes", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -1401,7 +1397,6 @@ mod tests {
             "TASK_BLOCKED_LOOP",
             "NEIGHBOUR_BLOCKED_LOOP",
             "NO_TYPE_AVAILABLE",
-            "EVENT_LOOP_LIMIT",
             "ASYNC_CONTEXT",
             "WAIT_INSIDE_TASK",
         ] {

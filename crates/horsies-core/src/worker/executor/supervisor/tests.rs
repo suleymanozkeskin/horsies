@@ -56,6 +56,19 @@ const POOL_SERVING: PoolAtFailure = PoolAtFailure {
 // Exits
 // ---------------------------------------------------------------------------
 
+/// A Python child closes its task loop after the stop frame within 7 s:
+/// `LOOP_CLOSE_TIMEOUT_S` (5 s), then `ASYNCGEN_SHUTDOWN_MIN_TIMEOUT_S` and
+/// `EXECUTOR_SHUTDOWN_MIN_TIMEOUT_S` (1 s each) of
+/// `python/horsies/core/worker/task_loop.py`. The Python test
+/// `tests/unit/test_task_loop.py::TestClose::test_close_steps_end_before_the_parent_kills_the_child`
+/// pins that sum. The parent waits longer for the exit, so it does not kill
+/// a child that is still closing.
+#[test]
+fn the_stop_wait_outlasts_the_close_of_a_python_child() {
+    let python_child_close = Duration::from_secs(7);
+    assert!(python_child_close < CHILD_STOP_TIMEOUT);
+}
+
 #[test]
 fn exit_codes_are_read_in_the_protocol() {
     assert_eq!(ReapedExit::ExitedWith(0).meaning(), ExitMeaning::Clean);
@@ -81,6 +94,52 @@ fn exit_codes_are_read_in_the_protocol() {
     );
     assert!(ReapedExit::KilledBySignal(libc::SIGKILL).is_sigkill());
     assert!(!ReapedExit::ExitedWith(libc::SIGKILL).is_sigkill());
+    assert_eq!(
+        ReapedExit::ExitedWith(80).meaning(),
+        ExitMeaning::Protocol(ChildExitCode::CoreStopped)
+    );
+}
+
+/// A child that held no task and ended with the core-stopped code is
+/// replaced with an error log; every other end keeps its path.
+#[test]
+fn an_end_without_a_task_names_a_stopped_core_only() {
+    assert_eq!(
+        EndWithoutTask::of(exited(ChildExitCode::CoreStopped.code())),
+        EndWithoutTask::CoreStopped
+    );
+    let others = [
+        exited(0),
+        exited(1),
+        exited(ChildExitCode::ParentGone.code()),
+        exited(ChildExitCode::BootFailed.code()),
+        exited(ChildExitCode::ChildHookFailed.code()),
+        killed(),
+        ChildExit::Reaped(ReapedExit::KilledBySignal(libc::SIGSEGV)),
+        ChildExit::ReapedElsewhere,
+        ChildExit::ExitUnknown,
+    ];
+    for exit in others {
+        assert_eq!(EndWithoutTask::of(exit), EndWithoutTask::Other, "{exit}");
+    }
+}
+
+/// A child that dies with the core-stopped code before its ready frame is a
+/// boot failure lost before ready, as the other codes of a child.
+#[test]
+fn a_core_stopped_exit_before_ready_is_lost_before_ready() {
+    let exit = exited(ChildExitCode::CoreStopped.code());
+    let cause = cause_of(boot_end_of(BootReply::Lost(lost(
+        LossCause::ChildDied,
+        exit,
+    ))));
+    assert_eq!(
+        cause,
+        BootFailureCause::LostBeforeReady {
+            loss: LossCause::ChildDied,
+            exit,
+        }
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -143,8 +202,7 @@ fn a_child_without_a_frame_is_read_by_its_exit() {
     );
 }
 
-/// Python `BootFailure.describe` with `describe_failure_cause`
-/// (`python/horsies/core/worker/slots.py:777-808`): a child that ended before
+/// The text of a boot failure: a child that ended before
 /// its ready frame names the cause without its loss, and the detail names
 /// the loss and the exit once. The line of a failed attempt and the error
 /// of a pool whose attempts ran out carry this text.
@@ -165,8 +223,7 @@ fn a_child_lost_before_ready_names_its_loss_once() {
     );
 }
 
-/// Python `boot_failure_of` (`python/horsies/core/worker/slots.py:2356-2362`):
-/// a forked child that did not reach the worker is a spawn failure, and the
+/// A forked child that did not reach the worker is a spawn failure, and the
 /// detail names the reparent failure before the loss and the exit. The line
 /// of a failed attempt and the error of a pool whose attempts ran out carry
 /// this text.
@@ -547,6 +604,31 @@ async fn a_kill_after_the_reap_refuses_a_pid_that_a_live_child_holds() {
         KillOutcome::Sent
     );
     assert_eq!(wait_for_exit(&mut live.exit, TEST_WAIT).await, killed());
+    stop(spawner);
+}
+
+/// Python `TestKillBeforeSession::test_a_reaped_child_is_left_alone`: the
+/// kill of a reaped child signals its session only, never the bare pid. A
+/// process outside the spawner that holds the pid and leads no session
+/// keeps running.
+#[tokio::test]
+async fn a_kill_after_the_reap_leaves_a_process_that_holds_the_pid_alone() {
+    let spawner = Spawner::start().unwrap();
+    let mut holder = std::process::Command::new("/bin/sh")
+        .args(["-c", "exec sleep 60"])
+        .spawn()
+        .unwrap();
+    let reaped = ChildId::reaped_child_with_pid(ProcessId::new(holder.id()).unwrap());
+
+    assert_eq!(
+        spawner.handle().kill_session(reaped).await,
+        KillOutcome::SessionGone
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(holder.try_wait().unwrap().is_none());
+    holder.kill().unwrap();
+    let _status = holder.wait().unwrap();
     stop(spawner);
 }
 

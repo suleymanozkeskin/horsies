@@ -1,22 +1,20 @@
-"""The pure parts of the whole-run pairs: the catalog, the compared part of a
-snapshot and the report compare. No database."""
+"""The whole-run compare rules that parity uses: the catalog, the compared
+part of a snapshot and the judgement of two snapshots. No database."""
 
 from __future__ import annotations
 
-from uuid import uuid4
+from datetime import UTC, datetime, timedelta, timezone
+from typing import Final
 
 import pytest
-from pydantic import SecretStr
 
-from horsies.core.models.broker import PostgresConfig
-from tests.dualrun.apps import whole_run_app
 from tests.dualrun.catalog import (
     ATTEMPT_ARCHIVE,
     BASELINE_CATALOG,
     KILL_REPORT_MEASURES,
     RESULT_ENVELOPE,
 )
-from tests.dualrun.databases import DualRunDatabase
+from tests.dualrun.compare import MissingRow, SnapshotDiff
 from tests.dualrun.normalize import AmbiguousGroup, NormalizedSnapshot, NormalizedTable
 from tests.dualrun.rules import (
     EachItem,
@@ -28,6 +26,7 @@ from tests.dualrun.rules import (
     TimeOrderOnly,
     catalog_defects,
 )
+from tests.dualrun.values import RunWindow
 from tests.dualrun.worker_run import (
     ARCHIVE_PROCESS_ID_POSITIONS,
     ARCHIVE_REPORT_POSITIONS,
@@ -37,21 +36,13 @@ from tests.dualrun.worker_run import (
     WHOLE_RUN_ATTEMPT_ARCHIVE,
     WHOLE_RUN_CATALOG,
     WHOLE_RUN_RESULT_ENVELOPE,
-    Absent,
-    AttemptReport,
-    Live,
-    NodeKey,
-    NodeReport,
-    NoTaskRow,
-    ReportEntry,
-    ReportKey,
-    TaskReport,
-    WorkflowKey,
-    WorkflowReport,
-    Terminal,
-    compare_reports,
+    ClockBoundaryStraddle,
+    DualRunMismatch,
+    PairEqual,
     compared_part,
-    worker_environment,
+    crosses_hour,
+    in_one_hour,
+    judge_snapshots,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -141,52 +132,67 @@ def test_the_compared_part_leaves_out_the_time_driven_tables() -> None:
     assert [group.table for group in compared.ambiguities] == ['horsies_tasks']
 
 
-def test_a_report_difference_names_the_task_and_both_sides() -> None:
-    same, other = uuid4(), uuid4()
-    completed = TaskReport(
-        state=Terminal(status='COMPLETED', error_code=None, retry_count=0),
-        attempts=(AttemptReport(attempt=1, outcome='COMPLETED', error_code=None),),
+ONE_HOUR: Final = RunWindow(
+    start=datetime(2026, 11, 18, 12, 5, tzinfo=UTC),
+    end=datetime(2026, 11, 18, 12, 9, tzinfo=UTC),
+)
+ACROSS_HOUR: Final = RunWindow(
+    start=datetime(2026, 11, 18, 12, 59, 48, tzinfo=UTC),
+    end=datetime(2026, 11, 18, 13, 1, 2, tzinfo=UTC),
+)
+"""The run span of the reference side of a pair across 13:00Z."""
+NEXT_HOUR: Final = RunWindow(
+    start=datetime(2026, 11, 18, 13, 1, 4, tzinfo=UTC),
+    end=datetime(2026, 11, 18, 13, 2, 3, tzinfo=UTC),
+)
+"""A span in the hour after ``ONE_HOUR``; neither crosses an hour."""
+LEAF_ONLY_IN_THE_REFERENCE: Final = SnapshotDiff(
+    entries=(MissingRow(table='horsies_task_history_leaf_catalog', identity=(), cells=()),),
+)
+
+
+def test_a_span_crosses_an_hour_when_its_end_is_in_a_later_utc_hour() -> None:
+    india = timezone(timedelta(hours=5, minutes=30))
+    local_hour_only = RunWindow(
+        start=datetime(2026, 11, 18, 12, 50, tzinfo=india),
+        end=datetime(2026, 11, 18, 13, 5, tzinfo=india),
     )
-    retried = TaskReport(state=Live(status='PENDING', retry_count=1), attempts=())
-    reference: dict[ReportKey, ReportEntry] = {same: completed, other: completed}
-    candidate: dict[ReportKey, ReportEntry] = {same: completed, other: retried}
-    differences = compare_reports(reference, candidate)
-    assert [difference.key for difference in differences] == [other]
-    assert differences[0].reference == completed
-    assert differences[0].candidate == retried
-    assert compare_reports(reference, dict(reference)) == ()
-    assert TaskReport(state=Absent(), attempts=()) != completed
+    assert not crosses_hour(ONE_HOUR)
+    assert crosses_hour(ACROSS_HOUR)
+    assert not crosses_hour(local_hour_only), '07:20 to 07:35 UTC'
 
 
-def test_a_report_covers_nodes_and_workflows_by_their_fixed_workflow_id() -> None:
-    workflow_id = uuid4()
-    reference: dict[ReportKey, ReportEntry] = {
-        NodeKey(workflow_id=workflow_id, task_index=1): NodeReport(
-            status='PENDING', task=NoTaskRow()
-        ),
-        WorkflowKey(workflow_id=workflow_id): WorkflowReport(status='PAUSED'),
-    }
-    candidate: dict[ReportKey, ReportEntry] = {
-        NodeKey(workflow_id=workflow_id, task_index=1): NodeReport(
-            status='PENDING', task=NoTaskRow()
-        ),
-        WorkflowKey(workflow_id=workflow_id): WorkflowReport(status='RUNNING'),
-    }
-    differences = compare_reports(reference, candidate)
-    assert [difference.key for difference in differences] == [
-        WorkflowKey(workflow_id=workflow_id)
-    ]
+def test_equal_snapshots_are_equal_in_any_hour() -> None:
+    equal = SnapshotDiff(entries=())
+    assert judge_snapshots(equal, ONE_HOUR, ONE_HOUR) == PairEqual()
+    assert judge_snapshots(equal, ACROSS_HOUR, NEXT_HOUR) == PairEqual()
 
 
-def test_the_worker_gets_the_libpq_url_that_the_config_accepts() -> None:
-    database = DualRunDatabase(
-        name='dualrun_' + uuid4().hex,
-        url='postgresql://postgres@127.0.0.1:55432/dualrun_x',
+def test_a_difference_in_one_hour_is_a_mismatch() -> None:
+    assert in_one_hour(ONE_HOUR, ONE_HOUR)
+    judgement = judge_snapshots(LEAF_ONLY_IN_THE_REFERENCE, ONE_HOUR, ONE_HOUR)
+    assert judgement == DualRunMismatch(diff=LEAF_ONLY_IN_THE_REFERENCE)
+
+
+def test_a_difference_across_an_hour_is_a_straddle_with_every_entry() -> None:
+    """#2017: the reference side ran across 13:00Z, so its worker added the
+    next hourly heartbeat leaf, and the candidate side ran after 13:00Z."""
+    assert not in_one_hour(ACROSS_HOUR, NEXT_HOUR)
+    judgement = judge_snapshots(LEAF_ONLY_IN_THE_REFERENCE, ACROSS_HOUR, NEXT_HOUR)
+    assert judgement == ClockBoundaryStraddle(
+        diff=LEAF_ONLY_IN_THE_REFERENCE,
+        reference_span=ACROSS_HOUR,
+        candidate_span=NEXT_HOUR,
     )
-    env = worker_environment(database, marker_dir='/markers')
-    assert env[whole_run_app.DATABASE_URL_ENV] == database.url
-    assert env[whole_run_app.MARKER_DIR_ENV] == '/markers'
-    config = PostgresConfig(
-        database_url=SecretStr(env[whole_run_app.DATABASE_URL_ENV]),
+
+
+def test_a_difference_of_two_sides_in_two_hours_is_a_straddle() -> None:
+    assert not crosses_hour(ONE_HOUR)
+    assert not crosses_hour(NEXT_HOUR)
+    assert not in_one_hour(ONE_HOUR, NEXT_HOUR)
+    judgement = judge_snapshots(LEAF_ONLY_IN_THE_REFERENCE, ONE_HOUR, NEXT_HOUR)
+    assert judgement == ClockBoundaryStraddle(
+        diff=LEAF_ONLY_IN_THE_REFERENCE,
+        reference_span=ONE_HOUR,
+        candidate_span=NEXT_HOUR,
     )
-    assert config.database_url.get_secret_value() == database.url

@@ -110,7 +110,7 @@ The pool size that the seats give is a default. The connections that a child use
 
 Each child kind has its own pool setting: `IsolatedChildren.pool`, `SharedAsyncChildren.pool` and `SharedThreadChildren.pool`. Each added connection counts once per child of that kind in the connection budget of the worker.
 
-Task code that sends through the app opens the app's broker on the runner loop of the broker, with `SharedThreadChildren.task_send_pool` connections (default 2). The seat threads share it. See [The Task-Send Pool](/horsies/workers/worker-profiles/#the-task-send-pool).
+Task code that sends through the app uses the app's broker, whose core pool holds `SharedThreadChildren.task_send_pool` connections (default 2). The seat threads share it. See [The Task-Send Pool](/horsies/workers/worker-profiles/#the-task-send-pool).
 
 ## Limits
 

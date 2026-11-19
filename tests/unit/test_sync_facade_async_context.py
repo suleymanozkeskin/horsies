@@ -1,25 +1,28 @@
 # pyright: reportPrivateUsage=false
 """Sync facades return ASYNC_CONTEXT on a thread that runs an event loop.
 
-A sync facade blocks its calling thread until the broker's sync runner
-completes the call. On a thread that runs an event loop, that wait stalls
-the loop, so each facade returns the ASYNC_CONTEXT member of its own catalog
-first: the runner thread does not start and no resource set is built.
+A sync facade blocks its calling thread until the core's blocking form
+ends. On a thread that runs an event loop, that wait stalls the loop, so
+each facade returns the ASYNC_CONTEXT member of its own catalog first: no
+core call runs.
 
-The broker is real and its URL is unreachable. The guard returns before any
-I/O, so no database is needed. With a guard removed, the call goes to the
-runner and fails on the connection, so the code and runner-state assertions
-fail.
+The broker is real and its URL is unreachable; a mock that records the calls
+wraps its core handle. The guard returns before any I/O, so no database is
+needed. With a guard removed, the call goes to the core and fails on the
+connection, so the code and nothing-ran assertions fail.
 """
 
 from __future__ import annotations
 
+import uuid
+
 import asyncio
-import threading
 from collections.abc import Callable, Generator
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from uuid import UUID
 
 import pytest
 from pydantic import SecretStr
@@ -27,7 +30,12 @@ from pydantic import SecretStr
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.result_types import BrokerAsyncContext, BrokerErrorCode, BrokerLoopRunnerFailed
+from horsies._core import CoreCallTimedOut
+from horsies.core.brokers.result_types import (
+    BrokerAsyncContext,
+    BrokerErrorCode,
+    BrokerOperationFailed,
+)
 from horsies.core.errors import ErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
@@ -43,16 +51,11 @@ from horsies.core.models.workflow import NodeKey
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.models.workflow.handle_types import (
     HandleAsyncContext,
+    HandleDbOperationFailed,
     HandleErrorCode,
-    HandleLoopRunnerFailed,
 )
 from horsies.core.task_decorator import TaskHandle, create_task_wrapper
 from horsies.core.types.result import Err, Ok, is_err, is_ok
-from horsies.core.utils.loop_runner import (
-    LoopRunner,
-    LoopRunnerError,
-    in_running_event_loop,
-)
 from horsies.core.workflows.lifecycle import (
     pause_workflow_sync,
     resume_workflow_sync,
@@ -62,9 +65,7 @@ from horsies.core.workflows.start_types import (
     WorkflowStartAsyncContext,
     WorkflowStartEnqueueFailed,
     WorkflowStartErrorCode,
-    WorkflowStartLoopRunnerFailed,
 )
-from tests.dualrun.reference.web_routes.actions import _handle_failed
 
 pytestmark = [pytest.mark.unit]
 
@@ -75,12 +76,14 @@ TASK_ID = '0b6f2f0e-6c1d-7f7a-9a52-3d2b1c0e9f82'
 
 @pytest.fixture
 def app() -> Generator[Horsies, None, None]:
-    """An app whose broker cannot connect. Stops the runner if a call started it."""
+    """An app whose broker cannot connect, and whose core handle records each
+    call it forwards."""
     app = Horsies(AppConfig(broker=PostgresConfig(
         database_url=SecretStr(UNREACHABLE_URL),
     )))
+    broker = app.get_broker()
+    broker._core_handle = MagicMock(wraps=broker._core_handle)
     yield app
-    app.get_broker()._loop_runner.stop()
 
 
 def _inside_loop[T](call: Callable[[], T]) -> T:
@@ -93,10 +96,10 @@ def _inside_loop[T](call: Callable[[], T]) -> T:
 
 
 def _assert_nothing_ran(broker: PostgresBroker) -> None:
-    """The sync runner never started and no resource set was built."""
-    assert broker._loop_runner._started is False
-    assert broker._loop_runner._thread is None
-    assert broker._loop_sets == ()
+    """No core call ran."""
+    core_handle = broker._core_handle
+    assert isinstance(core_handle, MagicMock), 'the app fixture wraps the core handle'
+    assert core_handle.mock_calls == []
 
 
 # =============================================================================
@@ -137,21 +140,16 @@ def test_broker_facade_returns_async_context(app: Horsies, name: str) -> None:
     _assert_nothing_ran(broker)
 
 
-def test_broker_close_returns_async_context_and_keeps_the_runner(
-    app: Horsies,
-) -> None:
-    """The guard runs before the try/finally, so the runner is not stopped."""
+def test_broker_close_returns_async_context(app: Horsies) -> None:
+    """The guard runs before the core close, so nothing closes."""
     broker = app.get_broker()
-    broker._loop_runner.start()
 
     result = _inside_loop(broker.close)
 
     assert is_err(result)
     assert result.err_value.code is BrokerErrorCode.ASYNC_CONTEXT
     assert 'close_async' in result.err_value.message
-    assert broker._loop_runner._started is True
-    assert broker._loop_runner._closed is False
-    assert broker._loop_sets == ()
+    _assert_nothing_ran(broker)
 
 
 APP_CALLS: dict[str, Callable[[Horsies], Any]] = {
@@ -280,7 +278,7 @@ def test_workflow_handle_wrap_method_returns_async_context(
 ) -> None:
     broker = app.get_broker()
     handle: WorkflowHandle[Any] = WorkflowHandle(
-        workflow_id=WORKFLOW_ID, broker=broker,
+        workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker,
     )
 
     result = _inside_loop(getattr(handle, name))
@@ -305,7 +303,7 @@ def test_workflow_handle_fold_method_returns_async_context(
 ) -> None:
     broker = app.get_broker()
     handle: WorkflowHandle[Any] = WorkflowHandle(
-        workflow_id=WORKFLOW_ID, broker=broker,
+        workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker,
     )
 
     result = _inside_loop(lambda: FOLD_CALLS[name](handle))
@@ -331,13 +329,6 @@ def test_lifecycle_sync_wrapper_returns_async_context(
     assert result.err_value.retryable is False
     assert result.err_value.workflow_id == WORKFLOW_ID
     _assert_nothing_ran(broker)
-
-
-def test_web_handle_failure_mapping_asserts_on_async_context() -> None:
-    error = HandleAsyncContext(message='refused', workflow_id=WORKFLOW_ID)
-
-    with pytest.raises(AssertionError, match=WORKFLOW_ID):
-        _handle_failed(error)
 
 
 # =============================================================================
@@ -439,196 +430,204 @@ def test_live_check_inside_loop_reports_its_own_code(app: Horsies) -> None:
 
 
 # =============================================================================
-# close_async stops the sync runner off the caller's loop
-# =============================================================================
-
-
-def test_close_async_stops_the_runner_on_another_thread(app: Horsies) -> None:
-    broker = app.get_broker()
-    broker._loop_runner.start()
-    stop_threads: list[tuple[str, bool]] = []
-    original_stop = LoopRunner.stop
-
-    def recording_stop(runner: LoopRunner) -> None:
-        stop_threads.append(
-            (threading.current_thread().name, in_running_event_loop()),
-        )
-        original_stop(runner)
-
-    async def close_on_loop() -> tuple[Any, str]:
-        result = await broker.close_async()
-        return result, threading.current_thread().name
-
-    with patch.object(LoopRunner, 'stop', recording_stop):
-        result, loop_thread = asyncio.run(close_on_loop())
-
-    assert is_ok(result)
-    assert len(stop_threads) == 1
-    stop_thread, stop_inside_loop = stop_threads[0]
-    assert stop_thread != loop_thread
-    assert stop_inside_loop is False
-    assert broker._loop_runner._started is False
-    assert broker._loop_runner._thread is None
-
-
-# =============================================================================
-# run_sync: a call from a thread that runs an event loop is a defect
-# =============================================================================
-
-
-async def _answer() -> int:
-    return 42
-
-
-def test_run_sync_inside_running_loop_fails_an_assertion(app: Horsies) -> None:
-    broker = app.get_broker()
-
-    with pytest.raises(AssertionError, match='run_sync\\(_answer\\)'):
-        _inside_loop(lambda: broker.run_sync(_answer))
-
-    _assert_nothing_ran(broker)
-
-
-def test_run_sync_with_a_stopped_loop_on_the_thread_runs(app: Horsies) -> None:
-    """A loop that is set on the thread but does not run does not trip it."""
-    broker = app.get_broker()
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(asyncio.sleep(0))
-
-        assert broker.run_sync(_answer) == 42
-    finally:
-        asyncio.set_event_loop(None)
-        loop.close()
-
-
-# =============================================================================
-# Every run_sync call site: a LoopRunnerError is the site's catalog error;
-# every other exception propagates unchanged
+# Every blocking call site: a CoreError of the blocking form is the site's
+# catalog error; every other exception propagates unchanged
 # =============================================================================
 
 
 def _workflow_handle(broker: PostgresBroker) -> WorkflowHandle[Any]:
-    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
+    return WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker)
 
 
-RUN_SYNC_SITES: dict[str, Callable[[Horsies, PostgresBroker], Any]] = {
-    'broker.close': lambda app, broker: broker.close(),
-    'app.get_result': lambda app, broker: app.get_result(TASK_ID, 0),
-    'app.get_task_info': lambda app, broker: app.get_task_info(TASK_ID),
-    'app.ping_database': lambda app, broker: app.ping_database(),
-    'app.ping_workers': lambda app, broker: app.ping_workers(),
-    'app.list_worker_states': lambda app, broker: app.list_worker_states(),
-    'app.get_worker_state': lambda app, broker: app.get_worker_state('worker-1'),
-    'app.get_worker_state_history': lambda app, broker: app.get_worker_state_history('worker-1'),
-    'app.get_class_coverage': lambda app, broker: app.get_class_coverage(),
-    'app.get_class_report': lambda app, broker: app.get_class_report(),
-    'WorkflowHandle.status': lambda app, broker: _workflow_handle(broker).status(),
-    'WorkflowHandle.get': lambda app, broker: _workflow_handle(broker).get(timeout_ms=0),
-    'start_workflow': lambda app, broker: _spec(app).start(WORKFLOW_ID),
-    'pause_workflow_sync': lambda app, broker: pause_workflow_sync(broker, WORKFLOW_ID),
-    'resume_workflow_sync': lambda app, broker: resume_workflow_sync(broker, WORKFLOW_ID),
+NODE_KEY: NodeKey[Any] = NodeKey('node-1')
+
+
+@dataclass(frozen=True)
+class BlockingSite:
+    """A sync facade that calls a blocking form of the core handle."""
+
+    call: Callable[[Horsies, PostgresBroker], Any]
+    blocking_form: str
+    """The method of ``CoreHandle`` that the facade calls."""
+    core_error_code: object
+    """The facade's failure code for a ``CoreError`` of the blocking form."""
+
+
+BLOCKING_SITES: dict[str, BlockingSite] = {
+    'broker.close': BlockingSite(
+        lambda app, broker: broker.close(), 'close', BrokerErrorCode.CLOSE_FAILED,
+    ),
+    'app.get_result': BlockingSite(
+        lambda app, broker: app.get_result(UUID(TASK_ID), 0),
+        'raw_result_record',
+        BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+    ),
+    'app.get_task_info': BlockingSite(
+        lambda app, broker: app.get_task_info(UUID(TASK_ID)),
+        'task_info',
+        BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+    ),
+    'app.ping_database': BlockingSite(
+        lambda app, broker: app.ping_database(),
+        'ping_database',
+        BrokerErrorCode.DB_PING_FAILED,
+    ),
+    'app.ping_workers': BlockingSite(
+        lambda app, broker: app.ping_workers(),
+        'ping_workers',
+        BrokerErrorCode.WORKER_PING_FAILED,
+    ),
+    'app.list_worker_states': BlockingSite(
+        lambda app, broker: app.list_worker_states(),
+        'worker_states',
+        BrokerErrorCode.MONITORING_QUERY_FAILED,
+    ),
+    'app.get_worker_state': BlockingSite(
+        lambda app, broker: app.get_worker_state('worker-1'),
+        'worker_state',
+        BrokerErrorCode.MONITORING_QUERY_FAILED,
+    ),
+    'app.get_worker_state_history': BlockingSite(
+        lambda app, broker: app.get_worker_state_history('worker-1'),
+        'worker_state_history',
+        BrokerErrorCode.MONITORING_QUERY_FAILED,
+    ),
+    'app.get_class_coverage': BlockingSite(
+        lambda app, broker: app.get_class_coverage(),
+        'class_coverage',
+        BrokerErrorCode.MONITORING_QUERY_FAILED,
+    ),
+    'app.get_class_report': BlockingSite(
+        lambda app, broker: app.get_class_report(),
+        'class_report',
+        BrokerErrorCode.MONITORING_QUERY_FAILED,
+    ),
+    'WorkflowHandle.status': BlockingSite(
+        lambda app, broker: _workflow_handle(broker).status(),
+        'workflow_status',
+        HandleErrorCode.DB_OPERATION_FAILED,
+    ),
+    'WorkflowHandle.results': BlockingSite(
+        lambda app, broker: _workflow_handle(broker).results(),
+        'workflow_node_results',
+        HandleErrorCode.DB_OPERATION_FAILED,
+    ),
+    'WorkflowHandle.tasks': BlockingSite(
+        lambda app, broker: _workflow_handle(broker).tasks(),
+        'workflow_nodes',
+        HandleErrorCode.DB_OPERATION_FAILED,
+    ),
+    'WorkflowHandle.cancel': BlockingSite(
+        lambda app, broker: _workflow_handle(broker).cancel(),
+        'cancel_workflow',
+        HandleErrorCode.DB_OPERATION_FAILED,
+    ),
+    'WorkflowHandle.pause': BlockingSite(
+        lambda app, broker: _workflow_handle(broker).pause(),
+        'pause_workflow',
+        HandleErrorCode.DB_OPERATION_FAILED,
+    ),
+    'WorkflowHandle.resume': BlockingSite(
+        lambda app, broker: _workflow_handle(broker).resume(),
+        'resume_workflow',
+        HandleErrorCode.DB_OPERATION_FAILED,
+    ),
+    'WorkflowHandle.get': BlockingSite(
+        lambda app, broker: _workflow_handle(broker).get(timeout_ms=0),
+        'wait_workflow_result',
+        OperationalErrorCode.BROKER_ERROR,
+    ),
+    'WorkflowHandle.result_for': BlockingSite(
+        lambda app, broker: _workflow_handle(broker).result_for(NODE_KEY),
+        'workflow_node_result',
+        OperationalErrorCode.BROKER_ERROR,
+    ),
+    'start_workflow': BlockingSite(
+        lambda app, broker: _spec(app).start(WORKFLOW_ID),
+        'start_workflow',
+        WorkflowStartErrorCode.ENQUEUE_FAILED,
+    ),
+    'pause_workflow_sync': BlockingSite(
+        lambda app, broker: pause_workflow_sync(broker, uuid.UUID(WORKFLOW_ID)),
+        'pause_workflow',
+        HandleErrorCode.DB_OPERATION_FAILED,
+    ),
+    'resume_workflow_sync': BlockingSite(
+        lambda app, broker: resume_workflow_sync(broker, uuid.UUID(WORKFLOW_ID)),
+        'resume_workflow',
+        HandleErrorCode.DB_OPERATION_FAILED,
+    ),
 }
 
 
-@pytest.mark.parametrize('site', list(RUN_SYNC_SITES))
-def test_run_sync_call_site_reraises_an_assertion(app: Horsies, site: str) -> None:
-    """A defect in the bridge propagates; it is not folded into an Err."""
-    broker = app.get_broker()
-
-    with (
-        patch.object(
-            broker, 'run_sync', side_effect=AssertionError('stub defect'),
-        ) as run_sync,
-        pytest.raises(AssertionError, match='stub defect'),
-    ):
-        RUN_SYNC_SITES[site](app, broker)
-
-    run_sync.assert_called_once()
+def _core_handle_raising(site: BlockingSite, raised: BaseException) -> MagicMock:
+    """A core handle whose blocking form of ``site`` raises ``raised``."""
+    handle = MagicMock()
+    setattr(handle, site.blocking_form, MagicMock(side_effect=raised))
+    return handle
 
 
-RUNNER_FAILURE_CODES: dict[str, object] = {
-    **{
-        site: BrokerErrorCode.LOOP_RUNNER_FAILED
-        for site in RUN_SYNC_SITES
-        if site.startswith(('broker.', 'app.'))
-    },
-    'WorkflowHandle.status': HandleErrorCode.LOOP_RUNNER_FAILED,
-    'WorkflowHandle.get': OperationalErrorCode.BROKER_ERROR,
-    'start_workflow': WorkflowStartErrorCode.LOOP_RUNNER_FAILED,
-    'pause_workflow_sync': HandleErrorCode.LOOP_RUNNER_FAILED,
-    'resume_workflow_sync': HandleErrorCode.LOOP_RUNNER_FAILED,
-}
-
-
-def _failure_code(result: object) -> object:
-    """The code of a failed facade result: an ``Err`` or a failed ``TaskResult``."""
+def _core_error_failure(result: object) -> tuple[object, BaseException | None]:
+    """The code of a failed facade result and its exception: an ``Err``, or a
+    failed ``TaskResult``, which holds no exception object."""
     match result:
         case TaskResult(err=TaskError(error_code=code)):
-            return code
+            return code, None
         case Err(err_value=(
-            BrokerLoopRunnerFailed(code=code)
-            | HandleLoopRunnerFailed(code=code)
-            | WorkflowStartLoopRunnerFailed(code=code)
+            BrokerOperationFailed(code=code, exception=exception)
+            | HandleDbOperationFailed(code=code, exception=exception)
+            | WorkflowStartEnqueueFailed(code=code, exception=exception)
         )):
-            return code
+            return code, exception
         case _:
             raise AssertionError(f'expected a failure, got {result!r}')
 
 
-def _runner_error_fields(result: object) -> tuple[bool, BaseException | None] | None:
-    """``(retryable, exception)`` of an ``Err`` result; ``None`` for a ``TaskResult``."""
-    match result:
-        case Err(err_value=(
-            BrokerLoopRunnerFailed(retryable=retryable, exception=exception)
-            | HandleLoopRunnerFailed(retryable=retryable, exception=exception)
-            | WorkflowStartLoopRunnerFailed(retryable=retryable, exception=exception)
-        )):
-            return (retryable, exception)
-        case _:
-            return None
-
-
-def test_runner_failure_codes_cover_every_site() -> None:
-    assert set(RUNNER_FAILURE_CODES) == set(RUN_SYNC_SITES)
-
-
-@pytest.mark.parametrize('site', list(RUN_SYNC_SITES))
-def test_run_sync_call_site_propagates_a_defect(app: Horsies, site: str) -> None:
-    """An exception that is not a LoopRunnerError propagates unchanged."""
+@pytest.mark.parametrize('site', list(BLOCKING_SITES))
+def test_blocking_call_site_propagates_a_defect(app: Horsies, site: str) -> None:
+    """An exception that is not a CoreError propagates unchanged; the
+    awaitable form is not called."""
     broker = app.get_broker()
+    blocking_site = BLOCKING_SITES[site]
     defect = TypeError('stub defect')
+    handle = _core_handle_raising(blocking_site, defect)
 
     with (
-        patch.object(broker, 'run_sync', side_effect=defect) as run_sync,
+        patch.object(broker, '_core_handle', handle),
         pytest.raises(TypeError) as exc_info,
     ):
-        RUN_SYNC_SITES[site](app, broker)
+        blocking_site.call(app, broker)
 
     assert exc_info.value is defect
-    run_sync.assert_called_once()
+    getattr(handle, blocking_site.blocking_form).assert_called_once()
+    getattr(handle, f'{blocking_site.blocking_form}_async').assert_not_called()
 
 
-@pytest.mark.parametrize('site', list(RUN_SYNC_SITES))
-def test_run_sync_call_site_returns_the_loop_runner_code(
+@pytest.mark.parametrize('site', list(BLOCKING_SITES))
+def test_blocking_call_site_returns_its_code_for_a_core_error(
     app: Horsies, site: str,
 ) -> None:
-    """A LoopRunnerError is the site's loop-runner error; nothing else is raised."""
+    """A CoreError of the blocking form (here: the call reached its bound) is
+    the site's own failure, with the error as its exception (an ``Err``) or
+    named in its message (a ``TaskResult``)."""
     broker = app.get_broker()
-    runner_error = LoopRunnerError('runner stopped')
+    blocking_site = BLOCKING_SITES[site]
+    timed_out = CoreCallTimedOut(f'CoreHandle.{blocking_site.blocking_form}', 1800, 'no_change')
+    handle = _core_handle_raising(blocking_site, timed_out)
 
-    with patch.object(broker, 'run_sync', side_effect=runner_error) as run_sync:
-        result = RUN_SYNC_SITES[site](app, broker)
+    with patch.object(broker, '_core_handle', handle):
+        result = blocking_site.call(app, broker)
 
-    assert _failure_code(result) is RUNNER_FAILURE_CODES[site]
-    match _runner_error_fields(result):
+    code, exception = _core_error_failure(result)
+    assert code is blocking_site.core_error_code
+    match exception:
         case None:
-            assert site == 'WorkflowHandle.get'
-        case (retryable, exception):
-            assert retryable is False
-            assert exception is runner_error
-    run_sync.assert_called_once()
+            failed = cast('TaskResult[Any, TaskError]', result).unwrap_err()
+            assert 'CoreCallTimedOut' in (failed.message or '')
+        case raised:
+            assert raised is timed_out
+    getattr(handle, blocking_site.blocking_form).assert_called_once()
+    getattr(handle, f'{blocking_site.blocking_form}_async').assert_not_called()
 
 
 # =============================================================================
@@ -691,11 +690,11 @@ ASYNC_TWINS: dict[str, tuple[Callable[[Horsies], Any], str]] = {
     ),
     'WorkflowHandle.result_for': (_workflow_result_for, 'handle.result_for_async('),
     'pause_workflow_sync': (
-        lambda app: pause_workflow_sync(app.get_broker(), WORKFLOW_ID),
+        lambda app: pause_workflow_sync(app.get_broker(), uuid.UUID(WORKFLOW_ID)),
         'pause_workflow(broker, workflow_id)',
     ),
     'resume_workflow_sync': (
-        lambda app: resume_workflow_sync(app.get_broker(), WORKFLOW_ID),
+        lambda app: resume_workflow_sync(app.get_broker(), uuid.UUID(WORKFLOW_ID)),
         'resume_workflow(broker, workflow_id)',
     ),
     'WorkflowSpec.start': (lambda app: _spec(app).start(WORKFLOW_ID), 'spec.start_async('),

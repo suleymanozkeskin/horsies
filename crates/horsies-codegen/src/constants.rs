@@ -1,14 +1,24 @@
 //! Render integer constants of horsies-core as modules of `_catalog`
-//! (`release_bounds.py`, `monitoring_bounds.py`). Each constant is a
-//! `Final` integer whose value is the core's constant, so a Python bound
-//! cannot differ from the bound that the core enforces: `check` fails when a
-//! core value changes and the module is not written again.
+//! (`monitoring_bounds.py`, `broker_bounds.py`, `exit_codes.py`,
+//! `child_bounds.py`). Each
+//! constant is a `Final` integer whose value is the core's constant, so a
+//! Python bound cannot differ from the bound that the core enforces: `check`
+//! fails when a core value changes and the module is not written again.
 
-use horsies_core::monitoring::{
-    MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT, MAX_TASK_PAGE_REACH, MAX_WORKFLOW_RUNS_LIMIT,
-    MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
+use horsies_core::frame_protocol::{
+    BAD_ARGUMENTS_EXIT_CODE, BAD_PARENT_FRAME_EXIT_CODE, BOOT_FAILED_EXIT_CODE,
+    CHILD_HOOK_FAILED_EXIT_CODE, CORE_STOPPED_EXIT_CODE, PARENT_GONE_EXIT_CODE,
+    PROTOCOL_MISMATCH_EXIT_CODE, REPARENT_FAILED_EXIT_CODE,
+    STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
 };
-use horsies_core::MAX_RELEASED_CLAIMS;
+use horsies_core::monitoring::{
+    LIST_ROW_BOUND, MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT, MAX_TASK_PAGE_REACH,
+    MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
+};
+use horsies_core::{
+    CANCELLED_WRITE_END, LIVENESS_LOCK_LOST_EXIT_CODE, RUNNER_HEARTBEAT_LOST_EXIT_CODE,
+    TASK_LIST_BOUND,
+};
 
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
 
@@ -34,21 +44,7 @@ pub struct ConstantModule {
     pub constants: &'static [CoreConstant],
 }
 
-const RELEASE_CONSTANTS: [CoreConstant; 1] = [CoreConstant {
-    name: "MAX_RELEASED_CLAIMS",
-    doc:
-        "The most claims of one release request (`horsies_release_claims`); the core refuses more.",
-    value: MAX_RELEASED_CLAIMS as i64,
-}];
-
-/// The bound of the claim release.
-pub const RELEASE_BOUNDS: ConstantModule = ConstantModule {
-    file: "release_bounds.py",
-    doc: "The bound of the claim release of horsies-core, generated from its Rust constant.",
-    constants: &RELEASE_CONSTANTS,
-};
-
-const MONITORING_CONSTANTS: [CoreConstant; 6] = [
+const MONITORING_CONSTANTS: [CoreConstant; 7] = [
     CoreConstant {
         name: "MONITORING_WINDOW_DEFAULT_SECONDS",
         doc: "The span of the window of a read that gives no bound.",
@@ -79,6 +75,12 @@ const MONITORING_CONSTANTS: [CoreConstant; 6] = [
         doc: "The most runs of one workflow runs list.",
         value: MAX_WORKFLOW_RUNS_LIMIT,
     },
+    CoreConstant {
+        name: "LIST_ROW_BOUND",
+        doc: "The most rows of the workflow names list and of the schedules list; a\n\
+              longer list is cut at the bound.",
+        value: LIST_ROW_BOUND as i64,
+    },
 ];
 
 /// The bounds of the monitoring reads. The window spans are whole seconds.
@@ -89,8 +91,112 @@ pub const MONITORING_BOUNDS: ConstantModule = ConstantModule {
     constants: &MONITORING_CONSTANTS,
 };
 
+const BROKER_CONSTANTS: [CoreConstant; 1] = [CoreConstant {
+    name: "TASK_LIST_ROW_BOUND",
+    doc: "The most rows of the stale task list and of the expired task list; a\n\
+          longer list is cut at the bound.",
+    value: TASK_LIST_BOUND as i64,
+}];
+
+/// The bound of the stale and expired task lists of the broker.
+pub const BROKER_BOUNDS: ConstantModule = ConstantModule {
+    file: "broker_bounds.py",
+    doc: "The bound of the task lists of the broker of horsies-core, generated from its\n\
+          Rust constant.",
+    constants: &BROKER_CONSTANTS,
+};
+
+const EXIT_CODE_CONSTANTS: [CoreConstant; 11] = [
+    CoreConstant {
+        name: "PARENT_GONE_EXIT_CODE",
+        doc: "A child: the parent is gone (the socket reached EOF, or the parent-death\n\
+              check found another parent).",
+        value: PARENT_GONE_EXIT_CODE as i64,
+    },
+    CoreConstant {
+        name: "BAD_PARENT_FRAME_EXIT_CODE",
+        doc: "A child: the parent sent a frame over the bounds, or a malformed frame.",
+        value: BAD_PARENT_FRAME_EXIT_CODE as i64,
+    },
+    CoreConstant {
+        name: "BAD_ARGUMENTS_EXIT_CODE",
+        doc: "A child: the child program got arguments it cannot use.",
+        value: BAD_ARGUMENTS_EXIT_CODE as i64,
+    },
+    CoreConstant {
+        name: "STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE",
+        doc: "A child: after a stop frame, threads of the task loop's executor still\n\
+              ran; the child left without waiting for them.",
+        value: STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE as i64,
+    },
+    CoreConstant {
+        name: "BOOT_FAILED_EXIT_CODE",
+        doc: "A child: the boot failed, after a `boot_failed` frame that names the cause.",
+        value: BOOT_FAILED_EXIT_CODE as i64,
+    },
+    CoreConstant {
+        name: "REPARENT_FAILED_EXIT_CODE",
+        doc: "A child: a forked child did not reach the worker as its parent in time.",
+        value: REPARENT_FAILED_EXIT_CODE as i64,
+    },
+    CoreConstant {
+        name: "RUNNER_HEARTBEAT_LOST_EXIT_CODE",
+        doc: "The worker process: it failed closed because its runner heartbeats\n\
+              stopped.",
+        value: RUNNER_HEARTBEAT_LOST_EXIT_CODE as i64,
+    },
+    CoreConstant {
+        name: "PROTOCOL_MISMATCH_EXIT_CODE",
+        doc: "A child: the init frame named another protocol version than the child\n\
+              speaks.",
+        value: PROTOCOL_MISMATCH_EXIT_CODE as i64,
+    },
+    CoreConstant {
+        name: "LIVENESS_LOCK_LOST_EXIT_CODE",
+        doc: "The worker process: it failed closed because its liveness lock was not\n\
+              held for the regain bound while it held a task.",
+        value: LIVENESS_LOCK_LOST_EXIT_CODE as i64,
+    },
+    CoreConstant {
+        name: "CORE_STOPPED_EXIT_CODE",
+        doc: "A child: its core stopped, or the process was forked after its core\n\
+              started; the child ended itself.",
+        value: CORE_STOPPED_EXIT_CODE as i64,
+    },
+    CoreConstant {
+        name: "CHILD_HOOK_FAILED_EXIT_CODE",
+        doc: "A child: a start hook of the child failed or hung.",
+        value: CHILD_HOOK_FAILED_EXIT_CODE as i64,
+    },
+];
+
+/// The exit codes of the worker process and of its children, in code order.
+pub const EXIT_CODES: ConstantModule = ConstantModule {
+    file: "exit_codes.py",
+    doc: "The exit codes of the worker process and of its children, generated from the\n\
+          constants of horsies-core. The code of a child names how the child ended;\n\
+          77 and 79 are codes of the worker process.",
+    constants: &EXIT_CODE_CONSTANTS,
+};
+
+const CHILD_CONSTANTS: [CoreConstant; 1] = [CoreConstant {
+    name: "CANCELLED_WRITE_END_SECONDS",
+    doc: "The longest end of a write of a child after its bound: the cancel request\n\
+          of the statement and the wait for its reply.",
+    value: CANCELLED_WRITE_END.as_secs() as i64,
+}];
+
+/// The bounds of the writes of a worker child. The spans are whole seconds.
+pub const CHILD_BOUNDS: ConstantModule = ConstantModule {
+    file: "child_bounds.py",
+    doc: "The bounds of the writes of a worker child in horsies-core, generated from its\n\
+          Rust constants. The spans are in whole seconds.",
+    constants: &CHILD_CONSTANTS,
+};
+
 /// Every generated module of core constants, in file order.
-pub const CONSTANT_MODULES: [ConstantModule; 2] = [RELEASE_BOUNDS, MONITORING_BOUNDS];
+pub const CONSTANT_MODULES: [ConstantModule; 4] =
+    [MONITORING_BOUNDS, BROKER_BOUNDS, EXIT_CODES, CHILD_BOUNDS];
 
 /// The text of one module of core constants.
 pub fn render_constant_module(module: &ConstantModule) -> String {
@@ -153,10 +259,6 @@ mod tests {
 
     #[test]
     fn each_module_holds_the_core_values() {
-        let rendered = render_constant_module(&RELEASE_BOUNDS);
-        assert!(rendered.contains(&format!(
-            "\nMAX_RELEASED_CLAIMS: Final = {MAX_RELEASED_CLAIMS}\n"
-        )));
         let rendered = render_constant_module(&MONITORING_BOUNDS);
         for (name, value) in [
             (
@@ -171,6 +273,36 @@ mod tests {
             ("MAX_TASK_PAGE_LIMIT", MAX_TASK_PAGE_LIMIT),
             ("MAX_BREAKDOWN_LIMIT", MAX_BREAKDOWN_LIMIT),
             ("MAX_WORKFLOW_RUNS_LIMIT", MAX_WORKFLOW_RUNS_LIMIT),
+            ("LIST_ROW_BOUND", LIST_ROW_BOUND as i64),
+        ] {
+            assert!(
+                rendered.contains(&format!("\n{name}: Final = {value}\n")),
+                "{name}"
+            );
+        }
+        let rendered = render_constant_module(&BROKER_BOUNDS);
+        assert!(rendered.contains(&format!(
+            "\nTASK_LIST_ROW_BOUND: Final = {TASK_LIST_BOUND}\n"
+        )));
+        let rendered = render_constant_module(&EXIT_CODES);
+        for (name, value) in [
+            ("PARENT_GONE_EXIT_CODE", PARENT_GONE_EXIT_CODE),
+            ("BAD_PARENT_FRAME_EXIT_CODE", BAD_PARENT_FRAME_EXIT_CODE),
+            ("BAD_ARGUMENTS_EXIT_CODE", BAD_ARGUMENTS_EXIT_CODE),
+            (
+                "STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE",
+                STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
+            ),
+            ("BOOT_FAILED_EXIT_CODE", BOOT_FAILED_EXIT_CODE),
+            ("REPARENT_FAILED_EXIT_CODE", REPARENT_FAILED_EXIT_CODE),
+            (
+                "RUNNER_HEARTBEAT_LOST_EXIT_CODE",
+                RUNNER_HEARTBEAT_LOST_EXIT_CODE,
+            ),
+            ("PROTOCOL_MISMATCH_EXIT_CODE", PROTOCOL_MISMATCH_EXIT_CODE),
+            ("LIVENESS_LOCK_LOST_EXIT_CODE", LIVENESS_LOCK_LOST_EXIT_CODE),
+            ("CORE_STOPPED_EXIT_CODE", CORE_STOPPED_EXIT_CODE),
+            ("CHILD_HOOK_FAILED_EXIT_CODE", CHILD_HOOK_FAILED_EXIT_CODE),
         ] {
             assert!(
                 rendered.contains(&format!("\n{name}: Final = {value}\n")),
@@ -179,11 +311,40 @@ mod tests {
         }
     }
 
+    /// The exit code module names every code of a child of the protocol,
+    /// once, and the two codes of the worker process.
+    #[test]
+    fn the_exit_codes_are_every_code_of_the_core_and_distinct() {
+        let values: BTreeSet<i64> = EXIT_CODES
+            .constants
+            .iter()
+            .map(|constant| constant.value)
+            .collect();
+        assert_eq!(values.len(), EXIT_CODES.constants.len());
+        let mut expected: BTreeSet<i64> = horsies_core::frame_protocol::ChildExitCode::ALL
+            .into_iter()
+            .map(|code| i64::from(code.code()))
+            .collect();
+        expected.insert(i64::from(RUNNER_HEARTBEAT_LOST_EXIT_CODE));
+        expected.insert(i64::from(LIVENESS_LOCK_LOST_EXIT_CODE));
+        assert_eq!(values, expected);
+    }
+
     /// A span in whole seconds loses nothing of the core's span.
     #[test]
     fn the_window_spans_are_whole_seconds() {
         assert_eq!(MONITORING_WINDOW_DEFAULT.subsec_nanos(), 0);
         assert_eq!(MONITORING_WINDOW_MAX.subsec_nanos(), 0);
+        assert_eq!(CANCELLED_WRITE_END.subsec_nanos(), 0);
+    }
+
+    #[test]
+    fn the_child_bounds_hold_the_core_spans() {
+        let rendered = render_constant_module(&CHILD_BOUNDS);
+        assert!(rendered.contains(&format!(
+            "\nCANCELLED_WRITE_END_SECONDS: Final = {}\n",
+            CANCELLED_WRITE_END.as_secs()
+        )));
     }
 
     #[test]

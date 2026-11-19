@@ -29,7 +29,6 @@ from horsies.core.errors import (
 from horsies.core.models.app import AppConfig
 from datetime import timedelta
 
-from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import (
     MOVED_TO_PARENT_POOL,
     MOVED_TO_WORKER_PROFILE,
@@ -339,20 +338,6 @@ class TestPostgresConfigPgBouncer:
         assert password in config.database_url.get_secret_value()
         assert password in config.effective_session_database_url
 
-    def test_worker_config_repr_masks_dsns(self) -> None:
-        """WorkerConfig auto-repr carried all three DSNs in cleartext."""
-        from horsies.core.worker.config import WorkerConfig
-
-        password = 'sup3r-secret-pw'
-        cfg = WorkerConfig(
-            dsn=f'postgresql://user:{password}@host/db',
-            psycopg_dsn=f'postgresql://user:{password}@host/db',
-            session_dsn=f'postgresql://user:{password}@direct/db',
-            queues=['default'],
-        )
-
-        assert password not in repr(cfg)
-        assert 'default' in repr(cfg)
 
     def test_pgbouncer_mode_requires_session_database_url(self) -> None:
         with pytest.raises(ConfigurationError, match='session_database_url required'):
@@ -664,57 +649,6 @@ class TestPostgresConfigKeepalives:
             'tcp_keepalives_count',
         ):
             assert field_name not in engine_kwargs
-
-
-@pytest.mark.unit
-class TestWorkerConfigPgBouncerChildKwargs:
-    """child_connect_kwargs stays consistent with pgbouncer_transaction_mode.
-
-    Regression: decoupling the child pool from the boolean must not let a
-    direct WorkerConfig(pgbouncer_transaction_mode=True) ship a child pool
-    with prepared statements enabled against transaction-pooled PgBouncer.
-    """
-
-    def test_boolean_alone_disables_child_prepared_statements(self) -> None:
-        from horsies.core.worker.config import WorkerConfig
-
-        cfg = WorkerConfig(
-            dsn='postgresql://u:p@pooler:6432/db',
-            psycopg_dsn='postgresql://u:p@direct/db',
-            queues=['default'],
-            pgbouncer_transaction_mode=True,
-        )
-
-        assert cfg.child_connect_kwargs == {'prepare_threshold': None}
-
-    def test_merges_with_existing_keepalive_kwargs(self) -> None:
-        from horsies.core.worker.config import WorkerConfig
-
-        cfg = WorkerConfig(
-            dsn='postgresql://u:p@pooler:6432/db',
-            psycopg_dsn='postgresql://u:p@direct/db',
-            queues=['default'],
-            pgbouncer_transaction_mode=True,
-            child_connect_kwargs={'keepalives': 1, 'keepalives_idle': 30},
-        )
-
-        assert cfg.child_connect_kwargs == {
-            'keepalives': 1,
-            'keepalives_idle': 30,
-            'prepare_threshold': None,
-        }
-
-    def test_no_pgbouncer_leaves_child_kwargs_untouched(self) -> None:
-        from horsies.core.worker.config import WorkerConfig
-
-        cfg = WorkerConfig(
-            dsn='postgresql://u:p@host/db',
-            psycopg_dsn='postgresql://u:p@host/db',
-            queues=['default'],
-            child_connect_kwargs={'keepalives': 1},
-        )
-
-        assert cfg.child_connect_kwargs == {'keepalives': 1}
 
 
 @pytest.mark.unit
@@ -1701,25 +1635,6 @@ class TestExactPool:
     def test_below_one_is_a_defect(self, connections: int) -> None:
         with pytest.raises(AssertionError, match='connections must be >= 1'):
             self._CONFIG.with_exact_pool(connections)
-
-    @pytest.mark.asyncio
-    async def test_the_broker_engine_opens_with_the_pool_and_no_overflow(
-        self,
-    ) -> None:
-        """The engine that a broker of the copy builds: QueuePool of
-        ``pool_size`` 7 and ``max_overflow`` 0. No connection opens."""
-        from sqlalchemy.pool import QueuePool
-
-        broker = PostgresBroker(self._CONFIG.with_exact_pool(7))
-        resources = broker._build_resources()  # pyright: ignore[reportPrivateUsage]
-        try:
-            pool = resources.engine.sync_engine.pool
-            assert isinstance(pool, QueuePool)
-            assert pool.size() == 7
-            assert pool._max_overflow == 0  # pyright: ignore[reportPrivateUsage]
-            assert pool.checkedout() == 0
-        finally:
-            await resources.engine.dispose()
 
 
 @pytest.mark.unit

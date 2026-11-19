@@ -1,7 +1,7 @@
 //! History/database contract errors.
 
 use crate::broker::core_rows::RowDecodeError;
-use crate::broker::{is_retryable_sqlx_error, is_retryable_statement_failure};
+use crate::broker::is_retryable_statement_failure;
 use crate::db::StatementFailure;
 
 /// The SQLSTATE of a terminal write whose row no history leaf can take: the
@@ -16,9 +16,6 @@ pub const HISTORY_LEAF_MISSING_SQLSTATE: &str = "55H01";
 
 #[derive(Debug, thiserror::Error)]
 pub enum HistoryError {
-    #[error("database error: {0}")]
-    Database(#[from] sqlx::Error),
-
     /// A statement on a core pool failed with one of the statement layer's
     /// three outcomes. Retryable when its cause may clear.
     #[error("database error: {0}")]
@@ -37,12 +34,6 @@ pub enum HistoryError {
 
     #[error("history leaf advisory lock is not held")]
     LeafLockNotHeld,
-
-    #[error("history leaf advisory lock is busy: {leaf_name}")]
-    LeafLockBusy { leaf_name: String },
-
-    #[error("history parent is absent: {0}")]
-    HistoryParentAbsent(String),
 }
 
 impl HistoryError {
@@ -50,20 +41,16 @@ impl HistoryError {
         Self::Contract(detail.into())
     }
 
-    /// Whether the call may be retried: a driver error by the driver
-    /// classification, a core statement failure by its transience. Every
-    /// other variant is not retryable (the rule of
+    /// Whether the call may be retried: a core statement failure by its
+    /// transience. Every other variant is not retryable (the rule of
     /// `WorkerError::is_retryable` for history errors).
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Database(error) => is_retryable_sqlx_error(error),
             Self::Statement(failure) => is_retryable_statement_failure(failure),
             Self::RowDecode(_)
             | Self::ArchiveDecode(_)
             | Self::Contract(_)
-            | Self::LeafLockNotHeld
-            | Self::LeafLockBusy { .. }
-            | Self::HistoryParentAbsent(_) => false,
+            | Self::LeafLockNotHeld => false,
         }
     }
 }

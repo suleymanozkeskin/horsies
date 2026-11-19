@@ -12,73 +12,19 @@ on data, not on exceptions.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar
-
 from horsies._catalog.monitoring import (
     MonitoringQueryErrorCode as MonitoringQueryErrorCode,
+)
+from horsies._catalog.monitoring_errors import (
+    MonitoringQueryCoreError as MonitoringQueryCoreError,
+    MonitoringQueryDbOperationFailed as MonitoringQueryDbOperationFailed,
+    MonitoringQueryHistoryContractViolation as MonitoringQueryHistoryContractViolation,
 )
 from horsies.core.types.result import Result
 
 
-if TYPE_CHECKING:
-    from horsies.core.brokers.resources import EventLoopLimit
-
-
-@dataclass(slots=True, frozen=True)
-class MonitoringQueryDbOperationFailed:
-    """The query failed with a database or driver error. Nothing changed.
-
-    ``retryable`` is the driver classification of the cause: ``True`` when
-    the condition may clear, for example a lost connection. ``exception``
-    is the ``SQLAlchemyError``.
-    """
-
-    code: ClassVar[MonitoringQueryErrorCode] = MonitoringQueryErrorCode.DB_OPERATION_FAILED
-    message: str = field(repr=False)
-    retryable: bool
-    exception: BaseException = field(repr=False)
-
-
-@dataclass(slots=True, frozen=True)
-class MonitoringQueryEventLoopLimit:
-    """The broker holds resource sets for its limit of open event loops. Nothing ran.
-
-    ``loop_limit`` names the limit and the threads of the held loops. A
-    query from this loop returns the same error until one of the held
-    loops closes.
-    """
-
-    code: ClassVar[MonitoringQueryErrorCode] = MonitoringQueryErrorCode.EVENT_LOOP_LIMIT
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    loop_limit: EventLoopLimit
-
-
-@dataclass(slots=True, frozen=True)
-class MonitoringQueryHistoryContractViolation:
-    """Stored history data does not decode. Nothing changed.
-
-    ``exception`` is the ``HistoryContractError``: for example a history
-    status that is not a ``TaskStatus`` member, an attempt snapshot that
-    does not decode, or an EXPLAIN payload that the row estimate cannot
-    read. A repeat gives the same result until the stored row or the
-    server changes.
-    """
-
-    code: ClassVar[MonitoringQueryErrorCode] = (
-        MonitoringQueryErrorCode.HISTORY_CONTRACT_VIOLATION
-    )
-    retryable: ClassVar[bool] = False
-    message: str = field(repr=False)
-    exception: BaseException = field(repr=False)
-
-
-type MonitoringQueryError = (
-    MonitoringQueryDbOperationFailed
-    | MonitoringQueryEventLoopLimit
-    | MonitoringQueryHistoryContractViolation
-)
-"""Every failure of a monitoring query: one variant per ``MonitoringQueryErrorCode``."""
+type MonitoringQueryError = MonitoringQueryCoreError
+"""Every failure of a monitoring query: one variant per ``MonitoringQueryErrorCode``,
+each a class of the core's catalog."""
 
 type MonitoringResult[T] = Result[T, MonitoringQueryError]

@@ -1,5 +1,3 @@
-//! Port of Python `tests/integration/test_autocommit_outcomes.py`.
-//!
 //! The fused completion runs as its own transaction. These tests pin what
 //! the caller relies on: a replay and a lost claim write nothing (no history
 //! row, no attempt, no wake), and a lost reply or a dead pooled connection
@@ -14,14 +12,13 @@
 
 use chrono::Duration;
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::claims::claim_pass;
 use crate::broker::core_rows::StatementLog;
 use crate::broker::error::BrokerError;
-use crate::broker::pools::unpinged_single_connection_core_pool;
+use crate::broker::pools::unpinged_single_connection_core_pool_for_url;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::terminalization;
 use crate::broker::terminalization::on_test_pool::terminalize;
@@ -29,10 +26,10 @@ use crate::core::lifecycle::{
     OwnedClaim, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
 };
 use crate::db::StatementFailure;
+use crate::test_support::sql::{self, TestPool};
 use crate::worker::execution::{
     finalize_workflow_phase, FinalizeError, FinalizeStage, PhaseTwoForm,
 };
-use crate::workflow_engine::steps::ChildBuild;
 
 const QUEUE: &str = "lifecycle_autocommit";
 const CHANNEL: &str = "task_queue_lifecycle_autocommit";
@@ -53,8 +50,8 @@ fn running_in_queue() -> TaskSeed {
     }
 }
 
-async fn history_rows(pool: &PgPool, task_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_task_history WHERE task_id = $1")
+async fn history_rows(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_task_history WHERE task_id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
@@ -147,9 +144,9 @@ async fn a_lost_claim_generation_writes_nothing() {
 #[serial]
 async fn a_lost_reply_is_retried_and_classified_on_the_replay() {
     let pool = pool().await;
-    let upstream = database_options(&pool);
-    let proxy = WireProxy::start(&upstream).await;
-    let proxied = unpinged_single_connection_core_pool(&proxy.options(&upstream));
+    let upstream = pool.url();
+    let proxy = WireProxy::start(upstream).await;
+    let proxied = unpinged_single_connection_core_pool_for_url(&proxy.url(upstream));
     // Open the connection, run the pool's first-use check and prepare the
     // statement on it, so the completion is one request with one reply. The
     // connection is back in the pool when the call returns.
@@ -214,7 +211,7 @@ async fn a_lost_reply_is_retried_and_classified_on_the_replay() {
 #[serial]
 async fn a_dead_connection_fails_the_completion_and_the_retry_applies() {
     let pool = pool().await;
-    let unpinged = unpinged_single_connection_core_pool(&database_options(&pool));
+    let unpinged = unpinged_single_connection_core_pool_for_url(pool.url());
     let pid = core_pool_backend_pid(&unpinged).await;
     let task_id = seed_task(&pool, &running_in_queue()).await;
     let before = live_row(&pool, task_id).await;
@@ -255,7 +252,7 @@ async fn a_dead_connection_fails_the_completion_and_the_retry_applies() {
 async fn plain_phase_two(broker: &PostgresBroker) -> Result<(), FinalizeError> {
     finalize_workflow_phase(
         broker,
-        ChildBuild::Client(&crate::test_support::child_specs::TestChildSpecs::empty()),
+        &crate::test_support::child_specs::TestChildSpecs::empty(),
         Uuid::new_v4(),
         QUEUE,
         false,
@@ -266,9 +263,8 @@ async fn plain_phase_two(broker: &PostgresBroker) -> Result<(), FinalizeError> {
     .map(|_parent_advances| ())
 }
 
-/// Python `test_a_dead_connection_fails_phase_two_as_retryable`
-/// (`tests/integration/test_autocommit_outcomes.py:400`): a connection lost
-/// while the phase-2 wake is in flight fails phase 2 as retryable.
+/// A connection lost while the phase-2 wake is in flight fails phase 2 as
+/// retryable.
 ///
 /// The wake of a plain task runs on the broker's main core pool, and the
 /// broker's core pools connect through the proxy (`WireProxy`). The first
@@ -281,10 +277,10 @@ async fn plain_phase_two(broker: &PostgresBroker) -> Result<(), FinalizeError> {
 #[serial]
 async fn a_dead_connection_fails_phase_two_as_retryable() {
     let pool = pool().await;
-    let upstream = database_options(&pool);
-    let proxy = WireProxy::start(&upstream).await;
-    let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
-    let broker = PostgresBroker::from_pool(proxied);
+    let upstream = pool.url();
+    let proxy = WireProxy::start(upstream).await;
+    let proxied = single_session_pool(&proxy.url(upstream)).await;
+    let broker = PostgresBroker::from_test_url(proxied.url(), crate::ClientFamily::Rust);
     plain_phase_two(&broker).await.expect("warm up");
     proxy.reset_round_trips();
 
@@ -317,7 +313,7 @@ async fn a_dead_connection_fails_phase_two_as_retryable() {
 #[serial]
 async fn a_dead_connection_fails_the_claim_pass_as_retryable() {
     let pool = pool().await;
-    let unpinged = unpinged_single_connection_core_pool(&database_options(&pool));
+    let unpinged = unpinged_single_connection_core_pool_for_url(pool.url());
     let pid = core_pool_backend_pid(&unpinged).await;
     let task_id = seed_task(
         &pool,

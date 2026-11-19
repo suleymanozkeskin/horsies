@@ -1,7 +1,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
-// `#[derive(horsies_macros::CodeCatalog)]` names `::horsies_core::catalog`,
-// and `#[derive(horsies_macros::ManifestSchema)]` names
+// `#[derive(horsies_core_derive::CodeCatalog)]` names `::horsies_core::catalog`,
+// and `#[derive(horsies_core_derive::ManifestSchema)]` names
 // `::horsies_core::manifest_schema`; this crate reaches both through its own
 // name.
 extern crate self as horsies_core;
@@ -14,6 +14,7 @@ pub mod catalog;
 #[doc(hidden)]
 pub mod core;
 pub mod db;
+pub mod error_catalog;
 pub mod failure_cause;
 pub mod handle;
 pub mod log_targets;
@@ -44,19 +45,20 @@ pub use crate::core::{
     mask_database_url, AnyNode, AppConfigError, BackoffStrategy, BuiltInTaskCode, CancelGraceMs,
     CancelGraceOutOfRange, ContractCode, CronEnumTerm, CronNumericTerm, CronOrdinal, CronSchedule,
     CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector, EnqueueRetention,
-    ErrorCategory, ErrorCode, Execution, ExecutionClass, HandleErrorCode, HandleOperationError,
-    HandleResult, HourlySchedule, IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey,
-    OnError, OperationalErrorCode, OutcomeCode, PausedAgeRefused, PausedWorkflowAge, PayloadPolicy,
-    PostgresConfig, PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError,
-    ResilienceConfigError, RetentionChoice, RetentionClassKeyRefused, RetentionConfig,
-    RetentionConfigError, RetrievalCode, RetryPolicy, RetryPolicyError, ScheduleConfig,
-    SchedulePattern, SubWorkflowFailure, SubWorkflowParams, SubWorkflowSummary, SuccessCase,
-    SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind,
-    TaskInfo, TaskOptions, TaskRegistry, TaskResult, TaskSchedule, TaskSendError,
-    TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, UserCode, UserCodeRefused,
-    ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig, WorkflowContext,
-    WorkflowMeta, WorkflowSpec, WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult,
-    WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES, WF_TASK_TERMINAL_VALUES,
+    ErrorCategory, ErrorCode, Execution, ExecutionClass, HandleErrorCode, HandleOperation,
+    HandleOperationError, HandleResult, HourlySchedule, IntervalSchedule, JoinType, Month,
+    MonthlySchedule, NodeKey, OnError, OperationalErrorCode, OutcomeCode, PausedAgeRefused,
+    PausedWorkflowAge, PayloadPolicy, PostgresConfig, PostgresConfigError, QueueMode,
+    RecoveryConfig, RecoveryConfigError, ResilienceConfigError, RetentionChoice,
+    RetentionClassKeyRefused, RetentionConfig, RetentionConfigError, RetrievalCode, RetryPolicy,
+    RetryPolicyError, ScheduleConfig, SchedulePattern, StartRefusalCause, SubWorkflowFailure,
+    SubWorkflowParams, SubWorkflowSummary, SuccessCase, SuccessPolicy, TaskAttemptInfo,
+    TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind, TaskInfo, TaskOptions,
+    TaskRegistry, TaskResult, TaskSchedule, TaskSendError, TaskSendErrorCode, TaskSendPayload,
+    TaskSendResult, TaskStatus, UserCode, UserCodeRefused, ValidationReport, Weekday,
+    WeeklySchedule, WorkerResilienceConfig, WorkflowContext, WorkflowMeta, WorkflowSpec,
+    WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus,
+    WorkflowTaskStatus, TASK_TERMINAL_STATES, WF_TASK_TERMINAL_VALUES,
     WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };
 pub use crate::core::{AppConfig, HorsiesError};
@@ -65,13 +67,14 @@ pub use crate::core::codec::{JsonText, JsonTextRefused};
 
 // broker re-exports
 pub use crate::broker::{
-    expected_schema_version, BrokerError, BrokerErrorCode, BrokerOperationError, BrokerResult,
+    expected_schema_version, BrokerCheckCause, BrokerError, BrokerErrorCode, BrokerOperationError,
+    BrokerOperationFailedCode, BrokerOperationSource, BrokerRefusalCause, BrokerResult,
     CheckInterruption, CheckedSend, ConnectivityRefusal, DatabasePing, ExpiredTaskRow,
     HeartbeatRow, ListenError, ListenProbeFailure, ListenerPlanError, PostgresBroker,
     RawResultRead, RawResultRecord, SchemaInitializationMode, SessionCheckFailure, StaleTaskRow,
     StoredEnvelopeRefused, StoredEnvelopeText, TaskAttemptRow, TaskInfoRead, TaskInfoRow,
-    WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WorkflowRow,
-    WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    WorkerPingRequest, WorkerPingStep, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
+    WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 // The bounded limit of a result wait; a client checks it before the read.
@@ -145,6 +148,11 @@ pub use crate::worker::executor::child_host::{
 pub use crate::worker::executor::protocol as frame_protocol;
 
 // worker re-exports
+// The exit codes of the worker process (the codes of a child are in
+// `frame_protocol`): `horsies-codegen` renders every exit code into the
+// Python `_catalog`.
+pub use crate::worker::liveness::LIVENESS_LOCK_LOST_EXIT_CODE;
+pub use crate::worker::runner_beats::RUNNER_HEARTBEAT_LOST_EXIT_CODE;
 // The worker connection check of a client's live check (`check --live`):
 // on a connected broker (the Rust client), and on a lazy handle (the Python
 // bridge).
@@ -186,7 +194,9 @@ pub use crate::broker::task_lists::{
     TASK_LIST_BOUND,
 };
 
-pub use crate::broker::client_family::{ClientFamily, FamilyCheckFailure, RecordedFamily};
+pub use crate::broker::client_family::{
+    ClientFamily, FamilyCheckFailure, RecordedFamily, UnknownStoredFamily,
+};
 pub use crate::broker::migrations::SchemaRefusal;
 pub use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
@@ -214,8 +224,8 @@ pub use crate::core::history::rerun::{
 pub use crate::broker::workflow_phase2::{NodeFinishForm, NodeFinished, ParentAdvanceStopped};
 pub use crate::broker::workflow_start::{ClientStartError, ClientStartOutcome};
 pub use crate::workflow_engine::child_spec::{
-    ChildSpecFuture, ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ChildSpecs,
-    ChildStartSource, ClientChildSpec, ClientSpec,
+    ChildSpecFuture, ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ChildStartSource,
+    ClientChildSpec, ClientSpec,
 };
 
 // The steps that a client's child spec source runs around its own builder:

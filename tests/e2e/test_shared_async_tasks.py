@@ -24,6 +24,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy import text
 
+from horsies import TaskAttemptInfo
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode
@@ -35,7 +36,7 @@ from tests.e2e.helpers.db import wait_for_status
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
 from tests.e2e.tasks import shared_async_tasks
-from tests.integration.history_seeding import AttemptRecord, read_attempts
+from tests.integration.history_seeding import read_attempts
 from tests.e2e.tasks.profiles import (
     SHARED_ONLY_1X4,
     SPLIT_SHARED_1X4,
@@ -279,7 +280,7 @@ async def _isolated_pid() -> str:
 async def _row_and_attempts(
     broker: PostgresBroker,
     task_id: UUID,
-) -> tuple[Any, tuple[AttemptRecord, ...]]:
+) -> tuple[Any, tuple[TaskAttemptInfo, ...]]:
     """The row of a task and its attempts, live or moved to history."""
     async with current_resources(broker).session_factory() as session:
         row = (
@@ -291,7 +292,7 @@ async def _row_and_attempts(
                 {'id': str(task_id)},
             )
         ).one()
-        attempts = await read_attempts(session, str(task_id))
+    attempts = await read_attempts(broker, str(task_id))
     return row, attempts
 
 

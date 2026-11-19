@@ -92,7 +92,7 @@ async def test_resume_injects_real_dependency_results(
     handle = await start_ok(spec, broker)
 
     # 1. Producer completes -> consumer enqueued with real dep results.
-    await finish_task(session, broker, handle.workflow_id, 0, TaskResult(ok=42))
+    await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=42))
     await session.commit()
 
     # Simulate a worker claiming (but not starting) the consumer's task so
@@ -137,12 +137,12 @@ async def test_resume_injects_real_dependency_results(
     assert is_ok(resume_r)
     session.expire_all()
 
-    kwargs_json = await _get_linked_task_kwargs(session, handle.workflow_id, 1)
-    assert 'RESULT_DESERIALIZATION_ERROR' not in kwargs_json, (
+    input_json = await _get_linked_task_kwargs(session, str(handle.workflow_id), 1)
+    assert 'RESULT_DESERIALIZATION_ERROR' not in input_json, (
         'Resumed consumer received a no-app sentinel instead of the real '
-        f'dependency result: {kwargs_json}'
+        f'dependency result: {input_json}'
     )
-    assert 'no_app' not in kwargs_json
-    assert '42' in kwargs_json, (
-        f'Expected producer ok=42 injected into consumer kwargs: {kwargs_json}'
+    assert 'no_app' not in input_json
+    assert '42' in input_json, (
+        f'Expected producer ok=42 injected into consumer kwargs: {input_json}'
     )

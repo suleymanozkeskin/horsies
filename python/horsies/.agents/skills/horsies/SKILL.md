@@ -88,7 +88,7 @@ Deadline: `add_numbers.with_options(good_until=deadline).send(a=5, b=3)` expires
 
 ### Retry a Failed Send
 
-`TaskSendError` is a union with one variant per code; match on the variant. Only `TaskSendEnqueueFailed` has `retryable` (`True` for a transient cause). The retry methods take a `TaskSendRetryable` (`TaskSendEnqueueFailed`, `TaskSendAsyncContext`, `TaskSendIdempotencyKeyConflict`, `TaskSendLoopRunnerFailed`); another variant is a type error and fails an assertion at run time. For a key conflict, `owner_task_id` names the task that holds the key; a retry is accepted after the reservation ends:
+`TaskSendError` is a union with one variant per code; match on the variant. Only `TaskSendEnqueueFailed` has `retryable` (`True` for a transient cause). The retry methods take a `TaskSendRetryable` (`TaskSendEnqueueFailed`, `TaskSendAsyncContext`, `TaskSendIdempotencyKeyConflict`); another variant is a type error and fails an assertion at run time. For a key conflict, `owner_task_id` names the task that holds the key; a retry is accepted after the reservation ends:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -189,7 +189,7 @@ Async: `spec.start_async()`.
 
 ### Retry a Failed Start
 
-`retry_start` takes `WorkflowStartRetryable`: `WorkflowStartEnqueueFailed`, `WorkflowStartAsyncContext` or `WorkflowStartLoopRunnerFailed`. It starts again with the error's `workflow_id`:
+`retry_start` takes `WorkflowStartRetryable`: `WorkflowStartEnqueueFailed` or `WorkflowStartAsyncContext`. It starts again with the error's `workflow_id`:
 
 ```python
 match spec.start():
@@ -230,11 +230,18 @@ All methods have `_async()` variants.
 
 ### Reconnect to an Existing Workflow
 
-```python
-from horsies import WorkflowHandle
+`WorkflowHandle.for_id(text, broker)` parses a workflow id text once, at the
+boundary: `Ok(handle)`, or `Err(HandleInvalidWorkflowId)` for text that is not
+a UUID (no handle is built).
 
-handle = WorkflowHandle(workflow_id="known-uuid", broker=app.get_broker())
-result = handle.get(timeout_ms=30_000)
+```python
+from horsies import Err, Ok, WorkflowHandle
+
+match WorkflowHandle.for_id("3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f", app.get_broker()):
+    case Ok(ok_value=handle):
+        result = handle.get(timeout_ms=30_000)
+    case Err(err_value=invalid):
+        print(invalid.message)  # the text is not a UUID
 ```
 
 ### Direct Result Access by Task ID
@@ -333,17 +340,28 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`.
 
 ### Error Code Enums
 
-- `TaskSendErrorCode`: `SEND_SUPPRESSED`, `ASYNC_CONTEXT`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_CONFLICT`, `PAYLOAD_TOO_LARGE`, `EVENT_LOOP_LIMIT`, `LOOP_RUNNER_FAILED`
-- `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `WORKFLOW_ID_CONFLICT`, `ENQUEUE_FAILED`, `LOOP_RUNNER_FAILED`, `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`
-- `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `STORED_DATA_INVALID`, `RESUME_RECOVERY_FAILED`, `LOOP_RUNNER_FAILED`, `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`
+- `TaskSendErrorCode`: `SEND_SUPPRESSED`, `ASYNC_CONTEXT`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_CONFLICT`, `PAYLOAD_TOO_LARGE`
+- `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `WORKFLOW_ID_CONFLICT`, `ENQUEUE_FAILED`, `ASYNC_CONTEXT`
+- `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `STORED_DATA_INVALID`, `RESUME_RECOVERY_FAILED`, `ASYNC_CONTEXT`
 
 `retryable=True` means transient (DB connection blip). `retryable=False` means permanent. On send errors only `TaskSendEnqueueFailed` has `retryable`.
 
-`HandleOperationError` is a union with one variant per `HandleErrorCode` member (`HandleWorkflowNotFound`, `HandleDbOperationFailed`, `HandleStoredDataInvalid`, `HandleResumeRecoveryFailed`, `HandleLoopRunnerFailed`, `HandleEventLoopLimit`, `HandleAsyncContext`); match on the variant. `HandleResumeRecoveryFailed` means `resume()` committed and only its recovery pass failed: the workflow is `RUNNING`.
+`HandleOperationError` is a union with one variant per `HandleErrorCode` member (`HandleWorkflowNotFound`, `HandleDbOperationFailed`, `HandleStoredDataInvalid`, `HandleResumeRecoveryFailed`, `HandleAsyncContext`); match on the variant. `HandleResumeRecoveryFailed` means `resume()` committed and only its recovery pass failed: the workflow is `RUNNING`.
 
-`EVENT_LOOP_LIMIT` (`WorkflowStartErrorCode`, `HandleErrorCode`): a workflow start and a workflow resume use one broker resource set per open event loop, up to 5 loops plus its sync runner loop and, in a worker child, the task loop. The next open loop gets this error and nothing runs; it clears when one of those loops closes. Every other call runs on the core of the process, which has no event loop limit: `TaskSendErrorCode`, `BrokerErrorCode`, `RetrievalCode` and the monitoring catalogs keep the member, and no call returns it.
+Every call runs on the core of the process: one pool for every thread and event loop, so no call has an event loop limit.
 
 `ASYNC_CONTEXT` (every catalog above, `BrokerErrorCode`, `RetrievalCode`): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell). Its wait would stall that loop, so nothing ran. Call the `*_async` form. `retryable=False` where the error has the field; `RetrievalCode.ASYNC_CONTEXT` is not cached; `await spec.retry_start_async(err)` completes a start that returned it. `app.check(live=True)` there reports `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`).
+
+### Raised, never returned: `ForkedAfterCoreStart`, `CoreStopped`
+
+These two core errors (import them from `horsies`) are states of the process, not of one call: the core refuses every later call in the process. Every call that runs on the core raises them, sync and async forms alike: the sends and their retry methods, the task, result and health reads, `check(live=True)`, the workflow start, `WorkflowHandle`, `horsies.monitoring` and the `horsies web` schema probe. No call returns them as a result, and no result type has a variant for them. Nothing ran, and a retry in the same process raises again.
+
+| Raised | Cause | Fix |
+|---|---|---|
+| `ForkedAfterCoreStart` | The process was forked without exec after the core started in its parent, for example a `multiprocessing` pool with the `fork` start method inside a task | Start child processes that call horsies with the `spawn` or `forkserver` start method, or start the core after the fork: fork before the parent's first call |
+| `CoreStopped` | A background task of the core panicked: a defect in horsies, not a failure of the database or of your code. `args` are the `(subject, cause)` of the first panic | Restart the process: the core does not start again in it. Report the panic's subject and cause as a defect |
+
+A worker child ends itself at its next core call (exit code 80; its last log line names the cause), and the worker replaces it. At the start of a task, before task code ran, the claim is released with no attempt charged. After a body that finished, the child reports the result first, and the task keeps it. A body that the refusal ended (a core call of the body raised it), and a body of a shared child that still runs at the exit, take the crashed-child path (`WORKER_CRASHED`) and the retry policy.
 
 ## CLI
 

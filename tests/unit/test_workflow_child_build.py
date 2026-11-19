@@ -1,14 +1,16 @@
-"""The child build of a sub-workflow node, and the start tree that it feeds.
+"""The child build of a sub-workflow node.
 
-``build_child`` takes the steps of ``enqueue_subworkflow_task`` before its
-writes; each failure is a ``ChildBuildFailed`` with the error that the node
-stores. ``start_tree`` pre-builds the child of every sub-workflow root.
+``build_child_within_depth`` builds the child spec of a sub-workflow node at
+the depth that the core checked; each failure is a ``ChildBuildFailed`` with
+the error that the node stores. The child spec source answers the core's
+``ChildSpecRequest`` with it.
 """
 
 from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -23,31 +25,19 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import OperationalErrorCode, TaskError, TaskResult
 from horsies.core.models.workflow import (
-    OnError,
-    SubWorkflowNode,
-    SuccessCase,
-    SuccessPolicy,
     TaskNode,
     WorkflowDefinition,
     WorkflowSpec,
 )
-from horsies.core.models.workflow.limits import MAX_SUBWORKFLOW_DEPTH
 from horsies.core.workflows.child_build import (
     ChildBuildFailed,
     ChildBuilt,
     ChildOfNode,
-    SubWorkflowNodeKind,
     TaskNodeKind,
-    build_child,
+    build_child_within_depth,
 )
 from horsies.core.workflows.child_spec_source import build_child_spec
 from horsies.core.workflows.registry import register_workflow_definition
-from horsies.core.workflows.start_tree import (
-    ChildOfWorkflow,
-    TopLevel,
-    start_tree,
-    tree_parameters,
-)
 
 pytestmark = [pytest.mark.unit]
 
@@ -95,19 +85,6 @@ class ResultChild(WorkflowDefinition[int]):
         return app.workflow(cls.name, [node], output=node, definition_key=cls.definition_key)
 
 
-class NestingChild(WorkflowDefinition[int]):
-    """A child whose root is itself a sub-workflow node."""
-
-    name = 'child_build.nesting_child'
-    definition_key = 'child_build.nesting_child.v1'
-
-    @classmethod
-    def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec[int]:
-        _ = (args, params)
-        inner = SubWorkflowNode(workflow_def=ValueChild)
-        return app.workflow(cls.name, [inner], output=inner, definition_key=cls.definition_key)
-
-
 class SurrogateNameChild(WorkflowDefinition[int]):
     """A child whose built spec has a name with a lone surrogate."""
 
@@ -139,7 +116,7 @@ class BrokenChild(WorkflowDefinition[int]):
 def registered_definitions() -> None:
     """The definitions of this module, registered again: other tests clear
     the definition registry."""
-    for definition in (ValueChild, ResultChild, NestingChild, BrokenChild, SurrogateNameChild):
+    for definition in (ValueChild, ResultChild, BrokenChild, SurrogateNameChild):
         register_workflow_definition(definition)
 
 
@@ -162,6 +139,16 @@ def _node(**values: Any) -> ChildOfNode:
     return ChildOfNode(**{**defaults, **values})
 
 
+def _build(
+    broker: MagicMock,
+    node: ChildOfNode,
+    dependency_results: Mapping[int, TaskResult[Any, TaskError]],
+) -> ChildBuilt | ChildBuildFailed:
+    """The build that the child spec source runs: the child one level below the
+    node's workflow, at a depth that the core checked against the limit."""
+    return build_child_within_depth(broker, node, dependency_results, node.parent_depth + 1)
+
+
 def _failure(built: object) -> TaskError:
     assert isinstance(built, ChildBuildFailed), built
     return built.error
@@ -169,7 +156,7 @@ def _failure(built: object) -> TaskError:
 
 class TestBuildChild:
     def test_a_child_that_builds_gives_its_spec_depth_and_node_rows(self) -> None:
-        built = build_child(_broker(), _node(node_input='{"value": 4}'), {})
+        built = _build(_broker(), _node(node_input='{"value": 4}'), {})
 
         assert isinstance(built, ChildBuilt)
         assert built.depth == 1
@@ -179,60 +166,49 @@ class TestBuildChild:
         ]
         assert all(isinstance(row.kind, TaskNodeKind) for row in built.nodes)
 
-    def test_a_child_past_the_depth_limit_fails_the_node(self) -> None:
-        error = _failure(build_child(_broker(), _node(parent_depth=MAX_SUBWORKFLOW_DEPTH), {}))
-
-        assert error.error_code is OperationalErrorCode.SUBWORKFLOW_DEPTH_LIMIT_REACHED
-        assert error.message == (
-            f'Subworkflow not started: the child workflow would have depth '
-            f'{MAX_SUBWORKFLOW_DEPTH + 1}, and the limit is {MAX_SUBWORKFLOW_DEPTH} '
-            '(workflow parent:3)'
-        )
-        assert error.data == {'workflow_id': 'parent-wf', 'task_index': 3}
-
     def test_a_definition_that_does_not_load_fails_the_node(self) -> None:
-        error = _failure(build_child(_broker(), _node(sub_definition_key='unknown.v1'), {}))
+        error = _failure(_build(_broker(), _node(sub_definition_key='unknown.v1'), {}))
 
         assert error.error_code is OperationalErrorCode.SUBWORKFLOW_LOAD_FAILED
         assert error.message == 'Failed to load subworkflow definition for parent:3'
         assert error.data == {'definition_key': 'unknown.v1'}
 
     def test_a_stored_input_that_is_not_json_fails_the_node(self) -> None:
-        error = _failure(build_child(_broker(), _node(node_input='{not json'), {}))
+        error = _failure(_build(_broker(), _node(node_input='{not json'), {}))
 
         assert error.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
         assert error.message == 'Corrupt kwargs JSON for subworkflow task 3'
 
     def test_an_empty_stored_input_fails_the_node(self) -> None:
         # A node without params stores '{}'; an empty text is corrupt data.
-        error = _failure(build_child(_broker(), _node(node_input=''), {}))
+        error = _failure(_build(_broker(), _node(node_input=''), {}))
 
         assert error.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
         assert error.message == 'Corrupt kwargs JSON for subworkflow task 3'
         assert error.data == {'workflow_id': 'parent-wf', 'task_index': 3}
 
     def test_an_input_that_does_not_decode_to_build_with_fails_the_node(self) -> None:
-        error = _failure(build_child(_broker(), _node(node_input='{"value": "x"}'), {}))
+        error = _failure(_build(_broker(), _node(node_input='{"value": "x"}'), {}))
 
         assert error.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
         assert (error.message or '').startswith('Typed decode of subworkflow kwargs failed for task 3: ')
 
     def test_an_args_from_text_that_is_not_json_fails_the_node(self) -> None:
-        error = _failure(build_child(_broker(), _node(args_from='{not json'), {}))
+        error = _failure(_build(_broker(), _node(args_from='{not json'), {}))
 
         assert error.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
         assert error.message == 'Corrupt args_from JSON for subworkflow task 3'
 
     def test_an_empty_args_from_text_fails_the_node(self) -> None:
         # A node without args_from stores NULL; an empty text is corrupt data.
-        error = _failure(build_child(_broker(), _node(args_from=''), {}))
+        error = _failure(_build(_broker(), _node(args_from=''), {}))
 
         assert error.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
         assert error.message == 'Corrupt args_from JSON for subworkflow task 3'
         assert error.data == {'workflow_id': 'parent-wf', 'task_index': 3}
 
     def test_an_args_from_index_that_is_not_an_int_fails_the_node(self) -> None:
-        error = _failure(build_child(_broker(), _node(args_from='{"value": "0"}'), {}))
+        error = _failure(_build(_broker(), _node(args_from='{"value": "0"}'), {}))
 
         assert error.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
         assert error.message == 'args_from has non-int values for subworkflow task 3'
@@ -241,7 +217,7 @@ class TestBuildChild:
     def test_an_args_from_index_that_is_a_bool_fails_the_node(self, flag: str) -> None:
         # bool is a subclass of int: true and false are not the indexes 1 and 0.
         error = _failure(
-            build_child(
+            _build(
                 _broker(),
                 _node(args_from=f'{{"value": {flag}}}'),
                 {0: TaskResult(ok=4), 1: TaskResult(ok=5)},
@@ -254,7 +230,7 @@ class TestBuildChild:
 
     def test_an_args_from_key_that_names_a_static_kwarg_fails_the_node(self) -> None:
         error = _failure(
-            build_child(_broker(), _node(node_input='{"value": 1}', args_from='{"value": 0}'), {}),
+            _build(_broker(), _node(node_input='{"value": 1}', args_from='{"value": 0}'), {}),
         )
 
         assert error.error_code is OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED
@@ -263,7 +239,7 @@ class TestBuildChild:
         )
 
     def test_a_dependency_result_reaches_build_with(self) -> None:
-        built = build_child(
+        built = _build(
             _broker(),
             _node(sub_definition_key=ResultChild.definition_key, args_from='{"source": 0}'),
             {0: TaskResult(ok=9)},
@@ -274,7 +250,7 @@ class TestBuildChild:
 
     def test_a_dependency_result_that_does_not_fit_build_with_fails_the_node(self) -> None:
         error = _failure(
-            build_child(
+            _build(
                 _broker(),
                 _node(sub_definition_key=ResultChild.definition_key, args_from='{"source": 0}'),
                 {0: TaskResult(ok='not an int')},
@@ -289,7 +265,7 @@ class TestBuildChild:
 
     def test_a_build_that_raises_fails_the_node(self) -> None:
         error = _failure(
-            build_child(_broker(), _node(sub_definition_key=BrokenChild.definition_key), {}),
+            _build(_broker(), _node(sub_definition_key=BrokenChild.definition_key), {}),
         )
 
         assert error.error_code is OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED
@@ -302,7 +278,7 @@ class TestBuildChild:
             'horsies.core.workflows.lifecycle.guard_no_positional_args',
             side_effect=ValueError('positional args'),
         ):
-            error = _failure(build_child(_broker(), _node(), {}))
+            error = _failure(_build(_broker(), _node(), {}))
 
         assert error.error_code is OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED
         assert error.message == 'Invalid child task node args for child_build.value: positional args'
@@ -314,97 +290,10 @@ class TestBuildChild:
         custom.app.get_valid_queue_names.return_value = ['other']
         with patch('horsies.core.workflows.child_build._built_spec') as built_spec:
             built_spec.return_value = ValueChild.build_with(APP)
-            error = _failure(build_child(custom, _node(), {}))
+            error = _failure(_build(custom, _node(), {}))
 
         assert error.error_code is OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED
         assert (error.message or '').startswith('Invalid queue/priority for child task child_build.value: ')
-
-
-def _top_spec(*nodes: TaskNode[Any] | SubWorkflowNode[Any], **options: Any) -> WorkflowSpec[Any]:
-    return APP.workflow('child_build.top', list(nodes), definition_key='child_build.top.v1', **options)
-
-
-class TestStartTree:
-    def test_a_tree_without_sub_workflow_nodes_is_one_workflow(self) -> None:
-        root = TaskNode(fn=value_task, kwargs={'value': 1})
-        dependent = TaskNode(fn=value_task, kwargs={'value': 2}, waits_for=[root])
-        tree = start_tree(_broker(), _top_spec(root, dependent), 'top-wf')
-
-        (workflow,) = tree.workflows
-        assert workflow.parent == TopLevel()
-        assert workflow.depth == 0
-        assert [node.workflow_id for node in tree.nodes] == ['top-wf', 'top-wf']
-        assert tree.failed == ()
-        assert not tree.has_failed_records
-
-    def test_a_sub_workflow_root_gets_its_child_and_the_child_its_own(self) -> None:
-        nesting = SubWorkflowNode(workflow_def=NestingChild)
-        tree = start_tree(_broker(), _top_spec(nesting), 'top-wf')
-
-        names = [workflow.name for workflow in tree.workflows]
-        assert names == ['child_build.top', NestingChild.name, ValueChild.name]
-        child, grandchild = tree.workflows[1], tree.workflows[2]
-        assert child.parent == ChildOfWorkflow(parent_workflow_id='top-wf', parent_task_index=0)
-        assert child.depth == 1
-        assert grandchild.parent == ChildOfWorkflow(
-            parent_workflow_id=child.workflow_id, parent_task_index=0,
-        )
-        assert grandchild.depth == 2
-
-    def test_a_sub_workflow_root_whose_child_fails_is_a_failed_record(self) -> None:
-        broken = SubWorkflowNode(workflow_def=BrokenChild)
-        tree = start_tree(_broker(), _top_spec(broken), 'top-wf')
-
-        assert [workflow.name for workflow in tree.workflows] == ['child_build.top']
-        (record,) = tree.failed
-        assert (record.workflow_id, record.task_index) == ('top-wf', 0)
-        stored = json.loads(record.result)
-        assert stored['err']['message'] == (
-            'Subworkflow build failed: RuntimeError: cannot build (workflow child_build.top:0)'
-        )
-        assert tree.has_failed_records
-
-    def test_a_dependent_sub_workflow_node_is_not_built(self) -> None:
-        root = TaskNode(fn=value_task, kwargs={'value': 1})
-        later = SubWorkflowNode(workflow_def=BrokenChild, waits_for=[root])
-        tree = start_tree(_broker(), _top_spec(root, later), 'top-wf')
-
-        assert len(tree.workflows) == 1
-        assert tree.failed == ()
-        assert isinstance(tree.nodes[1].row.kind, SubWorkflowNodeKind)
-
-    def test_the_parameters_hold_one_aligned_element_per_row(self) -> None:
-        root = TaskNode(fn=value_task, kwargs={'value': 1})
-        child = SubWorkflowNode(workflow_def=ValueChild)
-        dependent = TaskNode(fn=value_task, kwargs={'value': 2}, waits_for=[root, child])
-        spec = _top_spec(
-            root,
-            child,
-            dependent,
-            on_error=OnError.PAUSE,
-            output=dependent,
-            success_policy=SuccessPolicy(cases=[SuccessCase(required=[dependent])]),
-        )
-        parameters = tree_parameters(start_tree(_broker(), spec, 'top-wf'))
-
-        assert parameters['on_errors'] == ['pause', 'fail']
-        assert parameters['output_task_indexes'] == [2, 1]
-        assert parameters['success_policies'] == [
-            '{"cases":[{"required_indices":[2]}]}', None,
-        ]
-        assert parameters['depths'] == [0, 1]
-        assert parameters['node_task_indexes'] == [0, 1, 2, 0, 1]
-        assert parameters['node_dependencies'] == ['[]', '[]', '[0,1]', '[]', '[0]']
-        assert parameters['node_is_subworkflow'] == [False, True, False, False, False]
-        assert parameters['node_sub_workflow_params'] == [None, 'NOT_GIVEN', None, None, None]
-        assert parameters['node_max_retries'] == [0, None, 0, 0, 0]
-        node_lengths = {
-            len(cast(list[object], value))
-            for key, value in parameters.items()
-            if key.startswith('node_')
-        }
-        assert node_lengths == {5}
-        assert parameters['failed_workflow_ids'] == []
 
 
 def _request(**values: Any) -> ChildSpecRequest:
@@ -424,7 +313,8 @@ def _request(**values: Any) -> ChildSpecRequest:
 
 
 class TestBuildChildSpec:
-    """The child spec source of the core: ``build_child`` after the depth check."""
+    """The child spec source of the core: ``build_child_within_depth`` at the
+    depth of the request."""
 
     def test_a_child_that_builds_answers_its_spec_data(self) -> None:
         answer = build_child_spec(cast(Any, _broker()), _request())

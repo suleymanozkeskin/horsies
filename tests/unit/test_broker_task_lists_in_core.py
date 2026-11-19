@@ -1,12 +1,11 @@
 """``get_stale_tasks`` and ``get_expired_tasks`` through the core handle.
 
-The core returns ``TaskListComplete``, ``TaskListTruncated`` or
-``BrokerFailure``; the broker returns the rows, logs a cut list on
-``horsies.broker``, and maps a failure to its error. The stale threshold is
+The core returns ``TaskListComplete``, ``TaskListTruncated`` or its
+generated broker class (``BrokerOperationFailed``, ``BrokerInvalidInput``);
+the broker returns the rows, logs a cut list on ``horsies.broker``, and
+returns a failure as it is. The stale threshold is
 checked by the handle before any core call, with Python's rule and text: a
-refused threshold needs no database. The rows and their order are the core's;
-the dual-run pair (``tests/dualrun/test_stale_expired_lists.py``) compares
-them with Python's.
+refused threshold needs no database. The rows and their order are the core's.
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from horsies._core import (
-    BrokerFailure,
     CoreConnectionError,
     TaskListComplete,
     TaskListTruncated,
@@ -151,13 +149,7 @@ class TestAnswers:
         cause = CoreConnectionError('get_expired_tasks', 'connection refused', retryable)
         broker = _broker_answering(
             'expired_tasks_async',
-            _record(
-                BrokerFailure,
-                code='MONITORING_QUERY_FAILED',
-                message=message,
-                retryable=retryable,
-                exception=cause,
-            ),
+            BrokerOperationFailed(code=BrokerErrorCode.MONITORING_QUERY_FAILED, message=message, retryable=retryable, exception=cause),
         )
 
         result = await broker.get_expired_tasks()
@@ -191,7 +183,7 @@ class TestAnswers:
     async def test_another_code_from_the_core_is_a_defect(self) -> None:
         broker = _broker_answering(
             'expired_tasks_async',
-            _record(BrokerFailure, code='DB_PING_FAILED', message='x', retryable=False),
+            BrokerOperationFailed(code=BrokerErrorCode.DB_PING_FAILED, message='x', retryable=False, exception=CoreConnectionError('test_operation', 'x', True)),
         )
 
         with pytest.raises(AssertionError, match='DB_PING_FAILED'):

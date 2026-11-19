@@ -4,16 +4,13 @@ use chrono::{Duration, TimeZone, Utc};
 use serde::Serialize;
 use serde_json::json;
 use serial_test::serial;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::broker::terminalization::on_test_pool::terminalize;
-use crate::broker::terminalization_matrix::migrated_pool;
 use crate::broker::PostgresBroker;
-use crate::core::history::partitions::publication::LoaderPublication;
-use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome, WorkerOwned};
+use crate::test_support::migrated_pool;
+use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 use crate::test_support::terminal_writes::{self, TerminalFailure};
 
 use super::*;
@@ -804,8 +801,8 @@ impl TaskSeed {
 
 /// Insert one live row. A RUNNING row carries the process facts that its
 /// start writes, the facts of the attempt rows of [`seed_attempt`].
-async fn seed_task(pool: &PgPool, seed: &TaskSeed) {
-    sqlx::query(
+async fn seed_task(pool: &TestPool, seed: &TaskSeed) {
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
             started_at, claimed_at, claimed_by_worker_id, is_workflow_task, retry_count,
@@ -842,8 +839,8 @@ async fn seed_task(pool: &PgPool, seed: &TaskSeed) {
 
 /// Insert attempt `attempt` of a live task: FAILED with `code`. Every column
 /// of the baseline attempt row is named.
-async fn seed_attempt(pool: &PgPool, task_id: Uuid, attempt: i32, code: &str) {
-    sqlx::query(
+async fn seed_attempt(pool: &TestPool, task_id: Uuid, attempt: i32, code: &str) {
+    sql::query(
         "INSERT INTO horsies_task_attempts (
              task_id, attempt, outcome, will_retry, started_at, finished_at,
              error_code, error_message, failed_reason, worker_id, worker_hostname,
@@ -863,7 +860,7 @@ async fn seed_attempt(pool: &PgPool, task_id: Uuid, attempt: i32, code: &str) {
 }
 
 /// The success of a RUNNING plain task of `w2-worker`.
-async fn complete_task(pool: &PgPool, task_id: Uuid) {
+async fn complete_task(pool: &TestPool, task_id: Uuid) {
     let outcome = terminal_writes::complete_plain_task(pool, task_id, "w2-worker", "{\"Ok\":true}")
         .await
         .expect("complete W2 task");
@@ -874,7 +871,7 @@ async fn complete_task(pool: &PgPool, task_id: Uuid) {
 }
 
 /// The terminal failure of a RUNNING task of `w2-worker`, plain or workflow.
-async fn fail_task(pool: &PgPool, task_id: Uuid, code: &str) {
+async fn fail_task(pool: &TestPool, task_id: Uuid, code: &str) {
     let outcome = terminal_writes::fail_running_task(
         pool,
         task_id,
@@ -889,7 +886,7 @@ async fn fail_task(pool: &PgPool, task_id: Uuid, code: &str) {
     ));
 }
 
-async fn clean_w2(pool: &PgPool, scope: &TestScope) {
+async fn clean_w2(pool: &TestPool, scope: &TestScope) {
     let pattern = scope.pattern();
     for statement in [
         "DELETE FROM horsies_workflows WHERE name LIKE $1",
@@ -897,7 +894,7 @@ async fn clean_w2(pool: &PgPool, scope: &TestScope) {
         "DELETE FROM horsies_task_history WHERE task_name LIKE $1",
         "DELETE FROM horsies_tasks WHERE task_name LIKE $1",
     ] {
-        sqlx::query(statement)
+        sql::query(statement)
             .bind(&pattern)
             .execute(pool)
             .await
@@ -919,9 +916,9 @@ async fn live_and_history_aggregates_merge_before_caps() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("aggregate");
     clean_w2(&pool, &scope).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
 
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, execution, status,
              sent_at, enqueued_at, is_workflow_task,
@@ -978,7 +975,7 @@ async fn live_and_history_aggregates_merge_before_caps() {
     expired.status = "CLAIMED";
     expired.worker = Some(scope.worker.clone());
     seed_task(&pool, &expired).await;
-    sqlx::query("UPDATE horsies_tasks SET good_until = NOW() - INTERVAL '1 minute' WHERE id = $1")
+    sql::query("UPDATE horsies_tasks SET good_until = NOW() - INTERVAL '1 minute' WHERE id = $1")
         .bind(expired.id)
         .execute(&pool)
         .await
@@ -1005,7 +1002,7 @@ async fn live_and_history_aggregates_merge_before_caps() {
     outside_window.error_code = Some("W2_OUTSIDE_WINDOW".to_owned());
     seed_task(&pool, &outside_window).await;
     fail_task(&pool, outside_window.id, "W2_OUTSIDE_WINDOW").await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_task_history
          SET sent_at = NOW() - INTERVAL '7 minutes',
              enqueued_at = NOW() - INTERVAL '7 minutes',
@@ -1114,7 +1111,7 @@ async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("list");
     clean_w2(&pool, &scope).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
 
     for index in 0..5 {
         let mut live = scope.pending(format!("estimate_live_{index}"));
@@ -1125,7 +1122,7 @@ async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
         seed_task(&pool, &history).await;
         complete_task(&pool, history.id).await;
     }
-    sqlx::query("ANALYZE horsies_tasks, horsies_task_history")
+    sql::query("ANALYZE horsies_tasks, horsies_task_history")
         .execute(&pool)
         .await
         .expect("sample W2 lifecycle tables");
@@ -1146,7 +1143,7 @@ async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
     )
     .await
     .expect("unfiltered W2 list");
-    let live_estimate: i64 = sqlx::query_scalar(
+    let live_estimate: i64 = sql::query_scalar(
         "SELECT reltuples::bigint FROM pg_class WHERE oid = 'horsies_tasks'::regclass",
     )
     .fetch_one(&pool)
@@ -1154,7 +1151,7 @@ async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
     .expect("read live estimate");
     // The history side of an unfiltered total is the planner's estimate of
     // the window read that `horsies_monitoring_task_list` explains.
-    let history_payload: serde_json::Value = sqlx::query_scalar(
+    let history_payload: serde_json::Value = sql::query_scalar(
         "EXPLAIN (FORMAT JSON) SELECT 1 FROM horsies_task_history AS h
          WHERE h.terminal_at >= $1 AND h.terminal_at < $2",
     )
@@ -1266,7 +1263,7 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
     let pool = migrated_pool().await;
     let scope = TestScope::new("filters");
     clean_w2(&pool, &scope).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
 
     let match_name = scope.task("filter_match");
     let mut live_match = scope.running("filter_match");
@@ -1406,8 +1403,8 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
     clean_w2(&pool, &scope).await;
 }
 
-async fn seed_workflow(pool: &PgPool, workflow_id: Uuid, name: &str, status: &str) {
-    sqlx::query(
+async fn seed_workflow(pool: &TestPool, workflow_id: Uuid, name: &str, status: &str) {
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, status, on_error, definition_key, depth,
              root_workflow_id, sent_at, created_at, started_at, updated_at
@@ -1426,7 +1423,7 @@ async fn seed_workflow(pool: &PgPool, workflow_id: Uuid, name: &str, status: &st
 }
 
 async fn seed_node(
-    pool: &PgPool,
+    pool: &TestPool,
     scope: &TestScope,
     workflow_id: Uuid,
     task_index: i32,
@@ -1435,7 +1432,7 @@ async fn seed_node(
     task_id: Option<Uuid>,
     child_id: Option<Uuid>,
 ) {
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
             dependencies, allow_failed_deps, join_type, status, task_id, is_subworkflow,
@@ -1474,7 +1471,7 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("detail");
     clean_w2(&pool, &scope).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let workflow_id = Uuid::new_v4();
     seed_workflow(&pool, workflow_id, &scope.workflow("detail"), "RUNNING").await;
     // The second run: attempt 1 failed and was retried, and the failure of
@@ -1543,7 +1540,7 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
     );
     assert_eq!(node.attempts.len(), 2);
 
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_task_history
          SET attempt_snapshot_digest = decode(repeat('00', 32), 'hex')
          WHERE task_id = $1",
@@ -1556,11 +1553,11 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
         .await
         .expect_err("digest corruption must fail closed");
     assert_eq!(
-        error.code,
+        error.code(),
         MonitoringQueryErrorCode::HistoryContractViolation
     );
-    assert!(!error.retryable);
-    assert!(error.message.contains("digest"));
+    assert!(!error.retryable());
+    assert!(error.message().contains("digest"));
 
     let unknown = Uuid::new_v4();
     assert_eq!(
@@ -1579,14 +1576,14 @@ async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("workflow");
     clean_w2(&pool, &scope).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let root = Uuid::new_v4();
     let child = Uuid::new_v4();
     let root_name = scope.workflow("root");
     let child_name = scope.workflow("child");
     seed_workflow(&pool, root, &root_name, "RUNNING").await;
     seed_workflow(&pool, child, &child_name, "FAILED").await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_workflows
          SET parent_workflow_id = $1, parent_task_index = 2, root_workflow_id = $1, depth = 1
          WHERE id = $2",
@@ -1692,7 +1689,7 @@ async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
         (scope.schedule("tomorrow"), now + Duration::days(1), 2),
         (scope.schedule("soon"), now + Duration::minutes(5), 3),
     ] {
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_schedule_state (
                  schedule_name, next_run_at, last_run_at, last_task_id, run_count,
                  config_hash, updated_at
@@ -1734,17 +1731,16 @@ async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
 
 #[tokio::test]
 async fn database_failure_is_typed_and_retryable() {
-    let pool = PgPoolOptions::new()
+    let pool = TestPoolOptions::new()
         .acquire_timeout(std::time::Duration::from_millis(250))
-        .connect_lazy("postgresql://postgres:none@127.0.0.1:1/none")
-        .expect("lazy unreachable pool");
-    let broker = PostgresBroker::from_pool(pool);
+        .connect_lazy("postgresql://postgres:none@127.0.0.1:1/none");
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let error = list_tasks(&broker, &TaskListQuery::new(test_window()))
         .await
         .expect_err("unreachable monitoring database");
-    assert_eq!(error.code, MonitoringQueryErrorCode::DbOperationFailed);
-    assert!(error.retryable, "{error:?}");
-    assert!(error.message.contains("task list query failed"));
+    assert_eq!(error.code(), MonitoringQueryErrorCode::DbOperationFailed);
+    assert!(error.retryable(), "{error:?}");
+    assert!(error.message().contains("task list query failed"));
 }
 
 /// A published reader dropped out of band fails the detail read with a
@@ -1756,7 +1752,7 @@ async fn a_dropped_staged_reader_fails_the_detail_until_it_is_published_again() 
     let pool = migrated_pool().await;
     let scope = TestScope::new("unpub");
     clean_w2(&pool, &scope).await;
-    let broker = PostgresBroker::from_pool(pool.clone());
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
     let task = scope.running("unpublished_detail");
     seed_task(&pool, &task).await;
     complete_task(&pool, task.id).await;
@@ -1765,7 +1761,7 @@ async fn a_dropped_staged_reader_fails_the_detail_until_it_is_published_again() 
         TaskDetailRead::Found(_)
     ));
 
-    sqlx::query(&format!(
+    sql::query(&format!(
         "DROP FUNCTION {}(uuid)",
         crate::core::history::names::TASK_DETAIL_FUNCTION
     ))
@@ -1775,21 +1771,24 @@ async fn a_dropped_staged_reader_fails_the_detail_until_it_is_published_again() 
     let error = get_task_detail(&broker, task.id)
         .await
         .expect_err("a dropped reader is an error, not an absence");
-    assert_eq!(error.code, MonitoringQueryErrorCode::DbOperationFailed);
+    assert_eq!(error.code(), MonitoringQueryErrorCode::DbOperationFailed);
     assert!(
         error
-            .message
+            .message()
             .contains(crate::core::history::names::TASK_DETAIL_FUNCTION),
         "{}",
-        error.message
+        error.message()
     );
 
-    let mut transaction = pool.begin().await.expect("publication transaction");
-    StagedLoaderPublisher
-        .republish(transaction.as_mut())
-        .await
-        .expect("restore staged readers");
-    transaction.commit().await.expect("commit staged readers");
+    let published: String =
+        sql::query_scalar("SELECT outcome FROM horsies_publish_history_readers()")
+            .fetch_one(&pool)
+            .await
+            .expect("restore staged readers");
+    assert!(
+        matches!(published.as_str(), "PUBLISHED" | "ALREADY_CURRENT"),
+        "{published}"
+    );
     assert!(matches!(
         get_task_detail(&broker, task.id).await.unwrap(),
         TaskDetailRead::Found(_)

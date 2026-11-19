@@ -4,8 +4,7 @@
 //! there. The stale threshold is whole minutes from 0 to one year; another
 //! value is `INVALID_INPUT` before any read, with Python's text.
 
-use crate::broker::result_types::{BrokerErrorCode, BrokerOperationError};
-use crate::failure_cause::FailureCause;
+use crate::broker::result_types::BrokerOperationError;
 
 /// The most rows a stale or expired task list returns.
 pub const TASK_LIST_BOUND: usize = 10_000;
@@ -63,15 +62,10 @@ impl StaleThresholdRefusal {
             Self::BelowZero => "is below 0".to_owned(),
             Self::AboveMaximum => format!("is above {MAX_STALE_THRESHOLD_MINUTES} (one year)"),
         };
-        BrokerOperationError {
-            code: BrokerErrorCode::InvalidInput,
-            message: format!(
-                "stale_threshold_minutes {cause}; give whole minutes from 0 to \
-                 {MAX_STALE_THRESHOLD_MINUTES}"
-            ),
-            retryable: false,
-            cause: FailureCause::PreconditionFailed,
-        }
+        BrokerOperationError::invalid_input(format!(
+            "stale_threshold_minutes {cause}; give whole minutes from 0 to \
+             {MAX_STALE_THRESHOLD_MINUTES}"
+        ))
     }
 }
 
@@ -155,6 +149,7 @@ pub(crate) fn bounded_list_from_rows<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::broker::result_types::BrokerErrorCode;
 
     #[test]
     fn a_threshold_of_zero_to_one_year_is_accepted() {
@@ -168,7 +163,7 @@ mod tests {
         }
     }
 
-    /// Python `tests/unit/test_broker_task_lists.py`: the refusal texts.
+    /// The refusal texts.
     #[test]
     fn a_threshold_outside_the_range_is_invalid_input_with_python_text() {
         for (minutes, refusal) in [
@@ -187,8 +182,8 @@ mod tests {
                 "{minutes}"
             );
             let error = refusal.error();
-            assert_eq!(error.code, BrokerErrorCode::InvalidInput, "{minutes}");
-            assert!(!error.retryable, "{minutes}");
+            assert_eq!(error.code(), BrokerErrorCode::InvalidInput, "{minutes}");
+            assert!(!error.retryable(), "{minutes}");
         }
         for (refusal, cause) in [
             (StaleThresholdRefusal::BelowZero, "is below 0"),
@@ -205,7 +200,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                refusal.error().message,
+                refusal.error().message(),
                 format!("stale_threshold_minutes {cause}; give whole minutes from 0 to 525600")
             );
         }

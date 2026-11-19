@@ -8,11 +8,8 @@ insert path reads the row's `execution` column from them.
 
 from __future__ import annotations
 
-import asyncio
 import json
-import re
 import textwrap
-import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -23,8 +20,7 @@ from pydantic import SecretStr
 
 from horsies import Execution as PublicExecution
 from horsies.core.app import Horsies
-from horsies.core.brokers.result_types import BrokerInvalidTaskOptions
-from horsies.core.codec.json_io import Json, SerializationError
+from horsies.core.codec.json_io import Json
 from horsies.core.codec.task_options import (
     InvalidExecution,
     serialize_task_options,
@@ -33,13 +29,11 @@ from horsies.core.codec.task_options import (
 from horsies.core.errors import ErrorCode, TaskDefinitionError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.task_pg import TaskModel
 from horsies.core.models.tasks import (
     DEFAULT_CANCEL_GRACE_MS,
     MAX_CANCEL_GRACE_MS,
     MIN_CANCEL_GRACE_MS,
     Execution,
-    OperationalErrorCode,
     TaskError,
     TaskOptions,
     TaskResult,
@@ -56,12 +50,8 @@ from horsies.core.task_decorator import (
     execution_rule_error,
 )
 from horsies.core.types.result import Err, Ok
-from horsies.monitoring.models import TaskDetail
-from tests.baseline_sql import baseline_sql
 
 pytestmark = [pytest.mark.unit]
-
-_PACKAGE_ROOT = Path(__file__).resolve().parents[2] / 'python' / 'horsies'
 
 
 def _app() -> Horsies:
@@ -576,157 +566,6 @@ class TestStoredExecution:
         assert 'only SHARED_ASYNC has one' in _refused_detail(options)
 
 
-class TestEnqueueReadsTheClass:
-    def test_no_options_enqueue_isolated(self) -> None:
-        from horsies.core.brokers.postgres import _parse_enqueue_task_options  # pyright: ignore[reportPrivateUsage]
-
-        parsed = _parse_enqueue_task_options('t', None)
-        assert isinstance(parsed, Ok)
-        assert parsed.ok_value.execution is Execution.ISOLATED
-
-    def test_the_stored_class_is_the_insert_value(self) -> None:
-        from horsies.core.brokers.postgres import _parse_enqueue_task_options  # pyright: ignore[reportPrivateUsage]
-
-        written = serialize_task_options(
-            TaskOptions(
-                task_name='t',
-                execution=Execution.SHARED_THREAD,
-                timeout_ms=1_000,
-            ),
-        )
-        assert isinstance(written, Ok)
-        parsed = _parse_enqueue_task_options('t', written.ok_value)
-        assert isinstance(parsed, Ok)
-        assert parsed.ok_value.execution is Execution.SHARED_THREAD
-
-    def test_an_invalid_class_refuses_the_enqueue(self) -> None:
-        from horsies.core.brokers.postgres import _parse_enqueue_task_options  # pyright: ignore[reportPrivateUsage]
-
-        parsed = _parse_enqueue_task_options(
-            't',
-            json.dumps({'execution': 'PARALLEL'}),
-        )
-        assert isinstance(parsed, Err)
-        assert isinstance(parsed.err_value, BrokerInvalidTaskOptions)
-        assert 'execution is not one of' in parsed.err_value.message
-
-
-class TestWorkflowPaths:
-    def test_a_fast_path_root_without_options_is_isolated(self) -> None:
-        from horsies.core.workflows.lifecycle import root_execution
-
-        assert root_execution(None, 'root') is Execution.ISOLATED
-
-    def test_a_fast_path_root_reads_its_class(self) -> None:
-        from horsies.core.workflows.lifecycle import root_execution
-
-        options = json.dumps({'execution': 'SHARED_THREAD', 'cancel_grace_ms': None})
-        assert root_execution(options, 'root') is Execution.SHARED_THREAD
-
-    def test_a_fast_path_root_with_empty_options_text_raises(self) -> None:
-        from horsies.core.workflows.lifecycle import root_execution
-
-        # The decorator stores None for no options; an empty text is not JSON.
-        with pytest.raises(SerializationError, match='Corrupt task_options for root node root'):
-            root_execution('', 'root')
-
-    def test_a_fast_path_root_with_an_invalid_class_raises(self) -> None:
-        from horsies.core.workflows.lifecycle import root_execution
-
-        with pytest.raises(SerializationError, match='Invalid execution for root node'):
-            root_execution(json.dumps({'execution': 'PARALLEL'}), 'root')
-
-    @staticmethod
-    def _promotion_arguments(task_options: str | None) -> dict[str, Any]:
-        return {
-            'task_name': 'node.task',
-            'node_input': '{}',
-            'workflow_sent_at': datetime(2026, 1, 1, tzinfo=timezone.utc),
-            'queue_name': 'default',
-            'priority': 50,
-            'args_from': None,
-            'workflow_ctx_from': None,
-            'task_options_str': task_options,
-            'all_dep_results': {},
-            'all_dep_task_names': None,
-            'broker': None,
-            'all_dep_definition_keys': None,
-        }
-
-    @pytest.mark.asyncio
-    async def test_node_promotion_binds_the_stored_class(self) -> None:
-        from horsies.core.workflows.engine import _build_enqueued_task_params  # pyright: ignore[reportPrivateUsage]
-
-        options = json.dumps(
-            {'execution': 'SHARED_ASYNC', 'cancel_grace_ms': DEFAULT_CANCEL_GRACE_MS},
-        )
-        outcome = await _build_enqueued_task_params(
-            MagicMock(),
-            'workflow-1',
-            3,
-            **self._promotion_arguments(options),
-        )
-        assert isinstance(outcome, Ok)
-        assert outcome.ok_value['execution'] == 'SHARED_ASYNC'
-
-    @pytest.mark.asyncio
-    async def test_node_promotion_without_options_binds_isolated(self) -> None:
-        from horsies.core.workflows.engine import _build_enqueued_task_params  # pyright: ignore[reportPrivateUsage]
-
-        outcome = await _build_enqueued_task_params(
-            MagicMock(),
-            'workflow-1',
-            3,
-            **self._promotion_arguments(None),
-        )
-        assert isinstance(outcome, Ok)
-        assert outcome.ok_value['execution'] == 'ISOLATED'
-
-    @pytest.mark.asyncio
-    async def test_node_promotion_refuses_an_invalid_class(self) -> None:
-        from horsies.core.workflows.engine import _build_enqueued_task_params  # pyright: ignore[reportPrivateUsage]
-
-        outcome = await _build_enqueued_task_params(
-            MagicMock(),
-            'workflow-1',
-            3,
-            **self._promotion_arguments(json.dumps({'execution': 'PARALLEL'})),
-        )
-        assert isinstance(outcome, Err)
-        assert outcome.err_value.message.startswith('Invalid execution for task 3:')
-
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ('field', 'message'),
-        [
-            ('task_options_str', 'Corrupt task_options JSON for task 3'),
-            ('node_input', 'Corrupt kwargs JSON for task 3'),
-            ('args_from', 'Corrupt args_from JSON for task 3'),
-        ],
-        ids=['task-options', 'input', 'args-from'],
-    )
-    async def test_node_promotion_refuses_an_empty_stored_text(
-        self, field: str, message: str,
-    ) -> None:
-        """The Python engine reads an empty stored text as the baseline
-        promotion does (horsies_workflow_task_node_refusal): corrupt data,
-        not "none"."""
-        from horsies.core.workflows.engine import _build_enqueued_task_params  # pyright: ignore[reportPrivateUsage]
-
-        arguments = self._promotion_arguments(None)
-        arguments[field] = ''
-        outcome = await _build_enqueued_task_params(
-            MagicMock(),
-            'workflow-1',
-            3,
-            **arguments,
-        )
-        assert isinstance(outcome, Err)
-        assert outcome.err_value.message == message
-        assert outcome.err_value.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
-
-
 class TestPerSendOptions:
     def test_a_send_with_a_deadline_keeps_the_class_and_the_grace(self) -> None:
         app = _app()
@@ -753,93 +592,3 @@ class TestPerSendOptions:
         assert stored['good_until'] == deadline.isoformat()
 
 
-# Each statement that creates a horsies_tasks row, and the module it is in.
-_TASK_INSERT = re.compile(
-    r'INSERT INTO (?:horsies_tasks|\{LIVE_TASKS\})\s*\(([^)]*)\)',
-)
-
-
-class TestEveryInsertPathWritesTheColumn:
-    def test_each_task_insert_names_the_execution_column(self) -> None:
-        found: dict[str, list[str]] = {}
-        for source in sorted(_PACKAGE_ROOT.rglob('*.py')):
-            for match in _TASK_INSERT.finditer(source.read_text()):
-                columns = {column.strip() for column in match.group(1).split(',')}
-                found.setdefault(str(source.relative_to(_PACKAGE_ROOT)), []).append(
-                    'execution' if 'execution' in columns else 'MISSING',
-                )
-        # The rerun writes its task through horsies_enqueue_task, which
-        # takes the execution class as p_execution.
-        assert found == {
-            'core/workflows/sql.py': ['execution'],
-        }
-
-
-class TestMigrationText:
-    def test_the_check_domain_is_the_enum(self) -> None:
-        """The task table and the task facts of a workflow node check the
-        class against the same domain."""
-        domain = ', '.join(f"'{member.value}'" for member in Execution)
-
-        assert baseline_sql().count(f'execution IN ({domain})') == 2
-
-    def test_the_model_column_matches_the_baseline(self) -> None:
-        """The baseline table has no database defaults: every insert names
-        the class."""
-        column = TaskModel.__table__.columns['execution']
-        assert column.nullable is False
-        assert str(column.type) == 'TEXT'
-        assert column.server_default is None
-
-    @pytest.mark.parametrize(
-        ('name', 'status'),
-        [
-            ('horsies_tasks_claim_pending', 'PENDING'),
-            ('horsies_tasks_claim_expired_order', 'CLAIMED'),
-        ],
-    )
-    def test_the_claim_indexes_have_the_class_as_their_second_key(
-        self,
-        name: str,
-        status: str,
-    ) -> None:
-        index = (
-            f'CREATE INDEX {name}\n'
-            '    ON horsies_tasks USING btree '
-            '(queue_name, execution, priority, enqueued_at, id)\n'
-            f"    WHERE status = '{status}';"
-        )
-
-        assert index in baseline_sql()
-
-
-class TestMonitoringDetail:
-    def test_a_live_task_shows_its_class(self) -> None:
-        from tests.dualrun.reference.monitoring_queries import get_task_detail
-        from tests.monitoring_function_support import detail_row, function_broker
-
-        task_id = uuid.UUID('00000000-0000-7000-8000-000000000001')
-        broker, _ = function_broker([detail_row(str(task_id), execution='SHARED_THREAD')])
-
-        result = asyncio.run(get_task_detail(broker, task_id))
-
-        match result:
-            case Ok(TaskDetail(leaf=leaf)):
-                assert leaf.execution is Execution.SHARED_THREAD
-            case _:
-                raise AssertionError(f'the detail answered {result!r}')
-
-    def test_a_history_task_shows_no_class(self) -> None:
-        from tests.dualrun.reference.monitoring_queries import get_task_detail
-        from tests.monitoring_function_support import function_broker, history_row
-
-        task_id = uuid.UUID('00000000-0000-7000-8000-000000000002')
-        broker, _ = function_broker([history_row(str(task_id))])
-
-        result = asyncio.run(get_task_detail(broker, task_id))
-
-        match result:
-            case Ok(TaskDetail(leaf=leaf)):
-                assert leaf.execution is None
-            case _:
-                raise AssertionError(f'the detail answered {result!r}')

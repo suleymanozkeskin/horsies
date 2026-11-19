@@ -157,7 +157,7 @@ fn the_engine_merge_errors_are_python_s_texts() {
 #[tokio::test]
 #[serial]
 async fn the_sql_writer_builds_python_s_engine_errors() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let pool = crate::test_support::migrated_pool().await;
     for name in [
         "upstream_skipped",
         "result_deserialization_error_dependency_without_result",
@@ -176,14 +176,15 @@ async fn the_sql_writer_builds_python_s_engine_errors() {
             .as_str()
             .unwrap_or_else(|| panic!("{name}: a message"));
         let data = to_json_string(&vector.error["data"]).expect("the data encodes");
-        let written: String =
-            sqlx::query_scalar("SELECT horsies_task_error_envelope($1, $2, $3, NULL, NULL)")
-                .bind(code)
-                .bind(message)
-                .bind(&data)
-                .fetch_one(&pool)
-                .await
-                .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let written: String = crate::test_support::sql::query_scalar(
+            "SELECT horsies_task_error_envelope($1, $2, $3, NULL, NULL)",
+        )
+        .bind(code)
+        .bind(message)
+        .bind(&data)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert_eq!(written, vector.text, "{name}");
     }
     for name in [
@@ -191,15 +192,16 @@ async fn the_sql_writer_builds_python_s_engine_errors() {
         "workflow_output_skipped_non_ascii_task_name",
     ] {
         let output = vector(name);
-        let data: String =
-            sqlx::query_scalar("SELECT horsies_workflow_output_error_data($1, $2, $3, $4)")
-                .bind(Uuid::parse_str(input_text(&output, "workflow_id")).expect("a UUID"))
-                .bind(input_text(&output, "node_id"))
-                .bind(input_i32(&output, "task_index"))
-                .bind(input_text(&output, "task_name"))
-                .fetch_one(&pool)
-                .await
-                .expect("the output error data");
+        let data: String = crate::test_support::sql::query_scalar(
+            "SELECT horsies_workflow_output_error_data($1, $2, $3, $4)",
+        )
+        .bind(Uuid::parse_str(input_text(&output, "workflow_id")).expect("a UUID"))
+        .bind(input_text(&output, "node_id"))
+        .bind(input_i32(&output, "task_index"))
+        .bind(input_text(&output, "task_name"))
+        .fetch_one(&pool)
+        .await
+        .expect("the output error data");
         assert_eq!(
             data,
             to_json_string(&output.error["data"]).expect("the data encodes"),

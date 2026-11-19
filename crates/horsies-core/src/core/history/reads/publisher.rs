@@ -9,21 +9,20 @@
 //! current readers changes nothing.
 //!
 //! The manifest table, not the reader source, answers `references_leaf`.
-//!
-//! Python: `python/horsies/core/history/reads/publisher.py`.
-
-use sqlx::{FromRow, PgConnection};
 
 use crate::broker::core_rows::{column, one_row, query_in, StatementLog};
 use crate::core::history::errors::HistoryError;
+#[cfg(test)]
 use crate::core::history::names::TASK_LOOKUP_MANIFEST;
 #[cfg(test)]
 use crate::core::history::names::{
     TASK_DETAIL_FUNCTION, TASK_DUPLICATE_GUARD_FUNCTION, TASK_PROVENANCE_FUNCTION,
     TASK_RESULT_FUNCTION,
 };
-use crate::core::history::partitions::publication::{LoaderPublication, LoaderRepublished};
+use crate::core::history::partitions::publication::LoaderRepublished;
 use crate::db::{Transaction, TypedStatement};
+#[cfg(test)]
+use crate::test_support::sql::{self, CallError, TestConnection};
 
 const PUBLISH_READERS_SQL: &str =
     "SELECT outcome, absent_leaves FROM horsies_publish_history_readers()";
@@ -32,6 +31,7 @@ const PUBLISH_READERS_SQL: &str =
 pub(crate) static PUBLISH_READERS: TypedStatement =
     TypedStatement::new("publish_history_readers", PUBLISH_READERS_SQL, &[]);
 
+#[cfg(test)]
 const READERS_CURRENT_SQL: &str = "SELECT horsies_history_readers_current()";
 
 /// The signatures of the readers that `horsies_publish_history_readers`
@@ -47,69 +47,75 @@ pub(crate) fn rendered_reader_signatures() -> [String; 4] {
     ]
 }
 
-/// One row of `horsies_publish_history_readers()`, the two columns the
-/// publisher reads.
-#[derive(Debug, FromRow)]
-struct PublicationRow {
-    outcome: String,
-    absent_leaves: Option<Vec<String>>,
-}
-
+/// The publisher of the history readers. The core publishes in its own
+/// transactions ([`publish_readers_in`]); the tests reach the same functions
+/// on a test session through the methods below.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StagedLoaderPublisher;
 
-impl LoaderPublication for StagedLoaderPublisher {
-    /// Publishes the readers for the attached history leaves: one statement.
+#[cfg(test)]
+impl StagedLoaderPublisher {
+    /// Publishes the readers for the attached history leaves on a test
+    /// session: one statement, the statement of [`publish_readers_in`].
     ///
     /// Leaves that the catalog records as attached and whose relation no
     /// longer exists are left out of the readers and returned, in name
     /// order. A database error aborts the caller's transaction: `25000` when
     /// the transaction is not READ COMMITTED, `42P01` when no attached leaf
-    /// resolves its parent. An unknown outcome or a NULL absent-leaf list is
-    /// `HistoryError::Contract`.
-    async fn republish(
+    /// resolves its parent.
+    ///
+    /// Errors: [`CallError`]; `Contract` for an unknown outcome or a NULL
+    /// absent-leaf list.
+    pub(crate) async fn republish(
         &self,
-        connection: &mut PgConnection,
-    ) -> Result<LoaderRepublished, HistoryError> {
-        let row: PublicationRow = sqlx::query_as(PUBLISH_READERS_SQL)
-            .fetch_one(connection)
-            .await?;
-        republished_of(&row.outcome, row.absent_leaves)
+        connection: &mut TestConnection,
+    ) -> Result<LoaderRepublished, CallError> {
+        let (outcome, absent_leaves): (String, Option<Vec<String>>) =
+            sql::query_as(PUBLISH_READERS_SQL)
+                .fetch_one(&mut *connection)
+                .await
+                .map_err(CallError::Database)?;
+        republished_of(&outcome, absent_leaves).map_err(CallError::Contract)
     }
 
     /// Whether the published manifest still names `leaf_name`.
-    async fn references_leaf(
+    ///
+    /// Errors: [`CallError`].
+    pub(crate) async fn references_leaf(
         &self,
-        connection: &mut PgConnection,
+        connection: &mut TestConnection,
         leaf_name: &str,
-    ) -> Result<bool, HistoryError> {
-        let sql = format!(
+    ) -> Result<bool, CallError> {
+        let sql_text = format!(
             "SELECT EXISTS (
                  SELECT 1 FROM {TASK_LOOKUP_MANIFEST} WHERE leaf_name = $1
              )"
         );
-        Ok(sqlx::query_scalar(&sql)
+        sql::query_scalar(&sql_text)
             .bind(leaf_name)
-            .fetch_one(connection)
-            .await?)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(CallError::Database)
     }
 
     /// True unless `horsies_history_readers_current()` holds: the published
     /// manifest equals the catalog's reader manifest and each of the four
-    /// readers carries its stamp. One statement; reads only. A NULL answer is
-    /// `HistoryError::Contract`.
-    async fn needs_republication(
+    /// readers carries its stamp. One statement; reads only.
+    ///
+    /// Errors: [`CallError`]; `Contract` for a NULL answer.
+    pub(crate) async fn needs_republication(
         &self,
-        connection: &mut PgConnection,
-    ) -> Result<bool, HistoryError> {
-        let current: Option<bool> = sqlx::query_scalar(READERS_CURRENT_SQL)
-            .fetch_one(connection)
-            .await?;
+        connection: &mut TestConnection,
+    ) -> Result<bool, CallError> {
+        let current: Option<bool> = sql::query_scalar(READERS_CURRENT_SQL)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(CallError::Database)?;
         match current {
             Some(current) => Ok(!current),
-            None => Err(HistoryError::contract(
+            None => Err(CallError::Contract(HistoryError::contract(
                 "reader freshness check returned NULL, not a boolean",
-            )),
+            ))),
         }
     }
 }
@@ -156,22 +162,31 @@ fn republished_of(
 }
 
 /// Published manifest entries whose relation no longer resolves, in name
-/// order. It names what the published readers probe and cannot reach, which
-/// includes leaves the catalog has since recorded as dropped. Empty on a
-/// healthy database. Reads only.
-pub async fn published_manifest_absent_leaves(
-    connection: &mut PgConnection,
-) -> Result<Vec<String>, HistoryError> {
-    let sql = format!(
+/// order, on a test session. It names what the published readers probe and
+/// cannot reach, which includes leaves the catalog has since recorded as
+/// dropped. Empty on a healthy database. Reads only.
+///
+/// # Panics
+///
+/// When the statement fails: the test cannot run.
+#[cfg(test)]
+pub(crate) async fn published_manifest_absent_leaves(
+    connection: &mut TestConnection,
+) -> Vec<String> {
+    let sql_text = format!(
         "SELECT leaf_name FROM {TASK_LOOKUP_MANIFEST}
          WHERE to_regclass(leaf_name) IS NULL ORDER BY leaf_name"
     );
-    Ok(sqlx::query_scalar(&sql).fetch_all(connection).await?)
+    sql::query_scalar(&sql_text)
+        .fetch_all(&mut *connection)
+        .await
+        .expect("read the absent manifest leaves")
 }
 
 #[cfg(test)]
 mod publication_contract_tests {
     use super::*;
+    use crate::test_support::sql;
     use serial_test::serial;
 
     /// A publication that fails inside the caller's transaction leaves the
@@ -179,42 +194,42 @@ mod publication_contract_tests {
     #[tokio::test]
     #[serial]
     async fn failed_publication_restores_manifest_and_reader_definitions_on_rollback() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let mut tx = pool.begin().await.unwrap();
         let manifest_sql = "SELECT jsonb_agg(to_jsonb(m) ORDER BY probe_position) FROM horsies_task_lookup_manifest m";
-        let before: serde_json::Value = sqlx::query_scalar(manifest_sql)
-            .fetch_one(tx.as_mut())
+        let before: serde_json::Value = sql::query_scalar(manifest_sql)
+            .fetch_one(&mut *tx)
             .await
             .unwrap();
         assert!(before.as_array().unwrap().len() > 1);
         let readers_sql = "SELECT jsonb_agg(jsonb_build_array(proname, pg_get_functiondef(oid)) ORDER BY proname) FROM pg_proc WHERE proname IN ('horsies_task_history_duplicate_staged', 'horsies_task_provenance_staged', 'horsies_task_detail_staged', 'horsies_task_result_staged')";
-        let readers_before: serde_json::Value = sqlx::query_scalar(readers_sql)
-            .fetch_one(tx.as_mut())
+        let readers_before: serde_json::Value = sql::query_scalar(readers_sql)
+            .fetch_one(&mut *tx)
             .await
             .unwrap();
         assert_eq!(readers_before.as_array().unwrap().len(), 4);
         // A reader without the manifest stamp makes the next call publish
         // instead of answering ALREADY_CURRENT.
-        sqlx::query("COMMENT ON FUNCTION horsies_task_detail_staged(uuid) IS 'stale'")
-            .execute(tx.as_mut())
+        sql::query("COMMENT ON FUNCTION horsies_task_detail_staged(uuid) IS 'stale'")
+            .execute(&mut *tx)
             .await
             .unwrap();
-        sqlx::query("ALTER TABLE horsies_task_lookup_manifest ADD CONSTRAINT test_reject_manifest CHECK (probe_position < 1) NOT VALID").execute(tx.as_mut()).await.unwrap();
-        sqlx::query("SAVEPOINT publication_attempt")
-            .execute(tx.as_mut())
+        sql::query("ALTER TABLE horsies_task_lookup_manifest ADD CONSTRAINT test_reject_manifest CHECK (probe_position < 1) NOT VALID").execute(&mut *tx).await.unwrap();
+        sql::query("SAVEPOINT publication_attempt")
+            .execute(&mut *tx)
             .await
             .unwrap();
-        assert!(StagedLoaderPublisher.republish(tx.as_mut()).await.is_err());
-        sqlx::query("ROLLBACK TO SAVEPOINT publication_attempt")
-            .execute(tx.as_mut())
+        assert!(StagedLoaderPublisher.republish(&mut *tx).await.is_err());
+        sql::query("ROLLBACK TO SAVEPOINT publication_attempt")
+            .execute(&mut *tx)
             .await
             .unwrap();
-        let after: serde_json::Value = sqlx::query_scalar(manifest_sql)
-            .fetch_one(tx.as_mut())
+        let after: serde_json::Value = sql::query_scalar(manifest_sql)
+            .fetch_one(&mut *tx)
             .await
             .unwrap();
-        let readers_after: serde_json::Value = sqlx::query_scalar(readers_sql)
-            .fetch_one(tx.as_mut())
+        let readers_after: serde_json::Value = sql::query_scalar(readers_sql)
+            .fetch_one(&mut *tx)
             .await
             .unwrap();
         assert_eq!(before, after);

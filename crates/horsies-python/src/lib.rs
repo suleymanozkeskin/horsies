@@ -29,8 +29,12 @@
 //!   `PreparedWorker.run` runs it on the main thread (`worker`).
 //! - A `MonitoringHandler` serves the monitoring web app of a `CoreHandle`
 //!   for the FastAPI mount of `create_monitoring_app` (`web_handler`).
+//! - An operation that answers with a value of a core error catalog returns
+//!   the generated class of `horsies._catalog`, built here
+//!   (`catalog_errors`).
 
 mod bridge;
+mod catalog_errors;
 mod child_handle;
 mod child_spec;
 mod core_failures;
@@ -160,11 +164,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::workflow_start::WorkflowStartRequest>()?;
     module.add_class::<operations::workflow_start::WorkflowStarted>()?;
     module.add_class::<operations::workflow_start::WorkflowExists>()?;
-    module.add_class::<operations::workflow_start::WorkflowIdTaken>()?;
-    module.add_class::<operations::workflow_start::WorkflowStartFailed>()?;
     module.add_class::<operations::workflow_resume::WorkflowResumed>()?;
     module.add_class::<operations::workflow_resume::WorkflowNotPaused>()?;
-    module.add_class::<operations::workflow_resume::WorkflowResumeRecoveryFailed>()?;
     module.add_class::<operations::workflow_phase2::NodeFinishRequest>()?;
     module.add_class::<operations::workflow_phase2::NodeFinishedRecord>()?;
     module.add_class::<operations::workflow_phase2::NodeFinishFailed>()?;
@@ -180,7 +181,6 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::claim_settle::SettleFailed>()?;
     module.add_class::<child_handle::CoreChildHandle>()?;
     module.add_class::<scheduler::CoreScheduler>()?;
-    module.add_class::<records::BrokerFailure>()?;
     module.add_class::<records::DatabasePingRecord>()?;
     module.add_class::<records::HandleClosed>()?;
     module.add_class::<operations::connectivity::ConnectivityPassed>()?;
@@ -191,11 +191,6 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::arguments::StartAfterDelay>()?;
     module.add_class::<operations::arguments::StartAt>()?;
     module.add_class::<operations::cancel::TaskCancelledRecord>()?;
-    module.add_class::<operations::cancel::CancelRefusedWorkflowTask>()?;
-    module.add_class::<operations::cancel::CancelRefusedStatus>()?;
-    module.add_class::<operations::cancel::CancelTaskAbsent>()?;
-    module.add_class::<operations::cancel::CancelFailed>()?;
-    module.add_class::<operations::cancel::CancelStoredDataInvalid>()?;
     module.add_class::<operations::attempt_records::AttemptAlreadyApplied>()?;
     module.add_class::<operations::attempt_records::AttemptLostClaim>()?;
     module.add_class::<operations::attempt_records::AttemptSourceStateConflict>()?;
@@ -227,19 +222,13 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::rerun::RerunInputCorruptRecord>()?;
     module.add_class::<operations::rerun::RerunClassNotRegistered>()?;
     module.add_class::<operations::rerun::RerunClientFamilyMismatch>()?;
+    module.add_class::<operations::rerun::RerunUnknownStoredFamily>()?;
     module.add_class::<operations::rerun::RerunCallerKeyRefused>()?;
     module.add_class::<operations::rerun::RerunEnqueuedRecord>()?;
     module.add_class::<operations::rerun::RerunKeyReplayRecord>()?;
     module.add_class::<operations::rerun::RerunKeyConflictRecord>()?;
     module.add_class::<operations::enqueue::EnqueueRequest>()?;
     module.add_class::<operations::enqueue::Enqueued>()?;
-    module.add_class::<operations::enqueue::SendSuppressed>()?;
-    module.add_class::<operations::enqueue::SendAsyncContext>()?;
-    module.add_class::<operations::enqueue::SendValidationFailed>()?;
-    module.add_class::<operations::enqueue::SendEnqueueFailed>()?;
-    module.add_class::<operations::enqueue::SendPayloadMismatch>()?;
-    module.add_class::<operations::enqueue::SendPayloadTooLarge>()?;
-    module.add_class::<operations::enqueue::SendKeyConflict>()?;
     module.add_class::<operations::expiry_and_orphans::PendingExpiryDrained>()?;
     module.add_class::<operations::expiry_and_orphans::PendingExpiryBoundReached>()?;
     module.add_class::<operations::expiry_and_orphans::PendingExpiryFailed>()?;
@@ -301,7 +290,6 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::monitoring_reads::TaskBreakdownQuery>()?;
     module.add_class::<operations::monitoring_reads::WorkflowRunsQuery>()?;
     module.add_class::<operations::monitoring_reads::MonitoringJson>()?;
-    module.add_class::<operations::monitoring_reads::MonitoringFailed>()?;
     module.add_class::<operations::monitoring_reads::TaskDetailAbsent>()?;
     module.add_class::<operations::task_lists::TaskListComplete>()?;
     module.add_class::<operations::task_lists::TaskListTruncated>()?;
@@ -333,7 +321,6 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::workflow_lifecycle::WorkflowCancelled>()?;
     module.add_class::<operations::workflow_lifecycle::WorkflowNotCancellable>()?;
     module.add_class::<operations::workflow_lifecycle::WorkflowAbsent>()?;
-    module.add_class::<operations::workflow_lifecycle::HandleFailed>()?;
     module.add_class::<operations::workflow_reads::WorkflowStatusRead>()?;
     module.add_class::<operations::workflow_reads::WorkflowCompletedRead>()?;
     module.add_class::<operations::workflow_reads::WorkflowEndedRead>()?;

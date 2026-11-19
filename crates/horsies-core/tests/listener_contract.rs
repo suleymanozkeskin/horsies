@@ -1,10 +1,7 @@
-//! The listener contract against a live PostgreSQL: ports of the core rows of
-//! Python `tests/e2e/test_fanout_saturation.py`.
+//! The listener contract against a live PostgreSQL.
 //!
-//! Python's listener hands one queue per `listen()` call; the core's
-//! [`Listener`] hands one [`PayloadSubscription`] per
-//! subscription. The rows that pin Python's queue API (double unsubscribe,
-//! unknown queue, unlisten) and the measurement rows are not core.
+//! The core's [`Listener`] hands one [`PayloadSubscription`] per
+//! subscription.
 //!
 //! `DATABASE_URL` names the server; each test creates its own empty database
 //! through the core's test support (`src/test_support/database.rs`) and drops
@@ -68,7 +65,7 @@ mod test_database;
 /// binary creates empty databases only, so it never runs.
 #[allow(dead_code)]
 async fn install_template(url: &str) {
-    let broker = horsies_core::PostgresBroker::connect(url)
+    let broker = horsies_core::PostgresBroker::connect(url, horsies_core::ClientFamily::Rust)
         .await
         .expect("connect the template broker");
     broker

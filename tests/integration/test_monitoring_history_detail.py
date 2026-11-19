@@ -28,11 +28,11 @@ from tests.integration.test_task_result_history_fallback import (
     populated_history,
     seed_history_task,
 )
-from tests.integration.test_task_history_schema_emission import (
+from tests.integration.isolated_database import (
     MakeDatabase,
     make_database,
 )
-from horsies.core.utils.url import sqlalchemy_url
+from tests.sqlalchemy_url import sqlalchemy_url
 
 __all__ = ['make_database']
 

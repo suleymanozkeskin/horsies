@@ -1,15 +1,10 @@
 """Integration tests for task attempt history (horsies_task_attempts).
 
-Covers attempt-row creation at every terminal-state path:
-1. Success → COMPLETED attempt
-2. Terminal domain failure → FAILED attempt, task error_code set
-3. Retryable domain failure → FAILED attempt with will_retry=True
-4. Worker-level failure → WORKER_FAILURE attempt
-5. Stale runner cleanup → FAILED attempt with WORKER_CRASHED
-5b. Stale runner cleanup with retry policy → FAILED attempt, will_retry=True, task PENDING
-6. Replay idempotency → no duplicate rows on re-finalization
-7. Pre-exec aborts → no attempt row written
-8. Expired PENDING → EXPIRED status with TASK_EXPIRED result, no attempt row
+Covers the attempt rows of the broker's passes and reads:
+1. Stale runner cleanup → FAILED attempt with WORKER_CRASHED
+2. Stale runner cleanup with retry policy → FAILED attempt, will_retry=True, task PENDING
+3. TaskInfo.attempts newest first, live and after the move to history
+4. Expired PENDING → EXPIRED status with TASK_EXPIRED result, no attempt row
 """
 
 from __future__ import annotations
@@ -18,39 +13,28 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.history.archive.attempts import decode_attempt_snapshot
-from horsies.core.history.archive.versions import DecodedArchiveValue
 from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
-from horsies.core.models.app import AppConfig
-from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
     OperationalErrorCode,
-    TaskError,
     TaskResult,
 )
 from horsies.core.types.result import is_err, is_ok
-from horsies.core.worker.config import WorkerConfig
-from horsies.core.worker.worker import Worker
-from tests.dispatch_claim_support import claim_at, row_claim
-from tests.integration.autocommit_support import use_pooled_runners
+from tests.integration.terminal_writes import complete_plain_task
 from tests.integration.conftest import compute_test_command_fingerprint
+from tests.integration.history_seeding import read_attempts
 
 pytestmark = [pytest.mark.integration]
 
 # The claim generation of every RUNNING row seeded here, which the fences of
 # the worker check.
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
-
-NOW = datetime.now(timezone.utc)
 
 
 @pytest.fixture(autouse=True)
@@ -61,68 +45,6 @@ def _ensure_schema(broker: PostgresBroker) -> None:  # noqa: ARG001
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-_TEST_APP: Horsies | None = None
-
-
-def _test_app() -> Horsies:
-    """Lazy-built Horsies app registering all task names this file inserts.
-
-    Production workers wire ``_app`` via ``_locate_app(cfg.app_locator)``;
-    these tests bypass preload and build ``Worker`` directly. Strict-serde
-    phase-6 worker finalize looks up ``task_ok_type`` via
-    ``self._app.tasks[task_name]`` — each manually inserted task name
-    must be registered. ``JsonValue`` covers the mixed ok payloads.
-    """
-    global _TEST_APP
-    if _TEST_APP is None:
-        cfg = AppConfig(
-            broker=PostgresConfig(
-                database_url='postgresql://u:p@localhost/db',
-            )
-        )
-        _TEST_APP = Horsies(cfg)
-
-        @_TEST_APP.task(task_name='attempt_history_test')
-        def _attempt_history_test() -> TaskResult[JsonValue, TaskError]:
-            return TaskResult(ok=None)
-
-        @_TEST_APP.task(task_name='attempt_retry_test')
-        def _attempt_retry_test() -> TaskResult[JsonValue, TaskError]:
-            return TaskResult(ok=None)
-
-        @_TEST_APP.task(task_name='stale_attempt_test')
-        def _stale_attempt_test() -> TaskResult[JsonValue, TaskError]:
-            return TaskResult(ok=None)
-
-        @_TEST_APP.task(task_name='stale_retry_test')
-        def _stale_retry_test() -> TaskResult[JsonValue, TaskError]:
-            return TaskResult(ok=None)
-
-        @_TEST_APP.task(task_name='expire_test')
-        def _expire_test() -> TaskResult[JsonValue, TaskError]:
-            return TaskResult(ok=None)
-
-    return _TEST_APP
-
-
-def _make_worker(engine: AsyncEngine) -> Worker:
-    """Construct a Worker wired to the test DB (no listener needed)."""
-    sf = async_sessionmaker(engine, expire_on_commit=False)
-    cfg = WorkerConfig(
-        dsn='postgresql://u:p@localhost/db',
-        psycopg_dsn='postgresql://u:p@localhost/db',
-        queues=['default'],
-    )
-    worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
-    worker._app = _test_app()
-    # Pin the instance id to the owner id used by the insert helpers so the
-    # finalize-path ownership guard matches.
-    worker.worker_instance_id = 'w-test-1'
-    # Terminal-state writes, one checkout per statement: no worker stop here.
-    use_pooled_runners(worker)
-    return worker
 
 
 async def _insert_running_task(
@@ -225,124 +147,35 @@ async def _insert_retried_attempts(
     await session.commit()
 
 
-async def _insert_running_task_with_retry(
-    session: AsyncSession,
-    *,
-    good_until: datetime,
-    retry_count: int = 0,
-    max_retries: int = 3,
-    intervals: list[int] | None = None,
-    auto_retry_for: list[str] | None = None,
-) -> str:
-    """Insert RUNNING task with retry policy metadata and worker identity."""
-    if intervals is None:
-        intervals = [1, 1, 1]
-    if auto_retry_for is None:
-        auto_retry_for = ['TRANSIENT']
-
-    task_options = json.dumps(
-        {
-            'retry_policy': {
-                'max_retries': max_retries,
-                'intervals': intervals,
-                'backoff_strategy': 'fixed',
-                'jitter': False,
-                'auto_retry_for': auto_retry_for,
-            },
-            'good_until': good_until.isoformat(),
-        }
-    )
-
-    return await _insert_running_task(
-        session,
-        task_name='attempt_retry_test',
-        retry_count=retry_count,
-        max_retries=max_retries,
-        good_until=good_until,
-        task_options=task_options,
-    )
-
-
 async def _get_attempts(
-    session: AsyncSession,
+    broker: PostgresBroker,
     task_id: str,
 ) -> list[dict[str, Any]]:
-    """All attempts for a task, wherever they live, attempt ASC.
+    """All attempts for a task, attempt ASC, as a Python user reads them.
 
-    Live attempt rows while the task is live; after terminalization the
-    move purges them and the history snapshot is their only home — the
-    snapshot preserves every field this suite asserts on.
+    ``read_attempts`` reads them through ``get_task_info_async``: the live
+    attempt rows while the task is live; after terminalization the move
+    purges them and the core decodes the history snapshot, which keeps
+    every field this suite asserts on.
     """
-    result = await session.execute(
-        text("""
-            SELECT task_id, attempt, outcome, will_retry,
-                   started_at, finished_at,
-                   error_code, error_message, failed_reason,
-                   worker_id, worker_hostname, worker_pid, worker_process_name
-            FROM horsies_task_attempts
-            WHERE task_id = CAST(:task_id AS uuid)
-            ORDER BY attempt ASC
-        """),
-        {'task_id': task_id},
-    )
-    rows = result.fetchall()
-    cols = [
-        'task_id',
-        'attempt',
-        'outcome',
-        'will_retry',
-        'started_at',
-        'finished_at',
-        'error_code',
-        'error_message',
-        'failed_reason',
-        'worker_id',
-        'worker_hostname',
-        'worker_pid',
-        'worker_process_name',
+    return [
+        {
+            'task_id': str(attempt.task_id),
+            'attempt': attempt.attempt,
+            'outcome': attempt.outcome.value,
+            'will_retry': attempt.will_retry,
+            'started_at': attempt.started_at,
+            'finished_at': attempt.finished_at,
+            'error_code': attempt.error_code,
+            'error_message': attempt.error_message,
+            'failed_reason': attempt.failed_reason,
+            'worker_id': attempt.worker_id,
+            'worker_hostname': attempt.worker_hostname,
+            'worker_pid': attempt.worker_pid,
+            'worker_process_name': attempt.worker_process_name,
+        }
+        for attempt in await read_attempts(broker, task_id)
     ]
-    if rows:
-        return [dict(zip(cols, row)) for row in rows]
-    snapshot = (
-        await session.execute(
-            text("""
-                SELECT attempt_archive_version, attempt_snapshot,
-                       attempt_snapshot_digest
-                FROM horsies_task_history
-                WHERE task_id = CAST(:task_id AS uuid)
-            """),
-            {'task_id': task_id},
-        )
-    ).first()
-    if snapshot is None:
-        return []
-    decoded = decode_attempt_snapshot(
-        version=snapshot.attempt_archive_version,
-        payload=bytes(snapshot.attempt_snapshot),
-        digest=bytes(snapshot.attempt_snapshot_digest),
-    )
-    match decoded:
-        case DecodedArchiveValue(value=records):
-            return [
-                {
-                    'task_id': task_id,
-                    'attempt': record.attempt,
-                    'outcome': record.outcome,
-                    'will_retry': record.will_retry,
-                    'started_at': record.started_at,
-                    'finished_at': record.finished_at,
-                    'error_code': record.error_code,
-                    'error_message': record.error_message,
-                    'failed_reason': record.failed_reason,
-                    'worker_id': record.worker_id,
-                    'worker_hostname': record.worker_hostname,
-                    'worker_pid': record.worker_pid,
-                    'worker_process_name': record.worker_process_name,
-                }
-                for record in records
-            ]
-        case _:
-            raise AssertionError(f'corrupt attempt snapshot: {decoded!r}')
 
 
 async def _get_task_error_code(
@@ -368,218 +201,8 @@ def _serialize_ok(value: object) -> str:
     return r.ok_value
 
 
-def _serialize_err(error_code: str, message: str) -> str:
-    """Build the strict ``__h_task_result__`` envelope for a seeded err."""
-    r = dumps_json(
-        encode_task_result(
-            TaskResult(err=TaskError(error_code=error_code, message=message)),
-            JsonValue,
-        )
-    )
-    assert not is_err(r)
-    return r.ok_value
-
-
 # ---------------------------------------------------------------------------
-# 1. Success → COMPLETED attempt
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio(loop_scope='function')
-async def test_success_writes_completed_attempt(
-    engine: AsyncEngine,
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """Successful TaskResult writes one COMPLETED attempt row."""
-    task_id = await _insert_running_task(session)
-    worker = _make_worker(engine)
-    result_json = _serialize_ok(42)
-
-    result = await worker._persist_task_terminal_state(
-        task_id=task_id,
-        now=NOW,
-        ok=True,
-        result_json_str=result_json,
-        failed_reason=None,
-        task_name='attempt_history_test',
-        queue_name='default',
-        is_workflow_task=False,
-        claim=claim_at(CLAIMED_AT),
-    )
-
-    assert is_ok(result)
-    attempts = await _get_attempts(session, task_id)
-    assert len(attempts) == 1
-
-    att = attempts[0]
-    assert att['attempt'] == 1
-    assert att['outcome'] == 'COMPLETED'
-    assert att['will_retry'] is False
-    assert att['error_code'] is None
-    assert att['error_message'] is None
-    assert att['failed_reason'] is None
-    assert att['worker_id'] == 'w-test-1'
-    assert att['worker_hostname'] == 'host-test'
-    assert att['worker_pid'] == 9999
-    assert att['worker_process_name'] == 'proc-test'
-    assert att['started_at'] is not None
-    assert att['finished_at'] is not None
-
-
-# ---------------------------------------------------------------------------
-# 2. Terminal domain failure → FAILED attempt + task error_code
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio(loop_scope='function')
-async def test_terminal_failure_writes_failed_attempt_and_error_code(
-    engine: AsyncEngine,
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """Terminal error writes FAILED attempt and sets horsies_tasks.error_code."""
-    task_id = await _insert_running_task(session)
-    worker = _make_worker(engine)
-    result_json = _serialize_err('DOMAIN_ERROR', 'something broke')
-
-    result = await worker._persist_task_terminal_state(
-        task_id=task_id,
-        now=NOW,
-        ok=True,
-        result_json_str=result_json,
-        failed_reason=None,
-        task_name='attempt_history_test',
-        queue_name='default',
-        is_workflow_task=False,
-        claim=claim_at(CLAIMED_AT),
-    )
-
-    assert is_ok(result)
-    # A plain task owes no phase 2: the failure write sent its capacity wake.
-    assert result.ok_value is None
-
-    attempts = await _get_attempts(session, task_id)
-    assert len(attempts) == 1
-
-    att = attempts[0]
-    assert att['attempt'] == 1
-    assert att['outcome'] == 'FAILED'
-    assert att['will_retry'] is False
-    assert att['error_code'] == 'DOMAIN_ERROR'
-    assert att['error_message'] == 'something broke'
-    assert att['failed_reason'] is None
-
-    # Task row must also have error_code
-    task_ec = await _get_task_error_code(session, task_id)
-    assert task_ec == 'DOMAIN_ERROR'
-
-
-# ---------------------------------------------------------------------------
-# 3. Retryable failure → FAILED attempt with will_retry=True
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio(loop_scope='function')
-async def test_retryable_failure_writes_attempt_with_will_retry(
-    engine: AsyncEngine,
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """Retryable error with capacity writes FAILED attempt, will_retry=True,
-    and leaves horsies_tasks.error_code as NULL."""
-    good_until = datetime.now(timezone.utc) + timedelta(hours=1)
-    task_id = await _insert_running_task_with_retry(
-        session,
-        good_until=good_until,
-        retry_count=0,
-        max_retries=3,
-        intervals=[1, 1, 1],
-        auto_retry_for=['TRANSIENT'],
-    )
-    worker = _make_worker(engine)
-    result_json = _serialize_err('TRANSIENT', 'retryable error')
-
-    result = await worker._persist_task_terminal_state(
-        task_id=task_id,
-        now=NOW,
-        ok=True,
-        result_json_str=result_json,
-        failed_reason=None,
-        task_name='attempt_retry_test',
-        queue_name='default',
-        is_workflow_task=False,
-        claim=await row_claim(session, task_id),
-    )
-
-    assert is_ok(result)
-    assert result.ok_value is None  # retry path returns None
-
-    attempts = await _get_attempts(session, task_id)
-    assert len(attempts) == 1
-
-    att = attempts[0]
-    assert att['attempt'] == 1
-    assert att['outcome'] == 'FAILED'
-    assert att['will_retry'] is True
-    assert att['error_code'] == 'TRANSIENT'
-    assert att['error_message'] == 'retryable error'
-
-    # Task error_code stays NULL during retry
-    task_ec = await _get_task_error_code(session, task_id)
-    assert task_ec is None
-
-
-# ---------------------------------------------------------------------------
-# 4. Worker-level failure → WORKER_FAILURE attempt
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio(loop_scope='function')
-async def test_worker_failure_writes_worker_failure_attempt(
-    engine: AsyncEngine,
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """Worker crash (ok=False) writes one WORKER_FAILURE attempt row."""
-    task_id = await _insert_running_task(session)
-    worker = _make_worker(engine)
-
-    result = await worker._persist_task_terminal_state(
-        task_id=task_id,
-        now=NOW,
-        ok=False,
-        result_json_str='',
-        failed_reason='Segfault in child',
-        task_name='attempt_history_test',
-        queue_name='default',
-        is_workflow_task=False,
-        claim=claim_at(CLAIMED_AT),
-    )
-
-    assert is_ok(result)
-    # A plain task owes no phase 2: the failure write sent its capacity wake.
-    assert result.ok_value is None
-
-    attempts = await _get_attempts(session, task_id)
-    assert len(attempts) == 1
-
-    att = attempts[0]
-    assert att['attempt'] == 1
-    assert att['outcome'] == 'WORKER_FAILURE'
-    assert att['will_retry'] is False
-    assert att['error_code'] == 'BROKER_ERROR'
-    assert att['error_message'] == 'Segfault in child'
-    assert att['failed_reason'] == 'Segfault in child'
-    assert att['worker_id'] == 'w-test-1'
-
-    # Task carries the synthetic worker-failure error for workflow/capacity phase 2.
-    task_ec = await _get_task_error_code(session, task_id)
-    assert task_ec == 'BROKER_ERROR'
-
-
-# ---------------------------------------------------------------------------
-# 5. Stale runner cleanup → FAILED attempt with WORKER_CRASHED
+# 1. Stale runner cleanup → FAILED attempt with WORKER_CRASHED
 # ---------------------------------------------------------------------------
 
 
@@ -589,7 +212,11 @@ async def test_stale_cleanup_writes_failed_attempt_worker_crashed(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """mark_stale_tasks_as_failed writes one FAILED attempt with WORKER_CRASHED."""
+    """mark_stale_tasks_as_failed writes one FAILED attempt with WORKER_CRASHED.
+
+    No worker runs here, so no reaper runs the stale RUNNING pass, as with
+    ``auto_fail_stale_running=False``: the call runs the pass on demand.
+    """
     task_id = str(uuid.uuid4())
     sent_at, fingerprint = compute_test_command_fingerprint(task_name='stale_attempt_test')
     # Insert a RUNNING task with started_at far in the past and no heartbeat
@@ -626,7 +253,7 @@ async def test_stale_cleanup_writes_failed_attempt_worker_crashed(
     assert is_ok(result)
     assert result.ok_value >= 1
 
-    attempts = await _get_attempts(session, task_id)
+    attempts = await _get_attempts(broker, task_id)
     assert len(attempts) == 1
 
     att = attempts[0]
@@ -647,7 +274,7 @@ async def test_stale_cleanup_writes_failed_attempt_worker_crashed(
 
 
 # ---------------------------------------------------------------------------
-# 5b. Stale runner cleanup with retry policy → FAILED attempt, will_retry=True
+# 2. Stale runner cleanup with retry policy → FAILED attempt, will_retry=True
 # ---------------------------------------------------------------------------
 
 
@@ -657,7 +284,11 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """mark_stale_tasks_as_failed retries when WORKER_CRASHED is in auto_retry_for."""
+    """mark_stale_tasks_as_failed retries when WORKER_CRASHED is in auto_retry_for.
+
+    No worker runs here, so no reaper runs the stale RUNNING pass, as with
+    ``auto_fail_stale_running=False``: the call runs the pass on demand.
+    """
     task_id = str(uuid.uuid4())
     sent_at, fingerprint = compute_test_command_fingerprint(task_name='stale_retry_test')
     stale_started_at = datetime.now(timezone.utc) - timedelta(minutes=30)
@@ -721,7 +352,7 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
     assert row[3] is None, 'error_code should be cleared on retry'
 
     # Attempt row should say will_retry=True
-    attempts = await _get_attempts(session, task_id)
+    attempts = await _get_attempts(broker, task_id)
     assert len(attempts) == 1
     att = attempts[0]
     assert att['attempt'] == 1
@@ -732,218 +363,8 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
 
 
 # ---------------------------------------------------------------------------
-# 6. Replay idempotency → no duplicate attempt rows
+# 3. TaskInfo.attempts, live and after the move to history
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio(loop_scope='function')
-async def test_replay_does_not_create_duplicate_attempt(
-    engine: AsyncEngine,
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """Calling _persist_task_terminal_state twice for the same task
-    results in exactly one attempt row due to UPSERT idempotency."""
-    task_id = await _insert_running_task(session)
-    worker = _make_worker(engine)
-    result_json = _serialize_ok('first')
-
-    # First finalization: succeeds
-    r1 = await worker._persist_task_terminal_state(
-        task_id=task_id,
-        now=NOW,
-        ok=True,
-        result_json_str=result_json,
-        failed_reason=None,
-        task_name='attempt_history_test',
-        queue_name='default',
-        is_workflow_task=False,
-        claim=claim_at(CLAIMED_AT),
-    )
-    assert is_ok(r1)
-
-    attempts_after_first = await _get_attempts(session, task_id)
-    assert len(attempts_after_first) == 1
-
-    # Second finalization: task is no longer RUNNING → SELECT FOR UPDATE
-    # returns no row → early exit with Ok(None), no attempt written.
-    r2 = await worker._persist_task_terminal_state(
-        task_id=task_id,
-        now=NOW,
-        ok=True,
-        result_json_str=result_json,
-        failed_reason=None,
-        task_name='attempt_history_test',
-        queue_name='default',
-        is_workflow_task=False,
-        claim=claim_at(CLAIMED_AT),
-    )
-    assert is_ok(r2)
-    assert r2.ok_value is None  # guard caught it
-
-    attempts_after_second = await _get_attempts(session, task_id)
-    assert len(attempts_after_second) == 1  # still just one
-
-
-# ---------------------------------------------------------------------------
-# 7. Pre-exec aborts → no attempt row
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio(loop_scope='function')
-async def test_claim_lost_writes_no_attempt(
-    engine: AsyncEngine,
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """CLAIM_LOST abort does not write any attempt row."""
-    task_id = await _insert_running_task(session)
-    worker = _make_worker(engine)
-
-    result = await worker._persist_task_terminal_state(
-        task_id=task_id,
-        now=NOW,
-        ok=False,
-        result_json_str='',
-        failed_reason='CLAIM_LOST',
-        task_name='attempt_history_test',
-        queue_name='default',
-        is_workflow_task=False,
-        claim=claim_at(CLAIMED_AT),
-    )
-
-    assert is_ok(result)
-    assert result.ok_value is None
-    attempts = await _get_attempts(session, task_id)
-    assert len(attempts) == 0
-
-
-@pytest.mark.asyncio(loop_scope='function')
-async def test_workflow_stopped_error_code_writes_a_failed_attempt(
-    engine: AsyncEngine,
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """WORKFLOW_STOPPED is no task code: a result that carries it does not
-    decode and writes a FAILED attempt with WORKER_SERIALIZATION_ERROR."""
-    task_id = await _insert_running_task(session)
-    worker = _make_worker(engine)
-    # TaskError refuses the code, so the stored text is written by hand.
-    result_json = (
-        '{"__h_task_result__":true,"ok":null,'
-        '"err":{"exception":null,"error_code":"WORKFLOW_STOPPED",'
-        '"data":null,"message":"workflow was stopped"}}'
-    )
-
-    result = await worker._persist_task_terminal_state(
-        task_id=task_id,
-        now=NOW,
-        ok=True,
-        result_json_str=result_json,
-        failed_reason=None,
-        task_name='attempt_history_test',
-        queue_name='default',
-        is_workflow_task=False,
-        claim=claim_at(CLAIMED_AT),
-    )
-
-    assert is_ok(result)
-    assert result.ok_value is None
-    attempts = await _get_attempts(session, task_id)
-    assert len(attempts) == 1
-    attempt = attempts[0]
-    assert attempt['outcome'] == 'FAILED'
-    assert attempt['will_retry'] is False
-    assert attempt['error_code'] == 'WORKER_SERIALIZATION_ERROR'
-    assert 'reserved error code name' in attempt['error_message']
-
-
-# ---------------------------------------------------------------------------
-# 8. Corrupt JSON → FAILED attempt with WORKER_SERIALIZATION_ERROR
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio(loop_scope='function')
-async def test_corrupt_json_writes_serialization_error_attempt(
-    engine: AsyncEngine,
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """Corrupt result JSON writes a FAILED attempt with WORKER_SERIALIZATION_ERROR."""
-    task_id = await _insert_running_task(session)
-    worker = _make_worker(engine)
-
-    result = await worker._persist_task_terminal_state(
-        task_id=task_id,
-        now=NOW,
-        ok=True,
-        result_json_str='not json {',
-        failed_reason=None,
-        task_name='attempt_history_test',
-        queue_name='default',
-        is_workflow_task=False,
-        claim=claim_at(CLAIMED_AT),
-    )
-
-    assert is_ok(result)
-    attempts = await _get_attempts(session, task_id)
-    assert len(attempts) == 1
-
-    att = attempts[0]
-    assert att['attempt'] == 1
-    assert att['outcome'] == 'FAILED'
-    assert att['will_retry'] is False
-    assert att['error_code'] == 'WORKER_SERIALIZATION_ERROR'
-    assert att['error_message'] is not None
-    assert 'corrupt' in att['error_message'].lower()
-
-    task_ec = await _get_task_error_code(session, task_id)
-    assert task_ec == 'WORKER_SERIALIZATION_ERROR'
-
-
-# ---------------------------------------------------------------------------
-# 9. Attempt number increments with retry_count
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio(loop_scope='function')
-async def test_attempt_number_reflects_retry_count(
-    engine: AsyncEngine,
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """A task with retry_count=2 writes attempt=3."""
-    task_id = await _insert_running_task(session, retry_count=2)
-    # The attempts the two retries already recorded. Every path that
-    # raises retry_count writes its own attempt row first, so a live row
-    # at retry_count=2 without attempts 1 and 2 is a shape the engine
-    # never produces — and the archive rejects it, because the snapshot
-    # is decoded as a contiguous sequence from 1.
-    await _insert_retried_attempts(session, task_id, through=2)
-    worker = _make_worker(engine)
-    result_json = _serialize_ok('after retries')
-
-    result = await worker._persist_task_terminal_state(
-        task_id=task_id,
-        now=NOW,
-        ok=True,
-        result_json_str=result_json,
-        failed_reason=None,
-        task_name='attempt_history_test',
-        queue_name='default',
-        is_workflow_task=False,
-        claim=claim_at(CLAIMED_AT),
-    )
-
-    assert is_ok(result)
-    attempts = await _get_attempts(session, task_id)
-    assert [attempt['attempt'] for attempt in attempts] == [1, 2, 3]
-    assert attempts[-1]['outcome'] == 'COMPLETED'
-    assert [attempt['will_retry'] for attempt in attempts] == [
-        True,
-        True,
-        False,
-    ]
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -965,20 +386,15 @@ async def test_task_info_lists_attempts_newest_first_live_and_history(
     assert live_info.attempts is not None
     assert [a.attempt for a in live_info.attempts] == [2, 1]
 
-    worker = _make_worker(engine)
-    persist = worker._persist_task_terminal_state  # pyright: ignore[reportPrivateUsage]
-    finished = await persist(
-        task_id=task_id,
-        now=NOW,
-        ok=True,
-        result_json_str=_serialize_ok('after retries'),
-        failed_reason=None,
-        task_name='attempt_history_test',
-        queue_name='default',
-        is_workflow_task=False,
-        claim=claim_at(CLAIMED_AT),
-    )
-    assert is_ok(finished)
+    # The worker's plain success moves the row to history.
+    async with engine.begin() as connection:
+        outcome = await complete_plain_task(
+            connection,
+            task_id,
+            worker_id='w-test-1',
+            result_json=_serialize_ok('after retries'),
+        )
+    assert outcome == 'APPLIED'
 
     history = await broker.get_task_info_async(
         uuid.UUID(task_id), include_attempts=True,
@@ -993,7 +409,7 @@ async def test_task_info_lists_attempts_newest_first_live_and_history(
 
 
 # ---------------------------------------------------------------------------
-# 8. Expired PENDING task → EXPIRED status with TASK_EXPIRED result
+# 4. Expired PENDING task → EXPIRED status with TASK_EXPIRED result
 # ---------------------------------------------------------------------------
 
 
@@ -1049,5 +465,5 @@ async def test_expire_pending_task_transitions_to_expired(
     assert 'TASK_EXPIRED' in row[2]
 
     # No attempt row should exist (task never started)
-    attempts = await _get_attempts(session, task_id)
+    attempts = await _get_attempts(broker, task_id)
     assert len(attempts) == 0

@@ -1,8 +1,9 @@
 //! Exit codes of child processes: part of the protocol. The supervisor reads
 //! them to name how a child ended; the Python child and the Rust child host
-//! exit with them. Code 77 belongs to the worker process itself
-//! ([`crate::worker::runner_beats::RUNNER_HEARTBEAT_LOST_EXIT_CODE`]); no
-//! child uses it.
+//! exit with them. Codes 77 and 79 belong to the worker process itself
+//! ([`crate::worker::runner_beats::RUNNER_HEARTBEAT_LOST_EXIT_CODE`],
+//! [`crate::worker::liveness::LIVENESS_LOCK_LOST_EXIT_CODE`]); no child uses
+//! them.
 
 /// The parent is gone: the socket reached EOF, or the parent-death check
 /// found another parent.
@@ -20,6 +21,15 @@ pub const BOOT_FAILED_EXIT_CODE: i32 = 75;
 pub const REPARENT_FAILED_EXIT_CODE: i32 = 76;
 /// The init frame named another protocol version than the child speaks.
 pub const PROTOCOL_MISMATCH_EXIT_CODE: i32 = 78;
+/// The core of the child stopped (a panic in a core background task), or
+/// the process was forked after its core started. The child ends itself at
+/// its next core call: at the start of a task, after it reported the stop
+/// with `OWNERSHIP_UNCONFIRMED` so that the worker released the claim (no
+/// attempt charged); after a task body, with no report, so that the
+/// crashed-child path and the retry policy of the task apply. The child's
+/// last log line names the cause. A child that ends with this code while it
+/// holds no task is replaced.
+pub const CORE_STOPPED_EXIT_CODE: i32 = 80;
 /// A start hook of the child failed or hung.
 pub const CHILD_HOOK_FAILED_EXIT_CODE: i32 = 173;
 
@@ -33,12 +43,13 @@ pub enum ChildExitCode {
     BootFailed,
     ReparentFailed,
     ProtocolMismatch,
+    CoreStopped,
     ChildHookFailed,
 }
 
 impl ChildExitCode {
     /// Every code of the protocol, for checks over the whole set.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::ParentGone,
         Self::BadParentFrame,
         Self::BadArguments,
@@ -46,6 +57,7 @@ impl ChildExitCode {
         Self::BootFailed,
         Self::ReparentFailed,
         Self::ProtocolMismatch,
+        Self::CoreStopped,
         Self::ChildHookFailed,
     ];
 
@@ -58,6 +70,7 @@ impl ChildExitCode {
             Self::BootFailed => BOOT_FAILED_EXIT_CODE,
             Self::ReparentFailed => REPARENT_FAILED_EXIT_CODE,
             Self::ProtocolMismatch => PROTOCOL_MISMATCH_EXIT_CODE,
+            Self::CoreStopped => CORE_STOPPED_EXIT_CODE,
             Self::ChildHookFailed => CHILD_HOOK_FAILED_EXIT_CODE,
         }
     }

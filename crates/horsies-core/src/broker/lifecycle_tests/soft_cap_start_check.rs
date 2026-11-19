@@ -1,5 +1,3 @@
-//! Port of Python `tests/integration/test_soft_cap_start_check.py`.
-//!
 //! In soft-cap mode the claim counts only RUNNING rows against a queue's
 //! `max_concurrency`, so passes that follow each other claim rows of a capped
 //! queue while the rows that they claimed before are still CLAIMED. Each pass
@@ -21,15 +19,15 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::claims::{claim_pass, ClaimClasses, ClaimPassRequest};
 use crate::broker::core_rows::StatementLog;
-use crate::broker::pools::core_pool_for_test_pool;
+use crate::broker::pools::core_pool_for_test_url;
 use crate::broker::PostgresBroker;
 use crate::core::task::Execution;
+use crate::test_support::sql::{self, TestPool};
 use crate::worker::executor::slots::FreeCapacity;
 use crate::worker::queue_cap_hold::{admit_held_rows, QueueCapHold, StartCheckCaps, StartedClaim};
 
@@ -67,9 +65,9 @@ impl Names {
 
 /// One PENDING row of `queue_name` (Python `_seed_pending`); an older row is
 /// claimed first.
-async fn seed_pending(pool: &PgPool, queue_name: &str, age_s: i32) -> Uuid {
+async fn seed_pending(pool: &TestPool, queue_name: &str, age_s: i32) -> Uuid {
     let task_id = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -100,8 +98,8 @@ async fn seed_pending(pool: &PgPool, queue_name: &str, age_s: i32) -> Uuid {
 }
 
 /// Python `_set_running`: the row is RUNNING on `worker_id`.
-async fn set_running(pool: &PgPool, task_id: Uuid, worker_id: &str) {
-    sqlx::query(
+async fn set_running(pool: &TestPool, task_id: Uuid, worker_id: &str) {
+    sql::query(
         "UPDATE horsies_tasks
          SET status = 'RUNNING', claimed_at = NOW(), claim_expires_at = NULL,
              claimed_by_worker_id = $2, started_at = NOW(), updated_at = NOW()
@@ -115,8 +113,8 @@ async fn set_running(pool: &PgPool, task_id: Uuid, worker_id: &str) {
 }
 
 /// The status and the owner of each row.
-async fn statuses(pool: &PgPool, task_ids: &[Uuid]) -> HashMap<Uuid, (String, Option<String>)> {
-    let rows: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
+async fn statuses(pool: &TestPool, task_ids: &[Uuid]) -> HashMap<Uuid, (String, Option<String>)> {
+    let rows: Vec<(Uuid, String, Option<String>)> = sql::query_as(
         "SELECT id, status::text, claimed_by_worker_id::text FROM horsies_tasks WHERE id = ANY($1)",
     )
     .bind(task_ids)
@@ -213,9 +211,9 @@ impl SoftCapWorker {
     /// One pass: the claim, each row of an uncapped queue submitted, each
     /// row of the capped queue held, then the start check with the free
     /// slots after the submits.
-    async fn pass(&mut self, pool: &PgPool) {
+    async fn pass(&mut self, pool: &TestPool) {
         let claimed = claim_pass(
-            &core_pool_for_test_pool(pool),
+            &core_pool_for_test_url(pool.url()),
             StatementLog::Off,
             &self.request,
         )
@@ -228,7 +226,7 @@ impl SoftCapWorker {
                 false => self.submit(row.id),
             }
         }
-        let broker = PostgresBroker::from_pool(pool.clone());
+        let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
         let free = self.free_capacity();
         let admitted = admit_held_rows(&broker, &self.names.worker_id, &mut self.hold, || free)
             .await
@@ -239,7 +237,7 @@ impl SoftCapWorker {
         }
     }
 
-    async fn passes(&mut self, pool: &PgPool, count: u32) {
+    async fn passes(&mut self, pool: &TestPool, count: u32) {
         for _ in 0..count {
             self.pass(pool).await;
         }

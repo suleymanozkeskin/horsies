@@ -5,7 +5,6 @@
 use std::time::Duration;
 
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::{
@@ -19,6 +18,7 @@ use crate::core::{
     OnError, SubWorkflowSummary, TaskResult, WorkflowSpec, WorkflowStatus, WorkflowTaskStatus,
 };
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::{self, TestPool};
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::lifecycle::expire_paused_workflows;
 use crate::workflow_engine::query::NodesRead;
@@ -40,7 +40,7 @@ fn single(name: &str, on_error: OnError) -> WorkflowSpec {
     single
 }
 
-async fn status(pool: &PgPool, workflow_id: Uuid) -> WorkflowStatus {
+async fn status(pool: &TestPool, workflow_id: Uuid) -> WorkflowStatus {
     handle(pool, workflow_id).status().await.expect("status()")
 }
 
@@ -140,25 +140,23 @@ async fn status_of_an_unknown_id_is_workflow_not_found() {
         .await
         .expect_err("an unknown id has no status");
 
-    assert_eq!(error.code, HandleErrorCode::WorkflowNotFound);
-    assert!(!error.retryable);
-    assert_eq!(error.workflow_id, workflow_id);
+    assert_eq!(error.code(), HandleErrorCode::WorkflowNotFound);
+    assert!(!error.retryable());
+    assert_eq!(error.workflow_id(), workflow_id);
 }
 
 /// A PAUSED workflow of one failed node, set back an hour so that a paused
 /// expiry with a short age selects it.
-async fn paused_an_hour_ago(pool: &PgPool, name: &str) -> Uuid {
+async fn paused_an_hour_ago(pool: &TestPool, name: &str) -> Uuid {
     let child_specs = TestChildSpecs::empty();
     let workflow_id = start(pool, &single(name, OnError::Pause), &child_specs).await;
     let _task = finish_node(pool, workflow_id, 0, &err("FAIL", "pause"), &child_specs).await;
     assert_eq!(status(pool, workflow_id).await, WorkflowStatus::Paused);
-    sqlx::query(
-        "UPDATE horsies_workflows SET updated_at = NOW() - INTERVAL '1 hour' WHERE id = $1",
-    )
-    .bind(workflow_id)
-    .execute(pool)
-    .await
-    .expect("set the pause back an hour");
+    sql::query("UPDATE horsies_workflows SET updated_at = NOW() - INTERVAL '1 hour' WHERE id = $1")
+        .bind(workflow_id)
+        .execute(pool)
+        .await
+        .expect("set the pause back an hour");
     workflow_id
 }
 
@@ -261,8 +259,64 @@ async fn get_after_cancel_gives_workflow_cancelled() {
     assert_eq!(code(error_of(&got)).as_deref(), Some("WORKFLOW_CANCELLED"));
 }
 
+/// `TestWorkflowHandleGet.test_get_completed_returns_result`: a workflow of
+/// one node whose output is that node gives the node's result at `get()`.
+#[tokio::test]
+#[serial]
+async fn get_of_a_completed_workflow_gives_the_result_of_its_output_node() {
+    let pool = shared_pool().await;
+    let child_specs = TestChildSpecs::empty();
+    let mut workflow_spec = spec("get_completed", vec![task_node(0, "get_completed_a")]);
+    workflow_spec.output_index = Some(0);
+    let workflow_id = start(&pool, &workflow_spec, &child_specs).await;
+    let _a = finish_node(
+        &pool,
+        workflow_id,
+        0,
+        &ok(serde_json::json!(100)),
+        &child_specs,
+    )
+    .await;
+
+    let got = handle(&pool, workflow_id)
+        .get(Some(GET_WAIT))
+        .await
+        .expect("the result read");
+
+    match got {
+        TaskResult::Ok(value) => assert_eq!(value, serde_json::json!(100)),
+        TaskResult::Err(error) => panic!("a completed workflow gave an error: {error:?}"),
+    }
+}
+
+/// `TestWorkflowHandleGet.test_get_failed_returns_error`: a workflow whose
+/// one node fails gives the node's error at `get()`.
+#[tokio::test]
+#[serial]
+async fn get_of_a_failed_workflow_gives_the_error_of_its_node() {
+    let pool = shared_pool().await;
+    let child_specs = TestChildSpecs::empty();
+    let workflow_spec = spec("get_failed", vec![task_node(0, "get_failed_a")]);
+    let workflow_id = start(&pool, &workflow_spec, &child_specs).await;
+    let _a = finish_node(
+        &pool,
+        workflow_id,
+        0,
+        &err("TEST_ERROR", "Test failure"),
+        &child_specs,
+    )
+    .await;
+
+    let got = handle(&pool, workflow_id)
+        .get(Some(GET_WAIT))
+        .await
+        .expect("the result read");
+
+    assert_eq!(code(error_of(&got)).as_deref(), Some("TEST_ERROR"));
+}
+
 /// A finished chain: A gave 10 and B gave 20.
-async fn finished_chain(pool: &PgPool, name: &str) -> Uuid {
+async fn finished_chain(pool: &TestPool, name: &str) -> Uuid {
     let child_specs = TestChildSpecs::empty();
     let workflow_id = start(pool, &chain(name), &child_specs).await;
     let _a = finish_node(
@@ -461,7 +515,7 @@ async fn a_task_node_has_no_child_and_no_summary() {
 /// A RUNNING parent whose sub-workflow node 0 has `status` and is linked to
 /// a child workflow with `child_status`. Returns the parent and the child.
 async fn seed_linked_child(
-    pool: &PgPool,
+    pool: &TestPool,
     node_status: &'static str,
     child_status: &'static str,
     summary: Option<&str>,
@@ -524,7 +578,7 @@ async fn a_finished_sub_workflow_node_gives_its_summary() {
 
 /// The stored sub-workflow summary of the node 0 of `parent`, as the node
 /// read returns it.
-async fn stored_summary_of(pool: &PgPool, parent: Uuid) -> Option<String> {
+async fn stored_summary_of(pool: &TestPool, parent: Uuid) -> Option<String> {
     match handle(pool, parent).nodes().await.expect("the node read") {
         NodesRead::Nodes(nodes) => nodes[0].sub_workflow_summary.clone(),
         NodesRead::WorkflowAbsent => panic!("the parent {parent} has a row"),
@@ -650,15 +704,15 @@ async fn the_database_refuses_an_unknown_workflow_status() {
     let pool = shared_pool().await;
     let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
 
-    let refused = sqlx::query("UPDATE horsies_workflows SET status = 'BOGUS' WHERE id = $1")
+    let refused = sql::query("UPDATE horsies_workflows SET status = 'BOGUS' WHERE id = $1")
         .bind(workflow_id)
         .execute(&pool)
         .await
         .expect_err("the status CHECK refuses the value");
 
     match refused {
-        sqlx::Error::Database(error) => {
-            assert_eq!(error.code().as_deref(), Some("23514"));
+        sql::Error::Database(error) => {
+            assert_eq!(Some(error.code().code()), Some("23514"));
             assert_eq!(error.constraint(), Some("horsies_workflows_status_known"));
         }
         other => panic!("expected a check violation, got {other:?}"),
@@ -677,9 +731,9 @@ async fn a_lost_database_makes_status_give_a_retryable_db_operation_failed() {
         .await
         .expect_err("status() with no database");
 
-    assert_eq!(error.code, HandleErrorCode::DbOperationFailed);
-    assert!(error.retryable);
-    assert_eq!(error.workflow_id, workflow_id);
+    assert_eq!(error.code(), HandleErrorCode::DbOperationFailed);
+    assert!(error.retryable());
+    assert_eq!(error.workflow_id(), workflow_id);
 }
 
 /// `TestWorkflowHandleInfraErrors.test_get_db_error_returns_taskresult_broker_error`:
@@ -692,10 +746,7 @@ async fn a_lost_database_makes_the_result_read_fail_retryably() {
         .await
         .expect_err("the result read with no database");
 
-    assert!(
-        matches!(error, WorkflowError::Database(_) | WorkflowError::Broker(_)),
-        "{error:?}"
-    );
+    assert!(matches!(error, WorkflowError::Broker(_)), "{error:?}");
     assert!(error.is_retryable(), "{error:?}");
 }
 
@@ -707,8 +758,8 @@ async fn a_lost_database_makes_cancel_give_a_retryable_db_operation_failed() {
         .await
         .expect_err("cancel() with no database");
 
-    assert_eq!(error.code, HandleErrorCode::DbOperationFailed);
-    assert!(error.retryable);
+    assert_eq!(error.code(), HandleErrorCode::DbOperationFailed);
+    assert!(error.retryable());
 }
 
 /// `TestWorkflowHandleInfraErrors.test_results_db_error_returns_err_db_operation_failed`
@@ -721,8 +772,8 @@ async fn a_lost_database_makes_results_give_db_operation_failed() {
         .await
         .expect_err("results() with no database");
 
-    assert_eq!(error.code, HandleErrorCode::DbOperationFailed);
-    assert_eq!(error.workflow_id, workflow_id);
+    assert_eq!(error.code(), HandleErrorCode::DbOperationFailed);
+    assert_eq!(error.workflow_id(), workflow_id);
 }
 
 /// `TestListenerFallbackContract.test_handle_get_async_polls_on_listener_err`:

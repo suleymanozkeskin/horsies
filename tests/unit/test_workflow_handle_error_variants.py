@@ -4,9 +4,10 @@
 ``HandleOperationError`` is a union with one frozen variant per
 ``HandleErrorCode`` member. A variant's repr hides the message and the
 cause. Every variant carries ``workflow_id``. Stored data that does not
-parse is ``HandleStoredDataInvalid`` with its parse error. ``get()`` folds a
-status read failure into a ``TaskResult``, and the web routes map each
-variant onto one response.
+parse is ``HandleStoredDataInvalid`` with its parse error. A failure that
+the core answers is its generated class with the core's message, returned
+as it is. ``get()`` folds a status read failure into a ``TaskResult``, and
+the web routes map each variant onto one response.
 """
 
 from __future__ import annotations
@@ -14,14 +15,12 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from typing import Any, get_args
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy.exc import OperationalError
 
 import horsies._core as core
-from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.codec.json_io import EmptyJsonTextError, SerializationError
 from horsies.core.models.tasks import OperationalErrorCode, RetrievalCode
 from horsies.core.models.workflow.enums import WorkflowStatus
@@ -30,20 +29,13 @@ from horsies.core.models.workflow.handle_types import (
     HandleAsyncContext,
     HandleDbOperationFailed,
     HandleErrorCode,
-    HandleEventLoopLimit,
-    HandleLoopRunnerFailed,
     HandleOperationError,
     HandleResumeRecoveryFailed,
     HandleStoredDataInvalid,
     HandleWorkflowNotFound,
 )
-from horsies.core.types.result import Err, Ok, is_err, is_ok
-from tests.dualrun.reference.web_routes import actions as actions_module
-from tests.dualrun.reference.web_routes.actions import (
-    RESUME_RECOVERY_WARNING,
-    _handle_failed,
-    build_router,
-)
+from horsies.core.types.result import Ok, is_err, is_ok
+from tests.union_members import union_members
 
 pytestmark = [pytest.mark.unit]
 
@@ -52,7 +44,7 @@ CAUSE_MARKER = 'cause-marker-7d2e'
 WORKFLOW_ID = '3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f'
 UNKNOWN_STATUS = 'NOT_A_WORKFLOW_STATUS'
 _UNKNOWN_STATUS_CAUSE = core.CoreContractViolation(
-    'workflow_status', f'invalid workflow status: {UNKNOWN_STATUS}',
+    'workflow_status', f'invalid status: {UNKNOWN_STATUS}',
 )
 """The exception of a stored workflow status that does not parse."""
 
@@ -71,18 +63,6 @@ def _every_variant(cause: BaseException) -> list[HandleOperationError]:
         HandleResumeRecoveryFailed(
             message=message, workflow_id=WORKFLOW_ID, exception=cause,
         ),
-        HandleLoopRunnerFailed(
-            message=message, workflow_id=WORKFLOW_ID, exception=cause,
-        ),
-        HandleEventLoopLimit(
-            message=message,
-            workflow_id=WORKFLOW_ID,
-            loop_limit=EventLoopLimit(
-                limit=5,
-                held_thread_names=('MainThread',),
-                current_thread_name='worker-1',
-            ),
-        ),
         HandleAsyncContext(message=message, workflow_id=WORKFLOW_ID),
     ]
 
@@ -91,13 +71,9 @@ def _variant_id(error: HandleOperationError) -> str:
     return type(error).__name__
 
 
-def _db_error() -> OperationalError:
-    return OperationalError('SELECT 1', {}, Exception('connection refused'))
-
-
 class TestVariantCatalog:
     def test_each_code_names_exactly_one_variant(self) -> None:
-        codes = [variant.code for variant in get_args(HandleOperationError.__value__)]
+        codes = [variant.code for variant in union_members(HandleOperationError)]
 
         assert len(codes) == len(set(codes))
         assert set(codes) == set(HandleErrorCode)
@@ -105,7 +81,7 @@ class TestVariantCatalog:
     def test_the_fixture_builds_every_variant(self) -> None:
         built = {type(error) for error in _every_variant(RuntimeError('x'))}
 
-        assert built == set(get_args(HandleOperationError.__value__))
+        assert built == set(union_members(HandleOperationError))
 
     @pytest.mark.parametrize(
         'error', _every_variant(RuntimeError(CAUSE_MARKER)), ids=_variant_id,
@@ -160,7 +136,7 @@ def _handle_answering(method: str, answer: object) -> WorkflowHandle[Any]:
     """A handle whose core handle answers ``method`` with ``answer``."""
     broker = MagicMock()
     setattr(broker._core_handle, method, AsyncMock(return_value=answer))
-    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
+    return WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker)
 
 
 class TestStoredWorkflowStatus:
@@ -178,21 +154,20 @@ class TestStoredWorkflowStatus:
 
     @pytest.mark.asyncio
     async def test_an_unknown_status_is_stored_data_invalid(self) -> None:
-        handle = _handle_answering(
-            'workflow_status_async',
-            _core_record(
-                core.HandleFailed,
-                code='STORED_DATA_INVALID',
-                message=f'invalid workflow status: {UNKNOWN_STATUS}',
-                retryable=False,
-                exception=_UNKNOWN_STATUS_CAUSE,
+        invalid = HandleStoredDataInvalid(
+            message=(
+                f'Status failed for workflow {WORKFLOW_ID}: invalid status: {UNKNOWN_STATUS}'
             ),
+            workflow_id=WORKFLOW_ID,
+            exception=_UNKNOWN_STATUS_CAUSE,
         )
+        handle = _handle_answering('workflow_status_async', invalid)
 
         result = await handle.status_async()
 
         assert is_err(result)
         err = result.err_value
+        assert err is invalid
         assert isinstance(err, HandleStoredDataInvalid)
         assert err.exception is _UNKNOWN_STATUS_CAUSE
         assert err.workflow_id == WORKFLOW_ID
@@ -228,7 +203,7 @@ def _handle_with_core_answer(
     answer: object = None, *, raises: BaseException | None = None,
 ) -> WorkflowHandle[Any]:
     """A handle on ``_core_broker``."""
-    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=_core_broker(answer, raises=raises))
+    return WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=_core_broker(answer, raises=raises))
 
 
 class TestCancelOutcome:
@@ -240,7 +215,7 @@ class TestCancelOutcome:
     )
     async def test_a_cancelled_or_terminal_workflow_is_ok(self, record_class: type) -> None:
         broker = _core_broker(_cancel_record(record_class))
-        handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
+        handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker)
 
         result = await handle.cancel_async()
 
@@ -260,20 +235,21 @@ class TestCancelOutcome:
         assert result.err_value.workflow_id == WORKFLOW_ID
 
     @pytest.mark.asyncio
-    async def test_a_failure_record_is_db_operation_failed(self) -> None:
+    async def test_a_failure_of_the_core_is_its_class_as_it_is(self) -> None:
         cause = core.CoreConnectionError('cancel_workflow', CAUSE_MARKER, True)
-        handle = _handle_with_core_answer(_cancel_record(
-            core.HandleFailed,
-            code='DB_OPERATION_FAILED',
-            message=CAUSE_MARKER,
+        failed = HandleDbOperationFailed(
+            message=f'Cancel failed for workflow {WORKFLOW_ID}: {CAUSE_MARKER}',
             retryable=True,
+            workflow_id=WORKFLOW_ID,
             exception=cause,
-        ))
+        )
+        handle = _handle_with_core_answer(failed)
 
         result = await handle.cancel_async()
 
         assert is_err(result)
         err = result.err_value
+        assert err is failed
         assert isinstance(err, HandleDbOperationFailed)
         assert err.exception is cause
         assert err.retryable is True
@@ -281,14 +257,14 @@ class TestCancelOutcome:
 
     @pytest.mark.asyncio
     async def test_a_core_boundary_error_is_db_operation_failed(self) -> None:
-        stopped = core.CoreStopped('core task', 'planned panic')
-        handle = _handle_with_core_answer(raises=stopped)
+        not_started = core.CoreStartFailed('the core runtime could not start')
+        handle = _handle_with_core_answer(raises=not_started)
 
         result = await handle.cancel_async()
 
         assert is_err(result)
         assert isinstance(result.err_value, HandleDbOperationFailed)
-        assert result.err_value.exception is stopped
+        assert result.err_value.exception is not_started
         assert result.err_value.retryable is False
 
 
@@ -297,39 +273,46 @@ class TestCancelOutcome:
 # =============================================================================
 
 
-def _wait_failures() -> list[tuple[Any, object]]:
-    """Each failure record of the core wait, with its folded code."""
+def _wait_failures() -> list[tuple[Any, object, str]]:
+    """Each failure answer of the core wait, with its folded code and
+    message: a failure of the core keeps the core's message."""
+    failed_message = f'Get failed for workflow {WORKFLOW_ID}: {CAUSE_MARKER}'
     return [
-        (_core_record(core.WorkflowAbsent), RetrievalCode.WORKFLOW_NOT_FOUND),
         (
-            _core_record(
-                core.HandleFailed,
-                code='DB_OPERATION_FAILED',
-                message=CAUSE_MARKER,
+            _core_record(core.WorkflowAbsent),
+            RetrievalCode.WORKFLOW_NOT_FOUND,
+            f'Workflow {WORKFLOW_ID} not found',
+        ),
+        (
+            HandleDbOperationFailed(
+                message=failed_message,
                 retryable=True,
+                workflow_id=WORKFLOW_ID,
                 exception=core.CoreConnectionError('wait_workflow_result', CAUSE_MARKER, True),
             ),
             OperationalErrorCode.BROKER_ERROR,
+            failed_message,
         ),
         (
-            _core_record(
-                core.HandleFailed,
-                code='STORED_DATA_INVALID',
-                message=CAUSE_MARKER,
-                retryable=False,
+            HandleStoredDataInvalid(
+                message=failed_message,
+                workflow_id=WORKFLOW_ID,
                 exception=core.CoreContractViolation('wait_workflow_result', CAUSE_MARKER),
             ),
             OperationalErrorCode.BROKER_ERROR,
+            failed_message,
         ),
     ]
 
 
 @pytest.mark.parametrize(
-    ('answer', 'folded_code'),
+    ('answer', 'folded_code', 'folded_message'),
     _wait_failures(),
     ids=['absent', 'db_operation_failed', 'stored_data_invalid'],
 )
-def test_get_folds_each_wait_failure(answer: Any, folded_code: object) -> None:
+def test_get_folds_each_wait_failure(
+    answer: Any, folded_code: object, folded_message: str,
+) -> None:
     handle = _handle_answering('wait_workflow_result_async', answer)
 
     result = asyncio.run(handle.get_async(timeout_ms=0))
@@ -337,6 +320,7 @@ def test_get_folds_each_wait_failure(answer: Any, folded_code: object) -> None:
     assert result.is_err()
     task_error = result.unwrap_err()
     assert task_error.error_code is folded_code
+    assert task_error.message == folded_message
 
 
 # =============================================================================
@@ -504,15 +488,6 @@ class TestStoredNodeResult:
 # =============================================================================
 
 
-WEB_STATUS_CODES: dict[type[Any], int] = {
-    HandleWorkflowNotFound: 404,
-    HandleDbOperationFailed: 503,
-    HandleLoopRunnerFailed: 503,
-    HandleEventLoopLimit: 503,
-    HandleStoredDataInvalid: 500,
-}
-
-
 class TestStoredWorkflowResult:
     @pytest.mark.asyncio
     async def test_a_result_past_the_depth_bound_is_a_deserialization_error(
@@ -525,7 +500,7 @@ class TestStoredWorkflowResult:
             + ',"err":null}'
         )
         broker = MagicMock()
-        handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
+        handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker)
         handle.out_type = int
 
         result = handle._completed_result(stored)
@@ -539,99 +514,3 @@ class TestStoredWorkflowResult:
         assert 'nested deeper than' in result.err.message
 
 
-class TestWebMapping:
-    def test_every_variant_has_a_web_answer(self) -> None:
-        answered = set(WEB_STATUS_CODES) | {HandleAsyncContext, HandleResumeRecoveryFailed}
-
-        assert answered == set(get_args(HandleOperationError.__value__))
-
-    @pytest.mark.parametrize(
-        'error',
-        [
-            error
-            for error in _every_variant(RuntimeError('x'))
-            if type(error) in WEB_STATUS_CODES
-        ],
-        ids=_variant_id,
-    )
-    def test_variant_maps_to_its_status_code(self, error: HandleOperationError) -> None:
-        outcome = _handle_failed(error)
-
-        assert outcome.status_code == WEB_STATUS_CODES[type(error)]
-        assert outcome.content == {'detail': error.message}
-
-    def test_a_resume_recovery_failure_outside_the_resume_route_fails_an_assertion(
-        self,
-    ) -> None:
-        error = HandleResumeRecoveryFailed(
-            message='recovery failed', workflow_id=WORKFLOW_ID, exception=_db_error(),
-        )
-
-        with pytest.raises(AssertionError, match='RESUME_RECOVERY_FAILED'):
-            _handle_failed(error)
-
-
-def _resume_route(broker: Any) -> Any:
-    router = build_router(broker)
-    for route in router.routes:
-        if getattr(route, 'path', None) == '/workflows/{workflow_id}/resume':
-            return getattr(route, 'endpoint')
-    raise AssertionError('the resume route is not registered')
-
-
-class TestResumeRoute:
-    """The resume route answers from the variant; it does not read the status."""
-
-    def test_recovery_failure_is_resumed_with_a_warning(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        broker = MagicMock()
-        error = HandleResumeRecoveryFailed(
-            message='recovery failed', workflow_id=WORKFLOW_ID, exception=_db_error(),
-        )
-        monkeypatch.setattr(
-            actions_module, 'resume_workflow', AsyncMock(return_value=Err(error)),
-        )
-
-        response = asyncio.run(_resume_route(broker)(workflow_id=WORKFLOW_ID))
-
-        assert response.status_code == 200
-        body = json.loads(response.body)
-        assert body['outcome'] == 'resumed'
-        assert body['warning'] == RESUME_RECOVERY_WARNING
-        broker.select_resources.assert_not_called()
-
-    def test_failure_before_the_commit_is_service_unavailable(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        broker = MagicMock()
-        error = HandleDbOperationFailed(
-            message='resume failed',
-            retryable=True,
-            workflow_id=WORKFLOW_ID,
-            exception=_db_error(),
-        )
-        monkeypatch.setattr(
-            actions_module, 'resume_workflow', AsyncMock(return_value=Err(error)),
-        )
-
-        response = asyncio.run(_resume_route(broker)(workflow_id=WORKFLOW_ID))
-
-        assert response.status_code == 503
-        assert json.loads(response.body) == {'detail': 'resume failed'}
-        broker.select_resources.assert_not_called()
-
-    def test_a_resumed_run_is_resumed_without_a_warning(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        broker = MagicMock()
-        monkeypatch.setattr(
-            actions_module, 'resume_workflow', AsyncMock(return_value=Ok(True)),
-        )
-
-        response = asyncio.run(_resume_route(broker)(workflow_id=WORKFLOW_ID))
-
-        assert response.status_code == 200
-        body = json.loads(response.body)
-        assert body['outcome'] == 'resumed'
-        assert body['warning'] is None

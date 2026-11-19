@@ -20,32 +20,12 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from horsies import TaskAttemptInfo
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.history.archive.attempts import AttemptRecord
-from horsies.core.lifecycle.fences import OwnedClaim
-from horsies.core.lifecycle.operations import TerminalizationKind
-from horsies.core.lifecycle.outcomes import (
-    AlreadyApplied,
-    LostClaim,
-    ObservedForeignTerminalization,
-    PhaseTwoOwed,
-    PhaseTwoStep,
-    SourceStateConflict,
-    SuccessApplied,
-    TaskAbsent,
-    WorkflowSuccessOutcome,
-)
-from horsies.core.types.status import TaskStatus
-from horsies.core.worker.workflow_success import (
-    FinishWorkflowSuccess,
-    finish_workflow_success,
-    success_statement,
-)
-from tests.integration.conftest import DB_URL, compute_test_command_fingerprint
+from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import read_attempts
-from tests.integration.terminal_writes import StaleFailure, fail_stale_task
 
 pytestmark = [pytest.mark.integration]
 
@@ -53,7 +33,6 @@ WORKER: Final = 'w-workflow-success'
 QUEUE: Final = 'workflow_success_q'
 TASK_NAME: Final = 'workflow_success_task'
 OK_RESULT: Final = '{"__h_task_result__":true,"ok":7,"err":null}'
-NOTIFY_WAIT_S: Final = 0.5
 """How long a test listens for a capacity wake that must not come."""
 
 
@@ -164,48 +143,6 @@ async def _link_workflow_node(session: AsyncSession, task_id: str) -> None:
     )
 
 
-def _command(
-    seeded: _Seeded, *, fence: OwnedClaim | None = None
-) -> FinishWorkflowSuccess:
-    """The success of ``seeded``, under its own claim unless ``fence`` is given."""
-    return FinishWorkflowSuccess(
-        task_id=seeded.task_id,
-        fence=(
-            OwnedClaim(worker_id=WORKER, claimed_at=seeded.claimed_at)
-            if fence is None
-            else fence
-        ),
-        result_json=OK_RESULT,
-    )
-
-
-async def _finish(
-    engine: AsyncEngine, command: FinishWorkflowSuccess
-) -> WorkflowSuccessOutcome:
-    return await finish_workflow_success(
-        async_sessionmaker(engine, expire_on_commit=False),
-        command,
-    )
-
-
-@pytest_asyncio.fixture
-async def wakes() -> AsyncIterator[psycopg.AsyncConnection[Any]]:
-    """A connection that listens on the capacity channel of ``QUEUE``."""
-    connection = await psycopg.AsyncConnection.connect(
-        DB_URL,
-        autocommit=True,
-    )
-    await connection.execute(f'LISTEN task_queue_{QUEUE}')
-    yield connection
-    await connection.close()
-
-
-async def _payloads(connection: psycopg.AsyncConnection[Any]) -> list[str]:
-    return [
-        notify.payload async for notify in connection.notifies(timeout=NOTIFY_WAIT_S)
-    ]
-
-
 async def _live_row(engine: AsyncEngine, task_id: str) -> Any:
     async with engine.connect() as connection:
         return (
@@ -234,268 +171,8 @@ async def _history_row(engine: AsyncEngine, task_id: str) -> Any:
         ).one_or_none()
 
 
-async def _attempts(engine: AsyncEngine, task_id: str) -> tuple[AttemptRecord, ...]:
-    async with AsyncSession(engine) as session:
-        return await read_attempts(session, task_id)
-
-
-async def _pending_rows(engine: AsyncEngine, task_id: str) -> list[str]:
-    async with engine.connect() as connection:
-        rows = (
-            await connection.execute(
-                text(
-                    'SELECT terminalization_kind '
-                    'FROM horsies_workflow_phase2_pending '
-                    'WHERE task_id = CAST(:id AS uuid)'
-                ),
-                {'id': task_id},
-            )
-        ).all()
-    return [str(row[0]) for row in rows]
-
-
-@pytest.mark.asyncio(loop_scope='function')
-class TestApplied:
-    async def test_the_success_moves_the_row_with_its_attempt_and_owes_phase_two(
-        self,
-        engine: AsyncEngine,
-        seed: Any,
-        wakes: psycopg.AsyncConnection[Any],
-    ) -> None:
-        seeded = await seed()
-
-        outcome = await _finish(engine, _command(seeded))
-
-        match outcome:
-            case SuccessApplied(
-                task_id=task_id,
-                observed=observed,
-                phase_two=PhaseTwoOwed(task_name=name, queue_name=queue, step=step),
-            ):
-                assert task_id == seeded.task_id
-                assert (name, queue) == (TASK_NAME, QUEUE)
-                # The seeded node is the only node of its workflow.
-                assert step is PhaseTwoStep.NO_DEPENDENTS
-                assert observed.status is TaskStatus.RUNNING
-                assert observed.worker_id == WORKER
-                assert observed.claimed_at == seeded.claimed_at
-            case other:
-                raise AssertionError(other)
-        assert await _live_row(engine, seeded.task_id) is None
-        assert tuple(await _history_row(engine, seeded.task_id)) == (
-            'COMPLETED',
-            TerminalizationKind.COMPLETE_LOCKED.value,
-            None,
-            OK_RESULT,
-        )
-        (attempt,) = await _attempts(engine, seeded.task_id)
-        assert (
-            attempt.attempt,
-            attempt.outcome,
-            attempt.will_retry,
-            attempt.error_code,
-            attempt.error_message,
-            attempt.failed_reason,
-            attempt.worker_id,
-            attempt.worker_hostname,
-            attempt.worker_pid,
-            attempt.worker_process_name,
-        ) == (
-            1,
-            'COMPLETED',
-            False,
-            None,
-            None,
-            None,
-            WORKER,
-            'host-1',
-            4242,
-            'child-1',
-        )
-        assert attempt.started_at <= attempt.finished_at
-        assert await _pending_rows(engine, seeded.task_id) == [
-            TerminalizationKind.COMPLETE_LOCKED.value,
-        ]
-        assert await _payloads(wakes) == []
-
-    async def test_the_attempt_number_follows_the_retry_count(
-        self,
-        engine: AsyncEngine,
-        seed: Any,
-    ) -> None:
-        """Two failed attempts were retried; the success is the third."""
-        seeded = await seed(retry_count=2)
-        async with engine.begin() as connection:
-            await connection.execute(
-                text("""
-                    INSERT INTO horsies_task_attempts
-                        (task_id, attempt, outcome, will_retry,
-                         started_at, finished_at, error_code, worker_id,
-                         worker_hostname, worker_pid, worker_process_name)
-                    SELECT CAST(:id AS uuid), n, 'FAILED', TRUE,
-                           NOW() - interval '1 minute', NOW(), 'FLAKY',
-                           :worker, 'host-1', 4242, 'child-1'
-                    FROM generate_series(1, 2) AS n
-                """),
-                {'id': seeded.task_id, 'worker': WORKER},
-            )
-
-        outcome = await _finish(engine, _command(seeded))
-
-        assert isinstance(outcome, SuccessApplied)
-        attempts = await _attempts(engine, seeded.task_id)
-        assert [(a.attempt, a.outcome, a.will_retry) for a in attempts] == [
-            (1, 'FAILED', True),
-            (2, 'FAILED', True),
-            (3, 'COMPLETED', False),
-        ]
-
-    async def test_a_null_generation_is_refused(
-        self,
-        engine: AsyncEngine,
-        seed: Any,
-    ) -> None:
-        """The claim generation is required: a NULL claimed_at is refused
-        before any lock, and nothing is written. The worker never sends one
-        (``OwnedClaim`` requires a claim time), so the statement runs with
-        NULL in its place."""
-        seeded = await seed()
-        statement = success_statement(_command(seeded))
-        before = await _live_row(engine, seeded.task_id)
-
-        with pytest.raises(DBAPIError) as raised:
-            async with async_sessionmaker(engine, expire_on_commit=False)() as session:
-                await session.execute(
-                    statement.statement,
-                    {**statement.parameters, 'claimed_at': None},
-                )
-
-        original = raised.value.orig
-        assert isinstance(original, psycopg.Error)
-        assert original.sqlstate == '22023'
-        assert await _live_row(engine, seeded.task_id) == before
-        assert await _attempts(engine, seeded.task_id) == ()
-
-
-@pytest.mark.asyncio(loop_scope='function')
-class TestNoWrite:
-    async def test_a_replay_is_already_applied_and_writes_nothing(
-        self,
-        engine: AsyncEngine,
-        seed: Any,
-    ) -> None:
-        seeded = await seed()
-        first = await _finish(engine, _command(seeded))
-        assert isinstance(first, SuccessApplied)
-
-        replay = await _finish(engine, _command(seeded))
-
-        match replay:
-            case AlreadyApplied(terminal_at=terminal_at, kind=kind):
-                assert terminal_at == first.terminal_at
-                assert kind is TerminalizationKind.COMPLETE_LOCKED
-            case other:
-                raise AssertionError(other)
-        assert len(await _attempts(engine, seeded.task_id)) == 1
-        assert len(await _pending_rows(engine, seeded.task_id)) == 1
-
-    @pytest.mark.parametrize(
-        ('worker', 'shift_s'),
-        [(WORKER, 1.0), ('another-worker', 0.0)],
-        ids=['stale_generation', 'another_worker'],
-    )
-    async def test_a_claim_this_call_does_not_hold_is_a_lost_claim(
-        self,
-        engine: AsyncEngine,
-        seed: Any,
-        worker: str,
-        shift_s: float,
-    ) -> None:
-        seeded = await seed()
-        before = await _live_row(engine, seeded.task_id)
-
-        outcome = await _finish(
-            engine,
-            _command(
-                seeded,
-                fence=OwnedClaim(
-                    worker_id=worker,
-                    claimed_at=seeded.claimed_at + timedelta(seconds=shift_s),
-                ),
-            ),
-        )
-
-        match outcome:
-            case LostClaim(observed=observed):
-                assert observed.status is TaskStatus.RUNNING
-                assert observed.worker_id == WORKER
-                assert observed.claimed_at == seeded.claimed_at
-            case other:
-                raise AssertionError(other)
-        assert await _live_row(engine, seeded.task_id) == before
-        assert await _attempts(engine, seeded.task_id) == ()
-        assert await _pending_rows(engine, seeded.task_id) == []
-
-    async def test_a_claimed_row_is_a_conflict_and_writes_nothing(
-        self,
-        engine: AsyncEngine,
-        seed: Any,
-    ) -> None:
-        seeded = await seed(status='CLAIMED')
-        before = await _live_row(engine, seeded.task_id)
-
-        outcome = await _finish(engine, _command(seeded))
-
-        match outcome:
-            case SourceStateConflict(observed=observed):
-                assert observed.status is TaskStatus.CLAIMED
-            case other:
-                raise AssertionError(other)
-        assert await _live_row(engine, seeded.task_id) == before
-        assert await _attempts(engine, seeded.task_id) == ()
-
-    async def test_a_foreign_terminalization_is_a_conflict(
-        self,
-        engine: AsyncEngine,
-        seed: Any,
-    ) -> None:
-        seeded = await seed()
-        async with engine.begin() as connection:
-            stale = await fail_stale_task(
-                connection,
-                seeded.task_id,
-                failure=StaleFailure(
-                    stale_after_ms=0,
-                    finalizing_stale_after_ms=0,
-                    result_json=OK_RESULT,
-                    error_code='WORKER_CRASHED',
-                    failed_reason='went silent',
-                ),
-            )
-        assert stale == 'APPLIED'
-
-        outcome = await _finish(engine, _command(seeded))
-
-        match outcome:
-            case SourceStateConflict(
-                evidence=ObservedForeignTerminalization() as evidence
-            ):
-                assert evidence.committed_kind is TerminalizationKind.FAIL_STALE
-            case other:
-                raise AssertionError(other)
-        assert (await _history_row(engine, seeded.task_id)).status == 'FAILED'
-
-    async def test_an_unknown_task_is_absent(
-        self, engine: AsyncEngine, seed: Any
-    ) -> None:
-        _ = seed
-        missing = _Seeded(
-            task_id=str(uuid.uuid4()), claimed_at=datetime.now(timezone.utc)
-        )
-
-        outcome = await _finish(engine, _command(missing))
-
-        assert outcome == TaskAbsent(task_id=missing.task_id, ordinality=None)
+async def _attempts(broker: PostgresBroker, task_id: str) -> tuple[TaskAttemptInfo, ...]:
+    return await read_attempts(broker, task_id)
 
 
 _DIRECT_SQL: Final = """
@@ -521,6 +198,7 @@ class TestRefusedCall:
     async def test_it_raises_and_writes_nothing(
         self,
         engine: AsyncEngine,
+        broker: PostgresBroker,
         seed: Any,
         is_workflow_task: bool,
         result: str | None,
@@ -546,5 +224,5 @@ class TestRefusedCall:
         assert original.diag.message_primary is not None
         assert message in original.diag.message_primary
         assert await _live_row(engine, seeded.task_id) == before
-        assert await _attempts(engine, seeded.task_id) == ()
+        assert await _attempts(broker, seeded.task_id) == ()
         assert await _history_row(engine, seeded.task_id) is None

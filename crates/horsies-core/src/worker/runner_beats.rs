@@ -1,4 +1,4 @@
-//! Runner heartbeats of the worker parent (Python `core/worker/runner_heartbeat.py`).
+//! Runner heartbeats of the worker parent.
 //!
 //! - The writer beats every task the worker holds, once per
 //!   `runner_heartbeat_interval_ms`, in one fenced statement, on its own
@@ -45,7 +45,8 @@ use crate::worker::thread_dispatch::with_starter_dispatch;
 
 /// Exit code of the worker process when it failed closed because its runner
 /// heartbeats stopped. No other horsies process uses it. The core parent
-/// owns exit codes 76 and 77.
+/// owns exit codes 76 and 77, and 79 for a lost liveness lock
+/// ([`crate::worker::liveness::LIVENESS_LOCK_LOST_EXIT_CODE`]).
 pub const RUNNER_HEARTBEAT_LOST_EXIT_CODE: i32 = 77;
 
 /// How often the watchdog reads the time since the last beat.
@@ -174,7 +175,7 @@ struct Registry {
 pub struct RegistryClosed;
 
 /// The dispatches this worker holds: task id, claim generation and the
-/// process that runs each (Python `core/worker/live_dispatches.py`).
+/// process that runs each.
 ///
 /// A dispatch is held from its send until its end is read, a kill is sent
 /// to its child, or its child's exit is seen; the [`HeldDispatch`] guard
@@ -250,6 +251,12 @@ impl LiveDispatches {
             .values()
             .map(|dispatch| (dispatch.task_id, dispatch.claimed_at))
             .unzip()
+    }
+
+    /// Whether a task is held now: a task whose row a peer must not recover
+    /// while it runs.
+    pub(crate) fn holds_any(&self) -> bool {
+        !self.lock().held.is_empty()
     }
 
     /// The ids of the held tasks, in ticket order, for tests that check
@@ -917,7 +924,7 @@ fn run_watch(context: &WatchContext, stop: &Receiver<()>) {
 /// Whether the closed registry held a dispatch that runs in the worker
 /// process itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TaskCodeInWorker {
+pub(crate) enum TaskCodeInWorker {
     Held,
     NoneHeld,
 }
@@ -988,8 +995,9 @@ struct ChildToKill {
 /// Close the registry, mark each child that held a task as killed by the
 /// worker, and queue `SIGKILL` to its session through the spawner thread.
 /// The answers are read for the log, at most
-/// [`FAIL_CLOSED_KILL_ANSWER_WAIT`] in all.
-fn kill_held_children(live: &LiveDispatches) -> TaskCodeInWorker {
+/// [`FAIL_CLOSED_KILL_ANSWER_WAIT`] in all. The fail-closed exit of the
+/// worker liveness lock ([`crate::worker::liveness`]) calls it too.
+pub(crate) fn kill_held_children(live: &LiveDispatches) -> TaskCodeInWorker {
     let mut in_worker = TaskCodeInWorker::NoneHeld;
     let mut children: BTreeMap<ChildId, ChildToKill> = BTreeMap::new();
     for dispatch in live.close() {
@@ -1143,9 +1151,9 @@ mod fail_closed_tests;
 
 #[cfg(test)]
 mod tests {
-    use sqlx::PgPool;
 
     use super::*;
+    use crate::test_support::sql::{self, TestPool};
 
     #[test]
     fn held_dispatches_are_beaten_until_the_guard_drops() {
@@ -1180,7 +1188,7 @@ mod tests {
         assert_eq!(live.snapshot(), (Vec::new(), Vec::new()));
     }
 
-    /// Python `test_live_dispatches.py`: `close` refuses later holds and
+    /// `close` refuses later holds and
     /// returns what is held, in ticket order; a second close returns
     /// nothing, and a guard dropped after the close changes nothing.
     #[test]
@@ -1219,9 +1227,8 @@ mod tests {
         assert_eq!(kill_held_children(&live), TaskCodeInWorker::Held);
     }
 
-    /// Python `test_runner_heartbeat.py`, the kill of held children: the
-    /// watchdog marks each held child as killed by the worker and kills its
-    /// session through the spawner thread.
+    /// The kill of held children: the watchdog marks each held child as
+    /// killed by the worker and kills its session through the spawner thread.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_fail_closed_stop_marks_and_kills_each_held_child() {
         use crate::worker::executor::supervisor::{
@@ -1291,7 +1298,7 @@ mod tests {
         );
     }
 
-    /// Python `test_runner_heartbeat.py`: the fail-closed window is half the
+    /// The fail-closed window is half the
     /// threshold, and it holds one interval plus the landing allowance at the
     /// smallest threshold the config accepts.
     #[test]
@@ -1423,13 +1430,13 @@ mod tests {
     /// A RUNNING row on the baseline schema, owned by `owner` at the claim
     /// generation `claimed_at`, with or without the finalizing marker.
     async fn seed_running_task(
-        pool: &PgPool,
+        pool: &TestPool,
         task_id: Uuid,
         owner: &str,
         claimed_at: DateTime<Utc>,
         finalizing: bool,
     ) {
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, input, task_options, execution,
                 retention_class_key, sent_at, created_at, command_fingerprint_version,
@@ -1459,17 +1466,17 @@ mod tests {
         .unwrap();
     }
 
-    /// Python `test_runner_heartbeat_writer.py`: one statement beats the
+    /// One statement beats the
     /// held RUNNING rows of this worker at their claim generation, and no row
     /// of another generation, another worker, or with the finalizing marker.
     #[tokio::test]
     #[serial_test::serial]
     async fn one_statement_beats_only_rows_that_pass_the_fence() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         // The heartbeat table has no default partition: the current hour
         // needs its leaf, as at worker start.
         crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool(
-            &crate::broker::pools::core_pool_for_test_pool(&pool),
+            &crate::broker::pools::core_pool_for_test_url(pool.url()),
             crate::broker::core_rows::StatementLog::Off,
             2,
             2,
@@ -1479,7 +1486,7 @@ mod tests {
         .expect("partition coverage");
         let ids: Vec<Uuid> = (0..4).map(|_| Uuid::new_v4()).collect();
         let claimed_at: DateTime<Utc> =
-            sqlx::query_scalar("SELECT date_trunc('milliseconds', now())")
+            sql::query_scalar("SELECT date_trunc('milliseconds', now())")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
@@ -1502,12 +1509,12 @@ mod tests {
             pid: 7,
         };
         let generations = vec![claimed_at; ids.len()];
-        let core_pool = crate::broker::pools::core_pool_for_test_pool(&pool);
+        let core_pool = crate::broker::pools::core_pool_for_test_url(pool.url());
         let rows = write_beats(&core_pool, &sender, &ids, &generations)
             .await
             .unwrap();
         assert_eq!(rows, 1);
-        let beaten: Vec<Uuid> = sqlx::query_scalar(
+        let beaten: Vec<Uuid> = sql::query_scalar(
             "SELECT task_id FROM horsies_heartbeats
              WHERE role = 'runner' AND sender_id = 'beat-worker' AND task_id = ANY($1)",
         )
@@ -1516,12 +1523,12 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(beaten, vec![ids[0]]);
-        sqlx::query("DELETE FROM horsies_heartbeats WHERE task_id = ANY($1)")
+        sql::query("DELETE FROM horsies_heartbeats WHERE task_id = ANY($1)")
             .bind(&ids)
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_tasks WHERE id = ANY($1)")
+        sql::query("DELETE FROM horsies_tasks WHERE id = ANY($1)")
             .bind(&ids)
             .execute(&pool)
             .await

@@ -1,25 +1,30 @@
 """The monitoring reads that run in the core: the record of the core decides the answer.
 
 Every read of ``horsies.monitoring`` calls the broker's core handle. The tests run on a mocked handle: the record of each call is the
-seam. ``MonitoringJson`` is validated into the response model; a failure
-record maps to its variant; a core boundary error of the call is a database
-failure. The decoding of the function rows is the core's, and its tests
-cover it.
+seam. ``MonitoringJson`` is validated into the response model; a failure is
+the core's generated class, which every read returns as it is; a core
+boundary error of the call is a database failure. The decoding of the
+function rows is the core's, and its tests cover it. The values that the
+core builds into a failure class (message, retry rule, exception class and
+text) are pinned through the built module in
+``tests/integration/test_monitoring_queries.py`` and by the
+core's own tests.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Final
+from typing import Any, Final
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from horsies._core import (
     CoreConnectionError,
-    CoreStopped,
-    MonitoringFailed,
+    CoreStartFailed,
     MonitoringJson,
     TaskBreakdownQuery,
     TaskDetailAbsent,
@@ -207,59 +212,105 @@ class TestAnswers:
         assert result == Ok(TaskDetailNotFound(task_id=TASK_ID, reason=reason))
 
 
+def _core_failures() -> list[MonitoringQueryDbOperationFailed | MonitoringQueryHistoryContractViolation]:
+    """One value of each class that the core builds for a failed read."""
+    return [
+        MonitoringQueryDbOperationFailed(
+            message=MESSAGE,
+            retryable=True,
+            exception=CoreConnectionError('task list query', 'connection refused', True),
+        ),
+        MonitoringQueryHistoryContractViolation(
+            message='task detail query failed: history row has status BOGUS',
+            exception=HistoryContractError('history row has status BOGUS'),
+        ),
+    ]
+
+
+#: Each read of ``horsies.monitoring``: its core method, and its call on a broker.
+READS: Final[tuple[tuple[str, Callable[[MagicMock], Awaitable[MonitoringResult[Any]]]], ...]] = (
+    (
+        'monitoring_task_stats_async',
+        lambda broker: task_stats(
+            broker, window=WINDOW, task_names=[], queues=[], workers=[], error_codes=[],
+            error_categories=[], retried_only=False,
+        ),
+    ),
+    (
+        'monitoring_task_facets_async',
+        lambda broker: task_facets(
+            broker, window=WINDOW, statuses=[], error_categories=[], retried_only=False,
+        ),
+    ),
+    (
+        'monitoring_task_breakdown_async',
+        lambda broker: task_breakdown(
+            broker, window=WINDOW, group_by='worker', statuses=[], task_names=[], queues=[],
+            workers=[], error_codes=[], error_categories=[], retried_only=False,
+            limit=BreakdownLimit(value=50),
+        ),
+    ),
+    (
+        'monitoring_list_tasks_async',
+        lambda broker: list_tasks(
+            broker, window=WINDOW, statuses=[], task_names=[], queues=[], workers=[],
+            error_codes=[], error_categories=[], retried_only=False, sort_by='enqueued_at',
+            sort_dir='desc', page=TaskPage(offset=0, limit=50),
+        ),
+    ),
+    ('monitoring_task_detail_async', lambda broker: get_task_detail(broker, TASK_ID)),
+    ('monitoring_workflow_names_async', lambda broker: list_workflow_names(broker)),
+    (
+        'monitoring_workflow_runs_async',
+        lambda broker: list_workflow_runs(
+            broker, name=None, status=None, limit=WorkflowRunsLimit(value=30),
+        ),
+    ),
+    ('monitoring_workflow_run_async', lambda broker: get_workflow_run(broker, RUN_ID)),
+    ('monitoring_workflow_node_async', lambda broker: get_workflow_node(broker, RUN_ID, 7)),
+    ('monitoring_schedules_async', lambda broker: list_schedules(broker)),
+)
+
+
 class TestFailures:
-    @pytest.mark.parametrize('retryable', [True, False])
+    @pytest.mark.parametrize('read', READS, ids=[method for method, _ in READS])
+    @pytest.mark.parametrize('failure', _core_failures(), ids=lambda failure: type(failure).__name__)
     @pytest.mark.asyncio
-    async def test_a_database_failure_keeps_its_message_and_retry_rule(self, retryable: bool) -> None:
-        cause = CoreConnectionError('task list query', 'connection refused', retryable)
-        result, _ = await _list(
-            _record(
-                MonitoringFailed,
-                code='DB_OPERATION_FAILED',
-                message=MESSAGE,
-                retryable=retryable,
-                exception=cause,
-            ),
-        )
+    async def test_every_read_returns_the_core_s_failure_as_it_is(
+        self,
+        read: tuple[str, Callable[[MagicMock], Awaitable[MonitoringResult[Any]]]],
+        failure: MonitoringQueryDbOperationFailed | MonitoringQueryHistoryContractViolation,
+    ) -> None:
+        method, call = read
+        broker, _ = _broker(method, failure)
+
+        result = await call(broker)
 
         match result:
-            case Err(MonitoringQueryDbOperationFailed() as error):
-                assert error.message == MESSAGE
-                assert error.retryable is retryable
-                assert error.exception is cause
+            case Err(error):
+                assert error is failure
             case _:
-                raise AssertionError(f'expected a database failure: {result!r}')
+                raise AssertionError(f'expected the core failure: {result!r}')
 
     @pytest.mark.asyncio
-    async def test_history_data_that_does_not_decode_is_a_contract_violation(self) -> None:
-        message = 'task detail query failed: history row has status BOGUS'
-        broker, _ = _broker(
-            'monitoring_task_detail_async',
-            _record(MonitoringFailed, code='HISTORY_CONTRACT_VIOLATION', message=message, retryable=False),
-        )
+    async def test_a_core_text_that_does_not_match_the_model_raises_its_error(self) -> None:
+        text = '{"rows": []}'
+        with pytest.raises(ValidationError) as expected:
+            _ = TaskListPage.model_validate_json(text)
 
-        result = await get_task_detail(broker, TASK_ID)
+        with pytest.raises(ValidationError) as raised:
+            _ = await _list(_record(MonitoringJson, json=text))
 
-        match result:
-            case Err(MonitoringQueryHistoryContractViolation() as error):
-                assert error.message == message
-                assert error.retryable is False
-                assert isinstance(error.exception, HistoryContractError)
-            case _:
-                raise AssertionError(f'expected a contract violation: {result!r}')
-
-    @pytest.mark.asyncio
-    async def test_the_python_only_loop_limit_from_the_core_is_a_defect(self) -> None:
-        with pytest.raises(AssertionError, match='EVENT_LOOP_LIMIT'):
-            await _list(_record(MonitoringFailed, code='EVENT_LOOP_LIMIT', message=MESSAGE, retryable=False))
+        assert raised.value.title == expected.value.title == 'TaskListPage'
+        assert raised.value.errors(include_url=False) == expected.value.errors(include_url=False)
 
     @pytest.mark.parametrize(
         ('raised', 'retryable'),
         [
             (TooManyPendingCalls('CoreHandle.monitoring_list_tasks_async', 65_536), True),
-            (CoreStopped('core task', 'panic'), False),
+            (CoreStartFailed('the core runtime could not start'), False),
         ],
-        ids=['too-many-calls', 'stopped'],
+        ids=['too-many-calls', 'start-failed'],
     )
     @pytest.mark.asyncio
     async def test_a_core_boundary_error_is_a_database_failure(

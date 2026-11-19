@@ -12,7 +12,6 @@ from horsies.core.models.workflow.enums import (
     WORKFLOW_TERMINAL_STATES,
     WorkflowTaskStatus,
     WORKFLOW_TASK_TERMINAL_STATES,
-    WF_TASK_TERMINAL_VALUES as WF_TASK_TERMINAL_VALUES,
     OnError,
 )
 from horsies.core.models.workflow.nodes import (
@@ -43,8 +42,7 @@ from horsies.core.models.workflow.handle_types import (
     HandleAsyncContext,
     HandleDbOperationFailed,
     HandleErrorCode,
-    HandleEventLoopLimit,
-    HandleLoopRunnerFailed,
+    HandleInvalidWorkflowId,
     HandleOperationError,
     HandleResult,
     HandleResumeRecoveryFailed,
@@ -70,7 +68,6 @@ __all__ = [
     'WORKFLOW_TERMINAL_STATES',
     'WorkflowTaskStatus',
     'WORKFLOW_TASK_TERMINAL_STATES',
-    'WF_TASK_TERMINAL_VALUES',
     'OnError',
     # nodes
     'NodeKey',
@@ -96,8 +93,7 @@ __all__ = [
     'HandleAsyncContext',
     'HandleDbOperationFailed',
     'HandleErrorCode',
-    'HandleEventLoopLimit',
-    'HandleLoopRunnerFailed',
+    'HandleInvalidWorkflowId',
     'HandleOperationError',
     'HandleResult',
     'HandleResumeRecoveryFailed',

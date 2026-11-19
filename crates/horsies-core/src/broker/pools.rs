@@ -481,48 +481,26 @@ fn open_pool(
     ))
 }
 
-/// The URL of a test's sqlx connect options, in the form the statement
-/// layer reads: sqlx's own rendering (`ConnectOptions::to_url_lossy`)
-/// without its `statement-cache-capacity` parameter, which only sqlx reads.
-/// Test options set no option that the rendering drops (`application_name`,
-/// `options`).
+/// The core handle (producer pools) on the test database of `url`, for
+/// brokers that tests build from the URL. The environment is isolated: test
+/// URLs carry their password.
 #[cfg(test)]
-pub(crate) fn test_url_of(options: &sqlx::postgres::PgConnectOptions) -> String {
-    use sqlx::ConnectOptions;
-
-    let mut url = options.to_url_lossy();
-    let kept: Vec<(String, String)> = url
-        .query_pairs()
-        .filter(|(name, _)| *name != "statement-cache-capacity")
-        .map(|(name, value)| (name.into_owned(), value.into_owned()))
-        .collect();
-    url.set_query(None);
-    if !kept.is_empty() {
-        url.query_pairs_mut().extend_pairs(kept);
-    }
-    url.to_string()
-}
-
-/// The core handle on the database of a test's sqlx pool, for brokers that
-/// tests build from such a pool. The environment is isolated: test URLs
-/// carry their password.
-#[cfg(test)]
-pub(crate) fn handle_for_test_pool(pool: &sqlx::PgPool) -> CoreHandle {
+pub(crate) fn handle_for_test_url(url: &str) -> CoreHandle {
     CoreHandle::open_with_environment(
-        &PostgresConfig::from_url(test_url_of(&pool.connect_options())),
+        &PostgresConfig::from_url(url),
         PoolProfile::Producer,
         ConnectionEnvironment::isolated(),
     )
-    .expect("the URL of a test pool is accepted by the statement layer")
+    .expect("the URL of a test database is accepted by the statement layer")
 }
 
-/// A main core pool on the database of a test's sqlx pool, for the free
-/// lifecycle writers that tests call with a pool of their own. The same pool
-/// as the main pool of [`handle_for_test_pool`]; connects to nothing until
-/// the first checkout.
+/// A main core pool on the test database of `url`, for the free lifecycle
+/// writers that tests call with a pool of their own. The same pool as the
+/// main pool of [`handle_for_test_url`]; connects to nothing until the first
+/// checkout.
 #[cfg(test)]
-pub(crate) fn core_pool_for_test_pool(pool: &sqlx::PgPool) -> CorePool {
-    let config = PostgresConfig::from_url(test_url_of(&pool.connect_options()));
+pub(crate) fn core_pool_for_test_url(url: &str) -> CorePool {
+    let config = PostgresConfig::from_url(url);
     let plan = pool_plan(
         &config,
         PoolRole::Main,
@@ -540,13 +518,13 @@ pub(crate) fn core_pool_for_test_pool(pool: &sqlx::PgPool) -> CorePool {
     core_pool
 }
 
-/// A worker profile core pool of `size` connections on the database of a
-/// test's sqlx pool: it keeps [`WORKER_RESERVED_CONNECTIONS`] free from batch
+/// A worker profile core pool of `size` connections on the test database of
+/// `url`: it keeps [`WORKER_RESERVED_CONNECTIONS`] free from batch
 /// checkouts, as the pool of a worker. Connects to nothing until the first
 /// checkout.
 #[cfg(test)]
-pub(crate) fn worker_core_pool_for_test_pool(pool: &sqlx::PgPool, size: u32) -> CorePool {
-    let mut config = PostgresConfig::from_url(test_url_of(&pool.connect_options()));
+pub(crate) fn worker_core_pool_for_test_url(url: &str, size: u32) -> CorePool {
+    let mut config = PostgresConfig::from_url(url);
     config.pool_size = size;
     config.max_overflow = 0;
     let plan = pool_plan(
@@ -566,12 +544,12 @@ pub(crate) fn worker_core_pool_for_test_pool(pool: &sqlx::PgPool, size: u32) -> 
     core_pool
 }
 
-/// A session pool of `size` connections on the database of a test's sqlx
-/// pool: no reserve, statements prepared per connection, as the separate
-/// session pool of a broker. Connects to nothing until the first checkout.
+/// A session pool of `size` connections on the test database of `url`: no
+/// reserve, statements prepared per connection, as the separate session pool
+/// of a broker. Connects to nothing until the first checkout.
 #[cfg(test)]
-pub(crate) fn session_core_pool_for_test_pool(pool: &sqlx::PgPool, size: u32) -> CorePool {
-    let mut config = PostgresConfig::from_url(test_url_of(&pool.connect_options()));
+pub(crate) fn session_core_pool_for_test_url(url: &str, size: u32) -> CorePool {
+    let mut config = PostgresConfig::from_url(url);
     config.pool_size = size;
     config.max_overflow = 0;
     let plan = pool_plan(
@@ -591,19 +569,17 @@ pub(crate) fn session_core_pool_for_test_pool(pool: &sqlx::PgPool, size: u32) ->
     core_pool
 }
 
-/// The checkout wait of [`unpinged_single_connection_core_pool`].
+/// The checkout wait of [`unpinged_single_connection_core_pool_for_url`].
 #[cfg(test)]
 const TEST_CHECKOUT_WAIT: Duration = Duration::from_secs(30);
 
-/// A core pool of one connection on the URL of `options` that never pings a
-/// pooled connection at checkout (Python's worker pre-ping off) and never
-/// replaces it for its age, with the default socket settings. Once a
+/// A core pool of one connection on the test database of `url` that never
+/// pings a pooled connection at checkout (Python's worker pre-ping off) and
+/// never replaces it for its age, with the default socket settings. Once a
 /// statement is prepared on the connection, the statement is its only round
 /// trip. Connects to nothing until the first checkout.
 #[cfg(test)]
-pub(crate) fn unpinged_single_connection_core_pool(
-    options: &sqlx::postgres::PgConnectOptions,
-) -> CorePool {
+pub(crate) fn unpinged_single_connection_core_pool_for_url(url: &str) -> CorePool {
     let plan = PoolPlan {
         role: PoolRole::Main,
         sizing: PoolSizing::new(1, Reserve::NoReserve)
@@ -614,7 +590,7 @@ pub(crate) fn unpinged_single_connection_core_pool(
         protocol: StatementProtocol::PreparedPerConnection,
     };
     let (core_pool, _masked_url) = open_pool(
-        &test_url_of(options),
+        url,
         plan,
         &ConnectionEnvironment::isolated(),
         &crate::db::DEFAULT_SOCKET_SETTINGS,
@@ -1070,8 +1046,7 @@ mod tests {
 
 #[cfg(test)]
 mod kept_session_tests {
-    //! The session setting of the core pools on the test server (Python
-    //! `tests/integration/test_broker_session_settings.py`): a connection that
+    //! The session setting of the core pools on the test server: a connection that
     //! keeps its session runs `jit = off`, sent once in autocommit when the
     //! connection opens, so a rollback of a transaction on it keeps the
     //! setting. In PgBouncer transaction mode the main pool sets nothing (a
@@ -1087,11 +1062,11 @@ mod kept_session_tests {
     use serial_test::serial;
 
     use super::*;
-    use crate::broker::terminalization_matrix::migrated_database_url;
     use crate::db::{
         CheckoutClass, IsolationLevel, PooledConnection, RollbackOutcome, StatementBound,
         TypedStatement,
     };
+    use crate::test_support::migrated_database_url;
 
     /// The value of `jit` on the connection and where it comes from.
     const JIT_SETTING: TypedStatement = TypedStatement::new(
@@ -1155,7 +1130,7 @@ mod kept_session_tests {
         .expect("the pools of the test database build")
     }
 
-    /// Python `test_broker_session_settings.py::test_setting_survives_a_rollback_of_the_first_transaction`.
+    /// The setting survives a rollback of the first transaction.
     /// The connection opens at the first checkout, runs the setting, then the
     /// statement-pooling check; the transaction of the test rolls back after
     /// both, and the setting stays.
@@ -1193,7 +1168,7 @@ mod kept_session_tests {
         assert_eq!(setting, JitSetting::set_off_on_the_session());
     }
 
-    /// Python `test_broker_session_settings.py::test_transaction_mode_runtime_pool_keeps_the_server_setting`.
+    /// The runtime pool in transaction mode keeps the server setting.
     /// The two URLs reach the same server directly and differ only in
     /// `application_name`, so the session URL gets a pool of its own.
     #[tokio::test]

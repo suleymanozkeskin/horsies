@@ -201,6 +201,7 @@ The exit codes of `run`, the codes of the app's own binary:
 | 1 | Any other end: a refused check, a refused profile, a start that failed, a worker or a scheduler that failed, or `run` inside a tokio runtime |
 | 2 | Arguments that do not parse, or a removed flag |
 | 77 | `worker`: the worker could not write runner heartbeats, and it had not stopped 120 seconds after it started to stop. See [When the Worker Cannot Write Heartbeats](/horsies/workers/heartbeats-recovery/#when-the-worker-cannot-write-heartbeats) |
+| 79 | `worker`: the worker held a task, and its liveness lock was not held for 60 seconds. See [Worker Liveness Lock](/horsies/workers/heartbeats-recovery/#worker-liveness-lock) |
 
 A worker child exits with the code of `ChildHostExit`. The worker reads it to name how the child ended.
 

@@ -14,12 +14,12 @@ use crate::broker::attempt_writes::RetryPlacement;
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     encode_child_frame, encode_parent_frame, AsyncSeats, BlockedWhere, CancelGraceMs,
-    ChildConnection, ChildFrame, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl,
-    DispatchNumber, ExecutorThreads, InitFrame, LeftoverName, LoopBlockedFrame, LoopCulprit,
-    ParentFrame, PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame, ResultEnvelopeText, RssReading,
-    RunEnd, RunRef, RunStuckFrame, SeatEnd, SharedAsyncChild, SharedResultFrame, SharedRunFrame,
-    SharedThreadChild, SharedWork, StuckWork, TaskInputText, TaskSendPool, TaskTimeoutMs,
-    ThreadSeats,
+    ChildAfterFrame, ChildConnection, ChildFrame, ChildKind, ChildLogLevel, ChildPool,
+    ChildProgram, DatabaseUrl, DispatchNumber, ExecutorThreads, InitFrame, LeftoverName,
+    LoopBlockedFrame, LoopCulprit, ParentFrame, PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame,
+    ResultEnvelopeText, RssReading, RunEnd, RunRef, RunStuckFrame, SeatEnd, SharedAsyncChild,
+    SharedResultFrame, SharedRunFrame, SharedThreadChild, SharedWork, StuckWork, TaskInputText,
+    TaskSendPool, TaskTimeoutMs, ThreadSeats,
 };
 use crate::worker::executor::supervisor::{
     BootFailure, BootFailureCause, ChildCommand, ChildExit, LossCause, ReapedExit, Spawner,
@@ -287,6 +287,7 @@ async fn a_shared_seat_reports_the_result_of_its_run() {
         run: run_ref(),
         end: SeatEnd::Finished(RunEnd::Result(ok_envelope())),
         rss: RssReading::Unreadable,
+        child: ChildAfterFrame::ServesOn,
     });
     assert_eq!(
         run_one(
@@ -315,6 +316,7 @@ async fn a_stuck_async_run_ends_at_its_timeout_and_retries_isolated() {
             run: run_ref(),
             end: SeatEnd::TimedOut,
             rss: RssReading::Unreadable,
+            child: ChildAfterFrame::ServesOn,
         }),
     ];
     assert_eq!(
@@ -430,8 +432,7 @@ fn a_killed_child_loss_reads_as_a_kill_by_the_worker() {
     assert!(lost.to_string().contains("killed by the worker"));
 }
 
-/// The free seats of a shared pool, for the soft-cap start check (Python
-/// `test_queue_cap_hold.py::TestFreeChildren`): every seat of an open child
+/// The free seats of a shared pool, for the soft-cap start check: every seat of an open child
 /// is free; a submitted task takes one at once; a stopping pool has none.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_free_seats_of_an_open_child_less_the_submitted_tasks() {

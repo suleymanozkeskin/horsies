@@ -5,30 +5,27 @@
 //! `REPEAT`, so a task that finished answers from history and does not run
 //! again. The core's refusals that need no connection run first, then the
 //! first send of a handle installs the schema once, as Python's broker does.
-//! The outcome is `Enqueued`, `SendValidationFailed` (the core refused the
-//! input, the options or the idempotency key, before any connect),
-//! `SendEnqueueFailed` for a retention class key that no class derives (as
-//! Python's broker answers it), or one class per other variant of the core's
-//! send error catalog (`TaskSendError`), each with only the facts of its
-//! state.
+//! The outcome is `Enqueued`, or the broker catalog's class of the failure
+//! (`horsies._catalog.broker_errors`: `BrokerInvalidInput`,
+//! `BrokerInvalidTaskOptions`, `BrokerEnqueueFailed`,
+//! `BrokerPayloadMismatch` or `BrokerIdempotencyKeyConflict`), built in Rust
+//! (`catalog_errors`). The core decides the code, the message and the cause
+//! of each failure (`BrokerOperationError::enqueue_error`), so the Python
+//! client returns the class as it is.
 
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use horsies_core::core::task::send_types::send_error_from_enqueue;
 use horsies_core::{
-    BrokerError, BrokerErrorCode, CheckedSend, EnqueueRefusal, EnqueueRefusalCause,
-    EnqueueRetention, FailureCause, RetentionClassKeyRefused, SendKind, SendPart, TaskSendError,
-    TaskSendPayload,
+    BrokerError, BrokerOperationError, CheckedSend, EnqueueRefusal, EnqueueRetention, SendKind,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
 use super::arguments::{utc_instant, RerunInputPolicy, StartArgument, StartRule};
-use crate::core_failures::FailureException;
 use crate::handle::BrokerConnection;
+use crate::records::{BrokerFailure, Outcome};
 
 /// One send, as the core takes it. Built once, at the boundary.
 #[derive(Clone, Debug)]
@@ -46,28 +43,6 @@ pub struct EnqueueCommand {
     retention_class_key: String,
     rerun_input: RerunInputPolicy,
     send_kind: SendKind,
-}
-
-impl EnqueueCommand {
-    /// The send payload of the core's error catalog, for the error path.
-    fn payload(&self, retention: EnqueueRetention) -> TaskSendPayload {
-        let enqueue_delay_seconds = match self.start {
-            StartRule::AfterDelay { seconds } => Some(seconds),
-            StartRule::Now | StartRule::At(_) => None,
-        };
-        TaskSendPayload {
-            task_name: self.task_name.clone(),
-            queue_name: self.queue_name.clone(),
-            priority: self.priority,
-            input_json: self.input_json.clone(),
-            sent_at: self.sent_at,
-            good_until: self.good_until,
-            enqueue_delay_seconds,
-            task_options: self.task_options_json.clone(),
-            idempotency_key: self.idempotency_key.clone(),
-            retention,
-        }
-    }
 }
 
 /// A frozen send request. `None` for `good_until`, `task_options_json` or
@@ -172,215 +147,28 @@ pub struct Enqueued {
     pub task_id: Uuid,
 }
 
-/// Sends are suppressed. Nothing was written.
-#[pyclass(module = "horsies._core", frozen, get_all)]
-#[derive(Clone, Debug)]
-pub struct SendSuppressed {
-    pub message: String,
-}
-
-/// A blocking send ran on a thread that runs an event loop or a tokio
-/// runtime (Python `TaskSendAsyncContext`). Nothing was written. A client
-/// produces it before the send, never the core's enqueue.
-#[pyclass(module = "horsies._core", frozen, get_all)]
-#[derive(Clone, Debug)]
-pub struct SendAsyncContext {
-    pub task_id: Uuid,
-    pub message: String,
-}
-
-/// The core refused the send before any statement. Nothing was written.
-/// `code` is `INVALID_INPUT` (the input, or a fact of the call: the start,
-/// the sent instant, the idempotency key, the fingerprint) or
-/// `INVALID_TASK_OPTIONS`. `cause_text` is the JSON reader's
-/// error when the refused text does not read, and `None` when a rule refused
-/// a value that reads.
-#[pyclass(module = "horsies._core", frozen, get_all)]
-#[derive(Clone, Debug)]
-pub struct SendValidationFailed {
-    pub code: String,
-    pub message: String,
-    pub cause_text: Option<String>,
-}
-
-impl SendValidationFailed {
-    /// The record of a core refusal. Pure.
-    fn of(refusal: &EnqueueRefusal, message: String) -> Self {
-        Self {
-            code: refused_code(refusal.part).to_string(),
-            message,
-            cause_text: match &refusal.cause {
-                EnqueueRefusalCause::JsonUnreadable(text) => Some(text.clone()),
-                EnqueueRefusalCause::RuleRefused => None,
-            },
-        }
-    }
-}
-
-/// The broker code of a refused part. Pure.
-fn refused_code(part: SendPart) -> BrokerErrorCode {
-    match part {
-        SendPart::Input => BrokerErrorCode::InvalidInput,
-        SendPart::TaskOptions => BrokerErrorCode::InvalidTaskOptions,
-    }
-}
-
-/// The enqueue failed; the row may or may not exist. A retention class key
-/// that no class derives is this record too, built before any statement:
-/// nothing was written, and `retryable` is false
-/// (`retention_key_refused`). `exception` is the cause, with the subject
-/// `enqueue`.
-#[pyclass(module = "horsies._core", frozen, get_all)]
-#[derive(Clone, Debug)]
-pub struct SendEnqueueFailed {
-    pub task_id: Uuid,
-    pub message: String,
-    pub retryable: bool,
-    pub exception: FailureException,
-}
-
 /// The subject of the exception of a failed enqueue.
 const ENQUEUE_SUBJECT: &str = "enqueue";
 
-/// The task id exists with another command or idempotency key. Nothing was
-/// written.
-#[pyclass(module = "horsies._core", frozen, get_all)]
-#[derive(Clone, Debug)]
-pub struct SendPayloadMismatch {
-    pub task_id: Uuid,
-    pub message: String,
-}
-
-/// The input is larger than the configured limit. Nothing was written.
-#[pyclass(module = "horsies._core", frozen, get_all)]
-#[derive(Clone, Debug)]
-pub struct SendPayloadTooLarge {
-    pub message: String,
-    pub size_bytes: u64,
-    pub limit_bytes: u64,
-}
-
-/// The idempotency key is reserved by `owner_task_id` with another command.
-/// Nothing was written; a resend after the reservation ends is accepted.
-#[pyclass(module = "horsies._core", frozen, get_all)]
-#[derive(Clone, Debug)]
-pub struct SendKeyConflict {
-    pub task_id: Uuid,
-    pub owner_task_id: Uuid,
-    pub message: String,
-}
-
-/// The outcome of one send.
-pub enum SendOutcome {
-    Enqueued(Uuid),
-    /// The core refused the input or the options before any statement.
-    Invalid(SendValidationFailed),
-    /// No retention class derives the class key; nothing was written.
-    RetentionKeyRefused(SendEnqueueFailed),
-    /// The send catalog's answer to a broker error, and the cause of that
-    /// error.
-    Refused {
-        error: TaskSendError,
-        cause: FailureCause,
-    },
-}
-
-impl<'py> IntoPyObject<'py> for SendOutcome {
-    type Target = PyAny;
-    type Output = Bound<'py, PyAny>;
-    type Error = PyErr;
-
-    fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        match self {
-            Self::Enqueued(task_id) => Enqueued { task_id }.into_bound_py_any(py),
-            Self::Invalid(invalid) => invalid.into_bound_py_any(py),
-            Self::RetentionKeyRefused(failed) => failed.into_bound_py_any(py),
-            Self::Refused { error, cause } => refusal_record(py, error, cause),
-        }
-    }
-}
-
-fn refusal_record(
-    py: Python<'_>,
-    error: TaskSendError,
-    cause: FailureCause,
-) -> PyResult<Bound<'_, PyAny>> {
-    match error {
-        TaskSendError::SendSuppressed { message } => {
-            SendSuppressed { message }.into_bound_py_any(py)
-        }
-        TaskSendError::AsyncContext {
-            task_id, message, ..
-        } => SendAsyncContext { task_id, message }.into_bound_py_any(py),
-        // The send catalog's refusals besides the core's own (`refused`
-        // takes those): a reservation window or a value that does not
-        // serialize. Both refuse a fact of the call, which the input carries.
-        TaskSendError::ValidationFailed { message } => SendValidationFailed {
-            code: BrokerErrorCode::InvalidInput.to_string(),
-            message,
-            cause_text: None,
-        }
-        .into_bound_py_any(py),
-        TaskSendError::EnqueueFailed {
-            task_id,
-            message,
-            retryable,
-            ..
-        } => SendEnqueueFailed {
-            task_id,
-            exception: FailureException::new(ENQUEUE_SUBJECT, message.clone(), retryable, cause),
-            message,
-            retryable,
-        }
-        .into_bound_py_any(py),
-        TaskSendError::PayloadMismatch {
-            task_id, message, ..
-        } => SendPayloadMismatch { task_id, message }.into_bound_py_any(py),
-        TaskSendError::PayloadTooLarge {
-            message,
-            size_bytes,
-            limit_bytes,
-        } => SendPayloadTooLarge {
-            message,
-            size_bytes,
-            limit_bytes,
-        }
-        .into_bound_py_any(py),
-        TaskSendError::IdempotencyKeyConflict {
-            task_id,
-            message,
-            owner_task_id,
-            ..
-        } => SendKeyConflict {
-            task_id,
-            owner_task_id,
-            message,
-        }
-        .into_bound_py_any(py),
-    }
-}
+/// The outcome of one send: `Enqueued`, or the broker catalog's class of
+/// the failure, with `ENQUEUE_SUBJECT` as the subject of its exception.
+pub type SendOutcome = Outcome<Enqueued>;
 
 /// Enqueue one task. The core's refusals that need no connection run first
-/// (`CheckedSend::check`), as Python's `_prepare_enqueue` ran before its
-/// schema install: a refused send answers `SendValidationFailed` with no
-/// connect and no statement. Then the schema is installed once per handle; a
-/// failed connect or install is `SendEnqueueFailed`, as Python's enqueue
-/// reports it. Writes; a caller that leaves early sees the outcome as
-/// unknown, and a resend of the same request with the send kind `REPEAT` is
-/// safe.
+/// (`CheckedSend::check`), as `_prepare_enqueue` ran before the schema
+/// install (`core/brokers/postgres.py` of the `v0.7.0` package): a refused send
+/// answers `INVALID_INPUT` or `INVALID_TASK_OPTIONS` with no connect and no
+/// statement. Then the schema is installed once per handle; a failed connect
+/// or install is `ENQUEUE_FAILED`, as Python's enqueue reports it. Writes; a
+/// caller that leaves early sees the outcome as unknown, and a resend of the
+/// same request with the send kind `REPEAT` is safe.
 pub async fn enqueue_operation(
     connection: BrokerConnection,
     command: Arc<EnqueueCommand>,
 ) -> SendOutcome {
-    let retention = match EnqueueRetention::from_class_key(&command.retention_class_key) {
+    let retention = match send_retention(&command.retention_class_key) {
         Ok(retention) => retention,
-        Err(refused_key) => {
-            return SendOutcome::RetentionKeyRefused(retention_key_refused(
-                command.task_id,
-                &command.task_name,
-                &refused_key,
-            ));
-        }
+        Err(error) => return refused(&command.task_name, error),
     };
     let (enqueued_at, enqueue_delay_seconds) = match command.start {
         StartRule::Now => (None, None),
@@ -407,64 +195,51 @@ pub async fn enqueue_operation(
         retain_rerun_input,
     ) {
         Ok(send) => send,
-        Err(error) => return refused(&command, retention, &error),
+        Err(error) => return refused(&command.task_name, error),
     };
     let broker = match connection.initialized_broker().await {
         Ok(broker) => broker,
-        Err(error) => return refused(&command, retention, &error),
+        Err(error) => return refused(&command.task_name, error),
     };
     match broker.enqueue_checked(&send, command.send_kind).await {
-        Ok(task_id) => SendOutcome::Enqueued(task_id),
-        Err(error) => refused(&command, retention, &error),
+        Ok(task_id) => Outcome::Done(Enqueued { task_id }),
+        Err(error) => refused(&command.task_name, error),
     }
 }
 
-/// The record of a retention class key that no class derives, as Python's
-/// broker answers it: Python sends the key, the CHECK
-/// `horsies_tasks_retention_class_key_form` refuses the insert, and the
-/// enqueue is `BrokerEnqueueFailed` with that cause, not retryable. The core
-/// refuses the key before any statement; nothing is written in both. The
-/// message has Python's form, with the refusal as the cause. Pure.
-fn retention_key_refused(
-    task_id: Uuid,
-    task_name: &str,
-    refused: &RetentionClassKeyRefused,
-) -> SendEnqueueFailed {
-    let message = format!("Failed to enqueue task {task_name}: {refused}");
-    SendEnqueueFailed {
-        task_id,
-        exception: FailureException::new(
-            ENQUEUE_SUBJECT,
-            message.clone(),
-            false,
-            FailureCause::PreconditionFailed,
-        ),
-        message,
-        retryable: false,
-    }
-}
-
-/// The outcome of a failed enqueue: a core refusal keeps its part and its
-/// cause; every other error goes through the core's send catalog rule
-/// (`send_error_from_enqueue`). Pure.
-fn refused(
-    command: &EnqueueCommand,
-    retention: EnqueueRetention,
-    error: &BrokerError,
-) -> SendOutcome {
-    match error {
-        BrokerError::EnqueueContract(refusal) => {
-            SendOutcome::Invalid(SendValidationFailed::of(refusal, error.to_string()))
+/// The retention of the class key `class_key` of a send. Pure.
+///
+/// Errors: an empty key is the rule of the version-1 command
+/// (`BrokerError::EnqueueContract`, `INVALID_INPUT`, as Python's
+/// `EnqueueCommandV1` refuses it before any statement); a key that is not
+/// empty and that no class derives is `BrokerError::RetentionClassKey`
+/// (`ENQUEUE_FAILED`, not retryable, as Python's insert met the CHECK
+/// `horsies_tasks_retention_class_key_form`). Nothing is written in both.
+fn send_retention(class_key: &str) -> Result<EnqueueRetention, BrokerError> {
+    match class_key.is_empty() {
+        true => Err(BrokerError::EnqueueContract(
+            EnqueueRefusal::empty_retention_class_key(),
+        )),
+        false => {
+            EnqueueRetention::from_class_key(class_key).map_err(BrokerError::RetentionClassKey)
         }
-        other => SendOutcome::Refused {
-            error: send_error_from_enqueue(command.task_id, command.payload(retention), other),
-            cause: other.failure_cause(),
-        },
     }
+}
+
+/// The outcome of a send of `task_name` that failed with `error`: the
+/// broker catalog's class that the core decides
+/// (`BrokerOperationError::enqueue_error`). Pure.
+fn refused(task_name: &str, error: BrokerError) -> SendOutcome {
+    Outcome::Failed(BrokerFailure::of_operation_error(
+        ENQUEUE_SUBJECT,
+        BrokerOperationError::enqueue_error(task_name, error),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
+    use horsies_core::{BrokerErrorCode, EnqueueRefusalCause, SendPart};
+
     use super::*;
 
     #[test]
@@ -475,43 +250,77 @@ mod tests {
         assert!(refused.contains("\"repeat\""), "{refused}");
     }
 
-    #[test]
-    fn an_input_refusal_is_invalid_input_with_the_reader_error() {
-        let refusal = EnqueueRefusal {
-            part: SendPart::Input,
-            message: "task input refused: trailing characters".to_owned(),
-            cause: EnqueueRefusalCause::JsonUnreadable("trailing characters".to_owned()),
-        };
-        let record = SendValidationFailed::of(&refusal, refusal.message.clone());
-        assert_eq!(record.code, "INVALID_INPUT");
-        assert_eq!(record.cause_text.as_deref(), Some("trailing characters"));
+    /// The failure of a refused send, with the subject of its exception.
+    fn failure_of(outcome: SendOutcome) -> BrokerFailure {
+        match outcome {
+            Outcome::Failed(failure) => failure,
+            Outcome::Done(enqueued) => panic!("a refused send gave {enqueued:?}"),
+        }
     }
 
+    /// Python's `EnqueueCommandV1` refuses an empty retention class key
+    /// before any statement (`INVALID_INPUT`, with the rule as the cause); a
+    /// key that is not empty and that no class derives reaches the CHECK of
+    /// the insert (`ENQUEUE_FAILED`, not retryable). Both are the failure of
+    /// the send, with the subject `enqueue`.
     #[test]
-    fn a_retention_key_that_no_class_derives_is_a_failed_enqueue_that_is_not_retried() {
-        let task_id = Uuid::from_u128(7);
-        let refused = EnqueueRetention::from_class_key("standard_0d")
-            .expect_err("a period of 0 days is below the bounds");
-        let record = retention_key_refused(task_id, "send.task", &refused);
-        assert_eq!(record.task_id, task_id);
-        assert!(!record.retryable);
+    fn an_empty_retention_key_is_invalid_input_and_an_underived_one_a_failed_enqueue() {
+        let empty = send_retention("").expect_err("an empty key is refused");
+        match &empty {
+            BrokerError::EnqueueContract(refusal) => assert_eq!(
+                refusal.cause,
+                EnqueueRefusalCause::CommandRuleRefused(
+                    "retention_class_key must be non-empty".to_owned()
+                )
+            ),
+            other => panic!("an empty key gave {other:?}"),
+        }
+        let failure = failure_of(refused("send.task", empty));
+        assert_eq!(failure.subject, ENQUEUE_SUBJECT);
+        assert_eq!(failure.error.code(), BrokerErrorCode::InvalidInput);
+        assert_eq!(
+            failure.error.message(),
+            "enqueue input refused for send.task: retention_class_key must be non-empty"
+        );
+
+        let underived = send_retention("standard_0d").expect_err("0 days is below the bounds");
         assert!(
-            record.message.starts_with(
+            matches!(underived, BrokerError::RetentionClassKey(_)),
+            "{underived:?}"
+        );
+        let failure = failure_of(refused("send.task", underived));
+        assert_eq!(failure.subject, ENQUEUE_SUBJECT);
+        assert_eq!(failure.error.code(), BrokerErrorCode::EnqueueFailed);
+        assert!(!failure.error.retryable());
+        assert!(
+            failure.error.message().starts_with(
                 "Failed to enqueue task send.task: retention class key \"standard_0d\""
             ),
             "{}",
-            record.message
+            failure.error.message()
         );
+
+        assert!(matches!(
+            send_retention("forever"),
+            Ok(EnqueueRetention::Forever)
+        ));
     }
 
+    /// A core refusal of the task options is `INVALID_TASK_OPTIONS`, and of
+    /// the input `INVALID_INPUT`: the core decides the code from the part.
     #[test]
-    fn an_options_refusal_by_a_rule_is_invalid_task_options_with_no_cause() {
-        let refusal = EnqueueRefusal::by_rule(
-            SendPart::TaskOptions,
-            "task_options refused for t: retry_policy is not an object".to_owned(),
-        );
-        let record = SendValidationFailed::of(&refusal, refusal.message.clone());
-        assert_eq!(record.code, "INVALID_TASK_OPTIONS");
-        assert_eq!(record.cause_text, None);
+    fn a_core_refusal_has_the_code_of_its_part() {
+        for (part, code) in [
+            (SendPart::Input, BrokerErrorCode::InvalidInput),
+            (SendPart::TaskOptions, BrokerErrorCode::InvalidTaskOptions),
+        ] {
+            let refusal = EnqueueRefusal::by_rule(part, "refused".to_owned());
+            let failure = failure_of(refused("t", BrokerError::EnqueueContract(refusal)));
+            assert_eq!(failure.error.code(), code, "{part:?}");
+            assert_eq!(
+                failure.error.message(),
+                "enqueue contract violation: refused"
+            );
+        }
     }
 }

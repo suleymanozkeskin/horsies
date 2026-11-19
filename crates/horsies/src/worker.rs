@@ -11,11 +11,10 @@
 use std::sync::Arc;
 
 use horsies_core::core::config::worker_profile::ProfileRequest;
-use horsies_core::process_runtime::{spawn_on_process_runtime, ProcessRuntimeRefusal};
 use horsies_core::worker_manifest::WorkerManifest;
 use horsies_core::{
-    child_command, run_end_of, ChildSpecs, ClientFamily, RunPhase, Worker, WorkerPlan,
-    WorkerPlanRefused, WorkerRunEnd, WorkerStop,
+    child_command, run_end_of, ClientFamily, RunPhase, Worker, WorkerPlan, WorkerPlanRefused,
+    WorkerRunEnd, WorkerStop,
 };
 
 pub use horsies_core::worker_manifest::WorkerLogLevel;
@@ -23,6 +22,7 @@ pub use horsies_core::{WorkerBootCause, WorkerFailCause};
 
 use crate::check::{CheckReport, CheckScope, WORKER_STARTUP};
 use crate::config::{rust_child_launch, worker_manifest};
+use crate::process_state::{runtime_for, RuntimeStartFailed};
 use crate::signals::stop_on_signals;
 use crate::workflow::WorkflowRegistry;
 use crate::{AppRole, Horsies, HorsiesError};
@@ -94,9 +94,10 @@ pub enum WorkerRunError {
     /// PgBouncer transaction mode with no session URL). Nothing started.
     #[error("the connection settings are refused: {cause}")]
     ConnectionSettingsRefused { cause: String },
-    /// The core's process runtime cannot run the worker. Nothing started.
+    /// The OS refused the threads of the core's process runtime. Nothing
+    /// started; a later run tries the start again.
     #[error("{0}")]
-    RuntimeUnavailable(ProcessRuntimeRefusal),
+    RuntimeUnavailable(RuntimeStartFailed),
     /// The start failed; the worker claimed nothing. `message` names the
     /// subject and the cause.
     #[error("worker start failed ({}): {message}", .cause.as_str())]
@@ -126,26 +127,28 @@ impl Horsies {
     ///
     /// Errors: [`WorkerRunError`]. The run returns `Ok` only at a stop
     /// request.
+    ///
+    /// # Panics
+    ///
+    /// After the checks, in a process that was forked without `exec` after
+    /// the core's process runtime started in its parent. Nothing started.
     pub async fn run_worker(mut self, start: WorkerStart) -> Result<WorkerStopped, WorkerRunError> {
         self.set_role(AppRole::Worker);
         self.check_scope(CheckScope::WithoutSchedules, WORKER_STARTUP)
             .map_err(WorkerRunError::CheckRefused)?;
         let manifest = self.worker_manifest_of(start)?;
         let plan = WorkerPlan::of_manifest(&manifest).map_err(plan_refusal)?;
+        let runtime = runtime_for(format_args!("Horsies::run_worker"))
+            .map_err(WorkerRunError::RuntimeUnavailable)?;
         let stop = WorkerStop::new();
         let signal_stop = stop.clone();
-        let signals = spawn_on_process_runtime(stop_on_signals("worker", move || {
+        let signals = runtime.handle().spawn(stop_on_signals("worker", move || {
             signal_stop.request_stop()
-        }))
-        .map_err(WorkerRunError::RuntimeUnavailable)?;
-        let run = spawn_on_process_runtime(run_plan(plan, Arc::clone(self.workflows()), stop));
-        let end = match run {
-            Ok(run) => run.await,
-            Err(refusal) => {
-                signals.abort();
-                return Err(WorkerRunError::RuntimeUnavailable(refusal));
-            }
-        };
+        }));
+        let end = runtime
+            .handle()
+            .spawn(run_plan(plan, Arc::clone(self.workflows()), stop))
+            .await;
         signals.abort();
         match end {
             Ok(end) => outcome_of(end),
@@ -189,7 +192,7 @@ async fn run_plan(
     workflows: Arc<WorkflowRegistry>,
     stop: WorkerStop,
 ) -> WorkerRunEnd {
-    match Worker::from_plan(plan, ChildSpecs::Client(workflows), ClientFamily::Rust).await {
+    match Worker::from_plan(plan, workflows, ClientFamily::Rust).await {
         Ok(worker) => worker.with_stop(&stop).run_to_end().await,
         Err(error) => {
             tracing::error!("the worker did not build: {error}");
@@ -290,6 +293,57 @@ mod tests {
         assert_eq!(launch.command.args, vec![crate::CHILD_MODE_ARGUMENT]);
         assert_eq!(launch.log_level, WorkerLogLevel::Error);
         assert!(WorkerPlan::of_manifest(&manifest).is_ok());
+    }
+
+    /// The worker of `config` with the profile `web`: the app accepts the
+    /// config, the manifest asks for no preload process, and the plan builds.
+    fn assert_web_starts_with_no_preload(config: AppConfig) {
+        let app = Horsies::new(config).unwrap();
+        let manifest = app.worker_manifest_of(WorkerStart::profile("web")).unwrap();
+        assert_eq!(
+            manifest.profiles["web"].preload,
+            horsies_core::worker_manifest::Preload::NoPreload
+        );
+        assert!(WorkerPlan::of_manifest(&manifest).is_ok());
+    }
+
+    /// A profile built from `..WorkerProfile::default()` with no `preload`
+    /// has `ChildPreload::NoPreload`, and its worker starts.
+    #[test]
+    fn a_default_profile_starts_with_no_preload() {
+        let profile = WorkerProfile {
+            isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
+                IsolatedChildCount::try_from(2).unwrap(),
+            )),
+            ..WorkerProfile::default()
+        };
+        assert_eq!(profile.preload, ChildPreload::NoPreload);
+        let mut config = AppConfig::for_database_url("postgresql://localhost/horsies");
+        let _previous = config.worker_profiles.insert("web".to_owned(), profile);
+        assert_web_starts_with_no_preload(config);
+    }
+
+    /// A TOML profile without the `preload` key reads as
+    /// `ChildPreload::NoPreload`, and its worker starts. `toml` is built
+    /// with the `cli` feature.
+    #[cfg(feature = "cli")]
+    #[test]
+    fn a_toml_profile_without_preload_starts() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[broker]
+database_url = "postgresql://localhost/horsies"
+
+[worker_profiles.web]
+isolated = { kind = "isolated_children", count = 2 }
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.worker_profiles["web"].preload,
+            ChildPreload::NoPreload
+        );
+        assert_web_starts_with_no_preload(config);
     }
 
     #[test]

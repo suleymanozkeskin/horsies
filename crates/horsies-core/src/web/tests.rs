@@ -9,16 +9,16 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
 use serial_test::serial;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use crate::broker::terminalization_matrix::{migrated_database_url, migrated_pool};
 use crate::broker::{PostgresBroker, SchemaInitializationMode};
 use crate::monitoring::TaskAbsenceReason;
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::migrated_database_url;
+use crate::test_support::migrated_pool;
+use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 use crate::AppConfig;
 
 use super::app::{build_router, WebState};
@@ -107,10 +107,8 @@ impl MonitoringAuthPolicy for TrustedHeader {
     }
 }
 
-fn lazy_pool() -> PgPool {
-    PgPoolOptions::new()
-        .connect_lazy("postgresql://postgres:pw@127.0.0.1:1/none")
-        .expect("lazy test pool")
+fn lazy_pool() -> TestPool {
+    TestPoolOptions::new().connect_lazy("postgresql://postgres:pw@127.0.0.1:1/none")
 }
 
 fn status(state: SchemaState, version: Option<i64>) -> SchemaStatus {
@@ -165,13 +163,16 @@ fn fixed_probe(schema: SchemaStatus) -> Arc<SchemaProbe> {
 }
 
 fn test_state(
-    pool: PgPool,
+    pool: TestPool,
     auth_policy: Arc<dyn MonitoringAuthPolicy>,
     schema_probe: Arc<SchemaProbe>,
     actions_enabled: bool,
     assets: Arc<dyn super::spa::AssetStore>,
 ) -> WebState {
-    let broker = Arc::new(PostgresBroker::from_pool(pool));
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    ));
     WebState {
         events: EventBroadcaster::with_debounce(Arc::clone(&broker), Duration::from_millis(25)),
         broker,
@@ -183,7 +184,7 @@ fn test_state(
         actions_enabled,
         ui_config: MonitoringUiConfig::default(),
         assets,
-        children: crate::monitoring::ResumeChildren::Client(Arc::new(TestChildSpecs::empty())),
+        children: Arc::new(TestChildSpecs::empty()),
         heartbeat: Duration::from_millis(25),
         client_version: env!("CARGO_PKG_VERSION").to_owned(),
     }
@@ -330,6 +331,32 @@ async fn action_guard_order_is_authorization_then_intent_then_schema() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
     assert_eq!(json(response).await["code"], SCHEMA_UNKNOWN);
+}
+
+/// Python `tests/unit/test_web_auth.py::TestActGuard::test_rejects_a_wrong_intent_value`:
+/// an intent header with another value is refused as a missing intent, before
+/// the schema gate.
+#[tokio::test]
+async fn an_action_with_another_intent_value_is_refused() {
+    let unknown = status(SchemaState::Unknown, None);
+    let wrong_intent = Request::builder()
+        .method(Method::POST)
+        .uri("/api/tasks/not-a-uuid/cancel")
+        .header(INTENT_HEADER, "read")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .expect("action request");
+
+    let response = test_router(Arc::new(AllowAll), unknown, true)
+        .oneshot(wrong_intent)
+        .await
+        .expect("the router answers");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        json(response).await,
+        serde_json::json!({"detail": "Missing X-Horsies-Intent: action header."})
+    );
 }
 
 #[tokio::test]
@@ -787,6 +814,75 @@ fn the_runtime_config_is_the_text_of_python_json_dumps() {
     );
 }
 
+/// Python `tests/unit/test_web_app_shell.py::TestStaticServing::test_built_assets_are_served`:
+/// a built asset is served with the bytes of its file.
+#[tokio::test]
+async fn a_built_asset_is_served_with_its_bytes() {
+    let router = test_router(Arc::new(AllowAll), status(SchemaState::Unknown, None), true);
+
+    let asset = router
+        .oneshot(request(Method::GET, "/assets/app.js"))
+        .await
+        .unwrap();
+
+    assert_eq!(asset.status(), StatusCode::OK);
+    let body = to_bytes(asset.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(&body[..], b"console.log('horsies')");
+}
+
+/// Python `tests/unit/test_web_app_shell.py::TestStaticServing::test_no_custom_css_means_no_extra_stylesheet`:
+/// with no custom stylesheet, the page gets no stylesheet link.
+#[tokio::test]
+async fn no_custom_css_means_no_extra_stylesheet() {
+    let router = test_router(Arc::new(AllowAll), status(SchemaState::Unknown, None), true);
+
+    let page = router.oneshot(request(Method::GET, "/")).await.unwrap();
+
+    assert_eq!(page.status(), StatusCode::OK);
+    let page = String::from_utf8(
+        to_bytes(page.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(page.contains("window.__HORSIES_UI__"), "{page}");
+    assert!(!page.contains("<link rel=\"stylesheet\""), "{page}");
+}
+
+/// Python `tests/unit/test_web_app_shell.py::test_base_href_is_always_a_directory`:
+/// the base of the page ends with a slash under every mount, so relative
+/// asset URLs resolve against the mount.
+#[test]
+fn the_base_href_is_always_a_directory() {
+    for (root_path, base) in [
+        ("", "<base href=\"/\">"),
+        ("/monitoring", "<base href=\"/monitoring/\">"),
+        ("/a/b", "<base href=\"/a/b/\">"),
+    ] {
+        let page = inject("<html><head></head><body></body></html>", root_path, None);
+        assert!(page.contains(base), "{root_path:?}: {page}");
+    }
+}
+
+/// Python `tests/unit/test_web_app_shell.py::test_asset_resolution_rejects_traversal`:
+/// a request path resolves to an asset only for a built file inside the
+/// tree; not for the page, an empty path, a missing file, or a path that
+/// leaves the tree.
+#[test]
+fn an_asset_resolves_only_to_a_built_file_inside_the_tree() {
+    let assets = MemoryAssets::standard();
+    let resolve = |path: &str| {
+        safe_asset_path(path)
+            .and_then(|asset_path| super::spa::AssetStore::get(assets.as_ref(), &asset_path))
+    };
+
+    assert!(resolve("assets/app.js").is_some());
+    for path in ["../../etc/passwd", "index.html", "", "nope.js"] {
+        assert!(resolve(path).is_none(), "{path:?}");
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn embedded_spa_and_each_primary_view_api_roundtrip_against_postgres() {
@@ -842,6 +938,8 @@ async fn embedded_spa_and_each_primary_view_api_roundtrip_against_postgres() {
     }
 }
 
+/// Python `tests/unit/test_web_app_shell.py::TestMissingBuild`: the page
+/// names the missing build and the command that builds it; the API answers.
 #[tokio::test]
 async fn missing_embedded_index_is_a_factual_503_while_api_still_answers() {
     let state = test_state(
@@ -858,10 +956,13 @@ async fn missing_embedded_index_is_a_factual_503_while_api_still_answers() {
         .await
         .unwrap();
     assert_eq!(page.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert!(json(page).await["detail"]
-        .as_str()
-        .unwrap()
-        .contains("bun run build, then rebuild horsies-core"));
+    let page = json(page).await;
+    let detail = page["detail"].as_str().unwrap();
+    assert!(detail.contains("assets are not built"), "{detail}");
+    assert!(
+        detail.contains("bun run build, then rebuild horsies-core"),
+        "{detail}"
+    );
     assert_eq!(
         router
             .oneshot(request(Method::GET, "/api/meta"))
@@ -877,9 +978,9 @@ async fn missing_embedded_index_is_a_factual_503_while_api_still_answers() {
 #[serial]
 async fn worker_list_carries_the_slot_health() {
     let state = migrated_state().await;
-    let pool = state.broker.pool().clone();
+    let pool = migrated_pool().await;
     let worker_id = format!("itest-{}", Uuid::new_v4().simple());
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_worker_states (
             worker_id, snapshot_at, hostname, pid, processes,
             max_claim_batch, max_claim_per_worker, queues,
@@ -911,7 +1012,7 @@ async fn worker_list_carries_the_slot_health() {
         .unwrap();
     let status = response.status();
     let body = json(response).await;
-    sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+    sql::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
         .bind(&worker_id)
         .execute(&pool)
         .await
@@ -1022,9 +1123,9 @@ fn worker_list_ages_are_measured_to_the_read_time() {
 #[serial]
 async fn a_snapshot_ten_minutes_old_in_database_time_is_stale() {
     let state = migrated_state().await;
-    let pool = state.broker.pool().clone();
+    let pool = migrated_pool().await;
     let worker_id = format!("itest-{}", Uuid::new_v4().simple());
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_worker_states (
             worker_id, snapshot_at, hostname, pid, processes,
             max_claim_batch, max_claim_per_worker, queues,
@@ -1049,7 +1150,7 @@ async fn a_snapshot_ten_minutes_old_in_database_time_is_stale() {
         .unwrap();
     let status = response.status();
     let body = json(response).await;
-    sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+    sql::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
         .bind(&worker_id)
         .execute(&pool)
         .await
@@ -1078,11 +1179,11 @@ async fn a_snapshot_ten_minutes_old_in_database_time_is_stale() {
 #[serial]
 async fn class_report_answers_with_streams_and_budgets() {
     let state = migrated_state().await;
-    let pool = state.broker.pool().clone();
+    let pool = migrated_pool().await;
     let suffix = Uuid::new_v4().simple().to_string();
     let worker_id = format!("w-async-{suffix}");
     let queue = format!("q-{}", &suffix[..12]);
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_worker_states (
             worker_id, snapshot_at, hostname, pid, processes,
             max_claim_batch, max_claim_per_worker, queues,
@@ -1102,7 +1203,7 @@ async fn class_report_answers_with_streams_and_budgets() {
     .await
     .unwrap();
     let task_id = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
             is_workflow_task, retry_count, max_retries, command_fingerprint_version,
@@ -1126,12 +1227,12 @@ async fn class_report_answers_with_streams_and_budgets() {
         .unwrap();
     let status = response.status();
     let body = json(response).await;
-    sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+    sql::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
         .bind(&worker_id)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+    sql::query("DELETE FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .execute(&pool)
         .await
@@ -1170,14 +1271,14 @@ async fn class_report_answers_with_streams_and_budgets() {
     );
 }
 
-async fn clean_w4(pool: &PgPool, prefix: &str) {
+async fn clean_w4(pool: &TestPool, prefix: &str) {
     let pattern = format!("{prefix}%");
     for statement in [
         "DELETE FROM horsies_task_history WHERE task_name LIKE $1",
         "DELETE FROM horsies_tasks WHERE task_name LIKE $1",
         "DELETE FROM horsies_workflows WHERE name LIKE $1",
     ] {
-        sqlx::query(statement)
+        sql::query(statement)
             .bind(&pattern)
             .execute(pool)
             .await
@@ -1189,9 +1290,10 @@ async fn migrated_state() -> WebState {
     let pool = migrated_pool().await;
     let database_url = migrated_database_url().await;
     // The worker ping route needs the broker's listener.
-    let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
-        pool,
+    let broker = Arc::new(PostgresBroker::from_test_url_and_session_url(
+        pool.url(),
         &database_url,
+        crate::ClientFamily::Rust,
     ));
     WebState {
         schema_probe: Arc::new(SchemaProbe::new(Arc::clone(&broker))),
@@ -1204,15 +1306,15 @@ async fn migrated_state() -> WebState {
         actions_enabled: true,
         ui_config: MonitoringUiConfig::default(),
         assets: MemoryAssets::standard(),
-        children: crate::monitoring::ResumeChildren::Client(Arc::new(TestChildSpecs::empty())),
+        children: Arc::new(TestChildSpecs::empty()),
         heartbeat: Duration::from_millis(25),
         client_version: env!("CARGO_PKG_VERSION").to_owned(),
     }
 }
 
-async fn seed_pending(pool: &PgPool, prefix: &str) -> Uuid {
+async fn seed_pending(pool: &TestPool, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
             is_workflow_task, retry_count, max_retries, command_fingerprint_version,
@@ -1246,8 +1348,8 @@ fn status_count(stats: &serde_json::Value, status: &str) -> i64 {
 async fn task_stats_route_reuses_a_successful_scope_within_the_ttl() {
     let state = migrated_state().await;
     let prefix = format!("stats_cache_{}__", Uuid::new_v4().simple());
-    clean_w4(state.broker.pool(), &prefix).await;
-    let task_id = seed_pending(state.broker.pool(), &prefix).await;
+    clean_w4(&migrated_pool().await, &prefix).await;
+    let task_id = seed_pending(&migrated_pool().await, &prefix).await;
     let task_name = format!("{prefix}task_{}", task_id.simple());
     let path = format!("/api/tasks/stats?task_name={task_name}");
     let router = build_router(state.clone());
@@ -1261,16 +1363,16 @@ async fn task_stats_route_reuses_a_successful_scope_within_the_ttl() {
     let first = json(first).await;
     assert_eq!(status_count(&first, "PENDING"), 1);
 
-    sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+    sql::query("DELETE FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
-        .execute(state.broker.pool())
+        .execute(&migrated_pool().await)
         .await
         .unwrap();
 
     let second = router.oneshot(request(Method::GET, &path)).await.unwrap();
     assert_eq!(second.status(), StatusCode::OK);
     assert_eq!(json(second).await, first);
-    clean_w4(state.broker.pool(), &prefix).await;
+    clean_w4(&migrated_pool().await, &prefix).await;
 }
 
 #[tokio::test]
@@ -1278,8 +1380,8 @@ async fn task_stats_route_reuses_a_successful_scope_within_the_ttl() {
 async fn all_http_surfaces_route_to_the_monitoring_and_action_layers() {
     let state = migrated_state().await;
     let prefix = format!("w4_http_{}__", Uuid::new_v4().simple());
-    clean_w4(state.broker.pool(), &prefix).await;
-    let task_id = seed_pending(state.broker.pool(), &prefix).await;
+    clean_w4(&migrated_pool().await, &prefix).await;
+    let task_id = seed_pending(&migrated_pool().await, &prefix).await;
     let router = build_router(state.clone());
 
     let checks = [
@@ -1355,16 +1457,17 @@ async fn all_http_surfaces_route_to_the_monitoring_and_action_layers() {
             "warning": null
         })
     );
-    clean_w4(state.broker.pool(), &prefix).await;
+    clean_w4(&migrated_pool().await, &prefix).await;
 }
 
 #[tokio::test]
 #[serial]
 async fn broadcaster_subscribes_on_the_broker_listener_and_batches_real_notify_bursts() {
     let pool = migrated_pool().await;
-    let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
-        pool.clone(),
+    let broker = Arc::new(PostgresBroker::from_test_url_and_session_url(
+        pool.url(),
         &migrated_database_url().await,
+        crate::ClientFamily::Rust,
     ));
     let broadcaster = EventBroadcaster::with_debounce(broker, Duration::from_millis(40));
     let mut subscription = broadcaster.subscribe().await;
@@ -1377,7 +1480,7 @@ async fn broadcaster_subscribes_on_the_broker_listener_and_batches_real_notify_b
         ("horsies_workflow_status", "w1"),
         ("horsies_worker_state", "worker-1"),
     ] {
-        sqlx::query("SELECT pg_notify($1, $2)")
+        sql::query("SELECT pg_notify($1, $2)")
             .bind(channel)
             .bind(payload)
             .execute(&mut *transaction)
@@ -1413,14 +1516,15 @@ async fn a_listener_gap_sends_one_refresh_per_topic() {
     let url = migrated_database_url().await;
     let application_name = format!("web_events_gap_{}", Uuid::new_v4().simple());
     let separator = if url.contains('?') { '&' } else { '?' };
-    let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
-        pool.clone(),
+    let broker = Arc::new(PostgresBroker::from_test_url_and_session_url(
+        pool.url(),
         &format!("{url}{separator}application_name={application_name}"),
+        crate::ClientFamily::Rust,
     ));
     let broadcaster = EventBroadcaster::with_debounce(broker, Duration::from_millis(40));
     let mut subscription = broadcaster.subscribe().await;
 
-    let terminated: i64 = sqlx::query_scalar(
+    let terminated: i64 = sql::query_scalar(
         "SELECT count(*) FROM (
              SELECT pg_terminate_backend(pid) FROM pg_stat_activity
              WHERE application_name = $1
@@ -1454,9 +1558,10 @@ async fn a_listener_gap_sends_one_refresh_per_topic() {
 /// every client reads the degraded marker.
 #[tokio::test]
 async fn a_listener_that_cannot_start_degrades_the_stream() {
-    let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
-        lazy_pool(),
+    let broker = Arc::new(PostgresBroker::from_test_url_and_session_url(
+        lazy_pool().url(),
         "postgresql://postgres:pw@127.0.0.1:1/none",
+        crate::ClientFamily::Rust,
     ));
     let broadcaster = EventBroadcaster::with_debounce(broker, Duration::from_millis(25));
     let mut subscription = broadcaster.subscribe().await;
@@ -1496,9 +1601,12 @@ async fn sse_route_emits_idle_heartbeat_comments() {
 async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
     let database = crate::test_support::TestDatabase::create_empty().await;
     let broker = Arc::new(
-        PostgresBroker::connect_observe_only(&AppConfig::for_database_url(database.url()).broker)
-            .await
-            .unwrap(),
+        PostgresBroker::connect_observe_only(
+            &AppConfig::for_database_url(database.url()).broker,
+            crate::ClientFamily::Rust,
+        )
+        .await
+        .unwrap(),
     );
     assert_eq!(
         broker.schema_initialization_mode(),
@@ -1525,7 +1633,7 @@ async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
 
 #[tokio::test]
 async fn default_broker_mode_still_migrates_and_validates() {
-    let broker = PostgresBroker::from_pool(lazy_pool());
+    let broker = PostgresBroker::from_test_url(lazy_pool().url(), crate::ClientFamily::Rust);
     assert_eq!(
         broker.schema_initialization_mode(),
         SchemaInitializationMode::MigrateAndValidate
@@ -1713,9 +1821,7 @@ async fn a_node_index_outside_the_integer_column_is_not_found() {
     );
 }
 
-/// Python `tests/unit/test_monitoring_task_detail_absence.py`,
-/// `TestWebRoute::test_each_reason_is_not_found`: the 404 text of each
-/// absence reason.
+/// The 404 text of each absence reason.
 #[test]
 fn each_absence_reason_has_the_not_found_text_of_python() {
     for (reason, text) in [
@@ -1728,6 +1834,40 @@ fn each_absence_reason_has_the_not_found_text_of_python() {
     ] {
         assert_eq!(task_not_found_text(reason), text, "{reason:?}");
     }
+}
+
+/// A task detail read that fails is never answered as an absent task. A history contract
+/// violation is a server error (500); a database failure (the router's pool
+/// is lazy and unreachable) is unavailable (503).
+#[tokio::test]
+async fn a_task_detail_read_that_fails_is_not_a_not_found() {
+    let contract = super::common::query_failed(
+        "Task detail",
+        crate::monitoring::MonitoringQueryError::HistoryContractViolation {
+            message: "task detail history read failed: bad row".to_owned(),
+            source: crate::monitoring::HistoryContractSource(
+                crate::monitoring::MonitoringQueryErrorSource::History(
+                    crate::core::history::errors::HistoryError::Contract("bad row".to_owned()),
+                ),
+            ),
+        },
+    );
+    let contract = axum::response::IntoResponse::into_response(contract);
+    assert_eq!(contract.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Match, Some(crate::expected_schema_version())),
+        true,
+    );
+    let read = router
+        .oneshot(request(
+            Method::GET,
+            &format!("/api/tasks/{}", Uuid::new_v4()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(read.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 /// A UUIDv7 whose embedded birth is `birth`, with random tail bits.
@@ -1750,7 +1890,7 @@ fn uuid7_born_at(birth: chrono::DateTime<chrono::Utc>) -> Uuid {
 async fn an_absent_task_is_not_found_with_the_text_of_its_absence_reason() {
     let state = migrated_state().await;
     let detached_upper = chrono::Utc::now() - chrono::Duration::days(1);
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_task_history_leaf_catalog (
              leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor,
              index_schema_version, created_at, detached_at, dropped_at
@@ -1759,7 +1899,7 @@ async fn an_absent_task_is_not_found_with_the_text_of_its_absence_reason() {
     .bind(format!("web_detached_{}", Uuid::new_v4().simple()))
     .bind(detached_upper - chrono::Duration::days(1))
     .bind(detached_upper)
-    .execute(state.broker.pool())
+    .execute(&migrated_pool().await)
     .await
     .expect("record a detached period leaf");
     let router = build_router(state);
@@ -1861,9 +2001,9 @@ async fn an_unknown_error_category_is_a_bad_request_on_every_task_route() {
 #[serial]
 async fn the_run_route_answers_the_run_its_failed_indices_and_its_edges() {
     let state = migrated_state().await;
-    let pool = state.broker.pool().clone();
+    let pool = migrated_pool().await;
     let run_id = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflows (
             id, name, definition_key, status, on_error, output_task_index, success_policy,
             result, error, parent_workflow_id, parent_task_index, root_workflow_id, depth,
@@ -1879,7 +2019,7 @@ async fn the_run_route_answers_the_run_its_failed_indices_and_its_edges() {
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
             downstream_subworkflow,
             id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
@@ -1909,7 +2049,7 @@ async fn the_run_route_answers_the_run_its_failed_indices_and_its_edges() {
         .unwrap();
     let status = response.status();
     let body = json(response).await;
-    sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+    sql::query("DELETE FROM horsies_workflows WHERE id = $1")
         .bind(run_id)
         .execute(&pool)
         .await
@@ -1929,9 +2069,9 @@ async fn the_run_route_answers_the_run_its_failed_indices_and_its_edges() {
 #[serial]
 async fn a_cancel_of_stored_data_that_does_not_parse_is_a_server_error() {
     let state = migrated_state().await;
-    let pool = state.broker.pool().clone();
+    let pool = migrated_pool().await;
     let task_id = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -1975,7 +2115,7 @@ async fn a_cancel_of_stored_data_that_does_not_parse_is_a_server_error() {
         ),
         "{failed:?}"
     );
-    sqlx::query("UPDATE horsies_task_history SET status = 'NOT_KNOWN' WHERE task_id = $1")
+    sql::query("UPDATE horsies_task_history SET status = 'NOT_KNOWN' WHERE task_id = $1")
         .bind(task_id)
         .execute(&pool)
         .await
@@ -1987,7 +2127,7 @@ async fn a_cancel_of_stored_data_that_does_not_parse_is_a_server_error() {
         .unwrap();
     let status = response.status();
     let body = json(response).await;
-    sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+    sql::query("DELETE FROM horsies_task_history WHERE task_id = $1")
         .bind(task_id)
         .execute(&pool)
         .await
@@ -2034,9 +2174,9 @@ impl crate::ChildSpecSource for RaisingChildBuild {
 /// A PAUSED top-level workflow named `<prefix>parent` whose node 0 is a READY
 /// sub-workflow node with no child, so a resume owes its child start.
 /// Returns the workflow id.
-async fn seed_paused_parent_of_a_ready_child(pool: &PgPool, prefix: &str) -> Uuid {
+async fn seed_paused_parent_of_a_ready_child(pool: &TestPool, prefix: &str) -> Uuid {
     let workflow_id = Uuid::new_v4();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, status, on_error, definition_key, depth,
              root_workflow_id, sent_at, created_at, started_at,
@@ -2051,7 +2191,7 @@ async fn seed_paused_parent_of_a_ready_child(pool: &PgPool, prefix: &str) -> Uui
     .execute(pool)
     .await
     .expect("seed the PAUSED workflow");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
              dependencies, args_from, workflow_ctx_from, allow_failed_deps, join_type,
@@ -2089,8 +2229,8 @@ async fn a_resume_whose_child_build_raised_is_python_s_internal_server_error() {
     let mut state = migrated_state().await;
     let build = Arc::new(RaisingChildBuild::default());
     let source: Arc<dyn crate::ChildSpecSource> = build.clone();
-    state.children = crate::monitoring::ResumeChildren::Client(source);
-    let pool = state.broker.pool().clone();
+    state.children = source;
+    let pool = migrated_pool().await;
     let prefix = format!("web_resume_raised_{}__", Uuid::new_v4().simple());
     clean_w4(&pool, &prefix).await;
     let workflow_id = seed_paused_parent_of_a_ready_child(&pool, &prefix).await;
@@ -2109,7 +2249,7 @@ async fn a_resume_whose_child_build_raised_is_python_s_internal_server_error() {
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("response body");
-    let (workflow_status, node_status): (String, String) = sqlx::query_as(
+    let (workflow_status, node_status): (String, String) = sql::query_as(
         "SELECT w.status, t.status
          FROM horsies_workflows w
          JOIN horsies_workflow_tasks t ON t.workflow_id = w.id AND t.task_index = 0
@@ -2168,13 +2308,16 @@ async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_n
     let database = crate::test_support::TestDatabase::create_empty().await;
     let url = database.url().to_owned();
     let broker = Arc::new(
-        PostgresBroker::connect_observe_only(&AppConfig::for_database_url(&url).broker)
-            .await
-            .expect("connect the observe-only broker"),
+        PostgresBroker::connect_observe_only(
+            &AppConfig::for_database_url(&url).broker,
+            crate::ClientFamily::Rust,
+        )
+        .await
+        .expect("connect the observe-only broker"),
     );
     let handler = MonitoringHandler::new(
         Arc::clone(&broker),
-        crate::monitoring::ResumeChildren::Client(Arc::new(TestChildSpecs::empty())),
+        Arc::new(TestChildSpecs::empty()),
         MonitoringHandlerConfig {
             actions_enabled: true,
             ui: MonitoringUiConfig::default(),
@@ -2192,8 +2335,7 @@ async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_n
     let status = response.status;
     let body = body_json(&response);
     let objects = horsies_objects(database.client()).await;
-    broker.pool().close().await;
-    broker.session_pool().close().await;
+    broker.close().await;
     drop(broker);
     database.drop().await;
 

@@ -35,7 +35,7 @@ pub const HEARTBEAT: Duration = Duration::from_secs(15);
 /// The most items one web client can have queued. On overflow, the client's
 /// queued events are dropped and it gets one event with no ids for every
 /// topic ("refresh the whole topic"), so a slow client cannot grow the web
-/// process. Python keeps an unbounded queue (`tests/dualrun/reference/web_events.py:211`).
+/// process.
 pub const SUBSCRIBER_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,8 +234,10 @@ impl SubscriberQueue {
     }
 
     /// Queue one item. A full queue drops its items and takes one refresh
-    /// event per topic instead; a degraded marker is kept after them. A
-    /// closed queue takes nothing.
+    /// event per topic instead. A degraded marker among the dropped items,
+    /// or `item` when it is the marker, is queued after the refresh events,
+    /// so the stream still ends; an event `item` is covered by the refresh
+    /// events. A closed queue takes nothing.
     fn push(&self, item: StreamItem) {
         {
             let mut state = self.lock();
@@ -245,11 +247,12 @@ impl SubscriberQueue {
             match state.items.len() < SUBSCRIBER_QUEUE_CAPACITY {
                 true => state.items.push_back(item),
                 false => {
+                    let ends = item.is_none() || state.items.iter().any(Option::is_none);
                     state.items.clear();
                     state.items.extend(refresh_events().into_iter().map(Some));
-                    match item {
-                        Some(_covered_by_the_refresh) => {}
-                        None => state.items.push_back(None),
+                    match ends {
+                        true => state.items.push_back(None),
+                        false => {}
                     }
                 }
             }
@@ -476,8 +479,8 @@ impl EventBroadcaster {
     }
 }
 
-/// The JSON object of one event, as Python's `json.dumps` writes it
-/// (`tests/dualrun/reference/web_routes/events.py`): `{"topic": ..., "ids": [...]}`,
+/// The JSON object of one event, as Python's `json.dumps` writes it:
+/// `{"topic": ..., "ids": [...]}`,
 /// with a space after each `:` and `,`, and every text escaped to ASCII.
 /// Pure.
 pub(crate) fn data_frame(event: &TopicEvent) -> String {
@@ -555,9 +558,8 @@ enum FramesState {
     Ended,
 }
 
-/// One web client's event stream in the frame texts of the wire, as
-/// Python's `/api/events` route writes them
-/// (`tests/dualrun/reference/web_routes/events.py`): `data: <event>\n\n` per event,
+/// One web client's event stream in the frame texts of the wire:
+/// `data: <event>\n\n` per event,
 /// [`HEARTBEAT_FRAME`] after `heartbeat` without an event, and
 /// `data: {"topic": "degraded"}\n\n`, after which the stream ends.
 pub struct EventFrames {
@@ -688,6 +690,107 @@ mod queue_tests {
         assert_eq!(items.last(), Some(&None));
     }
 
+    /// A queue at its bound, of `tasks` events.
+    fn full_queue() -> SubscriberQueue {
+        let queue = SubscriberQueue::default();
+        for index in 0..SUBSCRIBER_QUEUE_CAPACITY {
+            queue.push(event("tasks", &index.to_string()));
+        }
+        queue
+    }
+
+    /// One refresh event per topic, then the degraded marker: the items of
+    /// an overflowed queue of a stream that ends.
+    fn refreshes_then_the_marker() -> Vec<StreamItem> {
+        let mut items: Vec<StreamItem> = refresh_events().into_iter().map(Some).collect();
+        items.push(None);
+        items
+    }
+
+    /// The refresh is one event with no ids per topic, in the order of the
+    /// topics.
+    #[test]
+    fn the_refresh_is_one_event_with_no_ids_per_topic() {
+        let refresh = |topic: &str| TopicEvent {
+            topic: topic.to_owned(),
+            ids: Vec::new(),
+        };
+
+        assert_eq!(
+            refresh_events(),
+            vec![refresh("tasks"), refresh("workflows"), refresh("workers")]
+        );
+        assert_eq!(refresh_events().len(), CHANNEL_TOPICS.len());
+    }
+
+    /// The bound is 256 items, and a queue at the bound holds every item it
+    /// took, the last one last.
+    #[tokio::test]
+    async fn a_queue_at_its_bound_of_256_items_holds_every_item() {
+        assert_eq!(SUBSCRIBER_QUEUE_CAPACITY, 256);
+        let queue = full_queue();
+
+        let items = drain(&queue).await;
+
+        assert_eq!(items.len(), SUBSCRIBER_QUEUE_CAPACITY);
+        assert_eq!(
+            items.last(),
+            Some(&event(
+                "tasks",
+                &(SUBSCRIBER_QUEUE_CAPACITY - 1).to_string()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_end_marker_past_the_bound_stays_after_the_refreshes() {
+        let queue = full_queue();
+
+        queue.push(None);
+
+        assert_eq!(drain(&queue).await, refreshes_then_the_marker());
+    }
+
+    /// An event that overflows a queue that holds the degraded marker drops
+    /// the marker with the events and queues it again after the refresh
+    /// events, so the stream still ends.
+    #[tokio::test]
+    async fn a_dropped_end_marker_is_queued_again_last() {
+        let queue = SubscriberQueue::default();
+        for index in 0..SUBSCRIBER_QUEUE_CAPACITY - 1 {
+            queue.push(event("tasks", &index.to_string()));
+        }
+        queue.push(None);
+
+        queue.push(event("tasks", "late"));
+
+        assert_eq!(drain(&queue).await, refreshes_then_the_marker());
+    }
+
+    /// A broker with no listener degrades the stream, which holds its
+    /// marker; events published past the bound leave the refresh events,
+    /// then the marker.
+    #[tokio::test]
+    async fn a_degraded_stream_keeps_its_marker_when_events_overflow_it() {
+        let broadcaster = EventBroadcaster::new(Arc::new(PostgresBroker::from_test_url(
+            "postgresql://horsies@127.0.0.1:1/horsies",
+            crate::ClientFamily::Rust,
+        )));
+        let subscription = broadcaster.subscribe().await;
+        assert!(broadcaster.degraded());
+
+        for index in 0..SUBSCRIBER_QUEUE_CAPACITY {
+            broadcaster
+                .publish(event("tasks", &index.to_string()))
+                .await;
+        }
+
+        assert_eq!(
+            drain(&subscription.queue).await,
+            refreshes_then_the_marker()
+        );
+    }
+
     #[tokio::test]
     async fn a_closed_queue_takes_nothing_and_ends() {
         let queue = SubscriberQueue::default();
@@ -810,10 +913,10 @@ mod queue_tests {
     /// A dropped client stream is removed at the next publish.
     #[tokio::test]
     async fn publish_drops_a_client_whose_stream_ended() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
-            .expect("a lazy pool opens no connection");
-        let broadcaster = EventBroadcaster::new(Arc::new(PostgresBroker::from_pool(pool)));
+        let broadcaster = EventBroadcaster::new(Arc::new(PostgresBroker::from_test_url(
+            "postgresql://horsies@127.0.0.1:1/horsies",
+            crate::ClientFamily::Rust,
+        )));
         let kept = Arc::new(SubscriberQueue::default());
         let dropped = Arc::new(SubscriberQueue::default());
         broadcaster

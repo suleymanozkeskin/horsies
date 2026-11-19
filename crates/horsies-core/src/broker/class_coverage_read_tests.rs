@@ -14,7 +14,6 @@
 
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::{json, Value};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::broker::class_coverage::{
@@ -25,6 +24,7 @@ use crate::broker::monitoring_test_database::MonitoringTestDatabase;
 use crate::broker::result_types::BrokerErrorCode;
 use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
 use crate::core::task::Execution;
+use crate::test_support::sql::{self, TestPool};
 
 const ISOLATED: Execution = Execution::Isolated;
 const ASYNC: Execution = Execution::SharedAsync;
@@ -40,14 +40,14 @@ fn async_children_only() -> Value {
 
 /// One worker snapshot on `queues`, `age_s` seconds old in database time.
 async fn snapshot(
-    pool: &PgPool,
+    pool: &TestPool,
     worker_id: &str,
     class_capacity: Value,
     queues: &[&str],
     age_s: f64,
 ) {
     let queues: Vec<String> = queues.iter().map(|queue| (*queue).to_owned()).collect();
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_worker_states (
             worker_id, snapshot_at, hostname, pid, processes,
             max_claim_batch, max_claim_per_worker, queues,
@@ -94,13 +94,13 @@ const DUE: Seeded = Seeded::Pending {
     due_in_s: -10.0,
 };
 
-async fn task(pool: &PgPool, queue: &str, execution: Execution, seeded: Seeded) {
+async fn task(pool: &TestPool, queue: &str, execution: Execution, seeded: Seeded) {
     let (status, priority, due_in_s, owner, lease_s) = match seeded {
         Seeded::Pending { priority, due_in_s } => ("PENDING", priority, due_in_s, None, None),
         Seeded::Claimed { owner, lease_s } => ("CLAIMED", 100, -10.0, Some(owner), Some(lease_s)),
         Seeded::Running { owner } => ("RUNNING", 100, -10.0, Some(owner), None),
     };
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, execution, retention_class_key,
             sent_at, created_at, command_fingerprint_version, command_fingerprint,
@@ -288,13 +288,13 @@ async fn a_live_snapshot_with_unreadable_budgets_fails_both_reads() {
     let report = broker.get_class_report().await.expect_err("refused");
 
     for error in [coverage, report] {
-        assert_eq!(error.code, BrokerErrorCode::MonitoringQueryFailed);
-        assert!(!error.retryable);
-        assert!(error.message.contains("w-odd"), "{}", error.message);
+        assert_eq!(error.code(), BrokerErrorCode::MonitoringQueryFailed);
+        assert!(!error.retryable());
+        assert!(error.message().contains("w-odd"), "{}", error.message());
         assert!(
-            error.message.contains("class_capacity is unreadable"),
+            error.message().contains("class_capacity is unreadable"),
             "{}",
-            error.message
+            error.message()
         );
     }
     database.drop().await;
@@ -320,18 +320,17 @@ async fn the_oldest_due_row_across_priorities_is_the_wait() {
         .await
         .expect("the report answers");
 
-    let oldest: DateTime<Utc> = sqlx::query_scalar(
+    let oldest: DateTime<Utc> = sql::query_scalar(
         "SELECT min(enqueued_at) FROM horsies_tasks WHERE execution = 'ISOLATED'",
     )
     .fetch_one(pool)
     .await
     .expect("oldest isolated row");
-    let next_due: DateTime<Utc> = sqlx::query_scalar(
-        "SELECT enqueued_at FROM horsies_tasks WHERE execution = 'SHARED_ASYNC'",
-    )
-    .fetch_one(pool)
-    .await
-    .expect("the shared row");
+    let next_due: DateTime<Utc> =
+        sql::query_scalar("SELECT enqueued_at FROM horsies_tasks WHERE execution = 'SHARED_ASYNC'")
+            .fetch_one(pool)
+            .await
+            .expect("the shared row");
     let [isolated, shared] = report.streams.as_slice() else {
         panic!("two streams: {:?}", report.streams);
     };
@@ -430,10 +429,10 @@ async fn rows_of_a_class_the_worker_does_not_serve_fail_the_report() {
         .await
         .expect_err("the report is refused");
 
-    assert_eq!(error.code, BrokerErrorCode::MonitoringQueryFailed);
-    assert!(!error.retryable);
-    assert!(error.message.contains("w1"), "{}", error.message);
-    assert!(error.message.contains("ISOLATED"), "{}", error.message);
+    assert_eq!(error.code(), BrokerErrorCode::MonitoringQueryFailed);
+    assert!(!error.retryable());
+    assert!(error.message().contains("w1"), "{}", error.message());
+    assert!(error.message().contains("ISOLATED"), "{}", error.message());
     database.drop().await;
 }
 
@@ -464,7 +463,7 @@ fn plan_has_node(plan: &Value, node_type: &str, relation: &str, depth: usize) ->
 async fn the_stream_and_head_parts_probe_the_pending_class_index() {
     let database = MonitoringTestDatabase::create().await;
     let pool = &database.pool;
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, execution, retention_class_key,
             sent_at, created_at, command_fingerprint_version, command_fingerprint,
@@ -480,7 +479,7 @@ async fn the_stream_and_head_parts_probe_the_pending_class_index() {
     .execute(pool)
     .await
     .expect("seed the pending rows");
-    sqlx::query("ANALYZE horsies_tasks")
+    sql::query("ANALYZE horsies_tasks")
         .execute(pool)
         .await
         .expect("analyze the task table");
@@ -490,7 +489,7 @@ async fn the_stream_and_head_parts_probe_the_pending_class_index() {
             .replace("$1", &WORKER_STATE_LIVE_WINDOW_S.to_string())
             .replace("$2", "20001")
             .replace("$3", "11");
-        let plan: Value = sqlx::query_scalar(&format!("EXPLAIN (FORMAT JSON) {literal}"))
+        let plan: Value = sql::query_scalar(&format!("EXPLAIN (FORMAT JSON) {literal}"))
             .fetch_one(pool)
             .await
             .expect("explain the class read");

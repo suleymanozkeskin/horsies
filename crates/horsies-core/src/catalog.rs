@@ -1,6 +1,6 @@
 //! The closed code catalogs of the core, as static data for clients.
 //!
-//! Each catalog is a code enum with `#[derive(horsies_macros::CodeCatalog)]`.
+//! Each catalog is a code enum with `#[derive(horsies_core_derive::CodeCatalog)]`.
 //! The derive records the members, their wire values and their docs.
 //! `horsies-codegen` reads [`CODE_CATALOGS`] and renders the Python enum
 //! classes, so a code is defined once, here in Rust.
@@ -191,9 +191,7 @@ mod tests {
             "NO_TYPE_AVAILABLE",
             "INVALID_JSON_PAYLOAD",
             "INVALID_TASK_OPTIONS",
-            "EVENT_LOOP_LIMIT",
             "ASYNC_CONTEXT",
-            "LOOP_RUNNER_FAILED",
             "INVALID_INPUT",
             "LISTENER_DISABLED",
             "WAIT_INSIDE_TASK",
@@ -207,8 +205,6 @@ mod tests {
             "PAYLOAD_MISMATCH",
             "IDEMPOTENCY_KEY_CONFLICT",
             "PAYLOAD_TOO_LARGE",
-            "EVENT_LOOP_LIMIT",
-            "LOOP_RUNNER_FAILED",
         ]);
         // python/horsies/core/workflows/start_types.py
         assert_python_members::<WorkflowStartErrorCode>(&[
@@ -216,14 +212,11 @@ mod tests {
             "VALIDATION_FAILED",
             "WORKFLOW_ID_CONFLICT",
             "ENQUEUE_FAILED",
-            "LOOP_RUNNER_FAILED",
-            "EVENT_LOOP_LIMIT",
             "ASYNC_CONTEXT",
         ]);
         // python/horsies/monitoring/errors.py
         assert_python_members::<MonitoringQueryErrorCode>(&[
             "DB_OPERATION_FAILED",
-            "EVENT_LOOP_LIMIT",
             "HISTORY_CONTRACT_VIOLATION",
         ]);
         // python/horsies/monitoring/task_actions.py
@@ -232,7 +225,6 @@ mod tests {
             "TASK_NOT_CANCELLABLE",
             "TASK_IS_WORKFLOW_TASK",
             "DB_OPERATION_FAILED",
-            "EVENT_LOOP_LIMIT",
             "STORED_DATA_INVALID",
         ]);
     }
@@ -268,7 +260,6 @@ mod tests {
             "WORKFLOW_NOT_FOUND",
             "RESULT_NOT_AVAILABLE",
             "RESULT_NOT_READY",
-            "EVENT_LOOP_LIMIT",
             "ASYNC_CONTEXT",
             "INVALID_INPUT",
             "WAIT_INSIDE_TASK",
@@ -349,7 +340,7 @@ mod tests {
             "FAILED",
             "SKIPPED",
         ]);
-        // python/horsies/core/history/reads/detail.py
+        // python/horsies/_catalog/history.py
         assert_python_members::<TaskAbsenceReason>(&[
             "PREDATES_RETAINED_HISTORY",
             "WITHIN_RETAINED_HISTORY",
@@ -365,8 +356,6 @@ mod tests {
             "DB_OPERATION_FAILED",
             "STORED_DATA_INVALID",
             "RESUME_RECOVERY_FAILED",
-            "LOOP_RUNNER_FAILED",
-            "EVENT_LOOP_LIMIT",
             "ASYNC_CONTEXT",
         ]);
     }

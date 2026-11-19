@@ -18,7 +18,8 @@ bookkeeping and adapts:
   same answer. "No schema" tells an operator to start a worker; saying that
   about a database that is merely down sends them to fix the wrong thing.
 
-The version is read with a plain SELECT and cached briefly, so a dashboard
+The core reads the version (``CoreHandle.schema_status_async``, on the
+broker's core pool) and the probe caches the answer briefly, so a dashboard
 left open does not re-query it on every request.
 
 The monitoring app runs the same probe and the action gate in the core
@@ -31,14 +32,12 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from enum import Enum
+from typing import Final, assert_never
 
-from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
-
-from horsies.core.baseline.migration import BASELINE_VERSION
+from horsies._core import CoreError, SchemaStatusRecord
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.logging import get_logger
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.core_failure import call_refusal_or_raise
 
 logger = get_logger('web')
 
@@ -47,17 +46,12 @@ SCHEMA_TTL_SECONDS = 60.0
 SCHEMA_INCOMPATIBLE = 'SCHEMA_INCOMPATIBLE'
 SCHEMA_UNKNOWN = 'SCHEMA_UNKNOWN'
 
-EXPECTED_SCHEMA_VERSION = BASELINE_VERSION
-"""The schema version this build writes through."""
-
-_BOOKKEEPING_TABLES_SQL = text(
-    "SELECT to_regclass('horsies_migrations') IS NOT NULL, "
-    "to_regclass('horsies_schema_version') IS NOT NULL"
-)
-_READ_SCHEMA_VERSION_SQL = text(
-    'SELECT COALESCE(max(version), 0) FROM horsies_migrations WHERE success'
-)
-
+EXPECTED_SCHEMA_VERSION: Final = 1000
+"""The schema version this build writes through: the version of the
+baseline migration (``BASELINE_MIGRATION_VERSION``,
+``crates/horsies-core/src/broker/migrations.rs``). The core answers an
+observed status with its own expected version (``SchemaStatusRecord``);
+this value fills the status of a probe that has never read one."""
 
 class SchemaState(str, Enum):
     """How the database's schema relates to the one this build expects."""
@@ -176,73 +170,46 @@ class SchemaProbe:
         return observed
 
     async def _read(self) -> SchemaStatus | None:
-        """Read the stored version, or None when the read fails.
+        """Read the schema state in the core, or None when the read fails.
 
-        A read fails on a database error, or when the broker already serves
-        its limit of open event loops. Neither is a verdict about the
-        schema; the warning log names the cause.
+        One call of ``CoreHandle.schema_status_async`` on the broker's core
+        pool. The core reads the bookkeeping tables and the stored version
+        and classifies them (``crates/horsies-core/src/web/schema.rs``).
+        Reads only.
+
+        A read fails when the core cannot connect or read (the core answers
+        ``UNKNOWN`` and logs the cause at WARNING), or when the core of this
+        process cannot run the call (``CoreCallRefusal``; the warning log
+        here names it). Neither is a verdict about the schema.
+
+        Raises ``ForkedAfterCoreStart`` and ``CoreStopped``: states of the
+        process, never a failed read (``call_refusal_or_raise``).
         """
-        match await self._broker.select_resources():
-            case Err(loop_limit):
-                logger.warning(f'Schema version probe failed: {loop_limit.describe()}')
-                return None
-            case Ok(resources):
-                pass
         try:
-            async with resources.session_factory() as session:
-                bookkeeping = (await session.execute(_BOOKKEEPING_TABLES_SQL)).one()
-                migrations_table, schema_version_table = bookkeeping
-                if not bool(migrations_table):
-                    return classify_without_migrations(
-                        schema_version_table=bool(schema_version_table),
-                    )
-                stored = int(
-                    (await session.execute(_READ_SCHEMA_VERSION_SQL)).scalar_one()
-                )
-        except SQLAlchemyError as exc:
-            logger.warning(f'Schema version probe failed: {exc}')
+            record = await self._broker._core_handle.schema_status_async()  # pyright: ignore[reportPrivateUsage]
+        except CoreError as exc:
+            refusal = call_refusal_or_raise(exc)
+            logger.warning(f'Schema version probe failed: {type(refusal).__name__}: {refusal}')
             return None
-        return classify_stored_version(stored)
+        return schema_status_of(record)
 
 
-def classify_without_migrations(*, schema_version_table: bool) -> SchemaStatus:
-    """The verdict for a database without ``horsies_migrations``.
+def schema_status_of(record: SchemaStatusRecord) -> SchemaStatus | None:
+    """The status of the core's schema record, or None for ``UNKNOWN``. Pure.
 
-    ``horsies_schema_version`` is the bookkeeping of horsies 0.x Python, so
-    with it the database holds a 0.x schema (ZERO_X); without it the database
-    has no horsies schema (ABSENT). The 0.x version is not read: this build
-    reports it as None.
+    The core builds a new probe for each call, so its ``UNKNOWN`` means that
+    this read failed: it is not a verdict, and ``SchemaProbe.status`` keeps
+    its last answer. The other states are observations, with the version
+    and the expected version of the core.
     """
-    return SchemaStatus(
-        state=SchemaState.ZERO_X if schema_version_table else SchemaState.ABSENT,
-        version=None,
-        expected_version=EXPECTED_SCHEMA_VERSION,
-    )
-
-
-def classify_stored_version(stored: int) -> SchemaStatus:
-    """The verdict for the highest successful version in ``horsies_migrations``.
-
-    ``stored`` is 0 when no row is recorded as successful: ABSENT. A version
-    below the baseline's is horsies-rust 0.x bookkeeping, since the first
-    version of this schema line is the baseline: ZERO_X. Otherwise the
-    version matches or differs from the one this build expects.
-    """
-    match stored:
-        case 0:
+    match record.state:
+        case 'UNKNOWN':
+            return None
+        case 'MATCH' | 'MISMATCH' | 'ABSENT' | 'ZERO_X' as observed:
             return SchemaStatus(
-                state=SchemaState.ABSENT,
-                version=None,
-                expected_version=EXPECTED_SCHEMA_VERSION,
+                state=SchemaState(observed),
+                version=record.version,
+                expected_version=record.expected_version,
             )
-        case _ if stored < BASELINE_VERSION:
-            state = SchemaState.ZERO_X
-        case _ if stored == EXPECTED_SCHEMA_VERSION:
-            state = SchemaState.MATCH
-        case _:
-            state = SchemaState.MISMATCH
-    return SchemaStatus(
-        state=state,
-        version=stored,
-        expected_version=EXPECTED_SCHEMA_VERSION,
-    )
+        case _ as unreachable:
+            assert_never(unreachable)

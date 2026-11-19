@@ -1,5 +1,5 @@
-//! Parse a stream of frames in a read buffer, one step at a time (Python
-//! `core/worker/frame_parser.py`), and the read buffer of one channel.
+//! Parse a stream of frames in a read buffer, one step at a time, and the
+//! read buffer of one channel.
 //!
 //! [`next_step`] names what the bytes at hand hold next, and [`plan_read`]
 //! names where the next read goes; both are pure. [`FrameReader`] owns the

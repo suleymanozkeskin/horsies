@@ -3,10 +3,6 @@
 //! probe (`horsies_coverage_probe`), the class registration
 //! (`horsies_register_retention_classes`) and the leaf creation
 //! (`horsies_create_history_leaf`, `horsies_create_heartbeat_leaf`).
-//!
-//! Python: `python/horsies/core/history/maintenance/coverage.py`
-//! (`_probe_complete_coverage`, `_coverage_probe_of`,
-//! `_register_required_classes`, `leaf_creation_of`).
 
 use std::collections::BTreeMap;
 
@@ -451,15 +447,15 @@ pub(crate) async fn register_retention_classes(
 
 /// One row of a leaf-creation function.
 #[derive(Debug)]
-struct LeafCreationRow {
-    outcome: String,
-    leaf_name: Option<String>,
-    conflict_kind: Option<String>,
+pub(crate) struct LeafCreationRow {
+    pub(crate) outcome: String,
+    pub(crate) leaf_name: Option<String>,
+    pub(crate) conflict_kind: Option<String>,
 }
 
 /// Which index of a created or repaired leaf names it in the outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CreatedLeafKind {
+pub(crate) enum CreatedLeafKind {
     /// The task-ID index `<leaf>_task_idx`.
     History,
     /// The probe index `<leaf>_probe_idx`.
@@ -534,7 +530,7 @@ fn leaf_creation_row(
 /// The outcome of one leaf-creation row. Pure. An outcome outside the
 /// function's set, a missing leaf name, or an unknown conflict kind is
 /// `HistoryError::Contract`.
-fn leaf_creation_of(
+pub(crate) fn leaf_creation_of(
     kind: CreatedLeafKind,
     class_key: &str,
     row: LeafCreationRow,
@@ -608,8 +604,8 @@ mod tests {
     const LEAF: &str = "horsies_task_history_standard_30d_2026_11_17";
     const HEARTBEAT_LEAF: &str = "horsies_heartbeats_2026_11_17_13";
 
-    /// Python `tests/unit/test_coverage_function_rows.py`: every outcome of
-    /// the leaf-creation functions maps onto its `LeafCreation`.
+    /// Every outcome of the leaf-creation functions maps onto its
+    /// `LeafCreation`.
     #[test]
     fn every_leaf_creation_outcome_maps_onto_its_variant() {
         let history = |outcome: &str, conflict: Option<&str>| {
@@ -820,8 +816,7 @@ mod tests {
         ));
     }
 
-    /// Python `test_coverage_function_rows.py::TestCoverageProbeRows`: each
-    /// class reaches the end of its newest leaf, and the probe reports the
+    /// Each class reaches the end of its newest leaf, and the probe reports the
     /// earliest; the forever leaf has no end and does not move it.
     #[test]
     fn history_coverage_is_the_earliest_newest_end_over_the_classes() {

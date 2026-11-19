@@ -20,7 +20,7 @@ The API is on the client pages: [Broker Connections](/horsies/configuration/brok
 | `pool_size` | 5 | 1 to 10,000 | Connection pool size (raise for high-throughput producers) |
 | `max_overflow` | 10 | 0 to 10,000 | Additional connections beyond pool_size |
 | `pool_timeout` | 30 | 0 to 4,294,967,295; `0`: a checkout does not wait | Seconds to wait for connection |
-| `pool_pre_ping` | on | – | Ping a pooled connection at checkout when it waited in the pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`), in every pool but the one of the worker process; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
+| `pool_pre_ping` | on | – | Ping a pooled connection at checkout when it waited in the pool for more than 1 s, in every pool but the one of the worker process; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
 | `worker_pool_pre_ping` | off | – | Ping a pooled connection of the worker process at checkout when it waited in the pool for more than 1 s. Off: the worker sends a one-statement write in one round trip, and a dead pooled connection fails its first statement with a connection error that the worker retries; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt) |
 | `tcp_keepalives` | on | – | Enable libpq TCP keepalives on broker and child-process connections; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
 | `tcp_keepalives_idle` | 30 | 1 to 32,767 | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
@@ -108,6 +108,7 @@ pool max_size (the pool of the worker process)
   + pool max_size again, when session_database_url differs from database_url (the session pool)
   + 1 listener connection
   + 1 runner heartbeat connection
+  + 1 liveness lock connection
   + isolated children * isolated.pool max_size
   + shared async children * shared_async.pool max_size
   + shared thread children * shared_thread.pool max_size
@@ -118,9 +119,10 @@ Each `max_size` is the resolved value: a `PoolSize`, or the size that
 `PoolSizeFromSeats()` derives from the seats; see
 [Connections](/horsies/workers/worker-profiles/#connections). With the defaults
 and a profile of 8 isolated children, the framework ceiling is about
-`5 + 1 + 1 + 8 * 1 = 15` direct connections, and `8 * 2 = 16` more when every
-child sends from one event loop. One listener connection carries every
-`LISTEN` of the worker process.
+`5 + 1 + 1 + 1 + 8 * 1 = 16` direct connections, and `8 * 2 = 16` more when
+every child sends from one event loop. One listener connection carries every
+`LISTEN` of the worker process, and one connection holds its
+[liveness lock](/horsies/workers/heartbeats-recovery/#worker-liveness-lock).
 Idle child processes keep no database connection by default because the
 `min_size` of each pool is 0; connections are opened lazily when task
 lifecycle work starts. An isolated child uses one connection at a time, for the

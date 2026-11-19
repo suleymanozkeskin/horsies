@@ -1,5 +1,4 @@
-//! Ports of Python `tests/unit/test_slot_pool.py` rows of `TestVerdicts`,
-//! `TestKill`, `TestKillAndWait` and `TestRecycle`: how a task ends when
+//! How a task ends when
 //! its isolated child dies, sends a bad frame, or passes its deadline, and
 //! when a child is replaced.
 //!
@@ -22,7 +21,8 @@ use super::scripted::{
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::worker::executor::protocol::{
-    encode_child_frame, ChildFrame, NoLeftWork, ResultFrame, RssMb, RssReading, RunEnd,
+    encode_child_frame, ChildAfterFrame, ChildFrame, NoLeftWork, ResultFrame, RssMb, RssReading,
+    RunEnd,
 };
 use crate::worker::executor::supervisor::Spawner;
 
@@ -496,6 +496,7 @@ fn logging_children(dir: &TestDir, tasks: &[ClaimedTask], runs: usize, rss: RssR
                 end: RunEnd::Result(super::scripted::ok_envelope(value)),
                 rss,
                 task_loop: NoLeftWork::NoTaskLoop,
+                child: ChildAfterFrame::ServesOn,
             });
             (
                 task,

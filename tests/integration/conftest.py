@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, AsyncGenerator, Generator
+from typing import Any, AsyncGenerator, Generator, Literal
 import pytest
 import pytest_asyncio
-from pydantic import SecretStr
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, AsyncEngine
@@ -18,21 +18,15 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.schedule import ScheduleConfig  # noqa: F401 - needed for AppConfig.model_rebuild()
-from horsies.core.utils.db import register_identity_text_reads
-from tests.broker_resources_support import current_resources
+from tests.broker_resources_support import (
+    current_resources,
+    read_uuid_columns_as_text,
+)
 from tests.session_database import suite_database_url
 
 # Rebuild AppConfig to resolve forward references
 AppConfig.model_rebuild()
 from horsies.core.codec.json_value import JsonValue
-from horsies.core.lifecycle.outcomes import PhaseTwoStep
-from horsies.core.workflows.node_finish import (
-    CapacityWake,
-    FactsUnknown,
-    NodeFinishFacts,
-    finish_node,
-)
-from horsies.core.workflows.steps import advance_parents
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import (
     TaskNode,
@@ -43,26 +37,15 @@ from horsies.core.models.workflow import (
     SuccessPolicy,
     SuccessCase,
 )
-from horsies._core import CoreHandle
-from horsies.core.brokers.postgres import PostgresBroker, WorkerProcessBroker
-from tests.dualrun.reference.worker_parent.worker import (
-    child_pool as reference_child_pool,
-)
-from tests.dualrun.reference.worker_parent.worker.child_pool import (
-    _cleanup_worker_pool,
-)
+import horsies._core as core
+from horsies.core.brokers.postgres import PostgresBroker
 from tests.fixtures.child_core import (
-    TEST_CHILD_POOL,
     drop_child_core_handle,
     install_child_core_handle,
 )
-from horsies.core.worker.worker import Worker
-from tests.dualrun.reference.worker_parent.worker.worker import (
-    Worker as ReferenceWorker,
-)
 from horsies.core.workflows.engine import start_workflow_async
 from horsies.core.types.result import is_err
-from horsies.core.utils.url import sqlalchemy_url
+from tests.sqlalchemy_url import sqlalchemy_url
 
 
 # A fresh database for this session (tests/session_database.py): the install
@@ -80,7 +63,7 @@ def db_url() -> str:
 async def engine(db_url: str) -> AsyncGenerator[AsyncEngine, None]:
     """SQLAlchemy async engine (session-scoped)."""
     eng = create_async_engine(sqlalchemy_url(db_url), echo=False)
-    register_identity_text_reads(eng)
+    read_uuid_columns_as_text(eng)
     yield eng
     await eng.dispose()
 
@@ -131,43 +114,6 @@ def app(app_config: AppConfig, broker: PostgresBroker) -> Horsies:
     return horsies_app
 
 
-@pytest.fixture(autouse=True)
-def worker_core_handle(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
-    """Give a ``Worker`` built without a broker the core handle of a worker
-    broker on the suite database; a worker built with a broker keeps its own.
-    The same for the ``Worker`` of the reference copy, which the parent-rule
-    tests build.
-
-    A running worker always has its broker (``run_forever`` refuses to start
-    without one), and production raises for a worker without one. Tests
-    that drive the worker's methods build it without a broker, and the
-    operations that run in the core need a handle. The handle's pools close
-    at teardown.
-    """
-    handle_broker = WorkerProcessBroker(PostgresConfig(database_url=SecretStr(DB_URL)))
-    handle = handle_broker._core_handle  # pyright: ignore[reportPrivateUsage]
-
-    def core_handle(worker: Worker | ReferenceWorker) -> CoreHandle:
-        match worker.broker:
-            case None:
-                return handle
-            case broker:
-                return broker._core_handle  # pyright: ignore[reportPrivateUsage]
-
-    monkeypatch.setattr(Worker, 'core_handle', property(core_handle))
-    monkeypatch.setattr(ReferenceWorker, 'core_handle', property(core_handle))
-    yield
-    _ = handle.close()
-
-
-@pytest.fixture(scope='session', autouse=True)
-def cleanup_worker_pool_at_teardown() -> Generator[None, None, None]:
-    """Close the psycopg pool of the version-1 child of the reference copy,
-    which the parent-rule tests open (``_initialize_worker_pool``)."""
-    yield
-    _cleanup_worker_pool()
-
-
 @pytest.fixture(scope='session', autouse=True)
 def child_core_handle() -> Generator[None, None, None]:
     """The core handle of a worker's child for the suite database, for the
@@ -177,20 +123,6 @@ def child_core_handle() -> Generator[None, None, None]:
     install_child_core_handle(DB_URL)
     yield
     drop_child_core_handle()
-
-
-@pytest.fixture(scope='session', autouse=True)
-def reference_child_core_handle() -> Generator[None, None, None]:
-    """The core handle of the version-1 child of the reference copy for the
-    suite database, for the parent-rule tests that run the start of the
-    reference child in this process (``_run_task_entry`` of
-    ``tests.dualrun.reference.worker_parent``)."""
-    reference_child_pool._initialize_child_core_handle(  # pyright: ignore[reportPrivateUsage]
-        PostgresConfig(database_url=SecretStr(DB_URL)),
-        TEST_CHILD_POOL,
-    )
-    yield
-    reference_child_pool._drop_child_core_handle()  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest_asyncio.fixture
@@ -402,73 +334,64 @@ def _error_code_text(error: TaskError) -> str:
             return code
 
 
+NodeFacts = Literal[
+    'NO_DEPENDENTS', 'DEPENDENTS_WITHOUT_SUBWORKFLOW', 'SUBWORKFLOW_REACHABLE', 'UNKNOWN',
+]
+"""The node facts that phase 2 takes (``core.NodeFinishRequest.facts``): the
+step that phase 1 read, or ``UNKNOWN`` for a task whose phase 1 committed
+earlier."""
+
+
 async def _phase_one(
     broker: PostgresBroker,
     task_id: str,
     task_name: str,
     claimed_at: datetime,
     result: TaskResult[Any, TaskError],
-) -> PhaseTwoStep:
-    """Phase 1 of the RUNNING task through the production functions: the
-    success, or the failure with no retry. Returns the node facts it read."""
+) -> NodeFacts:
+    """Phase 1 of the RUNNING task through the core handle of ``broker``: the
+    success (``finish_workflow_success_async``), or the failure with no retry
+    (``finish_failed_attempt_async``). Returns the node facts it read."""
     from horsies.core.codec.json_io import dumps_json
     from horsies.core.codec.typed import encode_task_result
-    from horsies.core.lifecycle.fences import OwnedClaim
-    from horsies.core.lifecycle.outcomes import FailureApplied, PhaseTwoOwed, SuccessApplied
     from horsies.core.models.workflow.typing_utils import resolve_source_ok_type
-    from horsies.core.utils.db import autocommit_connection
-    from horsies.core.worker.failed_attempt import (
-        AttemptFailure,
-        AttemptFailureKind,
-        FinishFailedAttempt,
-        NoRetry,
-        finish_failed_attempt,
-    )
-    from horsies.core.worker.workflow_success import (
-        FinishWorkflowSuccess,
-        finish_workflow_success,
-    )
 
-    session_factory = current_resources(broker).session_factory
+    handle = broker._core_handle  # pyright: ignore[reportPrivateUsage]
     ok_type = resolve_source_ok_type(broker.app, task_name)
     encoded = dumps_json(encode_task_result(result, Any if ok_type is None else ok_type))
     if is_err(encoded):
         pytest.fail(f'the result of task {task_id} does not encode: {encoded.err_value}')
-    fence = OwnedClaim(worker_id=FINISH_WORKER_ID, claimed_at=claimed_at)
     match result.err:
         case None:
-            outcome = await finish_workflow_success(
-                session_factory,
-                FinishWorkflowSuccess(
-                    task_id=task_id, fence=fence, result_json=encoded.ok_value,
+            succeeded = await handle.finish_workflow_success_async(
+                uuid.UUID(task_id),
+                worker_id=FINISH_WORKER_ID,
+                claimed_at=claimed_at,
+                result_json=encoded.ok_value,
+            )
+            match succeeded:
+                case core.WorkflowSuccessApplied(phase_two=owed):
+                    return owed.step
+                case _:
+                    pytest.fail(f'phase 1 of the success of task {task_id}: {succeeded!r}')
+        case error:
+            failed = await handle.finish_failed_attempt_async(
+                core.FinishFailedAttemptRequest(
+                    task_id=uuid.UUID(task_id),
+                    worker_id=FINISH_WORKER_ID,
+                    claimed_at=claimed_at,
+                    retry=core.NoRetry(),
+                    result_json=encoded.ok_value,
+                    error_code=_error_code_text(error),
+                    failed_reason=None,
+                    attempt_outcome='FAILED',
+                    attempt_error_message=error.message,
+                    attempt_failed_reason=None,
                 ),
             )
-            match outcome:
-                case SuccessApplied(phase_two=PhaseTwoOwed(step=step)):
-                    return step
-                case _:
-                    pytest.fail(f'phase 1 of the success of task {task_id}: {outcome!r}')
-        case error:
-            async with session_factory() as phase_one_session:
-                failed = await finish_failed_attempt(
-                    await autocommit_connection(phase_one_session),
-                    FinishFailedAttempt(
-                        task_id=task_id,
-                        fence=fence,
-                        retry=NoRetry(),
-                        result_json=encoded.ok_value,
-                        error_code=_error_code_text(error),
-                        failed_reason=None,
-                        attempt=AttemptFailure(
-                            kind=AttemptFailureKind.FAILED,
-                            error_message=error.message,
-                            failed_reason=None,
-                        ),
-                    ),
-                )
             match failed:
-                case FailureApplied(after=PhaseTwoOwed(step=step)):
-                    return step
+                case core.AttemptFailureApplied(after=core.PhaseTwoOwedRecord() as owed):
+                    return owed.step
                 case _:
                     pytest.fail(f'phase 1 of the failure of task {task_id}: {failed!r}')
 
@@ -479,7 +402,7 @@ class PhaseOneDone:
     task and the node facts that phase 2 takes."""
 
     task_id: str
-    facts: NodeFinishFacts
+    facts: NodeFacts
 
 
 async def finish_phase_one(
@@ -496,7 +419,7 @@ async def finish_phase_one(
     of an error result with no retry (``horsies_finish_workflow_success``,
     ``horsies_finish_failed_attempt``), and returns the node facts it read.
     A task that is no longer live (its phase 1 committed earlier) returns
-    ``FactsUnknown``: phase 2 replays in the transaction form. Fails the test
+    ``UNKNOWN``: phase 2 replays in the transaction form. Fails the test
     for a node with no task and for any other phase-1 outcome.
     """
     await session.commit()
@@ -527,21 +450,30 @@ async def finish_phase_one(
                 ),
             )
         case _:
-            return PhaseOneDone(task_id=task_id, facts=FactsUnknown())
+            return PhaseOneDone(task_id=task_id, facts='UNKNOWN')
 
 
 async def finish_phase_two(broker: PostgresBroker, done: PhaseOneDone) -> None:
-    """Phase 2 as the worker runs it: ``horsies_workflow_node_finish`` in the
-    form of the node facts, with the child starts it owes and the capacity
-    wake, then the parent advances after the commit. Fails the test for a
-    failed parent advance."""
-    session_factory = current_resources(broker).session_factory
-    committed = await finish_node(
-        session_factory, broker, done.task_id, done.facts, CapacityWake.SEND,
+    """Phase 2 as the worker runs it, through the core handle of ``broker``:
+    the node finish in the form of the node facts, with the child starts it
+    owes and the capacity wake (``finish_workflow_node_async``), then the
+    parent advances after the commit (``advance_workflow_parents_async``).
+    Fails the test for a failed node finish or parent advance."""
+    handle = broker._core_handle  # pyright: ignore[reportPrivateUsage]
+    finished = await handle.finish_workflow_node_async(
+        core.NodeFinishRequest(task_id=uuid.UUID(done.task_id), facts=done.facts, wake='SEND'),
     )
-    failure = await advance_parents(broker, session_factory, committed.parent_advances)
-    if failure is not None:
-        pytest.fail(f'parent advance after task {done.task_id}: {failure!r}')
+    match finished:
+        case core.NodeFinished(parent_advances=parent_advances):
+            pass
+        case core.NodeFinishFailed(message=message):
+            pytest.fail(f'phase 2 of task {done.task_id}: {message}')
+    advanced = await handle.advance_workflow_parents_async(parent_advances)
+    match advanced:
+        case core.ParentsAdvanced():
+            pass
+        case core.ParentAdvanceStopped(message=message):
+            pytest.fail(f'parent advance after task {done.task_id}: {message}')
 
 
 async def finish_task(
@@ -643,7 +575,7 @@ def compute_test_command_fingerprint(
     these values stores, with the stored ``input`` text in its kwargs
     element. The returned sent_at is the one to store in the row.
     """
-    from horsies.core.history.identity.fingerprint import EnqueueCommandV1
+    from tests.command_fingerprint import EnqueueCommandV1
 
     if sent_at is None:
         sent_at = datetime.now(timezone.utc)
@@ -651,8 +583,8 @@ def compute_test_command_fingerprint(
         task_name=task_name,
         queue_name=queue_name,
         priority=priority,
-        args_json=None,
-        kwargs_json=input_json,
+        positional_args_json=None,
+        input_json=input_json,
         good_until=good_until,
         enqueue_delay_seconds=None,
         task_options_json=task_options,

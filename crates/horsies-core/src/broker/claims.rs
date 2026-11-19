@@ -10,8 +10,7 @@
 //!
 //! And one read with no 0004 function:
 //! - [`count_queue_starts`]: the start check of soft-cap mode, the count of
-//!   each capped queue that has held rows (Python `COUNT_QUEUE_STARTS_SQL`,
-//!   `python/horsies/core/worker/sql.py`).
+//!   each capped queue that has held rows.
 //!
 //! Each is one statement in autocommit on a [`CorePool`], so its locks end
 //! with the statement. The claim pass and the start check are batch work

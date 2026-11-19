@@ -7,14 +7,16 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::broker::BrokerError;
+use crate::core::config::EnqueueRetention;
+use crate::error_catalog::{ErrorEnum, RecordFieldValue, RecordValue};
+use crate::FailureCause;
 
 /// Categorized task send failure codes.
 ///
 /// The members are Python's, in Python's order
-/// (`python/horsies/core/models/task_send_types.py`). `EVENT_LOOP_LIMIT`
-/// and `LOOP_RUNNER_FAILED` are produced by the Python client only;
-/// [`TaskSendError`] has no variant for them.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]
+/// (`python/horsies/core/models/task_send_types.py`). [`TaskSendError`] has
+/// one variant per member.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_core_derive::CodeCatalog)]
 #[code_catalog(module = "task_send", base = "str_enum")]
 pub enum TaskSendErrorCode {
     /// Send called while suppression is active (worker/scheduler import phase,
@@ -42,14 +44,6 @@ pub enum TaskSendErrorCode {
     /// written. Non-retryable — shrink the payload (pass a reference to
     /// external storage) or raise the configured limit.
     PayloadTooLarge,
-    /// The broker already holds resource sets for its limit of open event
-    /// loops, and this send ran on a new one; nothing was written. The retry
-    /// methods refuse it. Python client only; removed before 0.8.0.
-    EventLoopLimit,
-    /// A sync send or schedule could not run the enqueue on the broker's sync
-    /// runner: the runner is stopped, its thread did not start, or scheduling
-    /// failed. Nothing was written. Python client only; removed before 0.8.0.
-    LoopRunnerFailed,
 }
 
 impl std::fmt::Display for TaskSendErrorCode {
@@ -62,8 +56,6 @@ impl std::fmt::Display for TaskSendErrorCode {
             Self::PayloadMismatch => write!(f, "PAYLOAD_MISMATCH"),
             Self::IdempotencyKeyConflict => write!(f, "IDEMPOTENCY_KEY_CONFLICT"),
             Self::PayloadTooLarge => write!(f, "PAYLOAD_TOO_LARGE"),
-            Self::EventLoopLimit => write!(f, "EVENT_LOOP_LIMIT"),
-            Self::LoopRunnerFailed => write!(f, "LOOP_RUNNER_FAILED"),
         }
     }
 }
@@ -74,7 +66,7 @@ impl std::fmt::Display for TaskSendErrorCode {
 /// The retry methods extract this payload directly — no user input needed.
 /// A replay carries the same command and `sent_at`, so the exact-id resend
 /// check accepts it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskSendPayload {
     pub task_name: String,
     pub queue_name: String,
@@ -90,59 +82,175 @@ pub struct TaskSendPayload {
     pub retention: crate::core::config::EnqueueRetention,
 }
 
+impl TaskSendPayload {
+    /// The fields of the Python record `TaskSendPayload`
+    /// (`error_catalog::TASK_SEND_PAYLOAD`), by name, in the record's order.
+    /// The input is its text (Python's `None` stores the same `{}`), and
+    /// the retention is its class key, or `None` for forever. Pure.
+    pub fn record_values(&self) -> Vec<RecordFieldValue<'_>> {
+        fn field<'a>(name: &'static str, value: RecordValue<'a>) -> RecordFieldValue<'a> {
+            RecordFieldValue { name, value }
+        }
+        let retention_class_key = match self.retention {
+            EnqueueRetention::Forever => None,
+            EnqueueRetention::Default | EnqueueRetention::Period(_) => {
+                Some(self.retention.class_key())
+            }
+        };
+        vec![
+            field("task_name", RecordValue::Str(&self.task_name)),
+            field("queue_name", RecordValue::Str(&self.queue_name)),
+            field("priority", RecordValue::Int(i64::from(self.priority))),
+            field(
+                "input_json",
+                RecordValue::OptionalStr(Some(self.input_json.as_str())),
+            ),
+            field("sent_at", RecordValue::DateTime(self.sent_at)),
+            field("good_until", RecordValue::OptionalDateTime(self.good_until)),
+            field(
+                "enqueue_delay_seconds",
+                RecordValue::OptionalInt(self.enqueue_delay_seconds),
+            ),
+            field(
+                "task_options",
+                RecordValue::OptionalStr(self.task_options.as_deref()),
+            ),
+            field(
+                "idempotency_key",
+                RecordValue::OptionalStr(self.idempotency_key.as_deref()),
+            ),
+            field(
+                "retention_class_key",
+                RecordValue::OptionalRetentionClassKey(retention_class_key),
+            ),
+        ]
+    }
+}
+
 /// Error from task send/schedule operations: one variant per
 /// [`TaskSendErrorCode`] that the core or a client's blocking form
 /// produces, each with only the facts of its state (Python
 /// `python/horsies/core/models/task_send_types.py`).
-#[derive(Debug, Clone)]
+///
+/// The `///` lines of each variant are the docstring of its generated
+/// Python class (`horsies._catalog.task_send_errors`); Rust notes are `//`
+/// comments.
+#[derive(Debug, Clone, horsies_core_derive::ErrorCatalog)]
+#[error_catalog(
+    module = "task_send_errors",
+    code = "TaskSendErrorCode",
+    union = "TaskSendCoreError",
+    union_doc = "Every failure of a send or schedule that the core records."
+)]
 pub enum TaskSendError {
-    /// Sends are suppressed in this process. Nothing was serialized or
-    /// written. The retry methods refuse it.
-    SendSuppressed { message: String },
-    /// A blocking send, schedule or retry was called on a thread that runs
-    /// an event loop or a tokio runtime. The payload is prepared and nothing
-    /// was written. The retry methods accept it: an async retry completes
-    /// the dispatch with the same task id and payload; a blocking retry on
-    /// the same thread returns this error again. A client produces it, never
-    /// the core's enqueue.
+    /// Sends are suppressed in this process. Nothing was serialized or written.
+    ///
+    /// Suppression is active during the worker and scheduler import phase,
+    /// during ``check()``, and under ``HORSIES_SUPPRESS_SENDS=1``. The retry
+    /// methods refuse this error.
+    #[error_class(class = "TaskSendSuppressed", code = "SendSuppressed")]
+    SendSuppressed {
+        #[error_slot(python = "Str", hidden)]
+        message: String,
+    },
+    /// A sync send or schedule ran inside a running event loop. Nothing was written.
+    ///
+    /// The payload is prepared. ``retry_send_async(err)`` or
+    /// ``retry_schedule_async(err)`` completes the same dispatch with the same
+    /// task id. A sync retry from the same loop returns this error again.
+    // The Rust client's blocking forms give it on a thread that runs a tokio
+    // runtime; the core's enqueue never does.
+    #[error_class(class = "TaskSendAsyncContext", code = "AsyncContext")]
     AsyncContext {
+        #[error_slot(python = "Uuid")]
         task_id: Uuid,
+        #[error_slot(python = "TaskSendPayload", hidden)]
         payload: Box<TaskSendPayload>,
+        #[error_slot(python = "Str", hidden)]
         message: String,
     },
-    /// The input or the options were refused before anything was written.
-    /// The retry methods refuse it.
-    ValidationFailed { message: String },
-    /// The database failed during enqueue. The row may or may not exist.
-    /// `retryable` is the driver classification of the cause. A resend of
-    /// the same task id and payload is safe: the broker returns the existing
-    /// task for a duplicate.
+    /// The input was refused before anything was written.
+    ///
+    /// ``exception`` is the cause, or ``NoCause()`` when a check refused the
+    /// input without a Python exception. The retry methods refuse this error.
+    // `cause` is what refused it.
+    #[error_class(
+        class = "TaskSendValidationFailed",
+        code = "ValidationFailed",
+        exception = "BaseException | NoCause"
+    )]
+    ValidationFailed {
+        #[error_slot(python = "Str", hidden)]
+        message: String,
+        #[error_slot(skip)]
+        cause: FailureCause,
+    },
+    /// The broker or the database failed during enqueue. The row may or may not exist.
+    ///
+    /// ``retryable`` is the driver classification of the cause. ``retry_send(err)``
+    /// sends the same task id and payload again; the broker returns the existing
+    /// task for a duplicate. ``exception`` is ``NoCause()`` when the broker found
+    /// the failure by a data check.
+    // `cause` is what the enqueue met.
+    #[error_class(
+        class = "TaskSendEnqueueFailed",
+        code = "EnqueueFailed",
+        exception = "BaseException | NoCause"
+    )]
     EnqueueFailed {
+        #[error_slot(python = "Uuid")]
         task_id: Uuid,
+        #[error_slot(python = "TaskSendPayload", hidden)]
         payload: Box<TaskSendPayload>,
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "Bool")]
         retryable: bool,
+        #[error_slot(skip)]
+        cause: FailureCause,
     },
-    /// The task id exists with a different command or idempotency key.
-    /// Nothing was written. The retry methods refuse it.
+    /// The task id exists with a different command or idempotency key. Nothing was written.
+    ///
+    /// The message names which one differs. The retry methods refuse this error.
+    #[error_class(class = "TaskSendPayloadMismatch", code = "PayloadMismatch")]
     PayloadMismatch {
+        #[error_slot(python = "Uuid")]
         task_id: Uuid,
+        #[error_slot(python = "TaskSendPayload", hidden)]
         payload: Box<TaskSendPayload>,
+        #[error_slot(python = "Str", hidden)]
         message: String,
     },
-    /// The serialized input exceeds `payload.reject_bytes`. Nothing was
-    /// written. The retry methods refuse it.
+    /// The serialized kwargs exceed ``payload.reject_bytes``. Nothing was written.
+    ///
+    /// ``size_bytes`` is the length of the serialized kwargs and ``limit_bytes``
+    /// the configured limit. The retry methods refuse this error.
+    #[error_class(class = "TaskSendPayloadTooLarge", code = "PayloadTooLarge")]
     PayloadTooLarge {
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "Int")]
         size_bytes: u64,
+        #[error_slot(python = "Int")]
         limit_bytes: u64,
     },
-    /// The idempotency key is reserved by `owner_task_id` with a different
-    /// command. Nothing was written. The retry methods accept it.
+    /// The idempotency key is reserved by another task with a different command.
+    ///
+    /// Nothing was written. ``owner_task_id`` names the task that holds the key.
+    /// The retry methods accept this error: a retry after the reservation ends
+    /// is accepted, and a retry before that returns the same error.
+    #[error_class(
+        class = "TaskSendIdempotencyKeyConflict",
+        code = "IdempotencyKeyConflict"
+    )]
     IdempotencyKeyConflict {
+        #[error_slot(python = "Uuid")]
         task_id: Uuid,
+        #[error_slot(python = "TaskSendPayload", hidden)]
         payload: Box<TaskSendPayload>,
+        #[error_slot(python = "Str", hidden)]
         message: String,
+        #[error_slot(python = "Uuid")]
         owner_task_id: Uuid,
     },
 }
@@ -155,17 +263,10 @@ pub struct ResendTarget<'a> {
 }
 
 impl TaskSendError {
-    /// The code of this variant.
+    /// The code of this variant (the derive's one mapping,
+    /// [`ErrorEnum::error_code`]).
     pub fn code(&self) -> TaskSendErrorCode {
-        match self {
-            Self::SendSuppressed { .. } => TaskSendErrorCode::SendSuppressed,
-            Self::AsyncContext { .. } => TaskSendErrorCode::AsyncContext,
-            Self::ValidationFailed { .. } => TaskSendErrorCode::ValidationFailed,
-            Self::EnqueueFailed { .. } => TaskSendErrorCode::EnqueueFailed,
-            Self::PayloadMismatch { .. } => TaskSendErrorCode::PayloadMismatch,
-            Self::PayloadTooLarge { .. } => TaskSendErrorCode::PayloadTooLarge,
-            Self::IdempotencyKeyConflict { .. } => TaskSendErrorCode::IdempotencyKeyConflict,
-        }
+        ErrorEnum::error_code(self)
     }
 
     /// Whether the condition may clear, so the same send can succeed later.
@@ -191,11 +292,27 @@ impl TaskSendError {
         match self {
             Self::SendSuppressed { message }
             | Self::AsyncContext { message, .. }
-            | Self::ValidationFailed { message }
+            | Self::ValidationFailed { message, .. }
             | Self::EnqueueFailed { message, .. }
             | Self::PayloadMismatch { message, .. }
             | Self::PayloadTooLarge { message, .. }
             | Self::IdempotencyKeyConflict { message, .. } => message.as_str(),
+        }
+    }
+
+    /// What the send met. A variant without `cause` has the cause of its
+    /// state: a refusal of the call, an existing row or a held key is a
+    /// failed precondition. Pure.
+    pub fn failure_cause(&self) -> FailureCause {
+        match self {
+            Self::ValidationFailed { cause, .. } | Self::EnqueueFailed { cause, .. } => {
+                cause.clone()
+            }
+            Self::SendSuppressed { .. }
+            | Self::AsyncContext { .. }
+            | Self::PayloadMismatch { .. }
+            | Self::PayloadTooLarge { .. }
+            | Self::IdempotencyKeyConflict { .. } => FailureCause::PreconditionFailed,
         }
     }
 
@@ -214,10 +331,9 @@ impl TaskSendError {
 
     /// The task id and payload when the retry methods accept this error,
     /// else `None`. Python's accepted set (`TaskSendRetryable`,
-    /// `python/horsies/core/models/task_send_types.py:201-206`) without the
-    /// Python-only `LOOP_RUNNER_FAILED`: an async context, an enqueue failure
-    /// and a key conflict. A refusal is never replayed, because the same
-    /// input meets the same refusal.
+    /// `python/horsies/core/models/task_send_types.py`): an async context, an
+    /// enqueue failure and a key conflict. A refusal is never replayed,
+    /// because the same input meets the same refusal.
     pub fn resend_target(&self) -> Option<ResendTarget<'_>> {
         match self {
             Self::AsyncContext {
@@ -265,8 +381,11 @@ impl std::error::Error for TaskSendError {}
 /// - a key reserved by another task is `IDEMPOTENCY_KEY_CONFLICT`, naming
 ///   the owner;
 /// - every other error is `ENQUEUE_FAILED` with the error's own retryable
-///   flag; a conflict whose row vanished before the compare is not
-///   retryable.
+///   flag; a conflict whose row vanished before the compare and a retention
+///   class key that no class derives are not retryable.
+///
+/// `cause` of `VALIDATION_FAILED` and `ENQUEUE_FAILED` is the cause of
+/// `error` ([`BrokerError::failure_cause`]).
 pub fn send_error_from_enqueue(
     task_id: Uuid,
     payload: TaskSendPayload,
@@ -276,9 +395,10 @@ pub fn send_error_from_enqueue(
     match error {
         BrokerError::EnqueueContract(_)
         | BrokerError::Serialization(_)
-        | BrokerError::InvalidIdempotencyReservationWindow(_) => {
-            TaskSendError::ValidationFailed { message }
-        }
+        | BrokerError::InvalidIdempotencyReservationWindow(_) => TaskSendError::ValidationFailed {
+            message,
+            cause: error.failure_cause(),
+        },
         BrokerError::PayloadMismatch { .. } => TaskSendError::PayloadMismatch {
             task_id,
             payload: Box::new(payload),
@@ -293,8 +413,7 @@ pub fn send_error_from_enqueue(
             message,
             owner_task_id: *owner_task_id,
         },
-        BrokerError::Database(_)
-        | BrokerError::SchemaRefused(_)
+        BrokerError::SchemaRefused(_)
         | BrokerError::InvalidWorkflowNodeStatus
         | BrokerError::IncompleteTaskHistoryCutover
         | BrokerError::InvalidStatus(_)
@@ -302,21 +421,25 @@ pub fn send_error_from_enqueue(
         | BrokerError::ConnectionFailed(_)
         | BrokerError::InvalidConnectionSettings(_)
         | BrokerError::EnqueueConflictUnverifiable { .. }
+        | BrokerError::RetentionClassKey(_)
         | BrokerError::ListenerClosed
         | BrokerError::InstallLock(_)
         | BrokerError::InstallCoverage(_)
         | BrokerError::ClientFamilyMismatch { .. }
+        | BrokerError::UnknownStoredFamily(_)
         | BrokerError::TerminalizationContract(_)
         | BrokerError::HistoryReadContract(_)
         | BrokerError::InvalidClaimArgument(_)
         | BrokerError::ClaimContract(_)
         | BrokerError::Statement(_)
         | BrokerError::PoolSettings(_)
+        | BrokerError::ProcessRuntime(_)
         | BrokerError::RowDecode(_) => TaskSendError::EnqueueFailed {
             task_id,
             payload: Box::new(payload),
             message,
             retryable: error.is_retryable(),
+            cause: error.failure_cause(),
         },
     }
 }
@@ -365,6 +488,7 @@ mod tests {
             payload: Box::new(sample_payload()),
             message: "connection refused".to_owned(),
             retryable: true,
+            cause: FailureCause::Connection,
         };
         let display = format!("{}", err);
         // Must NOT contain the sensitive input
@@ -407,12 +531,25 @@ mod tests {
 
     /// A refused input is never replayed: the same input meets the same
     /// refusal (Python `test_send_idempotency_conflict.py`, refusal rows).
+    /// A rule of the version-1 command (an empty retention class key) and a
+    /// rule of the scoped key (an empty key) are refusals of the same kind:
+    /// Python passes their `ValueError`, the Rust client its precondition
+    /// cause.
     #[test]
     fn a_refusal_is_validation_failed_and_refused_for_a_resend() {
+        use crate::core::history::enqueue::EnqueuePreparationError;
+        use crate::core::history::identity::keys::IdempotencyKeyError;
+
         for refusal in [
             BrokerError::EnqueueContract(crate::broker::EnqueueRefusal::by_rule(
                 crate::core::history::enqueue::SendPart::TaskOptions,
                 "bad options".to_owned(),
+            )),
+            BrokerError::EnqueueContract(crate::broker::EnqueueRefusal::empty_retention_class_key()),
+            BrokerError::EnqueueContract(crate::broker::EnqueueRefusal::from(
+                EnqueuePreparationError::Idempotency(IdempotencyKeyError::Empty {
+                    label: "idempotency key",
+                }),
             )),
             BrokerError::InvalidIdempotencyReservationWindow("0s".to_owned()),
         ] {
@@ -424,6 +561,12 @@ mod tests {
             );
             assert!(!error.retryable(), "{refusal}");
             assert!(error.resend_target().is_none(), "{refusal}");
+            assert_eq!(error.failure_cause(), refusal.failure_cause(), "{refusal}");
+            assert_eq!(
+                error.failure_cause(),
+                FailureCause::PreconditionFailed,
+                "{refusal}"
+            );
         }
     }
 
@@ -466,6 +609,14 @@ mod tests {
         assert!(error.resend_target().is_none());
     }
 
+    /// A failed enqueue statement that did not reach the server.
+    fn not_sent(cause: crate::db::NotSentCause) -> BrokerError {
+        BrokerError::Statement(crate::db::StatementFailure::NotSent {
+            statement: "enqueue_task",
+            cause,
+        })
+    }
+
     /// Python `test_task_decorator.py::test_retry_send_reuses_task_id_and_payload`:
     /// a resend carries the first send's task id and payload.
     #[test]
@@ -476,11 +627,17 @@ mod tests {
         let error = send_error_from_enqueue(
             task_id,
             payload,
-            &BrokerError::Database(sqlx::Error::PoolTimedOut),
+            &not_sent(crate::db::NotSentCause::Checkout(
+                crate::db::CheckoutFailure::TimedOut {
+                    role: crate::db::PoolRole::Main,
+                    waited: std::time::Duration::from_secs(30),
+                },
+            )),
         );
 
         assert_eq!(error.code(), TaskSendErrorCode::EnqueueFailed);
         assert!(error.retryable());
+        assert_eq!(error.failure_cause(), FailureCause::Connection);
         let target = error
             .resend_target()
             .expect("an enqueue failure is accepted");
@@ -538,14 +695,32 @@ mod tests {
     /// cause, in both directions.
     #[test]
     fn a_failed_write_keeps_the_retry_flag_of_its_cause() {
-        for (cause, retryable) in [
-            (sqlx::Error::PoolTimedOut, true),
-            (sqlx::Error::Protocol("connection reset".to_owned()), true),
-            (sqlx::Error::PoolClosed, false),
-            (sqlx::Error::RowNotFound, false),
+        for (failure, retryable) in [
+            (
+                not_sent(crate::db::NotSentCause::Checkout(
+                    crate::db::CheckoutFailure::TimedOut {
+                        role: crate::db::PoolRole::Main,
+                        waited: std::time::Duration::from_secs(30),
+                    },
+                )),
+                true,
+            ),
+            (not_sent(crate::db::NotSentCause::ConnectionClosed), true),
+            (
+                not_sent(crate::db::NotSentCause::Checkout(
+                    crate::db::CheckoutFailure::PoolClosed {
+                        role: crate::db::PoolRole::Main,
+                    },
+                )),
+                false,
+            ),
+            (
+                BrokerError::RowDecode(crate::broker::RowDecodeError::NoRow {
+                    statement: "enqueue_task",
+                }),
+                false,
+            ),
         ] {
-            let failure = BrokerError::Database(cause);
-
             let error = send_error_from_enqueue(Uuid::from_u128(1), sample_payload(), &failure);
 
             assert_eq!(error.code(), TaskSendErrorCode::EnqueueFailed, "{failure}");

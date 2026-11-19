@@ -406,7 +406,7 @@ fn release_rows_that_break_the_contract_fail_closed() {
 }
 
 // ---------------------------------------------------------------------------
-// Start check (Python `tests/unit/test_queue_cap_hold.py::TestReadQueueStarts`)
+// Start check
 // ---------------------------------------------------------------------------
 
 fn queues(names: &[&str]) -> Vec<String> {

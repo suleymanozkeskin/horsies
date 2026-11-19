@@ -4,9 +4,9 @@
 //! checks it once before its first write. A handle writes only into a
 //! database of its own family; a database of the other family, or one with
 //! no family row, is refused with [`BrokerError::ClientFamilyMismatch`], not
-//! retryable. Reads are not checked. Python reference:
-//! `python/horsies/core/baseline/install.py` (`ClientFamily`, `RecordedFamily`,
-//! `_INSERT_FAMILY_SQL`).
+//! retryable. A family row whose value is not a client family is corrupt
+//! stored data: it is refused with [`BrokerError::UnknownStoredFamily`], not
+//! retryable, and nothing is written. Reads are not checked.
 
 use crate::broker::core_rows::RowDecodeError;
 use crate::broker::error::BrokerError;
@@ -30,7 +30,7 @@ impl ClientFamily {
     }
 
     /// Parse a stored value. The CHECK `horsies_client_family_family_known`
-    /// holds the column to these two values.
+    /// holds the column to these two values; `None` for any other text.
     pub fn parse(stored: &str) -> Option<Self> {
         match stored {
             "PYTHON" => Some(Self::Python),
@@ -55,6 +55,27 @@ impl std::fmt::Display for RecordedFamily {
             Self::Recorded(family) => write!(f, "the {} client", family.as_str()),
             Self::NotRecorded => write!(f, "no client family"),
         }
+    }
+}
+
+/// The family row holds a value that is not a client family of this build.
+/// The CHECK `horsies_client_family_family_known` refuses such a value, so
+/// the row or its CHECK was changed outside horsies: the stored data is
+/// corrupt. A handle does not install into or write into such a database.
+/// Not retryable: the same row meets the same refusal until it is repaired.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "the client family row of this database is corrupt: horsies_client_family.family holds \
+     {stored:?}, which is neither PYTHON nor RUST"
+)]
+pub struct UnknownStoredFamily {
+    /// The stored text of `horsies_client_family.family`.
+    pub stored: String,
+}
+
+impl From<UnknownStoredFamily> for BrokerError {
+    fn from(unknown: UnknownStoredFamily) -> Self {
+        BrokerError::UnknownStoredFamily(unknown)
     }
 }
 
@@ -117,11 +138,13 @@ impl From<FamilyCheckFailure> for BrokerError {
     }
 }
 
-/// Why a handle may not write: the database is of another family, or the
-/// family row could not be read.
+/// Why a handle may not write: the database is of another family, its family
+/// row holds a value that is not a client family, or the family row could
+/// not be read.
 #[derive(Debug)]
 pub(crate) enum FamilyCheckError {
     Mismatch(FamilyMismatch),
+    UnknownStoredFamily(UnknownStoredFamily),
     ReadFailed(FamilyCheckFailure),
 }
 
@@ -137,19 +160,18 @@ pub(crate) static RECORD_CLIENT_FAMILY: TypedStatement = TypedStatement::new(
     &[ParameterType::Text],
 );
 
-/// The recorded family of the stored `family` value (none: no row).
+/// The recorded family of the stored `family` value (`None`: no row). Pure.
 ///
-/// # Panics
-///
-/// A stored value outside the two names: the CHECK
-/// `horsies_client_family_family_known` makes it impossible, so it is a
-/// broken schema, not a family (Python raises here too).
-pub(crate) fn recorded_family_from(stored: Option<String>) -> RecordedFamily {
+/// Errors: [`UnknownStoredFamily`] for a stored value that is neither
+/// `PYTHON` nor `RUST`.
+pub(crate) fn recorded_family_from(
+    stored: Option<String>,
+) -> Result<RecordedFamily, UnknownStoredFamily> {
     match stored {
-        None => RecordedFamily::NotRecorded,
+        None => Ok(RecordedFamily::NotRecorded),
         Some(text) => match ClientFamily::parse(&text) {
-            Some(family) => RecordedFamily::Recorded(family),
-            None => panic!("horsies_client_family.family holds {text:?}, which its CHECK refuses"),
+            Some(family) => Ok(RecordedFamily::Recorded(family)),
+            None => Err(UnknownStoredFamily { stored: text }),
         },
     }
 }
@@ -178,6 +200,50 @@ mod tests {
             assert_eq!(ClientFamily::parse(family.as_str()), Some(family));
         }
         assert_eq!(ClientFamily::parse("rust"), None);
+    }
+
+    #[test]
+    fn a_stored_value_is_a_family_no_family_or_an_unknown_family() {
+        assert_eq!(recorded_family_from(None), Ok(RecordedFamily::NotRecorded));
+        for family in [ClientFamily::Python, ClientFamily::Rust] {
+            assert_eq!(
+                recorded_family_from(Some(family.as_str().to_owned())),
+                Ok(RecordedFamily::Recorded(family))
+            );
+        }
+        for stored in ["GO", "rust", ""] {
+            assert_eq!(
+                recorded_family_from(Some(stored.to_owned())),
+                Err(UnknownStoredFamily {
+                    stored: stored.to_owned()
+                })
+            );
+        }
+    }
+
+    /// The broker error of an unknown stored family names the table, the
+    /// column and the stored value; the stored row is a broken read
+    /// contract, not a precondition, and it does not clear.
+    #[test]
+    fn an_unknown_stored_family_is_a_named_broker_error_that_does_not_clear() {
+        let unknown = UnknownStoredFamily {
+            stored: "GO".to_owned(),
+        };
+        let error = BrokerError::from(unknown.clone());
+        assert!(
+            matches!(&error, BrokerError::UnknownStoredFamily(inner) if *inner == unknown),
+            "{error:?}"
+        );
+        assert!(!error.is_retryable());
+        assert_eq!(
+            error.failure_cause(),
+            crate::failure_cause::FailureCause::ContractViolation
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("horsies_client_family.family holds \"GO\""),
+            "{message}"
+        );
     }
 
     #[test]

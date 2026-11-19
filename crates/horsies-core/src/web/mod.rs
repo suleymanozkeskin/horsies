@@ -15,7 +15,6 @@ mod stdlib_uuid_text;
 mod task_stats_cache;
 mod uuid_text;
 
-pub use crate::monitoring::ResumeChildren;
 pub use auth::{INTENT_HEADER, INTENT_VALUE};
 /// The body type of the handler's request and response parts, from the
 /// `bytes` crate: no web framework's own type.

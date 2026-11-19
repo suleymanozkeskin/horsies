@@ -6,12 +6,12 @@
 //! (`wait_timeout_seconds`) before the call, so the core gets 0 to
 //! 4 294 967 295 ms or no limit. The outcome is `RawResultRecordRecord` (the
 //! task's status and its result envelope as JSON text; no result when the
-//! limit passed first), `RawResultAbsent`, or `BrokerFailure`.
+//! limit passed first), `RawResultAbsent`, or the generated broker error class.
 
 use std::time::Duration;
 
 use horsies_core::catalog::CodeEnum;
-use horsies_core::{BrokerErrorCode, RawResultRead, RawResultRecord};
+use horsies_core::{BrokerOperationError, RawResultRead, RawResultRecord};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -124,10 +124,9 @@ pub async fn raw_result_record_operation(
     let broker = match connection.initialized_broker().await {
         Ok(broker) => broker,
         Err(error) => {
-            return RawResultOutcome::Failed(BrokerFailure::from_broker_error(
+            return RawResultOutcome::Failed(BrokerFailure::of_operation_error(
                 SUBJECT,
-                BrokerErrorCode::TaskInfoQueryFailed,
-                &error,
+                BrokerOperationError::raw_result_query_failed(task_id, error),
             ))
         }
     };
@@ -139,9 +138,7 @@ pub async fn raw_result_record_operation(
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::{
-        BrokerOperationError, FailureCause, StoredEnvelopeText, TaskAbsenceReason, TaskStatus,
-    };
+    use horsies_core::{BrokerOperationError, StoredEnvelopeText, TaskAbsenceReason, TaskStatus};
 
     use super::*;
 
@@ -203,17 +200,19 @@ mod tests {
     fn a_failed_read_keeps_its_code_and_retry_rule() {
         let RawResultOutcome::Failed(failure) = read_outcome(
             task(),
-            Err(BrokerOperationError {
-                code: BrokerErrorCode::InvalidJsonPayload,
+            Err(BrokerOperationError::InvalidJsonPayload {
                 message: "digest mismatch".to_owned(),
-                retryable: false,
-                cause: FailureCause::ContractViolation,
+                cause: horsies_core::BrokerCheckCause::Check,
             }),
         ) else {
             panic!("a failed read gives BrokerFailure");
         };
-        assert_eq!(failure.code, "INVALID_JSON_PAYLOAD");
-        assert!(!failure.retryable);
+        assert_eq!(failure.subject, SUBJECT);
+        assert_eq!(
+            failure.error.code(),
+            horsies_core::BrokerErrorCode::InvalidJsonPayload
+        );
+        assert!(!failure.error.retryable());
     }
 
     #[test]

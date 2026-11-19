@@ -6,8 +6,7 @@
 //! `history_detail_from_wire`); only how the statements run differs. Each
 //! read checks out one connection of the given pool with
 //! `CheckoutClass::Batch` (broker reads are never reserved work) and runs
-//! its statements on it one by one, in autocommit, as the sqlx reads did on
-//! one acquired connection.
+//! its statements on it one by one, in autocommit.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
@@ -244,7 +243,7 @@ fn result_wire_row(row: &Row) -> Result<ResultWireRow, RowDecodeError> {
     })
 }
 
-fn history_detail_wire_row(row: &Row) -> Result<HistoryDetailWireRow, RowDecodeError> {
+pub(crate) fn history_detail_wire_row(row: &Row) -> Result<HistoryDetailWireRow, RowDecodeError> {
     let statement: &TypedStatement = &TASK_DETAIL;
     Ok(HistoryDetailWireRow {
         task_id: column(row, statement, "task_id")?,
@@ -289,7 +288,7 @@ fn history_detail_wire_row(row: &Row) -> Result<HistoryDetailWireRow, RowDecodeE
 mod tests {
     use super::*;
 
-    /// The statements run the SQL text of the sqlx reads.
+    /// The statements run the SQL text of the history reads.
     #[test]
     fn the_statements_carry_the_history_read_sql() {
         assert_eq!(TASK_RESULT.sql(), task_result_sql());

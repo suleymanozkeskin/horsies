@@ -5,9 +5,8 @@ dict keys, lone surrogates, non-finite floats) rather than coercing them, and
 emits no class tags. loads_json rejects an empty text (EmptyJsonTextError),
 non-RFC-8259 constants (NaN/Infinity), numeric literals outside the finite
 binary64 range, lone surrogates, and an object that repeats a key.
-loads_json_bytes is the stored-payload form: strict UTF-8, then the rules of
-loads_json. dumps_canonical_json is the one canonical form for hashed or stored
-text.
+validate_core_model_json reads the core's JSON text of a monitoring read
+with the outcome of the model's own validator.
 """
 
 from __future__ import annotations
@@ -15,14 +14,14 @@ from __future__ import annotations
 import sys
 
 import pytest
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from horsies.core.codec.json_io import (
     EmptyJsonTextError,
     SerializationError,
-    dumps_canonical_json,
     dumps_json,
     loads_json,
-    loads_json_bytes,
+    validate_core_model_json,
 )
 from horsies.core.codec.json_value import (
     JSON_TEXT_TOO_DEEP,
@@ -422,12 +421,6 @@ class TestLoadsJsonDepthBound:
         assert is_err(result)
         assert str(result.err_value) == f'JSON parse failed: {JSON_TEXT_TOO_DEEP}'
 
-    def test_a_stored_payload_past_the_bound_is_refused(self) -> None:
-        result = loads_json_bytes(_nested_text(MAX_JSON_DEPTH + 1).encode())
-
-        assert is_err(result)
-        assert str(result.err_value) == f'JSON parse failed: {JSON_TEXT_TOO_DEEP}'
-
     def test_a_wide_document_with_many_brackets_is_accepted(self) -> None:
         """The count of brackets exceeds the bound, the nesting does not."""
         document = '[' + ','.join(['{"key":[1]}'] * MAX_JSON_DEPTH) + ']'
@@ -455,95 +448,50 @@ class TestLoadsJsonDepthBound:
         assert not is_err(result)
         _scan_reserved_keys(result.ok_value)
         assert not is_err(dumps_json(result.ok_value))
-        assert dumps_canonical_json(result.ok_value) == _nested_text(MAX_JSON_DEPTH)
 
     def test_the_bound_leaves_room_for_the_stack_of_the_caller(self) -> None:
         assert 3 * MAX_JSON_DEPTH <= sys.getrecursionlimit()
 
 
-@pytest.mark.unit
-class TestLoadsJsonBytes:
-    """A stored payload parses as declared, or it is an error."""
-
-    def test_valid_payload(self) -> None:
-        result = loads_json_bytes('{"city":"Köln"}'.encode())
-        assert not is_err(result)
-        assert result.ok_value == {'city': 'Köln'}
-
-    def test_json_null_is_the_value_none(self) -> None:
-        result = loads_json_bytes(b'null')
-        assert not is_err(result)
-        assert result.ok_value is None
-
-    def test_empty_payload_is_an_empty_json_text_error_not_null(self) -> None:
-        result = loads_json_bytes(b'')
-        assert is_err(result)
-        assert isinstance(result.err_value, EmptyJsonTextError)
-        assert str(result.err_value) == 'JSON parse failed: the text is empty'
-
-    @pytest.mark.parametrize(
-        'payload',
-        [
-            b'\xff',
-            '[]'.encode('utf-16'),
-            '[]'.encode('utf-32'),
-        ],
-    )
-    def test_non_utf8_payload_is_an_error(self, payload: bytes) -> None:
-        result = loads_json_bytes(payload)
-        assert is_err(result)
-        assert 'not UTF-8' in str(result.err_value)
-
-    def test_payload_that_repeats_a_key_is_an_error(self) -> None:
-        result = loads_json_bytes(b'{"a":1,"a":2}')
-        assert is_err(result)
-        assert 'repeats a key' in str(result.err_value)
-
-    def test_utf8_byte_order_mark_is_an_error(self) -> None:
-        assert is_err(loads_json_bytes(b'\xef\xbb\xbf[]'))
-
-    def test_non_utf8_error_text_holds_no_payload_byte(self) -> None:
-        result = loads_json_bytes(b'[\xfe]')
-        assert is_err(result)
-        assert 'byte 1' in str(result.err_value)
-        assert '0xfe' not in str(result.err_value)
-
-    @pytest.mark.parametrize(
-        'payload',
-        [
-            b'{bad',
-            b'[NaN]',
-            b'[Infinity]',
-            b'[1e9999]',
-            b'[' + b'1' * 5000 + b']',
-            rb'["\ud800"]',
-        ],
-    )
-    def test_strict_parse_failure_is_an_error(self, payload: bytes) -> None:
-        assert is_err(loads_json_bytes(payload))
+class _CoreCount(BaseModel):
+    value: str
+    count: int
 
 
 @pytest.mark.unit
-class TestDumpsCanonicalJson:
-    """Equal content gives equal text, because callers store or hash it."""
+class TestValidateCoreModelJson:
+    """The value and the error are those of the model's own validator."""
 
-    def test_compact_sorted_and_unescaped(self) -> None:
-        assert dumps_canonical_json({'b': 1, 'a': ['ü']}) == '{"a":["ü"],"b":1}'
+    def test_a_matching_text_is_the_value_of_model_validate_json(self) -> None:
+        text = '{"value": "worker-1", "count": 2}'
 
-    def test_nested_keys_are_sorted(self) -> None:
-        assert dumps_canonical_json({'z': {'y': 1, 'x': 2}}) == (
-            '{"z":{"x":2,"y":1}}'
+        value = validate_core_model_json(TypeAdapter(_CoreCount), text)
+
+        assert value == _CoreCount.model_validate_json(text)
+        assert value == _CoreCount(value='worker-1', count=2)
+
+    def test_a_list_type_gives_its_items(self) -> None:
+        text = '[{"value": "a", "count": 1}]'
+
+        value = validate_core_model_json(TypeAdapter(list[_CoreCount]), text)
+
+        assert value == [_CoreCount(value='a', count=1)]
+
+    @pytest.mark.parametrize(
+        'text',
+        ['{"value": "worker-1"}', '{"value": "worker-1", "count": "x"}', 'not json'],
+        ids=['missing-field', 'wrong-type', 'malformed'],
+    )
+    def test_a_text_that_does_not_match_raises_the_error_of_the_model(
+        self, text: str,
+    ) -> None:
+        with pytest.raises(ValidationError) as expected:
+            _ = _CoreCount.model_validate_json(text)
+
+        with pytest.raises(ValidationError) as raised:
+            _ = validate_core_model_json(TypeAdapter(_CoreCount), text)
+
+        assert raised.value.title == expected.value.title == '_CoreCount'
+        assert raised.value.errors(include_url=False) == expected.value.errors(
+            include_url=False,
         )
-
-    def test_list_order_is_kept(self) -> None:
-        assert dumps_canonical_json(['b', 'a']) == '["b","a"]'
-
-    def test_largest_finite_float_is_kept(self) -> None:
-        assert dumps_canonical_json([1.7976931348623157e308]) == (
-            '[1.7976931348623157e+308]'
-        )
-
-    @pytest.mark.parametrize('value', [float('inf'), float('-inf'), float('nan')])
-    def test_non_finite_float_crashes_loud(self, value: float) -> None:
-        with pytest.raises(ValueError, match='not JSON compliant'):
-            dumps_canonical_json({'x': value})

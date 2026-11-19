@@ -7,7 +7,6 @@
 
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::subworkflow_matrix::{
@@ -25,16 +24,16 @@ use crate::broker::attempt_writes::{
 };
 use crate::broker::core_rows::StatementLog;
 use crate::broker::expiry_and_orphans::expire_pending_pass;
-use crate::broker::pools::core_pool_for_test_pool;
+use crate::broker::pools::core_pool_for_test_url;
 use crate::core::lifecycle::{FailedAttemptOutcome, OwnedClaim};
 use crate::core::WorkflowSpec;
 use crate::test_support::child_specs::TestChildSpecs;
+use crate::test_support::sql::{self, TestPool};
 use crate::workflow_engine::engine::on_workflow_task_complete_with;
 use crate::workflow_engine::phase2_recovery::drive_phase2_recovery_with;
 use crate::workflow_engine::recovery::{
     recover_stuck_workflows_observed_with, GLOBAL_SCAN_ROW_CAP,
 };
-use crate::workflow_engine::steps::ChildBuild;
 
 /// Python `_run_workflow_recovery`: quarantine bound of the phase-2 drain.
 const QUARANTINE_AFTER_ATTEMPTS: u32 = 25;
@@ -64,10 +63,10 @@ fn slow_parent(name: &str, value: &str) -> WorkflowSpec {
 }
 
 /// One recovery pass; returns the work it applied.
-async fn recovery_pass(pool: &PgPool, child_specs: &TestChildSpecs) -> u64 {
+async fn recovery_pass(pool: &TestPool, child_specs: &TestChildSpecs) -> u64 {
     let phase2 = drive_phase2_recovery_with(
-        &crate::broker::PostgresBroker::from_pool(pool.clone()),
-        ChildBuild::Client(child_specs),
+        &crate::broker::PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
+        child_specs,
         0,
         GLOBAL_SCAN_ROW_CAP,
         QUARANTINE_AFTER_ATTEMPTS,
@@ -75,8 +74,8 @@ async fn recovery_pass(pool: &PgPool, child_specs: &TestChildSpecs) -> u64 {
     .await
     .expect("the phase-2 drain");
     let report = recover_stuck_workflows_observed_with(
-        &crate::broker::PostgresBroker::from_pool(pool.clone()),
-        ChildBuild::Client(child_specs),
+        &crate::broker::PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
+        child_specs,
         FAILURE_LIMIT,
     )
     .await
@@ -87,7 +86,7 @@ async fn recovery_pass(pool: &PgPool, child_specs: &TestChildSpecs) -> u64 {
 /// Python `_mark_workflow_task_completed`: the task moves to history and the
 /// node is COMPLETED with `value`, and nothing advances the workflow.
 async fn mark_node_completed(
-    pool: &PgPool,
+    pool: &TestPool,
     workflow_id: Uuid,
     task_index: i32,
     value: serde_json::Value,
@@ -97,7 +96,7 @@ async fn mark_node_completed(
         .task_id
         .expect("the node has a task");
     let result_json = finish_phase1(pool, task_id, &ok(value)).await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_workflow_tasks SET status = 'COMPLETED', result = $3, completed_at = NOW()
          WHERE workflow_id = $1 AND task_index = $2",
     )
@@ -111,8 +110,8 @@ async fn mark_node_completed(
 
 /// Takes `workflow_id` and its node 0 back to before the child's result was
 /// written to the parent (`revert_node`) and before the workflow ended.
-async fn revert_end(pool: &PgPool, workflow_id: Uuid, revert_node: bool) {
-    sqlx::query(
+async fn revert_end(pool: &TestPool, workflow_id: Uuid, revert_node: bool) {
+    sql::query(
         "UPDATE horsies_workflows
          SET status = 'RUNNING', result = NULL, error = NULL, completed_at = NULL, updated_at = NOW()
          WHERE id = $1",
@@ -122,7 +121,7 @@ async fn revert_end(pool: &PgPool, workflow_id: Uuid, revert_node: bool) {
     .await
     .expect("revert the workflow end");
     if revert_node {
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_workflow_tasks
              SET status = 'RUNNING', result = NULL, sub_workflow_summary = NULL, completed_at = NULL
              WHERE workflow_id = $1 AND task_index = 0",
@@ -317,7 +316,7 @@ async fn recovery_starts_the_child_of_a_ready_node_and_the_workflow_completes() 
     )
     .await;
     mark_node_completed(&db.pool, workflow_id, 0, serde_json::json!("gate")).await;
-    sqlx::query(
+    sql::query(
         "UPDATE horsies_workflow_tasks SET status = 'READY' WHERE workflow_id = $1 AND task_index = 1",
     )
     .bind(workflow_id)
@@ -446,8 +445,8 @@ enum FailedAttempt {
 /// One failed attempt of `task_id`, held by [`WORKER`] as the worker holds it
 /// while it finalizes. The retry follows the row's counts, as the worker's
 /// policy check does for a code that the policy lists.
-async fn fail_attempt(pool: &PgPool, task_id: Uuid) -> FailedAttempt {
-    let (claimed_at, retry_count, max_retries): (DateTime<Utc>, i32, i32) = sqlx::query_as(
+async fn fail_attempt(pool: &TestPool, task_id: Uuid) -> FailedAttempt {
+    let (claimed_at, retry_count, max_retries): (DateTime<Utc>, i32, i32) = sql::query_as(
         "UPDATE horsies_tasks
          SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $2,
              claim_expires_at = NULL, started_at = NOW(), finalizing_at = NOW(),
@@ -472,7 +471,7 @@ async fn fail_attempt(pool: &PgPool, task_id: Uuid) -> FailedAttempt {
     let result_json =
         serde_json::to_string(&err("RETRY_PROBE", "attempt failed")).expect("encode the failure");
     let outcome = finish_failed_attempt(
-        &core_pool_for_test_pool(pool),
+        &core_pool_for_test_url(pool.url()),
         StatementLog::Off,
         &FinishFailedAttempt {
             task_id,
@@ -503,7 +502,7 @@ async fn fail_attempt(pool: &PgPool, task_id: Uuid) -> FailedAttempt {
 /// Starts a parent of [`retry_child`] and gives the child task
 /// [`CHILD_MAX_RETRIES`]. Returns the parent, the child and the child task.
 async fn start_retry_parent(
-    pool: &PgPool,
+    pool: &TestPool,
     name: &str,
     child_specs: &TestChildSpecs,
 ) -> (Uuid, Uuid, Uuid) {
@@ -518,7 +517,7 @@ async fn start_retry_parent(
         .await
         .task_id
         .expect("the child task is enqueued");
-    sqlx::query("UPDATE horsies_tasks SET max_retries = $2 WHERE id = $1")
+    sql::query("UPDATE horsies_tasks SET max_retries = $2 WHERE id = $1")
         .bind(task_id)
         .bind(CHILD_MAX_RETRIES)
         .execute(pool)
@@ -583,9 +582,9 @@ async fn a_child_task_that_spends_its_retries_fails_the_parent() {
     }
     let _ = ended.expect("the retries end");
     on_workflow_task_complete_with(
-        &crate::broker::PostgresBroker::from_pool(pool.clone()),
+        &crate::broker::PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
         task_id,
-        ChildBuild::Client(&child_specs),
+        &child_specs,
     )
     .await
     .expect("phase 2 of the last failure");
@@ -621,7 +620,7 @@ async fn an_expired_child_task_fails_the_child_and_the_parent() {
     let child_id = child_of(&db.pool, workflow_id, 0).await;
 
     assert!(
-        expire_pending_pass(&core_pool_for_test_pool(&db.pool), StatementLog::Off)
+        expire_pending_pass(&core_pool_for_test_url(db.pool.url()), StatementLog::Off)
             .await
             .expect("expire_pending_pass")
             .expired()

@@ -1,7 +1,6 @@
 //! Workflow recovery: the reaper's global pass and the tree pass of a resume.
 //!
-//! Each candidate is one step on the core statement layer (Python
-//! `core/workflows/recovery.py`, one `SAVEPOINT` per candidate):
+//! Each candidate is one step on the core statement layer:
 //!
 //! - case 0: `horsies_workflow_node_reevaluate`, in a transaction with its owed child starts;
 //! - cases 1 and 1.5: `horsies_workflow_nodes_enqueue_ready`, in a transaction with its owed child starts;
@@ -32,7 +31,7 @@ use crate::workflow_engine::recovery_limit::{
     CountFailures, FailureRecord, RecoveryCase, RecoveryFailurePolicy,
 };
 use crate::workflow_engine::steps::{
-    advance_parents, checkout, run_alone, run_in_transaction, step_row_select, ChildBuild,
+    advance_parents, checkout, run_alone, run_in_transaction, step_row_select,
     ChildFinishDisposition, OwedParentAdvances, ParentAdvance, StepContractError, StepDisposition,
     CHILD_FINISH,
 };
@@ -145,7 +144,7 @@ impl RecoveryPassFailure {
 }
 
 // ---------------------------------------------------------------------------
-// Discovery statements (Python's case queries, `core/workflows/recovery.py:207-311`)
+// Discovery statements
 // ---------------------------------------------------------------------------
 
 /// Case 0: PENDING nodes of a RUNNING workflow whose dependencies are all terminal. `$1`: the row cap, NULL for
@@ -225,8 +224,7 @@ WHERE wt.status = 'READY'
 LIMIT CAST($2 AS bigint)";
 
 /// Case 1.6: a RUNNING sub-workflow node whose child workflow is terminal, in a RUNNING parent. Every link
-/// path writes the parent node RUNNING, so Python's selection covers every linked node
-/// (`GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL`, `core/workflows/recovery.py:266-276`).
+/// path writes the parent node RUNNING, so the selection covers every linked node.
 const GLOBAL_CASE1_6_STALE_SUBWORKFLOW_SQL: &str = "\
 SELECT wt.workflow_id, wt.task_index, wt.sub_workflow_id
 FROM horsies_workflow_tasks wt
@@ -452,7 +450,7 @@ static FAIL_TREE_ORPHAN: TypedStatement = TypedStatement::new(
 // ---------------------------------------------------------------------------
 
 /// A case 0 candidate.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 struct StuckPendingRow {
     workflow_id: Uuid,
     task_index: i32,
@@ -474,7 +472,7 @@ struct StaleSubworkflowRow {
 }
 
 /// A completion candidate of the tree pass.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 struct StuckWorkflowRow {
     workflow_id: Uuid,
 }
@@ -487,7 +485,7 @@ struct OrphanedWorkflowRow {
 }
 
 /// A `PAGE` row of the audit.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 struct GlobalWorkflowAuditRow {
     scanned_count: i64,
     completion_ids: Vec<Uuid>,
@@ -631,7 +629,7 @@ pub async fn recover_stuck_workflows(
 ) -> Result<RecoveryReport, WorkflowError> {
     Box::pin(recover_stuck_workflows_observed_with(
         broker,
-        ChildBuild::Client(source),
+        source,
         failure_limit,
     ))
     .await
@@ -642,7 +640,7 @@ pub async fn recover_stuck_workflows(
 /// [`recover_stuck_workflows`]; a failed pass keeps its partial report ([`RecoveryPassFailure`]).
 pub(crate) async fn recover_stuck_workflows_observed_with(
     broker: &PostgresBroker,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
     failure_limit: u32,
 ) -> Result<RecoveryReport, RecoveryPassFailure> {
     Box::pin(recover_stuck_workflows_in_scope(
@@ -663,7 +661,7 @@ pub(crate) async fn recover_stuck_workflows_observed_with(
 /// Errors: the tree read or a discovery statement failed.
 pub(crate) async fn recover_workflow_tree(
     broker: &PostgresBroker,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
     root_workflow_id: Uuid,
 ) -> Result<RecoveryReport, WorkflowError> {
     let rows = run_alone(
@@ -691,7 +689,7 @@ pub(crate) async fn recover_workflow_tree(
 /// debug build needs more than a 2 MiB thread stack for one pass (see the module docs of `steps`).
 async fn recover_stuck_workflows_in_scope(
     broker: &PostgresBroker,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
     scope: RecoveryScope<'_>,
     failure_policy: RecoveryFailurePolicy,
 ) -> Result<RecoveryReport, RecoveryPassFailure> {
@@ -775,7 +773,7 @@ async fn recover_stuck_workflows_in_scope(
 #[derive(Clone, Copy)]
 struct PassContext<'a> {
     broker: &'a PostgresBroker,
-    build: ChildBuild<'a>,
+    build: &'a dyn ChildSpecSource,
     scope: RecoveryScope<'a>,
     failure_policy: RecoveryFailurePolicy,
 }
@@ -1194,9 +1192,8 @@ fn decode_rows<T>(
 }
 
 /// Cases 2/3 and 4 of the global pass: one audit page of `max_rows` RUNNING workflows, then one statement per
-/// candidate that renews the page claim with its work (Python `_recover_stuck_workflows_global`,
-/// `core/workflows/recovery.py:1229-1390`). The completion of a child that has a parent is followed by its parent
-/// advance as its own step. The claim is released at the end while this pass still owns it.
+/// candidate that renews the page claim with its work. The completion of a child that has a parent is followed by
+/// its parent advance as its own step. The claim is released at the end while this pass still owns it.
 ///
 /// Errors: the audit statement failed (both case metrics note it).
 async fn recover_global_workflow_end_states(
@@ -1760,9 +1757,9 @@ async fn fail_tree_orphan(
 
 /// The stored error of a RUNNING workflow with no node rows (recovery case 4): its start did not finish.
 ///
-/// Python stores `{"error_code": "E400", ...}` (`core/workflows/recovery.py:1001-1008, 1199-1206`), which is
-/// not a catalog error; the core stores the catalog code `WORKFLOW_START_INCOMPLETE` (approved rule), with
-/// Python's message.
+/// Python 0.7.0 stored `{"error_code": "E400", ...}` (`core/workflows/recovery.py` of the `v0.7.0` package), which
+/// is not a catalog error; the core stores the catalog code `WORKFLOW_START_INCOMPLETE` (approved rule), with
+/// the message of 0.7.0.
 fn orphaned_workflow_error(workflow_id: Uuid, name: &str) -> Result<String, serde_json::Error> {
     serde_json::to_string(&TaskError {
         error_code: OperationalErrorCode::WorkflowStartIncomplete.into(),
@@ -1793,7 +1790,7 @@ async fn audit_end_states(
 ) -> Result<(), WorkflowError> {
     let pass = PassContext {
         broker,
-        build: ChildBuild::Client(child_specs),
+        build: child_specs,
         scope: RecoveryScope::Global { max_rows },
         failure_policy,
     };
@@ -1804,25 +1801,26 @@ async fn audit_end_states(
 mod cap_tests {
     use super::*;
     use crate::test_support::child_specs::TestChildSpecs;
+    use crate::test_support::sql::{self, TestPool, TestPoolOptions};
     use crate::workflow_engine::steps::CommittedStep;
     use serial_test::serial;
-    use sqlx::PgPool;
     use uuid::Uuid;
 
     /// A broker on the database of `pool`: the recovery statements run on its core pools.
-    fn broker_of(pool: &PgPool) -> PostgresBroker {
-        PostgresBroker::from_pool(pool.clone())
+    fn broker_of(pool: &TestPool) -> PostgresBroker {
+        PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust)
     }
 
     /// A broker whose database refuses every connection (no server listens on port 1): each statement fails
     /// with a retryable connection error.
     fn unreachable_broker() -> PostgresBroker {
-        PostgresBroker::from_pool(
-            sqlx::postgres::PgPoolOptions::new()
+        PostgresBroker::from_test_url(
+            TestPoolOptions::new()
                 .max_connections(1)
                 .acquire_timeout(std::time::Duration::from_millis(100))
                 .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
-                .expect("a lazy pool opens no connection"),
+                .url(),
+            crate::ClientFamily::Rust,
         )
     }
 
@@ -1843,7 +1841,7 @@ mod cap_tests {
                 .value(&workflow_id)
                 .value(&task_indexes)
                 .finish(),
-            ChildBuild::Client(&child_specs),
+            &child_specs,
         )
         .await
     }
@@ -1864,7 +1862,7 @@ mod cap_tests {
                 .value(&workflow_id)
                 .value(&task_index)
                 .finish(),
-            ChildBuild::Client(&child_specs),
+            &child_specs,
         )
         .await
     }
@@ -1933,8 +1931,8 @@ mod cap_tests {
         }
     }
 
-    async fn insert_orphaned_workflow(pool: &PgPool, id: Uuid) {
-        sqlx::query(
+    async fn insert_orphaned_workflow(pool: &TestPool, id: Uuid) {
+        sql::query(
             "INSERT INTO horsies_workflows (
                 id, name, status, on_error, output_task_index,
                 definition_key, depth, root_workflow_id,
@@ -1952,11 +1950,11 @@ mod cap_tests {
     }
 
     async fn insert_running_workflow_with_pending_task(
-        pool: &PgPool,
+        pool: &TestPool,
         workflow_id: Uuid,
         created_at: chrono::DateTime<chrono::Utc>,
     ) {
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                  id, name, status, on_error, output_task_index,
                  definition_key, depth, root_workflow_id,
@@ -1972,7 +1970,7 @@ mod cap_tests {
         .execute(pool)
         .await
         .unwrap();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflow_tasks (
                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
@@ -1991,8 +1989,8 @@ mod cap_tests {
         .unwrap();
     }
 
-    async fn failed_count(pool: &PgPool, ids: &[Uuid]) -> i64 {
-        sqlx::query_scalar(
+    async fn failed_count(pool: &TestPool, ids: &[Uuid]) -> i64 {
+        sql::query_scalar(
             "SELECT COUNT(*) FROM horsies_workflows WHERE id = ANY($1) AND status = 'FAILED'",
         )
         .bind(ids)
@@ -2052,19 +2050,16 @@ mod cap_tests {
     #[tokio::test]
     #[serial]
     async fn recovery_case_4_fails_an_orphaned_workflow_with_the_catalog_code() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         insert_orphaned_workflow(&pool, workflow_id).await;
-        let report = recover_workflow_tree(
-            &broker_of(&pool),
-            ChildBuild::Client(&TestChildSpecs::empty()),
-            workflow_id,
-        )
-        .await
-        .unwrap();
+        let report =
+            recover_workflow_tree(&broker_of(&pool), &TestChildSpecs::empty(), workflow_id)
+                .await
+                .unwrap();
         assert_eq!(report.case4_orphaned_failed, 1);
         let (status, error): (String, String) =
-            sqlx::query_as("SELECT status, error FROM horsies_workflows WHERE id = $1")
+            sql::query_as("SELECT status, error FROM horsies_workflows WHERE id = $1")
                 .bind(workflow_id)
                 .fetch_one(&pool)
                 .await
@@ -2086,7 +2081,7 @@ mod cap_tests {
     async fn discovery_query_failure_keeps_case_metrics_in_the_health_snapshot() {
         let failure = recover_stuck_workflows_observed_with(
             &unreachable_broker(),
-            ChildBuild::Client(&TestChildSpecs::empty()),
+            &TestChildSpecs::empty(),
             25,
         )
         .await
@@ -2131,7 +2126,7 @@ mod cap_tests {
     /// A page of zero workflows is outside the audit function's bound (1 to 1000): the audit is refused
     /// (22023), both case metrics note the error, and the report has no completion yield.
     async fn a_zero_page_size_is_refused_and_has_undefined_completion_yield() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let mut report = RecoveryReport::default();
         let refused = audit_end_states(
             &broker_of(&pool),
@@ -2155,12 +2150,11 @@ mod cap_tests {
     #[tokio::test]
     #[serial]
     async fn case0_advances_the_selected_root_without_touching_unready_siblings() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
+        let pool = crate::test_support::migrated_pool().await;
+        let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
         broker.ensure_schema_initialized().await.unwrap();
-        let pool = broker.pool().clone();
         let workflow_id = Uuid::new_v4();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                  id, name, status, on_error, definition_key, depth,
                  root_workflow_id, sent_at, created_at, started_at, updated_at
@@ -2175,7 +2169,7 @@ mod cap_tests {
         // A node input is a JSON object text: the task row minted at ENQUEUED
         // refuses any other (horsies_workflow_task_input).
         for (task_index, dependencies) in [(0_i32, vec![]), (1_i32, vec![2_i32])] {
-            sqlx::query(
+            sql::query(
                 "INSERT INTO horsies_workflow_tasks (
                     downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
                     priority, dependencies, allow_failed_deps, join_type, status,
@@ -2195,7 +2189,7 @@ mod cap_tests {
             .await
             .unwrap();
         }
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflow_tasks (
                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
@@ -2211,15 +2205,12 @@ mod cap_tests {
         .await
         .unwrap();
 
-        let report = recover_workflow_tree(
-            &broker_of(&pool),
-            ChildBuild::Client(&TestChildSpecs::empty()),
-            workflow_id,
-        )
-        .await
-        .unwrap();
+        let report =
+            recover_workflow_tree(&broker_of(&pool), &TestChildSpecs::empty(), workflow_id)
+                .await
+                .unwrap();
         assert_eq!(report.case0_pending_reevaluated, 1);
-        let statuses: Vec<(i32, String)> = sqlx::query_as(
+        let statuses: Vec<(i32, String)> = sql::query_as(
             "SELECT task_index, status FROM horsies_workflow_tasks
              WHERE workflow_id = $1 ORDER BY task_index",
         )
@@ -2237,21 +2228,20 @@ mod cap_tests {
     #[tokio::test]
     #[serial]
     async fn recovery_cap_limits_rows_then_uncapped_processes_rest() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
-        let pool = broker.pool().clone();
+        let pool = crate::test_support::migrated_pool().await;
+        let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
 
         // Isolate: remove any pre-existing orphaned workflows.
-        sqlx::query("DELETE FROM horsies_workflow_tasks")
+        sql::query("DELETE FROM horsies_workflow_tasks")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_workflows")
+        sql::query("DELETE FROM horsies_workflows")
             .execute(&pool)
             .await
             .unwrap();
 
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_recovery_scan_cursors
              SET last_created_at = NULL, last_id = NULL,
                  cycle_upper_created_at = NULL, cycle_upper_id = NULL,
@@ -2275,7 +2265,7 @@ mod cap_tests {
         // Capped at 2: exactly 2 of the 3 orphans are failed this pass.
         let report = recover_stuck_workflows_in_scope(
             &broker,
-            ChildBuild::Client(&child_specs),
+            &child_specs,
             RecoveryScope::Global { max_rows: 2 },
             RecoveryFailurePolicy::LogOnly,
         )
@@ -2288,7 +2278,7 @@ mod cap_tests {
         // Uncapped: the remaining orphan is failed.
         let report = recover_stuck_workflows_in_scope(
             &broker,
-            ChildBuild::Client(&child_specs),
+            &child_specs,
             RecoveryScope::Global {
                 max_rows: GLOBAL_SCAN_ROW_CAP,
             },
@@ -2389,7 +2379,7 @@ mod cap_tests {
     #[tokio::test]
     #[serial]
     async fn generic_audit_uses_partial_index_for_wide_and_narrow_workflows() {
-        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let url = crate::test_support::migrated_database_url().await;
         let (client, notices) = crate::test_support::connect_collecting_notices(&url).await;
         client
             .batch_execute(
@@ -2456,16 +2446,16 @@ mod cap_tests {
     #[tokio::test]
     #[serial]
     async fn empty_global_workflow_audit_is_bounded_at_fifty_thousand_rows() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        sqlx::query("DELETE FROM horsies_workflow_tasks")
+        let pool = crate::test_support::migrated_pool().await;
+        sql::query("DELETE FROM horsies_workflow_tasks")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_workflows")
+        sql::query("DELETE FROM horsies_workflows")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_recovery_scan_cursors
              SET last_created_at = NULL, last_id = NULL,
                  cycle_upper_created_at = NULL, cycle_upper_id = NULL,
@@ -2479,7 +2469,7 @@ mod cap_tests {
         .await
         .unwrap();
 
-        sqlx::query(
+        sql::query(
             "WITH generated AS (
                  SELECT g,
                         ('10000000-0000-7000-8000-' ||
@@ -2503,7 +2493,7 @@ mod cap_tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
+        sql::query(
             "WITH generated AS (
                  SELECT g,
                         ('10000000-0000-7000-8000-' ||
@@ -2528,7 +2518,7 @@ mod cap_tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("ANALYZE horsies_workflows, horsies_workflow_tasks")
+        sql::query("ANALYZE horsies_workflows, horsies_workflow_tasks")
             .execute(&pool)
             .await
             .unwrap();
@@ -2551,7 +2541,7 @@ mod cap_tests {
 
         // The next page, with the plan of the page statement inside the function. The transaction rolls back,
         // so the cursor stays where the audit left it.
-        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let url = crate::test_support::migrated_database_url().await;
         let (client, notices) = crate::test_support::connect_collecting_notices(&url).await;
         client.batch_execute("BEGIN").await.expect("begin");
         client
@@ -2596,7 +2586,7 @@ mod cap_tests {
             TREE_CASE4_ORPHANED_WORKFLOW_SQL,
         ] {
             let explain = format!("EXPLAIN (FORMAT JSON) {tree_sql}");
-            let tree_plan: serde_json::Value = sqlx::query_scalar(&explain)
+            let tree_plan: serde_json::Value = sql::query_scalar(&explain)
                 .bind(vec![selected_workflow])
                 .bind(200_i64)
                 .fetch_one(&pool)
@@ -2622,15 +2612,15 @@ mod cap_tests {
             );
         }
 
-        sqlx::query("DELETE FROM horsies_workflow_tasks")
+        sql::query("DELETE FROM horsies_workflow_tasks")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_workflows")
+        sql::query("DELETE FROM horsies_workflows")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("ANALYZE horsies_workflows, horsies_workflow_tasks")
+        sql::query("ANALYZE horsies_workflows, horsies_workflow_tasks")
             .execute(&pool)
             .await
             .unwrap();
@@ -2639,16 +2629,16 @@ mod cap_tests {
     #[tokio::test]
     #[serial]
     async fn global_workflow_cursor_reaches_a_completion_after_a_stable_page() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        sqlx::query("DELETE FROM horsies_workflow_tasks")
+        let pool = crate::test_support::migrated_pool().await;
+        sql::query("DELETE FROM horsies_workflow_tasks")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_workflows")
+        sql::query("DELETE FROM horsies_workflows")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_recovery_scan_cursors
              SET last_created_at = NULL, last_id = NULL,
                  cycle_upper_created_at = NULL, cycle_upper_id = NULL,
@@ -2661,7 +2651,7 @@ mod cap_tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
+        sql::query(
             "WITH generated AS (
                  SELECT g,
                         ('60000000-0000-7000-8000-' ||
@@ -2681,7 +2671,7 @@ mod cap_tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
+        sql::query(
             "WITH generated AS (
                  SELECT g,
                         ('60000000-0000-7000-8000-' ||
@@ -2735,18 +2725,18 @@ mod cap_tests {
         assert_eq!(second.completion_candidate_yield, Some(1.0));
         let completed_id = Uuid::parse_str("60000000-0000-7000-8000-0000000000c9").unwrap();
         let status: String =
-            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+            sql::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
                 .bind(completed_id)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!(status, "COMPLETED");
 
-        sqlx::query("DELETE FROM horsies_workflow_tasks")
+        sql::query("DELETE FROM horsies_workflow_tasks")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_workflows")
+        sql::query("DELETE FROM horsies_workflows")
             .execute(&pool)
             .await
             .unwrap();
@@ -2755,16 +2745,16 @@ mod cap_tests {
     #[tokio::test]
     #[serial]
     async fn global_cycle_watermark_revisits_old_rows_while_new_rows_arrive() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        sqlx::query("DELETE FROM horsies_workflow_tasks")
+        let pool = crate::test_support::migrated_pool().await;
+        sql::query("DELETE FROM horsies_workflow_tasks")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_workflows")
+        sql::query("DELETE FROM horsies_workflows")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_recovery_scan_cursors
              SET last_created_at = NULL, last_id = NULL,
                  cycle_upper_created_at = NULL, cycle_upper_id = NULL,
@@ -2801,7 +2791,7 @@ mod cap_tests {
         .unwrap();
         assert_eq!(first.metrics.case2_3.rows_selected, 2);
 
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_workflow_tasks
              SET status = 'COMPLETED', completed_at = NOW()
              WHERE workflow_id = $1",
@@ -2852,18 +2842,18 @@ mod cap_tests {
         .unwrap();
         assert_eq!(third.case2_3_workflow_completed, 1);
         let status: String =
-            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+            sql::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
                 .bind(stable_ids[0])
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!(status, "COMPLETED");
 
-        sqlx::query("DELETE FROM horsies_workflow_tasks")
+        sql::query("DELETE FROM horsies_workflow_tasks")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_workflows")
+        sql::query("DELETE FROM horsies_workflows")
             .execute(&pool)
             .await
             .unwrap();
@@ -2872,16 +2862,16 @@ mod cap_tests {
     #[tokio::test]
     #[serial]
     async fn global_workflow_claim_refuses_a_second_caller_until_the_owner_expires() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        sqlx::query("DELETE FROM horsies_workflow_tasks")
+        let pool = crate::test_support::migrated_pool().await;
+        sql::query("DELETE FROM horsies_workflow_tasks")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_workflows")
+        sql::query("DELETE FROM horsies_workflows")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_recovery_scan_cursors
              SET last_created_at = NULL, last_id = NULL,
                  cycle_upper_created_at = NULL, cycle_upper_id = NULL,
@@ -2896,7 +2886,7 @@ mod cap_tests {
         .unwrap();
 
         let workflow_id = Uuid::new_v4();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                  id, name, status, on_error, output_task_index,
                  definition_key, depth, root_workflow_id,
@@ -2911,7 +2901,7 @@ mod cap_tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflow_tasks (
                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow,
@@ -2928,7 +2918,7 @@ mod cap_tests {
         .await
         .unwrap();
 
-        let abandoned = sqlx::query_as::<_, GlobalWorkflowAuditRow>(GLOBAL_WORKFLOW_AUDIT_SQL)
+        let abandoned = sql::query_as::<GlobalWorkflowAuditRow>(GLOBAL_WORKFLOW_AUDIT_SQL)
             .bind(200_i64)
             .bind(Uuid::new_v4())
             .bind(GLOBAL_WORKFLOW_AUDIT_CLAIM_TTL_MS)
@@ -2938,7 +2928,7 @@ mod cap_tests {
         assert_eq!(abandoned.completion_ids, vec![workflow_id]);
         assert!(abandoned.claim_token.is_some());
         let status: String =
-            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+            sql::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
                 .bind(workflow_id)
                 .fetch_one(&pool)
                 .await
@@ -2958,7 +2948,7 @@ mod cap_tests {
         assert_eq!(report.metrics.case2_3.refusals, 1);
         assert_eq!(report.case2_3_workflow_completed, 0);
 
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_recovery_scan_cursors
              SET claim_expires_at = statement_timestamp() - interval '1 second'
              WHERE scan_name = 'running_workflows'",
@@ -2978,19 +2968,19 @@ mod cap_tests {
         .unwrap();
         assert_eq!(report.case2_3_workflow_completed, 1);
         let status: String =
-            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+            sql::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
                 .bind(workflow_id)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!(status, "COMPLETED");
 
-        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+        sql::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
             .bind(workflow_id)
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
             .execute(&pool)
             .await
@@ -3000,16 +2990,16 @@ mod cap_tests {
     #[tokio::test]
     #[serial]
     async fn workflow_action_fences_the_claim_after_lease_expiry() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        sqlx::query("DELETE FROM horsies_workflow_tasks")
+        let pool = crate::test_support::migrated_pool().await;
+        sql::query("DELETE FROM horsies_workflow_tasks")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_workflows")
+        sql::query("DELETE FROM horsies_workflows")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_recovery_scan_cursors
              SET last_created_at = NULL, last_id = NULL,
                  cycle_upper_created_at = NULL, cycle_upper_id = NULL,
@@ -3023,7 +3013,7 @@ mod cap_tests {
         .unwrap();
 
         let workflow_id = Uuid::new_v4();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                  id, name, status, on_error, output_task_index,
                  definition_key, depth, root_workflow_id,
@@ -3038,7 +3028,7 @@ mod cap_tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflow_tasks (
                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow,
@@ -3055,7 +3045,7 @@ mod cap_tests {
         .await
         .unwrap();
 
-        let audit = sqlx::query_as::<_, GlobalWorkflowAuditRow>(GLOBAL_WORKFLOW_AUDIT_SQL)
+        let audit = sql::query_as::<GlobalWorkflowAuditRow>(GLOBAL_WORKFLOW_AUDIT_SQL)
             .bind(200_i64)
             .bind(Uuid::new_v4())
             .bind(500_i64)
@@ -3065,9 +3055,9 @@ mod cap_tests {
         let claim_token = audit.claim_token.expect("candidate page claim");
 
         let mut workflow_lock = pool.begin().await.unwrap();
-        sqlx::query("SELECT id FROM horsies_workflows WHERE id = $1 FOR UPDATE")
+        sql::query("SELECT id FROM horsies_workflows WHERE id = $1 FOR UPDATE")
             .bind(workflow_id)
-            .execute(workflow_lock.as_mut())
+            .execute(&mut *workflow_lock)
             .await
             .unwrap();
         let action_broker = broker_of(&pool);
@@ -3089,7 +3079,7 @@ mod cap_tests {
 
         let mut action_is_waiting = false;
         for _ in 0..100 {
-            action_is_waiting = sqlx::query_scalar(
+            action_is_waiting = sql::query_scalar(
                 "SELECT EXISTS (
                      SELECT 1 FROM pg_stat_activity
                      WHERE datname = current_database()
@@ -3111,7 +3101,7 @@ mod cap_tests {
             "candidate action must reach the workflow lock"
         );
         tokio::time::sleep(std::time::Duration::from_millis(550)).await;
-        let lease_expired: bool = sqlx::query_scalar(
+        let lease_expired: bool = sql::query_scalar(
             "SELECT claim_expires_at <= statement_timestamp()
              FROM horsies_recovery_scan_cursors
              WHERE scan_name = 'running_workflows'",
@@ -3141,19 +3131,19 @@ mod cap_tests {
             AuditAction::Written { .. }
         ));
         let status: String =
-            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+            sql::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
                 .bind(workflow_id)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!(status, "COMPLETED");
 
-        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+        sql::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
             .bind(workflow_id)
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
             .execute(&pool)
             .await
@@ -3168,7 +3158,7 @@ mod cap_tests {
     #[tokio::test]
     #[serial]
     async fn stale_page_owner_cannot_mutate_after_claim_takeover() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         for statement in [
             "DELETE FROM horsies_workflow_tasks",
             "DELETE FROM horsies_workflows",
@@ -3180,13 +3170,13 @@ mod cap_tests {
                  last_candidate_rows = 0, last_scan_at = NULL
              WHERE scan_name = 'running_workflows'",
         ] {
-            sqlx::query(statement)
+            sql::query(statement)
                 .execute(&pool)
                 .await
                 .expect("reset the running-workflows scan");
         }
         let workflow_id = Uuid::new_v4();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                  id, name, status, on_error, output_task_index,
                  definition_key, depth, root_workflow_id,
@@ -3202,7 +3192,7 @@ mod cap_tests {
         .expect("seed the orphaned workflow");
 
         let stale_token = Uuid::new_v4();
-        let first = sqlx::query_as::<_, GlobalWorkflowAuditRow>(GLOBAL_WORKFLOW_AUDIT_SQL)
+        let first = sql::query_as::<GlobalWorkflowAuditRow>(GLOBAL_WORKFLOW_AUDIT_SQL)
             .bind(200_i64)
             .bind(stale_token)
             .bind(60_000_i64)
@@ -3212,7 +3202,7 @@ mod cap_tests {
         assert_eq!(first.orphan_ids, vec![workflow_id]);
         assert_eq!(first.claim_token, Some(stale_token));
 
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_recovery_scan_cursors
              SET claim_expires_at = statement_timestamp() - interval '1 second'
              WHERE scan_name = 'running_workflows'
@@ -3223,7 +3213,7 @@ mod cap_tests {
         .await
         .expect("expire the first claim");
         let replacement_token = Uuid::new_v4();
-        let second = sqlx::query_as::<_, GlobalWorkflowAuditRow>(GLOBAL_WORKFLOW_AUDIT_SQL)
+        let second = sql::query_as::<GlobalWorkflowAuditRow>(GLOBAL_WORKFLOW_AUDIT_SQL)
             .bind(200_i64)
             .bind(replacement_token)
             .bind(60_000_i64)
@@ -3255,7 +3245,7 @@ mod cap_tests {
             "the stale page owner failed the workflow"
         );
         let status: String =
-            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+            sql::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
                 .bind(workflow_id)
                 .fetch_one(&pool)
                 .await
@@ -3272,7 +3262,7 @@ mod cap_tests {
         )
         .await
         .expect("release the takeover claim");
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
             .execute(&pool)
             .await
@@ -3282,13 +3272,13 @@ mod cap_tests {
     #[tokio::test]
     #[serial]
     async fn busy_global_workflow_cursor_refuses_without_waiting() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let mut holder = pool.begin().await.unwrap();
-        sqlx::query(
+        sql::query(
             "SELECT last_id FROM horsies_recovery_scan_cursors
              WHERE scan_name = 'running_workflows' FOR UPDATE",
         )
-        .execute(holder.as_mut())
+        .execute(&mut *holder)
         .await
         .unwrap();
 
@@ -3314,21 +3304,17 @@ mod cap_tests {
     #[tokio::test]
     #[serial]
     async fn workflow_tree_recovery_does_not_mutate_an_unrelated_orphan() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let selected = Uuid::new_v4();
         let unrelated = Uuid::new_v4();
         insert_orphaned_workflow(&pool, selected).await;
         insert_orphaned_workflow(&pool, unrelated).await;
 
-        let report = recover_workflow_tree(
-            &broker_of(&pool),
-            ChildBuild::Client(&TestChildSpecs::empty()),
-            selected,
-        )
-        .await
-        .unwrap();
+        let report = recover_workflow_tree(&broker_of(&pool), &TestChildSpecs::empty(), selected)
+            .await
+            .unwrap();
         assert_eq!(report.case4_orphaned_failed, 1);
-        let statuses: Vec<(Uuid, String)> = sqlx::query_as(
+        let statuses: Vec<(Uuid, String)> = sql::query_as(
             "SELECT id, status FROM horsies_workflows
              WHERE id = ANY($1) ORDER BY id",
         )
@@ -3342,7 +3328,7 @@ mod cap_tests {
         assert!(statuses
             .iter()
             .any(|row| row.0 == unrelated && row.1 == "RUNNING"));
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = ANY($1)")
+        sql::query("DELETE FROM horsies_workflows WHERE id = ANY($1)")
             .bind(vec![selected, unrelated])
             .execute(&pool)
             .await
@@ -3357,7 +3343,7 @@ mod cap_tests {
     async fn case_1_fails_a_ready_node_whose_args_from_names_a_static_member() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                 id, name, status, on_error, output_task_index,
                 definition_key, depth, root_workflow_id,
@@ -3375,7 +3361,7 @@ mod cap_tests {
             (0, "COMPLETED", "{}", "null", None),
             (1, "READY", "{0}", r#"{"x": 5}"#, Some(r#"{"x": 0}"#)),
         ] {
-            sqlx::query(
+            sql::query(
                 "INSERT INTO horsies_workflow_tasks (
                     downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                     dependencies, args_from, allow_failed_deps, join_type, status, is_subworkflow,
@@ -3402,7 +3388,7 @@ mod cap_tests {
             .expect("recovery enqueue path");
         assert_eq!(step.disposition, EnqueueReadyDisposition::Applied);
 
-        let (status, task_id, result): (String, Option<Uuid>, Option<String>) = sqlx::query_as(
+        let (status, task_id, result): (String, Option<Uuid>, Option<String>) = sql::query_as(
             "SELECT status, task_id, result FROM horsies_workflow_tasks
              WHERE workflow_id = $1 AND task_index = 1",
         )
@@ -3424,7 +3410,7 @@ mod cap_tests {
             Some("args_from key 'x' conflicts with static kwarg (task 1)")
         );
 
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
             .execute(&pool)
             .await
@@ -3433,9 +3419,9 @@ mod cap_tests {
 
     /// One RUNNING workflow (`on_error = fail`) with one READY task node whose stored options are `options`.
     /// Returns the workflow id.
-    async fn seed_ready_node(pool: &PgPool, task_name: &str, options: &str) -> Uuid {
+    async fn seed_ready_node(pool: &TestPool, task_name: &str, options: &str) -> Uuid {
         let workflow_id = Uuid::new_v4();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                 id, name, status, on_error, output_task_index,
                 definition_key, depth, root_workflow_id,
@@ -3449,7 +3435,7 @@ mod cap_tests {
         .execute(pool)
         .await
         .expect("insert the workflow");
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflow_tasks (
                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                 queue_name, priority, dependencies, allow_failed_deps, join_type, status,
@@ -3502,7 +3488,7 @@ mod cap_tests {
                 EnqueueReadyDisposition::Applied,
                 "{task_name}"
             );
-            let (status, task_id, result): (String, Option<Uuid>, Option<String>) = sqlx::query_as(
+            let (status, task_id, result): (String, Option<Uuid>, Option<String>) = sql::query_as(
                 "SELECT status, task_id, result FROM horsies_workflow_tasks
                  WHERE workflow_id = $1 AND task_index = 0",
             )
@@ -3538,20 +3524,20 @@ mod cap_tests {
                 "{task_name}"
             );
             let task_rows: i64 =
-                sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
+                sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
                     .bind(task_name)
                     .fetch_one(&pool)
                     .await
                     .unwrap();
             assert_eq!(task_rows, 0, "{task_name}");
             let workflow_status: String =
-                sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+                sql::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
                     .bind(workflow_id)
                     .fetch_one(&pool)
                     .await
                     .unwrap();
             assert_eq!(workflow_status, "FAILED", "{task_name}");
-            sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            sql::query("DELETE FROM horsies_workflows WHERE id = $1")
                 .bind(workflow_id)
                 .execute(&pool)
                 .await
@@ -3568,6 +3554,18 @@ mod cap_tests {
     #[serial]
     async fn a_stored_deadline_that_does_not_read_raises_and_keeps_the_ready_node() {
         use crate::workflow_engine::recovery_limit::{CandidateFailure, FailureClass};
+
+        impl sql::FromTestRow for GlobalWorkflowAuditRow {
+            fn from_row(row: &tokio_postgres::Row) -> Result<Self, sql::Error> {
+                Ok(Self {
+                    scanned_count: sql::named(row, "scanned_count")?,
+                    completion_ids: sql::named(row, "completion_ids")?,
+                    orphan_ids: sql::named(row, "orphan_ids")?,
+                    orphan_names: sql::named(row, "orphan_names")?,
+                    claim_token: sql::named(row, "claim_token")?,
+                })
+            }
+        }
 
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let task_name = "recovery_unreadable_deadline_node";
@@ -3588,7 +3586,7 @@ mod cap_tests {
                 FailureClass::Persistent,
                 "{options}"
             );
-            let (status, task_id): (String, Option<Uuid>) = sqlx::query_as(
+            let (status, task_id): (String, Option<Uuid>) = sql::query_as(
                 "SELECT status, task_id FROM horsies_workflow_tasks
                  WHERE workflow_id = $1 AND task_index = 0",
             )
@@ -3599,20 +3597,20 @@ mod cap_tests {
             assert_eq!(status, "READY", "{options}");
             assert_eq!(task_id, None, "{options}");
             let task_rows: i64 =
-                sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
+                sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
                     .bind(task_name)
                     .fetch_one(&pool)
                     .await
                     .unwrap();
             assert_eq!(task_rows, 0, "{options}");
             let workflow_status: String =
-                sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+                sql::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
                     .bind(workflow_id)
                     .fetch_one(&pool)
                     .await
                     .unwrap();
             assert_eq!(workflow_status, "RUNNING", "{options}");
-            sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            sql::query("DELETE FROM horsies_workflows WHERE id = $1")
                 .bind(workflow_id)
                 .execute(&pool)
                 .await
@@ -3622,16 +3620,14 @@ mod cap_tests {
 
     /// Recovery case 0 marks a PENDING node READY with its task row, in one transaction: a task insert that
     /// raises (a stored `good_until` that the database cannot read) rolls the READY mark back, and the node
-    /// stays PENDING with no task. Python runs each case 0 candidate in a savepoint
-    /// (`python/horsies/core/workflows/recovery.py:93-94`, `:712-760`). A READY node left behind would be selected
-    /// again by case 1 in the same pass.
+    /// stays PENDING with no task. A READY node left behind would be selected again by case 1 in the same pass.
     #[tokio::test]
     #[serial]
     async fn a_case_0_node_whose_task_insert_raises_stays_pending() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let task_name = "recovery_case0_raise_node";
         let workflow_id = Uuid::new_v4();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                 id, name, status, on_error, output_task_index,
                 definition_key, depth, root_workflow_id,
@@ -3654,7 +3650,7 @@ mod cap_tests {
                 Some(r#"{"good_until": "not-a-date"}"#),
             ),
         ] {
-            sqlx::query(
+            sql::query(
                 "INSERT INTO horsies_workflow_tasks (
                     downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                     queue_name, priority, dependencies, allow_failed_deps, join_type, status,
@@ -3682,7 +3678,7 @@ mod cap_tests {
             .await
             .expect_err("the task insert raises");
         assert!(matches!(error, WorkflowError::Broker(_)), "{error:?}");
-        let (status, task_id): (String, Option<Uuid>) = sqlx::query_as(
+        let (status, task_id): (String, Option<Uuid>) = sql::query_as(
             "SELECT status, task_id FROM horsies_workflow_tasks
              WHERE workflow_id = $1 AND task_index = 1",
         )
@@ -3693,13 +3689,13 @@ mod cap_tests {
         assert_eq!(status, "PENDING");
         assert_eq!(task_id, None);
         let task_rows: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
+            sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
                 .bind(task_name)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!(task_rows, 0);
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
             .execute(&pool)
             .await
@@ -3711,7 +3707,7 @@ mod cap_tests {
     async fn p6_workflow_enqueue_recovery_persists_never_eligible_facts() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                 id, name, status, on_error, output_task_index,
                 definition_key, depth, root_workflow_id,
@@ -3726,7 +3722,7 @@ mod cap_tests {
         .execute(&pool)
         .await
         .expect("insert recovery workflow");
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflow_tasks (
                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
@@ -3748,7 +3744,7 @@ mod cap_tests {
             .expect("recovery enqueue path");
         assert_eq!(step.disposition, EnqueueReadyDisposition::Applied);
         // The node holds its enqueue time: the node write and the task insert share a transaction.
-        let node_holds_enqueue_time: bool = sqlx::query_scalar(
+        let node_holds_enqueue_time: bool = sql::query_scalar(
             "SELECT wt.started_at IS NOT NULL AND wt.started_at = t.enqueued_at
              FROM horsies_workflow_tasks wt
              JOIN horsies_tasks t ON t.id = wt.task_id
@@ -3759,7 +3755,7 @@ mod cap_tests {
         .await
         .expect("read the recovery node enqueue time");
         assert!(node_holds_enqueue_time);
-        let facts: (String, Option<i32>, Option<i16>, bool) = sqlx::query_as(
+        let facts: (String, Option<i32>, Option<i16>, bool) = sql::query_as(
             "SELECT t.retention_class_key, octet_length(t.command_fingerprint),
                     t.command_fingerprint_version, t.retain_rerun_input
              FROM horsies_tasks t
@@ -3775,7 +3771,7 @@ mod cap_tests {
         assert!(facts.2.is_none());
         assert!(!facts.3);
         // The task row stores the start call time of its workflow as `sent_at`.
-        let sent_at_is_the_start_call_time: bool = sqlx::query_scalar(
+        let sent_at_is_the_start_call_time: bool = sql::query_scalar(
             "SELECT t.sent_at = timestamptz '2026-01-01 00:00:00+00'
              FROM horsies_tasks t
              JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
@@ -3787,7 +3783,7 @@ mod cap_tests {
         .expect("read recovery task sent_at");
         assert!(sent_at_is_the_start_call_time);
 
-        sqlx::query(
+        sql::query(
             "DELETE FROM horsies_tasks WHERE id IN (
                 SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1::uuid
              )",
@@ -3796,12 +3792,12 @@ mod cap_tests {
         .execute(&pool)
         .await
         .ok();
-        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1::uuid")
+        sql::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1::uuid")
             .bind(&workflow_id)
             .execute(&pool)
             .await
             .ok();
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1::uuid")
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1::uuid")
             .bind(&workflow_id)
             .execute(&pool)
             .await

@@ -25,7 +25,7 @@ from horsies.core.brokers.result_types import (
     BrokerPayloadMismatch,
     BrokerResult,
 )
-from horsies.core.history.identity.uuid7 import mint_task_id, uuid7_birth_at
+from tests.task_ids import mint_task_id, uuid7_birth_at
 from horsies.core.types.result import is_err, is_ok
 from tests.broker_resources_support import current_resources
 
@@ -35,15 +35,15 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 @dataclass(frozen=True, slots=True)
 class Send:
     task_id: UUID
-    kwargs_json: str | None
+    input_json: str | None
     sent_at: datetime
 
 
-def make_send(kwargs_json: str | None = '{"x":1}') -> Send:
+def make_send(input_json: str | None = '{"x":1}') -> Send:
     sent_at = datetime.now(timezone.utc)
     return Send(
         task_id=mint_task_id(),
-        kwargs_json=kwargs_json,
+        input_json=input_json,
         sent_at=sent_at,
     )
 
@@ -53,7 +53,7 @@ async def enqueue(broker: PostgresBroker, send: Send) -> BrokerResult[str]:
         'cutover.enqueue',
         task_id=send.task_id,
         send_kind=SendKind.FIRST,
-        input_json=send.kwargs_json,
+        input_json=send.input_json,
         sent_at=send.sent_at,
     )
 
@@ -127,7 +127,7 @@ class TestConvertedStatement:
         assert is_ok(first)
         tampered = Send(
             task_id=send.task_id,
-            kwargs_json='{"x":2}',
+            input_json='{"x":2}',
             sent_at=send.sent_at,
         )
         conflicted = await enqueue(broker, tampered)
@@ -142,7 +142,7 @@ async def enqueue_keyed(
         'cutover.enqueue',
         task_id=send.task_id,
         send_kind=SendKind.FIRST,
-        input_json=send.kwargs_json,
+        input_json=send.input_json,
         sent_at=send.sent_at,
         idempotency_key=key,
     )
@@ -186,7 +186,7 @@ class TestKeyedEnqueue:
         assert is_ok(committed)
         resend = Send(
             task_id=mint_task_id(),
-            kwargs_json=first.kwargs_json,
+            input_json=first.input_json,
             sent_at=first.sent_at,
         )
         replayed = await enqueue_keyed(broker, resend, key)
@@ -234,7 +234,7 @@ class TestKeyedEnqueue:
 
         fresh = Send(
             task_id=mint_task_id(),
-            kwargs_json=existing.kwargs_json,
+            input_json=existing.input_json,
             sent_at=existing.sent_at,
         )
         retried = await enqueue_keyed(broker, fresh, key)
@@ -286,12 +286,12 @@ class TestKeyedEnqueue:
     async def test_key_binding_verifies_the_canonical_command_fingerprint(
         self, broker: PostgresBroker
     ) -> None:
-        existing = make_send(kwargs_json='{"x":1}')
+        existing = make_send(input_json='{"x":1}')
         assert is_ok(await enqueue(broker, existing))
         key = f'fingerprint-key-{uuid4()}'
         tampered = Send(
             task_id=existing.task_id,
-            kwargs_json='{"x":2}',
+            input_json='{"x":2}',
             sent_at=existing.sent_at,
         )
 
@@ -323,7 +323,7 @@ class TestKeyedEnqueue:
         key = f'order-batch-{uuid4()}'
         committed = await enqueue_keyed(broker, first, key)
         assert is_ok(committed)
-        different = make_send(kwargs_json='{"x":99}')
+        different = make_send(input_json='{"x":99}')
         conflicted = await enqueue_keyed(broker, different, key)
         assert is_err(conflicted)
         match conflicted.err_value:
@@ -343,52 +343,4 @@ class TestKeyedEnqueue:
             ).scalar_one()
         assert orphan == 0
 
-    async def test_registry_indexes_are_present_since_emission(
-        self, broker: PostgresBroker
-    ) -> None:
-        """The v28 deliberate absence ended when the emission migration
-        landed the maintenance indexes: the recorded sequencing debt is
-        discharged, and this pin flips from absence to presence — the
-        inventory flip becoming a permanent structural invariant."""
-        from horsies.core.history.names import (
-            RESERVATION_REGISTRY_EXPIRY_INDEX,
-        )
 
-        async with current_resources(broker).session_factory() as session:
-            index_names = {
-                row.indexname
-                for row in (
-                    await session.execute(
-                        text(
-                            'SELECT indexname FROM pg_indexes '
-                            "WHERE tablename = 'horsies_key_reservations'"
-                        )
-                    )
-                ).all()
-            }
-        assert index_names == {
-            'horsies_key_reservations_pkey',
-            RESERVATION_REGISTRY_EXPIRY_INDEX,
-        }
-
-
-class TestReservationWindowConfiguration:
-    def test_boundary_values_are_legal_and_excess_is_typed(self) -> None:
-        from datetime import timedelta
-
-        from horsies.core.history.identity.keys import (
-            validate_reservation_window,
-        )
-
-        assert validate_reservation_window(timedelta(days=30)) == (
-            timedelta(days=30)
-        )
-        assert validate_reservation_window(timedelta(seconds=1)) == (
-            timedelta(seconds=1)
-        )
-        with pytest.raises(ValueError, match='positive'):
-            validate_reservation_window(timedelta(0))
-        with pytest.raises(ValueError, match='inclusive maximum'):
-            validate_reservation_window(
-                timedelta(days=30, microseconds=1)
-            )

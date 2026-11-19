@@ -7,11 +7,12 @@
 //!   through the public lifecycle functions.
 
 use serial_test::serial;
-use sqlx::PgPool;
+use tokio_postgres::Row;
 use uuid::Uuid;
 
 use super::*;
 use crate::core::workflow::handle_types::HandleErrorCode;
+use crate::test_support::sql::{self, TestPool};
 use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow};
 
 // ---------------------------------------------------------------------------
@@ -19,7 +20,10 @@ use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow};
 // ---------------------------------------------------------------------------
 
 async fn test_broker() -> PostgresBroker {
-    PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await)
+    PostgresBroker::from_test_url(
+        crate::test_support::migrated_pool().await.url(),
+        crate::ClientFamily::Rust,
+    )
 }
 
 /// The rows of a literal statement, read through the main core pool.
@@ -30,8 +34,8 @@ async fn rows_of(broker: &PostgresBroker, statement: &BoundStatement<'_>) -> Vec
         .expect("literal statement runs")
 }
 
-async fn seed_workflow(pool: &PgPool, id: Uuid, status: &str, parent: Option<Uuid>) {
-    sqlx::query(
+async fn seed_workflow(pool: &TestPool, id: Uuid, status: &str, parent: Option<Uuid>) {
+    sql::query(
         "INSERT INTO horsies_workflows (
              id, name, status, on_error, definition_key, depth,
              root_workflow_id, parent_workflow_id, parent_task_index,
@@ -52,8 +56,8 @@ async fn seed_workflow(pool: &PgPool, id: Uuid, status: &str, parent: Option<Uui
 }
 
 /// A CLAIMED task behind an ENQUEUED node at index 0 of `workflow_id`.
-async fn seed_claimed_node(pool: &PgPool, workflow_id: Uuid, task_id: Uuid) {
-    sqlx::query(
+async fn seed_claimed_node(pool: &TestPool, workflow_id: Uuid, task_id: Uuid) {
+    sql::query(
         "INSERT INTO horsies_tasks (
              id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
              claimed_at, claimed_by_worker_id, max_retries, retry_count, is_workflow_task,
@@ -69,7 +73,7 @@ async fn seed_claimed_node(pool: &PgPool, workflow_id: Uuid, task_id: Uuid) {
     .execute(pool)
     .await
     .expect("seed claimed task");
-    sqlx::query(
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps, join_type, status,
@@ -89,8 +93,8 @@ async fn seed_claimed_node(pool: &PgPool, workflow_id: Uuid, task_id: Uuid) {
 
 /// A RUNNING sub-workflow node at index 0 of `workflow_id` whose child is `child_id`: the parent node that
 /// `seed_workflow` names for a child.
-async fn seed_running_subworkflow_node(pool: &PgPool, workflow_id: Uuid, child_id: Uuid) {
-    sqlx::query(
+async fn seed_running_subworkflow_node(pool: &TestPool, workflow_id: Uuid, child_id: Uuid) {
+    sql::query(
         "INSERT INTO horsies_workflow_tasks (
              downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps, join_type, status,
@@ -108,8 +112,8 @@ async fn seed_running_subworkflow_node(pool: &PgPool, workflow_id: Uuid, child_i
     .expect("seed running sub-workflow node");
 }
 
-async fn workflow_status(pool: &PgPool, id: Uuid) -> String {
-    sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+async fn workflow_status(pool: &TestPool, id: Uuid) -> String {
+    sql::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
         .bind(id)
         .fetch_one(pool)
         .await
@@ -117,8 +121,8 @@ async fn workflow_status(pool: &PgPool, id: Uuid) -> String {
 }
 
 /// Status and task id of the node at index 0.
-async fn root_node(pool: &PgPool, workflow_id: Uuid) -> (String, Option<Uuid>) {
-    sqlx::query_as(
+async fn root_node(pool: &TestPool, workflow_id: Uuid) -> (String, Option<Uuid>) {
+    sql::query_as(
         "SELECT status, task_id FROM horsies_workflow_tasks
          WHERE workflow_id = $1 AND task_index = 0",
     )
@@ -281,7 +285,8 @@ async fn each_cancel_outcome_reads_into_its_variant() {
 #[should_panic(expected = "returned the outcome \"SUSPENDED\", which is outside its contract")]
 fn a_step_contract_error_has_no_handle_catalog_entry_and_panics() {
     let _error = crate::workflow_engine::lifecycle::handle_operation_error(
-        &WorkflowError::StepContract(StepContractError::UnknownOutcome {
+        crate::core::workflow::handle_types::HandleOperation::Pause,
+        WorkflowError::StepContract(StepContractError::UnknownOutcome {
             function: "horsies_workflow_pause",
             outcome: "SUSPENDED".to_owned(),
         }),
@@ -300,7 +305,7 @@ fn a_step_contract_error_has_no_handle_catalog_entry_and_panics() {
 #[serial]
 async fn pause_pauses_the_running_tree_and_abandons_its_claimed_tasks() {
     let broker = test_broker().await;
-    let pool = broker.pool().clone();
+    let pool = crate::test_support::migrated_pool().await;
     let root = Uuid::new_v4();
     let running_child = Uuid::new_v4();
     let completed_child = Uuid::new_v4();
@@ -319,7 +324,7 @@ async fn pause_pauses_the_running_tree_and_abandons_its_claimed_tasks() {
         root_node(&pool, running_child).await,
         ("READY".to_owned(), None)
     );
-    let archived: String = sqlx::query_scalar(
+    let archived: String = sql::query_scalar(
         "SELECT terminalization_kind FROM horsies_task_history WHERE task_id = $1",
     )
     .bind(claimed_task)
@@ -335,7 +340,7 @@ async fn pause_pauses_the_running_tree_and_abandons_its_claimed_tasks() {
 #[serial]
 async fn pause_answers_not_running_and_missing_workflows() {
     let broker = test_broker().await;
-    let pool = broker.pool().clone();
+    let pool = crate::test_support::migrated_pool().await;
     let paused = Uuid::new_v4();
     seed_workflow(&pool, paused, "PAUSED", None).await;
 
@@ -348,8 +353,8 @@ async fn pause_answers_not_running_and_missing_workflows() {
     let error = pause_workflow(&broker, missing)
         .await
         .expect_err("pause of a missing workflow");
-    assert_eq!(error.code, HandleErrorCode::WorkflowNotFound);
-    assert_eq!(error.workflow_id, missing);
+    assert_eq!(error.code(), HandleErrorCode::WorkflowNotFound);
+    assert_eq!(error.workflow_id(), missing);
 }
 
 /// Cancel moves the root and its PAUSED child to CANCELLED, moves the CLAIMED
@@ -358,7 +363,7 @@ async fn pause_answers_not_running_and_missing_workflows() {
 #[serial]
 async fn cancel_cancels_the_tree_and_the_tasks_behind_its_enqueued_nodes() {
     let broker = test_broker().await;
-    let pool = broker.pool().clone();
+    let pool = crate::test_support::migrated_pool().await;
     let root = Uuid::new_v4();
     let paused_child = Uuid::new_v4();
     let claimed_task = Uuid::new_v4();
@@ -372,7 +377,7 @@ async fn cancel_cancels_the_tree_and_the_tasks_behind_its_enqueued_nodes() {
     assert_eq!(workflow_status(&pool, paused_child).await, "CANCELLED");
     assert_eq!(root_node(&pool, paused_child).await.0, "SKIPPED".to_owned());
     let archived: String =
-        sqlx::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
+        sql::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
             .bind(claimed_task)
             .fetch_one(&pool)
             .await
@@ -386,7 +391,7 @@ async fn cancel_cancels_the_tree_and_the_tasks_behind_its_enqueued_nodes() {
 #[serial]
 async fn cancel_answers_terminal_and_missing_workflows() {
     let broker = test_broker().await;
-    let pool = broker.pool().clone();
+    let pool = crate::test_support::migrated_pool().await;
     let completed = Uuid::new_v4();
     let cancelled = Uuid::new_v4();
     seed_workflow(&pool, completed, "COMPLETED", None).await;
@@ -404,7 +409,7 @@ async fn cancel_answers_terminal_and_missing_workflows() {
     let error = cancel_workflow(&broker, missing)
         .await
         .expect_err("cancel of a missing workflow");
-    assert_eq!(error.code, HandleErrorCode::WorkflowNotFound);
+    assert_eq!(error.code(), HandleErrorCode::WorkflowNotFound);
 }
 
 // ---------------------------------------------------------------------------
@@ -827,7 +832,7 @@ fn every_resume_disposition_text_reads_and_others_do_not() {
 #[serial]
 async fn resume_resumes_the_paused_tree_and_answers_the_other_outcomes() {
     let broker = test_broker().await;
-    let pool = broker.pool().clone();
+    let pool = crate::test_support::migrated_pool().await;
     let root = Uuid::new_v4();
     let child = Uuid::new_v4();
     let claimed_task = Uuid::new_v4();
@@ -861,5 +866,5 @@ async fn resume_resumes_the_paused_tree_and_answers_the_other_outcomes() {
     )
     .await
     .expect_err("resume of a missing workflow");
-    assert_eq!(missing.code, HandleErrorCode::WorkflowNotFound);
+    assert_eq!(missing.code(), HandleErrorCode::WorkflowNotFound);
 }

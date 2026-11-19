@@ -7,15 +7,18 @@
 //! row at it. A refusal keeps the history locator. The function stores no
 //! reason: the recovery loop logs why it quarantines.
 
-use sqlx::{FromRow, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::core::history::errors::HistoryError;
+#[cfg(test)]
+use crate::core::history::phase2::consumption::Phase2CallError;
+#[cfg(test)]
+use crate::test_support::sql::{self, TestTransaction};
 
+#[cfg(test)]
 const QUARANTINE_ONE_SQL: &str = "SELECT verdict, detail FROM horsies_phase2_quarantine_one($1)";
 
-/// The verdicts of `horsies_phase2_quarantine_one`, as Python's vocabulary
-/// (`python/horsies/core/history/phase2/quarantine.py:174-185`).
+/// The verdicts of `horsies_phase2_quarantine_one`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuarantineVerdict {
     Repointed,
@@ -57,10 +60,21 @@ impl TryFrom<&str> for QuarantineVerdict {
     }
 }
 
-#[derive(Debug, FromRow)]
+#[cfg(test)]
+#[derive(Debug)]
 struct QuarantineVerdictRow {
     verdict: String,
     detail: Option<String>,
+}
+
+#[cfg(test)]
+impl sql::FromTestRow for QuarantineVerdictRow {
+    fn from_row(row: &tokio_postgres::Row) -> Result<Self, sql::Error> {
+        Ok(Self {
+            verdict: sql::named(row, "verdict")?,
+            detail: sql::named(row, "detail")?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,19 +86,25 @@ pub struct QuarantineOutcome {
 /// Quarantines the pending row of `task_id` in the caller's transaction.
 ///
 /// Outcomes: one `QuarantineVerdict` with the function's detail text. Errors:
-/// a database error, or a verdict outside the vocabulary (`HistoryError`
-/// contract). Effects on `Repointed`: one quarantine row, and the pending row
+/// a database error, or a verdict outside the vocabulary
+/// ([`Phase2CallError`]). Effects on `Repointed`: one quarantine row, and the pending row
 /// points at it. It does not commit; the caller's transaction decides.
-pub async fn quarantine_one(
-    transaction: &mut Transaction<'_, Postgres>,
+///
+/// The core's phase-2 recovery runs the workflow step functions instead; the
+/// tests of the function call it here.
+#[cfg(test)]
+pub(crate) async fn quarantine_one(
+    transaction: &mut TestTransaction<'_>,
     task_id: Uuid,
-) -> Result<QuarantineOutcome, HistoryError> {
-    let row: QuarantineVerdictRow = sqlx::query_as(QUARANTINE_ONE_SQL)
+) -> Result<QuarantineOutcome, Phase2CallError> {
+    let row: QuarantineVerdictRow = sql::query_as(QUARANTINE_ONE_SQL)
         .bind(task_id)
-        .fetch_one(transaction.as_mut())
-        .await?;
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(Phase2CallError::Database)?;
     Ok(QuarantineOutcome {
-        verdict: QuarantineVerdict::try_from(row.verdict.as_str())?,
+        verdict: QuarantineVerdict::try_from(row.verdict.as_str())
+            .map_err(Phase2CallError::Contract)?,
         detail: row.detail,
     })
 }

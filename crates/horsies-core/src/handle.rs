@@ -207,9 +207,8 @@ async fn connect(
         }
     };
     let window = manifest.send.idempotency_reservation_window.as_duration();
-    let broker = PostgresBroker::connect_with_policies(&config, mode, window, profile)
+    let broker = PostgresBroker::connect_with_policies(&config, mode, window, profile, family)
         .await?
-        .with_client_family(family)
         .with_install_coverage(install_coverage.clone());
     Ok(Arc::new(match HandleListener::of(manifest.schema) {
         HandleListener::Disabled => broker.without_listener(),
@@ -221,6 +220,7 @@ async fn connect(
 mod tests {
     use super::*;
     use crate::manifest::parse_producer_manifest;
+    use crate::test_support::TestDatabase;
 
     const MANIFEST: &str = r#"{
         "manifest_version": 1,
@@ -332,5 +332,46 @@ mod tests {
             rust.connection(),
             HandleConnection::Connected(kept) if Arc::ptr_eq(&kept, &first)
         ));
+    }
+
+    /// The manifest of [`MANIFEST`] on the database of `url`, whose handle
+    /// installs the schema at its first operation.
+    fn installing_manifest_on(url: &str) -> ProducerManifest {
+        let mut document: serde_json::Value =
+            serde_json::from_str(MANIFEST).expect("the manifest is JSON");
+        document["database"]["database_url"] = serde_json::Value::from(url);
+        document["schema"] = serde_json::Value::from("MIGRATE_AND_VALIDATE");
+        parse_producer_manifest(&document.to_string()).expect("the manifest is complete")
+    }
+
+    /// The first install of a handle on an empty database records the family
+    /// that its client gave: `PYTHON` for the Python bridge's handle, `RUST`
+    /// for the Rust client's.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn the_first_install_of_a_handle_records_the_family_of_its_client() {
+        for family in [ClientFamily::Python, ClientFamily::Rust] {
+            let database = TestDatabase::create_empty().await;
+            let handle = CoreHandle::new(
+                installing_manifest_on(database.url()),
+                PoolProfile::Producer,
+                family,
+            );
+            let broker = match handle.initialized_broker().await {
+                Ok(broker) => broker,
+                Err(error) => panic!("the first install on an empty database: {error}"),
+            };
+            assert_eq!(broker.client_family(), family);
+            let recorded: String = database
+                .client()
+                .query_one("SELECT family FROM horsies_client_family", &[])
+                .await
+                .expect("the install wrote one family row")
+                .get(0);
+            assert_eq!(recorded, family.as_str());
+            drop(broker);
+            assert_eq!(handle.close().await, HandleClose::Closed);
+            database.drop().await;
+        }
     }
 }

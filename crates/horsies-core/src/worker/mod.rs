@@ -13,6 +13,7 @@ pub mod executor;
 pub mod finalize_batch;
 pub mod from_manifest;
 pub mod heartbeat;
+pub mod liveness;
 pub mod memory_fit;
 pub mod profile_fit;
 pub mod queue_cap_hold;

@@ -253,9 +253,8 @@ fn baseline_file_list_is_the_whole_folder() {
 }
 
 /// Migration 1000 is the listed files as they are on disk, concatenated in
-/// list order, and its checksum is Python's rule
-/// (`python/horsies/core/baseline/migration.py`, `baseline_checksum`):
-/// SHA-384 of the UTF-8 bytes of that text. `BASELINE_SQL_FILE_TEXTS`, which
+/// list order, and its checksum is the SHA-384 of the UTF-8 bytes of that
+/// text. `BASELINE_SQL_FILE_TEXTS`, which
 /// Python reads, holds the same names and texts in the same order.
 #[test]
 fn baseline_is_one_migration_built_from_every_listed_file() {
@@ -286,6 +285,44 @@ fn baseline_is_one_migration_built_from_every_listed_file() {
         Sha384::digest(on_disk.as_bytes()).as_slice()
     );
     assert!(BASELINE_TABLES_SQL.contains(&format!("CREATE TABLE {MIGRATIONS_TABLE} (")));
+}
+
+/// The checksum of migration 1000, pinned. An edit of a baseline SQL file
+/// changes it, so the edit shows in this test's diff as well, and a database
+/// installed before the edit refuses the build as edited
+/// (`a_changed_checksum_is_refused_as_edited`). Python
+/// `tests/unit/test_baseline_migration.py::test_checksum_is_pinned`.
+#[test]
+fn the_checksum_of_the_baseline_is_pinned() {
+    const PINNED_CHECKSUM_HEX: &str = concat!(
+        "cf80502bc1bd507891d6348b909b68be3f17a390c907442f",
+        "50f0db769488c3d9ce1a8c7cd470ef67239c8ea6291670c5",
+    );
+    let baseline = &embedded_migrations()[0];
+    assert_eq!(baseline.version, BASELINE_MIGRATION_VERSION);
+    assert_eq!(hex(&baseline.checksum), PINNED_CHECKSUM_HEX);
+}
+
+/// The baseline text names no schema and holds no transaction control. The
+/// install creates the objects in the current schema, so a qualifier would put
+/// them elsewhere; it runs the text inside its own transaction with the
+/// bookkeeping row, so a COMMIT in the text would split the two. Python
+/// `tests/unit/test_baseline_migration.py::test_text_names_no_schema`,
+/// `::test_text_has_no_transaction_control`.
+#[test]
+fn the_baseline_text_names_no_schema_and_holds_no_transaction_control() {
+    let text = embedded_migrations()[0].script.sql();
+    assert!(
+        !text.contains("public."),
+        "the baseline names the public schema"
+    );
+    for line in text.lines() {
+        let statement = line.trim().to_uppercase();
+        assert!(
+            !["BEGIN;", "COMMIT;", "ROLLBACK;", "START TRANSACTION;"].contains(&statement.as_str()),
+            "the baseline holds transaction control: {line}"
+        );
+    }
 }
 
 /// The chain starts at the baseline and ascends; only the baseline writes the
@@ -646,6 +683,17 @@ fn each_install_error_keeps_its_meaning_as_a_broker_error() {
         }
     ));
     assert!(!other_family.is_retryable());
+
+    let unknown = UnknownStoredFamily {
+        stored: "GO".to_owned(),
+    };
+    let unknown_family =
+        BrokerError::from(SchemaInstallError::UnknownStoredFamily(unknown.clone()));
+    assert!(
+        matches!(&unknown_family, BrokerError::UnknownStoredFamily(inner) if *inner == unknown),
+        "{unknown_family:?}"
+    );
+    assert!(!unknown_family.is_retryable());
 
     let busy = BrokerError::from(SchemaInstallError::Lock(
         InstallLockFailure::WaitBoundReached {
@@ -1069,6 +1117,43 @@ async fn a_database_with_no_family_row_gets_this_client_s_row() {
     database.drop().await;
 }
 
+/// A family row that holds no client family is corrupt stored data: the
+/// install of either family is refused with the stored value at its state
+/// read, and changes nothing. The test writes the row past its CHECK
+/// (`horsies_client_family_family_known`), which it drops first.
+#[tokio::test]
+#[serial]
+async fn a_family_row_that_holds_no_client_family_is_refused_and_unchanged() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install into an empty database");
+    database
+        .execute(
+            "ALTER TABLE horsies_client_family \
+             DROP CONSTRAINT horsies_client_family_family_known; \
+             UPDATE horsies_client_family SET family = 'GO'",
+        )
+        .await;
+    let before = installed_on(&database).await;
+
+    for own in [ClientFamily::Python, ClientFamily::Rust] {
+        let refused = database.install(own, InstallLockPlan::fleet()).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(SchemaInstallError::UnknownStoredFamily(UnknownStoredFamily { stored }))
+                    if stored == "GO"
+            ),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(family_row(&database).await.as_deref(), Some("GO"));
+    assert_eq!(installed_on(&database).await, before);
+    database.drop().await;
+}
+
 /// The signatures of the history readers that do not exist, in order.
 async fn missing_readers(database: &MigrationTestDatabase) -> Vec<String> {
     database
@@ -1300,6 +1385,107 @@ async fn an_install_finished_by_another_installer_during_the_wait_is_not_repeate
     database.drop().await;
 }
 
+/// The polls of [`wait_for_a_lock_try`], 20 ms apart: at most 10 s.
+const LOCK_TRY_POLLS: u32 = 500;
+
+/// The pause between two polls of [`wait_for_a_lock_try`].
+const LOCK_TRY_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// The statement timeout of the index build that runs while an installer
+/// waits for the lock.
+const INDEX_BUILD_STATEMENT_TIMEOUT: &str = "2s";
+
+/// Whether a backend other than `observer` and `holder_pid` ran the lock try
+/// of the install ([`TRY_INSTALL_LOCK`]) within [`LOCK_TRY_POLLS`] polls.
+async fn wait_for_a_lock_try(observer: &Client, holder_pid: i32) -> bool {
+    for _ in 0..LOCK_TRY_POLLS {
+        let seen: bool = observer
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND pid NOT IN (pg_backend_pid(), $1)
+                       AND query LIKE '%' || $2 || '%'
+                 )",
+                &[&holder_pid, &TRY_INSTALL_LOCK.sql()],
+            )
+            .await
+            .expect("read the backends of the database")
+            .get(0);
+        match seen {
+            true => return true,
+            false => tokio::time::sleep(LOCK_TRY_POLL_INTERVAL).await,
+        }
+    }
+    false
+}
+
+/// Python `tests/integration/test_schema_lock_wait.py::test_waiting_migrator_does_not_block_a_concurrent_index_build`:
+/// an installer that waits for the install lock holds no snapshot while it
+/// waits: it tries the lock in one statement every [`INSTALL_LOCK_POLL`] and
+/// holds no transaction between the tries. An index build that waits for
+/// every older snapshot (`CREATE INDEX CONCURRENTLY`, the form of the index
+/// steps that a lock holder runs) ends within its statement timeout while the
+/// installer waits, and the installer installs the chain once the lock is
+/// released.
+#[tokio::test]
+#[serial]
+async fn an_installer_that_waits_for_the_lock_does_not_block_a_concurrent_index_build() {
+    let database = MigrationTestDatabase::create().await;
+    let lock = InstallLockPlan {
+        key: rand::thread_rng().gen_range(1..i64::MAX),
+        wait: Duration::from_secs(60),
+    };
+    let holder = database.hold_lock(lock.key).await;
+    let holder_pid: i32 = holder
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .expect("read the pid of the lock holder")
+        .get(0);
+    database
+        .execute("CREATE TABLE lock_wait_probe (name text)")
+        .await;
+    let builder = database.database.connect().await;
+    builder
+        .batch_execute(&format!(
+            "SET statement_timeout = '{INDEX_BUILD_STATEMENT_TIMEOUT}'"
+        ))
+        .await
+        .expect("bound the index build");
+    let build_during_the_wait = async {
+        assert!(
+            wait_for_a_lock_try(database.client(), holder_pid).await,
+            "the installer tries the lock"
+        );
+        builder
+            .batch_execute(
+                "CREATE INDEX CONCURRENTLY lock_wait_probe_name ON lock_wait_probe (name)",
+            )
+            .await
+            .expect("the index build ends while the installer waits");
+        let released: bool = holder
+            .query_one("SELECT pg_advisory_unlock($1)", &[&lock.key])
+            .await
+            .expect("release the lock")
+            .get(0);
+        assert!(released);
+    };
+
+    let (installed, ()) = tokio::join!(
+        database.install(ClientFamily::Rust, lock),
+        build_during_the_wait
+    );
+
+    installed.expect("the installer installs after the release");
+    assert_eq!(
+        bookkeeping_rows(&database).await,
+        chain_rows(embedded_migrations().len())
+    );
+    drop(builder);
+    drop(holder);
+    database.drop().await;
+}
+
 /// Python `test_broker_postgres.py::TestBaselineInstall::test_read_only_broker_runs_no_schema_statement`:
 /// an observe-only broker runs no schema statement. On an empty database its
 /// install calls return and the database stays empty.
@@ -1309,6 +1495,7 @@ async fn an_observe_only_broker_runs_no_schema_statement() {
     let database = MigrationTestDatabase::create().await;
     let broker = crate::broker::PostgresBroker::connect_observe_only(
         &crate::core::config::PostgresConfig::from_url(database.database.url()),
+        crate::ClientFamily::Rust,
     )
     .await
     .expect("connect an observe-only broker");
@@ -1345,6 +1532,7 @@ async fn the_install_of_a_broker_on_a_current_database_is_ok_and_writes_nothing(
     let before = installed_on(&database).await;
     let broker = crate::broker::PostgresBroker::connect_with(
         &crate::core::config::PostgresConfig::from_url(database.database.url()),
+        crate::ClientFamily::Rust,
     )
     .await
     .expect("connect the broker");
@@ -1361,6 +1549,128 @@ async fn the_install_of_a_broker_on_a_current_database_is_ok_and_writes_nothing(
     assert_eq!(installed_on(&database).await, before);
     broker.close().await;
     drop(broker);
+    database.drop().await;
+}
+
+/// The structural signature of one relation: a hash of its kind,
+/// persistence, access method and options; its columns with their types,
+/// defaults and identity; its constraints, indexes and triggers. `$1` is the
+/// relation name.
+const RELATION_SCHEMA_SIGNATURE_SQL: &str = "\
+SELECT encode(sha256(convert_to(
+    jsonb_build_object(
+        'relation', jsonb_build_array(
+            relation.relkind, relation.relpersistence, relation.relam, relation.reloptions
+        ),
+        'columns', COALESCE((
+            SELECT jsonb_agg(
+                jsonb_build_array(
+                    attribute.attnum, attribute.attname, attribute.atttypid, attribute.atttypmod,
+                    attribute.attcollation, attribute.attnotnull, attribute.attidentity,
+                    attribute.attgenerated, pg_get_expr(defaults.adbin, defaults.adrelid)
+                ) ORDER BY attribute.attnum
+            )
+            FROM pg_attribute AS attribute
+            LEFT JOIN pg_attrdef AS defaults
+              ON defaults.adrelid = attribute.attrelid AND defaults.adnum = attribute.attnum
+            WHERE attribute.attrelid = relation.oid AND attribute.attnum > 0
+              AND NOT attribute.attisdropped
+        ), '[]'::jsonb),
+        'constraints', COALESCE((
+            SELECT jsonb_agg(
+                jsonb_build_array(
+                    constraints.conname, constraints.contype, constraints.convalidated,
+                    pg_get_constraintdef(constraints.oid, false)
+                ) ORDER BY constraints.conname
+            )
+            FROM pg_constraint AS constraints
+            WHERE constraints.conrelid = relation.oid
+        ), '[]'::jsonb),
+        'indexes', COALESCE((
+            SELECT jsonb_agg(
+                jsonb_build_array(
+                    indexes.indisvalid, indexes.indisready, pg_get_indexdef(indexes.indexrelid)
+                ) ORDER BY indexes.indexrelid
+            )
+            FROM pg_index AS indexes
+            WHERE indexes.indrelid = relation.oid
+        ), '[]'::jsonb),
+        'triggers', COALESCE((
+            SELECT jsonb_agg(
+                jsonb_build_array(triggers.tgenabled, pg_get_triggerdef(triggers.oid, false))
+                ORDER BY triggers.tgname
+            )
+            FROM pg_trigger AS triggers
+            WHERE triggers.tgrelid = relation.oid AND NOT triggers.tgisinternal
+        ), '[]'::jsonb)
+    )::text,
+    'UTF8'
+)), 'hex')
+FROM pg_class AS relation
+WHERE relation.oid = to_regclass($1)";
+
+/// The structural signature of the history parent, the forever history
+/// relation and the key reservation table, read in UTC so that two captures
+/// compare.
+async fn history_relation_signatures(database: &MigrationTestDatabase) -> Vec<(String, String)> {
+    database
+        .client()
+        .batch_execute("SET TIME ZONE 'UTC'")
+        .await
+        .expect("render in UTC");
+    let mut signatures = Vec::new();
+    for relation in [
+        crate::core::history::names::TASK_HISTORY_PARENT,
+        crate::core::history::names::TASK_HISTORY_FOREVER,
+        crate::core::history::names::KEY_RESERVATIONS,
+    ] {
+        let signature: String = database
+            .client()
+            .query_one(RELATION_SCHEMA_SIGNATURE_SQL, &[&relation])
+            .await
+            .unwrap_or_else(|error| panic!("read the signature of {relation}: {error}"))
+            .get(0);
+        signatures.push((relation.to_owned(), signature));
+    }
+    signatures
+}
+
+/// Installs the schema through a broker of its own, as a new client process
+/// does, and closes the broker.
+async fn install_through_a_new_broker(database: &MigrationTestDatabase) {
+    let broker = crate::broker::PostgresBroker::connect_with(
+        &crate::core::config::PostgresConfig::from_url(database.database.url()),
+        crate::ClientFamily::Rust,
+    )
+    .await
+    .expect("connect the broker");
+    broker
+        .ensure_schema_initialized()
+        .await
+        .expect("install the schema");
+    broker.close().await;
+}
+
+/// A second install, by another broker, leaves the structure of the history
+/// parent, the forever history relation and the key reservation table
+/// unchanged, and the stored version stays the baseline version.
+#[tokio::test]
+#[serial]
+async fn a_second_install_leaves_the_history_relations_unchanged() {
+    let database = MigrationTestDatabase::create().await;
+    install_through_a_new_broker(&database).await;
+    let before = history_relation_signatures(&database).await;
+
+    install_through_a_new_broker(&database).await;
+
+    assert_eq!(history_relation_signatures(&database).await, before);
+    let version: i64 = database
+        .client()
+        .query_one("SELECT MAX(version) FROM horsies_migrations", &[])
+        .await
+        .expect("read the stored version")
+        .get(0);
+    assert_eq!(version, BASELINE_MIGRATION_VERSION);
     database.drop().await;
 }
 
@@ -1425,6 +1735,56 @@ async fn a_release_that_frees_no_lock_is_ownership_lost() {
         ),
         "{released:?}"
     );
+    drop(open);
+    let _closed = handle.close().await;
+    database.drop().await;
+}
+
+/// Python `test_broker_postgres.py::TestPostgresBrokerPgBouncerWiring::test_schema_lock_cancellation_releases_and_closes`:
+/// a lock session dropped while it may hold the lock (an install whose
+/// caller left) discards its connection. The server ends that session and
+/// its lock, so another session takes the lock.
+#[tokio::test]
+#[serial]
+async fn a_dropped_lock_session_frees_the_lock_with_its_session() {
+    let database = MigrationTestDatabase::create().await;
+    let handle = core_handle(database.database.url());
+    let open = handle
+        .pools()
+        .expect("the statement layer accepts the test URL");
+    let lock = test_lock();
+    let session = LockSession::acquire(open.pools().session_work(), lock, StatementLog::Off)
+        .await
+        .expect("a free lock is taken");
+    let taken_by_another_session = || async {
+        database
+            .client()
+            .query_one("SELECT pg_try_advisory_lock($1)", &[&lock.key])
+            .await
+            .expect("try the lock from another session")
+            .get::<_, bool>(0)
+    };
+    assert!(
+        !taken_by_another_session().await,
+        "the lock session holds the lock"
+    );
+
+    drop(session);
+
+    let mut freed = false;
+    for _ in 0..250 {
+        if taken_by_another_session().await {
+            freed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(freed, "the lock is free once the dropped session ends");
+    let _unlocked = database
+        .client()
+        .query_one("SELECT pg_advisory_unlock($1)", &[&lock.key])
+        .await
+        .expect("release the lock of the test session");
     drop(open);
     let _closed = handle.close().await;
     database.drop().await;

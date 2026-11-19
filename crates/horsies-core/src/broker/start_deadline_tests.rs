@@ -6,21 +6,21 @@
 
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::broker::claims::{start_attempt, StartAttempt, StartMiss, StartOutcome};
 use crate::broker::core_rows::StatementLog;
-use crate::broker::pools::core_pool_for_test_pool;
-use crate::broker::terminalization_matrix::migrated_pool;
+use crate::broker::pools::core_pool_for_test_url;
 use crate::core::lifecycle::OwnedClaim;
+use crate::test_support::migrated_pool;
+use crate::test_support::sql::{self, TestPool};
 
 const WORKER: &str = "start-deadline-worker";
 
 /// A CLAIMED row of `WORKER` whose `good_until` passed one minute ago and
 /// whose claim lease runs one more minute. Every baseline column is named.
-async fn seed_claim_past_its_deadline(pool: &PgPool, task_id: Uuid) -> DateTime<Utc> {
-    sqlx::query_scalar(
+async fn seed_claim_past_its_deadline(pool: &TestPool, task_id: Uuid) -> DateTime<Utc> {
+    sql::query_scalar(
         "INSERT INTO horsies_tasks (
             id, task_name, queue_name, priority, input, task_options, execution,
             retention_class_key, sent_at, created_at,
@@ -60,7 +60,7 @@ async fn a_claim_past_its_deadline_does_not_start() {
     let pool = migrated_pool().await;
     let task_id = Uuid::new_v4();
     let generation = seed_claim_past_its_deadline(&pool, task_id).await;
-    let core = core_pool_for_test_pool(&pool);
+    let core = core_pool_for_test_url(pool.url());
 
     let started = start_attempt(
         &core,
@@ -83,13 +83,13 @@ async fn a_claim_past_its_deadline_does_not_start() {
 
     assert_eq!(started, StartOutcome::Missed(StartMiss::DeadlinePassed));
     core.close();
-    let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+    let status: String = sql::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(&pool)
         .await
         .expect("read the row");
     assert_eq!(status, "CLAIMED");
-    let beats: i64 = sqlx::query_scalar(
+    let beats: i64 = sql::query_scalar(
         "SELECT count(*) FROM horsies_heartbeats WHERE task_id = $1 AND role = 'runner'",
     )
     .bind(task_id)
@@ -97,7 +97,7 @@ async fn a_claim_past_its_deadline_does_not_start() {
     .await
     .expect("count the runner beats");
     assert_eq!(beats, 0);
-    sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+    sql::query("DELETE FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .execute(&pool)
         .await

@@ -7,7 +7,6 @@
 
 use chrono::{DateTime, Utc};
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::spec_support::{
@@ -15,19 +14,20 @@ use super::spec_support::{
 };
 use crate::broker::claims::{claim_pass, ClaimClasses, ClaimPassRequest};
 use crate::broker::core_rows::StatementLog;
-use crate::broker::pools::core_pool_for_test_pool;
+use crate::broker::pools::core_pool_for_test_url;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
 use crate::core::task::Execution;
-use crate::monitoring::{cancel_task, TaskActionErrorCode};
+use crate::monitoring::{cancel_task, TaskActionError, TaskActionErrorCode};
+use crate::test_support::sql::{self, TestPool};
 use crate::TaskStatus;
 
 const WORKER: &str = "cancel-spec-worker";
 const OTHER_WORKER: &str = "cancel-spec-other-worker";
 
 /// The live status of `task_id`, or `None` when the row left the live table.
-async fn live_status(pool: &PgPool, task_id: Uuid) -> Option<String> {
-    sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+async fn live_status(pool: &TestPool, task_id: Uuid) -> Option<String> {
+    sql::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_optional(pool)
         .await
@@ -35,24 +35,24 @@ async fn live_status(pool: &PgPool, task_id: Uuid) -> Option<String> {
 }
 
 /// The history status of `task_id`, or `None` when it has no history row.
-async fn history_status(pool: &PgPool, task_id: Uuid) -> Option<String> {
-    sqlx::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
+async fn history_status(pool: &TestPool, task_id: Uuid) -> Option<String> {
+    sql::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
         .bind(task_id)
         .fetch_optional(pool)
         .await
         .expect("read the history row")
 }
 
-async fn attempt_rows(pool: &PgPool, task_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
+async fn attempt_rows(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
         .expect("count the attempt rows")
 }
 
-async fn claim_generation(pool: &PgPool, task_id: Uuid) -> DateTime<Utc> {
-    sqlx::query_scalar("SELECT claimed_at FROM horsies_tasks WHERE id = $1")
+async fn claim_generation(pool: &TestPool, task_id: Uuid) -> DateTime<Utc> {
+    sql::query_scalar("SELECT claimed_at FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(pool)
         .await
@@ -62,7 +62,7 @@ async fn claim_generation(pool: &PgPool, task_id: Uuid) -> DateTime<Utc> {
 /// One claim pass of `worker_id` on `default` (Python `claim_once`), through
 /// the claim function of the worker (`horsies_claim` with an ISOLATED budget
 /// of 10): the ids it claimed.
-async fn claim_once(pool: &PgPool, worker_id: &str) -> Vec<Uuid> {
+async fn claim_once(pool: &TestPool, worker_id: &str) -> Vec<Uuid> {
     let queues = vec!["default".to_owned()];
     let request = ClaimPassRequest {
         worker_id: worker_id.to_owned(),
@@ -82,13 +82,17 @@ async fn claim_once(pool: &PgPool, worker_id: &str) -> Vec<Uuid> {
         claim_lease_ms: std::num::NonZeroU32::new(60_000).expect("a positive lease"),
         lock_keys: Vec::new(),
     };
-    claim_pass(&core_pool_for_test_pool(pool), StatementLog::Off, &request)
-        .await
-        .expect("run one claim pass")
-        .claimed
-        .into_iter()
-        .map(|row| row.id)
-        .collect()
+    claim_pass(
+        &core_pool_for_test_url(pool.url()),
+        StatementLog::Off,
+        &request,
+    )
+    .await
+    .expect("run one claim pass")
+    .claimed
+    .into_iter()
+    .map(|row| row.id)
+    .collect()
 }
 
 /// Python `TestCancelTaskSucceeds::test_claimed_task_is_cancelled_and_claim_released`:
@@ -112,7 +116,7 @@ async fn a_cancelled_claim_leaves_no_live_row_and_keeps_its_claim_time() {
         Some("CANCELLED")
     );
     let claimed_at: Option<DateTime<Utc>> =
-        sqlx::query_scalar("SELECT claimed_at FROM horsies_task_history WHERE task_id = $1")
+        sql::query_scalar("SELECT claimed_at FROM horsies_task_history WHERE task_id = $1")
             .bind(task.id)
             .fetch_one(&database.pool)
             .await
@@ -136,10 +140,14 @@ async fn an_unknown_stored_history_status_is_stored_data_invalid_and_nothing_cha
         .await
         .expect_err("stored data that does not parse is refused");
 
-    assert_eq!(refused.code, TaskActionErrorCode::StoredDataInvalid);
-    assert!(!refused.retryable);
-    assert_eq!(refused.task_id, task.id);
-    assert!(refused.message.contains("NOT_KNOWN"), "{}", refused.message);
+    assert_eq!(refused.code(), TaskActionErrorCode::StoredDataInvalid);
+    assert!(!refused.retryable());
+    assert_eq!(refused.task_id(), task.id);
+    assert!(
+        refused.message().contains("NOT_KNOWN"),
+        "{}",
+        refused.message()
+    );
     assert_eq!(
         history_status(&database.pool, task.id).await.as_deref(),
         Some("NOT_KNOWN")
@@ -189,7 +197,7 @@ async fn a_success_finalize_after_the_cancel_of_a_running_task_changes_nothing()
         Some("CANCELLED")
     );
     let result: Option<Vec<u8>> =
-        sqlx::query_scalar("SELECT result_payload FROM horsies_task_history WHERE task_id = $1")
+        sql::query_scalar("SELECT result_payload FROM horsies_task_history WHERE task_id = $1")
             .bind(task.id)
             .fetch_one(&database.pool)
             .await
@@ -253,12 +261,12 @@ async fn a_concurrent_claim_and_cancel_leave_one_consistent_outcome() {
             assert_eq!(live_status(&database.pool, task.id).await, None);
         }
         Err(refused) => {
-            assert_eq!(refused.code, TaskActionErrorCode::TaskNotCancellable);
+            assert_eq!(refused.code(), TaskActionErrorCode::TaskNotCancellable);
+            let TaskActionError::NotCancellable { current_status, .. } = &refused else {
+                panic!("expected TASK_NOT_CANCELLABLE, got {refused:?}");
+            };
             assert!(
-                !matches!(
-                    refused.current_status,
-                    Some(TaskStatus::Pending | TaskStatus::Claimed)
-                ),
+                !matches!(current_status, TaskStatus::Pending | TaskStatus::Claimed),
                 "{refused:?}"
             );
             assert_ne!(history.as_deref(), Some("CANCELLED"));

@@ -2,10 +2,8 @@
 //! refusing class, horizon retune, index repair, manifest repair, coverage
 //! refusals and the missing-leaf rules.
 //!
-//! Python specification: `tests/integration/test_coverage_publication_batching.py`,
-//! `test_partition_coverage_containment.py`, `test_partition_coverage_horizon.py`,
-//! `test_partition_maintenance_fast_path.py` and
-//! `test_task_history_missing_leaf_resilience.py`. The core keeps the pool
+//! Python specification: `tests/integration/test_partition_coverage_containment.py`.
+//! The core keeps the pool
 //! coverage path only (history ledger row 33), so every pass here runs through
 //! `ensure_partition_coverage_in_pool` or `ensure_startup_coverage_in_pool`.
 
@@ -13,32 +11,29 @@ use chrono::DateTime;
 
 use super::*;
 use crate::core::history::ddl::runtime_names::daily_leaf_name as history_leaf_name;
-use crate::core::history::errors::HistoryError;
 use crate::core::history::maintenance::coverage::{CoverageEnsureFailed, CoverageEnsured};
-use crate::core::history::partitions::catalog::{
-    read_all_attached_leaf_rows, read_leaf_ordering_index_exists,
-};
+use crate::test_support::sql::{self, CallError, TestPool};
 
 fn period(days: i64) -> RetentionDays {
     RetentionDays::parse_period(Duration::days(days)).expect("retention period")
 }
 
-async fn database_today(pool: &PgPool) -> DateTime<Utc> {
+async fn database_today(pool: &TestPool) -> DateTime<Utc> {
     let mut connection = pool.acquire().await.expect("acquire clock");
-    utc_day_start(database_now(&mut connection).await.expect("database now"))
+    utc_day_start(database_now(&mut connection).await)
 }
 
-async fn database_hour(pool: &PgPool) -> DateTime<Utc> {
+async fn database_hour(pool: &TestPool) -> DateTime<Utc> {
     let mut connection = pool.acquire().await.expect("acquire clock");
-    let now = database_now(&mut connection).await.expect("database now");
+    let now = database_now(&mut connection).await;
     now.with_minute(0)
         .and_then(|value| value.with_second(0))
         .and_then(|value| value.with_nanosecond(0))
         .expect("truncate to the hour")
 }
 
-async fn class_leaf_count(pool: &PgPool, class_key: &str) -> i64 {
-    sqlx::query_scalar(&format!(
+async fn class_leaf_count(pool: &TestPool, class_key: &str) -> i64 {
+    sql::query_scalar(&format!(
         "SELECT count(*) FROM {LEAF_CATALOG} WHERE class_key = $1"
     ))
     .bind(class_key)
@@ -47,23 +42,23 @@ async fn class_leaf_count(pool: &PgPool, class_key: &str) -> i64 {
     .expect("count class leaves")
 }
 
-async fn relation_exists(pool: &PgPool, relation: &str) -> bool {
-    sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+async fn relation_exists(pool: &TestPool, relation: &str) -> bool {
+    sql::query_scalar("SELECT to_regclass($1) IS NOT NULL")
         .bind(relation)
         .fetch_one(pool)
         .await
         .expect("read relation presence")
 }
 
-async fn index_definition(pool: &PgPool, index_name: &str) -> String {
-    sqlx::query_scalar("SELECT pg_get_indexdef(to_regclass($1))")
+async fn index_definition(pool: &TestPool, index_name: &str) -> String {
+    sql::query_scalar("SELECT pg_get_indexdef(to_regclass($1))")
         .bind(index_name)
         .fetch_one(pool)
         .await
         .expect("read index definition")
 }
 
-async fn needs_republication(pool: &PgPool) -> bool {
+async fn needs_republication(pool: &TestPool) -> bool {
     let mut connection = pool.acquire().await.expect("acquire publisher");
     StagedLoaderPublisher
         .needs_republication(&mut connection)
@@ -71,9 +66,9 @@ async fn needs_republication(pool: &PgPool) -> bool {
         .expect("compare manifest and readers")
 }
 
-async fn settled_pool_pass(pool: &PgPool, history_days: u32, heartbeat_hours: u32) {
+async fn settled_pool_pass(pool: &TestPool, history_days: u32, heartbeat_hours: u32) {
     let outcome = ensure_partition_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(pool),
+        &crate::broker::pools::core_pool_for_test_url(pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         history_days,
         heartbeat_hours,
@@ -111,7 +106,7 @@ fn ensured(outcome: CoverageOutcome) -> CoverageEnsured {
 async fn coverage_creating_leaves_in_two_classes_leaves_the_readers_current() {
     let database = TestDatabase::create_with_connections(4).await;
     let outcome = ensure_partition_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         3,
         3,
@@ -126,7 +121,7 @@ async fn coverage_creating_leaves_in_two_classes_leaves_the_readers_current() {
     assert_eq!(class_leaf_count(&database.pool, "standard_30d").await, 4);
     assert_eq!(class_leaf_count(&database.pool, "standard_7d").await, 4);
 
-    let manifest: Vec<(i32, chrono::DateTime<Utc>)> = sqlx::query_as(&format!(
+    let manifest: Vec<(i32, chrono::DateTime<Utc>)> = sql::query_as(&format!(
         "SELECT probe_position, published_at FROM {TASK_LOOKUP_MANIFEST} ORDER BY probe_position"
     ))
     .fetch_all(&database.pool)
@@ -156,13 +151,13 @@ async fn a_returned_refusal_is_contained_like_a_raise() {
     let refusing_parent = register_class(&database.pool, "standard_10d", 10).await;
     let squatter = history_leaf_name(&refusing_parent, database_today(&database.pool).await)
         .expect("squatted leaf name");
-    sqlx::query(&format!("CREATE TABLE {squatter} (x integer)"))
+    sql::query(&format!("CREATE TABLE {squatter} (x integer)"))
         .execute(&database.pool)
         .await
         .expect("take the leaf name");
     let horizon = 5_u32;
     let outcome = ensure_partition_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         horizon,
         3,
@@ -188,7 +183,7 @@ async fn a_refusal_keeps_the_leaves_created_before_it() {
     let database = TestDatabase::create_with_connections(4).await;
     let class_key = "standard_7d";
     let first = ensure_partition_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         2,
         3,
@@ -205,13 +200,13 @@ async fn a_refusal_keeps_the_leaves_created_before_it() {
         database_today(&database.pool).await + Duration::days(4),
     )
     .expect("squatted leaf name");
-    sqlx::query(&format!("CREATE TABLE {squatter} (x integer)"))
+    sql::query(&format!("CREATE TABLE {squatter} (x integer)"))
         .execute(&database.pool)
         .await
         .expect("take the day+4 leaf name");
 
     let second = ensure_partition_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         4,
         3,
@@ -237,7 +232,7 @@ async fn a_heartbeat_horizon_retune_is_a_success_and_is_stored() {
     let database = TestDatabase::create_with_connections(4).await;
     settled_pool_pass(&database.pool, 2, 3).await;
     let retuned = ensure_partition_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         2,
         6,
@@ -246,7 +241,7 @@ async fn a_heartbeat_horizon_retune_is_a_success_and_is_stored() {
     .await
     .expect("retuned coverage pass");
     let _ = ensured(retuned);
-    let stored: i16 = sqlx::query_scalar(&format!(
+    let stored: i16 = sql::query_scalar(&format!(
         "SELECT heartbeat_horizon_hours FROM {RETENTION_CLASSES} WHERE class_key = $1"
     ))
     .bind(HEARTBEAT_CLASS_KEY)
@@ -265,7 +260,7 @@ async fn a_heartbeat_horizon_retune_is_a_success_and_is_stored() {
 async fn the_probe_names_heartbeat_leaves_on_the_24_hour_clock() {
     let database = TestDatabase::create_with_connections(4).await;
     let first = ensure_partition_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         2,
         48,
@@ -274,7 +269,7 @@ async fn the_probe_names_heartbeat_leaves_on_the_24_hour_clock() {
     .await
     .expect("first coverage pass");
     assert_eq!(ensured(first).created_heartbeat_leaves, 49);
-    let leaves: Vec<(String, DateTime<Utc>)> = sqlx::query_as(&format!(
+    let leaves: Vec<(String, DateTime<Utc>)> = sql::query_as(&format!(
         "SELECT leaf_name, lower_anchor FROM {LEAF_CATALOG} WHERE class_key = $1"
     ))
     .bind(HEARTBEAT_CLASS_KEY)
@@ -289,7 +284,7 @@ async fn the_probe_names_heartbeat_leaves_on_the_24_hour_clock() {
         );
     }
     let second = ensure_partition_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         2,
         48,
@@ -322,13 +317,13 @@ async fn coverage_repairs_descending_history_index_shapes() {
         format!("CREATE INDEX {id_index} ON {leaf} (task_id DESC)"),
         format!("CREATE INDEX {ordering_index} ON {leaf} (enqueued_at DESC)"),
     ] {
-        sqlx::query(&statement)
+        sql::query(&statement)
             .execute(&database.pool)
             .await
             .expect("plant a descending index");
     }
     let outcome = ensure_partition_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         2,
         2,
@@ -340,11 +335,7 @@ async fn coverage_repairs_descending_history_index_shapes() {
     assert!(index_definition(&database.pool, &id_index)
         .await
         .ends_with("USING btree (task_id)"));
-    let mut connection = database.pool.acquire().await.expect("acquire reader");
-    assert!(read_leaf_ordering_index_exists(&mut connection, &leaf)
-        .await
-        .expect("probe the ordering index"));
-    drop(connection);
+    assert!(ordering_index_exists(&database.pool, &leaf).await);
     database.drop().await;
 }
 
@@ -355,7 +346,7 @@ async fn coverage_repairs_descending_history_index_shapes() {
 async fn stale_manifest_rows_are_republished() {
     let database = TestDatabase::create_with_connections(4).await;
     settled_pool_pass(&database.pool, 2, 2).await;
-    sqlx::query(&format!(
+    sql::query(&format!(
         "UPDATE {TASK_LOOKUP_MANIFEST} SET probe_position = probe_position + 100"
     ))
     .execute(&database.pool)
@@ -363,7 +354,7 @@ async fn stale_manifest_rows_are_republished() {
     .expect("move every manifest position");
     assert!(needs_republication(&database.pool).await);
     let outcome = ensure_partition_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         2,
         2,
@@ -375,7 +366,7 @@ async fn stale_manifest_rows_are_republished() {
     assert_eq!(report.created_history_leaves, 0);
     assert!(report.republished);
     assert!(!needs_republication(&database.pool).await);
-    let lowest: i32 = sqlx::query_scalar(&format!(
+    let lowest: i32 = sql::query_scalar(&format!(
         "SELECT min(probe_position) FROM {TASK_LOOKUP_MANIFEST}"
     ))
     .fetch_one(&database.pool)
@@ -394,7 +385,7 @@ async fn a_stale_index_schema_version_fails_the_heartbeat_class() {
     let database = TestDatabase::create_with_connections(4).await;
     settled_pool_pass(&database.pool, 3, 6).await;
     let current = hourly_leaf_name(database_hour(&database.pool).await).expect("current hour");
-    let updated = sqlx::query(&format!(
+    let updated = sql::query(&format!(
         "UPDATE {LEAF_CATALOG} SET index_schema_version = 0
          WHERE class_key = $1
            AND lower_anchor <= statement_timestamp()
@@ -406,7 +397,7 @@ async fn a_stale_index_schema_version_fails_the_heartbeat_class() {
     .expect("stale the current heartbeat leaf");
     assert_eq!(updated.rows_affected(), 1);
     let outcome = ensure_partition_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         3,
         6,
@@ -428,7 +419,7 @@ async fn a_stale_index_schema_version_fails_the_heartbeat_class() {
 async fn a_heartbeat_class_row_without_a_horizon_is_refused() {
     let database = TestDatabase::create_with_connections(4).await;
     settled_pool_pass(&database.pool, 3, 6).await;
-    let refused = sqlx::query(&format!(
+    let refused = sql::query(&format!(
         "UPDATE {RETENTION_CLASSES} SET heartbeat_horizon_hours = NULL WHERE class_key = $1"
     ))
     .bind(HEARTBEAT_CLASS_KEY)
@@ -461,13 +452,13 @@ async fn a_history_failure_does_not_stop_heartbeat_repair() {
         format!("DROP INDEX {}", leaf_id_index_name(&history_leaf)),
         format!("DROP INDEX {heartbeat_index}"),
     ] {
-        sqlx::query(&statement)
+        sql::query(&statement)
             .execute(&database.pool)
             .await
             .expect("damage a current leaf");
     }
     let mut holder = database.pool.acquire().await.expect("acquire lock holder");
-    sqlx::query(&format!(
+    sql::query(&format!(
         "SELECT pg_advisory_lock({LEAF_LOCK_KEY_FUNCTION}($1, $2))"
     ))
     .bind("standard_30d")
@@ -477,7 +468,7 @@ async fn a_history_failure_does_not_stop_heartbeat_repair() {
     .expect("hold the history leaf lock");
 
     let outcome = ensure_partition_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         3,
         6,
@@ -485,7 +476,7 @@ async fn a_history_failure_does_not_stop_heartbeat_repair() {
     )
     .await
     .expect("coverage pass");
-    let released: bool = sqlx::query_scalar(&format!(
+    let released: bool = sql::query_scalar(&format!(
         "SELECT pg_advisory_unlock({LEAF_LOCK_KEY_FUNCTION}($1, $2))"
     ))
     .bind("standard_30d")
@@ -512,16 +503,16 @@ async fn startup_refuses_while_the_current_heartbeat_leaf_is_busy() {
     let database = TestDatabase::create_with_connections(4).await;
     let hour = database_hour(&database.pool).await;
     let mut holder = database.pool.begin().await.expect("begin lock holder");
-    sqlx::query(&format!(
+    sql::query(&format!(
         "SELECT pg_advisory_xact_lock({LEAF_LOCK_KEY_FUNCTION}($1, $2))"
     ))
     .bind(HEARTBEAT_CLASS_KEY)
     .bind(hour)
-    .execute(holder.as_mut())
+    .execute(&mut *holder)
     .await
     .expect("hold the current heartbeat leaf lock");
     let outcome = ensure_startup_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         3,
         6,
@@ -557,14 +548,14 @@ async fn a_pass_republishes_on_a_vanished_leaf_alone() {
         LeafCreation::Created { .. }
     ));
     settled_pool_pass(&database.pool, 2, 2).await;
-    sqlx::query(&format!("DROP TABLE {}", gone.leaf_name()))
+    sql::query(&format!("DROP TABLE {}", gone.leaf_name()))
         .execute(&database.pool)
         .await
         .expect("drop the old leaf out of band");
     assert!(needs_republication(&database.pool).await);
 
     let outcome = ensure_partition_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         2,
         2,
@@ -590,13 +581,13 @@ async fn an_in_horizon_loss_does_not_refuse_worker_startup() {
     settled_pool_pass(&database.pool, 2, 2).await;
     let parent = finite_class_parent_name("standard_30d").expect("default parent");
     let gone = history_leaf_name(&parent, database_today(&database.pool).await).expect("leaf");
-    sqlx::query(&format!("DROP TABLE {gone}"))
+    sql::query(&format!("DROP TABLE {gone}"))
         .execute(&database.pool)
         .await
         .expect("drop the current leaf out of band");
 
     let outcome = ensure_startup_coverage_in_pool(
-        &crate::broker::pools::core_pool_for_test_pool(&database.pool),
+        &crate::broker::pools::core_pool_for_test_url(database.pool.url()),
         crate::broker::core_rows::StatementLog::Off,
         2,
         2,
@@ -632,7 +623,7 @@ async fn the_manifest_read_fails_closed_when_no_history_parent_resolves() {
         create_leaf(&database.pool, &leaf).await,
         LeafCreation::Created { .. }
     ));
-    sqlx::query(&format!(
+    sql::query(&format!(
         "DROP TABLE {parent}, {TASK_HISTORY_FOREVER} CASCADE"
     ))
     .execute(&database.pool)
@@ -647,9 +638,11 @@ async fn the_manifest_read_fails_closed_when_no_history_parent_resolves() {
     assert!(
         matches!(
             refused,
-            HistoryError::Database(sqlx::Error::Database(ref error))
-                if error.code().as_deref() == Some("42P01")
-                    && error.message().contains("cannot see")
+            CallError::Database(ref error)
+                if error.sqlstate() == Some("42P01")
+                    && error
+                        .as_database_error()
+                        .is_some_and(|database_error| database_error.message().contains("cannot see"))
         ),
         "{refused:?}"
     );
@@ -672,21 +665,25 @@ async fn one_history_parent_gone_is_reported_not_raised() {
             LeafCreation::Created { .. }
         ));
     }
-    sqlx::query(&format!("DROP TABLE {lost_parent} CASCADE"))
+    sql::query(&format!("DROP TABLE {lost_parent} CASCADE"))
         .execute(&database.pool)
         .await
         .expect("drop one class parent");
 
     let mut transaction = database.pool.begin().await.expect("begin publication");
-    let absent: Vec<String> = sqlx::query_scalar("SELECT horsies_history_absent_leaves()")
+    let absent: Vec<String> = sql::query_scalar("SELECT horsies_history_absent_leaves()")
         .fetch_one(&mut *transaction)
         .await
         .expect("read absent history leaves");
     assert_eq!(absent, vec![lost.leaf_name().to_owned()]);
-    let attached = read_all_attached_leaf_rows(&mut transaction)
-        .await
-        .expect("read attached catalog leaves");
-    assert!(attached.iter().any(|row| row.leaf_name == kept.leaf_name()));
+    let attached: Vec<String> = sql::query_scalar(&format!(
+        "SELECT leaf_name FROM {LEAF_CATALOG}
+         WHERE detached_at IS NULL AND dropped_at IS NULL ORDER BY leaf_name"
+    ))
+    .fetch_all(&mut *transaction)
+    .await
+    .expect("read attached catalog leaves");
+    assert!(attached.iter().any(|name| name == kept.leaf_name()));
     let republished = StagedLoaderPublisher
         .republish(&mut transaction)
         .await

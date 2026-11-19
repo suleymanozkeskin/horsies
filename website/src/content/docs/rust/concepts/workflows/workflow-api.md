@@ -230,7 +230,16 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 
 ### WorkflowStartError
 
-`WorkflowStartError` has `code`, `message`, `retryable`, `workflow_name` and `workflow_id` (`Option<Uuid>`).
+`WorkflowStartError` is an enum with one variant per state. Every variant has `message`, `workflow_name` and `workflow_id`, the id of the start: the caller's, or the id minted for it before the checks. The methods `code()`, `message()`, `retryable()`, `workflow_name()`, `workflow_id()` and `failure_cause()` read them.
+
+| Variant | `code()` | Other fields |
+|---------|----------|--------------|
+| `ValidationFailed` | `ValidationFailed` | `workflow_id`, `cause`: a `StartRefusalCause`, the `WorkflowError` that refused the start (`Error`) or a check that found the refusal with no error (`Check`) |
+| `IdConflict` | `WorkflowIdConflict` | `workflow_id`, `existing_workflow_name` |
+| `EnqueueFailed` | `EnqueueFailed` | `workflow_id`, `retryable`, `cause`: the `WorkflowError` that the start met; a failed connect or schema install is `WorkflowError::Broker` |
+| `AsyncContext` | `AsyncContext` | `workflow_id` |
+
+`retryable()` is `false` for every variant but `EnqueueFailed`.
 
 | `WorkflowStartErrorCode` | When |
 |--------------------------|------|
@@ -239,7 +248,7 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 | `EnqueueFailed` | The connect, the schema install, the client family check, the database, or the build of a sub-workflow child failed. `retryable` is the classification of the cause. When the commit reply was lost, a start again with the same id finds the workflow |
 | `AsyncContext` | A blocking start of `horsies::blocking` on a thread that runs a tokio runtime. Nothing was written; `workflow_id` is the id of the start. Not retryable. See [Blocking API](/horsies/rust/tasks/blocking-api/) |
 
-`WorkflowFunction::retry_start(&error)` starts again with the error's `workflow_id`. It refuses with `ValidationFailed` an error that is not `EnqueueFailed`, an error of another workflow name, and an error with no workflow id. For a template, call `start_with_id(params, workflow_id)` with the error's id. The meaning of each code is on the [Errors Reference](/horsies/tasks/errors/#workflow-start-error-codes).
+`WorkflowFunction::retry_start(&error)` starts again with the error's `workflow_id`. It takes an `EnqueueFailed` or an `AsyncContext` error. It refuses with `ValidationFailed` an error with another code and an error of another workflow name. For a template, call `start_with_id(params, workflow_id)` with the error's id. The meaning of each code is on the [Errors Reference](/horsies/tasks/errors/#workflow-start-error-codes).
 
 ## WorkflowHandle
 
@@ -292,13 +301,13 @@ A workflow with no output node is read as `OutputlessResults`: the outcome of ea
 | `UnknownUserCode { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored user code is not a code of `E` |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A wait in a worker child. Nothing was read |
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking `get` or `result_for` (`handle.blocking()`) on a thread that runs a tokio runtime. Nothing was read |
-| `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed; `code` is the `HandleErrorCode` |
+| `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed; `code` is the `HandleErrorCode`. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
 
 `WorkflowReadError::code()` returns the library code of the failure.
 
 ### HandleOperationError
 
-`status`, `results`, `tasks`, `cancel`, `pause` and `resume` return `HandleOperationError` with `code`, `message`, `retryable` and `workflow_id`:
+`status`, `results`, `tasks`, `cancel`, `pause` and `resume` return `HandleOperationError`, an enum with one variant per state: `WorkflowNotFound`, `DbOperationFailed` (with `retryable` and `cause`), `StoredDataInvalid` and `ResumeRecoveryFailed` (with `cause`), and `AsyncContext`. Every variant has `message` and `workflow_id`; the methods `code()`, `message()`, `retryable()`, `workflow_id()` and `failure_cause()` read them. The `cause` is the `WorkflowError` that failed the operation; a failed connect is `WorkflowError::Broker`. The message of a failure starts with the operation's label, as Python's handle: `Status failed for workflow <id>: <cause>`; `WorkflowNotFound` has `Workflow <id> not found`. `retryable()` is `false` for every variant but `DbOperationFailed`:
 
 | `HandleErrorCode` | Returned by |
 |-------------------|-------------|

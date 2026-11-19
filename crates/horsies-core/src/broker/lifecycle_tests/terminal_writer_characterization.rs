@@ -1,6 +1,3 @@
-//! Port of Python `tests/integration/test_terminal_writer_characterization.py`,
-//! `test_every_writer_has_a_scenario`.
-//!
 //! Every terminalization kind names one test where its writer applies and
 //! one where its writer refuses. The `match` is exhaustive, so a new kind
 //! does not compile without its scenarios; the test checks that each named

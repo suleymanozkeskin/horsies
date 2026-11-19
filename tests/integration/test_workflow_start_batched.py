@@ -88,7 +88,7 @@ class TestBatchedStartShape:
         spec = _fanout_spec(app, 3, with_dependent=True)
         result = await start_workflow_async(spec, broker)
         assert not is_err(result), result
-        wf_id = result.ok_value.workflow_id
+        wf_id = str(result.ok_value.workflow_id)
 
         rows = (
             await session.execute(
@@ -135,7 +135,7 @@ class TestBatchedStartShape:
         assert not is_err(first)
         second = await start_workflow_async(spec, broker, workflow_id=wf_id)
         assert not is_err(second)
-        assert second.ok_value.workflow_id == wf_id
+        assert second.ok_value.workflow_id == uuid.UUID(wf_id)
 
         n_nodes = (
             await session.execute(
@@ -260,9 +260,10 @@ class TestBatchedStartShape:
         """Pinned behavioral difference vs the per-row path: the promotion
         path folds corrupt task_options into a FAILED task (it re-reads
         rows another transaction wrote); the batched start reads the task
-        decorator's own serialization, so corruption is a defect: the
-        SerializationError propagates and the transaction rolls back."""
-        from horsies.core.codec.json_io import SerializationError
+        decorator's own serialization, so corruption is a defect: the core's
+        node fact parse refuses the node, the bridge raises PanicException,
+        and nothing is written."""
+        from horsies._core import PanicException
 
         @app.task(task_name=f'batched_corrupt_{uuid.uuid4().hex[:8]}')
         def corrupt_task(*, value: int) -> TaskResult[int, TaskError]:
@@ -276,7 +277,10 @@ class TestBatchedStartShape:
             [TaskNode(fn=corrupt_task, kwargs={'value': 1})],
             definition_key=f'batched-corrupt-{uuid.uuid4().hex[:8]}',
         )
-        with pytest.raises(SerializationError, match='root node'):
+        with pytest.raises(
+            PanicException,
+            match=r'workflow node 0 \(batched_corrupt_\w+\) refused: task_options JSON is refused',
+        ):
             await start_workflow_async(spec, broker)
 
         leftover = (

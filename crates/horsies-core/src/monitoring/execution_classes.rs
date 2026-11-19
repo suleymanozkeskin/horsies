@@ -1,8 +1,8 @@
 //! Response models of the slot health and the execution class report.
 //!
 //! The worker routes read the broker's typed worker-health methods; these
-//! functions turn their results into the wire models of the monitoring UI
-//! (Python `python/horsies/monitoring/execution_classes.py`). Pure, no I/O.
+//! functions turn their results into the wire models of the monitoring UI.
+//! Pure, no I/O.
 
 use crate::broker::{
     ClassReport, PendingStream, SlotHealth, StreamCoverageState, StreamWait, WorkerClassLoad,
@@ -14,8 +14,7 @@ use super::models::{
     StreamCoverageInfo, StreamWaitInfo, WorkerClassLoadInfo,
 };
 
-/// The `slot_health` and `down_slots` fields of a worker state (Python
-/// `slot_health_info`, `execution_classes.py:45-64`).
+/// The `slot_health` and `down_slots` fields of a worker state.
 pub fn slot_health_info(slot_health: &SlotHealth) -> (SlotHealthKind, Vec<DownSlotInfo>) {
     match slot_health {
         SlotHealth::AllSlotsServing => (SlotHealthKind::AllServing, Vec::new()),
@@ -36,8 +35,7 @@ pub fn slot_health_info(slot_health: &SlotHealth) -> (SlotHealthKind, Vec<DownSl
     }
 }
 
-/// The wire model of a class report (Python `class_report_info`,
-/// `execution_classes.py:67-74`).
+/// The wire model of a class report.
 pub fn class_report_info(report: &ClassReport) -> ClassReportInfo {
     ClassReportInfo {
         checked_at: report.checked_at,
@@ -92,13 +90,19 @@ fn worker_info(worker: &WorkerClassLoad) -> WorkerClassLoadInfo {
 
 #[cfg(test)]
 mod tests {
-    //! The wire shape of the class report. Python reference:
-    //! `tests/unit/test_monitoring_execution_classes.py`.
+    //! The wire shape of the class report.
     use super::*;
     use crate::broker::BudgetLoad;
     use crate::core::task::Execution;
     use chrono::{TimeDelta, TimeZone, Utc};
     use serde_json::json;
+
+    #[test]
+    fn all_slots_serving_has_no_down_slot() {
+        let (kind, down) = slot_health_info(&SlotHealth::AllSlotsServing);
+        assert_eq!(kind, SlotHealthKind::AllServing);
+        assert_eq!(down.len(), 0);
+    }
 
     #[test]
     fn a_report_serializes_with_tagged_coverage_and_wait() {

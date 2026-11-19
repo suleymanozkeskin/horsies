@@ -12,9 +12,7 @@ class WorkflowStartErrorCode(str, Enum):
     """Categorized workflow start failure codes.
 
     The members are Python's, in Python's order
-    (`python/horsies/core/workflows/start_types.py`). `LOOP_RUNNER_FAILED`,
-    `EVENT_LOOP_LIMIT` and `ASYNC_CONTEXT` are produced by the Python client
-    only.
+    (`python/horsies/core/workflows/start_types.py`).
     """
 
     BROKER_NOT_CONFIGURED = 'BROKER_NOT_CONFIGURED'
@@ -29,18 +27,7 @@ class WorkflowStartErrorCode(str, Enum):
     ENQUEUE_FAILED = 'ENQUEUE_FAILED'
     """Infrastructure error: schema init, DB transaction. Conditionally retryable."""
 
-    LOOP_RUNNER_FAILED = 'LOOP_RUNNER_FAILED'
-    """A sync start could not run the call on the broker's sync runner: the runner is stopped, its
-    thread did not start, or scheduling failed. Nothing ran. Python client only; removed before
-    0.8.0.
-    """
-
-    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
-    """The broker already holds resource sets for its limit of open event loops, and this call ran on a
-    new one; nothing was written. Python client only; removed before 0.8.0.
-    """
-
     ASYNC_CONTEXT = 'ASYNC_CONTEXT'
-    """A sync start was called on a thread that runs an event loop; its wait would stall that loop, so
-    nothing was written. Python client only.
+    """A sync or blocking start was called on a thread that runs an event loop or a tokio
+    runtime; its wait would stall that loop, so nothing was written. `retry_start` accepts it.
     """

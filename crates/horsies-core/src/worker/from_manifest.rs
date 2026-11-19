@@ -39,7 +39,7 @@ use crate::worker_manifest::{
     ChildCommandManifest, ChildProgram as ManifestChildProgram, ClaimLease, ClusterWideCap,
     PreloadLaunch, QueueConcurrency, Queues, WorkerLogLevel, WorkerManifest,
 };
-use crate::workflow_engine::child_spec::ChildSpecs;
+use crate::workflow_engine::child_spec::ChildSpecSource;
 
 /// Everything [`Worker::of_child_specs`] takes but the broker and where the child
 /// specs come from, resolved from a worker manifest.
@@ -115,10 +115,9 @@ impl Worker {
     /// handle is refused; [`WorkerError::Config`] as [`Worker::of_child_specs`].
     pub async fn from_plan(
         plan: WorkerPlan,
-        child_specs: impl Into<ChildSpecs>,
+        child_specs: Arc<dyn ChildSpecSource>,
         family: ClientFamily,
     ) -> Result<Self, WorkerError> {
-        let child_specs = child_specs.into();
         let broker = worker_broker(&plan.broker_config, family).await?;
         Worker::of_child_specs(
             Arc::new(broker),
@@ -140,9 +139,7 @@ async fn worker_broker(
     config: &PostgresConfig,
     family: ClientFamily,
 ) -> Result<PostgresBroker, BrokerError> {
-    Ok(PostgresBroker::connect_worker_with(config)
-        .await?
-        .with_client_family(family))
+    PostgresBroker::connect_worker_with(config, family).await
 }
 
 /// The app config of the worker: the queue mode and the claim settings of

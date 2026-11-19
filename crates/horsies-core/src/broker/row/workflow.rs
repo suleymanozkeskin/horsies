@@ -1,9 +1,8 @@
 use chrono::{DateTime, Utc};
-use sqlx::FromRow;
 use uuid::Uuid;
 
 /// Row from the `horsies_workflows` table.
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone)]
 pub struct WorkflowRow {
     pub id: Uuid,
     pub name: String,
@@ -26,7 +25,7 @@ pub struct WorkflowRow {
 }
 
 /// Row from the `horsies_workflow_tasks` table.
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone)]
 pub struct WorkflowTaskRow {
     pub id: Uuid,
     pub workflow_id: Uuid,

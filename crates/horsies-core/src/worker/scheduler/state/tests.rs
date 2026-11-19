@@ -1,9 +1,8 @@
-use sqlx::PgPool;
-
 use super::test_rows::{delete_state, record_run, seed_state, state_row};
 use super::*;
 use crate::broker::PostgresBroker;
 use crate::core::EnqueueRetention;
+use crate::test_support::sql::{self, TestPool};
 
 /// The due read, the start write and the heal take no time from the
 /// client: each time comes from `statement_timestamp()`.
@@ -47,22 +46,20 @@ fn the_fire_names_every_argument_of_the_function() {
 }
 
 /// The database time, read in its own statement.
-async fn database_time(pool: &PgPool) -> DateTime<Utc> {
-    sqlx::query_scalar("SELECT statement_timestamp()")
+async fn database_time(pool: &TestPool) -> DateTime<Utc> {
+    sql::query_scalar("SELECT statement_timestamp()")
         .fetch_one(pool)
         .await
         .expect("database time")
 }
 
-/// Python `tests/integration/test_schedule_state_rows.py`,
-/// `test_the_due_read_returns_the_rows_at_or_before_the_database_time`:
-/// rows due at the database time, soonest first, only of the given
+/// Rows due at the database time, soonest first, only of the given
 /// names, and the database time of the read, also when nothing is due.
 #[tokio::test]
 #[serial_test::serial]
 async fn due_read_returns_the_database_time_and_the_rows_due_at_it() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let core = crate::broker::pools::core_pool_for_test_pool(&pool);
+    let pool = crate::test_support::migrated_pool().await;
+    let core = crate::broker::pools::core_pool_for_test_url(pool.url());
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let earlier = format!("qw_due_earlier_{suffix}");
     let now_due = format!("qw_due_now_{suffix}");
@@ -100,16 +97,14 @@ async fn due_read_returns_the_database_time_and_the_rows_due_at_it() {
     }
 }
 
-/// Python `test_schedule_state_rows.py`,
-/// `test_start_stores_new_and_changed_rows_from_the_database_time`: the
-/// start read returns the rows and the database time; the start write
+/// The start read returns the rows and the database time; the start write
 /// creates a new row, moves a changed row and keeps its run record, and
 /// leaves a row with the same digest alone.
 #[tokio::test]
 #[serial_test::serial]
 async fn start_read_and_write_follow_the_stored_digests() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let core = crate::broker::pools::core_pool_for_test_pool(&pool);
+    let pool = crate::test_support::migrated_pool().await;
+    let core = crate::broker::pools::core_pool_for_test_url(pool.url());
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let new_name = format!("qw_start_new_{suffix}");
     let changed = format!("qw_start_changed_{suffix}");
@@ -127,7 +122,7 @@ async fn start_read_and_write_follow_the_stored_digests() {
     .await;
     seed_state(&pool, &unchanged, seeded_at).await;
     let _hash =
-        sqlx::query("UPDATE horsies_schedule_state SET config_hash = $2 WHERE schedule_name = $1")
+        sql::query("UPDATE horsies_schedule_state SET config_hash = $2 WHERE schedule_name = $1")
             .bind(&unchanged)
             .bind(vec![3_u8; 32])
             .execute(&pool)
@@ -188,16 +183,15 @@ async fn start_read_and_write_follow_the_stored_digests() {
     }
 }
 
-/// Python `test_schedule_state_rows.py`,
-/// `test_the_heal_creates_missing_rows_and_leaves_existing_rows`. A second
+/// The heal creates missing rows and leaves existing rows. A second
 /// heal of the same name creates nothing and keeps the first row's
 /// `next_run_at` (the old per-row insert, `insert_state_if_absent`, is the
 /// heal of one row).
 #[tokio::test]
 #[serial_test::serial]
 async fn heal_creates_missing_rows_and_leaves_existing_rows() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let core = crate::broker::pools::core_pool_for_test_pool(&pool);
+    let pool = crate::test_support::migrated_pool().await;
+    let core = crate::broker::pools::core_pool_for_test_url(pool.url());
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let missing = format!("qw_heal_missing_{suffix}");
     let existing = format!("qw_heal_existing_{suffix}");
@@ -250,8 +244,8 @@ async fn heal_creates_missing_rows_and_leaves_existing_rows() {
 }
 
 /// The task rows of `task_name`.
-async fn count_tasks(pool: &PgPool, task_name: &str) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
+async fn count_tasks(pool: &TestPool, task_name: &str) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
         .bind(task_name)
         .fetch_one(pool)
         .await
@@ -260,8 +254,8 @@ async fn count_tasks(pool: &PgPool, task_name: &str) -> i64 {
 
 /// The send command of a task `task_name` on the default queue with no
 /// options and the input `{"value": 1}`.
-fn command_of(pool: &PgPool, task_name: &str) -> SendCommand {
-    PostgresBroker::from_pool(pool.clone())
+fn command_of(pool: &TestPool, task_name: &str) -> SendCommand {
+    PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust)
         .prepare_send_command(
             task_name,
             "default",
@@ -281,11 +275,11 @@ fn command_of(pool: &PgPool, task_name: &str) -> SendCommand {
 #[tokio::test]
 #[serial_test::serial]
 async fn the_fire_answers_each_state_of_the_row() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let core = crate::broker::pools::core_pool_for_test_pool(&pool);
+    let pool = crate::test_support::migrated_pool().await;
+    let core = crate::broker::pools::core_pool_for_test_url(pool.url());
     let name = format!("qw_fire_{}", uuid::Uuid::new_v4().simple());
     let command = command_of(&pool, &name);
-    let slot: DateTime<Utc> = sqlx::query_scalar(
+    let slot: DateTime<Utc> = sql::query_scalar(
         "SELECT date_trunc('second', statement_timestamp()) - interval '1 second'",
     )
     .fetch_one(&pool)
@@ -346,7 +340,7 @@ async fn the_fire_answers_each_state_of_the_row() {
     assert_eq!(count_tasks(&pool, &name).await, 1);
 
     core.close();
-    let _deleted = sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
+    let _deleted = sql::query("DELETE FROM horsies_tasks WHERE task_name = $1")
         .bind(&name)
         .execute(&pool)
         .await
@@ -361,8 +355,8 @@ async fn the_fire_answers_each_state_of_the_row() {
 #[serial_test::serial]
 #[should_panic(expected = "broke a precondition of horsies_fire_schedule")]
 async fn a_slot_after_the_database_time_is_a_caller_defect() {
-    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-    let core = crate::broker::pools::core_pool_for_test_pool(&pool);
+    let pool = crate::test_support::migrated_pool().await;
+    let core = crate::broker::pools::core_pool_for_test_url(pool.url());
     let name = format!("qw_defect_{}", uuid::Uuid::new_v4().simple());
     let command = command_of(&pool, &name);
     let slot = database_time(&pool).await + chrono::Duration::hours(1);

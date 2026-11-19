@@ -7,8 +7,7 @@
 //! whose recovery raises persistently is counted by
 //! `horsies_workflow_phase2_record_raise`; at the bound its workflow fails
 //! closed with `WORKFLOW_RECOVERY_LIMIT_REACHED` and its evidence is
-//! quarantined. Python: `drive_phase2_recovery`
-//! (`core/workflows/phase2_recovery.py:381-576`).
+//! quarantined.
 
 use uuid::Uuid;
 
@@ -17,12 +16,13 @@ use crate::broker::PostgresBroker;
 use crate::core::lifecycle::TerminalizationKind;
 use crate::core::types::status::TaskStatus;
 use crate::db::{CheckoutClass, ParameterType, Row, TypedStatement};
+use crate::workflow_engine::child_spec::ChildSpecSource;
 use crate::workflow_engine::recovery_limit::{
     recovery_limit_error, recovery_limit_payloads, run_catching_panic, CandidateFailure,
     FailureClass, RecoveryCase,
 };
 use crate::workflow_engine::steps::{
-    advance_parents, phase2_recover, run_alone, ChildBuild, CommittedStep, NodeFinishDisposition,
+    advance_parents, phase2_recover, run_alone, CommittedStep, NodeFinishDisposition,
     StepContractError,
 };
 
@@ -30,8 +30,7 @@ use super::WorkflowError;
 
 /// The phase-2 records older than the grace window (`$1` milliseconds) and
 /// under the attempt bound (`$2`), oldest first, at most `$3`. The record
-/// kind is read by `horsies_workflow_phase2_recover`, not here. Python:
-/// `DISCOVER_PENDING_SQL` (`core/workflows/phase2_recovery.py:72-82`).
+/// kind is read by `horsies_workflow_phase2_recover`, not here.
 static DISCOVER_PENDING: TypedStatement = TypedStatement::new(
     "phase2_discover_pending",
     "SELECT task_id
@@ -48,8 +47,7 @@ static DISCOVER_PENDING: TypedStatement = TypedStatement::new(
 );
 
 /// The count of the records at or over the attempt bound `$1`, which
-/// discovery no longer selects. Python: `COUNT_OVER_ATTEMPT_BOUND_SQL`
-/// (`core/workflows/phase2_recovery.py:100-103`).
+/// discovery no longer selects.
 static COUNT_OVER_ATTEMPT_BOUND: TypedStatement = TypedStatement::new(
     "phase2_count_over_attempt_bound",
     "SELECT count(*) AS over_attempt_bound
@@ -59,8 +57,7 @@ static COUNT_OVER_ATTEMPT_BOUND: TypedStatement = TypedStatement::new(
 );
 
 /// The workflow and the node of a phase-2 record, for the limit error of a
-/// raise. Python: `RAISED_ROW_CONTEXT_SQL`
-/// (`core/workflows/phase2_recovery.py:179-187`).
+/// raise.
 static RAISED_RECORD_CONTEXT: TypedStatement = TypedStatement::new(
     "phase2_raised_record_context",
     "SELECT p.workflow_id, n.task_index
@@ -138,8 +135,7 @@ pub(crate) enum Phase2Limit {
     LiveNodesFinish,
 }
 
-/// What a quarantine verdict means for the record. Python:
-/// `core/history/phase2/quarantine.py:174-185`.
+/// What a quarantine verdict means for the record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuarantineResult {
     /// `REPOINTED`, `PENDING_GONE`, `ALREADY_QUARANTINED`.
@@ -234,7 +230,7 @@ pub enum Phase2Wake {
 /// - [`WorkflowError::StepContract`] for a row that does not decode.
 pub(crate) async fn drive_phase2_recovery_with(
     broker: &PostgresBroker,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
     grace_ms: u64,
     max_rows: i64,
     quarantine_after_attempts: u32,
@@ -386,7 +382,7 @@ async fn advance_after_recovery(
     broker: &PostgresBroker,
     task_id: Uuid,
     committed: CommittedStep<NodeFinishDisposition>,
-    build: ChildBuild<'_>,
+    build: &dyn ChildSpecSource,
 ) {
     if committed.parent_advances.is_empty() {
         return;
@@ -418,8 +414,7 @@ async fn advance_after_recovery(
 /// Counts one persistent raise of a record: the context read (the workflow
 /// and the node of the record, for the limit error), then
 /// `horsies_workflow_phase2_record_raise`, each one statement on the main
-/// core pool with the reserve. Python: `_record_raised_row`
-/// (`core/workflows/phase2_recovery.py:594-678`).
+/// core pool with the reserve.
 ///
 /// The limit error names `attempt_bound` passes: the function writes the
 /// limit when the attempt count after the raise reaches the bound, and
@@ -562,21 +557,21 @@ mod tests {
     use crate::core::history::phase2::consumption::{consume_phase2, Phase2DispositionKind};
     use crate::core::lifecycle::TerminalizationOutcome;
     use crate::test_support::child_specs::TestChildSpecs;
+    use crate::test_support::sql::{self, TestPool, TestPoolOptions};
     use crate::test_support::terminal_writes::{self, TerminalFailure};
     use serial_test::serial;
-    use sqlx::PgPool;
 
     /// One recovery pass with the given grace, cap and attempt bound, and no
     /// child specs.
     async fn recovery_pass(
-        pool: &PgPool,
+        pool: &TestPool,
         grace_ms: u64,
         max_rows: i64,
         attempt_bound: u32,
     ) -> Result<Phase2RecoverySummary, WorkflowError> {
         drive_phase2_recovery_with(
-            &PostgresBroker::from_pool(pool.clone()),
-            ChildBuild::Client(&TestChildSpecs::empty()),
+            &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
+            &TestChildSpecs::empty(),
             grace_ms,
             max_rows,
             attempt_bound,
@@ -585,12 +580,12 @@ mod tests {
     }
 
     async fn seed_workflow_task(
-        pool: &PgPool,
+        pool: &TestPool,
         workflow_id: Uuid,
         task_id: Uuid,
         with_dependent: bool,
     ) {
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflows (
                 id, name, status, on_error, output_task_index,
                 definition_key, depth, root_workflow_id,
@@ -602,7 +597,7 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed workflow");
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
                 started_at, claimed_at, claimed_by_worker_id, is_workflow_task, retry_count,
@@ -619,7 +614,7 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed task");
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflow_tasks (
                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
@@ -636,7 +631,7 @@ mod tests {
         .await
         .expect("seed workflow task");
         if with_dependent {
-            sqlx::query(
+            sql::query(
                 "INSERT INTO horsies_workflow_tasks (
                     downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
                     priority, dependencies, allow_failed_deps, join_type, status,
@@ -655,7 +650,7 @@ mod tests {
         }
     }
 
-    async fn terminalize_workflow_task(pool: &PgPool, task_id: Uuid) {
+    async fn terminalize_workflow_task(pool: &TestPool, task_id: Uuid) {
         let result = serde_json::to_string(&crate::core::TaskResult::Ok(
             serde_json::json!({"value": 7}),
         ))
@@ -669,13 +664,13 @@ mod tests {
         ));
     }
 
-    async fn cleanup_case(pool: &PgPool, workflow_id: Uuid, task_id: Uuid) {
-        sqlx::query("DELETE FROM horsies_workflow_phase2_pending WHERE task_id = $1")
+    async fn cleanup_case(pool: &TestPool, workflow_id: Uuid, task_id: Uuid) {
+        sql::query("DELETE FROM horsies_workflow_phase2_pending WHERE task_id = $1")
             .bind(task_id)
             .execute(pool)
             .await
             .expect("remove the pending recovery fixture");
-        sqlx::query(
+        sql::query(
             "DELETE FROM horsies_tasks WHERE id IN (
                 SELECT task_id FROM horsies_workflow_tasks
                 WHERE workflow_id = $1 AND task_id IS NOT NULL
@@ -685,17 +680,17 @@ mod tests {
         .execute(pool)
         .await
         .ok();
-        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+        sql::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
             .bind(workflow_id)
             .execute(pool)
             .await
             .ok();
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        sql::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(workflow_id)
             .execute(pool)
             .await
             .ok();
-        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+        sql::query("DELETE FROM horsies_task_history WHERE task_id = $1")
             .bind(task_id)
             .execute(pool)
             .await
@@ -772,9 +767,8 @@ mod tests {
     /// broker error, not a summary of zero records.
     #[tokio::test]
     async fn discovery_failure_is_typed_instead_of_published_as_zero_health() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgresql://postgres@127.0.0.1:1/horsies_unreachable")
-            .unwrap();
+        let pool = TestPoolOptions::new()
+            .connect_lazy("postgresql://postgres@127.0.0.1:1/horsies_unreachable");
         let error = recovery_pass(&pool, 0, 1, 3)
             .await
             .expect_err("a failed discovery/count query must cross the containment seam");
@@ -784,8 +778,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn recovery_contains_retaining_row_advances_healthy_row_and_quarantines_at_bound() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
+        let pool = crate::test_support::migrated_pool().await;
+        sql::query("DELETE FROM horsies_workflow_phase2_pending")
             .execute(&pool)
             .await
             .expect("clear pending rows before global recovery");
@@ -797,7 +791,7 @@ mod tests {
         seed_workflow_task(&pool, good_workflow, good_task, false).await;
         terminalize_workflow_task(&pool, bad_task).await;
         terminalize_workflow_task(&pool, good_task).await;
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_workflow_phase2_pending
              SET result_digest = decode(repeat('ff', 32), 'hex'),
                  created_at = NOW() - INTERVAL '2 hours'
@@ -807,7 +801,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_workflow_phase2_pending
              SET created_at = NOW() - INTERVAL '1 hour'
              WHERE task_id = $1",
@@ -841,7 +835,7 @@ mod tests {
         assert_eq!(third.retained, 1);
         assert_eq!(third.quarantined, 0);
         assert_eq!(third.quarantine_refusals.len(), 1, "{third:?}");
-        let (source, attempts): (String, i32) = sqlx::query_as(
+        let (source, attempts): (String, i32) = sql::query_as(
             "SELECT recovery_source, attempt_count
              FROM horsies_workflow_phase2_pending WHERE task_id = $1",
         )
@@ -864,8 +858,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn recovery_rolls_back_one_failed_row_counts_its_raise_and_advances_the_next_candidate() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
+        let pool = crate::test_support::migrated_pool().await;
+        sql::query("DELETE FROM horsies_workflow_phase2_pending")
             .execute(&pool)
             .await
             .expect("clear pending rows before global recovery");
@@ -877,7 +871,7 @@ mod tests {
         seed_workflow_task(&pool, good_workflow, good_task, false).await;
         terminalize_workflow_task(&pool, bad_task).await;
         terminalize_workflow_task(&pool, good_task).await;
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_workflow_phase2_pending
              SET created_at = NOW() - CASE task_id
                  WHEN $1 THEN INTERVAL '2 hours' ELSE INTERVAL '1 hour' END
@@ -891,7 +885,7 @@ mod tests {
         // A persistent raise (P0001, the RAISE default): it rolls the row
         // back and adds one attempt (#819). A transient raise adds none
         // (`a_transient_raise_adds_no_attempt`).
-        sqlx::query(&format!(
+        sql::query(&format!(
             "CREATE OR REPLACE FUNCTION p7_phase2_inject_row_failure() RETURNS trigger
              LANGUAGE plpgsql AS $body$
              BEGIN
@@ -905,7 +899,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
+        sql::query(
             "CREATE TRIGGER p7_phase2_inject_row_failure
              BEFORE UPDATE ON horsies_workflow_tasks FOR EACH ROW
              EXECUTE FUNCTION p7_phase2_inject_row_failure()",
@@ -923,7 +917,7 @@ mod tests {
         assert_eq!(summary.retained, 0, "{summary:?}");
         // The raise is persistent (P0001): its attempt is counted on the record.
         assert_eq!(summary.raised_counted, 1, "{summary:?}");
-        let states: (String, i32, i64, String, i64) = sqlx::query_as(
+        let states: (String, i32, i64, String, i64) = sql::query_as(
             "SELECT
                  (SELECT status FROM horsies_workflow_tasks
                   WHERE workflow_id = $1 AND task_index = 0),
@@ -945,7 +939,7 @@ mod tests {
             states,
             ("RUNNING".to_owned(), 1, 1, "COMPLETED".to_owned(), 0)
         );
-        let failure_class: Option<String> = sqlx::query_scalar(
+        let failure_class: Option<String> = sql::query_scalar(
             "SELECT last_failure_class FROM horsies_workflow_phase2_pending WHERE task_id = $1",
         )
         .bind(bad_task)
@@ -954,11 +948,11 @@ mod tests {
         .unwrap();
         assert_eq!(failure_class.as_deref(), Some("RAISED"));
 
-        sqlx::query("DROP TRIGGER p7_phase2_inject_row_failure ON horsies_workflow_tasks")
+        sql::query("DROP TRIGGER p7_phase2_inject_row_failure ON horsies_workflow_tasks")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("DROP FUNCTION p7_phase2_inject_row_failure()")
+        sql::query("DROP FUNCTION p7_phase2_inject_row_failure()")
             .execute(&pool)
             .await
             .unwrap();
@@ -966,22 +960,20 @@ mod tests {
         cleanup_case(&pool, good_workflow, good_task).await;
     }
 
-    /// Python `tests/integration/test_task_history_phase2_consumption.py::TestDurableDispositions::test_terminal_workflow_supersedes_without_touching_the_node`:
-    /// the supersede rule of `horsies_phase2_consume`, the function that
-    /// Python's phase 2 calls: the record of a node of an ended workflow is
+    /// The supersede rule of `horsies_phase2_consume`: the record of a node of an ended workflow is
     /// deleted and the node is not written. The core's phase 2 writes the
     /// node instead (`horsies_workflow_node_finish`;
     /// `engine/task_complete_tests.rs::a_node_of_an_ended_workflow_completes_and_enqueues_nothing`).
     #[tokio::test]
     #[serial]
     async fn terminal_workflow_supersedes_pending_evidence_without_touching_the_node() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         for workflow_status in ["COMPLETED", "FAILED", "CANCELLED", "EXPIRED"] {
             let workflow_id = Uuid::new_v4();
             let task_id = Uuid::new_v4();
             seed_workflow_task(&pool, workflow_id, task_id, false).await;
             terminalize_workflow_task(&pool, task_id).await;
-            sqlx::query(
+            sql::query(
                 "UPDATE horsies_workflows
                  SET status = $2, completed_at = NOW(), updated_at = NOW()
                  WHERE id = $1",
@@ -1002,7 +994,7 @@ mod tests {
                 Phase2DispositionKind::SupersededByWorkflowTerminal,
                 "{workflow_status}",
             );
-            let state: (String, i64) = sqlx::query_as(
+            let state: (String, i64) = sql::query_as(
                 "SELECT wt.status,
                         (SELECT count(*) FROM horsies_workflow_phase2_pending p
                          WHERE p.task_id = $2)
@@ -1022,7 +1014,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn every_retaining_disposition_preserves_available_evidence() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
 
         let mut transaction = pool.begin().await.unwrap();
         let absent = consume_phase2(&mut transaction, Uuid::new_v4(), "FAILED")
@@ -1035,7 +1027,7 @@ mod tests {
         let source_absent_task = Uuid::new_v4();
         seed_workflow_task(&pool, source_absent_workflow, source_absent_task, false).await;
         terminalize_workflow_task(&pool, source_absent_task).await;
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_workflow_phase2_pending
              SET history_anchor = history_anchor + INTERVAL '90 days'
              WHERE task_id = $1",
@@ -1053,7 +1045,7 @@ mod tests {
             Phase2DispositionKind::SourceAbsent
         );
         transaction.commit().await.unwrap();
-        let still_pending: bool = sqlx::query_scalar(
+        let still_pending: bool = sql::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = $1)",
         )
         .bind(source_absent_task)
@@ -1067,7 +1059,7 @@ mod tests {
         let version_task = Uuid::new_v4();
         seed_workflow_task(&pool, version_workflow, version_task, false).await;
         terminalize_workflow_task(&pool, version_task).await;
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_workflow_phase2_pending
              SET history_schema_version = 2 WHERE task_id = $1",
         )
@@ -1084,7 +1076,7 @@ mod tests {
             Phase2DispositionKind::SourceVersionConflict
         );
         transaction.commit().await.unwrap();
-        let still_pending: bool = sqlx::query_scalar(
+        let still_pending: bool = sql::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = $1)",
         )
         .bind(version_task)
@@ -1099,19 +1091,19 @@ mod tests {
         seed_workflow_task(&pool, state_workflow, state_task, false).await;
         terminalize_workflow_task(&pool, state_task).await;
         let mut transaction = pool.begin().await.unwrap();
-        sqlx::query(
+        sql::query(
             "ALTER TABLE horsies_workflow_phase2_pending
              DROP CONSTRAINT horsies_workflow_phase2_pending_node_fkey",
         )
-        .execute(transaction.as_mut())
+        .execute(&mut *transaction)
         .await
         .unwrap();
-        sqlx::query(
+        sql::query(
             "DELETE FROM horsies_workflow_tasks
              WHERE workflow_id = $1 AND task_index = 0",
         )
         .bind(state_workflow)
-        .execute(transaction.as_mut())
+        .execute(&mut *transaction)
         .await
         .unwrap();
         let state = consume_phase2(&mut transaction, state_task, "FAILED")
@@ -1121,11 +1113,11 @@ mod tests {
             state.disposition,
             Phase2DispositionKind::SourceStateConflict
         );
-        let still_pending: bool = sqlx::query_scalar(
+        let still_pending: bool = sql::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = $1)",
         )
         .bind(state_task)
-        .fetch_one(transaction.as_mut())
+        .fetch_one(&mut *transaction)
         .await
         .unwrap();
         assert!(still_pending);
@@ -1135,13 +1127,12 @@ mod tests {
 
     /// The recovery reads the record's kind (the baseline record has no
     /// status column) and recovers a `FAIL_RUNNING` record with the FAILED
-    /// node status (Python `core/workflows/phase2_recovery.py`, discovery and
-    /// `terminal_status_of_pending_kind`).
+    /// node status.
     #[tokio::test]
     #[serial]
     async fn recovery_reads_the_kind_of_a_failure_record_and_fails_its_node() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
+        let pool = crate::test_support::migrated_pool().await;
+        sql::query("DELETE FROM horsies_workflow_phase2_pending")
             .execute(&pool)
             .await
             .expect("clear pending rows before global recovery");
@@ -1165,7 +1156,7 @@ mod tests {
             outcomes.as_slice(),
             [TerminalizationOutcome::Applied { .. }]
         ));
-        let kind: String = sqlx::query_scalar(
+        let kind: String = sql::query_scalar(
             "UPDATE horsies_workflow_phase2_pending
              SET created_at = NOW() - INTERVAL '1 hour'
              WHERE task_id = $1
@@ -1178,8 +1169,8 @@ mod tests {
         assert_eq!(kind, "FAIL_RUNNING");
 
         let summary = drive_phase2_recovery_with(
-            &PostgresBroker::from_pool(pool.clone()),
-            ChildBuild::Client(&TestChildSpecs::empty()),
+            &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
+            &TestChildSpecs::empty(),
             0,
             1,
             25,
@@ -1188,12 +1179,12 @@ mod tests {
         .expect("recovery pass");
 
         let node_status: String =
-            sqlx::query_scalar("SELECT status FROM horsies_workflow_tasks WHERE task_id = $1")
+            sql::query_scalar("SELECT status FROM horsies_workflow_tasks WHERE task_id = $1")
                 .bind(task_id)
                 .fetch_one(&pool)
                 .await
                 .expect("read the node");
-        let records: i64 = sqlx::query_scalar(
+        let records: i64 = sql::query_scalar(
             "SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1",
         )
         .bind(task_id)
@@ -1211,14 +1202,14 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn discovery_is_oldest_first_strictly_graced_and_capped() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let mut cases = Vec::new();
         for age in ["3 hours", "2 hours", "1 minute"] {
             let workflow_id = Uuid::new_v4();
             let task_id = Uuid::new_v4();
             seed_workflow_task(&pool, workflow_id, task_id, false).await;
             terminalize_workflow_task(&pool, task_id).await;
-            sqlx::query(
+            sql::query(
                 "UPDATE horsies_workflow_phase2_pending
                  SET result_digest = decode(repeat('ff', 32), 'hex'),
                      created_at = NOW() - $2::interval
@@ -1237,7 +1228,7 @@ mod tests {
             .expect("graced recovery pass");
         assert_eq!(summary.considered, 1);
         assert_eq!(summary.retained, 1);
-        let attempts: Vec<i32> = sqlx::query_scalar(
+        let attempts: Vec<i32> = sql::query_scalar(
             "SELECT attempt_count FROM horsies_workflow_phase2_pending
              WHERE task_id = ANY($1::uuid[])
              ORDER BY created_at, task_id",
@@ -1260,8 +1251,7 @@ mod tests {
     /// The quarantine step of the recovery loop on the baseline function
     /// (#861): a row whose consumption keeps retaining is quarantined at the
     /// attempt bound, and its pending row points at the verified copy.
-    /// Python: `python/horsies/core/workflows/phase2_recovery.py:681-725`
-    /// (`_quarantine_exhausted_row`). The history row and the pending row
+    /// The history row and the pending row
     /// agree on schema version 2: the consumer refuses it
     /// (`SOURCE_VERSION_CONFLICT`), and the copy check accepts it. Two earlier
     /// passes retained the row; this pass reaches the bound of 3, the smallest
@@ -1269,8 +1259,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn the_recovery_loop_quarantines_a_retaining_row_at_the_attempt_bound() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
+        let pool = crate::test_support::migrated_pool().await;
+        sql::query("DELETE FROM horsies_workflow_phase2_pending")
             .execute(&pool)
             .await
             .expect("clear pending rows before global recovery");
@@ -1278,14 +1268,12 @@ mod tests {
         let task_id = Uuid::new_v4();
         seed_workflow_task(&pool, workflow_id, task_id, false).await;
         terminalize_workflow_task(&pool, task_id).await;
-        sqlx::query(
-            "UPDATE horsies_task_history SET history_schema_version = 2 WHERE task_id = $1",
-        )
-        .bind(task_id)
-        .execute(&pool)
-        .await
-        .expect("set the history schema version");
-        sqlx::query(
+        sql::query("UPDATE horsies_task_history SET history_schema_version = 2 WHERE task_id = $1")
+            .bind(task_id)
+            .execute(&pool)
+            .await
+            .expect("set the history schema version");
+        sql::query(
             "UPDATE horsies_workflow_phase2_pending
              SET history_schema_version = 2
              WHERE task_id = $1",
@@ -1297,8 +1285,8 @@ mod tests {
         store_prior_attempts(&pool, task_id, 2, "SOURCE_VERSION_CONFLICT").await;
 
         let summary = drive_phase2_recovery_with(
-            &PostgresBroker::from_pool(pool.clone()),
-            ChildBuild::Client(&TestChildSpecs::empty()),
+            &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
+            &TestChildSpecs::empty(),
             0,
             1,
             3,
@@ -1312,7 +1300,7 @@ mod tests {
         assert_eq!(summary.quarantined, 1, "{summary:?}");
         assert!(summary.quarantine_refusals.is_empty(), "{summary:?}");
         let (source, attempts, failure_class, copies): (String, i32, Option<String>, i64) =
-            sqlx::query_as(
+            sql::query_as(
                 "SELECT p.recovery_source, p.attempt_count, p.last_failure_class,
                         (SELECT count(*) FROM horsies_workflow_phase2_quarantine AS q
                          WHERE q.task_id = p.task_id)
@@ -1337,8 +1325,8 @@ mod tests {
     /// A trigger that raises with `sqlstate` when a node of `workflow_id` is
     /// written COMPLETED: the recovery step of the record raises, and a limit
     /// write (FAILED) does not.
-    async fn fail_completion_of(pool: &PgPool, name: &str, workflow_id: Uuid, sqlstate: &str) {
-        sqlx::query(&format!(
+    async fn fail_completion_of(pool: &TestPool, name: &str, workflow_id: Uuid, sqlstate: &str) {
+        sql::query(&format!(
             "CREATE OR REPLACE FUNCTION {name}() RETURNS trigger
              LANGUAGE plpgsql AS $body$
              BEGIN
@@ -1352,7 +1340,7 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
-        sqlx::query(&format!(
+        sql::query(&format!(
             "CREATE TRIGGER {name} BEFORE UPDATE ON horsies_workflow_tasks
              FOR EACH ROW EXECUTE FUNCTION {name}()",
         ))
@@ -1361,12 +1349,12 @@ mod tests {
         .unwrap();
     }
 
-    async fn drop_trigger(pool: &PgPool, name: &str) {
-        sqlx::query(&format!("DROP TRIGGER {name} ON horsies_workflow_tasks"))
+    async fn drop_trigger(pool: &TestPool, name: &str) {
+        sql::query(&format!("DROP TRIGGER {name} ON horsies_workflow_tasks"))
             .execute(pool)
             .await
             .unwrap();
-        sqlx::query(&format!("DROP FUNCTION {name}()"))
+        sql::query(&format!("DROP FUNCTION {name}()"))
             .execute(pool)
             .await
             .unwrap();
@@ -1376,8 +1364,8 @@ mod tests {
     /// any grace, with `attempts` stored. Earlier attempts were raises: a
     /// record with attempts holds the time and the class of the last one
     /// (`horsies_workflow_phase2_pending_attempts`).
-    async fn lone_record(pool: &PgPool, workflow_id: Uuid, task_id: Uuid, attempts: i32) {
-        sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
+    async fn lone_record(pool: &TestPool, workflow_id: Uuid, task_id: Uuid, attempts: i32) {
+        sql::query("DELETE FROM horsies_workflow_phase2_pending")
             .execute(pool)
             .await
             .expect("clear pending rows before global recovery");
@@ -1390,12 +1378,12 @@ mod tests {
     /// one of `failure_class`, and ages the record past any grace. With no
     /// attempt, the time and the class stay NULL.
     async fn store_prior_attempts(
-        pool: &PgPool,
+        pool: &TestPool,
         task_id: Uuid,
         attempts: i32,
         failure_class: &str,
     ) {
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_workflow_phase2_pending
              SET attempt_count = $2,
                  last_attempt_at = CASE WHEN $2 = 0 THEN NULL ELSE NOW() - INTERVAL '30 minutes' END,
@@ -1412,8 +1400,8 @@ mod tests {
     }
 
     /// The recovery source of a record.
-    async fn recovery_source(pool: &PgPool, task_id: Uuid) -> String {
-        sqlx::query_scalar(
+    async fn recovery_source(pool: &TestPool, task_id: Uuid) -> String {
+        sql::query_scalar(
             "SELECT recovery_source FROM horsies_workflow_phase2_pending WHERE task_id = $1",
         )
         .bind(task_id)
@@ -1423,8 +1411,8 @@ mod tests {
     }
 
     /// The attempt count and failure class of a record.
-    async fn record_attempts(pool: &PgPool, task_id: Uuid) -> (i32, Option<String>) {
-        sqlx::query_as(
+    async fn record_attempts(pool: &TestPool, task_id: Uuid) -> (i32, Option<String>) {
+        sql::query_as(
             "SELECT attempt_count, last_failure_class
              FROM horsies_workflow_phase2_pending WHERE task_id = $1",
         )
@@ -1440,7 +1428,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_raise_at_the_bound_fails_the_workflow_closed_and_quarantines() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
         lone_record(&pool, workflow_id, task_id, 2).await;
@@ -1455,7 +1443,7 @@ mod tests {
             (1, 1, 1),
             "{summary:?}"
         );
-        let (status, error_json, node_status): (String, Option<String>, String) = sqlx::query_as(
+        let (status, error_json, node_status): (String, Option<String>, String) = sql::query_as(
             "SELECT w.status, w.error, n.status FROM horsies_workflows w
              JOIN horsies_workflow_tasks n ON n.workflow_id = w.id AND n.task_index = 0
              WHERE w.id = $1",
@@ -1481,7 +1469,7 @@ mod tests {
                 .and_then(|data| data.get("case").cloned()),
             Some(serde_json::json!("phase2_progression"))
         );
-        let (source, attempts): (String, i32) = sqlx::query_as(
+        let (source, attempts): (String, i32) = sql::query_as(
             "SELECT recovery_source, attempt_count
              FROM horsies_workflow_phase2_pending WHERE task_id = $1",
         )
@@ -1498,7 +1486,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_transient_raise_adds_no_attempt() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
         lone_record(&pool, workflow_id, task_id, 0).await;
@@ -1522,12 +1510,12 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_raise_at_the_bound_of_a_paused_workflow_is_not_recorded() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let broker = PostgresBroker::from_pool(pool.clone());
+        let pool = crate::test_support::migrated_pool().await;
+        let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
         let workflow_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
         lone_record(&pool, workflow_id, task_id, 2).await;
-        sqlx::query("UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = $1")
+        sql::query("UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = $1")
             .bind(workflow_id)
             .execute(&pool)
             .await
@@ -1546,7 +1534,7 @@ mod tests {
         );
         assert_eq!(recovery_source(&pool, task_id).await, source_before);
         let workflow_status: String =
-            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+            sql::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
                 .bind(workflow_id)
                 .fetch_one(&pool)
                 .await
@@ -1560,8 +1548,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_raise_under_the_bound_is_counted_and_a_gone_record_is_absent() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
-        let broker = PostgresBroker::from_pool(pool.clone());
+        let pool = crate::test_support::migrated_pool().await;
+        let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
         let workflow_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
         lone_record(&pool, workflow_id, task_id, 0).await;
@@ -1592,11 +1580,11 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn recovery_runs_the_child_start_that_its_record_owes() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         let task_id = Uuid::new_v4();
         lone_record(&pool, workflow_id, task_id, 0).await;
-        sqlx::query(
+        sql::query(
             "INSERT INTO horsies_workflow_tasks (
                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                 queue_name, priority, dependencies, allow_failed_deps, join_type, status,
@@ -1617,7 +1605,7 @@ mod tests {
         let summary = recovery_pass(&pool, 0, 10, 3).await.expect("recovery pass");
 
         assert_eq!((summary.applied, summary.failed), (1, 0), "{summary:?}");
-        let (status, result): (String, Option<String>) = sqlx::query_as(
+        let (status, result): (String, Option<String>) = sql::query_as(
             "SELECT status, result FROM horsies_workflow_tasks
              WHERE workflow_id = $1 AND task_index = 1",
         )
@@ -1775,8 +1763,10 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn each_raise_record_outcome_reads_into_its_variant() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
+        let broker = PostgresBroker::from_test_url(
+            crate::test_support::migrated_pool().await.url(),
+            crate::ClientFamily::Rust,
+        );
 
         let cases = [
             (
@@ -1865,7 +1855,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn recovery_writes_the_stored_error_of_a_failed_task_into_its_node() {
-        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let pool = crate::test_support::migrated_pool().await;
         let with_message =
             crate::core::TaskError::new("NODE_FAILURE", "the real one").expect("a user error code");
         let without_message = crate::core::TaskError {
@@ -1876,7 +1866,7 @@ mod tests {
             ("NODE_FAILURE", Some("the real one"), with_message),
             ("RATE_LIMITED", None, without_message),
         ] {
-            sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
+            sql::query("DELETE FROM horsies_workflow_phase2_pending")
                 .execute(&pool)
                 .await
                 .expect("clear pending rows before global recovery");
@@ -1901,7 +1891,7 @@ mod tests {
                 ),
                 "{code}: {outcomes:?}"
             );
-            sqlx::query(
+            sql::query(
                 "UPDATE horsies_workflow_phase2_pending
                  SET created_at = NOW() - INTERVAL '1 hour'
                  WHERE task_id = $1",
@@ -1912,8 +1902,8 @@ mod tests {
             .expect("age the phase-2 record");
 
             let summary = drive_phase2_recovery_with(
-                &PostgresBroker::from_pool(pool.clone()),
-                ChildBuild::Client(&TestChildSpecs::empty()),
+                &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
+                &TestChildSpecs::empty(),
                 0,
                 1,
                 25,
@@ -1921,7 +1911,7 @@ mod tests {
             .await
             .expect("recovery pass");
 
-            let (node_status, node_result): (String, Option<String>) = sqlx::query_as(
+            let (node_status, node_result): (String, Option<String>) = sql::query_as(
                 "SELECT status, result FROM horsies_workflow_tasks WHERE task_id = $1",
             )
             .bind(task_id)

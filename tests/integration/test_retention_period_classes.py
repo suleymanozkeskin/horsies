@@ -19,36 +19,21 @@ import uuid
 from datetime import timedelta
 from typing import Any
 
-import psycopg
 import pytest
-from pydantic import SecretStr
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.history.ddl.classes import (
-    ClassRegistered,
-    register_finite_retention_class,
-)
-from horsies.core.history.maintenance.coverage import (
-    CoverageEnsured,
-    ensure_partition_coverage,
-)
-from horsies.core.history.names import LEAF_CATALOG, RETENTION_CLASSES
 from horsies.core.history.periods import period_class_key
 from horsies.core.models.app import AppConfig
-from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import TaskNode
-from horsies.core.types.result import Ok, is_err, is_ok
+from horsies.core.types.result import is_err, is_ok
 from horsies.core.workflows.lifecycle import start_workflow_async
 from tests.broker_resources_support import current_resources
-from tests.integration.conftest import DB_URL
-from tests.integration.terminal_writes import complete_plain_task
 
 pytestmark = [
     pytest.mark.integration,
@@ -57,7 +42,6 @@ pytestmark = [
 
 _PERIOD = timedelta(days=7)
 _PERIOD_KEY = period_class_key(_PERIOD.days)
-WORKER = 'worker-retention-period-1'
 
 
 def _mapped_app(broker: PostgresBroker) -> tuple[Horsies, Any, Any]:
@@ -101,34 +85,6 @@ async def _row_class(engine: AsyncEngine, task_id: str) -> str | None:
                 {'task_id': task_id},
             )
         ).scalar_one()
-
-
-async def _forget(engine: AsyncEngine, key: str) -> None:
-    """Remove the class and every leaf a pass built for it.
-
-    The leaf catalog has a foreign key to the class, so the class row
-    goes last.
-    """
-    async with engine.begin() as connection:
-        leaves = (
-            await connection.execute(
-                text(f'SELECT leaf_name FROM {LEAF_CATALOG} WHERE class_key = :key'),
-                {'key': key},
-            )
-        ).scalars().all()
-        for leaf_name in leaves:
-            await connection.execute(text(f'DROP TABLE IF EXISTS {leaf_name} CASCADE'))
-        await connection.execute(
-            text(f'DELETE FROM {LEAF_CATALOG} WHERE class_key = :key'),
-            {'key': key},
-        )
-        await connection.execute(
-            text(f'DROP TABLE IF EXISTS horsies_task_history_{key} CASCADE')
-        )
-        await connection.execute(
-            text(f'DELETE FROM {RETENTION_CLASSES} WHERE class_key = :key'),
-            {'key': key},
-        )
 
 
 class TestEveryPathStampsThePeriodClass:
@@ -186,120 +142,4 @@ class TestEveryPathStampsThePeriodClass:
             ).scalar_one()
         assert stamped == _PERIOD_KEY
 
-    async def test_a_finished_row_lands_in_a_leaf_of_the_period_class(
-        self, broker: PostgresBroker,
-    ) -> None:
-        engine = current_resources(broker).engine
-        app, email_task, _alert_task = _mapped_app(broker)
-        async with engine.begin() as connection:
-            coverage = await ensure_partition_coverage(
-                connection,
-                history_horizon_days=2,
-                heartbeat_horizon_hours=6,
-                declared_classes=app.config.retention.registrable_classes(),
-            )
-        assert isinstance(coverage, CoverageEnsured), coverage
-        try:
-            sent = await email_task.send_async(x=5)
-            assert is_ok(sent), sent
-            task_id = sent.ok_value.task_id
-            async with engine.begin() as connection:
-                await connection.execute(
-                    text(
-                        "UPDATE horsies_tasks SET status = 'RUNNING', "
-                        'claimed_by_worker_id = :worker, claimed_at = NOW(), '
-                        'started_at = NOW(), worker_pid = 4242, '
-                        "worker_hostname = 'it-host', worker_process_name = 'it-proc' "
-                        'WHERE id = CAST(:task_id AS uuid)'
-                    ),
-                    {'task_id': task_id, 'worker': WORKER},
-                )
-                outcome = await complete_plain_task(
-                    connection, str(task_id), worker_id=WORKER, result_json='{"ok":5}'
-                )
-            assert outcome == 'APPLIED', outcome
-            async with engine.connect() as connection:
-                partition = (
-                    await connection.execute(
-                        text(
-                            'SELECT tableoid::regclass::text FROM horsies_task_history '
-                            'WHERE task_id = CAST(:task_id AS uuid)'
-                        ),
-                        {'task_id': task_id},
-                    )
-                ).scalar_one()
-            assert partition.startswith(f'horsies_task_history_{_PERIOD_KEY}_'), (
-                partition
-            )
-        finally:
-            await _forget(engine, _PERIOD_KEY)
 
-
-# A period whose key a pre-0.6.1 declaration held with another duration.
-_LEGACY_DAYS = 17
-_LEGACY_KEY = period_class_key(_LEGACY_DAYS)
-_LEGACY_DURATION = timedelta(days=5)
-
-
-def _app_mapping(days: int) -> Horsies:
-    return Horsies(
-        AppConfig(
-            queue_mode=QueueMode.DEFAULT,
-            broker=PostgresConfig(database_url=SecretStr(DB_URL)),
-            retention=RetentionConfig(
-                queue_retention={'default': timedelta(days=days)},
-            ),
-        )
-    )
-
-
-@pytest.mark.parametrize(
-    'registered',
-    [
-        pytest.param(timedelta(days=_LEGACY_DAYS), id='same-duration'),
-        pytest.param(None, id='not-registered'),
-    ],
-)
-async def test_a_broker_starts_with_its_period_key_registered_or_absent(
-    broker: PostgresBroker,
-    registered: timedelta | None,
-) -> None:
-    engine = current_resources(broker).engine
-    await _forget(engine, _LEGACY_KEY)
-    match registered:
-        case None:
-            pass
-        case duration:
-            async with engine.begin() as connection:
-                registration = await register_finite_retention_class(
-                    connection, class_key=_LEGACY_KEY, duration=duration,
-                )
-            assert isinstance(registration, ClassRegistered), registration
-    starting = PostgresBroker(PostgresConfig(database_url=SecretStr(DB_URL)))
-    starting.app = _app_mapping(_LEGACY_DAYS)
-    try:
-        initialized = await starting.ensure_schema_initialized()
-    finally:
-        await starting.close_async()
-        await _forget(engine, _LEGACY_KEY)
-    assert isinstance(initialized, Ok), initialized
-
-
-async def test_the_database_refuses_a_period_key_held_with_another_duration(
-    broker: PostgresBroker,
-) -> None:
-    """standard_17d holds 17 days: CHECK horsies_retention_classes_kind_shape.
-
-    Before the baseline such a row could exist and the broker refused to
-    start on it; now it cannot be stored.
-    """
-    engine = current_resources(broker).engine
-    await _forget(engine, _LEGACY_KEY)
-    with pytest.raises(IntegrityError) as refused:
-        async with engine.begin() as connection:
-            await register_finite_retention_class(
-                connection, class_key=_LEGACY_KEY, duration=_LEGACY_DURATION,
-            )
-    orig = refused.value.orig
-    assert isinstance(orig, psycopg.errors.CheckViolation), orig
-    assert orig.diag.constraint_name == 'horsies_retention_classes_kind_shape'

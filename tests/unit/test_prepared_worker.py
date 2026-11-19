@@ -5,6 +5,7 @@ a stop request never connects.
 
 from __future__ import annotations
 
+import json
 import threading
 from datetime import timedelta
 
@@ -17,7 +18,14 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import Execution
 from horsies.core.models.worker_profile import IsolatedChildren, WorkerProfile
-from horsies.core.worker_manifest import python_child_launch, to_worker_manifest
+from horsies.core.worker.config import ChildPreload
+from horsies.core.worker_manifest import (
+    CurrentDirectory,
+    child_argv,
+    child_sys_path,
+    python_child_launch,
+    to_worker_manifest,
+)
 
 
 class _Host:
@@ -58,10 +66,10 @@ def _manifest_json(profile: str | None) -> str:
         app_locator='app.main:app',
         imports=('app.tasks',),
         sys_path_roots=(),
-        parent_sys_path=(),
-        parent_argv=('horsies', 'worker'),
+        parent_sys_path=child_sys_path((), CurrentDirectory('/srv')),
+        parent_argv=child_argv(('horsies', 'worker')),
         log_level='INFO',
-    )
+    ).unwrap()
     manifest = to_worker_manifest(
         config,
         profile=profile,
@@ -75,6 +83,25 @@ def _manifest_json(profile: str | None) -> str:
 def test_a_known_profile_gives_a_prepared_worker() -> None:
     prepared = _core.prepare_worker(_manifest_json('small'), host=_Host())
     assert isinstance(prepared, _core.PreparedWorker)
+
+
+def test_a_default_python_profile_reaches_the_core_as_library() -> None:
+    """Python's default `preload` is `LIBRARY`, and the manifest carries it.
+    The core's own default (`NoPreload`, for a Rust profile) never applies to
+    a Python worker: the core takes the manifest with the key, and refuses the
+    same manifest without it."""
+    default_profile = WorkerProfile(isolated=IsolatedChildren(count=1))
+    assert default_profile.preload is ChildPreload.LIBRARY
+    manifest_json = _manifest_json('small')
+    document = json.loads(manifest_json)
+    assert document['profiles']['small']['preload'] == 'LIBRARY'
+    prepared = _core.prepare_worker(manifest_json, host=_Host())
+    assert isinstance(prepared, _core.PreparedWorker)
+
+    del document['profiles']['small']['preload']
+    with pytest.raises(_core.ManifestRefused) as refused:
+        _core.prepare_worker(json.dumps(document), host=_Host())
+    assert str(refused.value.args[0]).startswith('profiles.small')
 
 
 def test_an_unknown_profile_is_refused_with_the_report_lines() -> None:

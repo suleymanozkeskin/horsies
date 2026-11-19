@@ -10,32 +10,22 @@ that the broker flag genuinely suppresses the DDL seam.
 
 from __future__ import annotations
 
-from typing import Any
+import logging
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-import psycopg
 import pytest
 from pydantic import SecretStr
 
-from horsies.core.app import Horsies
+from horsies._core import SchemaStatusRecord, TooManyPendingCalls
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.baseline.migration import BASELINE_VERSION
 from horsies.web.schema import (
     EXPECTED_SCHEMA_VERSION,
-    SCHEMA_INCOMPATIBLE,
-    SCHEMA_UNKNOWN,
-    SchemaIncompatible,
     SchemaProbe,
     SchemaState,
     SchemaStatus,
-    classify_stored_version,
-    classify_without_migrations,
 )
-from tests.broker_resources_support import resources_of
-from tests.dualrun.reference.web_guards import schema_guard
 
 pytestmark = [pytest.mark.unit]
 
@@ -77,39 +67,6 @@ class TestSchemaStatus:
         assert status(SchemaState.ABSENT, None).compatible is False
         assert status(SchemaState.ZERO_X, None).compatible is False
         assert status(SchemaState.UNKNOWN, None).compatible is False
-
-
-class TestClassification:
-    """What each set of catalog facts means."""
-
-    def test_no_bookkeeping_at_all_is_absent(self) -> None:
-        assert classify_without_migrations(schema_version_table=False) == status(
-            SchemaState.ABSENT, None,
-        )
-
-    def test_the_0x_python_bookkeeping_alone_is_a_0x_schema(self) -> None:
-        """horsies_schema_version without horsies_migrations is horsies 0.x."""
-        assert classify_without_migrations(schema_version_table=True) == status(
-            SchemaState.ZERO_X, None,
-        )
-
-    def test_no_successful_migration_is_absent(self) -> None:
-        assert classify_stored_version(0) == status(SchemaState.ABSENT, None)
-
-    @pytest.mark.parametrize('stored', [1, 65, BASELINE_VERSION - 1])
-    def test_a_version_below_the_baseline_is_a_0x_schema(self, stored: int) -> None:
-        """horsies-rust 0.x records versions 1 to 65 in horsies_migrations."""
-        assert classify_stored_version(stored) == status(SchemaState.ZERO_X, stored)
-
-    def test_the_expected_version_matches(self) -> None:
-        assert classify_stored_version(EXPECTED_SCHEMA_VERSION) == status(
-            SchemaState.MATCH, EXPECTED_SCHEMA_VERSION,
-        )
-
-    def test_a_newer_version_is_a_mismatch(self) -> None:
-        assert classify_stored_version(EXPECTED_SCHEMA_VERSION + 1) == status(
-            SchemaState.MISMATCH, EXPECTED_SCHEMA_VERSION + 1,
-        )
 
 
 class TestProbeCaching:
@@ -182,108 +139,97 @@ class TestProbeFailureHandling:
         assert probe.reads == 3
 
 
-class TestSchemaGuard:
-    """The dependency every action route of the Python app inherited before
-    the switch (``tests/dualrun/reference/web_guards.py``)."""
+class TestProbeRead:
+    """The read is one core call (``CoreHandle.schema_status_async``); its
+    record decides the observation."""
 
     pytestmark = [asyncio_tests]
 
-    async def test_match_passes(self) -> None:
-        guard = schema_guard(StubProbe([status(SchemaState.MATCH, EXPECTED_SCHEMA_VERSION)]))
-
-        assert await guard() is None
-
-    async def test_mismatch_raises_with_both_versions_named(self) -> None:
-        guard = schema_guard(StubProbe([status(SchemaState.MISMATCH, 11)]))
-
-        with pytest.raises(SchemaIncompatible) as raised:
-            await guard()
-
-        assert 'v11' in raised.value.detail
-        assert f'v{EXPECTED_SCHEMA_VERSION}' in raised.value.detail
-
-    async def test_unknown_reports_reachability_not_a_missing_schema(self) -> None:
-        """The copy must never send an operator to initialize a live database."""
-        guard = schema_guard(StubProbe([status(SchemaState.UNKNOWN, None)]))
-
-        with pytest.raises(SchemaIncompatible) as raised:
-            await guard()
-
-        assert raised.value.code == SCHEMA_UNKNOWN
-        assert 'Cannot reach the database' in raised.value.detail
-        assert 'no horsies schema' not in raised.value.detail
-
-    async def test_absent_says_the_tool_will_not_create_it(self) -> None:
-        guard = schema_guard(StubProbe([status(SchemaState.ABSENT, None)]))
-
-        with pytest.raises(SchemaIncompatible) as raised:
-            await guard()
-
-        assert raised.value.code == SCHEMA_INCOMPATIBLE
-        assert 'no horsies schema' in raised.value.detail
-        assert 'never modifies the database schema' in raised.value.detail
-
-    async def test_a_0x_schema_names_the_new_database_remedy(self) -> None:
-        """A worker start cannot fix a 0.x database: the copy must not say so."""
-        guard = schema_guard(StubProbe([status(SchemaState.ZERO_X, None)]))
-
-        with pytest.raises(SchemaIncompatible) as raised:
-            await guard()
-
-        assert raised.value.code == SCHEMA_INCOMPATIBLE
-        assert 'horsies 0.x schema' in raised.value.detail
-        assert 'new database' in raised.value.detail
-        assert 'Start a horsies app or worker' not in raised.value.detail
-
-
-class TestNoDdlConstructionFlag:
-    """The flag that makes a broker structurally incapable of migrating."""
-
-    def test_default_preserves_existing_behaviour(self) -> None:
+    @staticmethod
+    def _probe(answer: object) -> tuple[SchemaProbe, PostgresBroker, MagicMock]:
+        """A probe, its broker, and the broker's core handle, which answers
+        ``answer``: a record, or an exception that the call raises."""
         broker = PostgresBroker(
-            PostgresConfig(database_url=SecretStr(DB_URL)), assume_initialized=True
+            PostgresConfig(database_url=SecretStr(DB_URL)), assume_initialized=True,
+        )
+        handle = MagicMock()
+        match answer:
+            case BaseException():
+                handle.schema_status_async = AsyncMock(side_effect=answer)
+            case _:
+                handle.schema_status_async = AsyncMock(return_value=answer)
+        broker._core_handle = handle
+        return SchemaProbe(broker), broker, handle
+
+    @staticmethod
+    def _record(state: str, version: int | None, expected_version: int) -> MagicMock:
+        return MagicMock(
+            spec=SchemaStatusRecord,
+            state=state,
+            version=version,
+            expected_version=expected_version,
         )
 
-        assert broker.run_schema_migrations is True
-
-    def test_flag_propagates_from_app_to_broker(self) -> None:
-        app = Horsies(
-            AppConfig(broker=PostgresConfig(database_url=SecretStr(DB_URL))),
-            run_schema_migrations=False,
+    @pytest.mark.parametrize(
+        ('state', 'version'),
+        [
+            (SchemaState.MATCH, EXPECTED_SCHEMA_VERSION),
+            (SchemaState.MISMATCH, EXPECTED_SCHEMA_VERSION + 1),
+            (SchemaState.ABSENT, None),
+            (SchemaState.ZERO_X, 65),
+            (SchemaState.ZERO_X, None),
+        ],
+    )
+    async def test_an_observed_state_is_the_observation_of_the_record(
+        self, state: SchemaState, version: int | None,
+    ) -> None:
+        """The state, the version and the expected version come from the core."""
+        expected_version = EXPECTED_SCHEMA_VERSION + 7
+        probe, _, handle = self._probe(
+            self._record(state.value, version, expected_version),
         )
 
-        assert app.get_broker().run_schema_migrations is False
+        observed = await probe._read()
 
-    def test_app_default_is_unchanged(self) -> None:
-        app = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(DB_URL))))
+        assert observed == SchemaStatus(
+            state=state, version=version, expected_version=expected_version,
+        )
+        handle.schema_status_async.assert_awaited_once_with()
 
-        assert app.get_broker().run_schema_migrations is True
-
-    @asyncio_tests
-    async def test_disabled_broker_runs_no_ddl_at_the_seam(self) -> None:
-        """The seam returns before opening a transaction, so nothing executes."""
-        broker = PostgresBroker(
-            PostgresConfig(database_url=SecretStr(DB_URL)),
-            assume_initialized=True,
-            run_schema_migrations=False,
+    async def test_unknown_is_a_failed_read_not_a_verdict(self) -> None:
+        """The core's UNKNOWN is a read that failed: None, and status() keeps
+        its rule for a failed read."""
+        probe, _, _ = self._probe(
+            self._record(SchemaState.UNKNOWN.value, None, EXPECTED_SCHEMA_VERSION),
         )
 
-        class ExplodingEngine:
-            def begin(self) -> Any:
-                raise AssertionError('the install seam opened a transaction')
+        assert await probe._read() is None
+        assert (await probe.status()).state is SchemaState.UNKNOWN
 
-        with patch(
-            'horsies.core.brokers.postgres.psycopg.AsyncConnection.connect',
-            new=AsyncMock(side_effect=AssertionError('the install seam connected')),
-        ):
-            await broker._maybe_run_schema_init(ExplodingEngine())  # type: ignore[arg-type]
+    async def test_a_core_that_cannot_run_the_read_is_a_failed_read(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A core boundary error is a failed read, logged with its type."""
+        refused = TooManyPendingCalls('CoreHandle.schema_status_async', 65_536)
+        probe, _, _ = self._probe(refused)
 
-    @asyncio_tests
-    async def test_enabled_broker_still_reaches_the_database(self) -> None:
-        """Control: with the flag on, the same call does try to connect."""
-        broker = PostgresBroker(
-            PostgresConfig(database_url=SecretStr(DB_URL)), assume_initialized=True
+        with caplog.at_level(logging.WARNING):
+            observed = await probe._read()
+
+        assert observed is None
+        assert any(
+            'Schema version probe failed: TooManyPendingCalls' in record.getMessage()
+            for record in caplog.records
         )
 
-        with pytest.raises(psycopg.OperationalError):
-            await broker._maybe_run_schema_init((await resources_of(broker)).engine)
+    async def test_a_defect_of_the_call_propagates(self) -> None:
+        """An exception that is not a CoreError is not a failed read."""
+        defect = TypeError('stub defect')
+        probe, _, _ = self._probe(defect)
+
+        with pytest.raises(TypeError) as raised:
+            await probe._read()
+
+        assert raised.value is defect
+
+

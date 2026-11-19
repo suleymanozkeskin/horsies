@@ -1,8 +1,7 @@
 //! The parent-child protocol: one codec for the worker parent, the preload
 //! process and every child, Python or Rust.
 //!
-//! A frame is a header, JSON metadata and a raw body (Python
-//! `core/worker/child_protocol.py`):
+//! A frame is a header, JSON metadata and a raw body:
 //!
 //! - Header: 12 bytes, `>IQ`: the metadata length as an unsigned 32-bit
 //!   number, then the body length as an unsigned 64-bit number, big-endian.
@@ -35,6 +34,10 @@
 //!   (TCP keepalives, TCP user timeout, and the server sessions of the URL).
 //! - `init` and `ready` carry `protocol`. Each side compares it before any
 //!   other field, so a mismatch is named, not read as a bad frame.
+//! - The result frames (`result`, `shared_result`) carry `child`:
+//!   `serves_on`, or `ends_itself` when the core of the child stopped and
+//!   the child ends itself once the frame is written. The parent sends no
+//!   run to a child that ends itself.
 //!
 //! This module does no I/O. [`FrameReader`] holds the read buffer of one
 //! channel; everything else is pure.
@@ -63,15 +66,16 @@ pub use bounds::{
 };
 pub use child_frames::{
     decode_child_frame, encode_child_frame, BodyEnd, BodyReturnedFrame, BootFailedFrame,
-    ChildFrame, ChildFrameRefusal, LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame,
-    LeftoverCancelFrame, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit, NoLeftWork, ReadyFrame,
-    ReportedBootCause, ResultFrame, RunEnd, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame,
-    ShortageErrno, StopReason,
+    ChildAfterFrame, ChildFrame, ChildFrameRefusal, LeftWorkEnd, LeftWorkEndedFrame,
+    LeftWorkStuckFrame, LeftoverCancelFrame, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit,
+    NoLeftWork, ReadyFrame, ReportedBootCause, ResultFrame, RunEnd, RunRef, RunStuckFrame, SeatEnd,
+    SharedResultFrame, ShortageErrno, StopReason,
 };
 pub use exit_codes::{
     ChildExitCode, BAD_ARGUMENTS_EXIT_CODE, BAD_PARENT_FRAME_EXIT_CODE, BOOT_FAILED_EXIT_CODE,
-    CHILD_HOOK_FAILED_EXIT_CODE, PARENT_GONE_EXIT_CODE, PROTOCOL_MISMATCH_EXIT_CODE,
-    REPARENT_FAILED_EXIT_CODE, STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
+    CHILD_HOOK_FAILED_EXIT_CODE, CORE_STOPPED_EXIT_CODE, PARENT_GONE_EXIT_CODE,
+    PROTOCOL_MISMATCH_EXIT_CODE, REPARENT_FAILED_EXIT_CODE,
+    STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
 };
 pub use header::{
     parse_header, EncodedFrame, FrameEncodeError, FrameOverBound, FrameSizes, HEADER_BYTES,

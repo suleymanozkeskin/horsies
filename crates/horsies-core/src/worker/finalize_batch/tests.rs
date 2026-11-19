@@ -1,5 +1,4 @@
-//! The finalize batcher on a scripted batch write (Python
-//! `tests/unit/test_finalize_batcher.py`).
+//! The finalize batcher on a scripted batch write.
 //!
 //! Each test drives [`FinalizeBatcher`] with a write that records each
 //! batch, counts the connections its writes hold (each write checks out one
@@ -1143,11 +1142,10 @@ async fn an_idle_batcher_holds_no_connection() {
 }
 
 // ---------------------------------------------------------------------------
-// The stop of the outcome writes (Python `tests/unit/test_worker_stop_ordering.py`)
+// The stop of the outcome writes
 // ---------------------------------------------------------------------------
 
-/// Python `test_stop_closes_the_finalize_batcher_after_the_finalizer_drain`:
-/// an outcome write that the drain cancels leaves its row in the batcher,
+/// An outcome write that the drain cancels leaves its row in the batcher,
 /// and the close, which runs after the drain, still writes that row.
 ///
 /// Time is paused: the drain bound passes at 50 ms with the write gated;

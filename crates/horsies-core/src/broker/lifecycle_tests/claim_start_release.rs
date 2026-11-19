@@ -5,7 +5,6 @@
 
 use chrono::Duration;
 use serial_test::serial;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::support::*;
@@ -15,8 +14,9 @@ use crate::broker::claims::{
     StartOutcome, StartWindow, WindowedStart,
 };
 use crate::broker::core_rows::StatementLog;
-use crate::broker::pools::core_pool_for_test_pool;
+use crate::broker::pools::core_pool_for_test_url;
 use crate::core::task::Execution;
+use crate::test_support::sql::{self, TestPool};
 
 const QUEUE: &str = "lifecycle_claim_start_release";
 
@@ -55,8 +55,8 @@ fn release(task_id: Uuid, placement: ReleasePlacement) -> ReleaseClaims {
     }
 }
 
-async fn runner_beats(pool: &PgPool, task_id: Uuid) -> i64 {
-    sqlx::query_scalar(
+async fn runner_beats(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar(
         "SELECT count(*) FROM horsies_heartbeats WHERE task_id = $1 AND role = 'runner'",
     )
     .bind(task_id)
@@ -77,7 +77,7 @@ mod claim {
         let task_id = seed_task(&pool, &pending("SHARED_THREAD")).await;
 
         let pass = claim_pass(
-            &core_pool_for_test_pool(&pool),
+            &core_pool_for_test_url(pool.url()),
             StatementLog::Off,
             &claim_request(QUEUE),
         )
@@ -112,9 +112,13 @@ mod claim {
             ..claim_request(QUEUE)
         };
 
-        let pass = claim_pass(&core_pool_for_test_pool(&pool), StatementLog::Off, &request)
-            .await
-            .expect("claim pass");
+        let pass = claim_pass(
+            &core_pool_for_test_url(pool.url()),
+            StatementLog::Off,
+            &request,
+        )
+        .await
+        .expect("claim pass");
 
         assert!(pass.claimed.iter().all(|row| row.id != task_id));
         assert_eq!(status_of(&pool, task_id).await, "PENDING");
@@ -135,7 +139,7 @@ mod start {
         let task_id = seed_task(&pool, &claimed()).await;
 
         let outcome = start_attempt(
-            &core_pool_for_test_pool(&pool),
+            &core_pool_for_test_url(pool.url()),
             StatementLog::Off,
             &start(task_id),
             crate::broker::child_writes::WriteDeadline::start_attempt(),
@@ -174,7 +178,7 @@ mod start {
         )
         .await;
         let lease_expired = seed_task(&pool, &claimed()).await;
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_tasks SET claim_expires_at = NOW() - interval '1 second'
              WHERE id = $1",
         )
@@ -194,7 +198,7 @@ mod start {
         ] {
             let before = live_row(&pool, task_id).await;
             let outcome = start_attempt(
-                &core_pool_for_test_pool(&pool),
+                &core_pool_for_test_url(pool.url()),
                 StatementLog::Off,
                 &start(task_id),
                 crate::broker::child_writes::WriteDeadline::start_attempt(),
@@ -220,7 +224,7 @@ mod start {
         let closed = seed_task(&pool, &claimed()).await;
         let still_open = seed_task(&pool, &claimed()).await;
         let open = seed_task(&pool, &claimed()).await;
-        let core_pool = core_pool_for_test_pool(&pool);
+        let core_pool = core_pool_for_test_url(pool.url());
 
         let before = live_row(&pool, closed).await;
         let passed = std::time::Instant::now()
@@ -292,9 +296,13 @@ mod release {
             placement: ReleasePlacement::SameClass,
         };
 
-        let outcomes = release_claims(&core_pool_for_test_pool(&pool), StatementLog::Off, &command)
-            .await
-            .expect("release");
+        let outcomes = release_claims(
+            &core_pool_for_test_url(pool.url()),
+            StatementLog::Off,
+            &command,
+        )
+        .await
+        .expect("release");
 
         assert_eq!(
             outcomes,
@@ -313,14 +321,13 @@ mod release {
     }
 
     /// A release clears every claim and run field and the finalizing
-    /// marker, as Python's `UNCLAIM_CLAIMED_TASK_SQL` (`core/worker/sql.py`):
-    /// a released PENDING row names no worker, no claim and no run.
+    /// marker: a released PENDING row names no worker, no claim and no run.
     #[tokio::test]
     #[serial]
     async fn a_release_clears_every_claim_and_run_field() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &claimed()).await;
-        sqlx::query(
+        sql::query(
             "UPDATE horsies_tasks
              SET started_at = NOW(), worker_pid = 321, worker_hostname = 'host1',
                  worker_process_name = 'worker', finalizing_at = NOW(),
@@ -334,7 +341,7 @@ mod release {
         .expect("stamp the run fields");
 
         let outcomes = release_claims(
-            &core_pool_for_test_pool(&pool),
+            &core_pool_for_test_url(pool.url()),
             StatementLog::Off,
             &release(task_id, ReleasePlacement::SameClass),
         )
@@ -380,7 +387,7 @@ mod release {
         .await;
 
         let outcomes = release_claims(
-            &core_pool_for_test_pool(&pool),
+            &core_pool_for_test_url(pool.url()),
             StatementLog::Off,
             &release(task_id, ReleasePlacement::Isolated),
         )
