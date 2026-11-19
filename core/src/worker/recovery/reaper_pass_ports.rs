@@ -13,9 +13,10 @@ use serial_test::serial;
 use uuid::Uuid;
 
 use super::*;
-use crate::broker::expiry_and_orphans::transitioned_count;
+use crate::broker::expiry_and_orphans::expired_tasks;
 use crate::broker::pools::core_pool_for_test_url;
 use crate::broker::BrokerError;
+use crate::core::lifecycle::MovedRow;
 use crate::core::lifecycle::TerminalizationOutcome;
 use crate::test_support::migrated_pool;
 use crate::test_support::sql::{self, TestPool};
@@ -660,7 +661,7 @@ async fn a_pending_expiry_pass_with_no_due_row_expires_none() {
     )
     .await;
 
-    let expired = expire_pending_pass(&core, StatementLog::Off)
+    let expired = expire_pending_pass(&core, StatementLog::Off, |_rows| {})
         .await
         .expect("the expiry pass");
 
@@ -681,12 +682,23 @@ async fn a_pending_expiry_pass_expires_each_due_row_with_task_expired() {
     let pool = migrated_pool().await;
     let core = core_pool_for_test_url(pool.url());
     let due = seed_tasks(&pool, &Seed::due_pending(), 3).await;
+    let mut handed_on: Vec<RecoveredTask> = Vec::new();
 
-    let expired = expire_pending_pass(&core, StatementLog::Off)
-        .await
-        .expect("the expiry pass");
+    let expired = expire_pending_pass(&core, StatementLog::Off, |rows| {
+        handed_on.extend_from_slice(rows);
+    })
+    .await
+    .expect("the expiry pass");
 
     assert_eq!(expired, PendingExpiryPass::Drained { expired: 3 });
+    let mut handed_on_ids: Vec<Uuid> = handed_on.iter().map(|task| task.task_id).collect();
+    let mut due_ids = due.clone();
+    handed_on_ids.sort();
+    due_ids.sort();
+    assert_eq!(handed_on_ids, due_ids);
+    assert!(handed_on
+        .iter()
+        .all(|task| task.task_name == "reaper_port" && task.queue_name == "default"));
     for task_id in due {
         let (status, _, error_code, result) = history_facts(&pool, task_id)
             .await
@@ -709,7 +721,7 @@ async fn a_pending_expiry_pass_runs_batches_until_a_short_one() {
     let core = core_pool_for_test_url(pool.url());
     let _due = seed_tasks(&pool, &Seed::due_pending(), 502).await;
 
-    let expired = expire_pending_pass(&core, StatementLog::Off)
+    let expired = expire_pending_pass(&core, StatementLog::Off, |_rows| {})
         .await
         .expect("the expiry pass");
 
@@ -729,16 +741,22 @@ async fn a_pending_expiry_pass_runs_batches_until_a_short_one() {
 /// outcome is a contract error.
 #[test]
 fn a_pending_expiry_batch_with_an_outcome_other_than_applied_is_a_contract_error() {
-    let refused = transitioned_count(&[TerminalizationOutcome::TaskAbsent {
-        task_id: Uuid::from_u128(7),
-        ordinality: None,
+    let refused = expired_tasks(&[MovedRow {
+        outcome: TerminalizationOutcome::TaskAbsent {
+            task_id: Uuid::from_u128(7),
+            ordinality: None,
+        },
+        task_name: "reaper_port".to_owned(),
+        queue_name: "default".to_owned(),
     }]);
 
     assert!(
         matches!(refused, Err(BrokerError::TerminalizationContract(_))),
         "{refused:?}"
     );
-    assert_eq!(transitioned_count(&[]).expect("no outcome is no move"), 0);
+    assert!(expired_tasks(&[])
+        .expect("no outcome is no move")
+        .is_empty());
 }
 
 /// Python `TestExpirePendingTasks::test_a_non_applied_batch_outcome_fails_closed`,
@@ -754,13 +772,19 @@ async fn a_pending_expiry_batch_with_an_outcome_other_than_applied_commits_nothi
          DROP FUNCTION horsies_expire_pending_tasks(integer, text, text);
          CREATE FUNCTION horsies_expire_pending_tasks(
              p_batch_size integer, p_result text, p_error_code text
-         ) RETURNS SETOF horsies_terminalization_outcome
+         ) RETURNS TABLE(
+             task_id uuid, ordinality bigint, outcome text, terminal_at timestamptz,
+             terminalization_kind text, observed_status text, observed_worker_id text,
+             observed_claimed_at timestamptz, guard_kind text, observed_guard jsonb,
+             task_name text, queue_name text
+         )
          LANGUAGE plpgsql AS $$
          BEGIN
              INSERT INTO expiry_batch_marker VALUES (TRUE);
              RETURN QUERY SELECT gen_random_uuid(), NULL::bigint, 'TASK_ABSENT'::text,
-                 NULL::timestamptz, NULL::text, NULL::text, NULL::varchar,
-                 NULL::timestamptz, NULL::text, NULL::jsonb;
+                 NULL::timestamptz, NULL::text, NULL::text, NULL::text,
+                 NULL::timestamptz, NULL::text, NULL::jsonb, 'reaper_port'::text,
+                 'default'::text;
          END
          $$;",
     )
@@ -769,7 +793,7 @@ async fn a_pending_expiry_batch_with_an_outcome_other_than_applied_commits_nothi
     .expect("replace the expiry batch function");
     let core = core_pool_for_test_url(pool.url());
 
-    let refused = expire_pending_pass(&core, StatementLog::Off).await;
+    let refused = expire_pending_pass(&core, StatementLog::Off, |_rows| {}).await;
 
     assert!(
         matches!(
@@ -798,7 +822,7 @@ async fn a_pending_expiry_pass_whose_batch_cannot_run_is_an_error() {
     let core = core_pool_for_test_url(pool.url());
     core.close();
 
-    let failed = expire_pending_pass(&core, StatementLog::Off).await;
+    let failed = expire_pending_pass(&core, StatementLog::Off, |_rows| {}).await;
 
     assert!(
         matches!(
@@ -823,7 +847,7 @@ async fn an_orphan_audit_with_no_orphan_cancels_none() {
     let core = core_pool_for_test_url(pool.url());
     let _sent = seed_task(&pool, &Seed::due_pending()).await;
 
-    let page = cancel_orphan_page(&core, StatementLog::Off)
+    let page = cancel_orphan_page(&core, StatementLog::Off, |_rows| {})
         .await
         .expect("the orphan audit");
 
@@ -853,15 +877,23 @@ async fn an_orphan_audit_cancels_and_counts_only_unlinked_workflow_tasks() {
     .await;
 
     let core = core_pool_for_test_url(pool.url());
+    let mut handed_on: Vec<RecoveredTask> = Vec::new();
 
-    let report = cancel_orphan_page(&core, StatementLog::Off)
-        .await
-        .expect("the orphan audit");
+    let report = cancel_orphan_page(&core, StatementLog::Off, |rows| {
+        handed_on.extend_from_slice(rows);
+    })
+    .await
+    .expect("the orphan audit");
 
     core.close();
     assert_eq!(report.rows_selected, 2);
     assert_eq!(report.candidates_returned, 2);
     assert_eq!(report.cancelled, 2);
+    let mut handed_on_ids: Vec<Uuid> = handed_on.iter().map(|task| task.task_id).collect();
+    let mut orphans = vec![pending, claimed];
+    handed_on_ids.sort();
+    orphans.sort();
+    assert_eq!(handed_on_ids, orphans);
     for task_id in [pending, claimed] {
         let (status, _, _, _) = history_facts(&pool, task_id)
             .await
@@ -883,15 +915,21 @@ async fn an_orphan_audit_with_an_outcome_other_than_applied_fails_and_commits_no
     sql::raw_sql(
         "DROP FUNCTION horsies_cancel_orphaned_tasks(integer);
          CREATE FUNCTION horsies_cancel_orphaned_tasks(p_batch_size integer)
-         RETURNS SETOF horsies_terminalization_outcome
+         RETURNS TABLE(
+             task_id uuid, ordinality bigint, outcome text, terminal_at timestamptz,
+             terminalization_kind text, observed_status text, observed_worker_id text,
+             observed_claimed_at timestamptz, guard_kind text, observed_guard jsonb,
+             task_name text, queue_name text
+         )
          LANGUAGE plpgsql AS $$
          BEGIN
              UPDATE horsies_recovery_scan_cursors
              SET last_scan_rows = 1, last_candidate_rows = 1, last_scan_at = now()
              WHERE scan_name = 'orphan_workflow_tasks';
              RETURN QUERY SELECT gen_random_uuid(), NULL::bigint, 'TASK_ABSENT'::text,
-                 NULL::timestamptz, NULL::text, NULL::text, NULL::varchar,
-                 NULL::timestamptz, NULL::text, NULL::jsonb;
+                 NULL::timestamptz, NULL::text, NULL::text, NULL::text,
+                 NULL::timestamptz, NULL::text, NULL::jsonb, 'reaper_port'::text,
+                 'default'::text;
          END
          $$;",
     )
@@ -901,7 +939,7 @@ async fn an_orphan_audit_with_an_outcome_other_than_applied_fails_and_commits_no
 
     let core = core_pool_for_test_url(pool.url());
 
-    let refused = cancel_orphan_page(&core, StatementLog::Off).await;
+    let refused = cancel_orphan_page(&core, StatementLog::Off, |_rows| {}).await;
 
     core.close();
     assert!(
@@ -931,11 +969,80 @@ async fn an_orphan_audit_whose_page_cannot_run_is_an_error() {
     let closed = core_pool_for_test_url(pool.url());
     closed.close();
 
-    let failed = cancel_orphan_page(&closed, StatementLog::Off).await;
+    let failed = cancel_orphan_page(&closed, StatementLog::Off, |_rows| {}).await;
 
     assert!(
         matches!(failed, Err(BrokerError::Statement(_))),
         "{failed:?}"
     );
     assert_eq!(live_status(&pool, orphan).await.as_deref(), Some("PENDING"));
+}
+
+/// The recovery events of `task_ids` in `events`: the task id and the
+/// action of each, sorted by task id. The shared test database can hold rows
+/// of other tests, whose events are left out.
+fn recoveries_of(
+    events: Vec<crate::events::Event>,
+    task_ids: &[Uuid],
+) -> Vec<(Uuid, RecoveryAction)> {
+    let mut told: Vec<(Uuid, RecoveryAction)> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            crate::events::Event::TaskRecovered(recovered)
+                if task_ids.contains(&recovered.task_id) =>
+            {
+                Some((recovered.task_id, recovered.action))
+            }
+            _ => None,
+        })
+        .collect();
+    told.sort_by_key(|(task_id, _)| *task_id);
+    told
+}
+
+/// With telemetry on, a reaper pass tells each row that its pending expiry
+/// and its orphan audit moved once: the due PENDING row as
+/// `PendingExpired`, the unlinked workflow task as `OrphanCancelled`, each
+/// counted under its action.
+#[tokio::test]
+#[serial]
+async fn a_reaper_pass_tells_each_expired_and_cancelled_row_once() {
+    let pool = migrated_pool().await;
+    let due = seed_task(&pool, &Seed::due_pending()).await;
+    let orphan = seed_task(&pool, &Seed::unlinked_workflow_task("PENDING")).await;
+    let mut watched = crate::test_support::telemetry::WatchedTelemetry::new();
+    let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(3_600);
+    let mut next_partition_maintenance = MaintenanceDue::after(Duration::from_secs(3_600));
+
+    run_reaper_pass(
+        &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
+        crate::test_support::child_specs::no_child_specs().as_ref(),
+        &RecoveryConfig::default(),
+        &RetentionConfig::default(),
+        &new_reaper_health(),
+        &mut next_retention_cleanup,
+        &mut next_partition_maintenance,
+        &mut OrphanSweepState::default(),
+        &mut UnheldOwners::default(),
+        &mut RecoveryFailures::new(crate::telemetry::registry::OptionalCounter::NotRecorded),
+        &watched.telemetry,
+    )
+    .await;
+
+    let mut expected = vec![
+        (due, RecoveryAction::PendingExpired),
+        (orphan, RecoveryAction::OrphanCancelled),
+    ];
+    expected.sort_by_key(|(task_id, _)| *task_id);
+    assert_eq!(recoveries_of(watched.events(), &[due, orphan]), expected);
+    let counted: Vec<String> = watched
+        .series(crate::telemetry::catalog::MetricId::RecoveryTasks)
+        .into_iter()
+        .map(|(labels, _)| labels.join(","))
+        .collect();
+    assert!(
+        counted.contains(&"pending_expired".to_owned())
+            && counted.contains(&"orphan_cancelled".to_owned()),
+        "{counted:?}"
+    );
 }

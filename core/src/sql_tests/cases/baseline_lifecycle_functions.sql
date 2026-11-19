@@ -2280,6 +2280,13 @@ SELECT lc_expect(
         || '00000000-0000-7000-8000-000000009011|APPLIED|EXPIRE_PENDING|PENDING|t|text'
 );
 SELECT lc_expect(
+    'expire pending: each row names the task name and the queue of the moved row',
+    (SELECT string_agg(concat_ws('|', right(task_id::text, 4), task_name, queue_name), ',' ORDER BY position)
+     FROM lc_expired
+     WHERE task_id IN ('00000000-0000-7000-8000-000000009011', '00000000-0000-7000-8000-000000009012')),
+    '9012|lc.task|q_lc,9011|lc.task|q_lc'
+);
+SELECT lc_expect(
     'expire pending: a row not due stays PENDING',
     (SELECT status FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000009013'),
     'PENDING'
@@ -2332,6 +2339,12 @@ SELECT lc_expect(
     (SELECT concat_ws('|', outcome, terminalization_kind, observed_status, pg_typeof(observed_worker_id)::text)
      FROM lc_swept WHERE task_id = '00000000-0000-7000-8000-000000009031'),
     'APPLIED|CANCEL_ORPHAN_SWEEP|PENDING|text'
+);
+SELECT lc_expect(
+    'orphan sweep: each row names the task name and the queue of the moved row',
+    (SELECT concat_ws('|', task_name, queue_name) FROM lc_swept
+     WHERE task_id = '00000000-0000-7000-8000-000000009031'),
+    'lc.task|q_lc'
 );
 SELECT lc_expect(
     'orphan sweep: a workflow task with a runnable node stays live',

@@ -1105,14 +1105,14 @@ mod round_trips {
         let pool = pool().await;
         drain_pending_expiry(&pool).await;
         let counted = counted_pool(&pool).await;
-        let _warm_up = expire_pending_pass(&counted.pool, StatementLog::Off)
+        let _warm_up = expire_pending_pass(&counted.pool, StatementLog::Off, |_rows| {})
             .await
             .expect("warm up");
         let task_id = seed_task(&pool, &TaskSeed::pending()).await;
         set_deadline(&pool, task_id, Deadline::PassedSecondsAgo(1.0)).await;
 
         counted.proxy.reset_round_trips();
-        let expired = expire_pending_pass(&counted.pool, StatementLog::Off)
+        let expired = expire_pending_pass(&counted.pool, StatementLog::Off, |_rows| {})
             .await
             .expect("pending expiry");
 

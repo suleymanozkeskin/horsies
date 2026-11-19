@@ -1282,7 +1282,12 @@ async fn run_reaper_pass(
             // One page on the main core pool with the reserve, in one
             // transaction with its cursor counts.
             let page = match broker.core_pools_for_write() {
-                Ok((open, _write)) => cancel_orphan_page(open.main(), broker.statement_log()).await,
+                Ok((open, _write)) => {
+                    let told = |cancelled: &[RecoveredTask]| {
+                        telemetry.tasks_recovered(cancelled, RecoveryAction::OrphanCancelled);
+                    };
+                    cancel_orphan_page(open.main(), broker.statement_log(), told).await
+                }
                 Err(error) => Err(error),
             };
             match page.map(|page| OrphanTaskAuditReport::ready(page, started)) {
@@ -1365,7 +1370,12 @@ async fn run_reaper_pass(
     // Expire unclaimed PENDING tasks whose good_until has passed, on the
     // main core pool with the reserve.
     let expired = match broker.core_pools_for_write() {
-        Ok((open, _write)) => expire_pending_pass(open.main(), broker.statement_log()).await,
+        Ok((open, _write)) => {
+            let told = |expired: &[RecoveredTask]| {
+                telemetry.tasks_recovered(expired, RecoveryAction::PendingExpired);
+            };
+            expire_pending_pass(open.main(), broker.statement_log(), told).await
+        }
         Err(error) => Err(PendingExpiryFailed {
             expired_before: 0,
             error,
