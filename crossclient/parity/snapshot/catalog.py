@@ -355,6 +355,33 @@ SLOTS_DOWN: Final = StoredJson(
 )
 """Down slots of a worker; ``down_since`` is a run clock value."""
 
+WORKER_TELEMETRY: Final = StoredJson(
+    storage=JsonStorage.TEXT,
+    format=Unversioned(),
+    paths=(
+        JsonPath(
+            steps=(Key(name='endpoint'), Key(name='down_since')),
+            rule=JsonTime(encoding=TimeEncoding.ISO_TEXT, rule=RUN_CLOCK),
+        ),
+        JsonPath(
+            steps=(Key(name='handler_child'), Key(name='down_since')),
+            rule=JsonTime(encoding=TimeEncoding.ISO_TEXT, rule=RUN_CLOCK),
+        ),
+        JsonPath(
+            steps=(Key(name='handler_child'), Key(name='pid')),
+            rule=Ignored(
+                reason=(
+                    'the process id of the handler child of the worker; each run starts '
+                    'its own processes'
+                ),
+            ),
+        ),
+    ),
+)
+"""The state of the metrics endpoint and of the handler child of a worker
+(``endpoint``, ``handler_child``); each ``down_since`` is a run clock value
+and the process id of the handler child is not compared."""
+
 
 def anchored(column: str, when_anchor_null: AnchorNull) -> TimeWithin:
     """An offset from ``column`` of the same row, within ``ANCHOR_TOLERANCE``."""
@@ -703,6 +730,7 @@ _WORKER_STATES: Final = TableRules(
         ('worker_started_at', RUN_CLOCK),
         ('slots_down', SLOTS_DOWN),
         ('class_capacity', JSON),
+        ('telemetry', WORKER_TELEMETRY),
     ),
     order_by=('worker_id', 'hostname', 'pid', 'snapshot_at'),
     identity=('worker_id', 'snapshot_at'),
