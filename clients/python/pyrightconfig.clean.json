@@ -99,7 +99,11 @@
     "tests/unit/test_generated_events.py",
     "horsies/core/telemetry",
     "horsies/core/models/tracing.py",
-    "tests/unit/test_tracing_config.py"
+    "tests/unit/test_tracing_config.py",
+    "horsies/core/models/log_format.py",
+    "horsies/core/logging.py",
+    "tests/unit/test_attempt_span.py",
+    "tests/unit/test_task_log_context.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error",
   "executionEnvironments": [

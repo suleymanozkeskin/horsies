@@ -28,7 +28,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Final, Generator
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from pydantic import BaseModel, SecretStr, field_validator
@@ -40,6 +40,8 @@ from horsies.core.codec.json_io import SerializationError, loads_json
 from horsies.core.codec.typed import decode_task_result
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.log_format import TextLogs
+from horsies.core.models.tracing import NoTracing
 from horsies.core.models.tasks import (
     MAX_CANCEL_GRACE_MS,
     MAX_TASK_TIMEOUT_MS,
@@ -59,7 +61,7 @@ from horsies.core.worker.stored_timeout import (
 from horsies.core.task_decorator import TaskBodyKind
 from horsies.core.models.boot_failure import AppLoadFailed
 from horsies.core.worker.task_loop import AsyncTaskPresence, LoopOpen, TaskLoop
-from horsies.core.worker.child_frames import BootFailedFrame
+from horsies.core.worker.child_frames import BootFailedFrame, NoTraceCarrier
 from horsies.core.worker.child_main import boot_app
 from horsies.core.worker.child_runner import (
     RunTheTask,
@@ -69,7 +71,13 @@ from horsies.core.worker.child_runner import (
     _serialization_error_response,
     attempt_elapsed_ms,
 )
-from horsies.core.worker.run_return import SetRunning, StartedRunning, StoppedBeforeRunning
+from horsies.core.worker.run_return import (
+    NothingRaised,
+    ResultFailed,
+    SetRunning,
+    StartedRunning,
+    StoppedBeforeRunning,
+)
 from tests.fixtures.core_frames import init_frame, isolated_kind, pool
 from tests.fixtures.run_return import envelope_of
 
@@ -222,14 +230,16 @@ class TestSerializationErrorResponse:
 
     def test_returns_the_error_envelope_with_the_message(self) -> None:
         error = SerializationError('bad json input')
-        payload = _serialization_error_response('my_task', error).text
+        encoded = _serialization_error_response('my_task', error)
+        payload = encoded.envelope.text
 
         assert _error_code(payload) == _SERIALIZATION_ERROR
+        assert encoded.outcome == ResultFailed('WORKER_SERIALIZATION_ERROR', NothingRaised())
         assert _error_message(payload) == 'bad json input'
 
     def test_includes_task_name_in_data(self) -> None:
         error = SerializationError('corrupt')
-        payload = _serialization_error_response('process_order', error).text
+        payload = _serialization_error_response('process_order', error).envelope.text
 
         parsed = _parse_task_result(payload)
         err_data = parsed.get('err') or parsed.get('error')
@@ -317,6 +327,8 @@ class TestChildBoot:
     ) -> dict[str, Any]:
         """Build a dict of mock objects for all dependencies of the boot."""
         mock_app = MagicMock()
+        mock_app.config.tracing = NoTracing()
+        mock_app.config.log_format = TextLogs()
         if app_tasks is not None:
             mock_app.tasks.keys_list.return_value = list(app_tasks.keys())
             mock_app.tasks.keys.return_value = app_tasks.keys()
@@ -368,7 +380,8 @@ class TestChildBoot:
 
         assert booted == Ok(AsyncTaskPresence.NO_ASYNC_TASK)
         mock_restore.assert_called_once_with(init)
-        mock_set_level.assert_called_once_with(20)
+        # Once before the app is located, once with its log format.
+        assert mock_set_level.call_args_list == [call(20), call(20, log_format=TextLogs())]
         mock_locate_app.assert_called_once_with('mymod:app')
         mock_set_current.assert_called_once_with(mocks['app'])
         mock_import_module.assert_any_call('extra_mod')
@@ -864,6 +877,7 @@ def _run_entry_defaults() -> dict[str, Any]:
         'claimed_at': CLAIMED_AT,
         'task_loop': TaskLoop(),
         'orphan_self_heal': True,
+        'trace': NoTraceCarrier(),
     }
 
 
