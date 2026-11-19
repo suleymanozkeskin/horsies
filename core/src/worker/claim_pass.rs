@@ -30,6 +30,7 @@ use crate::broker::{BrokerError, PostgresBroker};
 use crate::core::task::Execution;
 use crate::telemetry::labels::ReleaseReason;
 use crate::telemetry::worker::WorkerTelemetry;
+use crate::worker::executor::slots::dispatch::attempt_of;
 
 #[cfg(test)]
 mod tests;
@@ -293,6 +294,8 @@ async fn return_rows_of_another_class<S: ClaimPassSteps>(
         };
         tracing::warn!(
             task_id = %row.id,
+            attempt = attempt_of(row.retry_count).get(),
+            trace_id = row.trace_id.log_field(),
             "Task {} ({}) stores execution {}, and the registered function is {} on this \
              worker; {done}",
             row.id,

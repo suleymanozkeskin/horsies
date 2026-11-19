@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use super::board::{PoolBoard, PoolHealth, SlotPhase};
 use super::budgets::SlotService;
-use super::dispatch::{AttemptEnd, ClaimedTask, ExecutionClass, NotRunCause};
+use super::dispatch::{AttemptEnd, AttemptLog, ClaimedTask, ExecutionClass, NotRunCause};
 use super::isolated::run_slot;
 use super::route::IsolatedDeadline;
 use crate::broker::OrphanSelfHeal;
@@ -235,6 +235,8 @@ pub(super) struct QueuedRun {
     pub(super) frame: RunFrame,
     pub(super) deadline: IsolatedDeadline,
     pub(super) answer: Answer,
+    /// The log fields of the attempt.
+    pub(super) log: AttemptLog,
 }
 
 /// The tasks that wait for a slot, and the slot tasks that wait for a task,
@@ -534,6 +536,7 @@ impl IsolatedPool {
                 },
                 deadline,
                 answer: Answer::watched(sender, watch, ExecutionClass::Isolated),
+                log: task.log(),
             });
         }
         self.shared.queued.notify_one();

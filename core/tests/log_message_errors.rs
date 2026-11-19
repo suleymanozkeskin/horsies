@@ -14,6 +14,10 @@
 //! (`{error}`), a named argument (`{cause}` with `cause = error`) or a
 //! positional argument (`{}` or `{0}` with `error`). Expressions compare as
 //! token text.
+//!
+//! A second rule holds for the files of the worker parent that act on a
+//! claimed attempt ([`is_attempt_scoped`]): an event with a `task_id` field
+//! also has an `attempt` field, so each log record of an attempt names it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -554,4 +558,148 @@ fn calls_of_other_macros_are_not_events() {
     let events = events_of(OTHER_MACROS).expect("the fixture lexes");
 
     assert!(events.is_empty(), "{events:?}");
+}
+
+/// Whether the file at `relative` (under `src/worker/`) acts on a claimed
+/// attempt of the worker parent: every file but the tests, the reaper
+/// (`recovery.rs`, `recovery/`), the scheduler (`scheduler/`), the finalize
+/// and phase-2 steps that the reaper shares (`execution.rs`, `execution/`),
+/// and the child host, which runs in the child (`executor/child_host/`).
+fn is_attempt_scoped(relative: &Path) -> bool {
+    let first = relative
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        .unwrap_or_default();
+    let name = relative
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let is_test = name == "tests.rs"
+        || name.ends_with("_tests.rs")
+        || relative
+            .components()
+            .any(|component| component.as_os_str() == "tests");
+    let shared_with_the_reaper = matches!(
+        first,
+        "recovery.rs" | "recovery" | "scheduler" | "execution.rs" | "execution"
+    );
+    !is_test && !shared_with_the_reaper && !relative.starts_with("executor/child_host")
+}
+
+fn has_field(event: &Event, name: &str) -> bool {
+    event.fields.iter().any(|field| field.name == name)
+}
+
+/// The lines of the events of `events` with a `task_id` field and no
+/// `attempt` field.
+fn missing_attempts(events: &[Event]) -> Vec<usize> {
+    events
+        .iter()
+        .filter(|event| has_field(event, "task_id") && !has_field(event, "attempt"))
+        .map(|event| event.line)
+        .collect()
+}
+
+#[test]
+fn every_event_of_an_attempt_of_the_worker_names_its_attempt() {
+    let worker = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("worker");
+    let known_site = worker.join("executor").join("slots").join("outcome.rs");
+    let mut files = Vec::new();
+    rust_files(&worker, 1, &mut files);
+    files.retain(|path| {
+        is_attempt_scoped(
+            path.strip_prefix(&worker)
+                .expect("a file under src/worker/"),
+        )
+    });
+    files.sort();
+    let mut task_events = 0;
+    let mut known_site_found = false;
+    let mut report = Vec::new();
+    for path in &files {
+        let source = fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let events =
+            events_of(&source).unwrap_or_else(|error| panic!("lex {}: {error}", path.display()));
+        task_events += events
+            .iter()
+            .filter(|event| has_field(event, "task_id"))
+            .count();
+        known_site_found |= *path == known_site
+            && events
+                .iter()
+                .any(|event| has_field(event, "task_id") && has_field(event, "attempt"));
+        let relative = path
+            .strip_prefix(&worker)
+            .expect("a file under src/worker/");
+        report.extend(
+            missing_attempts(&events)
+                .into_iter()
+                .map(|line| format!("{}:{line}", relative.display())),
+        );
+    }
+    // A known positive: the scan reaches the events of the outcome writer,
+    // which name the attempt of their task.
+    assert!(
+        known_site_found,
+        "the scan of {} files found no event with task_id and attempt in {}",
+        files.len(),
+        known_site.display()
+    );
+    assert!(
+        report.is_empty(),
+        "{} of {task_events} events with a task_id field have no attempt field; add \
+         `attempt = task.retry.attempt().get()` and `trace_id = task.trace_id.log_field()`:\n{}",
+        report.len(),
+        report.join("\n")
+    );
+}
+
+/// One event per line from line 3 to line 6: the first and the third name
+/// their task and not its attempt.
+const EVENTS_OF_AN_ATTEMPT: &str = r#"
+fn sites(task: &Task, task_id: Uuid) {
+    tracing::warn!(task_id = %task.task_id, "a write failed");
+    tracing::warn!(%task_id, attempt = task.attempt, "a write failed");
+    tracing::debug!(task_id, "a run ended");
+    tracing::warn!(task_id = %task_id, attempt = 2, trace_id = task.trace_id, "a write failed");
+    tracing::info!(attempt = 2, "no task is named");
+}
+"#;
+
+#[test]
+fn an_event_that_names_its_task_and_not_its_attempt_is_found() {
+    let events = events_of(EVENTS_OF_AN_ATTEMPT).expect("the fixture lexes");
+
+    assert_eq!(events.len(), 5, "{events:?}");
+    assert_eq!(missing_attempts(&events), vec![3, 5]);
+}
+
+#[test]
+fn the_reaper_the_scheduler_the_child_host_and_the_tests_are_not_attempt_scoped() {
+    for scoped in [
+        "worker.rs",
+        "claim_pass.rs",
+        "children.rs",
+        "executor/slots/outcome.rs",
+        "executor/slots/isolated.rs",
+    ] {
+        assert!(is_attempt_scoped(Path::new(scoped)), "{scoped}");
+    }
+    for outside in [
+        "recovery.rs",
+        "recovery/owner_gone.rs",
+        "scheduler/service.rs",
+        "execution.rs",
+        "execution/parse.rs",
+        "executor/child_host/run.rs",
+        "executor/slots/settle_tests.rs",
+        "executor/slots/tests.rs",
+        "executor/slots/tests/settle_tests.rs",
+    ] {
+        assert!(!is_attempt_scoped(Path::new(outside)), "{outside}");
+    }
 }

@@ -42,6 +42,7 @@ use crate::db::{
     CheckoutClass, CorePool, ParameterType, PooledConnection, Row, StatementBound, TypedStatement,
 };
 use crate::events::{Priority, RunTrace, TraceCarrierText};
+use crate::telemetry::trace_carrier::{StoredTraceId, TRACE_ID_BYTES};
 
 /// The most rows one release statement takes (the bound of
 /// `horsies_release_claims`).
@@ -244,6 +245,9 @@ pub struct ClaimedRow {
     /// The trace carrier that the send stored on the row
     /// (`trace_carrier`), for the run frame of each attempt.
     pub trace: RunTrace,
+    /// The trace id that the send stored on the row (`trace_id`), for the
+    /// log records of each attempt.
+    pub trace_id: StoredTraceId,
     /// The priority of the row's queue: 1 is claimed first, 100 last.
     pub priority: Priority,
     /// When the row was due: its send, the end of its send delay, or its
@@ -306,6 +310,7 @@ struct ClaimWireRow {
     retry_count: Option<i32>,
     max_retries: Option<i32>,
     trace_carrier: Option<String>,
+    trace_id: Option<Vec<u8>>,
     priority: Option<i32>,
     enqueued_at: Option<DateTime<Utc>>,
     short_by: Option<i32>,
@@ -405,6 +410,7 @@ fn claim_wire_row(row: &Row, statement: &TypedStatement) -> Result<ClaimWireRow,
         retry_count: column(row, statement, "retry_count")?,
         max_retries: column(row, statement, "max_retries")?,
         trace_carrier: column(row, statement, "trace_carrier")?,
+        trace_id: column(row, statement, "trace_id")?,
         priority: column(row, statement, "priority")?,
         enqueued_at: column(row, statement, "enqueued_at")?,
         short_by: column(row, statement, "short_by")?,
@@ -487,6 +493,7 @@ fn decode_claimed_row(row: ClaimWireRow, read: ClaimRead) -> Result<ClaimedRow, 
         retry_count,
         max_retries: row.max_retries.ok_or_else(|| required("max_retries"))?,
         trace: stored_trace_of(id, row.trace_carrier),
+        trace_id: stored_trace_id_of(id, row.trace_id),
         priority,
         enqueued_at: row.enqueued_at.ok_or_else(|| required("enqueued_at"))?,
         read,
@@ -523,6 +530,30 @@ fn stored_trace_of(task_id: Uuid, trace_carrier: Option<String>) -> RunTrace {
     }
 }
 
+/// The trace id of a claimed row from its stored `trace_id`: none for
+/// `NULL`, else the 16 bytes. The table holds 16 bytes; another length was
+/// not written by a send, and it does not fail the claim: the row claims
+/// with no trace id, and a warning names the task and the length.
+fn stored_trace_id_of(task_id: Uuid, trace_id: Option<Vec<u8>>) -> StoredTraceId {
+    let bytes = match trace_id {
+        None => return StoredTraceId::NoTraceId,
+        Some(bytes) => bytes,
+    };
+    match <[u8; TRACE_ID_BYTES]>::try_from(bytes.as_slice()) {
+        Ok(id) => StoredTraceId::TraceId(id),
+        Err(_other_length) => {
+            tracing::warn!(
+                task_id = %task_id,
+                bytes = bytes.len(),
+                "claimed task {task_id} has a stored trace id of {} bytes, not {TRACE_ID_BYTES}; \
+                 its log records carry no trace id",
+                bytes.len(),
+            );
+            StoredTraceId::NoTraceId
+        }
+    }
+}
+
 fn decode_short_row(row: ClaimWireRow) -> Result<NonZeroU32, String> {
     let ClaimWireRow {
         row_kind: _,
@@ -537,6 +568,7 @@ fn decode_short_row(row: ClaimWireRow) -> Result<NonZeroU32, String> {
         retry_count,
         max_retries,
         trace_carrier,
+        trace_id,
         priority,
         enqueued_at,
         short_by,
@@ -553,6 +585,7 @@ fn decode_short_row(row: ClaimWireRow) -> Result<NonZeroU32, String> {
         retry_count.is_some(),
         max_retries.is_some(),
         trace_carrier.is_some(),
+        trace_id.is_some(),
         priority.is_some(),
         enqueued_at.is_some(),
     ];
