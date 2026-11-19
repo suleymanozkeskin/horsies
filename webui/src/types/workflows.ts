@@ -62,6 +62,9 @@ export interface WorkflowRunDetail {
   failed_count: number;
   /** `task_index` of every FAILED node, ascending — for failure navigation. */
   failed_indices: number[];
+  /** Trace id of the span that started the run (32 hex digits); null when
+   * the start carried no trace. */
+  trace_id: string | null;
 }
 
 /** One immutable execution attempt of a leaf task. `error_message` holds the cause. */
@@ -96,6 +99,9 @@ export interface LeafTask {
   worker_hostname: string | null;
   /** Absolute expiry. */
   good_until: string | null;
+  /** Trace id of the span that sent the task (32 hex digits); null when the
+   * send carried no trace. */
+  trace_id: string | null;
 }
 
 /** Per-node failure detail: node error, leaf task, and full attempt history. */

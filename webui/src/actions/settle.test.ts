@@ -24,6 +24,7 @@ const leaf = (status: string, retryCount: number) => ({
   exec_s: null,
   worker_hostname: null,
   good_until: null,
+  trace_id: null,
 });
 
 const taskDetail = (status: string, retryCount = 0): TaskDetail => ({
@@ -70,6 +71,7 @@ const runDetail = (
   edges: [],
   failed_count: 0,
   failed_indices: [],
+  trace_id: null,
 });
 
 describe('task cancel settling', () => {

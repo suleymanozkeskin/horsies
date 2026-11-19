@@ -161,6 +161,8 @@ const CORE_HANDLE_PARAMETERS: &[StubParameter] = &[
 const SET_PANIC_RULE_PARAMETERS: &[StubParameter] =
     &[positional("rule", "Literal['STOP_CORE', 'ABORT_PROCESS']")];
 
+const TRACE_LINK_REFUSAL_PARAMETERS: &[StubParameter] = &[positional("template", "str")];
+
 const ENQUEUE_REQUEST_PARAMETERS: &[StubParameter] = &[
     keyword("task_id", "uuid.UUID"),
     keyword("task_name", "str"),
@@ -2167,6 +2169,7 @@ const MONITORING_HANDLER_PARAMETERS: &[StubParameter] = &[
     positional("handle", "CoreHandle"),
     keyword("actions_enabled", "bool"),
     keyword("custom_css_url", "str | None"),
+    keyword("trace_link_template", "str | None"),
     keyword("client_version", "str"),
     keyword("heartbeat_ms", "int"),
 ];
@@ -3798,6 +3801,12 @@ const FUNCTIONS: &[StubFunction] = &[
         parameters: SET_PANIC_RULE_PARAMETERS,
         returns: TypeText::Plain("None"),
         doc: "Set what a panic in a core background task does in this process, before the first\ncore call. Another rule than the one in force raises PanicRuleFixed.",
+    },
+    StubFunction {
+        name: "trace_link_refusal",
+        parameters: TRACE_LINK_REFUSAL_PARAMETERS,
+        returns: TypeText::Plain("str | None"),
+        doc: "Why the core refuses template as the trace link template of the monitoring page, or\nNone when it accepts it. Pure.",
     },
 ];
 

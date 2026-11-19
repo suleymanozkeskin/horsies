@@ -1870,7 +1870,7 @@ class MonitoringHandler:
     create_monitoring_app. Starts nothing: the first call builds it. A handle without a child
     spec source raises RuntimeError; heartbeat_ms outside 1 to 3,600,000 raises ValueError.
     """
-    def __init__(self, handle: CoreHandle, *, actions_enabled: bool, custom_css_url: str | None, client_version: str, heartbeat_ms: int) -> None: ...
+    def __init__(self, handle: CoreHandle, *, actions_enabled: bool, custom_css_url: str | None, trace_link_template: str | None, client_version: str, heartbeat_ms: int) -> None: ...
     @property
     def max_request_body_bytes(self) -> int: ...
     def route_access(self, method: str, path: str) -> RouteAccess:
@@ -3254,4 +3254,10 @@ def resolve_monitoring_window(*, since: datetime.datetime | None, until: datetim
 def set_panic_rule(rule: Literal['STOP_CORE', 'ABORT_PROCESS']) -> None:
     """Set what a panic in a core background task does in this process, before the first
     core call. Another rule than the one in force raises PanicRuleFixed.
+    """
+
+
+def trace_link_refusal(template: str) -> str | None:
+    """Why the core refuses template as the trace link template of the monitoring page, or
+    None when it accepts it. Pure.
     """

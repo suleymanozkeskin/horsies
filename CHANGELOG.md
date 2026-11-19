@@ -102,6 +102,15 @@ before you upgrade a 0.7 deployment.
   trace id of the span that started the run: 32 lowercase hex digits, or
   `None` for a send or start with no trace. Code that builds one of these
   models, for example a test fake, must pass the field.
+- **The trace link of the web UI.** The task detail shows the trace id of
+  the task: as a link when the page has a template, else as text.
+  `MonitoringUIConfig(trace_link=TraceLinkTemplate(template=...))`,
+  `horsies web --trace-link TEMPLATE` (both clients) and the Rust
+  `MonitoringUiConfig.trace_link` set the template: an `http` or `https`
+  URL with one `{trace_id}`, at most 2,048 bytes of printable ASCII with no
+  space. The core checks it; a refused template is `HRS-221` (new
+  `CONFIG_INVALID_TRACE_LINK`) in Python and an argument error of
+  `horsies web`. `/api/meta` reports it as `trace_link_template`.
 
 ### Changed
 

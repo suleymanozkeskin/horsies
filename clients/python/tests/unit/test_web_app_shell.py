@@ -37,6 +37,7 @@ from horsies.web import (
     INTENT_VALUE,
     AllowAll,
     MonitoringUIConfig,
+    TraceLinkTemplate,
     TrustedHeader,
     ViewOnly,
     create_monitoring_app,
@@ -88,6 +89,20 @@ class TestMeta:
         assert body['schema_state'] == 'UNKNOWN'
         assert body['actions_enabled'] is False
         assert body['actions_disabled_reason'] == 'SCHEMA_UNKNOWN'
+        assert body['trace_link_template'] is None
+
+    async def test_reports_the_trace_link_template(self) -> None:
+        template = 'https://grafana.example.com/explore?traceId={trace_id}'
+        app = create_monitoring_app(
+            make_horsies_app(),
+            auth_policy=AllowAll(),
+            config=MonitoringUIConfig(trace_link=TraceLinkTemplate(template=template)),
+        )
+
+        async with client_for(app) as client:
+            body = (await client.get('/api/meta')).json()
+
+        assert body['trace_link_template'] == template
 
 
     async def test_view_only_deployment_reports_no_action_capability(self) -> None:
