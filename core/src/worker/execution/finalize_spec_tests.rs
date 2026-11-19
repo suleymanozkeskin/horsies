@@ -236,6 +236,7 @@ async fn claimed_task(pool: &TestPool, task_id: Uuid) -> ClaimedTask {
         },
         options: read_stored_options(task_options.as_deref()),
         trace: crate::events::RunTrace::NoCarrier,
+        trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
     }
 }
 
@@ -278,7 +279,7 @@ fn describe(outcome: &Result<FinalizeOutcome, FinalizeError>) -> String {
         }) => format!(
             "Terminal {{ capacity_notified: {capacity_notified}, phase_two: {phase_two:?} }}"
         ),
-        Ok(FinalizeOutcome::Retried) => "Retried".to_owned(),
+        Ok(FinalizeOutcome::Retried { .. }) => "Retried".to_owned(),
         Ok(FinalizeOutcome::Finalized) => "Finalized".to_owned(),
         Ok(FinalizeOutcome::Refused) => "Refused".to_owned(),
         Err(error) => format!("Err({error})"),
@@ -374,7 +375,7 @@ async fn a_listed_code_schedules_the_retry_and_wakes_its_queue_after_the_delay()
     let outcome = finalize(&pool, seeded.task_id, error_result("ERR")).await;
 
     assert!(
-        matches!(outcome, Ok(FinalizeOutcome::Retried)),
+        matches!(outcome, Ok(FinalizeOutcome::Retried { .. })),
         "{}",
         describe(&outcome)
     );
@@ -684,7 +685,7 @@ async fn retries_keep_the_sent_at_and_the_second_delay_is_longer() {
     for retry in 1..=2_i32 {
         let outcome = finalize(&pool, seeded.task_id, error_result("ERR")).await;
         assert!(
-            matches!(outcome, Ok(FinalizeOutcome::Retried)),
+            matches!(outcome, Ok(FinalizeOutcome::Retried { .. })),
             "retry {retry}: {}",
             describe(&outcome)
         );

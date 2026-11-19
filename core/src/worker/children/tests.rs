@@ -43,6 +43,7 @@ fn facts(pending: usize) -> PoolFacts {
         pending_limit: NonZeroUsize::new(pending).expect("a test pending limit above 0"),
         exit_not_seen: ExitNotSeen::LeaveToRecovery,
         placement: CpuPlacement::SharedCpus,
+        telemetry: crate::telemetry::worker::WorkerTelemetry::Off,
     }
 }
 

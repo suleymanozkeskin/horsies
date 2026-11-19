@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::budgets::SlotService;
 use super::dispatch::ExecutionClass;
+use crate::telemetry::worker::WorkerTelemetry;
 use crate::worker::executor::protocol::{ProcessId, RssReading};
 use crate::worker::executor::supervisor::boot::BootFailureDetail;
 use crate::worker::executor::supervisor::{BootFailure, BootFailureCause, PoolAtFailure};
@@ -225,6 +226,9 @@ pub struct PoolBoard {
     /// Woken when a child becomes ready to take a task after a boot. Holds
     /// at most one wake while no one waits.
     child_ready: Notify,
+    /// Where the boots of the slots are told: a child ready, a slot down, a
+    /// slot back in service.
+    telemetry: WorkerTelemetry,
 }
 
 impl PoolBoard {
@@ -262,7 +266,23 @@ impl PoolBoard {
             first_generation_in: CancellationToken::new(),
             new_kind: Notify::new(),
             child_ready: Notify::new(),
+            telemetry: WorkerTelemetry::Off,
         }
+    }
+
+    /// This board, telling the boots of its slots to `telemetry`.
+    pub fn with_telemetry(self, telemetry: WorkerTelemetry) -> Self {
+        Self { telemetry, ..self }
+    }
+
+    /// Where the boots of the slots are told.
+    pub fn telemetry(&self) -> &WorkerTelemetry {
+        &self.telemetry
+    }
+
+    /// The kind of the children of slot `index`.
+    pub fn class_of(&self, index: usize) -> ExecutionClass {
+        self.lock().slots[index].class
     }
 
     fn lock(&self) -> MutexGuard<'_, Slots> {

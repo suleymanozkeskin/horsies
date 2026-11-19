@@ -16,19 +16,30 @@
 //! past the series bound of its metric is counted by the registry; an event
 //! that is not queued is counted here.
 
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 
+use crate::core::task::{DeclaredErrorCodes, Execution};
 use crate::events::Event;
 use crate::telemetry::catalog::MetricId;
-use crate::telemetry::labels::{EventDropCause, RecoveryStep};
-use crate::telemetry::registry::{Counter, HandleRefused, OptionalCounter, Registry};
+use crate::telemetry::declared::{self, DeclaredValue, ErrorCodeValue};
+use crate::telemetry::labels::{ClaimPassResult, EventDropCause, RecoveryStep, ReleaseReason};
+use crate::telemetry::registry::{Counter, HandleRefused, Histogram, OptionalCounter, Registry};
+use crate::worker::executor::protocol::StopReason;
+use crate::worker::executor::slots::outcome::WriteStage;
+use crate::TaskAttemptOutcome;
 
+mod end_points;
+mod points;
+mod slot_points;
 #[cfg(test)]
 mod tests;
+
+pub(crate) use end_points::EndNoted;
 
 /// The most events that wait in the event queue of a worker. An offer to a
 /// full queue drops its event.
@@ -46,6 +57,15 @@ pub enum WorkerTelemetry {
     /// The points record their metrics, and offer their events when a
     /// handler child is linked.
     On(Arc<TelemetryOn>),
+}
+
+impl std::fmt::Debug for WorkerTelemetry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Off => formatter.write_str("WorkerTelemetry::Off"),
+            Self::On(_) => formatter.write_str("WorkerTelemetry::On"),
+        }
+    }
 }
 
 impl WorkerTelemetry {
@@ -69,16 +89,72 @@ pub enum EventRoute {
     HandlerChildLink(EventLink),
 }
 
+/// The user error codes that each task of a worker declares: the
+/// `error_codes` of each task of the worker manifest. The `error_code` label
+/// of a user code is the code when its task declares it, else `undeclared`.
+#[derive(Debug, Clone, Default)]
+pub struct DeclaredCodesByTask {
+    by_task: HashMap<String, DeclaredErrorCodes>,
+    /// The set of a task that the worker manifest does not name.
+    none: DeclaredErrorCodes,
+}
+
+impl DeclaredCodesByTask {
+    /// The declared codes of each task, by task name.
+    pub fn new(by_task: HashMap<String, DeclaredErrorCodes>) -> Self {
+        Self {
+            by_task,
+            none: DeclaredErrorCodes::NONE,
+        }
+    }
+
+    /// No task declares a code.
+    pub fn none() -> Self {
+        Self::new(HashMap::new())
+    }
+
+    /// The codes that task `task_name` declares; none for a task that the
+    /// worker manifest does not name.
+    pub fn of(&self, task_name: &str) -> &DeclaredErrorCodes {
+        self.by_task.get(task_name).unwrap_or(&self.none)
+    }
+}
+
 /// The telemetry of a worker that records metrics.
 pub struct TelemetryOn {
     registry: Arc<Registry>,
+    codes: DeclaredCodesByTask,
     metrics: PointMetrics,
     events: EventRoute,
 }
 
+/// The value of the `task` label.
+type TaskLabel = DeclaredValue<declared::TaskName>;
+/// The value of the `queue` label.
+type QueueLabel = DeclaredValue<declared::QueueName>;
+
 /// The metric handles that the points of a worker record.
 struct PointMetrics {
+    attempts: Counter<(
+        TaskLabel,
+        QueueLabel,
+        Execution,
+        TaskAttemptOutcome,
+        ErrorCodeValue,
+    )>,
+    end_not_known: Counter<(TaskLabel, QueueLabel, Execution)>,
+    run_duration: Histogram<(TaskLabel, QueueLabel, Execution, TaskAttemptOutcome)>,
+    queue_duration: Histogram<(QueueLabel, Execution)>,
+    slot_wait: Histogram<(Execution,)>,
+    record_duration: Histogram<(Execution,)>,
+    retries: Counter<(TaskLabel, QueueLabel, ErrorCodeValue)>,
+    claims_released: Counter<(ReleaseReason,)>,
+    starts_refused: Counter<(StopReason,)>,
+    finalize_retries: Counter<(WriteStage,)>,
+    claim_passes: Counter<(ClaimPassResult,)>,
     recovery_failures: Counter<(RecoveryStep,)>,
+    children_started: Counter<(Execution,)>,
+    child_boot: Histogram<(Execution,)>,
 }
 
 impl PointMetrics {
@@ -88,7 +164,20 @@ impl PointMetrics {
     /// the points with the labels of the catalog.
     fn of(registry: &Registry) -> Result<Self, HandleRefused> {
         Ok(Self {
+            attempts: registry.counter(MetricId::TaskAttempts)?,
+            end_not_known: registry.counter(MetricId::TaskAttemptsEndNotKnown)?,
+            run_duration: registry.histogram(MetricId::TaskRunDuration)?,
+            queue_duration: registry.histogram(MetricId::TaskQueueDuration)?,
+            slot_wait: registry.histogram(MetricId::TaskSlotWaitDuration)?,
+            record_duration: registry.histogram(MetricId::TaskRecordDuration)?,
+            retries: registry.counter(MetricId::TaskRetries)?,
+            claims_released: registry.counter(MetricId::TaskClaimsReleased)?,
+            starts_refused: registry.counter(MetricId::TaskStartsRefused)?,
+            finalize_retries: registry.counter(MetricId::FinalizeRetries)?,
+            claim_passes: registry.counter(MetricId::ClaimPasses)?,
             recovery_failures: registry.counter(MetricId::RecoveryPassFailures)?,
+            children_started: registry.counter(MetricId::ChildrenStarted)?,
+            child_boot: registry.histogram(MetricId::ChildBootDuration)?,
         })
     }
 }
@@ -104,14 +193,20 @@ pub enum Emitted {
 
 impl TelemetryOn {
     /// Telemetry that records the metrics of `registry` and builds no event.
+    /// `codes` are the declared codes of each task, for the `error_code`
+    /// label; give the registry the same sets (`ErrorCodeValues::new`).
     ///
     /// Errors: [`HandleRefused`] when `registry` does not hold a metric of
     /// the points with the labels of the catalog: a registry that
     /// [`Registry::for_worker`] did not build. Nothing is changed.
-    pub fn metrics_only(registry: Arc<Registry>) -> Result<Self, HandleRefused> {
+    pub fn metrics_only(
+        registry: Arc<Registry>,
+        codes: DeclaredCodesByTask,
+    ) -> Result<Self, HandleRefused> {
         Ok(Self {
             metrics: PointMetrics::of(&registry)?,
             registry,
+            codes,
             events: EventRoute::NoHandlerChild,
         })
     }
@@ -124,6 +219,7 @@ impl TelemetryOn {
     /// not hold `horsies.telemetry.events.dropped`. Nothing is changed.
     pub fn with_event_queue(
         registry: Arc<Registry>,
+        codes: DeclaredCodesByTask,
         capacity: NonZeroUsize,
     ) -> Result<(Self, EventQueue), HandleRefused> {
         let dropped = registry.counter(MetricId::EventsDropped)?;
@@ -131,6 +227,7 @@ impl TelemetryOn {
         let (link, queue) = event_link(capacity, dropped);
         let on = Self {
             registry,
+            codes,
             metrics,
             events: EventRoute::HandlerChildLink(link),
         };
@@ -207,6 +304,20 @@ impl EventQueue {
             0 => EventBatch::LinkClosed,
             _taken => EventBatch::Events(events),
         }
+    }
+
+    /// Take the events that wait now, at most `limit`, in the order of
+    /// their offers; none when the queue is empty or the link is gone.
+    /// Never waits.
+    pub fn take_waiting(&mut self, limit: NonZeroUsize) -> Vec<Event> {
+        let mut events = Vec::new();
+        while events.len() < limit.get() {
+            match self.receiver.try_recv() {
+                Ok(event) => events.push(event),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
+        events
     }
 }
 

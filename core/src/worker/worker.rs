@@ -22,7 +22,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::broker::claims::{ClaimClasses, ClaimPassRequest, ClaimedRow};
+use crate::broker::claims::{ClaimClasses, ClaimPassRequest, ClaimRead, ClaimedRow};
 use crate::broker::health::WORKER_PING_CHANNEL;
 use crate::broker::process_listener::{default_payload_capacity, fixed_channel};
 use crate::broker::PostgresBroker;
@@ -35,6 +35,7 @@ use crate::db::{
     ChannelName, CheckoutClass, ParameterType, PayloadEvent, PayloadFilter, PayloadSubscription,
     Reserve, StatementBound, TypedStatement, WakeEvent, WakeSubscription,
 };
+use crate::telemetry::labels::{ClaimPassResult, ReleaseReason};
 use crate::telemetry::worker::WorkerTelemetry;
 use crate::worker::backoff::RetryBackoff;
 use crate::worker::children::{
@@ -48,11 +49,12 @@ use crate::worker::config::WorkerConfig;
 use crate::worker::error::WorkerError;
 use crate::worker::executor::placement::WorkerThreads;
 use crate::worker::executor::protocol::TaskInputText;
+use crate::worker::executor::slots::outcome::EndWrites;
 use crate::worker::executor::slots::{
     describe_claim_plan, guard_new_kind_baselines, start_children, unserved_classes_line,
     AttemptEnd, BaselineOverLimit, ChildrenStart, ChildrenStartFailed, ClaimRoute, Claimed,
-    ClaimedTask, NotRunCause, OrphanSelfHeal, OutcomeWriter, PoolBoard, PoolFailure,
-    PoolStopReport, RetryFacts, TaskKind,
+    ClaimedTask, NotRunCause, OrphanSelfHeal, OutcomeWriter, PlacementReceipt, PoolBoard,
+    PoolFailure, PoolStopReport, RetryFacts, Settlement, Submitted, TaskKind,
 };
 use crate::worker::executor::supervisor::{
     PreloadMode, PreloadStart, PreloadUnsupported, Spawner, SpawnerStopReport, CHILD_KILL_WAIT,
@@ -721,24 +723,58 @@ fn claimed_of(row: ClaimedRow) -> Claimed {
             },
             options: read_stored_options(row.task_options.as_deref()),
             trace: row.trace,
+            trace_id: row.trace_id,
         },
         input: TaskInputText::new(row.input),
     }
+}
+
+/// Follow one submitted attempt to the end of its write: its placement on a
+/// child, its end, and the write of the end, with the lifecycle points of
+/// `telemetry` at each step: `AttemptPlaced`, then `AttemptEnded` (or
+/// `AttemptNotStarted`, or `ClaimReleased` for a task that reached no
+/// child), then `AttemptRecorded`. The result envelope of a reported end is
+/// read once, by `writer`. `read` is when the worker read the claim result
+/// of the task. Returns how the write settled.
+pub(crate) async fn follow_attempt<W: EndWrites>(
+    writer: &W,
+    telemetry: &WorkerTelemetry,
+    task: &ClaimedTask,
+    read: ClaimRead,
+    receipt: PlacementReceipt,
+    submitted: Submitted,
+) -> Settlement {
+    let placement = receipt.placement().await;
+    telemetry.attempt_placed(task, read, &placement);
+    let end = attempt_end(submitted).await;
+    let read_end = writer.read_end(task, end);
+    let noted = telemetry.attempt_ended(task, &placement, W::view(&read_end));
+    let settled = writer.write_end(task, read_end).await;
+    telemetry.attempt_recorded(task, noted, settled);
+    settled
 }
 
 /// Return each row that waited for its queue cap to the queue, at the stop
 /// (Python `_return_held_rows`). Runs after the claim loop ended and the
 /// pools stopped. Each row is one release write of the outcome writer
 /// (`NotDispatched(HeldForQueueCap)`), spawned with the outcome writes, so
-/// the drain of the writes bounds it. A row the release cannot return goes
-/// back when its lease expires.
+/// the drain of the writes bounds it, and one `ClaimReleased` of
+/// `telemetry`. A row the release cannot return goes back when its lease
+/// expires.
 fn return_held_rows(
     hold: &mut QueueCapHold,
     writer: &Arc<OutcomeWriter>,
     writes: &mut JoinSet<()>,
+    telemetry: &WorkerTelemetry,
 ) {
     for row in hold.drain() {
         let task = claimed_of(row).task;
+        telemetry.released(
+            task.task_id,
+            &task.task_name,
+            &task.queue_name,
+            ReleaseReason::HeldForQueueCap,
+        );
         let writer = Arc::clone(writer);
         writes.spawn(async move {
             let settled = writer
@@ -747,7 +783,7 @@ fn return_held_rows(
                     AttemptEnd::NotDispatched(NotRunCause::HeldForQueueCap),
                 )
                 .await;
-            tracing::debug!(task_id = %task.task_id, settlement = ?settled, "held row returned");
+            tracing::debug!(task_id = %task.task_id, attempt = task.retry.attempt().get(), trace_id = task.trace_id.log_field(), settlement = ?settled, "held row returned");
         });
     }
 }
@@ -1018,6 +1054,7 @@ impl Worker {
             ),
             exit_not_seen: exit_not_seen(&self.app_config.recovery),
             placement,
+            telemetry: self.telemetry.clone(),
         }
     }
 
@@ -1385,17 +1422,14 @@ impl Worker {
         let service = children.service();
         let plan = service.plan();
         let request = self.claim_request(service.claim_classes());
-        let claimed = claim_for_dispatch(steps, &request, &self.registered).await?;
+        let claimed =
+            claim_for_dispatch(steps, &request, &self.registered, &self.telemetry).await?;
         for row in claimed.rows {
             match (hold.holds(&row.queue_name), plan.route(row.execution)) {
                 (true, ClaimRoute::ServedBy(budget)) => hold.hold(row, budget),
-                (false, _) | (true, ClaimRoute::NotServed) => self.dispatch(
-                    children,
-                    writer,
-                    writes,
-                    claimed_of(row),
-                    StartCount::Unchecked,
-                ),
+                (false, _) | (true, ClaimRoute::NotServed) => {
+                    self.dispatch(children, writer, writes, row, StartCount::Unchecked)
+                }
             }
         }
         let admitted = admit_held_rows(&self.broker, &self.worker_id, hold, || {
@@ -1407,36 +1441,41 @@ impl Worker {
                 children,
                 writer,
                 writes,
-                claimed_of(admitted.row),
+                admitted.row,
                 StartCount::Admitted(admitted.started),
             );
         }
         Ok(claimed.counts)
     }
 
-    /// Submit one claimed task to the pool of its kind, and spawn the write
+    /// Submit one claimed row to the pool of its kind, and spawn the write
     /// of its end (Python `_dispatch_one`, `_finalize_after`). When the write
     /// ends, the claim loop is woken: a slot or seat is free again (Python
     /// `_capacity_released`). An admitted row of a capped queue counts in
     /// its queue's start check until the write ends (`count`). Never fails
     /// for a task: a task that reaches no child ends `NotDispatched`, and its
-    /// claim goes back to the queue.
+    /// claim goes back to the queue. With telemetry on, the placement of the
+    /// task on a child is watched and is the `AttemptPlaced` point.
     fn dispatch(
         &self,
         children: &WorkerChildren,
         writer: &Arc<OutcomeWriter>,
         writes: &mut JoinSet<()>,
-        claimed: Claimed,
+        row: ClaimedRow,
         count: StartCount,
     ) {
+        let read = row.read;
+        let claimed = claimed_of(row);
         let task = claimed.task.clone();
-        let submitted = children.submit(claimed);
+        let telemetry = self.telemetry.clone();
+        let (watch, receipt) = telemetry.placement_watch();
+        let submitted = children.submit_watched(claimed, watch);
         let writer = Arc::clone(writer);
         let released = Arc::clone(&self.capacity_released);
         let settle = async move {
-            let end = attempt_end(submitted).await;
-            let settled = writer.settle(&task, end).await;
-            tracing::debug!(task_id = %task.task_id, settlement = ?settled, "attempt end settled");
+            let settled =
+                follow_attempt(writer.as_ref(), &telemetry, &task, read, receipt, submitted).await;
+            tracing::debug!(task_id = %task.task_id, attempt = task.retry.attempt().get(), trace_id = task.trace_id.log_field(), settlement = ?settled, "attempt end settled");
         };
         writes.spawn(settle_then_release(settle, count, released));
     }
@@ -1463,10 +1502,15 @@ impl Worker {
                 return None;
             }
             reap_finished(writes);
-            match self
+            let pass = self
                 .claim_and_dispatch(&steps, children, writer, writes, hold)
-                .await
-            {
+                .await;
+            self.telemetry.claim_pass(match &pass {
+                Ok(counts) if counts.claimed > 0 => ClaimPassResult::Claimed,
+                Ok(_) => ClaimPassResult::Empty,
+                Err(_) => ClaimPassResult::Failed,
+            });
+            match pass {
                 Ok(counts) => {
                     claim_backoff.reset();
                     let repass =
@@ -1621,13 +1665,16 @@ impl Worker {
             self.cancel.clone(),
         );
 
-        let writer = Arc::new(OutcomeWriter::new(
-            Arc::clone(&self.broker),
-            Arc::clone(&self.child_specs),
-            self.worker_id.clone(),
-            self.app_config.payload.clone(),
-            batcher.clone(),
-        ));
+        let writer = Arc::new(
+            OutcomeWriter::new(
+                Arc::clone(&self.broker),
+                Arc::clone(&self.child_specs),
+                self.worker_id.clone(),
+                self.app_config.payload.clone(),
+                batcher.clone(),
+            )
+            .with_telemetry(self.telemetry.clone()),
+        );
         let stops = ChildrenStopCell::default();
         let services =
             match self.spawn_services(&children, &live, &stops, ping_responder, liveness_holder) {
@@ -1672,7 +1719,7 @@ impl Worker {
         RunningChildren::stop_pools(children, drain).await;
         // Rows that waited for their queue cap never reached a child: return
         // them to their queue, with the writes that the drain below bounds.
-        return_held_rows(&mut hold, &writer, &mut writes);
+        return_held_rows(&mut hold, &writer, &mut writes, &self.telemetry);
         // After the pools: every end is known, so the writes have database
         // work left only. A write that the drain cancels leaves its row in
         // the batcher, and the close still writes it.
@@ -2557,6 +2604,7 @@ mod tests {
             retry,
             options: crate::worker::retry::read_stored_options(task_options),
             trace: crate::events::RunTrace::NoCarrier,
+            trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
         }
     }
 
@@ -3274,6 +3322,10 @@ mod tests {
             retry_count: 1,
             max_retries: 3,
             trace: crate::events::RunTrace::NoCarrier,
+            trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
+            priority: crate::events::Priority::try_from(100).unwrap(),
+            enqueued_at: claimed_at,
+            read: crate::broker::claims::ClaimRead::now(),
         };
 
         let claimed = claimed_of(row);
@@ -3293,6 +3345,7 @@ mod tests {
                 },
                 options: read_stored_options(Some(r#"{"timeout_ms": 2000}"#)),
                 trace: crate::events::RunTrace::NoCarrier,
+                trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
             }
         );
         assert_eq!(claimed.input.as_str(), r#"{"n": 1}"#);
@@ -3316,7 +3369,7 @@ mod tests {
         let claim_loop = at(".claim_loop(&children");
         let cancel = at("self.cancel.cancel();\n        let drain");
         let pools = at("RunningChildren::stop_pools(children, drain).await");
-        let held = at("return_held_rows(&mut hold, &writer, &mut writes);");
+        let held = at("return_held_rows(&mut hold, &writer, &mut writes, &self.telemetry);");
         let writes = at("drain_then_close(&mut writes, OUTCOME_WRITE_DRAIN, &batcher)");
         let beats = at("services.stop_runner_beats().await");
         let spawner = at("RunningChildren::stop_spawner(spawner).await");
@@ -3727,6 +3780,10 @@ mod tests {
             retry_count,
             max_retries,
             trace: crate::events::RunTrace::NoCarrier,
+            trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
+            priority: crate::events::Priority::try_from(100).unwrap(),
+            enqueued_at: claimed_at,
+            read: crate::broker::claims::ClaimRead::now(),
         })
     }
 

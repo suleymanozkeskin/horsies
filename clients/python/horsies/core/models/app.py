@@ -13,6 +13,12 @@ from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
+from horsies.core.models.tracing import (
+    NoTracing,
+    TracingSetting,
+    tracing_errors,
+    tracing_label,
+)
 from horsies.core.models.schedule import ScheduleConfig, SchedulePattern
 from horsies.core.models.worker_profile import (
     WorkerProfile,
@@ -134,6 +140,9 @@ class AppConfig(BaseModel):
     )
     default_unhandled_error_code: str = 'UNHANDLED_EXCEPTION'
     resend_on_transient_err: bool = False
+    # Spans and producer metrics through the OpenTelemetry API
+    # (`OtelTracing`, needs `horsies[otel]`), or none (`NoTracing`).
+    tracing: TracingSetting = Field(default_factory=NoTracing)
 
     @model_validator(mode='after')
     def validate_queue_configuration(self):
@@ -335,6 +344,11 @@ class AppConfig(BaseModel):
                 )
             )
 
+        # OtelTracing needs the OpenTelemetry API; NoTracing does not look
+        # for it.
+        for tracing_error in tracing_errors(self.tracing):
+            report.add(tracing_error)
+
         # A queue mapped for retention must be a queue this deployment
         # has. RetentionConfig is a standalone model and cannot know the
         # queue set; AppConfig owns both, so the cross-check belongs
@@ -505,6 +519,9 @@ class AppConfig(BaseModel):
 
         # Send retry
         lines.append(f'  resend_on_transient_err: {self.resend_on_transient_err}')
+
+        # Tracing
+        lines.append(f'  tracing: {tracing_label(self.tracing)}')
 
         # Exception mapper
         if self.exception_mapper:

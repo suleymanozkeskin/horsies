@@ -45,6 +45,10 @@ fn row(name: &str, task_name: &str, execution: Execution) -> ClaimedRow {
         retry_count: 0,
         max_retries: 0,
         trace: crate::events::RunTrace::NoCarrier,
+        trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
+        priority: crate::events::Priority::try_from(100).unwrap(),
+        enqueued_at: claim_time(name),
+        read: crate::broker::claims::ClaimRead::now(),
     }
 }
 
@@ -270,6 +274,7 @@ async fn the_pass_sends_the_budgets_and_the_routes() {
         &steps,
         &request(one_isolated_child()),
         &RegisteredClasses::default(),
+        &WorkerTelemetry::Off,
     )
     .await
     .expect("the scripted pass");
@@ -295,6 +300,7 @@ async fn a_mismatched_row_goes_back_as_isolated() {
         &steps,
         &request(one_isolated_child()),
         &registered(&[("now_def", ISOLATED), ("iso", ISOLATED)]),
+        &WorkerTelemetry::Off,
     )
     .await
     .expect("the scripted pass");
@@ -312,6 +318,7 @@ async fn a_lost_claim_is_neither_returned_nor_dispatched() {
         &steps,
         &request(one_isolated_child()),
         &registered(&[("now_def", ISOLATED)]),
+        &WorkerTelemetry::Off,
     )
     .await
     .expect("the scripted pass");
@@ -338,6 +345,7 @@ async fn rows_that_fit_or_are_unknown_are_dispatched() {
         &steps,
         &request(one_isolated_child()),
         &registered(&[("awaited", SHARED_ASYNC)]),
+        &WorkerTelemetry::Off,
     )
     .await
     .expect("the scripted pass");
@@ -345,6 +353,144 @@ async fn rows_that_fit_or_are_unknown_are_dispatched() {
     assert_eq!(claimed.counts, counts(3, 0, ClaimTake::Full));
     assert!(steps.returned().is_empty());
     assert_eq!(ids(&claimed.rows), vec![task("t1"), task("t2"), task("t3")]);
+}
+
+// ---------------------------------------------------------------------------
+// The claim and release points
+// ---------------------------------------------------------------------------
+
+/// The type of each claim event and its task, in order.
+fn claim_events(events: &[crate::events::Event]) -> Vec<(String, Uuid)> {
+    use crate::events::Event;
+    events
+        .iter()
+        .map(|event| match event {
+            Event::TaskClaimed(claimed) => ("claimed".to_owned(), claimed.task_id),
+            Event::ClaimReleased(released) => {
+                (format!("released {:?}", released.reason), released.task_id)
+            }
+            other => panic!("the claim pass emits no {other:?}"),
+        })
+        .collect()
+}
+
+/// The count of each series of a histogram, by its label texts.
+fn histogram_counts(
+    series: Vec<(Vec<String>, crate::telemetry::registry::SampleValue)>,
+) -> Vec<(Vec<String>, u64)> {
+    use crate::telemetry::registry::SampleValue;
+    series
+        .into_iter()
+        .map(|(labels, value)| match value {
+            SampleValue::Histogram { buckets, .. } => (labels, buckets.iter().sum()),
+            other => panic!("a histogram series holds no {other:?}"),
+        })
+        .collect()
+}
+
+/// Each row that the claim statement returned is claimed once, in claim
+/// order; then each row that the pass returned to the queue is released
+/// once with its reason. A row whose claim was lost before its return is
+/// claimed and not released.
+#[tokio::test]
+async fn each_claimed_row_is_claimed_once_and_each_returned_row_released_once() {
+    use crate::telemetry::catalog::MetricId;
+    use crate::telemetry::registry::SampleValue;
+
+    let mut steps = ScriptedSteps::new(
+        vec![
+            row("t1", "now_def", SHARED_ASYNC),
+            row("t2", "iso", ISOLATED),
+            workflow_row("t3"),
+            row("t4", "now_def", SHARED_THREAD),
+        ],
+        ClaimTake::Full,
+    );
+    steps.non_runnable = vec![task("t3")];
+    steps.released = vec![task("t1")];
+    let mut watched = crate::test_support::telemetry::WatchedTelemetry::new();
+
+    let claimed = claim_for_dispatch(
+        &steps,
+        &request(one_isolated_child()),
+        &registered(&[("now_def", ISOLATED), ("iso", ISOLATED)]),
+        &watched.telemetry,
+    )
+    .await
+    .expect("the scripted pass");
+
+    assert_eq!(ids(&claimed.rows), vec![task("t2")]);
+    let events = watched.events();
+    assert_eq!(
+        claim_events(&events),
+        vec![
+            ("claimed".to_owned(), task("t1")),
+            ("claimed".to_owned(), task("t2")),
+            ("claimed".to_owned(), task("t3")),
+            ("claimed".to_owned(), task("t4")),
+            ("released WorkflowNotRunnable".to_owned(), task("t3")),
+            ("released ReturnedAsIsolated".to_owned(), task("t1")),
+        ]
+    );
+    match &events[1] {
+        crate::events::Event::TaskClaimed(claimed) => {
+            assert_eq!(claimed.attempt.get(), 1);
+            assert_eq!(claimed.priority.get(), 100);
+            assert_eq!(claimed.queue_wait, std::time::Duration::ZERO);
+            assert_eq!(claimed.execution, ISOLATED);
+            assert_eq!(claimed.task_name.as_str(), "iso");
+        }
+        other => panic!("the second event claims t2, not {other:?}"),
+    }
+    assert_eq!(
+        watched.series(MetricId::TaskClaimsReleased),
+        vec![
+            (
+                vec!["returned_as_isolated".to_owned()],
+                SampleValue::Counter(1)
+            ),
+            (
+                vec!["workflow_not_runnable".to_owned()],
+                SampleValue::Counter(1)
+            ),
+        ]
+    );
+    assert_eq!(
+        histogram_counts(watched.series(MetricId::TaskQueueDuration)),
+        vec![
+            (vec!["(unknown)".to_owned(), "ISOLATED".to_owned()], 2),
+            (vec!["(unknown)".to_owned(), "SHARED_ASYNC".to_owned()], 1),
+            (vec!["(unknown)".to_owned(), "SHARED_THREAD".to_owned()], 1),
+        ]
+    );
+}
+
+/// With telemetry off, a claim pass with claims and releases records no
+/// metric and queues no event.
+#[tokio::test]
+async fn with_telemetry_off_a_claim_pass_emits_nothing() {
+    use crate::telemetry::catalog::MetricId;
+
+    let mut steps = ScriptedSteps::new(
+        vec![row("t1", "now_def", SHARED_ASYNC), workflow_row("t3")],
+        ClaimTake::Full,
+    );
+    steps.non_runnable = vec![task("t3")];
+    steps.released = vec![task("t1")];
+    let mut watched = crate::test_support::telemetry::WatchedTelemetry::new();
+
+    let _claimed = claim_for_dispatch(
+        &steps,
+        &request(one_isolated_child()),
+        &registered(&[("now_def", ISOLATED)]),
+        &WorkerTelemetry::Off,
+    )
+    .await
+    .expect("the scripted pass");
+
+    assert!(watched.events().is_empty());
+    assert!(watched.series(MetricId::TaskClaimsReleased).is_empty());
+    assert!(watched.series(MetricId::TaskQueueDuration).is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +552,7 @@ async fn the_pass_counts_what_it_claimed_and_dropped() {
             &steps,
             &request(one_isolated_child()),
             &RegisteredClasses::default(),
+            &WorkerTelemetry::Off,
         )
         .await
         .expect("the scripted pass");
@@ -428,6 +575,7 @@ async fn a_short_take_is_reported_with_the_rows_it_took() {
         &steps,
         &request(one_isolated_child()),
         &RegisteredClasses::default(),
+        &WorkerTelemetry::Off,
     )
     .await
     .expect("the scripted pass");
@@ -444,6 +592,7 @@ async fn a_pass_that_took_nothing_still_reports_its_short_take() {
         &steps,
         &request(one_isolated_child()),
         &RegisteredClasses::default(),
+        &WorkerTelemetry::Off,
     )
     .await
     .expect("the scripted pass");
@@ -459,6 +608,7 @@ async fn an_empty_pass_reports_nothing() {
         &steps,
         &request(one_isolated_child()),
         &RegisteredClasses::default(),
+        &WorkerTelemetry::Off,
     )
     .await
     .expect("the scripted pass");
@@ -478,6 +628,7 @@ async fn a_pass_with_no_workflow_task_runs_no_workflow_filter() {
         &steps,
         &request(one_isolated_child()),
         &RegisteredClasses::default(),
+        &WorkerTelemetry::Off,
     )
     .await
     .expect("the scripted pass");

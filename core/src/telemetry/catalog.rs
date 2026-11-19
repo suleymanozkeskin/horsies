@@ -220,6 +220,7 @@ pub enum MetricId {
     TaskSent,
     TaskSendDuration,
     QueueTasks,
+    QueuePendingMoreThan,
     QueueOldestPendingAge,
     FleetWorkers,
     FleetWorkersTelemetryDown,
@@ -231,11 +232,12 @@ pub enum MetricId {
     SchemaVersion,
     CollectDuration,
     CollectErrors,
+    CollectFailed,
 }
 
 impl MetricId {
     /// Every metric, in declaration order.
-    pub const ALL: [Self; 39] = [
+    pub const ALL: [Self; 41] = [
         Self::TaskAttempts,
         Self::TaskAttemptsEndNotKnown,
         Self::TaskRunDuration,
@@ -264,6 +266,7 @@ impl MetricId {
         Self::TaskSent,
         Self::TaskSendDuration,
         Self::QueueTasks,
+        Self::QueuePendingMoreThan,
         Self::QueueOldestPendingAge,
         Self::FleetWorkers,
         Self::FleetWorkersTelemetryDown,
@@ -275,6 +278,7 @@ impl MetricId {
         Self::SchemaVersion,
         Self::CollectDuration,
         Self::CollectErrors,
+        Self::CollectFailed,
     ];
 
     /// The catalog entry of the metric.
@@ -308,6 +312,7 @@ impl MetricId {
             Self::TaskSent => &TASK_SENT,
             Self::TaskSendDuration => &TASK_SEND_DURATION,
             Self::QueueTasks => &QUEUE_TASKS,
+            Self::QueuePendingMoreThan => &QUEUE_PENDING_MORE_THAN,
             Self::QueueOldestPendingAge => &QUEUE_OLDEST_PENDING_AGE,
             Self::FleetWorkers => &FLEET_WORKERS,
             Self::FleetWorkersTelemetryDown => &FLEET_WORKERS_TELEMETRY_DOWN,
@@ -319,6 +324,7 @@ impl MetricId {
             Self::SchemaVersion => &SCHEMA_VERSION,
             Self::CollectDuration => &COLLECT_DURATION,
             Self::CollectErrors => &COLLECT_ERRORS,
+            Self::CollectFailed => &COLLECT_FAILED,
         }
     }
 }
@@ -673,7 +679,7 @@ static QUEUE_TASKS: MetricSpec = MetricSpec {
     kind: MetricKind::Gauge,
     unit: MetricUnit::Count,
     recorder: Recorder::FleetCollector,
-    help: "Live task rows, by queue, execution class and status.",
+    help: "Live task rows, by queue, execution class and status; a PENDING count past the count limit is in horsies.queue.pending.more_than instead.",
     labels: &[
         QUEUE,
         EXECUTION,
@@ -682,6 +688,15 @@ static QUEUE_TASKS: MetricSpec = MetricSpec {
             values: <LiveTaskStatus as LabelValue>::VALUES,
         },
     ],
+};
+
+static QUEUE_PENDING_MORE_THAN: MetricSpec = MetricSpec {
+    name: "horsies.queue.pending.more_than",
+    kind: MetricKind::Gauge,
+    unit: MetricUnit::Count,
+    recorder: Recorder::FleetCollector,
+    help: "PENDING tasks of a queue and execution class whose count passed the count limit: the count is more than this value.",
+    labels: &[QUEUE, EXECUTION],
 };
 
 static QUEUE_OLDEST_PENDING_AGE: MetricSpec = MetricSpec {
@@ -793,6 +808,15 @@ static COLLECT_ERRORS: MetricSpec = MetricSpec {
     unit: MetricUnit::Count,
     recorder: Recorder::FleetCollector,
     help: "Queries of the fleet collector that failed or passed their time limit, by query.",
+    labels: &[QUERY],
+};
+
+static COLLECT_FAILED: MetricSpec = MetricSpec {
+    name: "horsies.exporter.collect.failed",
+    kind: MetricKind::Gauge,
+    unit: MetricUnit::Count,
+    recorder: Recorder::FleetCollector,
+    help: "1 when the last run of a query of the fleet collector failed or passed its time limit, 0 when it answered, by query.",
     labels: &[QUERY],
 };
 

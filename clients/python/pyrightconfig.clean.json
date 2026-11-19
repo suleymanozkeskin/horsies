@@ -96,7 +96,10 @@
     "tests/unit/test_public_api_runner.py",
     "tests/unit/test_public_api_snapshot.py",
     "horsies/_catalog/events.py",
-    "tests/unit/test_generated_events.py"
+    "tests/unit/test_generated_events.py",
+    "horsies/core/telemetry",
+    "horsies/core/models/tracing.py",
+    "tests/unit/test_tracing_config.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error",
   "executionEnvironments": [

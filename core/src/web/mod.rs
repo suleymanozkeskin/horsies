@@ -7,6 +7,7 @@ mod app;
 mod auth;
 mod common;
 mod events;
+mod fleet_metrics;
 mod handler;
 mod routes;
 mod schema;

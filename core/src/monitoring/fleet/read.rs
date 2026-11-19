@@ -2,7 +2,7 @@
 //! another on the main core pool, each bounded by [`FLEET_QUERY_TIMEOUT`].
 
 use std::future::Future;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use tokio_postgres::types::Json;
@@ -13,6 +13,7 @@ use crate::db::{
     BoundStatement, CheckoutClass, RefusalCause, Row, StatementBound, StatementFailure, Transience,
     UnknownOutcomeCause,
 };
+use crate::handle::CoreHandle;
 use crate::telemetry::labels::FleetQuery;
 use crate::{BrokerError, ClassCoverage, PostgresBroker};
 
@@ -50,6 +51,45 @@ pub async fn read_fleet_state(broker: &PostgresBroker) -> FleetState {
         workflows: timed(FleetQuery::Workflows, read_workflows(broker)).await,
         schedules: timed(FleetQuery::Schedules, read_schedules(broker)).await,
         schema_version: timed(FleetQuery::SchemaVersion, read_schema_version(broker)).await,
+    }
+}
+
+/// The fleet state through `handle`: its broker, connected at the first
+/// call that succeeds ([`CoreHandle::broker`]), then [`read_fleet_state`].
+///
+/// When the connect fails, every part answers
+/// [`FleetQueryFailure::DatabaseFailed`] with the cause of the connect, and
+/// `took` of each part is the time of the connect; the next call connects
+/// again. The connect runs no schema step.
+pub async fn read_fleet_state_through(handle: &CoreHandle) -> FleetState {
+    let started = Instant::now();
+    match handle.broker().await {
+        Ok(broker) => read_fleet_state(&broker).await,
+        Err(error) => not_connected(&pools_failed(&error), started.elapsed()),
+    }
+}
+
+/// The fleet state of a read that could not connect: every part fails with
+/// `failure`.
+fn not_connected(failure: &FleetQueryFailure, took: Duration) -> FleetState {
+    FleetState {
+        queue_tasks: failed_part(FleetQuery::QueueTasks, failure, took),
+        oldest_pending: failed_part(FleetQuery::OldestPending, failure, took),
+        workers: failed_part(FleetQuery::Workers, failure, took),
+        class_coverage: failed_part(FleetQuery::ClassCoverage, failure, took),
+        workflows: failed_part(FleetQuery::Workflows, failure, took),
+        schedules: failed_part(FleetQuery::Schedules, failure, took),
+        schema_version: failed_part(FleetQuery::SchemaVersion, failure, took),
+    }
+}
+
+fn failed_part<T>(query: FleetQuery, failure: &FleetQueryFailure, took: Duration) -> FleetPart<T> {
+    FleetPart {
+        outcome: Err(FleetQueryError {
+            query,
+            failure: failure.clone(),
+        }),
+        took,
     }
 }
 

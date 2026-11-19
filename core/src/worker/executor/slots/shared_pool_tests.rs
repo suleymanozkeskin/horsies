@@ -119,6 +119,7 @@ fn claimed(execution: ExecutionClass) -> ClaimedTask {
         },
         options: read_stored_options(Some("{}")),
         trace: crate::events::RunTrace::NoCarrier,
+        trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
     }
 }
 

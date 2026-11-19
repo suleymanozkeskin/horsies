@@ -1,5 +1,5 @@
 //! The CLI runner of the user's binary: `horsies::cli::run(app)` serves
-//! child mode first, then `worker`, `scheduler` and `check`.
+//! child mode first, then `worker`, `scheduler`, `check` and `metrics`.
 //!
 //! ```ignore
 //! fn main() -> std::process::ExitCode {
@@ -12,6 +12,9 @@
 //!   `horsies worker`.
 //! - `<binary> scheduler [--loglevel LEVEL]`: Python `horsies scheduler`.
 //! - `<binary> check [--live] [--loglevel LEVEL]`: Python `horsies check`.
+//! - `<binary> metrics --listen HOST:PORT [--loglevel LEVEL]`: Python
+//!   `horsies metrics`; the fleet metrics of the app's database at
+//!   `GET /metrics`. `--listen` has no default.
 //!
 //! The worker starts this binary again for each child; `run` sees the child
 //! mode argument first and serves the child. Every line of `main` before
@@ -23,12 +26,14 @@
 
 // The shipped binary's commands (`crate::tools`) log through it too.
 pub(crate) mod logging;
+mod metrics;
 mod removed_flags;
 
 use std::ffi::OsString;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use horsies_core::telemetry::listen::ListenAddress;
 use horsies_core::{ChildHostExit, ChildLogSetup, ChildMode};
 
 use crate::child::exit_byte;
@@ -83,7 +88,10 @@ pub fn run(app: Horsies) -> ExitCode {
 
 /// The commands of the runner.
 #[derive(Debug, Parser)]
-#[command(about = "Run the horsies worker, the scheduler or the check of this app")]
+#[command(
+    about = "Run the horsies worker, the scheduler or the check of this app, or serve its fleet \
+             metrics"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -112,6 +120,15 @@ enum Command {
         #[arg(long)]
         live: bool,
         #[arg(long, value_enum, ignore_case = true, default_value = "WARNING")]
+        loglevel: LogLevel,
+    },
+    /// Serve the fleet metrics of the app's database at GET /metrics.
+    Metrics {
+        /// The address to serve on: HOST:PORT, or [IPV6]:PORT. Required;
+        /// there is no default.
+        #[arg(long, value_name = "HOST:PORT", value_parser = ListenAddress::parse)]
+        listen: ListenAddress,
+        #[arg(long, value_enum, ignore_case = true, default_value = "INFO")]
         loglevel: LogLevel,
     },
 }
@@ -167,6 +184,11 @@ fn run_command(mut app: Horsies, command: Command) -> ExitCode {
                 },
             };
             check_exit(checked)
+        }
+        Command::Metrics { listen, loglevel } => {
+            logging::install_logs(loglevel.child_level());
+            block_on_process_runtime(metrics::serve(&app, &listen))
+                .map_or(ExitCode::FAILURE, metrics_exit)
         }
     }
 }
@@ -231,6 +253,20 @@ fn scheduler_exit(end: Result<crate::SchedulerStopped, SchedulerRunError>) -> Ex
             | SchedulerRunError::StartFailed { .. }
             | SchedulerRunError::RuntimeUnavailable(_)),
         ) => {
+            tracing::error!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The exit status of a `metrics` run, with its log line.
+fn metrics_exit(end: Result<(), metrics::MetricsFailed>) -> ExitCode {
+    match end {
+        Ok(()) => {
+            tracing::info!("fleet metrics server stopped");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
             tracing::error!("{error}");
             ExitCode::FAILURE
         }
@@ -302,6 +338,44 @@ mod tests {
         ] {
             let error = parse(arguments).unwrap_err();
             assert_eq!(error.exit_code(), 2, "{arguments:?}");
+        }
+    }
+
+    #[test]
+    fn metrics_takes_a_listen_address_and_python_s_default_level() {
+        let cli = parse(&["app", "metrics", "--listen", "127.0.0.1:9100"]).unwrap();
+        match cli.command {
+            Command::Metrics { listen, loglevel } => {
+                assert_eq!(listen.to_string(), "127.0.0.1:9100");
+                assert_eq!(loglevel, LogLevel::Info);
+            }
+            other => panic!("expected metrics, got {other:?}"),
+        }
+        let cli = parse(&["app", "metrics", "--listen", "[::1]:9100"]).unwrap();
+        match cli.command {
+            Command::Metrics { listen, .. } => assert_eq!(listen.host(), "::1"),
+            other => panic!("expected metrics, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metrics_without_listen_is_a_usage_error() {
+        let error = parse(&["app", "metrics"]).unwrap_err();
+        assert_eq!(error.exit_code(), 2);
+        assert!(error.to_string().contains("--listen"), "{error}");
+    }
+
+    #[test]
+    fn metrics_with_an_address_that_does_not_parse_is_a_usage_error() {
+        for (address, refusal) in [
+            ("9100", "is not HOST:PORT"),
+            (":9100", "has no host before the port"),
+            ("localhost:0", "is not a number from 1 to 65535"),
+            ("::1:9100", "write an IPv6 address in brackets"),
+        ] {
+            let error = parse(&["app", "metrics", "--listen", address]).unwrap_err();
+            assert_eq!(error.exit_code(), 2, "{address}");
+            assert!(error.to_string().contains(refusal), "{address}: {error}");
         }
     }
 

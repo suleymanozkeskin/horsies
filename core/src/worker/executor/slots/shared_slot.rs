@@ -32,7 +32,7 @@ use super::booting::{boot_child, BootSlot, Booted};
 use super::defects::{
     count_defect, AfterDefect, CatchPanic, GenerationEnd, Served, SlotDefect, SlotDefects,
 };
-use super::dispatch::{AttemptEnd, NotRunCause};
+use super::dispatch::{AttemptEnd, AttemptLog, NotRunCause};
 use super::pool::{Answer, ExitNotSeen};
 use super::seat_runs::{
     backstop_step, end_at_late_backstop_exit, end_at_loss, end_past_deadlines, shared_recycle,
@@ -61,6 +61,8 @@ pub(super) struct RunHold {
     answer: Answer,
     beats: Beats,
     backstop: Backstop,
+    /// The log fields of the attempt.
+    log: AttemptLog,
 }
 
 /// Why the worker killed the child of a generation.
@@ -451,7 +453,11 @@ async fn pull_runs(pool: &SharedPoolShared, local: usize, generation: &mut Gener
 /// frame. A closed registry refuses the run and kills the child; a failed
 /// send kills the child.
 async fn send_run(pool: &SharedPoolShared, generation: &mut Generation, queued: QueuedSeatRun) {
-    let QueuedSeatRun { frame, mut answer } = queued;
+    let QueuedSeatRun {
+        frame,
+        mut answer,
+        log,
+    } = queued;
     let run = RunRef {
         dispatch: frame.dispatch,
         task_id: frame.task_id,
@@ -468,6 +474,8 @@ async fn send_run(pool: &SharedPoolShared, generation: &mut Generation, queued: 
         Err(RegistryClosed) => {
             tracing::error!(
                 task_id = %frame.task_id,
+                attempt = log.attempt.get(),
+                trace_id = log.trace_id.log_field(),
                 pid = channel.pid().get(),
                 "the runner heartbeats failed closed; the task is not sent, and its child is killed",
             );
@@ -490,6 +498,7 @@ async fn send_run(pool: &SharedPoolShared, generation: &mut Generation, queued: 
             answer,
             beats: Beats::Held(held),
             backstop: Backstop::after_send(work, sent_at),
+            log,
         },
     });
     let parent_frame = ParentFrame::SharedRun(frame);
@@ -503,6 +512,8 @@ async fn send_run(pool: &SharedPoolShared, generation: &mut Generation, queued: 
             // path, which is a defect (Python `_serve_slot`).
             tracing::error!(
                 task_id = %run.task_id,
+                attempt = log.attempt.get(),
+                trace_id = log.trace_id.log_field(),
                 error = %error,
                 "a shared run frame could not be encoded: {error}",
             );
@@ -510,7 +521,13 @@ async fn send_run(pool: &SharedPoolShared, generation: &mut Generation, queued: 
             send_kill(generation, KillReason::SlotDefect).await;
         }
         Err(failure @ (SendFailure::Write(_) | SendFailure::TimedOut)) => {
-            tracing::warn!(task_id = %run.task_id, failure = %failure, "a shared run frame could not be sent");
+            tracing::warn!(
+                task_id = %run.task_id,
+                attempt = log.attempt.get(),
+                trace_id = log.trace_id.log_field(),
+                failure = %failure,
+                "a shared run frame could not be sent",
+            );
             send_kill(generation, KillReason::SendFailed).await;
         }
     }
@@ -588,12 +605,25 @@ async fn on_frame(
                 .runs
                 .note_deadline(run)
                 .map_err(BadFrame::OutOfTurn)?;
-            tracing::info!(task_id = %run.task_id, timeout_ms = timeout.get(), pid, "a task reached its timeout_ms");
+            let log = generation
+                .runs
+                .get(run.dispatch)
+                .map(|seat| seat.attached.log);
+            tracing::info!(
+                task_id = %run.task_id,
+                attempt = log.map(|log| log.attempt.get()),
+                trace_id = log.and_then(|log| log.trace_id.log_field()),
+                timeout_ms = timeout.get(),
+                pid,
+                "a task reached its timeout_ms",
+            );
             let before = generation.service;
             generation.service.close_at_deadline(pool.kind, run);
             if before == ChildService::Open && generation.service != before {
                 tracing::warn!(
                     task_id = %run.task_id,
+                    attempt = log.map(|log| log.attempt.get()),
+                    trace_id = log.and_then(|log| log.trace_id.log_field()),
                     pid,
                     "closing a shared thread child: a task passed its deadline, and a thread \
                      cannot be cancelled; the child is killed when no task in it has time left",
@@ -709,14 +739,20 @@ async fn run_backstops(generation: &mut Generation) {
     for seat in generation.runs.iter() {
         let backstop = seat.attached.backstop;
         if backstop.due_at().is_some_and(|due| due <= now) {
-            frozen.push((seat.run, backstop_step(backstop, seat.work, &seat.report)));
+            frozen.push((
+                seat.run,
+                seat.attached.log,
+                backstop_step(backstop, seat.work, &seat.report),
+            ));
         }
     }
-    for (run, step) in frozen {
+    for (run, log, step) in frozen {
         let next = match step {
             BackstopStep::KillChild => {
                 tracing::warn!(
                     task_id = %run.task_id,
+                    attempt = log.attempt.get(),
+                    trace_id = log.trace_id.log_field(),
                     pid = generation.channel.pid().get(),
                     "a task passed its backstop, and its shared child reported neither the due \
                      step of its stop nor its end; killing the child with every task of it",
