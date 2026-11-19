@@ -2765,7 +2765,7 @@ class StoredOptionsRefused:
 
 
 @final
-class TraceCarrier:
+class StoredTraceCarrier:
     """The trace carrier that the send stored on the task row: the keys and the values that
     the propagator of the sender wrote. The child extracts it with the app's propagator.
     """
@@ -2793,7 +2793,7 @@ class RunFrame:
     @property
     def work(self) -> Literal['RUN'] | StoredOptionsRefused: ...
     @property
-    def trace(self) -> TraceCarrier | Literal['NO_CARRIER']: ...
+    def trace(self) -> StoredTraceCarrier | Literal['NO_CARRIER']: ...
     @property
     def input(self) -> str: ...
 
@@ -2836,7 +2836,7 @@ class SharedRunFrame:
     @property
     def work(self) -> AsyncTaskWork | ThreadTaskWork | StoredOptionsRefused: ...
     @property
-    def trace(self) -> TraceCarrier | Literal['NO_CARRIER']: ...
+    def trace(self) -> StoredTraceCarrier | Literal['NO_CARRIER']: ...
     @property
     def input(self) -> str: ...
 

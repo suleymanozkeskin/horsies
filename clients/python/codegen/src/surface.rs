@@ -3297,7 +3297,7 @@ const FRAME_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "TraceCarrier",
+        name: "StoredTraceCarrier",
         doc: "The trace carrier that the send stored on the task row: the keys and the values that\nthe propagator of the sender wrote. The child extracts it with the app's propagator.",
         constructor: Constructor::NoConstructor,
         properties: &[property("carrier", "dict[str, str]")],
@@ -3307,7 +3307,7 @@ const FRAME_CLASSES: &[StubClass] = &[
         name: "RunFrame",
         doc: "Run one task in an isolated child. The parent holds the deadline.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("task_id", "uuid.UUID"), property("task_name", "str"), property("queue_name", "str"), property("attempt", "int"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("orphan_self_heal", "bool"), property("work", "Literal['RUN'] | StoredOptionsRefused"), property("trace", "TraceCarrier | Literal['NO_CARRIER']"), property("input", "str")],
+        properties: &[property("task_id", "uuid.UUID"), property("task_name", "str"), property("queue_name", "str"), property("attempt", "int"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("orphan_self_heal", "bool"), property("work", "Literal['RUN'] | StoredOptionsRefused"), property("trace", "StoredTraceCarrier | Literal['NO_CARRIER']"), property("input", "str")],
         methods: &[],
     },
     StubClass {
@@ -3328,7 +3328,7 @@ const FRAME_CLASSES: &[StubClass] = &[
         name: "SharedRunFrame",
         doc: "Run one task on a free seat of a shared child.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("dispatch", "int"), property("task_id", "uuid.UUID"), property("task_name", "str"), property("queue_name", "str"), property("attempt", "int"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("orphan_self_heal", "bool"), property("work", "AsyncTaskWork | ThreadTaskWork | StoredOptionsRefused"), property("trace", "TraceCarrier | Literal['NO_CARRIER']"), property("input", "str")],
+        properties: &[property("dispatch", "int"), property("task_id", "uuid.UUID"), property("task_name", "str"), property("queue_name", "str"), property("attempt", "int"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("orphan_self_heal", "bool"), property("work", "AsyncTaskWork | ThreadTaskWork | StoredOptionsRefused"), property("trace", "StoredTraceCarrier | Literal['NO_CARRIER']"), property("input", "str")],
         methods: &[],
     },
     StubClass {

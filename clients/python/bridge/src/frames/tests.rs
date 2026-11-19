@@ -633,7 +633,7 @@ fn a_run_frame_gives_its_stored_trace_carrier() {
             py,
             c"frame = core.decode_parent_frame(meta, body)
 assert isinstance(frame, core.RunFrame), frame
-assert isinstance(frame.trace, core.TraceCarrier), frame.trace
+assert isinstance(frame.trace, core.StoredTraceCarrier), frame.trace
 assert frame.trace.carrier == {
     'traceparent': '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01',
 }
