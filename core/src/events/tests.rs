@@ -1103,3 +1103,49 @@ fn the_contract_is_the_snapshot_of_its_version() {
     assert_eq!(EVENT_CONTRACT.events, EVENT_TYPES);
     assert_eq!(EVENT_CONTRACT.value_types, EVENT_VALUE_TYPES);
 }
+
+/// Whether `event` is an event of type `E`, by [`UnionEvent::of_event`].
+fn is_of<E: UnionEvent>(event: &Event) -> bool {
+    E::of_event(event).is_some()
+}
+
+/// `of_event` of each type gives the record of an event of that type, and
+/// `None` for an event of every other type. The list has one entry per
+/// type of the union, so a new type fails here until it is added.
+#[test]
+fn of_event_gives_the_record_of_its_own_type_only() {
+    let checks: [(EventTypeName, fn(&Event) -> bool); 11] = [
+        (EventTypeName::TaskClaimed, is_of::<TaskClaimed>),
+        (EventTypeName::ClaimReleased, is_of::<ClaimReleased>),
+        (EventTypeName::AttemptPlaced, is_of::<AttemptPlaced>),
+        (EventTypeName::AttemptNotStarted, is_of::<AttemptNotStarted>),
+        (EventTypeName::AttemptEnded, is_of::<AttemptEnded>),
+        (EventTypeName::AttemptRecorded, is_of::<AttemptRecorded>),
+        (EventTypeName::TaskRecovered, is_of::<TaskRecovered>),
+        (EventTypeName::ChildStarted, is_of::<ChildStarted>),
+        (EventTypeName::ChildReplaced, is_of::<ChildReplaced>),
+        (EventTypeName::SlotDown, is_of::<SlotDown>),
+        (EventTypeName::SlotRecovered, is_of::<SlotRecovered>),
+    ];
+    assert_eq!(checks.len(), EventTypeName::ALL.len());
+    let events = vector_events();
+    for name in EventTypeName::ALL {
+        assert!(
+            events.iter().any(|(_, event)| event.type_name() == *name),
+            "the vectors have no event of {name:?}"
+        );
+    }
+    for (_, event) in &events {
+        for (name, is_of_type) in &checks {
+            assert_eq!(
+                is_of_type(event),
+                event.type_name() == *name,
+                "{name:?} of a {:?} event",
+                event.type_name()
+            );
+        }
+    }
+    let claimed = vector_event("task_claimed");
+    let record = TaskClaimed::of_event(&claimed).expect("a TaskClaimed event");
+    assert_eq!(Event::from(record.clone()), claimed);
+}

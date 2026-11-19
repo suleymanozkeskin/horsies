@@ -3,7 +3,7 @@
 Reference for the health reads on the app, the typed monitoring queries of
 `horsies::monitoring`, the task and workflow actions, and the web UI: the
 axum mount `horsies::web::router` (feature `web`) and the shipped
-`horsies web` command. The core serves every route, guard and event of the
+`horsies web` command; and the event handlers of `horsies::events`. The core serves every route, guard and event of the
 web UI, so the Python app and the Rust app answer alike.
 
 ## Health Reads on the App
@@ -304,7 +304,55 @@ horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
 - The bind and access rules are on the shared docs page
   `monitoring/web-ui-deployment`.
 
+## Event Handlers — `horsies::events`
+
+```rust
+use horsies::events::{AttemptEnded, HandlerError, TaskClaimed};
+use horsies::{Horsies, HorsiesError};
+
+async fn record_attempt_end(event: AttemptEnded) -> Result<(), HandlerError> {
+    println!("task {} attempt {} ended", event.task_id, event.attempt.get());
+    Ok(())
+}
+
+fn record_claim(event: TaskClaimed) -> Result<(), HandlerError> {
+    println!("task {} claimed", event.task_id);
+    Ok(())
+}
+
+fn add_handlers(app: &mut Horsies) -> Result<(), HorsiesError> {
+    app.on_event::<AttemptEnded>("audit.attempt_ended", record_attempt_end)?;
+    app.on_event_blocking::<TaskClaimed>("audit.task_claimed", record_claim)?;
+    app.on_handler_child_start(|| async { Ok::<(), String>(()) });
+    Ok(())
+}
+```
+
+- A handler takes the events of one type: `TaskClaimed`, `ClaimReleased`,
+  `AttemptPlaced`, `AttemptNotStarted`, `AttemptEnded`, `AttemptRecorded`,
+  `TaskRecovered`, `ChildStarted`, `ChildReplaced`, `SlotDown`,
+  `SlotRecovered`.
+- Register handlers in `main` before `horsies::cli::run(app)`. With a
+  handler, the worker starts one handler child (this binary in child
+  mode); handlers never run in the worker process.
+- Each handler runs on a thread of its own with a queue of
+  `HANDLER_QUEUE_EVENTS` (10,000). A full queue drops the event for that
+  handler and counts `horsies.telemetry.handler.dropped{handler}`.
+- A returned `HandlerError` or a panic counts
+  `horsies.telemetry.handler.errors{handler}`, is logged with the name, and
+  the handler takes its next event.
+- `name`: 1 to 255 characters, not `(unknown)`, once per app; at most 32
+  handlers. A refusal is a `HorsiesError`.
+- `on_handler_child_start(hook)`: once per handler child, before the
+  handlers start, 10 s per hook. A failure keeps the handler child down; the
+  worker runs on.
+- Delivery is at most once. The history tables are the record of a task.
+
 ## Things to Avoid
+
+**Do not block in an async event handler.** It takes no event while it
+blocks, so its queue fills and drops. Use `on_event_blocking` for a
+blocking call.
 
 **Do not treat an unfiltered `TaskListPage.total` as an exact count.** It
 is an estimate.
@@ -341,6 +389,12 @@ use horsies::monitoring::{
     cancel_task, cancel_task_action, pause_workflow_action, resume_workflow_action,
     cancel_workflow_action, TaskCancelled, TaskActionError, TaskActionErrorCode,
     TaskActionResult, ActionOutcome, ActionBody, ActionResponse,
+};
+use horsies::events::{
+    // Event handlers
+    TaskClaimed, ClaimReleased, AttemptPlaced, AttemptNotStarted, AttemptEnded,
+    AttemptRecorded, TaskRecovered, ChildStarted, ChildReplaced, SlotDown, SlotRecovered,
+    AttemptEnd, AttemptRecord, HandlerError, HANDLER_QUEUE_EVENTS, HANDLER_STATS_INTERVAL,
 };
 use horsies::web::{  // feature `web`
     router, Actions, MonitoringConfig, MonitoringUiConfig, MonitoringAuthPolicy,

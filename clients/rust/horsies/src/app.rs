@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex};
 use horsies_core::handle::CoreHandle;
 use horsies_core::manifest::ProducerManifest;
 use horsies_core::{
-    ClientFamily, CoverageRequest, NamedChildStartHook, PoolProfile, RegisteredTask, TaskRegistry,
+    ClientFamily, CoverageRequest, EventHandlerSet, NamedChildStartHook, PoolProfile,
+    RegisteredTask, TaskRegistry,
 };
 
 pub use horsies_core::manifest::SchemaMode;
@@ -78,18 +79,24 @@ pub struct Horsies {
     functions: Arc<TaskFunctions>,
     workflows: Arc<WorkflowRegistry>,
     child_start_hooks: Vec<ChildStartFn>,
+    event_handlers: EventHandlerSet,
+    handler_child_start_hooks: Vec<ChildStartFn>,
 }
 
 /// One start hook of a worker child, with its name, called once in the
 /// child.
 pub(crate) type ChildStartFn = NamedChildStartHook;
 
-/// What child mode takes from the app: the tasks, the start hooks in
-/// registration order, and the producer manifest of the app's handle.
+/// What child mode takes from the app: the tasks, the start hooks of a task
+/// child in registration order, the producer manifest of the app's handle,
+/// and what a handler child runs: the event handlers and the start hooks of
+/// the handler child.
 pub(crate) struct ChildParts {
     pub(crate) tasks: TaskRegistry,
     pub(crate) start_hooks: Vec<ChildStartFn>,
     pub(crate) producer_manifest: ProducerManifest,
+    pub(crate) event_handlers: EventHandlerSet,
+    pub(crate) handler_child_start_hooks: Vec<ChildStartFn>,
 }
 
 impl Horsies {
@@ -140,6 +147,8 @@ impl Horsies {
             sends: SendSuppression::new(),
             functions: Arc::new(TaskFunctions::new()),
             child_start_hooks: Vec::new(),
+            event_handlers: EventHandlerSet::new(),
+            handler_child_start_hooks: Vec::new(),
         }
     }
 
@@ -331,6 +340,21 @@ impl Horsies {
         self.child_start_hooks.len()
     }
 
+    /// The event handlers of the app.
+    pub(crate) fn event_handlers(&self) -> &EventHandlerSet {
+        &self.event_handlers
+    }
+
+    /// The event handlers of the app, to register one.
+    pub(crate) fn event_handlers_mut(&mut self) -> &mut EventHandlerSet {
+        &mut self.event_handlers
+    }
+
+    /// Keep `hook` as the last start hook of each handler child.
+    pub(crate) fn add_handler_child_start_hook(&mut self, hook: ChildStartFn) {
+        self.handler_child_start_hooks.push(hook);
+    }
+
     /// The parts of the app that child mode serves from. Consumes the app:
     /// a child process serves until its end.
     pub(crate) fn into_child_parts(self) -> ChildParts {
@@ -338,6 +362,8 @@ impl Horsies {
             producer_manifest: self.handle.manifest().clone(),
             tasks: self.tasks,
             start_hooks: self.child_start_hooks,
+            event_handlers: self.event_handlers,
+            handler_child_start_hooks: self.handler_child_start_hooks,
         }
     }
 }
@@ -350,6 +376,11 @@ impl std::fmt::Debug for Horsies {
             .field("tasks", &self.tasks.len())
             .field("workflows", &self.workflows)
             .field("child_start_hooks", &self.child_start_hooks.len())
+            .field("event_handlers", &self.event_handlers.len())
+            .field(
+                "handler_child_start_hooks",
+                &self.handler_child_start_hooks.len(),
+            )
             .finish()
     }
 }

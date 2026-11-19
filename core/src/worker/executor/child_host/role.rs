@@ -1,8 +1,10 @@
 //! Whether this process runs task bodies (Python `core/process_role.py`).
 //!
-//! A worker child runs task bodies only. The role belongs to the process, so
+//! A task child runs task bodies only. The role belongs to the process, so
 //! it holds for every thread and every runtime in the child, also for the
-//! threads and tasks that a body starts, and for the start hook.
+//! threads and tasks that a body starts, and for the start hook. A handler
+//! child runs no task body: a handler holds no task capacity, so a result
+//! wait in a handler is not refused.
 //!
 //! A result wait fails closed in a process that runs task bodies
 //! (`WAIT_INSIDE_TASK`). A task that waits for another task keeps its own
@@ -17,13 +19,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Whether this process runs task bodies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessRole {
-    /// A worker child: the Rust child host started in this process.
+    /// A task child: the Rust child host booted a task kind in this
+    /// process.
     RunsTaskBodies,
-    /// Any other process: a producer, a worker parent, a scheduler.
+    /// Any other process: a producer, a worker parent, a scheduler, a
+    /// handler child.
     RunsNoTaskBodies,
 }
 
-/// Set once, by the child host, before the start hook and the first run.
+/// Set once, by the child host of a task child, before the start hook and
+/// the first run.
 static RUNS_TASK_BODIES: AtomicBool = AtomicBool::new(false);
 
 /// The role of this process. Pure read; starts nothing.
@@ -34,8 +39,8 @@ pub fn process_role() -> ProcessRole {
     }
 }
 
-/// Record that this process runs task bodies. The child host calls it at its
-/// start; the role never goes back.
+/// Record that this process runs task bodies. The child host calls it when
+/// it boots a task child; the role never goes back.
 pub(super) fn mark_process_runs_task_bodies() {
     RUNS_TASK_BODIES.store(true, Ordering::Release);
 }
