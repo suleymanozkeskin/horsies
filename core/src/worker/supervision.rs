@@ -286,6 +286,7 @@ mod tests {
             },
             Utc::now(),
             crate::worker::metrics_endpoint::WorkerEndpoint::NoMetricsEndpoint,
+            crate::worker::executor::handler_child::HandlerChildView::off(),
             cancel.clone(),
         );
         run_loop_death_case("worker-state", cancel, handle).await;

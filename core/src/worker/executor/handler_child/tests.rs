@@ -538,7 +538,8 @@ async fn handler_stats_frames_give_the_handler_counters_and_the_rss() {
 // Snapshot form
 // ---------------------------------------------------------------------------
 
-/// Each state of the handler child has its form in the `telemetry` column.
+/// Each state of the handler child has its form in the `telemetry`
+/// column.
 #[test]
 fn each_state_has_its_snapshot_form() {
     let since = Utc.with_ymd_and_hms(2026, 11, 19, 9, 30, 0).unwrap();
@@ -598,11 +599,7 @@ fn each_state_has_its_snapshot_form() {
         ),
     ];
     for (state, handler_child) in cases {
-        assert_eq!(
-            telemetry_json(&state),
-            json!({ "handler_child": handler_child }),
-            "{state:?}"
-        );
+        assert_eq!(handler_child_json(&state), handler_child, "{state:?}");
     }
 }
 
@@ -621,7 +618,7 @@ fn a_resource_shortage_names_its_errno() {
     });
 
     assert_eq!(
-        telemetry_json(&down)["handler_child"]["cause"],
+        handler_child_json(&down)["cause"],
         json!({"kind": "boot_failed", "boot": "resource_shortage", "errno": "EMFILE"})
     );
 }

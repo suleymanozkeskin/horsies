@@ -19,6 +19,7 @@ use crate::core::task::execution::Execution;
 
 use crate::worker::children::ChildrenView;
 use crate::worker::config::WorkerConfig;
+use crate::worker::executor::handler_child::HandlerChildView;
 use crate::worker::executor::slots::{DownState, PoolService};
 use crate::worker::executor::supervisor::BootFailureCause;
 use crate::worker::metrics_endpoint::{telemetry_json, WorkerEndpoint};
@@ -294,6 +295,8 @@ pub(crate) struct SnapshotSource {
     pub worker_started_at: DateTime<Utc>,
     /// The metrics endpoint of the worker, for the `telemetry` column.
     pub endpoint: WorkerEndpoint,
+    /// The handler child of the worker, for the `telemetry` column.
+    pub handler_child: HandlerChildView,
     sys: System,
     sys_pid: Pid,
 }
@@ -312,6 +315,7 @@ impl SnapshotSource {
         claim_columns: ClaimColumns,
         worker_started_at: DateTime<Utc>,
         endpoint: WorkerEndpoint,
+        handler_child: HandlerChildView,
     ) -> Self {
         let sys_pid = Pid::from(pid as usize);
         let mut sys = System::new();
@@ -332,6 +336,7 @@ impl SnapshotSource {
             claim_columns,
             worker_started_at,
             endpoint,
+            handler_child,
             sys,
             sys_pid,
         }
@@ -410,7 +415,7 @@ pub(crate) async fn write_snapshot(
 
     let slots_down = slots_down_json(&source.children.down_slots());
     let class_capacity = class_capacity_of(&source.children.service());
-    let telemetry = telemetry_json(&source.endpoint);
+    let telemetry = telemetry_json(&source.endpoint, &source.handler_child.state());
     let metrics = collect_resource_metrics(&mut source.sys, source.sys_pid);
     let recovery_value = source.recovery_value().await;
     let processes = source.claim_columns.processes as i32;
@@ -464,8 +469,8 @@ pub(crate) async fn write_snapshot(
 /// `children` gives the slots of the worker at each snapshot: the down
 /// slots (`slots_down`) and the capacity in service of each budget
 /// (`class_capacity`). `claim_columns` are the profile's
-/// ([`ClaimColumns::of_profile`]). `endpoint` gives the state of the
-/// metrics endpoint (`telemetry`).
+/// ([`ClaimColumns::of_profile`]). `endpoint` and `handler_child` give the
+/// state of the metrics endpoint and of the handler child (`telemetry`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_worker_state_loop(
     broker: Arc<PostgresBroker>,
@@ -479,6 +484,7 @@ pub(crate) fn spawn_worker_state_loop(
     claim_columns: ClaimColumns,
     worker_started_at: DateTime<Utc>,
     endpoint: WorkerEndpoint,
+    handler_child: HandlerChildView,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -495,6 +501,7 @@ pub(crate) fn spawn_worker_state_loop(
             claim_columns,
             worker_started_at,
             endpoint,
+            handler_child,
         );
 
         // The first snapshot is written at start, then one per interval
@@ -596,6 +603,7 @@ mod tests {
             isolated_claim_columns(1),
             Utc::now(),
             WorkerEndpoint::NoMetricsEndpoint,
+            HandlerChildView::off(),
             cancel.clone(),
         );
         let result = tokio::time::timeout(Duration::from_secs(10), async {
@@ -983,6 +991,7 @@ mod tests {
             isolated_claim_columns(2),
             Utc::now(),
             WorkerEndpoint::NoMetricsEndpoint,
+            HandlerChildView::off(),
             cancel.clone(),
         );
         type Columns = (
@@ -1036,10 +1045,13 @@ mod tests {
         );
         // No limit is stored resolved: the seats of the worker (#804).
         assert_eq!(max_claim_per_worker, 2);
-        // No `--metrics-listen`: the endpoint is off.
+        // No `--metrics-listen` and no handler child: both are off.
         assert_eq!(
             telemetry,
-            serde_json::json!({ "endpoint": { "state": "off" } })
+            serde_json::json!({
+                "endpoint": { "state": "off" },
+                "handler_child": { "state": "off" },
+            })
         );
     }
 
@@ -1059,6 +1071,7 @@ mod tests {
             isolated_claim_columns(1),
             Utc::now(),
             WorkerEndpoint::NoMetricsEndpoint,
+            HandlerChildView::off(),
         )
     }
 
@@ -1189,6 +1202,7 @@ mod tests {
             isolated_claim_columns(1),
             Utc::now(),
             WorkerEndpoint::NoMetricsEndpoint,
+            HandlerChildView::off(),
             cancel.clone(),
         );
         let written = tokio::time::timeout(Duration::from_secs(10), async {

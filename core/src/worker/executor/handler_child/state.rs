@@ -101,18 +101,12 @@ impl HandlerChildView {
     }
 }
 
-/// The `telemetry` column of a worker snapshot: the state of each part of
-/// the telemetry of the worker, an object with the key `handler_child`.
-/// Pure.
-pub fn telemetry_json(handler_child: &HandlerChildState) -> Value {
-    json!({ "handler_child": handler_child_json(handler_child) })
-}
-
-/// The state of the handler child: `{"state": "off"}`,
+/// The state of the handler child, as the `handler_child` member of the
+/// `telemetry` column of a worker snapshot: `{"state": "off"}`,
 /// `{"state": "starting"}`, `{"state": "up", "pid": ..}`, or
 /// `{"state": "down", "cause": .., "detail": .., "down_since": ..,
 /// "next": ..}`. Pure.
-fn handler_child_json(state: &HandlerChildState) -> Value {
+pub fn handler_child_json(state: &HandlerChildState) -> Value {
     match state {
         HandlerChildState::Off => json!({ "state": "off" }),
         HandlerChildState::Starting => json!({ "state": "starting" }),
