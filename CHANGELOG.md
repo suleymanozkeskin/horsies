@@ -729,7 +729,9 @@ before you upgrade a 0.7 deployment.
   short text, the member docstring. `horsies-codegen` renders it as
   `horsies._catalog.error_codes.ErrorCode`, which `horsies.ErrorCode` and
   `horsies.core.errors.ErrorCode` re-export. Every code keeps its number
-  and its member name; the members are in code order.
+  and its member name; the members are in code order. New member:
+  `WORKFLOW_UNREGISTERED_TASK` (`HRS-302`), which the core had and Python
+  did not. Only the Rust client raises it.
 
 ### Fixed
 
@@ -1596,7 +1598,12 @@ unless it starts with "Added".
   (`HRS-214`), `ConfigInvalidKeepalive` (`HRS-215`), `ConfigOtelApiMissing`
   (`HRS-220`) and `ConfigInvalidTraceLink` (`HRS-221`). The Rust client
   raises none of them. An exhaustive `match` on `ErrorCode` needs the new
-  arms.
+  arms. `is_workflow_error`, `is_task_error`, `is_config_error` and
+  `is_registry_error` follow `category()`: `is_registry_error()` of
+  `WorkflowUnregisteredTask` (`HRS-302`) is now `true`.
+- **`task_name::node()` before `task_name::register` refuses with
+  `HRS-302`** (`ErrorCode::WorkflowUnregisteredTask`). Before, its
+  `HorsiesError` had no code.
 
 ## [0.7.0] - 2026-11-15
 

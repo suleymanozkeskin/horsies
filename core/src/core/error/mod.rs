@@ -45,8 +45,7 @@ impl std::fmt::Display for ErrorCategory {
 /// - HRS-200-HRS-299: Config/broker
 /// - HRS-300-HRS-399: Registry
 ///
-/// HRS-023, HRS-106 and HRS-302 are retired and are not used again
-/// ([`RETIRED_ERROR_CODES`]).
+/// HRS-023 and HRS-106 are retired and are not used again.
 ///
 /// This enum is the one list of the codes of both clients. `horsies-codegen`
 /// renders it as `horsies._catalog.error_codes.ErrorCode`, the Python
@@ -317,16 +316,12 @@ pub enum ErrorCode {
     /// Two tasks have the same name.
     #[code_catalog(value = "HRS-301")]
     TaskDuplicateName,
+    /// A workflow node names a task that is not registered in this process.
+    /// The Rust client refuses `<task>::node()` before
+    /// `<task>::register(&mut app)` with it.
+    #[code_catalog(value = "HRS-302")]
+    WorkflowUnregisteredTask,
 }
-
-/// The codes that no [`ErrorCode`] variant may take again: each one had a
-/// meaning in a past release.
-///
-/// - HRS-023: retired from the Python client.
-/// - HRS-106: retired from the Python client.
-/// - HRS-302 (`WorkflowUnregisteredTask`): a workflow node named a task that
-///   was not registered, a check of the Rust client up to 0.1.0-alpha.36.
-pub const RETIRED_ERROR_CODES: [&str; 3] = ["HRS-023", "HRS-106", "HRS-302"];
 
 impl ErrorCode {
     /// Numeric code string (e.g. "HRS-001"): the catalog value of the code.
@@ -417,7 +412,9 @@ impl ErrorCode {
             | Self::ConfigOtelApiMissing
             | Self::ConfigInvalidTraceLink => ErrorCategory::Config,
 
-            Self::TaskNotRegistered | Self::TaskDuplicateName => ErrorCategory::Registry,
+            Self::TaskNotRegistered | Self::TaskDuplicateName | Self::WorkflowUnregisteredTask => {
+                ErrorCategory::Registry
+            }
         }
     }
 
@@ -718,23 +715,15 @@ mod tests {
         }
     }
 
-    /// No code takes a retired number, and the class doc (the Python
-    /// docstring) names each retired number.
+    /// HRS-302 is a registry code for `category()` and for
+    /// `is_registry_error()` alike.
     #[test]
-    fn no_code_takes_a_retired_number() {
-        for code in <ErrorCode as CodeEnum>::VARIANTS {
-            assert!(
-                !RETIRED_ERROR_CODES.contains(&code.as_code_str()),
-                "{code:?} takes the retired {}",
-                code.as_code_str()
-            );
-        }
-        for retired in RETIRED_ERROR_CODES {
-            assert!(
-                <ErrorCode as CodeEnum>::CATALOG.doc.contains(retired),
-                "the ErrorCode doc does not name {retired}"
-            );
-        }
+    fn the_unregistered_workflow_task_code_is_a_registry_error() {
+        let code = ErrorCode::WorkflowUnregisteredTask;
+        assert_eq!(code.as_code_str(), "HRS-302");
+        assert_eq!(code.category(), ErrorCategory::Registry);
+        assert!(code.is_registry_error());
+        assert!(!code.is_workflow_error());
     }
 
     // --- ErrorCode category helper tests ---
