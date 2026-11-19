@@ -48,6 +48,7 @@ fn task(execution: ExecutionClass, stored: &str) -> ClaimedTask {
         },
         options: options(stored),
         trace: crate::events::RunTrace::NoCarrier,
+        trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
     }
 }
 

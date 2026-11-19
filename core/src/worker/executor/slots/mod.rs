@@ -105,8 +105,8 @@ pub use budgets::{
 pub use crate::broker::OrphanSelfHeal;
 pub use defects::{SlotDefect, SLOT_DEFECT_LIMIT};
 pub use dispatch::{
-    AttemptEnd, CancelEnd, Claimed, ClaimedTask, ExecutionClass, LoopKillCode, NotRunCause,
-    RetryFacts, Settlement, TaskKind, TerminalState, TimeoutCancel, WrittenEnd,
+    AttemptEnd, AttemptLog, CancelEnd, Claimed, ClaimedTask, ExecutionClass, LoopKillCode,
+    NotRunCause, RetryFacts, Settlement, TaskKind, TerminalState, TimeoutCancel, WrittenEnd,
 };
 #[cfg(test)]
 pub(crate) use outcome::test_successes;

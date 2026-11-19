@@ -407,6 +407,8 @@ pub(crate) async fn persist_terminal_state(
             if let Some(refusal) = task_error.storage_refusal() {
                 tracing::error!(
                     task_id = %task_id,
+                    attempt = task.retry.attempt().get(),
+                    trace_id = task.trace_id.log_field(),
                     error_code = %task_error.error_code,
                     cause = %refusal,
                     "data of a TaskError cannot be stored; it is stored as data_refused",

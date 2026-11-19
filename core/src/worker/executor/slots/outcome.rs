@@ -529,6 +529,8 @@ fn released(task: &ClaimedTask, reason: &str, outcomes: &[(Uuid, ReleaseOutcome)
         [(_, ReleaseOutcome::Released)] => {
             tracing::warn!(
                 task_id = %task.task_id,
+                attempt = task.retry.attempt().get(),
+                trace_id = task.trace_id.log_field(),
                 "Requeued worker-owned in-flight task {}: {reason}",
                 task.task_id,
             );
@@ -537,6 +539,8 @@ fn released(task: &ClaimedTask, reason: &str, outcomes: &[(Uuid, ReleaseOutcome)
         [(_, ReleaseOutcome::NotHeld)] => {
             tracing::warn!(
                 task_id = %task.task_id,
+                attempt = task.retry.attempt().get(),
+                trace_id = task.trace_id.log_field(),
                 "Failed to requeue task {} (not owned or not requeueable): {reason}",
                 task.task_id,
             );
@@ -560,6 +564,8 @@ fn release_failed(
 ) -> Settlement {
     tracing::error!(
         task_id = %task.task_id,
+        attempt = task.retry.attempt().get(),
+        trace_id = task.trace_id.log_field(),
         error = %error,
         "DB error while requeueing task {} ({reason}): {error}",
         task.task_id,
@@ -706,6 +712,8 @@ impl OutcomeWriter {
             ReadEnd::EndUnknown { pid } => {
                 tracing::warn!(
                     task_id = %task.task_id,
+                    attempt = task.retry.attempt().get(),
+                    trace_id = task.trace_id.log_field(),
                     pid = pid.get(),
                     "the exit of the task's child was not seen; recovery decides the row",
                 );
@@ -794,6 +802,8 @@ impl OutcomeWriter {
         }
         tracing::error!(
             task_id = %task.task_id,
+            attempt = task.retry.attempt().get(),
+            trace_id = task.trace_id.log_field(),
             "every retry of the TASK_TIMEOUT write failed; crash recovery writes the row",
         );
         let recovery = timeout_recovery_writes(task, &self.worker_id, timeout, placement);
@@ -972,6 +982,8 @@ impl OutcomeWriter {
                     let delay = phase_retry_delay(retries_done);
                     tracing::warn!(
                         task_id = %task.task_id,
+                        attempt = task.retry.attempt().get(),
+                        trace_id = task.trace_id.log_field(),
                         stage = ?stage,
                         retry = retries_done,
                         max = max_retries,
@@ -986,6 +998,8 @@ impl OutcomeWriter {
                 (true, false) => {
                     tracing::error!(
                         task_id = %task.task_id,
+                        attempt = task.retry.attempt().get(),
+                        trace_id = task.trace_id.log_field(),
                         stage = ?stage,
                         retries = max_retries,
                         error = %error,
@@ -999,6 +1013,8 @@ impl OutcomeWriter {
                 (false, _) => {
                     tracing::error!(
                         task_id = %task.task_id,
+                        attempt = task.retry.attempt().get(),
+                        trace_id = task.trace_id.log_field(),
                         stage = ?stage,
                         error = %error,
                         "Finalize stage will not be re-attempted ({}) stage={}: {error}",
@@ -1033,6 +1049,8 @@ impl OutcomeWriter {
             PhaseOneOutcome::ClaimReleased => {
                 tracing::warn!(
                     task_id = %task.task_id,
+                    attempt = task.retry.attempt().get(),
+                    trace_id = task.trace_id.log_field(),
                     "the child was killed before the task ran; the claim went back to the queue",
                 );
                 Settlement::Written(WrittenEnd::ClaimReleased)
@@ -1095,6 +1113,8 @@ impl OutcomeWriter {
                 (true, true) => {
                     tracing::warn!(
                         task_id = %task.task_id,
+                        attempt = task.retry.attempt().get(),
+                        trace_id = task.trace_id.log_field(),
                         send = sends,
                         max = RELEASE_SENDS,
                         error = %error,
@@ -1135,6 +1155,8 @@ impl OutcomeWriter {
             (StopReason::NodeNotLinked, _) => {
                 tracing::debug!(
                     task_id = %task.task_id,
+                    attempt = task.retry.attempt().get(),
+                    trace_id = task.trace_id.log_field(),
                     "Task {} terminalization classified as no-op: ORPHAN_SELF_HEAL_DISABLED",
                     task.task_id,
                 );

@@ -236,6 +236,7 @@ async fn claimed_task(pool: &TestPool, task_id: Uuid) -> ClaimedTask {
         },
         options: read_stored_options(task_options.as_deref()),
         trace: crate::events::RunTrace::NoCarrier,
+        trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
     }
 }
 
