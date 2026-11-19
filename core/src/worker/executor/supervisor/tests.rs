@@ -197,7 +197,9 @@ fn a_child_without_a_frame_is_read_by_its_exit() {
         }
     );
     assert_eq!(
-        cause_of(boot_end_of(BootReply::NotReadyInTime)),
+        cause_of(boot_end_of(BootReply::NotReadyInTime {
+            bound: CHILD_READY_TIMEOUT
+        })),
         BootFailureCause::NotReadyInTime
     );
 }

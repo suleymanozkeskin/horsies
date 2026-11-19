@@ -13,9 +13,12 @@
 //!   each attempt's end to the outcome writers.
 //! - [`child_host`]: child mode of a Rust worker binary, which runs its
 //!   registered tasks of the three classes.
+//! - [`handler_child`]: the one child that runs the event handlers of the
+//!   app; not a slot.
 //! - [`placement`]: the CPUs of the worker process and of its children.
 
 pub mod child_host;
+pub mod handler_child;
 pub mod placement;
 pub mod protocol;
 pub mod slots;
