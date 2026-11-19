@@ -67,6 +67,10 @@ class LeafTaskInfo(BaseModel):
 
     ``execution`` is the stored ``Execution`` of a live task, and ``None``
     for a task read from history, which does not keep the class.
+
+    ``trace_id`` is the trace id of the span that sent the task, as 32
+    lowercase hex digits, for a live task and a task in history; ``None``
+    for a task sent with no trace.
     """
 
     task_id: UUID
@@ -84,6 +88,7 @@ class LeafTaskInfo(BaseModel):
     worker_hostname: str | None
     good_until: datetime | None
     execution: Execution | None
+    trace_id: str | None
 
 
 class StatusCount(BaseModel):
@@ -307,7 +312,9 @@ class WorkflowRunDetail(BaseModel):
 
     ``failed_indices`` lists the ``task_index`` of every FAILED node in
     ascending order, so the UI can navigate failures without scanning the
-    graph; ``failed_count`` is its length.
+    graph; ``failed_count`` is its length. ``trace_id`` is the trace id of
+    the span that started the run, as 32 lowercase hex digits; ``None`` for
+    a start with no trace.
     """
 
     run: WorkflowRunSummary
@@ -315,6 +322,7 @@ class WorkflowRunDetail(BaseModel):
     edges: list[WorkflowEdge]
     failed_count: int
     failed_indices: list[int]
+    trace_id: str | None
 
 
 class WorkflowTaskDetail(BaseModel):

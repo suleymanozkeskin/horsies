@@ -28,6 +28,9 @@ use crate::broker::claims::{
 };
 use crate::broker::{BrokerError, PostgresBroker};
 use crate::core::task::Execution;
+use crate::telemetry::labels::ReleaseReason;
+use crate::telemetry::worker::WorkerTelemetry;
+use crate::worker::executor::slots::dispatch::attempt_of;
 
 #[cfg(test)]
 mod tests;
@@ -187,6 +190,13 @@ pub trait ClaimPassSteps: Send + Sync {
 
 /// Run one claim pass with `steps` and give the rows to dispatch.
 ///
+/// `telemetry` gets one `TaskClaimed` per row that the claim statement
+/// returned, then one `ClaimReleased` per row that a later step returned to
+/// the queue: a row of a paused or cancelled workflow
+/// (`WorkflowNotRunnable`), a row returned as `ISOLATED`
+/// (`ReturnedAsIsolated`). A row whose claim was lost before its return gets
+/// no release.
+///
 /// Errors: the [`BrokerError`] of the first step that failed. The claim
 /// committed before a later step fails: rows not yet returned or dispatched
 /// return to the queue when their lease expires.
@@ -194,11 +204,13 @@ pub async fn claim_for_dispatch<S: ClaimPassSteps>(
     steps: &S,
     request: &ClaimPassRequest,
     registered: &RegisteredClasses,
+    telemetry: &WorkerTelemetry,
 ) -> Result<ClaimedForDispatch, BrokerError> {
     let pass = steps.claim(request).await?;
+    telemetry.claimed(&pass.claimed);
     let claimed = pass.claimed.len();
-    let runnable = drop_non_runnable(steps, pass.claimed).await?;
-    let rows = return_rows_of_another_class(steps, runnable, registered).await?;
+    let runnable = drop_non_runnable(steps, pass.claimed, telemetry).await?;
+    let rows = return_rows_of_another_class(steps, runnable, registered, telemetry).await?;
     Ok(ClaimedForDispatch {
         counts: ClaimPassCounts {
             claimed,
@@ -209,11 +221,13 @@ pub async fn claim_for_dispatch<S: ClaimPassSteps>(
     })
 }
 
-/// Drop the rows of paused or cancelled workflows. Only workflow tasks can
-/// belong to one, so a pass with none runs no statement.
+/// Drop the rows of paused or cancelled workflows; `telemetry` gets one
+/// `ClaimReleased` per dropped row. Only workflow tasks can belong to one,
+/// so a pass with none runs no statement.
 async fn drop_non_runnable<S: ClaimPassSteps>(
     steps: &S,
     rows: Vec<ClaimedRow>,
+    telemetry: &WorkerTelemetry,
 ) -> Result<Vec<ClaimedRow>, BrokerError> {
     match rows.iter().any(|row| row.is_workflow_task) {
         false => Ok(rows),
@@ -221,10 +235,17 @@ async fn drop_non_runnable<S: ClaimPassSteps>(
             let claims: Vec<(Uuid, DateTime<Utc>)> =
                 rows.iter().map(|row| (row.id, row.claimed_at)).collect();
             let dropped = steps.non_runnable_workflow_tasks(&claims).await?;
-            Ok(rows
-                .into_iter()
-                .filter(|row| !dropped.contains(&row.id))
-                .collect())
+            let (released, runnable): (Vec<ClaimedRow>, Vec<ClaimedRow>) =
+                rows.into_iter().partition(|row| dropped.contains(&row.id));
+            for row in &released {
+                telemetry.released(
+                    row.id,
+                    &row.task_name,
+                    &row.queue_name,
+                    ReleaseReason::WorkflowNotRunnable,
+                );
+            }
+            Ok(runnable)
         }
     }
 }
@@ -232,11 +253,13 @@ async fn drop_non_runnable<S: ClaimPassSteps>(
 /// Return each row whose class does not fit its registered task, in one
 /// release as `ISOLATED`. Rows that fit, and rows of a task this worker did
 /// not register, come back in their order. Logs one warning per returned
-/// row.
+/// row; `telemetry` gets one `ClaimReleased` per row that the release
+/// returned.
 async fn return_rows_of_another_class<S: ClaimPassSteps>(
     steps: &S,
     rows: Vec<ClaimedRow>,
     registered: &RegisteredClasses,
+    telemetry: &WorkerTelemetry,
 ) -> Result<Vec<ClaimedRow>, BrokerError> {
     let mut fitting = Vec::with_capacity(rows.len());
     let mut mismatched: Vec<(ClaimedRow, Execution)> = Vec::new();
@@ -258,11 +281,21 @@ async fn return_rows_of_another_class<S: ClaimPassSteps>(
     let outcomes = steps.return_as_isolated(&claims).await?;
     for ((row, registered_class), (_, outcome)) in mismatched.iter().zip(&outcomes) {
         let done = match outcome {
-            ReleaseOutcome::Released => "wrote ISOLATED on the row and returned it to the queue",
+            ReleaseOutcome::Released => {
+                telemetry.released(
+                    row.id,
+                    &row.task_name,
+                    &row.queue_name,
+                    ReleaseReason::ReturnedAsIsolated,
+                );
+                "wrote ISOLATED on the row and returned it to the queue"
+            }
             ReleaseOutcome::NotHeld => "the claim was lost, so the row was left as it is",
         };
         tracing::warn!(
             task_id = %row.id,
+            attempt = attempt_of(row.retry_count).get(),
+            trace_id = row.trace_id.log_field(),
             "Task {} ({}) stores execution {}, and the registered function is {} on this \
              worker; {done}",
             row.id,

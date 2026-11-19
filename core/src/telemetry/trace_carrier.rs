@@ -30,6 +30,40 @@ pub const MAX_TRACE_CARRIER_BYTES: usize = 2_048;
 /// Bytes of a trace id.
 pub const TRACE_ID_BYTES: usize = 16;
 
+/// The trace id that a row stores, as the claim of the row read it: the id
+/// of the log records of each attempt of the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StoredTraceId {
+    /// The row stores no trace id.
+    #[default]
+    NoTraceId,
+    /// The 16-byte trace id of the span of the send.
+    TraceId([u8; TRACE_ID_BYTES]),
+}
+
+/// A trace id written as its 32 lowercase hex characters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceIdHex([u8; TRACE_ID_BYTES]);
+
+impl std::fmt::Display for TraceIdHex {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0
+            .iter()
+            .try_for_each(|byte| write!(formatter, "{byte:02x}"))
+    }
+}
+
+impl StoredTraceId {
+    /// The value of the `trace_id` field of a log record: the hex text of
+    /// the id, or no value, so the record leaves the field out.
+    pub fn log_field(self) -> Option<tracing::field::DisplayValue<TraceIdHex>> {
+        match self {
+            Self::NoTraceId => None,
+            Self::TraceId(id) => Some(tracing::field::display(TraceIdHex(id))),
+        }
+    }
+}
+
 /// The `p_trace_kind` of a row with no carrier.
 const NO_CARRIER_KIND: &str = "NO_CARRIER";
 
@@ -293,6 +327,34 @@ fn push_json_string(text: &mut String, value: &str) {
         }
     }
     text.push('"');
+}
+
+/// The text of a trace id: its 32 lowercase hex digits ([`TraceIdHex`]),
+/// as W3C Trace Context writes it. Pure.
+pub fn trace_id_text(trace_id: &[u8; TRACE_ID_BYTES]) -> String {
+    TraceIdHex(*trace_id).to_string()
+}
+
+/// A stored trace id that is not [`TRACE_ID_BYTES`] long: data that no
+/// writer stores (the send check takes 16 bytes only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the stored trace id has {bytes} bytes; a trace id has {length} bytes", length = TRACE_ID_BYTES)]
+pub struct StoredTraceIdLength {
+    pub bytes: usize,
+}
+
+/// The text of a stored trace id (`trace_id` of `horsies_tasks`,
+/// `horsies_workflows` and `horsies_task_history`): [`trace_id_text`], or
+/// `None` for a row with no trace. Pure.
+///
+/// Errors: [`StoredTraceIdLength`] for a value that is not 16 bytes.
+pub fn stored_trace_id_text(stored: Option<&[u8]>) -> Result<Option<String>, StoredTraceIdLength> {
+    match stored {
+        None => Ok(None),
+        Some(bytes) => <&[u8; TRACE_ID_BYTES]>::try_from(bytes)
+            .map(|trace_id| Some(trace_id_text(trace_id)))
+            .map_err(|_| StoredTraceIdLength { bytes: bytes.len() }),
+    }
 }
 
 /// Whether this process has logged a refused carrier.

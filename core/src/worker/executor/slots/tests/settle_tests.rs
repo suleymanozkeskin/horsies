@@ -336,7 +336,7 @@ async fn a_task_that_never_reached_a_child_goes_back_to_the_queue() {
     )
     .await;
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     assert_eq!(
         live_row(&pool, claimed.task_id).await,
         ("PENDING".to_owned(), None)
@@ -380,7 +380,7 @@ async fn a_reported_value_completes_the_task() {
     )
     .await;
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     assert_eq!(live_row_count(&pool, claimed.task_id).await, 0);
     assert_eq!(
         history_row(&pool, claimed.task_id).await,
@@ -405,7 +405,7 @@ async fn a_lost_child_fails_its_running_task_as_crashed() {
     .settle(&claimed, crashed())
     .await;
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     assert_eq!(
         history_row(&pool, claimed.task_id).await,
         ("FAILED".to_owned(), Some("WORKER_CRASHED".to_owned()))
@@ -438,7 +438,7 @@ async fn a_phase_two_error_after_a_lost_child_write_is_tried_again() {
     let updates_seen = refusal.updates_seen(&pool).await;
     refusal.remove(&pool).await;
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     assert_eq!(
         history_row(&pool, claimed.task_id).await,
         ("FAILED".to_owned(), Some("WORKER_CRASHED".to_owned()))
@@ -539,7 +539,7 @@ async fn a_write_error_that_cannot_clear_is_not_sent_again() {
     )))
     .settle(&claimed_now(), crashed())
     .await;
-    assert_ne!(settled, Settlement::Written);
+    assert!(!matches!(settled, Settlement::Written(_)), "{:?}", settled);
     assert!(
         started.elapsed() < Duration::from_secs_f64(phase_retry_delay(1)),
         "a retry wait passed: {:?}",

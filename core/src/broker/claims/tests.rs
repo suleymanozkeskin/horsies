@@ -19,6 +19,19 @@ fn task(n: u128) -> Uuid {
     Uuid::from_u128(n)
 }
 
+/// The read of the claim results of these tests.
+fn read() -> ClaimRead {
+    ClaimRead {
+        at: tokio::time::Instant::now(),
+        wall: instant(),
+    }
+}
+
+/// The time a claimed row of these tests was due: a minute before its claim.
+fn due() -> DateTime<Utc> {
+    instant() - chrono::Duration::minutes(1)
+}
+
 fn claimed_wire(n: u128) -> ClaimWireRow {
     ClaimWireRow {
         row_kind: "CLAIMED".to_owned(),
@@ -32,6 +45,10 @@ fn claimed_wire(n: u128) -> ClaimWireRow {
         claimed_at: Some(instant()),
         retry_count: Some(1),
         max_retries: Some(3),
+        trace_carrier: None,
+        trace_id: None,
+        priority: Some(40),
+        enqueued_at: Some(due()),
         short_by: None,
     }
 }
@@ -48,7 +65,8 @@ fn short_wire(short_by: i32) -> ClaimWireRow {
 
 #[test]
 fn claimed_rows_come_in_claim_order_with_no_short_take() {
-    let pass = decode_claim_pass(vec![claimed_wire(2), claimed_wire(1)]).unwrap();
+    let read = read();
+    let pass = decode_claim_pass(vec![claimed_wire(2), claimed_wire(1)], read).unwrap();
     assert_eq!(pass.take, ClaimTake::Full);
     assert_eq!(
         pass.claimed.iter().map(|row| row.id).collect::<Vec<_>>(),
@@ -67,13 +85,18 @@ fn claimed_rows_come_in_claim_order_with_no_short_take() {
             claimed_at: instant(),
             retry_count: 1,
             max_retries: 3,
+            trace: crate::events::RunTrace::NoCarrier,
+            trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
+            priority: Priority::try_from(40).unwrap(),
+            enqueued_at: due(),
+            read,
         }
     );
 }
 
 #[test]
 fn a_short_row_is_counted_and_is_not_a_task() {
-    let pass = decode_claim_pass(vec![claimed_wire(1), short_wire(2)]).unwrap();
+    let pass = decode_claim_pass(vec![claimed_wire(1), short_wire(2)], read()).unwrap();
     assert_eq!(pass.claimed.len(), 1);
     assert_eq!(
         pass.take,
@@ -85,7 +108,7 @@ fn a_short_row_is_counted_and_is_not_a_task() {
 
 #[test]
 fn an_empty_pass_is_full() {
-    let pass = decode_claim_pass(Vec::new()).unwrap();
+    let pass = decode_claim_pass(Vec::new(), read()).unwrap();
     assert!(pass.claimed.is_empty());
     assert_eq!(pass.take, ClaimTake::Full);
 }
@@ -123,6 +146,41 @@ fn rows_the_claim_never_returns_are_a_defect() {
             }],
         ),
         (
+            "claimed_with_a_negative_retry_count",
+            vec![ClaimWireRow {
+                retry_count: Some(-1),
+                ..claimed_wire(1)
+            }],
+        ),
+        (
+            "claimed_without_priority",
+            vec![ClaimWireRow {
+                priority: None,
+                ..claimed_wire(1)
+            }],
+        ),
+        (
+            "claimed_with_priority_zero",
+            vec![ClaimWireRow {
+                priority: Some(0),
+                ..claimed_wire(1)
+            }],
+        ),
+        (
+            "claimed_with_priority_above_100",
+            vec![ClaimWireRow {
+                priority: Some(101),
+                ..claimed_wire(1)
+            }],
+        ),
+        (
+            "claimed_without_due_time",
+            vec![ClaimWireRow {
+                enqueued_at: None,
+                ..claimed_wire(1)
+            }],
+        ),
+        (
             "claimed_of_an_unknown_class",
             vec![ClaimWireRow {
                 execution: Some("SHARED".to_owned()),
@@ -133,6 +191,34 @@ fn rows_the_claim_never_returns_are_a_defect() {
             "short_with_a_task_column",
             vec![ClaimWireRow {
                 id: Some(task(1)),
+                ..short_wire(1)
+            }],
+        ),
+        (
+            "short_with_a_trace_id",
+            vec![ClaimWireRow {
+                trace_id: Some(vec![7; 16]),
+                ..short_wire(1)
+            }],
+        ),
+        (
+            "short_with_a_priority",
+            vec![ClaimWireRow {
+                priority: Some(1),
+                ..short_wire(1)
+            }],
+        ),
+        (
+            "short_with_a_due_time",
+            vec![ClaimWireRow {
+                enqueued_at: Some(due()),
+                ..short_wire(1)
+            }],
+        ),
+        (
+            "short_with_a_trace_carrier",
+            vec![ClaimWireRow {
+                trace_carrier: Some(CARRIER_TEXT.to_owned()),
                 ..short_wire(1)
             }],
         ),
@@ -147,7 +233,10 @@ fn rows_the_claim_never_returns_are_a_defect() {
         ),
     ];
     for (name, rows) in cases {
-        assert!(decode_claim_pass(rows).is_err(), "{name} must fail closed");
+        assert!(
+            decode_claim_pass(rows, read()).is_err(),
+            "{name} must fail closed"
+        );
     }
 }
 
@@ -161,10 +250,13 @@ fn the_stored_class_of_a_claimed_row_parses() {
         ("SHARED_ASYNC", Execution::SharedAsync),
         ("SHARED_THREAD", Execution::SharedThread),
     ] {
-        let pass = decode_claim_pass(vec![ClaimWireRow {
-            execution: Some(stored.to_owned()),
-            ..claimed_wire(1)
-        }])
+        let pass = decode_claim_pass(
+            vec![ClaimWireRow {
+                execution: Some(stored.to_owned()),
+                ..claimed_wire(1)
+            }],
+            read(),
+        )
         .expect("a claimed row of a stored class reads");
 
         assert_eq!(pass.claimed.len(), 1, "{stored}");
@@ -177,10 +269,13 @@ fn the_stored_class_of_a_claimed_row_parses() {
 /// row contract of the claim, and the refusal names the task and the value.
 #[test]
 fn a_claimed_row_of_a_class_outside_the_enum_is_refused_with_its_task() {
-    let refused = decode_claim_pass(vec![ClaimWireRow {
-        execution: Some("SHARED_GPU".to_owned()),
-        ..claimed_wire(1)
-    }])
+    let refused = decode_claim_pass(
+        vec![ClaimWireRow {
+            execution: Some("SHARED_GPU".to_owned()),
+            ..claimed_wire(1)
+        }],
+        read(),
+    )
     .expect_err("a class outside the enum breaks the row contract");
 
     assert!(
@@ -190,6 +285,56 @@ fn a_claimed_row_of_a_class_outside_the_enum_is_refused_with_its_task() {
         )),
         "{refused}"
     );
+}
+
+/// A stored carrier of the send, as the core's encoder writes it.
+const CARRIER_TEXT: &str =
+    r#"{"traceparent":"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}"#;
+
+/// The stored carrier of a claimed row reaches the claimed row as its text;
+/// a row with no carrier (`NULL`) claims with no carrier.
+#[test]
+fn a_claimed_row_carries_its_stored_trace_carrier() {
+    let pass = decode_claim_pass(
+        vec![
+            ClaimWireRow {
+                trace_carrier: Some(CARRIER_TEXT.to_owned()),
+                ..claimed_wire(1)
+            },
+            claimed_wire(2),
+        ],
+        read(),
+    )
+    .expect("claimed rows with and without a carrier read");
+
+    assert_eq!(
+        pass.claimed[0].trace,
+        RunTrace::Carrier {
+            text: TraceCarrierText::new(CARRIER_TEXT.to_owned()).expect("a short carrier"),
+        }
+    );
+    assert_eq!(pass.claimed[1].trace, RunTrace::NoCarrier);
+}
+
+/// A stored text over the carrier bound was not written by a send. It does
+/// not fail the claim: the row claims with no carrier.
+#[test]
+fn a_stored_carrier_over_its_bound_claims_with_no_carrier() {
+    let over = format!(
+        r#"{{"k":"{}"}}"#,
+        "v".repeat(crate::events::MAX_EVENT_TRACE_CARRIER_CHARS)
+    );
+    let pass = decode_claim_pass(
+        vec![ClaimWireRow {
+            trace_carrier: Some(over),
+            ..claimed_wire(1)
+        }],
+        read(),
+    )
+    .expect("a carrier over its bound does not fail the claim");
+
+    assert_eq!(pass.claimed.len(), 1);
+    assert_eq!(pass.claimed[0].trace, RunTrace::NoCarrier);
 }
 
 // --- claim pass arguments -----------------------------------------------------
@@ -485,4 +630,42 @@ fn each_miss_reason_reads_back_from_its_text() {
     ] {
         assert_eq!(StartMiss::from_wire(miss.as_str()), Some(miss));
     }
+}
+
+/// The stored trace id of a claimed row reaches the claimed row as its 16
+/// bytes; `NULL` claims with no trace id; another length was not written by
+/// a send and claims with no trace id.
+#[test]
+fn a_claimed_row_carries_its_stored_trace_id() {
+    let pass = decode_claim_pass(
+        vec![
+            ClaimWireRow {
+                trace_id: Some((1..=16).collect()),
+                ..claimed_wire(1)
+            },
+            claimed_wire(2),
+            ClaimWireRow {
+                trace_id: Some(vec![1; 15]),
+                ..claimed_wire(3)
+            },
+        ],
+        read(),
+    )
+    .expect("claimed rows with and without a trace id read");
+
+    let mut expected = [0_u8; 16];
+    for (byte, value) in expected.iter_mut().zip(1_u8..) {
+        *byte = value;
+    }
+    assert_eq!(pass.claimed[0].trace_id, StoredTraceId::TraceId(expected));
+    assert_eq!(pass.claimed[1].trace_id, StoredTraceId::NoTraceId);
+    assert_eq!(pass.claimed[2].trace_id, StoredTraceId::NoTraceId);
+    assert_eq!(
+        pass.claimed[0]
+            .trace_id
+            .log_field()
+            .map(|field| format!("{field}")),
+        Some("0102030405060708090a0b0c0d0e0f10".to_owned())
+    );
+    assert!(pass.claimed[1].trace_id.log_field().is_none());
 }

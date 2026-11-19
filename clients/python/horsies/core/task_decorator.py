@@ -1754,7 +1754,8 @@ def create_task_wrapper(
     an `AsyncTaskFunction`, whose direct call returns a coroutine.
 
     `error_codes` are the codes that the task declares, which the decorator
-    checked (`parse_declared_error_codes`); the wrapper keeps them as
+    checked (`parse_declared_error_codes`), with the codes of its exception
+    mappers (`with_mapper_codes`); the wrapper keeps them as
     `task_error_codes`.
     """
 

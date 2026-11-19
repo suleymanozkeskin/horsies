@@ -53,6 +53,7 @@ from horsies.core.declared_error_codes import (
     RepeatedCodeRefused,
     ReservedNameRefused,
     parse_declared_error_codes,
+    with_mapper_codes,
 )
 from horsies.core.errors import (
     ConfigurationError,
@@ -774,6 +775,10 @@ class Horsies:
         a tuple of code texts; default `()`) declares the task's own error
         codes: the values of its `error_code` metric label besides the
         built-in codes and `undeclared` (`horsies.core.declared_error_codes`).
+        The codes that the task's `exception_mapper` and
+        `AppConfig.exception_mapper` map to are declared with no second
+        declaration (`with_mapper_codes`); the app's mapper is read when the
+        task is defined.
 
         Raises:
             TaskDefinitionError: empty task name, invalid options, mapper,
@@ -921,7 +926,11 @@ class Horsies:
                 task_options,
                 exception_mapper=exception_mapper,
                 default_unhandled_error_code=default_unhandled_error_code,
-                error_codes=declared_error_codes,
+                error_codes=with_mapper_codes(
+                    declared_error_codes,
+                    exception_mapper,
+                    self.config.exception_mapper,
+                ),
             )
 
             # Register task with this app, passing source for duplicate detection

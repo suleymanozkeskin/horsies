@@ -43,7 +43,25 @@ before you upgrade a 0.7 deployment.
   (`HRS-102`), a code that is empty, not `UPPER_SNAKE_CASE` or an exception
   class name (`HRS-112`, new `TASK_INVALID_ERROR_CODE`), a built-in code or
   `WORKFLOW_STOPPED` (`HRS-212`), and a code given twice (`HRS-113`, new
-  `TASK_DUPLICATE_ERROR_CODE`).
+  `TASK_DUPLICATE_ERROR_CODE`). The codes of the task's `exception_mapper`
+  and of `AppConfig.exception_mapper` are added to `task_error_codes` with
+  no second declaration; a code that the body returns directly needs
+  `error_codes=`.
+- **`AppConfig.tracing` and the extra `horsies[otel]`.** `tracing` takes
+  `OtelTracing()` or `NoTracing()` (the default). `OtelTracing()` needs the
+  OpenTelemetry API, which `pip install 'horsies[otel]'` installs
+  (`opentelemetry-api` 1.30 or later); without it the config is refused
+  with `HRS-220` (new `CONFIG_OTEL_API_MISSING`), which names the extra.
+  With `NoTracing()` horsies does not import `opentelemetry`. The success
+  text of `horsies check` ends with `tracing: OpenTelemetry` or
+  `tracing: off`.
+
+- **The trace id on the monitoring reads.** `LeafTaskInfo.trace_id` (the
+  task detail and the workflow node detail) is the trace id of the span that
+  sent the task, live and in history, and `WorkflowRunDetail.trace_id` the
+  trace id of the span that started the run: 32 lowercase hex digits, or
+  `None` for a send or start with no trace. Code that builds one of these
+  models, for example a test fake, must pass the field.
 
 ### Changed
 

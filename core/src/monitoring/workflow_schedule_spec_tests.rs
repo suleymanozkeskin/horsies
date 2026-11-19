@@ -14,7 +14,7 @@ use serial_test::serial;
 use uuid::Uuid;
 
 use super::spec_support::{
-    seed_node, seed_run, seed_terminal, seed_terminal_with_attempts, set_history_status,
+    seed_live, seed_node, seed_run, seed_terminal, seed_terminal_with_attempts, set_history_status,
     AttemptText, Ending, LiveTask, NodeKind, NodeSeed, RunSeed, SpecDatabase,
 };
 use crate::core::task::error::{OutcomeCode, TaskError};
@@ -215,6 +215,63 @@ async fn failed_node_indices_come_in_ascending_order() {
 
     assert_eq!(detail.failed_indices, [1, 2]);
     assert_eq!(detail.failed_count, 2);
+    database.drop().await;
+}
+
+/// The run detail carries the trace id of the span that started the run,
+/// and the node detail the trace id of its backing task; a run started with
+/// no trace carries none.
+#[tokio::test]
+#[serial]
+async fn the_run_and_its_node_carry_the_trace_id_of_their_start() {
+    let database = SpecDatabase::create().await;
+    let traced = RunSeed::running("alpha_flow");
+    seed_run(&database.pool, &traced).await;
+    let mut task = LiveTask::pending("alpha_task");
+    task.is_workflow_task = true;
+    let mut node = NodeSeed::task(traced.id, 0);
+    node.kind = NodeKind::Task {
+        task_id: Some(task.id),
+    };
+    seed_node(&database.pool, &node).await;
+    seed_live(&database.pool, &task).await;
+    let untraced = RunSeed::running("beta_flow");
+    seed_run(&database.pool, &untraced).await;
+    sql::query(
+        "UPDATE horsies_workflows SET trace_carrier = '{\"traceparent\":\"c3\"}', \
+         trace_id = decode(repeat('c3', 16), 'hex') WHERE id = $1",
+    )
+    .bind(traced.id)
+    .execute(&database.pool)
+    .await
+    .expect("store the run trace pair");
+    sql::query(
+        "UPDATE horsies_tasks SET trace_carrier = '{\"traceparent\":\"c3\"}', \
+         trace_id = decode(repeat('c3', 16), 'hex') WHERE id = $1",
+    )
+    .bind(task.id)
+    .execute(&database.pool)
+    .await
+    .expect("store the node task trace pair");
+    let broker = database.broker();
+
+    let traced_run = get_workflow_run(&broker, traced.id)
+        .await
+        .expect("read the run")
+        .expect("the run exists");
+    let untraced_run = get_workflow_run(&broker, untraced.id)
+        .await
+        .expect("read the run")
+        .expect("the run exists");
+    let node = get_workflow_node(&broker, traced.id, 0)
+        .await
+        .expect("read the node")
+        .expect("the node exists");
+
+    assert_eq!(traced_run.trace_id, Some("c3".repeat(16)));
+    assert_eq!(untraced_run.trace_id, None);
+    let leaf = node.leaf.expect("the node has a backing task");
+    assert_eq!(leaf.trace_id, Some("c3".repeat(16)));
     database.drop().await;
 }
 

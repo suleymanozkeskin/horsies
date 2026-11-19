@@ -830,7 +830,8 @@ impl LabelValue for TelemetryPart {
 }
 
 /// One query of the fleet collector (the `query` label of
-/// `horsies.exporter.collect.duration` and `horsies.exporter.collect.errors`).
+/// `horsies.exporter.collect.duration`, `horsies.exporter.collect.errors` and
+/// `horsies.exporter.collect.failed`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FleetQuery {
     /// The live task rows by queue, class and status.

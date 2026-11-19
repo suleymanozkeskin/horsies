@@ -360,7 +360,7 @@ async fn a_reported_result_of_a_shared_run_completes_the_row() {
         )
         .await;
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     assert_eq!(history_row(&pool, task_id).await["status"], "COMPLETED");
     remove_task(&pool, task_id).await;
 }
@@ -422,7 +422,10 @@ async fn a_timeout_retries_the_row_at_the_placement_of_its_end() {
             )
             .await;
 
-        assert_eq!(settled, Settlement::Written, "{execution} {placement:?}");
+        assert!(
+            matches!(settled, Settlement::Written(_)),
+            "{execution} {placement:?}"
+        );
         let row = live_row(&pool, task_id)
             .await
             .expect("a retried row stays live");
@@ -480,7 +483,7 @@ async fn a_timeout_with_no_retry_fails_the_row_with_task_timeout() {
         )
         .await;
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     let history = history_row(&pool, task_id).await;
     assert_eq!(history["status"], "FAILED");
     assert_eq!(history["error_code"], "TASK_TIMEOUT");
@@ -535,7 +538,7 @@ async fn a_loop_kill_fails_the_row_with_its_code() {
             )
             .await;
 
-        assert_eq!(settled, Settlement::Written, "{name}");
+        assert!(matches!(settled, Settlement::Written(_)), "{name}");
         let history = history_row(&pool, task_id).await;
         assert_eq!(history["status"], "FAILED", "{name}");
         assert_eq!(history["error_code"], name);
@@ -633,7 +636,7 @@ async fn settle_a_shared_run(pool: &TestPool, retried_code: &str, end: AttemptEn
 
     let settled = writer(pool.clone()).settle(&claimed, end).await;
 
-    assert_eq!(settled, Settlement::Written, "{left:?}");
+    assert!(matches!(settled, Settlement::Written(_)), "{left:?}");
     match left {
         Left::Retried { class, code } => {
             let row = live_row(pool, task_id)
@@ -782,7 +785,7 @@ async fn a_task_that_reached_no_child_goes_back_to_the_queue() {
         )
         .await;
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     let row = live_row(&pool, task_id).await.expect("the row stays live");
     assert_eq!(row["status"], "PENDING");
     assert_eq!(row["claimed_by_worker_id"], serde_json::Value::Null);
@@ -822,7 +825,7 @@ async fn a_row_held_for_its_queue_cap_goes_back_to_the_queue_at_the_stop() {
         )
         .await;
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     let row = live_row(&pool, task_id).await.expect("the row stays live");
     assert_eq!(row["status"], "PENDING");
     assert_eq!(row["claimed_by_worker_id"], serde_json::Value::Null);
@@ -886,7 +889,7 @@ async fn an_unreported_end_of_a_row_still_claimed_puts_it_back_with_no_attempt_r
 
         let settled = writer(pool.clone()).settle(&claimed, end).await;
 
-        assert_eq!(settled, Settlement::Written, "{label}");
+        assert!(matches!(settled, Settlement::Written(_)), "{label}");
         let row = live_row(&pool, task_id).await.expect("the row stays live");
         assert_eq!(row["status"], "PENDING", "{label}");
         assert_eq!(row["execution"], "SHARED_ASYNC", "{label}");

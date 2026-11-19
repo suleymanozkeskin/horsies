@@ -589,6 +589,49 @@ async fn a_live_leaf_shows_its_class_and_a_history_leaf_shows_none() {
     database.drop().await;
 }
 
+/// The leaf of a live task and of a task in history carries the trace id of
+/// the span that sent it, as 32 lowercase hex digits; a task sent with no
+/// trace carries none.
+#[tokio::test]
+#[serial]
+async fn a_leaf_carries_the_trace_id_of_its_send_live_and_in_history() {
+    let database = SpecDatabase::create().await;
+    let traced = LiveTask::pending("alpha_task");
+    seed_live(&database.pool, &traced).await;
+    let untraced = LiveTask::pending("beta_task");
+    seed_live(&database.pool, &untraced).await;
+    let finished = LiveTask::pending("gamma_task");
+    seed_terminal(&database.pool, &finished, Ending::Completed).await;
+    sql::query(
+        "UPDATE horsies_tasks SET trace_carrier = '{\"traceparent\":\"a1\"}', \
+         trace_id = decode(repeat('a1', 16), 'hex') WHERE id = $1",
+    )
+    .bind(traced.id)
+    .execute(&database.pool)
+    .await
+    .expect("store the live trace pair");
+    sql::query(
+        "UPDATE horsies_task_history SET trace_id = decode(repeat('b2', 16), 'hex') \
+         WHERE task_id = $1",
+    )
+    .bind(finished.id)
+    .execute(&database.pool)
+    .await
+    .expect("store the history trace id");
+    let broker = database.broker();
+
+    let traced_leaf = detail_of(&broker, traced.id).await.leaf;
+    let untraced_leaf = detail_of(&broker, untraced.id).await.leaf;
+    let finished_leaf = detail_of(&broker, finished.id).await.leaf;
+
+    assert_eq!(traced_leaf.trace_id, Some("a1".repeat(16)));
+    assert_eq!(untraced_leaf.trace_id, None);
+    assert_eq!(finished_leaf.trace_id, Some("b2".repeat(16)));
+    let encoded = serde_json::to_value(&untraced_leaf).expect("the leaf encodes");
+    assert_eq!(encoded["trace_id"], serde_json::Value::Null);
+    database.drop().await;
+}
+
 /// Python `TestGetTaskDetail::test_reports_good_until_and_workflow_membership`.
 #[tokio::test]
 #[serial]

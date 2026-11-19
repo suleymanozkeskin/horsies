@@ -118,6 +118,8 @@ fn claimed(execution: ExecutionClass) -> ClaimedTask {
             max_retries: 0,
         },
         options: read_stored_options(Some("{}")),
+        trace: crate::events::RunTrace::NoCarrier,
+        trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
     }
 }
 

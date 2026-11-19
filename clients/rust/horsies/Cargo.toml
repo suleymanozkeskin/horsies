@@ -12,13 +12,16 @@ categories = ["asynchronous", "database"]
 
 [features]
 default = ["cli"]
-# The CLI runner (`horsies::cli::run`) and the shipped `horsies` binary.
+# The CLI runner (`horsies::cli::run`) and the shipped `horsies` binary. The
+# runner's `metrics` command serves the fleet metrics with the core's metrics
+# endpoint.
 cli = [
     "dep:clap",
     "dep:owo-colors",
     "dep:tempfile",
     "dep:toml",
     "dep:tracing-subscriber",
+    "horsies-core/metrics-endpoint",
 ]
 # The axum mount of the core's monitoring handler (`horsies::web`), and the
 # server of the shipped binary's `horsies web`.

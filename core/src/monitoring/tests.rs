@@ -274,6 +274,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
         worker_hostname: None,
         good_until: None,
         execution: None,
+        trace_id: Some("0af7651916cd43dd8448eb211c80319c".to_owned()),
     };
     let summary = TaskSummary {
         id: task_id,
@@ -368,6 +369,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 "worker_hostname",
                 "good_until",
                 "execution",
+                "trace_id",
             ],
         ),
         (
@@ -545,8 +547,16 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 edges: vec![],
                 failed_count: 0,
                 failed_indices: vec![],
+                trace_id: None,
             }),
-            vec!["run", "nodes", "edges", "failed_count", "failed_indices"],
+            vec![
+                "run",
+                "nodes",
+                "edges",
+                "failed_count",
+                "failed_indices",
+                "trace_id",
+            ],
         ),
         (
             keys(WorkflowTaskDetail {

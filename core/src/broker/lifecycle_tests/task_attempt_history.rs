@@ -150,6 +150,8 @@ async fn replay_does_not_create_duplicate_attempt() {
             max_retries: 0,
         },
         options: read_stored_options(None),
+        trace: crate::events::RunTrace::NoCarrier,
+        trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
     };
     let payload_policy = PayloadPolicy::default();
 

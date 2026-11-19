@@ -266,7 +266,7 @@ async fn a_crash_whose_exit_was_seen_fails_the_row_with_worker_crashed() {
         )
         .await;
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     let live: Option<i64> = sql::query_scalar("SELECT 1::bigint FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_optional(&pool)

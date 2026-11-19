@@ -17,10 +17,10 @@ use tokio::task::JoinSet;
 
 use super::board::{PoolBoard, PoolHealth, SlotPhase};
 use super::budgets::SharedSlotService;
-use super::dispatch::{AttemptEnd, ClaimedTask, ExecutionClass, NotRunCause};
+use super::dispatch::{AttemptEnd, AttemptLog, ClaimedTask, ExecutionClass, NotRunCause};
 use super::pool::{
-    not_run_cause, stop_slots, Answer, DrainKills, ExitNotSeen, MemoryLimit, PoolStopReport,
-    Submitted, TaskLimit,
+    not_run_cause, stop_slots, Answer, DrainKills, ExitNotSeen, MemoryLimit, PlacementWatch,
+    PoolStopReport, Submitted, TaskLimit,
 };
 use super::seat_runs::{place_on_shared_child, OpenChildLoad, Placement, SharedChildKind};
 use super::shared_slot::run_shared_slot;
@@ -89,6 +89,8 @@ fn shared_kind_of(init: &InitFrame) -> (SharedChildKind, ExecutionClass, NonZero
 pub(super) struct QueuedSeatRun {
     pub(super) frame: SharedRunFrame,
     pub(super) answer: Answer,
+    /// The log fields of the attempt.
+    pub(super) log: AttemptLog,
 }
 
 /// Whether a slot's child takes new tasks, as placement sees it.
@@ -320,6 +322,18 @@ impl SharedPool {
     /// The input is dropped once the frame is sent. Work that does not fit
     /// the pool's kind is a defect of the route: it crashes loud.
     pub fn submit(&self, task: &ClaimedTask, input: TaskInputText, work: SharedWork) -> Submitted {
+        self.submit_watched(task, input, work, PlacementWatch::Unwatched)
+    }
+
+    /// As [`SharedPool::submit`]; `watch` is told when a child takes the
+    /// task, with the class of this pool as the kind of the child.
+    pub fn submit_watched(
+        &self,
+        task: &ClaimedTask,
+        input: TaskInputText,
+        work: SharedWork,
+        watch: PlacementWatch,
+    ) -> Submitted {
         assert!(
             work_fits(self.shared.kind, &work),
             "task {} was routed to the {} pool with work of another kind",
@@ -349,7 +363,8 @@ impl SharedPool {
                     work,
                     input,
                 },
-                answer: Answer::new(sender),
+                answer: Answer::watched(sender, watch, self.shared.class),
+                log: task.log(),
             });
             placer.choose(self.shared.seats)
         };

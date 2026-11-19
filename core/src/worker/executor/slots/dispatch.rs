@@ -8,6 +8,8 @@ use uuid::Uuid;
 
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::core::task::error::OperationalErrorCode;
+use crate::events::{AttemptNumber, RunTrace};
+use crate::telemetry::trace_carrier::StoredTraceId;
 use crate::worker::executor::protocol::{
     FailureDetail, ProcessId, RunEnd, TaskInputText, TaskTimeoutMs,
 };
@@ -32,6 +34,27 @@ pub struct RetryFacts {
     pub max_retries: i32,
 }
 
+impl RetryFacts {
+    /// The attempt that this claim runs ([`attempt_of`]).
+    pub fn attempt(&self) -> AttemptNumber {
+        attempt_of(self.retry_count)
+    }
+}
+
+/// The attempt that a claim of a row with `retry_count` runs: the count
+/// plus 1. The claim refuses a row with a count below 0; such a count here
+/// reads as 0. Pure and total: a count of 0 to `i32::MAX` gives 1 to
+/// `MAX_ATTEMPT`.
+pub fn attempt_of(retry_count: i32) -> AttemptNumber {
+    let from_zero = u32::try_from(retry_count).unwrap_or(0);
+    match AttemptNumber::try_from(from_zero + 1) {
+        Ok(attempt) => attempt,
+        Err(outside) => unreachable!(
+            "a retry count of 0 to i32::MAX gives an attempt of 1 to MAX_ATTEMPT: {outside}"
+        ),
+    }
+}
+
 /// One claimed row, as the executor needs it. The claim returns every
 /// field; the stored options are read once, here, into typed values. The
 /// task input travels apart ([`Claimed`]), so the executor can drop it once
@@ -49,6 +72,32 @@ pub struct ClaimedTask {
     pub kind: TaskKind,
     pub retry: RetryFacts,
     pub options: StoredOptions,
+    /// The trace carrier that the send stored on the row. The run frame
+    /// carries it to the child.
+    pub trace: RunTrace,
+    /// The trace id that the send stored on the row, for the log records of
+    /// the attempt.
+    pub trace_id: StoredTraceId,
+}
+
+impl ClaimedTask {
+    /// The log fields of this attempt.
+    pub fn log(&self) -> AttemptLog {
+        AttemptLog {
+            attempt: self.retry.attempt(),
+            trace_id: self.trace_id,
+        }
+    }
+}
+
+/// The log fields of one attempt besides its task id: the attempt number
+/// and the trace id of the send. Each log record of the worker parent that
+/// names the task of an attempt carries both (`attempt = log.attempt.get()`,
+/// `trace_id = log.trace_id.log_field()`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttemptLog {
+    pub attempt: AttemptNumber,
+    pub trace_id: StoredTraceId,
 }
 
 /// A claimed row and its input.
@@ -192,11 +241,39 @@ impl AttemptEnd {
     }
 }
 
+/// The terminal state that an applied terminal write set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalState {
+    /// A success write: the task is `COMPLETED`.
+    Completed,
+    /// A failed-attempt write with no retry: the task is `FAILED`.
+    Failed,
+}
+
+/// What an applied write of an attempt end left the row in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WrittenEnd {
+    /// The task is terminal. A replay that found its own committed write
+    /// reads as the state of that write: a failed-attempt replay finds a
+    /// committed retry as a lost claim, not as its own write.
+    Terminal(TerminalState),
+    /// The failed attempt scheduled a retry: the task is `PENDING` with
+    /// `retry_count`, due at `next_retry_at`.
+    RetryScheduled {
+        retry_count: i32,
+        next_retry_at: DateTime<Utc>,
+    },
+    /// The claim went back to the queue: the task is `PENDING` with the same
+    /// retry count.
+    ClaimReleased,
+}
+
 /// How the write of one attempt end settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Settlement {
-    /// The statement applied (or a replay found its own write).
-    Written,
+    /// The statement applied (or a replay found its own write), and left
+    /// the row as its [`WrittenEnd`] says.
+    Written(WrittenEnd),
     /// The child wrote what the case needs; nothing was owed.
     NothingOwed,
     /// The statement found the row not held by this claim and wrote nothing.
