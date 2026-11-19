@@ -79,7 +79,7 @@ __all__ = [
     'decode_event',
 ]
 
-EVENT_CONTRACT_VERSION: Final = 1
+EVENT_CONTRACT_VERSION: Final = 2
 """The version of the event contract that this module reads."""
 
 
@@ -513,9 +513,15 @@ class AttemptPlaced:
     queue: str
 
     execution: Execution
-    """The execution class of the task, which is the kind of the child."""
+    """The execution class of the task."""
 
     attempt: int
+
+    child_kind: Execution
+    """The kind of the child that took the task. A worker that runs no
+    child of a shared class serves that class on its isolated children,
+    so a task of a shared class can run on an isolated child.
+    """
 
     child_pid: int
     """The process id of the child."""
@@ -1705,12 +1711,13 @@ def _read_attempt_placed(fields: list[object], here: _At) -> Result[AttemptPlace
             wire_queue,
             wire_execution,
             wire_attempt,
+            wire_child_kind,
             wire_child_pid,
             wire_slot_wait,
         ]:
             pass
         case _:
-            return here.refuse(f'expected 8 items, found {len(fields)}')
+            return here.refuse(f'expected 9 items, found {len(fields)}')
     match _read_time(wire_at, here.inside('at')):
         case Ok(value_at):
             pass
@@ -1741,6 +1748,11 @@ def _read_attempt_placed(fields: list[object], here: _At) -> Result[AttemptPlace
             pass
         case Err() as refused:
             return refused
+    match _read_execution(wire_child_kind, here.inside('child_kind')):
+        case Ok(value_child_kind):
+            pass
+        case Err() as refused:
+            return refused
     match _read_whole_number(wire_child_pid, here.inside('child_pid'), 1, 2147483647):
         case Ok(value_child_pid):
             pass
@@ -1759,6 +1771,7 @@ def _read_attempt_placed(fields: list[object], here: _At) -> Result[AttemptPlace
             queue=value_queue,
             execution=value_execution,
             attempt=value_attempt,
+            child_kind=value_child_kind,
             child_pid=value_child_pid,
             slot_wait=value_slot_wait,
         )
