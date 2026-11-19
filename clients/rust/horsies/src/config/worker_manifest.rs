@@ -740,7 +740,7 @@ mod tests {
     fn the_metrics_endpoint_of_the_start_reads_back() {
         let address = horsies_core::telemetry::listen::ListenAddress::parse("0.0.0.0:9100")
             .expect("a valid address");
-        let endpoint = wire::MetricsEndpoint::of_address(&address);
+        let endpoint = wire::MetricsEndpoint::of_address(address);
         let manifest = worker_manifest(
             &config(),
             &registry(),

@@ -65,7 +65,7 @@ impl WorkerStart {
     /// it ends the start with `BootFailed`.
     pub fn with_metrics_endpoint(self, address: ListenAddress) -> Self {
         Self {
-            metrics_endpoint: MetricsEndpoint::of_address(&address),
+            metrics_endpoint: MetricsEndpoint::of_address(address),
             ..self
         }
     }
@@ -326,7 +326,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             manifest.metrics_endpoint,
-            MetricsEndpoint::of_address(&address)
+            MetricsEndpoint::of_address(address)
         );
         let plan = WorkerPlan::of_manifest(&manifest).unwrap();
         assert!(matches!(

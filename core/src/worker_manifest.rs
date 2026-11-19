@@ -291,11 +291,9 @@ pub enum MetricsEndpoint {
 
 impl MetricsEndpoint {
     /// The endpoint on `address`. Pure.
-    pub fn of_address(address: &ListenAddress) -> Self {
-        Self::ListenAddress {
-            host: address.listen_host().clone(),
-            port: address.listen_port(),
-        }
+    pub fn of_address(address: ListenAddress) -> Self {
+        let (host, port) = address.into_parts();
+        Self::ListenAddress { host, port }
     }
 }
 

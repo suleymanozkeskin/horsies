@@ -199,14 +199,9 @@ impl ListenAddress {
         self.port.get()
     }
 
-    /// The host as its checked part, for the worker manifest.
-    pub fn listen_host(&self) -> &ListenHost {
-        &self.host
-    }
-
-    /// The port as its checked part, for the worker manifest.
-    pub fn listen_port(&self) -> ListenPort {
-        self.port
+    /// The checked host and port of this address, for the worker manifest.
+    pub fn into_parts(self) -> (ListenHost, ListenPort) {
+        (self.host, self.port)
     }
 }
 
@@ -312,8 +307,7 @@ mod tests {
         let port: ListenPort = serde_json::from_value(serde_json::json!(9100)).expect("a port");
         let address = ListenAddress::new(host.clone(), port);
         assert_eq!(address.to_string(), "[::1]:9100");
-        assert_eq!(address.listen_host(), &host);
-        assert_eq!(address.listen_port(), port);
+        assert_eq!(address.into_parts(), (host.clone(), port));
         assert_eq!(serde_json::to_value(&host).expect("a text"), "::1");
         assert_eq!(serde_json::to_value(port).expect("a number"), 9100);
         for refused in [
