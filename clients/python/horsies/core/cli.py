@@ -744,8 +744,7 @@ def metrics_command(args: argparse.Namespace) -> None:
 
     Exit contract: 2 for arguments that do not parse (argparse); 0 at
     `SIGTERM` or `SIGINT`; 1 when the app cannot be discovered, the broker
-    does not build, a queue or schedule name cannot be a label value, or the
-    address does not bind.
+    does not build, or the address does not bind.
     """
     logger = get_logger('cli')
     setup_logging(args.loglevel)

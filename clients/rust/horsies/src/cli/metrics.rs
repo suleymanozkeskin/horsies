@@ -5,7 +5,10 @@
 //!   `FLEET_COLLECT_INTERVAL`; a scrape only renders the last read, so
 //!   scrapes add no load on the database.
 //! - The `queue` and `schedule` label values are the queues and the
-//!   schedules of the app's config; every other name is `(unknown)`.
+//!   schedules of the app's config; every other name is `(unknown)`. A
+//!   config name that cannot be a label value of its own (empty, the text
+//!   `(unknown)`, or past the bound of names) counts in the `(unknown)`
+//!   series too, and one WARNING line at the start names it.
 //! - The connection runs no schema step and opens no listener
 //!   (`SchemaMode::AssumeInitialized`).
 //! - A failed connect or a failed statement is
@@ -15,7 +18,7 @@
 use std::sync::Arc;
 
 use horsies_core::monitoring::fleet::{serve_fleet_metrics, FleetLabels};
-use horsies_core::telemetry::declared::DeclaredNamesRefused;
+use horsies_core::telemetry::declared::{warn_folded_names, Folded};
 use horsies_core::telemetry::endpoint::{bind_endpoint, EndpointFailed};
 use horsies_core::telemetry::listen::ListenAddress;
 
@@ -26,10 +29,6 @@ use crate::{Horsies, HorsiesError, SchemaMode};
 /// ends the command with exit status 1.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum MetricsFailed {
-    /// A queue or a schedule name of the config cannot be a label value:
-    /// it is empty or it is `(unknown)`.
-    #[error("the queue or schedule names of the config are not valid metric labels: {0}")]
-    Labels(DeclaredNamesRefused),
     /// The config does not build a handle.
     #[error("invalid application configuration: {0}")]
     Config(HorsiesError),
@@ -43,7 +42,11 @@ pub(super) enum MetricsFailed {
 ///
 /// Errors: [`MetricsFailed`].
 pub(super) async fn serve(app: &Horsies, listen: &ListenAddress) -> Result<(), MetricsFailed> {
-    let labels = FleetLabels::of_config(app.config()).map_err(MetricsFailed::Labels)?;
+    let Folded {
+        declared: labels,
+        folded,
+    } = FleetLabels::of_config(app.config());
+    warn_folded_names(&"the fleet metrics", &folded);
     let reader = Horsies::with_schema_mode(app.config().clone(), SchemaMode::AssumeInitialized)
         .map_err(MetricsFailed::Config)?;
     let endpoint = bind_endpoint(listen)
