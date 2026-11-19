@@ -409,7 +409,7 @@ pub(crate) async fn collect_with<R, F>(
 
 /// One WARNING line per part without an answer, and one for dropped
 /// series.
-fn log_recorded(recorded: &FleetRecorded) {
+pub(crate) fn log_recorded(recorded: &FleetRecorded) {
     for error in &recorded.failed {
         tracing::warn!("fleet collector: {error}; its gauges have no series until a read answers");
     }

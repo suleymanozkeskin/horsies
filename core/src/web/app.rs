@@ -250,10 +250,10 @@ async fn read_meta(State(state): State<WebState>, request: Request) -> Response 
     .into_response()
 }
 
-/// `GET /metrics`: the Prometheus text of the fleet collector. The first
-/// request starts its reads.
+/// `GET /metrics`: the Prometheus text of the fleet collector, after a read
+/// of the fleet state when one is due ([`WebFleetMetrics::render`]).
 async fn read_fleet_metrics(State(state): State<WebState>) -> Response {
-    metrics_response(state.fleet_metrics.render())
+    metrics_response(state.fleet_metrics.render().await)
 }
 
 async fn serve_spa(State(state): State<WebState>, request: Request) -> Response {

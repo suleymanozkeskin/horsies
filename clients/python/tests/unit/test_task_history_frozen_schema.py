@@ -59,6 +59,7 @@ HISTORY_COLUMNS = {
     'rerun_input_version',
     'rerun_input_digest',
     'rerun_input_inline',
+    'trace_id',
 }
 
 REMOVED_COLUMNS = {
@@ -100,7 +101,7 @@ def _normalised(sql: str) -> str:
 class TestHistoryProjection:
     def test_exactly_the_baseline_columns(self) -> None:
         assert defined_columns(HISTORY_DDL) == HISTORY_COLUMNS
-        assert len(HISTORY_COLUMNS) == 39
+        assert len(HISTORY_COLUMNS) == 40
 
     def test_removed_columns_are_absent(self) -> None:
         assert not HISTORY_COLUMNS & REMOVED_COLUMNS
