@@ -11,7 +11,7 @@ use std::env;
 use acme_showcase::domain::{Order, OrderLine, Product, ReturnCase, StockLevel, ORDER_PLACED};
 use acme_showcase::settings::{resolve_database_settings_from, ACME_URL_VARIABLE};
 use acme_showcase::{ensure_database, resolve_database_settings, DatabaseSettings, Store};
-use chrono::Utc;
+use chrono::{DateTime, SubsecRound, Utc};
 use sqlx::{Connection, PgConnection};
 use url::Url;
 
@@ -39,6 +39,17 @@ fn own_database_settings(configured: &DatabaseSettings) -> DatabaseSettings {
     let environment = BTreeMap::from([(ACME_URL_VARIABLE.to_owned(), url.to_string())]);
     resolve_database_settings_from(&environment, &BTreeMap::new())
         .expect("the settings of the database of the test")
+}
+
+/// The fraction digits of a PostgreSQL `timestamptz`: microseconds.
+const TIMESTAMPTZ_FRACTION_DIGITS: u16 = 6;
+
+/// The present instant as a `timestamptz` column holds it. sqlx sends an
+/// instant as whole microseconds and drops the rest, so an instant with
+/// nanoseconds (the clock of Linux; the clock of macOS has microseconds)
+/// reads back as a different value.
+fn stored_now() -> DateTime<Utc> {
+    Utc::now().trunc_subsecs(TIMESTAMPTZ_FRACTION_DIGITS)
 }
 
 /// Drops the database of `settings` and its open sessions, when it exists.
@@ -130,7 +141,7 @@ async fn schema_and_store_round_trip() {
             quantity: 2,
             unit_price_cents: 12_500,
         }],
-        created_at: Utc::now(),
+        created_at: stored_now(),
     };
     store.insert_order(&order).await.expect("order insert");
     assert_eq!(
@@ -200,7 +211,7 @@ async fn schema_and_store_round_trip() {
         quantity: 1,
         status: "received".into(),
         condition: None,
-        created_at: Utc::now(),
+        created_at: stored_now(),
     };
     store.open_return(&case).await.expect("return insert");
     assert_eq!(
