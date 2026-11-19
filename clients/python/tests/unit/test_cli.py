@@ -43,6 +43,7 @@ from horsies.core.errors import (
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
+from horsies.core.models.tracing import NoTracing, OtelTracing
 from horsies.core.models.worker_profile import (
     IsolatedChildren,
     WorkerProfile,
@@ -555,6 +556,7 @@ def _make_mock_app() -> MagicMock:
     app.config.worker_profiles = {
         'default': WorkerProfile(isolated=IsolatedChildren(count=1)),
     }
+    app.config.tracing = NoTracing()
     return app
 
 
@@ -1136,6 +1138,7 @@ class TestCheckCommand:
             'ok: all validations passed\n'
             '  2 task(s) registered\n'
             '  declared error codes: none\n'
+            '  tracing: off\n'
         )
 
     @patch('horsies.core.cli.setup_logging', autospec=True)
@@ -1159,14 +1162,37 @@ class TestCheckCommand:
             check_command(_make_check_namespace())
         assert exc_info.value.code == 0
 
-        # The text of the Rust client's `CheckPassed`, line for line.
+        # The text of the Rust client's `CheckPassed`, line for line, then
+        # the tracing line.
         assert capsys.readouterr().out == (
             'ok: all validations passed\n'
             '  3 task(s) registered\n'
             '  declared error codes:\n'
             '    charge: RATE_LIMITED, CARD_DECLINED\n'
             '    send_mail: BOUNCED\n'
+            '  tracing: off\n'
         )
+
+    @patch('horsies.core.cli.setup_logging', autospec=True)
+    @patch('horsies.core.cli.discover_app', autospec=True)
+    def test_the_success_text_reports_opentelemetry_tracing(
+        self,
+        mock_discover: MagicMock,
+        _mock_logging: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        app = _make_mock_app()
+        app.check.return_value = []
+        app.list_tasks.return_value = ['resize']
+        app.declared_error_codes.return_value = {}
+        app.config.tracing = OtelTracing()
+        mock_discover.return_value = (app, 'app', 'my.mod', None)
+
+        with pytest.raises(SystemExit) as exc_info:
+            check_command(_make_check_namespace())
+        assert exc_info.value.code == 0
+
+        assert capsys.readouterr().out.splitlines()[-1] == '  tracing: OpenTelemetry'
 
 
 # ---------------------------------------------------------------------------

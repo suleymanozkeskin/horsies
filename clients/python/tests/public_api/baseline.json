@@ -8338,6 +8338,12 @@
       "default": "False",
       "kind": "KEYWORD_ONLY",
       "name": "resend_on_transient_err"
+     },
+     {
+      "annotation": "Annotated[horsies.NoTracing | horsies.OtelTracing, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "<factory>",
+      "kind": "KEYWORD_ONLY",
+      "name": "tracing"
      }
     ],
     "returns": "None"
@@ -8507,6 +8513,13 @@
       "metadata": [],
       "name": "resend_on_transient_err",
       "type": "bool"
+     },
+     {
+      "alias": null,
+      "default": "factory NoTracing",
+      "metadata": [],
+      "name": "tracing",
+      "type": "horsies.NoTracing | horsies.OtelTracing"
      }
     ],
     "kind": "pydantic"
@@ -11846,6 +11859,7 @@
      "CONFIG_INVALID_RETENTION": "'HRS-216'",
      "CONFIG_INVALID_SCHEDULE": "'HRS-205'",
      "CONFIG_INVALID_WORKER_PROFILE": "'HRS-218'",
+     "CONFIG_OTEL_API_MISSING": "'HRS-220'",
      "MODULE_EXEC_ERROR": "'HRS-210'",
      "TASK_CANCEL_GRACE_OUT_OF_RANGE": "'HRS-111'",
      "TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC": "'HRS-110'",
@@ -15600,6 +15614,50 @@
    },
    "type_params": []
   },
+  "horsies:NoTracing": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['no_tracing']",
+      "default": "'no_tracing'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.models.tracing.NoTracing",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "'forbid'",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'no_tracing'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['no_tracing']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
   "horsies:NodeKey": {
    "abstract": false,
    "bases": [
@@ -16344,6 +16402,50 @@
      "WORKFLOW_RECOVERY_LIMIT_REACHED": "'WORKFLOW_RECOVERY_LIMIT_REACHED'",
      "WORKFLOW_START_INCOMPLETE": "'WORKFLOW_START_INCOMPLETE'"
     }
+   },
+   "type_params": []
+  },
+  "horsies:OtelTracing": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['otel_tracing']",
+      "default": "'otel_tracing'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.models.tracing.OtelTracing",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "'forbid'",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'otel_tracing'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['otel_tracing']"
+     }
+    ],
+    "kind": "pydantic"
    },
    "type_params": []
   },

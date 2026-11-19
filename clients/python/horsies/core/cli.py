@@ -35,6 +35,7 @@ from horsies.core.errors import (
 )
 from horsies.core.logging import get_logger
 from horsies.core.models.resilience import WorkerResilienceConfig
+from horsies.core.models.tracing import NoTracing, OtelTracing, tracing_label
 from horsies.core.models.worker_profile import (
     WorkerProfile,
     describe_worker_profile,
@@ -724,6 +725,7 @@ def check_command(args: argparse.Namespace) -> None:
             check_passed_text(
                 task_count=len(app.list_tasks()),
                 declared_error_codes=app.declared_error_codes(),
+                tracing=app.config.tracing,
             ),
         )
         sys.exit(0)
@@ -733,11 +735,13 @@ def check_passed_text(
     *,
     task_count: int,
     declared_error_codes: Mapping[str, tuple[str, ...]],
+    tracing: OtelTracing | NoTracing,
 ) -> str:
     """The success text of `horsies check`: the task count, then the
     declared error codes of each task that declares some, in task name
-    order, or `none`. The Rust client prints the same text
-    (`CheckPassed`'s `Display`). Pure."""
+    order, or `none`, then the tracing setting (`tracing_label`). The Rust
+    client prints the same lines before the tracing line (`CheckPassed`'s
+    `Display`). Pure."""
     lines = ['ok: all validations passed', f'  {task_count} task(s) registered']
     match len(declared_error_codes):
         case 0:
@@ -748,6 +752,7 @@ def check_passed_text(
                 f'    {task_name}: {", ".join(codes)}'
                 for task_name, codes in sorted(declared_error_codes.items())
             )
+    lines.append(f'  tracing: {tracing_label(tracing)}')
     return '\n'.join(lines)
 
 
