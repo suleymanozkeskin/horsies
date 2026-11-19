@@ -34,12 +34,14 @@ use super::defects::{
 };
 use super::dispatch::{AttemptEnd, AttemptLog, NotRunCause};
 use super::pool::{Answer, ExitNotSeen};
+use super::replacement::{reason_of_loss, tell_replaced, ChildLeave, GenerationChild};
 use super::seat_runs::{
     backstop_step, end_at_late_backstop_exit, end_at_loss, end_past_deadlines, shared_recycle,
     Backstop, BackstopStep, ChildService, CloseReason, FrameOutOfTurn, LoopBlockStep, LossSight,
     RunStopReport, RunWork, SeatRun, SeatRuns, StopReportFrame, StopStep, SHARED_STUCK_BACKSTOP,
 };
 use super::shared::{Accepting, QueuedSeatRun, SharedPoolShared, Take};
+use crate::telemetry::labels::ReplaceReason;
 use crate::worker::executor::protocol::{
     ChildAfterFrame, ChildFrame, ParentFrame, ProcessId, RunRef, SharedResultFrame,
 };
@@ -128,8 +130,8 @@ enum SlotEvent {
 /// Whether the generation goes on, and how it ends.
 enum Flow {
     Continue,
-    /// The closing child has no run: retire it.
-    Retire,
+    /// The child, closing for this reason, has no run: retire it.
+    Retire(CloseReason),
     /// The child said that it ends itself and has no run: wait for its
     /// exit.
     AwaitOwnEnd,
@@ -149,16 +151,22 @@ pub(super) async fn run_shared_slot(pool: Arc<SharedPoolShared>, local: usize) {
     let index = pool.first + local;
     let mut defects = SlotDefects::default();
     loop {
-        let served = CatchPanic::new(boot_and_serve(&pool, local, &mut defects)).await;
-        let defect = match served {
+        let mut child = GenerationChild::NotBooted;
+        let served = CatchPanic::new(boot_and_serve(&pool, local, &mut defects, &mut child)).await;
+        let (defect, leave) = match served {
             Ok(Served::PoolEnded) => return,
-            Ok(Served::Generation(GenerationEnd::Ended)) => None,
-            Ok(Served::Generation(GenerationEnd::Defect(defect))) => Some(defect),
+            Ok(Served::Generation(GenerationEnd::Ended(leave))) => (None, leave),
+            Ok(Served::Generation(GenerationEnd::Defect(defect))) => {
+                (Some(defect), ChildLeave::For(ReplaceReason::SlotDefect))
+            }
             Err(payload) => {
                 // The child of the generation was dropped with it; its
                 // channel kills it on drop.
                 pool.board.set(index, SlotPhase::Retiring);
-                Some(SlotDefect::panicked(payload.as_ref()))
+                (
+                    Some(SlotDefect::panicked(payload.as_ref())),
+                    ChildLeave::For(ReplaceReason::SlotDefect),
+                )
             }
         };
         pool.publish_load(local, Accepting::NotOpen, 0);
@@ -170,16 +178,21 @@ pub(super) async fn run_shared_slot(pool: Arc<SharedPoolShared>, local: usize) {
         }
         match pool.board.not_serving() {
             true => return,
-            false => pool.board.set(index, SlotPhase::Booting),
+            false => {
+                tell_replaced(&pool.board, index, child, leave);
+                pool.board.set(index, SlotPhase::Booting);
+            }
         }
     }
 }
 
-/// Boot a child for the slot and serve it.
+/// Boot a child for the slot and serve it. `child` names the booted child
+/// once the boot gave one.
 async fn boot_and_serve(
     pool: &SharedPoolShared,
     local: usize,
     defects: &mut SlotDefects,
+    child: &mut GenerationChild,
 ) -> Served {
     let boot = BootSlot {
         board: &pool.board,
@@ -194,6 +207,7 @@ async fn boot_and_serve(
     };
     match boot_child(&boot).await {
         Booted::Child(channel) => {
+            *child = GenerationChild::Booted(channel.pid());
             Served::Generation(serve_generation(pool, local, channel, defects).await)
         }
         Booted::PoolStopped | Booted::PoolFailed => Served::PoolEnded,
@@ -238,10 +252,19 @@ async fn serve_generation(
     pool.board.set(pool.first + local, SlotPhase::Retiring);
     pool.publish_load(local, Accepting::NotOpen, 0);
     let defect = generation.defect.take();
-    match flow {
-        Flow::Retire => retire(generation).await,
-        Flow::AwaitOwnEnd => end_child_that_ends_itself(generation).await,
-        Flow::KillPastDeadlines(reason) => kill_past_deadlines(pool, generation, reason).await,
+    let leave = match flow {
+        Flow::Retire(reason) => {
+            retire(generation).await;
+            leave_at_close(reason)
+        }
+        Flow::AwaitOwnEnd => {
+            end_child_that_ends_itself(generation).await;
+            ChildLeave::For(ReplaceReason::CoreStopped)
+        }
+        Flow::KillPastDeadlines(reason) => {
+            kill_past_deadlines(pool, generation, reason).await;
+            leave_at_close(reason)
+        }
         Flow::Lost(lost) => {
             // Every defect sets `defect` and kills the child: the runs end
             // as at a loss by a defect, not by a kill of the worker.
@@ -252,13 +275,44 @@ async fn serve_generation(
                 },
                 None => lost,
             };
-            lose_child(pool, generation, lost).await
+            let reason = reason_of_shared_loss(generation.kill, &lost);
+            lose_child(pool, generation, lost).await;
+            ChildLeave::For(reason)
         }
         Flow::Continue => unreachable!("the serve loop ends only with an end of the generation"),
-    }
+    };
     match defect {
         Some(defect) => GenerationEnd::Defect(defect),
-        None => GenerationEnd::Ended,
+        None => GenerationEnd::Ended(leave),
+    }
+}
+
+/// Why a child that closed for `reason` left its slot. Pure.
+fn leave_at_close(reason: CloseReason) -> ChildLeave {
+    match reason {
+        CloseReason::TaskCount => ChildLeave::For(ReplaceReason::TaskCount),
+        CloseReason::MemoryLimit => ChildLeave::For(ReplaceReason::MemoryLimit),
+        CloseReason::PoolStopping => ChildLeave::AtPoolStop,
+        CloseReason::SecondCancel => ChildLeave::For(ReplaceReason::SecondCancel),
+        CloseReason::LoopBlocked => ChildLeave::For(ReplaceReason::LoopBlocked),
+        CloseReason::LeftoverWork => ChildLeave::For(ReplaceReason::LeftoverWork),
+        CloseReason::AtDeadline { .. } => ChildLeave::For(ReplaceReason::AtDeadline),
+    }
+}
+
+/// The replace reason of a child lost by `lost`: the reason of the kill
+/// that the worker sent, else the loss cause. Pure.
+fn reason_of_shared_loss(kill: KillSent, lost: &ChildLost) -> ReplaceReason {
+    match kill {
+        KillSent::Sent(KillReason::BlockedLoop) => ReplaceReason::LoopBlocked,
+        KillSent::Sent(KillReason::Backstop { .. } | KillReason::PastDeadlines) => {
+            ReplaceReason::AtDeadline
+        }
+        KillSent::Sent(KillReason::SlotDefect) => ReplaceReason::SlotDefect,
+        KillSent::Sent(
+            KillReason::DrainDeadline | KillReason::RegistryClosed | KillReason::SendFailed,
+        ) => ReplaceReason::KilledByParent,
+        KillSent::NotSent => reason_of_loss(lost),
     }
 }
 
@@ -387,7 +441,7 @@ fn after_change(pool: &SharedPoolShared, generation: &mut Generation) -> Flow {
         generation.kill,
         generation.runs.all_out_of_time(pool.kind),
     ) {
-        (0, _, _) => Flow::Retire,
+        (0, _, _) => Flow::Retire(reason),
         (_, KillSent::NotSent, true) => Flow::KillPastDeadlines(reason),
         (_, KillSent::NotSent, false) | (_, KillSent::Sent(_), _) => Flow::Continue,
     }
@@ -940,5 +994,101 @@ async fn answer_after_exit(
             KillSent::Sent(_) | KillSent::NotSent => AttemptEnd::of_lost_child(&late),
         };
         finish(seat, end);
+    }
+}
+
+#[cfg(test)]
+mod replace_reason_tests {
+    use super::*;
+    use crate::worker::executor::protocol::DispatchNumber;
+    use crate::worker::executor::supervisor::PartialFrame;
+
+    fn run() -> RunRef {
+        RunRef {
+            dispatch: DispatchNumber::new(1).unwrap(),
+            task_id: uuid::Uuid::nil(),
+        }
+    }
+
+    fn lost(cause: LossCause) -> ChildLost {
+        ChildLost {
+            cause,
+            exit: ChildExit::ExitUnknown,
+            partial: PartialFrame::NoneAtHand,
+            pid: ProcessId::new(42).unwrap(),
+        }
+    }
+
+    #[test]
+    fn each_close_reason_but_the_pool_stop_is_a_replacement() {
+        let cases = [
+            (
+                CloseReason::TaskCount,
+                ChildLeave::For(ReplaceReason::TaskCount),
+            ),
+            (
+                CloseReason::MemoryLimit,
+                ChildLeave::For(ReplaceReason::MemoryLimit),
+            ),
+            (CloseReason::PoolStopping, ChildLeave::AtPoolStop),
+            (
+                CloseReason::SecondCancel,
+                ChildLeave::For(ReplaceReason::SecondCancel),
+            ),
+            (
+                CloseReason::LoopBlocked,
+                ChildLeave::For(ReplaceReason::LoopBlocked),
+            ),
+            (
+                CloseReason::LeftoverWork,
+                ChildLeave::For(ReplaceReason::LeftoverWork),
+            ),
+            (
+                CloseReason::AtDeadline { culprit: run() },
+                ChildLeave::For(ReplaceReason::AtDeadline),
+            ),
+        ];
+        for (reason, leave) in cases {
+            assert_eq!(leave_at_close(reason), leave, "{reason:?}");
+        }
+    }
+
+    #[test]
+    fn a_kill_of_the_worker_names_its_own_reason() {
+        let killed = lost(LossCause::KilledByParent);
+        let cases = [
+            (KillReason::BlockedLoop, ReplaceReason::LoopBlocked),
+            (
+                KillReason::Backstop { run: run() },
+                ReplaceReason::AtDeadline,
+            ),
+            (KillReason::PastDeadlines, ReplaceReason::AtDeadline),
+            (KillReason::SlotDefect, ReplaceReason::SlotDefect),
+            (KillReason::DrainDeadline, ReplaceReason::KilledByParent),
+            (KillReason::RegistryClosed, ReplaceReason::KilledByParent),
+            (KillReason::SendFailed, ReplaceReason::KilledByParent),
+        ];
+        for (kill, reason) in cases {
+            assert_eq!(
+                reason_of_shared_loss(KillSent::Sent(kill), &killed),
+                reason,
+                "{kill:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_loss_with_no_kill_is_its_loss_cause() {
+        let died = lost(LossCause::ChildDied);
+        let violated = lost(LossCause::ProtocolViolation);
+
+        assert_eq!(
+            reason_of_shared_loss(KillSent::NotSent, &died),
+            ReplaceReason::ChildDied
+        );
+        assert_eq!(
+            reason_of_shared_loss(KillSent::NotSent, &violated),
+            ReplaceReason::ProtocolViolation
+        );
     }
 }
