@@ -1,5 +1,5 @@
 {
-  "contract_version": 1,
+  "contract_version": 2,
   "vectors": [
     {
       "name": "task_claimed",
@@ -11,7 +11,7 @@
     },
     {
       "name": "attempt_placed",
-      "wire": ["AttemptPlaced", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "ISOLATED", 1, 4242, 250000]
+      "wire": ["AttemptPlaced", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "SHARED_ASYNC", 1, "ISOLATED", 4242, 250000]
     },
     {
       "name": "attempt_not_started",
