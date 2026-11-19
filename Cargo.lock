@@ -1025,6 +1025,8 @@ dependencies = [
  "horsies-core-derive",
  "http",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "include_dir",
  "libc",
  "log",

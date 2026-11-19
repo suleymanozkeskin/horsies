@@ -10,7 +10,9 @@ use crate::telemetry::declared::{DeclaredNames, ErrorCodeValues};
 use crate::telemetry::registry::{
     ProcessFacts, Registry, RegistryLabels, SampleValue, WorkerFacts,
 };
-use crate::telemetry::worker::{DeclaredCodesByTask, EventQueue, TelemetryOn, WorkerTelemetry};
+use crate::telemetry::worker::{
+    DeclaredCodesByTask, EventQueue, SentEventTypes, TelemetryOn, WorkerTelemetry,
+};
 
 /// The most events that a test reads at once.
 const MOST_TEST_EVENTS: NonZeroUsize = match NonZeroUsize::new(4_096) {
@@ -72,6 +74,7 @@ impl WatchedTelemetry {
             Arc::clone(&registry),
             codes,
             crate::telemetry::worker::EVENT_QUEUE_CAPACITY,
+            SentEventTypes::all(),
         )
         .expect("the telemetry of a worker registry");
         Self {

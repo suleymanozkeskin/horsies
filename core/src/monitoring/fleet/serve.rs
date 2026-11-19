@@ -11,7 +11,7 @@ use axum::Router;
 use tokio_util::sync::CancellationToken;
 
 use crate::handle::CoreHandle;
-use crate::telemetry::endpoint::{metrics_response, serve_endpoint, BoundEndpoint, EndpointFailed};
+use crate::telemetry::endpoint::{metrics_response, serve_endpoint, BoundEndpoint};
 
 use super::{collect_fleet_state_through, FleetCollector, FleetLabels};
 
@@ -38,14 +38,14 @@ async fn serve_metrics(State(collector): State<Arc<FleetCollector>>) -> Response
 /// the text, never an end of the server. At the stop, the requests in
 /// flight end, then a read in flight is dropped; the read only reads.
 ///
-/// Errors: [`EndpointFailed::Serve`].
+/// Never fails: the server takes the bounds of every metrics endpoint
+/// ([`EndpointBounds::PROVISIONAL`](crate::telemetry::endpoint::EndpointBounds::PROVISIONAL)).
 pub async fn serve_fleet_metrics<S>(
     endpoint: BoundEndpoint,
     handle: Arc<CoreHandle>,
     labels: FleetLabels,
     stop: S,
-) -> Result<(), EndpointFailed>
-where
+) where
     S: Future<Output = ()> + Send + 'static,
 {
     tracing::info!(
@@ -56,15 +56,13 @@ where
     let collecting = CancellationToken::new();
     let router = fleet_metrics_router(Arc::clone(&collector));
     let serving = async {
-        let served = serve_endpoint(endpoint, router, stop).await;
+        serve_endpoint(endpoint, router, stop).await;
         collecting.cancel();
-        served
     };
-    let ((), served) = tokio::join!(
+    let ((), ()) = tokio::join!(
         collect_fleet_state_through(&collector, &handle, &collecting),
         serving
     );
-    served
 }
 
 #[cfg(test)]
@@ -177,8 +175,7 @@ mod tests {
         assert_eq!(body, "");
 
         let _sent = stop.send(());
-        let served = server.await.expect("the server task ends");
-        assert!(served.is_ok(), "{served:?}");
+        server.await.expect("the server task ends");
     }
 
     #[tokio::test]
@@ -201,8 +198,7 @@ mod tests {
         assert!(head.starts_with("http/1.1 404 "), "{head}");
 
         let _sent = stop.send(());
-        let served = server.await.expect("the server task ends");
-        assert!(served.is_ok(), "{served:?}");
+        server.await.expect("the server task ends");
     }
 
     #[tokio::test]
@@ -251,7 +247,6 @@ mod tests {
         assert!(!body.contains("\nhorsies_queue_tasks{"), "{body}");
 
         let _sent = stop.send(());
-        let served = server.await.expect("the server task ends");
-        assert!(served.is_ok(), "{served:?}");
+        server.await.expect("the server task ends");
     }
 }
