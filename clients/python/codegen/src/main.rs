@@ -21,6 +21,9 @@
 //!   error classes, subsets, record classes and unions of
 //!   `horsies_core::error_catalog`; `_catalog/error_detail.py` with
 //!   `NoCause`; `_catalog/retention_class.py` with `RetentionClassKey`.
+//! - `_catalog/events.py`: the event classes of
+//!   `horsies_core::events::EVENT_CONTRACT` and `decode_event`, their
+//!   decoder.
 //! - `_core.pyi`: the type stubs of the extension module `horsies._core`.
 //!
 //! Usage:
@@ -37,6 +40,7 @@ mod catalogs;
 mod constants;
 mod core_stub;
 mod error_classes;
+mod events;
 mod manifest;
 mod output;
 mod python_text;
