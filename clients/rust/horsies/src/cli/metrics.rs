@@ -33,7 +33,7 @@ pub(super) enum MetricsFailed {
     /// The config does not build a handle.
     #[error("invalid application configuration: {0}")]
     Config(HorsiesError),
-    /// The address did not bind, or the server failed.
+    /// The address did not bind.
     #[error("{0}")]
     Endpoint(EndpointFailed),
 }
@@ -55,6 +55,6 @@ pub(super) async fn serve(app: &Horsies, listen: &ListenAddress) -> Result<(), M
         labels,
         stop_on_signals("fleet metrics server", || {}),
     )
-    .await
-    .map_err(MetricsFailed::Endpoint)
+    .await;
+    Ok(())
 }
