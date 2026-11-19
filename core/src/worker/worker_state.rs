@@ -120,17 +120,10 @@ pub fn class_capacity_json(budgets: &[BudgetColumn]) -> serde_json::Value {
     serde_json::Value::Object(capacity)
 }
 
-/// The `class_capacity` column of the worker's slots now: each budget of
-/// the plan with its capacity in service and the classes it claims (Python
-/// `class_capacity_json(self.cfg.claim_plan(), self._claim_capacity())`).
-/// Pure.
-pub fn class_capacity_of(service: &PoolService) -> serde_json::Value {
-    class_capacity_json(&budget_columns(service))
-}
-
 /// Each budget of the plan of the worker's slots now, with its capacity in
 /// service and the classes it claims: the entries of the `class_capacity`
-/// column. Pure.
+/// column (Python `class_capacity_json(self.cfg.claim_plan(),
+/// self._claim_capacity())`, with [`class_capacity_json`]). Pure.
 pub fn budget_columns(service: &PoolService) -> Vec<BudgetColumn> {
     let plan = service.plan();
     service
@@ -1074,7 +1067,7 @@ mod tests {
             shared_thread: Vec::new(),
         };
         assert_eq!(
-            class_capacity_of(&service),
+            class_capacity_json(&budget_columns(&service)),
             serde_json::json!({
                 "ISOLATED": {
                     "capacity": 2,
@@ -1169,7 +1162,7 @@ mod tests {
         assert_eq!(slots_down, serde_json::json!([]));
         assert_eq!(
             class_capacity,
-            class_capacity_of(&isolated_children(2).service())
+            class_capacity_json(&budget_columns(&isolated_children(2).service()))
         );
         // No limit is stored resolved: the seats of the worker (#804).
         assert_eq!(max_claim_per_worker, 2);
