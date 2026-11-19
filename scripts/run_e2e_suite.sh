@@ -24,6 +24,7 @@ E2E_DIR="clients/python/tests/e2e"
 # here loudly instead of silently vanishing from the job that runs it.
 EXCLUDED=(
     "clients/python/tests/e2e/test_pgbouncer_smoke.py"  # PgBouncer topology; dedicated job
+    "clients/python/tests/e2e/test_observability_stack.py"  # Collector containers; observability-stack job
 )
 
 for excluded in "${EXCLUDED[@]}"; do
