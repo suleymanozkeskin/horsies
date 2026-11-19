@@ -445,15 +445,20 @@ pub(crate) fn idle_child_recording_pid(pid_file: &Path) -> ChildCommand {
     ))
 }
 
-/// A child of any kind that writes its pid to `pid_file`, boots, then holds
-/// its first run: it reads the run frame and answers nothing. It exits 0 at
-/// the stop frame, 3 at any other frame after the run, or when it is killed.
+/// A child of any kind that boots, reads its first run frame, then writes
+/// its pid to `pid_file` and holds the run: it answers nothing. The pid
+/// file appears only once the child has the run frame, through a rename,
+/// so a reader never sees a part of it. It exits 0 at a stop frame, 3 at any
+/// other frame after the run, or when it is killed.
 pub(crate) fn child_holding_its_first_run(pid_file: &Path) -> ChildCommand {
+    let partial = pid_file.with_extension("part");
     shell(&format!(
-        "echo $$ > '{}'; {}{}{}exit 3",
-        pid_file.display(),
+        "{}{}echo $$ > '{}'; mv '{}' '{}'; {}exit 3",
         boot_any_kind(),
         read_frame(),
+        partial.display(),
+        partial.display(),
+        pid_file.display(),
         read_frame()
     ))
 }
