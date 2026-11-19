@@ -1017,6 +1017,7 @@ async fn a_start_with_a_failed_root_commits_the_child_its_progression_owes() {
             &children.client_spec(&spec),
             workflow_id,
             chrono::Utc::now(),
+            crate::telemetry::trace_carrier::SendTrace::NoCarrier,
             false,
             &children,
         )

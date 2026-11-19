@@ -68,6 +68,7 @@ use crate::db::{
     BoundStatement, CheckoutClass, IsolationLevel, NotSentCause, ParameterType, Row,
     StatementBound, StatementFailure, TypedStatement,
 };
+use crate::telemetry::trace_carrier::{SendTrace, StoredTrace};
 
 /// Refuse a sent task input that breaks the rules of a user value (Python `.send()` refuses it as
 /// `VALIDATION_FAILED`, `core/task_decorator.py:2378-2387`). An object input is Python's keyword input: no
@@ -772,7 +773,8 @@ impl SendCommand {
 /// One send after every refusal that needs no connection: the values that
 /// [`PostgresBroker::enqueue_checked`] binds to `horsies_enqueue_task`,
 /// except the key's reservation window, which is the broker's. It borrows
-/// the texts of the send. Only [`CheckedSend::check`] builds it.
+/// the texts of the send. Only [`CheckedSend::check`] builds it, with no
+/// trace carrier; [`CheckedSend::with_trace`] sets one.
 #[derive(Debug, Clone)]
 pub struct CheckedSend<'a> {
     task_id: Uuid,
@@ -786,6 +788,7 @@ pub struct CheckedSend<'a> {
     sent_at: DateTime<Utc>,
     max_retries: i32,
     facts: PreparedEnqueueFacts,
+    trace: StoredTrace,
 }
 
 impl<'a> CheckedSend<'a> {
@@ -875,7 +878,20 @@ impl<'a> CheckedSend<'a> {
             sent_at,
             max_retries,
             facts,
+            trace: StoredTrace::NoCarrier,
         })
+    }
+
+    /// The send with the trace carrier `trace` (the send of
+    /// [`CheckedSend::check`] has none). The carrier is checked against the
+    /// bounds of `telemetry::trace_carrier`: a carrier that breaks a bound
+    /// is not stored, the send keeps no carrier, and the process logs one
+    /// warning. Never refuses the send. Touches no database.
+    pub fn with_trace(self, trace: SendTrace) -> CheckedSend<'a> {
+        CheckedSend {
+            trace: StoredTrace::of_send(trace),
+            ..self
+        }
     }
 
     /// The task id of the send: the given one, or the one minted by the
@@ -1596,6 +1612,7 @@ impl PostgresBroker {
         let (key_kind, key_scope_version, key_window_micros) = key.columns();
         let key_digest = key.digest();
         let send_kind_text = send_kind.as_sql();
+        let (trace_kind, trace_carrier, trace_id) = send.trace.columns();
         let statement = &ENQUEUE_TASK;
         let bound = statement
             .bind()
@@ -1621,6 +1638,9 @@ impl PostgresBroker {
             .value(&key_scope_version)
             .value(&key_window_micros)
             .value(&send_kind_text)
+            .value(&trace_kind)
+            .value(&trace_carrier)
+            .value(&trace_id)
             .finish();
         self.log_statement(statement);
         let rows = open
@@ -5125,6 +5145,76 @@ mod enqueue_task_options_tests {
         let text = options.stored_options_text();
 
         assert_eq!(enqueue_max_retries("t", Some(&text)).expect("accepted"), 4);
+    }
+}
+
+#[cfg(test)]
+mod checked_send_trace_tests {
+    //! The trace carrier of a checked send: none by default, the checked
+    //! carrier when it holds every bound, none when it breaks one. The send
+    //! itself is never refused for its carrier.
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::telemetry::trace_carrier::{PropagatedTrace, MAX_TRACE_CARRIER_KEYS};
+
+    fn checked_send() -> CheckedSend<'static> {
+        CheckedSend::check(
+            "tasks.traced",
+            "{}",
+            "default",
+            100,
+            None,
+            None,
+            None,
+            None,
+            Some(Uuid::from_u128(7)),
+            None,
+            None,
+            EnqueueRetention::Forever,
+            false,
+        )
+        .expect("the send is checked")
+    }
+
+    fn propagated(carrier: BTreeMap<String, String>) -> SendTrace {
+        SendTrace::Propagated(PropagatedTrace {
+            carrier,
+            trace_id: (1..=16).collect(),
+        })
+    }
+
+    #[test]
+    fn a_checked_send_has_no_carrier() {
+        assert_eq!(checked_send().trace, StoredTrace::NoCarrier);
+    }
+
+    #[test]
+    fn a_send_with_a_carrier_stores_its_checked_text() {
+        let send = checked_send().with_trace(propagated(BTreeMap::from([(
+            "traceparent".to_owned(),
+            "00-0102-03-01".to_owned(),
+        )])));
+        assert_eq!(
+            send.trace.columns(),
+            (
+                "CARRIER",
+                Some("{\"traceparent\":\"00-0102-03-01\"}"),
+                Some((1..=16).collect::<Vec<u8>>().as_slice())
+            )
+        );
+        assert_eq!(send.task_id(), Uuid::from_u128(7));
+    }
+
+    #[test]
+    fn a_send_with_a_carrier_over_a_bound_keeps_the_send_and_stores_no_carrier() {
+        let over: BTreeMap<String, String> = (0..=MAX_TRACE_CARRIER_KEYS)
+            .map(|index| (format!("k{index}"), "v".to_owned()))
+            .collect();
+        let send = checked_send().with_trace(propagated(over));
+        assert_eq!(send.trace, StoredTrace::NoCarrier);
+        assert_eq!(send.task_id(), Uuid::from_u128(7));
+        assert_eq!(send.task_name, "tasks.traced");
     }
 }
 
