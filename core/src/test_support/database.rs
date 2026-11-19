@@ -144,6 +144,16 @@ pub(crate) fn is_generated_name(name: &str, prefix: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// A new name of a test database: `<prefix>rs_<32 hex>`. A process sweeps
+/// the inactive databases of such names that earlier processes left.
+pub(crate) fn new_test_database_name() -> String {
+    format!(
+        "{}{TEST_DATABASE_KIND}{}",
+        database_name_prefix(),
+        Uuid::new_v4().simple()
+    )
+}
+
 /// The URL of the test server.
 pub(crate) fn server_url() -> String {
     if let Ok(url) = std::env::var("DATABASE_URL") {
@@ -313,11 +323,7 @@ async fn create_database(source: Source, entry: RuntimeEntry) -> String {
             punctuation_blind_options().await
         }
     };
-    let name = format!(
-        "{}{TEST_DATABASE_KIND}{}",
-        database_name_prefix(),
-        Uuid::new_v4().simple()
-    );
+    let name = new_test_database_name();
     let admin = admin_connection().await;
     run(&admin, SETUP_LOCK_SQL).await;
     run(&admin, &format!("CREATE DATABASE \"{name}\" {create}")).await;

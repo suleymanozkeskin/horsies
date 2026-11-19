@@ -9,6 +9,7 @@ members = [
     "clients/python/bridge",
     "clients/rust/examples",
     "clients/rust/examples/showcase",
+    "clients/rust/tests/arbitrary-precision",
     "clients/rust/tests/docs-check",
     "clients/rust/tests/parity",
     "clients/rust/tests/support",

@@ -170,8 +170,8 @@ jobs:
 
   # The core, the extension module crate, the generator, the Rust client, its
   # macros and the examples on each supported Postgres major. The end-to-end
-  # crates under clients/rust/tests/ and the PgBouncer lane of the client move to the
-  # client of the core with #1410.
+  # crates and the parity runs: rust-e2e. The PgBouncer lane: rust-pgbouncer.
+  # serde_json's arbitrary_precision: rust-arbitrary-precision.
   rust-tests:
     name: rust-tests (Postgres ${{ matrix.postgres }})
     runs-on: ubuntu-latest
@@ -339,3 +339,154 @@ jobs:
         env:
           ACME_DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/acme_demo
         run: cargo test -p acme-showcase --features web --all-targets
+
+  # The end-to-end crates of the Rust client (clients/rust/tests/worker,
+  # support and queue_mismatch) and the parity runs with the Python client
+  # (tests/parity with the binary of clients/rust/tests/parity), on
+  # PostgreSQL 16. The test worker binary is the worker, its children and the
+  # scheduler; each test has a database of its own on the server of
+  # HORSIES_TEST_DATABASE_URL, and so has each side of a parity run.
+  rust-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: horsies
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Cache Cargo builds
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Test the end-to-end crates
+        env:
+          HORSIES_TEST_DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies
+        run: cargo test -p horsies-test-worker -p horsies-test-support -p horsies-queue-mismatch-tests
+
+      # The Python side of the parity runs: the client with horsies._core.
+      - name: Install the Python client
+        run: uv sync --dev
+
+      - name: Build the Rust side of the parity runs
+        run: cargo build -p horsies-parity-tests
+
+      # tests/parity/snapshot holds the unit and integration tests of the
+      # snapshot tool; tests.yml runs them.
+      - name: Parity runs
+        env:
+          HORSIES_TEST_DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies
+          HORSIES_PARITY_RUST_BIN: ${{ github.workspace }}/target/debug/horsies-parity
+        run: uv run pytest -c clients/python/pyproject.toml --rootdir . tests/parity --ignore=tests/parity/snapshot -v --tb=short
+
+  # The Rust lane through the PgBouncer fixture of the Python client
+  # (clients/python/tests/fixtures/pgbouncer/: PostgreSQL 18 on 15432, pools
+  # in transaction, session and statement mode, max_prepared_statements = 0).
+  # The core's PgBouncer tests are ignored unless the feature
+  # pgbouncer-fixture-tests is on; this job turns it on. The end-to-end crates
+  # run with every app on the transaction pool and the direct URL as its
+  # session database (HORSIES_TEST_DATABASE_URL_TRANSACTION,
+  # clients/rust/tests/support/src/database.rs).
+  rust-pgbouncer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - name: Cache Cargo builds
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Start PgBouncer fixture stack
+        run: docker compose -f clients/python/tests/fixtures/pgbouncer/compose.yaml up -d --wait
+
+      # src/broker/pgbouncer_contract_tests.rs: each test creates its own
+      # database through the direct URL. tests/db_statement_layer.rs: its two
+      # PgBouncer tests use the pools as given; its other tests create their
+      # databases on the server of DATABASE_URL.
+      - name: Test the core on the PgBouncer pools
+        env:
+          DATABASE_URL: postgresql://postgres:testpassword@localhost:15432/horsies
+          HORSIES_TEST_DATABASE_URL_DIRECT: postgresql://postgres:testpassword@localhost:15432/horsies
+          HORSIES_TEST_DATABASE_URL_TRANSACTION: postgresql://postgres:testpassword@localhost:16432/horsies
+          HORSIES_TEST_DATABASE_URL_SESSION: postgresql://postgres:testpassword@localhost:16433/horsies
+          HORSIES_TEST_DATABASE_URL_STATEMENT: postgresql://postgres:testpassword@localhost:16434/horsies
+          HORSIES_STMT_PGBOUNCER_STATEMENT_URL: postgresql://postgres:testpassword@localhost:16434/horsies
+          HORSIES_STMT_PGBOUNCER_TRANSACTION_URL: postgresql://postgres:testpassword@localhost:16432/horsies
+        run: |
+          cargo test -p horsies-core --features pgbouncer-fixture-tests --lib pgbouncer_contract_tests
+          cargo test -p horsies-core --features pgbouncer-fixture-tests --test db_statement_layer
+
+      - name: Test the end-to-end crates through the transaction pool
+        env:
+          HORSIES_TEST_DATABASE_URL: postgresql://postgres:testpassword@localhost:15432/horsies
+          HORSIES_TEST_DATABASE_URL_TRANSACTION: postgresql://postgres:testpassword@localhost:16432/horsies
+        run: cargo test -p horsies-test-worker -p horsies-test-support -p horsies-queue-mismatch-tests
+
+      - name: Stop PgBouncer fixture stack
+        if: always()
+        run: docker compose -f clients/python/tests/fixtures/pgbouncer/compose.yaml down -v
+
+  # The core and the client built with serde_json's arbitrary_precision on,
+  # as a dependency of a user's app can turn it on for the whole graph: the
+  # crate clients/rust/tests/arbitrary-precision turns it on, and its test
+  # proves that the flag is on. The client's tests run in the same graph.
+  rust-arbitrary-precision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - name: Cache Cargo builds
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Test the client with the flag on
+        run: cargo test -p horsies -p horsies-arbitrary-precision-tests

@@ -991,6 +991,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "horsies-arbitrary-precision-tests"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "horsies",
+ "horsies-core",
+ "serde_json",
+]
+
+[[package]]
 name = "horsies-codegen"
 version = "0.1.0"
 dependencies = [

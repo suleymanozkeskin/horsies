@@ -7,19 +7,22 @@
 //! `test_pgbouncer_prepared_statements.py` (baseline versions on
 //! `program/0.8.0`).
 //!
-//! The tests are ignored by default. Run them with the fixture up and
-//! `HORSIES_PGBOUNCER_TEST=1`:
+//! The tests are ignored unless the feature `pgbouncer-fixture-tests` is on.
+//! Run them with the fixture up (the `rust-pgbouncer` job of
+//! `.github/workflows/tests-full.yml` does):
 //!
 //! ```text
 //! docker compose -f clients/python/tests/fixtures/pgbouncer/compose.yaml up -d --wait
-//! HORSIES_PGBOUNCER_TEST=1 cargo test -p horsies-core pgbouncer_contract -- --ignored --test-threads=1
+//! cargo test -p horsies-core --features pgbouncer-fixture-tests --lib pgbouncer_contract_tests
 //! ```
 //!
 //! The URLs come from the same variables as Python's
 //! `clients/python/tests/pgbouncer_utils.py` (`HORSIES_TEST_DATABASE_URL_DIRECT`,
 //! `..._TRANSACTION`, `..._SESSION`, `..._STATEMENT`), with its defaults.
-//! Each test creates a database of its own through the direct URL; every
-//! PgBouncer pool routes any database name to the server.
+//! Each test creates a database of its own through the direct URL, named
+//! like every core test database (`<prefix>rs_<32 hex>`,
+//! `src/test_support/database.rs`); every PgBouncer pool routes any database
+//! name to the server.
 
 use chrono::Utc;
 use serial_test::serial;
@@ -30,6 +33,7 @@ use crate::core::config::{EnqueueRetention, PostgresConfig};
 use crate::core::history::identity::uuid7::mint_task_id;
 use crate::core::task::send_types::{send_error_from_enqueue, TaskSendErrorCode, TaskSendPayload};
 use crate::db::{CheckoutClass, ParameterType, PooledConnection, StatementBound, TypedStatement};
+use crate::test_support::new_test_database_name;
 use crate::test_support::sql::{self, TestConnection, TestPool, TestPoolOptions};
 
 /// Enqueues of the transaction-pool test: enough statements to meet a
@@ -82,15 +86,6 @@ struct PgbouncerUrls {
     statement: String,
 }
 
-fn require_fixture() {
-    assert_eq!(
-        std::env::var("HORSIES_PGBOUNCER_TEST").as_deref(),
-        Ok("1"),
-        "the PgBouncer contract tests need the fixture of clients/python/tests/fixtures/pgbouncer \
-         and HORSIES_PGBOUNCER_TEST=1"
-    );
-}
-
 /// The template URL of one endpoint: the variable, else Python's default.
 /// A driver suffix in the scheme (`postgresql+psycopg://`) is removed: the
 /// core takes `postgresql://` only.
@@ -122,10 +117,9 @@ fn with_query_parameter(url: &str, parameter: &str) -> String {
 }
 
 impl PgbouncerUrls {
-    async fn create(label: &str) -> Self {
-        require_fixture();
+    async fn create() -> Self {
         let direct = template_url("HORSIES_TEST_DATABASE_URL_DIRECT", 15432);
-        let database_name = format!("horsies_core_pgbouncer_{label}_{}", Uuid::new_v4().simple());
+        let database_name = new_test_database_name();
         let admin = with_database(&direct, "postgres");
         let mut connection = TestConnection::connect(&admin)
             .await
@@ -232,9 +226,12 @@ async fn direct_pool(url: &str) -> TestPool {
 /// pool that tracks no prepared statements.
 #[tokio::test]
 #[serial]
-#[ignore = "needs the PgBouncer fixture of clients/python/tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
+#[cfg_attr(
+    not(feature = "pgbouncer-fixture-tests"),
+    ignore = "needs the PgBouncer fixture of clients/python/tests/fixtures/pgbouncer and the feature pgbouncer-fixture-tests"
+)]
 async fn a_transaction_pool_with_a_direct_session_installs_checks_locks_and_enqueues() {
-    let urls = PgbouncerUrls::create("transaction").await;
+    let urls = PgbouncerUrls::create().await;
     let broker = PostgresBroker::connect_with(
         &sized(PostgresConfig::from_pgbouncer_urls(
             urls.transaction.clone(),
@@ -317,9 +314,12 @@ async fn a_transaction_pool_with_a_direct_session_installs_checks_locks_and_enqu
 /// the refusal is not retryable.
 #[tokio::test]
 #[serial]
-#[ignore = "needs the PgBouncer fixture of clients/python/tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
+#[cfg_attr(
+    not(feature = "pgbouncer-fixture-tests"),
+    ignore = "needs the PgBouncer fixture of clients/python/tests/fixtures/pgbouncer and the feature pgbouncer-fixture-tests"
+)]
 async fn a_session_url_on_the_transaction_pool_fails_the_worker_session_check() {
-    let urls = PgbouncerUrls::create("bad_session").await;
+    let urls = PgbouncerUrls::create().await;
     let session_url = with_query_parameter(
         &urls.transaction,
         "application_name=horsies_bad_session_probe",
@@ -349,9 +349,12 @@ async fn a_session_url_on_the_transaction_pool_fails_the_worker_session_check() 
 /// takes an enqueue and delivers a NOTIFY to a LISTEN.
 #[tokio::test]
 #[serial]
-#[ignore = "needs the PgBouncer fixture of clients/python/tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
+#[cfg_attr(
+    not(feature = "pgbouncer-fixture-tests"),
+    ignore = "needs the PgBouncer fixture of clients/python/tests/fixtures/pgbouncer and the feature pgbouncer-fixture-tests"
+)]
 async fn a_session_pooled_url_installs_enqueues_and_delivers_a_notify() {
-    let urls = PgbouncerUrls::create("session").await;
+    let urls = PgbouncerUrls::create().await;
     let broker = PostgresBroker::connect_with(
         &sized(PostgresConfig::from_url(urls.session.clone())),
         crate::ClientFamily::Rust,
@@ -389,9 +392,12 @@ async fn a_session_pooled_url_installs_enqueues_and_delivers_a_notify() {
 /// decisions": a statement-pooled URL answers `retryable = false`).
 #[tokio::test]
 #[serial]
-#[ignore = "needs the PgBouncer fixture of clients/python/tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
+#[cfg_attr(
+    not(feature = "pgbouncer-fixture-tests"),
+    ignore = "needs the PgBouncer fixture of clients/python/tests/fixtures/pgbouncer and the feature pgbouncer-fixture-tests"
+)]
 async fn a_statement_pooled_runtime_url_fails_the_send_as_not_retryable() {
-    let urls = PgbouncerUrls::create("statement").await;
+    let urls = PgbouncerUrls::create().await;
     let broker = PostgresBroker::connect_with(
         &sized(PostgresConfig::from_pgbouncer_urls(
             urls.statement.clone(),

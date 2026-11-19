@@ -20,6 +20,12 @@ default = []
 # with it on, every `#[serde(flatten)]`, `#[serde(tag)]` and
 # `#[serde(untagged)]` container in the graph rejects typed floats.
 arbitrary-precision = ["serde_json/arbitrary_precision"]
+# Test code only; it adds nothing to the library. The tests that need the
+# PgBouncer fixture of clients/python/tests/fixtures/pgbouncer/ run with it
+# on and are ignored with it off (src/broker/pgbouncer_contract_tests.rs,
+# tests/db_statement_layer.rs). The rust-pgbouncer job of
+# .github/workflows/tests-full.yml turns it on.
+pgbouncer-fixture-tests = []
 web = [
     "dep:async-stream",
     "dep:async-trait",

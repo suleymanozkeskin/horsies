@@ -1,0 +1,21 @@
+[package]
+name = "horsies-arbitrary-precision-tests"
+version = "0.1.0-alpha.1"
+edition = "2021"
+description = "Builds the core and the Rust client with serde_json's arbitrary_precision turned on by another crate of the graph"
+publish = false
+
+# Cargo turns a feature of a crate on for the whole build graph, so any
+# dependency of a user's app can turn on serde_json's `arbitrary_precision`.
+# This crate does that: `cargo test -p horsies-arbitrary-precision-tests`
+# builds horsies-core and horsies with the flag on, and `-p horsies` next to it
+# runs the client's tests with it on. Select this crate with `-p`: in a
+# `--workspace` build the flag is on for every crate of the workspace.
+
+[dependencies]
+horsies = { path = "../../horsies" }
+horsies-core = { path = "../../../../core" }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+
+[lints]
+workspace = true
