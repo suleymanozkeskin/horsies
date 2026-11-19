@@ -1,1 +1,1 @@
-Internal crate of [horsies-core](https://crates.io/crates/horsies-core): the derives of its code catalogs (`CodeCatalog`) and manifest types (`ManifestSchema`). Depend on `horsies` directly, not this crate.
+Internal crate of [horsies-core](https://crates.io/crates/horsies-core): the derives of its code catalogs (`CodeCatalog`), manifest types (`ManifestSchema`) and event types (`EventSchema`). Depend on `horsies` directly, not this crate.
