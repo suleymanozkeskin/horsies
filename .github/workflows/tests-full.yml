@@ -169,11 +169,13 @@ jobs:
         if: always()
         run: docker compose -f clients/python/tests/fixtures/pgbouncer/compose.yaml down -v
 
-  # The OpenTelemetry Collector config of deploy/otel-collector/: the
-  # Collector of clients/python/tests/fixtures/observability/compose.yaml
-  # scrapes a worker endpoint and `horsies metrics`, which the test starts on
-  # the runner, and writes the series as OTLP JSON. The containers use the
-  # host network.
+  # The files of deploy/ in the containers of
+  # clients/python/tests/fixtures/observability/compose.yaml, which use the
+  # host network: the Collector config exports the series of a worker
+  # endpoint and of `horsies metrics` (both started by the test on the
+  # runner) as OTLP JSON; promtool checks and tests the alert rules;
+  # Prometheus evaluates them and runs each dashboard query; Grafana loads
+  # the dashboard.
   observability-stack:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -215,6 +217,12 @@ jobs:
 
       - name: Validate the shipped Collector config
         run: docker compose -f clients/python/tests/fixtures/observability/compose.yaml run --rm --no-deps collector validate --config=/etc/otelcol/collector.yaml
+
+      - name: Check the alert rules
+        run: docker compose -f clients/python/tests/fixtures/observability/compose.yaml run --rm --no-deps --entrypoint promtool prometheus check rules /etc/prometheus/rules/horsies-alerts.yaml
+
+      - name: Unit tests of the alert rules
+        run: docker compose -f clients/python/tests/fixtures/observability/compose.yaml run --rm --no-deps --entrypoint promtool prometheus test rules /etc/prometheus/rules/horsies-alerts.test.yaml
 
       - name: Start the observability stack
         run: docker compose -f clients/python/tests/fixtures/observability/compose.yaml up -d --wait

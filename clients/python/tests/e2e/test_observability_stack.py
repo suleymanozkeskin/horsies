@@ -1,13 +1,18 @@
-"""The OpenTelemetry Collector config ``deploy/otel-collector/collector.yaml``
-exports the series of a worker endpoint and of the fleet collector through
-OTLP.
+"""The files of ``deploy/`` against a worker endpoint and the fleet
+collector:
 
-The stack is ``tests/fixtures/observability/compose.yaml``: the Collector
+- the OpenTelemetry Collector config ``deploy/otel-collector/collector.yaml``
+  exports their series through OTLP;
+- Prometheus evaluates the alert rules ``deploy/prometheus/horsies-alerts.yaml``
+  without error, and runs each query of the dashboard;
+- Grafana loads the dashboard ``deploy/grafana/horsies-dashboard.json``.
+
+The stack is ``tests/fixtures/observability/compose.yaml``. The Collector
 runs the shipped config with ``collector-test.yaml`` merged over it (a 2 s
-scrape interval, and a file exporter in place of the OTLP exporter). This
-test starts one worker with ``--metrics-listen`` and one ``horsies metrics``
-on the host, at the static targets of the shipped config, and reads the OTLP
-JSON that the file exporter writes.
+scrape interval, and a file exporter in place of the OTLP exporter).
+Prometheus scrapes the same two targets every 2 s. The module fixture starts
+one worker with ``--metrics-listen`` and one ``horsies metrics`` on the host,
+at the static targets of the shipped config.
 
 Runs only with ``HORSIES_OBSERVABILITY_STACK_TEST=1`` and the stack up: the
 ``observability-stack`` job of ``tests-full.yml``. ``HORSIES_OTLP_OUTPUT_DIR``
@@ -23,6 +28,7 @@ import subprocess
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -38,6 +44,16 @@ from horsies.core.types.result import is_err
 from tests.e2e.helpers.worker import REPO_ROOT, run_worker
 from tests.e2e.tasks import basic as basic_tasks
 from tests.metric_catalog import CatalogMetric, MetricKind, read_catalog
+from tests.observability_deploy import (
+    alert_rules,
+    dashboard,
+    dashboard_queries,
+    mapping,
+    panels,
+    sequence,
+    text,
+    variable_queries,
+)
 
 STACK_TEST_ENV: Final = 'HORSIES_OBSERVABILITY_STACK_TEST'
 OTLP_OUTPUT_DIR_ENV: Final = 'HORSIES_OTLP_OUTPUT_DIR'
@@ -100,6 +116,21 @@ OTLP_OUTPUT_MAX_BYTES: Final = 256 * 1024 * 1024
 """The largest OTLP file that the test reads. A 2 s scrape of both targets
 writes a few kB per export."""
 LOG_TAIL_BYTES: Final = 8_192
+
+PROMETHEUS_URL: Final = 'http://127.0.0.1:9090'
+GRAFANA_URL: Final = 'http://127.0.0.1:3000'
+DASHBOARD_UID: Final = 'horsies-overview'
+STACK_ANSWER_TIMEOUT_S: Final = 90.0
+"""Seconds for Prometheus to scrape and evaluate, and for Grafana to load the
+dashboard."""
+HTTP_BODY_MAX_BYTES: Final = 16 * 1024 * 1024
+GRAFANA_VARIABLE_VALUES: Final = {
+    '$__rate_interval': '1m',
+    '$queue': '.*',
+    '$task': '.*',
+}
+"""The value of each Grafana variable of the dashboard queries in a query to
+Prometheus: every queue and task."""
 
 
 class OtlpPoints(Enum):
@@ -299,29 +330,98 @@ def _wait_for_arrival(
     return arrived
 
 
+@dataclass(frozen=True)
+class HttpAnswer:
+    """The status and the body of an HTTP answer."""
+
+    status: int
+    body: bytes
+
+
+@dataclass(frozen=True)
+class HttpUnreachable:
+    """No HTTP answer: the connection failed or timed out."""
+
+    cause: str
+
+
+def _http_get(url: str) -> HttpAnswer | HttpUnreachable:
+    """GET ``url``; the body is read up to ``HTTP_BODY_MAX_BYTES``."""
+    try:
+        with urllib.request.urlopen(
+            url, timeout=ENDPOINT_REQUEST_TIMEOUT_S
+        ) as response:
+            return HttpAnswer(
+                status=response.status, body=response.read(HTTP_BODY_MAX_BYTES)
+            )
+    except urllib.error.HTTPError as refused:
+        return HttpAnswer(status=refused.code, body=refused.read(HTTP_BODY_MAX_BYTES))
+    except (urllib.error.URLError, ConnectionError, TimeoutError) as failure:
+        return HttpUnreachable(cause=repr(failure))
+
+
 def _wait_for_endpoint(
     url: str, process: subprocess.Popen[str] | subprocess.Popen[bytes]
 ) -> None:
     """Poll ``url`` until it answers 200. Fails the test when ``process``
     exits first or after ``ENDPOINT_READY_TIMEOUT_S``."""
     deadline = time.monotonic() + ENDPOINT_READY_TIMEOUT_S
-    last_failure = 'no request answered'
+    last: HttpAnswer | HttpUnreachable = HttpUnreachable(cause='no request sent')
     while time.monotonic() < deadline:
         if process.poll() is not None:
             pytest.fail(f'the process of {url} exited with {process.returncode}')
-        try:
-            with urllib.request.urlopen(
-                url, timeout=ENDPOINT_REQUEST_TIMEOUT_S
-            ) as response:
-                if response.status == 200:
-                    return
-                last_failure = f'status {response.status}'
-        except (urllib.error.URLError, ConnectionError, TimeoutError) as failure:
-            last_failure = repr(failure)
-        time.sleep(POLL_INTERVAL_S)
-    pytest.fail(
-        f'{url} did not answer 200 within {ENDPOINT_READY_TIMEOUT_S} s: {last_failure}'
-    )
+        last = _http_get(url)
+        match last:
+            case HttpAnswer(status=200):
+                return
+            case HttpAnswer() | HttpUnreachable():
+                time.sleep(POLL_INTERVAL_S)
+    pytest.fail(f'{url} did not answer 200 within {ENDPOINT_READY_TIMEOUT_S} s: {last}')
+
+
+@dataclass(frozen=True)
+class PrometheusData:
+    """The ``data`` of a Prometheus API answer with status ``success``."""
+
+    data: object
+
+
+def _prometheus_data(
+    path: str, query: dict[str, str]
+) -> PrometheusData | HttpAnswer | HttpUnreachable:
+    """The ``data`` of a Prometheus API answer with status ``success``, or
+    the answer that is not one."""
+    answer = _http_get(f'{PROMETHEUS_URL}{path}?{urllib.parse.urlencode(query)}')
+    match answer:
+        case HttpAnswer(status=200, body=body):
+            document = mapping(json.loads(body), path)
+            match document.get('status'):
+                case 'success':
+                    return PrometheusData(data=document.get('data'))
+                case _:
+                    return answer
+        case HttpAnswer() | HttpUnreachable():
+            return answer
+
+
+def _prometheus_series_count(selector: str) -> int:
+    """The number of series that an instant query of ``selector`` returns
+    now; 0 while Prometheus does not answer."""
+    match _prometheus_data('/api/v1/query', {'query': selector}):
+        case HttpAnswer() | HttpUnreachable():
+            return 0
+        case PrometheusData(data=data):
+            return len(sequence(mapping(data, selector).get('result'), selector))
+
+
+def _for_prometheus(expression: str, where: str) -> str:
+    """``expression`` with each Grafana variable replaced by its value in
+    ``GRAFANA_VARIABLE_VALUES``. Fails the test on another variable."""
+    for variable, value in GRAFANA_VARIABLE_VALUES.items():
+        expression = expression.replace(variable, value)
+    if '$' in expression:
+        pytest.fail(f'{where}: a Grafana variable without a test value: {expression!r}')
+    return expression
 
 
 def _log_tail(path: str) -> str:
@@ -394,16 +494,21 @@ def _otlp_output_path() -> Path:
     return Path(folder) / OTLP_OUTPUT_FILE
 
 
-def test_the_collector_exports_the_worker_and_fleet_series_through_otlp() -> None:
-    output = _otlp_output_path()
-    start = _output_size(output)
-    catalog = {metric.prometheus_name: metric for metric in read_catalog()}
-    assert set(WORKER_SERIES + FLEET_SERIES) <= catalog.keys()
-    expected = frozenset(
-        [(WORKER_JOB, name) for name in WORKER_SERIES]
-        + [(FLEET_JOB, name) for name in FLEET_SERIES]
-    )
+@dataclass(frozen=True)
+class OtlpOutput:
+    """The OTLP file, and its size before the processes of this module
+    started."""
 
+    path: Path
+    start: int
+
+
+@pytest.fixture(scope='module')
+def scraped_processes() -> Generator[OtlpOutput, None, None]:
+    """One worker with ``--metrics-listen`` and one ``horsies metrics``, both
+    serving ``/metrics``, for every test of this module."""
+    path = _otlp_output_path()
+    output = OtlpOutput(path=path, start=_output_size(path))
     with run_worker(
         DEFAULT_INSTANCE,
         profile='isolated-1',
@@ -416,7 +521,22 @@ def test_the_collector_exports_the_worker_and_fleet_series_through_otlp() -> Non
             DEFAULT_INSTANCE, FLEET_METRICS_ADDRESS
         ) as fleet_metrics:
             _wait_for_endpoint(f'http://{FLEET_METRICS_ADDRESS}/metrics', fleet_metrics)
-            arrived = _wait_for_arrival(output, start, expected)
+            yield output
+
+
+def test_the_collector_exports_the_worker_and_fleet_series_through_otlp(
+    scraped_processes: OtlpOutput,
+) -> None:
+    catalog = {metric.prometheus_name: metric for metric in read_catalog()}
+    assert set(WORKER_SERIES + FLEET_SERIES) <= catalog.keys()
+    expected = frozenset(
+        [(WORKER_JOB, name) for name in WORKER_SERIES]
+        + [(FLEET_JOB, name) for name in FLEET_SERIES]
+    )
+
+    arrived = _wait_for_arrival(
+        scraped_processes.path, scraped_processes.start, expected
+    )
 
     data_types = {key: arrived[key].points for key in sorted(expected)}
     assert data_types == {
@@ -427,3 +547,100 @@ def test_the_collector_exports_the_worker_and_fleet_series_through_otlp() -> Non
     assert all(ATTEMPT_ATTRIBUTE_KEYS <= keys for keys in attempts.attribute_keys), (
         attempts.attribute_keys
     )
+
+
+def test_prometheus_scrapes_the_worker_and_the_fleet_collector(
+    scraped_processes: OtlpOutput,
+) -> None:
+    selectors = (
+        f'horsies_task_attempts_total{{job="{WORKER_JOB}"}}',
+        f'horsies_fleet_workers{{job="{FLEET_JOB}"}}',
+    )
+    deadline = time.monotonic() + STACK_ANSWER_TIMEOUT_S
+    counts = {selector: _prometheus_series_count(selector) for selector in selectors}
+    while 0 in counts.values() and time.monotonic() < deadline:
+        time.sleep(POLL_INTERVAL_S)
+        counts = {
+            selector: _prometheus_series_count(selector) for selector in selectors
+        }
+
+    assert 0 not in counts.values(), counts
+
+
+def _rule_health() -> dict[str, tuple[str, str]]:
+    """The health and the last error of each alerting rule that Prometheus
+    loaded; empty while Prometheus does not answer."""
+    match _prometheus_data('/api/v1/rules', {'type': 'alert'}):
+        case HttpAnswer() | HttpUnreachable():
+            return {}
+        case PrometheusData(data=data):
+            pass
+    health: dict[str, tuple[str, str]] = {}
+    for group in sequence(mapping(data, 'rules').get('groups'), 'rules.groups'):
+        for value in sequence(
+            mapping(group, 'rules group').get('rules'), 'rules group rules'
+        ):
+            rule = mapping(value, 'rule')
+            health[text(rule.get('name'), 'rule name')] = (
+                text(rule.get('health'), 'rule health'),
+                text(rule.get('lastError', ''), 'rule lastError'),
+            )
+    return health
+
+
+def test_prometheus_evaluates_every_alert_rule_without_error(
+    scraped_processes: OtlpOutput,
+) -> None:
+    names = {rule.name for rule in alert_rules()}
+    deadline = time.monotonic() + STACK_ANSWER_TIMEOUT_S
+    health = _rule_health()
+    while (
+        health.keys() != names
+        or any(state == 'unknown' for state, _ in health.values())
+    ) and time.monotonic() < deadline:
+        time.sleep(POLL_INTERVAL_S)
+        health = _rule_health()
+
+    assert health == {name: ('ok', '') for name in names}
+
+
+def test_prometheus_runs_every_dashboard_query(scraped_processes: OtlpOutput) -> None:
+    expressions = [
+        (query.where, _for_prometheus(query.expression, query.where))
+        for query in dashboard_queries()
+    ] + [
+        (variable.where, _for_prometheus(variable.selector, variable.where))
+        for variable in variable_queries()
+    ]
+
+    refused: dict[str, HttpAnswer | HttpUnreachable] = {}
+    for where, expression in expressions:
+        match _prometheus_data('/api/v1/query', {'query': expression}):
+            case PrometheusData():
+                pass
+            case HttpAnswer() | HttpUnreachable() as answer:
+                refused[where] = answer
+
+    assert refused == {}
+
+
+def test_grafana_loads_the_provisioned_dashboard() -> None:
+    url = f'{GRAFANA_URL}/api/dashboards/uid/{DASHBOARD_UID}'
+    deadline = time.monotonic() + STACK_ANSWER_TIMEOUT_S
+    answer = _http_get(url)
+    while not (isinstance(answer, HttpAnswer) and answer.status == 200):
+        if time.monotonic() >= deadline:
+            pytest.fail(
+                f'{url} did not answer 200 within {STACK_ANSWER_TIMEOUT_S} s: {answer}'
+            )
+        time.sleep(POLL_INTERVAL_S)
+        answer = _http_get(url)
+
+    loaded = mapping(json.loads(answer.body), url)
+    board = mapping(loaded.get('dashboard'), f'{url} dashboard')
+    meta = mapping(loaded.get('meta'), f'{url} meta')
+    shipped = dashboard()
+    assert board.get('schemaVersion') == shipped.get('schemaVersion')
+    assert board.get('title') == shipped.get('title')
+    assert len(panels(board)) == len(panels(shipped))
+    assert meta.get('provisioned') is True

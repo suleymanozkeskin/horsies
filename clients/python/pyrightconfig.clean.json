@@ -106,7 +106,11 @@
     "tests/unit/test_task_log_context.py",
     "tests/metric_catalog.py",
     "tests/unit/test_metric_catalog.py",
-    "tests/e2e/test_observability_stack.py"
+    "tests/e2e/test_observability_stack.py",
+    "tests/promql_references.py",
+    "tests/unit/test_promql_references.py",
+    "tests/observability_deploy.py",
+    "tests/unit/test_observability_deploy_files.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error",
   "executionEnvironments": [
