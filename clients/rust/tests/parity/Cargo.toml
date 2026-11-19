@@ -2,7 +2,7 @@
 name = "horsies-parity-tests"
 version = "0.1.0-alpha.1"
 edition = "2021"
-description = "The Rust side of the parity runs with the Python client (tests/parity)"
+description = "The Rust side of the parity runs with the Python client (crossclient/parity)"
 publish = false
 
 # `horsies-parity send <scenario>` sends a scenario; any other command goes

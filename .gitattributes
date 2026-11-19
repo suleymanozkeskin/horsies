@@ -1,2 +1,2 @@
 core/webui-dist/** -whitespace
-tests/perf/releases/**/*.patch -whitespace
+crossclient/perf/releases/**/*.patch -whitespace

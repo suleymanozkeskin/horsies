@@ -37,23 +37,23 @@ jobs:
         run: uv sync --dev
 
       - name: Start measurement servers
-        run: docker compose -f tests/fixtures/perf/compose.yaml up -d --wait
+        run: docker compose -f crossclient/fixtures/perf/compose.yaml up -d --wait
 
       - name: Apply schema
         run: |
           for port in 15442 15446; do
-            uv run python -m tests.perf --apply-schema \
+            uv run python -m crossclient.perf --apply-schema \
               --dsn postgresql://postgres:testpassword@localhost:${port}/horsies
           done
 
       - name: Measurement harness control run
         run: |
           for port in 15442 15446; do
-            uv run python -m tests.perf --scenario all --scale smoke \
+            uv run python -m crossclient.perf --scenario all --scale smoke \
               --control \
               --dsn postgresql://postgres:testpassword@localhost:${port}/horsies
           done
 
       - name: Stop measurement servers
         if: always()
-        run: docker compose -f tests/fixtures/perf/compose.yaml down -v
+        run: docker compose -f crossclient/fixtures/perf/compose.yaml down -v
