@@ -8,10 +8,11 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::values::{
-    AttemptEnd, AttemptNumber, AttemptRecord, ChildReplaceReason, ClaimReleaseReason, Priority,
-    QueueName, RecoveryAction, SlotDownCause, SlotIndex, TaskName,
+    AttemptEnd, AttemptNumber, AttemptRecord, Priority, QueueName, SlotDownCause, SlotIndex,
+    TaskName,
 };
 use crate::core::task::Execution;
+use crate::telemetry::labels::{RecoveryAction, ReleaseReason, ReplaceReason};
 use crate::worker::executor::protocol::{ProcessId, StopReason};
 
 /// The worker claimed a task.
@@ -41,7 +42,7 @@ pub struct ClaimReleased {
     pub task_id: Uuid,
     pub task_name: TaskName,
     pub queue: QueueName,
-    pub reason: ClaimReleaseReason,
+    pub reason: ReleaseReason,
 }
 
 /// A task reached a child.
@@ -141,7 +142,7 @@ pub struct ChildReplaced {
     pub slot: SlotIndex,
     /// The process id of the old child.
     pub child_pid: ProcessId,
-    pub reason: ChildReplaceReason,
+    pub reason: ReplaceReason,
 }
 
 /// A slot is down after a boot failure that can clear.

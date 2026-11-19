@@ -594,24 +594,21 @@ fn path_of(names: &[&'static str]) -> WirePath {
 #[test]
 fn the_reasons_of_the_core_convert_one_to_one() {
     let not_run = [
-        (NotRunCause::PoolStopping, ClaimReleaseReason::PoolStopping),
-        (NotRunCause::PoolFailed, ClaimReleaseReason::PoolFailed),
-        (NotRunCause::QueueFull, ClaimReleaseReason::QueueFull),
+        (NotRunCause::PoolStopping, ReleaseReason::PoolStopping),
+        (NotRunCause::PoolFailed, ReleaseReason::PoolFailed),
+        (NotRunCause::QueueFull, ReleaseReason::QueueFull),
         (
             NotRunCause::NoChildOfItsKind,
-            ClaimReleaseReason::NoChildOfItsKind,
+            ReleaseReason::NoChildOfItsKind,
         ),
         (
             NotRunCause::RunnerBeatsFailedClosed,
-            ClaimReleaseReason::RunnerBeatsFailedClosed,
+            ReleaseReason::RunnerBeatsFailedClosed,
         ),
-        (
-            NotRunCause::HeldForQueueCap,
-            ClaimReleaseReason::HeldForQueueCap,
-        ),
+        (NotRunCause::HeldForQueueCap, ReleaseReason::HeldForQueueCap),
     ];
     for (cause, reason) in not_run {
-        assert_eq!(ClaimReleaseReason::from(cause), reason);
+        assert_eq!(ReleaseReason::from(cause), reason);
     }
     assert_eq!(
         SlotDownCause::from(ClearableBootCause::ResourceShortage(ShortageErrno::Enomem)),
@@ -775,7 +772,7 @@ fn vector_events() -> Vec<(&'static str, Event)> {
                 task_id: vector_task_id(),
                 task_name: text("send_email"),
                 queue: text("default"),
-                reason: ClaimReleaseReason::QueueFull,
+                reason: ReleaseReason::QueueFull,
             }
             .into(),
         ),
@@ -956,7 +953,7 @@ fn vector_events() -> Vec<(&'static str, Event)> {
                 child_kind: Execution::Isolated,
                 slot: number(0),
                 child_pid: pid(4242),
-                reason: ChildReplaceReason::MemoryLimitReached,
+                reason: ReplaceReason::MemoryLimit,
             }
             .into(),
         ),

@@ -15,7 +15,7 @@ event ClaimReleased
   task_id: Uuid
   task_name: Text(255)
   queue: Text(52)
-  reason: ClaimReleaseReason
+  reason: ReleaseReason
 
 event AttemptPlaced
   at: Time
@@ -73,7 +73,7 @@ event ChildReplaced
   child_kind: Execution
   slot: WholeNumber(0..=3071)
   child_pid: WholeNumber(1..=2147483647)
-  reason: ChildReplaceReason
+  reason: ReplaceReason
 
 event SlotDown
   at: Time
@@ -92,7 +92,7 @@ choice StopReason: CLAIM_LOST | OWNERSHIP_UNCONFIRMED | WORKFLOW_STOPPED | TASK_
 
 choice ShortageErrno: EMFILE | ENFILE | ENOMEM | EAGAIN
 
-choice ClaimReleaseReason: POOL_STOPPING | POOL_FAILED | QUEUE_FULL | NO_CHILD_OF_ITS_KIND | RUNNER_BEATS_FAILED_CLOSED | HELD_FOR_QUEUE_CAP | WORKFLOW_NOT_RUNNABLE | RETURNED_AS_ISOLATED
+choice ReleaseReason: POOL_STOPPING | POOL_FAILED | QUEUE_FULL | NO_CHILD_OF_ITS_KIND | RUNNER_BEATS_FAILED_CLOSED | HELD_FOR_QUEUE_CAP | WORKFLOW_NOT_RUNNABLE | RETURNED_AS_ISOLATED
 
 variants AttemptErrorCode
   BuiltIn(code: Codes(BuiltInTaskCode))
@@ -130,9 +130,9 @@ variants AttemptRecord
   RetriesExhausted
   WriteFailed
 
-choice RecoveryAction: CLAIM_REQUEUED | RUNNING_RETRIED | RUNNING_FAILED | PENDING_EXPIRED
+choice RecoveryAction: RUNNING_FAILED | RUNNING_RETRIED | CLAIM_REQUEUED | ORPHAN_CANCELLED | PENDING_EXPIRED
 
-choice ChildReplaceReason: TASK_COUNT_REACHED | MEMORY_LIMIT_REACHED | CHILD_DIED | CHANNEL_LOST | PROTOCOL_VIOLATION | PROTOCOL_MISMATCH | KILLED_BY_WORKER | SLOT_DEFECT
+choice ReplaceReason: CHILD_DIED | CHANNEL_LOST | PROTOCOL_VIOLATION | PROTOCOL_MISMATCH | KILLED_BY_PARENT | SLOT_DEFECT | SPAWNER_STOPPED | TASK_COUNT | MEMORY_LIMIT | SECOND_CANCEL | LOOP_BLOCKED | LEFTOVER_WORK | AT_DEADLINE
 
 variants SlotDownCause
   ResourceShortage(errno: ShortageErrno)

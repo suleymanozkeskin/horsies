@@ -48,16 +48,19 @@ pub use schema::{
     MAX_REFUSED_NAME_CHARS,
 };
 pub use values::{
-    AttemptEnd, AttemptErrorCode, AttemptNumber, AttemptRecord, AttemptStart, ChildReplaceReason,
-    ChildResult, ClaimReleaseReason, Priority, QueueName, RecoveryAction, RetryCount, RunTrace,
-    SlotDownCause, SlotIndex, TaskName, TraceCarrierText, UserCodeText, WorkerDecision,
-    BUILT_IN_TASK_CODES, MAX_ATTEMPT, MAX_EVENT_QUEUE_NAME_CHARS, MAX_EVENT_TASK_NAME_CHARS,
-    MAX_EVENT_TRACE_CARRIER_CHARS, MAX_EVENT_USER_CODE_CHARS, MAX_RETRY_COUNT, MAX_SLOT_INDEX,
+    AttemptEnd, AttemptErrorCode, AttemptNumber, AttemptRecord, AttemptStart, ChildResult,
+    Priority, QueueName, RetryCount, RunTrace, SlotDownCause, SlotIndex, TaskName,
+    TraceCarrierText, UserCodeText, WorkerDecision, BUILT_IN_TASK_CODES, MAX_ATTEMPT,
+    MAX_EVENT_QUEUE_NAME_CHARS, MAX_EVENT_TASK_NAME_CHARS, MAX_EVENT_TRACE_CARRIER_CHARS,
+    MAX_EVENT_USER_CODE_CHARS, MAX_RETRY_COUNT, MAX_SLOT_INDEX,
 };
 
-use crate::core::boot_failure::ShortageErrno;
-use crate::core::task::Execution;
-use crate::worker::executor::protocol::StopReason;
+// The closed types of other modules that event fields hold: the core's own
+// types, and the label sets of the metrics that event fields share.
+pub use crate::core::boot_failure::ShortageErrno;
+pub use crate::core::task::Execution;
+pub use crate::telemetry::labels::{RecoveryAction, ReleaseReason, ReplaceReason};
+pub use crate::worker::executor::protocol::StopReason;
 
 /// The version of the event contract: its event types, their fields and the
 /// closed types that the fields hold.
@@ -86,7 +89,7 @@ pub const EVENT_VALUE_TYPES: &[NamedType] = &[
     <Execution as EventNamedValue>::NAMED,
     <StopReason as EventNamedValue>::NAMED,
     <ShortageErrno as EventNamedValue>::NAMED,
-    <ClaimReleaseReason as EventNamedValue>::NAMED,
+    <ReleaseReason as EventNamedValue>::NAMED,
     <AttemptErrorCode as EventNamedValue>::NAMED,
     <ChildResult as EventNamedValue>::NAMED,
     <AttemptStart as EventNamedValue>::NAMED,
@@ -95,7 +98,7 @@ pub const EVENT_VALUE_TYPES: &[NamedType] = &[
     <AttemptEnd as EventNamedValue>::NAMED,
     <AttemptRecord as EventNamedValue>::NAMED,
     <RecoveryAction as EventNamedValue>::NAMED,
-    <ChildReplaceReason as EventNamedValue>::NAMED,
+    <ReplaceReason as EventNamedValue>::NAMED,
     <SlotDownCause as EventNamedValue>::NAMED,
 ];
 

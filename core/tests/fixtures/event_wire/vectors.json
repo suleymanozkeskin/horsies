@@ -63,7 +63,7 @@
     },
     {
       "name": "child_replaced",
-      "wire": ["ChildReplaced", 1700000000123456789, "ISOLATED", 0, 4242, "MEMORY_LIMIT_REACHED"]
+      "wire": ["ChildReplaced", 1700000000123456789, "ISOLATED", 0, 4242, "MEMORY_LIMIT"]
     },
     {
       "name": "slot_down",

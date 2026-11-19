@@ -1,8 +1,10 @@
 //! The bounded values and the closed types that event fields hold.
 //!
 //! Each closed type derives `EventSchema`. The core's own closed types that
-//! events hold as they are (`Execution`, `StopReason`, `ShortageErrno`)
-//! derive it where they are defined. Pure: no I/O.
+//! events hold as they are derive it where they are defined: `Execution`,
+//! `StopReason`, `ShortageErrno`, and the metric label sets that an event
+//! field shares (`ReleaseReason`, `ReplaceReason`, `RecoveryAction` of
+//! `telemetry::labels`). Pure: no I/O.
 
 use chrono::{DateTime, Utc};
 
@@ -19,6 +21,7 @@ use crate::core::config::worker_profile::{
 use crate::core::{
     BuiltInTaskCode, ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode, TaskErrorCode,
 };
+use crate::telemetry::labels::ReleaseReason;
 use crate::worker::executor::protocol::{BoundedText, ProcessId};
 use crate::worker::executor::slots::dispatch::NotRunCause;
 use crate::worker_manifest::MAX_QUEUE_PRIORITY;
@@ -35,9 +38,9 @@ pub const MAX_EVENT_QUEUE_NAME_CHARS: usize = 52;
 /// code is [`AttemptErrorCode::UserOverBound`].
 pub const MAX_EVENT_USER_CODE_CHARS: usize = 128;
 
-/// The most characters of a stored trace carrier that an event carries. It
-/// is at least the byte bound of a stored carrier, so every stored carrier
-/// fits.
+/// The most characters of a stored trace carrier that an event carries. The
+/// bound that the send puts on a stored carrier must not pass this one, so
+/// that every stored carrier fits in an event.
 pub const MAX_EVENT_TRACE_CARRIER_CHARS: usize = 2048;
 
 /// The largest attempt number. The retry count of a row is a Postgres
@@ -106,31 +109,8 @@ impl EventValue for BuiltInTaskCode {
     }
 }
 
-/// Why a claimed task went back to the queue before it reached a child. Its
-/// retry count did not change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::EventSchema)]
-pub enum ClaimReleaseReason {
-    /// The worker is stopping.
-    PoolStopping,
-    /// No child could start.
-    PoolFailed,
-    /// Too many tasks wait for a slot (the pending limit).
-    QueueFull,
-    /// The task's class names a child kind that this worker does not run.
-    NoChildOfItsKind,
-    /// The runner heartbeats of the worker failed closed: no beat would cover
-    /// the task.
-    RunnerBeatsFailedClosed,
-    /// The worker stopped while the task waited for its queue cap.
-    HeldForQueueCap,
-    /// The task's workflow is paused or cancelled.
-    WorkflowNotRunnable,
-    /// The task's stored class does not fit its registered task; the task
-    /// went back to the queue as `ISOLATED`.
-    ReturnedAsIsolated,
-}
-
-impl From<NotRunCause> for ClaimReleaseReason {
+/// The release reason of a claim that never reached a child.
+impl From<NotRunCause> for ReleaseReason {
     fn from(cause: NotRunCause) -> Self {
         match cause {
             NotRunCause::PoolStopping => Self::PoolStopping,
@@ -287,44 +267,6 @@ pub enum AttemptRecord {
     /// The write failed with an error that no retry can clear; the task
     /// waits for recovery.
     WriteFailed,
-}
-
-/// What a recovery pass did to a task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::EventSchema)]
-pub enum RecoveryAction {
-    /// A stale `CLAIMED` task, or one of a worker that is gone, went back to
-    /// `PENDING`.
-    ClaimRequeued,
-    /// A stale `RUNNING` task, or one of a worker that is gone, is `PENDING`
-    /// for a retry.
-    RunningRetried,
-    /// A stale `RUNNING` task, or one of a worker that is gone, is `FAILED`.
-    RunningFailed,
-    /// A `PENDING` task passed its `good_until` time and is `EXPIRED`.
-    PendingExpired,
-}
-
-/// Why a slot replaced its child.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::EventSchema)]
-pub enum ChildReplaceReason {
-    /// The child ran the number of tasks of its recycle rule.
-    TaskCountReached,
-    /// The child reported an RSS at the memory limit of its recycle rule.
-    MemoryLimitReached,
-    /// The child died by itself.
-    ChildDied,
-    /// The socket to the child closed while the child lived.
-    ChannelLost,
-    /// The child sent a bad frame, a frame at the wrong time, or more frames
-    /// than its mailbox holds.
-    ProtocolViolation,
-    /// The child speaks another protocol version.
-    ProtocolMismatch,
-    /// The worker killed the child: a timeout, a blocked event loop or a
-    /// frozen child.
-    KilledByWorker,
-    /// The slot of the child failed.
-    SlotDefect,
 }
 
 /// Why a slot is down: a boot failure that can clear. The worker boots the
