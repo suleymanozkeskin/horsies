@@ -124,6 +124,8 @@ from horsies.core.utils.loop_runner import (
 from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
 if TYPE_CHECKING:
+    import logging
+
     from horsies.core.app import Horsies
 from horsies.core.logging import enable_statement_echo, get_logger
 
@@ -895,7 +897,7 @@ class PostgresBroker:
             validate_reservation_window,
         )
 
-        self.idempotency_reservation_window = validate_reservation_window(
+        self.idempotency_reservation_window: timedelta = validate_reservation_window(
             idempotency_reservation_window
             if idempotency_reservation_window is not None
             else IDEMPOTENCY_WINDOW_DEFAULT
@@ -905,7 +907,7 @@ class PostgresBroker:
         # the tool at a database can never migrate that database. Owning
         # the schema stays the app's and the worker's job.
         self.run_schema_migrations = run_schema_migrations
-        self.logger = get_logger('broker')
+        self.logger: logging.Logger = get_logger('broker')
         self._app: Horsies | None = None  # Set by Horsies.get_broker()
 
         self._initialized = assume_initialized

@@ -92,7 +92,7 @@ def _tcp_value_error(
 
 
 class PostgresConfig(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     _ENGINE_KWARG_EXCLUDES: ClassVar[set[str]] = {
         'database_url',
