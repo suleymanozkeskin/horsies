@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::core::task::error::OperationalErrorCode;
-use crate::events::RunTrace;
+use crate::events::{AttemptNumber, RunTrace};
 use crate::worker::executor::protocol::{
     FailureDetail, ProcessId, RunEnd, TaskInputText, TaskTimeoutMs,
 };
@@ -31,6 +31,27 @@ pub use crate::worker::executor::protocol::TaskKind;
 pub struct RetryFacts {
     pub retry_count: i32,
     pub max_retries: i32,
+}
+
+impl RetryFacts {
+    /// The attempt that this claim runs ([`attempt_of`]).
+    pub fn attempt(&self) -> AttemptNumber {
+        attempt_of(self.retry_count)
+    }
+}
+
+/// The attempt that a claim of a row with `retry_count` runs: the count
+/// plus 1. The claim refuses a row with a count below 0; such a count here
+/// reads as 0. Pure and total: a count of 0 to `i32::MAX` gives 1 to
+/// `MAX_ATTEMPT`.
+pub fn attempt_of(retry_count: i32) -> AttemptNumber {
+    let from_zero = u32::try_from(retry_count).unwrap_or(0);
+    match AttemptNumber::try_from(from_zero + 1) {
+        Ok(attempt) => attempt,
+        Err(outside) => unreachable!(
+            "a retry count of 0 to i32::MAX gives an attempt of 1 to MAX_ATTEMPT: {outside}"
+        ),
+    }
 }
 
 /// One claimed row, as the executor needs it. The claim returns every

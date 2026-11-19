@@ -35,6 +35,7 @@ use crate::db::{
     ChannelName, CheckoutClass, ParameterType, PayloadEvent, PayloadFilter, PayloadSubscription,
     Reserve, StatementBound, TypedStatement, WakeEvent, WakeSubscription,
 };
+use crate::telemetry::labels::{ClaimPassResult, ReleaseReason};
 use crate::telemetry::worker::WorkerTelemetry;
 use crate::worker::backoff::RetryBackoff;
 use crate::worker::children::{
@@ -730,15 +731,23 @@ fn claimed_of(row: ClaimedRow) -> Claimed {
 /// (Python `_return_held_rows`). Runs after the claim loop ended and the
 /// pools stopped. Each row is one release write of the outcome writer
 /// (`NotDispatched(HeldForQueueCap)`), spawned with the outcome writes, so
-/// the drain of the writes bounds it. A row the release cannot return goes
-/// back when its lease expires.
+/// the drain of the writes bounds it, and one `ClaimReleased` of
+/// `telemetry`. A row the release cannot return goes back when its lease
+/// expires.
 fn return_held_rows(
     hold: &mut QueueCapHold,
     writer: &Arc<OutcomeWriter>,
     writes: &mut JoinSet<()>,
+    telemetry: &WorkerTelemetry,
 ) {
     for row in hold.drain() {
         let task = claimed_of(row).task;
+        telemetry.released(
+            task.task_id,
+            &task.task_name,
+            &task.queue_name,
+            ReleaseReason::HeldForQueueCap,
+        );
         let writer = Arc::clone(writer);
         writes.spawn(async move {
             let settled = writer
@@ -1385,7 +1394,8 @@ impl Worker {
         let service = children.service();
         let plan = service.plan();
         let request = self.claim_request(service.claim_classes());
-        let claimed = claim_for_dispatch(steps, &request, &self.registered).await?;
+        let claimed =
+            claim_for_dispatch(steps, &request, &self.registered, &self.telemetry).await?;
         for row in claimed.rows {
             match (hold.holds(&row.queue_name), plan.route(row.execution)) {
                 (true, ClaimRoute::ServedBy(budget)) => hold.hold(row, budget),
@@ -1463,10 +1473,15 @@ impl Worker {
                 return None;
             }
             reap_finished(writes);
-            match self
+            let pass = self
                 .claim_and_dispatch(&steps, children, writer, writes, hold)
-                .await
-            {
+                .await;
+            self.telemetry.claim_pass(match &pass {
+                Ok(counts) if counts.claimed > 0 => ClaimPassResult::Claimed,
+                Ok(_) => ClaimPassResult::Empty,
+                Err(_) => ClaimPassResult::Failed,
+            });
+            match pass {
                 Ok(counts) => {
                     claim_backoff.reset();
                     let repass =
@@ -1672,7 +1687,7 @@ impl Worker {
         RunningChildren::stop_pools(children, drain).await;
         // Rows that waited for their queue cap never reached a child: return
         // them to their queue, with the writes that the drain below bounds.
-        return_held_rows(&mut hold, &writer, &mut writes);
+        return_held_rows(&mut hold, &writer, &mut writes, &self.telemetry);
         // After the pools: every end is known, so the writes have database
         // work left only. A write that the drain cancels leaves its row in
         // the batcher, and the close still writes it.
@@ -3274,6 +3289,9 @@ mod tests {
             retry_count: 1,
             max_retries: 3,
             trace: crate::events::RunTrace::NoCarrier,
+            priority: crate::events::Priority::try_from(100).unwrap(),
+            enqueued_at: claimed_at,
+            read: crate::broker::claims::ClaimRead::now(),
         };
 
         let claimed = claimed_of(row);
@@ -3316,7 +3334,7 @@ mod tests {
         let claim_loop = at(".claim_loop(&children");
         let cancel = at("self.cancel.cancel();\n        let drain");
         let pools = at("RunningChildren::stop_pools(children, drain).await");
-        let held = at("return_held_rows(&mut hold, &writer, &mut writes);");
+        let held = at("return_held_rows(&mut hold, &writer, &mut writes, &self.telemetry);");
         let writes = at("drain_then_close(&mut writes, OUTCOME_WRITE_DRAIN, &batcher)");
         let beats = at("services.stop_runner_beats().await");
         let spawner = at("RunningChildren::stop_spawner(spawner).await");
@@ -3727,6 +3745,9 @@ mod tests {
             retry_count,
             max_retries,
             trace: crate::events::RunTrace::NoCarrier,
+            priority: crate::events::Priority::try_from(100).unwrap(),
+            enqueued_at: claimed_at,
+            read: crate::broker::claims::ClaimRead::now(),
         })
     }
 

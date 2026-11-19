@@ -20,13 +20,16 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 
+use crate::core::task::Execution;
 use crate::events::Event;
 use crate::telemetry::catalog::MetricId;
-use crate::telemetry::labels::{EventDropCause, RecoveryStep};
-use crate::telemetry::registry::{Counter, HandleRefused, OptionalCounter, Registry};
+use crate::telemetry::declared::{self, DeclaredValue};
+use crate::telemetry::labels::{ClaimPassResult, EventDropCause, RecoveryStep, ReleaseReason};
+use crate::telemetry::registry::{Counter, HandleRefused, Histogram, OptionalCounter, Registry};
 
+mod points;
 #[cfg(test)]
 mod tests;
 
@@ -78,6 +81,9 @@ pub struct TelemetryOn {
 
 /// The metric handles that the points of a worker record.
 struct PointMetrics {
+    queue_duration: Histogram<(DeclaredValue<declared::QueueName>, Execution)>,
+    claims_released: Counter<(ReleaseReason,)>,
+    claim_passes: Counter<(ClaimPassResult,)>,
     recovery_failures: Counter<(RecoveryStep,)>,
 }
 
@@ -88,6 +94,9 @@ impl PointMetrics {
     /// the points with the labels of the catalog.
     fn of(registry: &Registry) -> Result<Self, HandleRefused> {
         Ok(Self {
+            queue_duration: registry.histogram(MetricId::TaskQueueDuration)?,
+            claims_released: registry.counter(MetricId::TaskClaimsReleased)?,
+            claim_passes: registry.counter(MetricId::ClaimPasses)?,
             recovery_failures: registry.counter(MetricId::RecoveryPassFailures)?,
         })
     }
@@ -207,6 +216,20 @@ impl EventQueue {
             0 => EventBatch::LinkClosed,
             _taken => EventBatch::Events(events),
         }
+    }
+
+    /// Take the events that wait now, at most `limit`, in the order of
+    /// their offers; none when the queue is empty or the link is gone.
+    /// Never waits.
+    pub fn take_waiting(&mut self, limit: NonZeroUsize) -> Vec<Event> {
+        let mut events = Vec::new();
+        while events.len() < limit.get() {
+            match self.receiver.try_recv() {
+                Ok(event) => events.push(event),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
+        events
     }
 }
 
