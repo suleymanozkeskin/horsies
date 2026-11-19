@@ -85,6 +85,7 @@ pub(crate) fn manifest(profiles: Value, request: Value) -> Value {
         },
         "profiles": profiles,
         "profile": request,
+        "metrics_endpoint": {"kind": "NO_METRICS_ENDPOINT"},
         "claim": {
             "queues": {
                 "kind": "CUSTOM",
@@ -349,6 +350,71 @@ fn a_bad_set_of_declared_codes_is_refused_at_the_task_field() {
             "{codes}: {path}"
         );
     }
+}
+
+/// The metrics endpoint is an address with a host and a port in 1 to
+/// 65535, or no endpoint; the field has no default.
+#[test]
+fn a_metrics_endpoint_is_an_address_in_bounds_or_none() {
+    for (endpoint, host, port) in [
+        (
+            json!({"kind": "LISTEN_ADDRESS", "host": "0.0.0.0", "port": 9100}),
+            "0.0.0.0",
+            9100,
+        ),
+        (
+            json!({"kind": "LISTEN_ADDRESS", "host": "::1", "port": 1}),
+            "::1",
+            1,
+        ),
+        (
+            json!({"kind": "LISTEN_ADDRESS", "host": "metrics.internal", "port": 65_535}),
+            "metrics.internal",
+            65_535,
+        ),
+    ] {
+        let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+        document["metrics_endpoint"] = endpoint;
+        match parsed(&document).metrics_endpoint {
+            MetricsEndpoint::ListenAddress {
+                host: parsed_host,
+                port: parsed_port,
+            } => {
+                assert_eq!(parsed_host.as_str(), host);
+                assert_eq!(parsed_port.get(), port);
+            }
+            MetricsEndpoint::NoMetricsEndpoint => panic!("an address is an endpoint"),
+        }
+    }
+    let document = manifest(json!({"batch": full_profile()}), named("batch"));
+    assert_eq!(
+        parsed(&document).metrics_endpoint,
+        MetricsEndpoint::NoMetricsEndpoint
+    );
+
+    for endpoint in [
+        json!({"kind": "LISTEN_ADDRESS", "host": "", "port": 9100}),
+        json!({"kind": "LISTEN_ADDRESS", "host": "a".repeat(254), "port": 9100}),
+        json!({"kind": "LISTEN_ADDRESS", "host": "0.0.0.0", "port": 0}),
+        json!({"kind": "LISTEN_ADDRESS", "host": "0.0.0.0", "port": 65_536}),
+        json!({"kind": "LISTEN_ADDRESS", "host": "0.0.0.0"}),
+        json!({"kind": "LISTEN_ADDRESS", "port": 9100}),
+        json!({"kind": "LISTEN_ADDRESS", "host": "0.0.0.0", "port": 9100, "path": "/m"}),
+        json!({"kind": "NO_METRICS_ENDPOINT", "port": 9100}),
+        json!({"kind": "DEFAULT"}),
+        json!("0.0.0.0:9100"),
+    ] {
+        let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+        document["metrics_endpoint"] = endpoint.clone();
+        let path = refused_path(&document);
+        assert!(path.starts_with("metrics_endpoint"), "{endpoint}: {path}");
+    }
+    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let _removed = document
+        .as_object_mut()
+        .expect("a manifest is an object")
+        .remove("metrics_endpoint");
+    assert!(parse_worker_manifest(&document.to_string()).is_err());
 }
 
 /// A task record holds both facts and nothing else.

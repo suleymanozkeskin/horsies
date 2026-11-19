@@ -41,6 +41,7 @@ mod core_failures;
 mod errors;
 mod frames;
 mod handle;
+mod listen;
 mod logging;
 mod operations;
 mod process_core;
@@ -357,9 +358,12 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<worker::WorkerBootFailed>()?;
     module.add_class::<worker::WorkerFailed>()?;
     module.add_class::<worker::StopRequested>()?;
+    module.add_class::<listen::ListenAddressParsed>()?;
+    module.add_class::<listen::ListenAddressRefused>()?;
     module.add_function(wrap_pyfunction!(baseline_sql_files, module)?)?;
     module.add_function(wrap_pyfunction!(core_state, module)?)?;
     module.add_function(wrap_pyfunction!(mint_task_id, module)?)?;
+    module.add_function(wrap_pyfunction!(listen::parse_listen_address, module)?)?;
     module.add_function(wrap_pyfunction!(
         operations::rerun::rerun_read_function,
         module

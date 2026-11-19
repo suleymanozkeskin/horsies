@@ -3588,6 +3588,20 @@ const WORKER_CLASSES: &[StubClass] = &[
         methods: PREPARED_WORKER_METHODS,
     },
     StubClass {
+        name: "ListenAddressParsed",
+        doc: "A parsed address: the host (an IPv6 address without brackets) and the port, 1 to 65535.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("host", "str"), property("port", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "ListenAddressRefused",
+        doc: "A text that is not a HOST:PORT address; message names the text and the rule it breaks.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str")],
+        methods: &[],
+    },
+    StubClass {
         name: "WorkerProfileRefused",
         doc: "The profile of the manifest is refused: the profile set fails its checks, or the start\nnames no profile or an unknown one. refusals are the lines of the report.",
         constructor: Constructor::NoConstructor,
@@ -3732,6 +3746,12 @@ const FUNCTIONS: &[StubFunction] = &[
         parameters: &[],
         returns: TypeText::Plain("uuid.UUID | IdMintRefused"),
         doc: "Mint a new task id (UUIDv7). Starts no runtime.",
+    },
+    StubFunction {
+        name: "parse_listen_address",
+        parameters: &[positional("text", "str")],
+        returns: TypeText::Plain("ListenAddressParsed | ListenAddressRefused"),
+        doc: "Parse text as HOST:PORT or [IPV6]:PORT by the core's rules: ListenAddressParsed, or\nListenAddressRefused with the rule it breaks. Pure: starts no runtime; the host is resolved\nwhen the endpoint binds.",
     },
     StubFunction {
         name: "prepare_rerun_write",

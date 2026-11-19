@@ -175,3 +175,83 @@ async fn the_install_of_the_worker_broker_records_the_family_of_its_caller() {
         database.drop().await;
     }
 }
+
+/// The manifest of the batch profile with the metrics endpoint `endpoint`.
+fn manifest_with_endpoint(endpoint: serde_json::Value) -> serde_json::Value {
+    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    document["metrics_endpoint"] = endpoint;
+    document
+}
+
+#[test]
+fn no_metrics_endpoint_plans_none() {
+    assert_eq!(
+        batch_plan().metrics_endpoint,
+        MetricsEndpointPlan::NoMetricsEndpoint
+    );
+}
+
+#[test]
+fn a_listen_address_plans_the_endpoint_with_the_codes_of_each_task() {
+    let document = manifest_with_endpoint(json!({
+        "kind": "LISTEN_ADDRESS", "host": "::1", "port": 9100
+    }));
+    let manifest = parsed(&document);
+    let plan = WorkerPlan::of_manifest(&manifest).expect("a plan");
+    let MetricsEndpointPlan::ListenAddress {
+        address,
+        task_codes,
+    } = plan.metrics_endpoint
+    else {
+        panic!("an address plans an endpoint");
+    };
+    assert_eq!(address.to_string(), "[::1]:9100");
+    assert_eq!(
+        task_codes,
+        manifest
+            .tasks
+            .iter()
+            .map(|(name, task)| (name.clone(), task.error_codes.clone()))
+            .collect::<BTreeMap<String, DeclaredErrorCodes>>()
+    );
+    assert_eq!(task_codes["app.tasks.fetch"].iter().count(), 2);
+}
+
+/// With an endpoint, the worker of the plan builds the registry of its
+/// tasks and queues; a queue named as the fallback of the `queue` label is
+/// a config error that names the flag. Nothing connects.
+#[cfg(feature = "metrics-endpoint")]
+#[tokio::test]
+async fn the_worker_of_an_endpoint_plan_builds_and_a_fallback_queue_name_is_refused() {
+    let endpoint = json!({"kind": "LISTEN_ADDRESS", "host": "127.0.0.1", "port": 9100});
+    let plan = WorkerPlan::of_manifest(&parsed(&manifest_with_endpoint(endpoint.clone())))
+        .expect("a plan");
+    let built = Worker::from_plan(
+        plan,
+        crate::test_support::child_specs::no_child_specs(),
+        ClientFamily::Rust,
+    )
+    .await;
+    assert!(built.is_ok(), "{:?}", built.err());
+
+    let mut document = manifest_with_endpoint(endpoint);
+    document["claim"]["queues"]["queues"][0]["name"] = json!("(unknown)");
+    let plan = WorkerPlan::of_manifest(&parsed(&document)).expect("a plan");
+    match Worker::from_plan(
+        plan,
+        crate::test_support::child_specs::no_child_specs(),
+        ClientFamily::Rust,
+    )
+    .await
+    {
+        Err(WorkerError::Config(message)) => {
+            assert!(
+                message.starts_with("--metrics-listen 127.0.0.1:9100: "),
+                "{message}"
+            );
+            assert!(message.contains("(unknown)"), "{message}");
+        }
+        Err(other) => panic!("expected a config error, got {other}"),
+        Ok(_worker) => panic!("a queue named (unknown) is not a label value"),
+    }
+}
