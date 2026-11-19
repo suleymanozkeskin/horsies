@@ -32,7 +32,7 @@ FORWARDER_SUBJECT: Final = 'thread horsies-log-forwarder'
 
 SOURCE_LOCATION: Final = re.compile(r'\(at [^()]*child_spec\.rs:\d+\)')
 """The source location that the panic hook adds to the cause: the panic of
-the operation is in ``crates/horsies-python/src/child_spec.rs``."""
+the operation is in ``clients/python/bridge/src/child_spec.rs``."""
 
 
 def test_a_panic_in_an_operation_raises_panic_exception_and_the_core_runs_on(

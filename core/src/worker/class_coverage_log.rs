@@ -177,7 +177,7 @@ impl CoverageLogBound {
 
 /// The fleet check state of one reaper loop (Python
 /// `_ReaperPassState.class_coverage_checks_from` and `coverage_log`,
-/// `python/horsies/core/worker/runtime.py:173-177`).
+/// `clients/python/horsies/core/worker/runtime.py:173-177`).
 #[derive(Debug)]
 pub(crate) struct ClassCoverageLog {
     /// The loop reads the fleet check from this time on.

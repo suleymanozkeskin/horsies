@@ -1,4 +1,4 @@
-//! Port of Python `tests/integration/test_class_coverage.py`
+//! Port of Python `clients/python/tests/integration/test_class_coverage.py`
 //! `TestReaperPassLogsUnservedStreams::test_the_pass_logs_an_unserved_isolated_retry`.
 //!
 //! The test enters where a worker does: it spawns the reaper loop and reads

@@ -1,4 +1,4 @@
-# showcase/acme/workflows/catalog_import.py
+# clients/python/examples/acme/workflows/catalog_import.py
 """A long import, built to be cancelled.
 
 Forty independent chunk nodes on the `analytics` queue, which is capped at two

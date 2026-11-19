@@ -1,4 +1,4 @@
-# showcase/acme/tasks/returns.py
+# clients/python/examples/acme/tasks/returns.py
 """The returns desk: receive, inspect, and either restock or write off.
 
 `inspect_item` is where the pause story starts. When it finds damage it

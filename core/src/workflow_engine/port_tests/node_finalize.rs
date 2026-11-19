@@ -1,6 +1,6 @@
 //! The finalize of a workflow node from the worker's side: phase 1 of a
 //! success and its replay, the start check of a claimed node, and phase 2
-//! with its capacity wake. Python: `tests/integration/test_workflow_node_handoff.py`.
+//! with its capacity wake. Python: `clients/python/tests/integration/test_workflow_node_handoff.py`.
 //!
 //! The worker's finalize of a result is phase 1 (`persist_terminal_state`),
 //! then phase 2 (`finalize_workflow_phase`) when phase 1 owes it, as the

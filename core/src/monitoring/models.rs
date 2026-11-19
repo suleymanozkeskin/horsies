@@ -123,7 +123,7 @@ pub struct Facets {
 }
 
 /// What one breakdown group holds, tagged by `kind` (Python
-/// `BreakdownGroup`, `python/horsies/monitoring/models.py`): `value`, the tasks
+/// `BreakdownGroup`, `clients/python/horsies/monitoring/models.py`): `value`, the tasks
 /// whose group column holds `value` (a worker id, a task name or a queue
 /// name); or `unclaimed`, the tasks that no worker claimed, which only the
 /// `worker` grouping has. A worker whose id is the text `unknown` is a
@@ -308,7 +308,7 @@ pub struct WorkflowTaskDetail {
 }
 
 /// One slot that was down when the worker wrote its snapshot (Python
-/// `DownSlotInfo`, `python/horsies/monitoring/models.py:307-318`).
+/// `DownSlotInfo`, `clients/python/horsies/monitoring/models.py:307-318`).
 ///
 /// `cause` describes the cause of the last failed child start, and `detail`
 /// is its error text.
@@ -333,7 +333,7 @@ pub enum SlotHealthKind {
 }
 
 /// Latest state snapshot for one worker (Python `WorkerStateInfo`,
-/// `python/horsies/monitoring/models.py:321-351`).
+/// `clients/python/horsies/monitoring/models.py:321-351`).
 ///
 /// `down_slots` lists the down slots in slot order; it is empty unless
 /// `slot_health` is `slots_down`.
@@ -364,7 +364,7 @@ pub struct WorkerStateInfo {
 }
 
 /// One claim budget of a live worker (Python `BudgetLoadInfo`,
-/// `python/horsies/monitoring/models.py:354-367`).
+/// `clients/python/horsies/monitoring/models.py:354-367`).
 ///
 /// `capacity` (children or seats in service) and `serves` come from the
 /// worker's latest snapshot. `in_flight` counts, at the read, its `RUNNING`
@@ -393,7 +393,7 @@ pub struct WorkerClassLoadInfo {
 /// Whether live workers serve a pending stream, tagged by `kind`: `served`,
 /// `no_capacity` or `unserved` (Python `StreamServedInfo`,
 /// `StreamNoCapacityInfo`, `StreamUnservedInfo`,
-/// `python/horsies/monitoring/models.py:378-400`).
+/// `clients/python/horsies/monitoring/models.py:378-400`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -410,7 +410,7 @@ pub enum StreamCoverageInfo {
 
 /// How long the stream's rows wait, tagged by `kind`: `waiting` or
 /// `none_due` (Python `StreamWaitingInfo`, `StreamNoneDueInfo`,
-/// `python/horsies/monitoring/models.py:403-415`).
+/// `clients/python/horsies/monitoring/models.py:403-415`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -440,7 +440,7 @@ pub struct PendingStreamInfo {
 }
 
 /// Pending streams and the budget load of each live worker (Python
-/// `ClassReportInfo`, `python/horsies/monitoring/models.py:433-447`).
+/// `ClassReportInfo`, `clients/python/horsies/monitoring/models.py:433-447`).
 ///
 /// `checked_at` is database time. A worker is live while its latest snapshot
 /// is at most `live_window_s` old. `streams` is ordered by queue name, then

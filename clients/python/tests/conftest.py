@@ -10,7 +10,7 @@ import pytest
 from dotenv import load_dotenv
 
 # Load test environment before any test module imports
-load_dotenv(dotenv_path=Path(__file__).parent.parent / '.env.test')
+load_dotenv(dotenv_path=Path(__file__).parents[3] / '.env.test')
 
 
 def pytest_configure(config: pytest.Config) -> None:

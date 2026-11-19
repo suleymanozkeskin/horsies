@@ -1,4 +1,4 @@
-# showcase/acme/domain.py
+# clients/python/examples/acme/domain.py
 """Acme Clothing's domain vocabulary: error codes, entities, and task payloads.
 
 Entities mirror rows in the `acme_*` tables. Payload models are what tasks

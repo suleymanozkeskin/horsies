@@ -6,12 +6,12 @@ description = "Builds the Rust code blocks of the docs site and of the Rust skil
 publish = false
 
 # `build.rs` writes each `rust` block of website/src/content/docs/rust/ and
-# of crates/horsies/.agents/skills/horsies/ as a module of this crate.
+# of clients/rust/horsies/.agents/skills/horsies/ as a module of this crate.
 # `cargo check -p horsies-docs-check --all-targets` builds every block, the
 # `#[test]` functions of the testing page included.
 
 [dependencies]
-horsies = { path = "../../../crates/horsies", features = ["web", "sqlx", "tokio-postgres"] }
+horsies = { path = "../../horsies", features = ["web", "sqlx", "tokio-postgres"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "sync"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

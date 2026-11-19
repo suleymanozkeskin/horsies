@@ -1,5 +1,5 @@
 //! The start of the worker with retries, a stop during the start, and the
-//! wait of the claim loop (Python `tests/unit/test_worker_helpers.py`,
+//! wait of the claim loop (Python `clients/python/tests/unit/test_worker_helpers.py`,
 //! `TestStartWithResilienceConfig`, `TestHandleRetryableStartError`,
 //! `TestSleepWithStop`, `TestRunForever`, `TestRequestStop`,
 //! `TestWaitForAnyNotify`).

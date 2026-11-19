@@ -12,7 +12,7 @@ Covered: the authorization gate on every API route, the intent-header gate
 on actions, unknown-API 404s, page serving with per-request config
 injection, and mount-anywhere base paths.
 
-The core's tests of the same rules are in ``crates/horsies-core/src/web/tests.rs``.
+The core's tests of the same rules are in ``core/src/web/tests.rs``.
 """
 
 from __future__ import annotations

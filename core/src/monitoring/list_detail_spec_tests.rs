@@ -1,6 +1,6 @@
 //! The task list, task detail, span rules, read failures and list totals.
 //!
-//! Python specification: `tests/integration/test_monitoring_queries.py`
+//! Python specification: `clients/python/tests/integration/test_monitoring_queries.py`
 //! (`TestListTasks`, `TestGetTaskDetail`, `TestTaskDurations`,
 //! `TestDatabaseFailure`, `TestUnfilteredHistoryTotalContract`), baseline
 //! version on `program/0.8.0`. Each database test runs on a database of its
@@ -564,7 +564,7 @@ async fn a_node_of_another_task_does_not_link_this_task() {
     database.drop().await;
 }
 
-/// Python `tests/unit/test_execution_class.py`, `TestMonitoringDetail`: the
+/// Python `clients/python/tests/unit/test_execution_class.py`, `TestMonitoringDetail`: the
 /// leaf of a live task carries its stored class; a task read from history
 /// carries none, as history does not keep the class.
 #[tokio::test]

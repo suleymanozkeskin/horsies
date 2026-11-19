@@ -1,4 +1,4 @@
--- Two-session cases for crates/horsies-core/baseline/0006_history_functions.sql.
+-- Two-session cases for core/baseline/0006_history_functions.sql.
 --
 -- Run on a throwaway database that holds the baseline migration and the dblink extension, in autocommit:
 --   PGOPTIONS='-c horsies_test.peer_connstr=<libpq connection string of the same database>' \

@@ -46,11 +46,11 @@ from horsies.core.types.result import Err, Ok, Result
 
 DOC_ROOTS: Final = (
     Path('website') / 'src' / 'content' / 'docs',
-    Path('python') / 'horsies' / '.agents' / 'skills',
+    Path('clients') / 'python' / 'horsies' / '.agents' / 'skills',
 )
 PAGE_SUFFIXES: Final = frozenset({'.md', '.mdx'})
 # Packages whose module docstrings are read as pages.
-MODULE_ROOTS: Final = (Path('python') / 'horsies',)
+MODULE_ROOTS: Final = (Path('clients') / 'python' / 'horsies',)
 # The changelog shows past versions and has a twin file in the repo root.
 HISTORY_PAGES: Final = frozenset({'changelog.md'})
 PRELUDE_IMPORT: Final = 'from prelude import *  # noqa: F403\n'

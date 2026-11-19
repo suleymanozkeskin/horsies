@@ -12,7 +12,7 @@ name = "horsies-codegen"
 path = "src/main.rs"
 
 [dependencies]
-horsies-core = { path = "../horsies-core" }
+horsies-core = { path = "../../../core" }
 
 [lints]
 workspace = true

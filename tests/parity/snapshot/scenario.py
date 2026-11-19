@@ -28,7 +28,7 @@ from typing import Final, LiteralString
 import psycopg
 
 from horsies.core.types.result import Err, Ok, Result
-from tests.dualrun.capture import Connection
+from tests.parity.snapshot.capture import Connection
 
 Params = dict[str, object]
 

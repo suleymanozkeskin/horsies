@@ -1,6 +1,6 @@
 //! The `rust` code blocks of the docs site (`website/src/content/docs/rust/`)
-//! and of the Rust skill files (`crates/horsies/.agents/skills/horsies/`),
-//! built as modules of this crate (Python's twin: `tests/docs_examples/extract.py`).
+//! and of the Rust skill files (`clients/rust/horsies/.agents/skills/horsies/`),
+//! built as modules of this crate (Python's twin: `clients/python/tests/docs_examples/extract.py`).
 //!
 //! Run: `cargo check -p horsies-docs-check --all-targets`. A block that the
 //! client's API does not build fails the check, with the page and the line.

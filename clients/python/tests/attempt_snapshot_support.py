@@ -2,7 +2,7 @@
 
 ``horsies_encode_task_attempts`` (0006_history_functions.sql) writes the
 stored bytes of a history row's attempt snapshot, and the core decodes them
-(``crates/horsies-core/src/core/history/archive/attempts.rs``). Tests use
+(``core/src/core/history/archive/attempts.rs``). Tests use
 this mirror to seed history rows. A test that checks what the core wrote
 reads the attempts through ``PostgresBroker.get_task_info_async`` (see
 ``tests/integration/history_seeding.py::read_attempts``); the mirror has no

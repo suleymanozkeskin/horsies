@@ -18,7 +18,7 @@ note: `consume_number::Input` is defined in module `crate::consume_number` of th
 11 | #[task("consume_number")]
    | ^^^^^^^^^^^^^^^^^^^^^^^^^
 note: method defined here
-  --> $WORKSPACE/crates/horsies/src/workflow/node.rs
+  --> $WORKSPACE/clients/rust/horsies/src/workflow/node.rs
    |
    |     pub fn arg_from<S, E>(
    |            ^^^^^^^^

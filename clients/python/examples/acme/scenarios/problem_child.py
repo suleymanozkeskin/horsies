@@ -1,7 +1,7 @@
-# showcase/acme/scenarios/problem_child.py
+# clients/python/examples/acme/scenarios/problem_child.py
 """Everything that needs a human, in one go.
 
-    uv run python -m showcase.acme.scenarios problem-child
+    uv run python -m examples.acme.scenarios problem-child
 
 Three kinds of trouble, deliberately concentrated:
 

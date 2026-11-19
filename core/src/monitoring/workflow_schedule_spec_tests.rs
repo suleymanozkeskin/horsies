@@ -1,7 +1,7 @@
 //! Workflow names, runs, run detail, node detail, schedules and the list
 //! order plan.
 //!
-//! Python specification: `tests/integration/test_monitoring_queries.py`
+//! Python specification: `clients/python/tests/integration/test_monitoring_queries.py`
 //! (`TestWorkflowNames`, `TestListWorkflowRuns`, `TestGetWorkflowRun`,
 //! `TestGetWorkflowNode`, `TestListSchedules`), baseline versions on
 //! `program/0.8.0`. Each test runs on a database of its own

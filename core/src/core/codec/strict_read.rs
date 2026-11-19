@@ -25,7 +25,7 @@
 //!
 //! The functions read the text and build no value. Error texts never name a
 //! value of the text: the text is task input. Three refusals have the text of
-//! Python's reader (`python/horsies/core/codec/json_value.py:156, 180, 294`),
+//! Python's reader (`clients/python/horsies/core/codec/json_value.py:156, 180, 294`),
 //! so the public messages that carry them are the same in both clients: a
 //! non-standard constant, a number outside finite binary64 and a lone
 //! surrogate. Python's text for them names no byte offset, so neither does
@@ -719,7 +719,7 @@ mod tests {
     }
 
     /// The refusals that Python's reader words itself have Python's text
-    /// (`python/horsies/core/codec/json_value.py:156, 180, 294`), with no
+    /// (`clients/python/horsies/core/codec/json_value.py:156, 180, 294`), with no
     /// byte offset, as Python's text has none.
     #[test]
     fn the_refusals_that_python_words_have_python_s_text() {

@@ -1,4 +1,4 @@
-# showcase/acme/simulate.py
+# clients/python/examples/acme/simulate.py
 """Deterministic simulation of everything outside the database.
 
 Nothing here is random. Every draw is a stable hash of domain identifiers,

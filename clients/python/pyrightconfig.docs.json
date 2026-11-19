@@ -1,6 +1,6 @@
 {
   "include": ["build/doc_examples"],
-  "extraPaths": ["tests/docs_examples/stubs", "python"],
+  "extraPaths": ["tests/docs_examples/stubs", "."],
   "typeCheckingMode": "standard",
   "pythonVersion": "3.13",
   "reportUnusedExpression": "none",

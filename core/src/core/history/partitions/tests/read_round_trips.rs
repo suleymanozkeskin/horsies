@@ -1,7 +1,7 @@
 //! Ports of the Python round-trip tests of the result read: a result read is
 //! one statement, for a moved task and for a live one.
 //!
-//! Python specification: `tests/integration/test_task_result_history_fallback.py`
+//! Python specification: `clients/python/tests/integration/test_task_result_history_fallback.py`
 //! (`TestStagedResultReader`). The tests live here for the statement-counting
 //! proxy of this module. The read is the broker's statement-layer reader
 //! (`broker::history_reads::read_task_result`) on a core pool of one

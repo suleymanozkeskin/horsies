@@ -1,4 +1,4 @@
-# showcase/acme/tasks/orders.py
+# clients/python/examples/acme/tasks/orders.py
 """Order validation, warehouse work, and invoice rendering.
 
 `generate_invoice` carries `timeout_ms`. A stuck render is SIGKILLed at the

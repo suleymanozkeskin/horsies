@@ -20,7 +20,7 @@ import pytest
 
 pytestmark = [pytest.mark.unit]
 
-RESULTS_DIR = Path(__file__).resolve().parents[1] / 'perf' / 'results'
+RESULTS_DIR = Path(__file__).resolve().parent / 'results'
 
 # Each pattern is a way a summary stops resolving for a later reader.
 FORBIDDEN = (

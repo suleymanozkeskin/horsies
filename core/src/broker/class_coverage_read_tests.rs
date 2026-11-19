@@ -1,5 +1,5 @@
 //! The fleet check and the class report against PostgreSQL. Python
-//! reference: `tests/integration/test_class_coverage.py`.
+//! reference: `clients/python/tests/integration/test_class_coverage.py`.
 //!
 //! - A pending (queue, class) is served, served without capacity, or
 //!   unserved, from the live snapshots' queues and budgets.

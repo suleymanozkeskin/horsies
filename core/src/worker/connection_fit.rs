@@ -661,7 +661,7 @@ pub async fn check_handle_worker_connections(
 
 /// The connection fit of the profile that a worker runs, read at boot before
 /// the worker starts. The worker starts in every case (Python
-/// `_log_connection_fit`, `python/horsies/core/cli.py:711-745`).
+/// `_log_connection_fit`, `clients/python/horsies/core/cli.py:711-745`).
 #[derive(Debug)]
 pub enum BootConnectionFit {
     /// PgBouncer transaction mode: nothing is read.
@@ -706,7 +706,7 @@ pub struct BootConnectionLog {
 }
 
 /// The record that the worker logs for the fit of its profile `name`, with
-/// Python's level and text (`python/horsies/core/cli.py:691-745`): a profile above
+/// Python's level and text (`clients/python/horsies/core/cli.py:691-745`): a profile above
 /// the usable slots or an unreadable limit is a warning; a fitting profile
 /// and a transaction pooler are info. Pure.
 pub fn boot_connection_log(name: &str, fit: &BootConnectionFit) -> BootConnectionLog {

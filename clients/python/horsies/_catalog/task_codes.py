@@ -13,7 +13,7 @@ class OperationalErrorCode(str, Enum):
 
     Typical caller behavior: log, retry conditionally, inspect infra/runtime failure.
 
-    Members, wire values and order are Python's (`python/horsies/core/models/tasks.py`), plus
+    Members, wire values and order are Python's (`clients/python/horsies/core/models/tasks.py`), plus
     `WORKFLOW_START_INCOMPLETE`, which both catalogs hold.
     """
 

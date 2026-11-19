@@ -144,7 +144,7 @@ pub(crate) fn stored_queue_and_priority(node: &AnyNode) -> Result<(&str, i32), W
 /// `None` (SQL NULL) when the node takes no context.
 ///
 /// A node defined with an empty list takes no context, and its row stores NULL, as for no list
-/// (Python `_graph_columns`, `python/horsies/core/workflows/child_build.py:479-485`). The task input of
+/// (Python `_graph_columns`, `clients/python/horsies/core/workflows/child_build.py:479-485`). The task input of
 /// the baseline mint adds the context member for any stored array, an empty one included
 /// (`horsies_workflow_task_input`). Pure.
 pub(crate) fn stored_workflow_ctx_from(node: &AnyNode) -> Option<&[String]> {
@@ -370,7 +370,7 @@ mod tests {
 
     /// A task node stores the execution class of its merged task options: no options store `ISOLATED`, and
     /// a class in the options is read as written (Python
-    /// `tests/unit/test_execution_class.py::TestWorkflowPaths::test_a_fast_path_root_without_options_is_isolated`,
+    /// `clients/python/tests/unit/test_execution_class.py::TestWorkflowPaths::test_a_fast_path_root_without_options_is_isolated`,
     /// `::test_a_fast_path_root_reads_its_class`).
     #[test]
     fn a_task_node_stores_the_execution_class_of_its_options() {
@@ -388,7 +388,7 @@ mod tests {
 
     /// Task options that are not JSON (an empty text is not "no options") and an execution class that is
     /// not a class refuse the node with a validation error that names it; no class is guessed (Python
-    /// `tests/unit/test_execution_class.py::TestWorkflowPaths::test_a_fast_path_root_with_empty_options_text_raises`,
+    /// `clients/python/tests/unit/test_execution_class.py::TestWorkflowPaths::test_a_fast_path_root_with_empty_options_text_raises`,
     /// `::test_a_fast_path_root_with_an_invalid_class_raises`).
     #[test]
     fn a_task_node_whose_options_or_class_do_not_read_is_refused() {
@@ -410,7 +410,7 @@ mod tests {
     }
 
     /// A node defined with no list or with an empty list takes no context, and its row stores NULL
-    /// (Python `_graph_columns`, `python/horsies/core/workflows/child_build.py:479-485`).
+    /// (Python `_graph_columns`, `clients/python/horsies/core/workflows/child_build.py:479-485`).
     #[test]
     fn an_empty_context_list_is_no_context() {
         let mut node = node_with(false, Some(10));
@@ -684,8 +684,8 @@ mod tests {
     }
 
     /// Python refuses a node whose stored retry policy does not validate, and the start's transaction rolls
-    /// back (`python/horsies/core/workflows/lifecycle.py:152-203`, `root_retry_and_deadline`; the reader is
-    /// `stored_max_retries`, `python/horsies/core/codec/task_options.py:80-103`). Each options text here is a JSON
+    /// back (`clients/python/horsies/core/workflows/lifecycle.py:152-203`, `root_retry_and_deadline`; the reader is
+    /// `stored_max_retries`, `clients/python/horsies/core/codec/task_options.py:80-103`). Each options text here is a JSON
     /// object, so `prepare_workflow_task_facts` accepts it; only the retry limit refuses it. A reader that
     /// guesses a limit (3 for a policy without an integer `max_retries`) lets the start write its rows, and
     /// passes 21 on to the baseline CHECK (`max_retries BETWEEN 0 AND 20`) as a database error.
@@ -705,7 +705,7 @@ mod tests {
             )
         };
         // The detail of Python's refusal, where the case pins it
-        // (`tests/unit/test_stored_max_retries.py::TestWorkflowPaths::test_the_fast_path_root_refuses_a_negative_limit`).
+        // (`clients/python/tests/unit/test_stored_max_retries.py::TestWorkflowPaths::test_the_fast_path_root_refuses_a_negative_limit`).
         let cases = [
             (
                 "no max_retries",
@@ -773,7 +773,7 @@ mod tests {
     }
 
     /// Python raises when a node's options are not a JSON object and the start rolls back
-    /// (`python/horsies/core/workflows/lifecycle.py:576-604`); a deadline the database cannot read fails the
+    /// (`clients/python/horsies/core/workflows/lifecycle.py:576-604`); a deadline the database cannot read fails the
     /// insert. The core refuses both before any row: options that do not read are not replaced when a
     /// deadline is merged in, and a stored `good_until` that is not an RFC 3339 text is not read as no
     /// deadline.

@@ -11,11 +11,11 @@ use std::path::{Path, PathBuf};
 /// repository root.
 const DOC_ROOTS: [&str; 2] = [
     "website/src/content/docs/rust",
-    "crates/horsies/.agents/skills/horsies",
+    "clients/rust/horsies/.agents/skills/horsies",
 ];
 
 /// The repository root, relative to this crate.
-const REPO_ROOT_FROM_CRATE: &str = "../../..";
+const REPO_ROOT_FROM_CRATE: &str = "../../../..";
 
 /// The file extensions of a page.
 const PAGE_EXTENSIONS: [&str; 2] = ["md", "mdx"];

@@ -1,5 +1,5 @@
 //! Layer 5: workflow data flow, `args_from` and the workflow context
-//! (Python `tests/e2e/test_layer5_workflow_dataflow.py`), and the strict
+//! (Python `clients/python/tests/e2e/test_layer5_workflow_dataflow.py`), and the strict
 //! node input of the old `wrapped_input_strict.rs`.
 
 use std::collections::BTreeMap;

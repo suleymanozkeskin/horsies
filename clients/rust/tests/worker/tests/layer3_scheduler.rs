@@ -1,4 +1,4 @@
-//! Layer 3: the scheduler (Python `tests/e2e/test_layer3_scheduler.py`).
+//! Layer 3: the scheduler (Python `clients/python/tests/e2e/test_layer3_scheduler.py`).
 //!
 //! The scheduler is the test binary with `scheduler`: `horsies::cli::run`
 //! runs the schedules of the scheduler instance. A worker of the same

@@ -1,5 +1,5 @@
 //! Workflow operations of a client handle on its main core pool, one 0005
-//! function each (`crates/horsies-core/baseline/0005_workflow_functions.sql`):
+//! function each (`core/baseline/0005_workflow_functions.sql`):
 //!
 //! - [`PostgresBroker::pause_workflow`]: `horsies_workflow_pause`, the pause of
 //!   a RUNNING workflow and its RUNNING descendants.
@@ -69,7 +69,7 @@ pub struct WorkflowRetentionFailed {
 impl PostgresBroker {
     /// Pause a workflow tree: `horsies_workflow_pause`, one statement in
     /// autocommit (Python `pause_workflow`,
-    /// `python/horsies/core/workflows/lifecycle.py`).
+    /// `clients/python/horsies/core/workflows/lifecycle.py`).
     ///
     /// Outcomes:
     /// - `Ok(true)`: the workflow was RUNNING and is PAUSED with its RUNNING
@@ -89,7 +89,7 @@ impl PostgresBroker {
 
     /// Cancel a workflow tree: `horsies_workflow_cancel`, one statement in
     /// autocommit (Python `WorkflowHandle.cancel_async`,
-    /// `python/horsies/core/models/workflow/handle.py`).
+    /// `clients/python/horsies/core/models/workflow/handle.py`).
     ///
     /// Outcomes:
     /// - `Ok(true)`: the workflow and every PENDING, RUNNING or PAUSED
@@ -107,7 +107,7 @@ impl PostgresBroker {
 
     /// Resume a workflow tree of a client that builds its children through
     /// `source` (Python `resume_workflow`,
-    /// `python/horsies/core/workflows/lifecycle.py`): `horsies_workflow_resume`
+    /// `clients/python/horsies/core/workflows/lifecycle.py`): `horsies_workflow_resume`
     /// in a transaction with the child starts it owes, then the parent
     /// advances after the commit, then the recovery pass of the tree.
     ///
@@ -136,7 +136,7 @@ impl PostgresBroker {
 
     /// Expire the PAUSED workflows older than `older_than`, at most
     /// `batch_size` per call (Python `expire_paused_workflows`,
-    /// `python/horsies/core/workflows/lifecycle.py`): one read of the
+    /// `clients/python/horsies/core/workflows/lifecycle.py`): one read of the
     /// candidates, oldest first, then one `horsies_workflow_expire_paused` per
     /// candidate in autocommit, on the main core pool with the reserve. A
     /// resume that committed first wins.

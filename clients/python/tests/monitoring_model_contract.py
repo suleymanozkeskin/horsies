@@ -5,9 +5,9 @@ validates it into the Pydantic models of ``horsies.monitoring.models``. This
 module reduces the Pydantic JSON schema of each model to its contract: the
 field names, and per field the kind of value it holds. The core compares the
 JSON schema of each Rust model with this contract
-(``crates/horsies-core/src/monitoring/model_contract_tests.rs``), with the
+(``core/src/monitoring/model_contract_tests.rs``), with the
 known compatible differences named there. The contract is committed as
-``crates/horsies-core/src/monitoring/model_contract.json``;
+``core/src/monitoring/model_contract.json``;
 ``tests/unit/test_monitoring_model_contract.py`` checks that the file is the
 contract of the models of today.
 
@@ -43,9 +43,8 @@ type Schema = dict[str, object]
 type Kind = str | dict[str, object]
 
 CONTRACT_PATH: Final = (
-    Path(__file__).resolve().parents[1]
-    / 'crates'
-    / 'horsies-core'
+    Path(__file__).resolve().parents[3]
+    / 'core'
     / 'src'
     / 'monitoring'
     / 'model_contract.json'

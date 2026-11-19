@@ -1,4 +1,4 @@
-//! Port of Python `tests/integration/test_lifecycle_regressions.py`.
+//! Port of Python `clients/python/tests/integration/test_lifecycle_regressions.py`.
 //!
 //! The `test_future_failure_*` rows test the write after a child is lost.
 //! The decision that turns a lost child into that write belongs to the

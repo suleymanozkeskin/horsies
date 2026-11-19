@@ -333,7 +333,7 @@ async fn action_guard_order_is_authorization_then_intent_then_schema() {
     assert_eq!(json(response).await["code"], SCHEMA_UNKNOWN);
 }
 
-/// Python `tests/unit/test_web_auth.py::TestActGuard::test_rejects_a_wrong_intent_value`:
+/// Python `clients/python/tests/unit/test_web_auth.py::TestActGuard::test_rejects_a_wrong_intent_value`:
 /// an intent header with another value is refused as a missing intent, before
 /// the schema gate.
 #[tokio::test]
@@ -814,7 +814,7 @@ fn the_runtime_config_is_the_text_of_python_json_dumps() {
     );
 }
 
-/// Python `tests/unit/test_web_app_shell.py::TestStaticServing::test_built_assets_are_served`:
+/// Python `clients/python/tests/unit/test_web_app_shell.py::TestStaticServing::test_built_assets_are_served`:
 /// a built asset is served with the bytes of its file.
 #[tokio::test]
 async fn a_built_asset_is_served_with_its_bytes() {
@@ -830,7 +830,7 @@ async fn a_built_asset_is_served_with_its_bytes() {
     assert_eq!(&body[..], b"console.log('horsies')");
 }
 
-/// Python `tests/unit/test_web_app_shell.py::TestStaticServing::test_no_custom_css_means_no_extra_stylesheet`:
+/// Python `clients/python/tests/unit/test_web_app_shell.py::TestStaticServing::test_no_custom_css_means_no_extra_stylesheet`:
 /// with no custom stylesheet, the page gets no stylesheet link.
 #[tokio::test]
 async fn no_custom_css_means_no_extra_stylesheet() {
@@ -850,7 +850,7 @@ async fn no_custom_css_means_no_extra_stylesheet() {
     assert!(!page.contains("<link rel=\"stylesheet\""), "{page}");
 }
 
-/// Python `tests/unit/test_web_app_shell.py::test_base_href_is_always_a_directory`:
+/// Python `clients/python/tests/unit/test_web_app_shell.py::test_base_href_is_always_a_directory`:
 /// the base of the page ends with a slash under every mount, so relative
 /// asset URLs resolve against the mount.
 #[test]
@@ -865,7 +865,7 @@ fn the_base_href_is_always_a_directory() {
     }
 }
 
-/// Python `tests/unit/test_web_app_shell.py::test_asset_resolution_rejects_traversal`:
+/// Python `clients/python/tests/unit/test_web_app_shell.py::test_asset_resolution_rejects_traversal`:
 /// a request path resolves to an asset only for a built file inside the
 /// tree; not for the page, an empty path, a missing file, or a path that
 /// leaves the tree.
@@ -938,7 +938,7 @@ async fn embedded_spa_and_each_primary_view_api_roundtrip_against_postgres() {
     }
 }
 
-/// Python `tests/unit/test_web_app_shell.py::TestMissingBuild`: the page
+/// Python `clients/python/tests/unit/test_web_app_shell.py::TestMissingBuild`: the page
 /// names the missing build and the command that builds it; the API answers.
 #[tokio::test]
 async fn missing_embedded_index_is_a_factual_503_while_api_still_answers() {

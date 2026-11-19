@@ -1,4 +1,4 @@
-# python/horsies/core/models/recovery.py
+# clients/python/horsies/core/models/recovery.py
 from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Annotated, Final, Self, cast

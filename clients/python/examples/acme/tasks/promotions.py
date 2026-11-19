@@ -1,4 +1,4 @@
-# showcase/acme/tasks/promotions.py
+# clients/python/examples/acme/tasks/promotions.py
 """The promotions engine — and the three ways an exception reaches the dashboard.
 
 Nothing here raises on purpose. Both tasks contain real edge-case bugs, and

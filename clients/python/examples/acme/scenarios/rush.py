@@ -1,7 +1,7 @@
-# showcase/acme/scenarios/rush.py
+# clients/python/examples/acme/scenarios/rush.py
 """Fifty orders in thirty seconds — what saturation looks like.
 
-    uv run python -m showcase.acme.scenarios rush
+    uv run python -m examples.acme.scenarios rush
 
 Steady mode runs below capacity on purpose. This one runs well above it: the
 arrival rate is roughly ten times what twelve worker children can absorb, so

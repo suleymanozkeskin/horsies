@@ -176,7 +176,7 @@ pub enum ServerSessions {
 
 /// The connection settings of the parent's config that each connection of
 /// a child takes (Python `PostgresConfig.pooled_connect_args`,
-/// `python/horsies/core/models/broker.py:384-395`, sent as the `connect_kwargs` of
+/// `clients/python/horsies/core/models/broker.py:384-395`, sent as the `connect_kwargs` of
 /// the init frame).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildConnection {

@@ -1,6 +1,6 @@
 //! The sub-workflow matrix: read surfaces, nesting, joins, skips, success
 //! policies and outputless maps with sub-workflow nodes. Python:
-//! `tests/e2e/test_layer7_subworkflows.py`.
+//! `clients/python/tests/e2e/test_layer7_subworkflows.py`.
 //!
 //! Python runs these against a worker. Here [`drive`] plays the worker: it
 //! finishes every ENQUEUED node of a workflow tree with the outcome that the
@@ -41,7 +41,7 @@ const FAILED_INPUT_KEY: &str = "tests.port.e2e_sub_failed_input.v1";
 pub(super) const SLOW_KEY: &str = "tests.port.e2e_sub_slow.v1";
 
 // ---------------------------------------------------------------------------
-// Children (Python `tests/e2e/tasks/workflows.py`)
+// Children (Python `clients/python/tests/e2e/tasks/workflows.py`)
 // ---------------------------------------------------------------------------
 
 fn one_node_child(name: &str, node: AnyNode) -> WorkflowSpec {
@@ -117,7 +117,7 @@ pub(super) fn given_params_node(
 /// parent passes through `args_from` and writes what it saw into the input of
 /// its one task. The builder runs in the engine, so `value` is the result
 /// envelope itself, not the wrap that crosses to a worker (Python
-/// `python/horsies/core/workflows/engine.py:1171-1185`; the core's
+/// `clients/python/horsies/core/workflows/engine.py:1171-1185`; the core's
 /// `child_build_input`).
 fn failed_input_definition() -> TestChildBuild {
     Arc::new(|input: &str| -> Result<WorkflowSpec, TestBuildRefused> {
@@ -615,7 +615,7 @@ async fn a_failed_child_reaches_its_dependent_through_args_from_and_the_context(
         assert_subworkflow_error(&args_from_inner(&input, "child_result"), Some(child_id));
     let _through_ctx = assert_subworkflow_error(&ctx_result(&input, "node_0"), Some(child_id));
     // The context holds the stored summary text as a JSON string (Python
-    // `_build_workflow_context_data`, `python/horsies/core/workflows/engine.py:1666-1677`;
+    // `_build_workflow_context_data`, `clients/python/horsies/core/workflows/engine.py:1666-1677`;
     // the baseline `horsies_workflow_task_input`); the worker parses it.
     let summary_text = input[WORKFLOW_CTX_KWARG]["summaries_by_id"]["node_0"]
         .as_str()

@@ -1,8 +1,8 @@
 //! The slot health of a worker state snapshot: the `slots_down` column.
 //!
 //! Python reference: `DownSlot`, `AllSlotsServing`, `SlotsDown` and
-//! `parse_slot_health` (`python/horsies/core/models/health.py:100-259`), and the
-//! boot failure causes that can clear (`python/horsies/core/models/boot_failure.py`).
+//! `parse_slot_health` (`clients/python/horsies/core/models/health.py:100-259`), and the
+//! boot failure causes that can clear (`clients/python/horsies/core/models/boot_failure.py`).
 //!
 //! This module is pure. It does no I/O.
 
@@ -18,7 +18,7 @@ pub use crate::core::boot_failure::{ShortageErrno, MAX_BOOT_FAILURE_DETAIL_CHARS
 
 /// A boot failure cause that can clear by itself. Only these causes keep a
 /// slot down (Python `ClearableBootCause`,
-/// `python/horsies/core/models/boot_failure.py:167`).
+/// `clients/python/horsies/core/models/boot_failure.py:167`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClearableBootCause {
     /// A boot step failed with an errno of a resource limit.
@@ -28,7 +28,7 @@ pub enum ClearableBootCause {
 }
 
 /// The cause as short text, as Python's `describe_boot_cause`
-/// (`python/horsies/core/models/boot_failure.py:178-194`).
+/// (`clients/python/horsies/core/models/boot_failure.py:178-194`).
 impl fmt::Display for ClearableBootCause {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -94,7 +94,7 @@ fn unreadable(reason: impl Into<String>) -> SlotHealthUnreadable {
 }
 
 /// The slot health of a stored `slots_down` value (Python
-/// `parse_slot_health`, `python/horsies/core/models/health.py:159-187`).
+/// `parse_slot_health`, `clients/python/horsies/core/models/health.py:159-187`).
 ///
 /// An empty array is [`SlotHealth::AllSlotsServing`]. Each entry must name a
 /// distinct slot below `processes`, a cause that can clear, a detail of at
@@ -133,7 +133,7 @@ fn more_entries_than_processes(entries: usize, processes: i32) -> bool {
 }
 
 /// One `slots_down` entry (Python `_parse_down_slot`,
-/// `python/horsies/core/models/health.py:190-211`). The checks run in Python's
+/// `clients/python/horsies/core/models/health.py:190-211`). The checks run in Python's
 /// order, so the first unreadable field is the one Python names.
 fn down_slot(value: &Value, processes: i32) -> Result<DownSlot, SlotHealthUnreadable> {
     let Value::Object(fields) = value else {
@@ -176,7 +176,7 @@ fn failed_boots(fields: &Map<String, Value>) -> Result<NonZeroU64, SlotHealthUnr
 }
 
 /// An ISO instant with an offset (Python `_aware_instant`,
-/// `python/horsies/core/models/health.py:229-238`).
+/// `clients/python/horsies/core/models/health.py:229-238`).
 fn aware_instant(fields: &Map<String, Value>) -> Result<DateTime<Utc>, SlotHealthUnreadable> {
     let Some(Value::String(text)) = fields.get("down_since") else {
         return Err(unreadable("down_since is not text"));
@@ -199,8 +199,8 @@ fn is_instant_without_offset(text: &str) -> bool {
 }
 
 /// A stored cause that can keep a slot down (Python `_clearable_cause` and
-/// `parse_boot_cause`, `python/horsies/core/models/health.py:241-259`,
-/// `python/horsies/core/models/boot_failure.py:216-249`). A known cause that
+/// `parse_boot_cause`, `clients/python/horsies/core/models/health.py:241-259`,
+/// `clients/python/horsies/core/models/boot_failure.py:216-249`). A known cause that
 /// repeats is refused by its own reason, not as an unknown kind.
 fn clearable_cause(
     fields: &Map<String, Value>,
@@ -242,7 +242,7 @@ fn shortage_errno(cause: &Map<String, Value>) -> Result<ShortageErrno, SlotHealt
 #[cfg(test)]
 mod tests {
     //! One test per outcome of `parse_slot_health`. Python reference:
-    //! `tests/unit/test_health_models.py::TestSlotHealth`.
+    //! `clients/python/tests/unit/test_health_models.py::TestSlotHealth`.
     use super::*;
     use chrono::TimeZone;
     use serde_json::json;

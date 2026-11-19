@@ -2,7 +2,7 @@
 the deferred record.
 
 The batch moves encode each attempt snapshot once; the core tests that
-(``crates/horsies-core/src/broker/terminalization_matrix.rs``,
+(``core/src/broker/terminalization_matrix.rs``,
 ``batch_terminalization_encodes_each_attempt_snapshot_once``).
 """
 

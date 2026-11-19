@@ -1,5 +1,5 @@
 //! Join rules and composed DAG shapes, driven node by node through phase 2.
-//! Python: `tests/integration/test_workflow_join.py` and
+//! Python: `clients/python/tests/integration/test_workflow_join.py` and
 //! `test_workflow_composed_patterns.py`.
 //!
 //! The nodes run on [`PORT_QUEUE`], which no worker test claims, so a live
@@ -1103,7 +1103,7 @@ async fn task_rows_and_links(
     .expect("read the task rows and their links")
 }
 
-/// `tests/e2e/test_queue_starvation_repros.py::test_wide_fanin_join_does_not_create_orphaned_join_tasks`:
+/// `clients/python/tests/e2e/test_queue_starvation_repros.py::test_wide_fanin_join_does_not_create_orphaned_join_tasks`:
 /// 50 roots and one join node that waits for all of them. Every root
 /// finishes at once through the worker's finalize (phase 1, then phase 2,
 /// concurrently on one broker); then the join finishes. The workflow

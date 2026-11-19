@@ -2,8 +2,8 @@
 //! the class that task info reports.
 //!
 //! Python reference: `Execution` and `TaskInfo.execution`
-//! (`python/horsies/core/models/tasks.py`), and `stored_execution`
-//! (`python/horsies/core/codec/task_options.py`).
+//! (`clients/python/horsies/core/models/tasks.py`), and `stored_execution`
+//! (`clients/python/horsies/core/codec/task_options.py`).
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};

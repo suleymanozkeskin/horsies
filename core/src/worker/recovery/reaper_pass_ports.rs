@@ -1,4 +1,4 @@
-//! Ports of Python `tests/unit/test_broker_postgres.py` rows of the reaper's
+//! Ports of Python `clients/python/tests/unit/test_broker_postgres.py` rows of the reaper's
 //! passes: the stale RUNNING pass (`TestMarkStaleTasksAsFailed`), the
 //! pending expiry (`TestExpirePendingTasks`) and the orphan audit
 //! (`TestTerminateOrphanedWorkflowTasks`).

@@ -1,4 +1,4 @@
-//! Port of Python `tests/integration/test_task_attempt_history.py`.
+//! Port of Python `clients/python/tests/integration/test_task_attempt_history.py`.
 //!
 //! `test_stale_cleanup_with_retry_policy_schedules_retry` is
 //! `worker::recovery::...::a_stale_running_task_retries_when_its_policy_names_the_crash`

@@ -1,4 +1,4 @@
-# showcase/acme/workflows/warehouse_transfer.py
+# clients/python/examples/acme/workflows/warehouse_transfer.py
 """Move stock between sites.
 
     allocate_warehouse -> release_stock

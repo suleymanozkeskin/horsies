@@ -11,7 +11,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 > All public symbols: `from horsies import <name>`
 
 ## Agent Skills (Repository Guidance)
-- Skills ship in the wheel as one skill folder: `horsies/.agents/skills/horsies/` (a source checkout has it at `python/horsies/.agents/skills/horsies/`)
+- Skills ship in the wheel as one skill folder: `horsies/.agents/skills/horsies/` (a source checkout has it at `clients/python/horsies/.agents/skills/horsies/`)
 - `horsies skills install --target DIR` copies the folder to `DIR/horsies/` (for example `--target .claude/skills`); `--force` replaces a copy that differs
 - `SKILL.md` -> quick orientation and routing (the only file with frontmatter)
 - `tasks.md` -> task APIs, send/retry flows, serialization, error handling

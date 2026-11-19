@@ -1,4 +1,4 @@
-# python/horsies/core/scheduler/validation.py
+# clients/python/horsies/core/scheduler/validation.py
 """Schedule validation shared by scheduler boot and ``app.check()``.
 
 The checks here are functions of ``(app, schedule_config)`` — they touch no

@@ -1,6 +1,6 @@
 //! The parent finalize rows: retry scheduling, the terminal state, the
 //! result of a replay, the wakes of phase 2, and `sent_at` across retries
-//! (Python `tests/e2e/test_layer1_tasks.py`).
+//! (Python `clients/python/tests/e2e/test_layer1_tasks.py`).
 //!
 //! Each test enters at [`persist_terminal_state`], the worker's phase 1 for a
 //! result of an attempt, and reads the rows it left. The dispatch facts (the

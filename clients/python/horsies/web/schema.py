@@ -49,7 +49,7 @@ SCHEMA_UNKNOWN = 'SCHEMA_UNKNOWN'
 EXPECTED_SCHEMA_VERSION: Final = 1000
 """The schema version this build writes through: the version of the
 baseline migration (``BASELINE_MIGRATION_VERSION``,
-``crates/horsies-core/src/broker/migrations.rs``). The core answers an
+``core/src/broker/migrations.rs``). The core answers an
 observed status with its own expected version (``SchemaStatusRecord``);
 this value fills the status of a probe that has never read one."""
 
@@ -174,7 +174,7 @@ class SchemaProbe:
 
         One call of ``CoreHandle.schema_status_async`` on the broker's core
         pool. The core reads the bookkeeping tables and the stored version
-        and classifies them (``crates/horsies-core/src/web/schema.rs``).
+        and classifies them (``core/src/web/schema.rs``).
         Reads only.
 
         A read fails when the core cannot connect or read (the core answers

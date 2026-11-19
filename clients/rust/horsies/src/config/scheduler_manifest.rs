@@ -1,5 +1,5 @@
 //! The scheduler manifest of a Rust app (Python `to_scheduler_manifest`,
-//! `python/horsies/core/scheduler/manifest.py`).
+//! `clients/python/horsies/core/scheduler/manifest.py`).
 //!
 //! Per schedule, in config order: a disabled schedule is its name; an
 //! enabled schedule is its pattern text, timezone, catch-up rule and the

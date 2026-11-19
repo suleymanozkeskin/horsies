@@ -13,9 +13,9 @@ path:
 
 | Side | Tests | Path to this folder |
 |---|---|---|
-| Python | `tests/unit/test_stored_form_*.py`, helpers in `tests/stored_form_vectors.py` | `VECTORS_DIR` |
-| Core | `crates/horsies-core/src/stored_form_vectors/` | `CARGO_MANIFEST_DIR/tests/fixtures/stored_forms` |
-| Rust client | `crates/horsies/src/stored_form_vectors/` | `CARGO_MANIFEST_DIR/../horsies-core/tests/fixtures/stored_forms` |
+| Python | `tests/test_stored_form_*.py`, helpers in `tests/stored_form_vectors.py` | `VECTORS_DIR` |
+| Core | `core/src/stored_form_vectors/` | `CARGO_MANIFEST_DIR/tests/fixtures/stored_forms` |
+| Rust client | `clients/rust/horsies/src/stored_form_vectors/` | `CARGO_MANIFEST_DIR/../../../core/tests/fixtures/stored_forms` |
 
 Python's text is the reference: every vector text comes from Python's own
 encoder, and the Python tests check that it still does.
@@ -56,7 +56,7 @@ encoder, and the Python tests check that it still does.
 
 A vector file holds no lone UTF-16 surrogate: the Rust readers refuse the file
 itself, and a Rust `String` cannot hold one. Python refuses one at its encoder
-(`tests/unit/test_typed_codec.py`).
+(`clients/python/tests/unit/test_typed_codec.py`).
 
 Every form that holds user text has a vector with text outside ASCII, which
 every writer stores as the characters, not as `\u` escapes:
@@ -100,7 +100,7 @@ file rounds one.
 | `record_order` | `{"id": <decimal>, "amount": <float>}` | `Order(BaseModel)` | `Order` struct, same field order |
 
 A date-time's Rust type is `horsies::StoredDateTime`
-(`crates/horsies/src/task/stored_datetime.rs`), which writes Python's
+(`clients/rust/horsies/src/task/stored_datetime.rs`), which writes Python's
 fraction: 6 digits when the microsecond is not 0, else none. chrono's own
 serde form of `DateTime` and `NaiveDateTime` writes a whole millisecond with
 3 digits (`.500Z`); both clients read either text to the same value.
@@ -116,32 +116,32 @@ order of the Rust struct.
 
 Encoders:
 
-- Python: `encode_kwargs_read_back` (`python/horsies/core/codec/kwargs.py:299`),
-  then `dumps_json` (`python/horsies/core/codec/json_io.py:43`); the send path
-  is `python/horsies/core/task_decorator.py:2426-2432`.
+- Python: `encode_kwargs_read_back` (`clients/python/horsies/core/codec/kwargs.py:299`),
+  then `dumps_json` (`clients/python/horsies/core/codec/json_io.py:43`); the send path
+  is `clients/python/horsies/core/task_decorator.py:2426-2432`.
 - Rust client: the `Input` struct of the task attribute
-  (`crates/horsies-macros/src/codegen.rs`, `input_struct`), encoded by
-  `encode_send_input` (`crates/horsies/src/task/body.rs`): `{}` for a task
+  (`clients/rust/macros/src/codegen.rs`, `input_struct`), encoded by
+  `encode_send_input` (`clients/rust/horsies/src/task/body.rs`): `{}` for a task
   with no parameters (the input `()`), else `encode_read_back` through the
-  core's `to_json_bytes_strict` (`crates/horsies-core/src/core/codec/strict.rs`);
-  the send path is `crates/horsies/src/send/function.rs` (`encoded_input`). A
+  core's `to_json_bytes_strict` (`core/src/core/codec/strict.rs`);
+  the send path is `clients/rust/horsies/src/send/function.rs` (`encoded_input`). A
   schedule without input stores `{}` (`schedule_input_text`,
-  `crates/horsies/src/config/scheduler_manifest.rs`).
+  `clients/rust/horsies/src/config/scheduler_manifest.rs`).
 - Core: none. The send checks the text with the strict read rule
-  (`crates/horsies-core/src/core/history/enqueue.rs:198`, `check_json_text` at
-  `crates/horsies-core/src/core/codec/strict_read.rs:131`) and stores it as
+  (`core/src/core/history/enqueue.rs:198`, `check_json_text` at
+  `core/src/core/codec/strict_read.rs:131`) and stores it as
   written.
 
 Decoders:
 
-- Python: `loads_json` (`python/horsies/core/codec/json_io.py:97`), then
-  `decode_kwargs` (`python/horsies/core/codec/kwargs.py:496`), in the child at
-  `python/horsies/core/worker/child_runner.py:1300-1329`.
+- Python: `loads_json` (`clients/python/horsies/core/codec/json_io.py:97`), then
+  `decode_kwargs` (`clients/python/horsies/core/codec/kwargs.py:496`), in the child at
+  `clients/python/horsies/core/worker/child_runner.py:1300-1329`.
 - Core: the child host passes an input without engine members byte for byte
-  (`crates/horsies-core/src/worker/execution.rs:192`, `build_task_input`).
+  (`core/src/worker/execution.rs:192`, `build_task_input`).
   It writes an input with engine members from its text: each other member
   and each result envelope keeps its stored text.
-- Rust client: `decode_input` (`crates/horsies/src/task/body.rs:48`);
+- Rust client: `decode_input` (`clients/rust/horsies/src/task/body.rs:48`);
   `decode_unit_input` for a task with no parameters.
 
 ## Result envelope (`result_envelope.json`)
@@ -158,49 +158,49 @@ A vector holds an `ok` typed value (the notation above) or an `err` task error
 The history storage envelope of a result (`result_envelope_version` 1, codec
 `json-utf8`, a SHA-256 digest) wraps this text byte for byte. Its vectors are
 `task_history/python-v052-codec-vectors.json` (`result_envelopes`), tested by
-`crates/horsies-core/src/core/history/tests.rs`
+`core/src/core/history/tests.rs`
 (`result_vectors_match_python_bytes`).
 
 Encoders:
 
 - Python: `encode_returned_result` for a task body's return
-  (`python/horsies/core/codec/typed.py:862`), `encode_task_result` for a
+  (`clients/python/horsies/core/codec/typed.py:862`), `encode_task_result` for a
   library error (`:798`), the error object by `encode_task_error` (`:1053`),
   then `dumps_json`.
-- Core: `TaskResult`'s `Serialize` (`crates/horsies-core/src/core/task/result.rs:42`)
-  and `TaskError`'s (`crates/horsies-core/src/core/task/error.rs:781`), written
+- Core: `TaskResult`'s `Serialize` (`core/src/core/task/result.rs:42`)
+  and `TaskError`'s (`core/src/core/task/error.rs:781`), written
   through `task_result_to_json_string`
-  (`crates/horsies-core/src/core/codec/mod.rs:99`). The child host puts the
+  (`core/src/core/codec/mod.rs:99`). The child host puts the
   text of a task body's ok value in the envelope as it is (`result_end`,
-  `crates/horsies-core/src/worker/executor/child_host/run.rs:380`) and writes a
+  `core/src/worker/executor/child_host/run.rs:380`) and writes a
   task error with `error_envelope` (`:325`).
-- Rust client: `encode_output` (`crates/horsies/src/task/body.rs:169`) for an
+- Rust client: `encode_output` (`clients/rust/horsies/src/task/body.rs:169`) for an
   ok value; `body_result` (`:152`) and `TaskError::into_stored`
-  (`crates/horsies/src/task/error.rs:155`) for an error.
+  (`clients/rust/horsies/src/task/error.rs:155`) for an error.
 
 Decoders:
 
 - Python: `loads_json`, `validate_task_result_envelope`
-  (`python/horsies/core/codec/typed.py:1133`), `decode_task_result` (`:1183`),
+  (`clients/python/horsies/core/codec/typed.py:1133`), `decode_task_result` (`:1183`),
   `decode_task_error` (`:1078`).
-- Core: `TaskResult`'s `Deserialize` (`crates/horsies-core/src/core/task/result.rs:67`),
+- Core: `TaskResult`'s `Deserialize` (`core/src/core/task/result.rs:67`),
   `read_task_result_text` (`:123`), `TaskError::from_stored_text`
-  (`crates/horsies-core/src/core/task/error.rs:678`); the `ok` value and the
+  (`core/src/core/task/error.rs:678`); the `ok` value and the
   error `data` decode from their own text. A result read keeps the
   stored text (`StoredEnvelopeText::parse`,
-  `crates/horsies-core/src/broker/result_types.rs:146`). The child host
+  `core/src/broker/result_types.rs:146`). The child host
   (`build_task_input`, an `args_from` member and a result of the workflow
   context) and the sub-workflow child build (`merged_child_input`,
-  `crates/horsies-core/src/workflow_engine/start_statement.rs:458`) give a
+  `core/src/workflow_engine/start_statement.rs:458`) give a
   dependent each envelope as its stored text; the core test passes each
   vector through both.
-- Rust client: `outcome_of_record` (`crates/horsies/src/handle.rs:360`) and
-  `stored_result` (`crates/horsies/src/reads/by_task_id.rs:115`), on the
+- Rust client: `outcome_of_record` (`clients/rust/horsies/src/handle.rs:360`) and
+  `stored_result` (`clients/rust/horsies/src/reads/by_task_id.rs:115`), on the
   core's typed read. A dependency result (`TaskOutcome`'s `Deserialize`,
-  `crates/horsies/src/workflow/dependency.rs`) and
-  `WorkflowContext::result_for` (`crates/horsies/src/workflow/context.rs`)
+  `clients/rust/horsies/src/workflow/dependency.rs`) and
+  `WorkflowContext::result_for` (`clients/rust/horsies/src/workflow/context.rs`)
   read the envelope's text with `read_stored_result`
-  (`crates/horsies/src/handle.rs:422`), as `outcome_of_record` does; the
+  (`clients/rust/horsies/src/handle.rs:422`), as `outcome_of_record` does; the
   Rust test reads each `ok` vector through all three.
 
 The Rust client builds an error from a code, a message and `data`. The
@@ -223,22 +223,22 @@ made, and the core writer is the only writer.
 
 | Code | `data` keys, in order | Python writer | Core writer |
 |---|---|---|---|
-| `TASK_TIMEOUT` (4 vectors: `cancel_end` `RETURNED_AFTER_SIGNAL`, `DROPPED_AFTER_GRACE`, `KILLED_WITH_CHILD`, and none) | `task_id`, `timeout_ms`, `cancel_end` | removed in 0.8.0 | `crates/horsies-core/src/worker/executor/slots/outcome.rs:243` (`timeout_write`) |
-| `WORKER_CRASHED`, killed child | `task_id`, `worker_id` | removed in 0.8.0 | `crates/horsies-core/src/worker/executor/slots/outcome.rs:212` (`killed_child_write`) |
-| `WORKER_CRASHED`, stale | `stale_threshold_ms`, `stale_threshold_seconds`, `worker_pid`, `worker_hostname`, `worker_id`, `started_at`, `detected_at` | removed in 0.8.0 | `crates/horsies-core/src/worker/recovery.rs:1450` (`stale_attempt_command`) |
-| `UPSTREAM_SKIPPED` | `dependency_index` | `python/horsies/core/workflows/engine.py:2496-2499` | `crates/horsies-core/src/workflow_engine/args_merge.rs:330`; SQL `horsies_task_error_envelope` |
-| `RESULT_DESERIALIZATION_ERROR`, dependency without a result (2 vectors: an ASCII and a non-ASCII task name in the message) | `dependency_index` | `python/horsies/core/workflows/engine.py:186-193` | `crates/horsies-core/src/workflow_engine/args_merge.rs:345` |
-| `WORKFLOW_OUTPUT_SKIPPED` (2 vectors: an ASCII and a non-ASCII `output_task_name`) | `workflow_id`, `output_node_id`, `output_task_index`, `output_task_name` | `python/horsies/core/workflows/engine.py:3398-3420` | SQL `horsies_workflow_output_error_data` (`crates/horsies-core/baseline/0005_workflow_functions.sql:1309`) |
-| `WORKFLOW_ENQUEUE_FAILED`, `args_from` conflict | `workflow_id`, `task_index` | `python/horsies/core/workflows/engine.py:545-551` | `crates/horsies-core/src/workflow_engine/args_merge.rs:111` (`node_error`); SQL |
-| `SUBWORKFLOW_DEPTH_LIMIT_REACHED` | `workflow_id`, `task_index` | `python/horsies/core/workflows/engine.py:1068-1078` | `crates/horsies-core/src/workflow_engine/start.rs:193`; SQL |
-| `SUBWORKFLOW_LOAD_FAILED` | `definition_key` | `python/horsies/core/workflows/engine.py:616-619` | `crates/horsies-core/src/workflow_engine/start_statement.rs:707` |
-| `WORKFLOW_RECOVERY_LIMIT_REACHED` | `workflow_id`, `case`, `task_index`, `failed_passes`, `exception_type` | removed in 0.8.0 | `crates/horsies-core/src/workflow_engine/recovery_limit.rs:526`; SQL (`0005_workflow_functions.sql:4099`) |
-| `WORKFLOW_START_INCOMPLETE` (error object) | `workflow_id`, `recovery` | removed in 0.8.0 | `crates/horsies-core/src/workflow_engine/recovery.rs:1748` |
-| `WORKFLOW_EXPIRED` (error object) | `policy`, `older_than_seconds` | `python/horsies/core/workflows/lifecycle.py:845-857` | `crates/horsies-core/src/workflow_engine/lifecycle.rs:300` |
-| `UNHANDLED_EXCEPTION`, with the exception record | `exception_type` | `python/horsies/core/task_decorator.py:2031-2036` | `crates/horsies-core/src/worker/executor/child_host/panic.rs:175` (a Rust panic) |
+| `TASK_TIMEOUT` (4 vectors: `cancel_end` `RETURNED_AFTER_SIGNAL`, `DROPPED_AFTER_GRACE`, `KILLED_WITH_CHILD`, and none) | `task_id`, `timeout_ms`, `cancel_end` | removed in 0.8.0 | `core/src/worker/executor/slots/outcome.rs:243` (`timeout_write`) |
+| `WORKER_CRASHED`, killed child | `task_id`, `worker_id` | removed in 0.8.0 | `core/src/worker/executor/slots/outcome.rs:212` (`killed_child_write`) |
+| `WORKER_CRASHED`, stale | `stale_threshold_ms`, `stale_threshold_seconds`, `worker_pid`, `worker_hostname`, `worker_id`, `started_at`, `detected_at` | removed in 0.8.0 | `core/src/worker/recovery.rs:1450` (`stale_attempt_command`) |
+| `UPSTREAM_SKIPPED` | `dependency_index` | `clients/python/horsies/core/workflows/engine.py:2496-2499` | `core/src/workflow_engine/args_merge.rs:330`; SQL `horsies_task_error_envelope` |
+| `RESULT_DESERIALIZATION_ERROR`, dependency without a result (2 vectors: an ASCII and a non-ASCII task name in the message) | `dependency_index` | `clients/python/horsies/core/workflows/engine.py:186-193` | `core/src/workflow_engine/args_merge.rs:345` |
+| `WORKFLOW_OUTPUT_SKIPPED` (2 vectors: an ASCII and a non-ASCII `output_task_name`) | `workflow_id`, `output_node_id`, `output_task_index`, `output_task_name` | `clients/python/horsies/core/workflows/engine.py:3398-3420` | SQL `horsies_workflow_output_error_data` (`core/baseline/0005_workflow_functions.sql:1309`) |
+| `WORKFLOW_ENQUEUE_FAILED`, `args_from` conflict | `workflow_id`, `task_index` | `clients/python/horsies/core/workflows/engine.py:545-551` | `core/src/workflow_engine/args_merge.rs:111` (`node_error`); SQL |
+| `SUBWORKFLOW_DEPTH_LIMIT_REACHED` | `workflow_id`, `task_index` | `clients/python/horsies/core/workflows/engine.py:1068-1078` | `core/src/workflow_engine/start.rs:193`; SQL |
+| `SUBWORKFLOW_LOAD_FAILED` | `definition_key` | `clients/python/horsies/core/workflows/engine.py:616-619` | `core/src/workflow_engine/start_statement.rs:707` |
+| `WORKFLOW_RECOVERY_LIMIT_REACHED` | `workflow_id`, `case`, `task_index`, `failed_passes`, `exception_type` | removed in 0.8.0 | `core/src/workflow_engine/recovery_limit.rs:526`; SQL (`0005_workflow_functions.sql:4099`) |
+| `WORKFLOW_START_INCOMPLETE` (error object) | `workflow_id`, `recovery` | removed in 0.8.0 | `core/src/workflow_engine/recovery.rs:1748` |
+| `WORKFLOW_EXPIRED` (error object) | `policy`, `older_than_seconds` | `clients/python/horsies/core/workflows/lifecycle.py:845-857` | `core/src/workflow_engine/lifecycle.rs:300` |
+| `UNHANDLED_EXCEPTION`, with the exception record | `exception_type` | `clients/python/horsies/core/task_decorator.py:2031-2036` | `core/src/worker/executor/child_host/panic.rs:175` (a Rust panic) |
 
 The SQL writer is `horsies_task_error_envelope`
-(`crates/horsies-core/baseline/0005_workflow_functions.sql:99`); a DB test
+(`core/baseline/0005_workflow_functions.sql:99`); a DB test
 calls it with the code, the message and the data text of each engine vector.
 The core's tests call `timeout_write`, `killed_child_write`,
 `stale_attempt_command`, `upstream_skipped_error`, `missing_result_error` and
@@ -263,29 +263,29 @@ grace as resolved at definition).
 
 Encoders:
 
-- Python: `serialize_task_options` (`python/horsies/core/codec/task_options.py:27`);
+- Python: `serialize_task_options` (`clients/python/horsies/core/codec/task_options.py:27`);
   a send's options with its deadline at
-  `python/horsies/core/task_decorator.py:2067-2087`; a node's merge at
-  `python/horsies/core/workflows/child_build.py:574` and
-  `python/horsies/core/workflows/engine.py:464`.
+  `clients/python/horsies/core/task_decorator.py:2067-2087`; a node's merge at
+  `clients/python/horsies/core/workflows/child_build.py:574` and
+  `clients/python/horsies/core/workflows/engine.py:464`.
 - Core: `TaskOptions::stored_options_text`
-  (`crates/horsies-core/src/core/task/options.rs`); a send with a deadline,
+  (`core/src/core/task/options.rs`); a send with a deadline,
   `TaskOptions::stored_send_options_text`; `merge_good_until_into_options`
-  for a node (`crates/horsies-core/src/workflow_engine/mod.rs`).
+  for a node (`core/src/workflow_engine/mod.rs`).
 - Rust client: its send stores `send_options_text`
-  (`crates/horsies/src/send/function.rs`), the core's text with the
+  (`clients/rust/horsies/src/send/function.rs`), the core's text with the
   deadline in `good_until`, and the deadline also in the row's `good_until`
   column; a node merges its deadline in
-  `task_options_text` (`crates/horsies/src/workflow/spec_data.rs`), written
+  `task_options_text` (`clients/rust/horsies/src/workflow/spec_data.rs`), written
   with the core's `python_isoformat_utc`.
 
 Decoders:
 
-- Python: `stored_retry_policy` (`python/horsies/core/codec/task_options.py:85`),
+- Python: `stored_retry_policy` (`clients/python/horsies/core/codec/task_options.py:85`),
   `stored_max_retries` (`:112`), `stored_execution` (`:147`).
-- Core: `prepare_enqueue_facts` (`crates/horsies-core/src/core/history/enqueue.rs:101`,
+- Core: `prepare_enqueue_facts` (`core/src/core/history/enqueue.rs:101`,
   the execution class), `stored_max_retries`
-  (`crates/horsies-core/src/worker/retry.rs:481`), `read_stored_options`
+  (`core/src/worker/retry.rs:481`), `read_stored_options`
   (`:222`, the timeout and the policy at dispatch).
 
 ## Workflow spec data (`workflow_spec_data.json`)
@@ -298,14 +298,14 @@ of the generated dataclasses (`kind` first in a tagged union). The vector
 the task name and the node input.
 
 - Python: `workflow_spec_data` and `workflow_spec_json`
-  (`python/horsies/core/workflows/spec_data.py`), which call
-  `dump_workflow_spec_data` (`python/horsies/_catalog/workflow_spec.py`,
-  generated by `crates/horsies-codegen/src/manifest.rs` with
+  (`clients/python/horsies/core/workflows/spec_data.py`), which call
+  `dump_workflow_spec_data` (`clients/python/horsies/_catalog/workflow_spec.py`,
+  generated by `clients/python/codegen/src/manifest.rs` with
   `DumpEncoder::StrictJsonIo`): `dumps_json`, the encoder of the other
   stored forms, on the dataclasses with each tuple as a list.
 - Core: reads only, `parse_workflow_spec_data`
-  (`crates/horsies-core/src/workflow_engine/spec_data.rs:282`).
-- Rust client: `spec_data_text` (`crates/horsies/src/workflow/spec_data.rs:49`),
+  (`core/src/workflow_engine/spec_data.rs:282`).
+- Rust client: `spec_data_text` (`clients/rust/horsies/src/workflow/spec_data.rs:49`),
   read back by `client_spec` (`:36`).
 
 The Python test builds the dataclasses from each document; the core test

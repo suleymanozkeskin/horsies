@@ -1,9 +1,9 @@
 //! What a promoted task receives: `args_from` members, the workflow context
 //! and the workflow meta; and the e2e shapes of layers 4 and 5 at the engine
-//! level. Python: `tests/integration/test_workflow_args_from.py`,
+//! level. Python: `clients/python/tests/integration/test_workflow_args_from.py`,
 //! `test_workflow_ctx.py`, `test_workflow_container_kwargs.py`,
-//! `tests/e2e/test_layer5_workflow_dataflow.py`,
-//! `tests/e2e/test_layer4_workflow_structure.py`.
+//! `clients/python/tests/e2e/test_layer5_workflow_dataflow.py`,
+//! `clients/python/tests/e2e/test_layer4_workflow_structure.py`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -420,7 +420,7 @@ fn policy_with_optional(required_index: usize, optional: Vec<usize>) -> SuccessP
     }
 }
 
-/// `tests/e2e/test_layer5_workflow_dataflow.py::test_failed_propagation`:
+/// `clients/python/tests/e2e/test_layer5_workflow_dataflow.py::test_failed_propagation`:
 /// B runs after A fails, receives A's own error, and the case on B completes
 /// the workflow.
 #[tokio::test]
@@ -449,7 +449,7 @@ async fn a_node_after_a_failure_receives_the_original_error() {
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
 }
 
-/// `tests/e2e/test_layer5_workflow_dataflow.py::test_skipped_propagation`
+/// `clients/python/tests/e2e/test_layer5_workflow_dataflow.py::test_skipped_propagation`
 #[tokio::test]
 #[serial]
 async fn a_node_after_a_skip_receives_upstream_skipped() {
@@ -486,7 +486,7 @@ async fn a_node_after_a_skip_receives_upstream_skipped() {
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
 }
 
-/// `tests/e2e/test_layer5_workflow_dataflow.py::test_mixed_args_from_and_ctx`:
+/// `clients/python/tests/e2e/test_layer5_workflow_dataflow.py::test_mixed_args_from_and_ctx`:
 /// D gets B's result through `args_from` and C's through the context.
 #[tokio::test]
 #[serial]
@@ -524,7 +524,7 @@ async fn one_node_gets_args_from_of_one_dependency_and_the_context_of_another() 
     );
 }
 
-/// `tests/e2e/test_layer5_workflow_dataflow.py::test_dual_injection_same_node`
+/// `clients/python/tests/e2e/test_layer5_workflow_dataflow.py::test_dual_injection_same_node`
 #[tokio::test]
 #[serial]
 async fn one_dependency_read_through_args_from_and_the_context_gives_one_value() {
@@ -551,7 +551,7 @@ async fn one_dependency_read_through_args_from_and_the_context_gives_one_value()
     );
 }
 
-/// `tests/e2e/test_layer4_workflow_structure.py::test_fanout_sequential_with_single_process`:
+/// `clients/python/tests/e2e/test_layer4_workflow_structure.py::test_fanout_sequential_with_single_process`:
 /// a fan-out completes when its nodes finish one at a time.
 #[tokio::test]
 #[serial]
@@ -581,7 +581,7 @@ async fn a_fan_out_completes_when_its_nodes_finish_one_at_a_time() {
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
 }
 
-/// `tests/e2e/test_layer4_workflow_structure.py::test_fanin_aggregator_pending_during_execution`
+/// `clients/python/tests/e2e/test_layer4_workflow_structure.py::test_fanin_aggregator_pending_during_execution`
 #[tokio::test]
 #[serial]
 async fn a_fan_in_aggregator_stays_pending_while_some_roots_run() {
@@ -610,7 +610,7 @@ async fn a_fan_in_aggregator_stays_pending_while_some_roots_run() {
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
 }
 
-/// `tests/e2e/test_layer4_workflow_structure.py::test_complex_dag`: a node
+/// `clients/python/tests/e2e/test_layer4_workflow_structure.py::test_complex_dag`: a node
 /// starts (is enqueued) only after each of its dependencies completed.
 #[tokio::test]
 #[serial]
@@ -664,7 +664,7 @@ async fn a_seven_node_dag_starts_each_level_after_the_one_before() {
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
 }
 
-/// `tests/e2e/test_layer4_workflow_structure.py::test_workflow_task_expires_before_claim`
+/// `clients/python/tests/e2e/test_layer4_workflow_structure.py::test_workflow_task_expires_before_claim`
 #[tokio::test]
 #[serial]
 async fn a_workflow_task_past_its_deadline_is_not_claimed() {
@@ -700,7 +700,7 @@ async fn a_workflow_task_past_its_deadline_is_not_claimed() {
     db.drop().await;
 }
 
-/// `tests/e2e/test_layer4_workflow_structure.py::test_workflow_task_completes_before_expiry`
+/// `clients/python/tests/e2e/test_layer4_workflow_structure.py::test_workflow_task_completes_before_expiry`
 #[tokio::test]
 #[serial]
 async fn a_workflow_task_with_a_future_deadline_completes() {
@@ -727,7 +727,7 @@ fn linear(name: &str) -> WorkflowSpec {
     )
 }
 
-/// `tests/e2e/test_layer4_workflow_structure.py::test_workflow_cancellation`
+/// `clients/python/tests/e2e/test_layer4_workflow_structure.py::test_workflow_cancellation`
 #[tokio::test]
 #[serial]
 async fn a_cancel_skips_waiting_nodes_and_get_gives_workflow_cancelled() {
@@ -753,7 +753,7 @@ async fn a_cancel_skips_waiting_nodes_and_get_gives_workflow_cancelled() {
     assert_eq!(code(error_of(&got)).as_deref(), Some("WORKFLOW_CANCELLED"));
 }
 
-/// `tests/e2e/test_layer4_workflow_structure.py::test_handle_get_timeout`
+/// `clients/python/tests/e2e/test_layer4_workflow_structure.py::test_handle_get_timeout`
 #[tokio::test]
 #[serial]
 async fn get_of_a_workflow_that_does_not_finish_gives_wait_timeout() {

@@ -13,14 +13,14 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Final
 
-from tests.dualrun.normalize import (
+from tests.parity.snapshot.normalize import (
     PARTITION_TREE,
     NormalizedRow,
     NormalizedSnapshot,
     NormalizedTable,
 )
-from tests.dualrun.rules import AnchorReference, ColumnRule, TimeWithin
-from tests.dualrun.values import (
+from tests.parity.snapshot.rules import AnchorReference, ColumnRule, TimeWithin
+from tests.parity.snapshot.values import (
     Cell,
     NormalizedValue,
     OffsetFromAnchor,

@@ -8,15 +8,15 @@ from typing import Final
 
 import pytest
 
-from tests.dualrun.catalog import (
+from tests.parity.snapshot.catalog import (
     ATTEMPT_ARCHIVE,
     BASELINE_CATALOG,
     KILL_REPORT_MEASURES,
     RESULT_ENVELOPE,
 )
-from tests.dualrun.compare import MissingRow, SnapshotDiff
-from tests.dualrun.normalize import AmbiguousGroup, NormalizedSnapshot, NormalizedTable
-from tests.dualrun.rules import (
+from tests.parity.snapshot.compare import MissingRow, SnapshotDiff
+from tests.parity.snapshot.normalize import AmbiguousGroup, NormalizedSnapshot, NormalizedTable
+from tests.parity.snapshot.rules import (
     EachItem,
     Ignored,
     Index,
@@ -26,8 +26,8 @@ from tests.dualrun.rules import (
     TimeOrderOnly,
     catalog_defects,
 )
-from tests.dualrun.values import RunWindow
-from tests.dualrun.worker_run import (
+from tests.parity.snapshot.values import RunWindow
+from tests.parity.snapshot.worker_run import (
     ARCHIVE_PROCESS_ID_POSITIONS,
     ARCHIVE_REPORT_POSITIONS,
     PROCESS_ID_COLUMNS,

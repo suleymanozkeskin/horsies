@@ -1,4 +1,4 @@
-//! Port of Python `tests/integration/test_workflow_success_finish.py`
+//! Port of Python `clients/python/tests/integration/test_workflow_success_finish.py`
 //! (`horsies_finish_workflow_success`).
 //!
 //! The success goes through the worker's client (`finish_workflow_success`,

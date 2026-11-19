@@ -1,5 +1,5 @@
 //! Ports of the unreadable-value rows of Python
-//! `tests/integration/test_worker_health_api.py`: a stored slot health or
+//! `clients/python/tests/integration/test_worker_health_api.py`: a stored slot health or
 //! class capacity of another shape fails the worker state read with the
 //! worker named, instead of reading as a default.
 

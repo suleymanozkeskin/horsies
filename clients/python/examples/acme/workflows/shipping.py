@@ -1,4 +1,4 @@
-# showcase/acme/workflows/shipping.py
+# clients/python/examples/acme/workflows/shipping.py
 """The `shipping` child workflow: book a courier, print the label, seed tracking.
 
 Started as a `SubWorkflowNode` inside `order_fulfillment`, which forwards the

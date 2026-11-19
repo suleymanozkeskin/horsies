@@ -1,4 +1,4 @@
-# showcase/acme/workflows/customer_winback.py
+# clients/python/examples/acme/workflows/customer_winback.py
 """Find the abandoned carts, then mail the people who left them.
 
     abandoned_cart_sweep -> marketing_blast

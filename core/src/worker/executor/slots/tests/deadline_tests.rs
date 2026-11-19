@@ -1,5 +1,5 @@
 //! The deadline of an isolated task and the run frame it gets, with
-//! scripted children (Python `tests/unit/test_worker_helpers.py`,
+//! scripted children (Python `clients/python/tests/unit/test_worker_helpers.py`,
 //! `TestAwaitSlotOutcome`, `TestDispatchOne`, `TestFinalizeAfterSlotOutcome`).
 //!
 //! - The deadline starts when the run frame is sent, not when the task is

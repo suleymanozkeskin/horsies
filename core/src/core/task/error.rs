@@ -17,7 +17,7 @@ use crate::core::workflow::summary::SubWorkflowSummary;
 ///
 /// Typical caller behavior: log, retry conditionally, inspect infra/runtime failure.
 ///
-/// Members, wire values and order are Python's (`python/horsies/core/models/tasks.py`), plus
+/// Members, wire values and order are Python's (`clients/python/horsies/core/models/tasks.py`), plus
 /// `WORKFLOW_START_INCOMPLETE`, which both catalogs hold.
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_core_derive::CodeCatalog,
@@ -967,7 +967,7 @@ mod tests {
         assert_eq!(back, code);
     }
 
-    /// Python `tests/unit/test_error_code_families.py:200-216`: a user code with a built-in name is refused at
+    /// Python `clients/python/tests/unit/test_error_code_families.py:200-216`: a user code with a built-in name is refused at
     /// construction, also when the text is built at run time.
     #[test]
     fn a_user_code_with_a_built_in_name_is_refused() {
@@ -1124,7 +1124,7 @@ mod tests {
         }
     }
 
-    /// Python `tests/unit/test_strict_codec.py:650-680`: a `data` that cannot be stored keeps the code and the
+    /// Python `clients/python/tests/unit/test_strict_codec.py:650-680`: a `data` that cannot be stored keeps the code and the
     /// message; `data` becomes `{"data_refused": <cause>}`.
     #[test]
     fn a_refused_data_keeps_the_code_and_the_message() {
@@ -1377,7 +1377,7 @@ mod tests {
     #[test]
     fn names_that_python_does_not_have_are_not_built_in() {
         // The core's former names and members; Python's catalogs
-        // (`python/horsies/core/models/tasks.py`) hold none of them.
+        // (`clients/python/horsies/core/models/tasks.py`) hold none of them.
         for text in [
             "UNHANDLED_ERROR",
             "TASK_ERROR",

@@ -12,7 +12,7 @@ from typing import Final
 import pytest
 
 from horsies.core.types.result import Err, Ok, Result
-from tests.dualrun.catalog import (
+from tests.parity.snapshot.catalog import (
     ARGS_FROM_MARKER,
     ATTEMPT_ARCHIVE,
     LEAF_NAME,
@@ -27,7 +27,7 @@ from tests.dualrun.catalog import (
     WORKFLOW_ID,
     WORKFLOW_RESULT,
 )
-from tests.dualrun.cells import (
+from tests.parity.snapshot.cells import (
     NormalizeError,
     PendingId,
     PendingText,
@@ -40,9 +40,9 @@ from tests.dualrun.cells import (
     generated_name,
     text_with_ids,
 )
-from tests.dualrun.compare import ColumnDifference, compare_snapshots
-from tests.dualrun.normalize import NormalizedSnapshot, normalize_snapshot
-from tests.dualrun.rules import (
+from tests.parity.snapshot.compare import ColumnDifference, compare_snapshots
+from tests.parity.snapshot.normalize import NormalizedSnapshot, normalize_snapshot
+from tests.parity.snapshot.rules import (
     ColumnSpec,
     DigestOf,
     EachMarkedMember,
@@ -61,7 +61,7 @@ from tests.dualrun.rules import (
     TimeOrderOnly,
     Unversioned,
 )
-from tests.dualrun.values import (
+from tests.parity.snapshot.values import (
     CalendarUnit,
     DatedName,
     DigestMatches,

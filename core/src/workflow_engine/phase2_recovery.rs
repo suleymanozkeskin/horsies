@@ -753,7 +753,7 @@ mod tests {
         }
     }
 
-    /// Python `tests/unit/test_phase2_recovery_policy.py::TestDurableDispositions::test_only_the_three_durable_ones_are_listed`.
+    /// Python `clients/python/tests/unit/test_phase2_recovery_policy.py::TestDurableDispositions::test_only_the_three_durable_ones_are_listed`.
     /// The discovery order, the attempt bound and the cap are behaviour:
     /// `discovery_is_oldest_first_strictly_graced_and_capped`.
     #[test]
@@ -1848,8 +1848,8 @@ mod tests {
         );
     }
 
-    /// Python `tests/unit/test_phase2_recovery_policy.py::TestRecoveredFailureResult::test_the_stored_error_survives`
-    /// and `tests/unit/test_task_error_stored_decode.py::TestErrorWithNoMessage::test_phase2_recovery_returns_the_error`:
+    /// Python `clients/python/tests/unit/test_phase2_recovery_policy.py::TestRecoveredFailureResult::test_the_stored_error_survives`
+    /// and `clients/python/tests/unit/test_task_error_stored_decode.py::TestErrorWithNoMessage::test_phase2_recovery_returns_the_error`:
     /// phase-2 recovery writes the failed node with the error that the task
     /// stored, also an error with a code and no message.
     #[tokio::test]

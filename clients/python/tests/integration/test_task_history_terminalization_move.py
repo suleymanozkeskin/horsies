@@ -5,7 +5,7 @@ starts from the live row's digest, and the miss classifier reports replay,
 foreign terminalization, absence, and lost claims through the staged
 provenance path. The move of an applied completion with its projection
 and its attempt snapshot is a core test
-(``crates/horsies-core/src/broker/lifecycle_tests/
+(``core/src/broker/lifecycle_tests/
 task_history_terminalization_move.rs``, ``fused_completion_moves_the_row``).
 The COMPLETED-to-NEVER_ELIGIBLE eligibility test is the
 coverage obligation recorded at the envelope-shape reconciliation: the

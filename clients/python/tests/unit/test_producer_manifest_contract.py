@@ -1,7 +1,7 @@
 """Contract between the Pydantic broker config and the core's producer manifest.
 
 `to_producer_manifest` maps `PostgresConfig` into the manifest generated
-from horsies-core (`python/horsies/_catalog/manifest.py`). These tests pin that
+from horsies-core (`clients/python/horsies/_catalog/manifest.py`). These tests pin that
 every config field is mapped or named as outside the producer manifest,
 that every manifest field has a source, that the mapping copies each value,
 and which SQLAlchemy pool values the config keeps: each meaning that the

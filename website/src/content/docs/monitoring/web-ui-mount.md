@@ -119,4 +119,4 @@ What each policy answers is in [Authorization policies](/horsies/monitoring/web-
 
 ### Static Assets
 
-The SPA is compiled into `horsies._core`: the core embeds the committed build of `webui/` (`crates/horsies-core/webui-dist`), so an installed wheel and a build from a clone serve the same page with no extra step. The page and its assets carry no data and are served without a call of the policy.
+The SPA is compiled into `horsies._core`: the core embeds the committed build of `webui/` (`core/webui-dist`), so an installed wheel and a build from a clone serve the same page with no extra step. The page and its assets carry no data and are served without a call of the policy.

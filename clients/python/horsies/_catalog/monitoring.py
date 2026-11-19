@@ -23,7 +23,7 @@ class MonitoringQueryErrorCode(str, Enum):
     """Stored history data does not decode: a status that is not a task
     status, an attempt snapshot or archive envelope that does not decode.
     Not retryable: a repeat gives the same result until the stored row
-    changes (Python `python/horsies/monitoring/errors.py:26-98`).
+    changes (Python `clients/python/horsies/monitoring/errors.py:26-98`).
     """
 
 
@@ -46,5 +46,5 @@ class TaskActionErrorCode(str, Enum):
     status, or a cancel outcome row that does not decode. Nothing changed:
     the cancel refused the task. Not retryable: a repeat gives the same
     result until the stored row changes (Python
-    `python/horsies/monitoring/task_actions.py`, `TaskActionStoredDataInvalid`).
+    `clients/python/horsies/monitoring/task_actions.py`, `TaskActionStoredDataInvalid`).
     """

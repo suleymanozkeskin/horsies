@@ -1,5 +1,5 @@
 //! The recovery cases of the reaper's workflow pass, each on its own database.
-//! Python: `tests/integration/test_workflow_recovery.py` and
+//! Python: `clients/python/tests/integration/test_workflow_recovery.py` and
 //! `test_orphaned_workflow_task_repro.py`.
 
 use serial_test::serial;

@@ -1,5 +1,5 @@
 //! The write of each attempt end on the test database, and on a database
-//! that cannot be reached (Python `tests/unit/test_worker_helpers.py`,
+//! that cannot be reached (Python `clients/python/tests/unit/test_worker_helpers.py`,
 //! `TestFinalizeAfterSlotOutcome`, `TestRequeueDbErrorContainment`,
 //! `TestHandleFinalizeError`, `TestRetryFinalizeFuture`).
 //!
@@ -412,7 +412,7 @@ async fn a_lost_child_fails_its_running_task_as_crashed() {
     );
 }
 
-/// Python `tests/integration/test_lifecycle_regressions.py::test_future_failure_terminal_phase2_error_schedules_finalize_retry`:
+/// Python `clients/python/tests/integration/test_lifecycle_regressions.py::test_future_failure_terminal_phase2_error_schedules_finalize_retry`:
 /// the write for a lost child commits phase 1 (the task is FAILED with
 /// `WORKER_CRASHED`), and a phase-2 error that can clear is not dropped:
 /// phase 2 is tried again, and the node and its workflow finish. The first

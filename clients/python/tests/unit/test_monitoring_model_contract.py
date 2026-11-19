@@ -2,7 +2,7 @@
 the Pydantic models of today.
 
 The core's contract test compares the JSON schema of each Rust model with
-``crates/horsies-core/src/monitoring/model_contract.json``
+``core/src/monitoring/model_contract.json``
 (``model_contract_tests.rs``). A change of a Pydantic model that the file
 does not hold fails here; write the file again with
 ``uv run python -m tests.monitoring_model_contract``.

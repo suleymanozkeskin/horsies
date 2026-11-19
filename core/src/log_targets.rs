@@ -3,7 +3,7 @@
 //!
 //! A core event's target is its Rust module path unless the event names one.
 //! The Python bridge sends a record whose target is the name of a `horsies`
-//! logger to that logger (`crates/horsies-python/src/logging/names.rs`), so
+//! logger to that logger (`clients/python/bridge/src/logging/names.rs`), so
 //! each record below reaches the logger that the Python client used for the
 //! same write. A Rust subscriber filters these records by these names, not
 //! by their module path.

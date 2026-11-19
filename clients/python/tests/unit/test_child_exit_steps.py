@@ -84,7 +84,7 @@ def test_this_python_has_both_exit_steps() -> None:
                 'Each child stop on this Python takes the slow fallback: '
                 'sys.exit with the interpreter teardown. Find the function that '
                 'sys.exit runs for this step in this CPython, and update '
-                'ExitStep in python/horsies/core/worker/child_main.py.',
+                'ExitStep in clients/python/horsies/core/worker/child_main.py.',
             )
         case _ as unreachable:
             assert_never(unreachable)

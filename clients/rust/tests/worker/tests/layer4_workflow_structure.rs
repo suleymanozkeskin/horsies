@@ -1,5 +1,5 @@
 //! Layer 4: workflow structure (Python
-//! `tests/e2e/test_layer4_workflow_structure.py`). The specs are built in
+//! `clients/python/tests/e2e/test_layer4_workflow_structure.py`). The specs are built in
 //! the test process with the typed DSL and started with `Horsies::start`;
 //! the worker runs their nodes.
 

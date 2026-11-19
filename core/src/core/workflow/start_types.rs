@@ -1,6 +1,6 @@
 /// Typed error types for workflow start operations.
 ///
-/// Mirrors Python's `python/horsies/core/workflows/start_types.py`.
+/// Mirrors Python's `clients/python/horsies/core/workflows/start_types.py`.
 use uuid::Uuid;
 
 use crate::broker::workflow_start::ClientStartError;
@@ -11,7 +11,7 @@ use crate::FailureCause;
 /// Categorized workflow start failure codes.
 ///
 /// The members are Python's, in Python's order
-/// (`python/horsies/core/workflows/start_types.py`).
+/// (`clients/python/horsies/core/workflows/start_types.py`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_core_derive::CodeCatalog)]
 #[code_catalog(module = "workflow_start", base = "str_enum")]
 pub enum WorkflowStartErrorCode {
@@ -41,7 +41,7 @@ impl std::fmt::Display for WorkflowStartErrorCode {
 }
 
 /// The failure of a workflow start: one variant per Python class of
-/// `python/horsies/core/workflows/start_types.py` that the core or a client
+/// `clients/python/horsies/core/workflows/start_types.py` that the core or a client
 /// of the core produces, each with the facts of its state only. Carried
 /// inside `Err(...)` of a [`WorkflowStartResult`]. Each variant's doc is
 /// its Python class doc (`ErrorCatalog`, module
@@ -543,7 +543,7 @@ mod tests {
     }
 
     /// The classes of the start catalog have Python's names, slots and
-    /// order (`python/horsies/core/workflows/start_types.py`).
+    /// order (`clients/python/horsies/core/workflows/start_types.py`).
     #[test]
     fn the_start_classes_have_python_s_slots_in_python_s_order() {
         let catalog = <WorkflowStartError as ErrorEnum>::ERROR_CATALOG;

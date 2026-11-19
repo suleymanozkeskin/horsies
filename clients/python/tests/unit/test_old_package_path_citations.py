@@ -1,14 +1,14 @@
 """No tracked text file cites a package path from before the package move.
 
-The Python package moved from the repository root to ``python/horsies/``, and
+The Python package moved from the repository root to ``clients/python/horsies/``, and
 the package's SQL folder ``core/baseline/sql/`` moved to
-``crates/horsies-core/baseline/``. A path that starts at the old package
+``core/baseline/``. A path that starts at the old package
 folder and goes on with ``core/`` or ``monitoring/`` names a file that is not
 at that path any more. The scan reads every file of the git index that is
 UTF-8 text, apart from the files of ``KEPT_FILES``.
 
-The fix for a finding: cite ``python/horsies/<rest>`` for a package file, and
-``crates/horsies-core/baseline/<file>`` for a file of the old SQL folder.
+The fix for a finding: cite ``clients/python/horsies/<rest>`` for a package file, and
+``core/baseline/<file>`` for a file of the old SQL folder.
 """
 
 from __future__ import annotations
@@ -23,13 +23,13 @@ import pytest
 
 pytestmark = [pytest.mark.unit]
 
-REPO_ROOT: Final = Path(__file__).resolve().parents[2]
+REPO_ROOT: Final = Path(__file__).resolve().parents[4]
 
 OLD_PACKAGE_CITATION: Final = re.compile(
     r'(?<![A-Za-z0-9_.@/-])horsies/(?:core|monitoring)/',
 )
 """The old package folder, then ``core/`` or ``monitoring/``. A character
-before it that can be part of a path (``python/horsies/``, ``crates/horsies/``,
+before it that can be part of a path (``clients/python/horsies/``, ``clients/rust/horsies/``,
 a URL) means that it is not a path from the repository root."""
 
 GIT_LIST_TIMEOUT_S: Final = 60
@@ -46,17 +46,22 @@ class KeptFile:
 
 KEPT_FILES: Final = (
     KeptFile(
-        'crates/horsies-core/baseline/*.sql',
+        'core/baseline/*.sql',
         'the baseline migration text; a changed byte changes its stored checksum',
     ),
     KeptFile(
-        'tests/unit/test_old_package_path_citations.py',
+        'clients/python/tests/unit/test_old_package_path_citations.py',
         'this check names the old paths',
     ),
     KeptFile(
         'tests/perf/releases/**',
         'the release comparison patches and cites the v0.7.0 checkout, whose '
         'package is at horsies/',
+    ),
+    KeptFile(
+        'clients/python/pyrightconfig.clean.json',
+        'its paths are relative to clients/python/, where the package is at '
+        'horsies/',
     ),
 )
 
@@ -153,8 +158,8 @@ def test_no_tracked_file_cites_an_old_package_path(
         f'{citation.path}:{citation.line_number}: {citation.line}' for citation in findings
     )
     assert not findings, (
-        'old package paths cited; cite python/horsies/<rest>, or '
-        f'crates/horsies-core/baseline/<file> for the old SQL folder:\n{report}'
+        'old package paths cited; cite clients/python/horsies/<rest>, or '
+        f'core/baseline/<file> for the old SQL folder:\n{report}'
     )
 
 
@@ -183,9 +188,9 @@ def test_the_pattern_finds_an_old_path(line: str) -> None:
 @pytest.mark.parametrize(
     'line',
     [
-        'see python/horsies/core/brokers/postgres.py:120',
-        'crates/horsies/src/core/workflow/context.rs',
-        'crates/horsies-core/baseline/0001_tables.sql',
+        'see clients/python/horsies/core/brokers/postgres.py:120',
+        'clients/rust/horsies/src/core/workflow/context.rs',
+        'core/baseline/0001_tables.sql',
         'from horsies.core.brokers import postgres',
         'served from horsies/web/static/ in the wheel',
         'https://github.com/owner/horsies/core/brokers/postgres.py',

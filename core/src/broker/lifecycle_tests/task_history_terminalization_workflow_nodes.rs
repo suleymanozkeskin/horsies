@@ -1,4 +1,4 @@
-//! Port of Python `tests/integration/test_task_history_terminalization_workflow_nodes.py`.
+//! Port of Python `clients/python/tests/integration/test_task_history_terminalization_workflow_nodes.py`.
 //!
 //! `TestWorkflowStateMatrix::test_paused_sweep_takes_claimed_behind_runnable_nodes_only`
 //! is `terminalization_functions::workflow_scoped_batches::pause_applies_only_under_both_live_guards`.

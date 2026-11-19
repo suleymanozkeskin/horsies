@@ -5,7 +5,7 @@ worker parent sees a spawn failure itself. Each cause here is either one that
 can clear by itself, or one that is the same on every boot of the same code
 and settings. ``ClearableBootCause`` names the first group. The worker parent
 adds the causes that it alone sees
-(``crates/horsies-core/src/worker/executor/supervisor/boot.rs``).
+(``core/src/worker/executor/supervisor/boot.rs``).
 
 This module is pure. It does no I/O and holds no state.
 """

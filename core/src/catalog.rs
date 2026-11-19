@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn broker_send_start_and_monitoring_catalogs_equal_python_s() {
-        // python/horsies/core/brokers/result_types.py
+        // clients/python/horsies/core/brokers/result_types.py
         assert_python_members::<BrokerErrorCode>(&[
             "SCHEMA_INIT_FAILED",
             "ENQUEUE_FAILED",
@@ -196,7 +196,7 @@ mod tests {
             "LISTENER_DISABLED",
             "WAIT_INSIDE_TASK",
         ]);
-        // python/horsies/core/models/task_send_types.py
+        // clients/python/horsies/core/models/task_send_types.py
         assert_python_members::<TaskSendErrorCode>(&[
             "SEND_SUPPRESSED",
             "ASYNC_CONTEXT",
@@ -206,7 +206,7 @@ mod tests {
             "IDEMPOTENCY_KEY_CONFLICT",
             "PAYLOAD_TOO_LARGE",
         ]);
-        // python/horsies/core/workflows/start_types.py
+        // clients/python/horsies/core/workflows/start_types.py
         assert_python_members::<WorkflowStartErrorCode>(&[
             "BROKER_NOT_CONFIGURED",
             "VALIDATION_FAILED",
@@ -214,12 +214,12 @@ mod tests {
             "ENQUEUE_FAILED",
             "ASYNC_CONTEXT",
         ]);
-        // python/horsies/monitoring/errors.py
+        // clients/python/horsies/monitoring/errors.py
         assert_python_members::<MonitoringQueryErrorCode>(&[
             "DB_OPERATION_FAILED",
             "HISTORY_CONTRACT_VIOLATION",
         ]);
-        // python/horsies/monitoring/task_actions.py
+        // clients/python/horsies/monitoring/task_actions.py
         assert_python_members::<TaskActionErrorCode>(&[
             "TASK_NOT_FOUND",
             "TASK_NOT_CANCELLABLE",
@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn built_in_task_code_catalogs_equal_python_s() {
-        // python/horsies/core/models/tasks.py; WORKFLOW_START_INCOMPLETE is the one
+        // clients/python/horsies/core/models/tasks.py; WORKFLOW_START_INCOMPLETE is the one
         // approved addition, last in both catalogs.
         assert_python_members::<OperationalErrorCode>(&[
             "UNHANDLED_EXCEPTION",
@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn status_and_absence_catalogs_equal_python_s() {
-        // python/horsies/core/types/status.py
+        // clients/python/horsies/core/types/status.py
         assert_python_members::<TaskStatus>(&[
             "PENDING",
             "CLAIMED",
@@ -321,7 +321,7 @@ mod tests {
             "EXPIRED",
         ]);
         assert_python_members::<TaskAttemptOutcome>(&["COMPLETED", "FAILED", "WORKER_FAILURE"]);
-        // python/horsies/core/models/workflow/enums.py
+        // clients/python/horsies/core/models/workflow/enums.py
         assert_python_members::<WorkflowStatus>(&[
             "PENDING",
             "RUNNING",
@@ -340,7 +340,7 @@ mod tests {
             "FAILED",
             "SKIPPED",
         ]);
-        // python/horsies/_catalog/history.py
+        // clients/python/horsies/_catalog/history.py
         assert_python_members::<TaskAbsenceReason>(&[
             "PREDATES_RETAINED_HISTORY",
             "WITHIN_RETAINED_HISTORY",
@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn the_handle_catalog_is_python_s() {
-        // python/horsies/core/models/workflow/handle_types.py
+        // clients/python/horsies/core/models/workflow/handle_types.py
         assert_python_members::<HandleErrorCode>(&[
             "WORKFLOW_NOT_FOUND",
             "DB_OPERATION_FAILED",
@@ -391,11 +391,11 @@ mod tests {
 
     #[test]
     fn status_terminal_members_equal_python_s() {
-        // python/horsies/core/types/status.py
+        // clients/python/horsies/core/types/status.py
         let (constant, members) = lifecycle(<TaskStatus as CodeEnum>::CATALOG);
         assert_eq!(constant, "TASK_TERMINAL_STATES");
         assert_eq!(members, ["COMPLETED", "FAILED", "CANCELLED", "EXPIRED"]);
-        // python/horsies/core/models/workflow/enums.py
+        // clients/python/horsies/core/models/workflow/enums.py
         let (constant, members) = lifecycle(<WorkflowStatus as CodeEnum>::CATALOG);
         assert_eq!(constant, "WORKFLOW_TERMINAL_STATES");
         assert_eq!(members, ["COMPLETED", "FAILED", "CANCELLED", "EXPIRED"]);

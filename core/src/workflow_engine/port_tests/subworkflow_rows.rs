@@ -1,6 +1,6 @@
 //! Sub-workflow nodes through the engine: the child start, the child links,
 //! the depth limit, start failures, and the parent advance. Python:
-//! `tests/integration/test_workflow_subworkflow.py`.
+//! `clients/python/tests/integration/test_workflow_subworkflow.py`.
 
 use std::sync::Arc;
 

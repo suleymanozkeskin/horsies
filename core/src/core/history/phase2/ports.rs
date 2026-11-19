@@ -1,7 +1,7 @@
 //! The phase-2 rules: consumption from history, the caller's plan setting,
 //! the quarantine copy and the locator keys.
 //!
-//! Python specification: `tests/integration/test_phase2_consume_plan.py` and
+//! Python specification: `clients/python/tests/integration/test_phase2_consume_plan.py` and
 //! `test_task_history_phase2_quarantine.py`. Each test runs in one
 //! transaction that it rolls back, on the shared migrated database.
 

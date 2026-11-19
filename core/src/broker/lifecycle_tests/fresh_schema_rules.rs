@@ -1,7 +1,7 @@
 //! Rules of the baseline schema that no Python baseline test checks (#881).
 //!
 //! The core installs the same SQL text as Python. Objects that Python's
-//! `tests/integration/test_baseline_install.py` already checks are not tested
+//! `clients/python/tests/integration/test_baseline_install.py` already checks are not tested
 //! again here. These tests cover the rules of the fresh-schema rows that no
 //! committed test checks: the live rerun lineage pair, the two history CHECKs,
 //! and the absence of a DEFAULT partition.

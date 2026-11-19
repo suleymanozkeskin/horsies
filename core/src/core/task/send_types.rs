@@ -1,6 +1,6 @@
 /// Typed error types for task send/schedule operations.
 ///
-/// Mirrors Python's `python/horsies/core/models/task_send_types.py`: one variant per
+/// Mirrors Python's `clients/python/horsies/core/models/task_send_types.py`: one variant per
 /// code, and the core maps every enqueue error to its variant once
 /// ([`send_error_from_enqueue`]).
 use chrono::{DateTime, Utc};
@@ -14,7 +14,7 @@ use crate::FailureCause;
 /// Categorized task send failure codes.
 ///
 /// The members are Python's, in Python's order
-/// (`python/horsies/core/models/task_send_types.py`). [`TaskSendError`] has
+/// (`clients/python/horsies/core/models/task_send_types.py`). [`TaskSendError`] has
 /// one variant per member.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_core_derive::CodeCatalog)]
 #[code_catalog(module = "task_send", base = "str_enum")]
@@ -130,7 +130,7 @@ impl TaskSendPayload {
 /// Error from task send/schedule operations: one variant per
 /// [`TaskSendErrorCode`] that the core or a client's blocking form
 /// produces, each with only the facts of its state (Python
-/// `python/horsies/core/models/task_send_types.py`).
+/// `clients/python/horsies/core/models/task_send_types.py`).
 ///
 /// The `///` lines of each variant are the docstring of its generated
 /// Python class (`horsies._catalog.task_send_errors`); Rust notes are `//`
@@ -331,7 +331,7 @@ impl TaskSendError {
 
     /// The task id and payload when the retry methods accept this error,
     /// else `None`. Python's accepted set (`TaskSendRetryable`,
-    /// `python/horsies/core/models/task_send_types.py`): an async context, an
+    /// `clients/python/horsies/core/models/task_send_types.py`): an async context, an
     /// enqueue failure and a key conflict. A refusal is never replayed,
     /// because the same input meets the same refusal.
     pub fn resend_target(&self) -> Option<ResendTarget<'_>> {
@@ -372,7 +372,7 @@ impl std::fmt::Display for TaskSendError {
 impl std::error::Error for TaskSendError {}
 
 /// The send error for a failed enqueue, by Python's rule
-/// (`python/horsies/core/task_decorator.py:1248-1310`):
+/// (`clients/python/horsies/core/task_decorator.py:1248-1310`):
 /// - a refusal of the input, the options or the call (`EnqueueContract`,
 ///   `Serialization`, `InvalidIdempotencyReservationWindow`) is
 ///   `VALIDATION_FAILED`, not retryable;

@@ -57,19 +57,19 @@ Issues = "https://github.com/suleymanozkeskin/horsies/issues"
 horsies = "horsies.core.cli:main"
 
 [tool.maturin]
-# The extension module horsies._core, built from crates/horsies-python.
-manifest-path = "crates/horsies-python/Cargo.toml"
+# The extension module horsies._core, built from clients/python/bridge.
+manifest-path = "bridge/Cargo.toml"
 module-name = "horsies._core"
-python-source = "python"
+python-source = "."
 features = ["extension-module"]
-# maturin packs every file under python/horsies/ that .gitignore does not
+# maturin packs every file under clients/python/horsies/ that .gitignore does not
 # exclude. The skill files are listed so that the package data is stated, not
 # implied. The baseline SQL files and the web UI build
-# (crates/horsies-core/webui-dist) are compiled into horsies._core; the sdist
+# (core/webui-dist) are compiled into horsies._core; the sdist
 # carries the SQL files so that a build from the sdist can compile them.
 include = [
-    { path = "python/horsies/.agents/skills/horsies/*.md", format = ["sdist", "wheel"] },
-    { path = "crates/horsies-core/baseline/*.sql", format = "sdist" },
+    { path = "horsies/.agents/skills/horsies/*.md", format = ["sdist", "wheel"] },
+    { path = "../../core/baseline/*.sql", format = "sdist" },
 ]
 
 [dependency-groups]
@@ -103,8 +103,9 @@ markers = [
 
 [tool.pyright]
 typeCheckingMode = "strict"
-# The package is in python/; pyright resolves it there with or without an install.
-extraPaths = ["python"]
+# The package is in this folder (horsies/); pyright resolves it here with or
+# without an install.
+extraPaths = ["."]
 
 
 [tool.ruff.lint]
@@ -126,11 +127,14 @@ exclude-newer = "7 days"
 # horsies._core and the files that it compiles in.
 cache-keys = [
     { file = "pyproject.toml" },
-    { file = "Cargo.toml" },
-    { file = "Cargo.lock" },
-    { file = "crates/**/Cargo.toml" },
-    { file = "crates/**/*.rs" },
-    { file = "crates/horsies-core/baseline/*.sql" },
-    { file = "crates/horsies-core/migrations/*.sql" },
-    { file = "crates/horsies-core/webui-dist/**/*" },
+    { file = "../../Cargo.toml" },
+    { file = "../../Cargo.lock" },
+    { file = "bridge/Cargo.toml" },
+    { file = "bridge/**/*.rs" },
+    { file = "../../core/Cargo.toml" },
+    { file = "../../core/derive/Cargo.toml" },
+    { file = "../../core/**/*.rs" },
+    { file = "../../core/baseline/*.sql" },
+    { file = "../../core/migrations/*.sql" },
+    { file = "../../core/webui-dist/**/*" },
 ]

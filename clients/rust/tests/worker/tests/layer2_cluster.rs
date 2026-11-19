@@ -1,5 +1,5 @@
 //! Layer 2: several workers, caps, crash recovery and soft-cap leases
-//! (Python `tests/e2e/test_layer2_cluster.py`).
+//! (Python `clients/python/tests/e2e/test_layer2_cluster.py`).
 
 use std::time::Duration;
 

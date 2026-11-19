@@ -1,6 +1,6 @@
 //! Status counts, facets, breakdown and the error-category filter.
 //!
-//! Python specification: `tests/integration/test_monitoring_queries.py`
+//! Python specification: `clients/python/tests/integration/test_monitoring_queries.py`
 //! (`TestTaskStats`, `TestTaskFacets`, `TestTaskBreakdown`,
 //! `TestErrorCategoryFilter`), baseline version on `program/0.8.0`. Each test
 //! runs on a database of its own ([`SpecDatabase`]).

@@ -1,4 +1,4 @@
-# showcase/acme/tuning.py
+# clients/python/examples/acme/tuning.py
 """Every rate and duration the showcase uses, in one file.
 
 Nothing outside this module hard-codes a probability, an interval, or a

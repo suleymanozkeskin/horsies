@@ -8,7 +8,7 @@
 //!
 //! The PgBouncer lane sets [`TRANSACTION_POOL_URL_VARIABLE`]: the apps then
 //! connect through the transaction pool, with the direct server URL as
-//! their session database (Python `tests/e2e/tasks/instance_pgbouncer.py`).
+//! their session database (Python `clients/python/tests/e2e/tasks/instance_pgbouncer.py`).
 
 use tokio_postgres::{Client, NoTls};
 use url::Url;
@@ -22,7 +22,7 @@ pub const SERVER_URL_VARIABLES: [&str; 3] = [
 ];
 
 /// The variable that sets the prefix of every database name (Python
-/// `tests/session_database.py`).
+/// `clients/python/tests/session_database.py`).
 pub const DATABASE_PREFIX_VARIABLE: &str = "HORSIES_TEST_DATABASE_PREFIX";
 
 /// The prefix when [`DATABASE_PREFIX_VARIABLE`] is unset or empty.

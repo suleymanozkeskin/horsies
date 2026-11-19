@@ -427,7 +427,7 @@ mod tests {
     }
 
     /// Python `decode_value` on the ok slot: an engine key at any depth, or a value deeper than 200 levels,
-    /// does not read (`tests/unit/test_typed_codec.py:474-610`).
+    /// does not read (`clients/python/tests/unit/test_typed_codec.py:474-610`).
     #[test]
     fn an_ok_slot_follows_the_user_value_rules() {
         for text in [

@@ -1,19 +1,19 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/horsies",
-    "crates/horsies-codegen",
-    "crates/horsies-core",
-    "crates/horsies-core-derive",
-    "crates/horsies-macros",
-    "crates/horsies-python",
-    "rust/examples",
-    "rust/showcase",
-    "rust/tests/docs-check",
-    "rust/tests/parity",
-    "rust/tests/support",
-    "rust/tests/worker",
-    "rust/tests/queue_mismatch",
+    "clients/rust/horsies",
+    "clients/python/codegen",
+    "core",
+    "core/derive",
+    "clients/rust/macros",
+    "clients/python/bridge",
+    "clients/rust/examples",
+    "clients/rust/examples/showcase",
+    "clients/rust/tests/docs-check",
+    "clients/rust/tests/parity",
+    "clients/rust/tests/support",
+    "clients/rust/tests/worker",
+    "clients/rust/tests/queue_mismatch",
 ]
 
 [workspace.lints.rust]

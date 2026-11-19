@@ -1,4 +1,4 @@
-# showcase/acme/settings.py
+# clients/python/examples/acme/settings.py
 """Database URL resolution for the Acme Clothing showcase.
 
 Acme Clothing owns its own database (``acme_demo`` by default) so a demo run

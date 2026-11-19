@@ -570,7 +570,7 @@ pub struct BootMemoryLog {
 }
 
 /// The records that the worker logs for the memory fit of its profile
-/// `name`, with Python's levels and texts (`python/horsies/core/cli.py:617-688`):
+/// `name`, with Python's levels and texts (`clients/python/horsies/core/cli.py:617-688`):
 /// an unreadable cgroup is a warning; then the comparison: a sum above the
 /// usable memory or an unreadable memory is a warning, a fitting sum and no
 /// sum are info. Pure.

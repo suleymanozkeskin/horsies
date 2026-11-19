@@ -8,7 +8,7 @@ from typing import Final
 
 import horsies._core as _core
 
-_REPOSITORY: Final = Path(__file__).resolve().parents[2]
+_REPOSITORY: Final = Path(__file__).resolve().parents[4]
 _SCHEMA_PAGE: Final = (
     _REPOSITORY
     / 'website'

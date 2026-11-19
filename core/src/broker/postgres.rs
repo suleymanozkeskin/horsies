@@ -425,7 +425,7 @@ pub enum PrestartExpiry {
 // self-incrementing removes the snapshot from the written value entirely.
 //
 // The written row is the retry row of the baseline retry write
-// (`crates/horsies-core/baseline/0004_lifecycle_functions.sql:1479-1496`):
+// (`core/baseline/0004_lifecycle_functions.sql:1479-1496`):
 // PENDING, retry_count + 1, enqueued_at = next_retry_at, and every claim and
 // run field cleared. The retry time is `$2`, or the database clock when `$2`
 // is NULL (no delay): `enqueued_at` is NOT NULL in the baseline
@@ -470,9 +470,9 @@ static REQUEUE: TypedStatement = TypedStatement::new(
 
 // A live row holds no result and no failed reason: the baseline keeps them
 // with the terminal record in history (`horsies_tasks` in
-// `crates/horsies-core/baseline/0001_tables.sql`). The live reads below select
+// `core/baseline/0001_tables.sql`). The live reads below select
 // `NULL` for them, as Python's live reads do (`GET_TASK_STATUS_NAME_SQL`,
-// `python/horsies/core/brokers/postgres.py:942-948`; `get_task_info_async`,
+// `clients/python/horsies/core/brokers/postgres.py:942-948`; `get_task_info_async`,
 // `:3659-3672`).
 
 const GET_RAW_RESULT_PROBE_SQL: &str = "\
@@ -1901,7 +1901,7 @@ impl PostgresBroker {
     /// Subscribe a result wait on the broker's listener: a wake for this task
     /// id on `task_done`. A broker with no listener, or a refused
     /// subscription, makes the wait poll instead, as Python
-    /// (`python/horsies/core/brokers/postgres.py:3276-3281`).
+    /// (`clients/python/horsies/core/brokers/postgres.py:3276-3281`).
     async fn result_wait_mode(&self, task_id: Uuid) -> ResultWaitMode {
         let filter = PayloadFilter::Payload(task_id.to_string());
         match self
@@ -2275,7 +2275,7 @@ impl PostgresBroker {
     /// pools keep a transaction, and the session URL keeps session state (a
     /// LISTEN on it receives a NOTIFY). Runs at every worker boot, with or
     /// without PgBouncer mode (Python `validate_worker_database_paths`,
-    /// `python/horsies/core/brokers/postgres.py:1383-1412`).
+    /// `clients/python/horsies/core/brokers/postgres.py:1383-1412`).
     ///
     /// Steps:
     /// 1. `SELECT 1` on the session core pool when the session URL differs
@@ -2619,7 +2619,7 @@ mod rerun_family_error_tests {
 }
 
 /// The task info code of a read error, by Python's rule
-/// (`python/horsies/core/brokers/postgres.py:4889-4904`, `:4973-4977`): only a
+/// (`clients/python/horsies/core/brokers/postgres.py:4889-4904`, `:4973-4977`): only a
 /// stored result that fails its check is `INVALID_JSON_PAYLOAD`; a status or
 /// an attempt snapshot that does not decode, and a database failure, are
 /// `TASK_INFO_QUERY_FAILED`, retryable by the driver classification. A
@@ -2875,7 +2875,7 @@ fn history_result_text(detail: &HistoryTaskDetail) -> Result<Option<String>, Bro
 /// decode: a client reads it with the task's types. A stored result that
 /// fails the check is `INVALID_JSON_PAYLOAD`; a status or an attempt snapshot
 /// that does not decode is `TASK_INFO_QUERY_FAILED`, not retryable (Python
-/// `python/horsies/core/brokers/postgres.py:4889-4904`, `:4973-4977`).
+/// `clients/python/horsies/core/brokers/postgres.py:4889-4904`, `:4973-4977`).
 fn history_task_info(
     detail: HistoryTaskDetail,
     include_result: bool,
@@ -3006,7 +3006,7 @@ fn monitoring_query_error(operation: &str, error: BrokerError) -> BrokerOperatio
 }
 
 /// The error of a refused reply subscription of `ping_workers`, as Python
-/// (`python/horsies/core/brokers/postgres.py:2821-2865`): a broker with no listener
+/// (`clients/python/horsies/core/brokers/postgres.py:2821-2865`): a broker with no listener
 /// is `LISTENER_DISABLED`, not retryable; any other refusal is
 /// `WORKER_PING_FAILED` with the listener's retryable flag.
 fn worker_ping_subscribe_error(error: ListenError) -> BrokerOperationError {
@@ -3082,7 +3082,7 @@ fn decode_pong(
 use crate::worker::retry::stored_max_retries;
 
 /// The `max_retries` that enqueue stores, by Python's rule
-/// (`python/horsies/core/codec/task_options.py`, `stored_max_retries`): no
+/// (`clients/python/horsies/core/codec/task_options.py`, `stored_max_retries`): no
 /// options (`None`) and no `retry_policy` store 0; a policy stores its
 /// `max_retries`. The options are read with the reader of the dispatch
 /// ([`stored_max_retries`]), so a text that the worker would refuse is refused
@@ -3112,11 +3112,11 @@ pub(crate) const RESULT_WAIT_REPOLL: Duration = Duration::from_secs(30);
 
 /// Repoll interval of a task result wait whose listener works: a lost
 /// notification costs at most this long (Python's 5 s,
-/// `python/horsies/core/brokers/postgres.py:3285`).
+/// `clients/python/horsies/core/brokers/postgres.py:3285`).
 pub(crate) const TASK_RESULT_REPOLL_SUBSCRIBED: Duration = Duration::from_secs(5);
 
 /// Repoll interval of a task result wait with no listener (Python's 0.2 s,
-/// `python/horsies/core/brokers/postgres.py:3285`).
+/// `clients/python/horsies/core/brokers/postgres.py:3285`).
 pub(crate) const TASK_RESULT_REPOLL_POLLING: Duration = Duration::from_millis(200);
 
 /// How a task result wait learns that the task may have ended.
@@ -3963,7 +3963,7 @@ mod terminal_at_stamp_tests {
     //! clock in the same statement; a live transition keeps the row live and
     //! writes no history row. The baseline live table has no `terminal_at`
     //! column, and the history column is NOT NULL
-    //! (`crates/horsies-core/baseline/0001_tables.sql`). One pin per status
+    //! (`core/baseline/0001_tables.sql`). One pin per status
     //! family; the writer-inventory scan (tests/writer_inventory.rs) covers
     //! the rest structurally.
     use super::*;
@@ -4201,7 +4201,7 @@ mod terminal_at_stamp_tests {
     /// A requeue is a live transition: the row stays live as PENDING, writes
     /// no history row, counts the retry, and clears every claim and run
     /// field, as the baseline retry write
-    /// (`crates/horsies-core/baseline/0004_lifecycle_functions.sql:1479-1496`).
+    /// (`core/baseline/0004_lifecycle_functions.sql:1479-1496`).
     #[tokio::test]
     #[serial]
     async fn requeue_keeps_the_row_live_and_writes_no_history_row() {
@@ -4428,7 +4428,7 @@ mod broker_operation_error_tests {
     /// `close` returns the core pools to `Idle`, and the next operation opens
     /// new pools (`HandleState::Idle`, `broker/pools.rs`), as Python's broker
     /// stays usable after `close_async`
-    /// (`python/horsies/core/brokers/postgres.py:2403-2411`). A ping after a close
+    /// (`clients/python/horsies/core/brokers/postgres.py:2403-2411`). A ping after a close
     /// meets the server: here a refused connection, which is retryable. A
     /// checkout on a closed pool (`PoolClosed`) stays not retryable
     /// (`a_monitoring_read_failure_carries_the_driver_classification`).
@@ -4524,10 +4524,10 @@ mod connect_tests {
 
 #[cfg(test)]
 mod result_wait_tests {
-    //! The result wait: Python's limit bound (`python/horsies/core/utils/wait_timeout.py`)
+    //! The result wait: Python's limit bound (`clients/python/horsies/core/utils/wait_timeout.py`)
     //! before any read, Python's repoll intervals, a read at once after a
     //! listener gap, and polling with no listener or when the listener stops
-    //! (`python/horsies/core/brokers/postgres.py:3265-3285`).
+    //! (`clients/python/horsies/core/brokers/postgres.py:3265-3285`).
     use super::*;
     use crate::broker::result_types::BrokerErrorCode;
     use crate::broker::wait_limit::MAX_WAIT_LIMIT_MS;
@@ -5305,7 +5305,7 @@ mod client_family_tests {
 
 #[cfg(test)]
 mod task_info_code_tests {
-    //! Python's task info codes (`python/horsies/core/brokers/postgres.py:4889-4904`,
+    //! Python's task info codes (`clients/python/horsies/core/brokers/postgres.py:4889-4904`,
     //! `:4973-4977`): only a stored result that fails its check is
     //! `INVALID_JSON_PAYLOAD`.
     use super::*;

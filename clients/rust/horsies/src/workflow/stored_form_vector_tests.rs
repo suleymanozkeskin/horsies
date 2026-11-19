@@ -1,5 +1,5 @@
 //! The workflow spec data vectors
-//! (`crates/horsies-core/tests/fixtures/stored_forms/workflow_spec_data.json`)
+//! (`core/tests/fixtures/stored_forms/workflow_spec_data.json`)
 //! through the client's DSL and `spec_data_text`: a spec built with the DSL
 //! gives Python's text, or the vector's recorded `rust_drift`. The vector
 //! `members_of_every_kind` (args_from, workflow context, encoded options, a

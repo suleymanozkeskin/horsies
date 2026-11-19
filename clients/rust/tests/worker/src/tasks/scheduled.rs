@@ -1,4 +1,4 @@
-//! Tasks of the scheduler instance (Python `tests/e2e/tasks/scheduler.py`).
+//! Tasks of the scheduler instance (Python `clients/python/tests/e2e/tasks/scheduler.py`).
 
 use std::convert::Infallible;
 

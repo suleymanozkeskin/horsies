@@ -1,7 +1,7 @@
 //! Port of the Python history detail test of monitoring: the end stamp of a
 //! moved task follows its status.
 //!
-//! Python specification: `tests/integration/test_monitoring_history_detail.py`
+//! Python specification: `clients/python/tests/integration/test_monitoring_history_detail.py`
 //! (`TestTaskDetailFromHistory.test_moved_task_detail_resolves_with_attempts`).
 //! The FAILED case and the attempts are in
 //! `task_detail_uses_live_attempts_then_digest_verified_history`.

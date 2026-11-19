@@ -12,7 +12,7 @@ name = "horsies-test-worker"
 path = "src/main.rs"
 
 [dependencies]
-horsies = { path = "../../../crates/horsies" }
+horsies = { path = "../../horsies" }
 horsies-test-support = { path = "../support" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 serde = { version = "1", features = ["derive"] }

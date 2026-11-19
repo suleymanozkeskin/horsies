@@ -406,7 +406,7 @@ fn decode_claimed_row(row: ClaimWireRow) -> Result<ClaimedRow, String> {
     let required = |name: &str| format!("a CLAIMED row of horsies_claim has no {name}");
     let id = row.id.ok_or_else(|| required("id"))?;
     let execution_text = row.execution.ok_or_else(|| required("execution"))?;
-    // Python `parse_row_class` (`python/horsies/core/worker/row_class.py:75-88`):
+    // Python `parse_row_class` (`clients/python/horsies/core/worker/row_class.py:75-88`):
     // the refusal names the task and the stored value.
     let execution = Execution::from_stored(&execution_text).ok_or_else(|| {
         format!(

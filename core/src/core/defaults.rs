@@ -1,6 +1,6 @@
 /// Shared default constants for the horsies library.
 ///
-/// Mirrors Python's `python/horsies/core/defaults.py`.
+/// Mirrors Python's `clients/python/horsies/core/defaults.py`.
 /// Default claim lease duration in milliseconds.
 /// Applied when `claim_lease_ms` is not explicitly configured.
 /// Bounded so a crashed worker's claims become reclaimable within this window.

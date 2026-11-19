@@ -1,7 +1,7 @@
 //! Seeds, databases and engine drivers that the workflow engine ports share.
 //!
 //! Every seed names every column of its baseline table
-//! (`crates/horsies-core/baseline/0001_tables.sql`), and the two node columns that
+//! (`core/baseline/0001_tables.sql`), and the two node columns that
 //! #788 adds (`sub_workflow_params`, `downstream_subworkflow`). The node
 //! `error` column is not named: the baseline drops it (decision "The node
 //! `error` column", rule-following row 13).
@@ -68,11 +68,11 @@ pub(super) const PORT_QUEUE: &str = "port_workflow_q";
 /// uses `[]` too):
 /// - stored on a promoted task node, they fail that node alone with
 ///   `WORKER_SERIALIZATION_ERROR` (Python `_build_enqueued_task_params`,
-///   `python/horsies/core/workflows/engine.py:798-805`; the baseline
+///   `clients/python/horsies/core/workflows/engine.py:798-805`; the baseline
 ///   `horsies_workflow_task_options_refusal`);
 /// - on the task of a child node that has a `good_until`, the merge of the
 ///   deadline into them raises at each child start (Python
-///   `_child_task_options_json`, `python/horsies/core/workflows/engine.py:425-475`).
+///   `_child_task_options_json`, `clients/python/horsies/core/workflows/engine.py:425-475`).
 pub(super) const POISON_TASK_OPTIONS: &str = "[]";
 
 /// The process facts that the start write (`horsies_start_attempt`) records

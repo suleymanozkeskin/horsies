@@ -36,7 +36,7 @@ impl StaleMinutes {
 }
 
 /// Why a stale threshold is refused, in Python's terms
-/// (`_stale_threshold_minutes`, `python/horsies/core/brokers/postgres.py`).
+/// (`_stale_threshold_minutes`, `clients/python/horsies/core/brokers/postgres.py`).
 /// A client that takes untyped values (Python) also refuses a `bool` and a
 /// value that is not an integer with it.
 #[derive(Debug, Clone, PartialEq, Eq)]

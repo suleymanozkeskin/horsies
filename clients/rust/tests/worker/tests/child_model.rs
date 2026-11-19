@@ -1,7 +1,7 @@
 //! The child model of a Rust worker: each execution class runs its bodies
 //! in children of the worker binary, and a timeout, a blocked runtime, a
 //! crash or a drain ends one child, never the worker (Python
-//! `tests/e2e/test_shared_async_tasks.py`, `test_shared_thread_tasks.py`,
+//! `clients/python/tests/e2e/test_shared_async_tasks.py`, `test_shared_thread_tasks.py`,
 //! `test_task_timeout.py`).
 //!
 //! Four tests show that the child model closes the defects of the old

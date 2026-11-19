@@ -1,4 +1,4 @@
-//! The refusals of Python's `loads_json` (`python/horsies/core/codec/json_io.py`),
+//! The refusals of Python's `loads_json` (`clients/python/horsies/core/codec/json_io.py`),
 //! with Python's texts, for a stored text whose refusal names them.
 //!
 //! `loads_json` runs `json.loads` of CPython 3.13 (its C scanner) with three

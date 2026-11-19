@@ -1,7 +1,7 @@
-# showcase/acme/scenarios/chaos.py
+# clients/python/examples/acme/scenarios/chaos.py
 """Kill things and watch them come back.
 
-    uv run python -m showcase.acme.scenarios chaos
+    uv run python -m examples.acme.scenarios chaos
 
 Two kinds of crash, one automatic and one yours to cause.
 
@@ -70,10 +70,10 @@ def run() -> int:
 
     heading('the kill -9 drill')
     bullet('1. start steady in another terminal and let a few orders get going')
-    bullet('2. find the worker:   pgrep -f "horsies worker showcase.acme"')
+    bullet('2. find the worker:   pgrep -f "horsies worker examples.acme"')
     bullet('3. kill it outright:  kill -9 <pid>')
     bullet('4. watch the workers view: the worker stops reporting and goes stale')
-    bullet('5. restart it:        uv run horsies worker showcase.acme.app:app --profile default')
+    bullet('5. restart it:        uv run horsies worker examples.acme.app:app --profile default')
     bullet('6. CLAIMED tasks are requeued — user code never ran, so it is safe')
     bullet('7. RUNNING tasks are recovered against their retry policies')
     bullet(f'{WEB_BASE_URL}/workers   worker health, CPU and memory history')

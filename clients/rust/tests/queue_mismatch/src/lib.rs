@@ -1,5 +1,5 @@
 //! The configurations and tasks of the queue guard scenarios (Python
-//! `tests/unit/test_queue_mismatch_guard.py`).
+//! `clients/python/tests/unit/test_queue_mismatch_guard.py`).
 //!
 //! An app is built with no I/O, so the scenarios that only register and
 //! check use a URL of a server that does not exist. Scenario 5 connects to

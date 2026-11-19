@@ -1,4 +1,4 @@
-# showcase/acme/workflows/daily_report.py
+# clients/python/examples/acme/workflows/daily_report.py
 """The same DAG idea in the other style: `app.workflow()` with `.node()()`.
 
 Every other workflow here is class-based. This one is functional, because the

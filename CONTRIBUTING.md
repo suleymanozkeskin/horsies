@@ -6,10 +6,10 @@ A transition of `horsies_tasks.status` to `COMPLETED`, `FAILED`, `CANCELLED`,
 or `EXPIRED` must use the lifecycle boundary:
 
 1. Define or extend an exhaustive command in
-   `python/horsies/core/lifecycle/commands.py`.
-2. Execute it through `python/horsies/core/lifecycle/persistence.py`.
+   `clients/python/horsies/core/lifecycle/commands.py`.
+2. Execute it through `clients/python/horsies/core/lifecycle/persistence.py`.
 3. Define the database mutation only in the baseline SQL functions
-   (`crates/horsies-core/baseline/`).
+   (`core/baseline/`).
 4. Return a typed outcome. Expected race outcomes are data, not exceptions or
    row-count interpretation.
 5. Add the operation to the lifecycle matrix and exercise its applied,
@@ -19,6 +19,6 @@ Do not add a direct terminal-status update to a broker, worker, monitoring,
 workflow, or model module. Callers own transaction composition for attempt and
 workflow-node writes; terminalization functions never commit.
 
-`tests/unit/test_terminal_writer_inventory.py` enforces the database-program
-boundary. `tests/integration/test_terminal_writer_characterization.py`
+`clients/python/tests/unit/test_terminal_writer_inventory.py` enforces the database-program
+boundary. `clients/python/tests/integration/test_terminal_writer_characterization.py`
 executes the sixteen original transition contracts against PostgreSQL.

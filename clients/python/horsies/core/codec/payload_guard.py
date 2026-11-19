@@ -1,4 +1,4 @@
-# python/horsies/core/codec/payload_guard.py
+# clients/python/horsies/core/codec/payload_guard.py
 """Payload-size guardrail applied at the encode boundaries.
 
 Producers pass the already-serialized JSON text. The size is the number of

@@ -1,4 +1,4 @@
-//! The app of the Rust end-to-end tests (Python `tests/e2e/tasks/`).
+//! The app of the Rust end-to-end tests (Python `clients/python/tests/e2e/tasks/`).
 //!
 //! The same crate is the test binary's library and the tests' harness:
 //!

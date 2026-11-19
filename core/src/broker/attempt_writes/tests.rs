@@ -1,5 +1,5 @@
 //! The two one-statement attempt writers: the cases of Python
-//! `tests/integration/test_failed_attempt_finish.py`, and the fence of a
+//! `clients/python/tests/integration/test_failed_attempt_finish.py`, and the fence of a
 //! stale claim generation.
 
 use chrono::{DateTime, Duration, Utc};

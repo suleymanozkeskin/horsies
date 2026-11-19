@@ -1,4 +1,4 @@
-//! Database tests of the baseline SQL (`crates/horsies-core/baseline/`).
+//! Database tests of the baseline SQL (`core/baseline/`).
 //!
 //! - The case files are in `cases/`. The tests compile them in with
 //!   `include_str!`, so the files ship with the crate.

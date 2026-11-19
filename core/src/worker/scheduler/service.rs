@@ -1,4 +1,4 @@
-//! The scheduler service (Python `python/horsies/core/scheduler/service.py`,
+//! The scheduler service (Python `clients/python/horsies/core/scheduler/service.py`,
 //! `Scheduler`): the start, the tick, and the fire of each due schedule
 //! through `horsies_fire_schedule` on the main core pool of the broker.
 //!
@@ -492,7 +492,7 @@ fn manifest_command(send: &ScheduleSendManifest) -> Result<SendCommand, BrokerEr
 
 /// Store the state row of each enabled schedule that is new or whose pattern
 /// or timezone changed, in two statements on `pool` (Python `_initialize_schedules`,
-/// `python/horsies/core/scheduler/service.py`). `configured_names` holds the
+/// `clients/python/horsies/core/scheduler/service.py`). `configured_names` holds the
 /// name of every configured schedule, disabled ones included:
 ///
 /// 1. One read of every row's name and digest, with the database time.

@@ -1,7 +1,7 @@
-# showcase/acme/scenarios/__main__.py
+# clients/python/examples/acme/scenarios/__main__.py
 """Scenario dispatch.
 
-    uv run python -m showcase.acme.scenarios <name>
+    uv run python -m examples.acme.scenarios <name>
 
 Run from the repository root, the same directory the worker, scheduler, and
 web processes are started from.
@@ -44,7 +44,7 @@ SCENARIOS: Final[dict[str, Callable[[], int]]] = {
 def main() -> int:
     """Parse the scenario name and run it. Returns a process exit code."""
     parser = argparse.ArgumentParser(
-        prog='python -m showcase.acme.scenarios',
+        prog='python -m examples.acme.scenarios',
         description='Acme Clothing demo scenarios.',
     )
     parser.add_argument(

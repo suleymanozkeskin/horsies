@@ -1,5 +1,5 @@
 //! Marker files: how a task in a worker child and the test that sent it
-//! coordinate across processes (Python `tests/dualrun/apps/whole_run_app.py`,
+//! coordinate across processes (Python `tests/parity/snapshot/apps/whole_run_app.py`,
 //! `_first_call`, `_wait_for_marker`).
 //!
 //! The test creates the directory and gives its path to the worker in

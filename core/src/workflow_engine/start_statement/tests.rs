@@ -144,7 +144,7 @@ fn a_task_chain_gives_one_workflow_row_and_one_row_per_node() {
 }
 
 /// A node defined with an empty `workflow_ctx_from` takes no context: its row stores NULL, as for
-/// no list (Python `_graph_columns`, `python/horsies/core/workflows/child_build.py:479-485`). The task
+/// no list (Python `_graph_columns`, `clients/python/horsies/core/workflows/child_build.py:479-485`). The task
 /// input of the baseline mint adds the context member for any stored array
 /// (`horsies_workflow_task_input`).
 #[test]

@@ -43,7 +43,7 @@ import pytest
 
 pytestmark = [pytest.mark.unit]
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[4]
 ROOT_CHANGELOG = _REPO_ROOT / 'CHANGELOG.md'
 SITE_CHANGELOG = (
     _REPO_ROOT / 'website' / 'src' / 'content' / 'docs' / 'changelog.md'

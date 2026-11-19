@@ -1,5 +1,5 @@
 //! The tasks of the end-to-end app, and their registration per instance
-//! (Python `tests/e2e/tasks/`).
+//! (Python `clients/python/tests/e2e/tasks/`).
 //!
 //! The test process and every process of the worker binary register the
 //! same tasks for one instance, so the stored input of a send decodes in

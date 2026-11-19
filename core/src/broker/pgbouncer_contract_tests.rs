@@ -1,9 +1,9 @@
 //! PgBouncer contracts of the broker, against the fixture of
-//! `tests/fixtures/pgbouncer/` (PostgreSQL direct, and PgBouncer in
+//! `clients/python/tests/fixtures/pgbouncer/` (PostgreSQL direct, and PgBouncer in
 //! transaction, session and statement mode, each pool with
 //! `max_prepared_statements = 0`).
 //!
-//! Python specification: `tests/integration/test_pgbouncer_contract.py` and
+//! Python specification: `clients/python/tests/integration/test_pgbouncer_contract.py` and
 //! `test_pgbouncer_prepared_statements.py` (baseline versions on
 //! `program/0.8.0`).
 //!
@@ -11,12 +11,12 @@
 //! `HORSIES_PGBOUNCER_TEST=1`:
 //!
 //! ```text
-//! docker compose -f tests/fixtures/pgbouncer/compose.yaml up -d --wait
+//! docker compose -f clients/python/tests/fixtures/pgbouncer/compose.yaml up -d --wait
 //! HORSIES_PGBOUNCER_TEST=1 cargo test -p horsies-core pgbouncer_contract -- --ignored --test-threads=1
 //! ```
 //!
 //! The URLs come from the same variables as Python's
-//! `tests/pgbouncer_utils.py` (`HORSIES_TEST_DATABASE_URL_DIRECT`,
+//! `clients/python/tests/pgbouncer_utils.py` (`HORSIES_TEST_DATABASE_URL_DIRECT`,
 //! `..._TRANSACTION`, `..._SESSION`, `..._STATEMENT`), with its defaults.
 //! Each test creates a database of its own through the direct URL; every
 //! PgBouncer pool routes any database name to the server.
@@ -86,7 +86,7 @@ fn require_fixture() {
     assert_eq!(
         std::env::var("HORSIES_PGBOUNCER_TEST").as_deref(),
         Ok("1"),
-        "the PgBouncer contract tests need the fixture of tests/fixtures/pgbouncer \
+        "the PgBouncer contract tests need the fixture of clients/python/tests/fixtures/pgbouncer \
          and HORSIES_PGBOUNCER_TEST=1"
     );
 }
@@ -232,7 +232,7 @@ async fn direct_pool(url: &str) -> TestPool {
 /// pool that tracks no prepared statements.
 #[tokio::test]
 #[serial]
-#[ignore = "needs the PgBouncer fixture of tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
+#[ignore = "needs the PgBouncer fixture of clients/python/tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
 async fn a_transaction_pool_with_a_direct_session_installs_checks_locks_and_enqueues() {
     let urls = PgbouncerUrls::create("transaction").await;
     let broker = PostgresBroker::connect_with(
@@ -317,7 +317,7 @@ async fn a_transaction_pool_with_a_direct_session_installs_checks_locks_and_enqu
 /// the refusal is not retryable.
 #[tokio::test]
 #[serial]
-#[ignore = "needs the PgBouncer fixture of tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
+#[ignore = "needs the PgBouncer fixture of clients/python/tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
 async fn a_session_url_on_the_transaction_pool_fails_the_worker_session_check() {
     let urls = PgbouncerUrls::create("bad_session").await;
     let session_url = with_query_parameter(
@@ -349,7 +349,7 @@ async fn a_session_url_on_the_transaction_pool_fails_the_worker_session_check() 
 /// takes an enqueue and delivers a NOTIFY to a LISTEN.
 #[tokio::test]
 #[serial]
-#[ignore = "needs the PgBouncer fixture of tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
+#[ignore = "needs the PgBouncer fixture of clients/python/tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
 async fn a_session_pooled_url_installs_enqueues_and_delivers_a_notify() {
     let urls = PgbouncerUrls::create("session").await;
     let broker = PostgresBroker::connect_with(
@@ -389,7 +389,7 @@ async fn a_session_pooled_url_installs_enqueues_and_delivers_a_notify() {
 /// decisions": a statement-pooled URL answers `retryable = false`).
 #[tokio::test]
 #[serial]
-#[ignore = "needs the PgBouncer fixture of tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
+#[ignore = "needs the PgBouncer fixture of clients/python/tests/fixtures/pgbouncer and HORSIES_PGBOUNCER_TEST=1"]
 async fn a_statement_pooled_runtime_url_fails_the_send_as_not_retryable() {
     let urls = PgbouncerUrls::create("statement").await;
     let broker = PostgresBroker::connect_with(

@@ -1,4 +1,4 @@
-//! Retry tasks (Python `tests/e2e/tasks/retry.py`).
+//! Retry tasks (Python `clients/python/tests/e2e/tasks/retry.py`).
 
 use horsies::{task, RetryPolicy, TaskError, UserErrorCode};
 

@@ -234,7 +234,7 @@ struct LiveEntry {
 impl PostgresBroker {
     /// The fleet check: for each (queue, class) with `PENDING` rows, whether
     /// a live worker serves it (Python `get_class_coverage_async`,
-    /// `python/horsies/core/brokers/postgres.py:3102-3133`).
+    /// `clients/python/horsies/core/brokers/postgres.py:3102-3133`).
     ///
     /// A worker is live while its latest snapshot is at most
     /// `WORKER_STATE_LIVE_WINDOW_S` old. It serves a (queue, class) when the
@@ -261,7 +261,7 @@ impl PostgresBroker {
     /// The class report: pending streams with the wait of their oldest due
     /// row and their coverage, and the budget load of each live worker
     /// (Python `get_class_report_async`,
-    /// `python/horsies/core/brokers/postgres.py:3135-3162`).
+    /// `clients/python/horsies/core/brokers/postgres.py:3135-3162`).
     ///
     /// One autocommit statement on the main core pool; reads only.
     ///

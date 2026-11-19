@@ -1,6 +1,6 @@
 //! The profile fit at worker boot, read from the log of a worker that runs
-//! (Python `tests/unit/test_cli.py::TestBootConnectionFit`, the order of the
-//! limit read and the start of the worker; `python/horsies/core/cli.py:886` and
+//! (Python `clients/python/tests/unit/test_cli.py::TestBootConnectionFit`, the order of the
+//! limit read and the start of the worker; `clients/python/horsies/core/cli.py:886` and
 //! `:955`, the memory fit before the schema step and the connection fit after
 //! it).
 

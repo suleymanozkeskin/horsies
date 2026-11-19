@@ -1,7 +1,7 @@
 //! The class budgets of a worker state snapshot: the `class_capacity` column.
 //!
 //! Python reference: `ClassBudget`, `ClassBudgets` and `parse_class_capacity`
-//! (`python/horsies/core/models/health.py:261-395`).
+//! (`clients/python/horsies/core/models/health.py:261-395`).
 //!
 //! This module is pure. It does no I/O.
 
@@ -61,7 +61,7 @@ fn unreadable(reason: impl Into<String>) -> ClassCapacityUnreadable {
 }
 
 /// The class budgets of a stored `class_capacity` value (Python
-/// `parse_class_capacity`, `python/horsies/core/models/health.py:298-329`).
+/// `parse_class_capacity`, `clients/python/horsies/core/models/health.py:298-329`).
 ///
 /// Each key must be an [`Execution`] name, and each entry an object with a
 /// `capacity` (a whole number from 0 to `2^63 - 1`) and a `serves` array of
@@ -91,7 +91,7 @@ pub fn parse_class_capacity(value: &Value) -> Result<ClassBudgets, ClassCapacity
 }
 
 /// One entry (Python `_parse_class_budget`,
-/// `python/horsies/core/models/health.py:332-368`), checked in Python's order.
+/// `clients/python/horsies/core/models/health.py:332-368`), checked in Python's order.
 fn class_budget(name: &str, value: &Value) -> Result<ClassBudget, ClassCapacityUnreadable> {
     let budget = Execution::from_stored(name)
         .ok_or_else(|| unreadable(format!("budget '{name}' is not an execution class")))?;
@@ -118,7 +118,7 @@ fn class_budget(name: &str, value: &Value) -> Result<ClassBudget, ClassCapacityU
 }
 
 /// The distinct classes of a `serves` array, in [`Execution`] order (Python
-/// `_served_classes`, `python/horsies/core/models/health.py:371-386`).
+/// `_served_classes`, `clients/python/horsies/core/models/health.py:371-386`).
 fn served_classes(fields: &Map<String, Value>) -> Result<Vec<Execution>, ClassCapacityUnreadable> {
     let Some(Value::Array(entries)) = fields.get("serves") else {
         return Err(unreadable("serves is not a JSON array"));
@@ -151,7 +151,7 @@ fn served_class(entry: &Value) -> Result<Execution, ClassCapacityUnreadable> {
 #[cfg(test)]
 mod tests {
     //! One test per outcome of `parse_class_capacity`. Python reference:
-    //! `tests/unit/test_health_models.py::TestClassCapacity`.
+    //! `clients/python/tests/unit/test_health_models.py::TestClassCapacity`.
     use super::*;
     use serde_json::json;
 

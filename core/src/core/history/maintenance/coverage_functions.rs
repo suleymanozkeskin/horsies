@@ -1,5 +1,5 @@
 //! Clients of the coverage functions of
-//! `crates/horsies-core/baseline/0008_history_maintenance_functions.sql`: the
+//! `core/baseline/0008_history_maintenance_functions.sql`: the
 //! probe (`horsies_coverage_probe`), the class registration
 //! (`horsies_register_retention_classes`) and the leaf creation
 //! (`horsies_create_history_leaf`, `horsies_create_heartbeat_leaf`).

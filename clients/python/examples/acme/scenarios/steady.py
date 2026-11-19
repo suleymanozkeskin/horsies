@@ -1,7 +1,7 @@
-# showcase/acme/scenarios/steady.py
+# clients/python/examples/acme/scenarios/steady.py
 """Place orders on a retail-day rhythm until Ctrl-C — the "watch the dashboard" mode.
 
-    uv run python -m showcase.acme.scenarios steady
+    uv run python -m examples.acme.scenarios steady
 
 Each order starts one `order_fulfillment` run and two standalone sends. Every
 failure the demo can produce appears on its own within a few minutes: retried

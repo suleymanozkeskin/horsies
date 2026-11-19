@@ -1,4 +1,4 @@
-# showcase/acme/workflows/seasonal_markdown.py
+# clients/python/examples/acme/workflows/seasonal_markdown.py
 """Mark a whole range down, then measure what it did.
 
     update_price[sku 1..n]  -->  sales_rollup

@@ -1,8 +1,8 @@
 """Python's side of the shared golden vectors of the stored JSON forms.
 
-``crates/horsies-core/tests/fixtures/stored_forms/`` holds one file per stored
+``core/tests/fixtures/stored_forms/`` holds one file per stored
 form. Each vector is a value and the exact text that Python stores for it. The
-Python tests (``tests/unit/test_stored_form_*.py``) encode each value to the
+Python tests (``tests/test_stored_form_*.py``) encode each value to the
 text and decode the text to the value; the core and the Rust client test the
 same files. The folder's ``README.md`` names the encoder and the decoder of
 each form in each client.
@@ -66,8 +66,7 @@ from horsies.core.types.json_value import JsonValue
 
 VECTORS_DIR: Final = (
     Path(__file__).resolve().parents[1]
-    / 'crates'
-    / 'horsies-core'
+    / 'core'
     / 'tests'
     / 'fixtures'
     / 'stored_forms'

@@ -1,4 +1,4 @@
-# showcase/acme/tasks/payments.py
+# clients/python/examples/acme/tasks/payments.py
 """Card authorization, capture, and refund against the simulated provider.
 
 Two very different failures live here. `PSP_UNAVAILABLE` is operational: the

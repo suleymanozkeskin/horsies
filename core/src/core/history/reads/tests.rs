@@ -1062,7 +1062,7 @@ fn stored_ok(record: &crate::broker::RawResultRecord) -> serde_json::Value {
     envelope["ok"].clone()
 }
 
-/// Python `tests/integration/test_task_result_history_fallback.py::TestStagedResultReader::test_an_absence_from_a_stale_reader_is_confirmed_by_detail`:
+/// Python `clients/python/tests/integration/test_task_result_history_fallback.py::TestStagedResultReader::test_an_absence_from_a_stale_reader_is_confirmed_by_detail`:
 /// a result reader published before a leaf existed misses a row of that
 /// leaf; the detail reader finds the COMPLETED row and its result.
 #[tokio::test]
@@ -1097,7 +1097,7 @@ async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
     .await;
     // A result reader of a publication that ran before the leaf existed: it
     // probes the live table and no leaf (Python `_STALE_RESULT_READER_SQL`,
-    // `tests/integration/test_task_result_history_fallback.py`).
+    // `clients/python/tests/integration/test_task_result_history_fallback.py`).
     sql::query(
         "CREATE OR REPLACE FUNCTION horsies_task_result_staged(p_task_id uuid)
          RETURNS TABLE(location text, status text, failed_reason text,

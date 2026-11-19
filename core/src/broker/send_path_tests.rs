@@ -4,7 +4,7 @@
 //! broker's connections.
 //!
 //! Python specification (baseline versions on `program/0.8.0`):
-//! `tests/integration/test_enqueue_retry_limit.py`,
+//! `clients/python/tests/integration/test_enqueue_retry_limit.py`,
 //! `test_send_idempotency_conflict.py`,
 //! `test_statement_error_hides_parameters.py` and
 //! `test_sync_send_caller_thread.py`.

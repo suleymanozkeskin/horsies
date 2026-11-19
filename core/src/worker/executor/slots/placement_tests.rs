@@ -1,4 +1,4 @@
-//! Ports of Python `tests/unit/test_child_placement.py`: each child gets
+//! Ports of Python `clients/python/tests/unit/test_child_placement.py`: each child gets
 //! its CPUs before its init frame, a child whose CPUs the OS refuses is
 //! killed and its start fails, and the start places the worker's threads
 //! after its children started. These tests set real CPU masks: Linux only.

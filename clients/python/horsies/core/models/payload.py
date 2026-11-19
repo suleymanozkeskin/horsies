@@ -1,4 +1,4 @@
-# python/horsies/core/models/payload.py
+# clients/python/horsies/core/models/payload.py
 from __future__ import annotations
 from typing import Annotated, Optional
 from pydantic import BaseModel, ConfigDict, Field

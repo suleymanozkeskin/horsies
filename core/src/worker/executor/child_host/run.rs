@@ -254,7 +254,7 @@ async fn stop_for_workflow(
 /// The stop of a workflow task start whose node is not linked to the task,
 /// with the orphan self-heal off: the stop wrote nothing, and the row stays
 /// CLAIMED for inspection. Logs an error (Python
-/// `python/horsies/core/worker/child_runner.py`, the node check of
+/// `clients/python/horsies/core/worker/child_runner.py`, the node check of
 /// `_confirm_ownership_and_set_running`).
 fn node_not_linked(facts: &RunFacts) -> MissedStart {
     tracing::error!(

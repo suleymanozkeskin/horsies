@@ -21,7 +21,7 @@ use crate::test_support::sql::{self, Target};
 /// change a stored heartbeat class. When no heartbeat class is stored, the
 /// function registers it with the default horizon of the retention config,
 /// as the Python fixture `register_class`
-/// (`tests/integration/task_history_harness.py`) does. Returns the outcome
+/// (`clients/python/tests/integration/task_history_harness.py`) does. Returns the outcome
 /// of the period class: `REGISTERED`, or `VERIFIED` when the class was there.
 ///
 /// # Panics

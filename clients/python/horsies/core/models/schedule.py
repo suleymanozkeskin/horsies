@@ -1,4 +1,4 @@
-# python/horsies/core/models/schedule.py
+# clients/python/horsies/core/models/schedule.py
 from __future__ import annotations
 from datetime import time as datetime_time
 from typing import Annotated, Generic, Literal, TypeVar, Union, Optional, Any

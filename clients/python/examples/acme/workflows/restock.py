@@ -1,4 +1,4 @@
-# showcase/acme/workflows/restock.py
+# clients/python/examples/acme/workflows/restock.py
 """Three supplier feeds, two of which are enough.
 
     sync_supplier_feed[atlas]     \\

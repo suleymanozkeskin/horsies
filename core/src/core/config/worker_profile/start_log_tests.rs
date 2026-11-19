@@ -1,4 +1,4 @@
-//! The start log line of a worker profile (Python `tests/unit/test_cli.py`,
+//! The start log line of a worker profile (Python `clients/python/tests/unit/test_cli.py`,
 //! `TestWorkerStartLog`): the resolved pool and task-send pool of each child
 //! kind, the executor of the shared async children, and the pool of the
 //! worker process with where its size comes from.

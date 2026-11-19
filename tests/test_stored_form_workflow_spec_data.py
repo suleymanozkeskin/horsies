@@ -3,7 +3,7 @@
 A vector's value is the spec data document; Python builds the generated
 dataclasses of ``horsies._catalog.workflow_spec`` from it and
 ``dump_workflow_spec_data`` writes the text that crosses to the core
-(``python/horsies/core/workflows/spec_data.py``, ``workflow_spec_json``) with
+(``clients/python/horsies/core/workflows/spec_data.py``, ``workflow_spec_json``) with
 ``dumps_json``, the encoder of every stored form. The core reads the text
 with ``parse_workflow_spec_data``; the core and the Rust client test the same
 file.

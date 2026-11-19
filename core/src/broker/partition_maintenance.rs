@@ -1,5 +1,5 @@
 //! Partition maintenance of a client handle on its session-work core pool
-//! (`crates/horsies-core/baseline/0008_history_maintenance_functions.sql`):
+//! (`core/baseline/0008_history_maintenance_functions.sql`):
 //!
 //! - [`PostgresBroker::ensure_partition_coverage`]: one coverage pass (Python
 //!   `maintain_partition_coverage`): gated at worker startup and at the end

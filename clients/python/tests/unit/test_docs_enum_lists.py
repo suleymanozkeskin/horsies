@@ -5,7 +5,7 @@ A member added to or removed from an enum in code leaves those lists stale,
 and no other test reads them. This module reads every list and compares it
 with the enum.
 
-Scope: `website/src/content/docs/` (`.md`, `.mdx`), `python/horsies/.agents/skills/`
+Scope: `website/src/content/docs/` (`.md`, `.mdx`), `clients/python/horsies/.agents/skills/`
 (`.md`) and `website/public/llms.txt`. The changelog and the migration
 guides describe past versions, so the scan skips them. The pages under
 `website/src/content/docs/rust/` document the Rust crates, whose enums are
@@ -60,10 +60,10 @@ import pytest
 
 pytestmark = [pytest.mark.unit]
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[4]
 _DOCS_DIR = _REPO_ROOT / 'website' / 'src' / 'content' / 'docs'
 _RUST_DOCS_DIR = _DOCS_DIR / 'rust'
-_SKILLS_DIR = _REPO_ROOT / 'python' / 'horsies' / '.agents' / 'skills'
+_SKILLS_DIR = _REPO_ROOT / 'clients' / 'python' / 'horsies' / '.agents' / 'skills'
 _LLMS_FILE = _REPO_ROOT / 'website' / 'public' / 'llms.txt'
 _HISTORY_PAGES: Final = ('changelog.md',)
 _HISTORY_DIRS: Final = ('migrations',)
@@ -743,7 +743,7 @@ def test_each_docs_root_has_checked_lists() -> None:
     checked = scan_docs().checked_per_root
 
     assert checked.get('website/src/content/docs', 0) > 0
-    assert checked.get('python/horsies/.agents/skills', 0) > 0
+    assert checked.get('clients/python/horsies/.agents/skills', 0) > 0
     assert checked.get('website/public/llms.txt', 0) > 0
 
 

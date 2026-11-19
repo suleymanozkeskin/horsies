@@ -8,6 +8,11 @@ on:
 
 permissions: {}
 
+# The Python project is clients/python/. A step that runs uv at the
+# repository root uses its pyproject.toml, uv.lock and .venv.
+env:
+  UV_PROJECT: ${{ github.workspace }}/clients/python
+
 jobs:
   unit:
     runs-on: ubuntu-latest
@@ -25,7 +30,13 @@ jobs:
         run: uv sync --dev
 
       - name: Run unit tests
-        run: uv run pytest tests/unit/ -v --tb=short
+        run: uv run pytest clients/python/tests/unit/ -v --tb=short
+
+      # The unit tests of the cross-client harnesses in the top-level tests/:
+      # the perf harness and the stored-form vectors. They run from the
+      # repository root with the pytest settings of the Python project.
+      - name: Run the unit tests of the cross-client harnesses
+        run: uv run pytest -c clients/python/pyproject.toml --rootdir . tests/perf/ tests/test_stored_form_*.py -v --tb=short
 
   integration:
     runs-on: ubuntu-latest
@@ -67,7 +78,7 @@ jobs:
       - name: Run integration tests
         env:
           DB_PASSWORD: testpassword
-        run: uv run pytest tests/integration/ -v --tb=short
+        run: uv run pytest clients/python/tests/integration/ -v --tb=short
 
   e2e:
     runs-on: ubuntu-latest
@@ -125,7 +136,7 @@ jobs:
         run: uv sync --dev
 
       - name: Start PgBouncer fixture stack
-        run: docker compose -f tests/fixtures/pgbouncer/compose.yaml up -d --wait
+        run: docker compose -f clients/python/tests/fixtures/pgbouncer/compose.yaml up -d --wait
 
       - name: PgBouncer integration contracts
         env:
@@ -138,8 +149,8 @@ jobs:
           HORSIES_TEST_DATABASE_URL_STATEMENT: postgresql://postgres:testpassword@localhost:16434/horsies
         run: |
           uv run pytest \
-            tests/integration/test_pgbouncer_contract.py \
-            tests/integration/test_pgbouncer_prepared_statements.py \
+            clients/python/tests/integration/test_pgbouncer_contract.py \
+            clients/python/tests/integration/test_pgbouncer_prepared_statements.py \
             -v --tb=short
 
       - name: PgBouncer e2e smoke
@@ -151,15 +162,15 @@ jobs:
           HORSIES_TEST_DATABASE_URL_PREPARED: postgresql://postgres:testpassword@localhost:16435/horsies
           HORSIES_TEST_DATABASE_URL_SESSION: postgresql://postgres:testpassword@localhost:16433/horsies
           HORSIES_TEST_DATABASE_URL_STATEMENT: postgresql://postgres:testpassword@localhost:16434/horsies
-        run: uv run pytest tests/e2e/test_pgbouncer_smoke.py -v --tb=short
+        run: uv run pytest clients/python/tests/e2e/test_pgbouncer_smoke.py -v --tb=short
 
       - name: Stop PgBouncer fixture stack
         if: always()
-        run: docker compose -f tests/fixtures/pgbouncer/compose.yaml down -v
+        run: docker compose -f clients/python/tests/fixtures/pgbouncer/compose.yaml down -v
 
   # The core, the extension module crate, the generator, the Rust client, its
   # macros and the examples on each supported Postgres major. The end-to-end
-  # crates under rust/tests/ and the PgBouncer lane of the client move to the
+  # crates under clients/rust/tests/ and the PgBouncer lane of the client move to the
   # client of the core with #1410.
   rust-tests:
     name: rust-tests (Postgres ${{ matrix.postgres }})
@@ -235,7 +246,7 @@ jobs:
 
       # The core's tests create one database per test, copied from a
       # template that each test process installs, on the server of
-      # DATABASE_URL (crates/horsies-core/src/test_support/database.rs).
+      # DATABASE_URL (core/src/test_support/database.rs).
       - name: Create the core test database
         run: docker exec ${{ job.services.postgres.id }} createdb -U postgres horsies-core
 

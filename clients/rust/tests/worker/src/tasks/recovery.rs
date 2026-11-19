@@ -1,5 +1,5 @@
 //! The tasks of the recovery queue instance (Python
-//! `tests/e2e/tasks/instance_recovery.py`). In `Custom` queue mode every
+//! `clients/python/tests/e2e/tasks/instance_recovery.py`). In `Custom` queue mode every
 //! task names one of the configured queues.
 
 use std::convert::Infallible;

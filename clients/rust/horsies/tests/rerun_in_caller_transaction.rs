@@ -5,7 +5,7 @@
 //! included.
 //!
 //! Each test runs on a database of its own, a copy of the core's test
-//! template (`crates/horsies-core/src/test_support/database.rs`): the
+//! template (`core/src/test_support/database.rs`): the
 //! installed schema, Rust family.
 
 #![cfg(all(feature = "tokio-postgres", feature = "sqlx"))]
@@ -25,7 +25,7 @@ use uuid::Uuid;
 /// The test databases of the core. This binary creates copies of the
 /// template only.
 #[allow(dead_code)]
-#[path = "../../horsies-core/src/test_support/database.rs"]
+#[path = "../../../../core/src/test_support/database.rs"]
 mod test_database;
 
 use test_database::TestDatabase;

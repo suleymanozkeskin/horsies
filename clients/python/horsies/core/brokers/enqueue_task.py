@@ -1,7 +1,7 @@
 """The send kind of an enqueue: the first send of a task id or a repeat of it.
 
 The core runs the send in one statement (``horsies_enqueue_task``,
-``crates/horsies-core/src/broker/enqueue_task.rs``): an unkeyed send inserts
+``core/src/broker/enqueue_task.rs``): an unkeyed send inserts
 the row or answers what the row of its task id holds, and a keyed send
 claims the key reservation first. ``SendKind`` tells the function whether
 to read history first.

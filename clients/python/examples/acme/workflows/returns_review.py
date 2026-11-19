@@ -1,4 +1,4 @@
-# showcase/acme/workflows/returns_review.py
+# clients/python/examples/acme/workflows/returns_review.py
 """A returns workflow that pauses itself when it needs a person.
 
     receive_return -> inspect_item -> restock_or_writeoff

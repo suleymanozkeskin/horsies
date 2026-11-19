@@ -1,6 +1,6 @@
 //! Failure handling of the engine: failure marks, pause, resume no-ops,
 //! `allow_failed_deps` chains, and start refusals. Python:
-//! `tests/integration/test_workflow_error_handling.py`.
+//! `clients/python/tests/integration/test_workflow_error_handling.py`.
 
 use std::sync::Arc;
 
@@ -365,10 +365,10 @@ async fn store_node_options(pool: &TestPool, workflow_id: Uuid, task_index: i32,
 }
 
 /// Python `_build_enqueued_task_params` and `_fail_enqueued_task`
-/// (`python/horsies/core/workflows/engine.py:513-597, 752-820`): a task node whose stored retry policy does not read
+/// (`clients/python/horsies/core/workflows/engine.py:513-597, 752-820`): a task node whose stored retry policy does not read
 /// at promotion fails alone with `WORKER_SERIALIZATION_ERROR` and Python's text, which names the node index
 /// (`Invalid retry_policy for task <index>: <detail>`, the detail of `stored_max_retries`,
-/// `python/horsies/core/codec/task_options.py:103`), with the node index and the workflow id in `data`. It gets no
+/// `clients/python/horsies/core/codec/task_options.py:103`), with the node index and the workflow id in `data`. It gets no
 /// task row, and its failure is applied: with `on_error = fail` and no other node left, the workflow fails.
 /// The node is not left READY, and the step that promoted it is not rolled back. The baseline step writes the
 /// same error (`horsies_workflow_unbuildable_nodes`, `horsies_workflow_task_options_refusal`).
@@ -425,12 +425,12 @@ async fn a_task_node_that_cannot_be_prepared_at_promotion_fails_alone() {
 }
 
 /// Python `_fail_enqueued_task` returns "stop" when `on_error = pause` paused the workflow, and the promotion
-/// promotes no other node (`python/horsies/core/workflows/engine.py:513-597`). The node that cannot be prepared
+/// promotes no other node (`clients/python/horsies/core/workflows/engine.py:513-597`). The node that cannot be prepared
 /// fails; the workflow is PAUSED; its sibling of the same level holds no live task row and is not ENQUEUED.
 /// The node stores task options that are not an object, which Python refuses at promotion
-/// (`python/horsies/core/workflows/engine.py:798-805`). A stored `good_until` that the database cannot read does not
+/// (`clients/python/horsies/core/workflows/engine.py:798-805`). A stored `good_until` that the database cannot read does not
 /// fail the node: Python passes its text to the task insert, which raises, and the step rolls back
-/// (`python/horsies/core/workflows/engine.py:832-835`; the baseline `horsies_workflow_node_tasks_insert`).
+/// (`clients/python/horsies/core/workflows/engine.py:832-835`; the baseline `horsies_workflow_node_tasks_insert`).
 #[tokio::test]
 #[serial]
 async fn a_node_that_cannot_be_prepared_pauses_the_workflow_and_promotes_no_sibling() {

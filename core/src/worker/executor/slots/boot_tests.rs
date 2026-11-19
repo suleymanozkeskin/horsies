@@ -562,7 +562,7 @@ fn emfile_failure() -> BootFailure {
 }
 
 /// Python `TestBoot::test_a_task_loop_failure_on_the_only_slot_uses_every_attempt`
-/// and `tests/e2e/test_task_loop_boot.py`: the line of a slot that is down
+/// and `clients/python/tests/e2e/test_task_loop_boot.py`: the line of a slot that is down
 /// names the slot, the cause, the detail, the failed boots, the counted
 /// attempts and the wait before the next boot.
 #[test]

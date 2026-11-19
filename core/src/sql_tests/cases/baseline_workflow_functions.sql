@@ -2946,7 +2946,7 @@ END $$;
 
 -- The output node at completion ------------------------------------------------------------------------------------
 -- An absent output row, or an output node that is not terminal, is a defect of the caller, which counted no live
--- node: horsies_workflow_explicit_output raises data_corrupted (Python tests/unit/test_workflow_output_skipped.py,
+-- node: horsies_workflow_explicit_output raises data_corrupted (Python clients/python/tests/unit/test_workflow_output_skipped.py,
 -- TestExplicitOutputResult).
 
 DO $$
@@ -2963,7 +2963,7 @@ END $$;
 
 -- A stored error with a code and no message -----------------------------------------------------------------------
 -- message is for a human: each reader takes an error with a code and no message as that error, as stored (Python
--- tests/unit/test_task_error_stored_decode.py, TestErrorWithNoMessage).
+-- clients/python/tests/unit/test_task_error_stored_decode.py, TestErrorWithNoMessage).
 
 DO $$
 DECLARE
@@ -3008,7 +3008,7 @@ END $$;
 
 -- A required FAILED node whose stored result does not read ----------------------------------------------------------
 -- The workflow error under a success policy names the cause, as with no policy (Python
--- tests/unit/test_task_error_stored_decode.py, test_the_workflow_error_of_a_required_task_names_the_cause).
+-- clients/python/tests/unit/test_task_error_stored_decode.py, test_the_workflow_error_of_a_required_task_names_the_cause).
 
 DO $$
 DECLARE

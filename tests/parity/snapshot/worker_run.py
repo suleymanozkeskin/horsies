@@ -25,15 +25,15 @@ from datetime import UTC, datetime
 from typing import Final
 
 
-from tests.dualrun.catalog import (
+from tests.parity.snapshot.catalog import (
     ATTEMPT_ARCHIVE,
     BASELINE_CATALOG,
     KILL_REPORT_MEASURES,
     RESULT_ENVELOPE,
 )
-from tests.dualrun.compare import SnapshotDiff
-from tests.dualrun.normalize import NormalizedSnapshot
-from tests.dualrun.rules import (
+from tests.parity.snapshot.compare import SnapshotDiff
+from tests.parity.snapshot.normalize import NormalizedSnapshot
+from tests.parity.snapshot.rules import (
     ColumnRule,
     ColumnSpec,
     EachItem,
@@ -47,7 +47,7 @@ from tests.dualrun.rules import (
     TimeOrderBeforeRun,
     TimeOrderOnly,
 )
-from tests.dualrun.values import RunWindow
+from tests.parity.snapshot.values import RunWindow
 
 
 UNCOMPARED_TABLES: Final = frozenset({

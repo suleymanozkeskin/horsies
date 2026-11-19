@@ -273,7 +273,7 @@ pub(super) static RERUN_ENQUEUE: TypedStatement = TypedStatement::new(
 );
 
 /// Run one rerun inside the caller's transaction (Python `rerun_task`,
-/// `python/horsies/core/history/rerun/operations.py`): the three steps of
+/// `clients/python/horsies/core/history/rerun/operations.py`): the three steps of
 /// `steps` on `transaction`, so the core's own path and a client's
 /// transaction run one rerun.
 ///

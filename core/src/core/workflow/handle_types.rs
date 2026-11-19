@@ -5,7 +5,7 @@ use crate::broker::BrokerError;
 use crate::failure_cause::FailureCause;
 use crate::workflow_engine::error::WorkflowError;
 ///
-/// Mirrors Python's `python/horsies/core/models/workflow/handle_types.py`.
+/// Mirrors Python's `clients/python/horsies/core/models/workflow/handle_types.py`.
 ///
 /// Two error strategies by return type:
 ///
@@ -114,7 +114,7 @@ impl std::fmt::Display for HandleErrorCode {
 }
 
 /// The failure of a workflow handle operation: one variant per Python class
-/// of `python/horsies/core/models/workflow/handle_types.py` that the core or
+/// of `clients/python/horsies/core/models/workflow/handle_types.py` that the core or
 /// a client of the core produces, each with the facts of its state only.
 /// Carried inside `Err(...)` of a [`HandleResult`]. Each variant's doc is
 /// its Python class doc (`ErrorCatalog`).

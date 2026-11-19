@@ -1,6 +1,6 @@
 //! The expiry and orphan cancel of task rows, through the functions of the
 //! section "Expiry and orphan cancel" of
-//! `crates/horsies-core/baseline/0004_lifecycle_functions.sql`:
+//! `core/baseline/0004_lifecycle_functions.sql`:
 //!
 //! - `horsies_expire_pending_tasks`: one batch of PENDING rows whose
 //!   deadline passed. [`expire_pending_pass`] runs batches until one is
@@ -17,7 +17,7 @@
 //! core reaper, the core child host and the Python client's handles run the
 //! same functions here: `PostgresBroker.expire_pending_tasks` and
 //! `PostgresBroker.audit_orphaned_workflow_tasks`
-//! (`python/horsies/core/brokers/postgres.py`).
+//! (`clients/python/horsies/core/brokers/postgres.py`).
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;

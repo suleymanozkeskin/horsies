@@ -1,5 +1,5 @@
 //! The runner beat writer, and the parent half of Python
-//! `tests/e2e/test_child_isolation.py::test_a_task_that_holds_the_gil_is_not_failed_as_stale`.
+//! `clients/python/tests/e2e/test_child_isolation.py::test_a_task_that_holds_the_gil_is_not_failed_as_stale`.
 //!
 //! The worker parent writes one statement per interval for every task it
 //! holds. Each row is fenced: RUNNING, owned by this worker, at the claim

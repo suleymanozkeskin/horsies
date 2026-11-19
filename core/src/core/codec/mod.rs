@@ -237,7 +237,7 @@ mod tests {
 
     /// Python keeps room for the envelopes: a value of `MAX_VALUE_JSON_DEPTH`
     /// levels reads back inside its result envelope, past serde_json's own
-    /// limit of 128 (`tests/unit/test_typed_codec.py:1197-1206`).
+    /// limit of 128 (`clients/python/tests/unit/test_typed_codec.py:1197-1206`).
     #[test]
     fn a_value_of_200_levels_reads_back_in_its_envelope() {
         let mut value = serde_json::json!([1]);

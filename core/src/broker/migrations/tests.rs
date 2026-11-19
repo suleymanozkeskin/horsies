@@ -291,7 +291,7 @@ fn baseline_is_one_migration_built_from_every_listed_file() {
 /// changes it, so the edit shows in this test's diff as well, and a database
 /// installed before the edit refuses the build as edited
 /// (`a_changed_checksum_is_refused_as_edited`). Python
-/// `tests/unit/test_baseline_migration.py::test_checksum_is_pinned`.
+/// `clients/python/tests/unit/test_baseline_migration.py::test_checksum_is_pinned`.
 #[test]
 fn the_checksum_of_the_baseline_is_pinned() {
     const PINNED_CHECKSUM_HEX: &str = concat!(
@@ -307,7 +307,7 @@ fn the_checksum_of_the_baseline_is_pinned() {
 /// install creates the objects in the current schema, so a qualifier would put
 /// them elsewhere; it runs the text inside its own transaction with the
 /// bookkeeping row, so a COMMIT in the text would split the two. Python
-/// `tests/unit/test_baseline_migration.py::test_text_names_no_schema`,
+/// `clients/python/tests/unit/test_baseline_migration.py::test_text_names_no_schema`,
 /// `::test_text_has_no_transaction_control`.
 #[test]
 fn the_baseline_text_names_no_schema_and_holds_no_transaction_control() {
@@ -1420,7 +1420,7 @@ async fn wait_for_a_lock_try(observer: &Client, holder_pid: i32) -> bool {
     false
 }
 
-/// Python `tests/integration/test_schema_lock_wait.py::test_waiting_migrator_does_not_block_a_concurrent_index_build`:
+/// Python `clients/python/tests/integration/test_schema_lock_wait.py::test_waiting_migrator_does_not_block_a_concurrent_index_build`:
 /// an installer that waits for the install lock holds no snapshot while it
 /// waits: it tries the lock in one statement every [`INSTALL_LOCK_POLL`] and
 /// holds no transaction between the tries. An index build that waits for

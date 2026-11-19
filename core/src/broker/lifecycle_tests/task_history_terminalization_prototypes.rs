@@ -1,4 +1,4 @@
-//! Port of Python `tests/integration/test_task_history_terminalization_prototypes.py`.
+//! Port of Python `clients/python/tests/integration/test_task_history_terminalization_prototypes.py`.
 //!
 //! The Python file runs the move program against a prototype schema; these
 //! ports run its rows against the baseline functions of the core. Rows not

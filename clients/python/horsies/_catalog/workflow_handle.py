@@ -9,7 +9,7 @@ __all__ = ['HandleErrorCode']
 
 
 class HandleErrorCode(str, Enum):
-    """Mirrors Python's `python/horsies/core/models/workflow/handle_types.py`.
+    """Mirrors Python's `clients/python/horsies/core/models/workflow/handle_types.py`.
 
     Two error strategies by return type:
 

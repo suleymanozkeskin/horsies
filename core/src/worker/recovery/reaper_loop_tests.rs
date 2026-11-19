@@ -1,4 +1,4 @@
-//! Ports of Python `tests/e2e/test_heartbeat_prune_arm.py`.
+//! Ports of Python `clients/python/tests/e2e/test_heartbeat_prune_arm.py`.
 //!
 //! The pruning driver has tests that call it directly. These enter where a
 //! worker does: a heartbeat leaf is planted overdue, the reaper loop that

@@ -1,5 +1,5 @@
 //! The sub-workflow matrix: cancel, pause, recovery, child retries and child
-//! expiry. Python: `tests/e2e/test_layer7_subworkflows.py`.
+//! expiry. Python: `clients/python/tests/e2e/test_layer7_subworkflows.py`.
 //!
 //! [`drive`] plays the worker, as in `subworkflow_matrix.rs`. A recovery pass
 //! is Python's `_run_workflow_recovery`: the phase-2 recovery drain, then the

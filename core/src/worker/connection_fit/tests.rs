@@ -1,6 +1,6 @@
 //! The worker connection check. Python specification:
-//! `tests/integration/test_worker_connection_check.py` (the two live tests)
-//! and `tests/unit/test_worker_profile_fit.py`. The listener term is the
+//! `clients/python/tests/integration/test_worker_connection_check.py` (the two live tests)
+//! and `clients/python/tests/unit/test_worker_profile_fit.py`. The listener term is the
 //! core's one connection per process.
 
 use std::collections::BTreeMap;
@@ -682,8 +682,8 @@ async fn a_separate_session_url_counts_its_session_pool_against_the_server() {
 
 // --- the fit at worker boot ---------------------------------------------------
 //
-// Python `tests/unit/test_cli.py::TestBootConnectionFit` and
-// `python/horsies/core/cli.py:691-745`: the worker reads the limit before it starts,
+// Python `clients/python/tests/unit/test_cli.py::TestBootConnectionFit` and
+// `clients/python/horsies/core/cli.py:691-745`: the worker reads the limit before it starts,
 // logs the fit of its profile, and starts in every case.
 
 /// `test_a_profile_above_the_limit_warns_and_the_worker_starts`, with the
@@ -799,7 +799,7 @@ fn a_name_is_quoted_as_python_s_repr() {
 
 // --- the read of the server limit --------------------------------------------
 //
-// Python `tests/unit/test_worker_profile_fit.py::TestReadServerConnectionLimit`.
+// Python `clients/python/tests/unit/test_worker_profile_fit.py::TestReadServerConnectionLimit`.
 
 /// `test_reads_max_and_both_reserved_settings`: the read returns the
 /// server's `max_connections`, and as reserved the sum of
@@ -921,7 +921,7 @@ async fn no_answer_within_the_bound_makes_the_limit_unreadable() {
 
 // --- the terms of a profile ----------------------------------------------------
 //
-// Python `tests/unit/test_worker_profile_fit.py::TestConnectionNeed`, with the
+// Python `clients/python/tests/unit/test_worker_profile_fit.py::TestConnectionNeed`, with the
 // core's one listener connection.
 
 fn parsed(document: serde_json::Value) -> WorkerProfile {
@@ -1220,7 +1220,7 @@ fn a_set_worker_pool_is_counted_as_set() {
 
 // --- the live check of every profile -------------------------------------------
 //
-// Python `tests/unit/test_worker_profile_fit.py::TestCheckLiveWorkerConnections`.
+// Python `clients/python/tests/unit/test_worker_profile_fit.py::TestCheckLiveWorkerConnections`.
 
 /// `test_profiles_that_fit_have_no_error`: the check reads the limit of the
 /// test server, and a profile whose worker fits in the usable slots gives no

@@ -268,7 +268,7 @@ pub struct TaskOptions {
 
 impl TaskOptions {
     /// The stored `task_options` text of this task, in Python's layout
-    /// (`python/horsies/core/codec/task_options.py`, `serialize_task_options`), the
+    /// (`clients/python/horsies/core/codec/task_options.py`, `serialize_task_options`), the
     /// one layout the core reads at enqueue and at dispatch:
     ///
     /// ```json
@@ -299,7 +299,7 @@ impl TaskOptions {
 
     /// The stored `task_options` text of a send of this task with the
     /// deadline `good_until` (Python `serialize_task_options` of the send's
-    /// options, `python/horsies/core/task_decorator.py`): the text of
+    /// options, `clients/python/horsies/core/task_decorator.py`): the text of
     /// [`Self::stored_options_text`] with `good_until` as Python's
     /// `isoformat()` writes an aware UTC time (`+00:00`, 6 fraction digits
     /// when the microsecond is not 0). The send also stores the deadline in

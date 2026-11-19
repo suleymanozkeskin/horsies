@@ -807,7 +807,7 @@ mod tests {
     }
 
     /// The slots of two broker classes, as Python declares them
-    /// (`python/horsies/core/brokers/result_types.py`).
+    /// (`clients/python/horsies/core/brokers/result_types.py`).
     #[test]
     fn a_class_has_python_s_slots_in_python_s_order() {
         let classes = <BrokerOperationError as ErrorEnum>::ERROR_CATALOG.classes;
@@ -860,7 +860,7 @@ mod tests {
     }
 
     /// The slots of two send classes, as Python declares them
-    /// (`python/horsies/core/models/task_send_types.py`).
+    /// (`clients/python/horsies/core/models/task_send_types.py`).
     #[test]
     fn a_send_class_has_python_s_slots_in_python_s_order() {
         let classes = <TaskSendError as ErrorEnum>::ERROR_CATALOG.classes;

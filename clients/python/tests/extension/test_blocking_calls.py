@@ -27,7 +27,7 @@ PROGRAM = 'blocking_calls'
 
 SIGNAL_CHECK_SLICE_S: Final = 0.1
 """The time a blocking call keeps the GIL released before it checks signals
-(``SIGNAL_CHECK_SLICE`` in ``crates/horsies-python/src/bridge/blocking.rs``)."""
+(``SIGNAL_CHECK_SLICE`` in ``clients/python/bridge/src/bridge/blocking.rs``)."""
 
 SCHEDULING_TOLERANCE_S: Final = 0.3
 """Time on top of one slice for the OS to run the main thread and for the

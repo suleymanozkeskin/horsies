@@ -1,5 +1,5 @@
 //! The send of one task in one statement: `horsies_enqueue_task`
-//! (Python `python/horsies/core/brokers/enqueue_task.py`).
+//! (Python `clients/python/horsies/core/brokers/enqueue_task.py`).
 //!
 //! The function writes one PENDING row, or answers what the row that holds
 //! the task id or the key holds:

@@ -63,7 +63,7 @@ async fn clean_w3(pool: &TestPool) {
 
 /// Insert one live row. Only a CLAIMED row holds a claim lease
 /// (`horsies_tasks_status_live`; Python
-/// `tests/integration/monitoring_seeding.py:268-274`). A RUNNING row carries
+/// `clients/python/tests/integration/monitoring_seeding.py:268-274`). A RUNNING row carries
 /// the process facts that its start writes.
 async fn seed_task(pool: &TestPool, seed: &TaskSeed) {
     sql::query(

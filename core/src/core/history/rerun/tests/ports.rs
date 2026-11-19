@@ -1,7 +1,7 @@
 //! Port of the Python rerun refusal of values that a stored envelope may not
 //! hold.
 //!
-//! Python specification: `tests/integration/test_task_history_rerun.py`
+//! Python specification: `clients/python/tests/integration/test_task_history_rerun.py`
 //! (`TestTypedRefusals.test_refused_value_in_a_stored_envelope_fails_closed`).
 
 use super::*;
@@ -10,7 +10,7 @@ use crate::test_support::sql;
 /// A stored envelope whose input holds `Infinity`, a number outside the
 /// binary64 range, or a lone UTF-16 surrogate is input corrupt, and the rerun
 /// writes no task. The detail carries the text of Python's reader
-/// (`python/horsies/core/codec/json_value.py:156, 180, 294`).
+/// (`clients/python/horsies/core/codec/json_value.py:156, 180, 294`).
 #[tokio::test]
 #[serial]
 async fn a_refused_value_in_a_stored_envelope_fails_closed() {

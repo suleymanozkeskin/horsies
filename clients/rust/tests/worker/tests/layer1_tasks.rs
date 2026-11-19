@@ -1,5 +1,5 @@
 //! Layer 1: task fundamentals on the child model (Python
-//! `tests/e2e/test_layer1_tasks.py`).
+//! `clients/python/tests/e2e/test_layer1_tasks.py`).
 //!
 //! Each test has its own database, builds the app of its instance in this
 //! process, and starts the test binary as its worker; every task body runs
@@ -1042,7 +1042,7 @@ async fn test_attempt_recorded_on_retry_exhausted() {
 }
 
 /// Old Rust `test_enqueue_sha_idempotent_same_sha`; Python:
-/// `tests/unit/test_task_decorator.py` idempotency key sends. A second send
+/// `clients/python/tests/unit/test_task_decorator.py` idempotency key sends. A second send
 /// of the same command with the same key answers with the first task.
 #[tokio::test]
 #[serial]

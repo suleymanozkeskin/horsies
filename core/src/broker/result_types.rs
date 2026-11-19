@@ -1,6 +1,6 @@
 /// Typed error types for PostgresBroker operations.
 ///
-/// Mirrors Python's `python/horsies/core/brokers/result_types.py`.
+/// Mirrors Python's `clients/python/horsies/core/brokers/result_types.py`.
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -18,7 +18,7 @@ use crate::failure_cause::FailureCause;
 /// Categorized broker operation failure codes.
 ///
 /// The members are Python's, in Python's order
-/// (`python/horsies/core/brokers/result_types.py`). The nine operation codes from
+/// (`clients/python/horsies/core/brokers/result_types.py`). The nine operation codes from
 /// `SCHEMA_INIT_FAILED` to `LISTENER_SUBSCRIBE_FAILED` share one variant in
 /// Python, `BrokerOperationFailed`. A client produces `NO_BROKER` and
 /// `NO_TYPE_AVAILABLE`; only the Python client produces `ASYNC_CONTEXT`.
@@ -122,7 +122,7 @@ impl BrokerOperationFailedCode {
 }
 
 /// The failure of a broker operation: one variant per Python class of
-/// `python/horsies/core/brokers/result_types.py`, each with the facts of its
+/// `clients/python/horsies/core/brokers/result_types.py`, each with the facts of its
 /// state only. Carried inside `Err(...)` of a [`BrokerResult`]. Each
 /// variant's doc is its Python class doc (`ErrorCatalog`).
 ///

@@ -168,9 +168,9 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_arguments(arguments(&["check", "python/horsies"])),
+            parse_arguments(arguments(&["check", "clients/python/horsies"])),
             Ok(Command::Check {
-                package_dir: PathBuf::from("python/horsies")
+                package_dir: PathBuf::from("clients/python/horsies")
             })
         );
     }

@@ -23,8 +23,8 @@ pub use error::WorkflowError;
 /// The `max_retries` of a task node's row and of the task row minted from
 /// it, read from the node's `task_options` with the reader of a task row
 /// ([`crate::worker::retry::stored_max_retries`]; Python
-/// `python/horsies/core/workflows/engine.py:767-776`,
-/// `python/horsies/core/workflows/lifecycle.py:182-188`).
+/// `clients/python/horsies/core/workflows/engine.py:767-776`,
+/// `clients/python/horsies/core/workflows/lifecycle.py:182-188`).
 ///
 /// Options that the reader refuses are [`WorkflowError::Validation`] naming
 /// the node: no limit is guessed, and the caller writes no row from them.
@@ -67,11 +67,11 @@ fn node_options_refused(
 ///
 /// The options of a start come from the task function, and the start reads
 /// them here, before any statement (Python passes the text to the database,
-/// which refuses what it cannot read, `python/horsies/core/workflows/lifecycle.py:181-183`).
+/// which refuses what it cannot read, `clients/python/horsies/core/workflows/lifecycle.py:181-183`).
 /// A promotion or a recovery case reads the stored copy of the options
 /// instead: its task insert casts the stored `good_until` text, as
 /// `horsies_workflow_node_tasks_insert` does, and a text that the database
-/// cannot read raises from that insert (`python/horsies/core/workflows/engine.py:831-835`).
+/// cannot read raises from that insert (`clients/python/horsies/core/workflows/engine.py:831-835`).
 /// Pure.
 pub(crate) fn node_good_until(
     task_index: impl std::fmt::Display,
@@ -100,7 +100,7 @@ pub(crate) fn node_good_until(
 }
 
 /// Merge a node's `good_until` into its `task_options` at workflow start
-/// (Python `python/horsies/core/workflows/lifecycle.py:576-604`). The result is
+/// (Python `clients/python/horsies/core/workflows/lifecycle.py:576-604`). The result is
 /// what the node row stores and [`node_good_until`] reads back.
 ///
 /// - No deadline: the options as given; their readers judge them later.

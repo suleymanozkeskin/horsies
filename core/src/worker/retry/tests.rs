@@ -648,7 +648,7 @@ fn the_delay_is_at_least_one_second() {
 
 // --- stored retry limit ----------------------------------------------------
 //
-// Python `tests/integration/test_enqueue_retry_limit.py`
+// Python `clients/python/tests/integration/test_enqueue_retry_limit.py`
 // (`test_valid_policies_store_their_limits`,
 // `test_a_malformed_policy_is_refused_without_a_row`).
 
@@ -739,7 +739,7 @@ fn a_policy_that_does_not_fit_the_rule_is_refused_not_guessed() {
 
 /// The refusal is Python's `InvalidRetryPolicy.detail`, with no prefix: the
 /// send writes `task_options refused for <task>: <detail>`, as Python's
-/// enqueue does (`python/horsies/core/brokers/postgres.py:463-469`). The
+/// enqueue does (`clients/python/horsies/core/brokers/postgres.py:463-469`). The
 /// dispatch refusal adds the prefix (`stored retry_policy does not
 /// validate: `).
 #[test]

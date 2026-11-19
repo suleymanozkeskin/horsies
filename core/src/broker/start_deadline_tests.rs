@@ -1,6 +1,6 @@
 //! The start write refuses a claim whose deadline passed.
 //!
-//! Python specification: `tests/integration/test_shared_lifecycle_writes.py::
+//! Python specification: `clients/python/tests/integration/test_shared_lifecycle_writes.py::
 //! test_a_claim_past_its_deadline_expires_before_start` (the start statement
 //! guards `good_until`, so user code never starts after the deadline).
 

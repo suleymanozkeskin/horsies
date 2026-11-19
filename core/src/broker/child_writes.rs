@@ -1,6 +1,6 @@
 //! The bounds of the writes of a run in a worker's child, for the core
 //! child host and for the child handle of the Python client (Python
-//! `python/horsies/core/worker/shared_lifecycle.py`, `thread_runner.py`,
+//! `clients/python/horsies/core/worker/shared_lifecycle.py`, `thread_runner.py`,
 //! `child_runner.py`):
 //!
 //! | Write | Bound | Python |

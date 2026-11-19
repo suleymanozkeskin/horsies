@@ -2,11 +2,11 @@
 name = "horsies-queue-mismatch-tests"
 version = "0.1.0-alpha.1"
 edition = "2021"
-description = "The queue guard of task registration: six scenarios of Python tests/unit/test_queue_mismatch_guard.py"
+description = "The queue guard of task registration: six scenarios of Python clients/python/tests/unit/test_queue_mismatch_guard.py"
 publish = false
 
 [dependencies]
-horsies = { path = "../../../crates/horsies" }
+horsies = { path = "../../horsies" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

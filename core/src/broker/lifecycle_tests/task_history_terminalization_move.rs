@@ -1,4 +1,4 @@
-//! Port of Python `tests/integration/test_task_history_terminalization_move.py`.
+//! Port of Python `clients/python/tests/integration/test_task_history_terminalization_move.py`.
 
 use serial_test::serial;
 

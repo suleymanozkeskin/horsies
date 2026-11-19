@@ -2,7 +2,7 @@
 //! answer of the read's row, the write statement and each write outcome.
 //!
 //! Python specification: the outcome catalog of `rerun_task`
-//! (`python/horsies/core/history/rerun/operations.py`) and
+//! (`clients/python/horsies/core/history/rerun/operations.py`) and
 //! `_rerun_write_outcome`.
 
 use chrono::Duration;

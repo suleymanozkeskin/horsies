@@ -1,5 +1,5 @@
 //! The queue guard of task registration, in six scenarios (Python
-//! `tests/unit/test_queue_mismatch_guard.py`). A refused registration
+//! `clients/python/tests/unit/test_queue_mismatch_guard.py`). A refused registration
 //! leaves nothing registered: `main` returns the refusal with `?`, so a
 //! binary with a mismatched task never reaches `horsies::cli::run`.
 

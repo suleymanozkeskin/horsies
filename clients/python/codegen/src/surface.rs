@@ -1,7 +1,7 @@
 //! The Python surface of the extension module `horsies._core`, as data.
 //!
 //! The classes and functions here are defined with PyO3 in
-//! `crates/horsies-python`. PyO3 attribute values must be literals, so this
+//! `clients/python/bridge`. PyO3 attribute values must be literals, so this
 //! table repeats their names and signatures. A change to the extension
 //! changes this table in the same commit; a Python test compares the
 //! generated stub with the built module. Where a value is a catalog code,

@@ -1,0 +1,1 @@
+../clients/python/tests/attempt_snapshot_support.py

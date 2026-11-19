@@ -1,5 +1,5 @@
 //! Lifecycle operations of a client handle on its main core pool, one 0004
-//! function each (`crates/horsies-core/baseline/0004_lifecycle_functions.sql`):
+//! function each (`core/baseline/0004_lifecycle_functions.sql`):
 //!
 //! - [`PostgresBroker::requeue_stale_claimed`]: the stale CLAIMED requeue
 //!   pass, `horsies_requeue_stale_claims` in bounded batches.

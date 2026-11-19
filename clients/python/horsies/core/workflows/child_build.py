@@ -586,7 +586,7 @@ def task_node_row(
     The row carries the task options as text and the retention class key of
     the node's queue. The core reads the retry limit, the execution class and
     the deadline from the options (``node_task_facts``,
-    ``crates/horsies-core/src/workflow_engine/start.rs``) and refuses options
+    ``core/src/workflow_engine/start.rs``) and refuses options
     that do not validate.
 
     Raises:

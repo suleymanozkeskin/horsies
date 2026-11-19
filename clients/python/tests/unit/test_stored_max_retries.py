@@ -2,7 +2,7 @@
 
 The baseline stores `max_retries` from 0 to 20 (`horsies_tasks`, CHECK
 `horsies_tasks_retry_range`), and the core reads the stored retry
-policy with the same bound (`crates/horsies-core/src/worker/retry.rs`,
+policy with the same bound (`core/src/worker/retry.rs`,
 `stored_max_retries`). A `RetryPolicy` built in Python cannot pass it.
 """
 

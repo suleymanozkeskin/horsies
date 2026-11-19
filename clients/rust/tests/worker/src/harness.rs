@@ -1,6 +1,6 @@
 //! One test of the suite: a fresh database, the app of an instance in the
 //! test process, a marker directory, and the worker and scheduler
-//! processes of the test binary (Python `tests/e2e/conftest.py`,
+//! processes of the test binary (Python `clients/python/tests/e2e/conftest.py`,
 //! `helpers/worker.py`).
 //!
 //! The test process is a producer: it sends and reads through the client

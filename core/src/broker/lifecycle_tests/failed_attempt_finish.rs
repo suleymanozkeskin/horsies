@@ -1,4 +1,4 @@
-//! Port of Python `tests/integration/test_failed_attempt_finish.py`
+//! Port of Python `clients/python/tests/integration/test_failed_attempt_finish.py`
 //! (`horsies_finish_failed_attempt`).
 //!
 //! Rows that a core test already checks in full are not repeated:

@@ -1,6 +1,6 @@
 """The Python app of the parity runs (`tests/parity/runner.py`).
 
-The Rust app of `rust/tests/parity` has the same task names, input field
+The Rust app of `clients/rust/tests/parity` has the same task names, input field
 names, codes, messages, options, profiles and workflows, so the same
 scenario stores the same rows on each client. The runner sets
 `HORSIES_PARITY_DATABASE_URL` for each process of a side: the worker, its

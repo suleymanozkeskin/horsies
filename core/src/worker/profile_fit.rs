@@ -1,4 +1,4 @@
-//! The fit of the worker's profile at boot (Python `python/horsies/core/cli.py`,
+//! The fit of the worker's profile at boot (Python `clients/python/horsies/core/cli.py`,
 //! `_log_memory_fit` before the schema step and `_log_connection_fit` after
 //! it, before any child starts or any row is claimed).
 //!

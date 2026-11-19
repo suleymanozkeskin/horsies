@@ -4,7 +4,7 @@
 meets the core's input (the manifest generated from horsies-core). It maps
 `PostgresConfig` field by field. The typed values of the database section
 (the session database, `pool_recycle`, the TCP keepalive and user timeout
-settings) follow the rules of `python/horsies/core/manifest_database.py`, which the
+settings) follow the rules of `clients/python/horsies/core/manifest_database.py`, which the
 worker manifest builder shares. The two inputs that `PostgresConfig` does
 not hold, the schema mode and the idempotency reservation window, are
 parameters: the caller decides them. `schema_mode_of` gives the schema mode
@@ -66,7 +66,7 @@ def to_producer_manifest(
 
     Pure: no I/O. `schema` and `idempotency_reservation_window` come from the
     caller; the window is one that `validate_reservation_window` accepted
-    (`python/horsies/core/history/identity/keys.py`).
+    (`clients/python/horsies/core/history/identity/keys.py`).
     """
     return ProducerManifest(
         manifest_version=MANIFEST_VERSION,

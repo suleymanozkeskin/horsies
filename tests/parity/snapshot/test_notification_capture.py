@@ -10,18 +10,18 @@ import psycopg
 import pytest
 
 from horsies.core.types.result import Err, Ok, Result
-from tests.dualrun.capture import (
+from tests.parity.snapshot.capture import (
     Notification,
     capture_with_notifications,
     collect_notifications,
     open_listener,
     read_database_clock,
 )
-from tests.dualrun.catalog import NOTIFICATIONS
-from tests.dualrun.compare import ExtraRow, compare_snapshots
-from tests.dualrun.databases import DualRunDatabase, install_baseline_schema
-from tests.dualrun.normalize import NormalizedSnapshot
-from tests.dualrun.values import make_run_window
+from tests.parity.snapshot.catalog import NOTIFICATIONS
+from tests.parity.snapshot.compare import ExtraRow, compare_snapshots
+from tests.parity.snapshot.databases import DualRunDatabase, install_baseline_schema
+from tests.parity.snapshot.normalize import NormalizedSnapshot
+from tests.parity.snapshot.values import make_run_window
 
 pytestmark = [pytest.mark.integration]
 

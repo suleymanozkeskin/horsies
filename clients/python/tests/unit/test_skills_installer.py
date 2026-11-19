@@ -38,8 +38,8 @@ from horsies.core.skills_installer import (
 
 pytestmark = pytest.mark.unit
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_SKILL_DIR = _REPO_ROOT / 'python' / 'horsies' / '.agents' / 'skills' / 'horsies'
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_SKILL_DIR = _REPO_ROOT / 'clients' / 'python' / 'horsies' / '.agents' / 'skills' / 'horsies'
 _REFERENCE_FILES = ('tasks.md', 'workflows.md', 'configs.md', 'monitoring.md')
 
 
@@ -559,13 +559,13 @@ def _puts_files_into_the_wheel(entry: dict[str, object]) -> bool:
 
 class TestPackageData:
     def test_package_data_covers_every_skill_file(self) -> None:
-        config = tomllib.loads((_REPO_ROOT / 'pyproject.toml').read_text())
+        config = tomllib.loads((_REPO_ROOT / 'clients/python/pyproject.toml').read_text())
         patterns = [
             str(entry['path'])
             for entry in config['tool']['maturin']['include']
             if _puts_files_into_the_wheel(entry)
         ]
-        package_root = _REPO_ROOT / 'python' / 'horsies'
+        package_root = _REPO_ROOT / 'clients' / 'python' / 'horsies'
 
         uncovered = [
             relative

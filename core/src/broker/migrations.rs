@@ -7,7 +7,7 @@
 //!
 //! The embedded chain:
 //! - Version 1000 is the baseline schema: every file of
-//!   `crates/horsies-core/baseline/`, in the order of `baseline_sql_files!`
+//!   `core/baseline/`, in the order of `baseline_sql_files!`
 //!   below, concatenated with no separator, with one SHA-384 checksum over the
 //!   UTF-8 bytes of the result. It creates [`MIGRATIONS_TABLE`], the 0.x guard
 //!   row of `horsies_schema_version` and the empty `horsies_client_family`
@@ -76,7 +76,7 @@ pub const BASELINE_MIGRATION_VERSION: i64 = 1000;
 /// builds `BASELINE_SQL_FILES` (the names), `BASELINE_SQL_FILE_TEXTS` (each
 /// name with its text) and `BASELINE_SQL` (the texts, concatenated with no
 /// separator), so the names and the migration text cannot differ. The files
-/// of `crates/horsies-core/baseline/` are the single source; the core includes
+/// of `core/baseline/` are the single source; the core includes
 /// them by relative path and keeps no copy.
 macro_rules! baseline_sql_files {
     ($($file:literal),+ $(,)?) => {
@@ -99,7 +99,7 @@ macro_rules! baseline_sql_files {
     };
 }
 
-// The files of `crates/horsies-core/baseline/`, in the order they run. A file
+// The files of `core/baseline/`, in the order they run. A file
 // added to the folder without a line here fails
 // `baseline_file_list_is_the_whole_folder`.
 baseline_sql_files!(
@@ -259,7 +259,7 @@ fn shipped_versions() -> Vec<i64> {
 // ---- The install lock ----
 
 /// The name whose digest is the install lock key (Python
-/// `PostgresBroker._schema_advisory_key`, `python/horsies/core/brokers/postgres.py`).
+/// `PostgresBroker._schema_advisory_key`, `clients/python/horsies/core/brokers/postgres.py`).
 const INSTALL_LOCK_NAME: &str = "horsies:schema:v1";
 
 /// The longest an installer waits for another installer's lock, then

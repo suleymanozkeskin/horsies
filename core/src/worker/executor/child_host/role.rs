@@ -123,7 +123,7 @@ mod tests {
         assert_eq!(thread_role(), ThreadRole::Other);
     }
 
-    /// Python `wait_inside_task_message` (`tests/unit/test_wait_inside_task.py`):
+    /// Python `wait_inside_task_message` (`clients/python/tests/unit/test_wait_inside_task.py`):
     /// the message names the call and the workflow alternative, word for
     /// word.
     #[test]

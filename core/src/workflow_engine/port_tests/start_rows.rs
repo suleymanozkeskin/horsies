@@ -1,7 +1,7 @@
-//! What a workflow start stores. Python: `tests/integration/test_workflow_start.py`,
+//! What a workflow start stores. Python: `clients/python/tests/integration/test_workflow_start.py`,
 //! `test_workflow_start_batched.py`, `test_subworkflow_start_batched.py`,
 //! `test_workflow_kwargs_compat.py`, `test_subworkflow_priority_binding.py`,
-//! and `tests/e2e/test_layer7_subworkflow_priority.py`.
+//! and `clients/python/tests/e2e/test_layer7_subworkflow_priority.py`.
 
 use std::sync::Arc;
 
@@ -1041,7 +1041,7 @@ async fn a_child_built_by_its_builder_binds_the_queue_priority_on_node_and_task(
     db.drop().await;
 }
 
-/// `tests/e2e/test_layer7_subworkflow_priority.py::test_subworkflow_child_binds_queue_priority_and_claim_order`:
+/// `clients/python/tests/e2e/test_layer7_subworkflow_priority.py::test_subworkflow_child_binds_queue_priority_and_claim_order`:
 /// the child's task and a task sent later on the same queue have the same
 /// priority, and the claim takes the child's task first.
 #[tokio::test]

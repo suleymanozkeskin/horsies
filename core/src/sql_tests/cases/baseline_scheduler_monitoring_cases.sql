@@ -1,6 +1,6 @@
 -- Cases for the functions of 0007_scheduler_monitoring_functions.sql.
 --
--- Preconditions, set up by the runner (crates/horsies-core/src/sql_tests/baseline_scheduler_monitoring_sql.rs):
+-- Preconditions, set up by the runner (core/src/sql_tests/baseline_scheduler_monitoring_sql.rs):
 -- - a fresh database that holds the baseline migration;
 -- - the history readers published by horsies_publish_history_readers (on a fresh install they probe the forever
 --   leaf);

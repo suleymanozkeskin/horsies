@@ -1,7 +1,7 @@
 """Terminal writes of test seeds: the baseline function that a run calls for each end.
 
 Each function runs, on the caller's connection, the function of
-``crates/horsies-core/baseline/0004_lifecycle_functions.sql`` that a run
+``core/baseline/0004_lifecycle_functions.sql`` that a run
 calls for that end, with no retry, and returns the outcome text of its one
 row: ``APPLIED``, or the refusal that the function classified. A seed that
 needs a terminal row gets it here, never through an insert of a terminal

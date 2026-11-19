@@ -13,7 +13,7 @@
 //! the phase-2 step. Python has no counterpart: its phase 2 reads the nodes
 //! itself.
 //!
-//! Python reference: `python/horsies/core/lifecycle/outcomes.py`
+//! Python reference: `clients/python/horsies/core/lifecycle/outcomes.py`
 //! (`decode_failed_attempt_row`, `decode_workflow_success_row`).
 //!
 //! Decoding fails closed: a missing or unknown column, a column set or NULL

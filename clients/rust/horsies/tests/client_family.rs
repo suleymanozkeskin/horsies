@@ -3,7 +3,7 @@
 //! family row.
 //!
 //! Each test runs on an empty database of its own
-//! (`crates/horsies-core/src/test_support/database.rs`).
+//! (`core/src/test_support/database.rs`).
 
 #![cfg(feature = "tokio-postgres")]
 
@@ -14,7 +14,7 @@ use uuid::Uuid;
 /// The test databases of the core. This binary creates empty databases
 /// only.
 #[allow(dead_code)]
-#[path = "../../horsies-core/src/test_support/database.rs"]
+#[path = "../../../../core/src/test_support/database.rs"]
 mod test_database;
 
 use test_database::TestDatabase;

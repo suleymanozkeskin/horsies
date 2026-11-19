@@ -1,4 +1,4 @@
-//! Tasks of the custom queue instance (Python `tests/e2e/tasks/queues_custom.py`).
+//! Tasks of the custom queue instance (Python `clients/python/tests/e2e/tasks/queues_custom.py`).
 //! In `Custom` queue mode every task names one of the configured queues.
 
 use std::convert::Infallible;

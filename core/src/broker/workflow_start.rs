@@ -4,7 +4,7 @@
 //! from the client's [`ChildSpecSource`].
 //!
 //! The entry point of the Python client's `start_workflow_async`
-//! (`python/horsies/core/workflows/lifecycle.py`), which calls it through
+//! (`clients/python/horsies/core/workflows/lifecycle.py`), which calls it through
 //! `horsies._core` in place of its own statements.
 
 use std::future::Future;

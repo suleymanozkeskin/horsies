@@ -1,6 +1,6 @@
 """Python's side of the schedule config digest contract with the core.
 
-``crates/horsies-core/src/worker/scheduler/config_digest_vectors.json`` holds,
+``core/src/worker/scheduler/config_digest_vectors.json`` holds,
 per row, the text that the config digest of a schedule hashes (the pattern as
 ``model_dump(mode='json')`` writes it, then the timezone) and its SHA-256. The
 core tests in ``config_digest.rs`` pin the same table, so a change of the text
@@ -27,9 +27,8 @@ from horsies.core.scheduler.manifest import pattern_json
 pytestmark = [pytest.mark.unit]
 
 _VECTORS_PATH: Final = (
-    Path(__file__).resolve().parents[2]
-    / 'crates'
-    / 'horsies-core'
+    Path(__file__).resolve().parents[4]
+    / 'core'
     / 'src'
     / 'worker'
     / 'scheduler'

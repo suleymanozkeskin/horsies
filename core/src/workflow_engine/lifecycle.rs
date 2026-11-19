@@ -100,10 +100,10 @@ fn paused_expiry_outcome(rows: Vec<Row>) -> Result<PausedExpiry, StepContractErr
 ///   `DB_OPERATION_FAILED`, retryable by the statement layer's transience.
 ///
 /// The other variants have no entry in the handle catalog (Python's `HandleErrorCode`,
-/// `python/horsies/core/models/workflow/handle_types.py`). Each is a defect at this boundary, and the call
+/// `clients/python/horsies/core/models/workflow/handle_types.py`). Each is a defect at this boundary, and the call
 /// panics with the workflow id and the cause, where Python raises:
 /// - `StepContract`: a step row outside its function's contract; the core and the installed baseline
-///   disagree (Python raises `OutcomeDecodeError`, `python/horsies/core/workflows/lifecycle.py`).
+///   disagree (Python raises `OutcomeDecodeError`, `clients/python/horsies/core/workflows/lifecycle.py`).
 /// - `Validation`: only the host build of a child that a resume owes gives it (a stored node input that the
 ///   `args_from` merge refuses, a built child spec that the tree arguments refuse); Python's resume lets
 ///   every exception other than a database error propagate.

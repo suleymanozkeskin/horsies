@@ -181,8 +181,8 @@ fn a_chained_block_is_inside_the_module_of_the_chained_block_before_it() {
 #[test]
 fn the_module_name_is_the_page_path_and_the_line() {
     assert_eq!(
-        module_name("crates/horsies/.agents/skills/horsies/SKILL.md", 88),
-        "crates_horsies_agents_skills_horsies_skill__line88"
+        module_name("clients/rust/horsies/.agents/skills/horsies/SKILL.md", 88),
+        "clients_rust_horsies_agents_skills_horsies_skill__line88"
     );
 }
 

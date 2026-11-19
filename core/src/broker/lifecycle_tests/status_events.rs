@@ -1,4 +1,4 @@
-//! Port of Python `tests/integration/test_status_events.py`.
+//! Port of Python `clients/python/tests/integration/test_status_events.py`.
 //!
 //! `test_a_start_sends_no_status_event` and `test_a_completion_sends_the_status_event`
 //! are `broker::monitoring_schema_tests::a_start_sends_no_status_event` and

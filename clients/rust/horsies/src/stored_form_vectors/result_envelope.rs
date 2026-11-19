@@ -65,7 +65,7 @@ fn form() -> ResultEnvelopeForm {
 }
 
 /// The envelope that the core's child host writes for the text of an ok
-/// value (`crates/horsies-core/src/worker/executor/child_host/run.rs`,
+/// value (`core/src/worker/executor/child_host/run.rs`,
 /// `result_end`): the text as it is, in the `ok` slot.
 fn envelope_of_value(name: &str, bytes: &[u8]) -> String {
     let raw: &RawValue = serde_json::from_slice(bytes)

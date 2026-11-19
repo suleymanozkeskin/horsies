@@ -7,7 +7,7 @@ transitioned rows returned, oldest-first bound honored, SKIP LOCKED
 stepping around a concurrently held row, the batch deferred-result fence,
 and the non-positive batch-size raise. The mixed sweep of plain and
 workflow rows (empty attempt snapshots, the phase-2 records) is a core
-test (``crates/horsies-core/src/broker/lifecycle_tests/
+test (``core/src/broker/lifecycle_tests/
 task_history_terminalization_expiry.rs``, ``mixed_batch_moves_only_eligible_rows``).
 """
 

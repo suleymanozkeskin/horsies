@@ -199,7 +199,7 @@ async fn child_summary_counts_follow_the_child_node_statuses() {
 /// `test_terminal_two_step_handles_zero_task_workflow`: a workflow with no
 /// node has an empty terminal set, and its completion reads no row and fails
 /// on nothing. It has no output node, so it stores Python's outputless result
-/// with three empty maps (`python/horsies/core/workflows/engine.py:3935-3983`; the
+/// with three empty maps (`clients/python/horsies/core/workflows/engine.py:3935-3983`; the
 /// baseline `horsies_workflow_outputless_result`).
 #[tokio::test]
 #[serial]
@@ -251,7 +251,7 @@ async fn a_child_with_no_node_reports_a_total_of_zero() {
 /// An outputless child (no output node) that COMPLETED stores the outputless
 /// result; its parent node COMPLETES with `Ok(null)`, not with the child's
 /// terminal map, and the summary has no output (Python `_parse_child_output`
-/// and `_completed_child_node`, `python/horsies/core/workflows/engine.py`; the baseline
+/// and `_completed_child_node`, `clients/python/horsies/core/workflows/engine.py`; the baseline
 /// `horsies_workflow_child_node_result`).
 #[tokio::test]
 #[serial]
@@ -337,7 +337,7 @@ async fn the_parent_node_of_an_ended_parent_is_written_once() {
 }
 
 /// The error summary of a FAILED child, from its stored workflow error, as
-/// Python takes it (`python/horsies/core/workflows/engine.py:3030-3038`): the `message` of a
+/// Python takes it (`clients/python/horsies/core/workflows/engine.py:3030-3038`): the `message` of a
 /// JSON object; the first 200 characters of a text that is not JSON, an empty
 /// text included (no writer stores one); none for other JSON and no text.
 #[tokio::test]
@@ -418,7 +418,7 @@ async fn a_completion_with_a_stored_error_and_no_failed_node_keeps_that_error() 
 
 /// A workflow with eight terminal
 /// nodes completes with its explicit output copied unchanged, or with
-/// Python's outputless result (`python/horsies/core/workflows/engine.py:3973-3983`), for a
+/// Python's outputless result (`clients/python/horsies/core/workflows/engine.py:3973-3983`), for a
 /// small and a 64 KiB result; with a FAILED node it fails and stores no
 /// result. Each completion sends one `workflow_done` notification with the
 /// workflow id.

@@ -755,7 +755,7 @@ mod tests {
     /// `args_from` members after them, in `jsonb` key order; it holds the members of the merged
     /// input, each `args_from` entry replaced by its `inner` envelope. Python builds the kwargs of
     /// `build_with` in the same order: the decoded node input, then the `args_from` map as it reads
-    /// it from its `jsonb` column (`python/horsies/core/workflows/child_build.py`, `_input_kwargs`).
+    /// it from its `jsonb` column (`clients/python/horsies/core/workflows/child_build.py`, `_input_kwargs`).
     #[test]
     fn a_child_build_input_holds_its_static_members_first() {
         let mut deps = HashMap::new();
@@ -1056,7 +1056,7 @@ mod tests {
 
     /// A dependency result and a static member with an integer outside the `i64` and `u64`
     /// range keep their stored text through the merge and the child build input, as Python
-    /// reads any integer (`python/horsies/core/workflows/child_build.py`, `_input_kwargs`).
+    /// reads any integer (`clients/python/horsies/core/workflows/child_build.py`, `_input_kwargs`).
     #[test]
     fn an_integer_outside_the_i64_and_u64_range_keeps_its_stored_text() {
         let mut deps = HashMap::new();

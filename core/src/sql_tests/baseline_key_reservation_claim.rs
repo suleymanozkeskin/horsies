@@ -1,5 +1,5 @@
 //! `horsies_key_reservation_claim`
-//! (`crates/horsies-core/baseline/0003_interim_functions.sql`) under
+//! (`core/baseline/0003_interim_functions.sql`) under
 //! concurrent claims of one key.
 //!
 //! Each case has a database of its own that holds the baseline migration.

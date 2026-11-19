@@ -1,5 +1,5 @@
 //! The Rust client's side of the shared golden vectors of the stored JSON
-//! forms (`crates/horsies-core/tests/fixtures/stored_forms/`, with its
+//! forms (`core/tests/fixtures/stored_forms/`, with its
 //! `README.md`).
 //!
 //! Each vector is a value and the exact text that Python stores for it. The
@@ -32,7 +32,7 @@ use crate::StoredDateTime;
 /// The text of the vector file `name` of the core's vector folder.
 pub(crate) fn vector_file(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../horsies-core/tests/fixtures/stored_forms")
+        .join("../../../core/tests/fixtures/stored_forms")
         .join(name);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read the vector file {}: {error}", path.display()))

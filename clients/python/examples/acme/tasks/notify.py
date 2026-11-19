@@ -1,4 +1,4 @@
-# showcase/acme/tasks/notify.py
+# clients/python/examples/acme/tasks/notify.py
 """Customer notifications.
 
 `send_order_email` is the workflow's recovery handler. Its node sets

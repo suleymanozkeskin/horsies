@@ -24,7 +24,7 @@ from tests.extension.fresh_interpreter import (
 )
 from tests.extension.programs.report import Report
 
-STUB_PATH: Final = REPOSITORY_ROOT / 'python' / 'horsies' / '_core.pyi'
+STUB_PATH: Final = REPOSITORY_ROOT / 'horsies' / '_core.pyi'
 
 
 @dataclass(frozen=True)

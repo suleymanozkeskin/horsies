@@ -1,6 +1,6 @@
 """Python's side of the calculator contract with the core.
 
-``crates/horsies-core/src/worker/scheduler/calculator_vectors.json`` holds, per
+``core/src/worker/scheduler/calculator_vectors.json`` holds, per
 row, a pattern in the text of ``model_dump(mode='json')``, a timezone, an
 instant and the next run after it. This test pins the pattern text that the
 Python schedule model writes; the core test
@@ -24,9 +24,8 @@ from horsies.core.models.schedule import SchedulePattern
 from horsies.core.types.result import Ok
 
 _VECTORS_PATH: Final = (
-    Path(__file__).resolve().parents[2]
-    / 'crates'
-    / 'horsies-core'
+    Path(__file__).resolve().parents[4]
+    / 'core'
     / 'src'
     / 'worker'
     / 'scheduler'

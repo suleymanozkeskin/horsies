@@ -1,5 +1,5 @@
 //! The terminal-transition vocabulary (parity with Python's
-//! `python/horsies/core/lifecycle/`).
+//! `clients/python/horsies/core/lifecycle/`).
 //!
 //! Every way a task reaches a terminal status is one of eleven commands
 //! (`commands`) or one of four writers with no command: the three attempt
@@ -497,7 +497,7 @@ pub(crate) mod tests {
     }
 
     /// Per command, not per set, the fence is the ownership that its writer
-    /// compares (the `fence` of each writer of `tests/lifecycle_matrix.py`).
+    /// compares (the `fence` of each writer of `clients/python/tests/lifecycle_matrix.py`).
     /// The failed attempt and the success of a workflow task have writers of
     /// their own, whose commands hold an `OwnedClaim` by type
     /// (`FinishFailedAttempt`, `FinishWorkflowSuccess`).

@@ -1,7 +1,7 @@
 //! TCP keepalives and the TCP user timeout of every core connection, as
 //! config values (Python `PostgresConfig.tcp_keepalives`,
 //! `tcp_keepalives_idle`, `tcp_keepalives_interval`, `tcp_keepalives_count`,
-//! `tcp_user_timeout_ms`, `python/horsies/core/models/broker.py:129-157`).
+//! `tcp_user_timeout_ms`, `clients/python/horsies/core/models/broker.py:129-157`).
 //!
 //! Each count is a bounded type that only its `TryFrom<u32>` constructs, so
 //! a value out of bounds is refused when the config or the manifest is

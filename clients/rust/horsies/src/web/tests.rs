@@ -2,7 +2,7 @@
 //! verdicts, the routes that answer before any statement, a database that
 //! cannot be reached, the event stream of a handle without a listener, and
 //! the mount path. The routes themselves are tested in the core
-//! (`crates/horsies-core/src/web/tests.rs`).
+//! (`core/src/web/tests.rs`).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 

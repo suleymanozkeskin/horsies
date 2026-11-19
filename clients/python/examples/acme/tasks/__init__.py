@@ -1,4 +1,4 @@
-# showcase/acme/tasks/__init__.py
+# clients/python/examples/acme/tasks/__init__.py
 """Acme Clothing's task modules.
 
 Every task here is keyword-only, returns `TaskResult`, and reports database

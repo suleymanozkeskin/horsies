@@ -1,7 +1,7 @@
 """Python mirror of the core's version-1 command fingerprint, for seeding tests only.
 
 The core computes the fingerprint of every send
-(``EnqueueCommandV1``, ``crates/horsies-core/src/core/history/identity/fingerprint.rs``)
+(``EnqueueCommandV1``, ``core/src/core/history/identity/fingerprint.rs``)
 and pins its digests. Tests that insert a task row with test-side SQL use
 this mirror to store the fingerprint that a send of the same values stores.
 

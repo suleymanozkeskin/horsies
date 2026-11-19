@@ -142,7 +142,7 @@ impl SchemaReader for BrokerSchemaReader {
 }
 
 /// The verdict for a database without `horsies_migrations` (Python
-/// `classify_without_migrations`, `python/horsies/web/schema.py`):
+/// `classify_without_migrations`, `clients/python/horsies/web/schema.py`):
 /// `horsies_schema_version` is the bookkeeping of horsies 0.x Python, so with
 /// it the database holds a 0.x schema; without it the database has no
 /// horsies schema. The 0.x version is not read.

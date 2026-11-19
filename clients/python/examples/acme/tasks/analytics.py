@@ -1,4 +1,4 @@
-# showcase/acme/tasks/analytics.py
+# clients/python/examples/acme/tasks/analytics.py
 """Reporting, imports, and the deliberately crash-prone export.
 
 `sales_rollup` and `abandoned_cart_sweep` are the scheduled reporting jobs.

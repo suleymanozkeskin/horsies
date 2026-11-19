@@ -255,7 +255,7 @@ class TestModuleDocstrings:
         assert read_module_blocks(MODULE, source) == Ok(())
 
     def test_extract_all_writes_a_module_docstring_block(self, tmp_path: Path) -> None:
-        package = tmp_path / 'python' / 'horsies'
+        package = tmp_path / 'clients' / 'python' / 'horsies'
         package.mkdir(parents=True)
         (package / 'module.py').write_text('"""Title.\n\n```python\nx = 1\n```\n"""\n')
         output = tmp_path / 'out'
@@ -263,13 +263,13 @@ class TestModuleDocstrings:
         errors = extract_all(tmp_path, output)
 
         assert errors == ()
-        assert find_modules(tmp_path) == (Path('python/horsies/module.py'),)
-        assert [path.name for path in output.glob('*.py')] == ['python_horsies_module.py']
+        assert find_modules(tmp_path) == (Path('clients/python/horsies/module.py'),)
+        assert [path.name for path in output.glob('*.py')] == ['clients_python_horsies_module.py']
 
 
 class TestRealDocs:
     def test_every_block_of_the_docs_and_skills_is_valid_or_skipped(self, tmp_path: Path) -> None:
-        repo_root = Path(__file__).resolve().parents[2]
+        repo_root = Path(__file__).resolve().parents[4]
 
         errors = extract_all(repo_root, tmp_path)
 

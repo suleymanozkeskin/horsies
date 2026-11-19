@@ -1,8 +1,8 @@
-# Postgres for the Acme Clothing showcase.
+# Postgres for the Acme Clothing showcase. From clients/python/:
 #
-#   docker compose -f showcase/docker-compose.yml up -d
+#   docker compose -f examples/docker-compose.yml up -d
 #   ACME_DATABASE_URL=postgresql://postgres:postgres@localhost:5433/acme_demo \
-#     uv run python -m showcase.acme.scenarios seed
+#     uv run python -m examples.acme.scenarios seed
 #
 # Port 5433, not 5432, so this never collides with a Postgres already running
 # on the host. Any Postgres 14+ works; this file exists so that "I do not have

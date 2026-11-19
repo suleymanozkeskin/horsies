@@ -1,6 +1,6 @@
 //! Databases and seeds of the monitoring read ports.
 //!
-//! Python specification: `tests/integration/test_monitoring_queries.py`
+//! Python specification: `clients/python/tests/integration/test_monitoring_queries.py`
 //! (baseline version on `program/0.8.0`), whose fixture empties every table
 //! that the reads count. Facets and unfiltered reads count every row of the
 //! database, so each test here runs on a migrated database of its own.
@@ -567,7 +567,7 @@ impl NodeSeed {
 /// Insert one workflow node of task `alpha_task`. Every baseline column is
 /// named. A sub-workflow node carries `sub_workflow_params = 'NOT_GIVEN'`
 /// and a task node none (`horsies_workflow_tasks_sub_workflow_params_by_kind`;
-/// Python `tests/integration/monitoring_seeding.py:576-600`).
+/// Python `clients/python/tests/integration/monitoring_seeding.py:576-600`).
 pub(super) async fn seed_node(pool: &TestPool, node: &NodeSeed) {
     let (is_subworkflow, task_id, child) = match node.kind {
         NodeKind::Task { task_id } => (false, task_id, None),

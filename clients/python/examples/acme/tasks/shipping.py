@@ -1,4 +1,4 @@
-# showcase/acme/tasks/shipping.py
+# clients/python/examples/acme/tasks/shipping.py
 """Courier booking, label printing, and tracking — the child workflow's tasks.
 
 The three run in sequence inside the `shipping` sub-workflow, each consuming

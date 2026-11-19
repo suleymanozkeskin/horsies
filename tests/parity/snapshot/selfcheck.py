@@ -7,7 +7,7 @@ snapshot code, because both databases ran the same writes.
 Two sequences:
 
 - ``run_function_calls``:
-  ``crates/horsies-core/src/sql_tests/cases/baseline_function_calls.sql``,
+  ``core/src/sql_tests/cases/baseline_function_calls.sql``,
   which calls every SQL function of the baseline (claim, completions,
   failures with retry, expiry, cancels, phase 2, history moves, key
   reservations). The fixed ids of the script are replaced by new UUIDv7
@@ -32,21 +32,21 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from horsies.core.types.result import Err, Ok, Result
-from tests.dualrun.capture import (
+from tests.parity.snapshot.capture import (
     CaptureError,
     ClockReadFailed,
     Connection,
     capture_snapshot,
     read_database_clock,
 )
-from tests.dualrun.catalog import BASELINE_CATALOG
-from tests.dualrun.databases import (
+from tests.parity.snapshot.catalog import BASELINE_CATALOG
+from tests.parity.snapshot.databases import (
     DatabaseSetupFailed,
     DualRunDatabase,
     install_baseline_schema,
 )
-from tests.dualrun.normalize import NormalizedSnapshot
-from tests.dualrun.values import (
+from tests.parity.snapshot.normalize import NormalizedSnapshot
+from tests.parity.snapshot.values import (
     CalendarUnit,
     RunWindow,
     RunWindowInvalid,
@@ -55,9 +55,8 @@ from tests.dualrun.values import (
 from tests.sqlalchemy_url import sqlalchemy_url
 
 FUNCTION_CALLS_SQL: Final = (
-    Path(__file__).parent.parent.parent
-    / 'crates'
-    / 'horsies-core'
+    Path(__file__).parents[3]
+    / 'core'
     / 'src'
     / 'sql_tests'
     / 'cases'
@@ -267,7 +266,7 @@ _MARK_DETACHED_SQL: Final[LiteralString] = """
 
 async def _seed(url: str) -> None:
     """The production coverage pass: class registration, leaves, heartbeat leaves, staged readers."""
-    from tests.integration.history_seeding import ensure_history_seedable
+    from tests.history_seeding import ensure_history_seedable
 
     engine = create_async_engine(sqlalchemy_url(url))
     try:

@@ -341,7 +341,7 @@ async fn migration_0038_monitoring_triggers_deliver_each_channel() {
         .expect("clean W1 task");
 }
 
-/// Python `tests/integration/test_status_events.py`: a status change other
+/// Python `clients/python/tests/integration/test_status_events.py`: a status change other
 /// than the start sends a `horsies_task_status` event; the start (to
 /// RUNNING) sends none.
 #[tokio::test]

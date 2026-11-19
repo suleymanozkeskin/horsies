@@ -1,5 +1,5 @@
 {
-  "about": "The schedule config digest: the text that Python's _compute_config_hash (tests/dualrun/reference/scheduler_loop_caller.py) hashes, dumps_json({'pattern': pattern.model_dump(mode='json'), 'timezone': timezone}), and its SHA-256 in lowercase hex, written by Python 3.13 with pydantic 2.13. The config_digest.rs tests and tests/unit/test_schedule_config_digest_vectors.py pin this one table. config_check is what the schedule config of each client does with the pattern: ACCEPTED, or REFUSED_TIME_WITH_FRACTION for a time of day with a fraction of a second; the text of such a row stays a contract vector of the digest text.",
+  "about": "The schedule config digest: the text that Python's _compute_config_hash (tests/parity/snapshot/reference/scheduler_loop_caller.py) hashes, dumps_json({'pattern': pattern.model_dump(mode='json'), 'timezone': timezone}), and its SHA-256 in lowercase hex, written by Python 3.13 with pydantic 2.13. The config_digest.rs tests and clients/python/tests/unit/test_schedule_config_digest_vectors.py pin this one table. config_check is what the schedule config of each client does with the pattern: ACCEPTED, or REFUSED_TIME_WITH_FRACTION for a time of day with a fraction of a second; the text of such a row stays a contract vector of the digest text.",
   "vectors": [
     {
       "name": "interval of 60 seconds",

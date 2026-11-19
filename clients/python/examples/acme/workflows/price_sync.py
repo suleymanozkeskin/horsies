@@ -1,4 +1,4 @@
-# showcase/acme/workflows/price_sync.py
+# clients/python/examples/acme/workflows/price_sync.py
 """The routine price sync — the same three tasks as `flash_sale`, opposite policy.
 
     publish_cdn     \\

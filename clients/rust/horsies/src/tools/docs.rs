@@ -1,5 +1,5 @@
 //! `horsies get-docs`: fetch the docs of this release for AI agents (Python
-//! `horsies get-docs`, `python/horsies/core/docs_fetcher.py`).
+//! `horsies get-docs`, `clients/python/horsies/core/docs_fetcher.py`).
 //!
 //! The docs are those of the release tag `v<crate version>`; `--ref main`
 //! fetches the `main` branch instead, which can differ from this version.

@@ -1,4 +1,4 @@
-//! The tasks of the workflow layers (Python `tests/e2e/tasks/workflows.py`).
+//! The tasks of the workflow layers (Python `clients/python/tests/e2e/tasks/workflows.py`).
 //! Every node task has the code type [`WfCode`], so a node reads the
 //! failure of any upstream node with its code.
 

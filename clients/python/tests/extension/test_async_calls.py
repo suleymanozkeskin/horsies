@@ -29,11 +29,11 @@ LOOP_KINDS: Final = ('asyncio', 'uvloop')
 
 RUNTIME_WORKER_THREADS: Final = 2
 """Worker threads of the core runtime of a Python process
-(``PRODUCER_RUNTIME_WORKER_THREADS`` in ``crates/horsies-python/src/process_core.rs``)."""
+(``PRODUCER_RUNTIME_WORKER_THREADS`` in ``clients/python/bridge/src/process_core.rs``)."""
 
 LOG_FORWARDER_THREADS: Final = 1
 """The one log forwarder thread of a process
-(``crates/horsies-python/src/logging/forwarder.rs``)."""
+(``clients/python/bridge/src/logging/forwarder.rs``)."""
 
 CONCURRENT_AWAITS: Final = 1_000
 

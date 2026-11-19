@@ -124,7 +124,7 @@ class PostgresConfig(BaseModel):
     )
     # The ping runs at checkout only for a connection that waited in the
     # pool for longer than 1 s (the core's idle ping, DEFAULT_IDLE_PING_AFTER
-    # of crates/horsies-core/src/db/pool.rs). A connection that dies within
+    # of core/src/db/pool.rs). A connection that dies within
     # that time of its check-in fails the next statement on it, as one that
     # dies after a ping does.
     pool_pre_ping: bool = Field(

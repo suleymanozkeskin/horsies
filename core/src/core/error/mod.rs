@@ -579,7 +579,7 @@ mod tests {
 
     // --- ErrorCode category helper tests ---
 
-    /// Python `python/horsies/core/errors.py`: `HRS-021` is
+    /// Python `clients/python/horsies/core/errors.py`: `HRS-021` is
     /// `WORKFLOW_KWARGS_ARGS_FROM_OVERLAP` and `HRS-026` is
     /// `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED`; `HRS-032` is
     /// `WORKFLOW_INVALID_ID`, which the core does not raise.
@@ -602,7 +602,7 @@ mod tests {
         }
     }
 
-    /// Python `python/horsies/core/errors.py`: the codes of the workflow
+    /// Python `clients/python/horsies/core/errors.py`: the codes of the workflow
     /// builder checks of a client, with Python's numbers.
     #[test]
     fn the_workflow_builder_codes_have_python_numbers() {

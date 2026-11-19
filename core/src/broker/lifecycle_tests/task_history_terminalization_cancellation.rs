@@ -1,4 +1,4 @@
-//! Port of Python `tests/integration/test_task_history_terminalization_cancellation.py`.
+//! Port of Python `clients/python/tests/integration/test_task_history_terminalization_cancellation.py`.
 //!
 //! Rows that a core test already checks are not repeated:
 //! `TestOrphanSingle::test_terminal_only_link_still_orphans_and_archives_linkage`

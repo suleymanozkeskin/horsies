@@ -1,10 +1,10 @@
 //! The stored `retry_policy` of task options, read by Python's rule:
 //! `RetryPolicy.model_validate(policy, strict=True)` (Python
-//! `stored_retry_policy`, `python/horsies/core/codec/task_options.py:85-117`).
+//! `stored_retry_policy`, `clients/python/horsies/core/codec/task_options.py:85-117`).
 //!
 //! A refusal has Python's text after the prefix of the caller: the entries of
 //! pydantic's field errors as `validation_summary` writes them
-//! (`python/horsies/core/codec/validation_errors.py:93-115`), or the error of
+//! (`clients/python/horsies/core/codec/validation_errors.py:93-115`), or the error of
 //! the first model validator that refuses. The baseline SQL reads the policy of
 //! a workflow node by the same rule (`horsies_workflow_retry_policy_refusal`,
 //! `baseline/0005_workflow_functions.sql`).

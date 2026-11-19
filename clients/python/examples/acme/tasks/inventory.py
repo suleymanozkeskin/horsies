@@ -1,4 +1,4 @@
-# showcase/acme/tasks/inventory.py
+# clients/python/examples/acme/tasks/inventory.py
 """Stock reservation, release, and the scheduled supplier feed pull.
 
 `reserve_stock` is the honest-failure showpiece: it reserves against the real

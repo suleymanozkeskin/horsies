@@ -15,7 +15,7 @@ import pytest
 
 pytestmark = [pytest.mark.unit]
 
-RELEASES_DIR = Path(__file__).resolve().parents[1] / 'perf' / 'releases'
+RELEASES_DIR = Path(__file__).resolve().parent / 'releases'
 _FILE_HEADER = re.compile(r'^diff --git a/(\S+) b/(\S+)$', re.MULTILINE)
 
 

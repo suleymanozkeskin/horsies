@@ -3,7 +3,7 @@
 //! keeps recent and running records, and a finished row lands in a leaf of
 //! its class.
 //!
-//! Python specification: `tests/integration/test_reaper_registers_declared_classes.py`,
+//! Python specification: `clients/python/tests/integration/test_reaper_registers_declared_classes.py`,
 //! `test_retention_class_at_enqueue.py` and `test_retention_period_classes.py`.
 //! Each test runs on its own database: the reaper pass and the class registry
 //! are global to a database.

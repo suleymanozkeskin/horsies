@@ -2,7 +2,7 @@
 //!
 //! The readers are rendered in the database by
 //! `horsies_publish_history_readers()`
-//! (`crates/horsies-core/baseline/0008_history_maintenance_functions.sql`), the
+//! (`core/baseline/0008_history_maintenance_functions.sql`), the
 //! one renderer of every client. One call, in the caller's transaction,
 //! rewrites the manifest table from the leaf catalog, replaces the four
 //! readers and stamps each with the manifest it was rendered from. A call on

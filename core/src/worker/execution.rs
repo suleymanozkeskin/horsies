@@ -894,7 +894,7 @@ pub(crate) async fn send_phase2_wake(
 }
 
 /// The payload of a capacity wake. The baseline functions send the same
-/// constant (`crates/horsies-core/baseline/0004_lifecycle_functions.sql:1064`,
+/// constant (`core/baseline/0004_lifecycle_functions.sql:1064`,
 /// `:1510`; `0005_workflow_functions.sql:1972`). No receiver reads the
 /// payload on a queue channel: the claim loop subscribes by channel.
 const CAPACITY_WAKE_PAYLOAD: &str = "capacity";
@@ -1683,7 +1683,7 @@ mod task_input_tests {
 
     /// Each `args_from` member is the text of its `inner` envelope as stored, so an integer
     /// outside the `i64` and `u64` range reaches the task (Python reads any integer:
-    /// `loads_json`, `python/horsies/core/codec/json_io.py:97`).
+    /// `loads_json`, `clients/python/horsies/core/codec/json_io.py:97`).
     #[test]
     fn an_args_from_member_keeps_the_stored_text_of_its_envelope() {
         let wrap = |inner: &str| {

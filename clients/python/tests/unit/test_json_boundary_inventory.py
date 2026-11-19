@@ -1,12 +1,12 @@
 """Frozen inventory of JSON parsing and serializing in the runtime package.
 
-``python/horsies/core/codec/json_io.py`` is the JSON boundary. ``loads_json`` carries
+``clients/python/horsies/core/codec/json_io.py`` is the JSON boundary. ``loads_json`` carries
 the strict hooks, so a parse anywhere else lets ``NaN``, ``Infinity`` or
 ``1e9999`` into the system. This inventory is the tripwire: an added parse
 fails here, and an added, removed, or moved ``json.dumps`` fails here and must
 be reviewed before the inventory changes.
 
-Scope: every ``.py`` file under ``python/horsies/``. The scan resolves import aliases
+Scope: every ``.py`` file under ``clients/python/horsies/``. The scan resolves import aliases
 and also counts a reference that is passed without a call, such as
 ``json_deserializer=json.loads``.
 
@@ -36,9 +36,9 @@ import pytest
 
 pytestmark = [pytest.mark.unit]
 
-_REPO_ROOT: Final = Path(__file__).resolve().parents[2]
-_RUNTIME_ROOT: Final = _REPO_ROOT / 'python' / 'horsies'
-_CODEC_MODULE: Final = 'python/horsies/core/codec/json_io.py'
+_REPO_ROOT: Final = Path(__file__).resolve().parents[4]
+_RUNTIME_ROOT: Final = _REPO_ROOT / 'clients' / 'python' / 'horsies'
+_CODEC_MODULE: Final = 'clients/python/horsies/core/codec/json_io.py'
 _MODULE_SCOPE: Final = '<module>'
 
 _JSON_MODULES: Final = frozenset({'json', 'json.decoder', 'json.encoder'})
@@ -53,11 +53,11 @@ _FROZEN_DUMPS: Final = Counter(
     {
         (_CODEC_MODULE, 'dumps_json'): 1,
         # The manifest of the core holds only text, integers and booleans.
-        ('python/horsies/_catalog/manifest.py', 'dump_producer_manifest'): 1,
-        ('python/horsies/_catalog/worker_manifest.py', 'dump_worker_manifest'): 1,
+        ('clients/python/horsies/_catalog/manifest.py', 'dump_producer_manifest'): 1,
+        ('clients/python/horsies/_catalog/worker_manifest.py', 'dump_worker_manifest'): 1,
         # The profiles member of the worker manifest, for the live check.
-        ('python/horsies/core/worker_manifest.py', 'dump_worker_profiles'): 1,
-        ('python/horsies/_catalog/scheduler_manifest.py', 'dump_scheduler_manifest'): 1,
+        ('clients/python/horsies/core/worker_manifest.py', 'dump_worker_profiles'): 1,
+        ('clients/python/horsies/_catalog/scheduler_manifest.py', 'dump_scheduler_manifest'): 1,
     }
 )
 
@@ -241,7 +241,7 @@ class TestRuntimeInventory:
             (_CODEC_MODULE, 'loads_json', 'loads'): 1,
             # The JSON text that the core writes from its model of a monitoring read.
             (_CODEC_MODULE, 'validate_core_model_json', 'validate_json'): 1,
-            ('python/horsies/core/codec/typed.py', '_validate_wire', 'validate_json'): 1,
+            ('clients/python/horsies/core/codec/typed.py', '_validate_wire', 'validate_json'): 1,
         })
 
     def test_json_dumps_sites_are_frozen(self) -> None:

@@ -1,5 +1,5 @@
 //! The expected results are the results of Python's `loads_json`
-//! (`python/horsies/core/codec/json_io.py`) on CPython 3.13.
+//! (`clients/python/horsies/core/codec/json_io.py`) on CPython 3.13.
 
 use super::*;
 

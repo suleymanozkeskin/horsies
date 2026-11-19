@@ -41,7 +41,7 @@ pub(crate) struct MetaResponse {
     pub expected_schema_version: i64,
     pub schema_compatible: bool,
     /// The probe's verdict itself, so a client never derives it from the
-    /// version numbers (Python `python/horsies/web/app.py:64-99`).
+    /// version numbers (Python `clients/python/horsies/web/app.py:64-99`).
     pub schema_state: SchemaState,
     pub actions_disabled_reason: Option<String>,
 }

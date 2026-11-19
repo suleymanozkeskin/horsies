@@ -3,7 +3,7 @@
 //!
 //! Each test calls the broker method that the worker or the child calls
 //! (the Python child calls the same methods through its core handle,
-//! `crates/horsies-python/src/operations/start.rs`, `finalizing.rs`,
+//! `clients/python/bridge/src/operations/start.rs`, `finalizing.rs`,
 //! `stop_before_start.rs`), on a broker whose core pools connect through a
 //! counting proxy. A first call of the same statement opens the connection,
 //! runs the client family check and prepares the statement, so the counted

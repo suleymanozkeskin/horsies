@@ -1,5 +1,5 @@
 //! Layer 7: sub-workflows on every read surface (Python
-//! `tests/e2e/test_layer7_subworkflows.py`). The parent specs are built in
+//! `clients/python/tests/e2e/test_layer7_subworkflows.py`). The parent specs are built in
 //! the test process with the typed DSL; their children are the definitions
 //! of `horsies_test_worker::tasks::subworkflow`, which every process of the
 //! instance registers, so the worker builds each child from its registry.

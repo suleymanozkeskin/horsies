@@ -1,6 +1,6 @@
 //! Layer 6: joins, pause and resume, success policies, recovery and
 //! retries of workflows (Python
-//! `tests/e2e/test_layer6_workflow_advanced.py`). The specs are built in the
+//! `clients/python/tests/e2e/test_layer6_workflow_advanced.py`). The specs are built in the
 //! test process with the typed DSL and started with `Horsies::start`; the
 //! worker runs their nodes, and its reaper runs the workflow recovery.
 
@@ -661,7 +661,7 @@ async fn test_recovery_preserves_failed_state() {
     assert_eq!(failed_code(&handle).await, "DELIBERATE_FAILURE");
 }
 
-/// Python: `tests/integration/test_workflow_recovery.py::test_recover_failed_recomputes_first_failed_error`.
+/// Python: `clients/python/tests/integration/test_workflow_recovery.py::test_recover_failed_recomputes_first_failed_error`.
 /// A workflow put back to RUNNING with the error of its second failed node
 /// is finalized with the error of its first failed node by index.
 #[tokio::test]

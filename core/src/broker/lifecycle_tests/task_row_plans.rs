@@ -1,4 +1,4 @@
-//! Port of Python `tests/integration/test_task_row_plans.py`.
+//! Port of Python `clients/python/tests/integration/test_task_row_plans.py`.
 //!
 //! `test_the_finalizing_marker_reads_its_row_through_the_primary_key` is
 //! `worker::finalizing_tests::the_finalizing_marker_reads_its_row_through_the_primary_key`

@@ -8,8 +8,8 @@ from typing import Final
 import pytest
 
 from horsies.core.types.result import Err, Ok
-from tests.dualrun.catalog import BASELINE_CATALOG
-from tests.dualrun.coverage import (
+from tests.parity.snapshot.catalog import BASELINE_CATALOG
+from tests.parity.snapshot.coverage import (
     DatabaseType,
     DetachedLeaf,
     DetachedLeafShapeMismatch,
@@ -26,7 +26,7 @@ from tests.dualrun.coverage import (
     rule_fits_type,
     split_detached_leaves,
 )
-from tests.dualrun.rules import (
+from tests.parity.snapshot.rules import (
     AnchoredJsonTime,
     AnchorNull,
     AnchorReference,
@@ -65,7 +65,7 @@ from tests.dualrun.rules import (
     Unversioned,
     catalog_defects,
 )
-from tests.dualrun.values import (
+from tests.parity.snapshot.values import (
     FiniteTime,
     InfiniteFuture,
     InfinitePast,

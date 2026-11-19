@@ -1,6 +1,6 @@
 //! The OS threads of an idle producer process of the Rust client after its
 //! first send (the Python check of the same count:
-//! `tests/extension/test_async_calls.py`,
+//! `clients/python/tests/extension/test_async_calls.py`,
 //! `test_an_idle_producer_after_its_first_send_keeps_the_core_threads_only`).
 //!
 //! The count is read in a process of its own: the test starts this test
@@ -8,7 +8,7 @@
 //! ignored test [`child_counts_the_threads_of_a_first_send`] alone. The
 //! counts of the child are differences, so the threads of the test harness
 //! do not count. The database is a copy of the core's test template
-//! (`crates/horsies-core/src/test_support/database.rs`); its URL names the
+//! (`core/src/test_support/database.rs`); its URL names the
 //! server by IP address, so the connect needs no host name lookup, which
 //! runs on a thread of the runtime's blocking pool.
 
@@ -29,7 +29,7 @@ use horsies_core::PostgresBroker;
 /// The test databases of the core. This binary creates copies of the
 /// template only.
 #[allow(dead_code)]
-#[path = "../../horsies-core/src/test_support/database.rs"]
+#[path = "../../../../core/src/test_support/database.rs"]
 mod test_database;
 
 use test_database::TestDatabase;

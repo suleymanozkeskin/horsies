@@ -1,5 +1,5 @@
 //! Tasks of the shared execution classes and of the runner defects of the
-//! old in-process worker (Python `tests/e2e/tasks/shared_async_tasks.py`,
+//! old in-process worker (Python `clients/python/tests/e2e/tasks/shared_async_tasks.py`,
 //! `shared_thread_tasks.py`, `async_tasks.py`).
 
 use std::convert::Infallible;

@@ -1,4 +1,4 @@
--- Cases for crates/horsies-core/baseline/0006_history_functions.sql, one session.
+-- Cases for core/baseline/0006_history_functions.sql, one session.
 --
 -- Run on a database that holds the baseline migration, in one transaction that the caller rolls back:
 --   psql -v ON_ERROR_STOP=1 --single-transaction -f history_functions_cases.sql
@@ -1271,7 +1271,7 @@ SELECT fixture_check(
 -- UPDATE of the stored version; the CHECKs allow every positive version.
 
 -- The record statement of the recovery pass for a disposition that keeps the pending row
--- (crates/horsies-core/src/workflow_engine/phase2_recovery.rs, RECORD_RETAINING_ATTEMPT_SQL).
+-- (core/src/workflow_engine/phase2_recovery.rs, RECORD_RETAINING_ATTEMPT_SQL).
 CREATE FUNCTION fixture_record_retaining_attempt(p_task uuid, p_failure_class text) RETURNS integer
 LANGUAGE sql AS $$
     UPDATE horsies_workflow_phase2_pending

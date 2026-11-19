@@ -1,7 +1,7 @@
-//! Ports of Python `tests/unit/test_broker_postgres.py` rows of the worker
+//! Ports of Python `clients/python/tests/unit/test_broker_postgres.py` rows of the worker
 //! ping and of the result wait: the pong decode, the early return at
 //! `min_responses`, and the end of a result wait that its caller drops (with
-//! the workflow result wait of `tests/unit/test_workflow_handle_async_cleanup.py`).
+//! the workflow result wait of `clients/python/tests/unit/test_workflow_handle_async_cleanup.py`).
 //!
 //! The database tests run on the database of their test runtime
 //! (`terminalization_matrix::migrated_pool`), with the broker's listener on
@@ -192,7 +192,7 @@ async fn a_result_wait_dropped_while_it_waits_unlistens_its_channel() {
     );
 }
 
-/// Python `tests/unit/test_workflow_handle_async_cleanup.py::TestWorkflowHandleAsyncCleanup::test_get_async_cancellation_still_completes_unsubscribe`:
+/// Python `clients/python/tests/unit/test_workflow_handle_async_cleanup.py::TestWorkflowHandleAsyncCleanup::test_get_async_cancellation_still_completes_unsubscribe`:
 /// a workflow result wait (`wait_workflow_end`, the wait of
 /// `WorkflowHandle.get`) that its caller drops while it waits leaves no
 /// LISTEN behind. The drop of its subscription is synchronous, so no second

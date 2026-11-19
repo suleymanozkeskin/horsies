@@ -1,9 +1,9 @@
-# showcase/acme/scenarios/seed.py
+# clients/python/examples/acme/scenarios/seed.py
 """Create the demo database, the `acme_*` tables, and the catalog.
 
 Run once before anything else:
 
-    uv run python -m showcase.acme.scenarios seed
+    uv run python -m examples.acme.scenarios seed
 
 The catalog is deterministic: the same SKUs, names, prices, and stock every
 time. The last few SKUs are seeded with zero stock — those are the
@@ -89,9 +89,9 @@ def run() -> int:
 
     heading('next')
     bullet('start the four processes from the repository root:')
-    bullet('  uv run horsies worker showcase.acme.app:app --profile default')
-    bullet('  uv run horsies scheduler showcase.acme.app:app')
-    bullet('  uv run horsies web showcase.acme.app:app --enable-actions')
-    bullet('  uv run python -m showcase.acme.scenarios steady')
+    bullet('  uv run horsies worker examples.acme.app:app --profile default')
+    bullet('  uv run horsies scheduler examples.acme.app:app')
+    bullet('  uv run horsies web examples.acme.app:app --enable-actions')
+    bullet('  uv run python -m examples.acme.scenarios steady')
     bullet(f'then open {WEB_BASE_URL}')
     return 0

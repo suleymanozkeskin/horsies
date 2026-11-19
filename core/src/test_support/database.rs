@@ -11,7 +11,7 @@
 //!   core pools; an integration test installs through its public API.
 //! - Every name starts with one prefix, `HORSIES_TEST_DATABASE_PREFIX`
 //!   (default `horsies_test_`), the variable of the Python suites
-//!   (`tests/session_database.py`): `<prefix>rs_<32 hex>` for a test
+//!   (`clients/python/tests/session_database.py`): `<prefix>rs_<32 hex>` for a test
 //!   database and `<prefix>rstpl_<32 hex>` for a template. Runs that share
 //!   one server set different prefixes.
 //! - A test database is dropped (`DROP DATABASE ... WITH (FORCE)`) when the

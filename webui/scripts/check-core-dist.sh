@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Rebuilds crates/horsies-core/webui-dist from webui/ (`bun run build`)
+# Rebuilds core/webui-dist from webui/ (`bun run build`)
 # and fails when the result differs from the committed build: a changed or
 # deleted tracked file, or a file that git does not track (ignored files
 # included).
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
-dist_dir="crates/horsies-core/webui-dist"
+dist_dir="core/webui-dist"
 
 cd "$repo_root/webui"
 bun run build

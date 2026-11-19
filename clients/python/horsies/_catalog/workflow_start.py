@@ -12,7 +12,7 @@ class WorkflowStartErrorCode(str, Enum):
     """Categorized workflow start failure codes.
 
     The members are Python's, in Python's order
-    (`python/horsies/core/workflows/start_types.py`).
+    (`clients/python/horsies/core/workflows/start_types.py`).
     """
 
     BROKER_NOT_CONFIGURED = 'BROKER_NOT_CONFIGURED'

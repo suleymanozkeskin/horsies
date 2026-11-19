@@ -1,5 +1,5 @@
 //! The run of a started scheduler and the state start (Python
-//! `tests/unit/test_scheduler_service.py`, `TestRunForever`,
+//! `clients/python/tests/unit/test_scheduler_service.py`, `TestRunForever`,
 //! `TestCheckAndRunSchedules`, `TestInitializeSchedules`): a stop asked for
 //! before the run, a tick that fails, a tick with no enabled schedule, and
 //! the start write's rows.

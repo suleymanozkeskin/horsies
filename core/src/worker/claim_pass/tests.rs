@@ -1,6 +1,6 @@
 //! The claim pass with classes on scripted database steps (Python
-//! `tests/unit/test_claim_plan.py`: `TestRowClass`,
-//! `TestClaimPassWithClasses`; `tests/unit/test_worker_helpers.py`:
+//! `clients/python/tests/unit/test_claim_plan.py`: `TestRowClass`,
+//! `TestClaimPassWithClasses`; `clients/python/tests/unit/test_worker_helpers.py`:
 //! `TestClaimPass`). The statements themselves are tested on the test
 //! database in `broker::lifecycle_tests::claim_start_release`.
 

@@ -1,4 +1,4 @@
-# showcase/acme/store.py
+# clients/python/examples/acme/store.py
 """The `acme_*` tables and the typed helpers tasks use to read and write them.
 
 Acme Clothing's state is real: products, stock, orders, lines, payments, and

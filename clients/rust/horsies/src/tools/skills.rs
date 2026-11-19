@@ -1,8 +1,8 @@
 //! `horsies skills install --target <dir> [--force]`: copy the agent skill
 //! folder of this release to `<dir>/horsies/` (Python `horsies skills
-//! install`, `python/horsies/core/skills_installer.py`).
+//! install`, `clients/python/horsies/core/skills_installer.py`).
 //!
-//! The files of `crates/horsies/.agents/skills/horsies/` are in the binary,
+//! The files of `clients/rust/horsies/.agents/skills/horsies/` are in the binary,
 //! put there when it was built. A copy that differs from them is replaced
 //! only with `--force`. The new copy is written beside the destination
 //! first and then moved into place, so a failure says what is at the

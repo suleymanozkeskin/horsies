@@ -1,4 +1,4 @@
-"""Unit tests for CLI module (python/horsies/core/cli.py)."""
+"""Unit tests for CLI module (clients/python/horsies/core/cli.py)."""
 
 from __future__ import annotations
 

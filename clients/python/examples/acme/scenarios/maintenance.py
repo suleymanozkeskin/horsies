@@ -1,7 +1,7 @@
-# showcase/acme/scenarios/maintenance.py
+# clients/python/examples/acme/scenarios/maintenance.py
 """Start the back-office workflows once each.
 
-    uv run python -m showcase.acme.scenarios maintenance
+    uv run python -m examples.acme.scenarios maintenance
 
 The order path is what `steady` exercises. These are the rest of the business:
 a routine price sync, a winback campaign, a stock transfer between sites, a

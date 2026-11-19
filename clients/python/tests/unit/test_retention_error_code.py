@@ -219,7 +219,7 @@ class TestPublishedCodeTable:
         """The published table is the adopter's index of what a code means."""
         from pathlib import Path
 
-        repo_root = Path(__file__).resolve().parents[2]
+        repo_root = Path(__file__).resolve().parents[4]
         table = (
             repo_root
             / 'website'

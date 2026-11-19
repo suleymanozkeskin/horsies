@@ -13,7 +13,7 @@ its command through the plain methods of the app (`run_worker`,
 
 ## Start the demo
 
-Run PostgreSQL with `docker compose -f rust/showcase/docker-compose.yml up -d`.
+Run PostgreSQL with `docker compose -f clients/rust/examples/showcase/docker-compose.yml up -d`.
 The compose service listens on port `5433`.
 
 For that compose service, set
@@ -119,7 +119,7 @@ operation or use the history rerun API when a retained task is eligible.
 ## Scenarios
 
 Each scenario uses the same deterministic hash over its domain identifiers.
-Rates and work envelopes live in `rust/showcase/src/tuning.rs`.
+Rates and work envelopes live in `clients/rust/examples/showcase/src/tuning.rs`.
 
 `steady` places orders at the tuned demand rate. It starts a return workflow
 for every sixth order and a supplier restock workflow for every twentieth.

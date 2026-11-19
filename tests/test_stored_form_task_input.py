@@ -3,7 +3,7 @@
 A vector's value is a set of keyword arguments with declared types. Python's
 send encodes them with ``encode_kwargs_read_back`` and ``dumps_json``; its
 child reads the text with ``loads_json`` and ``decode_kwargs``
-(``python/horsies/core/worker/child_runner.py:1300-1329``). The core and the
+(``clients/python/horsies/core/worker/child_runner.py:1300-1329``). The core and the
 Rust client test the same file.
 """
 

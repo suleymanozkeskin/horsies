@@ -171,7 +171,7 @@ mod tests {
 
     /// Every pattern kind, every cron term kind and every day selector
     /// (`config_digest_vectors.json`; the Python test
-    /// `tests/unit/test_schedule_config_digest_vectors.py` pins the same
+    /// `clients/python/tests/unit/test_schedule_config_digest_vectors.py` pins the same
     /// table).
     fn python_vectors() -> Vec<PythonVector> {
         let table: PythonVectors = serde_json::from_str(include_str!("config_digest_vectors.json"))

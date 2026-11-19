@@ -2,7 +2,7 @@
 //! refusing class, horizon retune, index repair, manifest repair, coverage
 //! refusals and the missing-leaf rules.
 //!
-//! Python specification: `tests/integration/test_partition_coverage_containment.py`.
+//! Python specification: `clients/python/tests/integration/test_partition_coverage_containment.py`.
 //! The core keeps the pool
 //! coverage path only (history ledger row 33), so every pass here runs through
 //! `ensure_partition_coverage_in_pool` or `ensure_startup_coverage_in_pool`.

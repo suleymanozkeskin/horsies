@@ -879,7 +879,7 @@ class TestResumeOfAChildBuildThatRaises:
     whose text can hold user data. The core answers the same, commits
     nothing, and logs the exception's type and text with the resume and the
     build on ``horsies.monitoring``. The core's mapping is also tested in
-    ``crates/horsies-core/src/web/tests.rs``
+    ``core/src/web/tests.rs``
     (``a_resume_whose_child_build_raised_is_python_s_internal_server_error``).
     """
 

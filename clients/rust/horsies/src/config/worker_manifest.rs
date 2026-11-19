@@ -1,5 +1,5 @@
 //! The worker manifest of a Rust app (Python `to_worker_manifest`,
-//! `python/horsies/core/worker_manifest.py`).
+//! `clients/python/horsies/core/worker_manifest.py`).
 //!
 //! The app's validated config, its task registrations, the profile that
 //! the start asks for and the child launch become the one manifest that the

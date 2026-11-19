@@ -1,7 +1,7 @@
 -- Cases for the monitoring read functions of 0007_scheduler_monitoring_functions.sql: the status counts, the
 -- breakdown, the workflow names, runs, run and node, and the schedule list.
 --
--- Preconditions, set up by the runner (crates/horsies-core/src/sql_tests/baseline_scheduler_monitoring_sql.rs):
+-- Preconditions, set up by the runner (core/src/sql_tests/baseline_scheduler_monitoring_sql.rs):
 -- - a fresh database that holds the baseline migration;
 -- - the published history readers rendered for the forever leaf (horsies_task_detail_staged and
 --   horsies_task_provenance_staged);
@@ -15,7 +15,7 @@
 -- reports that COMMIT with the warning "there is no transaction in progress".
 --
 -- The expected answers of the read cases are those of the Python reads that the functions replace
--- (python/horsies/monitoring/queries.py) on the seed below. The seed section is the part between the lines "seed: begin"
+-- (clients/python/horsies/monitoring/queries.py) on the seed below. The seed section is the part between the lines "seed: begin"
 -- and "seed: end"; its codes are built-in codes of the given category or codes outside the taxonomy, so the small
 -- taxonomy of these cases and the full one of the library classify them the same way.
 

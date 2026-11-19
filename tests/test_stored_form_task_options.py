@@ -2,9 +2,9 @@
 
 A task stores ``serialize_task_options`` of its ``TaskOptions``; a send with
 a deadline stores the send's options with ``good_until``
-(``python/horsies/core/task_decorator.py:2067-2087``); a workflow node stores
+(``clients/python/horsies/core/task_decorator.py:2067-2087``); a workflow node stores
 its task's options with its deadline merged as ``good_until``
-(``python/horsies/core/workflows/child_build.py``). The core reads the text
+(``clients/python/horsies/core/workflows/child_build.py``). The core reads the text
 at enqueue. Python reads it back with the public ``RetryPolicy`` model and
 ``stored_execution`` (the class read of a child). The core and the Rust
 client test the same file.

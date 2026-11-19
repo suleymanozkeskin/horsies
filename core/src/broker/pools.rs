@@ -15,7 +15,7 @@
 //!   connection. The main pool sends unnamed statements only in PgBouncer
 //!   transaction mode; the session pool always keeps its session.
 //! - A child of a worker ([`PoolProfile::Child`]) gets the pool of Python's
-//!   child (`python/horsies/core/worker/child_pool.py:122-136`): its main URL pool
+//!   child (`clients/python/horsies/core/worker/child_pool.py:122-136`): its main URL pool
 //!   keeps `min_size` connections open, and with `check` it pings every
 //!   pooled connection at checkout in place of the 1 s idle ping.
 //!

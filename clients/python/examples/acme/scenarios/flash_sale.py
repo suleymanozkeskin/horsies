@@ -1,7 +1,7 @@
-# showcase/acme/scenarios/flash_sale.py
+# clients/python/examples/acme/scenarios/flash_sale.py
 """Two sales and a burst of expiring price updates.
 
-    uv run python -m showcase.acme.scenarios flash-sale
+    uv run python -m examples.acme.scenarios flash-sale
 
 The first campaign is an ordinary one: at least one publish target accepts it,
 so the `SuccessPolicy` is satisfied and the run COMPLETES — even though the

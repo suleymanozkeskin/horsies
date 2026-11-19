@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterator
 import pytest
 
 from horsies.core.types.result import Err, Ok
-from tests.dualrun.databases import DualRunDatabase, create_database, drop_database
+from tests.parity.snapshot.databases import DualRunDatabase, create_database, drop_database
 from tests.session_database import base_database_url
 
 

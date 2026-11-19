@@ -1,4 +1,4 @@
-//! Bounded waits on a condition (Python `tests/e2e/helpers/db.py`).
+//! Bounded waits on a condition (Python `clients/python/tests/e2e/helpers/db.py`).
 
 use std::time::{Duration, Instant};
 

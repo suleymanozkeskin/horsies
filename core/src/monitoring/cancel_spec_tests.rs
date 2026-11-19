@@ -1,7 +1,7 @@
 //! The monitoring task cancel: a claimed row, stored data that does not
 //! parse, a finalize after the cancel, and a claim that meets the cancel.
 //!
-//! Python specification: `tests/integration/test_monitoring_task_actions.py`
+//! Python specification: `clients/python/tests/integration/test_monitoring_task_actions.py`
 //! (baseline version on `program/0.8.0`). Each test runs on a database of
 //! its own ([`SpecDatabase`]), so a claim pass sees only its rows.
 

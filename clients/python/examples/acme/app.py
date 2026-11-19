@@ -1,12 +1,12 @@
-# showcase/acme/app.py
+# clients/python/examples/acme/app.py
 """The Acme Clothing horsies application: queues, recovery tuning, and schedules.
 
 Run every process from the repository root:
 
-    uv run horsies worker showcase.acme.app:app --profile default
-    uv run horsies scheduler showcase.acme.app:app
-    uv run horsies web showcase.acme.app:app --enable-actions
-    uv run horsies check showcase.acme.app:app
+    uv run horsies worker examples.acme.app:app --profile default
+    uv run horsies scheduler examples.acme.app:app
+    uv run horsies web examples.acme.app:app --enable-actions
+    uv run horsies check examples.acme.app:app
 """
 
 from __future__ import annotations
@@ -362,24 +362,24 @@ app = Horsies(
 )
 
 app.discover_tasks([
-    'showcase.acme.tasks.payments',
-    'showcase.acme.tasks.inventory',
-    'showcase.acme.tasks.orders',
-    'showcase.acme.tasks.promotions',
-    'showcase.acme.tasks.shipping',
-    'showcase.acme.tasks.returns',
-    'showcase.acme.tasks.notify',
-    'showcase.acme.tasks.analytics',
-    'showcase.acme.workflows.order_fulfillment',
-    'showcase.acme.workflows.shipping',
-    'showcase.acme.workflows.returns_review',
-    'showcase.acme.workflows.restock',
-    'showcase.acme.workflows.flash_sale',
-    'showcase.acme.workflows.catalog_import',
-    'showcase.acme.workflows.daily_report',
-    'showcase.acme.workflows.price_sync',
-    'showcase.acme.workflows.customer_winback',
-    'showcase.acme.workflows.warehouse_transfer',
-    'showcase.acme.workflows.seasonal_markdown',
-    'showcase.acme.workflows.fraud_review',
+    'examples.acme.tasks.payments',
+    'examples.acme.tasks.inventory',
+    'examples.acme.tasks.orders',
+    'examples.acme.tasks.promotions',
+    'examples.acme.tasks.shipping',
+    'examples.acme.tasks.returns',
+    'examples.acme.tasks.notify',
+    'examples.acme.tasks.analytics',
+    'examples.acme.workflows.order_fulfillment',
+    'examples.acme.workflows.shipping',
+    'examples.acme.workflows.returns_review',
+    'examples.acme.workflows.restock',
+    'examples.acme.workflows.flash_sale',
+    'examples.acme.workflows.catalog_import',
+    'examples.acme.workflows.daily_report',
+    'examples.acme.workflows.price_sync',
+    'examples.acme.workflows.customer_winback',
+    'examples.acme.workflows.warehouse_transfer',
+    'examples.acme.workflows.seasonal_markdown',
+    'examples.acme.workflows.fraud_review',
 ])

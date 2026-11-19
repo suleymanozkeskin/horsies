@@ -1,6 +1,6 @@
 //! The limit of a result wait, parsed once before any read.
 //!
-//! Python's rule (`python/horsies/core/utils/wait_timeout.py:33-56`): a wait takes
+//! Python's rule (`clients/python/horsies/core/utils/wait_timeout.py:33-56`): a wait takes
 //! no limit, or a limit from 0 to `MAX_TASK_TIMEOUT_MS` (2^32 - 1 ms, about
 //! 49.7 days); a larger limit is refused as `INVALID_INPUT` before any read.
 //! The bound also keeps `Instant + limit` far from overflow, which panics.
@@ -11,7 +11,7 @@ use tokio::time::Instant;
 
 /// The longest limit a result wait accepts, in milliseconds: 2^32 - 1, the
 /// bound of a task timeout (Python `MAX_TASK_TIMEOUT_MS`,
-/// `python/horsies/core/models/tasks.py:548`).
+/// `clients/python/horsies/core/models/tasks.py:548`).
 pub const MAX_WAIT_LIMIT_MS: u64 = 4_294_967_295;
 
 /// How long a result wait may last.

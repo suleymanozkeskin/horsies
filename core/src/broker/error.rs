@@ -354,7 +354,7 @@ pub fn is_retryable_statement_failure(failure: &StatementFailure) -> bool {
 }
 
 /// Why the schema install lock could not be used (Python
-/// `python/horsies/core/brokers/postgres.py:1466-1525`).
+/// `clients/python/horsies/core/brokers/postgres.py:1466-1525`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InstallLockFailure {
     /// Another installer held the lock for the whole wait bound. Nothing was

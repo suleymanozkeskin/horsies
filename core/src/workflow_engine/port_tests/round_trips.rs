@@ -1,5 +1,5 @@
 //! Round trips of the workflow operations, counted at the wire. Python:
-//! `tests/integration/test_workflow_start_batched.py::TestBatchedStartShape::test_statement_count_flat_in_root_count`
+//! `clients/python/tests/integration/test_workflow_start_batched.py::TestBatchedStartShape::test_statement_count_flat_in_root_count`
 //! and `test_subworkflow_start_batched.py::TestBulkChildStart::test_statement_count_flat_in_children_and_shape`.
 //!
 //! Each case runs on a [`CountedBroker`], whose core pools connect through a

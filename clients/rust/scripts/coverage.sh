@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT_DIR"
 
 MODE="${1:-summary}"
@@ -58,7 +58,7 @@ case "$MODE" in
     ;;
   *)
     cat <<'EOF'
-Usage: ./rust/scripts/coverage.sh [summary|full|html|full-html|lcov|full-lcov|json|full-json] [extra cargo-llvm-cov args...]
+Usage: ./clients/rust/scripts/coverage.sh [summary|full|html|full-html|lcov|full-lcov|json|full-json] [extra cargo-llvm-cov args...]
 
 Modes:
   summary    Run the core coverage suite and print the terminal summary

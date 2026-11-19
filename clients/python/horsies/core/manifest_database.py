@@ -1,12 +1,12 @@
 """The database-section mapping that the producer and worker manifest builders share.
 
-`python/horsies/_catalog/manifest.py` and `python/horsies/_catalog/worker_manifest.py` are
+`clients/python/horsies/_catalog/manifest.py` and `clients/python/horsies/_catalog/worker_manifest.py` are
 generated as two modules, so each has its own classes for the same Rust types
 (`manifest.PoolRecycleNever` is not `worker_manifest.PoolRecycleNever`). The
 rules that turn the validated `PostgresConfig` values into these types are
 written once here. Each function takes the constructors of the target module
 as keyword arguments and returns that module's type; the builders pass their
-generated classes (`python/horsies/core/manifest.py`, `python/horsies/core/worker_manifest.py`).
+generated classes (`clients/python/horsies/core/manifest.py`, `clients/python/horsies/core/worker_manifest.py`).
 
 Pydantic refuses every user error first, so a value that breaks a rule here is
 a defect: it raises `AssertionError`. Every function is pure.

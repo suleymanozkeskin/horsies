@@ -31,15 +31,15 @@ from typing import Final, assert_never
 from tests.public_api.compare import Err, JsonValue, Ok, Result
 
 PUBLIC_API_FOLDER: Final = Path(__file__).resolve().parent
-REPOSITORY_ROOT: Final = PUBLIC_API_FOLDER.parents[1]
+REPOSITORY_ROOT: Final = PUBLIC_API_FOLDER.parents[3]
 SNAPSHOT_TOOL: Final = PUBLIC_API_FOLDER / 'snapshot.py'
 PYRIGHT_VIEW_TOOL: Final = PUBLIC_API_FOLDER / 'pyright_view.py'
 BASELINE_SNAPSHOT: Final = PUBLIC_API_FOLDER / 'baseline.json'
 BASELINE_PYRIGHT_VIEW: Final = PUBLIC_API_FOLDER / 'baseline-pyright.json'
 DOC_ROOTS: Final = (
     REPOSITORY_ROOT / 'website' / 'src' / 'content' / 'docs',
-    REPOSITORY_ROOT / 'python' / 'horsies' / '.agents' / 'skills',
-    REPOSITORY_ROOT / 'showcase',
+    REPOSITORY_ROOT / 'clients' / 'python' / 'horsies' / '.agents' / 'skills',
+    REPOSITORY_ROOT / 'clients' / 'python' / 'examples',
 )
 # One run of a tool; pyright over the package takes seconds.
 TOOL_TIMEOUT_SECONDS: Final = 900

@@ -1,5 +1,5 @@
 //! The sub-workflow definitions and their tasks (Python
-//! `tests/e2e/tasks/workflows.py`, the `E2ESub...` definitions).
+//! `clients/python/tests/e2e/tasks/workflows.py`, the `E2ESub...` definitions).
 //!
 //! Every process of an instance registers the definitions, so the worker
 //! builds the child of each sub-workflow node from the app's registry. The

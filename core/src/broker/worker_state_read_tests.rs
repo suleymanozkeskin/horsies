@@ -1,7 +1,7 @@
 //! The worker state reads against PostgreSQL: the slot health, the class
 //! budgets and the child memory of each snapshot, and the refusal of a stored
 //! value of another shape. Python reference:
-//! `tests/integration/test_worker_health_api.py`.
+//! `clients/python/tests/integration/test_worker_health_api.py`.
 
 use std::num::NonZeroU64;
 use std::sync::Arc;

@@ -1,7 +1,7 @@
 """The workflow recovery limit: classification, outcomes, and the error text.
 
 The real writes are in
-crates/horsies-core/src/workflow_engine/port_tests/recovery_limit_pass.rs.
+core/src/workflow_engine/port_tests/recovery_limit_pass.rs.
 Here the count statement (`count_recovery_raise`) is patched, and the pass
 runs against sessions that answer with planned rows.
 """

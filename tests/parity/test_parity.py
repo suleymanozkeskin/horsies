@@ -1,7 +1,7 @@
 """Parity of the Rust client with the Python client, by scenario.
 
 Each test runs one scenario of `scenarios.py` on the Python client and on
-the Rust client (`rust/tests/parity`), each on its own fresh database, and
+the Rust client (`clients/rust/tests/parity`), each on its own fresh database, and
 requires equal snapshots except the client family row, and equal reports.
 Snapshots that differ while the run spans of the two sides do not lie in one
 UTC hour (`ClockBoundaryStraddle`) run again on new databases, at most
@@ -19,9 +19,9 @@ from collections.abc import Callable
 import pytest
 
 from horsies.core.types.result import Err, Ok
-from tests.dualrun.compare import render_diff
-from tests.dualrun.databases import DualRunDatabase
-from tests.dualrun.worker_run import (
+from tests.parity.snapshot.compare import render_diff
+from tests.parity.snapshot.databases import DualRunDatabase
+from tests.parity.snapshot.worker_run import (
     ClockBoundaryStraddle,
     DualRunMismatch,
     PairEqual,

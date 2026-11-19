@@ -12,16 +12,16 @@ from typing import Final, TypeVar
 import pytest
 
 from horsies.core.types.result import Err, Ok, Result
-from tests.dualrun.compare import compare_snapshots, render_diff
-from tests.dualrun.databases import DualRunDatabase
-from tests.dualrun.selfcheck import (
+from tests.parity.snapshot.compare import compare_snapshots, render_diff
+from tests.parity.snapshot.databases import DualRunDatabase
+from tests.parity.snapshot.selfcheck import (
     SelfCheckRun,
     SelfCheckStepFailed,
     run_function_calls,
     run_seeded_history,
     straddles,
 )
-from tests.dualrun.values import CalendarUnit, DatedName, ExactValue
+from tests.parity.snapshot.values import CalendarUnit, DatedName, ExactValue
 
 pytestmark = [pytest.mark.integration]
 

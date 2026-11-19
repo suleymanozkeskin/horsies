@@ -1,4 +1,4 @@
-//! Port of Python `tests/integration/test_task_history_terminalization_expiry.py`.
+//! Port of Python `clients/python/tests/integration/test_task_history_terminalization_expiry.py`.
 //!
 //! `TestDiscoveryBatch::test_skip_locked_steps_around_a_held_row` is
 //! `terminalization_functions::expire_pending_tasks::a_row_a_concurrent_claim_holds_is_stepped_around`.

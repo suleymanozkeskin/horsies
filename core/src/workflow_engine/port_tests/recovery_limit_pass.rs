@@ -54,7 +54,7 @@ const LIMIT_MESSAGE: &str = "Workflow recovery raised a persistent error";
 /// `BAD_GOOD_UNTIL`). The options parse, so the node is not refused when its
 /// task is built; the deadline text goes to the task insert, which raises
 /// (Python `_build_enqueued_task_params`,
-/// `python/horsies/core/workflows/engine.py:831-835`).
+/// `clients/python/horsies/core/workflows/engine.py:831-835`).
 const BAD_GOOD_UNTIL: &str = r#"{"good_until":"not-a-date"}"#;
 
 async fn pass(pool: &TestPool, child_specs: &TestChildSpecs) -> RecoveryReport {
@@ -195,7 +195,7 @@ async fn stop_killing(pool: &TestPool, table: &str) {
 /// The child specs of a child whose task has options that are not a JSON
 /// object and a `good_until` (Python's `PoisonOptionsChild`): the merge of
 /// the deadline into the options raises at each start of the child (Python
-/// `_child_task_options_json`, `python/horsies/core/workflows/engine.py:425-475`).
+/// `_child_task_options_json`, `clients/python/horsies/core/workflows/engine.py:425-475`).
 fn poison_child_specs() -> TestChildSpecs {
     let mut child_task = task_node(0, "limit_child_task");
     child_task.task_options_json = Some(POISON_TASK_OPTIONS.to_owned());

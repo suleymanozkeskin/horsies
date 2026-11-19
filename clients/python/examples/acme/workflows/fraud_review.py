@@ -1,4 +1,4 @@
-# showcase/acme/workflows/fraud_review.py
+# clients/python/examples/acme/workflows/fraud_review.py
 """Reconcile first, refund only if a person says so.
 
     reconcile_payments -> refund_payment          (OnError.PAUSE)

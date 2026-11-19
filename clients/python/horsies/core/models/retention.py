@@ -1,4 +1,4 @@
-# python/horsies/core/models/retention.py
+# clients/python/horsies/core/models/retention.py
 """Data-lifecycle configuration: how long records live and how they age.
 
 Split out of `RecoveryConfig` because the two answer different

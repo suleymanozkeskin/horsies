@@ -1,4 +1,4 @@
-//! Task fundamentals (Python `tests/e2e/tasks/basic.py`). Each task is
+//! Task fundamentals (Python `clients/python/tests/e2e/tasks/basic.py`). Each task is
 //! `ISOLATED`, the default class, on the default queue.
 
 use std::collections::BTreeMap;

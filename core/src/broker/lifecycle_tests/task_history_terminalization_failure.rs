@@ -1,4 +1,4 @@
-//! Port of Python `tests/integration/test_task_history_terminalization_failure.py`.
+//! Port of Python `clients/python/tests/integration/test_task_history_terminalization_failure.py`.
 //!
 //! The Python file and the ports drive `horsies_finish_failed_attempt` (kind
 //! `FAIL_RUNNING`) and `horsies_finish_stale_attempt` (kind `FAIL_STALE`).

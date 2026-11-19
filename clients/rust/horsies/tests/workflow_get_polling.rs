@@ -1,14 +1,14 @@
 //! The polling fallback of `WorkflowHandle::get` (Python
-//! `TestListenerFallbackContract`, `tests/integration/test_workflow_handle.py`):
+//! `TestListenerFallbackContract`, `clients/python/tests/integration/test_workflow_handle.py`):
 //! the reading app's session URL refuses each connect, so the wait cannot
 //! subscribe on `workflow_done` and reads the workflow row again every
 //! second.
 //!
 //! Each test runs on a database of its own, a copy of the core's test
-//! template (`crates/horsies-core/src/test_support/database.rs`): the
+//! template (`core/src/test_support/database.rs`): the
 //! installed schema, Rust family. A worker broker of the test covers the
 //! history partitions and ends the workflow's node as a worker does
-//! (Python `finish_task`, `tests/integration/conftest.py`).
+//! (Python `finish_task`, `clients/python/tests/integration/conftest.py`).
 
 #![cfg(feature = "tokio-postgres")]
 
@@ -31,7 +31,7 @@ use uuid::Uuid;
 /// The test databases of the core. This binary creates copies of the
 /// template only.
 #[allow(dead_code)]
-#[path = "../../horsies-core/src/test_support/database.rs"]
+#[path = "../../../../core/src/test_support/database.rs"]
 mod test_database;
 
 use test_database::TestDatabase;

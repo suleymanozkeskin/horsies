@@ -551,7 +551,7 @@ async fn enqueue_once(
 }
 
 /// The stored options text of a send (Python `_serialize_options_for_send`,
-/// `python/horsies/core/task_decorator.py`). Pure.
+/// `clients/python/horsies/core/task_decorator.py`). Pure.
 ///
 /// - No options and no deadline: `None`, no text.
 /// - Options and no deadline: [`TaskOptions::stored_options_text`].

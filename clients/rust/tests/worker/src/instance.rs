@@ -1,5 +1,5 @@
 //! The app instances of the end-to-end tests and their worker profiles
-//! (Python `tests/e2e/tasks/instance*.py`, `profiles.py`).
+//! (Python `clients/python/tests/e2e/tasks/instance*.py`, `profiles.py`).
 //!
 //! A test builds the app of one instance in its own process, as a producer,
 //! and starts the test binary with the same instance as its worker or

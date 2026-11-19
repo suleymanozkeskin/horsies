@@ -33,7 +33,7 @@ from datetime import timedelta
 from enum import Enum
 from typing import Final
 
-from tests.dualrun.rules import (
+from tests.parity.snapshot.rules import (
     CANONICAL_UUID,
     AnchorNull,
     AnchorReference,
@@ -153,7 +153,7 @@ _CONTEXT: Final = Key(name='__h_workflow_ctx__')
 ARGS_FROM_MARKER: Final = '__h_taskresult_envelope__'
 """The marker of an ``args_from`` entry: a member of a task input that the
 engine writes in place of the keyword argument that a node takes from a
-dependency (``crates/horsies-core/src/workflow_engine/args_merge.rs``,
+dependency (``core/src/workflow_engine/args_merge.rs``,
 ``ARGS_FROM_ENVELOPE_KEY``)."""
 
 _ARGS_FROM_ERROR: Final = (
@@ -321,7 +321,7 @@ BLOCKED_TIME: Final = RunMeasure(
 worker measured it, in the ``TASK_BLOCKED_LOOP`` and ``NEIGHBOUR_BLOCKED_LOOP``
 reports: ``... held the event loop of its shared async child for <n> ms, past
 the block limit, ...``
-(``crates/horsies-core/src/worker/executor/slots/seat_runs.rs``)."""
+(``core/src/worker/executor/slots/seat_runs.rs``)."""
 
 KILLED_CHILD_PID: Final = RunMeasure(
     name='killed_child_pid',
@@ -330,7 +330,7 @@ KILLED_CHILD_PID: Final = RunMeasure(
 """The process id of the worker child that the worker killed, in the
 ``the worker killed the child (pid=<n>, <exit>)`` part of a kill report. Each
 run starts its own processes; the whole-run catalog ignores the process id
-columns for the same reason (``tests/dualrun/worker_run.py``)."""
+columns for the same reason (``tests/parity/snapshot/worker_run.py``)."""
 
 KILL_REPORT_MEASURES: Final = RunMeasuresInText(measures=(BLOCKED_TIME, KILLED_CHILD_PID))
 """The rule of a stored text that can hold a kill report: the measured block
@@ -893,8 +893,8 @@ QUEUE_CHANNEL_PREFIX: Final = 'task_queue_'
 
 RETRY_WAKE_PREFIX: Final = 'retry:'
 """The prefix of the wake that a retry sends on the queue of its task:
-``retry:<task id>`` (the worker's retry, ``crates/horsies-core/src/worker/execution.rs``;
-the stale recovery's retry, ``crates/horsies-core/src/broker/stale_recovery.rs``)."""
+``retry:<task id>`` (the worker's retry, ``core/src/worker/execution.rs``;
+the stale recovery's retry, ``core/src/broker/stale_recovery.rs``)."""
 
 
 def notification_payload(channel: str) -> NotificationPayload:

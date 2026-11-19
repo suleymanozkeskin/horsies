@@ -5,7 +5,7 @@
 //! it into the Pydantic models of `horsies.monitoring.models` (one
 //! `model_validate_json` per read). `model_contract.json` holds the contract
 //! of the Pydantic models: per model, the field names and the kind of value
-//! each field holds (`tests/monitoring_model_contract.py` writes it, and a
+//! each field holds (`clients/python/tests/monitoring_model_contract.py` writes it, and a
 //! Python unit test checks that it is current). This test reduces the JSON
 //! schema of each Rust model (`schemars`, a dev-dependency) to the same
 //! kinds and compares them. The fields must be the same; each kind must be

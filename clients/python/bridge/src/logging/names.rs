@@ -6,7 +6,7 @@
 //! that names the Python name of a logger of the set (for example
 //! `horsies.db`) goes to that logger. Otherwise the routes map each target
 //! prefix to the logger of the same component in Python
-//! (`horsies.<component>`, `python/horsies/core/logging.py`). An event whose target
+//! (`horsies.<component>`, `clients/python/horsies/core/logging.py`). An event whose target
 //! is neither is not forwarded: it comes from another crate.
 //!
 //! `horsies.sql` holds the statement log of the broker (`echo=True`): one

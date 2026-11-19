@@ -1,7 +1,7 @@
 """Public catalog paths re-export the classes generated from horsies-core.
 
 `horsies-codegen` renders the code enums of horsies-core into
-`python/horsies/_catalog/`. A public module re-exports a generated class only when
+`clients/python/horsies/_catalog/`. A public module re-exports a generated class only when
 the core catalog holds exactly the members of the Python catalog it
 replaces. This test pins both facts for each re-exported class: the public
 name is the generated class itself, and its members and values are the

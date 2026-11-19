@@ -37,7 +37,7 @@ static WORKFLOW_RESULT: TypedStatement = TypedStatement::new(
 );
 
 /// Every node of one workflow, in index order, from the workflow row (Python
-/// `GET_WORKFLOW_TASKS_SQL`, `python/horsies/core/models/workflow/handle.py`): no row means no
+/// `GET_WORKFLOW_TASKS_SQL`, `clients/python/horsies/core/models/workflow/handle.py`): no row means no
 /// workflow has the id; one row whose `workflow_task_id` is NULL means the workflow has no node.
 static WORKFLOW_NODES: TypedStatement = TypedStatement::new(
     "workflow_nodes",
@@ -328,7 +328,7 @@ pub async fn get_workflow_status(
 }
 
 /// Repoll interval of a workflow result wait with no listener (Python's
-/// 1 s, `python/horsies/core/models/workflow/handle.py`, `WorkflowHandle.get`).
+/// 1 s, `clients/python/horsies/core/models/workflow/handle.py`, `WorkflowHandle.get`).
 pub(crate) const WORKFLOW_RESULT_REPOLL_POLLING: Duration = Duration::from_secs(1);
 
 /// The end of a workflow, with its stored values as text.
@@ -703,7 +703,7 @@ mod wait_tests {
         assert_eq!(wait.expect("no workflow error"), WorkflowWait::NotFound);
     }
 
-    /// Python `tests/unit/test_workflow_handle_async_cleanup.py::TestWorkflowHandleZeroTimeout`
+    /// Python `clients/python/tests/unit/test_workflow_handle_async_cleanup.py::TestWorkflowHandleZeroTimeout`
     /// (`test_zero_timeout_returns_wait_timeout_immediately`,
     /// `test_zero_timeout_returns_result_when_already_complete`): a zero
     /// timeout is a budget of no time, not "no limit". On a RUNNING workflow

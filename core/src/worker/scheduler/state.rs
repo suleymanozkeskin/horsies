@@ -2,7 +2,7 @@
 //!
 //! - the due read, the start read and write, the existence heal;
 //! - the fire: the slot tasks and the state move in one statement
-//!   (`horsies_fire_schedule`, `crates/horsies-core/baseline/0007_scheduler_monitoring_functions.sql`).
+//!   (`horsies_fire_schedule`, `core/baseline/0007_scheduler_monitoring_functions.sql`).
 //!
 //! Each function sends one statement in autocommit on the core pool it is
 //! given, on a connection that passes the reserve gate

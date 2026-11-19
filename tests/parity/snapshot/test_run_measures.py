@@ -11,11 +11,11 @@ from typing import Final
 import pytest
 
 from horsies.core.types.result import Err, Ok
-from tests.dualrun.catalog import KILL_REPORT_MEASURES
-from tests.dualrun.cells import RawRow, RawSnapshot, RawTable, measured_text
-from tests.dualrun.compare import ColumnDifference, compare_snapshots
-from tests.dualrun.normalize import NormalizedSnapshot, normalize_snapshot
-from tests.dualrun.rules import (
+from tests.parity.snapshot.catalog import KILL_REPORT_MEASURES
+from tests.parity.snapshot.cells import RawRow, RawSnapshot, RawTable, measured_text
+from tests.parity.snapshot.compare import ColumnDifference, compare_snapshots
+from tests.parity.snapshot.normalize import NormalizedSnapshot, normalize_snapshot
+from tests.parity.snapshot.rules import (
     ColumnSpec,
     EachItem,
     IdFamily,
@@ -35,7 +35,7 @@ from tests.dualrun.rules import (
     Unversioned,
     catalog_defects,
 )
-from tests.dualrun.values import (
+from tests.parity.snapshot.values import (
     DuringRun,
     MeasuredText,
     MeasureToken,

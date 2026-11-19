@@ -1,5 +1,5 @@
 //! A worker or scheduler process of a test (Python
-//! `tests/e2e/helpers/worker.py`).
+//! `clients/python/tests/e2e/helpers/worker.py`).
 //!
 //! The process starts in a process group of its own, with stdin closed and
 //! stdout and stderr drained into a bounded buffer of lines, so a full pipe

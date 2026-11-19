@@ -271,7 +271,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// A list with `depth` levels and a number inside (Python `_nested_list`, `tests/unit/test_typed_codec.py:1004`).
+    /// A list with `depth` levels and a number inside (Python `_nested_list`, `clients/python/tests/unit/test_typed_codec.py:1004`).
     fn nested_list(depth: usize) -> serde_json::Value {
         let mut value = json!([1]);
         for _ in 1..depth {
@@ -280,7 +280,7 @@ mod tests {
         value
     }
 
-    /// Python `tests/unit/test_typed_codec.py:474-610`: each engine key is refused at any depth.
+    /// Python `clients/python/tests/unit/test_typed_codec.py:474-610`: each engine key is refused at any depth.
     #[test]
     fn engine_keys_are_refused_at_any_depth() {
         for key in [
@@ -317,7 +317,7 @@ mod tests {
     }
 
     /// Python `MAX_TYPED_JSON_DEPTH`: a value of 200 levels passes, 201 do not
-    /// (`tests/unit/test_typed_codec.py:1194-1206`).
+    /// (`clients/python/tests/unit/test_typed_codec.py:1194-1206`).
     #[test]
     fn depth_is_bounded_at_the_value_bound() {
         assert_eq!(

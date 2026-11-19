@@ -9,8 +9,8 @@
 //! digits. The user-value paths keep the value as its text (`JsonText`,
 //! `&RawValue`) or decode the asked type from the text.
 //!
-//! The scan lexes each production module of `crates/horsies-core/src` and
-//! `crates/horsies/src` into token trees (`proc-macro2`): `lib.rs`, then each
+//! The scan lexes each production module of `core/src` and
+//! `clients/rust/horsies/src` into token trees (`proc-macro2`): `lib.rs`, then each
 //! file that a `mod name;` declares, and skips each item that `#[cfg(test)]`
 //! gates. A site is one of [`SiteKind`]. A site is keyed by its file, its
 //! enclosing item (`module::Type::function`) and its kind, with a count. The
@@ -146,27 +146,27 @@ struct Known {
     allowed: Allowed,
 }
 
-const CORE: &str = "crates/horsies-core/src/";
-const CLIENT: &str = "crates/horsies/src/";
+const CORE: &str = "core/src/";
+const CLIENT: &str = "clients/rust/horsies/src/";
 
 /// Every read into `Value` of the production modules, with its reason.
 const KNOWN_SITES: &[Known] = &[
     Known {
-        file: "crates/horsies-core/src/broker/class_coverage_reads.rs",
+        file: "core/src/broker/class_coverage_reads.rs",
         item: "LiveEntry",
         kind: SiteKind::DeserializeField,
         count: 1,
         allowed: Allowed::NotUserValue("the class capacity of a live worker"),
     },
     Known {
-        file: "crates/horsies-core/src/broker/class_coverage_reads.rs",
+        file: "core/src/broker/class_coverage_reads.rs",
         item: "decoded_part",
         kind: SiteKind::FromValue,
         count: 1,
         allowed: Allowed::NotUserValue("a part of the class coverage read"),
     },
     Known {
-        file: "crates/horsies-core/src/broker/class_coverage_reads.rs",
+        file: "core/src/broker/class_coverage_reads.rs",
         item: "PostgresBroker::coverage_row",
         kind: SiteKind::RowDecoderField,
         count: 2,
@@ -175,7 +175,7 @@ const KNOWN_SITES: &[Known] = &[
         ),
     },
     Known {
-        file: "crates/horsies-core/src/broker/class_coverage_reads.rs",
+        file: "core/src/broker/class_coverage_reads.rs",
         item: "PostgresBroker::report_row",
         kind: SiteKind::RowDecoderField,
         count: 3,
@@ -184,7 +184,7 @@ const KNOWN_SITES: &[Known] = &[
         ),
     },
     Known {
-        file: "crates/horsies-core/src/broker/core_rows.rs",
+        file: "core/src/broker/core_rows.rs",
         item: "stored_worker_state",
         kind: SiteKind::RowDecoderField,
         count: 5,
@@ -194,70 +194,70 @@ const KNOWN_SITES: &[Known] = &[
         ),
     },
     Known {
-        file: "crates/horsies-core/src/broker/postgres.rs",
+        file: "core/src/broker/postgres.rs",
         item: "decode_pong",
         kind: SiteKind::FromValue,
         count: 1,
         allowed: Allowed::NotUserValue("the payload of a worker pong"),
     },
     Known {
-        file: "crates/horsies-core/src/broker/postgres.rs",
+        file: "core/src/broker/postgres.rs",
         item: "decode_pong",
         kind: SiteKind::TypedLetParse,
         count: 1,
         allowed: Allowed::NotUserValue("the payload of a worker pong"),
     },
     Known {
-        file: "crates/horsies-core/src/core/config/broker.rs",
+        file: "core/src/core/config/broker.rs",
         item: "PostgresConfig::deserialize",
         kind: SiteKind::FromValue,
         count: 1,
         allowed: Allowed::NotUserValue("the broker config"),
     },
     Known {
-        file: "crates/horsies-core/src/core/config/broker.rs",
+        file: "core/src/core/config/broker.rs",
         item: "PostgresConfig::deserialize",
         kind: SiteKind::ValueDeserialize,
         count: 1,
         allowed: Allowed::NotUserValue("the broker config"),
     },
     Known {
-        file: "crates/horsies-core/src/core/config/recovery.rs",
+        file: "core/src/core/config/recovery.rs",
         item: "RecoveryConfig::deserialize",
         kind: SiteKind::FromValue,
         count: 1,
         allowed: Allowed::NotUserValue("the recovery config"),
     },
     Known {
-        file: "crates/horsies-core/src/core/config/recovery.rs",
+        file: "core/src/core/config/recovery.rs",
         item: "RecoveryConfig::deserialize",
         kind: SiteKind::ValueDeserialize,
         count: 1,
         allowed: Allowed::NotUserValue("the recovery config"),
     },
     Known {
-        file: "crates/horsies-core/src/core/config/retention.rs",
+        file: "core/src/core/config/retention.rs",
         item: "RetentionConfig::deserialize",
         kind: SiteKind::FromValue,
         count: 1,
         allowed: Allowed::NotUserValue("the retention config"),
     },
     Known {
-        file: "crates/horsies-core/src/core/config/retention.rs",
+        file: "core/src/core/config/retention.rs",
         item: "RetentionConfig::deserialize",
         kind: SiteKind::ValueDeserialize,
         count: 1,
         allowed: Allowed::NotUserValue("the retention config"),
     },
     Known {
-        file: "crates/horsies-core/src/core/history/archive/attempts.rs",
+        file: "core/src/core/history/archive/attempts.rs",
         item: "decode_attempt_rows",
         kind: SiteKind::TypedLetParse,
         count: 1,
         allowed: Allowed::NotUserValue("the attempt records of a history row"),
     },
     Known {
-        file: "crates/horsies-core/src/core/history/enqueue.rs",
+        file: "core/src/core/history/enqueue.rs",
         item: "parse_optional_object",
         kind: SiteKind::TypedLetParse,
         count: 1,
@@ -266,14 +266,14 @@ const KNOWN_SITES: &[Known] = &[
         ),
     },
     Known {
-        file: "crates/horsies-core/src/core/history/reads/aggregates.rs",
+        file: "core/src/core/history/reads/aggregates.rs",
         item: "plan_rows_from_explain_text",
         kind: SiteKind::TypedLetParse,
         count: 1,
         allowed: Allowed::NotUserValue("the EXPLAIN output of a statement"),
     },
     Known {
-        file: "crates/horsies-core/src/core/history/rerun/input_envelope.rs",
+        file: "core/src/core/history/rerun/input_envelope.rs",
         item: "decode_input_envelope",
         kind: SiteKind::TypedLetParse,
         count: 1,
@@ -284,35 +284,35 @@ const KNOWN_SITES: &[Known] = &[
         ),
     },
     Known {
-        file: "crates/horsies-core/src/core/lifecycle/attempt_outcomes.rs",
+        file: "core/src/core/lifecycle/attempt_outcomes.rs",
         item: "shared_columns",
         kind: SiteKind::RowDecoderField,
         count: 1,
         allowed: Allowed::NotUserValue("the guard evidence of an outcome row"),
     },
     Known {
-        file: "crates/horsies-core/src/core/lifecycle/outcomes.rs",
+        file: "core/src/core/lifecycle/outcomes.rs",
         item: "decode_outcome_row",
         kind: SiteKind::RowDecoderField,
         count: 1,
         allowed: Allowed::NotUserValue("the guard evidence of an outcome row"),
     },
     Known {
-        file: "crates/horsies-core/src/core/task/error.rs",
+        file: "core/src/core/task/error.rs",
         item: "TaskErrorCode::deserialize",
         kind: SiteKind::FromValue,
         count: 1,
         allowed: Allowed::NotUserValue("the code of an error"),
     },
     Known {
-        file: "crates/horsies-core/src/core/task/error.rs",
+        file: "core/src/core/task/error.rs",
         item: "TaskErrorCode::deserialize",
         kind: SiteKind::ValueDeserialize,
         count: 1,
         allowed: Allowed::NotUserValue("the code of an error"),
     },
     Known {
-        file: "crates/horsies-core/src/worker/execution.rs",
+        file: "core/src/worker/execution.rs",
         item: "parse::WorkflowCtxPayload",
         kind: SiteKind::DeserializeField,
         count: 2,
@@ -322,7 +322,7 @@ const KNOWN_SITES: &[Known] = &[
         ),
     },
     Known {
-        file: "crates/horsies-core/src/worker/executor/protocol/metadata.rs",
+        file: "core/src/worker/executor/protocol/metadata.rs",
         item: "parse_metadata",
         kind: SiteKind::TurbofishValue,
         count: 1,
@@ -331,28 +331,28 @@ const KNOWN_SITES: &[Known] = &[
         ),
     },
     Known {
-        file: "crates/horsies-core/src/worker/finalize_batch/statement.rs",
+        file: "core/src/worker/finalize_batch/statement.rs",
         item: "raw_outcome",
         kind: SiteKind::RowDecoderField,
         count: 1,
         allowed: Allowed::NotUserValue("the guard evidence of an outcome row"),
     },
     Known {
-        file: "crates/horsies-core/src/workflow_engine/args_merge.rs",
+        file: "core/src/workflow_engine/args_merge.rs",
         item: "read_args_from",
         kind: SiteKind::TypedLetParse,
         count: 1,
         allowed: Allowed::NotUserValue("the args_from map of a node: kwarg name to node index"),
     },
     Known {
-        file: "crates/horsies/src/config.rs",
+        file: "clients/rust/horsies/src/config.rs",
         item: "core_database_url",
         kind: SiteKind::FromValue,
         count: 1,
         allowed: Allowed::NotUserValue("a database URL text"),
     },
     Known {
-        file: "crates/horsies/src/workflow/handle.rs",
+        file: "clients/rust/horsies/src/workflow/handle.rs",
         item: "node_info",
         kind: SiteKind::FromValue,
         count: 1,
@@ -1261,7 +1261,7 @@ fn scan_crates(root: &Path) -> BTreeMap<SiteKey, usize> {
 
 #[test]
 fn every_read_into_value_of_the_core_and_the_rust_client_is_listed() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let found = scan_crates(&root);
     let known: BTreeMap<SiteKey, usize> = KNOWN_SITES
         .iter()

@@ -3,7 +3,7 @@
 `to_scheduler_manifest` is the one place where the schedule config (Pydantic)
 and the prepared wire text of each enabled schedule (`prepare_schedules`) meet
 the input of the core's scheduler (the manifest generated from horsies-core,
-`python/horsies/_catalog/scheduler_manifest.py`). Per schedule, in config
+`clients/python/horsies/_catalog/scheduler_manifest.py`). Per schedule, in config
 order, it gives the pattern text, the timezone, the catch-up rule and the send
 facts of each slot: the task, the queue and its priority, the input text, the
 task's options text, the retention class key and the rerun-input posture.

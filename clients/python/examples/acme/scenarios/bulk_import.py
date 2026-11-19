@@ -1,7 +1,7 @@
-# showcase/acme/scenarios/bulk_import.py
+# clients/python/examples/acme/scenarios/bulk_import.py
 """Start a long import and hand you its id, so you can cancel it.
 
-    uv run python -m showcase.acme.scenarios bulk-import
+    uv run python -m examples.acme.scenarios bulk-import
 
 Forty chunk nodes, each about eight seconds, on a queue capped at two
 concurrent tasks. It runs for several minutes on purpose — long enough to open

@@ -490,7 +490,7 @@ struct FacetRow {
 }
 
 /// Build [`Facets`] from the rows of the facets function, as Python's
-/// `task_facets` (`python/horsies/monitoring/queries.py:942-1007`): the code list
+/// `task_facets` (`clients/python/horsies/monitoring/queries.py:942-1007`): the code list
 /// follows the selected categories and holds at most [`ERROR_FACET_CAP`]
 /// codes; the category totals cover every category, selected or not.
 fn facets_from_rows(

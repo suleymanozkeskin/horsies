@@ -1,5 +1,5 @@
 //! The reads of a workflow handle on its main core pool, as the Python client's
-//! `WorkflowHandle` sends them (`python/horsies/core/models/workflow/handle.py`):
+//! `WorkflowHandle` sends them (`clients/python/horsies/core/models/workflow/handle.py`):
 //! the status, the wait for the end, the node results, one node result, and the
 //! nodes. Each read returns the stored values as text; the client decodes a result
 //! envelope with its own output type.

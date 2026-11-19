@@ -41,7 +41,7 @@ pub(crate) fn client_spec(
 }
 
 /// The spec data text of `spec` in the app of `config`: the document that
-/// the core's parser reads (`tests/fixtures/stored_forms/workflow_spec_data.json`
+/// the core's parser reads (`clients/python/tests/fixtures/stored_forms/workflow_spec_data.json`
 /// of the core pins it). Pure. Errors: `WORKFLOW_UNRESOLVED_QUEUE` (HRS-014)
 /// for a task node on a queue that the app does not admit; a task options
 /// text that does not take the node's deadline.

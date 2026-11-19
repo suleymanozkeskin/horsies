@@ -117,7 +117,7 @@ fn mint_task_id() -> PyResult<MintOutcome> {
 
 /// The files of the baseline migration (version 1000) as `(file name, text)`
 /// pairs, in the order they run. The texts are compiled into this module from
-/// `crates/horsies-core/baseline/`. Pure: no I/O, and it starts no runtime.
+/// `core/baseline/`. Pure: no I/O, and it starts no runtime.
 #[pyfunction]
 fn baseline_sql_files() -> Vec<(&'static str, &'static str)> {
     horsies_core::BASELINE_SQL_FILE_TEXTS.to_vec()

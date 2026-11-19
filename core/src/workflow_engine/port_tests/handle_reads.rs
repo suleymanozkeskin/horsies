@@ -1,5 +1,5 @@
 //! The reads of the workflow handle: status, get, results, result_for, tasks,
-//! and their errors. Python: `tests/integration/test_workflow_handle.py`
+//! and their errors. Python: `clients/python/tests/integration/test_workflow_handle.py`
 //! (the read classes).
 
 use std::time::Duration;

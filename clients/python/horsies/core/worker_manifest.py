@@ -2,7 +2,7 @@
 
 `to_worker_manifest` is the one place where the user config of a worker
 (Pydantic) meets the input of the core's worker (the manifest generated from
-horsies-core, `python/horsies/_catalog/worker_manifest.py`). It maps every worker
+horsies-core, `clients/python/horsies/_catalog/worker_manifest.py`). It maps every worker
 profile, the database settings, the queue and claim settings, the recovery,
 retention, resilience and payload settings, the registered task classes and
 the child launch. It does not pick the profile: the core checks the profile

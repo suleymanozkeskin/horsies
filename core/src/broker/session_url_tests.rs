@@ -2,7 +2,7 @@
 //! worker session check, the listener and the schema install use the session
 //! URL; the runtime statements use the main URL.
 //!
-//! Python specification: `tests/unit/test_broker_postgres.py`,
+//! Python specification: `clients/python/tests/unit/test_broker_postgres.py`,
 //! `TestPostgresBrokerPgBouncerWiring` (baseline version on `program/0.8.0`).
 //! The Python tests mock the engines; here the two URLs name two databases,
 //! or one database under two application names, so each URL's use shows in

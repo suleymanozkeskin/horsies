@@ -17,7 +17,7 @@ class TaskNodeFacts:
 
     The core parses the other facts of the node row (the retry limit, the
     execution class and the deadline) from the node's task options
-    (``node_task_facts``, ``crates/horsies-core/src/workflow_engine/start.rs``).
+    (``node_task_facts``, ``core/src/workflow_engine/start.rs``).
 
     Attributes:
         retention_class_key: The stored retention class key of the node's

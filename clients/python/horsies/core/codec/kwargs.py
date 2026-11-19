@@ -1,7 +1,7 @@
 """Typed kwargs codec — phase 3+4 of strict-serde.
 
 Bridges between the producer/worker call sites and the typed primitives
-in `python/horsies/core/codec/typed.py`. Encoders run at producer sites
+in `clients/python/horsies/core/codec/typed.py`. Encoders run at producer sites
 (`.send()`, scheduler enqueue, workflow lifecycle); the decoder runs at
 the worker's `_run_task_entry`.
 

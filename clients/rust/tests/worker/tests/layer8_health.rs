@@ -1,5 +1,5 @@
 //! Layer 8: health reads of the app against live workers (Python
-//! `tests/e2e/test_worker_health.py`).
+//! `clients/python/tests/e2e/test_worker_health.py`).
 
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
@@ -131,7 +131,7 @@ async fn test_get_worker_state_history_newest_first_and_limit() {
     assert!(newest[0].snapshot_at >= history[0].snapshot_at);
 }
 
-/// Python: `tests/unit` ping argument checks; the e2e twin of
+/// Python: `clients/python/tests/unit` ping argument checks; the e2e twin of
 /// `horsies-core broker::postgres::broker_operation_error_tests::ping_workers_refuses_a_zero_timeout_as_invalid_input`.
 #[tokio::test]
 #[serial]

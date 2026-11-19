@@ -1,10 +1,10 @@
 //! Branches of the workflow start and of the handle reads. Python:
-//! `tests/unit/test_workflow_start_catches.py`,
-//! `tests/unit/test_success_policy_subworkflow_node.py` (the start),
-//! `tests/unit/test_workflow_handle_missing_workflow.py`,
-//! `tests/unit/test_workflow_handle_error_variants.py`
+//! `clients/python/tests/unit/test_workflow_start_catches.py`,
+//! `clients/python/tests/unit/test_success_policy_subworkflow_node.py` (the start),
+//! `clients/python/tests/unit/test_workflow_handle_missing_workflow.py`,
+//! `clients/python/tests/unit/test_workflow_handle_error_variants.py`
 //! (`TestStoredSubworkflowSummary`) and
-//! `tests/unit/test_workflow_node_status_check.py`. Each test names the
+//! `clients/python/tests/unit/test_workflow_node_status_check.py`. Each test names the
 //! Python tests that it ports.
 
 use serial_test::serial;

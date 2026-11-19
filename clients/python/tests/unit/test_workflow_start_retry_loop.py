@@ -2,7 +2,7 @@
 
 The core resends a start after a transient failure when the caller asks for
 it (``PostgresBroker::start_client_workflow``, tested in
-``crates/horsies-core/src/broker/workflow_start.rs``). The client passes the
+``core/src/broker/workflow_start.rs``). The client passes the
 ``resend_on_transient_err`` choice into the ``WorkflowStartRequest``
 unchanged, and maps the core's answer: a failure record keeps its retry rule
 and its cause, an exception of the core call that is not a ``CoreError``

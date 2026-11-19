@@ -1,4 +1,4 @@
-# showcase/acme/workflows/order_fulfillment.py
+# clients/python/examples/acme/workflows/order_fulfillment.py
 """The flagship DAG: one order, validated, reserved, paid, packed, and shipped.
 
     validate_order

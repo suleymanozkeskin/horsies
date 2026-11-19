@@ -56,7 +56,7 @@ from horsies.core.codec.validation_errors import ValueValidationError, exception
 
 # Engine transport keys (strict-serde §8). Pinned here so the worker
 # consumer stays in lockstep with the engine emitters in
-# ``python/horsies/core/workflows/engine.py``.
+# ``clients/python/horsies/core/workflows/engine.py``.
 _ENGINE_KEY_WORKFLOW_CTX = '__h_workflow_ctx__'
 _ENGINE_KEY_WORKFLOW_META = '__h_workflow_meta__'
 _ENGINE_KEY_TASKRESULT_ENVELOPE = '__h_taskresult_envelope__'

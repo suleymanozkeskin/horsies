@@ -1,7 +1,7 @@
 //! Typed client for the phase-2 quarantine of one pending row.
 //!
 //! Calls the baseline function `horsies_phase2_quarantine_one(p_task_id uuid)`
-//! (`crates/horsies-core/baseline/0003_interim_functions.sql`). The function
+//! (`core/baseline/0003_interim_functions.sql`). The function
 //! locks only the pending row, copies the recovery projection of the history
 //! row into the quarantine table, verifies the copy and repoints the pending
 //! row at it. A refusal keeps the history locator. The function stores no

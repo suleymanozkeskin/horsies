@@ -5,7 +5,7 @@ core answers ``WorkflowStarted`` or ``WorkflowExists``, or the generated
 ``WorkflowStartIdConflict`` or ``WorkflowStartEnqueueFailed`` that it built,
 which the start returns as they are. Prevalidation stays in Python, before
 any core call. The core writes the start and resends it
-(``crates/horsies-core/src/broker/workflow_start.rs``).
+(``core/src/broker/workflow_start.rs``).
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 //! The facts of a failed child boot that more than one part of the core
 //! reads: the child frames and the supervisor of the executor, and the
 //! `slots_down` value of a worker state snapshot (Python
-//! `python/horsies/core/models/boot_failure.py`). Pure.
+//! `clients/python/horsies/core/models/boot_failure.py`). Pure.
 
 /// The detail of a failed boot has at most this many characters (Python
 /// `MAX_BOOT_FAILURE_DETAIL_CHARS`).

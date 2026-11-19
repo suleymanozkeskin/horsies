@@ -12,7 +12,7 @@ import pytest
 from psycopg import sql
 
 from horsies.core.types.result import Err, Ok, Result
-from tests.dualrun.capture import (
+from tests.parity.snapshot.capture import (
     CaptureBlocked,
     CatalogCoverageGap,
     TableRowLimitExceeded,
@@ -20,26 +20,26 @@ from tests.dualrun.capture import (
     read_database_clock,
     read_raw_snapshot,
 )
-from tests.dualrun.catalog import BASELINE_CATALOG, RUN_CLOCK
-from tests.dualrun.compare import ColumnDifference, compare_snapshots, render_diff
-from tests.dualrun.coverage import (
+from tests.parity.snapshot.catalog import BASELINE_CATALOG, RUN_CLOCK
+from tests.parity.snapshot.compare import ColumnDifference, compare_snapshots, render_diff
+from tests.parity.snapshot.coverage import (
     DatabaseType,
     DetachedLeafShapeMismatch,
     RuleTypeMismatch,
     RuleWithoutColumn,
     UnclassifiedColumn,
 )
-from tests.dualrun.databases import DualRunDatabase, install_baseline_schema
-from tests.dualrun.normalize import NormalizedSnapshot
-from tests.dualrun.rules import IdFamily
-from tests.dualrun.scenario import (
+from tests.parity.snapshot.databases import DualRunDatabase, install_baseline_schema
+from tests.parity.snapshot.normalize import NormalizedSnapshot
+from tests.parity.snapshot.rules import IdFamily
+from tests.parity.snapshot.scenario import (
     RowOrder,
     ScenarioFacts,
     ScenarioVariant,
     write_scenario,
 )
-from tests.dualrun.selfcheck import seed_history, straddles
-from tests.dualrun.values import (
+from tests.parity.snapshot.selfcheck import seed_history, straddles
+from tests.parity.snapshot.values import (
     CalendarUnit,
     Cell,
     ExactValue,

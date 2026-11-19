@@ -1,5 +1,5 @@
 {
-  "about": "Next runs that Python's calculate_next_run (python/horsies/core/scheduler/calculator.py) gives. calculator.rs tests and tests/unit/test_schedule_calculator_vectors.py pin this one table: pattern_json is the pattern in the text of model_dump(mode=json), after and next_run_at are UTC instants.",
+  "about": "Next runs that Python's calculate_next_run (clients/python/horsies/core/scheduler/calculator.py) gives. calculator.rs tests and clients/python/tests/unit/test_schedule_calculator_vectors.py pin this one table: pattern_json is the pattern in the text of model_dump(mode=json), after and next_run_at are UTC instants.",
   "vectors": [
     {
       "name": "interval of 90 minutes",

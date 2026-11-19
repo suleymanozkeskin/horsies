@@ -6,7 +6,7 @@ use crate::db::StatementFailure;
 
 /// The SQLSTATE of a terminal write whose row no history leaf can take: the
 /// class partition or the leaf of the row's UTC day does not exist
-/// (`horsies_require_history_leaf`, `crates/horsies-core/baseline/0006_history_functions.sql`).
+/// (`horsies_require_history_leaf`, `core/baseline/0006_history_functions.sql`).
 /// The message names the class and the missing range; DETAIL names the
 /// missing relation. Nothing of the write committed. The code is in class 55,
 /// object not in prerequisite state, so the write is retryable: the next

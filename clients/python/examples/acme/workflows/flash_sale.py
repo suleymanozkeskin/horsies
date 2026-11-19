@@ -1,4 +1,4 @@
-# showcase/acme/workflows/flash_sale.py
+# clients/python/examples/acme/workflows/flash_sale.py
 """A sale that succeeds if *either* publish target accepts it.
 
     publish_cdn     ---\\

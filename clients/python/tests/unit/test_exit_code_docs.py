@@ -23,11 +23,11 @@ from horsies._catalog.exit_codes import (
 
 pytestmark = [pytest.mark.unit]
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[4]
 MIGRATION_PAGE = REPO / 'website/src/content/docs/migrations/migration-to-0-7-0.md'
 CLI_PAGES = (
     REPO / 'website/src/content/docs/cli.md',
-    REPO / 'python/horsies/docs/cli.md',
+    REPO / 'clients/python/horsies/docs/cli.md',
 )
 # The codes of the ``horsies`` command itself: a clean end, an error, a usage
 # error. They are not codes of the core.

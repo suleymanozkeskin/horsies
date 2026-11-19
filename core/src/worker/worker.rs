@@ -2686,7 +2686,7 @@ mod tests {
         let _: fn(&Worker) -> &str = |w| w.worker_id();
     }
 
-    /// Python `python/horsies/core/cli.py:886` and `:955`: the memory fit of the
+    /// Python `clients/python/horsies/core/cli.py:886` and `:955`: the memory fit of the
     /// profile is logged before the database start, the connection fit after
     /// it and before the banner and the claim loop; neither returns an error.
     #[test]

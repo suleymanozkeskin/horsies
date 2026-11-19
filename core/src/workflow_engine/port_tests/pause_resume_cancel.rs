@@ -1,8 +1,8 @@
 //! Pause, resume and cancel. Python: the cancel and pause/resume classes of
-//! `tests/integration/test_workflow_handle.py`, and
+//! `clients/python/tests/integration/test_workflow_handle.py`, and
 //! `test_workflow_pause_notification.py`, `test_cascade_resume_bug.py`,
 //! `test_resume_dependency_results.py`, and the
-//! pause and crash rows of `tests/e2e/test_layer6_workflow_advanced.py`.
+//! pause and crash rows of `clients/python/tests/e2e/test_layer6_workflow_advanced.py`.
 
 use std::time::Duration;
 
@@ -894,7 +894,7 @@ async fn a_resumed_node_receives_its_dependency_result() {
     db.drop().await;
 }
 
-/// `tests/e2e/test_layer6_workflow_advanced.py::test_pause_then_cancel`
+/// `clients/python/tests/e2e/test_layer6_workflow_advanced.py::test_pause_then_cancel`
 #[tokio::test]
 #[serial]
 async fn a_paused_workflow_cancels_and_skips_its_pending_node() {
@@ -909,7 +909,7 @@ async fn a_paused_workflow_cancels_and_skips_its_pending_node() {
     assert_eq!(node_status(&pool, workflow_id, 1).await, "SKIPPED");
 }
 
-/// `tests/e2e/test_layer6_workflow_advanced.py::test_workflow_recovers_after_worker_crash`:
+/// `clients/python/tests/e2e/test_layer6_workflow_advanced.py::test_workflow_recovers_after_worker_crash`:
 /// the reaper fails the two running nodes of a crashed worker with
 /// `WORKER_CRASHED`; the `allow_failed_deps` node and its dependent then run
 /// on their own queue, and the workflow ends FAILED.

@@ -30,20 +30,20 @@ PROGRAM = 'log_records'
 
 RUNTIME_THREAD_NAME: Final = 'horsies-core'
 """The name of the core runtime's worker threads (``RUNTIME_THREAD_NAME`` in
-``crates/horsies-python/src/process_core.rs``)."""
+``clients/python/bridge/src/process_core.rs``)."""
 
 HOLD_S: Final = 1.0
 """How long ``programs/log_records.py`` holds the forwarder in the time case."""
 
 LEVEL_REFRESH_INTERVAL_S: Final = 5.0
 """The forwarder reads the levels again at this interval
-(``LEVEL_REFRESH_INTERVAL`` in ``crates/horsies-python/src/logging/forwarder.rs``)."""
+(``LEVEL_REFRESH_INTERVAL`` in ``clients/python/bridge/src/logging/forwarder.rs``)."""
 
 LOG_CHANNEL_CAPACITY: Final = 8_192
-"""``LOG_CHANNEL_CAPACITY`` in ``crates/horsies-python/src/logging/mod.rs``."""
+"""``LOG_CHANNEL_CAPACITY`` in ``clients/python/bridge/src/logging/mod.rs``."""
 
 FORWARD_BATCH: Final = 256
-"""``FORWARD_BATCH`` in ``crates/horsies-python/src/logging/forwarder.rs``: the
+"""``FORWARD_BATCH`` in ``clients/python/bridge/src/logging/forwarder.rs``: the
 records the blocked forwarder holds besides the channel."""
 
 FLOOD_PINGS: Final = 10_000

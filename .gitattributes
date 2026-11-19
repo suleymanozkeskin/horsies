@@ -1,2 +1,2 @@
-crates/horsies-core/webui-dist/** -whitespace
+core/webui-dist/** -whitespace
 tests/perf/releases/**/*.patch -whitespace

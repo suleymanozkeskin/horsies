@@ -1,6 +1,6 @@
 //! The memory fit of a worker profile (Python
-//! `tests/unit/test_worker_profile_fit.py`, the memory classes, and
-//! `tests/unit/test_cli.py::TestBootMemoryFit`). Each test keeps the name of
+//! `clients/python/tests/unit/test_worker_profile_fit.py`, the memory classes, and
+//! `clients/python/tests/unit/test_cli.py::TestBootMemoryFit`). Each test keeps the name of
 //! its Python test.
 
 use std::fs;

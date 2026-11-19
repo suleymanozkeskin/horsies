@@ -17,7 +17,7 @@ from enum import Enum
 from typing import Final, cast
 
 from horsies.core.types.result import Err, Ok, Result
-from tests.dualrun.rules import (
+from tests.parity.snapshot.rules import (
     CANONICAL_UUID,
     AnchorNull,
     AnchorReference,
@@ -48,7 +48,7 @@ from tests.dualrun.rules import (
     TimeWithin,
     Unversioned,
 )
-from tests.dualrun.values import (
+from tests.parity.snapshot.values import (
     CalendarUnit,
     DatedName,
     DigestMatches,

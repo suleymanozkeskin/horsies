@@ -2,7 +2,7 @@
 
 The frozen crate is `crates/horsies` at FREEZE_COMMIT, the last commit before
 its engine was deleted (#1404). `frozen-crate-test-fates.tsv` holds one row
-per test function of it: the file below `crates/horsies/`, the test as
+per test function of it: the file below `clients/rust/horsies/`, the test as
 `module::name`, the fate and its detail.
 
 Fates and their details:
@@ -26,10 +26,10 @@ A row whose detail holds `UNACCOUNTED` has no fate yet: `build` writes it
 for a frozen test with no tip test of its name and no recorded fate.
 
 Commands, from the repository root:
-- `python rust/tests/frozen_fates.py build`: write the list from the frozen
+- `python clients/rust/tests/frozen_fates.py build`: write the list from the frozen
   crate (read with `git` at FREEZE_COMMIT) and the tip tree. A COVERED,
   PORTED or DELETED row of the current list is kept as it is.
-- `python rust/tests/frozen_fates.py check`: check that each row has a known
+- `python clients/rust/tests/frozen_fates.py check`: check that each row has a known
   fate, that each test and code reference resolves in the tip, and that no
   row is unaccounted.
 
@@ -51,10 +51,10 @@ from pathlib import Path
 from typing import Final
 
 FREEZE_COMMIT: Final = 'a21bd7b255a5ea7473acf3b632db728d46a0e3c9'
-REPO_ROOT: Final = Path(__file__).resolve().parents[2]
-LIST_PATH: Final = REPO_ROOT / 'rust' / 'tests' / 'frozen-crate-test-fates.tsv'
+REPO_ROOT: Final = Path(__file__).resolve().parents[3]
+LIST_PATH: Final = REPO_ROOT / 'clients' / 'rust' / 'tests' / 'frozen-crate-test-fates.tsv'
 FROZEN_CRATE: Final = 'crates/horsies'
-TIP_CRATES: Final = (('horsies-core', 'crates/horsies-core'), ('horsies', 'crates/horsies'))
+TIP_CRATES: Final = (('horsies-core', 'core'), ('horsies', 'clients/rust/horsies'))
 UNACCOUNTED: Final = 'UNACCOUNTED: no tip test of this name and no recorded fate'
 
 REFERENCE_JOIN: Final = ' + '
@@ -63,7 +63,7 @@ CODE_MARK: Final = ' -- code: '
 
 HEADER: Final = (
     '# One fate for every test function of the frozen crate crates/horsies at '
-    f'{FREEZE_COMMIT[:10]} (#1754). Built and checked by rust/tests/frozen_fates.py.\n'
+    f'{FREEZE_COMMIT[:10]} (#1754). Built and checked by clients/rust/tests/frozen_fates.py.\n'
     '# fate: KEPT (detail: the tip test of the same name), CHANGED (detail: the tip test '
     'under another name, for the 0.8.0 rule), COVERED (detail: the tip tests that hold the '
     'same guarantee, then a note), PORTED (detail: the ported tests), DELETED (detail: why '
@@ -115,7 +115,7 @@ RENAMED: Final[dict[str, str]] = {
 CLEAN_SLATE: Final = (
     'clean-slate baseline: the schema is one baseline (migration 1000); a database of an '
     'older horsies is refused, never cut over, transcoded, migrated or upgraded'
-    f'{CODE_MARK}crates/horsies-core/src/broker/migrations.rs::pub enum SchemaRefusal'
+    f'{CODE_MARK}core/src/broker/migrations.rs::pub enum SchemaRefusal'
 )
 _CLEAN_SLATE_FILE: Final = re.compile(
     r'(cutover|transcode|migrations\.rs|terminalization_matrix/schema\.rs)'

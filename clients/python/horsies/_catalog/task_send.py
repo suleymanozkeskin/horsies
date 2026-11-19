@@ -12,7 +12,7 @@ class TaskSendErrorCode(str, Enum):
     """Categorized task send failure codes.
 
     The members are Python's, in Python's order
-    (`python/horsies/core/models/task_send_types.py`). [`TaskSendError`] has
+    (`clients/python/horsies/core/models/task_send_types.py`). [`TaskSendError`] has
     one variant per member.
     """
 

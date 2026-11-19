@@ -9,7 +9,7 @@ tags: [internals, database, schema, PostgreSQL, task-history]
 ## Schema Creation
 
 The schema is one migration, version 1000: the SQL files in
-`crates/horsies-core/baseline/`, run in name order in one transaction.
+`core/baseline/`, run in name order in one transaction.
 
 | File | Holds |
 | ---- | ----- |
@@ -286,4 +286,4 @@ byte-identical.)
 
 ## File Location
 
-`crates/horsies-core/baseline/` (the schema); `crates/horsies-core/src/broker/migrations.rs` (the install).
+`core/baseline/` (the schema); `core/src/broker/migrations.rs` (the install).

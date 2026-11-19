@@ -1,4 +1,4 @@
-//! Port of Python `tests/e2e/test_worker_health.py::test_ping_and_worker_state_correlate`:
+//! Port of Python `clients/python/tests/e2e/test_worker_health.py::test_ping_and_worker_state_correlate`:
 //! one live worker answers a ping, and the worker state reads list the same
 //! worker with its pid, host and queues.
 

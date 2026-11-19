@@ -1,4 +1,4 @@
-"""Tests for PostgresBroker (python/horsies/core/brokers/postgres.py).
+"""Tests for PostgresBroker (clients/python/horsies/core/brokers/postgres.py).
 
 Strategy: a double of the broker's core handle stands in for the core, so no
 test reaches PostgreSQL. Tests verify logic, branching, error handling, and

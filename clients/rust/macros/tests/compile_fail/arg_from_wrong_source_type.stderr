@@ -9,7 +9,7 @@ error[E0308]: mismatched types
    = note: expected struct `TypedNodeRef<i64>`
               found struct `TypedNodeRef<std::string::String>`
 note: method defined here
-  --> $WORKSPACE/crates/horsies/src/workflow/node.rs
+  --> $WORKSPACE/clients/rust/horsies/src/workflow/node.rs
    |
    |     pub fn arg_from<S, E>(
    |            ^^^^^^^^

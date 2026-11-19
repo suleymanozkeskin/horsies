@@ -1,6 +1,6 @@
 //! The worker parent: a lost child whose exit was or was not seen, the
 //! retry of a run that timed out, a start hook that fails in a replacement
-//! child (Python `tests/unit/test_child_process_start_hooks.py`), and the
+//! child (Python `clients/python/tests/unit/test_child_process_start_hooks.py`), and the
 //! drain of the pool at the stop.
 
 use std::num::{NonZeroU64, NonZeroUsize};

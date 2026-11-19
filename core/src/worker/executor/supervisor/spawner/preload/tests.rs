@@ -611,7 +611,7 @@ fn the_preload_mode_argument_is_the_python_value() {
 }
 
 // ---------------------------------------------------------------------------
-// The rules of Python `tests/unit/test_preload.py` on the core
+// The rules of Python `clients/python/tests/unit/test_preload.py` on the core
 // ---------------------------------------------------------------------------
 
 /// How long the `late:<file>` behaviour waits before it answers a request.

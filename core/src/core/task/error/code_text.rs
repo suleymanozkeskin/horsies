@@ -11,7 +11,7 @@
 //!
 //! Callers: the stored retry policy reader of the worker
 //! (`worker/retry/stored_policy.rs`) and the check of a task's
-//! `auto_retry_for` in the Rust client (`crates/horsies/src/check.rs`).
+//! `auto_retry_for` in the Rust client (`clients/rust/horsies/src/check.rs`).
 
 use super::RESERVED_NON_TASK_CODES;
 
@@ -182,7 +182,7 @@ mod tests {
     }
 
     /// The two rules differ, as in Python: a task error may carry
-    /// `my_user_code` (Python `tests/unit/test_typed_codec.py:528`), and a
+    /// `my_user_code` (Python `clients/python/tests/unit/test_typed_codec.py:528`), and a
     /// stored error with that code reads, while `auto_retry_for` refuses it.
     #[test]
     fn a_task_error_code_is_not_held_to_the_retry_code_rule() {

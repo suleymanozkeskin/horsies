@@ -1,4 +1,4 @@
-# showcase/acme/scenarios/__init__.py
+# clients/python/examples/acme/scenarios/__init__.py
 """Shared scenario helpers: order building, and the pointers each run prints.
 
 Orders are built, not invented. Every choice — customer, lines, quantities,

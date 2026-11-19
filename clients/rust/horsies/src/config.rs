@@ -4,7 +4,7 @@
 //! Python client reads too, and its validation rules. This module names the
 //! types a Rust app builds an [`AppConfig`] from, adds the rules that only a
 //! Rust app has, and resolves a validated config into the manifest that the
-//! core reads, as the Python client does (`python/horsies/core/manifest.py`).
+//! core reads, as the Python client does (`clients/python/horsies/core/manifest.py`).
 
 use std::collections::BTreeMap;
 

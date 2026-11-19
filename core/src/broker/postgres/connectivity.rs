@@ -1,5 +1,5 @@
 //! The connectivity step of a client's live check (`check --live`; Python
-//! `Horsies._check_broker_connectivity`, `python/horsies/core/app.py`), and
+//! `Horsies._check_broker_connectivity`, `clients/python/horsies/core/app.py`), and
 //! the LISTEN probe that it shares with the worker boot's session check.
 //!
 //! Both clients call [`PostgresBroker::check_connectivity`], so the rule has

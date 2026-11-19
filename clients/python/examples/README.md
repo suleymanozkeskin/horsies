@@ -1,6 +1,6 @@
 # Acme Clothing
 
-A runnable demonstration of [horsies](../README.md): a fictional fast-fashion
+A runnable demonstration of [horsies](../../../README.md): a fictional fast-fashion
 retailer whose orders, payments, stock, and shipments are real rows in a real
 PostgreSQL database. Only the outside world is simulated — the payment
 provider, the courier API, the label printer, the mail gateway.
@@ -13,23 +13,23 @@ with all of it.
 
 ## Run it
 
-Everything runs from the repository root.
+Everything runs from `clients/python/`.
 
 ```bash
 # once: create the demo database, tables, and catalog
-uv run python -m showcase.acme.scenarios seed
+uv run python -m examples.acme.scenarios seed
 
 # terminal 1
-uv run horsies worker showcase.acme.app:app --profile default
+uv run horsies worker examples.acme.app:app --profile default
 
 # terminal 2
-uv run horsies scheduler showcase.acme.app:app
+uv run horsies scheduler examples.acme.app:app
 
 # terminal 3
-uv run horsies web showcase.acme.app:app --enable-actions
+uv run horsies web examples.acme.app:app --enable-actions
 
 # terminal 4 — places an order every 4-8 s until Ctrl-C
-uv run python -m showcase.acme.scenarios steady
+uv run python -m examples.acme.scenarios steady
 ```
 
 Then open <http://127.0.0.1:8600>.
@@ -37,7 +37,7 @@ Then open <http://127.0.0.1:8600>.
 Validate the app without a database or a worker at any time:
 
 ```bash
-uv run horsies check showcase.acme.app:app
+uv run horsies check examples.acme.app:app
 ```
 
 ## The database
@@ -46,7 +46,7 @@ Acme Clothing uses its own database, `acme_demo`, so a demo run never mixes rows
 with a horsies development database. The `acme_*` tables and the horsies
 tables share it.
 
-`showcase/acme/settings.py` resolves the URL, first match wins:
+`clients/python/examples/acme/settings.py` resolves the URL, first match wins:
 
 1. `ACME_DATABASE_URL` in the environment;
 2. `ACME_DATABASE_URL` in the repository `.env`;
@@ -76,7 +76,7 @@ its own within a few minutes:
 | 4% | missing size code raises `KeyError`, mapped globally | `/?error_code=DATA_CORRUPTION` |
 | 2% of customers | loyalty tier table dereference, under the task's own code | `/?error_code=LOYALTY_ENGINE_BUG` |
 
-Every one of those numbers lives in `showcase/acme/tuning.py`. Nothing else
+Every one of those numbers lives in `clients/python/examples/acme/tuning.py`. Nothing else
 in the showcase hard-codes a rate, an interval, or a sleep.
 
 ## Nothing raises into the void
@@ -210,7 +210,7 @@ point rather than letting exceptions escape from wherever they happen.
 
 ## Scenarios
 
-Run from the repository root as `uv run python -m showcase.acme.scenarios <name>`.
+Run from `clients/python/` as `uv run python -m examples.acme.scenarios <name>`.
 Every one ends by printing the dashboard links for what it just started.
 
 | Scenario | What it does | Runs for |
@@ -270,7 +270,7 @@ is a thing to look at in the dashboard, not a claim to take on trust.
 ## Layout
 
 ```
-showcase/acme/
+clients/python/examples/acme/
   app.py         queues, recovery tuning, 32 schedules, the global exception mapper
   settings.py    database URL resolution
   tuning.py      every rate and duration
@@ -289,10 +289,10 @@ showcase/acme/
 
 ## Running it as a group
 
-`showcase/Procfile` starts the worker, scheduler, and web UI together under any
+`clients/python/examples/Procfile` starts the worker, scheduler, and web UI together under any
 Procfile runner. The scenarios stay manual — they are the part you drive.
 
-If there is no Postgres to hand, `showcase/docker-compose.yml` brings one up on
+If there is no Postgres to hand, `clients/python/examples/docker-compose.yml` brings one up on
 port 5433, away from anything already listening on 5432.
 
 ## The two workflows that stop and wait

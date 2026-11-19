@@ -1,7 +1,7 @@
 //! Row contracts and argument rules of the claim, the start and the
-//! release. Ports of Python `tests/unit/test_worker_helpers.py`
+//! release. Ports of Python `clients/python/tests/unit/test_worker_helpers.py`
 //! `TestReadClaimRows` (the claimed rows, the short take, rows the claim
-//! never returns) and of the encodings of `tests/unit/test_claim_plan.py`
+//! never returns) and of the encodings of `clients/python/tests/unit/test_claim_plan.py`
 //! `TestEncodings`. The statements run in
 //! `broker::lifecycle_tests::claim_start_release`.
 

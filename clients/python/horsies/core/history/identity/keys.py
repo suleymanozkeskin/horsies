@@ -2,7 +2,7 @@
 its check.
 
 The core frames and hashes the caller's key under the task-name scope
-(``ScopedIdempotencyKey``, ``crates/horsies-core/src/core/history/identity/keys.rs``).
+(``ScopedIdempotencyKey``, ``core/src/core/history/identity/keys.rs``).
 The client checks the configured window before any write.
 """
 

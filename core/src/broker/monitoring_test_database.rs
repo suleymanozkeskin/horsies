@@ -2,7 +2,7 @@
 //!
 //! The worker list, the fleet check and the class report read every row of
 //! their tables, so their tests do not share a database with other tests
-//! (Python empties the tables instead: `tests/integration/test_class_coverage.py`,
+//! (Python empties the tables instead: `clients/python/tests/integration/test_class_coverage.py`,
 //! `empty_fleet`).
 
 use crate::broker::PostgresBroker;

@@ -1,6 +1,6 @@
 //! Tests of the claim plan and of the capacity of each budget (Python
-//! `tests/unit/test_claim_plan.py` and the down-slot budget of
-//! `tests/unit/test_worker_helpers.py`).
+//! `clients/python/tests/unit/test_claim_plan.py` and the down-slot budget of
+//! `clients/python/tests/unit/test_worker_helpers.py`).
 //!
 //! - The route of each class follows from the children a worker runs: its
 //!   own budget, the `ISOLATED` budget, or not served.

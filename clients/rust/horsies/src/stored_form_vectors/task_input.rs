@@ -93,7 +93,7 @@ fn vectors(rows: Vec<VectorRow>) -> Vec<Vector> {
 }
 
 /// The input of a task whose one parameter is `value: T`, as the task
-/// attribute generates it (`crates/horsies-macros/src/codegen.rs`,
+/// attribute generates it (`clients/rust/macros/src/codegen.rs`,
 /// `input_struct`).
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

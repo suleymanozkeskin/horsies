@@ -1,7 +1,7 @@
 """Contract between the Pydantic app config and the core's worker manifest.
 
 `to_worker_manifest` maps `AppConfig` into the manifest generated from
-horsies-core (`python/horsies/_catalog/worker_manifest.py`). These tests pin that
+horsies-core (`clients/python/horsies/_catalog/worker_manifest.py`). These tests pin that
 the bounds of the profile models are the bounds of the manifest, that every
 profile field is mapped with each Pydantic default as a value, that the
 drain timeout becomes whole milliseconds, that every `PostgresConfig` field

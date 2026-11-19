@@ -1,7 +1,7 @@
 //! Ports of the core rows of the identity and enqueue prototypes (#880).
 //!
-//! Python specification: `tests/integration/test_task_history_identity_prototypes.py`
-//! and `tests/integration/test_enqueue_cutover_conversion.py`. The identity
+//! Python specification: `clients/python/tests/integration/test_task_history_identity_prototypes.py`
+//! and `clients/python/tests/integration/test_enqueue_cutover_conversion.py`. The identity
 //! prototypes call candidate SQL functions; these ports send through
 //! `PostgresBroker::enqueue`, the production path. Each test runs on the P6
 //! enqueue database (`enqueue_history_tests::migrated_pool`) and clears its

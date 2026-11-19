@@ -766,7 +766,7 @@ mod tests {
     /// Europe/Berlin and America/New_York) and for months without the day,
     /// the core gives the next run that Python's `calculate_next_run` gave
     /// (`calculator_vectors.json`; the Python test
-    /// `tests/unit/test_schedule_calculator_vectors.py` pins the same table).
+    /// `clients/python/tests/unit/test_schedule_calculator_vectors.py` pins the same table).
     /// The pattern is read from Python's text, as the scheduler manifest
     /// gives it.
     #[test]

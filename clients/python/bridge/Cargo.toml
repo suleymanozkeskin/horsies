@@ -21,7 +21,7 @@ extension-module = ["pyo3/extension-module"]
 [dependencies]
 # The Python package ships the web app, so the core's web layer is always on;
 # the schema read of the web gate comes from it.
-horsies-core = { path = "../horsies-core", features = ["web"] }
+horsies-core = { path = "../../../core", features = ["web"] }
 pyo3 = { version = "=0.30.1", features = ["abi3-py313", "chrono", "uuid"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 futures-util = "0.3"
