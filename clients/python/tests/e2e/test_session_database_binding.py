@@ -44,8 +44,12 @@ RESOLVE_URL_PROGRAM = (
 def test_a_subprocess_resolves_the_database_url_of_this_process(
     subprocess_environment: Callable[[], dict[str, str]],
 ) -> None:
+    # -P: like the `horsies` script that starts a scheduler or worker, the
+    # probe does not put its working directory first on sys.path. From the
+    # repository root that folder holds the other package `tests` (the
+    # cross-client harnesses), which would shadow PYTHONPATH.
     result = subprocess.run(
-        [sys.executable, '-c', RESOLVE_URL_PROGRAM],
+        [sys.executable, '-P', '-c', RESOLVE_URL_PROGRAM],
         env=subprocess_environment(),
         capture_output=True,
         text=True,

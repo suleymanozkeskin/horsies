@@ -559,19 +559,22 @@ def _puts_files_into_the_wheel(entry: dict[str, object]) -> bool:
 
 class TestPackageData:
     def test_package_data_covers_every_skill_file(self) -> None:
-        config = tomllib.loads((_REPO_ROOT / 'clients/python/pyproject.toml').read_text())
+        # The include paths of maturin are relative to the folder of
+        # pyproject.toml, the Python project.
+        project_root = _REPO_ROOT / 'clients' / 'python'
+        config = tomllib.loads((project_root / 'pyproject.toml').read_text())
         patterns = [
             str(entry['path'])
             for entry in config['tool']['maturin']['include']
             if _puts_files_into_the_wheel(entry)
         ]
-        package_root = _REPO_ROOT / 'clients' / 'python' / 'horsies'
+        package_root = project_root / 'horsies'
 
         uncovered = [
             relative
             for path in sorted((package_root / '.agents').rglob('*'))
             if path.is_file()
-            for relative in [path.relative_to(_REPO_ROOT).as_posix()]
+            for relative in [path.relative_to(project_root).as_posix()]
             if not any(_matches_package_glob(relative, pattern) for pattern in patterns)
         ]
 
