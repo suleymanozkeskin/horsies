@@ -108,7 +108,7 @@ fn task_module(
     let params_items = params_module(signature);
     let send_params = send_params(signature);
     let build_input = build_input(signature);
-    let registered = registered_task(signature, fn_name, input, kind);
+    let registered = registered_task(signature, fn_name, input, code, kind);
     let workflow_ctx = match attrs.workflow_ctx {
         true => quote! { .with_workflow_ctx() },
         false => quote! {},
@@ -144,7 +144,6 @@ fn task_module(
             pub fn register(
                 app: &mut ::horsies::Horsies,
             ) -> ::std::result::Result<#function_type, ::horsies::HorsiesError> {
-                ::horsies::__private::refuse_foreign_user_codes::<#code>(TASK_NAME)?;
                 #runtime_capture
                 let task = #registered #workflow_ctx .with_task_options(#options);
                 app.register(TASK_NAME, task)?;
@@ -341,11 +340,14 @@ fn retry_code_checks(attrs: &TaskAttrs, code: &Type, cfg_attrs: &[&Attribute]) -
 }
 
 /// The `RegisteredTask` of the function: a body struct that decodes the
-/// input, calls the function and stores what it returned.
+/// input, calls the function and stores what it returned. Its meta declares
+/// the codes of the code type `code` (`UserErrorCode::CODES`); the
+/// registration checks them.
 fn registered_task(
     signature: &Signature,
     fn_name: &syn::Ident,
     input: &Type,
+    code: &Type,
     kind: BodyKind,
 ) -> TokenStream {
     let (runtime_field, runtime_init, runtime_clone) = match signature.takes_runtime {
@@ -361,6 +363,7 @@ fn registered_task(
     let meta = quote! {
         ::horsies::__private::TaskMeta::for_input::<#input>()
             .in_module(::horsies::__private::parent_module(::std::module_path!()))
+            .with_error_codes(<#code as ::horsies::UserErrorCode>::CODES)
     };
     let validate_call = match &signature.input {
         InputShape::Unit(_) => quote! { ::horsies::__private::decode_unit_input(input) },

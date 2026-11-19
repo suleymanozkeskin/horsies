@@ -10,8 +10,6 @@ use horsies_core::catalog::{CatalogMember, CodeEnum};
 use horsies_core::core::task::error::RESERVED_NON_TASK_CODES;
 use horsies_core::{ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode, UserCode};
 
-use crate::{ErrorCode, HorsiesError};
-
 /// The error codes that a task's own failures carry.
 ///
 /// Derive it: `#[derive(horsies::UserErrorCode)]`. The derive checks every
@@ -140,7 +138,7 @@ pub(crate) const fn is_retry_code(text: &str, user_codes: &[&str]) -> bool {
 /// The stored retry code of an `auto_retry_for` entry: the built-in code
 /// of that name, else the user code. The task attribute asserted at
 /// compile time that `text` is one of the two, and `E::CODES` holds only
-/// user codes (`user_code_refusals`, checked before the registration), so a
+/// user codes (the registration refuses a set with another name), so a
 /// text that is neither is a defect.
 pub(crate) fn stored_retry_code(text: &str) -> horsies_core::TaskErrorCode {
     match horsies_core::BuiltInTaskCode::parse(text) {
@@ -180,24 +178,6 @@ pub(crate) fn stored_user_code<E: UserErrorCode>(code: &E) -> UserCode {
             std::any::type_name::<E>()
         )
     })
-}
-
-/// The codes of `E` that a user code may not have, as registration
-/// refusals (`HRS-212`). Empty for every derived type. Pure.
-pub(crate) fn user_code_refusals<E: UserErrorCode>(task_name: &str) -> Vec<HorsiesError> {
-    E::CODES
-        .iter()
-        .filter_map(|code| UserCode::parse(*code).err())
-        .map(|refused| {
-            HorsiesError::new(format!(
-                "task '{task_name}': error code type {} has a code that is not a user code: \
-                 {refused}",
-                std::any::type_name::<E>()
-            ))
-            .with_code(ErrorCode::CheckReservedCodeCollision)
-            .with_help("derive the code type with #[derive(horsies::UserErrorCode)]")
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -310,19 +290,6 @@ mod tests {
             <UserCode as UserErrorCode>::from_code("WORKFLOW_STOPPED"),
             None
         );
-        assert!(user_code_refusals::<UserCode>("charge").is_empty());
-    }
-
-    #[test]
-    fn a_hand_written_impl_with_a_built_in_name_is_refused_at_registration() {
-        let refusals = user_code_refusals::<HandWritten>("charge");
-        assert_eq!(refusals.len(), 1);
-        assert_eq!(
-            refusals[0].code,
-            Some(ErrorCode::CheckReservedCodeCollision)
-        );
-        assert!(refusals[0].message.contains("charge"));
-        assert!(user_code_refusals::<std::convert::Infallible>("charge").is_empty());
     }
 
     #[test]

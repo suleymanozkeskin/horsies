@@ -6,12 +6,17 @@
 //! `Horsies.validate_queue_name`). Each registered task carries its resolved
 //! queue and priority, which sends and workflow nodes inherit.
 //!
+//! The user error codes that a task declares (`UserErrorCode::CODES` of its
+//! code type, which the task macros fill) follow the rules of a declared
+//! set (`DeclaredErrorCodes::parse`).
+//!
 //! Every function is pure: it reads the config and changes only the registry
 //! it is given.
 
-use horsies_core::{RegisteredTask, TaskRegistry};
+use horsies_core::core::task::error::CodeTextRefusal;
+use horsies_core::{DeclaredCodeRefusal, DeclaredErrorCodes, RegisteredTask, TaskRegistry};
 
-use crate::{AppConfig, ErrorCode, HorsiesError, QueueMode};
+use crate::{AppConfig, ErrorCode, HorsiesError, QueueMode, ValidationReport};
 
 /// The one queue of `Default` mode.
 pub(crate) const DEFAULT_QUEUE: &str = "default";
@@ -32,10 +37,13 @@ pub(crate) enum QueueSource<'a> {
 /// Register `task` as `name` in `tasks`, with the queue that `source` gives
 /// and its priority.
 ///
-/// Refuses: a definition-time `good_until` (`TaskInvalidOptions`); a queue
-/// that the queue mode does not admit (`ConfigInvalidQueueMode`,
-/// `TaskInvalidQueue`); an empty or repeated name (the core registry's
-/// refusals). After a refusal `tasks` is unchanged.
+/// Refuses: a definition-time `good_until` (`TaskInvalidOptions`); a set
+/// of declared error codes that breaks a rule of a declared set
+/// (`CheckReservedCodeCollision`, `TaskInvalidErrorCode`,
+/// `TaskDuplicateErrorCode`; [`refuse_bad_error_codes`]); a queue that the
+/// queue mode does not admit (`ConfigInvalidQueueMode`, `TaskInvalidQueue`);
+/// an empty or repeated name (the core registry's refusals). After a
+/// refusal `tasks` is unchanged.
 pub(crate) fn register_task(
     tasks: &mut TaskRegistry,
     config: &AppConfig,
@@ -44,6 +52,7 @@ pub(crate) fn register_task(
     source: QueueSource<'_>,
 ) -> Result<(), HorsiesError> {
     refuse_definition_deadline(&name, &task)?;
+    refuse_bad_error_codes(&name, &task)?;
     let requested = match source {
         QueueSource::TaskOptions => task
             .task_options()
@@ -152,6 +161,54 @@ fn refuse_definition_deadline(name: &str, task: &RegisteredTask) -> Result<(), H
              good_until on the node",
         )),
     }
+}
+
+/// The error codes that `task` declares follow the rules of a declared
+/// set: the code-text rule, no built-in or reserved name, each code once.
+/// A derived code type keeps the last two rules at compile time; a code
+/// type whose variant name does not give an `UPPER_SNAKE_CASE` code (for
+/// example a leading `_`) or a hand-written impl can break one.
+///
+/// Errors: one error per refused code, with the HRS code of its refusal
+/// (`DeclaredCodeRefusal::error_code`); several refusals come in one error
+/// (`ValidationReport::into_result`).
+fn refuse_bad_error_codes(name: &str, task: &RegisteredTask) -> Result<(), HorsiesError> {
+    match DeclaredErrorCodes::parse(task.error_codes()) {
+        Ok(_declared) => Ok(()),
+        Err(refused) => {
+            let mut report = ValidationReport::new("task registration");
+            for refusal in refused.refusals() {
+                report.add(declared_code_error(name, refusal));
+            }
+            report.into_result()
+        }
+    }
+}
+
+/// The registration error of one refused declared code.
+fn declared_code_error(name: &str, refusal: &DeclaredCodeRefusal) -> HorsiesError {
+    let help = match refusal {
+        DeclaredCodeRefusal::Text {
+            refusal: CodeTextRefusal::ReservedName,
+            ..
+        }
+        | DeclaredCodeRefusal::BuiltInName { .. } => {
+            "rename the code: a built-in or reserved name is not a user code; derive the code \
+             type with #[derive(horsies::UserErrorCode)]"
+        }
+        DeclaredCodeRefusal::Text {
+            refusal:
+                CodeTextRefusal::Empty
+                | CodeTextRefusal::ExceptionClassName
+                | CodeTextRefusal::NotUpperSnakeCase,
+            ..
+        } => "give the code an UPPER_SNAKE_CASE name, for example RATE_LIMITED",
+        DeclaredCodeRefusal::Repeated { .. } => "list each code once in UserErrorCode::CODES",
+    };
+    HorsiesError::new(format!("task '{name}': {refusal}"))
+        .with_code(refusal.error_code())
+        .with_note("the error codes of a task are UserErrorCode::CODES of its code type")
+        .with_help(help)
 }
 
 #[cfg(test)]
@@ -323,6 +380,108 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(refused.code, Some(ErrorCode::TaskDuplicateName));
+    }
+
+    fn task_declaring(codes: &'static [&'static str]) -> RegisteredTask {
+        RegisteredTask::Blocking {
+            task: Arc::new(EchoTask),
+            meta: TaskMeta::default().with_error_codes(codes),
+        }
+    }
+
+    fn register_declaring(
+        codes: &'static [&'static str],
+    ) -> (TaskRegistry, Result<(), HorsiesError>) {
+        let mut tasks = TaskRegistry::new();
+        let registered = register_task(
+            &mut tasks,
+            &default_config(),
+            "charge".to_owned(),
+            task_declaring(codes),
+            QueueSource::TaskOptions,
+        );
+        (tasks, registered)
+    }
+
+    #[test]
+    fn a_valid_set_of_declared_codes_registers() {
+        let (tasks, registered) = register_declaring(&["CARD_DECLINED", "RATE_LIMITED"]);
+        assert!(registered.is_ok());
+        assert_eq!(
+            tasks.get("charge").unwrap().error_codes(),
+            ["CARD_DECLINED", "RATE_LIMITED"]
+        );
+    }
+
+    #[test]
+    fn a_built_in_or_reserved_name_is_refused_with_hrs_212_and_nothing_is_registered() {
+        let cases: [&'static [&'static str]; 2] =
+            [&["FINE", "BROKER_ERROR"], &["WORKFLOW_STOPPED"]];
+        for codes in cases {
+            let (tasks, registered) = register_declaring(codes);
+            let refused = registered.unwrap_err();
+            assert_eq!(
+                refused.code,
+                Some(ErrorCode::CheckReservedCodeCollision),
+                "{codes:?}"
+            );
+            assert!(
+                refused.message.contains("task 'charge'"),
+                "{}",
+                refused.message
+            );
+            assert!(tasks.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_code_outside_the_code_text_rule_is_refused_with_hrs_112() {
+        let cases: [&'static [&'static str]; 4] =
+            [&["_INTERNAL"], &["\u{c4}RGER"], &["TimeoutError"], &[""]];
+        for codes in cases {
+            let (tasks, registered) = register_declaring(codes);
+            let refused = registered.unwrap_err();
+            assert_eq!(
+                refused.code,
+                Some(ErrorCode::TaskInvalidErrorCode),
+                "{codes:?}"
+            );
+            assert!(tasks.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_repeated_code_is_refused_with_hrs_113() {
+        let (tasks, registered) = register_declaring(&["RATE_LIMITED", "RATE_LIMITED"]);
+        let refused = registered.unwrap_err();
+        assert_eq!(refused.code, Some(ErrorCode::TaskDuplicateErrorCode));
+        assert!(
+            refused.message.contains("RATE_LIMITED"),
+            "{}",
+            refused.message
+        );
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn every_refused_code_is_named_in_one_error() {
+        let (_tasks, registered) = register_declaring(&["bad", "BROKER_ERROR", "OK", "OK"]);
+        let refused = registered.unwrap_err();
+        assert_eq!(refused.notes.len(), 3, "{refused}");
+        assert_eq!(refused.code, None);
+        for code in ["HRS-112", "HRS-212", "HRS-113"] {
+            assert!(
+                refused.notes.iter().any(|note| note.contains(code)),
+                "{code}: {refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_task_that_declares_no_code_registers() {
+        let (tasks, registered) = register_declaring(&[]);
+        assert!(registered.is_ok());
+        assert!(tasks.get("charge").unwrap().error_codes().is_empty());
     }
 
     #[test]
