@@ -1399,13 +1399,9 @@ impl Worker {
         for row in claimed.rows {
             match (hold.holds(&row.queue_name), plan.route(row.execution)) {
                 (true, ClaimRoute::ServedBy(budget)) => hold.hold(row, budget),
-                (false, _) | (true, ClaimRoute::NotServed) => self.dispatch(
-                    children,
-                    writer,
-                    writes,
-                    claimed_of(row),
-                    StartCount::Unchecked,
-                ),
+                (false, _) | (true, ClaimRoute::NotServed) => {
+                    self.dispatch(children, writer, writes, row, StartCount::Unchecked)
+                }
             }
         }
         let admitted = admit_held_rows(&self.broker, &self.worker_id, hold, || {
@@ -1417,33 +1413,40 @@ impl Worker {
                 children,
                 writer,
                 writes,
-                claimed_of(admitted.row),
+                admitted.row,
                 StartCount::Admitted(admitted.started),
             );
         }
         Ok(claimed.counts)
     }
 
-    /// Submit one claimed task to the pool of its kind, and spawn the write
+    /// Submit one claimed row to the pool of its kind, and spawn the write
     /// of its end (Python `_dispatch_one`, `_finalize_after`). When the write
     /// ends, the claim loop is woken: a slot or seat is free again (Python
     /// `_capacity_released`). An admitted row of a capped queue counts in
     /// its queue's start check until the write ends (`count`). Never fails
     /// for a task: a task that reaches no child ends `NotDispatched`, and its
-    /// claim goes back to the queue.
+    /// claim goes back to the queue. With telemetry on, the placement of the
+    /// task on a child is watched and is the `AttemptPlaced` point.
     fn dispatch(
         &self,
         children: &WorkerChildren,
         writer: &Arc<OutcomeWriter>,
         writes: &mut JoinSet<()>,
-        claimed: Claimed,
+        row: ClaimedRow,
         count: StartCount,
     ) {
+        let read = row.read;
+        let claimed = claimed_of(row);
         let task = claimed.task.clone();
-        let submitted = children.submit(claimed);
+        let telemetry = self.telemetry.clone();
+        let (watch, receipt) = telemetry.placement_watch();
+        let submitted = children.submit_watched(claimed, watch);
         let writer = Arc::clone(writer);
         let released = Arc::clone(&self.capacity_released);
         let settle = async move {
+            let placement = receipt.placement().await;
+            telemetry.attempt_placed(&task, read, &placement);
             let end = attempt_end(submitted).await;
             let settled = writer.settle(&task, end).await;
             tracing::debug!(task_id = %task.task_id, settlement = ?settled, "attempt end settled");

@@ -128,3 +128,88 @@ fn the_reaper_counts_its_failures_only_with_telemetry_on() {
     assert!(matches!(off, OptionalCounter::NotRecorded));
     assert!(matches!(on, OptionalCounter::Recording(_)));
 }
+
+/// A plain task of `execution` at attempt 3, on queue `default`.
+fn claimed_task(execution: Execution) -> crate::worker::executor::slots::ClaimedTask {
+    use crate::worker::executor::slots::{ClaimedTask, RetryFacts, TaskKind};
+    ClaimedTask {
+        task_id: uuid::Uuid::from_u128(7),
+        task_name: "app.tasks.send_email".to_owned(),
+        queue_name: "default".to_owned(),
+        claimed_at: Utc::now(),
+        execution,
+        kind: TaskKind::Plain,
+        retry: RetryFacts {
+            retry_count: 2,
+            max_retries: 3,
+        },
+        options: crate::worker::retry::read_stored_options(None),
+        trace: crate::events::RunTrace::NoCarrier,
+    }
+}
+
+/// A placement of a task on an isolated child, one second after `read`.
+fn placed_after(read: crate::broker::claims::ClaimRead) -> crate::worker::executor::slots::Placed {
+    use crate::worker::executor::protocol::ProcessId;
+    crate::worker::executor::slots::Placed {
+        child_pid: ProcessId::new(4242).unwrap(),
+        child_kind: Execution::Isolated,
+        at: read.at + std::time::Duration::from_secs(1),
+        wall: read.wall + chrono::Duration::seconds(1),
+    }
+}
+
+#[test]
+fn a_placed_task_gives_one_attempt_placed_with_its_child_and_one_slot_wait() {
+    use crate::worker::executor::slots::ChildPlacement;
+    let mut watched = crate::test_support::telemetry::WatchedTelemetry::new();
+    let task = claimed_task(Execution::SharedAsync);
+    let read = crate::broker::claims::ClaimRead::now();
+    let placed = placed_after(read);
+
+    watched
+        .telemetry
+        .attempt_placed(&task, read, &ChildPlacement::Placed(placed));
+
+    let events = watched.events();
+    assert_eq!(events.len(), 1, "{events:?}");
+    match &events[0] {
+        Event::AttemptPlaced(event) => {
+            assert_eq!(event.task_id, task.task_id);
+            assert_eq!(event.execution, Execution::SharedAsync);
+            assert_eq!(event.child_kind, Execution::Isolated);
+            assert_eq!(event.child_pid, placed.child_pid);
+            assert_eq!(event.attempt.get(), 3);
+            assert_eq!(event.at, placed.wall);
+            assert_eq!(event.slot_wait, std::time::Duration::from_secs(1));
+        }
+        other => panic!("the placement emits AttemptPlaced, not {other:?}"),
+    }
+    match watched.series(MetricId::TaskSlotWaitDuration).as_slice() {
+        [(labels, SampleValue::Histogram { buckets, .. })] => {
+            assert_eq!(labels, &vec!["SHARED_ASYNC".to_owned()]);
+            assert_eq!(buckets.iter().sum::<u64>(), 1);
+        }
+        other => panic!("one slot wait series, not {other:?}"),
+    }
+}
+
+#[test]
+fn a_task_that_no_child_took_or_telemetry_off_gives_no_placement() {
+    use crate::worker::executor::slots::{ChildPlacement, PlacementReceipt, PlacementWatch};
+    let mut watched = crate::test_support::telemetry::WatchedTelemetry::new();
+    let task = claimed_task(Execution::Isolated);
+    let read = crate::broker::claims::ClaimRead::now();
+
+    watched
+        .telemetry
+        .attempt_placed(&task, read, &ChildPlacement::NotPlaced);
+    WorkerTelemetry::Off.attempt_placed(&task, read, &ChildPlacement::Placed(placed_after(read)));
+
+    assert!(watched.events().is_empty());
+    assert!(watched.series(MetricId::TaskSlotWaitDuration).is_empty());
+    assert!(matches!(
+        WorkerTelemetry::Off.placement_watch(),
+        (PlacementWatch::Unwatched, PlacementReceipt::Unwatched)
+    ));
+}

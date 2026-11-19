@@ -82,6 +82,7 @@ pub struct TelemetryOn {
 /// The metric handles that the points of a worker record.
 struct PointMetrics {
     queue_duration: Histogram<(DeclaredValue<declared::QueueName>, Execution)>,
+    slot_wait: Histogram<(Execution,)>,
     claims_released: Counter<(ReleaseReason,)>,
     claim_passes: Counter<(ClaimPassResult,)>,
     recovery_failures: Counter<(RecoveryStep,)>,
@@ -95,6 +96,7 @@ impl PointMetrics {
     fn of(registry: &Registry) -> Result<Self, HandleRefused> {
         Ok(Self {
             queue_duration: registry.histogram(MetricId::TaskQueueDuration)?,
+            slot_wait: registry.histogram(MetricId::TaskSlotWaitDuration)?,
             claims_released: registry.counter(MetricId::TaskClaimsReleased)?,
             claim_passes: registry.counter(MetricId::ClaimPasses)?,
             recovery_failures: registry.counter(MetricId::RecoveryPassFailures)?,

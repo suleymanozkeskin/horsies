@@ -53,6 +53,8 @@ mod outcome_tests;
 #[cfg(all(test, target_os = "linux"))]
 mod placement_tests;
 #[cfg(test)]
+mod placement_watch_tests;
+#[cfg(test)]
 mod plain_success_tests;
 #[cfg(test)]
 mod ready_wake_tests;
@@ -108,8 +110,8 @@ pub use dispatch::{
 pub(crate) use outcome::test_successes;
 pub use outcome::OutcomeWriter;
 pub use pool::{
-    ExitNotSeen, IsolatedPool, IsolatedPoolConfig, MemoryLimit, PoolStopReport, Submitted,
-    TaskLimit,
+    watched_placement, ChildPlacement, ExitNotSeen, IsolatedPool, IsolatedPoolConfig, MemoryLimit,
+    Placed, PlacementReceipt, PlacementWatch, PoolStopReport, Submitted, TaskLimit,
 };
 pub use route::{
     describe_claim_plan, dispatch_route, unserved_classes_line, ClaimPlan, ClaimRoute,
