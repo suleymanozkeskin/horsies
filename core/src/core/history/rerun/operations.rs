@@ -13,17 +13,22 @@ use crate::core::history::identity::keys::{validate_reservation_window, Idempote
 use crate::core::history::identity::uuid7::Uuid7Error;
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::db::{ParameterType, StatementFailure, Transaction, TypedStatement};
+use crate::telemetry::trace_carrier::{SendTrace, StoredTrace};
 
 use super::caller::{CallerTransaction, OwnTransactionError};
 use super::steps::{
     decode_rerun_write, prepare_rerun_write, rerun_read, RerunPreparation, RerunRowError,
 };
 
+/// One rerun request: the source task, the deadline and the caller key of
+/// the new task, and its trace carrier ([`RerunTask::new`] has none;
+/// [`RerunTask::with_trace`] sets one).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RerunTask {
     source_task_id: Uuid,
     deadline: Option<DateTime<Utc>>,
     caller_key: Option<String>,
+    trace: StoredTrace,
 }
 
 impl RerunTask {
@@ -36,7 +41,24 @@ impl RerunTask {
             source_task_id,
             deadline,
             caller_key,
+            trace: StoredTrace::NoCarrier,
         }
+    }
+
+    /// The request with the trace carrier `trace` of the caller's span. The
+    /// carrier is checked against the bounds of `telemetry::trace_carrier`:
+    /// a carrier that breaks a bound is not stored, the new task keeps no
+    /// carrier, and the process logs one warning. Never refuses the rerun.
+    pub fn with_trace(self, trace: SendTrace) -> Self {
+        Self {
+            trace: StoredTrace::of_send(trace),
+            ..self
+        }
+    }
+
+    /// The trace that the new task stores.
+    pub fn trace(&self) -> &StoredTrace {
+        &self.trace
     }
 
     pub fn source_task_id(&self) -> Uuid {
@@ -240,16 +262,16 @@ pub(crate) fn rerun_first_statement() -> &'static TypedStatement {
 /// class key, retain rerun input, max retries, good until, sent at,
 /// fingerprint version, fingerprint, source task id, root task id, key kind,
 /// key digest, key scope version, key window in microseconds (made into the
-/// exact `interval`; NULL for an unkeyed rerun). The row carries the
-/// source's exact input and options texts and stores no envelope: the move
-/// builds it from `input` and `task_options`. The trace is `NO_CARRIER`: the
-/// rerun stores no carrier.
+/// exact `interval`; NULL for an unkeyed rerun), trace kind, trace carrier
+/// text, trace id (`StoredTrace::columns`). The row carries the source's
+/// exact input and options texts and stores no envelope: the move builds it
+/// from `input` and `task_options`.
 pub(super) static RERUN_ENQUEUE: TypedStatement = TypedStatement::new(
     "rerun_enqueue",
     "SELECT outcome, task_id FROM horsies_enqueue_task(\
      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'NOW', NULL, NULL, $13, $14, \
      'RERUN', $15, $16, $17, $18, $19, $20::bigint * interval '1 microsecond', 'FIRST', \
-     'NO_CARRIER', NULL, NULL)",
+     $21, $22, $23)",
     &[
         ParameterType::Uuid,
         ParameterType::Text,
@@ -271,6 +293,9 @@ pub(super) static RERUN_ENQUEUE: TypedStatement = TypedStatement::new(
         ParameterType::Bytea,
         ParameterType::Int2,
         ParameterType::Int8,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Bytea,
     ],
 );
 
