@@ -116,6 +116,23 @@ before you upgrade a 0.7 deployment.
   space. The core checks it; a refused template is `HRS-221` (new
   `CONFIG_INVALID_TRACE_LINK`) in Python and an argument error of
   `horsies web`. `/api/meta` reports it as `trace_link_template`.
+- **`horsies worker <app> --profile <name> --metrics-listen HOST:PORT`.**
+  The worker serves its metrics at `GET /metrics` (Prometheus text format)
+  and its health probes at `GET /livez` and `GET /readyz` on `HOST:PORT`
+  or `[IPV6]:PORT`. There is no default address and no config field:
+  without the flag the worker serves no endpoint. The host is required and
+  the port is 1 to 65535; a value that does not parse is a usage error
+  (exit 2) before the worker starts. `/livez` answers 503 when the claim
+  loop of the worker is past the deadline of its next turn, and 200 during
+  the start and the stop. `/readyz` answers 200 when the pools of the
+  worker have no failure, a child serves, and its liveness lock is held,
+  and 503 during the start and the stop. A port in use does not stop the
+  worker: it starts and claims, the endpoint binds again with a backoff of
+  1 s to 60 s, and the probes answer once it binds. The endpoint serves at
+  most 16 connections at once, closes a connection whose request head is
+  not read within 5 s, and answers 431 for a head over 8 KiB. The worker
+  snapshot (`horsies_worker_states.telemetry`) shows the endpoint `off`,
+  `binding`, `serving`, or `down` with its address and cause.
 
 ### Changed
 
@@ -918,6 +935,13 @@ before you upgrade a 0.7 deployment.
 The crate `horsies` is rebuilt on `horsies-core`, the engine that the
 Python client runs on. Each entry is a breaking change of the crate's API,
 unless it starts with "Added".
+
+- **Added: `<binary> worker --metrics-listen HOST:PORT` and
+  `WorkerStart::with_metrics_endpoint(ListenAddress)`.** The worker metrics
+  endpoint of the Python flag above, with the same rules. The `cli` feature
+  turns on the server (`horsies-core/metrics-endpoint`); a core without it
+  ends a start that asks for an endpoint with `BootFailed`. `ListenAddress`
+  and `ListenAddressRefused` are exported from `horsies`.
 
 - **The client runs on `horsies-core`.** The crate has no engine of its
   own: no sqlx broker, no worker, no workflow engine, no monitoring queries
