@@ -53,9 +53,13 @@ pub struct AttemptPlaced {
     pub task_id: Uuid,
     pub task_name: TaskName,
     pub queue: QueueName,
-    /// The execution class of the task, which is the kind of the child.
+    /// The execution class of the task.
     pub execution: Execution,
     pub attempt: AttemptNumber,
+    /// The kind of the child that took the task. A worker that runs no
+    /// child of a shared class serves that class on its isolated children,
+    /// so a task of a shared class can run on an isolated child.
+    pub child_kind: Execution,
     /// The process id of the child.
     pub child_pid: ProcessId,
     /// From the claim to the time the child took the task (monotonic clock
