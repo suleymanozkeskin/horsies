@@ -124,7 +124,7 @@ RETURNS text LANGUAGE sql AS $$
     SELECT outcome FROM horsies_enqueue_task(
         p_id, 'lc.task', 'q_lc', 100, '{"x":1}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL,
         p_sent_at, 'NOW', NULL, NULL, 1::smallint, sha256(p_fingerprint_seed::bytea),
-        'FIRST_RUN', NULL, NULL, 'UNKEYED', NULL, NULL, NULL, p_send_kind
+        'FIRST_RUN', NULL, NULL, 'UNKEYED', NULL, NULL, NULL, p_send_kind, 'NO_CARRIER', NULL, NULL
     )
 $$;
 
@@ -134,7 +134,8 @@ RETURNS text LANGUAGE sql AS $$
     SELECT outcome || ':' || task_id FROM horsies_enqueue_task(
         p_id, 'lc.task', 'q_lc', 100, '{"x":1}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL,
         p_sent_at, 'NOW', NULL, NULL, 1::smallint, sha256(p_fingerprint_seed::bytea),
-        'FIRST_RUN', NULL, NULL, 'KEYED', sha256(p_key_seed::bytea), 1::smallint, interval '1 hour', 'FIRST'
+        'FIRST_RUN', NULL, NULL, 'KEYED', sha256(p_key_seed::bytea), 1::smallint, interval '1 hour', 'FIRST',
+        'NO_CARRIER', NULL, NULL
     )
 $$;
 
@@ -144,7 +145,19 @@ RETURNS text LANGUAGE sql AS $$
     SELECT outcome || ':' || task_id FROM horsies_enqueue_task(
         p_id, 'lc.task', 'q_lc', 100, '{"x":1}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL,
         now(), 'NOW', NULL, NULL, 1::smallint, sha256(p_id::text::bytea),
-        'FIRST_RUN', NULL, NULL, 'KEYED', sha256(p_key_seed::bytea), 1::smallint, p_window, 'FIRST'
+        'FIRST_RUN', NULL, NULL, 'KEYED', sha256(p_key_seed::bytea), 1::smallint, p_window, 'FIRST',
+        'NO_CARRIER', NULL, NULL
+    )
+$$;
+
+-- One unkeyed first send of lc.task to q_trace with the given trace arguments.
+CREATE FUNCTION lc_send_traced(
+    p_id uuid, p_fingerprint_seed text, p_trace_kind text, p_trace_carrier text, p_trace_id bytea
+) RETURNS text LANGUAGE sql AS $$
+    SELECT outcome FROM horsies_enqueue_task(
+        p_id, 'lc.task', 'q_trace', 100, '{"x":1}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL,
+        now(), 'NOW', NULL, NULL, 1::smallint, sha256(p_fingerprint_seed::bytea),
+        'FIRST_RUN', NULL, NULL, 'UNKEYED', NULL, NULL, NULL, 'FIRST', p_trace_kind, p_trace_carrier, p_trace_id
     )
 $$;
 
@@ -161,7 +174,8 @@ SELECT lc_expect(
         ARRAY[TRUE, FALSE], ARRAY[0, 2], ARRAY[NULL, now() + interval '1 hour']::timestamptz[],
         ARRAY[now(), now()], ARRAY[now(), now() + interval '5 seconds'], ARRAY[FALSE, FALSE],
         ARRAY[1, 1]::smallint[], ARRAY[sha256('a2'::bytea), sha256('a1'::bytea)], ARRAY[NULL, NULL]::bytea[],
-        ARRAY[NULL, NULL]::uuid[], ARRAY[NULL, NULL]::uuid[], now() - interval '7 seconds', 'NONE')),
+        ARRAY[NULL, NULL]::uuid[], ARRAY[NULL, NULL]::uuid[], ARRAY[NULL, NULL]::text[], ARRAY[NULL, NULL]::bytea[],
+        now() - interval '7 seconds', 'NONE')),
     '1:INSERTED,2:INSERTED'
 );
 SELECT lc_expect(
@@ -184,7 +198,8 @@ SELECT lc_expect(
         ARRAY[NULL, NULL, NULL]::timestamptz[], ARRAY[now(), now(), now()], ARRAY[now(), now(), now()],
         ARRAY[FALSE, FALSE, FALSE], ARRAY[1, 1, 1]::smallint[],
         ARRAY[sha256('a1'::bytea), sha256('other'::bytea), sha256('a3'::bytea)], ARRAY[NULL, NULL, NULL]::bytea[],
-        ARRAY[NULL, NULL, NULL]::uuid[], ARRAY[NULL, NULL, NULL]::uuid[], now(), 'FOR_UPDATE')),
+        ARRAY[NULL, NULL, NULL]::uuid[], ARRAY[NULL, NULL, NULL]::uuid[], ARRAY[NULL, NULL, NULL]::text[],
+        ARRAY[NULL, NULL, NULL]::bytea[], now(), 'FOR_UPDATE')),
     '1:SAME_COMMAND,2:PAYLOAD_MISMATCH,3:INSERTED'
 );
 SELECT lc_expect(
@@ -202,7 +217,7 @@ SELECT lc_expect(
         ARRAY[NULL]::timestamptz[], ARRAY[(SELECT sent_at FROM horsies_tasks
                                            WHERE id = '00000000-0000-7000-8000-000000000a04')],
         ARRAY[now()], ARRAY[TRUE], ARRAY[NULL]::smallint[], ARRAY[NULL]::bytea[], ARRAY[NULL]::bytea[],
-        ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[], now(), 'NONE')),
+        ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[], ARRAY[NULL]::text[], ARRAY[NULL]::bytea[], now(), 'NONE')),
     'PAYLOAD_MISMATCH'
 );
 SELECT lc_expect(
@@ -211,7 +226,7 @@ SELECT lc_expect(
         ARRAY[]::uuid[], ARRAY[]::text[], ARRAY[]::text[], ARRAY[]::integer[], ARRAY[]::text[], ARRAY[]::text[],
         ARRAY[]::text[], ARRAY[]::text[], ARRAY[]::boolean[], ARRAY[]::integer[], ARRAY[]::timestamptz[],
         ARRAY[]::timestamptz[], ARRAY[]::timestamptz[], ARRAY[]::boolean[], ARRAY[]::smallint[], ARRAY[]::bytea[],
-        ARRAY[]::bytea[], ARRAY[]::uuid[], ARRAY[]::uuid[], now(), 'NONE')),
+        ARRAY[]::bytea[], ARRAY[]::uuid[], ARRAY[]::uuid[], ARRAY[]::text[], ARRAY[]::bytea[], now(), 'NONE')),
     '0'
 );
 SELECT lc_expect_sqlstate(
@@ -220,8 +235,55 @@ SELECT lc_expect_sqlstate(
         ARRAY[gen_random_uuid()], ARRAY['lc.task', 'lc.task'], ARRAY['q_lc'], ARRAY[1], ARRAY['{}'],
         ARRAY[NULL]::text[], ARRAY['ISOLATED'], ARRAY['forever'], ARRAY[TRUE], ARRAY[0], ARRAY[NULL]::timestamptz[],
         ARRAY[now()], ARRAY[now()], ARRAY[FALSE], ARRAY[1]::smallint[], ARRAY[sha256('x'::bytea)],
-        ARRAY[NULL]::bytea[], ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[], now(), 'NONE')$q$,
+        ARRAY[NULL]::bytea[], ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[], ARRAY[NULL]::text[], ARRAY[NULL]::bytea[],
+        now(), 'NONE')$q$,
     '22023'
+);
+SELECT lc_expect(
+    'insert rows: a row stores the trace pair it is given',
+    (SELECT outcome FROM horsies_insert_task_rows(
+        ARRAY['00000000-0000-7000-8000-000000000a05']::uuid[], ARRAY['lc.task'], ARRAY['q_trace'], ARRAY[1],
+        ARRAY['{}'], ARRAY[NULL]::text[], ARRAY['ISOLATED'], ARRAY['forever'], ARRAY[TRUE], ARRAY[0],
+        ARRAY[NULL]::timestamptz[], ARRAY[now()], ARRAY[now()], ARRAY[FALSE], ARRAY[1]::smallint[],
+        ARRAY[sha256('a05'::bytea)], ARRAY[NULL]::bytea[], ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[],
+        ARRAY['{"traceparent":"t"}'], ARRAY[decode('4bf92f3577b34da6a3ce929d0e0e4736', 'hex')], now(), 'NONE')),
+    'INSERTED'
+);
+SELECT lc_expect(
+    'insert rows: the stored trace pair',
+    (SELECT trace_carrier || '|' || encode(trace_id, 'hex') FROM horsies_tasks
+     WHERE id = '00000000-0000-7000-8000-000000000a05'),
+    '{"traceparent":"t"}|4bf92f3577b34da6a3ce929d0e0e4736'
+);
+SELECT lc_expect_sqlstate(
+    'insert rows: trace arrays of another length',
+    $q$SELECT * FROM horsies_insert_task_rows(
+        ARRAY[gen_random_uuid()], ARRAY['lc.task'], ARRAY['q_trace'], ARRAY[1], ARRAY['{}'],
+        ARRAY[NULL]::text[], ARRAY['ISOLATED'], ARRAY['forever'], ARRAY[TRUE], ARRAY[0], ARRAY[NULL]::timestamptz[],
+        ARRAY[now()], ARRAY[now()], ARRAY[FALSE], ARRAY[1]::smallint[], ARRAY[sha256('x'::bytea)],
+        ARRAY[NULL]::bytea[], ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[], ARRAY[NULL, NULL]::text[],
+        ARRAY[NULL]::bytea[], now(), 'NONE')$q$,
+    '22023'
+);
+SELECT lc_expect_sqlstate(
+    'insert rows: a carrier with no trace id (table CHECK)',
+    $q$SELECT * FROM horsies_insert_task_rows(
+        ARRAY[gen_random_uuid()], ARRAY['lc.task'], ARRAY['q_trace'], ARRAY[1], ARRAY['{}'],
+        ARRAY[NULL]::text[], ARRAY['ISOLATED'], ARRAY['forever'], ARRAY[TRUE], ARRAY[0], ARRAY[NULL]::timestamptz[],
+        ARRAY[now()], ARRAY[now()], ARRAY[FALSE], ARRAY[1]::smallint[], ARRAY[sha256('x'::bytea)],
+        ARRAY[NULL]::bytea[], ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[], ARRAY['{}']::text[],
+        ARRAY[NULL]::bytea[], now(), 'NONE')$q$,
+    '23514'
+);
+SELECT lc_expect_sqlstate(
+    'insert rows: a trace id that is not 16 bytes (table CHECK)',
+    $q$SELECT * FROM horsies_insert_task_rows(
+        ARRAY[gen_random_uuid()], ARRAY['lc.task'], ARRAY['q_trace'], ARRAY[1], ARRAY['{}'],
+        ARRAY[NULL]::text[], ARRAY['ISOLATED'], ARRAY['forever'], ARRAY[TRUE], ARRAY[0], ARRAY[NULL]::timestamptz[],
+        ARRAY[now()], ARRAY[now()], ARRAY[FALSE], ARRAY[1]::smallint[], ARRAY[sha256('x'::bytea)],
+        ARRAY[NULL]::bytea[], ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[], ARRAY['{}']::text[],
+        ARRAY['\x00'::bytea], now(), 'NONE')$q$,
+    '23514'
 );
 SELECT lc_expect_sqlstate(
     'insert rows: a NULL element in a required column',
@@ -229,7 +291,8 @@ SELECT lc_expect_sqlstate(
         ARRAY[gen_random_uuid()], ARRAY[NULL]::text[], ARRAY['q_lc'], ARRAY[1], ARRAY['{}'],
         ARRAY[NULL]::text[], ARRAY['ISOLATED'], ARRAY['forever'], ARRAY[TRUE], ARRAY[0], ARRAY[NULL]::timestamptz[],
         ARRAY[now()], ARRAY[now()], ARRAY[FALSE], ARRAY[1]::smallint[], ARRAY[sha256('x'::bytea)],
-        ARRAY[NULL]::bytea[], ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[], now(), 'NONE')$q$,
+        ARRAY[NULL]::bytea[], ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[], ARRAY[NULL]::text[], ARRAY[NULL]::bytea[],
+        now(), 'NONE')$q$,
     '22023'
 );
 SELECT lc_expect_sqlstate(
@@ -240,7 +303,8 @@ SELECT lc_expect_sqlstate(
         ARRAY[NULL, NULL]::text[], ARRAY['ISOLATED', 'ISOLATED'], ARRAY['forever', 'forever'], ARRAY[TRUE, TRUE],
         ARRAY[0, 0], ARRAY[NULL, NULL]::timestamptz[], ARRAY[now(), now()], ARRAY[now(), now()],
         ARRAY[FALSE, FALSE], ARRAY[1, 1]::smallint[], ARRAY[sha256('x'::bytea), sha256('x'::bytea)],
-        ARRAY[NULL, NULL]::bytea[], ARRAY[NULL, NULL]::uuid[], ARRAY[NULL, NULL]::uuid[], now(), 'NONE')$q$,
+        ARRAY[NULL, NULL]::bytea[], ARRAY[NULL, NULL]::uuid[], ARRAY[NULL, NULL]::uuid[], ARRAY[NULL, NULL]::text[],
+        ARRAY[NULL, NULL]::bytea[], now(), 'NONE')$q$,
     '22023'
 );
 SELECT lc_expect_sqlstate(
@@ -249,7 +313,8 @@ SELECT lc_expect_sqlstate(
         ARRAY[gen_random_uuid()], ARRAY['lc.task'], ARRAY['q_lc'], ARRAY[1], ARRAY['{}'],
         ARRAY[NULL]::text[], ARRAY['ISOLATED'], ARRAY['forever'], ARRAY[TRUE], ARRAY[0], ARRAY[NULL]::timestamptz[],
         ARRAY[now()], ARRAY[now()], ARRAY[FALSE], ARRAY[1]::smallint[], ARRAY[sha256('x'::bytea)],
-        ARRAY[NULL]::bytea[], ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[], NULL, 'NONE')$q$,
+        ARRAY[NULL]::bytea[], ARRAY[NULL]::uuid[], ARRAY[NULL]::uuid[], ARRAY[NULL]::text[], ARRAY[NULL]::bytea[],
+        NULL, 'NONE')$q$,
     '22023'
 );
 SELECT lc_expect_sqlstate(
@@ -258,7 +323,7 @@ SELECT lc_expect_sqlstate(
         ARRAY[]::uuid[], ARRAY[]::text[], ARRAY[]::text[], ARRAY[]::integer[], ARRAY[]::text[], ARRAY[]::text[],
         ARRAY[]::text[], ARRAY[]::text[], ARRAY[]::boolean[], ARRAY[]::integer[], ARRAY[]::timestamptz[],
         ARRAY[]::timestamptz[], ARRAY[]::timestamptz[], ARRAY[]::boolean[], ARRAY[]::smallint[], ARRAY[]::bytea[],
-        ARRAY[]::bytea[], ARRAY[]::uuid[], ARRAY[]::uuid[], now(), 'SKIP')$q$,
+        ARRAY[]::bytea[], ARRAY[]::uuid[], ARRAY[]::uuid[], ARRAY[]::text[], ARRAY[]::bytea[], now(), 'SKIP')$q$,
     '22023'
 );
 
@@ -308,7 +373,7 @@ SELECT lc_expect(
     (SELECT outcome FROM horsies_enqueue_task(
         '00000000-0000-7000-8000-000000000b02', 'lc.task', 'q_lc', 100, '{"x":1}', NULL, 'ISOLATED', 'forever',
         TRUE, 3, NULL, now(), 'AT', now() + interval '1 hour', NULL, 1::smallint, sha256('b02'::bytea),
-        'FIRST_RUN', NULL, NULL, 'UNKEYED', NULL, NULL, NULL, 'FIRST')),
+        'FIRST_RUN', NULL, NULL, 'UNKEYED', NULL, NULL, NULL, 'FIRST', 'NO_CARRIER', NULL, NULL)),
     'INSERTED'
 );
 SELECT lc_expect(
@@ -321,7 +386,7 @@ SELECT lc_expect(
     (SELECT outcome FROM horsies_enqueue_task(
         '00000000-0000-7000-8000-000000000b03', 'lc.task', 'q_lc', 100, '{"x":1}', NULL, 'ISOLATED', 'forever',
         TRUE, 3, NULL, now(), 'AFTER_DELAY', NULL, 30, 1::smallint, sha256('b03'::bytea),
-        'FIRST_RUN', NULL, NULL, 'UNKEYED', NULL, NULL, NULL, 'FIRST')),
+        'FIRST_RUN', NULL, NULL, 'UNKEYED', NULL, NULL, NULL, 'FIRST', 'NO_CARRIER', NULL, NULL)),
     'INSERTED'
 );
 SELECT lc_expect(
@@ -336,7 +401,7 @@ SELECT lc_expect(
         '00000000-0000-7000-8000-000000000b04', 'lc.task', 'q_lc', 100, '{"x":1}', NULL, 'ISOLATED', 'forever',
         TRUE, 3, NULL, now(), 'NOW', NULL, NULL, 1::smallint, sha256('b04'::bytea),
         'RERUN', '00000000-0000-7000-8000-000000000bf1', '00000000-0000-7000-8000-000000000bf0',
-        'UNKEYED', NULL, NULL, NULL, 'FIRST')),
+        'UNKEYED', NULL, NULL, NULL, 'FIRST', 'NO_CARRIER', NULL, NULL)),
     'INSERTED'
 );
 SELECT lc_expect(
@@ -345,6 +410,60 @@ SELECT lc_expect(
      WHERE id = '00000000-0000-7000-8000-000000000b04'),
     '00000000-0000-7000-8000-000000000bf1>00000000-0000-7000-8000-000000000bf0'
 );
+
+-- The trace pair.
+SELECT lc_expect(
+    'enqueue: a send with no carrier stores no pair',
+    (SELECT (trace_carrier IS NULL AND trace_id IS NULL)::text FROM horsies_tasks
+     WHERE id = '00000000-0000-7000-8000-000000000b01'),
+    'true'
+);
+SELECT lc_expect(
+    'enqueue: a send with a carrier inserts',
+    lc_send_traced('00000000-0000-7000-8000-000000000b31', 'b31', 'CARRIER',
+                   '{"traceparent":"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}',
+                   decode('0af7651916cd43dd8448eb211c80319c', 'hex')),
+    'INSERTED'
+);
+SELECT lc_expect(
+    'enqueue: the row stores the carrier text and the trace id as sent',
+    (SELECT trace_carrier || '|' || encode(trace_id, 'hex') FROM horsies_tasks
+     WHERE id = '00000000-0000-7000-8000-000000000b31'),
+    '{"traceparent":"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}|0af7651916cd43dd8448eb211c80319c'
+);
+SELECT lc_expect(
+    'enqueue: a resend with another carrier is the same command',
+    lc_send_traced('00000000-0000-7000-8000-000000000b31', 'b31', 'CARRIER', '{"b3":"other"}',
+                   decode('4bf92f3577b34da6a3ce929d0e0e4736', 'hex')),
+    'SAME_COMMAND'
+);
+SELECT lc_expect(
+    'enqueue: a resend keeps the pair of the stored row',
+    (SELECT encode(trace_id, 'hex') FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000b31'),
+    '0af7651916cd43dd8448eb211c80319c'
+);
+SELECT lc_expect(
+    'enqueue: a cancel of a traced task applies',
+    (SELECT outcome FROM horsies_cancel_task('00000000-0000-7000-8000-000000000b31', FALSE)),
+    'APPLIED'
+);
+SELECT lc_expect(
+    'enqueue: the history row keeps the trace id of the live row',
+    (SELECT encode(trace_id, 'hex') FROM horsies_task_history WHERE task_id = '00000000-0000-7000-8000-000000000b31'),
+    '0af7651916cd43dd8448eb211c80319c'
+);
+SELECT lc_expect_sqlstate('enqueue: a NULL trace kind', $q$SELECT lc_send_traced(
+    gen_random_uuid(), 'x', NULL, NULL, NULL)$q$, '22023');
+SELECT lc_expect_sqlstate('enqueue: an unknown trace kind', $q$SELECT lc_send_traced(
+    gen_random_uuid(), 'x', 'MAYBE', NULL, NULL)$q$, '22023');
+SELECT lc_expect_sqlstate('enqueue: a carrier text with NO_CARRIER', $q$SELECT lc_send_traced(
+    gen_random_uuid(), 'x', 'NO_CARRIER', '{}', NULL)$q$, '22023');
+SELECT lc_expect_sqlstate('enqueue: CARRIER with no trace id', $q$SELECT lc_send_traced(
+    gen_random_uuid(), 'x', 'CARRIER', '{}', NULL)$q$, '22023');
+SELECT lc_expect_sqlstate('enqueue: CARRIER with no text', $q$SELECT lc_send_traced(
+    gen_random_uuid(), 'x', 'CARRIER', NULL, decode('0af7651916cd43dd8448eb211c80319c', 'hex'))$q$, '22023');
+SELECT lc_expect_sqlstate('enqueue: a trace id of 15 bytes', $q$SELECT lc_send_traced(
+    gen_random_uuid(), 'x', 'CARRIER', '{}', decode('0af7651916cd43dd8448eb211c8031', 'hex'))$q$, '22023');
 
 -- Keyed sends.
 SELECT lc_expect(
@@ -472,71 +591,71 @@ SELECT lc_expect(
 SELECT lc_expect_sqlstate('enqueue: unknown start kind', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', 'q_lc', 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
     'LATER', NULL, NULL, 1::smallint, sha256('x'::bytea), 'FIRST_RUN', NULL, NULL, 'UNKEYED', NULL, NULL, NULL,
-    'FIRST')$q$, '22023');
+    'FIRST', 'NO_CARRIER', NULL, NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('enqueue: start AT without a time', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', 'q_lc', 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
     'AT', NULL, NULL, 1::smallint, sha256('x'::bytea), 'FIRST_RUN', NULL, NULL, 'UNKEYED', NULL, NULL, NULL,
-    'FIRST')$q$, '22023');
+    'FIRST', 'NO_CARRIER', NULL, NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('enqueue: start NOW with a delay', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', 'q_lc', 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
     'NOW', NULL, 5, 1::smallint, sha256('x'::bytea), 'FIRST_RUN', NULL, NULL, 'UNKEYED', NULL, NULL, NULL,
-    'FIRST')$q$, '22023');
+    'FIRST', 'NO_CARRIER', NULL, NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('enqueue: a negative delay', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', 'q_lc', 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
     'AFTER_DELAY', NULL, -1, 1::smallint, sha256('x'::bytea), 'FIRST_RUN', NULL, NULL, 'UNKEYED', NULL, NULL,
-    NULL, 'FIRST')$q$, '22023');
+    NULL, 'FIRST', 'NO_CARRIER', NULL, NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('enqueue: a rerun without its root', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', 'q_lc', 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
     'NOW', NULL, NULL, 1::smallint, sha256('x'::bytea), 'RERUN', gen_random_uuid(), NULL, 'UNKEYED', NULL, NULL,
-    NULL, 'FIRST')$q$, '22023');
+    NULL, 'FIRST', 'NO_CARRIER', NULL, NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('enqueue: a first run with lineage', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', 'q_lc', 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
     'NOW', NULL, NULL, 1::smallint, sha256('x'::bytea), 'FIRST_RUN', gen_random_uuid(), gen_random_uuid(),
-    'UNKEYED', NULL, NULL, NULL, 'FIRST')$q$, '22023');
+    'UNKEYED', NULL, NULL, NULL, 'FIRST', 'NO_CARRIER', NULL, NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('enqueue: a keyed send without its window', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', 'q_lc', 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
     'NOW', NULL, NULL, 1::smallint, sha256('x'::bytea), 'FIRST_RUN', NULL, NULL, 'KEYED', sha256('k'::bytea),
-    1::smallint, NULL, 'FIRST')$q$, '22023');
+    1::smallint, NULL, 'FIRST', 'NO_CARRIER', NULL, NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('enqueue: an unkeyed send with a digest', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', 'q_lc', 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
     'NOW', NULL, NULL, 1::smallint, sha256('x'::bytea), 'FIRST_RUN', NULL, NULL, 'UNKEYED', sha256('k'::bytea),
-    NULL, NULL, 'FIRST')$q$, '22023');
+    NULL, NULL, 'FIRST', 'NO_CARRIER', NULL, NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('enqueue: unknown key kind', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', 'q_lc', 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
     'NOW', NULL, NULL, 1::smallint, sha256('x'::bytea), 'FIRST_RUN', NULL, NULL, 'MAYBE', NULL, NULL, NULL,
-    'FIRST')$q$, '22023');
+    'FIRST', 'NO_CARRIER', NULL, NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('enqueue: unknown send kind', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', 'q_lc', 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
     'NOW', NULL, NULL, 1::smallint, sha256('x'::bytea), 'FIRST_RUN', NULL, NULL, 'UNKEYED', NULL, NULL, NULL,
-    'AGAIN')$q$, '22023');
+    'AGAIN', 'NO_CARRIER', NULL, NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('enqueue: a fingerprint of 31 bytes', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', 'q_lc', 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
     'NOW', NULL, NULL, 1::smallint, substring(sha256('x'::bytea) FROM 2), 'FIRST_RUN', NULL, NULL, 'UNKEYED',
-    NULL, NULL, NULL, 'FIRST')$q$, '22023');
+    NULL, NULL, NULL, 'FIRST', 'NO_CARRIER', NULL, NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('enqueue: a NULL input', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', 'q_lc', 100, NULL, NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
     'NOW', NULL, NULL, 1::smallint, sha256('x'::bytea), 'FIRST_RUN', NULL, NULL, 'UNKEYED', NULL, NULL, NULL,
-    'FIRST')$q$, '22023');
+    'FIRST', 'NO_CARRIER', NULL, NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('enqueue: a window over 30 days (key claim)', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', 'q_lc', 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
     'NOW', NULL, NULL, 1::smallint, sha256('x'::bytea), 'FIRST_RUN', NULL, NULL, 'KEYED', sha256('k31'::bytea),
-    1::smallint, interval '720:00:00.000001', 'FIRST')$q$, '22023');
+    1::smallint, interval '720:00:00.000001', 'FIRST', 'NO_CARRIER', NULL, NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('enqueue: a window with a day field (key claim)', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', 'q_lc', 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
     'NOW', NULL, NULL, 1::smallint, sha256('x'::bytea), 'FIRST_RUN', NULL, NULL, 'KEYED', sha256('kday'::bytea),
-    1::smallint, interval '1 day', 'FIRST')$q$, '22023');
+    1::smallint, interval '1 day', 'FIRST', 'NO_CARRIER', NULL, NULL)$q$, '22023');
 -- A column shape that the table refuses: the queue name over 52 bytes (CHECK, 23514).
 SELECT lc_expect_sqlstate('enqueue: a queue name over 52 bytes', $q$SELECT * FROM horsies_enqueue_task(
     gen_random_uuid(), 'lc.task', repeat('q', 53), 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(),
     'NOW', NULL, NULL, 1::smallint, sha256('x'::bytea), 'FIRST_RUN', NULL, NULL, 'UNKEYED', NULL, NULL, NULL,
-    'FIRST')$q$, '23514');
+    'FIRST', 'NO_CARRIER', NULL, NULL)$q$, '23514');
 -- An error message carries no argument value.
 DO $$
 BEGIN
     PERFORM * FROM horsies_enqueue_task(
         gen_random_uuid(), 'lc.task', 'q_lc', 100, '{"secret":"s3cr3t"}', NULL, 'ISOLATED', 'forever', TRUE, 3,
         NULL, now(), 'AT', NULL, NULL, 1::smallint, sha256('x'::bytea), 'FIRST_RUN', NULL, NULL, 'UNKEYED',
-        NULL, NULL, NULL, 'FIRST');
+        NULL, NULL, NULL, 'FIRST', 'NO_CARRIER', NULL, NULL);
     RAISE EXCEPTION 'case enqueue: error text: the refused call succeeded';
 EXCEPTION WHEN invalid_parameter_value THEN
     IF SQLERRM LIKE '%s3cr3t%' THEN

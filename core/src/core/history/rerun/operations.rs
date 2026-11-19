@@ -242,12 +242,14 @@ pub(crate) fn rerun_first_statement() -> &'static TypedStatement {
 /// key digest, key scope version, key window in microseconds (made into the
 /// exact `interval`; NULL for an unkeyed rerun). The row carries the
 /// source's exact input and options texts and stores no envelope: the move
-/// builds it from `input` and `task_options`.
+/// builds it from `input` and `task_options`. The trace is `NO_CARRIER`: the
+/// rerun stores no carrier.
 pub(super) static RERUN_ENQUEUE: TypedStatement = TypedStatement::new(
     "rerun_enqueue",
     "SELECT outcome, task_id FROM horsies_enqueue_task(\
      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'NOW', NULL, NULL, $13, $14, \
-     'RERUN', $15, $16, $17, $18, $19, $20::bigint * interval '1 microsecond', 'FIRST')",
+     'RERUN', $15, $16, $17, $18, $19, $20::bigint * interval '1 microsecond', 'FIRST', \
+     'NO_CARRIER', NULL, NULL)",
     &[
         ParameterType::Uuid,
         ParameterType::Text,

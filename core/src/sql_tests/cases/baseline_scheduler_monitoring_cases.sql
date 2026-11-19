@@ -261,7 +261,7 @@ SELECT test_check(
 FROM test_last_fire AS f;
 
 SELECT test_check(
-    'fire: the slot row is an unkeyed send with the task options, retry limit, class and fingerprint',
+    'fire: the slot row is an unkeyed send with the task options, retry limit, class and fingerprint, and no trace',
     t.status = 'PENDING' AND t.sent_at = date_trunc('minute', now()) - interval '1 minute'
     AND t.enqueued_at = t.created_at AND t.updated_at = t.created_at AND t.created_at > now() - interval '1 minute'
     AND t.task_name = 'app.scheduled' AND t.queue_name = 'default' AND t.priority = 70
@@ -269,7 +269,7 @@ SELECT test_check(
     AND t.max_retries = 2 AND t.retry_count = 0 AND t.retention_class_key = 'standard_30d' AND t.retain_rerun_input
     AND t.command_fingerprint_version = 1 AND t.command_fingerprint = sha256('cmd-single'::bytea)
     AND t.good_until IS NULL AND t.idempotency_key_digest IS NULL AND NOT t.is_workflow_task
-    AND t.rerun_of_task_id IS NULL AND t.claimed_at IS NULL,
+    AND t.rerun_of_task_id IS NULL AND t.claimed_at IS NULL AND t.trace_carrier IS NULL AND t.trace_id IS NULL,
     row_to_json(t)::text
 )
 FROM horsies_tasks AS t
@@ -458,7 +458,7 @@ CREATE OR REPLACE FUNCTION horsies_insert_task_rows(
     p_max_retries integer[], p_good_untils timestamp with time zone[], p_sent_ats timestamp with time zone[],
     p_enqueued_ats timestamp with time zone[], p_is_workflow_tasks boolean[], p_fingerprint_versions smallint[],
     p_fingerprints bytea[], p_key_digests bytea[], p_rerun_of_task_ids uuid[], p_rerun_root_task_ids uuid[],
-    p_row_time timestamp with time zone, p_conflict_lock text
+    p_trace_carriers text[], p_trace_ids bytea[], p_row_time timestamp with time zone, p_conflict_lock text
 ) RETURNS TABLE(ordinality bigint, task_id uuid, outcome text)
     LANGUAGE sql AS $$
     SELECT u.position, u.id, 'CONFLICT_UNVERIFIABLE'::text FROM unnest(p_ids) WITH ORDINALITY AS u(id, position)

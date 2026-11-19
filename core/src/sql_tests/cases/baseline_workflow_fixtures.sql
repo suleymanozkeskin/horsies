@@ -129,8 +129,10 @@ RETURNS TABLE (
         coalesce((SELECT array_agg(result ORDER BY position) FROM f), ARRAY[]::text[])
 $$;
 
--- Starts a tree from a JSON description (wft_tree).
-CREATE FUNCTION wft_start(p_workflows jsonb, p_nodes jsonb, p_failed jsonb DEFAULT '[]')
+-- Starts a tree from a JSON description (wft_tree). A start with p_trace_id carries the trace pair (CARRIER), a
+-- start without one carries none (NO_CARRIER).
+CREATE FUNCTION wft_start(p_workflows jsonb, p_nodes jsonb, p_failed jsonb DEFAULT '[]',
+                          p_trace_carrier text DEFAULT NULL, p_trace_id bytea DEFAULT NULL)
 RETURNS SETOF horsies_workflow_step_row LANGUAGE sql AS $$
     SELECT s.* FROM wft_tree(p_workflows, p_nodes, p_failed) AS a
     CROSS JOIN LATERAL horsies_workflow_start(
@@ -141,7 +143,8 @@ RETURNS SETOF horsies_workflow_step_row LANGUAGE sql AS $$
         a.node_join_types, a.node_min_successes, a.node_task_options, a.node_max_retries, a.node_executions,
         a.node_good_untils, a.node_retention_class_keys, a.node_is_subworkflow, a.node_sub_workflow_names,
         a.node_sub_definition_keys, a.node_sub_workflow_params, a.failed_workflow_ids, a.failed_task_indexes,
-        a.failed_results
+        a.failed_results, CASE WHEN p_trace_id IS NULL THEN 'NO_CARRIER' ELSE 'CARRIER' END, p_trace_carrier,
+        p_trace_id
     ) AS s
 $$;
 
@@ -174,6 +177,24 @@ RETURNS SETOF horsies_workflow_step_row LANGUAGE sql AS $$
         NULL, NULL, NULL, NULL,
         NULL, NULL, NULL
     )
+$$;
+
+-- A one-node workflow p_id started with the trace arguments as given, for the refusals of the trace variant.
+CREATE FUNCTION wft_start_traced(p_id uuid, p_trace_kind text, p_trace_carrier text, p_trace_id bytea)
+RETURNS SETOF horsies_workflow_step_row LANGUAGE sql AS $$
+    SELECT s.* FROM wft_tree(
+        jsonb_build_array(jsonb_build_object('id', p_id, 'on_error', 'fail')), '[{"idx":0}]', '[]'
+    ) AS a
+    CROSS JOIN LATERAL horsies_workflow_start(
+        a.workflow_ids, a.names, a.definition_keys, a.on_errors, a.output_task_indexes, a.success_policies,
+        a.parent_workflow_ids, a.parent_task_indexes, a.depths, '2030-01-01 00:00:00+00',
+        a.node_workflow_ids, a.node_task_indexes, a.node_ids, a.node_task_names, a.node_inputs, a.node_queue_names,
+        a.node_priorities, a.node_dependencies, a.node_args_from, a.node_workflow_ctx_from, a.node_allow_failed_deps,
+        a.node_join_types, a.node_min_successes, a.node_task_options, a.node_max_retries, a.node_executions,
+        a.node_good_untils, a.node_retention_class_keys, a.node_is_subworkflow, a.node_sub_workflow_names,
+        a.node_sub_definition_keys, a.node_sub_workflow_params, a.failed_workflow_ids, a.failed_task_indexes,
+        a.failed_results, p_trace_kind, p_trace_carrier, p_trace_id
+    ) AS s
 $$;
 
 -- One workflow, no children.
