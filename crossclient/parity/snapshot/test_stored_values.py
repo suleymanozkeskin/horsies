@@ -12,7 +12,7 @@ from typing import Final
 import pytest
 
 from horsies.core.types.result import Err, Ok, Result
-from tests.parity.snapshot.catalog import (
+from crossclient.parity.snapshot.catalog import (
     ARGS_FROM_MARKER,
     ATTEMPT_ARCHIVE,
     LEAF_NAME,
@@ -27,7 +27,7 @@ from tests.parity.snapshot.catalog import (
     WORKFLOW_ID,
     WORKFLOW_RESULT,
 )
-from tests.parity.snapshot.cells import (
+from crossclient.parity.snapshot.cells import (
     NormalizeError,
     PendingId,
     PendingText,
@@ -40,9 +40,9 @@ from tests.parity.snapshot.cells import (
     generated_name,
     text_with_ids,
 )
-from tests.parity.snapshot.compare import ColumnDifference, compare_snapshots
-from tests.parity.snapshot.normalize import NormalizedSnapshot, normalize_snapshot
-from tests.parity.snapshot.rules import (
+from crossclient.parity.snapshot.compare import ColumnDifference, compare_snapshots
+from crossclient.parity.snapshot.normalize import NormalizedSnapshot, normalize_snapshot
+from crossclient.parity.snapshot.rules import (
     ColumnSpec,
     DigestOf,
     EachMarkedMember,
@@ -61,7 +61,7 @@ from tests.parity.snapshot.rules import (
     TimeOrderOnly,
     Unversioned,
 )
-from tests.parity.snapshot.values import (
+from crossclient.parity.snapshot.values import (
     CalendarUnit,
     DatedName,
     DigestMatches,

@@ -23,7 +23,7 @@ from horsies.core.codec.typed import (
 )
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import Err, Ok
-from tests.stored_form_vectors import load_form, rows, task_error_of, text_of
+from crossclient.stored_form_vectors import load_form, rows, task_error_of, text_of
 
 _FORM: Final = load_form('error_data.json')
 _VECTORS: Final = rows(_FORM, 'vectors')

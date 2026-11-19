@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Final
 
-from tests.parity.snapshot.rules import (
+from crossclient.parity.snapshot.rules import (
     AnchorReference,
     ColumnRule,
     DigestOf,

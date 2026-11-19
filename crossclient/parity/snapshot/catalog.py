@@ -33,7 +33,7 @@ from datetime import timedelta
 from enum import Enum
 from typing import Final
 
-from tests.parity.snapshot.rules import (
+from crossclient.parity.snapshot.rules import (
     CANONICAL_UUID,
     AnchorNull,
     AnchorReference,
@@ -330,7 +330,7 @@ KILLED_CHILD_PID: Final = RunMeasure(
 """The process id of the worker child that the worker killed, in the
 ``the worker killed the child (pid=<n>, <exit>)`` part of a kill report. Each
 run starts its own processes; the whole-run catalog ignores the process id
-columns for the same reason (``tests/parity/snapshot/worker_run.py``)."""
+columns for the same reason (``crossclient/parity/snapshot/worker_run.py``)."""
 
 KILL_REPORT_MEASURES: Final = RunMeasuresInText(measures=(BLOCKED_TIME, KILLED_CHILD_PID))
 """The rule of a stored text that can hold a kill report: the measured block

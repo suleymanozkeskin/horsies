@@ -109,15 +109,16 @@ jobs:
       - name: Run unit tests
         run: uv run --no-sync pytest clients/python/tests/unit/ -v --tb=short
 
-      # The unit tests of the cross-client harnesses in the top-level tests/:
-      # the perf harness and the stored-form vectors. They run from the
-      # repository root with the pytest settings of the Python project.
+      # The unit tests of the cross-client harnesses in crossclient/:
+      # the perf harness, the stored-form vectors and the package root. They
+      # run from the repository root with the pytest settings of the Python
+      # project.
       - name: Run the unit tests of the cross-client harnesses
-        run: uv run --no-sync pytest -c clients/python/pyproject.toml --rootdir . tests/perf/ tests/test_stored_form_*.py -v --tb=short
+        run: uv run --no-sync pytest -c clients/python/pyproject.toml --rootdir . crossclient/perf/ crossclient/test_*.py -v --tb=short
 
       # The pure tests of the dual-run snapshot: rules, normalize, compare.
       - name: Run dual-run unit tests
-        run: uv run --no-sync pytest -c clients/python/pyproject.toml --rootdir . tests/parity/snapshot/ -m unit -v --tb=short
+        run: uv run --no-sync pytest -c clients/python/pyproject.toml --rootdir . crossclient/parity/snapshot/ -m unit -v --tb=short
 
       # The public API of the installed wheel against clients/python/tests/public_api/
       # baseline.json and baseline-pyright.json: exports, the deep imports of
@@ -173,7 +174,7 @@ jobs:
       - name: Run dual-run integration tests
         env:
           DB_PASSWORD: testpassword
-        run: uv run --no-sync pytest -c clients/python/pyproject.toml --rootdir . tests/parity/snapshot/ -m integration -v --tb=short
+        run: uv run --no-sync pytest -c clients/python/pyproject.toml --rootdir . crossclient/parity/snapshot/ -m integration -v --tb=short
 
   extension:
     needs: [scope, python-wheel]

@@ -26,13 +26,13 @@ import psycopg
 from psycopg import pq, sql
 
 from horsies.core.types.result import Err, Ok, Result
-from tests.parity.snapshot.catalog import (
+from crossclient.parity.snapshot.catalog import (
     BASELINE_CATALOG,
     NOTIFICATIONS,
     NOTIFIED_CATALOG,
     notification_row,
 )
-from tests.parity.snapshot.cells import (
+from crossclient.parity.snapshot.cells import (
     RawRow,
     RawSnapshot,
     RawTable,
@@ -42,7 +42,7 @@ from tests.parity.snapshot.cells import (
     UnreadableTime,
     UnsupportedStoredFormat,
 )
-from tests.parity.snapshot.coverage import (
+from crossclient.parity.snapshot.coverage import (
     ColumnType,
     CoverageGap,
     DatabaseType,
@@ -54,9 +54,9 @@ from tests.parity.snapshot.coverage import (
     parse_column_type,
     split_detached_leaves,
 )
-from tests.parity.snapshot.normalize import NormalizedSnapshot, normalize_snapshot
-from tests.parity.snapshot.rules import SnapshotCatalog, TableRules
-from tests.parity.snapshot.values import RunWindow, RunWindowInvalid
+from crossclient.parity.snapshot.normalize import NormalizedSnapshot, normalize_snapshot
+from crossclient.parity.snapshot.rules import SnapshotCatalog, TableRules
+from crossclient.parity.snapshot.values import RunWindow, RunWindowInvalid
 
 TABLE_ROW_LIMIT: Final = 10_000
 """Most rows the capture reads from one table; a table with more fails the capture."""

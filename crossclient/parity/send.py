@@ -1,6 +1,6 @@
 """The send process of the Python side of a parity run.
 
-`python -m tests.parity.send <scenario>` sends the scenario's tasks, reruns
+`python -m crossclient.parity.send <scenario>` sends the scenario's tasks, reruns
 the tasks of its reruns, starts its workflows, runs its actions on the
 started workflows, then pings, through the parity app on the database of
 `HORSIES_PARITY_DATABASE_URL`. It prints one JSON line per send, rerun,
@@ -41,9 +41,8 @@ from horsies import (
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import WorkflowHandle
 from horsies.core.types.result import Err, Ok
-from tests.sqlalchemy_url import sqlalchemy_url
-from tests.parity import app as parity
-from tests.parity.scenarios import (
+from crossclient.parity import app as parity
+from crossclient.parity.scenarios import (
     ActionKind,
     Health,
     Rerun,
@@ -52,6 +51,7 @@ from tests.parity.scenarios import (
     WorkflowAction,
     scenario_named,
 )
+from tests.sqlalchemy_url import sqlalchemy_url
 
 RESULT_WAIT_MS: Final = 30_000
 """The longest wait for the end of a rerun source."""
@@ -322,7 +322,7 @@ def main(arguments: list[str]) -> int:
         case [scenario_name]:
             pass
         case _:
-            print('usage: python -m tests.parity.send <scenario>', file=sys.stderr)
+            print('usage: python -m crossclient.parity.send <scenario>', file=sys.stderr)
             return 2
     try:
         lines = asyncio.run(_run(scenario_name))

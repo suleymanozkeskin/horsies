@@ -4,7 +4,7 @@ Each call here is public API of horsies 0.7.0 and of the current release, with
 the same signature in both: ``Horsies``, ``AppConfig``, ``PostgresConfig``,
 ``app.task``, ``send``, ``TaskNode``, ``app.workflow``, ``WorkflowSpec.start``,
 ``PostgresBroker.close``. The harness of each release runs this file
-unchanged (``tests/perf/releases/README.md``), so a comparison of two releases
+unchanged (``crossclient/perf/releases/README.md``), so a comparison of two releases
 measures the same call through the product of each release.
 
 A call writes new rows with ids that the library mints. The rows of a scenario

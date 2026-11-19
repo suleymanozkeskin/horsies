@@ -8,15 +8,15 @@ from typing import Final
 
 import pytest
 
-from tests.parity.snapshot.catalog import (
+from crossclient.parity.snapshot.catalog import (
     ATTEMPT_ARCHIVE,
     BASELINE_CATALOG,
     KILL_REPORT_MEASURES,
     RESULT_ENVELOPE,
 )
-from tests.parity.snapshot.compare import MissingRow, SnapshotDiff
-from tests.parity.snapshot.normalize import AmbiguousGroup, NormalizedSnapshot, NormalizedTable
-from tests.parity.snapshot.rules import (
+from crossclient.parity.snapshot.compare import MissingRow, SnapshotDiff
+from crossclient.parity.snapshot.normalize import AmbiguousGroup, NormalizedSnapshot, NormalizedTable
+from crossclient.parity.snapshot.rules import (
     EachItem,
     Ignored,
     Index,
@@ -26,8 +26,8 @@ from tests.parity.snapshot.rules import (
     TimeOrderOnly,
     catalog_defects,
 )
-from tests.parity.snapshot.values import RunWindow
-from tests.parity.snapshot.worker_run import (
+from crossclient.parity.snapshot.values import RunWindow
+from crossclient.parity.snapshot.worker_run import (
     ARCHIVE_PROCESS_ID_POSITIONS,
     ARCHIVE_REPORT_POSITIONS,
     PROCESS_ID_COLUMNS,

@@ -7,6 +7,12 @@ its harness. Each folder here holds one patch for the `tests/perf` folder of
 one released tag. The patch makes that harness run on the schema of that
 release. The patch changes the harness only. It changes no product code.
 
+The package of the harnesses is `tests` in `v0.7.0` and `crossclient` in the
+current checkout. A path or a module name of the v0.7.0 checkout starts with
+`tests` (`tests/perf/`, `tests.perf`); one of the current checkout starts with
+`crossclient` (`crossclient/perf/`, `crossclient.perf`). The patch names its
+files by their paths in `v0.7.0`.
+
 | Folder | Applies to | Changes |
 |---|---|---|
 | `v0.7.0/harness.patch` | tag `v0.7.0` (schema 61) | See "The v0.7.0 patch" |
@@ -49,13 +55,15 @@ operation. The patch makes these changes:
 - **Selection.** `--scenario candidates` selects no scenario now. A selection
   of no scenario is refused.
 - **Public call scenarios.** The patch adds `tests/perf/public_calls.py`, the
-  same file as in the current harness, and the scenarios `send` and
+  same file as `crossclient/perf/public_calls.py` of the current harness with
+  the package name `tests`, and the scenarios `send` and
   `workflow-start` (see "Scenario map"). The runner, the entry point and the
   report change as in the current harness to run them; the report names the
   payload "payload per operation".
 - **Worker drain scenario.** The patch adds `tests/perf/worker_process.py`,
   `tests/perf/worker_drain.py` and `tests/perf/worker_drain_app.py`, the same
-  files as in the current harness, and the scenario `claim-finish` (see
+  files as in `crossclient/perf/` of the current harness with the package name
+  `tests`, and the scenario `claim-finish` (see
   "Claim and finish"). The runner, the entry point, the report and the server
   counts change as in the current harness to run it.
 
@@ -69,7 +77,8 @@ them.
 The scenarios of the current harness call public operations of the library,
 or drain sent tasks with a worker that the public CLI starts ("Claim and
 finish"). Each one has a v0.7.0 scenario of the same name that runs the same
-files. The calls of `tests/perf/public_calls.py` are public API of both
+files. The calls of `public_calls.py` (`tests/perf/` in v0.7.0,
+`crossclient/perf/` in the current checkout) are public API of both
 releases with the same signature, so a pair measures the same call through
 the product of each release.
 
@@ -98,7 +107,7 @@ worker loads.
 
 | Scenario (both releases) | One operation (a drain) | Reported |
 |---|---|---|
-| `claim-finish` | `send()` of 10,000 no-op tasks (not timed), then `horsies worker tests.perf.worker_drain_app:app --profile perf-drain --loglevel WARNING`; the time from the start of the worker process until all 10,000 tasks are COMPLETED or FAILED | tasks per second over the drains of each side |
+| `claim-finish` | `send()` of 10,000 no-op tasks (not timed), then `horsies worker <package>.perf.worker_drain_app:app --profile perf-drain --loglevel WARNING` (`<package>`: `tests` in v0.7.0, `crossclient` in the current checkout); the time from the start of the worker process until all 10,000 tasks are COMPLETED or FAILED | tasks per second over the drains of each side |
 
 - The constants are in `worker_drain.py`: `DRAIN_TASK_COUNT` (10,000 tasks),
   `DRAIN_WORKER_PROFILE` (4 isolated children; a child is not replaced after
@@ -185,7 +194,7 @@ Use one PostgreSQL server for both releases. Use one database for each
 release: the two schemas have the same table names.
 
 1. Start the server with the settings of the measurement contract
-   (`tests/fixtures/perf/compose.yaml`): `pg_stat_statements` preloaded with
+   (`crossclient/fixtures/perf/compose.yaml`): `pg_stat_statements` preloaded with
    `track=all` and `track_utility=off`, `fsync`, `synchronous_commit`,
    `full_page_writes` and `autovacuum` off. Stop every other workload on the
    host.
@@ -194,7 +203,7 @@ release: the two schemas have the same table names.
 
    ```sh
    git worktree add ../horsies-v0.7.0 v0.7.0
-   git -C ../horsies-v0.7.0 apply "$PWD/tests/perf/releases/v0.7.0/harness.patch"
+   git -C ../horsies-v0.7.0 apply "$PWD/crossclient/perf/releases/v0.7.0/harness.patch"
    (cd ../horsies-v0.7.0 && uv sync --frozen --dev)
    ```
 
@@ -209,7 +218,7 @@ release: the two schemas have the same table names.
    ```sh
    (cd ../horsies-v0.7.0 && uv run python -m tests.perf --apply-schema \
        --dsn postgresql+psycopg://USER:PASSWORD@HOST:PORT/horsies_v070)
-   uv run python -m tests.perf --apply-schema \
+   uv run python -m crossclient.perf --apply-schema \
        --dsn postgresql://USER:PASSWORD@HOST:PORT/horsies_v080
    ```
 
@@ -222,7 +231,7 @@ release: the two schemas have the same table names.
        --scenario send --scale gate \
        --demo-quiesced --control --write-summary \
        --dsn postgresql+psycopg://USER:PASSWORD@HOST:PORT/horsies_v070)
-   uv run python -m tests.perf \
+   uv run python -m crossclient.perf \
        --scenario send --scale gate \
        --demo-quiesced --control --write-summary \
        --dsn postgresql://USER:PASSWORD@HOST:PORT/horsies_v080
@@ -230,8 +239,10 @@ release: the two schemas have the same table names.
 
 6. Compare the runs. The harness compares the two sides of one run only. In
    a control run both sides send the same statement. Each checkout writes its
-   summaries to its own `tests/perf/results/` and the samples to
-   `tests/perf/results/raw/`. Compare the latency percentiles and the server
+   summaries to the `perf/results/` folder of its harness package
+   (`tests/perf/results/` in v0.7.0, `crossclient/perf/results/` in the
+   current checkout) and the samples to `raw/` in that folder. Compare the
+   latency percentiles and the server
    counts of the two releases from these files.
 
 Each run seeds 100,000 ballast rows through the terminal write of its own

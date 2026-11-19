@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.perf.statistics import (
+from crossclient.perf.statistics import (
     Budget,
     Verdict,
     compare,

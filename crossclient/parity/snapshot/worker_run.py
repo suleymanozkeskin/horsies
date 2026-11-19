@@ -1,4 +1,4 @@
-"""The whole-run compare rules that parity uses (``tests/parity``).
+"""The whole-run compare rules that parity uses (``crossclient/parity``).
 
 The snapshot of a whole run compares by ``WHOLE_RUN_CATALOG``: the baseline
 rules, with the process ids of a run ignored (the pid columns, the process
@@ -25,15 +25,15 @@ from datetime import UTC, datetime
 from typing import Final
 
 
-from tests.parity.snapshot.catalog import (
+from crossclient.parity.snapshot.catalog import (
     ATTEMPT_ARCHIVE,
     BASELINE_CATALOG,
     KILL_REPORT_MEASURES,
     RESULT_ENVELOPE,
 )
-from tests.parity.snapshot.compare import SnapshotDiff
-from tests.parity.snapshot.normalize import NormalizedSnapshot
-from tests.parity.snapshot.rules import (
+from crossclient.parity.snapshot.compare import SnapshotDiff
+from crossclient.parity.snapshot.normalize import NormalizedSnapshot
+from crossclient.parity.snapshot.rules import (
     ColumnRule,
     ColumnSpec,
     EachItem,
@@ -47,7 +47,7 @@ from tests.parity.snapshot.rules import (
     TimeOrderBeforeRun,
     TimeOrderOnly,
 )
-from tests.parity.snapshot.values import RunWindow
+from crossclient.parity.snapshot.values import RunWindow
 
 
 UNCOMPARED_TABLES: Final = frozenset({

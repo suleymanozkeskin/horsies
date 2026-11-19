@@ -14,7 +14,7 @@ database. One side, on an empty `dualrun_` database:
    own start.
    The first operation of the side installs the schema, so the client
    family row is the side's.
-3. Run the send process of the side (`python -m tests.parity.send`, or
+3. Run the send process of the side (`python -m crossclient.parity.send`, or
    `horsies-parity send`): it sends the tasks, reruns tasks, starts the
    workflows, runs the actions on them and pings, and prints the ids of the
    sends, reruns and starts in order, and the counts of the ping answers.
@@ -28,7 +28,7 @@ database. One side, on an empty `dualrun_` database:
 6. Stop each process with `SIGTERM`; kill its process group after
    `STOP_WAIT`.
 7. Read the clock again, capture the snapshot with the whole-run catalog
-   (`tests/parity/snapshot/worker_run.py`), and read the report: the task of each
+   (`crossclient/parity/snapshot/worker_run.py`), and read the report: the task of each
    send and rerun, each node of each started workflow, the status of each
    started workflow, the ping answers, the run count of the schedule and
    each slot task, keyed by position.
@@ -71,32 +71,32 @@ from uuid import UUID
 import psycopg
 
 from horsies.core.types.result import Err, Ok, Result
-from tests.parity import app as parity
-from tests.parity.snapshot.capture import capture_snapshot, read_database_clock
-from tests.parity.snapshot.compare import (
+from crossclient.parity import app as parity
+from crossclient.parity.snapshot.capture import capture_snapshot, read_database_clock
+from crossclient.parity.snapshot.compare import (
     ColumnDifference,
     DiffEntry,
     SnapshotDiff,
     compare_snapshots,
 )
-from tests.parity.snapshot.databases import DualRunDatabase
-from tests.parity.snapshot.normalize import NormalizedSnapshot
-from tests.parity.snapshot.values import ExactValue, RunWindow, make_run_window
-from tests.parity.snapshot.worker_run import (
+from crossclient.parity.snapshot.databases import DualRunDatabase
+from crossclient.parity.snapshot.normalize import NormalizedSnapshot
+from crossclient.parity.snapshot.values import ExactValue, RunWindow, make_run_window
+from crossclient.parity.snapshot.worker_run import (
     WHOLE_RUN_CATALOG,
     PairJudgement,
     compared_part,
     judge_snapshots,
 )
-from tests.parity.app import DATABASE_URL_ENV
-from tests.parity.scenarios import NoScheduler, Scenario, ScheduleSlots, WorkerStart
+from crossclient.parity.app import DATABASE_URL_ENV
+from crossclient.parity.scenarios import NoScheduler, Scenario, ScheduleSlots, WorkerStart
 
 REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 
 RUST_BINARY_ENV: Final = 'HORSIES_PARITY_RUST_BIN'
 """The path of the Rust scenario binary; default `target/debug/horsies-parity`."""
 
-PYTHON_APP_LOCATOR: Final = 'tests.parity.app:app'
+PYTHON_APP_LOCATOR: Final = 'crossclient.parity.app:app'
 
 TERMINAL_WAIT: Final = timedelta(seconds=120)
 WORKER_READY_LINE: Final = 'worker ready'
@@ -146,7 +146,7 @@ def _commands(client: Client) -> SideCommands:
         case Client.PYTHON:
             return SideCommands(
                 worker=[sys.executable, '-m', 'horsies.core.cli', 'worker', PYTHON_APP_LOCATOR],
-                send=[sys.executable, '-m', 'tests.parity.send'],
+                send=[sys.executable, '-m', 'crossclient.parity.send'],
                 scheduler=[
                     sys.executable, '-m', 'horsies.core.cli', 'scheduler', PYTHON_APP_LOCATOR,
                 ],

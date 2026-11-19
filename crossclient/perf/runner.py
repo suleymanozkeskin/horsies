@@ -29,8 +29,8 @@ from typing import Any, assert_never, cast
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
-from tests.perf.counters import Counts, CounterProbe, install_extension
-from tests.perf.scenarios import (
+from crossclient.perf.counters import Counts, CounterProbe, install_extension
+from crossclient.perf.scenarios import (
     BatchScenario,
     Invocation,
     PublicCall,
@@ -46,8 +46,8 @@ from tests.perf.scenarios import (
     seed_rows,
     seed_terminal_ballast,
 )
-from tests.perf.worker_drain import DrainSender
-from tests.perf.worker_process import (
+from crossclient.perf.worker_drain import DrainSender
+from crossclient.perf.worker_process import (
     Drained,
     DrainOutcome,
     DrainTimedOut,
@@ -62,7 +62,7 @@ from tests.perf.worker_process import (
     wait_for_drain,
     worker_state,
 )
-from tests.perf.statistics import (
+from crossclient.perf.statistics import (
     Comparison,
     ThroughputComparison,
     Verdict,

@@ -9,13 +9,13 @@ from typing import Final
 import pytest
 
 from horsies.core.types.result import Err, Ok, Result
-from tests.parity.snapshot.catalog import (
+from crossclient.parity.snapshot.catalog import (
     BASELINE_CATALOG,
     NOTIFICATIONS,
     NOTIFIED_CATALOG,
     notification_row,
 )
-from tests.parity.snapshot.cells import (
+from crossclient.parity.snapshot.cells import (
     NormalizeError,
     RawRow,
     RawSnapshot,
@@ -24,7 +24,7 @@ from tests.parity.snapshot.cells import (
     UnanchoredTime,
     UnreadableTime,
 )
-from tests.parity.snapshot.compare import (
+from crossclient.parity.snapshot.compare import (
     DIFF_REPORT_ROW_LIMIT,
     AmbiguousRows,
     ColumnDifference,
@@ -35,8 +35,8 @@ from tests.parity.snapshot.compare import (
     compare_snapshots,
     render_diff,
 )
-from tests.parity.snapshot.normalize import NormalizedSnapshot, normalize_snapshot
-from tests.parity.snapshot.rules import (
+from crossclient.parity.snapshot.normalize import NormalizedSnapshot, normalize_snapshot
+from crossclient.parity.snapshot.rules import (
     AnchorNull,
     AnchorReference,
     ColumnSpec,
@@ -50,7 +50,7 @@ from tests.parity.snapshot.rules import (
     TimeOrderOnly,
     TimeWithin,
 )
-from tests.parity.snapshot.values import (
+from crossclient.parity.snapshot.values import (
     Cell,
     DuringRun,
     ExactValue,

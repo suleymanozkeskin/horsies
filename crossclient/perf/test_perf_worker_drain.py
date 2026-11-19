@@ -18,8 +18,8 @@ from typing import Final
 
 import pytest
 
-from tests.perf import worker_drain
-from tests.perf.worker_process import WorkerStartFailed
+from crossclient.perf import worker_drain
+from crossclient.perf.worker_process import WorkerStartFailed
 
 pytestmark = [pytest.mark.unit]
 

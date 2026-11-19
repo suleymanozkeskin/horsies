@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.perf.worker_process import (
+from crossclient.perf.worker_process import (
     WORKER_SCRIPT_NAME,
     Drained,
     DrainOutcome,
@@ -282,7 +282,7 @@ class TestStartWorker:
         working_directory.mkdir()
         started = start_worker(
             script=_echo_script(tmp_path),
-            app_locator='tests.perf.worker_drain_app:app',
+            app_locator='crossclient.perf.worker_drain_app:app',
             profile='perf-drain',
             loglevel='WARNING',
             environment={'HORSIES_PERF_PROBE': 'probe-value'},
@@ -294,7 +294,7 @@ class TestStartWorker:
             assert started.process.wait(10) == 0
             assert started.started_ns == 42
             assert started.log_path.read_text(encoding='utf-8').splitlines() == [
-                'worker tests.perf.worker_drain_app:app --profile perf-drain '
+                'worker crossclient.perf.worker_drain_app:app --profile perf-drain '
                 '--loglevel WARNING',
                 'probe-value',
                 str(working_directory.resolve()),
@@ -307,7 +307,7 @@ class TestStartWorker:
         missing = tmp_path / WORKER_SCRIPT_NAME
         started = start_worker(
             script=missing,
-            app_locator='tests.perf.worker_drain_app:app',
+            app_locator='crossclient.perf.worker_drain_app:app',
             profile='perf-drain',
             loglevel='WARNING',
             environment={},

@@ -1,4 +1,4 @@
-"""The Python app of the parity runs (`tests/parity/runner.py`).
+"""The Python app of the parity runs (`crossclient/parity/runner.py`).
 
 The Rust app of `clients/rust/tests/parity` has the same task names, input field
 names, codes, messages, options, profiles and workflows, so the same
@@ -76,11 +76,11 @@ RETRY_POLICY: Final = RetryPolicy.fixed([1, 1], auto_retry_for=['TRANSIENT'])
 """Two retries one second apart for the code `TRANSIENT`."""
 
 CHAIN_NAME: Final = 'parity_chain'
-CHAIN_DEFINITION_KEY: Final = 'tests.parity.chain.v1'
+CHAIN_DEFINITION_KEY: Final = 'crossclient.parity.chain.v1'
 CHILD_NAME: Final = 'parity_child'
-CHILD_DEFINITION_KEY: Final = 'tests.parity.child.v1'
+CHILD_DEFINITION_KEY: Final = 'crossclient.parity.child.v1'
 PARENT_NAME: Final = 'parity_parent'
-PARENT_DEFINITION_KEY: Final = 'tests.parity.parent.v1'
+PARENT_DEFINITION_KEY: Final = 'crossclient.parity.parent.v1'
 
 SCHEDULE_NAME: Final = 'parity_slots'
 SLOT_TASK_NAME: Final = 'parity.add'

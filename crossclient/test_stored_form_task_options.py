@@ -24,7 +24,7 @@ from horsies.core.codec.task_options import (
 )
 from horsies.core.models.tasks import Execution, RetryPolicy, TaskOptions
 from horsies.core.types.result import Err, Ok, Result
-from tests.stored_form_vectors import load_form, rows, text_of
+from crossclient.stored_form_vectors import load_form, rows, text_of
 
 _FORM: Final = load_form('task_options.json')
 

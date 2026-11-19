@@ -1,14 +1,14 @@
 """Fresh ``dualrun_`` databases with the schema of the core's install, for the integration tests.
 
-The server comes from ``server_url`` (the ``HORSIES_TEST_DATABASE_URL``
-override, else the local default). These functions create and drop only
-databases whose name matches ``dualrun_<32 hex>``; they never change another
-database.
+The fixtures give these functions the server URL of ``base_database_url``,
+from the test support of the Python client
+(``clients/python/tests/session_database.py``). These functions create and
+drop only databases whose name matches ``dualrun_<32 hex>``; they never change
+another database.
 """
 
 from __future__ import annotations
 
-import os
 import re
 import uuid
 from dataclasses import dataclass
@@ -32,23 +32,6 @@ from horsies.core.utils.url import to_psycopg_url
 
 DATABASE_PREFIX: Final = 'dualrun_'
 _DATABASE_NAME: Final = re.compile(r'^dualrun_[0-9a-f]{32}$')
-_SERVER_URL_VARIABLES: Final = ('HORSIES_TEST_DATABASE_URL', 'HORSES_E2E_DB_URL')
-"""The variables that name the test server, in the order they are read."""
-
-
-def server_url() -> str:
-    """The URL of the test server: the first non-empty variable of
-    ``_SERVER_URL_VARIABLES``, else ``postgresql://postgres:<DB_PASSWORD>@localhost:5432/horsies``.
-
-    The same variables and default as the database suites of the Python
-    client. Reads the environment only.
-    """
-    for name in _SERVER_URL_VARIABLES:
-        value = os.environ.get(name)
-        if value:
-            return value
-    password = os.environ.get('DB_PASSWORD', '')
-    return f'postgresql://postgres:{password}@localhost:5432/horsies'
 
 
 class SetupStep(Enum):

@@ -9,16 +9,16 @@ from typing import Final
 
 import pytest
 
-from tests.parity.snapshot.compare import AmbiguousRows, Side, SnapshotDiff
-from tests.parity.snapshot.normalize import AmbiguousGroup, NormalizedSnapshot, NormalizedTable
-from tests.parity.snapshot.values import ExactValue, RunWindow
-from tests.parity.snapshot.worker_run import (
+from crossclient.parity.snapshot.compare import AmbiguousRows, Side, SnapshotDiff
+from crossclient.parity.snapshot.normalize import AmbiguousGroup, NormalizedSnapshot, NormalizedTable
+from crossclient.parity.snapshot.values import ExactValue, RunWindow
+from crossclient.parity.snapshot.worker_run import (
     WHOLE_RUN_CATALOG,
     ClockBoundaryStraddle,
     DualRunMismatch,
     PairEqual,
 )
-from tests.parity.runner import (
+from crossclient.parity.runner import (
     AttemptReport,
     Client,
     ReportEntry,

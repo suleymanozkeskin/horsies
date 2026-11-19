@@ -17,7 +17,7 @@ from horsies.core.codec.typed import decode_task_result, encode_returned_result
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import Err, Ok
-from tests.stored_form_vectors import load_form, rows, task_error_of, text_of, typed
+from crossclient.stored_form_vectors import load_form, rows, task_error_of, text_of, typed
 
 _FORM: Final = load_form('result_envelope.json')
 

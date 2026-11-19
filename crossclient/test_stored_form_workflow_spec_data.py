@@ -44,7 +44,7 @@ from horsies._catalog.workflow_spec import (
 )
 from horsies.core.codec.json_io import SerializationError
 from horsies.core.types.result import Err, Ok
-from tests.stored_form_vectors import load_form, rows, text_of
+from crossclient.stored_form_vectors import load_form, rows, text_of
 
 _FORM: Final = load_form('workflow_spec_data.json')
 

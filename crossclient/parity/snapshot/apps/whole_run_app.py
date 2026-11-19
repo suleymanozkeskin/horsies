@@ -1,4 +1,4 @@
-"""The app of the whole-run worker pairs (`tests/parity/snapshot/worker_run.py`).
+"""The app of the whole-run worker pairs (`crossclient/parity/snapshot/worker_run.py`).
 
 Both sides of a pair run this module, each with its own database: the runner
 sets `DUALRUN_WORKER_DATABASE_URL` in the environment of each worker. The
@@ -359,7 +359,7 @@ class ChildChain(WorkflowDefinition[int]):
     `value`."""
 
     name = 'whole_run_child_chain'
-    definition_key = 'tests.parity.snapshot.whole_run.child_chain.v1'
+    definition_key = 'crossclient.parity.snapshot.whole_run.child_chain.v1'
 
     @classmethod
     def build_with(  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -394,7 +394,7 @@ chain_with_subworkflow = app.workflow(
     tasks=[_chain_first, _chain_sub, _chain_last],
     output=_chain_last,
     on_error=OnError.FAIL,
-    definition_key='tests.parity.snapshot.whole_run.chain.v1',
+    definition_key='crossclient.parity.snapshot.whole_run.chain.v1',
 )
 """A task, a sub-workflow whose child the worker builds, then a task."""
 
@@ -404,7 +404,7 @@ class ChildFromResult(WorkflowDefinition[int]):
     that value: the start of this child builds the grandchild."""
 
     name = 'whole_run_child_from_result'
-    definition_key = 'tests.parity.snapshot.whole_run.child_from_result.v1'
+    definition_key = 'crossclient.parity.snapshot.whole_run.child_from_result.v1'
 
     @classmethod
     def build_with(  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -435,7 +435,7 @@ class RefusedChild(WorkflowDefinition[int]):
     `WORKFLOW_ENQUEUE_FAILED`."""
 
     name = 'whole_run_refused_child'
-    definition_key = 'tests.parity.snapshot.whole_run.refused_child.v1'
+    definition_key = 'crossclient.parity.snapshot.whole_run.refused_child.v1'
 
     @classmethod
     def build_with(  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -456,7 +456,7 @@ chain_from_result = app.workflow(
     tasks=[_from_first, _from_sub],
     output=_from_sub,
     on_error=OnError.FAIL,
-    definition_key='tests.parity.snapshot.whole_run.chain_from_result.v1',
+    definition_key='crossclient.parity.snapshot.whole_run.chain_from_result.v1',
 )
 """A task, then a sub-workflow that the worker builds from the task's
 result; the child's start builds a grandchild."""
@@ -473,7 +473,7 @@ chain_with_refused_child = app.workflow(
     tasks=[_refused_first, _refused_sub],
     output=_refused_sub,
     on_error=OnError.FAIL,
-    definition_key='tests.parity.snapshot.whole_run.refused_chain.v1',
+    definition_key='crossclient.parity.snapshot.whole_run.refused_chain.v1',
 )
 """A task, then a sub-workflow whose build in the worker raises: the node
 and the workflow fail."""
@@ -490,7 +490,7 @@ pause_chain = app.workflow(
     tasks=[_pause_first, _pause_second],
     output=_pause_second,
     on_error=OnError.FAIL,
-    definition_key='tests.parity.snapshot.whole_run.pause_chain.v1',
+    definition_key='crossclient.parity.snapshot.whole_run.pause_chain.v1',
 )
 """A node that runs until the runner paused the workflow, then a node that
 the pause holds."""

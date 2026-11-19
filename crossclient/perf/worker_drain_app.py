@@ -8,6 +8,6 @@ from the database URL that the harness puts in the environment of the worker
 
 from __future__ import annotations
 
-from tests.perf.worker_drain import drain_app, drain_dsn_from_environment
+from crossclient.perf.worker_drain import drain_app, drain_dsn_from_environment
 
 app = drain_app(drain_dsn_from_environment()).app

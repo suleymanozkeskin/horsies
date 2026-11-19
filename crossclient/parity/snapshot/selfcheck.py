@@ -33,21 +33,21 @@ from horsies.core.history.ddl.classes import (
     DEFAULT_RETENTION_DAYS,
 )
 from horsies.core.types.result import Err, Ok, Result
-from tests.parity.snapshot.capture import (
+from crossclient.parity.snapshot.capture import (
     CaptureError,
     ClockReadFailed,
     Connection,
     capture_snapshot,
     read_database_clock,
 )
-from tests.parity.snapshot.catalog import BASELINE_CATALOG
-from tests.parity.snapshot.databases import (
+from crossclient.parity.snapshot.catalog import BASELINE_CATALOG
+from crossclient.parity.snapshot.databases import (
     DatabaseSetupFailed,
     DualRunDatabase,
     install_baseline_schema,
 )
-from tests.parity.snapshot.normalize import NormalizedSnapshot
-from tests.parity.snapshot.values import (
+from crossclient.parity.snapshot.normalize import NormalizedSnapshot
+from crossclient.parity.snapshot.values import (
     CalendarUnit,
     RunWindow,
     RunWindowInvalid,

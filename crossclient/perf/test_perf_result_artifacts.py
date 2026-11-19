@@ -78,6 +78,6 @@ class TestSummariesAreSelfContained:
             check=False,
         )
         assert completed.returncode == 0, (
-            'tests/perf/results/raw is not ignored; a gate run would commit '
+            'crossclient/perf/results/raw is not ignored; a gate run would commit '
             'tens of thousands of samples'
         )

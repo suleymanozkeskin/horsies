@@ -11,7 +11,7 @@ from pydantic import SecretStr
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import Err, Ok
-from tests.parity.snapshot.databases import DualRunDatabase
+from crossclient.parity.snapshot.databases import DualRunDatabase
 
 
 @asynccontextmanager

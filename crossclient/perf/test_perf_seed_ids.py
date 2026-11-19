@@ -12,8 +12,8 @@ import uuid
 
 import pytest
 
-from tests.perf.public_calls import SEND_TASK_NAME, WORKFLOW_TASK_NAME
-from tests.perf.scenarios import (
+from crossclient.perf.public_calls import SEND_TASK_NAME, WORKFLOW_TASK_NAME
+from crossclient.perf.scenarios import (
     ID_BIRTH,
     MAX_SEEDED_INDEX,
     SCENARIOS,
@@ -23,7 +23,7 @@ from tests.perf.scenarios import (
     seed_ids,
     seed_rows,
 )
-from tests.perf.worker_drain import DRAIN_TASK_NAME
+from crossclient.perf.worker_drain import DRAIN_TASK_NAME
 
 pytestmark = [pytest.mark.unit]
 

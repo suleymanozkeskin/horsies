@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from horsies.core.types.result import Err, Ok, Result
-from tests.parity.snapshot.cells import (
+from crossclient.parity.snapshot.cells import (
     NormalizeError,
     PendingDocument,
     PendingId,
@@ -52,7 +52,7 @@ from tests.parity.snapshot.cells import (
     generated_name,
     stable_rows,
 )
-from tests.parity.snapshot.rules import (
+from crossclient.parity.snapshot.rules import (
     ColumnSpec,
     Exact,
     GeneratedName,
@@ -61,7 +61,7 @@ from tests.parity.snapshot.rules import (
     TableRules,
     catalog_defects,
 )
-from tests.parity.snapshot.values import (
+from crossclient.parity.snapshot.values import (
     Cell,
     ExactValue,
     NullValue,

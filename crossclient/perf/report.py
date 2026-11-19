@@ -17,18 +17,18 @@ import json
 from dataclasses import asdict
 from typing import assert_never, cast
 
-from tests.perf.runner import (
+from crossclient.perf.runner import (
     WAL_RECORD_DELTA_PER_TERMINAL_ROW,
     Measurement,
     RunResult,
 )
-from tests.perf.scenarios import (
+from crossclient.perf.scenarios import (
     BatchScenario,
     PublicCallScenario,
     SingleRowScenario,
     WorkerDrainScenario,
 )
-from tests.perf.statistics import Comparison, ThroughputComparison
+from crossclient.perf.statistics import Comparison, ThroughputComparison
 
 
 def render_summary(result: RunResult) -> str:

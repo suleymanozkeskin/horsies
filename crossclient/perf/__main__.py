@@ -5,11 +5,11 @@ harness still works and is expected on any change to it; a gate run produces
 evidence that a phase is allowed to proceed, and refuses to start unless the
 conditions that make its numbers meaningful have been stated.
 
-    uv run python -m tests.perf --scenario send \\
+    uv run python -m crossclient.perf --scenario send \\
         --dsn postgresql://postgres:testpassword@localhost:15446/horsies \\
         --scale smoke --control
 
-    uv run python -m tests.perf --scenario send \\
+    uv run python -m crossclient.perf --scenario send \\
         --dsn ... --scale gate --demo-quiesced --control
 
 On the baseline schema every scenario has one implementation, so a gate run
@@ -30,10 +30,10 @@ from typing import assert_never
 
 from sqlalchemy import create_engine
 
-from tests.perf.prepare import apply_schema
-from tests.perf.report import render_raw, render_summary, summary_filename
-from tests.perf.runner import RunResult, run_scenario, server_setting
-from tests.perf.scenarios import (
+from crossclient.perf.prepare import apply_schema
+from crossclient.perf.report import render_raw, render_summary, summary_filename
+from crossclient.perf.runner import RunResult, run_scenario, server_setting
+from crossclient.perf.scenarios import (
     SCENARIOS,
     BatchScenario,
     PublicCallScenario,
@@ -42,7 +42,7 @@ from tests.perf.scenarios import (
     WorkerDrainScenario,
     scenario_by_name,
 )
-from tests.perf.statistics import Verdict
+from crossclient.perf.statistics import Verdict
 from horsies.core.types.result import Err, Ok
 from tests.sqlalchemy_url import sqlalchemy_url
 
@@ -79,7 +79,7 @@ GATE_ENVIRONMENT: dict[str, str] = {
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog='tests.perf')
+    parser = argparse.ArgumentParser(prog='crossclient.perf')
     parser.add_argument('--dsn', required=True)
     parser.add_argument(
         '--apply-schema',

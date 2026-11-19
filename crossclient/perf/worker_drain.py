@@ -11,7 +11,7 @@ with the same signature in both: ``Horsies``, ``AppConfig``,
 ``IsolatedRecycle``, ``NoTaskLimit``, ``app.task``, ``send``,
 ``PostgresBroker.close``. The count is one SQL statement on columns that both
 schemas have. The harness of each release runs this file unchanged
-(``tests/perf/releases/README.md``).
+(``crossclient/perf/releases/README.md``).
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from horsies import (
     TaskSendResult,
     WorkerProfile,
 )
-from tests.perf.worker_process import (
+from crossclient.perf.worker_process import (
     StartedWorker,
     WorkerStartFailed,
     cli_script,
@@ -85,13 +85,13 @@ WORKER_STOP_TIMEOUT: Final = timedelta(seconds=60)
 WORKER_LOGLEVEL: Final = 'WARNING'
 """The ``--loglevel`` of the worker."""
 
-WORKER_APP_LOCATOR: Final = 'tests.perf.worker_drain_app:app'
+WORKER_APP_LOCATOR: Final = 'crossclient.perf.worker_drain_app:app'
 """The app that ``horsies worker`` loads: ``worker_drain_app.py``."""
 
 CHECKOUT_ROOT: Final = Path(__file__).resolve().parents[2]
 """The repository root: the working directory of the worker and its
 ``PYTHONPATH``. ``WORKER_APP_LOCATOR`` names a module of the top-level
-package ``tests``. The ``horsies`` CLI adds its working directory to
+package ``crossclient``. The ``horsies`` CLI adds its working directory to
 ``sys.path`` only when that folder holds a ``pyproject.toml``, and the
 repository root holds none (the Python project is ``clients/python/``)."""
 
@@ -102,7 +102,7 @@ DRAIN_DSN_VARIABLE: Final = 'HORSIES_PERF_DRAIN_DSN'
 """The environment variable that gives the worker the database URL."""
 
 # The alias marks the read as harness bookkeeping: the server counts leave
-# out each statement that holds it (tests/perf/counters.py).
+# out each statement that holds it (crossclient/perf/counters.py).
 _COUNT_TERMINAL_SQL = text("""
     SELECT count(*) AS perf_harness_read
     FROM horsies_task_history

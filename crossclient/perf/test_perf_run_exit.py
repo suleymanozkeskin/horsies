@@ -19,8 +19,8 @@ from typing import NoReturn
 
 import pytest
 
-from tests.perf import __main__ as perf_main
-from tests.perf.__main__ import (
+from crossclient.perf import __main__ as perf_main
+from crossclient.perf.__main__ import (
     GATE_ENVIRONMENT,
     _block_size_for,
     _control_disagreements,
@@ -33,14 +33,14 @@ from tests.perf.__main__ import (
 )
 from datetime import timedelta
 
-from tests.perf.counters import Counts
-from tests.perf.scenarios import (
+from crossclient.perf.counters import Counts
+from crossclient.perf.scenarios import (
     PublicCallScenario,
     Scenario,
     SingleRowScenario,
     WorkerDrainScenario,
 )
-from tests.perf.runner import (
+from crossclient.perf.runner import (
     Conditions,
     Measurement,
     PlanEvidence,
@@ -48,7 +48,7 @@ from tests.perf.runner import (
     _comparison_label,
     _contract_violations,
 )
-from tests.perf.statistics import Budget, Verdict
+from crossclient.perf.statistics import Budget, Verdict
 
 
 def _never_run(*_args: object) -> NoReturn:

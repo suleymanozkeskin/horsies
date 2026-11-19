@@ -2,7 +2,7 @@
 
 ``core/tests/fixtures/stored_forms/`` holds one file per stored
 form. Each vector is a value and the exact text that Python stores for it. The
-Python tests (``tests/test_stored_form_*.py``) encode each value to the
+Python tests (``crossclient/test_stored_form_*.py``) encode each value to the
 text and decode the text to the value; the core and the Rust client test the
 same files. The folder's ``README.md`` names the encoder and the decoder of
 each form in each client.

@@ -62,7 +62,7 @@ ignored-content/
 clients/python/horsies/_core.*.so
 
 # Raw measurement samples: large, unreadable, uploaded as CI artifacts instead.
-tests/perf/results/raw/
+crossclient/perf/results/raw/
 
 # Carried over from horsies-rust (its .gitignore applied to its whole tree)
 .idea/

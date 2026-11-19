@@ -13,7 +13,7 @@ would flatter it by the batch size.
 On the baseline schema each scenario has one implementation, the statement
 that the product sends, so both sides of a run execute it (a control run). A
 release is compared with another release by running the harness of each
-release on one server in one session (``tests/perf/releases/README.md``).
+release on one server in one session (``crossclient/perf/releases/README.md``).
 The candidate slot stays for a comparison of two implementations on one
 schema; a gate refuses a scenario without a candidate unless the run is a
 control run.
@@ -48,15 +48,15 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.sql.elements import TextClause
 
-from tests.perf.public_calls import (
+from crossclient.perf.public_calls import (
     INPUT_TEXT_BYTES,
     SendCall,
     WorkflowStartCall,
     delete_sent_tasks,
     delete_started_workflows,
 )
-from tests.perf.statistics import Budget
-from tests.perf.worker_drain import (
+from crossclient.perf.statistics import Budget
+from crossclient.perf.worker_drain import (
     DRAIN_COUNT_INTERVAL,
     DRAIN_ISOLATED_CHILDREN,
     DRAIN_PROFILE_NAME,
@@ -68,7 +68,7 @@ from tests.perf.worker_drain import (
     delete_drained_tasks,
     start_drain_worker,
 )
-from tests.perf.worker_process import StartedWorker, WorkerStartFailed
+from crossclient.perf.worker_process import StartedWorker, WorkerStartFailed
 
 WORKER_ID = 'perf-harness'
 WORKER_HOSTNAME = 'perf-harness-host'

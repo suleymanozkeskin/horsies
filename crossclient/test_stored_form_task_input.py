@@ -20,7 +20,7 @@ from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import decode_kwargs, encode_kwargs_read_back
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.types.result import Err, Ok
-from tests.stored_form_vectors import (
+from crossclient.stored_form_vectors import (
     annotation_of,
     load_form,
     rows,

@@ -10,7 +10,7 @@ from enum import Enum
 from typing import Final
 
 from horsies.core.types.result import Err, Ok, Result
-from tests.parity.snapshot.rules import IdFamily
+from crossclient.parity.snapshot.rules import IdFamily
 
 _MICROSECOND: Final = timedelta(microseconds=1)
 _OFFSET_SHIFT: Final = 10**9

@@ -7,7 +7,7 @@ Snapshots that differ while the run spans of the two sides do not lie in one
 UTC hour (`ClockBoundaryStraddle`) run again on new databases, at most
 `STRADDLE_REPEATS` times; the last run must have no difference.
 
-Run: `pytest tests/parity -m e2e` with a test server
+Run: `pytest crossclient/parity -m e2e` with a test server
 (`HORSIES_TEST_DATABASE_URL`), a built `horsies._core`, and the Rust scenario
 binary (`cargo build -p horsies-parity-tests`, or `HORSIES_PARITY_RUST_BIN`).
 """
@@ -19,16 +19,16 @@ from collections.abc import Callable
 import pytest
 
 from horsies.core.types.result import Err, Ok
-from tests.parity.snapshot.compare import render_diff
-from tests.parity.snapshot.databases import DualRunDatabase
-from tests.parity.snapshot.worker_run import (
+from crossclient.parity.snapshot.compare import render_diff
+from crossclient.parity.snapshot.databases import DualRunDatabase
+from crossclient.parity.snapshot.worker_run import (
     ClockBoundaryStraddle,
     DualRunMismatch,
     PairEqual,
     PairJudgement,
 )
-from tests.parity.runner import Client, PingReport, compare_sides, run_side, rust_binary
-from tests.parity.scenarios import SCENARIOS, Scenario
+from crossclient.parity.runner import Client, PingReport, compare_sides, run_side, rust_binary
+from crossclient.parity.scenarios import SCENARIOS, Scenario
 
 pytestmark = [pytest.mark.e2e]
 

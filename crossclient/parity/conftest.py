@@ -7,18 +7,18 @@ from collections.abc import Callable, Iterator
 import pytest
 
 from horsies.core.types.result import Err, Ok
-from tests.parity.snapshot.databases import (
+from crossclient.parity.snapshot.databases import (
     DualRunDatabase,
     create_database,
     drop_database,
-    server_url,
 )
+from tests.session_database import base_database_url
 
 
 @pytest.fixture
 def empty_database() -> Iterator[Callable[[], DualRunDatabase]]:
     """A factory of empty `dualrun_` databases. Each one is dropped at teardown."""
-    server = server_url()
+    server = base_database_url()
     created: list[DualRunDatabase] = []
 
     def make() -> DualRunDatabase:

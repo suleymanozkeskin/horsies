@@ -18,7 +18,7 @@ from datetime import timedelta
 from enum import Enum
 from typing import Final
 
-from tests.parity import app as parity
+from crossclient.parity import app as parity
 
 
 class SendForm(Enum):

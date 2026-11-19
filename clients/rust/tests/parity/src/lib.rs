@@ -1,9 +1,9 @@
-//! The Rust side of the parity runs (`tests/parity/runner.py`).
+//! The Rust side of the parity runs (`crossclient/parity/runner.py`).
 //!
 //! The app has the task names, input field names, codes, messages, options,
 //! profiles, schedule and workflows of the Python parity app
-//! (`tests/parity/app.py`), and [`SCENARIOS`] holds the scenarios of
-//! `tests/parity/scenarios.py`. The runner sets [`DATABASE_URL_ENV`] for the
+//! (`crossclient/parity/app.py`), and [`SCENARIOS`] holds the scenarios of
+//! `crossclient/parity/scenarios.py`. The runner sets [`DATABASE_URL_ENV`] for the
 //! worker, its children, the scheduler and the send process.
 
 use std::collections::BTreeMap;
@@ -38,11 +38,11 @@ const PAST_THE_DEADLINE: Duration = Duration::from_secs(30);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub const CHAIN_NAME: &str = "parity_chain";
-pub const CHAIN_DEFINITION_KEY: &str = "tests.parity.chain.v1";
+pub const CHAIN_DEFINITION_KEY: &str = "crossclient.parity.chain.v1";
 pub const CHILD_NAME: &str = "parity_child";
-pub const CHILD_DEFINITION_KEY: &str = "tests.parity.child.v1";
+pub const CHILD_DEFINITION_KEY: &str = "crossclient.parity.child.v1";
 pub const PARENT_NAME: &str = "parity_parent";
-pub const PARENT_DEFINITION_KEY: &str = "tests.parity.parent.v1";
+pub const PARENT_DEFINITION_KEY: &str = "crossclient.parity.parent.v1";
 
 /// The retries of a send of the form [`SendForm::RetryOfAsyncContext`].
 const SEND_RETRIES: usize = 2;
@@ -75,7 +75,7 @@ pub enum ParityCode {
 }
 
 /// Two retries one second apart for the code `TRANSIENT`, with jitter, as
-/// Python's `RetryPolicy.fixed` gives by default (`tests/parity/app.py`).
+/// Python's `RetryPolicy.fixed` gives by default (`crossclient/parity/app.py`).
 fn retry_policy() -> RetryPolicy {
     RetryPolicy::fixed(vec![1, 1], true).expect("a fixed policy of 1 s intervals is valid")
 }
@@ -470,7 +470,7 @@ pub enum WorkerStart {
 
 /// One worker per profile, the sends in order, the reruns in order, the
 /// workflow starts in order, the actions in order, then the pings. The
-/// runner of `tests/parity` reads the profiles, the worker start and the
+/// runner of `crossclient/parity` reads the profiles, the worker start and the
 /// scheduler of the Python copy; the send process reads the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Scenario {
@@ -493,7 +493,7 @@ const fn send(task_name: &'static str, kwargs: &'static [(&'static str, i64)]) -
     }
 }
 
-/// The scenarios of `tests/parity/scenarios.py`, in its order.
+/// The scenarios of `crossclient/parity/scenarios.py`, in its order.
 pub const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "isolated_outcomes",
@@ -1020,7 +1020,7 @@ async fn act(action: &WorkflowAction, handles: &[WorkflowHandle<i64>]) -> Result
 /// Send the tasks of `scenario`, rerun the tasks of its reruns, start its
 /// workflows, run its actions on the started workflows, then ping, in
 /// order. The result is one JSON line per send, rerun, start and ping, as
-/// `tests/parity/send.py` prints them.
+/// `crossclient/parity/send.py` prints them.
 ///
 /// Errors: the first refused send, rerun, start, action or ping.
 pub async fn run_sends(
