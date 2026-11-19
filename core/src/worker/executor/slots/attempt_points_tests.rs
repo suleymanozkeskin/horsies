@@ -64,6 +64,9 @@ fn error_frame(task: &ClaimedTask, code: &str) -> ChildFrame {
     ChildFrame::Result(ResultFrame {
         task_id: task.task_id,
         end: RunEnd::Result(envelope),
+        started_at: crate::events::AttemptStart::Reported {
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        },
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
     })
