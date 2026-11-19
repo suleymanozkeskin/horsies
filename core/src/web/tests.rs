@@ -14,7 +14,9 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use crate::broker::{PostgresBroker, SchemaInitializationMode};
+use crate::monitoring::fleet::FleetLabels;
 use crate::monitoring::TaskAbsenceReason;
+use crate::telemetry::exposition::PROMETHEUS_TEXT_CONTENT_TYPE;
 use crate::test_support::child_specs::TestChildSpecs;
 use crate::test_support::migrated_database_url;
 use crate::test_support::migrated_pool;
@@ -28,6 +30,7 @@ use super::events::{
     data_frame, degraded_frame, EventBroadcaster, EventCoalescer, TopicEvent, CHANNEL_TOPICS,
     HEARTBEAT, MAX_IDS_PER_EVENT,
 };
+use super::fleet_metrics::WebFleetMetrics;
 use super::handler::{
     AccessGrant, AccessNeed, GrantedAccess, MonitoringHandler, MonitoringHandlerConfig,
     RequestParts, ResponseForm, ResponseParts, Verdict,
@@ -174,6 +177,10 @@ fn test_state(
         crate::ClientFamily::Rust,
     ));
     WebState {
+        fleet_metrics: Arc::new(WebFleetMetrics::new(
+            Arc::clone(&broker),
+            FleetLabels::none(),
+        )),
         events: EventBroadcaster::with_debounce(Arc::clone(&broker), Duration::from_millis(25)),
         broker,
         auth_policy,
@@ -1300,6 +1307,10 @@ async fn migrated_state() -> WebState {
         task_stats_cache: Arc::new(TaskStatsCache::new()),
         task_facets_cache: Arc::new(ReadCache::new()),
         task_breakdown_cache: Arc::new(ReadCache::new()),
+        fleet_metrics: Arc::new(WebFleetMetrics::new(
+            Arc::clone(&broker),
+            FleetLabels::none(),
+        )),
         events: EventBroadcaster::with_debounce(Arc::clone(&broker), Duration::from_millis(25)),
         broker,
         auth_policy: Arc::new(AllowAll),
@@ -2323,6 +2334,7 @@ async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_n
             ui: MonitoringUiConfig::default(),
             client_version: env!("CARGO_PKG_VERSION").to_owned(),
             heartbeat: HEARTBEAT,
+            fleet_labels: FleetLabels::none(),
         },
     );
 
@@ -2722,6 +2734,93 @@ async fn route_access_follows_the_actions_switch() {
         super::handler::route_access(false, &Method::POST, &path).need,
         AccessNeed::View
     );
+}
+
+/// `/metrics` needs the view verdict; another method on it and a longer
+/// path are public (a 405 and the page).
+#[tokio::test]
+async fn metrics_needs_the_view_verdict() {
+    let handler = granted_handler(true);
+    for (method, path, need) in [
+        (Method::GET, "/metrics", AccessNeed::View),
+        (Method::HEAD, "/metrics", AccessNeed::View),
+        (Method::POST, "/metrics", AccessNeed::Public),
+        (Method::GET, "/metrics/extra", AccessNeed::Public),
+    ] {
+        let access = handler.route_access(&method, path);
+        assert_eq!(access.need, need, "{method} {path}");
+        assert_eq!(access.form, ResponseForm::OneResponse, "{method} {path}");
+    }
+}
+
+/// The most answers that the test reads while it waits for the first read
+/// of the fleet state.
+const METRICS_POLLS: usize = 200;
+
+/// `/metrics` answers 403 after a refused view and 405 for another method.
+/// After an allowed view it answers the fleet text with the Prometheus
+/// content type; the first answer starts the reads, and a database that
+/// refuses connections shows as a failed read of each query.
+#[tokio::test]
+async fn metrics_serves_the_fleet_text_behind_the_view_verdict() {
+    let handler = granted_handler(true);
+    let refused = handler
+        .handle(
+            parts(Method::GET, "/metrics"),
+            grant(Verdict::Refused, Verdict::NotAsked),
+        )
+        .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    let other_method = handler
+        .handle(
+            parts(Method::POST, "/metrics"),
+            grant(Verdict::NotAsked, Verdict::NotAsked),
+        )
+        .await;
+    assert_eq!(other_method.status, StatusCode::METHOD_NOT_ALLOWED);
+
+    let first = handler
+        .handle(
+            parts(Method::GET, "/metrics"),
+            grant(Verdict::Allowed, Verdict::NotAsked),
+        )
+        .await;
+    assert_eq!(first.status, StatusCode::OK);
+    let content_type: Vec<&[u8]> = first
+        .headers
+        .iter()
+        .filter(|(name, _)| *name == axum::http::header::CONTENT_TYPE)
+        .map(|(_, value)| value.as_bytes())
+        .collect();
+    assert_eq!(content_type, vec![PROMETHEUS_TEXT_CONTENT_TYPE.as_bytes()]);
+    let body = String::from_utf8(first.body.to_vec()).expect("the text is UTF-8");
+    assert!(
+        body.contains("# TYPE horsies_queue_tasks gauge\n"),
+        "{body}"
+    );
+
+    let mut text = String::new();
+    for _ in 0..METRICS_POLLS {
+        let answer = handler
+            .handle(
+                parts(Method::GET, "/metrics"),
+                grant(Verdict::Allowed, Verdict::NotAsked),
+            )
+            .await;
+        text = String::from_utf8(answer.body.to_vec()).expect("the text is UTF-8");
+        match text.contains("horsies_exporter_collect_failed{query=") {
+            true => break,
+            false => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+    for query in ["queue_tasks", "workers", "schema_version"] {
+        assert!(
+            text.contains(&format!(
+                "horsies_exporter_collect_failed{{query=\"{query}\"}} 1\n"
+            )),
+            "{query}: {text}"
+        );
+    }
 }
 
 /// A broker without a session URL has no listener: the stream sends the

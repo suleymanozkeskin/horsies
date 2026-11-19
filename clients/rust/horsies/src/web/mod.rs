@@ -14,6 +14,10 @@
 //!    goes to the handler with its verdicts, and its answer is sent as it
 //!    is.
 //!
+//! `GET /metrics` is the fleet metrics of the app's database, behind the
+//! view verdict. Its `queue` and `schedule` labels are the queues and the
+//! schedules of the app's config; other names are `(unknown)`.
+//!
 //! ```ignore
 //! let app = horsies::Horsies::with_schema_mode(config, horsies::SchemaMode::ObserveOnly)?;
 //! let monitoring = horsies::web::router(&app, MonitoringConfig::default(), ViewOnly);
@@ -34,6 +38,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use futures_util::StreamExt;
 use horsies_core::handle::CoreHandle;
+use horsies_core::monitoring::fleet::FleetLabels;
 use horsies_core::web::{
     route_access, AccessGrant, AccessNeed, EventFrames, EventStreamItem, MonitoringHandler,
     MonitoringHandlerConfig, RequestParts, ResponseForm, ResponseParts, Verdict, HEARTBEAT,
@@ -93,6 +98,7 @@ where
         Actions::Enabled => true,
         Actions::Disabled => false,
     };
+    let fleet_labels = fleet_labels_of(app);
     let mount = Arc::new(Mount {
         handle: app.reads_handle(),
         workflows: Arc::clone(app.workflows()),
@@ -101,11 +107,30 @@ where
             ui: config.ui,
             client_version: env!("CARGO_PKG_VERSION").to_owned(),
             heartbeat: HEARTBEAT,
+            fleet_labels,
         },
         policy,
         handler: OnceCell::new(),
     });
     Router::new().fallback(serve::<P>).with_state(mount)
+}
+
+/// The label names of `/metrics`: the queues and the schedules of the app's
+/// config. A config whose names cannot be label values (a name that is
+/// `(unknown)`) gives no declared name, with one WARNING line: every queue
+/// and schedule of `/metrics` is then `(unknown)`, and the rest of the mount
+/// serves as before.
+fn fleet_labels_of(app: &Horsies) -> FleetLabels {
+    match FleetLabels::of_config(app.config()) {
+        Ok(labels) => labels,
+        Err(refused) => {
+            tracing::warn!(
+                "the fleet metrics of /metrics label every queue and schedule (unknown): \
+                 {refused}"
+            );
+            FleetLabels::none()
+        }
+    }
 }
 
 /// What every request of one mount reads.

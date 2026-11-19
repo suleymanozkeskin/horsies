@@ -22,6 +22,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use horsies_core::monitoring::fleet::FleetLabels;
 use horsies_core::web::{
     route_access, AccessGrant as CoreGrant, AccessNeed, Bytes, EventFrames, EventStreamItem,
     Method, MonitoringHandler as CoreHandler, MonitoringHandlerConfig, MonitoringUiConfig,
@@ -522,6 +523,10 @@ impl MonitoringHandler {
                         ui: MonitoringUiConfig { custom_css_url },
                         client_version,
                         heartbeat,
+                        // The constructor takes no queue or schedule names:
+                        // every queue and schedule of `/metrics` is
+                        // `(unknown)`.
+                        fleet_labels: FleetLabels::none(),
                     },
                 },
                 built: OnceCell::new(),
