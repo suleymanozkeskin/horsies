@@ -455,6 +455,24 @@ impl PoolBoard {
             .collect()
     }
 
+    /// The slots whose child serves: an isolated child idle or busy, an
+    /// open shared child. A booting, closing, retiring or down slot takes no
+    /// new task. The readiness probe of the worker endpoint reads it.
+    #[cfg(feature = "metrics-endpoint")]
+    pub fn serving_slots(&self) -> usize {
+        self.lock()
+            .slots
+            .iter()
+            .filter(|slot| match slot.phase {
+                SlotPhase::Serving { .. } => true,
+                SlotPhase::Booting
+                | SlotPhase::Closing { .. }
+                | SlotPhase::Retiring
+                | SlotPhase::Down(_) => false,
+            })
+            .count()
+    }
+
     /// Every slot that is down, with its board index, for the worker
     /// snapshot.
     pub fn down_slots(&self) -> Vec<(usize, DownState)> {

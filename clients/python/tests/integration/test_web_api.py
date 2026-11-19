@@ -455,12 +455,12 @@ class TestWorkerReads:
                     max_claim_batch, max_claim_per_worker, queues,
                     queue_priorities, queue_max_concurrency, recovery_config,
                     tasks_running, tasks_claimed, worker_started_at,
-                    slots_down, class_capacity
+                    slots_down, class_capacity, telemetry
                 ) VALUES (
                     :wid, now(), 'itest-host', 4242, 2, 0, 2,
                     ARRAY['default'], '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
                     0, 0, now(),
-                    CAST(:slots_down AS JSONB), '{}'::jsonb
+                    CAST(:slots_down AS JSONB), '{}'::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
                 )
             """),
             {
@@ -513,12 +513,12 @@ class TestWorkerReads:
                     max_claim_batch, max_claim_per_worker, queues,
                     queue_priorities, queue_max_concurrency, recovery_config,
                     tasks_running, tasks_claimed, worker_started_at,
-                    slots_down, class_capacity
+                    slots_down, class_capacity, telemetry
                 ) VALUES (
                     'w-async', now(), 'itest-host', 4242, 2, 0, 2,
                     ARRAY['default'], '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
                     0, 0, now(), '[]'::jsonb,
-                    '{"SHARED_ASYNC": {"capacity": 8, "serves": ["SHARED_ASYNC"]}}'
+                    '{"SHARED_ASYNC": {"capacity": 8, "serves": ["SHARED_ASYNC"]}}', jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
                 )
             """),
         )
