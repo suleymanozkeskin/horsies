@@ -329,16 +329,10 @@ fn push_json_string(text: &mut String, value: &str) {
     text.push('"');
 }
 
-/// The text of a trace id: 32 lowercase hex digits, as W3C Trace Context
-/// writes it. Pure.
+/// The text of a trace id: its 32 lowercase hex digits ([`TraceIdHex`]),
+/// as W3C Trace Context writes it. Pure.
 pub fn trace_id_text(trace_id: &[u8; TRACE_ID_BYTES]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut text = String::with_capacity(TRACE_ID_BYTES * 2);
-    for byte in trace_id {
-        text.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        text.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
-    }
-    text
+    TraceIdHex(*trace_id).to_string()
 }
 
 /// A stored trace id that is not [`TRACE_ID_BYTES`] long: data that no
