@@ -36,6 +36,7 @@ fn facts() -> PoolFacts {
         pending_limit: std::num::NonZeroUsize::new(16).unwrap(),
         exit_not_seen: ExitNotSeen::LeaveToRecovery,
         placement: CpuPlacement::SharedCpus,
+        telemetry: crate::telemetry::worker::WorkerTelemetry::Off,
     }
 }
 

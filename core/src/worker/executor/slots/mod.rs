@@ -79,6 +79,8 @@ mod shared_thread_tests;
 #[cfg(test)]
 mod slot_defect_tests;
 #[cfg(test)]
+mod slot_points_tests;
+#[cfg(test)]
 mod start_tests;
 #[cfg(test)]
 mod stop_and_loss_tests;
