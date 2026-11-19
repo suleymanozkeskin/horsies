@@ -60,7 +60,8 @@ pub enum BootFailureCause {
     /// Repeats: the child ended before its ready frame and sent no boot
     /// failure frame.
     LostBeforeReady { loss: LossCause, exit: ChildExit },
-    /// Repeats: no frame within [`CHILD_READY_TIMEOUT`].
+    /// Repeats: no frame within the ready bound of the child
+    /// ([`CHILD_READY_TIMEOUT`] for a slot's child).
     NotReadyInTime,
     /// Repeats: the child speaks another protocol version. A package upgrade
     /// under a running worker gives this; the process supervisor restarts the
@@ -169,8 +170,9 @@ pub enum BootReply {
     /// another protocol version ends the channel this way too
     /// ([`LossCause::ProtocolMismatch`]).
     Lost(ChildLost),
-    /// No frame within [`CHILD_READY_TIMEOUT`].
-    NotReadyInTime,
+    /// No frame within `bound`, the ready bound of the boot
+    /// ([`CHILD_READY_TIMEOUT`] for a slot's child).
+    NotReadyInTime { bound: Duration },
 }
 
 /// How a boot ended when it did not give a ready child.
@@ -194,9 +196,9 @@ pub fn boot_end_of(reply: BootReply) -> BootEnd {
             frame.cause.into(),
             &format!("{}: {}", frame.error_name, frame.detail),
         )),
-        BootReply::NotReadyInTime => BootEnd::Failed(BootFailure::new(
+        BootReply::NotReadyInTime { bound } => BootEnd::Failed(BootFailure::new(
             BootFailureCause::NotReadyInTime,
-            &format!("no ready frame after {}s", CHILD_READY_TIMEOUT.as_secs()),
+            &format!("no ready frame after {}s", bound.as_secs_f64()),
         )),
         BootReply::Lost(lost) => boot_end_of_loss(&lost),
     }

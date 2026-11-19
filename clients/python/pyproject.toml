@@ -95,6 +95,9 @@ dev = [
     # in-memory span exporter and metric reader.
     "opentelemetry-api>=1.30",
     "opentelemetry-sdk>=1.30",
+    # The checks of the alert rules and the Collector config in deploy/.
+    "pyyaml>=6.0.2",
+    "types-pyyaml>=6.0.12",
 ]
 
 [tool.pytest.ini_options]

@@ -13,8 +13,13 @@
 //! each seat kind, the cancel signal of a shared async run at its deadline
 //! ([`run_cancel_signal`]), the reports of work a body left
 //! ([`spawn_in_run`]), and the protocol's exit codes.
+//!
+//! A client that traces its task bodies gives the host a [`BodySpans`]: the
+//! host runs each body inside the `tracing` span that it opens for the run
+//! ([`BodyScope`]).
 
 mod args;
+mod body_scope;
 mod handle_setup;
 mod host;
 mod link;
@@ -38,6 +43,7 @@ mod stored_form_vector_tests;
 mod tests;
 
 pub use args::{child_mode, ChildArgs, ChildArgsError, ChildMode, CHILD_MODE_ARGUMENT};
+pub use body_scope::{BodyCarrier, BodyOutcome, BodyRun, BodyScope, BodySpans};
 pub use handle_setup::{child_handle_setup, ChildHandleSetup, HandlerChildHasNoHandle};
 pub use host::{
     child_command, run_child_host, ChildApp, ChildHookFailure, ChildHostExit, ChildLogSetup,

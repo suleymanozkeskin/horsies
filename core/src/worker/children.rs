@@ -30,11 +30,15 @@ use crate::core::config::worker_profile::{
     SharedThreadSetting, TaskLimitSetting, WorkerProfile,
 };
 use crate::telemetry::worker::WorkerTelemetry;
+use crate::worker::executor::handler_child::{
+    HandlerChildBounds, HandlerChildConfig, HANDLER_CHILD_PROCESS_NAME,
+    HANDLER_TASK_SEND_CONNECTIONS,
+};
 use crate::worker::executor::placement::{plan_own_core, CpuPlacement, PlacementRefused};
 use crate::worker::executor::protocol::{
     AsyncSeats, ChildConnection, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl,
-    ExecutorThreads, InitFrame, IsolatedChild, PoolMaxSize, PoolMinSize, SharedAsyncChild,
-    SharedThreadChild, TaskSendPool, ThreadSeats,
+    ExecutorThreads, HandlerChild, InitFrame, IsolatedChild, PoolMaxSize, PoolMinSize,
+    SharedAsyncChild, SharedThreadChild, TaskSendPool, ThreadSeats,
 };
 use crate::worker::executor::slots::{
     dispatch_route, AttemptEnd, BaselineLimits, ChildLayout, Claimed, DispatchRoute, DownState,
@@ -241,6 +245,30 @@ fn init_frame(launch: &ChildLaunch, child_kind: ChildKind) -> InitFrame {
         connection: launch.connection.clone(),
         process_name: CHILD_PROCESS_NAME.to_owned(),
         child_kind,
+    }
+}
+
+/// The handler child of a worker: the child program of `launch` with the
+/// handler kind and its process name, on the CPUs of the children of
+/// `placement`, with the bounds of a worker. Pure.
+pub fn handler_child_config(launch: &ChildLaunch, placement: &CpuPlacement) -> HandlerChildConfig {
+    let task_send_pool = match TaskSendPool::new(HANDLER_TASK_SEND_CONNECTIONS) {
+        Some(pool) => pool,
+        None => panic!("HANDLER_TASK_SEND_CONNECTIONS is within the bounds of a task send pool"),
+    };
+    HandlerChildConfig {
+        command: launch.command.clone(),
+        init: InitFrame {
+            program: launch.program.clone(),
+            log_level: launch.log_level,
+            database_url: launch.database_url.clone(),
+            connection: launch.connection.clone(),
+            process_name: HANDLER_CHILD_PROCESS_NAME.to_owned(),
+            child_kind: ChildKind::Handler(HandlerChild { task_send_pool }),
+        },
+        cpus: placement.child_cpus(),
+        kill_wait: CHILD_KILL_WAIT,
+        bounds: HandlerChildBounds::WORKER,
     }
 }
 

@@ -15,6 +15,9 @@ pub mod from_manifest;
 pub mod heartbeat;
 pub mod liveness;
 pub mod memory_fit;
+pub(crate) mod metrics_endpoint;
+#[cfg(feature = "metrics-endpoint")]
+pub(crate) mod probes;
 pub mod profile_fit;
 pub mod queue_cap_hold;
 pub mod recovery;

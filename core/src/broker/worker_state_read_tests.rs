@@ -33,13 +33,13 @@ async fn insert_snapshot(
             max_claim_batch, max_claim_per_worker, queues,
             queue_priorities, queue_max_concurrency, recovery_config,
             tasks_running, tasks_claimed, children_memory_mb, worker_started_at,
-            slots_down, class_capacity
+            slots_down, class_capacity, telemetry
         ) VALUES (
             $1, now(), 'itest-host', 4242, 2,
             2, 2, ARRAY['default'],
             '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
             0, 0, 96.5, now(),
-            $2, $3
+            $2, $3, jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
         )",
     )
     .bind(worker_id)
@@ -226,13 +226,13 @@ async fn insert_snapshot_at(
             max_claim_batch, max_claim_per_worker, queues,
             queue_priorities, queue_max_concurrency, recovery_config,
             tasks_running, tasks_claimed, children_memory_mb, worker_started_at,
-            slots_down, class_capacity
+            slots_down, class_capacity, telemetry
         ) VALUES (
             $1, now() - make_interval(secs => $2::float8), 'itest-host', 4242, 2,
             2, 2, ARRAY['default'],
             '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
             $3, 0, 96.5, now() - interval '1 hour',
-            '[]'::jsonb, '{}'::jsonb
+            '[]'::jsonb, '{}'::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
         )",
     )
     .bind(worker_id)

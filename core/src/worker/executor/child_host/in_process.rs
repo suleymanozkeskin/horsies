@@ -7,6 +7,7 @@
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
+use super::body_scope::BodyScope;
 use super::host::{ChildApp, ChildLogSetup, ChildStartHook};
 use super::link::{read_frame, FrameWriter};
 use super::run::HostContext;
@@ -33,6 +34,17 @@ pub(crate) async fn run_isolated_in_process(
     registry: Arc<TaskRegistry>,
     run: RunFrame,
 ) -> RunEnd {
+    run_isolated_in_process_scoped(broker, registry, run, BodyScope::NoScope).await
+}
+
+/// [`run_isolated_in_process`] with the body scope `body_scope` around the
+/// body of the run.
+pub(crate) async fn run_isolated_in_process_scoped(
+    broker: Arc<PostgresBroker>,
+    registry: Arc<TaskRegistry>,
+    run: RunFrame,
+    body_scope: BodyScope,
+) -> RunEnd {
     let (ours, theirs) = UnixStream::pair().expect("a socket pair");
     let writer = FrameWriter::start(ours, 16).expect("the frame writer starts");
     let context = HostContext {
@@ -44,6 +56,7 @@ pub(crate) async fn run_isolated_in_process(
             producer_manifest: super::producer::test_producer_manifest(),
             log_setup: ChildLogSetup::NoSetup,
             family: crate::ClientFamily::Rust,
+            body_scope,
         }),
         pid: IN_PROCESS_PID,
         writer,

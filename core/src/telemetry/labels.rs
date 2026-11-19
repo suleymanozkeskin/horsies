@@ -246,9 +246,12 @@ pub const ERROR_CODE_FIXED: &[ValueGroup] = &[
 pub const ERROR_CODE_VALUES: LabelValues =
     LabelValues::FixedThenDeclared(ERROR_CODE_FIXED, DeclaredSource::UserErrorCodes);
 
+/// The value of the `result` label of a send that succeeded.
+pub const SEND_OK_RESULT: &str = "ok";
+
 /// The values of the `result` label of a send: `ok`, or the send error code.
 pub const SEND_RESULT_VALUES: LabelValues = LabelValues::Fixed(&[
-    ValueGroup::Listed(&["ok"]),
+    ValueGroup::Listed(&[SEND_OK_RESULT]),
     ValueGroup::Codes(<TaskSendErrorCode as CodeEnum>::CATALOG),
 ]);
 
@@ -999,7 +1002,7 @@ mod tests {
             LabelValues::Fixed(groups) => group_texts(groups),
             other => panic!("the send result label has fixed values, not {other:?}"),
         };
-        assert_eq!(send_results.first(), Some(&"ok"));
+        assert_eq!(send_results.first(), Some(&SEND_OK_RESULT));
         assert_eq!(send_results.len(), 1 + TaskSendErrorCode::VARIANTS.len());
         for source in [
             DeclaredSource::TaskNames,
