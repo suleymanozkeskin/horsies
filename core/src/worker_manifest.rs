@@ -26,6 +26,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::core::config::bounded::BoundedU32;
+use crate::core::config::no_member_after_the_tag;
 use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
 use crate::core::config::worker_profile::{
     select_worker_profile, ChildPreload, ClaimLimits, DrainTimeout, ExecutorThreadCount,
@@ -286,6 +287,7 @@ pub enum MetricsEndpoint {
         port: ListenPort,
     },
     /// No metrics endpoint.
+    #[serde(deserialize_with = "no_member_after_the_tag")]
     NoMetricsEndpoint,
 }
 
