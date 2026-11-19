@@ -1054,6 +1054,7 @@ impl Worker {
             ),
             exit_not_seen: exit_not_seen(&self.app_config.recovery),
             placement,
+            telemetry: self.telemetry.clone(),
         }
     }
 
