@@ -92,8 +92,17 @@ generates the module `validate_order`:
 - `send`, `schedule` and `with_options` before `register` in the process
   return `TaskSendError::ValidationFailed`, which names the task.
   `node()` before `register` returns a `HorsiesError`.
-- `register` refuses a code type whose `CODES` holds a built-in or reserved
-  name (`HRS-212`). Only a hand-written `UserErrorCode` impl can have one.
+- `register` checks the codes of the code type (`UserErrorCode::CODES`):
+  a built-in or reserved name is `HRS-212`; a code that is empty, not
+  `UPPER_SNAKE_CASE` or an exception class name is `HRS-112`; a code given
+  twice is `HRS-113`. The derive refuses a built-in or reserved name and a
+  repeated code at compile time. A variant name that gives a code outside
+  `UPPER_SNAKE_CASE` (a leading `_`, a letter outside ASCII) and a
+  hand-written impl reach the registration check.
+- `CODES` are the task's declared error codes. `horsies check` lists them.
+  The `error_code` metric label of the task has each built-in code, each
+  declared code and `undeclared`; another user code counts as `undeclared`.
+  No user work is needed: the task macros fill the codes from `E`.
 - `TaskFunctionNotFound` is `NotRegistered { task_name }` or
   `OtherTypes { task_name, registered, asked }`.
 

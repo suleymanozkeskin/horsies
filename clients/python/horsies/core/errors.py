@@ -81,6 +81,11 @@ class ErrorCode(str, Enum):
     TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT = 'HRS-109'
     TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC = 'HRS-110'
     TASK_CANCEL_GRACE_OUT_OF_RANGE = 'HRS-111'
+    # The codes of `@app.task(error_codes=...)`: a code that fails the
+    # code-text rule, and a code given twice. A built-in or reserved name is
+    # CHECK_RESERVED_CODE_COLLISION.
+    TASK_INVALID_ERROR_CODE = 'HRS-112'
+    TASK_DUPLICATE_ERROR_CODE = 'HRS-113'
 
     # Config/broker (HRS-200-HRS-299)
     CONFIG_INVALID_QUEUE_MODE = 'HRS-200'

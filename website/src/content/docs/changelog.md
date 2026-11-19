@@ -31,6 +31,19 @@ before you upgrade a 0.7 deployment.
   `ForkedAfterCoreStart` and `CoreStopped` (raised). Import them from
   `horsies`. They are defined in `horsies.core.brokers.enqueue_task` and in
   the extension `horsies._core`.
+- **`@app.task(..., error_codes=...)` declares a task's own error codes.**
+  It takes an `Enum` class (its member values) or a tuple of strings; the
+  default is `()`. The declared codes are the values of the task's
+  `error_code` metric label besides the built-in codes and `undeclared`;
+  another user code still works everywhere and counts as `undeclared` in
+  that label only. The task function keeps them in `task_error_codes`,
+  `Horsies.declared_error_codes()` returns them by task name, and the
+  success text of `horsies check` lists them under `declared error codes:`.
+  The decorator refuses a value that is neither an `Enum` class nor a tuple
+  (`HRS-102`), a code that is empty, not `UPPER_SNAKE_CASE` or an exception
+  class name (`HRS-112`, new `TASK_INVALID_ERROR_CODE`), a built-in code or
+  `WORKFLOW_STOPPED` (`HRS-212`), and a code given twice (`HRS-113`, new
+  `TASK_DUPLICATE_ERROR_CODE`).
 
 ### Changed
 
@@ -1432,6 +1445,16 @@ unless it starts with "Added".
   Python's text: no fraction for a whole second, 6 digits for a whole
   microsecond, 9 digits below the microsecond; the offset `Z` when it is 0.
   It reads any RFC 3339 fraction.
+- **Added: each task declares the error codes of its code type.** The task
+  macros (`#[task]`, `#[blocking_task]`, `async_task_fn!`,
+  `blocking_task_fn!`) fill the declared codes from `UserErrorCode::CODES`;
+  `RegisteredTask::error_codes()` returns them.
+  `Horsies::register` checks them for every task: a built-in or reserved
+  name is `HRS-212`, an empty code, a code that is not `UPPER_SNAKE_CASE` or
+  an exception class name is `HRS-112`, a code given twice is `HRS-113`.
+  Before, only the `#[task]` attribute checked a built-in or reserved name.
+  `CheckPassed::declared_error_codes()` returns them by task name, and the
+  success text of `check` lists them. `CheckPassed` is no longer `Copy`.
 
 ## 0.7.0 — 2026-11-15
 

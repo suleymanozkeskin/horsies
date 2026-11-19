@@ -29,7 +29,17 @@ These are compile errors:
 - two variants with one code;
 - a code with the name of a built-in code or of a reserved code (`WORKFLOW_STOPPED`).
 
-`std::convert::Infallible` is the code type of a task with no codes of its own. A hand-written `UserErrorCode` impl keeps the same contract; `register` refuses an impl whose `CODES` holds a built-in or reserved name (`HRS-212`).
+`std::convert::Infallible` is the code type of a task with no codes of its own. A hand-written `UserErrorCode` impl keeps the same contract.
+
+`CODES` are the task's [declared error codes](/horsies/tasks/errors/#declared-error-codes). The task macros (`#[task]`, `#[blocking_task]`, `async_task_fn!`, `blocking_task_fn!`) fill them from the code type, with no other user work. `register` checks them:
+
+| Refusal | Code |
+|---------|------|
+| A built-in or reserved name | `HRS-212` |
+| An empty code, a code that is not `UPPER_SNAKE_CASE`, or an exception class name | `HRS-112` |
+| A code given twice | `HRS-113` |
+
+The derive refuses a built-in or reserved name and a repeated code at compile time. A variant name whose code is not `UPPER_SNAKE_CASE` (a leading `_`, a letter outside ASCII) and a hand-written impl reach the check of `register`.
 
 ## TaskError
 

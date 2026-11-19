@@ -44,6 +44,16 @@ from horsies.core.exception_mapper import (
     validate_exception_mapper,
     validate_error_code_string,
 )
+from horsies.core.declared_error_codes import (
+    NO_ERROR_CODES,
+    CodeRefusal,
+    CodeSetFormRefused,
+    CodesRefused,
+    CodeTextRefused,
+    RepeatedCodeRefused,
+    ReservedNameRefused,
+    parse_declared_error_codes,
+)
 from horsies.core.errors import (
     ConfigurationError,
     HorsiesError,
@@ -64,6 +74,7 @@ import glob
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
 from fnmatch import fnmatch
 from uuid import UUID
 from horsies.core.utils.imports import import_by_path
@@ -94,7 +105,7 @@ from horsies.core.models.workflow.nesting_check import (
 from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.codec.validation_errors import ValueValidationError, exception_text
 from horsies.core.types.core_failure import call_refusal_or_raise
-from horsies.core.types.result import is_err
+from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.models.broker import PostgresConfig
 from horsies._catalog.manifest import dump_producer_manifest
 from horsies._core import (
@@ -255,6 +266,97 @@ def _no_location(error: _E) -> _E:
     """
     error.location = None
     return error
+
+
+_ERROR_CODES_FORM_HELP: Final = (
+    'pass an Enum class whose member values are the codes, or a tuple of '
+    "UPPER_SNAKE_CASE strings, for example error_codes=('RATE_LIMITED',)"
+)
+"""The help of an `error_codes` value that is not an `Enum` class or a tuple."""
+
+
+def _declared_error_codes_or_raise(
+    value: object,
+    *,
+    task_label: str,
+    location: SourceLocation | None,
+) -> tuple[str, ...]:
+    """The codes that the `error_codes` value `value` of a task declares,
+    in the order of the declaration (`parse_declared_error_codes`).
+
+    Raises:
+        TaskDefinitionError: HRS-102 when `value` is neither an `Enum` class
+            nor a tuple; one error per refused code otherwise (HRS-112,
+            HRS-113, HRS-212), several in a `MultipleValidationErrors`
+            (`raise_collected`).
+    """
+    match parse_declared_error_codes(value):
+        case Ok(codes):
+            return codes
+        case Err(refused):
+            pass
+    match refused:
+        case CodeSetFormRefused(given=given):
+            raise TaskDefinitionError(
+                message='invalid error_codes',
+                code=ErrorCode.TASK_INVALID_OPTIONS,
+                location=location,
+                notes=[
+                    f"task '{task_label}'",
+                    f'error_codes is a {given}, not an Enum class or a tuple',
+                ],
+                help_text=_ERROR_CODES_FORM_HELP,
+            )
+        case CodesRefused(refusals=refusals):
+            report = ValidationReport('task definition')
+            for refusal in refusals:
+                report.add(
+                    _declared_code_error(
+                        refusal,
+                        task_label=task_label,
+                        location=location,
+                    ),
+                )
+            raise_collected(report)
+            raise AssertionError(
+                f"task '{task_label}': a refused error_codes value has no refusal",
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _declared_code_error(
+    refusal: CodeRefusal,
+    *,
+    task_label: str,
+    location: SourceLocation | None,
+) -> TaskDefinitionError:
+    """The definition error of one refused entry of `error_codes`."""
+    match refusal:
+        case CodeTextRefused(detail=detail):
+            code = ErrorCode.TASK_INVALID_ERROR_CODE
+            message = detail
+            help_text = 'use UPPER_SNAKE_CASE error codes, for example RATE_LIMITED'
+        case ReservedNameRefused(detail=detail):
+            code = ErrorCode.CHECK_RESERVED_CODE_COLLISION
+            message = detail
+            help_text = (
+                'use a different UPPER_SNAKE_CASE code that does not match a '
+                'built-in library code'
+            )
+        case RepeatedCodeRefused(code=repeated):
+            code = ErrorCode.TASK_DUPLICATE_ERROR_CODE
+            message = f"error_codes value '{repeated}' is given more than once"
+            help_text = 'list each code once'
+        case _ as unreachable:
+            assert_never(unreachable)
+    return TaskDefinitionError(
+        message=message,
+        code=code,
+        location=location,
+        notes=[f"task '{task_label}'"],
+        help_text=help_text,
+    )
 
 
 def _connectivity_failed(cause: str) -> ConfigurationError:
@@ -553,6 +655,7 @@ class Horsies:
         retry_policy: Optional['RetryPolicy'] = None,
         exception_mapper: Optional['ExceptionMapper'] = None,
         default_unhandled_error_code: Optional[str] = None,
+        error_codes: type[Enum] | tuple[str, ...] = (),
     ) -> 'SharedAsyncTaskDecorator': ...
 
     # The last overload also accepts a literal SHARED_THREAD, and its return
@@ -570,6 +673,7 @@ class Horsies:
         retry_policy: Optional['RetryPolicy'] = None,
         exception_mapper: Optional['ExceptionMapper'] = None,
         default_unhandled_error_code: Optional[str] = None,
+        error_codes: type[Enum] | tuple[str, ...] = (),
     ) -> 'SharedThreadTaskDecorator': ...
 
     # cancel_grace_ms with a literal class other than SHARED_ASYNC: the
@@ -588,6 +692,7 @@ class Horsies:
         retry_policy: Optional['RetryPolicy'] = None,
         exception_mapper: Optional['ExceptionMapper'] = None,
         default_unhandled_error_code: Optional[str] = None,
+        error_codes: type[Enum] | tuple[str, ...] = (),
     ) -> 'CancelGraceRefusedDecorator': ...
 
     @overload
@@ -599,6 +704,7 @@ class Horsies:
         retry_policy: Optional['RetryPolicy'] = None,
         exception_mapper: Optional['ExceptionMapper'] = None,
         default_unhandled_error_code: Optional[str] = None,
+        error_codes: type[Enum] | tuple[str, ...] = (),
         timeout_ms: Optional[int] = None,
         execution: Literal[Execution.ISOLATED] = Execution.ISOLATED,
     ) -> 'TaskDecorator': ...
@@ -613,6 +719,7 @@ class Horsies:
         retry_policy: Optional['RetryPolicy'] = None,
         exception_mapper: Optional['ExceptionMapper'] = None,
         default_unhandled_error_code: Optional[str] = None,
+        error_codes: type[Enum] | tuple[str, ...] = (),
         timeout_ms: Optional[int] = None,
         execution: Literal[Execution.ISOLATED] = Execution.ISOLATED,
     ) -> 'CancelGraceRefusedDecorator': ...
@@ -632,6 +739,7 @@ class Horsies:
         retry_policy: Optional['RetryPolicy'] = None,
         exception_mapper: Optional['ExceptionMapper'] = None,
         default_unhandled_error_code: Optional[str] = None,
+        error_codes: type[Enum] | tuple[str, ...] = (),
     ) -> 'TaskDecorator': ...
 
     def task(
@@ -662,10 +770,18 @@ class Horsies:
         and `timeout_ms`; `SHARED_THREAD` needs a `def` function and
         `timeout_ms`; only `SHARED_ASYNC` takes `cancel_grace_ms`.
 
+        `error_codes` (an `Enum` class, whose member values are the codes, or
+        a tuple of code texts; default `()`) declares the task's own error
+        codes: the values of its `error_code` metric label besides the
+        built-in codes and `undeclared` (`horsies.core.declared_error_codes`).
+
         Raises:
             TaskDefinitionError: empty task name, invalid options, mapper,
                 or error code; or an execution declaration that breaks a
-                rule (HRS-107 to HRS-111, one code per rule).
+                rule (HRS-107 to HRS-111, one code per rule); or an
+                `error_codes` value that is not an `Enum` class or a tuple
+                (HRS-102), one error per refused code (HRS-112, HRS-113,
+                HRS-212), several in a `MultipleValidationErrors`.
             ConfigurationError: queue name not in app config.
             RegistryError: duplicate task name from a different source.
                 All three fire at import/definition time by design — a task
@@ -724,6 +840,12 @@ class Horsies:
             default_unhandled_error_code: str | None = task_options_kwargs.pop(
                 'default_unhandled_error_code',
                 None,
+            )
+
+            declared_error_codes = _declared_error_codes_or_raise(
+                task_options_kwargs.pop('error_codes', NO_ERROR_CODES),
+                task_label=fn.__name__,
+                location=fn_location,
             )
 
             good_until_value = task_options_kwargs.pop('good_until', None)
@@ -799,6 +921,7 @@ class Horsies:
                 task_options,
                 exception_mapper=exception_mapper,
                 default_unhandled_error_code=default_unhandled_error_code,
+                error_codes=declared_error_codes,
             )
 
             # Register task with this app, passing source for duplicate detection
@@ -1478,6 +1601,15 @@ class Horsies:
     def list_tasks(self) -> list[str]:
         """List tasks registered with this app"""
         return list(self.tasks.keys_list())
+
+    def declared_error_codes(self) -> dict[str, tuple[str, ...]]:
+        """The error codes that each task declares (`error_codes=`), by task
+        name in name order, for each task that declares at least one. Pure."""
+        return {
+            name: self.tasks[name].task_error_codes
+            for name in sorted(self.tasks.keys_list())
+            if self.tasks[name].task_error_codes
+        }
 
     def get_broker(self) -> 'PostgresBroker':
         """Get the configured PostgreSQL broker for this app.

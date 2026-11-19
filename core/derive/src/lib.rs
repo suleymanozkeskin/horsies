@@ -1,15 +1,17 @@
 //! The derives that `horsies-core` uses for its own facts: the static data of
 //! its closed code enums (`CodeCatalog`), the Python classes of its error
 //! enums (`ErrorCatalog`) and the values of their instances
-//! (`ErrorClassValues`), and the Python form of its manifest types
-//! (`ManifestSchema`). The task and workflow macros of the Rust client are
-//! in `horsies-macros`.
+//! (`ErrorClassValues`), the Python form of its manifest types
+//! (`ManifestSchema`), and the wire codec and Python form of its event
+//! types (`EventSchema`). The task and workflow macros of the Rust client
+//! are in `horsies-macros`.
 
 use proc_macro::TokenStream;
 use syn::{parse_macro_input, DeriveInput};
 
 mod code_catalog;
 mod error_catalog;
+mod event_schema;
 mod manifest_schema;
 
 /// Derive the static catalog data of a closed code enum of horsies-core:
@@ -126,6 +128,39 @@ pub fn derive_error_class_values(item: TokenStream) -> TokenStream {
 pub fn derive_manifest_schema(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
     match manifest_schema::derive_manifest_schema(input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// Derive the wire codec and the Python form of a type of the event
+/// contract (`horsies_core::events`).
+///
+/// A struct of named fields is an event type: wire form `[tag, field, ...]`.
+/// An enum of unit variants is a choice: wire form the variant name in
+/// SCREAMING_SNAKE_CASE. An enum with a variant of named fields is a
+/// variant type: wire form `[variant name, field, ...]`. Each field type
+/// implements `horsies_core::events::EventValue`.
+///
+/// ```ignore
+/// /// When the attempt started.
+/// #[derive(horsies_core_derive::EventSchema)]
+/// pub enum AttemptStart {
+///     /// The child reported the time of its start write.
+///     Reported { started_at: DateTime<Utc> },
+///     /// The child reported no start time.
+///     NotReported,
+/// }
+/// ```
+///
+/// Emits `impl horsies_core::events::EventRecord` for a struct, and
+/// `impl horsies_core::events::EventValue` and
+/// `impl horsies_core::events::EventNamedValue` for an enum. A field with
+/// `#[event_schema(internal)]` is read only by the handler child.
+#[proc_macro_derive(EventSchema, attributes(event_schema))]
+pub fn derive_event_schema(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as DeriveInput);
+    match event_schema::derive_event_schema(input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
