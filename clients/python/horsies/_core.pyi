@@ -3236,9 +3236,7 @@ class FleetMetricsStopped:
 
 @final
 class FleetMetricsFailed:
-    """The address did not bind, or the server failed. message names the address and the
-    cause.
-    """
+    """The address did not bind. message names the address and the cause."""
     @property
     def message(self) -> str: ...
 

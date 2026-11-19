@@ -3713,7 +3713,7 @@ const FLEET_METRICS_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "FleetMetricsFailed",
-        doc: "The address did not bind, or the server failed. message names the address and the\ncause.",
+        doc: "The address did not bind. message names the address and the cause.",
         constructor: Constructor::NoConstructor,
         properties: &[property("message", "str")],
         methods: &[],

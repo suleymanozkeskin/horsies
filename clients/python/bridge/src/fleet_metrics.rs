@@ -82,8 +82,7 @@ pub struct FleetLabelsRefused {
 #[derive(Clone, Debug)]
 pub struct FleetMetricsStopped {}
 
-/// The address did not bind, or the server failed. `message` names the
-/// address and the cause.
+/// The address did not bind. `message` names the address and the cause.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct FleetMetricsFailed {
@@ -286,10 +285,8 @@ async fn run_operation(
         // and no stop can come any more; the run ends.
         let _stopped_or_gone = stopped.wait_for(|stop| *stop).await.is_ok();
     };
-    match serve_fleet_metrics(endpoint, handle, labels, stop).await {
-        Ok(()) => RunOutcome::Stopped(FleetMetricsStopped {}),
-        Err(failed) => failed_run(&failed),
-    }
+    serve_fleet_metrics(endpoint, handle, labels, stop).await;
+    RunOutcome::Stopped(FleetMetricsStopped {})
 }
 
 fn failed_run(failed: &EndpointFailed) -> RunOutcome {
