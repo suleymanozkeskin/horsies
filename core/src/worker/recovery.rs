@@ -45,8 +45,10 @@ use crate::worker::liveness::OWNER_GONE_SPAN;
 use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
 use crate::workflow_engine::child_spec::ChildSpecSource;
 
+mod maintenance_due;
 pub(crate) mod owner_gone;
 
+use maintenance_due::MaintenanceDue;
 pub(crate) use owner_gone::{forget_ended_workers, owner_gone_step, UnheldOwners};
 
 #[cfg(test)]
@@ -250,6 +252,61 @@ mod p7_maintenance_tests {
             .unwrap();
     }
 
+    /// A host that slept seven hours, past the default heartbeat horizon of
+    /// six: the last maintenance was seven hours ago on the wall clock and
+    /// now on the monotonic clock, which stops while the host sleeps. The
+    /// pass runs the partition maintenance (its coverage health is set) and
+    /// sets the next deadline one interval ahead.
+    #[tokio::test]
+    #[serial]
+    async fn a_pass_after_a_host_sleep_runs_the_partition_maintenance() {
+        let pool = crate::test_support::migrated_pool().await;
+        let recovery = RecoveryConfig {
+            auto_requeue_stale_claimed: false,
+            auto_fail_stale_running: false,
+            auto_terminate_orphaned_workflow_tasks: false,
+            ..RecoveryConfig::default()
+        };
+        let retention = RetentionConfig {
+            worker_state_retention_hours: None,
+            terminal_record_retention_hours: None,
+            ..RetentionConfig::default()
+        };
+        let interval = Duration::from_secs(retention.partition_maintenance_interval_s);
+        let slept = Duration::from_secs(7 * 3600);
+        let health = new_reaper_health();
+        let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut next_partition_maintenance = MaintenanceDue::after_from(
+            tokio::time::Instant::now(),
+            std::time::SystemTime::now() - slept,
+            interval,
+        );
+        let mut orphan_state = OrphanSweepState::default();
+
+        run_reaper_pass(
+            &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
+            crate::test_support::child_specs::no_child_specs().as_ref(),
+            &recovery,
+            &retention,
+            &health,
+            &mut next_retention_cleanup,
+            &mut next_partition_maintenance,
+            &mut orphan_state,
+            &mut UnheldOwners::default(),
+        )
+        .await;
+
+        let snapshot = health.read().await.clone();
+        assert_eq!(
+            snapshot
+                .partition_coverage
+                .as_ref()
+                .and_then(|value| value["state"].as_str()),
+            Some("ensured"),
+        );
+        assert!(!next_partition_maintenance.is_due());
+    }
+
     #[tokio::test]
     #[serial]
     async fn periodic_maintenance_publishes_all_health_and_contains_coverage_failure() {
@@ -267,7 +324,7 @@ mod p7_maintenance_tests {
         retention.history_leaf_horizon_days = 1;
         let health = new_reaper_health();
         let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
-        let mut next_partition_maintenance = tokio::time::Instant::now();
+        let mut next_partition_maintenance = MaintenanceDue::now();
         let mut orphan_state = OrphanSweepState::default();
 
         run_reaper_pass(
@@ -304,7 +361,7 @@ mod p7_maintenance_tests {
             "every pass publishes non-phase2 workflow-recovery health independently",
         );
         assert!(
-            next_partition_maintenance > tokio::time::Instant::now(),
+            !next_partition_maintenance.is_due(),
             "the periodic maintenance tick advances after contained failures",
         );
     }
@@ -364,7 +421,7 @@ mod p7_maintenance_tests {
         let retention = RetentionConfig::default();
         let health = new_reaper_health();
         let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
-        let mut next_partition_maintenance = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut next_partition_maintenance = MaintenanceDue::after(Duration::from_secs(60));
         let mut orphan_state = OrphanSweepState::default();
 
         run_reaper_pass(
@@ -425,7 +482,7 @@ mod p7_maintenance_tests {
         let retention = RetentionConfig::default();
         let health = new_reaper_health();
         let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
-        let mut next_partition_maintenance = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut next_partition_maintenance = MaintenanceDue::after(Duration::from_secs(60));
         let mut orphan_state = OrphanSweepState::default();
 
         run_reaper_pass(
@@ -614,7 +671,7 @@ mod p7_maintenance_tests {
             .extend([blocked_period.as_duration(), valid_period.as_duration()]);
         let health = new_reaper_health();
         let mut next_retention_cleanup = tokio::time::Instant::now();
-        let mut next_partition_maintenance = tokio::time::Instant::now();
+        let mut next_partition_maintenance = MaintenanceDue::now();
         let mut orphan_state = OrphanSweepState::default();
         run_reaper_pass(
             &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
@@ -880,7 +937,7 @@ pub fn spawn_reaper(
         // The first pass runs at start and includes the retention cleanup
         // (Python `_ReaperPassState(next_retention_cleanup_at=time.monotonic())`).
         let mut next_retention_cleanup = tokio::time::Instant::now();
-        let mut next_partition_maintenance = tokio::time::Instant::now();
+        let mut next_partition_maintenance = MaintenanceDue::now();
         let mut orphan_state = OrphanSweepState::default();
         // When this reaper first read each worker's liveness lock free; it
         // lives as long as the loop.
@@ -1105,7 +1162,7 @@ async fn run_reaper_pass(
     retention: &RetentionConfig,
     health: &ReaperHealth,
     next_retention_cleanup: &mut tokio::time::Instant,
-    next_partition_maintenance: &mut tokio::time::Instant,
+    next_partition_maintenance: &mut MaintenanceDue,
     orphan_state: &mut OrphanSweepState,
     unheld_owners: &mut UnheldOwners,
 ) {
@@ -1410,7 +1467,7 @@ async fn run_reaper_pass(
         }
     }
 
-    if tokio::time::Instant::now() >= *next_partition_maintenance {
+    if next_partition_maintenance.is_due() {
         let declared = retention.registrable_periods();
         let coverage = match CoverageRequest::new(
             retention.history_leaf_horizon_days,
@@ -1500,8 +1557,9 @@ async fn run_reaper_pass(
             }
         };
         health.write().await.partition_pruning = Some(pruning_health);
-        *next_partition_maintenance = tokio::time::Instant::now()
-            + Duration::from_secs(retention.partition_maintenance_interval_s);
+        *next_partition_maintenance = MaintenanceDue::after(Duration::from_secs(
+            retention.partition_maintenance_interval_s,
+        ));
     }
 }
 
@@ -2339,7 +2397,7 @@ mod tests {
         recovery.auto_fail_stale_running = true;
         let health = new_reaper_health();
         let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
-        let mut next_partition_maintenance = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut next_partition_maintenance = MaintenanceDue::after(Duration::from_secs(60));
         let mut orphan_state = OrphanSweepState::default();
         let pass = tokio::time::timeout(
             Duration::from_secs(30),

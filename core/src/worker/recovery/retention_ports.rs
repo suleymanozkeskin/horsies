@@ -69,7 +69,7 @@ async fn run_maintenance_pass(
     recovery.auto_terminate_orphaned_workflow_tasks = false;
     let health = new_reaper_health();
     let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(3_600);
-    let mut next_partition_maintenance = tokio::time::Instant::now();
+    let mut next_partition_maintenance = super::MaintenanceDue::now();
     let mut orphan_state = OrphanSweepState::default();
     run_reaper_pass(
         &crate::broker::PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
