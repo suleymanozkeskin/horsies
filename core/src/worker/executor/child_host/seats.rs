@@ -144,22 +144,25 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
     let RunFrame {
         task_id,
         task_name,
-        queue_name: _,
-        attempt: _,
+        queue_name,
+        attempt,
         worker_id,
         claimed_at,
         orphan_self_heal,
         work,
-        workflow: _,
+        workflow,
         trace,
         input,
     } = run;
     let facts = RunFacts {
         task_id,
         task_name,
+        queue_name,
+        attempt,
         worker_id,
         claimed_at,
         orphan_self_heal,
+        workflow,
     };
     let started_at = match start_attempt(context, &facts).await {
         Started::Running { started_at } => started_at,
@@ -301,9 +304,12 @@ fn facts_of(run: &SharedRunFrame) -> RunFacts {
     RunFacts {
         task_id: run.task_id,
         task_name: run.task_name.clone(),
+        queue_name: run.queue_name.clone(),
+        attempt: run.attempt,
         worker_id: run.worker_id.clone(),
         claimed_at: run.claimed_at,
         orphan_self_heal: run.orphan_self_heal,
+        workflow: run.workflow,
     }
 }
 

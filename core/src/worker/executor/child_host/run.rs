@@ -26,12 +26,13 @@ use crate::core::lifecycle::OwnedClaim;
 use crate::core::task::error::{OperationalErrorCode, TaskError};
 use crate::core::task::fn_trait::{RawTaskResult, RegisteredTask, TaskModule};
 use crate::core::task::result::TaskResult;
+use crate::events::{AttemptNumber, QueueName};
 use crate::worker::execution::{
     build_task_input, mark_task_finalizing, phase_retry_delay, FinalizingMark,
 };
 use crate::worker::executor::protocol::{
-    FailureDetail, ResultEnvelopeText, RunEnd, StopReason, StoredOptionsRefusal, TaskInputText,
-    MAX_BODY_BYTES,
+    FailureDetail, ResultEnvelopeText, RunEnd, RunWorkflow, StopReason, StoredOptionsRefusal,
+    TaskInputText, MAX_BODY_BYTES,
 };
 
 /// What every run of one child shares.
@@ -43,16 +44,21 @@ pub(super) struct HostContext {
     pub(super) writer: FrameWriter,
 }
 
-/// The facts of one run that every write fences on.
+/// The facts of one run, from its run frame: the task, the claim that every
+/// write fences on (`worker_id`, `claimed_at`), and the queue, the attempt
+/// and the workflow node that the span of its body names.
 #[derive(Debug, Clone)]
 pub(super) struct RunFacts {
     pub(super) task_id: Uuid,
     pub(super) task_name: String,
+    pub(super) queue_name: QueueName,
+    pub(super) attempt: AttemptNumber,
     pub(super) worker_id: String,
     pub(super) claimed_at: DateTime<Utc>,
     /// Whether the stop before start cancels the task when no node links it
     /// live; the run frame carries it.
     pub(super) orphan_self_heal: OrphanSelfHeal,
+    pub(super) workflow: RunWorkflow,
 }
 
 /// How the start write ended.

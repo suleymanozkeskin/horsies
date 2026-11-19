@@ -5,7 +5,8 @@
 //! bodies gives the host a [`BodySpans`] in [`BodyScope::Spans`]. For each
 //! run whose body starts, the host:
 //! 1. asks [`BodySpans::open`] for a `tracing` span, with the facts of the
-//!    run and the trace carrier that the send stored ([`BodyRun`]);
+//!    run (the task, its queue, the attempt, the workflow node that links
+//!    it) and the trace carrier that the send stored ([`BodyRun`]);
 //! 2. runs the body inside that span: an async body is polled inside it, a
 //!    blocking body runs inside it on its own thread, so a `tracing` span
 //!    that the body opens, and an `#[instrument]` function that it calls,
@@ -33,7 +34,8 @@ use super::run::RunFacts;
 use crate::core::task::error::TaskErrorCode;
 use crate::core::task::fn_trait::RawTaskResult;
 use crate::core::task::result::TaskResult;
-use crate::events::RunTrace;
+use crate::events::{AttemptNumber, RunTrace};
+use crate::worker::executor::protocol::RunWorkflow;
 use crate::Execution;
 
 /// What the host does around each task body of a child.
@@ -68,10 +70,17 @@ pub trait BodySpans: Send + Sync {
 pub struct BodyRun<'a> {
     pub task_id: Uuid,
     pub task_name: &'a str,
+    /// The queue of the task row.
+    pub queue_name: &'a str,
+    /// The attempt that the claim runs, from 1: the retry count of the row
+    /// plus 1.
+    pub attempt: AttemptNumber,
     /// The worker that claimed the task.
     pub worker_id: &'a str,
     /// The execution class of the child that runs the body.
     pub execution: Execution,
+    /// The workflow node that links the task, as the claim read it.
+    pub workflow: RunWorkflow,
     /// The trace carrier that the send stored on the task row.
     pub carrier: &'a BodyCarrier,
 }
@@ -169,8 +178,11 @@ impl BodyScope {
                 let run = BodyRun {
                     task_id: facts.task_id,
                     task_name: &facts.task_name,
+                    queue_name: facts.queue_name.as_str(),
+                    attempt: facts.attempt,
                     worker_id: &facts.worker_id,
                     execution,
+                    workflow: facts.workflow,
                     carrier: &carrier,
                 };
                 let span = spans.open(&run);

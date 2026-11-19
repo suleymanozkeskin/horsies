@@ -134,9 +134,12 @@ fn facts_with(task_id: Uuid, claimed_at: DateTime<Utc>, self_heal: OrphanSelfHea
     RunFacts {
         task_id,
         task_name: TASK_NAME.to_owned(),
+        queue_name: crate::events::QueueName::cut("default"),
+        attempt: crate::events::AttemptNumber::SMALLEST,
         worker_id: WORKER_ID.to_owned(),
         claimed_at,
         orphan_self_heal: self_heal,
+        workflow: crate::worker::executor::protocol::RunWorkflow::NotInWorkflow,
     }
 }
 

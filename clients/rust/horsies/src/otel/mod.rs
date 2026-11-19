@@ -39,8 +39,12 @@
 //! of a child only when `main` shuts the provider down after `run`.
 //!
 //! The attempt span has `horsies.task.id`, `horsies.task.name`,
-//! `horsies.task.execution`, `horsies.worker.id`, `messaging.system`,
-//! `messaging.operation.type` (`process`) and `messaging.message.id`. Its
+//! `horsies.task.attempt` (from 1), `horsies.task.execution`,
+//! `horsies.queue`, `horsies.worker.id`, `messaging.system`,
+//! `messaging.operation.type` (`process`), `messaging.destination.name` (the
+//! queue) and `messaging.message.id`, and, for a task that a workflow node
+//! links, `horsies.workflow.id` and `horsies.workflow.node` (the node
+//! index). Its
 //! status is OK when the body returned a value, and ERROR with `error.type`
 //! (the error code) when it returned an error, panicked
 //! (`UNHANDLED_EXCEPTION`) or ran past its deadline (`TASK_TIMEOUT`). An

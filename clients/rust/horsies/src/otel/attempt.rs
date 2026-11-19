@@ -17,6 +17,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use horsies_core::frame_protocol::{RunWorkflow, WorkflowNodeIndex, MAX_WORKFLOW_NODE_INDEX};
+use horsies_core::telemetry::labels::LabelName;
 use horsies_core::{BodyOutcome, BodyRun, BodyScope, BodySpans, OutcomeCode};
 use opentelemetry::global;
 use opentelemetry::trace::Status;
@@ -24,8 +26,8 @@ use tracing_opentelemetry::{OpenTelemetrySpanExt, SetParentError};
 
 use super::carrier::{attempt_parent_of, AttemptParent};
 use super::{
-    ERROR_TYPE_KEY, MESSAGING_MESSAGE_ID_KEY, MESSAGING_OPERATION_TYPE_KEY, MESSAGING_SYSTEM,
-    MESSAGING_SYSTEM_KEY,
+    ERROR_TYPE_KEY, MESSAGING_DESTINATION_NAME_KEY, MESSAGING_MESSAGE_ID_KEY,
+    MESSAGING_OPERATION_TYPE_KEY, MESSAGING_SYSTEM, MESSAGING_SYSTEM_KEY, WORKFLOW_ID_KEY,
 };
 
 /// The `tracing` target of the attempt span of each task body. A filter of
@@ -42,6 +44,10 @@ const ATTEMPT_SPAN_DIRECTIVE: &str = "horsies::attempt=info";
 const PROCESS_OPERATION: &str = "process";
 const EXECUTION_KEY: &str = "horsies.task.execution";
 const WORKER_ID_KEY: &str = "horsies.worker.id";
+/// The attempt number, from 1.
+const ATTEMPT_KEY: &str = "horsies.task.attempt";
+/// The index of the workflow node that links the task.
+const WORKFLOW_NODE_KEY: &str = "horsies.workflow.node";
 
 /// The body scope of a worker child: each task body runs inside its
 /// attempt span.
@@ -94,9 +100,13 @@ pub(super) fn attempt_span(run: &BodyRun<'_>, parent: AttemptParent) -> tracing:
     );
     span.set_attribute(EXECUTION_KEY, run.execution.as_str());
     span.set_attribute(WORKER_ID_KEY, run.worker_id.to_owned());
+    span.set_attribute(ATTEMPT_KEY, i64::from(run.attempt.get()));
+    span.set_attribute(LabelName::Queue.attribute_key(), run.queue_name.to_owned());
     span.set_attribute(MESSAGING_SYSTEM_KEY, MESSAGING_SYSTEM);
     span.set_attribute(MESSAGING_OPERATION_TYPE_KEY, PROCESS_OPERATION);
+    span.set_attribute(MESSAGING_DESTINATION_NAME_KEY, run.queue_name.to_owned());
     span.set_attribute(MESSAGING_MESSAGE_ID_KEY, run.task_id.to_string());
+    set_workflow_attributes(&span, run.workflow);
     match parent {
         AttemptParent::NoCarrier => {}
         AttemptParent::Extracted(context) => match span.set_parent(context) {
@@ -105,6 +115,29 @@ pub(super) fn attempt_span(run: &BodyRun<'_>, parent: AttemptParent) -> tracing:
         },
     }
     span
+}
+
+/// Set `horsies.workflow.id` and `horsies.workflow.node` (the node index) on
+/// `span` for a task that a workflow node links; nothing for another task.
+fn set_workflow_attributes(span: &tracing::Span, workflow: RunWorkflow) {
+    match workflow {
+        RunWorkflow::NotInWorkflow => {}
+        RunWorkflow::InWorkflow {
+            workflow_id,
+            node_index,
+        } => {
+            span.set_attribute(WORKFLOW_ID_KEY, workflow_id.to_string());
+            span.set_attribute(WORKFLOW_NODE_KEY, node_index_value(node_index));
+        }
+    }
+}
+
+/// The attribute value of `node_index`. Pure.
+fn node_index_value(node_index: WorkflowNodeIndex) -> i64 {
+    match i64::try_from(node_index.get()) {
+        Ok(value) => value,
+        Err(_) => unreachable!("a node index of at most {MAX_WORKFLOW_NODE_INDEX} fits an i64"),
+    }
 }
 
 /// Whether this process logged an attempt span that got no parent.

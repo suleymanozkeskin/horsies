@@ -1532,11 +1532,16 @@ unless it starts with "Added".
   body runs inside a `tracing` span `run <task_name>` of kind CONSUMER
   (target `horsies::attempt`), whose OpenTelemetry parent is the context
   extracted from the stored carrier, through `tracing-opentelemetry` 0.34;
-  a span that the body opens is its child. Its status is OK for a returned
-  value, and ERROR with `error.type` for an error, a panic or a run past
-  its deadline. `horsies::otel::layer()` is the `tracing-opentelemetry`
-  layer on the global tracer provider; `horsies::cli::run` adds it to its
-  subscriber, and a binary that installs its own subscriber adds it there.
+  a span that the body opens is its child. It has the attributes of the
+  Python attempt span: the task id and name, `horsies.task.attempt`, the
+  execution class, `horsies.queue` and `messaging.destination.name`, the
+  worker id, and, for a task that a workflow node links,
+  `horsies.workflow.id` and `horsies.workflow.node`. Its status is OK for
+  a returned value, and ERROR with `error.type` for an error, a panic or a
+  run past its deadline. `horsies::otel::layer()` is the
+  `tracing-opentelemetry` layer on the global tracer provider;
+  `horsies::cli::run` adds it to its subscriber, and a binary that installs
+  its own subscriber adds it there.
   Without the feature no OpenTelemetry crate is compiled.
 - **Added: `cli::run_with_log_format(app, LogFormat::Json)`**: the runner
   and each worker child write one JSON object per log record, with the

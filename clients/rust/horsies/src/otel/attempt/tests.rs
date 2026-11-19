@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use horsies_core::telemetry::labels::LabelName;
+use horsies_core::events::AttemptNumber;
 use horsies_core::{BodyCarrier, Execution, OperationalErrorCode, TaskErrorCode, UserCode};
 use opentelemetry::trace::{SpanId, SpanKind, TraceId, TracerProvider as _};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
@@ -23,6 +23,7 @@ use super::*;
 const TASK_NAME: &str = "app.tasks.charge";
 const SPAN_NAME: &str = "run app.tasks.charge";
 const WORKER_ID: &str = "worker-7";
+const QUEUE_NAME: &str = "payments";
 const SEND_TRACE_ID: u128 = 0x0af7_6519_16cd_43dd_8448_eb21_1c80_319c;
 const SEND_SPAN_ID: u64 = 0xb7ad_6b71_6920_3331;
 const TRACEPARENT: &str = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
@@ -35,12 +36,17 @@ fn send_carrier() -> BodyCarrier {
     ]))
 }
 
+/// The second attempt of a task that no workflow node links, on
+/// [`QUEUE_NAME`].
 fn run_with(task_id: Uuid, carrier: &BodyCarrier) -> BodyRun<'_> {
     BodyRun {
         task_id,
         task_name: TASK_NAME,
+        queue_name: QUEUE_NAME,
+        attempt: AttemptNumber::try_from(2).unwrap(),
         worker_id: WORKER_ID,
         execution: Execution::SharedAsync,
+        workflow: RunWorkflow::NotInWorkflow,
         carrier,
     }
 }
@@ -84,8 +90,9 @@ async fn reserve_stock(items: u32) -> u32 {
 
 /// The parent of the attempt span is the send span that the stored carrier
 /// names; the span is `run <task_name>` of kind CONSUMER with the task's
-/// attributes; the keys of the task name and of `error.type` are the keys
-/// of the metric catalog.
+/// attributes, its queue and its attempt; the keys of the task name, the
+/// queue and `error.type` are the keys of the metric catalog. A task that
+/// no workflow node links has no workflow attribute.
 #[test]
 fn the_attempt_span_is_a_child_of_the_send_span_with_the_task_attributes() {
     let task_id = Uuid::new_v4();
@@ -111,16 +118,58 @@ fn the_attempt_span_is_a_child_of_the_send_span_with_the_task_attributes() {
         (LabelName::Task.attribute_key(), TASK_NAME),
         (LabelName::Execution.attribute_key(), "SHARED_ASYNC"),
         (LabelName::WorkerId.attribute_key(), WORKER_ID),
+        (LabelName::Queue.attribute_key(), QUEUE_NAME),
+        ("horsies.task.attempt", "2"),
         ("messaging.system", "horsies"),
         ("messaging.operation.type", "process"),
+        ("messaging.destination.name", QUEUE_NAME),
         ("messaging.message.id", task_id_text.as_str()),
     ] {
         assert_eq!(attribute(attempt, key).as_deref(), Some(value), "{key}");
+    }
+    for key in ["horsies.workflow.id", "horsies.workflow.node"] {
+        assert_eq!(attribute(attempt, key), None, "{key}");
     }
     assert_eq!(attempt.status, Status::Ok);
     assert_eq!(
         attribute(attempt, LabelName::ErrorCode.attribute_key()),
         None
+    );
+}
+
+/// The attempt span of a workflow task names the workflow and the index of
+/// the node that links the task.
+#[test]
+fn the_attempt_span_of_a_workflow_task_names_its_workflow_and_node() {
+    let workflow_id = Uuid::from_u128(0xf007);
+    let carrier = BodyCarrier::NoCarrier;
+    let run = BodyRun {
+        workflow: RunWorkflow::InWorkflow {
+            workflow_id,
+            node_index: WorkflowNodeIndex::new(7).unwrap(),
+        },
+        ..run_with(Uuid::new_v4(), &carrier)
+    };
+    let spans = record_attempt(&run, &BodyOutcome::Returned, |span| span.in_scope(|| {}));
+    let attempt = span_named(&spans, SPAN_NAME);
+    let workflow_id_text = workflow_id.to_string();
+    assert_eq!(
+        attribute(attempt, "horsies.workflow.id").as_deref(),
+        Some(workflow_id_text.as_str())
+    );
+    assert_eq!(
+        attribute(attempt, "horsies.workflow.node").as_deref(),
+        Some("7")
+    );
+}
+
+/// The largest node index is an attribute value.
+#[test]
+fn the_largest_node_index_is_an_attribute_value() {
+    let largest = WorkflowNodeIndex::new(MAX_WORKFLOW_NODE_INDEX).unwrap();
+    assert_eq!(
+        u64::try_from(node_index_value(largest)).unwrap(),
+        MAX_WORKFLOW_NODE_INDEX
     );
 }
 
