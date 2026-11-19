@@ -9,7 +9,7 @@ pub const MAX_BOOT_FAILURE_DETAIL_CHARS: usize = 2400;
 
 /// An errno that names an OS resource limit. A boot that failed with one can
 /// succeed later, when the resource is free again (Python `ShortageErrno`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::EventSchema)]
 pub enum ShortageErrno {
     Emfile,
     Enfile,

@@ -38,7 +38,7 @@ pub enum ReportedBootCause {
 /// Why a child stopped before it set its row RUNNING. No task code ran. The
 /// start's miss path wrote what each case needs, except for
 /// `OwnershipUnconfirmed`, whose claim the parent releases.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, horsies_core_derive::EventSchema)]
 pub enum StopReason {
     /// The row is not CLAIMED by this worker at this claim generation.
     ClaimLost,

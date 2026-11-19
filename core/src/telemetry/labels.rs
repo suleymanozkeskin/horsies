@@ -345,8 +345,9 @@ impl LabelValue for MetricId {
 }
 
 /// Why the worker released a claimed task before it ran (the `reason` label
-/// of `horsies.task.claims.released`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// of `horsies.task.claims.released`, and the `reason` of a `ClaimReleased`
+/// event).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::EventSchema)]
 pub enum ReleaseReason {
     /// The worker is stopping.
     PoolStopping,
@@ -407,8 +408,9 @@ impl LabelValue for ReleaseReason {
 
 /// Why a child ended and was replaced (the `reason` label of
 /// `horsies.worker.children.replaced`): the loss causes of a child, and the
-/// reasons why a child retires after a task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// reasons why a child retires after a task. The `reason` of a
+/// `ChildReplaced` event too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::EventSchema)]
 pub enum ReplaceReason {
     /// The child died by itself.
     ChildDied,
@@ -493,8 +495,8 @@ impl LabelValue for ReplaceReason {
 }
 
 /// What the reaper did to a task row (the `action` label of
-/// `horsies.recovery.tasks`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// `horsies.recovery.tasks`, and the `action` of a `TaskRecovered` event).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::EventSchema)]
 pub enum RecoveryAction {
     /// A stale RUNNING row failed.
     RunningFailed,

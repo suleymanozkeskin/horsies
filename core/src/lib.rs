@@ -1,9 +1,10 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 // `#[derive(horsies_core_derive::CodeCatalog)]` names `::horsies_core::catalog`,
-// and `#[derive(horsies_core_derive::ManifestSchema)]` names
-// `::horsies_core::manifest_schema`; this crate reaches both through its own
-// name.
+// `#[derive(horsies_core_derive::ManifestSchema)]` names
+// `::horsies_core::manifest_schema`, and
+// `#[derive(horsies_core_derive::EventSchema)]` names `::horsies_core::events`;
+// this crate reaches them through its own name.
 extern crate self as horsies_core;
 
 // Internal modules (merged from formerly separate crates).
@@ -15,6 +16,8 @@ pub mod catalog;
 pub mod core;
 pub mod db;
 pub mod error_catalog;
+// The public lifecycle events of the core worker and their wire codec.
+pub mod events;
 pub mod failure_cause;
 pub mod handle;
 pub mod log_targets;
