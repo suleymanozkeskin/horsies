@@ -22,7 +22,7 @@ use crate::test_support::telemetry::series_of;
 use crate::worker::executor::protocol::{
     encode_parent_frame, ChildConnection, ChildFrame, ChildKind, ChildLogLevel, ChildProgram,
     DatabaseUrl, HandlerChild, HandlerCounts, HandlerCountsList, HandlerName, HandlerStatsFrame,
-    ParentFrame, ProcessId, ReadyFrame, RssMb, TaskSendPool, HEADER_BYTES,
+    ParentFrame, ProcessId, ReadyFrame, RssMb, SpanReadCounts, TaskSendPool, HEADER_BYTES,
 };
 use crate::worker::executor::slots::scripted::{
     boot_any_kind, read_bytes, send, shell, take_init, ticket, tickets, until, ScriptCount,
@@ -474,6 +474,14 @@ async fn a_child_that_does_not_exit_is_killed_after_the_stop_exit_bound() {
 // ---------------------------------------------------------------------------
 
 fn stats(handlers: &[(&str, u64, u64)], rss_mib: f64) -> ChildFrame {
+    stats_with_reads(handlers, SpanReadCounts::default(), rss_mib)
+}
+
+fn stats_with_reads(
+    handlers: &[(&str, u64, u64)],
+    span_reads: SpanReadCounts,
+    rss_mib: f64,
+) -> ChildFrame {
     ChildFrame::HandlerStats(HandlerStatsFrame {
         handlers: HandlerCountsList::new(
             handlers
@@ -486,6 +494,7 @@ fn stats(handlers: &[(&str, u64, u64)], rss_mib: f64) -> ChildFrame {
                 .collect(),
         )
         .unwrap(),
+        span_reads,
         rss: crate::worker::executor::protocol::RssReading::Mb(RssMb::new(rss_mib).unwrap()),
     })
 }
@@ -530,6 +539,49 @@ async fn handler_stats_frames_give_the_handler_counters_and_the_rss() {
             SampleValue::Gauge(12.0 * 1_048_576.0)
         )]
     );
+    let (stopped, _took) = child.stop().await;
+    assert_eq!(stopped, HandlerChildStopped::Ended);
+}
+
+/// The span read counts of the `handler_stats` frames are totals: each
+/// reason of `horsies.spans.worker_ended.read_failures` gets the growth of
+/// its total.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handler_stats_frames_give_the_span_read_failures() {
+    let dir = TestDir::new();
+    let script = format!(
+        "{}{}{}{}",
+        boot_any_kind(),
+        send(&[stats_with_reads(
+            &[],
+            SpanReadCounts {
+                read_failed: 2,
+                not_read: 0,
+            },
+            10.0
+        )]),
+        send(&[stats_with_reads(
+            &[],
+            SpanReadCounts {
+                read_failed: 3,
+                not_read: 4,
+            },
+            10.0
+        )]),
+        record_frames(&dir),
+    );
+    let child = Harness::start(shell(&script), bounds(), SentEventTypes::all(), 64);
+
+    let registry = Arc::clone(&child.registry);
+    until("the second stats frame is recorded", STATE_WAIT, || {
+        series_of(&registry, MetricId::SpanReadFailures)
+            == vec![
+                (vec!["not_read".to_owned()], SampleValue::Counter(4)),
+                (vec!["read_failed".to_owned()], SampleValue::Counter(3)),
+            ]
+    })
+    .await;
+
     let (stopped, _took) = child.stop().await;
     assert_eq!(stopped, HandlerChildStopped::Ended);
 }

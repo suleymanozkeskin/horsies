@@ -3075,7 +3075,7 @@ class HandlerStatsFrame:
     """The counts of each event handler of a handler child since it started, each name once,
     and its RSS.
     """
-    def __init__(self, *, handlers: list[HandlerCounts], rss_mb: float | Literal['UNREADABLE']) -> None: ...
+    def __init__(self, *, handlers: list[HandlerCounts], span_read_failed: int, span_not_read: int, rss_mb: float | Literal['UNREADABLE']) -> None: ...
 
 
 @final

@@ -19,10 +19,11 @@ use super::{
     HandlerChildMetrics, StopSignal, EVENT_BATCH_MAX, HANDLER_MAILBOX_FRAMES, STOP_FLUSH_PASSES,
 };
 use crate::events::Event;
-use crate::telemetry::labels::{EventDropCause, LabelValue};
+use crate::telemetry::labels::{EventDropCause, LabelValue, SpanReadFailure};
 use crate::telemetry::worker::{EventBatch, EventQueue};
 use crate::worker::executor::protocol::{
-    ChildFrame, EventBatch as FrameEvents, EventsFrame, HandlerStatsFrame, ParentFrame, WireEvent,
+    ChildFrame, EventBatch as FrameEvents, EventsFrame, HandlerStatsFrame, ParentFrame,
+    SpanReadCounts, WireEvent,
 };
 use crate::worker::executor::slots::booting::lost_after_kill;
 use crate::worker::executor::supervisor::{ChildChannel, ChildLost, FrameWait, CHANNEL_LOST_GRACE};
@@ -435,25 +436,45 @@ struct Totals {
     dropped: u64,
 }
 
-/// The totals that the current child reported last, by the position of the
-/// handler's label value: at most the declared handlers and the fallback.
-/// A frame holds totals since the child started, so a counter gets the
-/// growth of each total; a total below the last one adds nothing.
+/// The totals that the current child reported last: those of each handler,
+/// by the position of the handler's label value (at most the declared
+/// handlers and the fallback), and those of the span reads. A frame holds
+/// totals since the child started, so a counter gets the growth of each
+/// total; a total below the last one adds nothing.
 #[derive(Debug, Default)]
-struct HandlerTotals(HashMap<u32, Totals>);
+struct HandlerTotals {
+    handlers: HashMap<u32, Totals>,
+    span_reads: SpanReadCounts,
+}
 
 impl HandlerTotals {
-    /// Add the growth of each total of `stats` to the handler counters, and
-    /// set the RSS of the child.
+    /// Add the growth of each total of `stats` to the handler counters and
+    /// to `horsies.spans.worker_ended.read_failures`, and set the RSS of the
+    /// child.
     fn record(&mut self, metrics: &HandlerChildMetrics, stats: &HandlerStatsFrame) {
+        let reads = stats.span_reads;
+        let last = self.span_reads;
+        let _recorded = metrics.span_read_failures.add(
+            (SpanReadFailure::ReadFailed,),
+            reads.read_failed.saturating_sub(last.read_failed),
+        );
+        let _recorded = metrics.span_read_failures.add(
+            (SpanReadFailure::NotRead,),
+            reads.not_read.saturating_sub(last.not_read),
+        );
+        self.span_reads = reads;
         for counts in stats.handlers.handlers() {
             let label = metrics.handlers.value_of(counts.handler.as_str());
-            let last = self.0.get(&label.position()).copied().unwrap_or_default();
+            let last = self
+                .handlers
+                .get(&label.position())
+                .copied()
+                .unwrap_or_default();
             let errors = counts.errors.saturating_sub(last.errors);
             let dropped = counts.dropped.saturating_sub(last.dropped);
             let _recorded = metrics.handler_errors.add((label,), errors);
             let _recorded = metrics.handler_dropped.add((label,), dropped);
-            let _previous = self.0.insert(
+            let _previous = self.handlers.insert(
                 label.position(),
                 Totals {
                     errors: counts.errors,

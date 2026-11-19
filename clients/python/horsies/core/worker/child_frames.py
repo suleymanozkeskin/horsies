@@ -451,12 +451,30 @@ class HandlerCounts:
 
 
 @dataclass(frozen=True, slots=True)
+class SpanReadCounts:
+    """The spans of attempts of workflow tasks that the worker ended, which
+    the handler child made with no workflow node since it started:
+    ``read_failed`` when the node read ran and failed, ``not_read`` when it
+    did not run (the queue of the reader was full, or the child stopped
+    first)."""
+
+    read_failed: int
+    not_read: int
+
+
+NO_SPAN_READS: Final = SpanReadCounts(read_failed=0, not_read=0)
+"""The span read counts of a child that makes no span of an attempt that
+the worker ended."""
+
+
+@dataclass(frozen=True, slots=True)
 class HandlerStatsFrame:
     """The counts of each event handler of a handler child, each name once,
-    at most ``MAX_EVENT_HANDLERS``, and the RSS of the child. Each frame
-    holds the totals since the child started."""
+    at most ``MAX_EVENT_HANDLERS``, the counts of its span reads, and the RSS
+    of the child. Each frame holds the totals since the child started."""
 
     handlers: tuple[HandlerCounts, ...]
+    span_reads: SpanReadCounts
     rss: RssReading
 
 
@@ -746,7 +764,7 @@ def core_child_frame(frame: ChildFrame) -> CoreChildFrame:
             return core.LoopBlockedFrame(
                 culprit=_culprit(culprit), blocked_ms=blocked_ms, location=where,
             )
-        case HandlerStatsFrame(handlers=handlers, rss=rss):
+        case HandlerStatsFrame(handlers=handlers, span_reads=span_reads, rss=rss):
             return core.HandlerStatsFrame(
                 handlers=[
                     core.HandlerCounts(
@@ -756,6 +774,8 @@ def core_child_frame(frame: ChildFrame) -> CoreChildFrame:
                     )
                     for counts in handlers
                 ],
+                span_read_failed=span_reads.read_failed,
+                span_not_read=span_reads.not_read,
                 rss_mb=_rss(rss),
             )
         case _ as unreachable:
