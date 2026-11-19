@@ -1523,6 +1523,39 @@ unless it starts with "Added".
   Before, only the `#[task]` attribute checked a built-in or reserved name.
   `CheckPassed::declared_error_codes()` returns them by task name, and the
   success text of `check` lists them. `CheckPassed` is no longer `Copy`.
+- **Added: the feature `otel`** (`horsies::otel`), with the global
+  providers and the global propagator of `opentelemetry` 0.33. A task send
+  is one span of kind PRODUCER, `send <task_name>`, around every database
+  call of the send, and a workflow start is one span
+  `start <workflow_name>`; the send hands the core the carrier that the
+  propagator injects for that span, with its trace id. A send records
+  `horsies.task.sent` (task, queue, result `ok` or the send error code)
+  and `horsies.task.send.duration` (queue). In a worker child each task
+  body runs inside a `tracing` span `run <task_name>` of kind CONSUMER
+  (target `horsies::attempt`), whose OpenTelemetry parent is the context
+  extracted from the stored carrier, through `tracing-opentelemetry` 0.34;
+  a span that the body opens is its child. It has the attributes of the
+  Python attempt span: the task id and name, `horsies.task.attempt`, the
+  execution class, `horsies.queue` and `messaging.destination.name`, the
+  worker id, and, for a task that a workflow node links,
+  `horsies.workflow.id`, `horsies.workflow.node` and
+  `horsies.workflow.root_id`. The task id, the task name and the attempt
+  are fields of the span, so each log record of the body carries them. Its
+  status is OK for a returned value, and ERROR with `error.type` for an
+  error, a panic or a run past its deadline. `horsies::otel::layer()` is
+  the `tracing-opentelemetry` layer on the global tracer provider;
+  `horsies::cli::run` adds it to its subscriber, and a binary that installs
+  its own subscriber adds it there. Without the feature no OpenTelemetry
+  crate is compiled, and each task body still runs inside the same
+  `tracing` span `run` (target `horsies::attempt`,
+  `horsies::ATTEMPT_SPAN_TARGET`) with `horsies.task.id`,
+  `horsies.task.name` and `horsies.task.attempt`, so the log records of the
+  body carry them; `horsies::cli::run` keeps that span at every
+  `--loglevel` in both builds.
+- **Added: `cli::run_with_log_format(app, LogFormat::Json)`**: the runner
+  and each worker child write one JSON object per log record, with the
+  event's fields at the top level and the record's spans with their
+  fields. `cli::run(app)` keeps the text format.
 
 ## 0.7.0 — 2026-11-15
 

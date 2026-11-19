@@ -528,7 +528,8 @@ jobs:
 
       # Each feature of the client has code of its own: `cli` (the default)
       # holds horsies::cli::run and the shipped binary, `web` the axum mount,
-      # `tokio-postgres` and `sqlx` the rerun adapters.
+      # `tokio-postgres` and `sqlx` the rerun adapters, `otel` the
+      # OpenTelemetry spans and producer metrics.
       - name: Check the client with default features
         run: cargo check -p horsies --all-targets
 
@@ -540,6 +541,10 @@ jobs:
 
       - name: Check the client with the sqlx feature
         run: cargo check -p horsies --all-targets --features sqlx
+
+      # `otel` without `cli`: the spans and metrics need no CLI runner.
+      - name: Check the client with the otel feature and no default features
+        run: cargo check -p horsies --all-targets --no-default-features --features otel
 
       - name: Check the client with no default features
         run: cargo check -p horsies --all-targets --no-default-features
@@ -602,11 +607,12 @@ jobs:
           DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies
         run: cargo test -p horsies
 
-      # The rerun adapters run against the server of DATABASE_URL.
+      # The rerun adapters and the carrier of a traced send run against the
+      # server of DATABASE_URL.
       - name: Test the client with every feature
         env:
           DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies
-        run: cargo test -p horsies --features web,tokio-postgres,sqlx
+        run: cargo test -p horsies --features web,tokio-postgres,sqlx,otel
 
   # horsies-codegen renders the catalog modules under clients/python/horsies/_catalog/
   # and the stubs clients/python/horsies/_core.pyi from horsies-core; the rendered
