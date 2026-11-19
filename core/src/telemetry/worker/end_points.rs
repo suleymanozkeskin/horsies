@@ -16,7 +16,7 @@ use super::{TelemetryOn, WorkerTelemetry};
 use crate::core::task::error::{error_code_label, OperationalErrorCode, TaskErrorCode};
 use crate::events::{
     self, AttemptEnded, AttemptErrorCode, AttemptNotStarted, AttemptRecord, AttemptRecorded,
-    AttemptStart, ChildResult, Event, RetryCount, RunTrace, WorkerDecision,
+    AttemptStart, ChildResult, RetryCount, RunTrace, WorkerDecision,
 };
 use crate::telemetry::declared::ErrorCodeValue;
 use crate::telemetry::labels::ReleaseReason;
@@ -263,15 +263,13 @@ impl TelemetryOn {
 
     fn not_started(&self, task: &ClaimedTask, reason: StopReason) {
         let _recorded = self.metrics.starts_refused.add((reason,), 1);
-        let _emitted = self.emit(|| {
-            Event::AttemptNotStarted(AttemptNotStarted {
-                at: Utc::now(),
-                task_id: task.task_id,
-                task_name: events::TaskName::cut(&task.task_name),
-                queue: events::QueueName::cut(&task.queue_name),
-                attempt: task.retry.attempt(),
-                reason,
-            })
+        let _emitted = self.emit(|| AttemptNotStarted {
+            at: Utc::now(),
+            task_id: task.task_id,
+            task_name: events::TaskName::cut(&task.task_name),
+            queue: events::QueueName::cut(&task.queue_name),
+            attempt: task.retry.attempt(),
+            reason,
         });
     }
 
@@ -321,17 +319,15 @@ impl TelemetryOn {
                 ErrorCodeValue::NO_ERROR_CODE
             }
         };
-        let _emitted = self.emit(|| {
-            Event::AttemptEnded(AttemptEnded {
-                at: Utc::now(),
-                task_id: task.task_id,
-                task_name: events::TaskName::cut(&task.task_name),
-                queue: events::QueueName::cut(&task.queue_name),
-                execution: task.execution,
-                attempt: task.retry.attempt(),
-                end: event_end(ran, &task.trace, placed),
-                run_duration,
-            })
+        let _emitted = self.emit(|| AttemptEnded {
+            at: Utc::now(),
+            task_id: task.task_id,
+            task_name: events::TaskName::cut(&task.task_name),
+            queue: events::QueueName::cut(&task.queue_name),
+            execution: task.execution,
+            attempt: task.retry.attempt(),
+            end: event_end(ran, &task.trace, placed),
+            run_duration,
         });
         EndNoted::Seen { seen, error_code }
     }
@@ -380,16 +376,14 @@ impl TelemetryOn {
                 return;
             }
         };
-        let _emitted = self.emit(|| {
-            Event::AttemptRecorded(AttemptRecorded {
-                at: Utc::now(),
-                task_id: task.task_id,
-                task_name: events::TaskName::cut(&task.task_name),
-                queue: events::QueueName::cut(&task.queue_name),
-                attempt: task.retry.attempt(),
-                record,
-                record_duration,
-            })
+        let _emitted = self.emit(|| AttemptRecorded {
+            at: Utc::now(),
+            task_id: task.task_id,
+            task_name: events::TaskName::cut(&task.task_name),
+            queue: events::QueueName::cut(&task.queue_name),
+            attempt: task.retry.attempt(),
+            record,
+            record_duration,
         });
     }
 }
