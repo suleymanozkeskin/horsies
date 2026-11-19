@@ -32,11 +32,12 @@ jobs:
       - name: Run unit tests
         run: uv run pytest clients/python/tests/unit/ -v --tb=short
 
-      # The unit tests of the cross-client harnesses in the top-level tests/:
-      # the perf harness and the stored-form vectors. They run from the
-      # repository root with the pytest settings of the Python project.
+      # The unit tests of the cross-client harnesses in crossclient/:
+      # the perf harness, the stored-form vectors and the package root. They
+      # run from the repository root with the pytest settings of the Python
+      # project.
       - name: Run the unit tests of the cross-client harnesses
-        run: uv run pytest -c clients/python/pyproject.toml --rootdir . tests/perf/ tests/test_stored_form_*.py -v --tb=short
+        run: uv run pytest -c clients/python/pyproject.toml --rootdir . crossclient/perf/ crossclient/test_*.py -v --tb=short
 
   integration:
     runs-on: ubuntu-latest
@@ -342,7 +343,7 @@ jobs:
 
   # The end-to-end crates of the Rust client (clients/rust/tests/worker,
   # support and queue_mismatch) and the parity runs with the Python client
-  # (tests/parity with the binary of clients/rust/tests/parity), on
+  # (crossclient/parity with the binary of clients/rust/tests/parity), on
   # PostgreSQL 16. The test worker binary is the worker, its children and the
   # scheduler; each test has a database of its own on the server of
   # HORSIES_TEST_DATABASE_URL, and so has each side of a parity run.
@@ -398,13 +399,13 @@ jobs:
       - name: Build the Rust side of the parity runs
         run: cargo build -p horsies-parity-tests
 
-      # tests/parity/snapshot holds the unit and integration tests of the
+      # crossclient/parity/snapshot holds the unit and integration tests of the
       # snapshot tool; tests.yml runs them.
       - name: Parity runs
         env:
           HORSIES_TEST_DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies
           HORSIES_PARITY_RUST_BIN: ${{ github.workspace }}/target/debug/horsies-parity
-        run: uv run pytest -c clients/python/pyproject.toml --rootdir . tests/parity --ignore=tests/parity/snapshot -v --tb=short
+        run: uv run pytest -c clients/python/pyproject.toml --rootdir . crossclient/parity --ignore=crossclient/parity/snapshot -v --tb=short
 
   # The Rust lane through the PgBouncer fixture of the Python client
   # (clients/python/tests/fixtures/pgbouncer/: PostgreSQL 18 on 15432, pools

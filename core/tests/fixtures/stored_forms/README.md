@@ -13,7 +13,7 @@ path:
 
 | Side | Tests | Path to this folder |
 |---|---|---|
-| Python | `tests/test_stored_form_*.py`, helpers in `tests/stored_form_vectors.py` | `VECTORS_DIR` |
+| Python | `crossclient/test_stored_form_*.py`, helpers in `crossclient/stored_form_vectors.py` | `VECTORS_DIR` |
 | Core | `core/src/stored_form_vectors/` | `CARGO_MANIFEST_DIR/tests/fixtures/stored_forms` |
 | Rust client | `clients/rust/horsies/src/stored_form_vectors/` | `CARGO_MANIFEST_DIR/../../../core/tests/fixtures/stored_forms` |
 

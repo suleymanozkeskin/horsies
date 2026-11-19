@@ -54,7 +54,7 @@ KEPT_FILES: Final = (
         'this check names the old paths',
     ),
     KeptFile(
-        'tests/perf/releases/**',
+        'crossclient/perf/releases/**',
         'the release comparison patches and cites the v0.7.0 checkout, whose '
         'package is at horsies/',
     ),
