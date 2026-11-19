@@ -42,7 +42,8 @@ string validates at runtime, but strict type checkers reject it — wrap with
 | `exception_mapper` | `ExceptionMapper` | `{}` | Global exception-to-error-code mapping |
 | `default_unhandled_error_code` | `str` | `"UNHANDLED_EXCEPTION"` | Must be `UPPER_SNAKE_CASE` |
 | `resend_on_transient_err` | `bool` | `False` | Auto-retry transient ENQUEUE_FAILED |
-| `tracing` | `OtelTracing \| NoTracing` | `NoTracing()` | `OtelTracing()`: spans of the sends and producer metrics through the OpenTelemetry API; needs `horsies[otel]`, else HRS-220. `NoTracing()` imports no `opentelemetry` |
+| `tracing` | `OtelTracing \| NoTracing` | `NoTracing()` | `OtelTracing()`: spans of the sends and of each attempt, and producer metrics, through the OpenTelemetry API; `parentage=ChildOfSend()` (default) or `LinkedToSend()`; needs `horsies[otel]`, else HRS-220. `NoTracing()` imports no `opentelemetry` |
+| `log_format` | `TextLogs \| JsonLogs` | `TextLogs()` | Format of the horsies log records; `JsonLogs()`: one JSON object per line |
 | `worker_profiles` | `dict[str, WorkerProfile]` | `{}` | Named worker settings; `horsies worker <app> --profile <name>` runs one. See [Worker profiles](#worker-profiles) |
 
 ### Validation Rules

@@ -52,7 +52,9 @@ from horsies.core.worker.run_return import (
     CoreStoppedBeforeStart,
     MarkerDone,
     MarkerEnd,
+    StartedRunning,
     StoppedBeforeRunning,
+    run_workflow_of,
 )
 
 logger = get_logger('worker')
@@ -129,8 +131,9 @@ async def _confirm_ownership_and_set_running(
     claimed_at: datetime,
     *,
     orphan_self_heal: bool,
-) -> StoppedBeforeRunning | None | _WorkflowResumedBeforeStart | CoreStoppedBeforeStart:
-    """Set the row RUNNING. None: started.
+) -> StartedRunning | StoppedBeforeRunning | _WorkflowResumedBeforeStart | CoreStoppedBeforeStart:
+    """Set the row RUNNING. ``StartedRunning``: started, at the time that
+    the start write returned.
 
     Same contract as the sync function of this name in ``child_runner``. A
     failure record of the core and a ``CoreError`` of the core boundary
@@ -171,7 +174,7 @@ async def _set_running(
     claimed_at: datetime,
     *,
     orphan_self_heal: bool,
-) -> StoppedBeforeRunning | None | _WorkflowResumedBeforeStart:
+) -> StartedRunning | StoppedBeforeRunning | _WorkflowResumedBeforeStart:
     """One attempt of ``_confirm_ownership_and_set_running``: one
     ``horsies_start_attempt`` statement through ``handle``, then the miss
     path, each within the bound of the attempt in the core. The function
@@ -194,8 +197,8 @@ async def _set_running(
         deadline_in_ms=None,
     )
     match record:
-        case core.AttemptStarted():
-            return None
+        case core.AttemptStarted(started_at=started_at, workflow=workflow):
+            return StartedRunning(started_at, run_workflow_of(workflow))
         case core.AttemptMissed(reason=reason):
             return await _after_missed_start(
                 handle,
@@ -223,10 +226,10 @@ async def confirm_until_not_resumed(
     claimed_at: datetime,
     *,
     orphan_self_heal: bool,
-) -> StoppedBeforeRunning | None | CoreStoppedBeforeStart:
+) -> StartedRunning | StoppedBeforeRunning | CoreStoppedBeforeStart:
     """Run the RUNNING transition, again when a resume came before the stop.
 
-    None: the task starts. ``StoppedBeforeRunning`` or
+    ``StartedRunning``: the task starts. ``StoppedBeforeRunning`` or
     ``CoreStoppedBeforeStart``: the task stops before user code.
     Same contract as ``_confirm_until_not_resumed`` in ``child_runner``.
     """
@@ -240,7 +243,7 @@ async def confirm_until_not_resumed(
         match result:
             case _WorkflowResumedBeforeStart():
                 continue
-            case None | StoppedBeforeRunning() | CoreStoppedBeforeStart():
+            case StartedRunning() | StoppedBeforeRunning() | CoreStoppedBeforeStart():
                 return result
             case _ as unreachable:
                 assert_never(unreachable)

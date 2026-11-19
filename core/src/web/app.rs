@@ -87,9 +87,14 @@ pub(crate) fn build_router(state: WebState) -> Router {
         .merge(action_routes)
         .fallback(api_not_found)
         .layer(middleware::from_fn(log_invalid_input));
-    let metrics = Router::new()
-        .route("/metrics", get(read_fleet_metrics))
-        .route_layer(middleware::from_fn_with_state(state.clone(), view_guard));
+    // The guard wraps the GET route only (`MethodRouter::route_layer`):
+    // another method answers 405 without a view verdict, as `route_access`
+    // marks it public. `Router::route_layer` would wrap the 405 too.
+    let metrics = Router::new().route(
+        "/metrics",
+        get(read_fleet_metrics)
+            .route_layer(middleware::from_fn_with_state(state.clone(), view_guard)),
+    );
     Router::new()
         .nest("/api", api)
         .merge(metrics)
@@ -242,10 +247,10 @@ async fn read_meta(State(state): State<WebState>, request: Request) -> Response 
     .into_response()
 }
 
-/// `GET /metrics`: the Prometheus text of the fleet collector. The first
-/// request starts its reads.
+/// `GET /metrics`: the Prometheus text of the fleet collector, after a read
+/// of the fleet state when one is due ([`WebFleetMetrics::render`]).
 async fn read_fleet_metrics(State(state): State<WebState>) -> Response {
-    metrics_response(state.fleet_metrics.render())
+    metrics_response(state.fleet_metrics.render().await)
 }
 
 async fn serve_spa(State(state): State<WebState>, request: Request) -> Response {

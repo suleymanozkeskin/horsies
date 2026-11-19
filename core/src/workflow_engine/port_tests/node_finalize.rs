@@ -143,6 +143,7 @@ async fn run_node_a(pool: &TestPool, workflow_id: Uuid) -> RunningNode {
             },
             options: read_stored_options(task_options.as_deref()),
             trace: crate::events::RunTrace::NoCarrier,
+            trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
         },
     }
 }
@@ -206,6 +207,7 @@ async fn finalize_on(
             broker,
             &TestChildSpecs::empty(),
             claimed.task_id,
+            claimed.log(),
             &claimed.queue_name,
             claimed.kind.is_workflow_task(),
             capacity_notified,
@@ -581,6 +583,7 @@ async fn phase_two(
         &broker,
         &TestChildSpecs::empty(),
         task_id,
+        crate::worker::executor::slots::AttemptLog::FIRST_UNTRACED,
         queue_name,
         is_workflow_task,
         false,
@@ -783,6 +786,7 @@ async fn a_phase_two_lost_after_its_step_ran_commits_neither_the_wake_nor_the_no
         &proxied_broker,
         &TestChildSpecs::empty(),
         task_id,
+        crate::worker::executor::slots::AttemptLog::FIRST_UNTRACED,
         SEEDED_NODE_QUEUE,
         true,
         false,

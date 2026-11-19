@@ -1,11 +1,15 @@
+import json
 import logging
 import os
 import sys
 import threading
-from datetime import datetime
-from typing import Final, TextIO
+from contextvars import ContextVar, Token
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Final, TextIO, assert_never
 
 from horsies._core import refresh_log_levels
+from horsies.core.models.log_format import JsonLogs, TextLogs
 
 # Library convention: NullHandler so logs are silent by default.
 # The application (or horsies CLI) configures handlers.
@@ -161,21 +165,203 @@ def _should_use_color(stream: object) -> bool:
     return bool(callable(isatty) and isatty())
 
 
-def configure_logging(level: int = logging.INFO) -> None:
-    """Configure horsies logging on stderr; color only when the sink is a TTY.
+@dataclass(frozen=True, slots=True)
+class SpanIds:
+    """The ids of the span of a running task, as lowercase hex text:
+    ``trace_id`` 32 characters, ``span_id`` 16."""
 
-    Called by the CLI entrypoint and child worker processes. Color is gated by
-    ``_should_use_color`` (TTY / ``NO_COLOR`` / ``FORCE_COLOR``). Library users
-    should configure the 'horsies' logger via standard logging.
+    trace_id: str
+    span_id: str
 
-    The stderr handler drops ``horsies.sql`` records while ``horsies.sql``
-    holds the stdout handler of ``enable_statement_echo``
-    (``_EchoedStatementFilter``), so each statement shows once, on stdout.
+
+@dataclass(frozen=True, slots=True)
+class NoSpanIds:
+    """The running task has no span: tracing is off, or the span did not
+    open, or the SDK gave a span that is not valid."""
+
+
+@dataclass(frozen=True, slots=True)
+class RunningTask:
+    """The task whose body runs in this context, in a worker child, and the
+    number of its attempt, from 1."""
+
+    task_id: str
+    task_name: str
+    attempt: int
+    span: SpanIds | NoSpanIds
+
+
+@dataclass(frozen=True, slots=True)
+class NoRunningTask:
+    """No task body runs in this context."""
+
+
+_RUNNING_TASK: ContextVar[RunningTask | NoRunningTask] = ContextVar(
+    'horsies_running_task',
+    default=NoRunningTask(),
+)
+
+
+def running_task() -> RunningTask | NoRunningTask:
+    """The task whose body runs in the current context. Reads a context
+    variable only."""
+    return _RUNNING_TASK.get()
+
+
+def enter_running_task(task: RunningTask) -> Token[RunningTask | NoRunningTask]:
+    """Make ``task`` the running task of the current context, until
+    ``leave_running_task`` with the returned token, in the same context."""
+    return _RUNNING_TASK.set(task)
+
+
+def leave_running_task(token: Token[RunningTask | NoRunningTask]) -> None:
+    """Restore the running task that ``enter_running_task`` replaced."""
+    _RUNNING_TASK.reset(token)
+
+
+TASK_CONTEXT_FIELDS: Final = ('task_id', 'task_name', 'attempt', 'trace_id', 'span_id')
+"""The record attributes that ``TaskContextFilter`` sets."""
+
+
+class TaskContextFilter(logging.Filter):
+    """Puts the task context of the current context on each record.
+
+    Inside the body of a task in a worker child, the record gets
+    ``task_id``, ``task_name``, ``attempt`` (the number of the attempt, from
+    1), and, when the attempt has a span, ``trace_id`` and ``span_id``
+    (lowercase hex). An attribute without a value is ``None``, so a format
+    string can name every field. A record that already has one of these
+    attributes keeps it: the records of the core carry ``task_id``,
+    ``attempt`` and ``trace_id`` of their own.
+
+    ``configure_logging`` adds it to the horsies handler. Add it to a handler
+    of your own to get the same attributes there. It never drops a record.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Set each field of ``TASK_CONTEXT_FIELDS`` that ``record`` does
+        not have. Returns ``True``: the record passes."""
+        for name, value in _context_values(running_task()):
+            if name not in record.__dict__:
+                setattr(record, name, value)
+        return True
+
+
+def _context_values(
+    task: RunningTask | NoRunningTask,
+) -> tuple[tuple[str, str | int | None], ...]:
+    """The value of each name of ``TASK_CONTEXT_FIELDS`` for ``task``. Pure."""
+    values: tuple[str | int | None, ...]
+    match task:
+        case RunningTask(task_id=task_id, task_name=task_name, attempt=attempt, span=span):
+            trace_id, span_id = _span_values(span)
+            values = (task_id, task_name, attempt, trace_id, span_id)
+        case NoRunningTask():
+            values = (None, None, None, None, None)
+        case _ as unreachable:
+            assert_never(unreachable)
+    return tuple(zip(TASK_CONTEXT_FIELDS, values, strict=True))
+
+
+def _span_values(span: SpanIds | NoSpanIds) -> tuple[str | None, str | None]:
+    """The trace id and the span id of ``span``, or ``None`` for each. Pure."""
+    match span:
+        case SpanIds(trace_id=trace_id, span_id=span_id):
+            return trace_id, span_id
+        case NoSpanIds():
+            return None, None
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+JSON_LOG_CONTEXT_FIELDS: Final = ('task_id', 'task_name', 'attempt', 'trace_id', 'span_id')
+"""The context keys of a JSON log line, read from the record attributes."""
+
+
+class JsonLogsFormatter(logging.Formatter):
+    """One JSON object per record, on one line, with the same keys in every
+    record:
+
+    - ``ts``: the time of the record, ISO 8601 in UTC, in microseconds;
+    - ``level``, ``logger``, ``message``, ``process`` (the pid);
+    - ``task_id``, ``task_name``, ``attempt``, ``trace_id``, ``span_id``:
+      the record attributes of these names (``TaskContextFilter``, or the
+      fields of a core record), ``null`` when the record has none;
+    - ``exc``: the traceback text of the record's exception, or ``null``.
+
+    A context value that is not a text or an integer is written as its
+    text. The output is ASCII: other characters are escaped.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        """The JSON line of ``record``, with no newline."""
+        line: dict[str, object] = {
+            'ts': datetime.fromtimestamp(record.created, tz=UTC).isoformat(
+                timespec='microseconds',
+            ),
+            'level': record.levelname,
+            'logger': record.name,
+            'message': record.getMessage(),
+            'process': record.process,
+        }
+        for name in JSON_LOG_CONTEXT_FIELDS:
+            line[name] = _json_context_value(record.__dict__.get(name))
+        line['exc'] = self._exception_text(record)
+        return json.dumps(line, separators=(',', ':'), allow_nan=False)
+
+    def _exception_text(self, record: logging.LogRecord) -> str | None:
+        match record.exc_info:
+            case None | (None, None, None):
+                return None
+            case exc_info:
+                return self.formatException(exc_info)
+
+
+def _json_context_value(value: object) -> str | int | None:
+    """A record attribute as a JSON value: a text, an integer or ``None`` as
+    it is, any other value as its text. Pure."""
+    match value:
+        case None | str() | int():
+            return value
+        case _:
+            return str(value)
+
+
+TEXT_LOGS: Final = TextLogs()
+"""The default log format."""
+
+
+def configure_logging(
+    level: int = logging.INFO,
+    *,
+    log_format: TextLogs | JsonLogs = TEXT_LOGS,
+) -> None:
+    """Configure horsies logging on stderr, in ``log_format``.
+
+    Called by the CLI entrypoint and child worker processes, once before the
+    app is loaded and once with the app's ``AppConfig.log_format``. Library
+    users should configure the 'horsies' logger via standard logging.
+
+    - ``TextLogs``: ``ColoredFormatter``; color only when the sink is a TTY
+      (``_should_use_color``: TTY / ``NO_COLOR`` / ``FORCE_COLOR``).
+    - ``JsonLogs``: ``JsonLogsFormatter``, with no color.
+
+    The handler has ``TaskContextFilter``. It drops ``horsies.sql`` records
+    while ``horsies.sql`` holds the stdout handler of
+    ``enable_statement_echo`` (``_EchoedStatementFilter``), so each statement
+    shows once, on stdout. A second call replaces the handler of the first.
     """
     root = logging.getLogger('horsies')
     root.handlers.clear()
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(ColoredFormatter(use_color=_should_use_color(sys.stderr)))
+    match log_format:
+        case TextLogs():
+            handler.setFormatter(ColoredFormatter(use_color=_should_use_color(sys.stderr)))
+        case JsonLogs():
+            handler.setFormatter(JsonLogsFormatter())
+        case _ as unreachable:
+            assert_never(unreachable)
+    handler.addFilter(TaskContextFilter())
     handler.addFilter(_EchoedStatementFilter())
     root.addHandler(handler)
     root.setLevel(level)

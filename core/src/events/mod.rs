@@ -64,7 +64,7 @@ pub use crate::worker::executor::protocol::StopReason;
 
 /// The version of the event contract: its event types, their fields and the
 /// closed types that the fields hold.
-pub const EVENT_CONTRACT_VERSION: u32 = 2;
+pub const EVENT_CONTRACT_VERSION: u32 = 3;
 
 /// The event contract, as `horsies-codegen` renders it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,9 +128,17 @@ pub struct EventEncodeError {
     pub refusal: EncodeRefusal,
 }
 
-/// Defines the union [`Event`], the list [`EVENT_TYPES`] and the dispatch of
-/// the codec from one list of event types, so that no event type is in one
-/// of them and not in the others.
+/// An event type of the union [`Event`], with its name. A point of the
+/// worker builds one of these; the worker builds it only when its handler
+/// child takes events of its type.
+pub trait UnionEvent: EventRecord + Into<Event> {
+    /// The name of the type: its wire tag.
+    const NAME: EventTypeName;
+}
+
+/// Defines the union [`Event`], the names [`EventTypeName`], the list
+/// [`EVENT_TYPES`] and the dispatch of the codec from one list of event
+/// types, so that no event type is in one of them and not in the others.
 macro_rules! event_union {
     ($($event:ident,)+) => {
         /// One event of the contract. A handler subscribes to one event
@@ -141,6 +149,31 @@ macro_rules! event_union {
             $($event($event),)+
         }
 
+        /// The name of one event type: the tag of its wire form. A handler
+        /// takes the events of one type, which it names with this value.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub enum EventTypeName {
+            $($event,)+
+        }
+
+        impl EventTypeName {
+            /// Every event type name, in the order of [`Event`].
+            pub const ALL: &'static [EventTypeName] = &[$(Self::$event,)+];
+
+            /// The event type of this name.
+            pub fn event_type(self) -> EventType {
+                match self {
+                    $(Self::$event => <$event as EventRecord>::TYPE,)+
+                }
+            }
+        }
+
+        $(
+            impl UnionEvent for $event {
+                const NAME: EventTypeName = EventTypeName::$event;
+            }
+        )+
+
         /// The event types, in the order of [`Event`]. A client checks a
         /// handler's event type against this list.
         pub const EVENT_TYPES: &[EventType] = &[$(<$event as EventRecord>::TYPE,)+];
@@ -150,6 +183,13 @@ macro_rules! event_union {
             pub fn event_type(&self) -> EventType {
                 match self {
                     $(Self::$event(_) => <$event as EventRecord>::TYPE,)+
+                }
+            }
+
+            /// The name of the type of this event.
+            pub fn type_name(&self) -> EventTypeName {
+                match self {
+                    $(Self::$event(_) => EventTypeName::$event,)+
                 }
             }
         }

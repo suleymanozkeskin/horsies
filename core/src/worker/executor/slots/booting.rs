@@ -73,17 +73,25 @@ pub(super) async fn boot_child(slot: &BootSlot<'_>) -> Booted {
             (false, true) => return Booted::PoolFailed,
             (false, false) => {}
         }
+        let boot_began = tokio::time::Instant::now();
         let failure = match boot_attempt(slot).await {
             BootAttempt::Ready(channel, rss) => {
-                if let SlotPhase::Down(down) = board.phase(index) {
-                    tracing::warn!(
-                        slot = index,
-                        failed_boots = down.failed_boots.get(),
-                        cause = %down.cause,
-                        "{}",
-                        back_in_service_line(index, &down),
-                    );
-                }
+                let was_down = match board.phase(index) {
+                    SlotPhase::Down(down) => {
+                        tracing::warn!(
+                            slot = index,
+                            failed_boots = down.failed_boots.get(),
+                            cause = %down.cause,
+                            "{}",
+                            back_in_service_line(index, &down),
+                        );
+                        true
+                    }
+                    SlotPhase::Booting
+                    | SlotPhase::Serving { .. }
+                    | SlotPhase::Closing { .. }
+                    | SlotPhase::Retiring => false,
+                };
                 board.ready(
                     index,
                     ReadyChild {
@@ -91,6 +99,13 @@ pub(super) async fn boot_child(slot: &BootSlot<'_>) -> Booted {
                         rss,
                     },
                 );
+                let kind = board.class_of(index);
+                board
+                    .telemetry()
+                    .child_started(kind, index, channel.pid(), boot_began.elapsed());
+                if was_down {
+                    board.telemetry().slot_recovered(kind, index);
+                }
                 return Booted::Child(channel);
             }
             BootAttempt::Stopped => return Booted::PoolStopped,
@@ -231,7 +246,14 @@ fn record_slot_down(
         SlotPhase::Booting
         | SlotPhase::Serving { .. }
         | SlotPhase::Closing { .. }
-        | SlotPhase::Retiring => Utc::now(),
+        | SlotPhase::Retiring => {
+            // The slot goes down now: one `SlotDown`, not one per boot that
+            // fails while it is down.
+            board
+                .telemetry()
+                .slot_down(board.class_of(index), index, failure.cause);
+            Utc::now()
+        }
     };
     tracing::warn!(
         slot = index,
@@ -293,13 +315,15 @@ pub(super) fn outside_kill_line(index: usize, kills_in_a_row: u32) -> String {
 /// child, `<name>-shared-<index>` for a shared async child and
 /// `<name>-thread-<index>` for a shared thread child (Python `_Slot.init_for`,
 /// `_SharedSlot.init_for`). A Python child sets
-/// `multiprocessing.current_process().name` to it. Pure.
+/// `multiprocessing.current_process().name` to it. A handler child is not a
+/// slot: its template is a defect of the caller and crashes loud. Pure.
 pub(super) fn init_for_slot(template: &InitFrame, index: usize) -> InitFrame {
     let name = &template.process_name;
     let process_name = match template.child_kind {
         ChildKind::Isolated(_) => format!("{name}-{index}"),
         ChildKind::SharedAsync(_) => format!("{name}-shared-{index}"),
         ChildKind::SharedThread(_) => format!("{name}-thread-{index}"),
+        ChildKind::Handler(_) => panic!("a slot was given the init frame of a handler child"),
     };
     InitFrame {
         process_name,
@@ -419,7 +443,8 @@ async fn boot_reply(mut channel: ChildChannel, reply: FrameWait) -> BootAttempt 
             | ChildFrame::RunStuck(_)
             | ChildFrame::LeftoverCancel(_)
             | ChildFrame::LeftoverStuck(_)
-            | ChildFrame::LoopBlocked(_),
+            | ChildFrame::LoopBlocked(_)
+            | ChildFrame::HandlerStats(_),
         ) => {
             let lost = channel.discard_violating_child().await;
             let _ = channel.dispose().await;

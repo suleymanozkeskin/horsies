@@ -42,6 +42,7 @@ pub(super) fn task_send_pool_of(kind: ChildKind) -> TaskSendPool {
         ChildKind::Isolated(child) => child.task_send_pool,
         ChildKind::SharedAsync(child) => child.task_send_pool,
         ChildKind::SharedThread(child) => child.task_send_pool,
+        ChildKind::Handler(child) => child.task_send_pool,
     }
 }
 

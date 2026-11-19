@@ -26,12 +26,12 @@ use crate::worker::executor::slots::{
 };
 
 /// An event of slot `slot`.
-fn slot_event(slot: u32) -> Event {
-    Event::SlotRecovered(SlotRecovered {
+fn slot_event(slot: u32) -> SlotRecovered {
+    SlotRecovered {
         at: Utc::now(),
         child_kind: Execution::Isolated,
         slot: SlotIndex::try_from(slot).unwrap(),
-    })
+    }
 }
 
 fn capacity(events: usize) -> NonZeroUsize {
@@ -45,6 +45,7 @@ async fn an_offer_to_a_full_queue_drops_the_event_and_counts_queue_full() {
         Arc::clone(&registry),
         DeclaredCodesByTask::none(),
         capacity(2),
+        SentEventTypes::all(),
     )
     .expect("the telemetry of a worker registry");
 
@@ -86,6 +87,7 @@ async fn an_offer_after_the_reader_is_gone_drops_the_event_and_counts_child_down
         Arc::clone(&registry),
         DeclaredCodesByTask::none(),
         capacity(2),
+        SentEventTypes::all(),
     )
     .expect("the telemetry of a worker registry");
     drop(queue);
@@ -104,9 +106,13 @@ async fn an_offer_after_the_reader_is_gone_drops_the_event_and_counts_child_down
 
 #[tokio::test]
 async fn the_queue_ends_after_the_link_is_gone_and_its_events_are_read() {
-    let (on, mut queue) =
-        TelemetryOn::with_event_queue(worker_registry(), DeclaredCodesByTask::none(), capacity(4))
-            .expect("the telemetry of a worker registry");
+    let (on, mut queue) = TelemetryOn::with_event_queue(
+        worker_registry(),
+        DeclaredCodesByTask::none(),
+        capacity(4),
+        SentEventTypes::all(),
+    )
+    .expect("the telemetry of a worker registry");
     let _first = on.emit(|| slot_event(0));
     drop(on);
 
@@ -118,6 +124,63 @@ async fn the_queue_ends_after_the_link_is_gone_and_its_events_are_read() {
         "{first:?}"
     );
     assert!(matches!(second, EventBatch::LinkClosed), "{second:?}");
+}
+
+/// The worker sends its handler child only the event types that the child
+/// takes: an event of another type is not built and not counted as a drop.
+#[test]
+fn an_event_of_a_type_that_the_child_does_not_take_is_not_built() {
+    let registry = worker_registry();
+    let (on, mut queue) = TelemetryOn::with_event_queue(
+        Arc::clone(&registry),
+        DeclaredCodesByTask::none(),
+        capacity(4),
+        SentEventTypes::of([EventTypeName::SlotRecovered]),
+    )
+    .expect("the telemetry of a worker registry");
+    let built = Cell::new(false);
+
+    let not_sent = on.emit(|| {
+        built.set(true);
+        events::ChildStarted {
+            at: Utc::now(),
+            child_kind: Execution::Isolated,
+            slot: SlotIndex::try_from(0).unwrap(),
+            child_pid: crate::worker::executor::protocol::ProcessId::new(7).unwrap(),
+            boot_duration: std::time::Duration::from_millis(5),
+        }
+    });
+    let sent = on.emit(|| slot_event(1));
+
+    assert_eq!(not_sent, Emitted::TypeNotSent);
+    assert!(!built.get());
+    assert_eq!(sent, Emitted::Offered(Offer::Queued));
+    assert_eq!(slots_of(&queue.take_waiting(capacity(8))), vec![1]);
+    assert!(series_of(&registry, MetricId::EventsDropped).is_empty());
+}
+
+/// A set of types holds each type that it was given, and no other.
+#[test]
+fn a_set_of_sent_types_holds_exactly_its_types() {
+    let sent = SentEventTypes::of([
+        EventTypeName::TaskClaimed,
+        EventTypeName::AttemptEnded,
+        EventTypeName::TaskClaimed,
+    ]);
+
+    let held: Vec<EventTypeName> = EventTypeName::ALL
+        .iter()
+        .copied()
+        .filter(|name| sent.sends(*name))
+        .collect();
+
+    assert_eq!(
+        held,
+        vec![EventTypeName::TaskClaimed, EventTypeName::AttemptEnded]
+    );
+    assert!(EventTypeName::ALL
+        .iter()
+        .all(|name| SentEventTypes::all().sends(*name)));
 }
 
 #[test]
@@ -166,6 +229,7 @@ fn claimed_task(execution: Execution) -> crate::worker::executor::slots::Claimed
         },
         options: crate::worker::retry::read_stored_options(None),
         trace: crate::events::RunTrace::NoCarrier,
+        trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
     }
 }
 
@@ -592,4 +656,95 @@ fn each_finalize_retry_counts_under_its_stage() {
             (vec!["phase1_persist".to_owned()], SampleValue::Counter(2)),
         ]
     );
+}
+
+#[test]
+fn each_recovered_row_gives_one_task_recovered_with_its_action_and_one_count() {
+    use crate::broker::stale_recovery::RecoveredTask;
+    use crate::telemetry::labels::RecoveryAction;
+    let mut watched = WatchedTelemetry::new();
+    let requeued = [7_u128, 8].map(|id| RecoveredTask {
+        task_id: uuid::Uuid::from_u128(id),
+        task_name: "app.tasks.send_email".to_owned(),
+        queue_name: "default".to_owned(),
+    });
+
+    watched.telemetry.task_recovered(
+        uuid::Uuid::from_u128(6),
+        "app.tasks.report",
+        "slow",
+        RecoveryAction::RunningFailed,
+    );
+    watched
+        .telemetry
+        .tasks_recovered(&requeued, RecoveryAction::ClaimRequeued);
+
+    let told: Vec<(u128, RecoveryAction, String, String)> = watched
+        .events()
+        .into_iter()
+        .map(|event| match event {
+            Event::TaskRecovered(recovered) => (
+                recovered.task_id.as_u128(),
+                recovered.action,
+                recovered.task_name.as_str().to_owned(),
+                recovered.queue.as_str().to_owned(),
+            ),
+            other => panic!("only TaskRecovered, not {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        told,
+        vec![
+            (
+                6,
+                RecoveryAction::RunningFailed,
+                "app.tasks.report".to_owned(),
+                "slow".to_owned()
+            ),
+            (
+                7,
+                RecoveryAction::ClaimRequeued,
+                "app.tasks.send_email".to_owned(),
+                "default".to_owned()
+            ),
+            (
+                8,
+                RecoveryAction::ClaimRequeued,
+                "app.tasks.send_email".to_owned(),
+                "default".to_owned()
+            ),
+        ]
+    );
+    assert_eq!(
+        watched.series(MetricId::RecoveryTasks),
+        vec![
+            (vec!["claim_requeued".to_owned()], SampleValue::Counter(2)),
+            (vec!["running_failed".to_owned()], SampleValue::Counter(1)),
+        ]
+    );
+}
+
+#[test]
+fn with_telemetry_off_a_recovered_row_tells_nothing() {
+    use crate::broker::stale_recovery::RecoveredTask;
+    use crate::telemetry::labels::RecoveryAction;
+    let watched = WatchedTelemetry::new();
+    let off = WorkerTelemetry::Off;
+
+    off.task_recovered(
+        uuid::Uuid::from_u128(6),
+        "app.tasks.report",
+        "slow",
+        RecoveryAction::RunningRetried,
+    );
+    off.tasks_recovered(
+        &[RecoveredTask {
+            task_id: uuid::Uuid::from_u128(7),
+            task_name: "app.tasks.send_email".to_owned(),
+            queue_name: "default".to_owned(),
+        }],
+        RecoveryAction::ClaimRequeued,
+    );
+
+    assert!(watched.series(MetricId::RecoveryTasks).is_empty());
 }

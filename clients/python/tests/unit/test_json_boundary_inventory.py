@@ -58,6 +58,9 @@ _FROZEN_DUMPS: Final = Counter(
         # The profiles member of the worker manifest, for the live check.
         ('clients/python/horsies/core/worker_manifest.py', 'dump_worker_profiles'): 1,
         ('clients/python/horsies/_catalog/scheduler_manifest.py', 'dump_scheduler_manifest'): 1,
+        # A JSON log line: texts, integers and nulls; any other value is
+        # written as its text before the dump.
+        ('clients/python/horsies/core/logging.py', 'JsonLogsFormatter.format'): 1,
     }
 )
 

@@ -20,10 +20,12 @@ the stop:
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal, assert_never
 
-from horsies._core import CoreStopped, ForkedAfterCoreStart
+from horsies._core import CoreStopped, ForkedAfterCoreStart, RunWorkflowNode
 
 type StopReason = Literal[
     'CLAIM_LOST',
@@ -56,12 +58,108 @@ class ResultEnvelope:
 
 
 @dataclass(frozen=True, slots=True)
+class ResultSucceeded:
+    """The envelope holds the task's value."""
+
+
+@dataclass(frozen=True, slots=True)
+class RaisedInRun:
+    """An exception left the body or the steps of the run, and the run
+    mapped it to its task error. ``exception`` is the live exception."""
+
+    exception: BaseException
+
+
+@dataclass(frozen=True, slots=True)
+class NothingRaised:
+    """The task error holds no live exception: the body returned the error,
+    or the run built it before the body (a resolve or decode failure)."""
+
+
+@dataclass(frozen=True, slots=True)
+class ResultFailed:
+    """The envelope holds a task error. ``error_code`` is the text of its
+    code: the value of a built-in code, or the user's code."""
+
+    error_code: str
+    raised: RaisedInRun | NothingRaised
+
+
+type ResultOutcome = ResultSucceeded | ResultFailed
+"""What the envelope of a run holds: the task's value or a task error."""
+
+
+@dataclass(frozen=True, slots=True)
+class EncodedResult:
+    """The envelope of a run and what it holds. The run reads ``outcome``
+    where it builds the envelope, so nothing decodes the envelope text
+    again; the frame takes ``envelope`` only."""
+
+    envelope: ResultEnvelope
+    outcome: ResultOutcome
+
+
+@dataclass(frozen=True, slots=True)
+class InWorkflow:
+    """The node at ``node_index`` of the workflow ``workflow_id`` links the
+    task, in the tree whose top-level workflow is ``root_workflow_id`` (the
+    workflow itself for a top-level workflow)."""
+
+    workflow_id: uuid.UUID
+    node_index: int
+    root_workflow_id: uuid.UUID
+
+
+@dataclass(frozen=True, slots=True)
+class NotInWorkflow:
+    """No workflow node links the task: a task of a send or a schedule."""
+
+
+type RunWorkflow = InWorkflow | NotInWorkflow
+"""The workflow node that links a started task."""
+
+
+def run_workflow_of(workflow: RunWorkflowNode | Literal['NOT_IN_WORKFLOW']) -> RunWorkflow:
+    """The workflow node of a start (``core.AttemptStarted.workflow``),
+    frozen. Pure."""
+    match workflow:
+        case 'NOT_IN_WORKFLOW':
+            return NotInWorkflow()
+        case RunWorkflowNode(
+            workflow_id=workflow_id,
+            node_index=node_index,
+            root_workflow_id=root_workflow_id,
+        ):
+            return InWorkflow(
+                workflow_id=workflow_id,
+                node_index=node_index,
+                root_workflow_id=root_workflow_id,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+@dataclass(frozen=True, slots=True)
+class StartedRunning:
+    """The start write set the row RUNNING. ``started_at`` is the time that
+    ``horsies_start_attempt`` returned for it, on the database clock (an
+    aware ``datetime``): the frame that ends the run reports it.
+    ``workflow`` is the node that links the task, read with the node row
+    that the start locks."""
+
+    started_at: datetime
+    workflow: RunWorkflow
+
+
+@dataclass(frozen=True, slots=True)
 class SetRunning:
-    """The run set its row RUNNING, then ended with ``result``: the body ran,
-    or a refusal or a resolve error ended it after the RUNNING update. The
-    end of the run writes the finalizing marker when one is due."""
+    """The run set its row RUNNING at ``started_at``, then ended with
+    ``result``: the body ran, or a refusal or a resolve error ended it after
+    the RUNNING update. The end of the run writes the finalizing marker when
+    one is due."""
 
     result: ResultEnvelope
+    started_at: datetime
 
 
 @dataclass(frozen=True, slots=True)

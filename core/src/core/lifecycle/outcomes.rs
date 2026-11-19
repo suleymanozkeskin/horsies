@@ -274,6 +274,33 @@ const ROW_COLUMNS: [&str; 10] = [
     "observed_guard",
 ];
 
+/// The columns of a row of a discovery batch (`horsies_expire_pending_tasks`,
+/// `horsies_cancel_orphaned_tasks`): the outcome columns, then the task name
+/// and the queue of the row that the batch moved.
+const MOVED_ROW_COLUMNS: [&str; 12] = [
+    "task_id",
+    "ordinality",
+    "outcome",
+    "terminal_at",
+    "terminalization_kind",
+    "observed_status",
+    "observed_worker_id",
+    "observed_claimed_at",
+    "guard_kind",
+    "observed_guard",
+    "task_name",
+    "queue_name",
+];
+
+/// One row of a discovery batch: its outcome, and the task name and the
+/// queue of the row that the batch moved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MovedRow {
+    pub outcome: TerminalizationOutcome,
+    pub task_name: String,
+    pub queue_name: String,
+}
+
 /// One returned row, extracted with types but not yet interpreted.
 ///
 /// Split from [`decode_outcome_row`] so the contract logic is testable
@@ -296,8 +323,26 @@ pub struct RawOutcomeRow {
 /// on any deviation from the wire contract.
 pub fn decode_outcome_row(row: &CoreRow) -> Result<TerminalizationOutcome, OutcomeDecodeError> {
     let present: Vec<&str> = row.columns().iter().map(|column| column.name()).collect();
-    require_exact_columns(&present)?;
-    let raw = RawOutcomeRow {
+    require_exact_columns(&present, &ROW_COLUMNS)?;
+    decode_raw(raw_outcome_row(row)?)
+}
+
+/// Decode one row of a discovery batch into its outcome and the task name
+/// and queue of the moved row. Fails closed on any deviation from the wire
+/// contract of a discovery batch (`MOVED_ROW_COLUMNS`).
+pub fn decode_moved_row(row: &CoreRow) -> Result<MovedRow, OutcomeDecodeError> {
+    let present: Vec<&str> = row.columns().iter().map(|column| column.name()).collect();
+    require_exact_columns(&present, &MOVED_ROW_COLUMNS)?;
+    Ok(MovedRow {
+        outcome: decode_raw(raw_outcome_row(row)?)?,
+        task_name: core_column(row, "task_name")?,
+        queue_name: core_column(row, "queue_name")?,
+    })
+}
+
+/// The outcome columns of `row`, with their types, not yet interpreted.
+fn raw_outcome_row(row: &CoreRow) -> Result<RawOutcomeRow, OutcomeDecodeError> {
+    Ok(RawOutcomeRow {
         task_id: core_column(row, "task_id")?,
         ordinality: core_column(row, "ordinality")?,
         outcome: core_column(row, "outcome")?,
@@ -308,8 +353,7 @@ pub fn decode_outcome_row(row: &CoreRow) -> Result<TerminalizationOutcome, Outco
         observed_claimed_at: core_column(row, "observed_claimed_at")?,
         guard_kind: core_column(row, "guard_kind")?,
         observed_guard: core_column(row, "observed_guard")?,
-    };
-    decode_raw(raw)
+    })
 }
 
 fn core_column<'r, T: FromSql<'r>>(
@@ -320,9 +364,9 @@ fn core_column<'r, T: FromSql<'r>>(
         .map_err(|error| OutcomeDecodeError(format!("column {column}: {error}")))
 }
 
-/// The row has exactly the ten columns of the wire contract.
-fn require_exact_columns(present: &[&str]) -> Result<(), OutcomeDecodeError> {
-    let missing: Vec<&str> = ROW_COLUMNS
+/// The row has exactly the columns `expected` of its wire contract.
+fn require_exact_columns(present: &[&str], expected: &[&str]) -> Result<(), OutcomeDecodeError> {
+    let missing: Vec<&str> = expected
         .iter()
         .copied()
         .filter(|c| !present.contains(c))
@@ -330,7 +374,7 @@ fn require_exact_columns(present: &[&str]) -> Result<(), OutcomeDecodeError> {
     let unexpected: Vec<&str> = present
         .iter()
         .copied()
-        .filter(|c| !ROW_COLUMNS.contains(c))
+        .filter(|c| !expected.contains(c))
         .collect();
     if !missing.is_empty() || !unexpected.is_empty() {
         return Err(OutcomeDecodeError(format!(

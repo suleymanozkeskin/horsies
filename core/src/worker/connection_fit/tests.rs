@@ -952,6 +952,7 @@ fn task_send_pool_of_the_init_frame(profile: &WorkerProfile) -> u64 {
         pending_limit: NonZeroUsize::new(8).expect("a test pending limit above 0"),
         exit_not_seen: ExitNotSeen::LeaveToRecovery,
         placement: CpuPlacement::SharedCpus,
+        telemetry: crate::telemetry::worker::WorkerTelemetry::Off,
     };
     let kinds = [
         isolated_pool_config(profile, &launch, &facts).map(|config| config.init.child_kind),
@@ -965,6 +966,7 @@ fn task_send_pool_of_the_init_frame(profile: &WorkerProfile) -> u64 {
             ChildKind::Isolated(child) => child.task_send_pool.get(),
             ChildKind::SharedAsync(child) => child.task_send_pool.get(),
             ChildKind::SharedThread(child) => child.task_send_pool.get(),
+            ChildKind::Handler(_) => panic!("a slot pool builds a task child"),
         })
         .collect();
     let [send] = sends.as_slice() else {

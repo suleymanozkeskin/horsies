@@ -49,6 +49,7 @@ fn body_returned(task: &ClaimedTask, value: u32) -> ChildFrame {
         task_id: task.task_id,
         returned: BodyEnd::Result(ok_envelope(value)),
         left: left_tasks(),
+        started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
     })
 }
 
@@ -156,6 +157,9 @@ fn write_result_file(path: &std::path::Path, task: &ClaimedTask, envelope: &Resu
     let frame = ChildFrame::Result(ResultFrame {
         task_id: task.task_id,
         end: RunEnd::Result(envelope.clone()),
+        started_at: crate::events::AttemptStart::Reported {
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        },
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
         child: ChildAfterFrame::ServesOn,
@@ -255,6 +259,9 @@ async fn a_result_with_no_left_work_keeps_the_child() {
     let empty_loop = ChildFrame::Result(ResultFrame {
         task_id: second.task_id,
         end: RunEnd::Result(ok_envelope(2)),
+        started_at: crate::events::AttemptStart::Reported {
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        },
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::LoopHoldsNoTask,
         child: ChildAfterFrame::ServesOn,
@@ -289,6 +296,7 @@ async fn a_run_stopped_before_running_is_answered_as_such() {
     let stopped = ChildFrame::Result(ResultFrame {
         task_id: first.task_id,
         end: RunEnd::StoppedBeforeRunning(StopReason::ClaimLost),
+        started_at: crate::events::AttemptStart::NotReported,
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
         child: ChildAfterFrame::ServesOn,
@@ -326,6 +334,7 @@ async fn a_child_that_ends_itself_gets_no_next_task() {
     let released = ChildFrame::Result(ResultFrame {
         task_id: first.task_id,
         end: RunEnd::StoppedBeforeRunning(StopReason::OwnershipUnconfirmed),
+        started_at: crate::events::AttemptStart::NotReported,
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
         child: ChildAfterFrame::EndsItself,

@@ -19,6 +19,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use super::board::{PoolBoard, PoolFailure};
+use super::replacement::ChildLeave;
 use crate::worker::executor::protocol::FrameEncodeError;
 use crate::worker::executor::supervisor::boot::BootFailureDetail;
 
@@ -74,9 +75,10 @@ pub enum TasksFinished {
 /// How one generation of a slot ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenerationEnd {
-    /// The child retired or was lost, or the pools stop or failed.
-    Ended,
-    /// A defect ended the generation.
+    /// The child retired, ended itself or was lost, or the pools stop or
+    /// failed: `ChildLeave` says which.
+    Ended(ChildLeave),
+    /// A defect ended the generation; its child was killed.
     Defect(SlotDefect),
 }
 

@@ -69,6 +69,44 @@ before you upgrade a 0.7 deployment.
   the user's OpenTelemetry SDK never changes the outcome of a send.
   `PostgresBroker.enqueue` and `enqueue_async` take `trace=`
   (`TraceCarrier` or the default `NO_TRACE_CARRIER`).
+- **The span and the log context of each attempt.** With `OtelTracing()`,
+  a worker child runs the steps of each attempt after its RUNNING update
+  inside one span of kind CONSUMER, `run <task_name>`. The span is the
+  current context of the body in an isolated child, on a seat of a shared
+  async child and on a seat of a shared thread child, so a span that the
+  body starts is its child. The configured propagator extracts the carrier
+  that the send stored. `OtelTracing(parentage=ChildOfSend())` (the default)
+  makes the attempt span a child of the send span; `LinkedToSend()` starts a
+  trace with a link to it. Attributes: `messaging.system`,
+  `messaging.operation.type`, `messaging.operation.name`,
+  `messaging.message.id`, `messaging.destination.name` (the queue),
+  `horsies.task.id`, `horsies.task.name`, `horsies.task.attempt` (from 1),
+  `horsies.task.execution`, `horsies.queue`, `horsies.worker.id`, and, for
+  a task that a workflow node links, `horsies.workflow.id`,
+  `horsies.workflow.node` (the index of the node) and
+  `horsies.workflow.root_id` (the top-level workflow of its tree). A task
+  error sets the status ERROR and `error.type` to its code, and the live
+  exception that it keeps is recorded on the span. Set the SDK of a child in
+  `on_child_process_start`. At its stop a child flushes the tracer provider
+  for at most 1 s. The span holds what the body returned; the end that the
+  worker decides for a timeout, a kill or a lost child is not on it.
+- **`AppConfig.log_format` and `TaskContextFilter`.** `log_format` takes
+  `TextLogs()` (the default) or `JsonLogs()`: one JSON object per line with
+  the keys `ts`, `level`, `logger`, `message`, `process`, `task_id`,
+  `task_name`, `attempt`, `trace_id`, `span_id` and `exc`. `horsies worker`,
+  `horsies scheduler`, `horsies check` and each worker child write in it
+  once they have loaded the app. `TaskContextFilter` puts `task_id`,
+  `task_name`, `attempt`, `trace_id` and `span_id` of the running task on
+  each record (`None` outside a task body); the horsies handler has it, and
+  a handler of your own takes it, with `JsonLogsFormatter` for the JSON
+  lines.
+
+- **The trace id on the monitoring reads.** `LeafTaskInfo.trace_id` (the
+  task detail and the workflow node detail) is the trace id of the span that
+  sent the task, live and in history, and `WorkflowRunDetail.trace_id` the
+  trace id of the span that started the run: 32 lowercase hex digits, or
+  `None` for a send or start with no trace. Code that builds one of these
+  models, for example a test fake, must pass the field.
 
 ### Changed
 
@@ -1499,6 +1537,39 @@ unless it starts with "Added".
   Before, only the `#[task]` attribute checked a built-in or reserved name.
   `CheckPassed::declared_error_codes()` returns them by task name, and the
   success text of `check` lists them. `CheckPassed` is no longer `Copy`.
+- **Added: the feature `otel`** (`horsies::otel`), with the global
+  providers and the global propagator of `opentelemetry` 0.33. A task send
+  is one span of kind PRODUCER, `send <task_name>`, around every database
+  call of the send, and a workflow start is one span
+  `start <workflow_name>`; the send hands the core the carrier that the
+  propagator injects for that span, with its trace id. A send records
+  `horsies.task.sent` (task, queue, result `ok` or the send error code)
+  and `horsies.task.send.duration` (queue). In a worker child each task
+  body runs inside a `tracing` span `run <task_name>` of kind CONSUMER
+  (target `horsies::attempt`), whose OpenTelemetry parent is the context
+  extracted from the stored carrier, through `tracing-opentelemetry` 0.34;
+  a span that the body opens is its child. It has the attributes of the
+  Python attempt span: the task id and name, `horsies.task.attempt`, the
+  execution class, `horsies.queue` and `messaging.destination.name`, the
+  worker id, and, for a task that a workflow node links,
+  `horsies.workflow.id`, `horsies.workflow.node` and
+  `horsies.workflow.root_id`. The task id, the task name and the attempt
+  are fields of the span, so each log record of the body carries them. Its
+  status is OK for a returned value, and ERROR with `error.type` for an
+  error, a panic or a run past its deadline. `horsies::otel::layer()` is
+  the `tracing-opentelemetry` layer on the global tracer provider;
+  `horsies::cli::run` adds it to its subscriber, and a binary that installs
+  its own subscriber adds it there. Without the feature no OpenTelemetry
+  crate is compiled, and each task body still runs inside the same
+  `tracing` span `run` (target `horsies::attempt`,
+  `horsies::ATTEMPT_SPAN_TARGET`) with `horsies.task.id`,
+  `horsies.task.name` and `horsies.task.attempt`, so the log records of the
+  body carry them; `horsies::cli::run` keeps that span at every
+  `--loglevel` in both builds.
+- **Added: `cli::run_with_log_format(app, LogFormat::Json)`**: the runner
+  and each worker child write one JSON object per log record, with the
+  event's fields at the top level and the record's spans with their
+  fields. `cli::run(app)` keeps the text format.
 
 ## 0.7.0 — 2026-11-15
 

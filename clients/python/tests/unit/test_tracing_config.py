@@ -21,7 +21,13 @@ from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models import tracing as tracing_module
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tracing import NoTracing, OtelTracing, tracing_label
+from horsies.core.models.tracing import (
+    ChildOfSend,
+    LinkedToSend,
+    NoTracing,
+    OtelTracing,
+    tracing_label,
+)
 from horsies.core.telemetry.otel_api import (
     OTEL_API_MODULES,
     OtelApiInstalled,
@@ -119,6 +125,26 @@ class TestSetting:
             AppConfig.model_validate(
                 {'broker': _BROKER, 'tracing': {'kind': 'zipkin'}},
             )
+
+    def test_an_attempt_span_is_a_child_of_the_send_span_by_default(self) -> None:
+        assert OtelTracing().parentage == ChildOfSend()
+
+    def test_the_parentage_is_read_from_its_kind(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _presence_is(monkeypatch, OtelApiInstalled())
+        config = AppConfig.model_validate(
+            {
+                'broker': _BROKER,
+                'tracing': {'kind': 'otel_tracing', 'parentage': {'kind': 'linked_to_send'}},
+            },
+        )
+        assert config.tracing == OtelTracing(parentage=LinkedToSend())
+
+    def test_a_parentage_of_another_kind_is_refused(self) -> None:
+        with pytest.raises(ValidationError):
+            OtelTracing.model_validate({'parentage': {'kind': 'follows_from'}})
 
     def test_the_label_names_the_setting(self) -> None:
         assert tracing_label(OtelTracing()) == 'OpenTelemetry'

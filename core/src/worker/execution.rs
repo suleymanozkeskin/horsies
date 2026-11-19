@@ -57,7 +57,7 @@ use crate::workflow_engine::steps::{
     NodeFinishDisposition, OwedParentAdvances,
 };
 
-use crate::worker::executor::slots::{ClaimedTask, RetryFacts};
+use crate::worker::executor::slots::{AttemptLog, ClaimedTask, RetryFacts};
 use crate::worker::retry::{admit_retry, RetryAdmission, StoredOptions};
 
 use self::parse::workflow_ctx_text;
@@ -112,6 +112,8 @@ pub(crate) enum FinalizeOutcome {
 /// [`run_phase2`].
 pub(crate) struct Phase2Work {
     pub task_id: Uuid,
+    /// The log fields of the attempt whose phase 1 owes this phase 2.
+    pub log: AttemptLog,
     pub queue_name: String,
     pub is_workflow_task: bool,
     /// Phase 1 already woke queue capacity; Phase 2 skips its notify.
@@ -398,7 +400,15 @@ pub(crate) async fn persist_terminal_state(
                 PayloadKind::Result,
                 result_bytes.len(),
             );
-            persist_ok_result(broker, task_id, result_bytes, fence, is_workflow_task).await
+            persist_ok_result(
+                broker,
+                task_id,
+                task.log(),
+                result_bytes,
+                fence,
+                is_workflow_task,
+            )
+            .await
         }
         TaskResult::Err(ref task_error) => {
             // The stored error keeps its code when its `data` cannot be stored:
@@ -407,6 +417,8 @@ pub(crate) async fn persist_terminal_state(
             if let Some(refusal) = task_error.storage_refusal() {
                 tracing::error!(
                     task_id = %task_id,
+                    attempt = task.retry.attempt().get(),
+                    trace_id = task.trace_id.log_field(),
                     error_code = %task_error.error_code,
                     cause = %refusal,
                     "data of a TaskError cannot be stored; it is stored as data_refused",
@@ -437,7 +449,7 @@ pub(crate) async fn persist_terminal_state(
                     failed_reason: None,
                 },
             };
-            persist_failed_attempt(broker, &command, is_workflow_task).await
+            persist_failed_attempt(broker, &command, task.log(), is_workflow_task).await
         }
     }
 }
@@ -468,10 +480,12 @@ fn retry_request_for(
     }
 }
 
-/// Persist a success, or fail a result that is not valid JSON.
+/// Persist a success, or fail a result that is not valid JSON. `log` names
+/// the attempt in the records of the write.
 pub(crate) async fn persist_ok_result(
     broker: &PostgresBroker,
     task_id: Uuid,
+    log: AttemptLog,
     result_bytes: &[u8],
     fence: OwnedClaim,
     is_workflow_task: bool,
@@ -485,6 +499,7 @@ pub(crate) async fn persist_ok_result(
             return persist_undecodable_result(
                 broker,
                 task_id,
+                log,
                 fence,
                 is_workflow_task,
                 &parse_error.to_string(),
@@ -576,10 +591,12 @@ async fn persist_workflow_success(
 
 /// A result that is not valid JSON fails the task with
 /// `WORKER_SERIALIZATION_ERROR`, never retried, with the decode diagnosis as
-/// the attempt message (Python `ResultUndecodable`).
+/// the attempt message (Python `ResultUndecodable`). `log` names the
+/// attempt in the records of the write.
 pub(crate) async fn persist_undecodable_result(
     broker: &PostgresBroker,
     task_id: Uuid,
+    log: AttemptLog,
     fence: OwnedClaim,
     is_workflow_task: bool,
     diagnosis: &str,
@@ -604,17 +621,19 @@ pub(crate) async fn persist_undecodable_result(
             failed_reason: None,
         },
     };
-    persist_failed_attempt(broker, &command, is_workflow_task).await
+    persist_failed_attempt(broker, &command, log, is_workflow_task).await
 }
 
 /// Write a failed attempt in one statement and map its outcome to what is
 /// owed (Python `_after_failed_attempt`): a plain task's failure sent its
 /// wake in the statement; a workflow task's failure owes phase 2; a retry
 /// wakes the queue when it is due; a replay owes what the committed write
-/// owed; a refusal owes nothing.
+/// owed; a refusal owes nothing. `log` names the attempt of `command` in
+/// the records of the write.
 pub(crate) async fn persist_failed_attempt(
     broker: &PostgresBroker,
     command: &FinishFailedAttempt,
+    log: AttemptLog,
     is_workflow_task: bool,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let (open, _write) = broker
@@ -623,7 +642,7 @@ pub(crate) async fn persist_failed_attempt(
     let outcome = finish_failed_attempt(open.main(), broker.statement_log(), command)
         .await
         .map_err(|error| phase1_error(command.task_id, "failed attempt", error))?;
-    after_failed_attempt(broker, command, is_workflow_task, outcome).await
+    after_failed_attempt(broker, command, log, is_workflow_task, outcome).await
 }
 
 /// What the write of an attempt whose child ended without a report did.
@@ -646,6 +665,7 @@ pub(crate) enum UnreportedAttemptWrite {
 pub(crate) async fn persist_unreported_attempt(
     broker: &PostgresBroker,
     command: &FinishFailedAttempt,
+    log: AttemptLog,
     is_workflow_task: bool,
 ) -> Result<UnreportedAttemptWrite, FinalizeError> {
     let (open, _write) = broker
@@ -657,7 +677,7 @@ pub(crate) async fn persist_unreported_attempt(
     match outcome {
         UnreportedAttemptOutcome::Released(_) => Ok(UnreportedAttemptWrite::ClaimReleased),
         UnreportedAttemptOutcome::Failed(failed) => {
-            after_failed_attempt(broker, command, is_workflow_task, failed)
+            after_failed_attempt(broker, command, log, is_workflow_task, failed)
                 .await
                 .map(UnreportedAttemptWrite::Written)
         }
@@ -668,6 +688,7 @@ pub(crate) async fn persist_unreported_attempt(
 async fn after_failed_attempt(
     broker: &PostgresBroker,
     command: &FinishFailedAttempt,
+    log: AttemptLog,
     is_workflow_task: bool,
     outcome: FailedAttemptOutcome,
 ) -> Result<FinalizeOutcome, FinalizeError> {
@@ -689,9 +710,11 @@ async fn after_failed_attempt(
             queue_name,
             ..
         } => {
-            wake_when_retry_due(broker, command, queue_name);
+            wake_when_retry_due(broker, command, log, queue_name);
             tracing::info!(
                 task_id = %command.task_id,
+                attempt = log.attempt.get(),
+                trace_id = log.trace_id.log_field(),
                 retry_count,
                 %next_retry_at,
                 "task scheduled for retry",
@@ -717,8 +740,13 @@ async fn after_failed_attempt(
 /// on the main core pool of `broker`, as open when the retry was written. A
 /// failed wake is logged: the retried row is PENDING and the worker's poll
 /// finds it. A close of the broker in the delay closes that pool, so the
-/// wake fails and is logged.
-fn wake_when_retry_due(broker: &PostgresBroker, command: &FinishFailedAttempt, queue_name: String) {
+/// wake fails and is logged. `log` names the attempt that failed.
+fn wake_when_retry_due(
+    broker: &PostgresBroker,
+    command: &FinishFailedAttempt,
+    log: AttemptLog,
+    queue_name: String,
+) {
     let delay_seconds = match command.retry {
         RetryRequest::RetryAfter { delay_seconds, .. } => delay_seconds,
         RetryRequest::NoRetry => unreachable!(
@@ -732,6 +760,8 @@ fn wake_when_retry_due(broker: &PostgresBroker, command: &FinishFailedAttempt, q
         Err(error) => {
             tracing::warn!(
                 task_id = %task_id,
+                attempt = log.attempt.get(),
+                trace_id = log.trace_id.log_field(),
                 queue = %queue_name,
                 error = %error,
                 "delayed retry NOTIFY not scheduled: {error}; worker polling fallback will recover",
@@ -747,6 +777,8 @@ fn wake_when_retry_due(broker: &PostgresBroker, command: &FinishFailedAttempt, q
         {
             tracing::warn!(
                 task_id = %task_id,
+                attempt = log.attempt.get(),
+                trace_id = log.trace_id.log_field(),
                 queue = %queue_name,
                 error = %error,
                 "Error sending delayed notification for retry:{task_id}: {error}",
@@ -816,7 +848,8 @@ fn envelope_error(task_id: Uuid, error: serde_json::Error) -> FinalizeError {
 /// step owes after its commit.
 ///
 /// The node finish builds the child of each sub-workflow node that it
-/// promotes with `build`.
+/// promotes with `build`. `log` names the attempt of `task_id` in the
+/// records of the step.
 ///
 /// Errors: [`FinalizeError`] at [`FinalizeStage::Phase2Workflow`], retryable
 /// when the failure may clear.
@@ -824,6 +857,7 @@ pub(crate) async fn finalize_workflow_phase(
     broker: &PostgresBroker,
     build: &dyn ChildSpecSource,
     task_id: Uuid,
+    log: AttemptLog,
     queue_name: &str,
     is_workflow_task: bool,
     capacity_notified: bool,
@@ -837,6 +871,7 @@ pub(crate) async fn finalize_workflow_phase(
                 broker,
                 build,
                 task_id,
+                log,
                 capacity_notified,
                 phase_two,
             ))
@@ -937,6 +972,7 @@ async fn finish_workflow_node(
     broker: &PostgresBroker,
     build: &dyn ChildSpecSource,
     task_id: Uuid,
+    log: AttemptLog,
     capacity_notified: bool,
     phase_two: PhaseTwoForm,
 ) -> Result<OwedParentAdvances, FinalizeError> {
@@ -977,12 +1013,13 @@ async fn finish_workflow_node(
         message: format!("workflow node finish failed: {error}"),
         retryable: error.is_retryable(),
     })?;
-    node_finish_outcome(task_id, disposition, parent_advances)
+    node_finish_outcome(task_id, log, disposition, parent_advances)
 }
 
 /// What a committed node finish leaves owed. Pure, apart from the log.
 fn node_finish_outcome(
     task_id: Uuid,
+    log: AttemptLog,
     disposition: NodeFinishDisposition,
     parent_advances: OwedParentAdvances,
 ) -> Result<OwedParentAdvances, FinalizeError> {
@@ -993,6 +1030,8 @@ fn node_finish_outcome(
         NodeFinishDisposition::AlreadyApplied | NodeFinishDisposition::PendingAbsent => {
             tracing::debug!(
                 task_id = %task_id,
+                attempt = log.attempt.get(),
+                trace_id = log.trace_id.log_field(),
                 disposition = ?disposition,
                 "phase 2 found its record applied or absent; nothing written",
             );
@@ -1188,7 +1227,14 @@ pub(crate) async fn run_phase2(
     let finished = Box::pin(retry_phase2(broker, build, &work)).await;
     match finished {
         Ok(owed) if !owed.is_empty() => {
-            Box::pin(retry_parent_advances(broker, build, work.task_id, owed)).await;
+            Box::pin(retry_parent_advances(
+                broker,
+                build,
+                work.task_id,
+                work.log,
+                owed,
+            ))
+            .await;
         }
         // Each failure was logged where it happened; workflow recovery
         // applies the durable phase-2 record.
@@ -1212,13 +1258,16 @@ async fn retry_phase2(
     build: &dyn ChildSpecSource,
     work: &Phase2Work,
 ) -> Result<OwedParentAdvances, FinalizeError> {
-    let mut attempt: u32 = 0;
+    let log = work.log;
+    let mut phase2_retry: u32 = 0;
     loop {
-        if attempt > 0 {
-            let delay = phase_retry_delay(attempt);
+        if phase2_retry > 0 {
+            let delay = phase_retry_delay(phase2_retry);
             tracing::warn!(
                 task_id = %work.task_id,
-                attempt,
+                attempt = log.attempt.get(),
+                trace_id = log.trace_id.log_field(),
+                phase2_retry,
                 max = PHASE2_MAX_RETRIES,
                 delay_s = format!("{:.1}", delay),
                 "retrying Phase 2 finalize",
@@ -1229,6 +1278,7 @@ async fn retry_phase2(
             broker,
             build,
             work.task_id,
+            log,
             &work.queue_name,
             work.is_workflow_task,
             work.capacity_notified,
@@ -1240,18 +1290,22 @@ async fn retry_phase2(
             Err(error) if !error.retryable => {
                 tracing::error!(
                     task_id = %work.task_id,
+                    attempt = log.attempt.get(),
+                    trace_id = log.trace_id.log_field(),
                     error = %error,
-                    attempt,
+                    phase2_retry,
                     "Finalize stage will not be re-attempted ({}) stage=phase2_workflow: {error}",
                     work.task_id,
                 );
                 return Err(error);
             }
-            Err(error) if attempt >= PHASE2_MAX_RETRIES => {
+            Err(error) if phase2_retry >= PHASE2_MAX_RETRIES => {
                 tracing::error!(
                     task_id = %work.task_id,
+                    attempt = log.attempt.get(),
+                    trace_id = log.trace_id.log_field(),
                     error = %error,
-                    attempts = PHASE2_MAX_RETRIES,
+                    phase2_retries = PHASE2_MAX_RETRIES,
                     "Finalize retries exhausted for task {} stage=phase2_workflow after \
                      {PHASE2_MAX_RETRIES} attempts: {error}",
                     work.task_id,
@@ -1261,17 +1315,19 @@ async fn retry_phase2(
             Err(error) => {
                 tracing::warn!(
                     task_id = %work.task_id,
+                    attempt = log.attempt.get(),
+                    trace_id = log.trace_id.log_field(),
                     error = %error,
-                    attempt,
+                    phase2_retry,
                     "Finalize retry scheduled for task {} stage=phase2_workflow \
                      ({}/{PHASE2_MAX_RETRIES}) in {:.1}s: {error}",
                     work.task_id,
-                    attempt + 1,
-                    phase_retry_delay(attempt + 1),
+                    phase2_retry + 1,
+                    phase_retry_delay(phase2_retry + 1),
                 );
             }
         }
-        attempt += 1;
+        phase2_retry += 1;
     }
 }
 
@@ -1280,17 +1336,19 @@ async fn retry_phase2(
 /// with up to [`PHASE2_MAX_RETRIES`] retries that go on from the level that
 /// failed. A non-retryable failure, or spent
 /// retries, leave the rest to workflow recovery (case 1.6: a terminal child
-/// under a live parent node). Logs every failure.
+/// under a live parent node). Logs every failure, naming the attempt of
+/// `task_id` with `log`.
 async fn retry_parent_advances(
     broker: &PostgresBroker,
     build: &dyn ChildSpecSource,
     task_id: Uuid,
+    log: AttemptLog,
     first_owed: OwedParentAdvances,
 ) {
     let mut owed = first_owed;
-    for attempt in 0..=PHASE2_MAX_RETRIES {
-        if attempt > 0 {
-            let delay = phase_retry_delay(attempt);
+    for advance_retry in 0..=PHASE2_MAX_RETRIES {
+        if advance_retry > 0 {
+            let delay = phase_retry_delay(advance_retry);
             tokio::time::sleep(Duration::from_secs_f64(delay)).await;
         }
         let failure = match Box::pin(advance_parents(
@@ -1307,8 +1365,10 @@ async fn retry_parent_advances(
         match failure.error.is_retryable() {
             true => tracing::warn!(
                 task_id = %task_id,
+                attempt = log.attempt.get(),
+                trace_id = log.trace_id.log_field(),
                 child_workflow_id = %failure.failed_child_workflow_id,
-                attempt,
+                advance_retry,
                 error = %failure.error,
                 "parent advance failed (retryable): {}",
                 failure.error,
@@ -1316,6 +1376,8 @@ async fn retry_parent_advances(
             false => {
                 tracing::error!(
                     task_id = %task_id,
+                    attempt = log.attempt.get(),
+                    trace_id = log.trace_id.log_field(),
                     child_workflow_id = %failure.failed_child_workflow_id,
                     owed_after = failure.owed_after.child_workflow_ids().len(),
                     error = %failure.error,
@@ -1329,8 +1391,10 @@ async fn retry_parent_advances(
     }
     tracing::error!(
         task_id = %task_id,
+        attempt = log.attempt.get(),
+        trace_id = log.trace_id.log_field(),
         child_workflow_ids = ?owed.child_workflow_ids(),
-        attempts = PHASE2_MAX_RETRIES,
+        advance_retries = PHASE2_MAX_RETRIES,
         "parent advance retries exhausted — workflow recovery will handle",
     );
 }

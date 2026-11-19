@@ -72,6 +72,7 @@ use crate::core::lifecycle::{
 };
 use crate::core::types::status::TaskStatus;
 use crate::db::{CheckoutClass, ParameterType, StatementBound, Transience, TypedStatement};
+use crate::telemetry::worker::WorkerTelemetry;
 use crate::worker::execution::{mark_task_finalizing, FinalizingMark};
 use crate::worker::finalize_batch::statement::complete_plain_successes;
 use crate::worker::finalize_batch::{BatchOutcomes, BatchWriteError, SuccessBatch};
@@ -146,7 +147,9 @@ impl PostgresBroker {
             .await
             .map_err(not_started)?;
         let (open, _write) = self.core_pools_for_write().map_err(not_started)?;
-        requeue_stale_claimed_pass(open.main(), self.statement_log(), stale_after).await
+        // A pass of a client handle runs outside a worker: no worker
+        // telemetry is told of the requeued rows.
+        requeue_stale_claimed_pass(open.main(), self.statement_log(), stale_after, |_rows| {}).await
     }
 
     /// Return claimed rows that no child started to the queue (one call of at
@@ -199,11 +202,14 @@ impl PostgresBroker {
     ) -> Result<StaleRunningPass, BrokerError> {
         self.ensure_client_family_for_write().await?;
         let (open, _write) = self.core_pools_for_write()?;
+        // A pass of a client handle runs outside a worker: no worker
+        // telemetry is told of the recovered rows.
         stale_running_pass(
             open.main(),
             self.statement_log(),
             thresholds,
             STALE_RUNNING_SCAN_BATCH,
+            &WorkerTelemetry::Off,
         )
         .await
     }
@@ -492,7 +498,9 @@ impl PostgresBroker {
             .await
             .map_err(not_started)?;
         let (open, _write) = self.core_pools_for_write().map_err(not_started)?;
-        expire_pending_pass(open.main(), self.statement_log()).await
+        // A pass of a client handle runs outside a worker: no worker
+        // telemetry is told of the expired rows.
+        expire_pending_pass(open.main(), self.statement_log(), |_rows| {}).await
     }
 
     /// One page of the orphan sweep (Python
@@ -511,7 +519,9 @@ impl PostgresBroker {
     pub async fn audit_orphaned_workflow_tasks(&self) -> Result<OrphanAuditPage, BrokerError> {
         self.ensure_client_family_for_write().await?;
         let (open, _write) = self.core_pools_for_write()?;
-        cancel_orphan_page(open.main(), self.statement_log()).await
+        // A page of a client handle runs outside a worker: no worker
+        // telemetry is told of the cancelled rows.
+        cancel_orphan_page(open.main(), self.statement_log(), |_rows| {}).await
     }
 
     /// Expire one CLAIMED task of `worker_id` whose deadline passed before its

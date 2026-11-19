@@ -1,4 +1,4 @@
-"""The version-2 child on the core frame codec: the frames that it sends
+"""The version-3 child on the core frame codec: the frames that it sends
 (``child_frames``), its frame reader and the checks of its init frame
 (``child_main``), the checks of each parent frame field by the core decoder
 (``core.decode_parent_frame``), the work of a run frame (``child_runner``), the
@@ -48,17 +48,24 @@ from horsies.core.worker import child_main
 from horsies.core.worker.child_frames import (
     MAX_BOOT_DETAIL_CHARS,
     MAX_BOOT_ERROR_NAME_CHARS,
+    MAX_EVENT_HANDLERS,
+    MAX_HANDLER_NAME_CHARS,
     MAX_LEFTOVER_TASK_NAMES,
     BlockingRun,
     BodyReturnedFrame,
     BootFailedFrame,
     ChildForkedFrame,
     CulpritUnknown,
+    HandlerCounts,
+    HandlerStatsFrame,
+    LeftoverCancelFrame,
+    LeftoverStuckFrame,
     LeftWorkEnd,
     LeftWorkEndedFrame,
     LoopBlockedFrame,
     LoopHoldsTasks,
     NoTaskLoop,
+    NoTraceCarrier,
     PreloadRefusedFrame,
     ReadyFrame,
     ResultFrame,
@@ -67,9 +74,13 @@ from horsies.core.worker.child_frames import (
     RunStuckFrame,
     SeatTimedOut,
     SharedResultFrame,
+    StartNotReported,
+    StartReported,
+    StoredTraceCarrier,
     boot_failed_frame,
     encode_child_frame,
     encode_preload_frame,
+    run_trace_of,
     stored_refusal_of,
 )
 from horsies.core.worker.child_inbox import ParentFrameInbox
@@ -83,8 +94,12 @@ from horsies.core.worker.stored_timeout import (
 )
 from horsies.core.worker.task_loop import AsyncTaskPresence
 from tests.fixtures.core_frames import (
+    TRACEPARENT,
     async_work,
+    carrier_trace,
+    events_frame,
     framed,
+    handler_kind,
     init_frame,
     init_meta,
     pool,
@@ -97,11 +112,21 @@ from tests.fixtures.core_frames import (
     shared_thread_kind,
     thread_work,
 )
+from tests.fixtures.run_return import STARTED_AT
 
 pytestmark = [pytest.mark.unit]
 
 _HEADER: Final = struct.Struct('>IQ')
 TASK_ID: Final = uuid.UUID('0190f2d8-7c1e-7a3b-9f00-000000000001')
+
+# Two event wire forms of ``core/tests/fixtures/event_wire/vectors.json``.
+CLAIM_RELEASED: Final = (
+    '["ClaimReleased",1700000000123456789,"0192f6a1-7b3c-7d4e-8f00-0123456789ab",'
+    '"send_email","default","QUEUE_FULL"]'
+)
+SLOT_RECOVERED: Final = '["SlotRecovered",1700000000123456789,"SHARED_ASYNC",1]'
+STARTED_TEXT: Final = '2026-11-17T10:00:01.250Z'
+"""``STARTED_AT`` as the core writes it."""
 
 
 def _meta_and_body(encoded: bytes | core.FrameTooLarge) -> tuple[dict[str, object], bytes]:
@@ -130,6 +155,7 @@ class TestChildFrames:
                 ResultFrame(
                     task_id=TASK_ID,
                     end=ResultEnvelope(envelope),
+                    started=StartReported(STARTED_AT),
                     rss=RssUnreadable(),
                     task_loop=NoTaskLoop(),
                 ),
@@ -137,6 +163,7 @@ class TestChildFrames:
         )
         assert meta['kind'] == 'result'
         assert meta['end'] == {'kind': 'result'}
+        assert meta['started_at'] == {'kind': 'reported', 'time': '2026-11-17T10:00:01.250Z'}
         assert meta['rss_mb'] is None
         assert meta['task_loop'] == {'kind': 'none'}
         assert meta['child'] == 'serves_on'
@@ -157,7 +184,13 @@ class TestChildFrames:
         stopped = StoppedBeforeRunning(reason)  # pyright: ignore[reportArgumentType]
         meta, body = _meta_and_body(
             encode_child_frame(
-                ResultFrame(task_id=TASK_ID, end=stopped, rss=RssMb(1.0), task_loop=NoTaskLoop()),
+                ResultFrame(
+                    task_id=TASK_ID,
+                    end=stopped,
+                    started=StartNotReported(),
+                    rss=RssMb(1.0),
+                    task_loop=NoTaskLoop(),
+                ),
             ),
         )
         assert meta['end'] == {'kind': 'stopped_before_running', 'reason': reason}
@@ -166,7 +199,13 @@ class TestChildFrames:
     def test_a_timed_out_seat_has_no_body(self) -> None:
         meta, body = _meta_and_body(
             encode_child_frame(
-                SharedResultFrame(dispatch=3, task_id=TASK_ID, end=SeatTimedOut(), rss=RssMb(1.0)),
+                SharedResultFrame(
+                    dispatch=3,
+                    task_id=TASK_ID,
+                    end=SeatTimedOut(),
+                    started=StartNotReported(),
+                    rss=RssMb(1.0),
+                ),
             ),
         )
         assert meta['kind'] == 'shared_result'
@@ -178,7 +217,12 @@ class TestChildFrames:
         left = LoopHoldsTasks(count=12, names=tuple(f'job_{n}' for n in range(MAX_LEFTOVER_TASK_NAMES)))
         meta, body = _meta_and_body(
             encode_child_frame(
-                BodyReturnedFrame(task_id=TASK_ID, returned=ResultEnvelope('{}'), left=left),
+                BodyReturnedFrame(
+                    task_id=TASK_ID,
+                    returned=ResultEnvelope('{}'),
+                    started_at=STARTED_AT,
+                    left=left,
+                ),
             ),
         )
         assert meta['kind'] == 'body_returned'
@@ -344,7 +388,8 @@ class TestFrameReader:
         monkeypatch.setattr(child_main.os, '_exit', _raise_exit)
         rust_init = init_meta()
         rust_init['program'] = {'kind': 'rust'}
-        for data in (framed({'kind': 'stop'}), framed(rust_init)):
+        events = framed({'kind': 'events'}, f'[{SLOT_RECOVERED}]'.encode('utf-8'))
+        for data in (framed({'kind': 'stop'}), framed(rust_init), events):
             sock = _ScriptedSocket(data, 1 << 16)
             with pytest.raises(_Exited) as exited:
                 read_init_frame(sock, ParentFrameReader(sock))  # pyright: ignore[reportArgumentType]
@@ -366,6 +411,12 @@ class TestChildHandle:
     def test_the_handle_of_a_child_comes_from_its_init_frame(self) -> None:
         handle = core.CoreChildHandle.from_init(init_frame())
         assert isinstance(handle, core.CoreChildHandle)
+
+    def test_a_handler_child_has_no_child_handle(self) -> None:
+        """A handler child runs no task, so it writes nothing through a
+        child handle: its init frame is a defect of the caller."""
+        with pytest.raises(ValueError, match='handler child'):
+            core.CoreChildHandle.from_init(init_frame(child_kind=handler_kind()))
 
 
 def _parent(meta: object, body: bytes = b'') -> object:
@@ -543,7 +594,11 @@ class TestChildKindPool:
     def test_a_complete_kind_decodes(self, kind: dict[str, object]) -> None:
         """The control of the refusals below: each valid shape decodes."""
         match _init_kind(kind):
-            case core.InitFrame(child_kind=child_kind):
+            case core.InitFrame(
+                child_kind=core.IsolatedChildKind()
+                | core.SharedAsyncChildKind()
+                | core.SharedThreadChildKind() as child_kind,
+            ):
                 child_pool = child_kind.pool
                 assert (child_pool.min_size, child_pool.max_size, child_pool.check) == (
                     0,
@@ -949,3 +1004,394 @@ class TestBootFailureFromException:
                 assert task_loop.report() == NoTaskLoop()
             case Err(failed):
                 raise AssertionError(failed)
+
+
+class TestVersionThreeChildFrames:
+    """The bytes of each frame and field that version 3 adds, from the
+    frames of the child."""
+
+    def test_a_result_frame_carries_the_start_of_its_attempt(self) -> None:
+        encoded = encode_child_frame(
+            ResultFrame(
+                task_id=TASK_ID,
+                end=ResultEnvelope('{}'),
+                started=StartReported(STARTED_AT),
+                rss=RssMb(1.5),
+                task_loop=NoTaskLoop(),
+            ),
+        )
+        assert encoded == framed(
+            {
+                'kind': 'result',
+                'task_id': str(TASK_ID),
+                'end': {'kind': 'result'},
+                'started_at': {'kind': 'reported', 'time': STARTED_TEXT},
+                'rss_mb': 1.5,
+                'task_loop': {'kind': 'none'},
+                'child': 'serves_on',
+            },
+            b'{}',
+        )
+
+    def test_a_shared_result_frame_carries_the_start_of_its_attempt(self) -> None:
+        encoded = encode_child_frame(
+            SharedResultFrame(
+                dispatch=3,
+                task_id=TASK_ID,
+                end=StoppedBeforeRunning('CLAIM_LOST'),
+                started=StartNotReported(),
+                rss=RssUnreadable(),
+            ),
+        )
+        assert encoded == framed(
+            {
+                'kind': 'shared_result',
+                'dispatch': 3,
+                'task_id': str(TASK_ID),
+                'end': {'kind': 'stopped_before_running', 'reason': 'CLAIM_LOST'},
+                'started_at': {'kind': 'not_reported'},
+                'rss_mb': None,
+                'child': 'serves_on',
+            },
+        )
+
+    def test_the_frames_of_a_body_that_ran_carry_the_time_of_its_start(self) -> None:
+        left = LoopHoldsTasks(count=1, names=('poll',))
+        assert encode_child_frame(
+            BodyReturnedFrame(
+                task_id=TASK_ID,
+                returned=ResultEnvelope('{}'),
+                started_at=STARTED_AT,
+                left=left,
+            ),
+        ) == framed(
+            {
+                'kind': 'body_returned',
+                'task_id': str(TASK_ID),
+                'returned': {'kind': 'result'},
+                'started_at': STARTED_TEXT,
+                'left': {'count': 1, 'names': ['poll']},
+            },
+            b'{}',
+        )
+        assert encode_child_frame(
+            LeftoverCancelFrame(
+                dispatch=2,
+                task_id=TASK_ID,
+                returned=ResultEnvelope('{}'),
+                started_at=STARTED_AT,
+            ),
+        ) == framed(
+            {
+                'kind': 'leftover_cancel',
+                'dispatch': 2,
+                'task_id': str(TASK_ID),
+                'returned': {'kind': 'result'},
+                'started_at': STARTED_TEXT,
+            },
+            b'{}',
+        )
+        assert encode_child_frame(
+            LeftoverStuckFrame(
+                dispatch=2,
+                task_id=TASK_ID,
+                tasks=0,
+                executor_items=1,
+                names=(),
+                returned=ResultEnvelope('{}'),
+                started_at=STARTED_AT,
+            ),
+        ) == framed(
+            {
+                'kind': 'leftover_stuck',
+                'dispatch': 2,
+                'task_id': str(TASK_ID),
+                'tasks': 0,
+                'executor_items': 1,
+                'names': [],
+                'returned': {'kind': 'result'},
+                'started_at': STARTED_TEXT,
+            },
+            b'{}',
+        )
+
+    def test_the_handler_stats_frame_carries_the_counts_of_each_handler(self) -> None:
+        encoded = encode_child_frame(
+            HandlerStatsFrame(
+                handlers=(
+                    HandlerCounts(handler='app.handlers.on_claim', errors=0, dropped=3),
+                    HandlerCounts(handler='app.handlers.on_end', errors=2, dropped=0),
+                ),
+                rss=RssMb(40.5),
+            ),
+        )
+        assert encoded == framed(
+            {
+                'kind': 'handler_stats',
+                'handlers': [
+                    {'handler': 'app.handlers.on_claim', 'errors': 0, 'dropped': 3},
+                    {'handler': 'app.handlers.on_end', 'errors': 2, 'dropped': 0},
+                ],
+                'rss_mb': 40.5,
+            },
+        )
+        assert encode_child_frame(
+            HandlerStatsFrame(handlers=(), rss=RssUnreadable()),
+        ) == framed({'kind': 'handler_stats', 'handlers': [], 'rss_mb': None})
+
+    @pytest.mark.parametrize(
+        'frame',
+        [
+            pytest.param(
+                ResultFrame(
+                    task_id=TASK_ID,
+                    end=StoppedBeforeRunning('CLAIM_LOST'),
+                    started=StartReported(STARTED_AT),
+                    rss=RssMb(1.0),
+                    task_loop=NoTaskLoop(),
+                ),
+                id='a-stop-with-a-start',
+            ),
+            pytest.param(
+                ResultFrame(
+                    task_id=TASK_ID,
+                    end=ResultEnvelope('{}'),
+                    started=StartNotReported(),
+                    rss=RssMb(1.0),
+                    task_loop=NoTaskLoop(),
+                ),
+                id='a-result-with-no-start',
+            ),
+            pytest.param(
+                SharedResultFrame(
+                    dispatch=1,
+                    task_id=TASK_ID,
+                    end=ResultEnvelope('{}'),
+                    started=StartNotReported(),
+                    rss=RssMb(1.0),
+                ),
+                id='a-seat-result-with-no-start',
+            ),
+            pytest.param(
+                HandlerStatsFrame(
+                    handlers=(HandlerCounts(handler='', errors=0, dropped=0),),
+                    rss=RssMb(1.0),
+                ),
+                id='an-empty-handler-name',
+            ),
+            pytest.param(
+                HandlerStatsFrame(
+                    handlers=(
+                        HandlerCounts(
+                            handler='h' * (MAX_HANDLER_NAME_CHARS + 1), errors=0, dropped=0,
+                        ),
+                    ),
+                    rss=RssMb(1.0),
+                ),
+                id='a-handler-name-over-its-bound',
+            ),
+            pytest.param(
+                HandlerStatsFrame(
+                    handlers=(
+                        HandlerCounts(handler='a', errors=0, dropped=0),
+                        HandlerCounts(handler='a', errors=1, dropped=0),
+                    ),
+                    rss=RssMb(1.0),
+                ),
+                id='a-handler-counted-twice',
+            ),
+            pytest.param(
+                HandlerStatsFrame(
+                    handlers=tuple(
+                        HandlerCounts(handler=f'h{n}', errors=0, dropped=0)
+                        for n in range(MAX_EVENT_HANDLERS + 1)
+                    ),
+                    rss=RssMb(1.0),
+                ),
+                id='too-many-handlers',
+            ),
+        ],
+    )
+    def test_a_frame_outside_its_rules_is_a_defect_of_the_child(
+        self,
+        frame: ResultFrame | SharedResultFrame | HandlerStatsFrame,
+    ) -> None:
+        with pytest.raises(ValueError):
+            encode_child_frame(frame)
+
+
+class TestVersionThreeParentFrames:
+    """The frames and fields that version 3 adds, from the worker parent,
+    as the core decodes them for a child."""
+
+    def test_a_run_frame_gives_its_stored_trace_carrier(self) -> None:
+        trace = carrier_trace({'traceparent': TRACEPARENT, 'tracestate': 'k=v'})
+        assert trace == {
+            'kind': 'carrier',
+            'text': f'{{"traceparent":"{TRACEPARENT}","tracestate":"k=v"}}',
+        }
+        frame = run_frame(task_id=TASK_ID, trace=trace)
+        assert run_trace_of(frame.trace) == StoredTraceCarrier(
+            carrier={'traceparent': TRACEPARENT, 'tracestate': 'k=v'},
+        )
+        shared = shared_run_frame(
+            dispatch=7, task_id=TASK_ID, work=thread_work(5_000), trace=trace,
+        )
+        assert run_trace_of(shared.trace) == StoredTraceCarrier(
+            carrier={'traceparent': TRACEPARENT, 'tracestate': 'k=v'},
+        )
+
+    def test_a_run_frame_with_no_carrier_gives_none(self) -> None:
+        assert run_trace_of(run_frame(task_id=TASK_ID).trace) == NoTraceCarrier()
+
+    def test_a_run_frame_gives_its_queue_and_its_attempt(self) -> None:
+        frame = run_frame(task_id=TASK_ID, queue_name='emails', attempt=3)
+        assert (frame.queue_name, frame.attempt) == ('emails', 3)
+        shared = shared_run_frame(
+            dispatch=7,
+            task_id=TASK_ID,
+            work=thread_work(5_000),
+            queue_name='emails',
+            attempt=2,
+        )
+        assert (shared.queue_name, shared.attempt) == ('emails', 2)
+
+    def test_the_largest_attempt_and_queue_name_decode(self) -> None:
+        frame = run_frame(task_id=TASK_ID, queue_name='q' * 52, attempt=2**31)
+        assert (len(frame.queue_name), frame.attempt) == (52, 2**31)
+
+    @pytest.mark.parametrize(
+        ('key', 'value'),
+        [
+            ('attempt', None),
+            ('attempt', 0),
+            ('attempt', -1),
+            ('attempt', 2**31 + 1),
+            ('attempt', '1'),
+            ('attempt', 1.5),
+            ('queue_name', None),
+            ('queue_name', 5),
+            ('queue_name', 'q' * 53),
+        ],
+    )
+    @pytest.mark.parametrize('kind', ['run', 'shared_run'])
+    def test_every_malformed_attempt_and_queue_name_is_refused(
+        self,
+        kind: str,
+        key: str,
+        value: object,
+    ) -> None:
+        match _parent({**_run_of_kind(kind), key: value}, b'{}'):
+            case core.FrameRefused(reason=reason):
+                assert key in reason
+            case other:
+                pytest.fail(f'a malformed {key} is refused, got {other!r}')
+
+    @pytest.mark.parametrize('key', ['queue_name', 'attempt'])
+    @pytest.mark.parametrize('kind', ['run', 'shared_run'])
+    def test_a_run_frame_without_its_queue_or_attempt_is_refused(self, kind: str, key: str) -> None:
+        match _parent(_without(_run_of_kind(kind), key), b'{}'):
+            case core.FrameRefused(reason=reason):
+                assert key in reason
+            case other:
+                pytest.fail(f'a run frame without its {key} is refused, got {other!r}')
+
+    @pytest.mark.parametrize(
+        'trace',
+        [
+            None,
+            'no_carrier',
+            {'kind': 'remote'},
+            {'kind': 'carrier'},
+            {'kind': 'carrier', 'text': 5},
+            {'kind': 'carrier', 'text': '[1]'},
+            {'kind': 'carrier', 'text': '{"a":1}'},
+            {'kind': 'carrier', 'text': '{"a":"1","a":"2"}'},
+            {'kind': 'carrier', 'text': '{"k":"' + 'v' * 2048 + '"}'},
+            {'kind': 'no_carrier', 'text': '{}'},
+        ],
+    )
+    @pytest.mark.parametrize('kind', ['run', 'shared_run'])
+    def test_every_malformed_trace_is_refused(self, kind: str, trace: object) -> None:
+        assert _refused({**_run_of_kind(kind), 'trace': trace}, b'{}')
+
+    @pytest.mark.parametrize('kind', ['run', 'shared_run'])
+    def test_a_run_frame_without_its_trace_is_refused(self, kind: str) -> None:
+        match _parent(_without(_run_of_kind(kind), 'trace'), b'{}'):
+            case core.FrameRefused(reason=reason):
+                assert 'trace' in reason
+            case other:
+                pytest.fail(f'a run frame without its trace is refused, got {other!r}')
+
+    def test_the_init_frame_of_a_handler_child(self) -> None:
+        match _init_kind(handler_kind(task_send_pool=3)):
+            case core.InitFrame(child_kind=core.HandlerChildKind() as kind):
+                assert kind.task_send_pool == 3
+            case other:
+                pytest.fail(f'a handler kind decodes as one, got {other!r}')
+
+    @pytest.mark.parametrize(
+        'child_kind',
+        [
+            {'kind': 'handler'},
+            {'kind': 'handler', 'task_send_pool': 0},
+            {'kind': 'handler', 'task_send_pool': 1, 'pool': _POOL},
+        ],
+    )
+    def test_the_handler_kind_is_checked(self, child_kind: object) -> None:
+        assert isinstance(_init_kind(child_kind), core.FrameRefused)
+
+    def test_an_events_frame_gives_the_wire_text_of_each_event(self) -> None:
+        frame = events_frame((CLAIM_RELEASED, SLOT_RECOVERED))
+        assert frame.events == [CLAIM_RELEASED, SLOT_RECOVERED]
+
+    @pytest.mark.parametrize(
+        ('meta', 'body'),
+        [
+            ({'kind': 'events', 'count': 1}, f'[{SLOT_RECOVERED}]'.encode('utf-8')),
+            ({'kind': 'events'}, b'[]'),
+            ({'kind': 'events'}, b'{}'),
+            ({'kind': 'events'}, b'[1,'),
+            ({'kind': 'events'}, b'[\xff]'),
+        ],
+    )
+    def test_every_malformed_events_frame_is_refused(
+        self,
+        meta: dict[str, object],
+        body: bytes,
+    ) -> None:
+        assert _refused(meta, body)
+
+    def test_an_init_frame_of_version_two_is_a_named_mismatch(self) -> None:
+        match _parent(init_meta(protocol=2)):
+            case core.ParentProtocolMismatch(received=received, expected=expected):
+                assert received == 2
+                assert expected == 3
+            case other:
+                pytest.fail(f'a version-2 init frame is a mismatch, got {other!r}')
+
+
+class TestATaskChildRefusesHandlerFrames:
+    """A task child serves runs: the init frame of a handler child and an
+    events frame end it with the bad-frame code."""
+
+    def test_the_init_frame_of_a_handler_child_is_refused(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(child_main.os, '_exit', _raise_exit)
+        sock = _ScriptedSocket(framed(init_meta(child_kind=handler_kind())), 1 << 16)
+        with pytest.raises(_Exited) as exited:
+            read_init_frame(sock, ParentFrameReader(sock))  # pyright: ignore[reportArgumentType]
+        assert exited.value.code == child_main.BAD_PARENT_FRAME_EXIT_CODE
+
+    def test_an_events_frame_after_the_init_frame_is_refused(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(child_main.os, '_exit', _raise_exit)
+        data = framed({'kind': 'events'}, f'[{SLOT_RECOVERED}]'.encode('utf-8'))
+        reader = ParentFrameReader(_ScriptedSocket(data, 1 << 16))  # pyright: ignore[reportArgumentType]
+        with pytest.raises(_Exited) as exited:
+            child_main._read_parent_frames(reader, ParentFrameInbox())
+        assert exited.value.code == child_main.BAD_PARENT_FRAME_EXIT_CODE

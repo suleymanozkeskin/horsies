@@ -29,6 +29,7 @@ use crate::core::config::worker_profile::{
     ChildPreload, IsolatedSetting, MemoryLimitSetting, ParentCpu, SharedAsyncSetting,
     SharedThreadSetting, TaskLimitSetting, WorkerProfile,
 };
+use crate::telemetry::worker::WorkerTelemetry;
 use crate::worker::executor::placement::{plan_own_core, CpuPlacement, PlacementRefused};
 use crate::worker::executor::protocol::{
     AsyncSeats, ChildConnection, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl,
@@ -252,6 +253,8 @@ pub struct PoolFacts {
     pub pending_limit: NonZeroUsize,
     pub exit_not_seen: ExitNotSeen,
     pub placement: CpuPlacement,
+    /// Where the boots of the slots are told.
+    pub telemetry: WorkerTelemetry,
 }
 
 /// The child kind of the isolated children of the profile, when it has
@@ -486,7 +489,8 @@ impl WorkerChildren {
         spawner: &SpawnerHandle,
         live: &LiveDispatches,
     ) -> Self {
-        let board = Arc::new(PoolBoard::new(child_layout(profile)));
+        let board =
+            Arc::new(PoolBoard::new(child_layout(profile)).with_telemetry(facts.telemetry.clone()));
         let isolated = isolated_pool_config(profile, launch, facts).map(|config| {
             IsolatedPool::start(config, Arc::clone(&board), spawner.clone(), live.clone())
         });
@@ -558,7 +562,7 @@ impl WorkerChildren {
         let route = match dispatch_route(task.execution, self.service().plan(), &task.options) {
             Ok(route) => route,
             Err(unserved) => {
-                tracing::error!(task_id = %task.task_id, "{unserved}; the row goes back to the queue");
+                tracing::error!(task_id = %task.task_id, attempt = task.retry.attempt().get(), trace_id = task.trace_id.log_field(), "{unserved}; the row goes back to the queue");
                 return Submitted::NotDispatched(NotRunCause::NoChildOfItsKind);
             }
         };

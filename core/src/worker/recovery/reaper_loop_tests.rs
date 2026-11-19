@@ -159,7 +159,7 @@ async fn a_started_reaper_drops_an_overdue_heartbeat_leaf() {
         maintenance_only_recovery(),
         RetentionConfig::default(),
         new_reaper_health(),
-        crate::telemetry::registry::OptionalCounter::NotRecorded,
+        crate::telemetry::worker::WorkerTelemetry::Off,
         cancel.clone(),
     );
 

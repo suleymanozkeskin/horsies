@@ -4,23 +4,30 @@
 //!
 //! A constructor cuts each text to its bound, as the version-1 child did. Any
 //! other value outside its bound (a process id of 0, a dispatch number of 0,
-//! a report whose names do not match its count, an unknown choice) is a
-//! defect of the child and raises `ValueError`.
+//! a report whose names do not match its count, an unknown choice, a start
+//! that does not fit the end of its run, a handler name that is empty or
+//! over its bound) is a defect of the child and raises `ValueError`. A
+//! handler name is the key of its counts, so it is refused, never cut.
 
 use std::num::NonZeroU64;
 
+use chrono::{DateTime, Utc};
+use horsies_core::events::AttemptStart;
 use horsies_core::frame_protocol::{
     BlockedWhere, BodyEnd, BodyReturnedFrame, BootDetail, BootErrorName, BootFailedFrame,
-    ChildAfterFrame, ChildFrame, DispatchNumber, FailureDetail, LeftWorkEnd, LeftWorkEndedFrame,
-    LeftWorkStuckFrame, LeftoverCancelFrame, LeftoverName, LeftoverStuckFrame, LoopBlockedFrame,
-    LoopCulprit, LoopHoldsTasks, NoLeftWork, ProcessId, ReadyFrame, ReportedBootCause,
-    ResultEnvelopeText, ResultFrame, RssMb, RssReading, RunEnd, RunRef, RunStuckFrame, SeatEnd,
-    SharedResultFrame, ShortageErrno, StopReason, StuckWork,
+    ChildAfterFrame, ChildFrame, DispatchNumber, FailureDetail, HandlerCounts, HandlerCountsList,
+    HandlerName, HandlerStatsFrame, LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame,
+    LeftoverCancelFrame, LeftoverName, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit,
+    LoopHoldsTasks, NoLeftWork, ProcessId, ReadyFrame, ReportedBootCause, ResultEnvelopeText,
+    ResultFrame, RssMb, RssReading, RunEnd, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame,
+    ShortageErrno, StopReason, StuckWork,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyString;
 use uuid::Uuid;
+
+use crate::operations::arguments::utc_instant;
 
 /// The RSS of a child in MiB, or `'UNREADABLE'`.
 #[derive(FromPyObject)]
@@ -82,6 +89,51 @@ fn child_after_frame(child: &str) -> PyResult<ChildAfterFrame> {
         other => Err(PyValueError::new_err(format!(
             "child must be 'SERVES_ON' or 'ENDS_ITSELF', not {other:?}"
         ))),
+    }
+}
+
+/// The start of an attempt, as the child passes it: the aware `datetime`
+/// that its start write returned, or `'NOT_REPORTED'`.
+#[derive(FromPyObject)]
+pub enum StartArgument<'py> {
+    Text(String),
+    Time(Bound<'py, PyAny>),
+}
+
+impl StartArgument<'_> {
+    /// The start: a naive `datetime` raises `TypeError`, another text than
+    /// `'NOT_REPORTED'` raises `ValueError`.
+    fn attempt_start(self) -> PyResult<AttemptStart> {
+        match self {
+            Self::Text(text) => match text.as_str() {
+                "NOT_REPORTED" => Ok(AttemptStart::NotReported),
+                other => Err(PyValueError::new_err(format!(
+                    "started_at must be an aware datetime or 'NOT_REPORTED', not {other:?}"
+                ))),
+            },
+            Self::Time(time) => Ok(AttemptStart::Reported {
+                started_at: utc_instant(&time)?,
+            }),
+        }
+    }
+}
+
+/// The start of a run that ended with `end`: a stop before running has no
+/// start, and a result envelope comes after the start write. A start that
+/// does not fit its end is a defect of the child.
+fn start_of_end(end: &RunEnd, started_at: AttemptStart) -> PyResult<AttemptStart> {
+    match (end, started_at) {
+        (RunEnd::StoppedBeforeRunning(_), AttemptStart::Reported { .. }) => {
+            Err(PyValueError::new_err(
+                "started_at of a run that stopped before running must be 'NOT_REPORTED'",
+            ))
+        }
+        (RunEnd::Result(_), AttemptStart::NotReported) => Err(PyValueError::new_err(
+            "started_at of a run that ended with a result envelope must be its start time",
+        )),
+        (RunEnd::StoppedBeforeRunning(_), AttemptStart::NotReported)
+        | (RunEnd::Result(_), AttemptStart::Reported { .. })
+        | (RunEnd::WorkerFailure(_), _) => Ok(started_at),
     }
 }
 
@@ -423,6 +475,39 @@ child_frame_class!(
     /// `blocked_ms`.
     LoopBlockedFrameRecord as "LoopBlockedFrame"
 );
+child_frame_class!(
+    /// The counts of each event handler of a handler child since it
+    /// started, and its RSS.
+    HandlerStatsFrameRecord as "HandlerStatsFrame"
+);
+
+/// The cumulative counts of one event handler: `errors` events for which it
+/// failed, `dropped` events that its full queue dropped. `handler` is its
+/// name: 1 to `max_handler_name_chars` characters.
+#[pyclass(module = "horsies._core", name = "HandlerCounts", frozen)]
+pub struct HandlerCountsRecord {
+    counts: HandlerCounts,
+}
+
+#[pymethods]
+impl HandlerCountsRecord {
+    #[new]
+    #[pyo3(signature = (*, handler, errors, dropped))]
+    fn new(handler: String, errors: u64, dropped: u64) -> PyResult<Self> {
+        let handler = match handler.is_empty() {
+            true => return Err(PyValueError::new_err("handler must not be empty")),
+            false => HandlerName::new(handler)
+                .map_err(|over| PyValueError::new_err(format!("handler: {over}")))?,
+        };
+        Ok(Self {
+            counts: HandlerCounts {
+                handler,
+                errors,
+                dropped,
+            },
+        })
+    }
+}
 
 #[pymethods]
 impl ReadyFrameRecord {
@@ -455,14 +540,17 @@ impl BootFailedFrameRecord {
 
 #[pymethods]
 impl ResultFrameRecord {
+    /// `started_at`: the aware `datetime` that the start write returned, or
+    /// `'NOT_REPORTED'` for a run that stopped before running.
     /// `task_loop`: `'NO_TASK_LOOP'` or `'LOOP_HOLDS_NO_TASK'`. `child`:
     /// `'SERVES_ON'`, or `'ENDS_ITSELF'` when the child ends itself once the
     /// frame is written.
     #[new]
-    #[pyo3(signature = (*, task_id, end, rss_mb, task_loop, child))]
+    #[pyo3(signature = (*, task_id, end, started_at, rss_mb, task_loop, child))]
     fn new(
         task_id: Uuid,
         end: RunEndArgument<'_>,
+        started_at: StartArgument<'_>,
         rss_mb: RssArgument,
         task_loop: &str,
         child: &str,
@@ -476,10 +564,12 @@ impl ResultFrameRecord {
                 )))
             }
         };
+        let end = end.run_end()?;
         Ok(Self {
             frame: ChildFrame::Result(ResultFrame {
                 task_id,
-                end: end.run_end()?,
+                started_at: start_of_end(&end, started_at.attempt_start()?)?,
+                end,
                 rss: rss_mb.reading()?,
                 task_loop,
                 child: child_after_frame(child)?,
@@ -490,17 +580,21 @@ impl ResultFrameRecord {
 
 #[pymethods]
 impl BodyReturnedFrameRecord {
+    /// `started_at`: the aware `datetime` that the start write returned.
     #[new]
-    #[pyo3(signature = (*, task_id, returned, left))]
+    #[pyo3(signature = (*, task_id, returned, started_at, left))]
     fn new(
         task_id: Uuid,
         returned: BodyEndArgument<'_>,
+        started_at: &Bound<'_, PyAny>,
         left: &Bound<'_, LoopHoldsTasksRecord>,
     ) -> PyResult<Self> {
+        let started_at: DateTime<Utc> = utc_instant(started_at)?;
         Ok(Self {
             frame: ChildFrame::BodyReturned(BodyReturnedFrame {
                 task_id,
                 returned: returned.body_end()?,
+                started_at,
                 left: left.get().held.clone(),
             }),
         })
@@ -548,21 +642,31 @@ impl LeftWorkStuckFrameRecord {
 
 #[pymethods]
 impl SharedResultFrameRecord {
-    /// `child`: `'SERVES_ON'`, or `'ENDS_ITSELF'` when the child ends itself
-    /// once the frame is written.
+    /// `started_at`: the aware `datetime` that the start write returned, or
+    /// `'NOT_REPORTED'` for a run that stopped before running. `child`:
+    /// `'SERVES_ON'`, or `'ENDS_ITSELF'` when the child ends itself once the
+    /// frame is written.
     #[new]
-    #[pyo3(signature = (*, dispatch, task_id, end, rss_mb, child))]
+    #[pyo3(signature = (*, dispatch, task_id, end, started_at, rss_mb, child))]
     fn new(
         dispatch: u64,
         task_id: Uuid,
         end: SeatEndArgument<'_>,
+        started_at: StartArgument<'_>,
         rss_mb: RssArgument,
         child: &str,
     ) -> PyResult<Self> {
+        let end = end.seat_end()?;
+        let started_at = started_at.attempt_start()?;
+        let started_at = match &end {
+            SeatEnd::Finished(run_end) => start_of_end(run_end, started_at)?,
+            SeatEnd::TimedOut => started_at,
+        };
         Ok(Self {
             frame: ChildFrame::SharedResult(SharedResultFrame {
                 run: run_ref(dispatch, task_id)?,
-                end: end.seat_end()?,
+                end,
+                started_at,
                 rss: rss_mb.reading()?,
                 child: child_after_frame(child)?,
             }),
@@ -608,13 +712,21 @@ impl RunStuckFrameRecord {
 
 #[pymethods]
 impl LeftoverCancelFrameRecord {
+    /// `started_at`: the aware `datetime` that the start write returned.
     #[new]
-    #[pyo3(signature = (*, dispatch, task_id, returned))]
-    fn new(dispatch: u64, task_id: Uuid, returned: BodyEndArgument<'_>) -> PyResult<Self> {
+    #[pyo3(signature = (*, dispatch, task_id, returned, started_at))]
+    fn new(
+        dispatch: u64,
+        task_id: Uuid,
+        returned: BodyEndArgument<'_>,
+        started_at: &Bound<'_, PyAny>,
+    ) -> PyResult<Self> {
+        let started_at: DateTime<Utc> = utc_instant(started_at)?;
         Ok(Self {
             frame: ChildFrame::LeftoverCancel(LeftoverCancelFrame {
                 run: run_ref(dispatch, task_id)?,
                 returned: returned.body_end()?,
+                started_at,
             }),
         })
     }
@@ -622,19 +734,46 @@ impl LeftoverCancelFrameRecord {
 
 #[pymethods]
 impl LeftoverStuckFrameRecord {
+    /// `started_at`: the aware `datetime` that the start write returned.
     #[new]
-    #[pyo3(signature = (*, dispatch, task_id, work, returned))]
+    #[pyo3(signature = (*, dispatch, task_id, work, returned, started_at))]
     fn new(
         dispatch: u64,
         task_id: Uuid,
         work: &Bound<'_, StuckWorkRecord>,
         returned: BodyEndArgument<'_>,
+        started_at: &Bound<'_, PyAny>,
     ) -> PyResult<Self> {
+        let started_at: DateTime<Utc> = utc_instant(started_at)?;
         Ok(Self {
             frame: ChildFrame::LeftoverStuck(LeftoverStuckFrame {
                 run: run_ref(dispatch, task_id)?,
                 work: work.get().work.clone(),
                 returned: returned.body_end()?,
+                started_at,
+            }),
+        })
+    }
+}
+
+#[pymethods]
+impl HandlerStatsFrameRecord {
+    /// `handlers`: the counts of each handler, each name once, at most
+    /// `max_event_handlers`. `rss_mb`: the RSS of the child in MiB, or
+    /// `'UNREADABLE'`.
+    #[new]
+    #[pyo3(signature = (*, handlers, rss_mb))]
+    fn new(handlers: Vec<Bound<'_, HandlerCountsRecord>>, rss_mb: RssArgument) -> PyResult<Self> {
+        let counts = handlers
+            .iter()
+            .map(|record| record.get().counts.clone())
+            .collect();
+        let handlers = HandlerCountsList::new(counts)
+            .map_err(|invalid| PyValueError::new_err(invalid.to_string()))?;
+        Ok(Self {
+            frame: ChildFrame::HandlerStats(HandlerStatsFrame {
+                handlers,
+                rss: rss_mb.reading()?,
             }),
         })
     }
@@ -656,7 +795,7 @@ impl LoopBlockedFrameRecord {
     }
 }
 
-/// A child frame argument: one of the thirteen frame classes.
+/// A child frame argument: one of the fourteen frame classes.
 #[derive(FromPyObject)]
 pub enum ChildFrameArgument<'py> {
     Ready(Bound<'py, ReadyFrameRecord>),
@@ -672,6 +811,7 @@ pub enum ChildFrameArgument<'py> {
     LeftoverCancel(Bound<'py, LeftoverCancelFrameRecord>),
     LeftoverStuck(Bound<'py, LeftoverStuckFrameRecord>),
     LoopBlocked(Bound<'py, LoopBlockedFrameRecord>),
+    HandlerStats(Bound<'py, HandlerStatsFrameRecord>),
 }
 
 impl ChildFrameArgument<'_> {
@@ -691,6 +831,7 @@ impl ChildFrameArgument<'_> {
             Self::LeftoverCancel(record) => with_frame(record.get().frame()),
             Self::LeftoverStuck(record) => with_frame(record.get().frame()),
             Self::LoopBlocked(record) => with_frame(record.get().frame()),
+            Self::HandlerStats(record) => with_frame(record.get().frame()),
         }
     }
 }
@@ -717,5 +858,7 @@ pub fn add_child_frame_classes(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<LeftoverCancelFrameRecord>()?;
     module.add_class::<LeftoverStuckFrameRecord>()?;
     module.add_class::<LoopBlockedFrameRecord>()?;
+    module.add_class::<HandlerCountsRecord>()?;
+    module.add_class::<HandlerStatsFrameRecord>()?;
     Ok(())
 }

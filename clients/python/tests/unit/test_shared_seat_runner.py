@@ -61,6 +61,7 @@ from tests.fixtures.core_frames import (
     shared_run_frame,
     stop_frame,
 )
+from tests.fixtures.run_return import STARTED as STARTED_RUN
 
 EXECUTOR_THREADS = 4
 """The size of the default executor of a test child."""
@@ -268,7 +269,7 @@ class _Steps:
     """The replaced database steps, as the seat sees them."""
 
     def __init__(self) -> None:
-        self.confirm = AsyncMock(return_value=None)
+        self.confirm = AsyncMock(return_value=STARTED_RUN)
         self.mark = AsyncMock(return_value=MarkerDone())
 
 
@@ -348,7 +349,7 @@ def test_a_refusal_fails_the_task_after_running_and_before_resolve(
     assert envelope == child_runner._stored_timeout_refusal_response(
         'seat_double',
         CancelGraceInvalid(reason=reason),
-    )
+    ).envelope
     error = _result(envelope, int).unwrap_err()
     assert error.error_code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR
     assert error.data == {

@@ -45,7 +45,7 @@ from horsies.core.types.result import Err, Ok
 from horsies.core.task_decorator import await_task_call_in_worker
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import child_runner
-from horsies.core.worker.child_frames import LoopHoldsNoTask
+from horsies.core.worker.child_frames import LoopHoldsNoTask, NoTraceCarrier
 from horsies.core.worker.task_loop import (
     AsyncTaskPresence,
     LoopNotCreated,
@@ -53,6 +53,7 @@ from horsies.core.worker.task_loop import (
     TaskLoop,
 )
 from horsies.core.worker.child_runner import RunTheTask
+from horsies.core.worker.run_return import NotInWorkflow, StartedRunning
 from tests.fixtures.core_frames import init_frame
 from tests.fixtures.run_return import wire_of
 
@@ -97,6 +98,13 @@ def no_task_loop() -> Iterator[TaskLoop]:
     loop.close()
 
 
+_STARTED = StartedRunning(
+    datetime(2026, 11, 17, 10, 0, 1, tzinfo=timezone.utc),
+    NotInWorkflow(),
+)
+"""The start that the stubbed RUNNING update returns."""
+
+
 def _runner(
     app: Horsies,
     task_loop: TaskLoop,
@@ -113,7 +121,7 @@ def _runner(
                 patch.object(
                     child_runner,
                     '_confirm_ownership_and_set_running',
-                    set_running or MagicMock(return_value=None),
+                    set_running or MagicMock(return_value=_STARTED),
                 ),
             )
             stack.enter_context(
@@ -131,6 +139,9 @@ def _runner(
                     claimed_at=CLAIMED_AT,
                     task_loop=task_loop,
                     orphan_self_heal=True,
+                    queue_name='default',
+                    attempt=1,
+                    trace=NoTraceCarrier(),
                 )
             )
 
@@ -365,7 +376,7 @@ class TestEntriesTheChildCannotRun:
         any task failure."""
         app = _app()
         cast(Any, app.tasks)['not_a_task_function'] = entry
-        set_running = MagicMock(return_value=None)
+        set_running = MagicMock(return_value=_STARTED)
 
         run = _runner(app, task_loop, set_running)
         ok, payload, reason = run('not_a_task_function')
@@ -416,7 +427,7 @@ class TestEntriesTheChildCannotRun:
         self,
         task_loop: TaskLoop,
     ) -> None:
-        set_running = MagicMock(return_value=None)
+        set_running = MagicMock(return_value=_STARTED)
 
         ok, payload, reason = _runner(_app(), task_loop, set_running)('not_registered')
 

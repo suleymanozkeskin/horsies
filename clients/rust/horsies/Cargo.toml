@@ -14,13 +14,15 @@ categories = ["asynchronous", "database"]
 default = ["cli"]
 # The CLI runner (`horsies::cli::run`) and the shipped `horsies` binary. The
 # runner's `metrics` command serves the fleet metrics with the core's metrics
-# endpoint.
+# endpoint. `tracing-subscriber/json`: the JSON log format of
+# `horsies::cli::run_with_log_format`.
 cli = [
     "dep:clap",
     "dep:owo-colors",
     "dep:tempfile",
     "dep:toml",
     "dep:tracing-subscriber",
+    "tracing-subscriber/json",
     "horsies-core/metrics-endpoint",
 ]
 # The axum mount of the core's monitoring handler (`horsies::web`), and the
@@ -30,6 +32,11 @@ web = ["dep:axum", "dep:futures-util", "horsies-core/web", "tokio/net"]
 tokio-postgres = ["dep:tokio-postgres"]
 # The rerun adapter for a `sqlx::Transaction<'_, Postgres>`.
 sqlx = ["dep:sqlx"]
+# OpenTelemetry (`horsies::otel`): the spans of the task sends, the workflow
+# starts and the task bodies, and the producer metrics, with the global
+# providers of `opentelemetry`. Without it no OpenTelemetry crate is
+# compiled.
+otel = ["dep:opentelemetry", "dep:tracing-opentelemetry", "dep:tracing-subscriber"]
 
 [[bin]]
 name = "horsies"
@@ -88,6 +95,15 @@ tracing-subscriber = { version = "0.3", features = [
     "env-filter",
     "fmt",
 ], optional = true }
+# The OpenTelemetry API (feature `otel`): spans, metrics, propagation. The
+# user's providers and propagator are of this version.
+opentelemetry = { version = "0.33.1", default-features = false, features = [
+    "trace",
+    "metrics",
+], optional = true }
+# The `tracing` layer of the attempt span (feature `otel`), for
+# `opentelemetry` 0.33.
+tracing-opentelemetry = { version = "0.34.0", default-features = false, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
@@ -97,6 +113,13 @@ tower = { version = "0.5", features = ["util"] }
 bytes = "1"
 # The fork of `tests/fork_refusal.rs`.
 libc = "0.2"
+# The SDK of the `otel` tests: the W3C propagator, and the in-memory span
+# and metric exporters.
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = [
+    "trace",
+    "metrics",
+    "testing",
+] }
 
 [lints]
 workspace = true

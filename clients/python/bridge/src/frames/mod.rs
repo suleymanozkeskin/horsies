@@ -32,9 +32,10 @@ use horsies_core::frame_protocol::{
     encode_preload_frame as core_encode_preload_frame, EncodedFrame, FrameEncodeError,
     FrameOverBound, FrameReader, ParentFrame, ParentFrameRefusal, BAD_ARGUMENTS_EXIT_CODE,
     BAD_PARENT_FRAME_EXIT_CODE, BOOT_FAILED_EXIT_CODE, CHILD_HOOK_FAILED_EXIT_CODE,
-    CORE_STOPPED_EXIT_CODE, MAX_BODY_BYTES, MAX_LEFTOVER_TASK_NAMES, MAX_META_BYTES,
-    PARENT_GONE_EXIT_CODE, PROTOCOL_MISMATCH_EXIT_CODE, PROTOCOL_VERSION,
-    REPARENT_FAILED_EXIT_CODE, SPAWN_REQUEST_BYTE, STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
+    CORE_STOPPED_EXIT_CODE, MAX_BODY_BYTES, MAX_EVENT_HANDLERS, MAX_HANDLER_NAME_CHARS,
+    MAX_LEFTOVER_TASK_NAMES, MAX_META_BYTES, PARENT_GONE_EXIT_CODE, PROTOCOL_MISMATCH_EXIT_CODE,
+    PROTOCOL_VERSION, REPARENT_FAILED_EXIT_CODE, SPAWN_REQUEST_BYTE,
+    STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -49,8 +50,9 @@ use preload::PreloadFrameArgument;
 
 /// The numbers that the child, the preload process and the worker parent
 /// share: the protocol version, the exit codes of a child, the byte of a
-/// spawn request, and the two bounds that the child applies before it builds
-/// a frame (the names of a report of left work, the bytes of a body).
+/// spawn request, and the bounds that the child applies before it builds a
+/// frame (the names of a report of left work, the bytes of a body, the
+/// handlers of a handler child and the characters of a handler name).
 #[pyclass(module = "horsies._core", frozen, get_all)]
 pub struct ProtocolNumbers {
     protocol_version: u32,
@@ -71,6 +73,10 @@ pub struct ProtocolNumbers {
     max_leftover_task_names: usize,
     /// The largest body of a frame, in bytes: the largest result envelope.
     max_body_bytes: u64,
+    /// The most event handlers of one handler child.
+    max_event_handlers: usize,
+    /// The most characters of the name of an event handler.
+    max_handler_name_chars: usize,
 }
 
 /// A header over the bounds: nothing was allocated for its frame, and the
@@ -156,13 +162,15 @@ fn protocol_numbers() -> ProtocolNumbers {
         spawn_request_byte: SPAWN_REQUEST_BYTE,
         max_leftover_task_names: MAX_LEFTOVER_TASK_NAMES,
         max_body_bytes: MAX_BODY_BYTES,
+        max_event_handlers: MAX_EVENT_HANDLERS,
+        max_handler_name_chars: MAX_HANDLER_NAME_CHARS,
     }
 }
 
 /// Decode one parent frame from its metadata and its body: `InitFrame`,
-/// `RunFrame`, `SharedRunFrame`, `StopFrame`; `FrameRefused` for a malformed
-/// frame; `ParentProtocolMismatch` for an init frame of another protocol
-/// version. Pure.
+/// `RunFrame`, `SharedRunFrame`, `EventsFrame`, `StopFrame`; `FrameRefused`
+/// for a malformed frame; `ParentProtocolMismatch` for an init frame of
+/// another protocol version. Pure.
 #[pyfunction]
 fn decode_parent_frame(py: Python<'_>, meta: &[u8], body: &[u8]) -> PyResult<Py<PyAny>> {
     refuse_by_fork_rule()?;

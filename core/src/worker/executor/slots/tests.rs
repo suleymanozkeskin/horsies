@@ -48,6 +48,7 @@ fn task(execution: ExecutionClass, stored: &str) -> ClaimedTask {
         },
         options: options(stored),
         trace: crate::events::RunTrace::NoCarrier,
+        trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
     }
 }
 
@@ -834,11 +835,14 @@ fn run_frame_bytes(claimed: &ClaimedTask) -> Vec<u8> {
     encode_parent_frame(&ParentFrame::Run(RunFrame {
         task_id: claimed.task_id,
         task_name: claimed.task_name.clone(),
+        queue_name: crate::events::QueueName::cut(&claimed.queue_name),
+        attempt: claimed.retry.attempt(),
         worker_id: "worker-1".to_owned(),
         claimed_at: claimed.claimed_at,
         orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work: IsolatedWork::Run,
         input: TaskInputText::new("{}".to_owned()),
+        trace: crate::events::RunTrace::NoCarrier,
     }))
     .unwrap()
     .to_bytes()
@@ -920,6 +924,9 @@ async fn an_isolated_slot_reports_the_result_of_its_child() {
         end: RunEnd::Result(ResultEnvelopeText::new(
             r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned(),
         )),
+        started_at: crate::events::AttemptStart::Reported {
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        },
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
         child: ChildAfterFrame::ServesOn,

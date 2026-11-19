@@ -46,6 +46,7 @@ fn claimed_wire(n: u128) -> ClaimWireRow {
         retry_count: Some(1),
         max_retries: Some(3),
         trace_carrier: None,
+        trace_id: None,
         priority: Some(40),
         enqueued_at: Some(due()),
         short_by: None,
@@ -85,6 +86,7 @@ fn claimed_rows_come_in_claim_order_with_no_short_take() {
             retry_count: 1,
             max_retries: 3,
             trace: crate::events::RunTrace::NoCarrier,
+            trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
             priority: Priority::try_from(40).unwrap(),
             enqueued_at: due(),
             read,
@@ -189,6 +191,13 @@ fn rows_the_claim_never_returns_are_a_defect() {
             "short_with_a_task_column",
             vec![ClaimWireRow {
                 id: Some(task(1)),
+                ..short_wire(1)
+            }],
+        ),
+        (
+            "short_with_a_trace_id",
+            vec![ClaimWireRow {
+                trace_id: Some(vec![7; 16]),
                 ..short_wire(1)
             }],
         ),
@@ -393,10 +402,99 @@ fn a_count_above_the_integer_range_is_refused() {
 #[test]
 fn a_started_row_carries_its_start() {
     assert_eq!(
-        decode_start("STARTED", None, Some(instant())),
+        decode_start(
+            "STARTED",
+            None,
+            Some(instant()),
+            StartWorkflowColumns::default()
+        ),
         Ok(StartOutcome::Started {
-            started_at: instant()
+            started_at: instant(),
+            workflow: RunWorkflow::NotInWorkflow,
         })
+    );
+}
+
+/// The workflow of the started tasks of these tests.
+const WORKFLOW_ID: Uuid = Uuid::from_u128(0xf004);
+/// The root workflow of [`WORKFLOW_ID`].
+const ROOT_WORKFLOW_ID: Uuid = Uuid::from_u128(0xf001);
+
+/// The workflow columns of a started task of node `node_index` of
+/// [`WORKFLOW_ID`], whose tree has the root [`ROOT_WORKFLOW_ID`].
+fn node_columns(node_index: i32) -> StartWorkflowColumns {
+    StartWorkflowColumns {
+        workflow_id: Some(WORKFLOW_ID),
+        workflow_task_index: Some(node_index),
+        root_workflow_id: Some(ROOT_WORKFLOW_ID),
+    }
+}
+
+/// A started workflow task carries its workflow, the index of its node,
+/// the largest index included, and the root of its tree.
+#[test]
+fn a_started_workflow_task_carries_its_node_and_its_root() {
+    let largest = i32::try_from(MAX_WORKFLOW_NODE_INDEX).expect("the bound fits an i32");
+    for (stored, node_index) in [(3, 3), (largest, MAX_WORKFLOW_NODE_INDEX)] {
+        assert_eq!(
+            decode_start("STARTED", None, Some(instant()), node_columns(stored)),
+            Ok(StartOutcome::Started {
+                started_at: instant(),
+                workflow: RunWorkflow::InWorkflow {
+                    workflow_id: WORKFLOW_ID,
+                    node_index: WorkflowNodeIndex::try_from(node_index).expect("a node index"),
+                    root_workflow_id: ROOT_WORKFLOW_ID,
+                },
+            }),
+            "{stored}"
+        );
+    }
+}
+
+/// Workflow columns that the start never returns are a breach of its row
+/// contract: some set and others NULL, a node index outside its bound, and
+/// any of them on a miss.
+#[test]
+fn workflow_columns_the_start_never_returns_fail_closed() {
+    let past_the_largest =
+        i32::try_from(MAX_WORKFLOW_NODE_INDEX + 1).expect("the bound fits an i32");
+    let started_cases = [
+        (
+            "workflow_id_alone",
+            StartWorkflowColumns {
+                workflow_id: Some(WORKFLOW_ID),
+                ..StartWorkflowColumns::default()
+            },
+        ),
+        (
+            "node_index_alone",
+            StartWorkflowColumns {
+                workflow_task_index: Some(0),
+                ..StartWorkflowColumns::default()
+            },
+        ),
+        (
+            "no_root",
+            StartWorkflowColumns {
+                root_workflow_id: None,
+                ..node_columns(0)
+            },
+        ),
+        ("negative_node_index", node_columns(-1)),
+        (
+            "node_index_past_the_spec_bound",
+            node_columns(past_the_largest),
+        ),
+    ];
+    for (name, columns) in started_cases {
+        assert!(
+            decode_start("STARTED", None, Some(instant()), columns).is_err(),
+            "{name} must fail closed"
+        );
+    }
+    assert!(
+        decode_start("MISSED", Some("NOT_HELD"), None, node_columns(0)).is_err(),
+        "a miss with workflow columns must fail closed"
     );
 }
 
@@ -411,7 +509,7 @@ fn each_miss_reason_decodes() {
         ("NODE_NOT_LINKED", StartMiss::NodeNotLinked),
     ] {
         assert_eq!(
-            decode_start("MISSED", Some(wire), None),
+            decode_start("MISSED", Some(wire), None, StartWorkflowColumns::default()),
             Ok(StartOutcome::Missed(miss)),
             "{wire}"
         );
@@ -444,7 +542,7 @@ fn a_start_row_against_its_outcome_fails_closed() {
     ];
     for (name, outcome, reason, started_at) in cases {
         assert!(
-            decode_start(outcome, reason, started_at).is_err(),
+            decode_start(outcome, reason, started_at, StartWorkflowColumns::default()).is_err(),
             "{name} must fail closed"
         );
     }
@@ -621,4 +719,42 @@ fn each_miss_reason_reads_back_from_its_text() {
     ] {
         assert_eq!(StartMiss::from_wire(miss.as_str()), Some(miss));
     }
+}
+
+/// The stored trace id of a claimed row reaches the claimed row as its 16
+/// bytes; `NULL` claims with no trace id; another length was not written by
+/// a send and claims with no trace id.
+#[test]
+fn a_claimed_row_carries_its_stored_trace_id() {
+    let pass = decode_claim_pass(
+        vec![
+            ClaimWireRow {
+                trace_id: Some((1..=16).collect()),
+                ..claimed_wire(1)
+            },
+            claimed_wire(2),
+            ClaimWireRow {
+                trace_id: Some(vec![1; 15]),
+                ..claimed_wire(3)
+            },
+        ],
+        read(),
+    )
+    .expect("claimed rows with and without a trace id read");
+
+    let mut expected = [0_u8; 16];
+    for (byte, value) in expected.iter_mut().zip(1_u8..) {
+        *byte = value;
+    }
+    assert_eq!(pass.claimed[0].trace_id, StoredTraceId::TraceId(expected));
+    assert_eq!(pass.claimed[1].trace_id, StoredTraceId::NoTraceId);
+    assert_eq!(pass.claimed[2].trace_id, StoredTraceId::NoTraceId);
+    assert_eq!(
+        pass.claimed[0]
+            .trace_id
+            .log_field()
+            .map(|field| format!("{field}")),
+        Some("0102030405060708090a0b0c0d0e0f10".to_owned())
+    );
+    assert!(pass.claimed[1].trace_id.log_field().is_none());
 }

@@ -6,7 +6,8 @@
 //!   claimed task (and the node write of a workflow task). It writes no
 //!   runner beat: the worker's runner beats cover the attempt from its next
 //!   pass, and the stale RUNNING rule judges the attempt from its
-//!   `started_at` until then.
+//!   `started_at` until then. A started workflow task returns the node that
+//!   links it ([`RunWorkflow`]).
 //! - [`release_claims`]: `horsies_release_claims`, the return of claimed rows
 //!   that no child started.
 //!
@@ -36,12 +37,15 @@ use uuid::Uuid;
 use crate::broker::child_writes::{connection_for, query_within, WriteDeadline};
 use crate::broker::core_rows::{column, StatementLog};
 use crate::broker::error::BrokerError;
+use crate::core::config::bounded::BoundedU32;
 use crate::core::lifecycle::OwnedClaim;
 use crate::core::task::Execution;
+use crate::core::workflow::spec::MAX_WORKFLOW_NODES;
 use crate::db::{
     CheckoutClass, CorePool, ParameterType, PooledConnection, Row, StatementBound, TypedStatement,
 };
 use crate::events::{Priority, RunTrace, TraceCarrierText};
+use crate::telemetry::trace_carrier::{StoredTraceId, TRACE_ID_BYTES};
 
 /// The most rows one release statement takes (the bound of
 /// `horsies_release_claims`).
@@ -244,6 +248,9 @@ pub struct ClaimedRow {
     /// The trace carrier that the send stored on the row
     /// (`trace_carrier`), for the run frame of each attempt.
     pub trace: RunTrace,
+    /// The trace id that the send stored on the row (`trace_id`), for the
+    /// log records of each attempt.
+    pub trace_id: StoredTraceId,
     /// The priority of the row's queue: 1 is claimed first, 100 last.
     pub priority: Priority,
     /// When the row was due: its send, the end of its send delay, or its
@@ -306,6 +313,7 @@ struct ClaimWireRow {
     retry_count: Option<i32>,
     max_retries: Option<i32>,
     trace_carrier: Option<String>,
+    trace_id: Option<Vec<u8>>,
     priority: Option<i32>,
     enqueued_at: Option<DateTime<Utc>>,
     short_by: Option<i32>,
@@ -405,6 +413,7 @@ fn claim_wire_row(row: &Row, statement: &TypedStatement) -> Result<ClaimWireRow,
         retry_count: column(row, statement, "retry_count")?,
         max_retries: column(row, statement, "max_retries")?,
         trace_carrier: column(row, statement, "trace_carrier")?,
+        trace_id: column(row, statement, "trace_id")?,
         priority: column(row, statement, "priority")?,
         enqueued_at: column(row, statement, "enqueued_at")?,
         short_by: column(row, statement, "short_by")?,
@@ -487,6 +496,7 @@ fn decode_claimed_row(row: ClaimWireRow, read: ClaimRead) -> Result<ClaimedRow, 
         retry_count,
         max_retries: row.max_retries.ok_or_else(|| required("max_retries"))?,
         trace: stored_trace_of(id, row.trace_carrier),
+        trace_id: stored_trace_id_of(id, row.trace_id),
         priority,
         enqueued_at: row.enqueued_at.ok_or_else(|| required("enqueued_at"))?,
         read,
@@ -523,6 +533,31 @@ fn stored_trace_of(task_id: Uuid, trace_carrier: Option<String>) -> RunTrace {
     }
 }
 
+/// The trace id of a row from its stored `trace_id`: none for `NULL`, else
+/// the 16 bytes. The table holds 16 bytes; another length was not written by
+/// a send, and it does not fail the read (the claim, the stale RUNNING scan):
+/// the row reads with no trace id, and a warning names the task and the
+/// length.
+pub(crate) fn stored_trace_id_of(task_id: Uuid, trace_id: Option<Vec<u8>>) -> StoredTraceId {
+    let bytes = match trace_id {
+        None => return StoredTraceId::NoTraceId,
+        Some(bytes) => bytes,
+    };
+    match <[u8; TRACE_ID_BYTES]>::try_from(bytes.as_slice()) {
+        Ok(id) => StoredTraceId::TraceId(id),
+        Err(_other_length) => {
+            tracing::warn!(
+                task_id = %task_id,
+                bytes = bytes.len(),
+                "task {task_id} has a stored trace id of {} bytes, not {TRACE_ID_BYTES}; \
+                 its log records carry no trace id",
+                bytes.len(),
+            );
+            StoredTraceId::NoTraceId
+        }
+    }
+}
+
 fn decode_short_row(row: ClaimWireRow) -> Result<NonZeroU32, String> {
     let ClaimWireRow {
         row_kind: _,
@@ -537,6 +572,7 @@ fn decode_short_row(row: ClaimWireRow) -> Result<NonZeroU32, String> {
         retry_count,
         max_retries,
         trace_carrier,
+        trace_id,
         priority,
         enqueued_at,
         short_by,
@@ -553,6 +589,7 @@ fn decode_short_row(row: ClaimWireRow) -> Result<NonZeroU32, String> {
         retry_count.is_some(),
         max_retries.is_some(),
         trace_carrier.is_some(),
+        trace_id.is_some(),
         priority.is_some(),
         enqueued_at.is_some(),
     ];
@@ -646,12 +683,42 @@ impl StartMiss {
     }
 }
 
+/// The largest index of a workflow node: a workflow spec holds at most
+/// [`MAX_WORKFLOW_NODES`] nodes, numbered from 0.
+pub const MAX_WORKFLOW_NODE_INDEX: u32 = MAX_WORKFLOW_NODES as u32 - 1;
+
+/// The index of a node in its workflow spec.
+pub type WorkflowNodeIndex = BoundedU32<0, MAX_WORKFLOW_NODE_INDEX>;
+
+/// The workflow node that links a started task, read with the node row that
+/// the start locks and the workflow row that its guards read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunWorkflow {
+    /// No workflow node links the task: a task of a send or a schedule. A
+    /// workflow task with no linked node does not start
+    /// ([`StartMiss::NodeNotLinked`]).
+    NotInWorkflow,
+    /// The node at `node_index` of the workflow `workflow_id` links the
+    /// task. `root_workflow_id` is the top-level workflow of its tree: the
+    /// workflow itself for a top-level workflow, its root for a
+    /// sub-workflow at any depth.
+    InWorkflow {
+        workflow_id: Uuid,
+        node_index: WorkflowNodeIndex,
+        root_workflow_id: Uuid,
+    },
+}
+
 /// What the start reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartOutcome {
     /// The row is RUNNING (and, for a workflow task, its node RUNNING),
-    /// from `started_at` on the database clock.
-    Started { started_at: DateTime<Utc> },
+    /// from `started_at` on the database clock. `workflow` is the node that
+    /// links the task.
+    Started {
+        started_at: DateTime<Utc>,
+        workflow: RunWorkflow,
+    },
     /// Nothing was written.
     Missed(StartMiss),
 }
@@ -758,7 +825,12 @@ async fn start_on(
     let outcome: String = column(row, statement, "outcome")?;
     let miss_reason: Option<String> = column(row, statement, "miss_reason")?;
     let started_at: Option<DateTime<Utc>> = column(row, statement, "started_at")?;
-    decode_start(&outcome, miss_reason.as_deref(), started_at).map_err(|detail| {
+    let workflow = StartWorkflowColumns {
+        workflow_id: column(row, statement, "workflow_id")?,
+        workflow_task_index: column(row, statement, "workflow_task_index")?,
+        root_workflow_id: column(row, statement, "root_workflow_id")?,
+    };
+    decode_start(&outcome, miss_reason.as_deref(), started_at, workflow).map_err(|detail| {
         BrokerError::ClaimContract(format!(
             "horsies_start_attempt for task {}: {detail}",
             command.task_id
@@ -766,19 +838,79 @@ async fn start_on(
     })
 }
 
+/// The workflow columns of one start row, as returned.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct StartWorkflowColumns {
+    workflow_id: Option<Uuid>,
+    workflow_task_index: Option<i32>,
+    root_workflow_id: Option<Uuid>,
+}
+
 /// The outcome of one start row. Pure.
+///
+/// Errors: the contract breach as text: an outcome other than `STARTED`
+/// with `started_at` and `MISSED` with a known `miss_reason`, a miss with a
+/// workflow column, and the workflow columns that [`started_workflow`]
+/// refuses.
 fn decode_start(
     outcome: &str,
     miss_reason: Option<&str>,
     started_at: Option<DateTime<Utc>>,
+    workflow: StartWorkflowColumns,
 ) -> Result<StartOutcome, String> {
     match (outcome, miss_reason, started_at) {
-        ("STARTED", None, Some(started_at)) => Ok(StartOutcome::Started { started_at }),
-        ("MISSED", Some(reason), None) => StartMiss::from_wire(reason)
-            .map(StartOutcome::Missed)
-            .ok_or_else(|| format!("unknown miss reason {reason:?}")),
+        ("STARTED", None, Some(started_at)) => Ok(StartOutcome::Started {
+            started_at,
+            workflow: started_workflow(workflow)?,
+        }),
+        ("MISSED", Some(reason), None) => match workflow == StartWorkflowColumns::default() {
+            true => StartMiss::from_wire(reason)
+                .map(StartOutcome::Missed)
+                .ok_or_else(|| format!("unknown miss reason {reason:?}")),
+            false => Err(format!("a miss carries the workflow columns {workflow:?}")),
+        },
         (outcome, miss_reason, started_at) => Err(format!(
             "outcome {outcome:?} with miss_reason {miss_reason:?} and started_at {started_at:?}"
+        )),
+    }
+}
+
+/// The workflow node of a started task: none when the three columns are
+/// NULL (a plain task), the node when the three are set. Pure.
+///
+/// The start reads the three with one node row and its workflow row, and
+/// the workflow start writes each node index from a spec of at most
+/// [`MAX_WORKFLOW_NODES`] nodes.
+///
+/// Errors: the contract breach as text: some columns NULL and others set,
+/// or a node index outside 0 to [`MAX_WORKFLOW_NODE_INDEX`].
+fn started_workflow(columns: StartWorkflowColumns) -> Result<RunWorkflow, String> {
+    match (
+        columns.workflow_id,
+        columns.workflow_task_index,
+        columns.root_workflow_id,
+    ) {
+        (None, None, None) => Ok(RunWorkflow::NotInWorkflow),
+        (Some(workflow_id), Some(stored_index), Some(root_workflow_id)) => {
+            let node_index = u32::try_from(stored_index)
+                .ok()
+                .and_then(|index| WorkflowNodeIndex::try_from(index).ok())
+                .ok_or_else(|| {
+                    format!(
+                        "a started task has node index {stored_index}, outside 0 to \
+                         {MAX_WORKFLOW_NODE_INDEX}"
+                    )
+                })?;
+            Ok(RunWorkflow::InWorkflow {
+                workflow_id,
+                node_index,
+                root_workflow_id,
+            })
+        }
+        (workflow_id, workflow_task_index, root_workflow_id) => Err(format!(
+            "a started task has workflow_id {workflow_id:?}, workflow_task_index \
+             {workflow_task_index:?} and root_workflow_id {root_workflow_id:?}: the three are set \
+             together or not at all"
         )),
     }
 }

@@ -19,6 +19,7 @@ from horsies.core.models.tracing import (
     tracing_errors,
     tracing_label,
 )
+from horsies.core.models.log_format import LogFormatSetting, TextLogs
 from horsies.core.models.schedule import ScheduleConfig, SchedulePattern
 from horsies.core.models.worker_profile import (
     WorkerProfile,
@@ -143,6 +144,9 @@ class AppConfig(BaseModel):
     # Spans and producer metrics through the OpenTelemetry API
     # (`OtelTracing`, needs `horsies[otel]`), or none (`NoTracing`).
     tracing: TracingSetting = Field(default_factory=NoTracing)
+    # The format of the horsies log records in the processes that load the
+    # app: one line of text (`TextLogs`) or one JSON object (`JsonLogs`).
+    log_format: LogFormatSetting = Field(default_factory=TextLogs)
 
     @model_validator(mode='after')
     def validate_queue_configuration(self):

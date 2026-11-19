@@ -302,6 +302,7 @@ mod tests {
             retry_count: 0,
             max_retries: 3,
             trace: horsies_core::events::RunTrace::NoCarrier,
+            trace_id: horsies_core::telemetry::trace_carrier::StoredTraceId::NoTraceId,
             priority: horsies_core::events::Priority::try_from(100).expect("100 is a priority"),
             enqueued_at: Utc::now(),
             read: horsies_core::ClaimRead::now(),

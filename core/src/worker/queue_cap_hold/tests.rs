@@ -21,6 +21,14 @@ fn generation() -> DateTime<Utc> {
         .expect("a valid test instant")
 }
 
+/// The read of every claimed row of these tests: one value for the whole
+/// test binary, so a row built again for an assertion equals the row that
+/// the hold took.
+fn read() -> crate::broker::claims::ClaimRead {
+    static READ: std::sync::OnceLock<crate::broker::claims::ClaimRead> = std::sync::OnceLock::new();
+    *READ.get_or_init(crate::broker::claims::ClaimRead::now)
+}
+
 fn row(name: &str, queue_name: &str) -> ClaimedRow {
     ClaimedRow {
         id: task(name),
@@ -34,9 +42,10 @@ fn row(name: &str, queue_name: &str) -> ClaimedRow {
         retry_count: 0,
         max_retries: 0,
         trace: crate::events::RunTrace::NoCarrier,
+        trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
         priority: crate::events::Priority::try_from(100).unwrap(),
         enqueued_at: generation(),
-        read: crate::broker::claims::ClaimRead::now(),
+        read: read(),
     }
 }
 

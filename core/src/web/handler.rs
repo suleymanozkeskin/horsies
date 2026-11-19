@@ -198,8 +198,8 @@ impl MonitoringHandler {
     /// The handler of `broker`. The resume route builds the sub-workflow
     /// children that a resume owes through `children`. Starts nothing: the
     /// event broadcaster subscribes on the broker's listener at the first
-    /// subscriber, and the first `/metrics` request starts the reads of the
-    /// fleet state.
+    /// subscriber, and a `/metrics` request reads the fleet state when a
+    /// read is due.
     pub fn new(
         broker: Arc<PostgresBroker>,
         children: Arc<dyn ChildSpecSource>,

@@ -112,7 +112,7 @@ horsies.worker.children.replaced
   recorder: worker
   help: Child processes that ended and were replaced, by kind and reason.
   label kind (horsies.child.kind): "ISOLATED" "SHARED_ASYNC" "SHARED_THREAD"
-  label reason (horsies.reason): "child_died" "channel_lost" "protocol_violation" "protocol_mismatch" "killed_by_parent" "slot_defect" "spawner_stopped" "task_count" "memory_limit" "second_cancel" "loop_blocked" "leftover_work" "at_deadline"
+  label reason (horsies.reason): "child_died" "channel_lost" "protocol_violation" "protocol_mismatch" "killed_by_parent" "slot_defect" "spawner_stopped" "task_count" "memory_limit" "second_cancel" "loop_blocked" "leftover_work" "at_deadline" "core_stopped"
 horsies.worker.child.boot.duration
   prometheus: horsies_worker_child_boot_duration_seconds
   kind: histogram

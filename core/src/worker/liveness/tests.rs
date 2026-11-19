@@ -25,9 +25,12 @@ use super::*;
 use crate::broker::core_rows::StatementLog;
 use crate::broker::pools::core_pool_for_test_url;
 use crate::db::{ConnectError, ConnectFailure, CorePool, MaskedUrl, DEFAULT_SOCKET_SETTINGS};
+use crate::events::{Event, RecoveryAction};
+use crate::telemetry::worker::WorkerTelemetry;
 use crate::test_support::migrated_database_url;
 use crate::test_support::migrated_pool;
 use crate::test_support::sql::{self, TestPool};
+use crate::test_support::telemetry::WatchedTelemetry;
 use crate::worker::recovery::owner_gone::OwnerGoneStep;
 use crate::worker::recovery::{owner_gone_step, UnheldOwners};
 use crate::worker::runner_beats::DispatchRunner;
@@ -559,15 +562,48 @@ fn recovered(running: &RowState, claimed: &RowState) -> bool {
 }
 
 async fn pass(core: &CorePool, memory: &mut UnheldOwners, span: Duration) -> OwnerGoneStep {
+    told_pass(core, memory, span, &WorkerTelemetry::Off).await
+}
+
+/// [`pass`], telling each recovered row to `telemetry`.
+async fn told_pass(
+    core: &CorePool,
+    memory: &mut UnheldOwners,
+    span: Duration,
+    telemetry: &WorkerTelemetry,
+) -> OwnerGoneStep {
     owner_gone_step(
         core,
         StatementLog::Off,
         &RecoveryConfig::default(),
         memory,
         span,
+        telemetry,
     )
     .await
     .expect("the owner-gone step reads the lock table")
+}
+
+/// The recovery events of `task_ids` in `events`: the task id, the action,
+/// the task name and the queue of each, sorted by task id.
+fn recoveries_of(
+    events: Vec<Event>,
+    task_ids: &[Uuid],
+) -> Vec<(Uuid, RecoveryAction, String, String)> {
+    let mut told: Vec<(Uuid, RecoveryAction, String, String)> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::TaskRecovered(recovered) if task_ids.contains(&recovered.task_id) => Some((
+                recovered.task_id,
+                recovered.action,
+                recovered.task_name.as_str().to_owned(),
+                recovered.queue.as_str().to_owned(),
+            )),
+            _ => None,
+        })
+        .collect();
+    told.sort_by_key(|(task_id, ..)| *task_id);
+    told
 }
 
 /// Run passes every [`PASS_INTERVAL`] until one finds the lock of
@@ -898,10 +934,13 @@ async fn two_losses_with_a_regain_between_two_reads_mark_no_owner_gone() {
 
 /// One loss past the regain bound: the worker cannot take its lock again
 /// and fails closed, so its lock stays free at one generation. Two reads a
-/// span apart judge it gone, and its rows are recovered.
+/// span apart judge it gone, and its rows are recovered. With telemetry on,
+/// each recovered row is told once: the RUNNING row as `RunningFailed`, the
+/// CLAIMED row as `ClaimRequeued`.
 #[tokio::test]
 #[serial]
 async fn a_single_loss_past_the_bound_marks_the_owner_gone() {
+    let mut watched = WatchedTelemetry::new();
     let pool = migrated_pool().await;
     let url = migrated_database_url().await;
     let worker_id = Uuid::new_v4().to_string();
@@ -923,7 +962,7 @@ async fn a_single_loss_past_the_bound_marks_the_owner_gone() {
     let first_pass_at = Instant::now();
     let mut judged: u64 = 0;
     loop {
-        let step = pass(&core, &mut memory, TEST_SPAN).await;
+        let step = told_pass(&core, &mut memory, TEST_SPAN, &watched.telemetry).await;
         judged += step.gone_owners;
         let states = (
             row_state(&pool, running).await,
@@ -940,6 +979,25 @@ async fn a_single_loss_past_the_bound_marks_the_owner_gone() {
     }
     core.close();
     assert!(judged > 0, "a pass judged the worker gone");
+    let mut expected = vec![
+        (
+            running,
+            RecoveryAction::RunningFailed,
+            "liveness_test".to_owned(),
+            "q_liveness".to_owned(),
+        ),
+        (
+            claimed,
+            RecoveryAction::ClaimRequeued,
+            "liveness_test".to_owned(),
+            "q_liveness".to_owned(),
+        ),
+    ];
+    expected.sort_by_key(|(task_id, ..)| *task_id);
+    assert_eq!(
+        recoveries_of(watched.events(), &[running, claimed]),
+        expected
+    );
 }
 
 /// A regain whose generation write does not commit is no regain. The test

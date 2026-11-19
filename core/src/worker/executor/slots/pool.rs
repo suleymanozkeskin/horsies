@@ -16,10 +16,11 @@ use uuid::Uuid;
 
 use super::board::{PoolBoard, PoolHealth, SlotPhase};
 use super::budgets::SlotService;
-use super::dispatch::{AttemptEnd, ClaimedTask, ExecutionClass, NotRunCause};
+use super::dispatch::{AttemptEnd, AttemptLog, ClaimedTask, ExecutionClass, NotRunCause};
 use super::isolated::run_slot;
 use super::route::IsolatedDeadline;
 use crate::broker::OrphanSelfHeal;
+use crate::events::QueueName;
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     InitFrame, IsolatedWork, ProcessId, RunFrame, TaskInputText,
@@ -235,6 +236,8 @@ pub(super) struct QueuedRun {
     pub(super) frame: RunFrame,
     pub(super) deadline: IsolatedDeadline,
     pub(super) answer: Answer,
+    /// The log fields of the attempt.
+    pub(super) log: AttemptLog,
 }
 
 /// The tasks that wait for a slot, and the slot tasks that wait for a task,
@@ -526,14 +529,18 @@ impl IsolatedPool {
                 frame: RunFrame {
                     task_id: task.task_id,
                     task_name: task.task_name.clone(),
+                    queue_name: QueueName::cut(&task.queue_name),
+                    attempt: task.retry.attempt(),
                     worker_id: self.shared.config.worker_id.clone(),
                     claimed_at: task.claimed_at,
                     orphan_self_heal: self.shared.config.orphan_self_heal,
                     work,
+                    trace: task.trace.clone(),
                     input,
                 },
                 deadline,
                 answer: Answer::watched(sender, watch, ExecutionClass::Isolated),
+                log: task.log(),
             });
         }
         self.shared.queued.notify_one();
