@@ -53,13 +53,13 @@ async fn snapshot(
             max_claim_batch, max_claim_per_worker, queues,
             queue_priorities, queue_max_concurrency, recovery_config,
             tasks_running, tasks_claimed, worker_started_at,
-            slots_down, class_capacity
+            slots_down, class_capacity, telemetry
         ) VALUES (
             $1, now() - make_interval(secs => $2::double precision), 'itest-host', 4242, 4,
             0, 4, $3::text[],
             '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
             0, 0, now() - interval '1 hour',
-            '[]'::jsonb, $4
+            '[]'::jsonb, $4, jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
         )",
     )
     .bind(worker_id)

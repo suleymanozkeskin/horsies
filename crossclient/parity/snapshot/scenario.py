@@ -349,12 +349,12 @@ _WORKER_STATE_SQL: Final[LiteralString] = """
         worker_id, snapshot_at, hostname, pid, processes, max_claim_batch, max_claim_per_worker,
         cluster_wide_cap, queues, queue_priorities, queue_max_concurrency, recovery_config,
         tasks_running, tasks_claimed, memory_usage_mb, memory_percent, cpu_percent,
-        children_memory_mb, worker_started_at, slots_down, class_capacity
+        children_memory_mb, worker_started_at, slots_down, class_capacity, telemetry
     ) VALUES (
         %(worker)s, %(snapshot_at)s, %(host)s, %(pid)s, 2, 4, 8,
         NULL, ARRAY['default', 'billing']::varchar(100)[], '{"default": 1, "billing": 2}', '{}',
         '{"enabled": true}', 0, 1, %(memory_mb)s, %(memory_percent)s, %(cpu_percent)s,
-        NULL, %(started_at)s, '[]', '{}'
+        NULL, %(started_at)s, '[]', '{}', jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
     )
 """
 

@@ -462,13 +462,13 @@ async fn reaper_recovers_stale_runner_when_owner_worker_state_is_fresh() {
             max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
             queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
             memory_usage_mb, memory_percent, cpu_percent, children_memory_mb,
-            worker_started_at, slots_down, class_capacity
+            worker_started_at, slots_down, class_capacity, telemetry
         ) VALUES (
             $1, NOW(), 'lifecycle-host', 4242, 1, 1,
             1, NULL, ARRAY[$2]::varchar[], '{}'::jsonb,
             '{}'::jsonb, '{}'::jsonb, 1, 0,
             NULL, NULL, NULL, NULL,
-            NOW() - interval '1 hour', '{}'::jsonb, '{}'::jsonb
+            NOW() - interval '1 hour', '{}'::jsonb, '{}'::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
         )",
     )
     .bind(WORKER)
