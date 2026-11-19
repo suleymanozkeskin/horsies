@@ -5,8 +5,8 @@
 //! bodies gives the host a [`BodySpans`] in [`BodyScope::Spans`]. For each
 //! run whose body starts, the host:
 //! 1. asks [`BodySpans::open`] for a `tracing` span, with the facts of the
-//!    run (the task, its queue, the attempt, the workflow node that links
-//!    it) and the trace carrier that the send stored ([`BodyRun`]);
+//!    run (the task, its queue, the attempt), the workflow node that its
+//!    start read, and the trace carrier that the send stored ([`BodyRun`]);
 //! 2. runs the body inside that span: an async body is polled inside it, a
 //!    blocking body runs inside it on its own thread, so a `tracing` span
 //!    that the body opens, and an `#[instrument]` function that it calls,
@@ -31,11 +31,11 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::run::RunFacts;
+use crate::broker::claims::RunWorkflow;
 use crate::core::task::error::TaskErrorCode;
 use crate::core::task::fn_trait::RawTaskResult;
 use crate::core::task::result::TaskResult;
 use crate::events::{AttemptNumber, RunTrace};
-use crate::worker::executor::protocol::RunWorkflow;
 use crate::Execution;
 
 /// What the host does around each task body of a child.
@@ -79,7 +79,7 @@ pub struct BodyRun<'a> {
     pub worker_id: &'a str,
     /// The execution class of the child that runs the body.
     pub execution: Execution,
-    /// The workflow node that links the task, as the claim read it.
+    /// The workflow node that links the task, as the start read it.
     pub workflow: RunWorkflow,
     /// The trace carrier that the send stored on the task row.
     pub carrier: &'a BodyCarrier,
@@ -149,6 +149,15 @@ impl<'a> BodyOutcome<'a> {
     }
 }
 
+/// What the scope of a body takes besides the facts of its run: the trace
+/// carrier that its run frame carried, and the workflow node that its start
+/// read.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SpanSource<'a> {
+    pub(super) trace: &'a RunTrace,
+    pub(super) workflow: RunWorkflow,
+}
+
 /// The scope of one body, open. [`OpenBody::close`] ends it.
 pub(super) enum OpenBody {
     /// No scope: the body runs inside `tracing::Span::none()`.
@@ -162,19 +171,19 @@ pub(super) enum OpenBody {
 
 impl BodyScope {
     /// Open the scope of the body of the run `facts` in a child of
-    /// `execution`, whose run frame carried `trace`. With
-    /// [`BodyScope::NoScope`] nothing is called and the carrier is not
-    /// read.
+    /// `execution`, with the trace carrier and the workflow node of
+    /// `source`. With [`BodyScope::NoScope`] nothing is called and the
+    /// carrier is not read.
     pub(super) fn open(
         &self,
         facts: &RunFacts,
         execution: Execution,
-        trace: &RunTrace,
+        source: SpanSource<'_>,
     ) -> OpenBody {
         match self {
             BodyScope::NoScope => OpenBody::Unscoped,
             BodyScope::Spans(spans) => {
-                let carrier = BodyCarrier::of_trace(facts.task_id, trace);
+                let carrier = BodyCarrier::of_trace(facts.task_id, source.trace);
                 let run = BodyRun {
                     task_id: facts.task_id,
                     task_name: &facts.task_name,
@@ -182,7 +191,7 @@ impl BodyScope {
                     attempt: facts.attempt,
                     worker_id: &facts.worker_id,
                     execution,
-                    workflow: facts.workflow,
+                    workflow: source.workflow,
                     carrier: &carrier,
                 };
                 let span = spans.open(&run);

@@ -1533,13 +1533,15 @@ unless it starts with "Added".
   Python attempt span: the task id and name, `horsies.task.attempt`, the
   execution class, `horsies.queue` and `messaging.destination.name`, the
   worker id, and, for a task that a workflow node links,
-  `horsies.workflow.id` and `horsies.workflow.node`. Its status is OK for
-  a returned value, and ERROR with `error.type` for an error, a panic or a
-  run past its deadline. `horsies::otel::layer()` is the
-  `tracing-opentelemetry` layer on the global tracer provider;
+  `horsies.workflow.id`, `horsies.workflow.node` and
+  `horsies.workflow.root_id`. The task id, the task name and the attempt
+  are fields of the span, so each log record of the body carries them. Its
+  status is OK for a returned value, and ERROR with `error.type` for an
+  error, a panic or a run past its deadline. `horsies::otel::layer()` is
+  the `tracing-opentelemetry` layer on the global tracer provider;
   `horsies::cli::run` adds it to its subscriber, and a binary that installs
-  its own subscriber adds it there.
-  Without the feature no OpenTelemetry crate is compiled.
+  its own subscriber adds it there. Without the feature no OpenTelemetry
+  crate is compiled.
 - **Added: `cli::run_with_log_format(app, LogFormat::Json)`**: the runner
   and each worker child write one JSON object per log record, with the
   event's fields at the top level and the record's spans with their

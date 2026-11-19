@@ -18,6 +18,7 @@ use crate::broker::child_writes::{
     WriteDeadline, CHILD_STATEMENT_BOUND, FINALIZING_MARKER_BOUND, FINALIZING_MARKER_END,
     START_ATTEMPT_END,
 };
+use crate::broker::claims::RunWorkflow;
 use crate::broker::{OrphanSelfHeal, PostgresBroker, PrestartExpiry};
 use crate::core::config::PostgresConfig;
 use crate::core::registry::task::TaskRegistry;
@@ -147,7 +148,6 @@ fn facts(task_id: Uuid, claimed_at: DateTime<Utc>) -> RunFacts {
         worker_id: WORKER_ID.to_owned(),
         claimed_at,
         orphan_self_heal: OrphanSelfHeal::Off,
-        workflow: crate::worker::executor::protocol::RunWorkflow::NotInWorkflow,
     }
 }
 
@@ -366,7 +366,13 @@ async fn a_start_reports_the_started_at_that_it_wrote() {
             .await
             .expect("read the started_at of the row");
     match started {
-        Started::Running { started_at } => assert_eq!(started_at, written),
+        Started::Running {
+            started_at,
+            workflow,
+        } => {
+            assert_eq!(started_at, written);
+            assert_eq!(workflow, RunWorkflow::NotInWorkflow);
+        }
         Started::Stopped(reason) => panic!("a held claim starts, not {reason:?}"),
     }
     remove_task(&pool, task_id).await;

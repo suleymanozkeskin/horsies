@@ -18,7 +18,7 @@ use super::role::as_blocking_body;
 use crate::broker::child_writes::{WriteDeadline, PRE_START_CONFIRM_ATTEMPTS};
 use crate::broker::claims::{
     release_claims_within, start_attempt as start_statement, ReleaseBatch, ReleaseClaims,
-    ReleaseOutcome, ReleasePlacement, StartAttempt, StartMiss, StartOutcome,
+    ReleaseOutcome, ReleasePlacement, RunWorkflow, StartAttempt, StartMiss, StartOutcome,
 };
 use crate::broker::workflow_stop_before_start::stop_before_start;
 use crate::broker::{BrokerError, OrphanSelfHeal, PostgresBroker, PrestartExpiry, StopBeforeStart};
@@ -31,8 +31,8 @@ use crate::worker::execution::{
     build_task_input, mark_task_finalizing, phase_retry_delay, FinalizingMark,
 };
 use crate::worker::executor::protocol::{
-    FailureDetail, ResultEnvelopeText, RunEnd, RunWorkflow, StopReason, StoredOptionsRefusal,
-    TaskInputText, MAX_BODY_BYTES,
+    FailureDetail, ResultEnvelopeText, RunEnd, StopReason, StoredOptionsRefusal, TaskInputText,
+    MAX_BODY_BYTES,
 };
 
 /// What every run of one child shares.
@@ -45,8 +45,8 @@ pub(super) struct HostContext {
 }
 
 /// The facts of one run, from its run frame: the task, the claim that every
-/// write fences on (`worker_id`, `claimed_at`), and the queue, the attempt
-/// and the workflow node that the span of its body names.
+/// write fences on (`worker_id`, `claimed_at`), and the queue and the
+/// attempt that the span of its body names.
 #[derive(Debug, Clone)]
 pub(super) struct RunFacts {
     pub(super) task_id: Uuid,
@@ -58,15 +58,16 @@ pub(super) struct RunFacts {
     /// Whether the stop before start cancels the task when no node links it
     /// live; the run frame carries it.
     pub(super) orphan_self_heal: OrphanSelfHeal,
-    pub(super) workflow: RunWorkflow,
 }
 
 /// How the start write ended.
 pub(super) enum Started {
     /// The row is RUNNING; `started_at` is the time that the start write
-    /// returned (the database clock).
+    /// returned (the database clock), and `workflow` the node that links
+    /// the task, read with the node row that the start locked.
     Running {
         started_at: DateTime<Utc>,
+        workflow: RunWorkflow,
     },
     Stopped(StopReason),
 }
@@ -126,7 +127,15 @@ pub(super) async fn start_attempt(context: &HostContext, facts: &RunFacts) -> St
             Err(error) => Err(error),
         };
         let missed = match outcome {
-            Ok(StartOutcome::Started { started_at, .. }) => return Started::Running { started_at },
+            Ok(StartOutcome::Started {
+                started_at,
+                workflow,
+            }) => {
+                return Started::Running {
+                    started_at,
+                    workflow,
+                }
+            }
             Ok(StartOutcome::Missed(miss)) => {
                 after_missed_start(context, facts, miss, deadline).await
             }

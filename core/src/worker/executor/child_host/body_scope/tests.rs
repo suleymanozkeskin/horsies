@@ -20,6 +20,7 @@ use super::super::run_work::RunScope;
 use super::super::seats::isolated_body;
 use super::super::start_tests::{remove_task, seed_claimed, WORKER_ID};
 use super::*;
+use crate::broker::claims::WorkflowNodeIndex;
 use crate::broker::{OrphanSelfHeal, PostgresBroker};
 use crate::core::registry::task::TaskRegistry;
 use crate::core::task::error::{OperationalErrorCode, TaskError};
@@ -27,9 +28,7 @@ use crate::core::task::fn_trait::{
     AsyncTaskFn, BlockingTaskFn, RegisteredTask, TaskMeta, TaskModule,
 };
 use crate::events::{QueueName, TraceCarrierText};
-use crate::worker::executor::protocol::{
-    IsolatedWork, RunEnd, RunFrame, TaskInputText, WorkflowNodeIndex,
-};
+use crate::worker::executor::protocol::{IsolatedWork, RunEnd, RunFrame, TaskInputText};
 
 /// The task name of the row that `seed_claimed` writes.
 const SEEDED_TASK_NAME: &str = "app.tasks.start";
@@ -265,11 +264,22 @@ fn blocking_task(seen: &SeenInside, result: fn() -> RawTaskResult) -> Registered
 /// The queue of the runs of [`facts`].
 const SCOPE_QUEUE: &str = "scope-queue";
 
-/// The workflow node of the runs of [`facts`]: index 4 of workflow `0xf004`.
+/// The workflow node that the start of a run of these tests gave: index 4
+/// of workflow `0xf004`, in the tree of `0xf001`.
 fn scope_workflow() -> RunWorkflow {
     RunWorkflow::InWorkflow {
         workflow_id: Uuid::from_u128(0xf004),
-        node_index: WorkflowNodeIndex::new(4).expect("4 is a node index"),
+        node_index: WorkflowNodeIndex::try_from(4).expect("4 is a node index"),
+        root_workflow_id: Uuid::from_u128(0xf001),
+    }
+}
+
+/// The span source of a run with the stored trace `trace` whose start gave
+/// [`scope_workflow`].
+fn source(trace: &RunTrace) -> SpanSource<'_> {
+    SpanSource {
+        trace,
+        workflow: scope_workflow(),
     }
 }
 
@@ -287,7 +297,6 @@ fn facts(task_id: Uuid) -> RunFacts {
         worker_id: "scope-worker".to_owned(),
         claimed_at: Utc::now(),
         orphan_self_heal: OrphanSelfHeal::Off,
-        workflow: scope_workflow(),
     }
 }
 
@@ -347,24 +356,22 @@ fn the_end_of_a_body_is_what_it_returned() {
 /// With no scope, the body runs inside no span and no client is called.
 #[test]
 fn no_scope_gives_the_body_no_span() {
-    let open = BodyScope::NoScope.open(
-        &facts(Uuid::new_v4()),
-        Execution::Isolated,
-        &carrier_trace(),
-    );
+    let trace = carrier_trace();
+    let open = BodyScope::NoScope.open(&facts(Uuid::new_v4()), Execution::Isolated, source(&trace));
     assert!(open.span().is_none());
     open.close(&BodyOutcome::Returned);
 }
 
-/// A client scope is opened once with the facts of the run (its queue, its
-/// attempt and its workflow node among them) and its carrier, and closed
-/// once with the end, on the span that it opened.
+/// A client scope is opened once with the facts of the run (its queue and
+/// its attempt among them), the workflow node of its start and its carrier,
+/// and closed once with the end, on the span that it opened.
 #[test]
 fn a_client_scope_opens_with_the_run_facts_and_closes_with_the_end() {
     let spans = Arc::new(RecordingSpans::new());
     let scope = BodyScope::Spans(Arc::clone(&spans) as Arc<dyn BodySpans>);
     let task_id = Uuid::new_v4();
-    let open = scope.open(&facts(task_id), Execution::SharedThread, &carrier_trace());
+    let trace = carrier_trace();
+    let open = scope.open(&facts(task_id), Execution::SharedThread, source(&trace));
     let span = span_number(&open.span());
     open.close(&BodyOutcome::TimedOut);
     assert_eq!(
@@ -402,7 +409,7 @@ async fn isolated_run_of(
     let scope = BodyScope::Spans(Arc::clone(&spans) as Arc<dyn BodySpans>);
     let seen_inside: SeenInside = Arc::new(Mutex::new(Vec::new()));
     let facts = facts(Uuid::new_v4());
-    let open = scope.open(&facts, Execution::Isolated, &RunTrace::NoCarrier);
+    let open = scope.open(&facts, Execution::Isolated, source(&RunTrace::NoCarrier));
     let task = make_task(&seen_inside, result);
     let result = isolated_body(
         &RunScope::new(),
@@ -525,9 +532,10 @@ fn a_thread_seat_body_runs_inside_the_span_on_the_seat_thread() {
 }
 
 /// An isolated run on the database: the host opens the scope after the
-/// start, with the facts of the run frame (its queue, attempt and workflow
-/// node as the frame carries them) and its stored carrier, runs the body
-/// inside the span, and closes the scope with the end.
+/// start, with the facts of the run frame (its queue and attempt as the
+/// frame carries them), the workflow node of its start (none for the seeded
+/// plain task) and its stored carrier, runs the body inside the span, and
+/// closes the scope with the end.
 #[tokio::test]
 #[serial]
 async fn an_isolated_run_opens_its_scope_with_its_facts_and_its_stored_carrier() {
@@ -548,7 +556,6 @@ async fn an_isolated_run_opens_its_scope_with_its_facts_and_its_stored_carrier()
         claimed_at: generation,
         orphan_self_heal: OrphanSelfHeal::Off,
         work: IsolatedWork::Run,
-        workflow: scope_workflow(),
         trace: carrier_trace(),
         input: TaskInputText::new("{}".to_owned()),
     };
@@ -579,7 +586,7 @@ async fn an_isolated_run_opens_its_scope_with_its_facts_and_its_stored_carrier()
                     attempt: third_attempt(),
                     worker_id: WORKER_ID.to_owned(),
                     execution: Execution::Isolated,
-                    workflow: scope_workflow(),
+                    workflow: RunWorkflow::NotInWorkflow,
                     carrier: BodyCarrier::Carrier(carrier_map()),
                 },
                 span,

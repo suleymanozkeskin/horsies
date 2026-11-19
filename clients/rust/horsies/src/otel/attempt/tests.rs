@@ -6,7 +6,10 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use horsies_core::events::AttemptNumber;
-use horsies_core::{BodyCarrier, Execution, OperationalErrorCode, TaskErrorCode, UserCode};
+use horsies_core::{
+    BodyCarrier, Execution, OperationalErrorCode, TaskErrorCode, UserCode, WorkflowNodeIndex,
+    MAX_WORKFLOW_NODE_INDEX,
+};
 use opentelemetry::trace::{SpanId, SpanKind, TraceId, TracerProvider as _};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData};
@@ -137,40 +140,86 @@ fn the_attempt_span_is_a_child_of_the_send_span_with_the_task_attributes() {
     );
 }
 
-/// The attempt span of a workflow task names the workflow and the index of
-/// the node that links the task.
+/// The attempt span of a workflow task names the workflow, the index of
+/// the node that links the task, the largest index included, and the root
+/// of its tree.
 #[test]
-fn the_attempt_span_of_a_workflow_task_names_its_workflow_and_node() {
+fn the_attempt_span_of_a_workflow_task_names_its_workflow_node_and_root() {
     let workflow_id = Uuid::from_u128(0xf007);
+    let root_workflow_id = Uuid::from_u128(0xf001);
     let carrier = BodyCarrier::NoCarrier;
-    let run = BodyRun {
-        workflow: RunWorkflow::InWorkflow {
-            workflow_id,
-            node_index: WorkflowNodeIndex::new(7).unwrap(),
-        },
-        ..run_with(Uuid::new_v4(), &carrier)
-    };
-    let spans = record_attempt(&run, &BodyOutcome::Returned, |span| span.in_scope(|| {}));
-    let attempt = span_named(&spans, SPAN_NAME);
-    let workflow_id_text = workflow_id.to_string();
-    assert_eq!(
-        attribute(attempt, "horsies.workflow.id").as_deref(),
-        Some(workflow_id_text.as_str())
-    );
-    assert_eq!(
-        attribute(attempt, "horsies.workflow.node").as_deref(),
-        Some("7")
-    );
+    for node_index in [7, MAX_WORKFLOW_NODE_INDEX] {
+        let run = BodyRun {
+            workflow: RunWorkflow::InWorkflow {
+                workflow_id,
+                node_index: WorkflowNodeIndex::try_from(node_index).unwrap(),
+                root_workflow_id,
+            },
+            ..run_with(Uuid::new_v4(), &carrier)
+        };
+        let spans = record_attempt(&run, &BodyOutcome::Returned, |span| span.in_scope(|| {}));
+        let attempt = span_named(&spans, SPAN_NAME);
+        let workflow_id_text = workflow_id.to_string();
+        let root_workflow_id_text = root_workflow_id.to_string();
+        let node_index_text = node_index.to_string();
+        for (key, value) in [
+            ("horsies.workflow.id", workflow_id_text.as_str()),
+            ("horsies.workflow.node", node_index_text.as_str()),
+            ("horsies.workflow.root_id", root_workflow_id_text.as_str()),
+        ] {
+            assert_eq!(attribute(attempt, key).as_deref(), Some(value), "{key}");
+        }
+    }
 }
 
-/// The largest node index is an attribute value.
+/// A writer whose bytes go to one shared buffer.
+struct Captured(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A log record of the body carries the fields of the attempt span, the
+/// attempt among them: the text format of a `fmt` layer writes them in the
+/// span context of the record.
 #[test]
-fn the_largest_node_index_is_an_attribute_value() {
-    let largest = WorkflowNodeIndex::new(MAX_WORKFLOW_NODE_INDEX).unwrap();
-    assert_eq!(
-        u64::try_from(node_index_value(largest)).unwrap(),
-        MAX_WORKFLOW_NODE_INDEX
-    );
+fn a_record_of_the_body_carries_the_attempt_of_its_span() {
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let writer_buffer = Arc::clone(&buffer);
+    let layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(move || Captured(Arc::clone(&writer_buffer)));
+    let carrier = BodyCarrier::NoCarrier;
+    tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), || {
+        let span = attempt_span(
+            &run_with(Uuid::new_v4(), &carrier),
+            AttemptParent::NoCarrier,
+        );
+        span.in_scope(|| tracing::warn!("the card was declined"));
+    });
+    let text = String::from_utf8(
+        buffer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone(),
+    )
+    .unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let [line] = lines.as_slice() else {
+        panic!("one line per record, not {lines:?}");
+    };
+    assert!(line.contains("the card was declined"), "{line}");
+    assert!(line.contains("horsies.task.attempt=2"), "{line}");
 }
 
 /// A task with no stored carrier gets a root span of a new trace.

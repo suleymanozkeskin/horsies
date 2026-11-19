@@ -19,6 +19,7 @@ use uuid::Uuid;
 use super::host::{ChildApp, ChildLogSetup, ChildStartHook};
 use super::link::FrameWriter;
 use super::run::{start_attempt, HostContext, RunFacts, Started};
+use crate::broker::claims::{RunWorkflow, WorkflowNodeIndex};
 use crate::broker::{OrphanSelfHeal, PostgresBroker};
 use crate::core::registry::task::TaskRegistry;
 use crate::test_support::sql::{self, TestPool};
@@ -139,7 +140,6 @@ fn facts_with(task_id: Uuid, claimed_at: DateTime<Utc>, self_heal: OrphanSelfHea
         worker_id: WORKER_ID.to_owned(),
         claimed_at,
         orphan_self_heal: self_heal,
-        workflow: crate::worker::executor::protocol::RunWorkflow::NotInWorkflow,
     }
 }
 
@@ -177,8 +177,9 @@ async fn remove_case(pool: &TestPool, workflow_id: Option<Uuid>, task_id: Uuid) 
     }
 }
 
-/// The start of a workflow task hands its node over to RUNNING and stamps
-/// the node's first start.
+/// The start of a workflow task hands its node over to RUNNING, stamps the
+/// node's first start, and gives the node: its workflow, its index and the
+/// root of its tree (the workflow itself at depth 0).
 #[tokio::test]
 #[serial]
 async fn workflow_task_still_transitions_node_to_running() {
@@ -200,7 +201,17 @@ async fn workflow_task_still_transitions_node_to_running() {
 
     let started = start_attempt(&context, &facts(task_id, claimed_at)).await;
 
-    assert!(matches!(started, Started::Running { .. }));
+    match started {
+        Started::Running { workflow, .. } => assert_eq!(
+            workflow,
+            RunWorkflow::InWorkflow {
+                workflow_id,
+                node_index: WorkflowNodeIndex::SMALLEST,
+                root_workflow_id: workflow_id,
+            }
+        ),
+        Started::Stopped(reason) => panic!("a linked workflow task starts, not {reason:?}"),
+    }
     let (node_status, node_started_at): (String, Option<DateTime<Utc>>) = sql::query_as(
         "SELECT status, started_at FROM horsies_workflow_tasks WHERE workflow_id = $1",
     )

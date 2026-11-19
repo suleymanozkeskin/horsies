@@ -17,9 +17,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use horsies_core::frame_protocol::{RunWorkflow, WorkflowNodeIndex, MAX_WORKFLOW_NODE_INDEX};
 use horsies_core::telemetry::labels::LabelName;
-use horsies_core::{BodyOutcome, BodyRun, BodyScope, BodySpans, OutcomeCode};
+use horsies_core::{BodyOutcome, BodyRun, BodyScope, BodySpans, OutcomeCode, RunWorkflow};
 use opentelemetry::global;
 use opentelemetry::trace::Status;
 use tracing_opentelemetry::{OpenTelemetrySpanExt, SetParentError};
@@ -44,10 +43,10 @@ const ATTEMPT_SPAN_DIRECTIVE: &str = "horsies::attempt=info";
 const PROCESS_OPERATION: &str = "process";
 const EXECUTION_KEY: &str = "horsies.task.execution";
 const WORKER_ID_KEY: &str = "horsies.worker.id";
-/// The attempt number, from 1.
-const ATTEMPT_KEY: &str = "horsies.task.attempt";
 /// The index of the workflow node that links the task.
 const WORKFLOW_NODE_KEY: &str = "horsies.workflow.node";
+/// The top-level workflow of the tree of the node that links the task.
+const WORKFLOW_ROOT_ID_KEY: &str = "horsies.workflow.root_id";
 
 /// The body scope of a worker child: each task body runs inside its
 /// attempt span.
@@ -97,10 +96,10 @@ pub(super) fn attempt_span(run: &BodyRun<'_>, parent: AttemptParent) -> tracing:
         otel.kind = "consumer",
         horsies.task.id = %run.task_id,
         horsies.task.name = run.task_name,
+        horsies.task.attempt = run.attempt.get(),
     );
     span.set_attribute(EXECUTION_KEY, run.execution.as_str());
     span.set_attribute(WORKER_ID_KEY, run.worker_id.to_owned());
-    span.set_attribute(ATTEMPT_KEY, i64::from(run.attempt.get()));
     span.set_attribute(LabelName::Queue.attribute_key(), run.queue_name.to_owned());
     span.set_attribute(MESSAGING_SYSTEM_KEY, MESSAGING_SYSTEM);
     span.set_attribute(MESSAGING_OPERATION_TYPE_KEY, PROCESS_OPERATION);
@@ -117,26 +116,21 @@ pub(super) fn attempt_span(run: &BodyRun<'_>, parent: AttemptParent) -> tracing:
     span
 }
 
-/// Set `horsies.workflow.id` and `horsies.workflow.node` (the node index) on
-/// `span` for a task that a workflow node links; nothing for another task.
+/// Set `horsies.workflow.id`, `horsies.workflow.node` (the node index) and
+/// `horsies.workflow.root_id` on `span` for a task that a workflow node
+/// links; nothing for another task.
 fn set_workflow_attributes(span: &tracing::Span, workflow: RunWorkflow) {
     match workflow {
         RunWorkflow::NotInWorkflow => {}
         RunWorkflow::InWorkflow {
             workflow_id,
             node_index,
+            root_workflow_id,
         } => {
             span.set_attribute(WORKFLOW_ID_KEY, workflow_id.to_string());
-            span.set_attribute(WORKFLOW_NODE_KEY, node_index_value(node_index));
+            span.set_attribute(WORKFLOW_NODE_KEY, i64::from(node_index.get()));
+            span.set_attribute(WORKFLOW_ROOT_ID_KEY, root_workflow_id.to_string());
         }
-    }
-}
-
-/// The attribute value of `node_index`. Pure.
-fn node_index_value(node_index: WorkflowNodeIndex) -> i64 {
-    match i64::try_from(node_index.get()) {
-        Ok(value) => value,
-        Err(_) => unreachable!("a node index of at most {MAX_WORKFLOW_NODE_INDEX} fits an i64"),
     }
 }
 

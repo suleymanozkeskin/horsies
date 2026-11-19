@@ -40,7 +40,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 use tokio::task::JoinError;
 
-use super::body_scope::{BodyOutcome, OpenBody};
+use super::body_scope::{BodyOutcome, OpenBody, SpanSource};
 use super::panic::PanicRecord;
 use super::rss::read_rss;
 use super::run::{
@@ -54,7 +54,7 @@ use super::run_work::{
 use crate::core::task::error::{OperationalErrorCode, TaskError};
 use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, TaskModule};
 use crate::core::task::result::TaskResult;
-use crate::events::{AttemptStart, RunTrace};
+use crate::events::AttemptStart;
 use crate::worker::executor::protocol::{
     BodyEnd, BodyReturnedFrame, CancelGraceMs, ChildAfterFrame, ChildFrame, DispatchNumber,
     FailureDetail, IsolatedWork, LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame,
@@ -161,10 +161,12 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
         worker_id,
         claimed_at,
         orphan_self_heal,
-        workflow,
     };
-    let started_at = match start_attempt(context, &facts).await {
-        Started::Running { started_at } => started_at,
+    let (started_at, workflow) = match start_attempt(context, &facts).await {
+        Started::Running {
+            started_at,
+            workflow,
+        } => (started_at, workflow),
         Started::Stopped(reason) => {
             let end = RunEnd::StoppedBeforeRunning(reason);
             send_isolated_result(context, task_id, end, AttemptStart::NotReported).await;
@@ -177,10 +179,14 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
         IsolatedWork::Run => match prepare(&context.app, &facts.task_name, &input) {
             Prepared::Ended(end) => end,
             Prepared::Body { task, input } => {
-                let body = context
-                    .app
-                    .body_scope
-                    .open(&facts, Execution::Isolated, &trace);
+                let body = context.app.body_scope.open(
+                    &facts,
+                    Execution::Isolated,
+                    SpanSource {
+                        trace: &trace,
+                        workflow,
+                    },
+                );
                 result_end(isolated_body(&scope, &facts.task_name, task, input, body).await)
             }
         },
@@ -308,7 +314,6 @@ fn facts_of(run: &SharedRunFrame) -> RunFacts {
         worker_id: run.worker_id.clone(),
         claimed_at: run.claimed_at,
         orphan_self_heal: run.orphan_self_heal,
-        workflow: run.workflow,
     }
 }
 
@@ -403,7 +408,10 @@ async fn async_seat(
             SeatEnd::Finished(RunEnd::StoppedBeforeRunning(reason)),
             AttemptStart::NotReported,
         ),
-        Started::Running { started_at } => {
+        Started::Running {
+            started_at,
+            workflow,
+        } => {
             let (end, marker) = match work {
                 AsyncSeatWork::Refusal(refusal) => {
                     (SeatEnd::Finished(refusal_end(&refusal)), Marker::Write)
@@ -413,7 +421,10 @@ async fn async_seat(
                         run_ref,
                         facts: &facts,
                         input: &run.input,
-                        trace: &run.trace,
+                        span: SpanSource {
+                            trace: &run.trace,
+                            workflow,
+                        },
                         started_at,
                     };
                     async_body(&context, &watch, body, timeout, grace).await
@@ -457,13 +468,13 @@ fn joined_result(
 }
 
 /// The facts of one run on a seat after its start: its reference, its
-/// facts, its input, its stored trace and the time that its start write
-/// returned.
+/// facts, its input, its stored trace with the workflow node that its start
+/// read, and the time that its start write returned.
 struct SeatBody<'a> {
     run_ref: RunRef,
     facts: &'a RunFacts,
     input: &'a TaskInputText,
-    trace: &'a RunTrace,
+    span: SpanSource<'a>,
     started_at: DateTime<Utc>,
 }
 
@@ -482,7 +493,7 @@ async fn async_body(
         run_ref,
         facts,
         input,
-        trace,
+        span,
         started_at,
     } = body;
     let (task, module, input): (Arc<dyn AsyncTaskFn>, TaskModule, Vec<u8>) =
@@ -506,7 +517,7 @@ async fn async_body(
     let open = context
         .app
         .body_scope
-        .open(facts, Execution::SharedAsync, trace);
+        .open(facts, Execution::SharedAsync, span);
     let body = async_body_in(task, input, open.span());
     let mut handle = scope.spawn_body(&facts.task_name, body);
     let deadline = tokio::time::sleep(Duration::from_millis(timeout.get()));
@@ -795,12 +806,19 @@ fn thread_seat(
             SeatEnd::Finished(RunEnd::StoppedBeforeRunning(reason)),
             AttemptStart::NotReported,
         ),
-        Started::Running { started_at } => {
+        Started::Running {
+            started_at,
+            workflow,
+        } => {
+            let span = SpanSource {
+                trace: &run.trace,
+                workflow,
+            };
             let end = match work {
                 ThreadSeatWork::Refusal(refusal) => SeatEnd::Finished(refusal_end(&refusal)),
-                ThreadSeatWork::Task { timeout } => thread_body(
-                    context, runtime, run_ref, &facts, &run.input, &run.trace, timeout,
-                ),
+                ThreadSeatWork::Task { timeout } => {
+                    thread_body(context, runtime, run_ref, &facts, &run.input, span, timeout)
+                }
             };
             runtime.block_on(mark_finalizing(context, &facts));
             (end, AttemptStart::Reported { started_at })
@@ -867,7 +885,7 @@ fn thread_body(
     run_ref: RunRef,
     facts: &RunFacts,
     input: &TaskInputText,
-    trace: &RunTrace,
+    span: SpanSource<'_>,
     timeout: TaskTimeoutMs,
 ) -> SeatEnd {
     let (task, module, input) = match prepare(&context.app, &facts.task_name, input) {
@@ -893,7 +911,7 @@ fn thread_body(
     let open = context
         .app
         .body_scope
-        .open(facts, Execution::SharedThread, trace);
+        .open(facts, Execution::SharedThread, span);
     let result = run_blocking_body(&task, &input, &facts.task_name, module, &open.span());
     match gate.finish() {
         GateEnd::Returned => {
