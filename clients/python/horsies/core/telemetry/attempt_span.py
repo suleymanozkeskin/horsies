@@ -48,12 +48,13 @@ from horsies.core.logging import (
 )
 from horsies.core.models.tasks import Execution
 from horsies.core.models.tracing import NoTracing, OtelTracing
-from horsies.core.worker.child_frames import RunTrace, RunWorkflow
+from horsies.core.worker.child_frames import RunTrace
 from horsies.core.worker.run_return import (
     BodyInterrupted,
     EncodedResult,
     ResultEnvelope,
     ResultOutcome,
+    RunWorkflow,
 )
 
 _logger = get_logger('telemetry')
@@ -291,7 +292,12 @@ def _running_task(
             ids: SpanIds | NoSpanIds = NoSpanIds()
         case _:
             ids = span.ids
-    return RunningTask(task_id=subject.task_id, task_name=subject.task_name, span=ids)
+    return RunningTask(
+        task_id=subject.task_id,
+        task_name=subject.task_name,
+        attempt=subject.attempt,
+        span=ids,
+    )
 
 
 def _make_current(span: OpenAttemptSpan | _NoSpan) -> _SpanContext:

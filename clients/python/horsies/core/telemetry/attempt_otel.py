@@ -17,8 +17,9 @@ This module imports `opentelemetry`. `attempt_spans_of` imports it only for
   `messaging.destination.name` (the queue), `horsies.task.id`,
   `horsies.task.name`, `horsies.task.attempt` (from 1),
   `horsies.task.execution`, `horsies.queue`, `horsies.worker.id`; for a task
-  that a workflow node links, `horsies.workflow.id` and
-  `horsies.workflow.node` (the index of the node).
+  that a workflow node links, `horsies.workflow.id`, `horsies.workflow.node`
+  (the index of the node) and `horsies.workflow.root_id` (the top-level
+  workflow of its tree), as the start read them.
 - Status: unset when the envelope holds the task's value; ERROR with
   `error.type` = the error code when it holds a task error. The live
   exception that the task error keeps is recorded on the span first. A body
@@ -55,19 +56,16 @@ from horsies.core.telemetry.attempt_span import (
     ScopeRaised,
     SpansFlushed,
 )
-from horsies.core.worker.child_frames import (
-    InWorkflow,
-    NotInWorkflow,
-    NoTraceCarrier,
-    RunWorkflow,
-    StoredTraceCarrier,
-)
+from horsies.core.worker.child_frames import NoTraceCarrier, StoredTraceCarrier
 from horsies.core.worker.run_return import (
     BodyInterrupted,
+    InWorkflow,
+    NotInWorkflow,
     NothingRaised,
     RaisedInRun,
     ResultFailed,
     ResultSucceeded,
+    RunWorkflow,
 )
 
 INSTRUMENTATION_SCOPE: Final = 'horsies'
@@ -97,6 +95,7 @@ QUEUE_KEY: Final = 'horsies.queue'
 WORKER_ID_KEY: Final = 'horsies.worker.id'
 WORKFLOW_ID_KEY: Final = 'horsies.workflow.id'
 WORKFLOW_NODE_KEY: Final = 'horsies.workflow.node'
+WORKFLOW_ROOT_ID_KEY: Final = 'horsies.workflow.root_id'
 
 TRACE_ID_HEX_DIGITS: Final = 32
 SPAN_ID_HEX_DIGITS: Final = 16
@@ -240,11 +239,20 @@ def attempt_attributes(subject: AttemptSubject) -> dict[str, AttributeValue]:
 
 
 def workflow_attributes(workflow: RunWorkflow) -> dict[str, AttributeValue]:
-    """The workflow attributes of an attempt span: the workflow id and the
-    node index for a task that a node links, none otherwise. Pure."""
+    """The workflow attributes of an attempt span: the workflow id, the node
+    index and the root workflow id for a task that a node links, none
+    otherwise. Pure."""
     match workflow:
-        case InWorkflow(workflow_id=workflow_id, node_index=node_index):
-            return {WORKFLOW_ID_KEY: str(workflow_id), WORKFLOW_NODE_KEY: node_index}
+        case InWorkflow(
+            workflow_id=workflow_id,
+            node_index=node_index,
+            root_workflow_id=root_workflow_id,
+        ):
+            return {
+                WORKFLOW_ID_KEY: str(workflow_id),
+                WORKFLOW_NODE_KEY: node_index,
+                WORKFLOW_ROOT_ID_KEY: str(root_workflow_id),
+            }
         case NotInWorkflow():
             return {}
         case _ as unreachable:

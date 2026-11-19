@@ -61,7 +61,7 @@ from horsies.core.worker.stored_timeout import (
 from horsies.core.task_decorator import TaskBodyKind
 from horsies.core.models.boot_failure import AppLoadFailed
 from horsies.core.worker.task_loop import AsyncTaskPresence, LoopOpen, TaskLoop
-from horsies.core.worker.child_frames import BootFailedFrame, NotInWorkflow, NoTraceCarrier
+from horsies.core.worker.child_frames import BootFailedFrame, NoTraceCarrier
 from horsies.core.worker.child_main import boot_app
 from horsies.core.worker.child_runner import (
     RunTheTask,
@@ -72,6 +72,7 @@ from horsies.core.worker.child_runner import (
     attempt_elapsed_ms,
 )
 from horsies.core.worker.run_return import (
+    NotInWorkflow,
     NothingRaised,
     ResultFailed,
     SetRunning,
@@ -93,7 +94,7 @@ TASK_ID = '0b4d8a52-7d0e-4a0e-9d11-6b2f1f7c9e02'
 STARTED_AT: Final = datetime(2026, 11, 17, 10, 0, 1, tzinfo=timezone.utc)
 """The time that the fake start write returns."""
 
-STARTED: Final = StartedRunning(STARTED_AT)
+STARTED: Final = StartedRunning(STARTED_AT, NotInWorkflow())
 """The start that a stubbed ownership confirm returns."""
 
 
@@ -879,7 +880,6 @@ def _run_entry_defaults() -> dict[str, Any]:
         'orphan_self_heal': True,
         'queue_name': 'default',
         'attempt': 1,
-        'workflow': NotInWorkflow(),
         'trace': NoTraceCarrier(),
     }
 

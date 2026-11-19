@@ -45,7 +45,7 @@ from horsies.core.types.result import Err, Ok
 from horsies.core.task_decorator import await_task_call_in_worker
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import child_runner
-from horsies.core.worker.child_frames import LoopHoldsNoTask, NotInWorkflow, NoTraceCarrier
+from horsies.core.worker.child_frames import LoopHoldsNoTask, NoTraceCarrier
 from horsies.core.worker.task_loop import (
     AsyncTaskPresence,
     LoopNotCreated,
@@ -53,7 +53,7 @@ from horsies.core.worker.task_loop import (
     TaskLoop,
 )
 from horsies.core.worker.child_runner import RunTheTask
-from horsies.core.worker.run_return import StartedRunning
+from horsies.core.worker.run_return import NotInWorkflow, StartedRunning
 from tests.fixtures.core_frames import init_frame
 from tests.fixtures.run_return import wire_of
 
@@ -98,7 +98,10 @@ def no_task_loop() -> Iterator[TaskLoop]:
     loop.close()
 
 
-_STARTED = StartedRunning(datetime(2026, 11, 17, 10, 0, 1, tzinfo=timezone.utc))
+_STARTED = StartedRunning(
+    datetime(2026, 11, 17, 10, 0, 1, tzinfo=timezone.utc),
+    NotInWorkflow(),
+)
 """The start that the stubbed RUNNING update returns."""
 
 
@@ -138,7 +141,6 @@ def _runner(
                     orphan_self_heal=True,
                     queue_name='default',
                     attempt=1,
-                    workflow=NotInWorkflow(),
                     trace=NoTraceCarrier(),
                 )
             )

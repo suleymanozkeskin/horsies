@@ -167,7 +167,6 @@ fn claimed_task(execution: Execution) -> crate::worker::executor::slots::Claimed
         options: crate::worker::retry::read_stored_options(None),
         trace: crate::events::RunTrace::NoCarrier,
         trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
-        workflow: crate::worker::executor::protocol::RunWorkflow::NotInWorkflow,
     }
 }
 

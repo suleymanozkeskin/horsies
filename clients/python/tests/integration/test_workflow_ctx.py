@@ -25,7 +25,7 @@ from horsies.core.models.workflow import (
 )
 from horsies.core.worker.current import set_current_app
 from horsies.core.worker.child_runner import _run_task_entry
-from horsies.core.worker.child_frames import NotInWorkflow, NoTraceCarrier
+from horsies.core.worker.child_frames import NoTraceCarrier
 from horsies.core.worker.task_loop import TaskLoop
 
 from .conftest import make_simple_task, make_no_ctx_task, make_workflow_spec, start_ok
@@ -519,7 +519,6 @@ class TestWorkflowCtx:
                 orphan_self_heal=True,
                 queue_name='default',
                 attempt=1,
-                workflow=NotInWorkflow(),
                 trace=NoTraceCarrier(),
             )
         )
@@ -593,7 +592,6 @@ class TestWorkflowCtx:
                 orphan_self_heal=True,
                 queue_name='default',
                 attempt=1,
-                workflow=NotInWorkflow(),
                 trace=NoTraceCarrier(),
             )
         )
@@ -670,7 +668,6 @@ class TestWorkflowCtx:
                 orphan_self_heal=True,
                 queue_name='default',
                 attempt=1,
-                workflow=NotInWorkflow(),
                 trace=NoTraceCarrier(),
             )
         )
@@ -962,7 +959,6 @@ class TestWorkflowCtx:
                 orphan_self_heal=True,
                 queue_name='default',
                 attempt=1,
-                workflow=NotInWorkflow(),
                 trace=NoTraceCarrier(),
             )
         )

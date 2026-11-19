@@ -182,10 +182,12 @@ class NoSpanIds:
 
 @dataclass(frozen=True, slots=True)
 class RunningTask:
-    """The task whose body runs in this context, in a worker child."""
+    """The task whose body runs in this context, in a worker child, and the
+    number of its attempt, from 1."""
 
     task_id: str
     task_name: str
+    attempt: int
     span: SpanIds | NoSpanIds
 
 
@@ -217,7 +219,7 @@ def leave_running_task(token: Token[RunningTask | NoRunningTask]) -> None:
     _RUNNING_TASK.reset(token)
 
 
-TASK_CONTEXT_FIELDS: Final = ('task_id', 'task_name', 'trace_id', 'span_id')
+TASK_CONTEXT_FIELDS: Final = ('task_id', 'task_name', 'attempt', 'trace_id', 'span_id')
 """The record attributes that ``TaskContextFilter`` sets."""
 
 
@@ -225,11 +227,12 @@ class TaskContextFilter(logging.Filter):
     """Puts the task context of the current context on each record.
 
     Inside the body of a task in a worker child, the record gets
-    ``task_id``, ``task_name``, and, when the attempt has a span,
-    ``trace_id`` and ``span_id`` (lowercase hex). An attribute without a
-    value is ``None``, so a format string can name every field. A record
-    that already has one of these attributes keeps it: the records of the
-    core carry ``task_id``, ``attempt`` and ``trace_id`` of their own.
+    ``task_id``, ``task_name``, ``attempt`` (the number of the attempt, from
+    1), and, when the attempt has a span, ``trace_id`` and ``span_id``
+    (lowercase hex). An attribute without a value is ``None``, so a format
+    string can name every field. A record that already has one of these
+    attributes keeps it: the records of the core carry ``task_id``,
+    ``attempt`` and ``trace_id`` of their own.
 
     ``configure_logging`` adds it to the horsies handler. Add it to a handler
     of your own to get the same attributes there. It never drops a record.
@@ -246,14 +249,15 @@ class TaskContextFilter(logging.Filter):
 
 def _context_values(
     task: RunningTask | NoRunningTask,
-) -> tuple[tuple[str, str | None], ...]:
+) -> tuple[tuple[str, str | int | None], ...]:
     """The value of each name of ``TASK_CONTEXT_FIELDS`` for ``task``. Pure."""
+    values: tuple[str | int | None, ...]
     match task:
-        case RunningTask(task_id=task_id, task_name=task_name, span=span):
+        case RunningTask(task_id=task_id, task_name=task_name, attempt=attempt, span=span):
             trace_id, span_id = _span_values(span)
-            values = (task_id, task_name, trace_id, span_id)
+            values = (task_id, task_name, attempt, trace_id, span_id)
         case NoRunningTask():
-            values = (None, None, None, None)
+            values = (None, None, None, None, None)
         case _ as unreachable:
             assert_never(unreachable)
     return tuple(zip(TASK_CONTEXT_FIELDS, values, strict=True))

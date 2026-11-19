@@ -1011,7 +1011,6 @@ fn claimed_task() -> ClaimedTask {
         options: read_stored_options(Some("{}")),
         trace: crate::events::RunTrace::NoCarrier,
         trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
-        workflow: crate::worker::executor::protocol::RunWorkflow::NotInWorkflow,
     }
 }
 
@@ -1062,7 +1061,6 @@ fn run_frame_bytes(claimed: &ClaimedTask) -> Vec<u8> {
         orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work: IsolatedWork::Run,
         input: input(),
-        workflow: claimed.workflow,
         trace: crate::events::RunTrace::NoCarrier,
     }))
     .expect("the run frame encodes")

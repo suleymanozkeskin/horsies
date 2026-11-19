@@ -32,7 +32,6 @@ fn claimed(vector: &ErrorVector) -> ClaimedTask {
         options: read_stored_options(None),
         trace: crate::events::RunTrace::NoCarrier,
         trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
-        workflow: crate::worker::executor::protocol::RunWorkflow::NotInWorkflow,
     }
 }
 

@@ -35,7 +35,6 @@ fn row(name: &str, queue_name: &str) -> ClaimedRow {
         max_retries: 0,
         trace: crate::events::RunTrace::NoCarrier,
         trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
-        workflow: crate::worker::executor::protocol::RunWorkflow::NotInWorkflow,
         priority: crate::events::Priority::try_from(100).unwrap(),
         enqueued_at: generation(),
         read: crate::broker::claims::ClaimRead::now(),

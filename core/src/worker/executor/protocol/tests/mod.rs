@@ -658,7 +658,6 @@ fn the_isolated_run_frame_carries_the_input_as_its_body() {
             claimed_at: claim_time(),
             orphan_self_heal: OrphanSelfHeal::On,
             work: IsolatedWork::Run,
-            workflow: RunWorkflow::NotInWorkflow,
             trace: crate::events::RunTrace::NoCarrier,
             input: TaskInputText::new(r#"{"a":1,"b":2}"#.to_owned()),
         }),
@@ -668,7 +667,7 @@ fn the_isolated_run_frame_carries_the_input_as_its_body() {
                 r#""task_name":"app.tasks.add","queue_name":"default","attempt":1,"#,
                 r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00.123456Z","orphan_self_heal":true,"#,
-                r#""work":{"kind":"run"},"workflow":{"kind":"not_in_workflow"},"#,
+                r#""work":{"kind":"run"},"#,
                 r#""trace":{"kind":"no_carrier"}}"#,
             ),
             br#"{"a":1,"b":2}"#,
@@ -690,7 +689,6 @@ fn the_isolated_run_frame_carries_a_refusal_of_stored_options() {
             work: IsolatedWork::Refusal(StoredOptionsRefusal::TimeoutValueInvalid(
                 RefusalReason::new("timeout_ms is below 1000".to_owned()).unwrap(),
             )),
-            workflow: RunWorkflow::NotInWorkflow,
             trace: crate::events::RunTrace::NoCarrier,
             input: TaskInputText::new("null".to_owned()),
         }),
@@ -702,7 +700,7 @@ fn the_isolated_run_frame_carries_a_refusal_of_stored_options() {
                 r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"#,
                 r#""work":{"kind":"refusal","#,
                 r#""refusal":{"kind":"value_invalid","reason":"timeout_ms is below 1000"}},"#,
-                r#""workflow":{"kind":"not_in_workflow"},"trace":{"kind":"no_carrier"}}"#,
+                r#""trace":{"kind":"no_carrier"}}"#,
             ),
             b"null",
         ),
@@ -722,7 +720,6 @@ fn the_shared_run_frame_carries_the_seat_work() {
             claimed_at: whole_second_claim_time(),
             orphan_self_heal: OrphanSelfHeal::Off,
             work,
-            workflow: RunWorkflow::NotInWorkflow,
             trace: crate::events::RunTrace::NoCarrier,
             input: TaskInputText::new("{}".to_owned()),
         })
@@ -735,7 +732,7 @@ fn the_shared_run_frame_carries_the_seat_work() {
                 r#""task_name":"app.tasks.fetch","queue_name":"default","attempt":1,"#,
                 r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{},"#,
-                r#""workflow":{{"kind":"not_in_workflow"}},"trace":{{"kind":"no_carrier"}}}}"#,
+                r#""trace":{{"kind":"no_carrier"}}}}"#,
             ),
             work
         )
@@ -1153,7 +1150,6 @@ fn the_claim_generation_round_trips_exactly() {
         claimed_at,
         orphan_self_heal: OrphanSelfHeal::Off,
         work: IsolatedWork::Run,
-        workflow: RunWorkflow::NotInWorkflow,
         trace: crate::events::RunTrace::NoCarrier,
         input: TaskInputText::new("{}".to_owned()),
     });
@@ -1178,7 +1174,6 @@ fn the_orphan_self_heal_round_trips_in_both_run_frames() {
             claimed_at: claim_time(),
             orphan_self_heal: self_heal,
             work: IsolatedWork::Run,
-            workflow: RunWorkflow::NotInWorkflow,
             trace: crate::events::RunTrace::NoCarrier,
             input: TaskInputText::new("{}".to_owned()),
         });
@@ -1194,7 +1189,6 @@ fn the_orphan_self_heal_round_trips_in_both_run_frames() {
             work: SharedWork::ThreadTask {
                 timeout_ms: TaskTimeoutMs::new(5_000).unwrap(),
             },
-            workflow: RunWorkflow::NotInWorkflow,
             trace: crate::events::RunTrace::NoCarrier,
             input: TaskInputText::new("{}".to_owned()),
         });
@@ -1209,7 +1203,7 @@ fn the_orphan_self_heal_round_trips_in_both_run_frames() {
 #[test]
 fn a_run_frame_without_its_orphan_self_heal_is_refused() {
     let run = format!(
-        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"run"}},"workflow":{{"kind":"not_in_workflow"}},"trace":{{"kind":"no_carrier"}}}}"#
+        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"run"}},"trace":{{"kind":"no_carrier"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&run, b"{}")),
@@ -1218,7 +1212,7 @@ fn a_run_frame_without_its_orphan_self_heal_is_refused() {
         },
     );
     let shared = format!(
-        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"thread_task","timeout_ms":5000}},"workflow":{{"kind":"not_in_workflow"}},"trace":{{"kind":"no_carrier"}}}}"#
+        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"thread_task","timeout_ms":5000}},"trace":{{"kind":"no_carrier"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&shared, b"{}")),
@@ -1236,7 +1230,7 @@ fn a_claim_generation_with_an_offset_is_read() {
             r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
             r#""task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","#,
             r#""claimed_at":"2026-11-16T09:30:00.123456+00:00","orphan_self_heal":false,"#,
-            r#""work":{"kind":"run"},"workflow":{"kind":"not_in_workflow"},"#,
+            r#""work":{"kind":"run"},"#,
             r#""trace":{"kind":"no_carrier"}}"#,
         ),
         b"{}",
@@ -1336,7 +1330,7 @@ fn a_body_on_a_frame_without_one_is_refused() {
 #[test]
 fn input_that_is_not_utf8_is_refused() {
     let meta = format!(
-        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{{"kind":"run"}},"workflow":{{"kind":"not_in_workflow"}},"trace":{{"kind":"no_carrier"}}}}"#
+        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{{"kind":"run"}},"trace":{{"kind":"no_carrier"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&meta, &[0x7b, 0xff])),
@@ -1412,7 +1406,7 @@ fn a_stuck_report_names_live_work() {
 #[test]
 fn seat_work_outside_its_bounds_is_refused() {
     let meta = format!(
-        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{{"kind":"task","timeout_ms":999,"cancel_grace_ms":1000}},"workflow":{{"kind":"not_in_workflow"}},"trace":{{"kind":"no_carrier"}}}}"#
+        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{{"kind":"task","timeout_ms":999,"cancel_grace_ms":1000}},"trace":{{"kind":"no_carrier"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&meta, b"{}")),

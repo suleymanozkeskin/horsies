@@ -148,7 +148,6 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
         claimed_at,
         orphan_self_heal,
         work,
-        workflow: _,
         trace: _,
         input,
     } = run;
