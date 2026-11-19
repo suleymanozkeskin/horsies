@@ -11,42 +11,8 @@ use chrono::Utc;
 use super::*;
 use crate::core::task::Execution;
 use crate::events::{SlotIndex, SlotRecovered};
-use crate::telemetry::declared::{DeclaredNames, ErrorCodeValues};
-use crate::telemetry::registry::{ProcessFacts, RegistryLabels, SampleValue, WorkerFacts};
-
-/// The registry of a worker with no declared name.
-fn worker_registry() -> Arc<Registry> {
-    let registry = Registry::for_worker(RegistryLabels {
-        tasks: DeclaredNames::none(),
-        queues: DeclaredNames::none(),
-        handlers: DeclaredNames::none(),
-        schedules: DeclaredNames::none(),
-        error_codes: ErrorCodeValues::none(),
-        process: ProcessFacts::Worker(WorkerFacts {
-            version: "0.8.0".to_owned(),
-            profile: "default".to_owned(),
-            worker_id: "worker-1".to_owned(),
-        }),
-    })
-    .expect("the registry of a worker builds");
-    Arc::new(registry)
-}
-
-/// The series of `metric` in `registry`: the label texts and the value of
-/// each, sorted by label texts.
-fn series_of(registry: &Registry, metric: MetricId) -> Vec<(Vec<String>, SampleValue)> {
-    let mut series: Vec<(Vec<String>, SampleValue)> = registry
-        .snapshot()
-        .into_iter()
-        .find(|family| family.metric == metric)
-        .expect("the registry holds the metric")
-        .series
-        .into_iter()
-        .map(|series| (series.label_texts, series.value))
-        .collect();
-    series.sort_by(|left, right| left.0.cmp(&right.0));
-    series
-}
+use crate::telemetry::registry::SampleValue;
+use crate::test_support::telemetry::{series_of, worker_registry};
 
 /// An event of slot `slot`.
 fn slot_event(slot: u32) -> Event {

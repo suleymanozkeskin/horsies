@@ -2,13 +2,15 @@
 //! ([`database`]), the statements of the tests ([`sql`]), the core handle on
 //! one of them, the terminal writes of seeds ([`terminal_writes`]), the
 //! capture of the `tracing` events of a test ([`log_capture`]), and the
-//! child spec source of the workflow tests ([`child_specs`]).
+//! child spec source of the workflow tests ([`child_specs`]), and the
+//! telemetry of a worker under test ([`telemetry`]).
 
 pub(crate) mod child_specs;
 mod database;
 pub(crate) mod history;
 mod log_capture;
 pub(crate) mod sql;
+pub(crate) mod telemetry;
 pub(crate) mod terminal_writes;
 
 pub(crate) use database::{
