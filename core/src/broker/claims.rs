@@ -3,8 +3,10 @@
 //! - [`claim_pass`]: `horsies_claim`, one claim pass with a budget per
 //!   execution class and the routes of the worker's claim plan.
 //! - [`start_attempt`]: `horsies_start_attempt`, the RUNNING write of one
-//!   claimed task with its first runner beat (and the node write of a
-//!   workflow task).
+//!   claimed task (and the node write of a workflow task). It writes no
+//!   runner beat: the worker's runner beats cover the attempt from its next
+//!   pass, and the stale RUNNING rule judges the attempt from its
+//!   `started_at` until then.
 //! - [`release_claims`]: `horsies_release_claims`, the return of claimed rows
 //!   that no child started.
 //!
@@ -68,16 +70,15 @@ static CLAIM_PASS: TypedStatement = TypedStatement::new(
 );
 
 /// `horsies_start_attempt`. Parameters in order: task id, worker id, claim
-/// generation, pid, host name, process name, sender of the first beat.
+/// generation, pid, host name, process name.
 static START_ATTEMPT: TypedStatement = TypedStatement::new(
     "start_attempt",
-    "SELECT * FROM horsies_start_attempt($1, $2, $3, $4, $5, $6, $7)",
+    "SELECT * FROM horsies_start_attempt($1, $2, $3, $4, $5, $6)",
     &[
         ParameterType::Uuid,
         ParameterType::Text,
         ParameterType::Timestamptz,
         ParameterType::Int4,
-        ParameterType::Text,
         ParameterType::Text,
         ParameterType::Text,
     ],
@@ -481,28 +482,23 @@ pub struct StartAttempt {
     pub worker_pid: i32,
     pub worker_hostname: String,
     pub worker_process_name: String,
-    /// The sender id of the first runner beat.
-    pub beat_sender_id: String,
 }
 
 impl StartAttempt {
     /// The start of `task_id` under `fence` by the process `worker_pid` on
-    /// `worker_hostname`: the process name is `worker-<pid>` and the beat
-    /// sender `<worker_id>:<pid>` (Python `start_attempt_params`). Pure.
+    /// `worker_hostname`: the process name is `worker-<pid>`. Pure.
     pub fn of_process(
         task_id: Uuid,
         fence: OwnedClaim,
         worker_pid: i32,
         worker_hostname: String,
     ) -> StartAttempt {
-        let beat_sender_id = format!("{}:{worker_pid}", fence.worker_id);
         StartAttempt {
             task_id,
             fence,
             worker_pid,
             worker_hostname,
             worker_process_name: format!("worker-{worker_pid}"),
-            beat_sender_id,
         }
     }
 }
@@ -555,8 +551,8 @@ impl StartMiss {
 /// What the start reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartOutcome {
-    /// The row is RUNNING with its first runner beat (and, for a workflow
-    /// task, its node RUNNING), from `started_at` on the database clock.
+    /// The row is RUNNING (and, for a workflow task, its node RUNNING),
+    /// from `started_at` on the database clock.
     Started { started_at: DateTime<Utc> },
     /// Nothing was written.
     Missed(StartMiss),
@@ -587,8 +583,7 @@ pub enum WindowedStart {
 /// Start one claimed task: `horsies_start_attempt` on `pool`, as a child
 /// write within `deadline`, the deadline of its start attempt
 /// ([`crate::broker::child_writes::connection_for`]). Writes the RUNNING
-/// row, the first runner beat and the node write in one statement, or
-/// nothing on a miss. Does not expire the row or stop the task on a miss;
+/// row and the node write in one statement, or nothing on a miss. Does not expire the row or stop the task on a miss;
 /// that is the caller's next step, within the same deadline.
 ///
 /// Errors: [`BrokerError::Statement`]: nothing sent (a failed checkout, or
@@ -652,7 +647,6 @@ async fn start_on(
         .value(&command.worker_pid)
         .value(&command.worker_hostname)
         .value(&command.worker_process_name)
-        .value(&command.beat_sender_id)
         .finish();
     log.log(statement);
     let rows = connection.query(&bound, statement_bound).await?;

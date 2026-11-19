@@ -50,9 +50,6 @@ const BEAT_INTERVAL_MS: u64 = 1_000;
 /// The last lines of the worker log that a failed wait shows.
 const FAILURE_LOG_LINES: usize = 200;
 
-/// The beat sender of the start that a test writes for the child.
-const CHILD_BEAT_SENDER: &str = "scripted-child";
-
 /// A drain that ends soon after the stop: the pool kills a child that
 /// still holds its task.
 const SHORT_DRAIN_SECS: u64 = 1;
@@ -62,13 +59,13 @@ const SHORT_DRAIN_SECS: u64 = 1;
 const LONG_DRAIN_SECS: u64 = 120;
 
 /// The start of the attempt of a CLAIMED row, as its child writes it:
-/// `horsies_start_attempt` under the worker's claim, with a first runner
-/// beat of the sender `$2`. No row while the task is not CLAIMED.
+/// `horsies_start_attempt` under the worker's claim. No row while the task
+/// is not CLAIMED.
 const START_AS_THE_CHILD_SQL: &str = "\
 SELECT s.outcome
 FROM horsies_tasks t
 CROSS JOIN LATERAL horsies_start_attempt(
-    t.id, t.claimed_by_worker_id, t.claimed_at, 4242, 'scripted-host', 'scripted-child', $2
+    t.id, t.claimed_by_worker_id, t.claimed_at, 4242, 'scripted-host', 'scripted-child'
 ) AS s
 WHERE t.id = $1 AND t.status = 'CLAIMED'";
 
@@ -177,7 +174,6 @@ async fn start_as_the_child(pool: &TestPool, task_id: Uuid, pid_file: &Path) -> 
     .expect("the worker claims the task and sends the run to the child");
     let started: Option<String> = sql::query_scalar(START_AS_THE_CHILD_SQL)
         .bind(task_id)
-        .bind(CHILD_BEAT_SENDER)
         .fetch_optional(pool)
         .await
         .expect("write the start of the attempt");
@@ -269,17 +265,16 @@ async fn a_task_held_in_a_child_gets_the_runner_beats_of_the_worker() {
 #[serial_test::serial]
 async fn runner_beats_that_cannot_land_stop_the_worker_with_runner_heartbeat_lost() {
     let (database, pool) = database().await;
-    let refusal = format!(
+    let refusal =
         "CREATE FUNCTION test_refuse_runner_beat() RETURNS trigger LANGUAGE plpgsql AS $body$
          BEGIN
              RAISE EXCEPTION 'a runner beat refused by the test';
          END
          $body$;
          CREATE TRIGGER test_refuse_runner_beat BEFORE INSERT ON horsies_heartbeats
-             FOR EACH ROW WHEN (NEW.role = 'runner' AND NEW.sender_id <> '{CHILD_BEAT_SENDER}')
-             EXECUTE FUNCTION test_refuse_runner_beat();"
-    );
-    sql::raw_sql(&refusal)
+             FOR EACH ROW WHEN (NEW.role = 'runner')
+             EXECUTE FUNCTION test_refuse_runner_beat();";
+    sql::raw_sql(refusal)
         .execute(&pool)
         .await
         .expect("install the refusal of the worker's runner beats");

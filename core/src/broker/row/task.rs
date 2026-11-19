@@ -118,7 +118,9 @@ pub struct TaskAttemptRow {
 /// Represents a RUNNING task whose worker has not sent a heartbeat within
 /// the configured threshold, indicating the worker may have crashed.
 /// `started_at` is set: the query selects only rows that started before the
-/// threshold. `last_heartbeat` is `None` for a task with no runner beat.
+/// threshold. `last_heartbeat` is the latest runner beat sent at or after
+/// `started_at`, and `None` for a task with no such beat: the start writes
+/// no beat, and a beat of an earlier attempt does not count.
 #[derive(Debug, Clone, Serialize)]
 pub struct StaleTaskRow {
     pub id: Uuid,

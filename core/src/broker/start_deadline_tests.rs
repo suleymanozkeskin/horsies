@@ -74,7 +74,6 @@ async fn a_claim_past_its_deadline_does_not_start() {
             worker_pid: 4242,
             worker_hostname: "start-host".to_owned(),
             worker_process_name: "worker".to_owned(),
-            beat_sender_id: WORKER.to_owned(),
         },
         crate::broker::child_writes::WriteDeadline::start_attempt(),
     )

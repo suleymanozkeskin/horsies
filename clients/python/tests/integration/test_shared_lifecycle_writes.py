@@ -1,8 +1,8 @@
 """The lifecycle writes of a shared async child against a real database.
 
-A shared async child sets its row RUNNING and writes the first runner
-heartbeat, and marks the row finalizing, through the awaitable methods of
-its core handle. These tests run those writes, with the real functions, on
+A shared async child sets its row RUNNING, with no runner heartbeat, and
+marks the row finalizing, through the awaitable methods of its core
+handle. These tests run those writes, with the real functions, on
 the core handle of the suite.
 """
 
@@ -195,7 +195,7 @@ async def _runner_beats(session: AsyncSession, task_id: str) -> list[str]:
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_the_running_update_writes_the_first_beat_and_the_marker_follows(
+async def test_the_running_update_writes_no_beat_and_the_marker_follows(
     session: AsyncSession,
     broker: PostgresBroker,  # noqa: ARG001 - the schema and history leaves
     clean_workflow_tables: None,  # noqa: ARG001
@@ -218,7 +218,7 @@ async def test_the_running_update_writes_the_first_beat_and_the_marker_follows(
     assert running.status == 'RUNNING'
     assert running.worker_pid == os.getpid()
     assert running.finalizing_at is None
-    assert await _runner_beats(session, task_id) == [f'{WORKER_ID}:{os.getpid()}']
+    assert await _runner_beats(session, task_id) == []
     assert marked.finalizing_at is not None
     assert marked.finalizing_by_worker_id == WORKER_ID
 
@@ -346,8 +346,8 @@ async def test_a_failed_workflow_check_undoes_the_running_update(
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """A workflow task's start is one statement: a node that is not linked
-    writes no RUNNING update and no first beat. With the orphan self-heal of
-    the run off, the stop before start leaves the row CLAIMED."""
+    writes no RUNNING update. With the orphan self-heal of the run off, the
+    stop before start leaves the row CLAIMED."""
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=5)
     task_id = await _seed_claimed_workflow_task(session, claimed_at)
     await _seed_running_workflow_with_node(session, task_id, 'COMPLETED')
@@ -373,7 +373,7 @@ async def test_a_node_that_is_not_linked_with_the_self_heal_on_cancels_the_orpha
 ) -> None:
     """With the orphan self-heal of the run on, the stop before start moves
     the row to history as CANCELLED (CANCEL_ORPHAN): no RUNNING update, no
-    first beat."""
+    beat."""
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=5)
     task_id = await _seed_claimed_workflow_task(session, claimed_at)
     await _seed_running_workflow_with_node(session, task_id, 'COMPLETED')

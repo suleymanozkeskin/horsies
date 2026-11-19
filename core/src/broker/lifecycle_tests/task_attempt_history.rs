@@ -194,7 +194,6 @@ async fn claim_lost_writes_no_attempt() {
             worker_pid: 4242,
             worker_hostname: "lifecycle-host".to_owned(),
             worker_process_name: "lifecycle-process".to_owned(),
-            beat_sender_id: WORKER.to_owned(),
         },
         crate::broker::child_writes::WriteDeadline::start_attempt(),
     )

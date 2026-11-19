@@ -667,8 +667,7 @@ SELECT lc_task('00000000-0000-7000-8000-000000000d01', 'CLAIMED');
 SELECT lc_expect(
     'start: a held claim starts',
     (SELECT concat_ws('|', outcome, miss_reason, started_at = now()) FROM horsies_start_attempt(
-        '00000000-0000-7000-8000-000000000d01', 'w1', now() - interval '1 second', 42, 'host-b', 'worker-42',
-        'w1:42')),
+        '00000000-0000-7000-8000-000000000d01', 'w1', now() - interval '1 second', 42, 'host-b', 'worker-42')),
     'STARTED|t'
 );
 SELECT lc_expect(
@@ -679,34 +678,33 @@ SELECT lc_expect(
     'RUNNING|t|t|42|host-b|worker-42|w1'
 );
 SELECT lc_expect(
-    'start: the first runner beat',
-    (SELECT string_agg(concat_ws('|', role, sender_id, hostname, pid, sent_at = now()), ',')
-     FROM horsies_heartbeats WHERE task_id = '00000000-0000-7000-8000-000000000d01'),
-    'runner|w1:42|host-b|42|t'
+    'start: the start writes no heartbeat',
+    (SELECT count(*)::text FROM horsies_heartbeats WHERE task_id = '00000000-0000-7000-8000-000000000d01'),
+    '0'
 );
 SELECT lc_expect(
     'start: a started row does not start again',
     (SELECT concat_ws('|', outcome, miss_reason) FROM horsies_start_attempt(
-        '00000000-0000-7000-8000-000000000d01', 'w1', now() - interval '1 second', 42, 'h', 'p', 's')),
+        '00000000-0000-7000-8000-000000000d01', 'w1', now() - interval '1 second', 42, 'h', 'p')),
     'MISSED|NOT_HELD'
 );
 SELECT lc_task('00000000-0000-7000-8000-000000000d02', 'CLAIMED');
 SELECT lc_expect(
     'start: another claim generation is not held',
     (SELECT concat_ws('|', outcome, miss_reason) FROM horsies_start_attempt(
-        '00000000-0000-7000-8000-000000000d02', 'w1', now() - interval '2 seconds', 42, 'h', 'p', 's')),
+        '00000000-0000-7000-8000-000000000d02', 'w1', now() - interval '2 seconds', 42, 'h', 'p')),
     'MISSED|NOT_HELD'
 );
 SELECT lc_expect(
     'start: another worker does not hold it',
     (SELECT concat_ws('|', outcome, miss_reason) FROM horsies_start_attempt(
-        '00000000-0000-7000-8000-000000000d02', 'w2', now() - interval '1 second', 42, 'h', 'p', 's')),
+        '00000000-0000-7000-8000-000000000d02', 'w2', now() - interval '1 second', 42, 'h', 'p')),
     'MISSED|NOT_HELD'
 );
 SELECT lc_expect(
     'start: an absent task is not held',
     (SELECT concat_ws('|', outcome, miss_reason) FROM horsies_start_attempt(
-        '00000000-0000-7000-8000-000000000dff', 'w1', now(), 42, 'h', 'p', 's')),
+        '00000000-0000-7000-8000-000000000dff', 'w1', now(), 42, 'h', 'p')),
     'MISSED|NOT_HELD'
 );
 SELECT lc_expect(
@@ -720,24 +718,24 @@ WHERE id = '00000000-0000-7000-8000-000000000d02';
 SELECT lc_expect(
     'start: an expired lease',
     (SELECT concat_ws('|', outcome, miss_reason) FROM horsies_start_attempt(
-        '00000000-0000-7000-8000-000000000d02', 'w1', now() - interval '1 second', 42, 'h', 'p', 's')),
+        '00000000-0000-7000-8000-000000000d02', 'w1', now() - interval '1 second', 42, 'h', 'p')),
     'MISSED|LEASE_EXPIRED'
 );
 UPDATE horsies_tasks SET good_until = now() WHERE id = '00000000-0000-7000-8000-000000000d02';
 SELECT lc_expect(
     'start: a passed deadline comes first, at any claim generation of this worker',
     (SELECT concat_ws('|', outcome, miss_reason) FROM horsies_start_attempt(
-        '00000000-0000-7000-8000-000000000d02', 'w1', now() - interval '9 seconds', 42, 'h', 'p', 's')),
+        '00000000-0000-7000-8000-000000000d02', 'w1', now() - interval '9 seconds', 42, 'h', 'p')),
     'MISSED|DEADLINE_PASSED'
 );
 SELECT lc_expect(
     'start: a passed deadline of another worker is not held',
     (SELECT concat_ws('|', outcome, miss_reason) FROM horsies_start_attempt(
-        '00000000-0000-7000-8000-000000000d02', 'w2', now() - interval '1 second', 42, 'h', 'p', 's')),
+        '00000000-0000-7000-8000-000000000d02', 'w2', now() - interval '1 second', 42, 'h', 'p')),
     'MISSED|NOT_HELD'
 );
 SELECT lc_expect_sqlstate('start: a NULL claim generation', $q$SELECT * FROM horsies_start_attempt(
-    '00000000-0000-7000-8000-000000000d02', 'w1', NULL, 42, 'h', 'p', 's')$q$, '22023');
+    '00000000-0000-7000-8000-000000000d02', 'w1', NULL, 42, 'h', 'p')$q$, '22023');
 
 -- Workflow tasks.
 SELECT lc_workflow('00000000-0000-7000-8000-000000000e01', 'RUNNING');
@@ -747,7 +745,7 @@ SELECT lc_node('00000000-0000-7000-8000-000000000f11', '00000000-0000-7000-8000-
 SELECT lc_expect(
     'start: a workflow task starts with its node',
     (SELECT outcome FROM horsies_start_attempt(
-        '00000000-0000-7000-8000-000000000d11', 'w1', now() - interval '1 second', 42, 'h', 'p', 's')),
+        '00000000-0000-7000-8000-000000000d11', 'w1', now() - interval '1 second', 42, 'h', 'p')),
     'STARTED'
 );
 SELECT lc_expect(
@@ -763,7 +761,7 @@ SELECT lc_node('00000000-0000-7000-8000-000000000f12', '00000000-0000-7000-8000-
 SELECT lc_expect(
     'start: a retried attempt keeps the first started_at of its node',
     (SELECT outcome FROM horsies_start_attempt(
-        '00000000-0000-7000-8000-000000000d12', 'w1', now() - interval '1 second', 42, 'h', 'p', 's')),
+        '00000000-0000-7000-8000-000000000d12', 'w1', now() - interval '1 second', 42, 'h', 'p')),
     'STARTED'
 );
 SELECT lc_expect(
@@ -779,7 +777,7 @@ SELECT lc_node('00000000-0000-7000-8000-000000000f13', '00000000-0000-7000-8000-
 SELECT lc_expect(
     'start: a paused workflow',
     (SELECT concat_ws('|', outcome, miss_reason) FROM horsies_start_attempt(
-        '00000000-0000-7000-8000-000000000d13', 'w1', now() - interval '1 second', 42, 'h', 'p', 's')),
+        '00000000-0000-7000-8000-000000000d13', 'w1', now() - interval '1 second', 42, 'h', 'p')),
     'MISSED|WORKFLOW_PAUSED'
 );
 SELECT lc_expect(
@@ -795,7 +793,7 @@ SELECT lc_node('00000000-0000-7000-8000-000000000f14', '00000000-0000-7000-8000-
 SELECT lc_expect(
     'start: a cancelled workflow',
     (SELECT concat_ws('|', outcome, miss_reason) FROM horsies_start_attempt(
-        '00000000-0000-7000-8000-000000000d14', 'w1', now() - interval '1 second', 42, 'h', 'p', 's')),
+        '00000000-0000-7000-8000-000000000d14', 'w1', now() - interval '1 second', 42, 'h', 'p')),
     'MISSED|WORKFLOW_CANCELLED'
 );
 SELECT lc_task('00000000-0000-7000-8000-000000000d15', 'CLAIMED', 'w1', TRUE);
@@ -804,14 +802,14 @@ SELECT lc_node('00000000-0000-7000-8000-000000000f15', '00000000-0000-7000-8000-
 SELECT lc_expect(
     'start: a node in a final status is not linked',
     (SELECT concat_ws('|', outcome, miss_reason) FROM horsies_start_attempt(
-        '00000000-0000-7000-8000-000000000d15', 'w1', now() - interval '1 second', 42, 'h', 'p', 's')),
+        '00000000-0000-7000-8000-000000000d15', 'w1', now() - interval '1 second', 42, 'h', 'p')),
     'MISSED|NODE_NOT_LINKED'
 );
 SELECT lc_task('00000000-0000-7000-8000-000000000d16', 'CLAIMED', 'w1', TRUE);
 SELECT lc_expect(
     'start: a workflow task with no node is not linked',
     (SELECT concat_ws('|', outcome, miss_reason) FROM horsies_start_attempt(
-        '00000000-0000-7000-8000-000000000d16', 'w1', now() - interval '1 second', 42, 'h', 'p', 's')),
+        '00000000-0000-7000-8000-000000000d16', 'w1', now() - interval '1 second', 42, 'h', 'p')),
     'MISSED|NODE_NOT_LINKED'
 );
 
@@ -1364,6 +1362,75 @@ SELECT lc_expect_sqlstate('stale attempt: a NULL error code', $q$SELECT * FROM h
     gen_random_uuid(), 'BEAT_AGE', 0, 0, NULL, NULL, 'NONE', NULL, NULL, '{}', NULL, 'r', 'm', 'r')$q$, '22023');
 SELECT lc_expect_sqlstate('stale attempt: a NULL result', $q$SELECT * FROM horsies_finish_stale_attempt(
     gen_random_uuid(), 'BEAT_AGE', 0, 0, NULL, NULL, 'NONE', NULL, NULL, NULL, 'E', 'r', 'm', 'r')$q$, '23502');
+
+-- Only the beats of this attempt count: a runner beat sent before started_at belongs to an earlier attempt, and the
+-- start writes no beat. 3011: a retried task, CLAIMED again, whose earlier attempt left a runner beat 2 minutes ago
+-- (inside the 600 s recency bound, past the 60 s threshold); its new attempt starts now. 3012 and 3013: RUNNING rows
+-- whose earlier attempt left a beat 1 s before their start; 3012 started exactly 60 s ago (not stale: the test is
+-- strict), 3013 started 1 ms before that (stale).
+SELECT lc_task('00000000-0000-7000-8000-000000003011', 'CLAIMED');
+UPDATE horsies_tasks SET retry_count = 1 WHERE id = '00000000-0000-7000-8000-000000003011';
+SELECT lc_task('00000000-0000-7000-8000-000000003012', 'RUNNING');
+SELECT lc_task('00000000-0000-7000-8000-000000003013', 'RUNNING');
+UPDATE horsies_tasks SET started_at = now() - interval '60 seconds'
+WHERE id = '00000000-0000-7000-8000-000000003012';
+UPDATE horsies_tasks SET started_at = now() - interval '60.001 seconds'
+WHERE id = '00000000-0000-7000-8000-000000003013';
+INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid) VALUES
+    ('00000000-0000-7000-8000-000000003011', 'w1', 'runner', now() - interval '2 minutes', 'host-a', 7),
+    ('00000000-0000-7000-8000-000000003012', 'w1', 'runner', now() - interval '61 seconds', 'host-a', 7),
+    ('00000000-0000-7000-8000-000000003013', 'w1', 'runner', now() - interval '61.001 seconds', 'host-a', 7);
+SELECT lc_expect(
+    'stale (retried attempt): the new attempt starts and writes no beat',
+    (SELECT outcome FROM horsies_start_attempt(
+        '00000000-0000-7000-8000-000000003011', 'w1', now() - interval '1 second', 42, 'host-b', 'worker-42'))
+    || ':' || (SELECT string_agg((now() - sent_at)::text, ',') FROM horsies_heartbeats
+               WHERE task_id = '00000000-0000-7000-8000-000000003011'),
+    'STARTED:00:02:00'
+);
+SELECT lc_expect(
+    'stale scan: a beat of an earlier attempt does not count for a retried attempt that started now',
+    (SELECT count(*)::text FROM horsies_stale_running_scan('BEAT_AGE', 60000, 600000, NULL, NULL, 10000)
+     WHERE task_id = '00000000-0000-7000-8000-000000003011'),
+    '0'
+);
+SELECT lc_expect(
+    'stale scan: started_at on the threshold is not stale, 1 ms past it is, whatever the beat of an earlier attempt',
+    (SELECT string_agg(right(task_id::text, 4), ',' ORDER BY task_id)
+     FROM horsies_stale_running_scan('BEAT_AGE', 60000, 600000, NULL, NULL, 10000)
+     WHERE task_id IN ('00000000-0000-7000-8000-000000003012', '00000000-0000-7000-8000-000000003013')),
+    '3013'
+);
+SELECT lc_expect(
+    'stale attempt: a retried attempt that started now is judged from its start, with no beat in the evidence',
+    (SELECT concat_ws('|', outcome, guard_kind, observed_guard::jsonb -> 'last_heartbeat_at' = 'null'::jsonb,
+        (observed_guard::jsonb ->> 'started_at')::timestamptz = now())
+     FROM horsies_finish_stale_attempt(
+        '00000000-0000-7000-8000-000000003011', 'BEAT_AGE', 60000, 600000, NULL, NULL, 'NONE', NULL, NULL,
+        '{"err":"crashed"}', 'WORKER_CRASHED', 'r', 'm', 'r')),
+    'SOURCE_STATE_CONFLICT|STALENESS|t|t'
+);
+SELECT lc_expect(
+    'stale attempt: started_at on the threshold is not stale, whatever the beat of an earlier attempt',
+    (SELECT concat_ws('|', outcome, guard_kind, observed_guard::jsonb -> 'last_heartbeat_at' = 'null'::jsonb)
+     FROM horsies_finish_stale_attempt(
+        '00000000-0000-7000-8000-000000003012', 'BEAT_AGE', 60000, 600000, NULL, NULL, 'NONE', NULL, NULL,
+        '{"err":"crashed"}', 'WORKER_CRASHED', 'r', 'm', 'r')),
+    'SOURCE_STATE_CONFLICT|STALENESS|t'
+);
+SELECT lc_expect(
+    'stale attempt: started_at 1 ms past the threshold is stale',
+    (SELECT concat_ws('|', outcome, terminalization_kind) FROM horsies_finish_stale_attempt(
+        '00000000-0000-7000-8000-000000003013', 'BEAT_AGE', 60000, 600000, NULL, NULL, 'NONE', NULL, NULL,
+        '{"err":"crashed"}', 'WORKER_CRASHED', 'r', 'm', 'r')),
+    'APPLIED|FAIL_STALE'
+);
+SELECT lc_expect(
+    'stale attempt: the attempts that are not stale stay RUNNING',
+    (SELECT string_agg(right(id::text, 4) || ':' || status, ',' ORDER BY id) FROM horsies_tasks
+     WHERE id IN ('00000000-0000-7000-8000-000000003011', '00000000-0000-7000-8000-000000003012')),
+    '3011:RUNNING,3012:RUNNING'
+);
 
 ------------------------------------------------------------------------------------------------------------------------
 -- horsies_requeue_stale_claims

@@ -23,6 +23,8 @@ use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
+use crate::broker::child_writes::WriteDeadline;
+use crate::broker::claims::{start_attempt, StartAttempt, StartOutcome};
 use crate::broker::core_rows::StatementLog;
 use crate::broker::expiry_and_orphans::expire_pending_pass;
 use crate::broker::pools::{core_pool_for_test_url, unpinged_single_connection_core_pool_for_url};
@@ -607,6 +609,66 @@ mod finish {
         core.close();
         cleanup_tasks(&pool, &[task_id]).await;
         cleanup_workflows(&pool, &[workflow_id]).await;
+    }
+
+    /// Cases `stale scan: a beat of an earlier attempt does not count for a
+    /// retried attempt that started now` and `stale attempt: a retried
+    /// attempt that started now is judged from its start, with no beat in the
+    /// evidence`, through the core's start. The earlier attempt left a runner
+    /// beat 2 minutes ago: inside the 600 s recency bound, past the 60 s
+    /// threshold. The start writes no beat, so the new attempt is judged from
+    /// its `started_at`: the scan does not list it, and the recovery refuses
+    /// it with no beat in the evidence.
+    #[tokio::test]
+    #[serial]
+    async fn a_beat_of_an_earlier_attempt_does_not_make_a_restarted_task_stale() {
+        let pool = pool().await;
+        let core = core_pool_for_test_url(pool.url());
+        let task_id = seed_task(
+            &pool,
+            &TaskSeed {
+                queue_name: QUEUE,
+                retry_count: 1,
+                max_retries: 3,
+                ..TaskSeed::claimed()
+            },
+        )
+        .await;
+        beat(&pool, task_id, BeatRole::Runner, Duration::seconds(120)).await;
+
+        let started = start_attempt(
+            &core,
+            StatementLog::Off,
+            &StartAttempt::of_process(task_id, owned_claim(), 4242, "lifecycle-host".to_owned()),
+            WriteDeadline::start_attempt(),
+        )
+        .await
+        .expect("the start");
+        let candidates = scan_stale_running(&core, StatementLog::Off, thresholds(), whole_scan())
+            .await
+            .expect("stale scan");
+        let outcome = recover(&core, &finish(task_id, StaleRetry::NoRetry)).await;
+
+        assert!(
+            matches!(started, StartOutcome::Started { .. }),
+            "{started:?}"
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.task_id != task_id),
+            "the scan listed the restarted task"
+        );
+        match outcome {
+            StaleAttemptOutcome::Refused(AttemptWriteRefusal::SourceStateConflict {
+                evidence: GuardEvidence::Staleness(staleness),
+                ..
+            }) => assert_eq!(staleness.last_heartbeat_at, None, "{staleness:?}"),
+            other => panic!("expected the staleness refusal, got {other:?}"),
+        }
+        assert_refusal_wrote_nothing(&pool, task_id).await;
+        core.close();
+        cleanup_tasks(&pool, &[task_id]).await;
     }
 
     /// Case `stale attempt: refusals write nothing`, for one row.

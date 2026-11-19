@@ -29,7 +29,7 @@
 -- Lock order: none. Reads no table.
 -- Returns: the id. Raises 22004 for a NULL argument and 22023 for a slot time before 1970 or past the 48-bit
 -- millisecond range.
--- Replaces: horsies/core/utils/fingerprint.py:78-87 (schedule_slot_task_id, a UUIDv5 with no birth time).
+-- Replaces (`v0.7.0` package): core/utils/fingerprint.py:78-87 (schedule_slot_task_id, a UUIDv5 with no birth time).
 CREATE FUNCTION horsies_schedule_slot_task_id(
     p_schedule_name text,
     p_slot_at timestamp with time zone
@@ -102,11 +102,11 @@ $$;
 -- 'STATE_MISSING' (no state row; nothing written) or 'STATE_MOVED' (next_run_at differs from
 -- p_expected_next_run_at; nothing written). After 'ADVANCED', one row_kind 'SLOT' row per slot in slot order, with
 -- slot_at, task_id and slot_outcome.
--- Replaces: horsies/core/scheduler/service.py:506-732 (_check_schedule: the advisory lock at :531-536, the state
--- read, the per-slot enqueues, the state update), :938-1025 (_enqueue_scheduled_task) and :907-936
--- (_count_existing_slot_as_fired); horsies/core/scheduler/state.py:12-35 and :242-420 (update_after_run,
--- update_next_run); horsies/core/brokers/postgres.py:2587-2709 (the unkeyed enqueue) and :2861-2925 (the conflict
--- read). One slot took 6 round trips on two connections, plus 1 per extra slot and 3 per conflicting slot.
+-- Replaces (`v0.7.0` package): core/scheduler/service.py:506-732 (_check_schedule: the advisory lock at :531-536, the
+-- state read, the per-slot enqueues, the state update), :938-1025 (_enqueue_scheduled_task) and :907-936
+-- (_count_existing_slot_as_fired); core/scheduler/state.py:12-35 and :242-420 (update_after_run, update_next_run);
+-- core/brokers/postgres.py:2587-2709 (the unkeyed enqueue) and :2861-2925 (the conflict read). One slot took 6 round
+-- trips on two connections, plus 1 per extra slot and 3 per conflicting slot.
 CREATE FUNCTION horsies_fire_schedule(
     p_schedule_name text,
     p_expected_next_run_at timestamp with time zone,
@@ -253,17 +253,17 @@ $$;
 -- horsies_list_stale_tasks: the RUNNING tasks whose runner stopped beating.
 --
 -- Guarantee: every RUNNING row that started before now() minus the threshold and has no runner beat since then,
--- ordered by its latest runner beat with rows that have no beat first, then by id. It changes nothing. This is
--- Python's rule (the latest beat, or started_at when there is no beat, before the window) for every row whose beats
--- are not older than its started_at; the start writes the first runner beat at started_at. A runner beat of an
--- earlier attempt, older than the restart, no longer makes a task that just restarted stale. The verdict reads only
--- the heartbeat leaves of the threshold window; the read of the latest beat (with no time bound) runs only for the
--- rows that are stale.
+-- ordered by its latest runner beat of this attempt with rows that have no such beat first, then by id. It changes
+-- nothing. This is the beat rule of horsies_stale_running_scan (the latest runner beat sent at or after started_at,
+-- or started_at when there is none, before the window), without the finalizing marker; the start writes no runner
+-- beat. A runner beat of an earlier attempt, older than the restart, does not make a task that just restarted stale
+-- and is not its last_heartbeat. The verdict reads only the heartbeat leaves of the threshold window; the read of
+-- the latest beat (sent at or after started_at, with no other time bound) runs only for the rows that are stale.
 -- The list is bounded at 10,000 rows (c_row_bound); the statement reads one row more to know whether it cut.
 -- Lock order: none (a plain read).
 -- Returns: one row per stale task (row_kind 'TASK', row_position 1..n), then one row_kind 'LIST_END' row whose
 -- list_state is 'COMPLETE' or 'TRUNCATED' and whose row_bound is the bound. last_heartbeat is NULL for a task
--- with no runner beat. Raises 22023 for a threshold outside 0..525600 minutes (one year).
+-- with no runner beat since its start. Raises 22023 for a threshold outside 0..525600 minutes (one year).
 -- Replaces: horsies/core/brokers/postgres.py:649-669 (GET_STALE_TASKS_SQL) and :3469-3492 (get_stale_tasks), which
 -- ran in a session (BEGIN, SELECT, ROLLBACK) with no row bound and no threshold check.
 CREATE FUNCTION horsies_list_stale_tasks(p_threshold_minutes integer)
@@ -315,7 +315,7 @@ BEGIN
         LEFT JOIN LATERAL (
             SELECT h.sent_at AS last_heartbeat
             FROM horsies_heartbeats AS h
-            WHERE h.task_id = s.id AND h.role = 'runner'
+            WHERE h.task_id = s.id AND h.role = 'runner' AND h.sent_at >= s.started_at
             ORDER BY h.sent_at DESC
             LIMIT 1
         ) AS beat ON TRUE
@@ -1025,9 +1025,9 @@ $$;
 -- task_count 0 for a status that no task has.
 -- Raises 22004 for a NULL argument, 22023 for a broken scope precondition (horsies_monitoring_check_scope), and
 -- XX001 for a stored status that is not a task status (the message names it).
--- Replaces: horsies/monitoring/queries.py:935-1005 (task_stats) and horsies/core/history/reads/aggregates.py:63-76
--- (history_scoped_status_counts_statement): a session of 4 round trips with two statements, so two snapshots, and
--- the sum and the zero fill in client code.
+-- Replaces (`v0.7.0` package): monitoring/queries.py:869-939 (task_stats) and core/history/reads/aggregates.py:63-76
+-- (history_scoped_status_counts_statement): a session of 4 round trips with two statements, so two snapshots, and the
+-- sum and the zero fill in client code.
 CREATE FUNCTION horsies_monitoring_task_stats(
     p_window_lower timestamp with time zone,
     p_window_upper timestamp with time zone,
@@ -1150,11 +1150,10 @@ $$;
 -- one row_kind 'GROUP' row per group (row_position 1..n, group_kind set, group_count NULL).
 -- Raises 22004 for a NULL argument and 22023 for an unknown group column, a limit outside 1..500 or a broken scope
 -- precondition (horsies_monitoring_check_scope).
--- Replaces: horsies/monitoring/queries.py:1076-1253 (task_breakdown) and
--- horsies/core/history/reads/aggregates.py:85-105 (history_breakdown_statement): a session of 4 round trips with two
--- statements, so two snapshots, every group of both sides read into the client, and the merge, the order, the cap
--- and the total in client code. Python labels the unclaimed rows 'unknown' and so merges them with a worker of that
--- name.
+-- Replaces (`v0.7.0` package): monitoring/queries.py:1010-1187 (task_breakdown) and
+-- core/history/reads/aggregates.py:85-105 (history_breakdown_statement): a session of 4 round trips with two
+-- statements, so two snapshots, every group of both sides read into the client, and the merge, the order, the cap and
+-- the total in client code. 0.7.0 labels the unclaimed rows 'unknown' and so merges them with a worker of that name.
 CREATE FUNCTION horsies_monitoring_task_breakdown(
     p_window_lower timestamp with time zone,
     p_window_upper timestamp with time zone,

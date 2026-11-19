@@ -1,8 +1,8 @@
 """The lifecycle writes of a shared thread child against a real database.
 
 A shared thread child runs each task on a seat thread. The thread sets its
-row RUNNING with the first runner heartbeat, and marks it finalizing,
-through the core handle of the child, whose pool has fewer connections than
+row RUNNING, with no runner heartbeat, and marks it finalizing, through the
+core handle of the child, whose pool has fewer connections than
 seats: threads wait for each other there. These tests run the real seat
 threads (``ThreadSeats``, ``ThreadRunTable``, ``PostgresThreadSeats``) with
 the real functions, on version-2 frames as the core decodes them; a
@@ -272,7 +272,7 @@ async def test_seat_threads_share_a_pool_smaller_than_the_seats(
         assert row.worker_pid == os.getpid()
         assert row.finalizing_at is not None
         assert row.finalizing_by_worker_id == WORKER_ID
-        assert await _runner_beats(session, task_id) == [f'{WORKER_ID}:{os.getpid()}']
+        assert await _runner_beats(session, task_id) == []
 
 
 @pytest.mark.asyncio(loop_scope='function')

@@ -133,7 +133,7 @@ const BATCH_SUCCESS_SQL: &str = "SELECT string_agg(outcome, ',' ORDER BY ordinal
         ARRAY['{}', '{}'], 'w1', TRUE)";
 
 const START_SQL: &str = "SELECT outcome, miss_reason
-    FROM horsies_start_attempt($1::uuid, 'w1', $2::timestamptz, 7, 'h', 'p', 's')";
+    FROM horsies_start_attempt($1::uuid, 'w1', $2::timestamptz, 7, 'h', 'p')";
 
 const KEYED_SEND_SQL: &str = r#"SELECT outcome FROM horsies_enqueue_task(
     $1::uuid, 'lc.task', 'q_sessions', 100, '{"x":1}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL,
@@ -171,7 +171,7 @@ const RELEASE_ISOLATED_SQL: &str = "SELECT * FROM horsies_release_claims(
 const RELEASE_SAME_CLASS_SQL: &str = "SELECT * FROM horsies_release_claims(
     ARRAY[$1::uuid]::uuid[], ARRAY[$2::timestamptz]::timestamptz[], 'w1', 'SAME_CLASS')";
 const START_ROWS_SQL: &str =
-    "SELECT * FROM horsies_start_attempt($1::uuid, 'w1', $2::timestamptz, 7, 'h', 'p', 's')";
+    "SELECT * FROM horsies_start_attempt($1::uuid, 'w1', $2::timestamptz, 7, 'h', 'p')";
 
 const TAKE_LIVENESS_SQL: &str = "SELECT horsies_take_worker_liveness($1::text)";
 const LIVENESS_GENERATION_SQL: &str =

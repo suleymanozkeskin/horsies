@@ -605,6 +605,21 @@ before you upgrade a 0.7 deployment.
   `horsies_forget_ended_worker_liveness` (the reaper deletes the generation
   rows of ended workers at each retention sweep).
 
+- **The start of a task writes no runner heartbeat.** The RUNNING update of
+  a child (`horsies_start_attempt`, now with 6 arguments: the beat sender is
+  gone) no longer inserts a runner heartbeat; the worker process writes
+  every runner heartbeat. The stale RUNNING rule (the reaper and
+  `mark_stale_tasks_as_failed`) reads only the runner heartbeats sent at or
+  after the task's `started_at`, and judges a task with no such heartbeat
+  from `started_at`. So its verdicts do not change, and a heartbeat of an
+  earlier attempt of a retried task never counts for the new attempt. The
+  start runs one INSERT fewer, and it no longer fails when the heartbeat
+  leaf of the current hour is missing. `get_stale_tasks` returns
+  `last_heartbeat` as `None` for a task with no runner heartbeat since its
+  start (0.7 returned the time of the start), and the `STALENESS` evidence
+  of a refused stale recovery has a null `last_heartbeat_at` until the first
+  runner heartbeat of the attempt.
+
 ### Fixed
 
 - **The schema install creates the history leaves of the current day, so a

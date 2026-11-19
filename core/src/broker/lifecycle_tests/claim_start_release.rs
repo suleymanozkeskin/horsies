@@ -43,7 +43,6 @@ fn start(task_id: Uuid) -> StartAttempt {
         worker_pid: 4242,
         worker_hostname: "lifecycle-host".to_owned(),
         worker_process_name: "lifecycle-process".to_owned(),
-        beat_sender_id: WORKER.to_owned(),
     }
 }
 
@@ -129,11 +128,12 @@ mod claim {
 mod start {
     use super::*;
 
-    /// A row CLAIMED by this worker at this generation becomes RUNNING with
-    /// its first runner beat.
+    /// A row CLAIMED by this worker at this generation becomes RUNNING. The
+    /// start writes no runner beat: the stale RUNNING rule judges the
+    /// attempt from its `started_at` until the first beat of the worker.
     #[tokio::test]
     #[serial]
-    async fn a_held_claim_starts_with_its_first_runner_beat() {
+    async fn a_held_claim_starts_and_writes_no_runner_beat() {
         let pool = pool().await;
         ensure_recent_heartbeat_leaves(&pool).await;
         let task_id = seed_task(&pool, &claimed()).await;
@@ -155,7 +155,7 @@ mod start {
         assert_eq!(row["status"], "RUNNING");
         assert_eq!(row["claim_expires_at"], serde_json::Value::Null);
         assert_eq!(row["worker_pid"], 4242);
-        assert_eq!(runner_beats(&pool, task_id).await, 1);
+        assert_eq!(runner_beats(&pool, task_id).await, 0);
         cleanup_tasks(&pool, &[task_id]).await;
     }
 

@@ -32,7 +32,7 @@ Written by the worker process for the RUNNING tasks that its children hold:
 
 - Indicates that the task's child process runs it
 - One thread of the worker writes one statement per `runner_heartbeat_interval_ms` for all of these tasks. The thread does not run on the worker's event loop
-- The child writes the first beat, in the statement that sets the row RUNNING
+- The child writes no beat. A task gets its first beat at the first pass of the thread after its start; the passes are one `runner_heartbeat_interval_ms` apart
 - Task code cannot stop it: C code that holds the GIL in a child does not reach the worker process
 
 The statement beats a row only when all of these are true:
@@ -121,7 +121,8 @@ for task in tasks.filter(status='CLAIMED'):
         requeue(task)  # Safe - code never ran
 
 for task in tasks.filter(status='RUNNING'):
-    last_hb = get_latest_heartbeat(task, role='runner')
+    # Only the beats of this attempt: an earlier attempt's beats are older than started_at
+    last_hb = get_latest_heartbeat(task, role='runner', since=task.started_at) or task.started_at
     if task.finalizing_at is recent:
         continue  # Child finished; parent may still be committing the result
     if now - last_hb > running_stale_threshold:
@@ -148,6 +149,9 @@ When a RUNNING task has no recent runner heartbeat:
 - Otherwise: marked as FAILED with `WORKER_CRASHED` error
 - Recent `finalizing_at` suppresses recovery so a completed child is not failed
   while the parent is still writing terminal state
+- Only the runner heartbeats sent at or after the task's `started_at` count. A
+  task with no such heartbeat counts from `started_at`. A heartbeat of an
+  earlier attempt of a retried task never counts for the new attempt
 
 `running_stale_threshold_ms` measures missing heartbeats, not task wall-clock
 duration. A task can run longer than the threshold while its child holds it and
@@ -242,7 +246,7 @@ Heartbeats are stored in the `horsies_heartbeats` table:
 | ------ | ---- | ----------- |
 | `id` | int | Auto-increment ID |
 | `task_id` | str | Task being tracked |
-| `sender_id` | str | Worker id. The first runner beat, which the child writes, has `<worker id>:<child pid>` |
+| `sender_id` | str | Worker id |
 | `role` | str | 'claimer' or 'runner' |
 | `sent_at` | datetime | Heartbeat timestamp |
 | `hostname` | str | Machine hostname |
@@ -252,7 +256,7 @@ Heartbeats are stored in the `horsies_heartbeats` table:
 
 Three calls do by hand what the reaper does, each with a threshold that the call takes:
 
-- The stale read lists the RUNNING tasks whose latest runner heartbeat, or their start when they have none, is older than the threshold. It changes nothing.
+- The stale read lists the RUNNING tasks whose latest runner heartbeat since their start, or their start when they have none, is older than the threshold. It changes nothing.
 - The RUNNING pass recovers stale RUNNING tasks as [Stale RUNNING Recovery](#stale-running-recovery) states, and returns the number of tasks that it retried or failed.
 - The CLAIMED pass returns stale CLAIMED tasks to PENDING as [Stale CLAIMED → PENDING](#stale-claimed--pending) states, and returns the number of tasks that it requeued.
 

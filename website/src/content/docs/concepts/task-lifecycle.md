@@ -82,8 +82,9 @@ The Python client checks a status with `is_terminal` and holds the terminal stat
 
 - Task dispatched to one of the worker's child processes
 - Child process sets `status=RUNNING`, `started_at=NOW()`
-- The same transaction writes the first runner heartbeat. The worker process
-  writes the later ones while the child holds the task
+- The start writes no runner heartbeat. The worker process writes them while
+  the child holds the task; until the first one, the reaper counts from
+  `started_at`
 - Non-workflow tasks skip workflow-status preflight work; workflow tasks update
   the workflow task row in the same start transaction
 

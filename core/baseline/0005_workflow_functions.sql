@@ -327,11 +327,11 @@ BEGIN
 END;
 $$;
 
--- The error of a stored node result, as the bare error object text, for the workflow error column. Python:
--- _decode_err_only (core/workflows/engine.py:324-377) and _recovered_failure_result
--- (core/workflows/phase2_recovery.py:233-292). Returns the err slot text unchanged for 'ERROR'; NULL for 'VALUE',
--- 'ABSENT' (NULL) and 'OUTPUTLESS' (no error to report: the caller keeps the stored error); for 'UNREADABLE', an
--- empty text included, a RESULT_DESERIALIZATION_ERROR object whose message is the cause
+-- The error of a stored node result, as the bare error object text, for the workflow error column. Python 0.7.0
+-- (`v0.7.0` package): _decode_err_only (core/workflows/engine.py:284-337) and _recovered_failure_result
+-- (core/workflows/phase2_recovery.py:222-287). Returns the err slot text unchanged for 'ERROR'; NULL for 'VALUE',
+-- 'ABSENT' (NULL) and 'OUTPUTLESS' (no error to report: the caller keeps the stored error); for 'UNREADABLE', an empty
+-- text included, a RESULT_DESERIALIZATION_ERROR object whose message is the cause
 -- (horsies_workflow_unreadable_result_cause).
 -- Locks: none.
 CREATE FUNCTION horsies_workflow_err_slot(p_result text) RETURNS text
@@ -1682,10 +1682,10 @@ BEGIN
 END;
 $$;
 
--- Why an array of node indexes of a stored success policy does not read, or NULL when it reads. It reads when it is
--- a JSON array whose items are integers from 0. jsonb keeps the written form of a number: 1.0 is not an index, and
--- 1e2 is stored as 100, which is one. Python's reader decodes the same jsonb text, so it sees the same numbers.
--- The cause text is the one of Python's read_stored_success_policy (core/workflows/stored_success_policy.py).
+-- Why an array of node indexes of a stored success policy does not read, or NULL when it reads. It reads when it is a
+-- JSON array whose items are integers from 0. jsonb keeps the written form of a number: 1.0 is not an index, and 1e2 is
+-- stored as 100, which is one. The cause texts are pinned by the 'unreadable policy' cases of
+-- core/src/sql_tests/cases/baseline_workflow_functions.sql.
 -- Precondition: p_indices is not SQL NULL (the caller checks that the key is present).
 -- Locks: none.
 CREATE FUNCTION horsies_workflow_policy_indices_cause(p_indices jsonb) RETURNS text
@@ -1710,8 +1710,7 @@ BEGIN
 END;
 $$;
 
--- The success cases of a workflow's stored success policy (horsies_workflows.success_policy), read by the rule of
--- Python's read_stored_success_policy (core/workflows/stored_success_policy.py). Returns:
+-- The success cases of a workflow's stored success policy (horsies_workflows.success_policy). Returns:
 -- - NULL for no policy: SQL NULL or JSON null;
 -- - the "cases" array for the form the workflow start stores: an object whose "cases" is an array of objects, each
 --   with "required_indices", an array of integers from 0; "optional_indices", when present and not null, is the
@@ -2066,7 +2065,8 @@ $$;
 -- Dispositions: APPLIED; ALREADY_APPLIED (the parent node is terminal; nothing written); CHILD_ABSENT; NOT_A_CHILD
 -- (the workflow has no parent); CHILD_NOT_TERMINAL (nothing written); PARENT_ABSENT (nothing written).
 -- Lock order: parent workflow row, parent node row, then the promotion locks.
--- Python: on_subworkflow_complete (core/workflows/engine.py:3283-3465), driven by core/worker/finalize.py:2248-2290.
+-- Python 0.7.0 (`v0.7.0` package): on_subworkflow_complete (core/workflows/engine.py:3283-3465), driven by
+-- core/worker/finalize.py:2248-2290.
 -- Returns: the OUTCOME row and the owed CHILD_START and SOURCE rows of the parent's promotion.
 CREATE FUNCTION horsies_workflow_child_finish(p_child_workflow_id uuid) RETURNS SETOF horsies_workflow_step_row
     LANGUAGE plpgsql
@@ -2270,8 +2270,8 @@ $$;
 -- treats it as a phase-2 error, and phase-2 recovery counts it.
 -- Lock order: workflow row, node row, pending row, quarantine row, then the promotion locks (node rows, new task
 -- rows) and, under on_error pause, the RUNNING descendant workflow rows in (depth, id) order.
--- Python: COMPLETE_WORKFLOW_TASK_SQL and apply_node_progression (core/worker/finalize.py:1618-1673;
--- core/workflows/sql.py:337-383; core/workflows/engine.py:1821-2060).
+-- Python 0.7.0 (`v0.7.0` package): COMPLETE_WORKFLOW_TASK_SQL and apply_node_progression
+-- (core/worker/finalize.py:1618-1673; core/workflows/sql.py:337-383; core/workflows/engine.py:1821-2060).
 CREATE FUNCTION horsies_workflow_node_finish(p_task_id uuid, p_wake boolean, p_dependents text)
     RETURNS SETOF horsies_workflow_step_row
     LANGUAGE plpgsql
@@ -2315,7 +2315,7 @@ $$;
 -- with no policy evaluation. Returns REFUSED (the workflow is not RUNNING: a pause or a cancel won; nothing written),
 -- LIMIT_REACHED_FAILED, or LIMIT_REACHED_LIVE_NODES (the last live node ends the workflow).
 -- Precondition: the caller holds the workflow row FOR UPDATE. p_task_index may be NULL (no node to fail).
--- Python: _write_limit (core/workflows/recovery_limit.py:392-431).
+-- Python 0.7.0 (`v0.7.0` package): _write_limit (core/workflows/recovery_limit.py:392-431).
 -- Locks: the workflow row (held by the caller), then the node rows it writes.
 CREATE FUNCTION horsies_workflow_apply_recovery_limit(
     p_workflow_id uuid, p_task_index integer, p_limit_error text, p_limit_node_result text
@@ -2362,7 +2362,7 @@ $$;
 -- copies the evidence to the quarantine table (horsies_phase2_quarantine_one); detail holds the quarantine verdict.
 -- p_attempt_bound is 3..1000 (22023 otherwise).
 -- Lock order: as horsies_workflow_node_finish; the quarantine function locks only the pending row, already held.
--- Python: drive_phase2_recovery per row (core/workflows/phase2_recovery.py:390-440, 620-662).
+-- Python 0.7.0 (`v0.7.0` package): drive_phase2_recovery per row (core/workflows/phase2_recovery.py:390-440, :620-662).
 -- Returns: the OUTCOME row (detail: the quarantine verdict at the bound) and the owed CHILD_START and SOURCE rows.
 CREATE FUNCTION horsies_workflow_phase2_recover(p_task_id uuid, p_attempt_bound integer)
     RETURNS SETOF horsies_workflow_step_row
@@ -2412,8 +2412,8 @@ $$;
 --   evidence is quarantined. limit_outcome and the quarantine verdict are returned.
 -- - NOT_RECORDED: at the bound with a workflow that is not RUNNING; nothing written (a later pass after a resume
 --   tries again).
--- Python: _record_raised_row (core/workflows/phase2_recovery.py:533-608), which locked the pending row before the
--- workflow row.
+-- Python 0.7.0 (`v0.7.0` package): _record_raised_row (core/workflows/phase2_recovery.py:533-608), which locked the
+-- pending row before the workflow row.
 CREATE FUNCTION horsies_workflow_phase2_record_raise(
     p_task_id uuid, p_attempt_bound integer, p_limit_error text, p_limit_node_result text
 ) RETURNS TABLE (outcome text, attempt_count integer, limit_outcome text, quarantine_verdict text)
@@ -3013,9 +3013,8 @@ $$;
 -- p_level counts the levels of this start (1 for its top row); more than 33 raises internal_error (depth 0 to 32;
 -- the tree check refuses a deeper tree).
 -- Locks: the rows of the new tree, then the progression and advance locks. Returns the owed child starts.
--- Python: start_workflow_async after the top row (core/workflows/lifecycle.py, before the switch: the reference in
--- tests/dualrun/reference/workflow_start.py) and enqueue_subworkflow_task after its link
--- (core/workflows/engine.py:1531-1602).
+-- Python 0.7.0 (`v0.7.0` package): start_workflow_async after the top row (core/workflows/lifecycle.py) and
+-- enqueue_subworkflow_task after its link (core/workflows/engine.py:1531-1602).
 CREATE FUNCTION horsies_workflow_start_tree(
     p_workflow_id uuid, p_level integer, p_top_workflow_id uuid,
     p_workflow_ids uuid[], p_names text[], p_definition_keys text[], p_on_errors text[],
@@ -3557,9 +3556,9 @@ $$;
 -- which the baseline does not have, and any CANCELLED workflow kept by retention makes it pass.
 -- Returns one row per input id, in input order: DISPATCH or BLOCKED.
 -- Lock order: workflow rows FOR SHARE in (depth, id) order, task rows in id order (no task advisory lock), node rows.
--- Python: _filter_nonrunnable_workflow_tasks (core/worker/claiming.py:503-620) with
+-- Python 0.7.0 (`v0.7.0` package): _filter_nonrunnable_workflow_tasks (core/worker/claiming.py:503-620) with
 -- horsies_find_non_runnable_workflow_tasks, horsies_abandon_owned_nodes, RESET_PAUSED_WORKFLOW_TASKS_SQL,
--- horsies_cancel_owned_nodes and SKIP_CANCELLED_WORKFLOW_TASKS_SQL (core/worker/sql.py:228-233, 286-299).
+-- horsies_cancel_owned_nodes and SKIP_CANCELLED_WORKFLOW_TASKS_SQL (core/worker/sql.py:228-233, :284-297).
 CREATE FUNCTION horsies_workflow_claimed_tasks_settle(
     p_task_ids uuid[], p_claimed_ats timestamp with time zone[], p_worker_id text
 ) RETURNS TABLE (task_id uuid, disposition text)
@@ -3692,9 +3691,10 @@ $$;
 -- Returns one row: outcome (the step that ran), and move_outcome, the outcome of the move it ran (APPLIED,
 -- ALREADY_APPLIED, LOST_CLAIM, SOURCE_STATE_CONFLICT, TASK_ABSENT), NULL for RESUMED and NODE_NOT_LINKED.
 -- Lock order: workflow row FOR SHARE, task advisory lock, task row, node row.
--- Python: the miss path of _confirm_ownership_and_set_running (core/worker/child_runner.py:1195-1235) with
--- _expire_claimed_task_before_start (:1066-1100) and _handle_workflow_stop_before_start (:960-1064), and the
--- orphan cancel of the finalize classification (core/lifecycle/classify.py:281-297).
+-- Python 0.7.0 (`v0.7.0` package): the miss path of _confirm_ownership_and_set_running
+-- (core/worker/child_runner.py:1195-1235) with _expire_claimed_task_before_start (:1063-1096) and
+-- _handle_workflow_stop_before_start (:963-1060), and the orphan cancel of the finalize classification
+-- (core/lifecycle/classify.py:281-297).
 CREATE FUNCTION horsies_workflow_task_stop_before_start(
     p_task_id uuid,
     p_worker_id text,
@@ -3876,7 +3876,7 @@ $$;
 -- STALE (the node is absent or not PENDING; detail: its status; nothing written); NOT_RUNNING (detail: the workflow
 -- status; nothing written); NOT_FOUND.
 -- Lock order: workflow row, node rows, new task rows (the promotion locks).
--- Python: recovery case 0 with try_make_ready_and_enqueue (core/workflows/recovery.py:705-760;
+-- Python 0.7.0 (`v0.7.0` package): recovery case 0 with try_make_ready_and_enqueue (core/workflows/recovery.py:705-760;
 -- core/workflows/engine.py:2547-2738).
 -- Returns the OUTCOME row (advance_child_workflow_id when the step ended the workflow and it has a parent) and the
 -- owed CHILD_START and SOURCE rows.
@@ -3928,7 +3928,7 @@ $$;
 -- Dispositions: APPLIED (detail: the indexes moved, as a JSON array); STALE (none of the nodes is READY with no work;
 -- nothing written); NOT_RUNNING (detail: the workflow status; nothing written); NOT_FOUND.
 -- Lock order: workflow row, node rows, new task rows.
--- Python: recovery cases 1 and 1.5 with enqueue_workflow_task and enqueue_subworkflow_task
+-- Python 0.7.0 (`v0.7.0` package): recovery cases 1 and 1.5 with enqueue_workflow_task and enqueue_subworkflow_task
 -- (core/workflows/recovery.py:762-902).
 -- Returns the OUTCOME row (advance_child_workflow_id when the step ended the workflow and it has a parent) and the
 -- owed CHILD_START and SOURCE rows.
@@ -3988,7 +3988,7 @@ $$;
 -- has candidates, else NULL); CURSOR_HELD (another reaper holds the cursor row or its live claim; nothing written).
 -- Locks: the cursor row. Reads horsies_workflows through idx_horsies_workflows_running_recovery_scan and the nodes
 -- through idx_horsies_workflow_tasks_nonterminal and uq_horsies_workflow_task_index.
--- Python: GLOBAL_WORKFLOW_AUDIT_SQL (core/workflows/recovery.py:341-494).
+-- Python 0.7.0 (`v0.7.0` package): GLOBAL_WORKFLOW_AUDIT_SQL (core/workflows/recovery.py:341-494).
 CREATE FUNCTION horsies_workflow_recovery_audit_page(p_max_rows integer, p_claim_token uuid, p_claim_ttl_ms integer)
     RETURNS TABLE (
         outcome text, scanned_count bigint, completion_ids uuid[], orphan_ids uuid[], orphan_names text[],
@@ -4146,8 +4146,9 @@ $$;
 -- Internal: renews the audit page claim p_claim_token for p_claim_ttl_ms from the statement time. FALSE when the
 -- claim is gone (released, expired, or taken by another reaper): the caller then does nothing. The renewal and the
 -- candidate's work commit together, which fences an owner whose claim expired.
--- Locks: the cursor row of 'running_workflows'. Python: RENEW_GLOBAL_WORKFLOW_AUDIT_CLAIM_SQL and
--- LOCK_GLOBAL_WORKFLOW_AUDIT_CLAIM_SQL (core/workflows/recovery.py:496-513).
+-- Locks: the cursor row of 'running_workflows'.
+-- Python 0.7.0 (`v0.7.0` package): RENEW_GLOBAL_WORKFLOW_AUDIT_CLAIM_SQL and LOCK_GLOBAL_WORKFLOW_AUDIT_CLAIM_SQL
+-- (core/workflows/recovery.py:496-513).
 CREATE FUNCTION horsies_workflow_audit_claim_renew(p_claim_token uuid, p_claim_ttl_ms integer) RETURNS boolean
     LANGUAGE plpgsql
     SET plan_cache_mode TO 'force_generic_plan'
@@ -4175,7 +4176,7 @@ $$;
 -- UNCHANGED (workflow_status: the observed status, NULL when the workflow is gone; a live node, or not RUNNING);
 -- AUDIT_CLAIM_LOST.
 -- Lock order: the cursor row, then the workflow row (no other holder of the cursor row waits for a workflow row).
--- Python: _recover_global_completion_candidate (core/workflows/recovery.py:1115-1192).
+-- Python 0.7.0 (`v0.7.0` package): _recover_global_completion_candidate (core/workflows/recovery.py:1115-1192).
 CREATE FUNCTION horsies_workflow_recover_completion(p_workflow_id uuid, p_claim_token uuid, p_claim_ttl_ms integer)
     RETURNS TABLE (outcome text, workflow_status text, advance_child_workflow_id uuid)
     LANGUAGE plpgsql
@@ -4207,8 +4208,8 @@ $$;
 -- observed status, NULL when the workflow is gone; not RUNNING, or it has a node); AUDIT_CLAIM_LOST.
 -- Arguments: p_error must not be NULL (22023).
 -- Lock order: the cursor row, then the workflow row.
--- Python: _recover_global_orphan_candidate with FAIL_ORPHANED_WORKFLOW_SQL (core/workflows/recovery.py:1194-1227,
--- 522-530), which stored the non-catalog code E400.
+-- Python 0.7.0 (`v0.7.0` package): _recover_global_orphan_candidate with FAIL_ORPHANED_WORKFLOW_SQL
+-- (core/workflows/recovery.py:1194-1227, :522-530), which stored the non-catalog code E400.
 CREATE FUNCTION horsies_workflow_fail_orphaned(
     p_workflow_id uuid, p_claim_token uuid, p_claim_ttl_ms integer, p_error text
 ) RETURNS TABLE (outcome text, workflow_status text, advance_child_workflow_id uuid)
@@ -4265,8 +4266,8 @@ $$;
 -- exactly for terminal_workflow_running; p_error_type (1..255 characters) and p_error_detail (0..500 characters),
 -- cut and escaped by the core; p_limit 3..1000. Refused (22023).
 -- Lock order: workflow row, count row, then the limit writes (node rows).
--- Python: record_recovery_raise with _count_recovery_raise and apply_recovery_limit
--- (core/workflows/recovery_limit.py:203-223, 341-470).
+-- Python 0.7.0 (`v0.7.0` package): record_recovery_raise with _count_recovery_raise and apply_recovery_limit
+-- (core/workflows/recovery_limit.py:203-223, :341-523).
 -- Returns one row (outcome, failed_passes: the count after this call, NULL when nothing was counted;
 -- limit_write_error).
 CREATE FUNCTION horsies_workflow_recovery_record_raise(

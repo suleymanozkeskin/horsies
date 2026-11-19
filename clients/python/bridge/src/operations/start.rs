@@ -29,8 +29,8 @@ use uuid::Uuid;
 
 use crate::handle::BrokerConnection;
 
-/// The row is RUNNING with its first runner beat (and, for a workflow task,
-/// its node RUNNING), from `started_at` on the database clock.
+/// The row is RUNNING (and, for a workflow task, its node RUNNING), from
+/// `started_at` on the database clock. The start writes no runner beat.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct AttemptStarted {

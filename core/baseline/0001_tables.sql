@@ -718,8 +718,8 @@ CREATE TABLE horsies_task_history_leaf_catalog (
         REFERENCES horsies_retention_classes (class_key)
 );
 
--- Catalog row of the forever leaf. index_schema_version 1 is the leaf index shape of 0002_indexes.sql
--- (INDEX_SCHEMA_VERSION in horsies/core/history/partitions/catalog.py).
+-- Catalog row of the forever leaf. index_schema_version 1 is the leaf index shape of 0002_indexes.sql, the version that
+-- horsies_create_partition_leaf writes and horsies_history_leaf_state checks.
 INSERT INTO horsies_task_history_leaf_catalog (
     leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor, index_schema_version, created_at,
     detached_at, dropped_at

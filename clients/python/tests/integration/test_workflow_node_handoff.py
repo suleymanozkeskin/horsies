@@ -165,12 +165,12 @@ async def _beat_count(session: AsyncSession, task_id: str) -> int:
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_a_start_writes_one_runner_beat(
+async def test_a_start_writes_no_runner_beat(
     session: AsyncSession,
     broker: PostgresBroker,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """The first runner heartbeat is part of the transition."""
+    """The start writes no runner heartbeat: the worker process writes them."""
     task_id, claimed_at = await _arrange(session, broker, 'ENQUEUED')
 
     result = _confirm_ownership_and_set_running(
@@ -182,7 +182,7 @@ async def test_a_start_writes_one_runner_beat(
 
     assert result is None
     assert await _task_status(session, task_id) == 'RUNNING'
-    assert await _beat_count(session, task_id) == 1
+    assert await _beat_count(session, task_id) == 0
 
 
 @pytest.mark.asyncio(loop_scope='function')

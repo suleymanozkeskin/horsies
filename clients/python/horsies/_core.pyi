@@ -1227,7 +1227,7 @@ class QueueStartsFailed:
 
 @final
 class AttemptStarted:
-    """The row is RUNNING with its first runner beat, from started_at on the database clock."""
+    """The row is RUNNING (and, for a workflow task, its node RUNNING), from started_at on the database clock. The start writes no runner beat."""
     @property
     def task_id(self) -> uuid.UUID: ...
     @property

@@ -99,8 +99,8 @@ def run_thread_seat_task(
     """Run one task on the calling seat thread, up to its result.
 
     The steps and outcomes of ``child_runner._run_task_entry`` but the
-    finalizing marker: the RUNNING transition with the first runner
-    heartbeat, then the task call and the result encode. ``start_check``
+    finalizing marker: the RUNNING transition, then the task call and the
+    result encode. ``start_check``
     runs right before the RUNNING update and gives the time left before the
     deadline of the run; the core checks it again once the pool gave a
     connection. A deadline that passed first returns ``DeadlineBeforeStart``,
