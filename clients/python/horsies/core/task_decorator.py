@@ -1057,6 +1057,9 @@ class _TaskFunctionMembers(Protocol[P, T]):
     task_name: str
     task_queue_name: str | None
     task_options_json: str | None
+    task_error_codes: tuple[str, ...]
+    """The user error codes that the task declares (`error_codes=`), in the
+    order of the declaration; `()` when it declares none."""
 
     @abstractmethod
     def send(
@@ -1715,6 +1718,7 @@ def create_task_wrapper(
     *,
     exception_mapper: ExceptionMapper | None = None,
     default_unhandled_error_code: str | None = None,
+    error_codes: tuple[str, ...] = (),
 ) -> 'AsyncTaskFunction[P, T]': ...
 
 
@@ -1727,6 +1731,7 @@ def create_task_wrapper(
     *,
     exception_mapper: ExceptionMapper | None = None,
     default_unhandled_error_code: str | None = None,
+    error_codes: tuple[str, ...] = (),
 ) -> 'TaskFunction[P, T]': ...
 
 
@@ -1739,6 +1744,7 @@ def create_task_wrapper(
     *,
     exception_mapper: ExceptionMapper | None = None,
     default_unhandled_error_code: str | None = None,
+    error_codes: tuple[str, ...] = (),
 ) -> 'TaskFunction[P, T] | AsyncTaskFunction[P, T]':
     """
     Create a task wrapper for a specific app instance.
@@ -1746,6 +1752,10 @@ def create_task_wrapper(
 
     A `def` function gives a `TaskFunction`. An `async def` function gives
     an `AsyncTaskFunction`, whose direct call returns a coroutine.
+
+    `error_codes` are the codes that the task declares, which the decorator
+    checked (`parse_declared_error_codes`); the wrapper keeps them as
+    `task_error_codes`.
     """
 
     fn_location = SourceLocation.from_function(fn)
@@ -3018,6 +3028,7 @@ def create_task_wrapper(
                 MappingProxyType(exception_mapper) if exception_mapper is not None else None
             )
             self.default_unhandled_error_code: str | None = default_unhandled_error_code
+            self.task_error_codes: tuple[str, ...] = error_codes
             # The exception mapping of this task, for the worker's await of
             # an async call (`await_task_call_in_worker`).
             self._map_exception = exception_result

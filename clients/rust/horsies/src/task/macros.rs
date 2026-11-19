@@ -6,8 +6,10 @@
 //! `decode_input`, runs the function, and stores what it returned with
 //! `body_result`: the same adapters as the `#[horsies::task]` attribute.
 //! The task records `module_path!()` of the call site, the `module` of the
-//! exception record of a panic. Attach the options (queue, retry, timeout,
-//! execution class) with `RegisteredTask::with_task_options`.
+//! exception record of a panic, and declares the codes of `E`
+//! (`UserErrorCode::CODES`), which the registration checks. Attach the
+//! options (queue, retry, timeout, execution class) with
+//! `RegisteredTask::with_task_options`.
 
 /// A `RegisteredTask` that runs the async function `$function` with an input
 /// of type `$input`.
@@ -62,7 +64,10 @@ macro_rules! async_task_fn {
         $crate::__private::RegisteredTask::Async {
             task: ::std::sync::Arc::new(__HorsiesAsyncBody),
             meta: $crate::__private::TaskMeta::for_input::<$input>()
-                .in_module(::std::module_path!()),
+                .in_module(::std::module_path!())
+                .with_error_codes($crate::__private::async_task_codes::<$input, _, _, _, _>(
+                    &$function,
+                )),
         }
     }};
 }
@@ -105,7 +110,10 @@ macro_rules! blocking_task_fn {
         $crate::__private::RegisteredTask::Blocking {
             task: ::std::sync::Arc::new(__HorsiesBlockingBody),
             meta: $crate::__private::TaskMeta::for_input::<$input>()
-                .in_module(::std::module_path!()),
+                .in_module(::std::module_path!())
+                .with_error_codes($crate::__private::blocking_task_codes::<$input, _, _, _>(
+                    &$function,
+                )),
         }
     }};
 }
@@ -186,5 +194,63 @@ mod tests {
     fn validate_input_accepts_an_input_of_the_type() {
         let task = crate::blocking_task_fn!(multiply, AddInput);
         assert!(task.validate_input(&input(1, 1)).is_ok());
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum MathCode {
+        Overflow,
+        DivideByZero,
+    }
+
+    impl crate::UserErrorCode for MathCode {
+        const CODES: &'static [&'static str] = &["OVERFLOW", "DIVIDE_BY_ZERO"];
+
+        fn code(&self) -> &str {
+            match self {
+                Self::Overflow => "OVERFLOW",
+                Self::DivideByZero => "DIVIDE_BY_ZERO",
+            }
+        }
+
+        fn from_code(text: &str) -> Option<Self> {
+            match text {
+                "OVERFLOW" => Some(Self::Overflow),
+                "DIVIDE_BY_ZERO" => Some(Self::DivideByZero),
+                _ => None,
+            }
+        }
+    }
+
+    async fn checked_add(input: AddInput) -> Result<i64, TaskError<MathCode>> {
+        input
+            .a
+            .checked_add(input.b)
+            .ok_or_else(|| TaskError::user(MathCode::Overflow, "the sum overflows"))
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn checked_divide(input: AddInput) -> Result<i64, TaskError<MathCode>> {
+        input
+            .a
+            .checked_div(input.b)
+            .ok_or_else(|| TaskError::user(MathCode::DivideByZero, "the divisor is 0"))
+    }
+
+    #[test]
+    fn each_macro_declares_the_codes_of_the_code_type() {
+        let async_task = crate::async_task_fn!(checked_add, AddInput);
+        assert_eq!(async_task.error_codes(), ["OVERFLOW", "DIVIDE_BY_ZERO"]);
+        let blocking_task = crate::blocking_task_fn!(checked_divide, AddInput);
+        assert_eq!(blocking_task.error_codes(), ["OVERFLOW", "DIVIDE_BY_ZERO"]);
+    }
+
+    #[test]
+    fn a_task_whose_code_type_has_no_code_declares_none() {
+        assert!(crate::async_task_fn!(add, AddInput)
+            .error_codes()
+            .is_empty());
+        assert!(crate::blocking_task_fn!(multiply, AddInput)
+            .error_codes()
+            .is_empty());
     }
 }

@@ -105,6 +105,26 @@ Workflow-specific error codes are distributed across the four families above:
 
 Every code of the four families is reserved: a task's own code must not have the name of a library code. `WORKFLOW_STOPPED` is reserved too; it is not a task code. A client refuses a reserved name as a task's own code, as an `auto_retry_for` entry of a user code, and in the config. A library code is stored in a tagged form, `{"__builtin_task_code__": "BROKER_ERROR"}`, and a task's own code as plain text, so a stored code reads back as the same kind. The client rules: [Python](/horsies/tasks/error-types/#reserved-built-in-code-enforcement), [Rust](/horsies/rust/tasks/errors/#the-code-type).
 
+### Declared Error Codes
+
+A task can declare its own error codes. The declared codes close the set of values of the `error_code` label of the task's worker metrics:
+
+- each built-in code, by its value (`BROKER_ERROR`);
+- each code that the task declares (`CARD_DECLINED`);
+- `undeclared`, for every other user code of the task.
+
+A declared set has no size limit. Only the label folds a code into `undeclared`: the task's error, its attempt record, its events, traces and logs keep the exact code. `horsies check` lists the declared codes of each task that declares some.
+
+Each client refuses a bad set when the task is defined:
+
+| Refusal | Code |
+| ------- | ---- |
+| A built-in code or a reserved name (`WORKFLOW_STOPPED`) | `HRS-212` |
+| An empty code, a code that is not `UPPER_SNAKE_CASE`, or an exception class name (`TimeoutError`) | `HRS-112` |
+| A code given twice | `HRS-113` |
+
+Declaring is optional. The client APIs: [Python](/horsies/tasks/defining-tasks/#declare-error-codes) (`error_codes=` of `@app.task`), [Rust](/horsies/rust/tasks/errors/#the-code-type) (`UserErrorCode::CODES` of the task's code type, with no other user work).
+
 ## Call Error Codes
 
 The codes of the client calls. The error types that carry them are on the client pages.
@@ -257,6 +277,8 @@ deployment pattern.
 | HRS-109 | `TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT` | `SHARED_ASYNC` or `SHARED_THREAD` without `timeout_ms` |
 | HRS-110 | `TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC` | `cancel_grace_ms` with an execution class other than `SHARED_ASYNC` |
 | HRS-111 | `TASK_CANCEL_GRACE_OUT_OF_RANGE` | `cancel_grace_ms` outside `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (10,000) |
+| HRS-112 | `TASK_INVALID_ERROR_CODE` | A declared error code is empty, not `UPPER_SNAKE_CASE`, or an exception class name. See [Declared Error Codes](#declared-error-codes) |
+| HRS-113 | `TASK_DUPLICATE_ERROR_CODE` | A task declares one error code more than once |
 
 ### Configuration (HRS-200-HRS-299)
 
@@ -275,7 +297,7 @@ deployment pattern.
 | HRS-209 | `CONFIG_INVALID_EXCEPTION_MAPPER` | Invalid exception mapper |
 | HRS-210 | `MODULE_EXEC_ERROR` | Module raised an error during import |
 | HRS-211 | `BROKER_INIT_FAILED` | Broker failed to initialize |
-| HRS-212 | `CHECK_RESERVED_CODE_COLLISION` | User config value collides with a reserved built-in error code |
+| HRS-212 | `CHECK_RESERVED_CODE_COLLISION` | User config value collides with a reserved built-in error code, or a task declares a built-in code or a reserved name as its own error code |
 | HRS-213 | `CONFIG_INVALID_BROKER_POOL` | A `PostgresConfig` pool value outside its range: `pool_size` outside 1 to 10,000, `max_overflow` outside 0 to 10,000, `pool_timeout` outside 0 to 4,294,967,295 s, or `pool_recycle` that is not -1 or 0 to 4,294,967,295 s. `pool_size=0` and `max_overflow=-1` (no limit in SQLAlchemy) are refused, and the help says to give a number. Also a `PostgresConfig` that sets a pool field removed in 0.7.0: `worker_pool_size` or `worker_max_overflow` (the help names `WorkerProfile.pool`), or `worker_child_pool_min_size`, `worker_child_pool_max_size` or `worker_child_pool_check` (the help names the `pool` field of each child kind that replaces it) |
 | HRS-214 | `CONFIG_INVALID_CHILD_HOOK` | `on_child_process_start` received a value that is not callable, or an async function |
 | HRS-215 | `CONFIG_INVALID_KEEPALIVE` | A TCP value outside its range: while `tcp_keepalives` is on, `tcp_keepalives_idle` or `tcp_keepalives_interval` outside 1 to 32,767 s, or `tcp_keepalives_count` outside 1 to 127; or a `tcp_user_timeout_ms` that is not 0 or 1 to 2,147,483,647 ms. The first value out of range is refused, in field order |

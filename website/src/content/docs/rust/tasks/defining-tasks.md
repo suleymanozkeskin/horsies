@@ -111,7 +111,7 @@ The attribute generates a module with the name of the function:
 
 | Item | Does |
 |------|------|
-| `validate_order::register(&mut app)` | Registers the task and returns its `TaskFunction<validate_order::Input, String, OrderCode>`. Refuses a code type that names a built-in or reserved code (`HRS-212`); this happens only with a hand-written `UserErrorCode` impl |
+| `validate_order::register(&mut app)` | Registers the task and returns its `TaskFunction<validate_order::Input, String, OrderCode>`. The task declares the codes of `OrderCode` (`UserErrorCode::CODES`); a code that breaks a rule is refused (`HRS-212`, `HRS-112`, `HRS-113`; see [Task Errors](/horsies/rust/tasks/errors/#the-code-type)) |
 | `validate_order::send(input)` | Sends the task through the function of the first `register` in this process |
 | `validate_order::schedule(delay, input)` | Sends the task to start after `delay: WholeSeconds` |
 | `validate_order::with_options(options)` | The two sends with `TaskSendOptions` |

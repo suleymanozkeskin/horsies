@@ -892,7 +892,8 @@ $$;
 -- - HISTORY only: terminal_at, terminalization_kind, error_code, final_failed_reason; with p_with_result:
 --   result_envelope_version, result_payload, result_digest;
 -- - with p_with_attempts: attempt_archive_version and attempt_snapshot; HISTORY also attempt_snapshot_digest;
--- - ABSENT only: absence_reason.
+-- - ABSENT only: absence_reason;
+-- - LIVE and HISTORY: trace_id, the trace id of the producer span (NULL for a task sent with no trace).
 -- Raises 22004 for a NULL argument, and data_corrupted (XX001) when the published reader reports the task live
 -- after the live miss of the same snapshot, or answers a location it does not define.
 -- Replaces: horsies/monitoring/queries.py:1404-1499 (get_task_detail) and :1516-1548 (_history_detail), which read
@@ -935,7 +936,8 @@ CREATE FUNCTION horsies_monitoring_task_detail(
     attempt_snapshot_digest bytea,
     workflow_id uuid,
     workflow_task_index integer,
-    absence_reason text
+    absence_reason text,
+    trace_id bytea
 )
     LANGUAGE plpgsql STABLE
 AS $$
@@ -959,7 +961,7 @@ BEGIN
            CASE WHEN p_with_attempts THEN 1::smallint END,
            CASE WHEN p_with_attempts THEN horsies_encode_task_attempts(t.id) END,
            NULL::bytea,
-           link.workflow_id, link.task_index, NULL::text
+           link.workflow_id, link.task_index, NULL::text, t.trace_id
     FROM horsies_tasks AS t
     LEFT JOIN horsies_workflow_tasks AS link ON link.task_id = t.id
     WHERE t.id = p_task_id;
@@ -990,7 +992,7 @@ BEGIN
                CASE WHEN p_with_attempts THEN v_row.attempt_archive_version END,
                CASE WHEN p_with_attempts THEN v_row.attempt_snapshot END,
                CASE WHEN p_with_attempts THEN v_row.attempt_snapshot_digest END,
-               link.workflow_id, link.task_index, NULL::text
+               link.workflow_id, link.task_index, NULL::text, v_row.trace_id
         FROM (SELECT 1) AS one
         LEFT JOIN horsies_workflow_tasks AS link ON link.task_id = p_task_id;
         RETURN;
@@ -1003,7 +1005,7 @@ BEGIN
            NULL::character varying, NULL::timestamptz, NULL::text, NULL::timestamptz, NULL::text, NULL::text,
            NULL::text, NULL::smallint, NULL::bytea, NULL::bytea, NULL::smallint, NULL::bytea, NULL::bytea,
            NULL::uuid, NULL::integer,
-           horsies_task_absence_reason(p_task_id);
+           horsies_task_absence_reason(p_task_id), NULL::bytea;
 END;
 $$;
 
@@ -1417,9 +1419,10 @@ $$;
 -- break that invariant and raise data_corrupted (XX001). It changes nothing.
 -- Lock order: none (a plain read).
 -- Returns: a run: one row_kind 'RUN' row (row_position 0: workflow_id, workflow_name, definition_key, status,
--- created_at, completed_at), then one row_kind 'NODE' row per node (row_position 1..n: status, started_at,
--- completed_at, task_index, node_id, task_name, dependencies, allow_failed_deps, is_subworkflow, sub_workflow_id,
--- child_total, child_failed). No run: one row_kind 'ABSENT' row with workflow_id. No result or error column is read.
+-- created_at, completed_at, trace_id: the trace id of the start, NULL for a start with no trace), then one row_kind
+-- 'NODE' row per node (row_position 1..n: status, started_at, completed_at, task_index, node_id, task_name,
+-- dependencies, allow_failed_deps, is_subworkflow, sub_workflow_id, child_total, child_failed). No run: one row_kind
+-- 'ABSENT' row with workflow_id. No result or error column is read.
 -- Raises 22004 for a NULL id.
 -- Replaces: horsies/monitoring/queries.py:1709-1810 (get_workflow_run): a session of 4 or 5 round trips (the run,
 -- the nodes, the child counts when the run has sub-workflow nodes) that loaded every column of the run.
@@ -1442,7 +1445,8 @@ RETURNS TABLE (
     is_subworkflow boolean,
     sub_workflow_id uuid,
     child_total bigint,
-    child_failed bigint
+    child_failed bigint,
+    trace_id bytea
 )
     LANGUAGE plpgsql STABLE
 AS $$
@@ -1458,7 +1462,7 @@ BEGIN
     RETURN QUERY
     SELECT 'RUN'::text, 0, w.id, w.name, w.definition_key, w.status::text, w.created_at, NULL::timestamptz,
            w.completed_at, NULL::integer, NULL::character varying, NULL::character varying, NULL::integer[],
-           NULL::boolean, NULL::boolean, NULL::uuid, NULL::bigint, NULL::bigint
+           NULL::boolean, NULL::boolean, NULL::uuid, NULL::bigint, NULL::bigint, w.trace_id
     FROM horsies_workflows AS w
     WHERE w.id = p_workflow_id;
     IF NOT FOUND THEN
@@ -1466,14 +1470,14 @@ BEGIN
         SELECT 'ABSENT'::text, NULL::integer, p_workflow_id, NULL::character varying, NULL::character varying,
                NULL::text, NULL::timestamptz, NULL::timestamptz, NULL::timestamptz, NULL::integer,
                NULL::character varying, NULL::character varying, NULL::integer[], NULL::boolean, NULL::boolean,
-               NULL::uuid, NULL::bigint, NULL::bigint;
+               NULL::uuid, NULL::bigint, NULL::bigint, NULL::bytea;
         RETURN;
     END IF;
     RETURN QUERY
     SELECT 'NODE'::text, (row_number() OVER (ORDER BY n.task_index))::integer, NULL::uuid,
            NULL::character varying, NULL::character varying, n.status::text, NULL::timestamptz, n.started_at,
            n.completed_at, n.task_index, n.node_id, n.task_name, n.dependencies, n.allow_failed_deps,
-           n.is_subworkflow, n.sub_workflow_id, child.node_total, child.failed_total
+           n.is_subworkflow, n.sub_workflow_id, child.node_total, child.failed_total, NULL::bytea
     FROM horsies_workflow_tasks AS n
     LEFT JOIN LATERAL (
         SELECT count(*) AS node_total, count(*) FILTER (WHERE c.status = 'FAILED') AS failed_total
@@ -1557,7 +1561,8 @@ CREATE FUNCTION horsies_monitoring_workflow_node(
     attempt_snapshot_digest bytea,
     workflow_id uuid,
     workflow_task_index integer,
-    absence_reason text
+    absence_reason text,
+    trace_id bytea
 )
     LANGUAGE plpgsql STABLE
 AS $$
@@ -1582,7 +1587,7 @@ BEGIN
                NULL::timestamptz, NULL::timestamptz, NULL::character varying, NULL::character varying,
                NULL::integer, NULL::character varying, NULL::timestamptz, NULL::text, NULL::timestamptz, NULL::text,
                NULL::text, NULL::text, NULL::smallint, NULL::bytea, NULL::bytea, NULL::smallint, NULL::bytea,
-               NULL::bytea, NULL::uuid, NULL::integer, NULL::text;
+               NULL::bytea, NULL::uuid, NULL::integer, NULL::text, NULL::bytea;
         RETURN;
     END IF;
     IF v_node.task_id IS NULL THEN
@@ -1594,7 +1599,7 @@ BEGIN
                NULL::timestamptz, NULL::timestamptz, NULL::character varying, NULL::character varying,
                NULL::integer, NULL::character varying, NULL::timestamptz, NULL::text, NULL::timestamptz, NULL::text,
                NULL::text, NULL::text, NULL::smallint, NULL::bytea, NULL::bytea, NULL::smallint, NULL::bytea,
-               NULL::bytea, NULL::uuid, NULL::integer, NULL::text;
+               NULL::bytea, NULL::uuid, NULL::integer, NULL::text, NULL::bytea;
         RETURN;
     END IF;
     RETURN QUERY
@@ -1605,7 +1610,7 @@ BEGIN
            d.worker_id, d.worker_hostname, d.worker_pid, d.worker_process_name, d.next_retry_at, d.execution,
            d.terminal_at, d.terminalization_kind, d.error_code, d.final_failed_reason, d.result_envelope_version,
            d.result_payload, d.result_digest, d.attempt_archive_version, d.attempt_snapshot,
-           d.attempt_snapshot_digest, d.workflow_id, d.workflow_task_index, d.absence_reason
+           d.attempt_snapshot_digest, d.workflow_id, d.workflow_task_index, d.absence_reason, d.trace_id
     FROM horsies_monitoring_task_detail(v_node.task_id, FALSE, TRUE) AS d;
 END;
 $$;
