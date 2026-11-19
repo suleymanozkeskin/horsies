@@ -1,5 +1,5 @@
 {
- "completeness_score": 0.942910447761194,
+ "completeness_score": 0.9467826086956522,
  "diagnostics": [
   "horsies.AppConfig | warning | No docstring found for class \"horsies.AppConfig\"",
   "horsies.NotEligibleReason | warning | No docstring found for class \"horsies.NotEligibleReason\"",

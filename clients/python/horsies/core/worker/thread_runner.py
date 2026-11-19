@@ -19,11 +19,13 @@ from typing import Any, assert_never
 
 from horsies import _core as core
 from horsies.core.logging import get_logger
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import Execution, TaskError, TaskResult
+from horsies.core.telemetry.attempt_span import run_in_attempt_span
 from horsies.core.worker.child_frames import ThreadSeatWork, stored_refusal_of
 from horsies.core.worker.run_return import (
     BodyInterrupted,
     CoreStoppedBeforeStart,
+    EncodedResult,
     MarkerEnd,
     ResultEnvelope,
     StartedRunning,
@@ -42,6 +44,7 @@ from horsies.core.worker.child_runner import (
     encoded_body_end,
     mark_run_finalizing,
     set_running_or_end_child,
+    shared_attempt_subject,
 )
 
 logger = get_logger('worker')
@@ -151,6 +154,20 @@ def _run_after_running(
     frame: core.SharedRunFrame,
     work: ThreadSeatWork,
 ) -> ResultEnvelope | BodyInterrupted:
+    """The steps of a run after its RUNNING update (``_thread_steps``),
+    inside the span and the log context of its attempt
+    (``run_in_attempt_span``). The span is current on the calling seat
+    thread only, so the other seats do not see it."""
+    return run_in_attempt_span(
+        shared_attempt_subject(frame, Execution.SHARED_THREAD),
+        lambda: _thread_steps(frame, work),
+    )
+
+
+def _thread_steps(
+    frame: core.SharedRunFrame,
+    work: ThreadSeatWork,
+) -> EncodedResult | BodyInterrupted:
     """The steps of a run after its RUNNING update, as in
     ``_run_task_entry``. Any exception becomes ``TASK_EXCEPTION``. A body
     that a refusal of the core ended gives ``BodyInterrupted``
@@ -169,7 +186,7 @@ def _run_after_running(
         match prepared:
             case _PreparedCall(task=task, args=args, kwargs=kwargs):
                 pass
-            case ResultEnvelope():
+            case EncodedResult():
                 return prepared
         out = _thread_call_result(frame.task_name, task(*args, **kwargs))
         logger.info(f'Task execution completed: {frame.task_name} ({frame.task_id})')

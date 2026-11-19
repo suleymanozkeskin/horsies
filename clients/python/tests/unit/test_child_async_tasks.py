@@ -45,7 +45,7 @@ from horsies.core.types.result import Err, Ok
 from horsies.core.task_decorator import await_task_call_in_worker
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import child_runner
-from horsies.core.worker.child_frames import LoopHoldsNoTask
+from horsies.core.worker.child_frames import LoopHoldsNoTask, NoTraceCarrier
 from horsies.core.worker.task_loop import (
     AsyncTaskPresence,
     LoopNotCreated,
@@ -136,6 +136,7 @@ def _runner(
                     claimed_at=CLAIMED_AT,
                     task_loop=task_loop,
                     orphan_self_heal=True,
+                    trace=NoTraceCarrier(),
                 )
             )
 
