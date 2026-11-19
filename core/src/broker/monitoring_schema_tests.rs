@@ -84,13 +84,13 @@ async fn seed_worker_state(pool: &TestPool, worker_id: &str) {
             queue_priorities, queue_max_concurrency, recovery_config,
             tasks_running, tasks_claimed, memory_usage_mb, memory_percent,
             cpu_percent, children_memory_mb, worker_started_at,
-            slots_down, class_capacity
+            slots_down, class_capacity, telemetry
         ) VALUES (
             $1, NOW(), 'w1-host', 1, 1, 1, 1, NULL,
             ARRAY['default']::text[], '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
             0, 0, NULL, NULL,
             NULL, NULL, NOW(),
-            '[]'::jsonb, '{}'::jsonb
+            '[]'::jsonb, '{}'::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
         )",
     )
     .bind(worker_id)
