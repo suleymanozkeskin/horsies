@@ -51,6 +51,13 @@ before you upgrade a 0.7 deployment.
   text of `horsies check` ends with `tracing: OpenTelemetry` or
   `tracing: off`.
 
+- **The trace id on the monitoring reads.** `LeafTaskInfo.trace_id` (the
+  task detail and the workflow node detail) is the trace id of the span that
+  sent the task, live and in history, and `WorkflowRunDetail.trace_id` the
+  trace id of the span that started the run: 32 lowercase hex digits, or
+  `None` for a send or start with no trace. Code that builds one of these
+  models, for example a test fake, must pass the field.
+
 ### Changed
 
 - **0.8.0 starts on a new database.** The core installs a new baseline

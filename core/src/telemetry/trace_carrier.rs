@@ -295,6 +295,40 @@ fn push_json_string(text: &mut String, value: &str) {
     text.push('"');
 }
 
+/// The text of a trace id: 32 lowercase hex digits, as W3C Trace Context
+/// writes it. Pure.
+pub fn trace_id_text(trace_id: &[u8; TRACE_ID_BYTES]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(TRACE_ID_BYTES * 2);
+    for byte in trace_id {
+        text.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        text.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    text
+}
+
+/// A stored trace id that is not [`TRACE_ID_BYTES`] long: data that no
+/// writer stores (the send check takes 16 bytes only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the stored trace id has {bytes} bytes; a trace id has {length} bytes", length = TRACE_ID_BYTES)]
+pub struct StoredTraceIdLength {
+    pub bytes: usize,
+}
+
+/// The text of a stored trace id (`trace_id` of `horsies_tasks`,
+/// `horsies_workflows` and `horsies_task_history`): [`trace_id_text`], or
+/// `None` for a row with no trace. Pure.
+///
+/// Errors: [`StoredTraceIdLength`] for a value that is not 16 bytes.
+pub fn stored_trace_id_text(stored: Option<&[u8]>) -> Result<Option<String>, StoredTraceIdLength> {
+    match stored {
+        None => Ok(None),
+        Some(bytes) => <&[u8; TRACE_ID_BYTES]>::try_from(bytes)
+            .map(|trace_id| Some(trace_id_text(trace_id)))
+            .map_err(|_| StoredTraceIdLength { bytes: bytes.len() }),
+    }
+}
+
 /// Whether this process has logged a refused carrier.
 pub(crate) struct CarrierRefusalLog {
     logged: AtomicBool,
