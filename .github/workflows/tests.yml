@@ -511,8 +511,10 @@ jobs:
 
       # Cargo unifies the features of the checked crates: horsies-python turns
       # on the `web` feature of horsies-core here.
+      # horsies-arbitrary-precision-tests would turn on serde_json's
+      # arbitrary_precision for every crate; tests-full.yml builds it alone.
       - name: Check the workspace
-        run: cargo check --workspace --all-targets --exclude horsies-test-worker --exclude horsies-docs-check
+        run: cargo check --workspace --all-targets --exclude horsies-test-worker --exclude horsies-docs-check --exclude horsies-arbitrary-precision-tests
 
       # Every `rust` block of website/src/content/docs/rust/ and of the Rust
       # skill files, as a module of the crate; the error names the page.

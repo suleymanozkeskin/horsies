@@ -2,10 +2,13 @@
 //!
 //! `DATABASE_URL` names the server (the `horsies-core` database of the core
 //! suite); each test creates its own empty database through the core's test
-//! support (`src/test_support/database.rs`) and drops it at the end. The PgBouncer tests are ignored unless their URLs are set:
-//! `HORSIES_STMT_PGBOUNCER_STATEMENT_URL` (a pool in statement mode) and
-//! `HORSIES_STMT_PGBOUNCER_TRANSACTION_URL` (transaction mode with
-//! `max_prepared_statements = 0`).
+//! support (`src/test_support/database.rs`) and drops it at the end. The
+//! PgBouncer tests are ignored unless the feature `pgbouncer-fixture-tests`
+//! is on; they read their URLs from `HORSIES_STMT_PGBOUNCER_STATEMENT_URL`
+//! (a pool in statement mode) and `HORSIES_STMT_PGBOUNCER_TRANSACTION_URL`
+//! (transaction mode with `max_prepared_statements = 0`). The `rust-pgbouncer`
+//! job of `.github/workflows/tests-full.yml` runs them on the fixture of
+//! `clients/python/tests/fixtures/pgbouncer/`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -1015,7 +1018,10 @@ async fn a_session_pool_runs_the_statement_pooling_check() {
 }
 
 #[tokio::test]
-#[ignore = "needs PgBouncer in statement mode; set HORSIES_STMT_PGBOUNCER_STATEMENT_URL"]
+#[cfg_attr(
+    not(feature = "pgbouncer-fixture-tests"),
+    ignore = "needs PgBouncer in statement mode, HORSIES_STMT_PGBOUNCER_STATEMENT_URL and the feature pgbouncer-fixture-tests"
+)]
 async fn a_statement_pooled_url_is_refused_at_every_first_checkout() {
     let url = std::env::var("HORSIES_STMT_PGBOUNCER_STATEMENT_URL")
         .expect("HORSIES_STMT_PGBOUNCER_STATEMENT_URL is set");
@@ -1061,7 +1067,10 @@ async fn a_statement_pooled_url_is_refused_at_every_first_checkout() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "needs PgBouncer in transaction mode; set HORSIES_STMT_PGBOUNCER_TRANSACTION_URL"]
+#[cfg_attr(
+    not(feature = "pgbouncer-fixture-tests"),
+    ignore = "needs PgBouncer in transaction mode, HORSIES_STMT_PGBOUNCER_TRANSACTION_URL and the feature pgbouncer-fixture-tests"
+)]
 async fn unnamed_statements_stay_correct_under_transaction_pooling() {
     const CLIENTS: i64 = 32;
     const QUERIES_PER_CLIENT: i64 = 500;
