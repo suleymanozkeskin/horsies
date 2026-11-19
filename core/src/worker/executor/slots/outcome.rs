@@ -823,6 +823,7 @@ impl OutcomeWriter {
                     persist_ok_result(
                         &self.broker,
                         task.task_id,
+                        task.log(),
                         value,
                         fence(task, &self.worker_id),
                         workflow,
@@ -835,6 +836,7 @@ impl OutcomeWriter {
                 persist_undecodable_result(
                     &self.broker,
                     task.task_id,
+                    task.log(),
                     fence(task, &self.worker_id),
                     workflow,
                     diagnosis,
@@ -842,10 +844,10 @@ impl OutcomeWriter {
                 .await
             }
             (PhaseOneWrite::Failure(command), ClaimedRowRule::Refuse) => {
-                persist_failed_attempt(&self.broker, command, workflow).await
+                persist_failed_attempt(&self.broker, command, task.log(), workflow).await
             }
             (PhaseOneWrite::Failure(command), ClaimedRowRule::Release) => {
-                return persist_unreported_attempt(&self.broker, command, workflow)
+                return persist_unreported_attempt(&self.broker, command, task.log(), workflow)
                     .await
                     .map(|written| match written {
                         UnreportedAttemptWrite::ClaimReleased => PhaseOneOutcome::ClaimReleased,
@@ -877,6 +879,7 @@ impl OutcomeWriter {
                 return persist_undecodable_result(
                     &self.broker,
                     task.task_id,
+                    task.log(),
                     fence(task, &self.worker_id),
                     false,
                     &diagnosis,
@@ -1072,6 +1075,7 @@ impl OutcomeWriter {
             self.child_specs.as_ref(),
             Phase2Work {
                 task_id: task.task_id,
+                log: task.log(),
                 queue_name: task.queue_name.clone(),
                 is_workflow_task: task.kind.is_workflow_task(),
                 capacity_notified,

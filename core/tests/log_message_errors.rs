@@ -16,8 +16,9 @@
 //! token text.
 //!
 //! A second rule holds for the files of the worker parent that act on a
-//! claimed attempt ([`is_attempt_scoped`]): an event with a `task_id` field
-//! also has an `attempt` field, so each log record of an attempt names it.
+//! claimed attempt ([`is_attempt_scoped`]), the finalize and phase-2 steps
+//! of `execution.rs` included: an event with a `task_id` field also has an
+//! `attempt` field, so each log record of an attempt names it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -562,9 +563,10 @@ fn calls_of_other_macros_are_not_events() {
 
 /// Whether the file at `relative` (under `src/worker/`) acts on a claimed
 /// attempt of the worker parent: every file but the tests, the reaper
-/// (`recovery.rs`, `recovery/`), the scheduler (`scheduler/`), the finalize
-/// and phase-2 steps that the reaper shares (`execution.rs`, `execution/`),
-/// and the child host, which runs in the child (`executor/child_host/`).
+/// (`recovery.rs`, `recovery/`), the scheduler (`scheduler/`), and the child
+/// host, which runs in the child (`executor/child_host/`). The finalize and
+/// phase-2 steps (`execution.rs`, `execution/`) are in: each of their
+/// records names the attempt whose write it is.
 fn is_attempt_scoped(relative: &Path) -> bool {
     let first = relative
         .components()
@@ -580,11 +582,8 @@ fn is_attempt_scoped(relative: &Path) -> bool {
         || relative
             .components()
             .any(|component| component.as_os_str() == "tests");
-    let shared_with_the_reaper = matches!(
-        first,
-        "recovery.rs" | "recovery" | "scheduler" | "execution.rs" | "execution"
-    );
-    !is_test && !shared_with_the_reaper && !relative.starts_with("executor/child_host")
+    let outside_the_attempts = matches!(first, "recovery.rs" | "recovery" | "scheduler");
+    !is_test && !outside_the_attempts && !relative.starts_with("executor/child_host")
 }
 
 fn has_field(event: &Event, name: &str) -> bool {
@@ -607,6 +606,7 @@ fn every_event_of_an_attempt_of_the_worker_names_its_attempt() {
         .join("src")
         .join("worker");
     let known_site = worker.join("executor").join("slots").join("outcome.rs");
+    let known_phase_two_site = worker.join("execution.rs");
     let mut files = Vec::new();
     rust_files(&worker, 1, &mut files);
     files.retain(|path| {
@@ -618,6 +618,7 @@ fn every_event_of_an_attempt_of_the_worker_names_its_attempt() {
     files.sort();
     let mut task_events = 0;
     let mut known_site_found = false;
+    let mut known_phase_two_site_found = false;
     let mut report = Vec::new();
     for path in &files {
         let source = fs::read_to_string(path)
@@ -632,6 +633,12 @@ fn every_event_of_an_attempt_of_the_worker_names_its_attempt() {
             && events
                 .iter()
                 .any(|event| has_field(event, "task_id") && has_field(event, "attempt"));
+        known_phase_two_site_found |= *path == known_phase_two_site
+            && events.iter().any(|event| {
+                has_field(event, "task_id")
+                    && has_field(event, "attempt")
+                    && has_field(event, "phase2_retry")
+            });
         let relative = path
             .strip_prefix(&worker)
             .expect("a file under src/worker/");
@@ -648,6 +655,15 @@ fn every_event_of_an_attempt_of_the_worker_names_its_attempt() {
         "the scan of {} files found no event with task_id and attempt in {}",
         files.len(),
         known_site.display()
+    );
+    // A second known positive: the phase-2 retry records of the finalize
+    // name the attempt, and the retry number of the phase-2 write apart.
+    assert!(
+        known_phase_two_site_found,
+        "the scan of {} files found no phase-2 retry event with task_id, attempt and \
+         phase2_retry in {}",
+        files.len(),
+        known_phase_two_site.display()
     );
     assert!(
         report.is_empty(),
@@ -684,6 +700,8 @@ fn the_reaper_the_scheduler_the_child_host_and_the_tests_are_not_attempt_scoped(
         "worker.rs",
         "claim_pass.rs",
         "children.rs",
+        "execution.rs",
+        "execution/parse.rs",
         "executor/slots/outcome.rs",
         "executor/slots/isolated.rs",
     ] {
@@ -693,8 +711,7 @@ fn the_reaper_the_scheduler_the_child_host_and_the_tests_are_not_attempt_scoped(
         "recovery.rs",
         "recovery/owner_gone.rs",
         "scheduler/service.rs",
-        "execution.rs",
-        "execution/parse.rs",
+        "execution/finalize_spec_tests.rs",
         "executor/child_host/run.rs",
         "executor/slots/settle_tests.rs",
         "executor/slots/tests.rs",
