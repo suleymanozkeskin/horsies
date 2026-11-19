@@ -783,8 +783,9 @@ fn vector_events() -> Vec<(&'static str, Event)> {
                 task_id: vector_task_id(),
                 task_name: text("send_email"),
                 queue: text("default"),
-                execution: Execution::Isolated,
+                execution: Execution::SharedAsync,
                 attempt: number(1),
+                child_kind: Execution::Isolated,
                 child_pid: pid(4242),
                 slot_wait: Duration::from_nanos(250_000),
             }

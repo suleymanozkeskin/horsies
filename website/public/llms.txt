@@ -28,7 +28,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - @app.task("name", queue_name="q", retry_policy=...) -> decorator (CUSTOM mode)
 - @app.task("name", exception_mapper={ValueError: "VALIDATION_ERROR"}) -> per-task exception mapping
 - @app.task("name", default_unhandled_error_code="MY_ERROR") -> override default error code
-- @app.task("name", error_codes=ChargeCode) or error_codes=("CARD_DECLINED",) -> declares the task's own codes (an Enum class: its member values; or a tuple of str; default ()); they are the values of the task's error_code metric label besides the built-in codes and `undeclared`; task_function.task_error_codes keeps them; refusals: not an Enum class or a tuple HRS-102, not UPPER_SNAKE_CASE HRS-112, built-in or WORKFLOW_STOPPED HRS-212, repeated HRS-113
+- @app.task("name", error_codes=ChargeCode) or error_codes=("CARD_DECLINED",) -> declares the task's own codes (an Enum class: its member values; or a tuple of str; default ()); they are the values of the task's error_code metric label besides the built-in codes and `undeclared`; the values of the task's exception_mapper and of AppConfig.exception_mapper are added with no second declaration; task_function.task_error_codes keeps them; refusals: not an Enum class or a tuple HRS-102, not UPPER_SNAKE_CASE HRS-112, built-in or WORKFLOW_STOPPED HRS-212, repeated HRS-113
 - app.workflow(name, tasks, on_error, output, success_policy, *, definition_key) -> WorkflowSpec (definition_key is required; a WorkflowDefinition class supplies it)
 - @app.workflow_builder(cases=[...]) -> decorator; registers a WorkflowSpec builder for `horsies check` validation
 - app.discover_tasks(["myapp.tasks", "myapp.workflows"]) -> register modules for import

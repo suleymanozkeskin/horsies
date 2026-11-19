@@ -17,11 +17,15 @@ core's `DeclaredErrorCodes::parse`, in its order for each entry:
 3. not the text of an earlier accepted entry (`HRS-113`).
 
 A value that is neither an `Enum` class nor a tuple is `HRS-102`.
+
+The declared set of a task also holds the codes that its exception mappers
+can produce, with no second declaration (`with_mapper_codes`): the values of
+the task's `exception_mapper` and of `AppConfig.exception_mapper`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Final, cast
@@ -120,6 +124,52 @@ def parse_declared_error_codes(
             return Ok(tuple(accepted))
         case _:
             return Err(CodesRefused(refusals=tuple(refusals)))
+
+
+def with_mapper_codes(
+    declared: tuple[str, ...],
+    task_mapper: Mapping[type[BaseException], str] | None,
+    app_mapper: Mapping[type[BaseException], str],
+) -> tuple[str, ...]:
+    """The declared set of a task: the codes that `error_codes=` declares
+    (`declared`, as `parse_declared_error_codes` accepted them), then the
+    user codes that the task's exception mapper `task_mapper` can produce,
+    then those of the app's mapper `app_mapper`. Each code comes once, in
+    the order of its first place: the declaration, then each mapper in the
+    order of its entries. Pure.
+
+    A mapper value that is not a user code is not added: a built-in code
+    (every built-in code is a value of the `error_code` label already), a
+    reserved name, or a text outside the code-text rule. The mapper checks
+    refuse such a value: `HRS-209` when the task or the app config is
+    defined, `HRS-212` in `horsies check`. So the result always holds only
+    codes that `parse_declared_error_codes` accepts.
+    """
+    task_codes: tuple[str, ...] = (
+        tuple(task_mapper.values()) if task_mapper is not None else ()
+    )
+    codes: list[str] = list(declared)
+    for code in (*task_codes, *app_mapper.values()):
+        match _is_user_code(code) and code not in codes:
+            case True:
+                codes.append(code)
+            case False:
+                pass
+    return tuple(codes)
+
+
+def _is_user_code(code: object) -> bool:
+    """Whether `code` is a text that a task may declare: it passes the
+    code-text rule, it is not a reserved name, and it is not the name of a
+    built-in code. Pure."""
+    match code:
+        case str() as text:
+            return (
+                validate_error_code_string(text, field_name=ERROR_CODES_FIELD) is None
+                and text not in BUILTIN_CODE_REGISTRY
+            )
+        case _:
+            return False
 
 
 def _entries_of(value: object) -> Result[tuple[object, ...], CodeSetFormRefused]:
