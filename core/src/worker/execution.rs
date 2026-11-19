@@ -16,7 +16,7 @@
 //! Phase 2 replays consume the durable v33 outbox row; terminal live rows are
 //! no longer a recovery authority after the v35 move-to-history cutover.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::value::RawValue;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -91,8 +91,12 @@ pub(crate) enum FinalizeOutcome {
         /// The form of the phase-2 statement.
         phase_two: PhaseTwoForm,
     },
-    /// Task was requeued for retry. No workflow callback needed.
-    Retried,
+    /// Task was requeued for retry: it holds `retry_count` and is due at
+    /// `next_retry_at`. No workflow callback needed.
+    Retried {
+        retry_count: i32,
+        next_retry_at: DateTime<Utc>,
+    },
     /// Plain (non-workflow) task fully finalized in one statement (fence,
     /// attempt, move and capacity wake), or a replay of a write that owes
     /// nothing more. No Phase 2 needed.
@@ -692,7 +696,10 @@ async fn after_failed_attempt(
                 %next_retry_at,
                 "task scheduled for retry",
             );
-            Ok(FinalizeOutcome::Retried)
+            Ok(FinalizeOutcome::Retried {
+                retry_count,
+                next_retry_at,
+            })
         }
         FailedAttemptOutcome::Refused(AttemptWriteRefusal::AlreadyApplied { .. }) => {
             replay_of_committed_write(broker, command.task_id, is_workflow_task).await

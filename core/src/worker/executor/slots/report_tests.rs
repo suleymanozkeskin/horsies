@@ -675,7 +675,7 @@ async fn an_undecodable_result_fails_the_task_as_a_serialization_error_with_no_r
         )
         .await;
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     let (status, _kind, error_code, final_failed_reason) = history_facts(&pool, task_id)
         .await
         .expect("the task moved to history");
@@ -835,7 +835,7 @@ async fn a_plain_success_completes_in_the_fused_write_and_wakes_its_queue() {
         )
         .await;
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     let (status, kind, error_code, final_failed_reason) = history_facts(&pool, task_id)
         .await
         .expect("the task moved to history");
@@ -869,7 +869,7 @@ async fn a_workflow_success_completes_in_the_locked_write_and_finishes_its_node(
         )
         .await;
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     let (status, kind, _error_code, _final_failed_reason) = history_facts(&pool, task_id)
         .await
         .expect("the task moved to history");
@@ -1033,7 +1033,7 @@ async fn settle_on_a_running_row(end: AttemptEnd) -> (HistoryFacts, Vec<AttemptR
     let facts = history_facts(&pool, task_id).await;
     let attempts = archived_attempts(&pool, task_id).await;
     remove_task(&pool, task_id).await;
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     (facts.expect("the task moved to history"), attempts)
 }
 
@@ -1211,7 +1211,7 @@ async fn a_crash_write_sent_again_stores_python_s_retry_text() {
     remove_task(&pool, task_id).await;
     let text =
         "Retry after future-stage finalize error: Worker child lost: child died: exit code 9";
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     assert_attempt_failed_with_reason(
         &facts.expect("the task moved to history"),
         &attempts,

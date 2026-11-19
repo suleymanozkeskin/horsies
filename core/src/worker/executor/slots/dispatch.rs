@@ -217,11 +217,39 @@ impl AttemptEnd {
     }
 }
 
+/// The terminal state that an applied terminal write set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalState {
+    /// A success write: the task is `COMPLETED`.
+    Completed,
+    /// A failed-attempt write with no retry: the task is `FAILED`.
+    Failed,
+}
+
+/// What an applied write of an attempt end left the row in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WrittenEnd {
+    /// The task is terminal. A replay that found its own committed write
+    /// reads as the state of that write: a failed-attempt replay finds a
+    /// committed retry as a lost claim, not as its own write.
+    Terminal(TerminalState),
+    /// The failed attempt scheduled a retry: the task is `PENDING` with
+    /// `retry_count`, due at `next_retry_at`.
+    RetryScheduled {
+        retry_count: i32,
+        next_retry_at: DateTime<Utc>,
+    },
+    /// The claim went back to the queue: the task is `PENDING` with the same
+    /// retry count.
+    ClaimReleased,
+}
+
 /// How the write of one attempt end settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Settlement {
-    /// The statement applied (or a replay found its own write).
-    Written,
+    /// The statement applied (or a replay found its own write), and left
+    /// the row as its [`WrittenEnd`] says.
+    Written(WrittenEnd),
     /// The child wrote what the case needs; nothing was owed.
     NothingOwed,
     /// The statement found the row not held by this claim and wrote nothing.
