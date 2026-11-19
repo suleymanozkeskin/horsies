@@ -613,6 +613,12 @@ SELECT test_raises('workflow runs refuse a NULL limit',
 -- horsies_monitoring_workflow_run
 ------------------------------------------------------------------------------------------------------------------------
 
+-- The run etl and the live task of its node 0 carry a trace pair.
+UPDATE horsies_workflows SET trace_carrier = '{"traceparent":"f1"}', trace_id = decode(repeat('f1', 16), 'hex')
+WHERE id = '00000000-0000-4000-8000-00000000f001';
+UPDATE horsies_tasks SET trace_carrier = '{"traceparent":"a1"}', trace_id = decode(repeat('a1', 16), 'hex')
+WHERE id = '00000000-0000-4000-8000-0000000000a1';
+
 SELECT test_check(
     'workflow run: the RUN row, then the nodes in task_index order',
     array_agg(r.row_kind || '@' || r.row_position || ':' || COALESCE(r.task_index::text, '-') ORDER BY r.row_position)
@@ -622,10 +628,10 @@ SELECT test_check(
 )
 FROM horsies_monitoring_workflow_run('00000000-0000-4000-8000-00000000f001') AS r;
 SELECT test_check(
-    'workflow run: the run columns',
+    'workflow run: the run columns, with the trace id of the start',
     r.workflow_id = '00000000-0000-4000-8000-00000000f001' AND r.workflow_name = 'etl'
     AND r.definition_key = 'defs.etl.v1' AND r.status = 'RUNNING' AND r.created_at = test_base() - interval '3 hours'
-    AND r.completed_at IS NULL,
+    AND r.completed_at IS NULL AND r.trace_id = decode(repeat('f1', 16), 'hex'),
     row_to_json(r)::text
 )
 FROM horsies_monitoring_workflow_run('00000000-0000-4000-8000-00000000f001') AS r
@@ -646,7 +652,7 @@ SELECT test_check(
     AND NOT r.allow_failed_deps AND r.is_subworkflow
     AND r.sub_workflow_id = '00000000-0000-4000-8000-00000000f004'
     AND r.started_at = test_base() - interval '170 minutes' AND r.completed_at IS NULL
-    AND r.workflow_id IS NULL AND r.created_at IS NULL,
+    AND r.workflow_id IS NULL AND r.created_at IS NULL AND r.trace_id IS NULL,
     row_to_json(r)::text
 )
 FROM horsies_monitoring_workflow_run('00000000-0000-4000-8000-00000000f001') AS r
@@ -679,7 +685,7 @@ SELECT test_raises('workflow run refuses a NULL id',
 ------------------------------------------------------------------------------------------------------------------------
 
 SELECT test_check(
-    'workflow node: a node of a live task carries the live row and its attempts (encoded as in history)',
+    'workflow node: a node of a live task carries the live row, its trace id and its attempts (encoded as in history)',
     n.row_kind = 'NODE' AND n.node_task_index = 0 AND n.node_id = 'node-0' AND n.node_task_name = 'step_0'
     AND n.node_status = 'ENQUEUED' AND NOT n.node_is_subworkflow
     AND n.node_task_id = '00000000-0000-4000-8000-0000000000a1' AND n.node_result IS NULL
@@ -687,7 +693,8 @@ SELECT test_check(
     AND n.execution = 'SHARED_ASYNC' AND n.worker_hostname IS NULL AND n.terminal_at IS NULL
     AND n.attempt_archive_version = 1
     AND jsonb_array_length(convert_from(n.attempt_snapshot, 'UTF8')::jsonb) = 1
-    AND n.workflow_id = '00000000-0000-4000-8000-00000000f001' AND n.workflow_task_index = 0,
+    AND n.workflow_id = '00000000-0000-4000-8000-00000000f001' AND n.workflow_task_index = 0
+    AND n.trace_id = decode(repeat('a1', 16), 'hex'),
     row_to_json(n)::text
 )
 FROM horsies_monitoring_workflow_node('00000000-0000-4000-8000-00000000f001', 0) AS n;

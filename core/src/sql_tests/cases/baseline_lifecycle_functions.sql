@@ -685,6 +685,8 @@ UPDATE horsies_tasks SET good_until = now() - interval '1 second' WHERE id = '00
 UPDATE horsies_tasks SET next_retry_at = now() + interval '1 hour' WHERE id = '00000000-0000-7000-8000-000000000c05';
 UPDATE horsies_tasks SET claim_expires_at = now() - interval '1 second', priority = 90
 WHERE id = '00000000-0000-7000-8000-000000000c06';
+UPDATE horsies_tasks SET trace_carrier = '{"traceparent":"c02"}', trace_id = decode(repeat('c2', 16), 'hex')
+WHERE id = '00000000-0000-7000-8000-000000000c02';
 
 SELECT lc_expect(
     'claim in-flight: an expired claim does not count',
@@ -712,6 +714,12 @@ SELECT lc_expect(
     (SELECT string_agg(concat_ws('|', row_kind, right(id::text, 3), input, execution, is_workflow_task,
         claimed_at = now(), retry_count, max_retries), ',') FROM lc_claimed),
     'CLAIMED|c02|{"x":1}|ISOLATED|f|t|1|4,CLAIMED|c01|{"x":1}|ISOLATED|f|t|1|4,CLAIMED|c06|{"x":1}|ISOLATED|f|t|1|4'
+);
+SELECT lc_expect(
+    'claim: each CLAIMED row returns its priority, its due time and its trace pair',
+    (SELECT string_agg(concat_ws('|', right(id::text, 3), priority, enqueued_at = now() - interval '1 minute',
+        coalesce(trace_carrier, 'none'), coalesce(encode(trace_id, 'hex'), 'none')), ',') FROM lc_claimed),
+    'c02|10|t|{"traceparent":"c02"}|' || repeat('c2', 16) || ',c01|50|t|none|none,c06|90|t|none|none'
 );
 SELECT lc_expect(
     'claim: the result columns have built-in types',
@@ -784,10 +792,11 @@ SELECT lc_expect(
 
 SELECT lc_task('00000000-0000-7000-8000-000000000d01', 'CLAIMED');
 SELECT lc_expect(
-    'start: a held claim starts',
-    (SELECT concat_ws('|', outcome, miss_reason, started_at = now()) FROM horsies_start_attempt(
+    'start: a held claim starts; a plain task has no workflow place',
+    (SELECT concat_ws('|', outcome, miss_reason, started_at = now(),
+        workflow_id IS NULL AND workflow_task_index IS NULL) FROM horsies_start_attempt(
         '00000000-0000-7000-8000-000000000d01', 'w1', now() - interval '1 second', 42, 'host-b', 'worker-42')),
-    'STARTED|t'
+    'STARTED|t|t'
 );
 SELECT lc_expect(
     'start: the row is RUNNING with its process facts and no lease',
@@ -821,10 +830,11 @@ SELECT lc_expect(
     'MISSED|NOT_HELD'
 );
 SELECT lc_expect(
-    'start: an absent task is not held',
-    (SELECT concat_ws('|', outcome, miss_reason) FROM horsies_start_attempt(
+    'start: an absent task is not held, with no start time and no workflow place',
+    (SELECT concat_ws('|', outcome, miss_reason,
+        started_at IS NULL AND workflow_id IS NULL AND workflow_task_index IS NULL) FROM horsies_start_attempt(
         '00000000-0000-7000-8000-000000000dff', 'w1', now(), 42, 'h', 'p')),
-    'MISSED|NOT_HELD'
+    'MISSED|NOT_HELD|t'
 );
 SELECT lc_expect(
     'start: a miss writes nothing',
@@ -862,10 +872,10 @@ SELECT lc_task('00000000-0000-7000-8000-000000000d11', 'CLAIMED', 'w1', TRUE);
 SELECT lc_node('00000000-0000-7000-8000-000000000f11', '00000000-0000-7000-8000-000000000e01', 0, 'ENQUEUED',
                '00000000-0000-7000-8000-000000000d11');
 SELECT lc_expect(
-    'start: a workflow task starts with its node',
-    (SELECT outcome FROM horsies_start_attempt(
+    'start: a workflow task starts with its node, and returns the workflow id and the node index',
+    (SELECT concat_ws('|', outcome, workflow_id, workflow_task_index) FROM horsies_start_attempt(
         '00000000-0000-7000-8000-000000000d11', 'w1', now() - interval '1 second', 42, 'h', 'p')),
-    'STARTED'
+    'STARTED|00000000-0000-7000-8000-000000000e01|0'
 );
 SELECT lc_expect(
     'start: the node is RUNNING from now',
