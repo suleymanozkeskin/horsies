@@ -14,20 +14,23 @@ Boot, before the ready frame:
    register the handlers.
 2. Run the ``on_handler_child_start`` hooks, each for at most
    ``HANDLER_HOOK_TIMEOUT_S``. A hook that raises or runs longer ends the
-   child with ``CHILD_HOOK_FAILURE_EXIT_CODE``.
+   child with ``CHILD_HOOK_FAILURE_EXIT_CODE``. The user sets the tracer
+   provider here.
 3. Start one ``HandlerInbox`` of ``HANDLER_QUEUE_EVENTS`` events and one
    thread per handler. An ``async def`` handler gets an event loop of its
    own, which its thread runs.
-4. Start the control thread, which reads the frames of the worker.
+4. Choose the spans of the attempts that the worker ended from
+   ``AppConfig.tracing`` (``ended_attempt_spans_of``).
+5. Start the control thread, which reads the frames of the worker.
 
 After the ready frame:
 
 - The control thread decodes each event of an ``events`` frame with the
-  generated decoder (``decode_event``). The step for an attempt that the
-  worker ended comes first (``WorkerEndedSpans``), then the event goes to
-  the inbox of each handler of its type. A full inbox drops the event for
-  that handler only and counts it. The control thread never waits for a
-  handler.
+  generated decoder (``decode_event``). The span of an attempt that the
+  worker ended comes first (``make_ended_attempt_span``), then the event
+  goes to the inbox of each handler of its type. A full inbox drops the
+  event for that handler only and counts it. The control thread never
+  waits for a handler.
 - Each handler thread takes the events of its inbox in order and calls its
   handler. A handler that fails is counted and logged with its name: the
   first failure with its traceback, then one line per
@@ -38,8 +41,9 @@ After the ready frame:
   started, and the RSS of the child.
 
 At the stop frame each inbox closes, the handler threads get
-``HANDLER_DRAIN_S`` together for the events left, the child sends a last
-``handler_stats`` frame and exits 0. The handler threads are daemon threads:
+``HANDLER_DRAIN_S`` together for the events left, the spans of the attempts
+that the worker ended are flushed within ``ENDED_ATTEMPT_SPAN_FLUSH_BOUND_S``,
+the child sends a last ``handler_stats`` frame and exits 0. The handler threads are daemon threads:
 the exit does not wait for a handler that blocks, and the events left in its
 inbox are logged.
 """
@@ -70,6 +74,12 @@ from horsies.core.models.boot_failure import (
     TaskLoopCreateFailed,
     ThreadStartRefused,
     shortage_or,
+)
+from horsies.core.telemetry.ended_attempt_span import (
+    EndedAttemptSpans,
+    ended_attempt_spans_of,
+    flush_ended_attempt_spans_at_stop,
+    make_ended_attempt_span,
 )
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_frames import (
@@ -403,17 +413,6 @@ class RunningHandler:
 
 
 @dataclass(frozen=True, slots=True)
-class NoWorkerEndedSpans:
-    """The child makes no span for an attempt that the worker ended
-    (``AttemptEndDecidedByWorker``): its event goes to the handlers only."""
-
-
-type WorkerEndedSpans = NoWorkerEndedSpans
-"""What the child does for an attempt that the worker ended, before the
-handlers get its event."""
-
-
-@dataclass(frozen=True, slots=True)
 class NotJsonText:
     """The wire text of an event is not JSON text."""
 
@@ -458,9 +457,9 @@ class EventDispatch:
     """Gives each event of an ``events`` frame to the handlers of its type.
     The control thread only.
 
-    For each event: the step for an attempt that the worker ended
-    (``worker_ended_spans``), then an offer to the inbox of each handler of
-    the event type. An event of a type that no handler takes goes to none.
+    For each event: the span of an attempt that the worker ended
+    (``make_ended_attempt_span`` with ``ended_spans``), then an offer to the
+    inbox of each handler of the event type. An event of a type that no handler takes goes to none.
     A wire text that does not decode is logged (the first, then one line
     per ``HANDLER_ERROR_LOG_EVERY``) and skipped; the other events of its
     frame still go out.
@@ -469,7 +468,7 @@ class EventDispatch:
     def __init__(
         self,
         running: Sequence[RunningHandler],
-        worker_ended_spans: WorkerEndedSpans,
+        ended_spans: EndedAttemptSpans,
     ) -> None:
         routes: dict[type[AnyEvent], list[RunningHandler]] = {}
         for one in running:
@@ -477,7 +476,7 @@ class EventDispatch:
         self._routes: Final[Mapping[type[AnyEvent], tuple[RunningHandler, ...]]] = {
             event_class: tuple(handlers) for event_class, handlers in routes.items()
         }
-        self._worker_ended_spans: Final = worker_ended_spans
+        self._ended_spans: Final = ended_spans
         self._refused = 0
 
     def dispatch(self, texts: Sequence[str]) -> None:
@@ -491,9 +490,7 @@ class EventDispatch:
                     self._skip(refused)
 
     def _route(self, event: AnyEvent) -> None:
-        match self._worker_ended_spans:
-            case NoWorkerEndedSpans():
-                pass
+        _ = make_ended_attempt_span(self._ended_spans, event)
         for one in self._routes.get(type(event), ()):
             one.offer(event)
 
@@ -719,13 +716,16 @@ def start_handler_control_thread(
 
 
 def exit_after_handler_stop(
-    sock: socket.socket, running: Sequence[RunningHandler]
+    sock: socket.socket,
+    running: Sequence[RunningHandler],
+    ended_spans: EndedAttemptSpans,
 ) -> NoReturn:
     """After the stop frame: close each inbox, give the handler threads
     ``HANDLER_DRAIN_S`` together for the events left, log the events that
-    are still left, send the last ``handler_stats`` frame, then exit 0
-    (``end_without_teardown``). The worker kills a child that has not
-    exited within its stop bound."""
+    are still left, flush the spans of the attempts that the worker ended
+    (``flush_ended_attempt_spans_at_stop``), send the last ``handler_stats``
+    frame, then exit 0 (``end_without_teardown``). The worker kills a child
+    that has not exited within its stop bound."""
     for one in running:
         one.inbox.close()
     drain_end = time.monotonic() + HANDLER_DRAIN_S
@@ -740,6 +740,7 @@ def exit_after_handler_stop(
                 left,
                 HANDLER_DRAIN_S,
             )
+    _ = flush_ended_attempt_spans_at_stop(ended_spans)
     _send_child_frame(sock, stats_frame(running))
     end_without_teardown(0)
 
@@ -777,7 +778,8 @@ def serve_handler_child(
         case Err(failed):
             fail_boot(sock, failed)
     stopped = threading.Event()
-    dispatch = EventDispatch(running, NoWorkerEndedSpans())
+    ended_spans = ended_attempt_spans_of(app.config.tracing)
+    dispatch = EventDispatch(running, ended_spans)
     match start_handler_control_thread(reader, dispatch, stopped):
         case Ok():
             pass
@@ -789,4 +791,4 @@ def serve_handler_child(
     )
     while not stopped.wait(HANDLER_STATS_INTERVAL_S):
         _send_child_frame(sock, stats_frame(running))
-    exit_after_handler_stop(sock, running)
+    exit_after_handler_stop(sock, running, ended_spans)

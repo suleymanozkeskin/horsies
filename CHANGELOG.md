@@ -106,6 +106,23 @@ before you upgrade a 0.7 deployment.
   hook that raises or runs longer leaves the handler child down, and the
   worker runs its tasks on (`HRS-214` for an async hook).
 
+- **Spans of the attempts that the worker ended.** With `OtelTracing()`,
+  the handler child of a worker makes the span of each attempt that the
+  worker ended itself: an isolated task killed at its timeout
+  (`TASK_TIMEOUT`), a shared async child killed for a blocked loop
+  (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`), and a child lost with its
+  exit seen (`WORKER_CRASHED`). The child of such an attempt is gone, so its
+  own span never ends. The span is `run <task_name>` of kind CONSUMER under
+  the span that sent the task, from the time the task reached its child to
+  the time the end reached the worker, with status ERROR, `error.type` = the
+  code, the attributes of the span of a child and
+  `horsies.span.source = "worker"`. The span of a workflow task has no
+  `horsies.workflow.*` attributes: the worker does not know the node.
+  `OtelTracing(worker_ended_spans=...)` takes the new `WorkerEndedSpans`:
+  `MAKE_SPANS` (the default), with which the worker starts its handler child
+  also when the app has no handler, or `NO_SPANS`. Set the tracer provider
+  in `@app.on_handler_child_start`.
+
 - **The trace id on the monitoring reads.** `LeafTaskInfo.trace_id` (the
   task detail and the workflow node detail) is the trace id of the span that
   sent the task, live and in history, and `WorkflowRunDetail.trace_id` the

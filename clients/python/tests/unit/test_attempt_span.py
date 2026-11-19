@@ -951,7 +951,7 @@ class TestTheProviderFlush:
     ) -> None:
         monkeypatch.setattr(attempt_otel.trace, 'get_tracer_provider', lambda: provider)
 
-        assert attempt_otel._global_provider_flush(250) == expected
+        assert attempt_otel.global_provider_flush(250) == expected
 
 
 class TestTheOutcomeOfAResult:

@@ -30,6 +30,10 @@ from pathlib import Path
 from typing import Any, Final, NoReturn, cast
 
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import Tracer
 from pydantic import SecretStr
 
 from horsies import _core as core
@@ -39,6 +43,14 @@ from horsies.core.event_handlers import EventHandler
 from horsies.core.models.app import AppConfig
 from horsies.core.models.boot_failure import AppLoadFailed, ThreadStartRefused
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.tracing import OtelTracing
+from horsies.core.telemetry import ended_attempt_otel
+from horsies.core.telemetry.attempt_span import StopFlush
+from horsies.core.telemetry.ended_attempt_span import (
+    NO_ENDED_ATTEMPT_SPANS,
+    EndedAttemptSpans,
+    OtelEndedAttemptSpans,
+)
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import child_main, handler_child
 from horsies.core.worker.child_frames import (
@@ -55,7 +67,6 @@ from horsies.core.worker.handler_child import (
     HandlerInbox,
     InboxClosed,
     InboxFull,
-    NoWorkerEndedSpans,
     NotJsonText,
     OnLoop,
     Queued,
@@ -252,7 +263,7 @@ class TestTypedDispatch:
         for event_class in events.EVENT_TYPES:
             app.on_event(event_class)(_recorder(received, event_class))
         running = _started(app)
-        dispatch = EventDispatch(running, NoWorkerEndedSpans())
+        dispatch = EventDispatch(running, NO_ENDED_ATTEMPT_SPANS)
 
         dispatch.dispatch([text for _name, text in WIRE_TEXTS])
         _stop(running)
@@ -274,7 +285,7 @@ class TestTypedDispatch:
         app.on_event(AttemptEnded)(_recorder(received, AttemptEnded))
         running = _started(app)
 
-        EventDispatch(running, NoWorkerEndedSpans()).dispatch(_texts_of('TaskClaimed'))
+        EventDispatch(running, NO_ENDED_ATTEMPT_SPANS).dispatch(_texts_of('TaskClaimed'))
         _stop(running)
 
         assert received == {'AttemptEnded': []}
@@ -294,7 +305,7 @@ class TestTypedDispatch:
         running = _started(app)
 
         with caplog.at_level(logging.ERROR):
-            EventDispatch(running, NoWorkerEndedSpans()).dispatch(
+            EventDispatch(running, NO_ENDED_ATTEMPT_SPANS).dispatch(
                 ['["AttemptEnded",1]', _attempt_ended_text(4)],
             )
         _stop(running)
@@ -318,7 +329,7 @@ class TestHandlerKinds:
         app.on_event(AttemptEnded)(on_end)
         running = _started(app)
 
-        EventDispatch(running, NoWorkerEndedSpans()).dispatch([_attempt_ended_text(1)])
+        EventDispatch(running, NO_ENDED_ATTEMPT_SPANS).dispatch([_attempt_ended_text(1)])
         _stop(running)
 
         assert len(threads) == 1
@@ -343,7 +354,7 @@ class TestHandlerKinds:
         app.on_event(AttemptEnded)(second)
         running = _started(app)
 
-        EventDispatch(running, NoWorkerEndedSpans()).dispatch([_attempt_ended_text(1)])
+        EventDispatch(running, NO_ENDED_ATTEMPT_SPANS).dispatch([_attempt_ended_text(1)])
         _stop(running)
 
         loops = dict(seen)
@@ -374,7 +385,7 @@ class TestFailingHandlers:
         running = _started(app)
 
         with caplog.at_level(logging.ERROR):
-            EventDispatch(running, NoWorkerEndedSpans()).dispatch(
+            EventDispatch(running, NO_ENDED_ATTEMPT_SPANS).dispatch(
                 [_attempt_ended_text(attempt) for attempt in (1, 2, 3)],
             )
             _stop(running)
@@ -400,7 +411,7 @@ class TestFailingHandlers:
         running = _started(app)
 
         with caplog.at_level(logging.ERROR):
-            EventDispatch(running, NoWorkerEndedSpans()).dispatch(
+            EventDispatch(running, NO_ENDED_ATTEMPT_SPANS).dispatch(
                 [_attempt_ended_text(attempt) for attempt in range(1, 8)],
             )
             _stop(running)
@@ -434,7 +445,7 @@ class TestFailingHandlers:
         app.on_event(AttemptEnded)(on_end)
         running = _started(app)
 
-        EventDispatch(running, NoWorkerEndedSpans()).dispatch(
+        EventDispatch(running, NO_ENDED_ATTEMPT_SPANS).dispatch(
             [_attempt_ended_text(1), _attempt_ended_text(2)],
         )
         _stop(running)
@@ -463,7 +474,7 @@ class TestFailingHandlers:
             caplog.at_level(logging.ERROR),
         ):
             warnings.simplefilter('always')
-            EventDispatch(running, NoWorkerEndedSpans()).dispatch(
+            EventDispatch(running, NO_ENDED_ATTEMPT_SPANS).dispatch(
                 [_attempt_ended_text(1)]
             )
             _stop(running)
@@ -500,7 +511,7 @@ class TestBlockingHandler:
         app.on_event(AttemptEnded)(blocking)
         app.on_event(AttemptEnded)(recording)
         running = _started(app)
-        dispatch = EventDispatch(running, NoWorkerEndedSpans())
+        dispatch = EventDispatch(running, NO_ENDED_ATTEMPT_SPANS)
 
         dispatch.dispatch([_attempt_ended_text(1)])
         assert entered.wait(_WAIT_S)
@@ -673,6 +684,57 @@ class TestServedChild:
                 handler=app.get_event_handlers()[0].name, errors=1, dropped=0
             ),
         )
+
+    def test_a_child_of_an_otel_app_makes_the_span_of_a_worker_ended_attempt_first(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        exporter = InMemorySpanExporter()
+        provider = TracerProvider(shutdown_on_exit=False)
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+        def provider_tracer(*_args: object, **_kwargs: object) -> Tracer:
+            return provider.get_tracer('horsies')
+
+        monkeypatch.setattr(ended_attempt_otel.trace, 'get_tracer', provider_tracer)
+        flushed: list[EndedAttemptSpans] = []
+        flush_at_stop = handler_child.flush_ended_attempt_spans_at_stop
+
+        def recording_flush(spans: EndedAttemptSpans) -> StopFlush:
+            flushed.append(spans)
+            return flush_at_stop(spans)
+
+        monkeypatch.setattr(handler_child, 'flush_ended_attempt_spans_at_stop', recording_flush)
+        app = Horsies(
+            config=AppConfig(
+                broker=PostgresConfig(
+                    database_url=SecretStr('postgresql://user:pass@localhost/db')
+                ),
+                tracing=OtelTracing(),
+            ),
+        )
+        spans_at_handler: list[int] = []
+
+        def on_end(event: AttemptEnded) -> None:
+            del event
+            spans_at_handler.append(len(exporter.get_finished_spans()))
+
+        app.on_event(AttemptEnded)(on_end)
+        child = _ServedChild(monkeypatch, app)
+        child.start()
+        _wait_until(lambda: bool(child.snapshot()), 'the ready frame')
+
+        child.send(_events_bytes([dict(WIRE_TEXTS)['attempt_ended_by_worker']]))
+        _wait_until(lambda: bool(spans_at_handler), 'the handler call')
+        child.send(_stop_bytes())
+        child.join()
+        child.close()
+        provider.shutdown()
+
+        assert [span.name for span in exporter.get_finished_spans()] == ['run send_email']
+        assert spans_at_handler == [1]
+        assert [type(spans) for spans in flushed] == [OtelEndedAttemptSpans]
+        assert child.exit_codes == [0]
 
     def test_stats_frames_come_at_the_interval_with_the_totals(
         self,
@@ -919,7 +981,7 @@ class TestControlThread:
         with pytest.raises(_Exited) as exited:
             handler_child._read_handler_frames(
                 reader,
-                EventDispatch((), NoWorkerEndedSpans()),
+                EventDispatch((), NO_ENDED_ATTEMPT_SPANS),
                 threading.Event(),
             )
         return exited.value.code
@@ -953,7 +1015,7 @@ class TestControlThread:
         )
 
         handler_child._read_handler_frames(
-            reader, EventDispatch((), NoWorkerEndedSpans()), stopped
+            reader, EventDispatch((), NO_ENDED_ATTEMPT_SPANS), stopped
         )
 
         assert stopped.is_set()

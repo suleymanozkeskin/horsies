@@ -10,6 +10,7 @@ the client does not import `opentelemetry`.
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Annotated, ClassVar, Literal, Union, assert_never
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -49,6 +50,23 @@ AttemptParentage = Annotated[
 """How the span of an attempt relates to the span that sent its task."""
 
 
+class WorkerEndedSpans(str, Enum):
+    """Whether the handler child of a worker makes the span of each attempt
+    that the worker ended: an isolated task killed at its timeout, a shared
+    async child killed for a blocked loop, a child lost with its exit seen.
+    The task child of such an attempt is gone, so the span that it opened is
+    never exported.
+
+    - `MAKE_SPANS`: the handler child makes the span. The default. The
+      worker starts its handler child also when the app has no event
+      handler; set the tracer provider in `@app.on_handler_child_start`.
+    - `NO_SPANS`: no span for these attempts.
+    """
+
+    MAKE_SPANS = 'MAKE_SPANS'
+    NO_SPANS = 'NO_SPANS'
+
+
 class OtelTracing(BaseModel):
     """Spans and producer metrics through the OpenTelemetry API.
 
@@ -58,12 +76,17 @@ class OtelTracing(BaseModel):
     `parentage` places the span of each attempt: `ChildOfSend()` (the
     default) or `LinkedToSend()`. A task sent with no span has an attempt
     span with no parent in both.
+
+    `worker_ended_spans` makes the span of each attempt that the worker
+    ended, in the handler child: `WorkerEndedSpans.MAKE_SPANS` (the default)
+    or `WorkerEndedSpans.NO_SPANS`.
     """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid', frozen=True)
 
     kind: Literal['otel_tracing'] = 'otel_tracing'
     parentage: AttemptParentage = Field(default_factory=ChildOfSend)
+    worker_ended_spans: WorkerEndedSpans = WorkerEndedSpans.MAKE_SPANS
 
 
 class NoTracing(BaseModel):
@@ -80,6 +103,18 @@ TracingSetting = Annotated[
     Field(discriminator='kind'),
 ]
 """The tracing setting of `AppConfig.tracing`."""
+
+
+def worker_ended_spans_of(setting: OtelTracing | NoTracing) -> WorkerEndedSpans:
+    """Whether the handler child makes the spans of the attempts that the
+    worker ended under `setting`: never with `NoTracing`. Pure."""
+    match setting:
+        case NoTracing():
+            return WorkerEndedSpans.NO_SPANS
+        case OtelTracing(worker_ended_spans=spans):
+            return spans
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def tracing_errors(setting: OtelTracing | NoTracing) -> list[ConfigurationError]:
