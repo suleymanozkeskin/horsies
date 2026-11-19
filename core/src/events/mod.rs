@@ -64,7 +64,7 @@ pub use crate::worker::executor::protocol::StopReason;
 
 /// The version of the event contract: its event types, their fields and the
 /// closed types that the fields hold.
-pub const EVENT_CONTRACT_VERSION: u32 = 1;
+pub const EVENT_CONTRACT_VERSION: u32 = 2;
 
 /// The event contract, as `horsies-codegen` renders it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
