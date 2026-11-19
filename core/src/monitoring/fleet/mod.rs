@@ -50,7 +50,9 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use crate::core::task::Execution;
 use crate::db::Transience;
-use crate::telemetry::labels::{FleetQuery, FleetWorkerState, LiveTaskStatus, LiveWorkflowStatus};
+use crate::telemetry::labels::{
+    FleetQuery, FleetWorkerState, LiveTaskStatus, LiveWorkflowStatus, TelemetryPart,
+};
 use crate::{ClassCoverage, StreamWait, PENDING_STREAM_LIMIT};
 
 #[cfg(feature = "web")]
@@ -227,6 +229,8 @@ pub struct FleetWorkers {
     pub workers: LiveWorkerCounts,
     /// The seats of the live workers, per budget class.
     pub seats: ClassSeats,
+    /// The live workers whose telemetry parts are down, per part.
+    pub telemetry_down: TelemetryDownCounts,
 }
 
 /// The live workers by slot health.
@@ -245,6 +249,28 @@ impl LiveWorkerCounts {
         match state {
             FleetWorkerState::Serving => self.serving,
             FleetWorkerState::Degraded => self.degraded,
+        }
+    }
+}
+
+/// The live workers whose latest snapshot records a telemetry part as down
+/// (`"state": "down"` in its member of the `telemetry` column). A snapshot
+/// with another state of the part, or with no member of it, does not count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TelemetryDownCounts {
+    /// The metrics endpoint is down.
+    pub endpoint: u64,
+    /// The handler child is down.
+    pub handler_child: u64,
+}
+
+impl TelemetryDownCounts {
+    /// The live workers whose `part` is down (the `part` label of
+    /// `horsies.fleet.workers.telemetry_down`).
+    pub fn of(&self, part: TelemetryPart) -> u64 {
+        match part {
+            TelemetryPart::Endpoint => self.endpoint,
+            TelemetryPart::HandlerChild => self.handler_child,
         }
     }
 }

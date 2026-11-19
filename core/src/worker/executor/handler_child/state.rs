@@ -9,6 +9,7 @@ use tokio::sync::watch;
 
 use crate::worker::executor::protocol::ProcessId;
 use crate::worker::executor::supervisor::{BootFailureCause, LossCause};
+use crate::worker::metrics_endpoint::TELEMETRY_PART_DOWN;
 
 /// The state of the handler child of a worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,7 +119,7 @@ pub fn handler_child_json(state: &HandlerChildState) -> Value {
         HandlerChildState::Starting => json!({ "state": "starting" }),
         HandlerChildState::Up { pid } => json!({ "state": "up", "pid": pid.get() }),
         HandlerChildState::Down(down) => json!({
-            "state": "down",
+            "state": TELEMETRY_PART_DOWN,
             "cause": cause_json(down.cause),
             "detail": down.detail,
             "down_since": down.since.to_rfc3339_opts(SecondsFormat::Micros, false),
