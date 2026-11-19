@@ -27,6 +27,7 @@ use crate::core::task::result::TaskResult;
 use crate::core::task::Execution;
 use crate::core::types::status::TaskStatus;
 use crate::db::{ParameterType, Row, TypedStatement};
+use crate::telemetry::trace_carrier::stored_trace_id_text;
 
 use super::models::{
     Breakdown, BreakdownCounts, BreakdownGroup, ErrorCategory, GroupRow, LeafTaskInfo,
@@ -94,7 +95,7 @@ pub(super) static MONITORING_TASK_DETAIL: TypedStatement = TypedStatement::new(
             retry_count, max_retries, enqueued_at, started_at, good_until, worker_hostname,
             execution, terminal_at, error_code, final_failed_reason, attempt_archive_version,
             attempt_snapshot, attempt_snapshot_digest, workflow_id, workflow_task_index,
-            absence_reason
+            absence_reason, trace_id
      FROM horsies_monitoring_task_detail($1, $2, $3)",
     &[
         ParameterType::Uuid,
@@ -187,7 +188,8 @@ pub(super) static MONITORING_WORKFLOW_RUN: TypedStatement = TypedStatement::new(
     "monitoring_workflow_run",
     "SELECT row_kind, row_position, workflow_id, workflow_name, definition_key, status,
             created_at, started_at, completed_at, task_index, node_id, task_name, dependencies,
-            allow_failed_deps, is_subworkflow, sub_workflow_id, child_total, child_failed
+            allow_failed_deps, is_subworkflow, sub_workflow_id, child_total, child_failed,
+            trace_id
      FROM horsies_monitoring_workflow_run($1)
      ORDER BY row_position NULLS FIRST",
     &[ParameterType::Uuid],
@@ -203,7 +205,7 @@ pub(super) static MONITORING_WORKFLOW_NODE: TypedStatement = TypedStatement::new
             priority, status, is_workflow_task, retry_count, max_retries, enqueued_at,
             started_at, good_until, worker_hostname, execution, terminal_at, error_code,
             final_failed_reason, attempt_archive_version, attempt_snapshot,
-            attempt_snapshot_digest, workflow_id, workflow_task_index, absence_reason
+            attempt_snapshot_digest, workflow_id, workflow_task_index, absence_reason, trace_id
      FROM horsies_monitoring_workflow_node($1, $2)",
     &[ParameterType::Uuid, ParameterType::Int4],
 );
@@ -499,6 +501,9 @@ pub(super) fn task_detail_row(
     let error_code: Option<String> = column(row, statement, "error_code")?;
     let failed_reason: Option<String> = column(row, statement, "final_failed_reason")?;
     let terminal_at: Option<DateTime<Utc>> = column(row, statement, "terminal_at")?;
+    let stored_trace_id: Option<Vec<u8>> = column(row, statement, "trace_id")?;
+    let trace_id = stored_trace_id_text(stored_trace_id.as_deref())
+        .map_err(|refused| DetailRowError::StoredData(format!("task {task_id}: {refused}")))?;
     let records = match (location, attempt_version, attempt_payload) {
         (_, None, None) => Vec::new(),
         (Location::Live, Some(version), Some(payload)) => {
@@ -589,6 +594,7 @@ pub(super) fn task_detail_row(
         worker_hostname: column(row, statement, "worker_hostname")?,
         good_until: column(row, statement, "good_until")?,
         execution,
+        trace_id,
     };
     Ok(TaskDetailRead::Found(TaskDetail {
         leaf,
@@ -905,10 +911,15 @@ fn run_node(row: &Row, statement: &TypedStatement) -> Result<RunNode, RowDecodeE
     })
 }
 
-/// The run, its nodes in task index order, its edges and its failed nodes.
-/// An edge joins a dependency to the node that names it; a dependency on an
-/// index that the run does not have makes no edge. Pure.
-fn run_detail(run: WorkflowRunSummary, nodes: Vec<RunNode>) -> WorkflowRunDetail {
+/// The run, its nodes in task index order, its edges, its failed nodes and
+/// the trace id of its start. An edge joins a dependency to the node that
+/// names it; a dependency on an index that the run does not have makes no
+/// edge. Pure.
+fn run_detail(
+    run: WorkflowRunSummary,
+    nodes: Vec<RunNode>,
+    trace_id: Option<String>,
+) -> WorkflowRunDetail {
     let known: HashSet<i32> = nodes.iter().map(|node| node.info.task_index).collect();
     let mut edges = Vec::new();
     for node in &nodes {
@@ -935,6 +946,7 @@ fn run_detail(run: WorkflowRunSummary, nodes: Vec<RunNode>) -> WorkflowRunDetail
         edges,
         failed_count: i64::try_from(failed_indices.len()).unwrap_or(i64::MAX),
         failed_indices,
+        trace_id,
     }
 }
 
@@ -964,11 +976,15 @@ pub(super) fn workflow_run(
         ("ABSENT", false) => Err(shape(statement, "a row follows the ABSENT row".to_owned())),
         ("RUN", _) => {
             let run = run_summary(first, statement)?;
+            let stored_trace_id: Option<Vec<u8>> = column(first, statement, "trace_id")?;
+            let trace_id = stored_trace_id_text(stored_trace_id.as_deref()).map_err(|refused| {
+                shape(statement, format!("workflow run {}: {refused}", run.id))
+            })?;
             let nodes = node_rows
                 .iter()
                 .map(|row| run_node(row, statement))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(RunRead::Found(run_detail(run, nodes)))
+            Ok(RunRead::Found(run_detail(run, nodes, trace_id)))
         }
         (other, _) => Err(shape(statement, format!("unknown row_kind {other:?}"))),
     }
@@ -1307,6 +1323,7 @@ mod tests {
                 node(1, "FAILED", vec![0]),
                 node(2, "FAILED", vec![0, 1, 99]),
             ],
+            None,
         );
 
         assert_eq!(

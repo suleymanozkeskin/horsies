@@ -3306,6 +3306,12 @@
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "execution"
+     },
+     {
+      "annotation": "None | str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "trace_id"
      }
     ],
     "returns": "None"
@@ -3429,6 +3435,13 @@
       "metadata": [],
       "name": "execution",
       "type": "None | horsies.Execution"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "trace_id",
+      "type": "None | str"
      }
     ],
     "kind": "pydantic"
@@ -6520,6 +6533,12 @@
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "failed_indices"
+     },
+     {
+      "annotation": "None | str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "trace_id"
      }
     ],
     "returns": "None"
@@ -6573,6 +6592,13 @@
       "metadata": [],
       "name": "failed_indices",
       "type": "list[int]"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "trace_id",
+      "type": "None | str"
      }
     ],
     "kind": "pydantic"
