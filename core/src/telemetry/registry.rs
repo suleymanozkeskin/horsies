@@ -317,6 +317,13 @@ pub enum HandleRefused {
     /// The registry counts this metric itself.
     #[error("the registry counts {} itself", .metric.spec().name)]
     CountedByTheRegistry { metric: MetricId },
+    /// The registry has no worker facts ([`ProcessFacts::NotAWorker`]): the
+    /// telemetry of the points of a worker takes the worker id from the
+    /// registry of that worker.
+    #[error(
+        "the registry has no worker facts; the points of a worker need the registry of a worker"
+    )]
+    NoWorkerFacts,
 }
 
 /// The cells of one series of a kind.

@@ -35,9 +35,10 @@ pub const MAX_EVENTS_PER_FRAME: usize = 256;
 /// largest event is the `AttemptEnded` of an attempt that the worker ended:
 /// its internal trace carrier has at most
 /// [`crate::telemetry::trace_carrier::MAX_TRACE_CARRIER_BYTES`] bytes of
-/// printable ASCII, which the JSON escape at most doubles, and its task name
-/// has at most 255 characters of at most 6 JSON bytes each. Together with
-/// its other fields that is less than 6,200 bytes.
+/// printable ASCII, which the JSON escape at most doubles (4,096 bytes), and
+/// its task name and its internal worker id have at most 255 characters
+/// each, and its queue name 52, of at most 6 JSON bytes each (3,372 bytes).
+/// Together with its other fields that is less than 7,800 bytes.
 pub const MAX_EVENT_WIRE_BYTES: usize = 8 * 1024;
 /// The most event handlers of one handler child, and so the most entries of
 /// one `handler_stats` frame.
