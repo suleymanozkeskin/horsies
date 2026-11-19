@@ -21,6 +21,7 @@ from horsies.core.models.worker_profile import IsolatedChildren, WorkerProfile
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker_manifest import (
     CurrentDirectory,
+    TaskFacts,
     child_argv,
     child_sys_path,
     python_child_launch,
@@ -73,7 +74,7 @@ def _manifest_json(profile: str | None) -> str:
     manifest = to_worker_manifest(
         config,
         profile=profile,
-        tasks={'app.tasks.add': Execution.ISOLATED},
+        tasks={'app.tasks.add': TaskFacts(execution=Execution.ISOLATED, error_codes=())},
         child_launch=launch,
         idempotency_reservation_window=timedelta(minutes=1),
     )

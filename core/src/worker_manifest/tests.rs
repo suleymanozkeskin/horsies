@@ -111,9 +111,12 @@ pub(crate) fn manifest(profiles: Value, request: Value) -> Value {
             "reject_bytes": {"kind": "NO_LIMIT"}
         },
         "tasks": {
-            "app.tasks.add": "ISOLATED",
-            "app.tasks.fetch": "SHARED_ASYNC",
-            "app.tasks.resize": "SHARED_THREAD"
+            "app.tasks.add": {"execution": "ISOLATED", "error_codes": []},
+            "app.tasks.fetch": {
+                "execution": "SHARED_ASYNC",
+                "error_codes": ["RATE_LIMITED", "NOT_FOUND"]
+            },
+            "app.tasks.resize": {"execution": "SHARED_THREAD", "error_codes": []}
         },
         "child_launch": {
             "command": {
@@ -208,10 +211,11 @@ fn a_complete_manifest_parses() {
             name: "batch".to_owned()
         }
     );
-    assert_eq!(
-        manifest.tasks.get("app.tasks.fetch"),
-        Some(&Execution::SharedAsync)
-    );
+    let fetch = &manifest.tasks["app.tasks.fetch"];
+    assert_eq!(fetch.execution, Execution::SharedAsync);
+    let codes: Vec<&str> = fetch.error_codes.iter().map(|code| code.as_str()).collect();
+    assert_eq!(codes, ["NOT_FOUND", "RATE_LIMITED"]);
+    assert!(manifest.tasks["app.tasks.add"].error_codes.is_empty());
     assert_eq!(manifest.child_launch.log_level, WorkerLogLevel::Info);
     match &manifest.claim.queues {
         Queues::Custom { queues } => {
@@ -321,6 +325,60 @@ fn an_unknown_field_or_a_missing_one_is_refused_with_its_path() {
         refused_path(&manifest(json!({"batch": profile}), named("batch")))
             .starts_with("profiles.batch")
     );
+}
+
+/// The parser applies the rules of a declared set
+/// (`DeclaredErrorCodes::parse`) and names the field of the task.
+#[test]
+fn a_bad_set_of_declared_codes_is_refused_at_the_task_field() {
+    for codes in [
+        json!(["RATE_LIMITED", "RATE_LIMITED"]),
+        json!(["rate_limited"]),
+        json!(["TimeoutError"]),
+        json!([""]),
+        json!(["TASK_TIMEOUT"]),
+        json!(["WORKFLOW_STOPPED"]),
+        json!([7]),
+        json!("RATE_LIMITED"),
+    ] {
+        let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+        document["tasks"]["app.tasks.fetch"]["error_codes"] = codes.clone();
+        let path = refused_path(&document);
+        assert!(
+            path.starts_with("tasks.app.tasks.fetch.error_codes"),
+            "{codes}: {path}"
+        );
+    }
+}
+
+/// A task record holds both facts and nothing else.
+#[test]
+fn a_task_record_without_its_codes_or_with_another_field_is_refused() {
+    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    document["tasks"]["app.tasks.add"] = json!({"execution": "ISOLATED"});
+    assert!(refused_path(&document).starts_with("tasks."));
+    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    document["tasks"]["app.tasks.add"] = json!("ISOLATED");
+    assert!(refused_path(&document).starts_with("tasks."));
+    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    document["tasks"]["app.tasks.add"]["queue"] = json!("default");
+    assert!(refused_path(&document).starts_with("tasks."));
+}
+
+/// The declared codes of a parsed task give the label of each error code.
+#[test]
+fn the_declared_codes_of_a_task_give_its_error_code_labels() {
+    use crate::core::task::{
+        error_code_label, ErrorCodeLabel, OperationalErrorCode, TaskErrorCode, UserCode,
+    };
+    let manifest = parsed(&manifest(json!({"batch": full_profile()}), named("batch")));
+    let fetch = &manifest.tasks["app.tasks.fetch"].error_codes;
+    let declared = TaskErrorCode::User(UserCode::parse("RATE_LIMITED").expect("a user code"));
+    let other = TaskErrorCode::User(UserCode::parse("GONE").expect("a user code"));
+    let built_in = TaskErrorCode::from(OperationalErrorCode::BrokerError);
+    assert_eq!(error_code_label(fetch, &declared).value(), "RATE_LIMITED");
+    assert_eq!(error_code_label(fetch, &other), ErrorCodeLabel::Undeclared);
+    assert_eq!(error_code_label(fetch, &built_in).value(), "BROKER_ERROR");
 }
 
 #[test]

@@ -23,7 +23,7 @@ use horsies_core::core::config::worker_profile::{
 };
 use horsies_core::manifest::WholeSeconds;
 use horsies_core::worker_manifest as wire;
-use horsies_core::{Execution, RetentionDays, TaskRegistry};
+use horsies_core::{DeclaredErrorCodes, Execution, RegisteredTask, RetentionDays, TaskRegistry};
 
 use super::{core_database_url, send_manifest, session_database};
 use crate::{
@@ -65,7 +65,9 @@ pub(crate) enum ChildLaunchRefused {
 /// The worker manifest of `config`. Pure: no I/O.
 ///
 /// - `tasks`: the app's registrations; each task's class is the
-///   `execution` of its options, `ISOLATED` for a task without options.
+///   `execution` of its options, `ISOLATED` for a task without options, and
+///   its declared error codes are the codes of its code type
+///   ([`task_records`]).
 /// - `profile`: the `--profile` value of the start.
 /// - `child_launch`: from [`rust_child_launch`].
 ///
@@ -100,7 +102,7 @@ pub(crate) fn worker_manifest(
         retention,
         resilience,
         payload,
-        tasks: task_classes(tasks),
+        tasks: task_records(tasks),
         child_launch,
     })
 }
@@ -139,18 +141,32 @@ pub(crate) fn rust_child_launch(
     })
 }
 
-/// The class of each registered task: the `execution` of its options,
-/// `ISOLATED` for a task registered without options. Pure.
-pub(crate) fn task_classes(tasks: &TaskRegistry) -> BTreeMap<String, Execution> {
+/// The record of each registered task: its class, the `execution` of its
+/// options (`ISOLATED` for a task registered without options), and the
+/// error codes that it declares (`RegisteredTask::error_codes`). Pure.
+pub(crate) fn task_records(tasks: &TaskRegistry) -> BTreeMap<String, wire::TaskManifest> {
     tasks
         .iter()
         .map(|(name, task)| {
-            let class = task
+            let execution = task
                 .task_options()
                 .map_or(Execution::Isolated, |options| options.execution);
-            (name.to_owned(), class)
+            let record = wire::TaskManifest {
+                execution,
+                error_codes: declared_codes(name, task),
+            };
+            (name.to_owned(), record)
         })
         .collect()
+}
+
+/// The declared error codes of the registered task `name`. The
+/// registration refused a set that breaks a rule (`register_task`), so a
+/// refusal here is a defect: it panics with the task and the cause.
+fn declared_codes(name: &str, task: &RegisteredTask) -> DeclaredErrorCodes {
+    DeclaredErrorCodes::parse(task.error_codes()).unwrap_or_else(|refused| {
+        panic!("task '{name}' was registered with error codes that the registration refuses: {refused}")
+    })
 }
 
 /// The database section of a worker: the pool of the worker process is the
@@ -752,11 +768,49 @@ mod tests {
 
     #[test]
     fn each_task_has_the_class_of_its_options() {
-        let classes = task_classes(&registry());
-        assert_eq!(classes["plain"], Execution::Isolated);
-        assert_eq!(classes["fan_out"], Execution::SharedAsync);
-        assert_eq!(classes["resize"], Execution::SharedThread);
-        assert_eq!(classes.len(), 3);
+        let records = task_records(&registry());
+        assert_eq!(records["plain"].execution, Execution::Isolated);
+        assert_eq!(records["fan_out"].execution, Execution::SharedAsync);
+        assert_eq!(records["resize"].execution, Execution::SharedThread);
+        assert_eq!(records.len(), 3);
+    }
+
+    #[test]
+    fn each_task_carries_the_codes_of_its_code_type_sorted() {
+        let mut tasks = registry();
+        tasks
+            .register(
+                "charge",
+                RegisteredTask::Blocking {
+                    task: Arc::new(EchoTask),
+                    meta: TaskMeta::default().with_error_codes(&["RATE_LIMITED", "CARD_DECLINED"]),
+                },
+            )
+            .unwrap();
+        let records = task_records(&tasks);
+        let codes: Vec<&str> = records["charge"]
+            .error_codes
+            .iter()
+            .map(|code| code.as_str())
+            .collect();
+        assert_eq!(codes, ["CARD_DECLINED", "RATE_LIMITED"]);
+        assert!(records["plain"].error_codes.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "task 'charge' was registered with error codes")]
+    fn a_set_that_the_registration_refuses_is_a_defect() {
+        let mut tasks = TaskRegistry::new();
+        tasks
+            .register(
+                "charge",
+                RegisteredTask::Blocking {
+                    task: Arc::new(EchoTask),
+                    meta: TaskMeta::default().with_error_codes(&["DUP", "DUP"]),
+                },
+            )
+            .unwrap();
+        let _records = task_records(&tasks);
     }
 
     #[test]

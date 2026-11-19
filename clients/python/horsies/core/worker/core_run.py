@@ -43,6 +43,7 @@ from horsies.core.worker_manifest import (
     CurrentDirectoryRead,
     CurrentDirectoryUnreadable,
     MainModuleLocator,
+    TaskFacts,
     child_argv,
     child_sys_path,
     current_interpreter_flags,
@@ -160,9 +161,13 @@ def worker_manifest_json(
             return Err(refused)
         case _ as unreachable:
             assert_never(unreachable)
-    tasks = registered_task_classes(
+    classes = registered_task_classes(
         (name, task.task_options_json) for name, task in app.tasks.items()
     )
+    tasks = {
+        name: TaskFacts(execution=classes[name], error_codes=task.task_error_codes)
+        for name, task in app.tasks.items()
+    }
     manifest = to_worker_manifest(
         app.config,
         profile=launch.profile,

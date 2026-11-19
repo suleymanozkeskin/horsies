@@ -23,7 +23,6 @@ use crate::broker::{BrokerError, PostgresBroker};
 use crate::core::config::app::AppConfig;
 use crate::core::config::queue::{CustomQueueConfig, QueueMode};
 use crate::core::config::worker_profile::{ProfileSelectionRefused, SelectedProfile};
-use crate::core::task::Execution;
 use crate::core::PostgresConfig;
 use crate::worker::children::{ChildLaunch, PreloadProgram};
 use crate::worker::claim_pass::RegisteredClasses;
@@ -37,7 +36,7 @@ use crate::worker::executor::supervisor::ChildCommand;
 use crate::worker::worker::Worker;
 use crate::worker_manifest::{
     ChildCommandManifest, ChildProgram as ManifestChildProgram, ClaimLease, ClusterWideCap,
-    PreloadLaunch, QueueConcurrency, Queues, WorkerLogLevel, WorkerManifest,
+    PreloadLaunch, QueueConcurrency, Queues, TaskManifest, WorkerLogLevel, WorkerManifest,
 };
 use crate::workflow_engine::child_spec::ChildSpecSource;
 
@@ -271,11 +270,11 @@ fn launch_of(manifest: &WorkerManifest, connection: ChildConnection) -> ChildLau
 }
 
 /// The class of each registered task. Pure.
-fn registered_of(tasks: &BTreeMap<String, Execution>) -> RegisteredClasses {
+fn registered_of(tasks: &BTreeMap<String, TaskManifest>) -> RegisteredClasses {
     RegisteredClasses::new(
         tasks
             .iter()
-            .map(|(name, execution)| (name.clone(), *execution))
+            .map(|(name, task)| (name.clone(), task.execution))
             .collect::<HashMap<_, _>>(),
     )
 }
