@@ -26,7 +26,16 @@ arbitrary-precision = ["serde_json/arbitrary_precision"]
 # tests/db_statement_layer.rs). The rust-pgbouncer job of
 # .github/workflows/tests-full.yml turns it on.
 pgbouncer-fixture-tests = []
+# The HTTP server of a metrics endpoint: `horsies metrics` serves the fleet
+# collector's `GET /metrics` with it (`telemetry::endpoint`,
+# `monitoring::fleet::serve_fleet_metrics`). It reuses optional dependencies of
+# `web`; no crate is added.
+metrics-endpoint = ["dep:axum", "tokio/net"]
+# The monitoring handler. It turns `metrics-endpoint` on too: the core tests
+# run with `--features web`, and the Python bridge, which builds `web`, serves
+# `horsies metrics`.
 web = [
+    "metrics-endpoint",
     "dep:async-stream",
     "dep:async-trait",
     "dep:axum",

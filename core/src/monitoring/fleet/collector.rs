@@ -24,6 +24,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::task::Execution;
+use crate::handle::CoreHandle;
 use crate::telemetry::catalog::MetricId;
 use crate::telemetry::declared::{
     DeclaredNames, DeclaredNamesRefused, ErrorCodeValues, QueueName, ScheduleName,
@@ -42,8 +43,8 @@ use super::gauges::{
     ScheduleLabels, StreamLabels, WorkerSeries,
 };
 use super::{
-    read_fleet_state, FleetPart, FleetQueryError, FleetState, FleetWorkers, OldestPending,
-    QueueTasks, ScheduleRuns, SchemaVersion, WorkflowCounts,
+    read_fleet_state, read_fleet_state_through, FleetPart, FleetQueryError, FleetState,
+    FleetWorkers, OldestPending, QueueTasks, ScheduleRuns, SchemaVersion, WorkflowCounts,
 };
 
 /// The least time between the starts of two reads of the fleet state.
@@ -367,6 +368,17 @@ pub async fn collect_fleet_state(
     stop: &CancellationToken,
 ) {
     collect_with(collector, || read_fleet_state(broker), stop).await;
+}
+
+/// [`collect_fleet_state`] through `handle`: a read connects first while no
+/// connect has succeeded ([`read_fleet_state_through`]); a failed connect is
+/// a read in which every part failed.
+pub async fn collect_fleet_state_through(
+    collector: &FleetCollector,
+    handle: &CoreHandle,
+    stop: &CancellationToken,
+) {
+    collect_with(collector, || read_fleet_state_through(handle), stop).await;
 }
 
 /// [`collect_fleet_state`] with the read `read`.
