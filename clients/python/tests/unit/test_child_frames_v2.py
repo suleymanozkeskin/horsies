@@ -58,7 +58,6 @@ from horsies.core.worker.child_frames import (
     CulpritUnknown,
     HandlerCounts,
     HandlerStatsFrame,
-    InWorkflow,
     LeftoverCancelFrame,
     LeftoverStuckFrame,
     LeftWorkEnd,
@@ -66,7 +65,6 @@ from horsies.core.worker.child_frames import (
     LoopBlockedFrame,
     LoopHoldsTasks,
     NoTaskLoop,
-    NotInWorkflow,
     NoTraceCarrier,
     PreloadRefusedFrame,
     ReadyFrame,
@@ -83,7 +81,6 @@ from horsies.core.worker.child_frames import (
     encode_child_frame,
     encode_preload_frame,
     run_trace_of,
-    run_workflow_of,
     stored_refusal_of,
 )
 from horsies.core.worker.child_inbox import ParentFrameInbox
@@ -103,7 +100,6 @@ from tests.fixtures.core_frames import (
     events_frame,
     framed,
     handler_kind,
-    in_workflow,
     init_frame,
     init_meta,
     pool,
@@ -1248,44 +1244,21 @@ class TestVersionThreeParentFrames:
     def test_a_run_frame_with_no_carrier_gives_none(self) -> None:
         assert run_trace_of(run_frame(task_id=TASK_ID).trace) == NoTraceCarrier()
 
-    def test_a_run_frame_gives_its_queue_its_attempt_and_its_workflow_node(self) -> None:
-        workflow_id = uuid.UUID('0190f2d8-7c1e-7a3b-9f00-00000000f001')
-        frame = run_frame(
-            task_id=TASK_ID,
-            queue_name='emails',
-            attempt=3,
-            workflow=in_workflow(workflow_id, 7),
-        )
+    def test_a_run_frame_gives_its_queue_and_its_attempt(self) -> None:
+        frame = run_frame(task_id=TASK_ID, queue_name='emails', attempt=3)
         assert (frame.queue_name, frame.attempt) == ('emails', 3)
-        assert run_workflow_of(frame.workflow) == InWorkflow(workflow_id=workflow_id, node_index=7)
         shared = shared_run_frame(
             dispatch=7,
             task_id=TASK_ID,
             work=thread_work(5_000),
             queue_name='emails',
             attempt=2,
-            workflow=in_workflow(workflow_id, 0),
         )
         assert (shared.queue_name, shared.attempt) == ('emails', 2)
-        assert run_workflow_of(shared.workflow) == InWorkflow(workflow_id=workflow_id, node_index=0)
 
-    def test_a_run_frame_of_a_task_that_no_node_links_gives_no_workflow(self) -> None:
-        frame = run_frame(task_id=TASK_ID)
-        assert frame.workflow == 'NOT_IN_WORKFLOW'
-        assert run_workflow_of(frame.workflow) == NotInWorkflow()
-
-    def test_the_largest_span_facts_decode(self) -> None:
-        workflow_id = uuid.UUID('0190f2d8-7c1e-7a3b-9f00-00000000f001')
-        frame = run_frame(
-            task_id=TASK_ID,
-            queue_name='q' * 52,
-            attempt=2**31,
-            workflow=in_workflow(workflow_id, 9_999),
-        )
+    def test_the_largest_attempt_and_queue_name_decode(self) -> None:
+        frame = run_frame(task_id=TASK_ID, queue_name='q' * 52, attempt=2**31)
         assert (len(frame.queue_name), frame.attempt) == (52, 2**31)
-        assert run_workflow_of(frame.workflow) == InWorkflow(
-            workflow_id=workflow_id, node_index=9_999,
-        )
 
     @pytest.mark.parametrize(
         ('key', 'value'),
@@ -1299,29 +1272,10 @@ class TestVersionThreeParentFrames:
             ('queue_name', None),
             ('queue_name', 5),
             ('queue_name', 'q' * 53),
-            ('workflow', None),
-            ('workflow', 'not_in_workflow'),
-            ('workflow', {'kind': 'in_dag'}),
-            ('workflow', {'kind': 'not_in_workflow', 'node_index': 0}),
-            ('workflow', {'kind': 'in_workflow', 'node_index': 0}),
-            ('workflow', {'kind': 'in_workflow', 'workflow_id': str(TASK_ID)}),
-            ('workflow', {'kind': 'in_workflow', 'workflow_id': 'f001', 'node_index': 0}),
-            ('workflow', {'kind': 'in_workflow', 'workflow_id': str(TASK_ID), 'node_index': -1}),
-            ('workflow', {'kind': 'in_workflow', 'workflow_id': str(TASK_ID), 'node_index': 10_000}),
-            ('workflow', {'kind': 'in_workflow', 'workflow_id': str(TASK_ID), 'node_index': '3'}),
-            (
-                'workflow',
-                {
-                    'kind': 'in_workflow',
-                    'workflow_id': str(TASK_ID),
-                    'node_index': 0,
-                    'root_workflow_id': str(TASK_ID),
-                },
-            ),
         ],
     )
     @pytest.mark.parametrize('kind', ['run', 'shared_run'])
-    def test_every_malformed_span_fact_is_refused(
+    def test_every_malformed_attempt_and_queue_name_is_refused(
         self,
         kind: str,
         key: str,
@@ -1333,9 +1287,9 @@ class TestVersionThreeParentFrames:
             case other:
                 pytest.fail(f'a malformed {key} is refused, got {other!r}')
 
-    @pytest.mark.parametrize('key', ['queue_name', 'attempt', 'workflow'])
+    @pytest.mark.parametrize('key', ['queue_name', 'attempt'])
     @pytest.mark.parametrize('kind', ['run', 'shared_run'])
-    def test_a_run_frame_without_a_span_fact_is_refused(self, kind: str, key: str) -> None:
+    def test_a_run_frame_without_its_queue_or_attempt_is_refused(self, kind: str, key: str) -> None:
         match _parent(_without(_run_of_kind(kind), key), b'{}'):
             case core.FrameRefused(reason=reason):
                 assert key in reason

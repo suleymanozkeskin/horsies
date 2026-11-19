@@ -49,7 +49,6 @@ fn task(execution: ExecutionClass, stored: &str) -> ClaimedTask {
         options: options(stored),
         trace: crate::events::RunTrace::NoCarrier,
         trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
-        workflow: crate::worker::executor::protocol::RunWorkflow::NotInWorkflow,
     }
 }
 
@@ -843,7 +842,6 @@ fn run_frame_bytes(claimed: &ClaimedTask) -> Vec<u8> {
         orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work: IsolatedWork::Run,
         input: TaskInputText::new("{}".to_owned()),
-        workflow: claimed.workflow,
         trace: crate::events::RunTrace::NoCarrier,
     }))
     .unwrap()

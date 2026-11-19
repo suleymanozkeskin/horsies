@@ -54,6 +54,7 @@ from horsies.core.worker.run_return import (
     MarkerEnd,
     StartedRunning,
     StoppedBeforeRunning,
+    run_workflow_of,
 )
 
 logger = get_logger('worker')
@@ -196,8 +197,8 @@ async def _set_running(
         deadline_in_ms=None,
     )
     match record:
-        case core.AttemptStarted(started_at=started_at):
-            return StartedRunning(started_at)
+        case core.AttemptStarted(started_at=started_at, workflow=workflow):
+            return StartedRunning(started_at, run_workflow_of(workflow))
         case core.AttemptMissed(reason=reason):
             return await _after_missed_start(
                 handle,

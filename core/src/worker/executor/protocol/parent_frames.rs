@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::bounds::{
     AsyncSeats, CancelGraceMs, ExecutorThreads, PoolMaxSize, PoolMinSize, TaskSendPool,
-    TaskTimeoutMs, ThreadSeats, WorkflowNodeIndex,
+    TaskTimeoutMs, ThreadSeats,
 };
 use super::event_batch::{decode_event_batch, EventBatch};
 use super::header::{pack, EncodedFrame, FrameEncodeError, NO_BODY};
@@ -95,24 +95,6 @@ impl TaskKind {
     pub fn is_workflow_task(self) -> bool {
         matches!(self, Self::WorkflowTask)
     }
-}
-
-/// The workflow node that links the task of a run, as the claim read it
-/// (`horsies_claim`, unlocked). The child names it on the span of the
-/// attempt. The start statement does not take it: it reads the node with
-/// the locked row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunWorkflow {
-    /// No workflow node links the task: a task of a send or a schedule, or
-    /// a workflow task whose node is gone (its start then misses with
-    /// `NODE_NOT_LINKED`).
-    NotInWorkflow,
-    /// The node at `node_index` of the workflow `workflow_id` links the
-    /// task.
-    InWorkflow {
-        workflow_id: Uuid,
-        node_index: WorkflowNodeIndex,
-    },
 }
 
 /// What a Python child imports before it reports ready.
@@ -331,8 +313,6 @@ pub struct RunFrame {
     /// `auto_terminate_orphaned_workflow_tasks`).
     pub orphan_self_heal: OrphanSelfHeal,
     pub work: IsolatedWork,
-    /// The workflow node that links the task, for the span of the attempt.
-    pub workflow: RunWorkflow,
     /// The trace carrier that the send stored on the task row. The child
     /// extracts it with the app's propagator.
     pub trace: RunTrace,
@@ -355,8 +335,6 @@ pub struct SharedRunFrame {
     /// As [`RunFrame::orphan_self_heal`].
     pub orphan_self_heal: OrphanSelfHeal,
     pub work: SharedWork,
-    /// As [`RunFrame::workflow`].
-    pub workflow: RunWorkflow,
     /// As [`RunFrame::trace`].
     pub trace: RunTrace,
     pub input: TaskInputText,
@@ -425,7 +403,6 @@ enum ParentWire<'a> {
         claimed_at: String,
         orphan_self_heal: bool,
         work: IsolatedWorkWire<'a>,
-        workflow: WorkflowWire,
         trace: TraceWire<'a>,
     },
     SharedRun {
@@ -438,7 +415,6 @@ enum ParentWire<'a> {
         claimed_at: String,
         orphan_self_heal: bool,
         work: SharedWorkWire<'a>,
-        workflow: WorkflowWire,
         trace: TraceWire<'a>,
     },
     Events,
@@ -528,13 +504,6 @@ enum ChildKindWire {
 enum TraceWire<'a> {
     Carrier { text: &'a str },
     NoCarrier,
-}
-
-#[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum WorkflowWire {
-    NotInWorkflow,
-    InWorkflow { workflow_id: Uuid, node_index: u64 },
 }
 
 #[derive(Serialize)]
@@ -659,19 +628,6 @@ fn trace_wire(trace: &RunTrace) -> TraceWire<'_> {
     }
 }
 
-fn workflow_wire(workflow: RunWorkflow) -> WorkflowWire {
-    match workflow {
-        RunWorkflow::NotInWorkflow => WorkflowWire::NotInWorkflow,
-        RunWorkflow::InWorkflow {
-            workflow_id,
-            node_index,
-        } => WorkflowWire::InWorkflow {
-            workflow_id,
-            node_index: node_index.get(),
-        },
-    }
-}
-
 fn refusal_wire(refusal: &StoredOptionsRefusal) -> RefusalWire<'_> {
     match refusal {
         StoredOptionsRefusal::OptionsUnreadable(reason) => RefusalWire::OptionsUnreadable {
@@ -741,7 +697,6 @@ pub fn encode_parent_frame(frame: &ParentFrame) -> Result<EncodedFrame<'_>, Fram
                 claimed_at: time_text(&run.claimed_at),
                 orphan_self_heal: self_heal_flag(run.orphan_self_heal),
                 work: isolated_work_wire(&run.work),
-                workflow: workflow_wire(run.workflow),
                 trace: trace_wire(&run.trace),
             },
             run.input.as_str().as_bytes(),
@@ -757,7 +712,6 @@ pub fn encode_parent_frame(frame: &ParentFrame) -> Result<EncodedFrame<'_>, Fram
                 claimed_at: time_text(&run.claimed_at),
                 orphan_self_heal: self_heal_flag(run.orphan_self_heal),
                 work: shared_work_wire(&run.work),
-                workflow: workflow_wire(run.workflow),
                 trace: trace_wire(&run.trace),
             },
             run.input.as_str().as_bytes(),
@@ -1059,26 +1013,6 @@ fn decode_trace(trace: &Fields<'_>) -> Result<RunTrace, MalformedFrame> {
     }
 }
 
-/// The workflow node of a run: `in_workflow` with the workflow id and a node
-/// index of 0 to [`super::bounds::MAX_WORKFLOW_NODE_INDEX`], or
-/// `not_in_workflow`.
-fn decode_workflow(workflow: &Fields<'_>) -> Result<RunWorkflow, MalformedFrame> {
-    match workflow.kind()? {
-        "in_workflow" => {
-            workflow.only(&["kind", "workflow_id", "node_index"])?;
-            Ok(RunWorkflow::InWorkflow {
-                workflow_id: workflow.task_id("workflow_id")?,
-                node_index: workflow.bounded_count("node_index")?,
-            })
-        }
-        "not_in_workflow" => {
-            workflow.only(&["kind"])?;
-            Ok(RunWorkflow::NotInWorkflow)
-        }
-        other => Err(workflow.unknown_kind(other)),
-    }
-}
-
 /// Whether `text` is one strict JSON object whose values are texts. Pure.
 fn is_carrier_object(text: &str) -> bool {
     check_json_text(text).is_ok() && serde_json::from_str::<BTreeMap<String, String>>(text).is_ok()
@@ -1095,7 +1029,6 @@ fn decode_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<RunFrame, MalformedF
         "claimed_at",
         "orphan_self_heal",
         "work",
-        "workflow",
         "trace",
     ])?;
     Ok(RunFrame {
@@ -1107,7 +1040,6 @@ fn decode_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<RunFrame, MalformedF
         claimed_at: fields.time("claimed_at")?,
         orphan_self_heal: OrphanSelfHeal::of_recovery_flag(fields.flag("orphan_self_heal")?),
         work: decode_isolated_work(&fields.object("work")?)?,
-        workflow: decode_workflow(&fields.object("workflow")?)?,
         trace: decode_trace(&fields.object("trace")?)?,
         input: TaskInputText::new(text_body(body)?),
     })
@@ -1125,7 +1057,6 @@ fn decode_shared_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<SharedRunFram
         "claimed_at",
         "orphan_self_heal",
         "work",
-        "workflow",
         "trace",
     ])?;
     Ok(SharedRunFrame {
@@ -1138,7 +1069,6 @@ fn decode_shared_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<SharedRunFram
         claimed_at: fields.time("claimed_at")?,
         orphan_self_heal: OrphanSelfHeal::of_recovery_flag(fields.flag("orphan_self_heal")?),
         work: decode_shared_work(&fields.object("work")?)?,
-        workflow: decode_workflow(&fields.object("workflow")?)?,
         trace: decode_trace(&fields.object("trace")?)?,
         input: TaskInputText::new(text_body(body)?),
     })

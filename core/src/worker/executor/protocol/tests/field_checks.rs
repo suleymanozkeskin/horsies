@@ -198,7 +198,6 @@ fn the_child_decoder_refuses_a_parent_frame() {
             cancel_grace_ms: CancelGraceMs::new(5_000).unwrap(),
         },
         input: TaskInputText::new("{}".to_owned()),
-        workflow: RunWorkflow::NotInWorkflow,
         trace: crate::events::RunTrace::NoCarrier,
     }))
     .unwrap()

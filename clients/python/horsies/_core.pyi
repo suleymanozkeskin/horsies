@@ -1228,11 +1228,26 @@ class QueueStartsFailed:
 
 @final
 class AttemptStarted:
-    """The row is RUNNING (and, for a workflow task, its node RUNNING), from started_at on the database clock. The start writes no runner beat."""
+    """The row is RUNNING (and, for a workflow task, its node RUNNING), from started_at on the database clock. The start writes no runner beat. workflow is the node that links the task."""
     @property
     def task_id(self) -> uuid.UUID: ...
     @property
     def started_at(self) -> datetime.datetime: ...
+    @property
+    def workflow(self) -> RunWorkflowNode | Literal['NOT_IN_WORKFLOW']: ...
+
+
+@final
+class RunWorkflowNode:
+    """The workflow node that links a started task: the node at node_index of the workflow
+    workflow_id, in the tree whose top-level workflow is root_workflow_id.
+    """
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def node_index(self) -> int: ...
+    @property
+    def root_workflow_id(self) -> uuid.UUID: ...
 
 
 @final
@@ -2738,17 +2753,6 @@ class TraceCarrier:
 
 
 @final
-class RunWorkflowNode:
-    """The workflow node that links the task of a run, as the claim read it: the node at
-    node_index of the workflow workflow_id.
-    """
-    @property
-    def workflow_id(self) -> uuid.UUID: ...
-    @property
-    def node_index(self) -> int: ...
-
-
-@final
 class RunFrame:
     """Run one task in an isolated child. The parent holds the deadline."""
     @property
@@ -2767,8 +2771,6 @@ class RunFrame:
     def orphan_self_heal(self) -> bool: ...
     @property
     def work(self) -> Literal['RUN'] | StoredOptionsRefused: ...
-    @property
-    def workflow(self) -> RunWorkflowNode | Literal['NOT_IN_WORKFLOW']: ...
     @property
     def trace(self) -> TraceCarrier | Literal['NO_CARRIER']: ...
     @property
@@ -2812,8 +2814,6 @@ class SharedRunFrame:
     def orphan_self_heal(self) -> bool: ...
     @property
     def work(self) -> AsyncTaskWork | ThreadTaskWork | StoredOptionsRefused: ...
-    @property
-    def workflow(self) -> RunWorkflowNode | Literal['NOT_IN_WORKFLOW']: ...
     @property
     def trace(self) -> TraceCarrier | Literal['NO_CARRIER']: ...
     @property

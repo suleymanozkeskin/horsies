@@ -1,8 +1,8 @@
-//! The content that version 3 adds: the trace and the facts of the attempt
-//! span (queue, attempt, workflow node) of the run frames, the start of the
-//! frames that end a run, the handler kind, the `events` frame and the
-//! `handler_stats` frame. Pinned bytes for each, a refusal for each
-//! malformed new field, and the named mismatch of a version-2 peer.
+//! The content that version 3 adds: the trace, the queue and the attempt of
+//! the run frames, the start of the frames that end a run, the handler
+//! kind, the `events` frame and the `handler_stats` frame. Pinned bytes for
+//! each, a refusal for each malformed new field, and the named mismatch of
+//! a version-2 peer.
 
 use serde_json::{json, Value};
 
@@ -111,7 +111,6 @@ fn the_run_frames_carry_the_stored_trace_carrier() {
             claimed_at: whole_second_claim_time(),
             orphan_self_heal: OrphanSelfHeal::Off,
             work: IsolatedWork::Run,
-            workflow: RunWorkflow::NotInWorkflow,
             trace: carrier_trace(),
             input: TaskInputText::new("{}".to_owned()),
         }),
@@ -121,7 +120,7 @@ fn the_run_frames_carry_the_stored_trace_carrier() {
                 r#""task_name":"app.tasks.add","queue_name":"default","attempt":1,"#,
                 r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"#,
-                r#""work":{"kind":"run"},"workflow":{"kind":"not_in_workflow"},"#,
+                r#""work":{"kind":"run"},"#,
                 r#""trace":{"kind":"carrier","text":"#,
                 r#""{\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\"}"}}"#,
             ),
@@ -141,7 +140,6 @@ fn the_run_frames_carry_the_stored_trace_carrier() {
             work: SharedWork::ThreadTask {
                 timeout_ms: TaskTimeoutMs::new(5_000).unwrap(),
             },
-            workflow: RunWorkflow::NotInWorkflow,
             trace: carrier_trace(),
             input: TaskInputText::new("{}".to_owned()),
         }),
@@ -153,7 +151,6 @@ fn the_run_frames_carry_the_stored_trace_carrier() {
                 r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":true,"#,
                 r#""work":{"kind":"thread_task","timeout_ms":5000},"#,
-                r#""workflow":{"kind":"not_in_workflow"},"#,
                 r#""trace":{"kind":"carrier","text":"#,
                 r#""{\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\"}"}}"#,
             ),
@@ -174,7 +171,6 @@ fn run_meta_without_trace() -> Value {
         "claimed_at": "2026-11-16T09:30:00Z",
         "orphan_self_heal": false,
         "work": {"kind": "run"},
-        "workflow": {"kind": "not_in_workflow"},
     })
 }
 
@@ -278,7 +274,6 @@ fn a_shared_run_frame_without_its_trace_is_refused() {
         "claimed_at": "2026-11-16T09:30:00Z",
         "orphan_self_heal": false,
         "work": {"kind": "thread_task", "timeout_ms": 5000},
-        "workflow": {"kind": "not_in_workflow"},
     });
     assert_eq!(
         malformed_parent_meta(&meta, b"{}"),
@@ -289,22 +284,11 @@ fn a_shared_run_frame_without_its_trace_is_refused() {
 }
 
 // ---------------------------------------------------------------------------
-// The facts of the attempt span in the run frames
+// The queue and the attempt of the run frames
 // ---------------------------------------------------------------------------
 
-/// The workflow of the run frames of these tests.
-const WORKFLOW: &str = "0190f5a2-7b1c-7d3e-8f00-00000000f001";
-
-/// The node at `node_index` of [`WORKFLOW`].
-fn in_workflow(node_index: u64) -> RunWorkflow {
-    RunWorkflow::InWorkflow {
-        workflow_id: task_id(WORKFLOW),
-        node_index: WorkflowNodeIndex::new(node_index).unwrap(),
-    }
-}
-
 #[test]
-fn the_run_frames_carry_the_queue_the_attempt_and_the_workflow_node() {
+fn the_run_frames_carry_the_queue_and_the_attempt() {
     assert_parent_bytes(
         &ParentFrame::Run(RunFrame {
             task_id: task_id(T5),
@@ -315,7 +299,6 @@ fn the_run_frames_carry_the_queue_the_attempt_and_the_workflow_node() {
             claimed_at: whole_second_claim_time(),
             orphan_self_heal: OrphanSelfHeal::Off,
             work: IsolatedWork::Run,
-            workflow: in_workflow(7),
             trace: RunTrace::NoCarrier,
             input: TaskInputText::new("{}".to_owned()),
         }),
@@ -325,10 +308,7 @@ fn the_run_frames_carry_the_queue_the_attempt_and_the_workflow_node() {
                 r#""task_name":"app.tasks.add","queue_name":"emails","attempt":3,"#,
                 r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"#,
-                r#""work":{"kind":"run"},"#,
-                r#""workflow":{"kind":"in_workflow","#,
-                r#""workflow_id":"0190f5a2-7b1c-7d3e-8f00-00000000f001","node_index":7},"#,
-                r#""trace":{"kind":"no_carrier"}}"#,
+                r#""work":{"kind":"run"},"trace":{"kind":"no_carrier"}}"#,
             ),
             b"{}",
         ),
@@ -346,7 +326,6 @@ fn the_run_frames_carry_the_queue_the_attempt_and_the_workflow_node() {
             work: SharedWork::ThreadTask {
                 timeout_ms: TaskTimeoutMs::new(5_000).unwrap(),
             },
-            workflow: in_workflow(0),
             trace: RunTrace::NoCarrier,
             input: TaskInputText::new("{}".to_owned()),
         }),
@@ -358,8 +337,6 @@ fn the_run_frames_carry_the_queue_the_attempt_and_the_workflow_node() {
                 r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"#,
                 r#""work":{"kind":"thread_task","timeout_ms":5000},"#,
-                r#""workflow":{"kind":"in_workflow","#,
-                r#""workflow_id":"0190f5a2-7b1c-7d3e-8f00-00000000f001","node_index":0},"#,
                 r#""trace":{"kind":"no_carrier"}}"#,
             ),
             b"{}",
@@ -367,10 +344,10 @@ fn the_run_frames_carry_the_queue_the_attempt_and_the_workflow_node() {
     );
 }
 
-/// The largest attempt, the largest node index and a queue name of 52
-/// characters round trip in both run frames.
+/// The largest attempt and a queue name of 52 characters round trip in both
+/// run frames.
 #[test]
-fn the_largest_span_facts_round_trip_in_both_run_frames() {
+fn the_largest_attempt_and_queue_name_round_trip_in_both_run_frames() {
     let queue_name = QueueName::new("q".repeat(crate::events::MAX_EVENT_QUEUE_NAME_CHARS)).unwrap();
     let run = ParentFrame::Run(RunFrame {
         task_id: task_id(T5),
@@ -381,7 +358,6 @@ fn the_largest_span_facts_round_trip_in_both_run_frames() {
         claimed_at: claim_time(),
         orphan_self_heal: OrphanSelfHeal::Off,
         work: IsolatedWork::Run,
-        workflow: in_workflow(MAX_WORKFLOW_NODE_INDEX),
         trace: RunTrace::NoCarrier,
         input: TaskInputText::new("{}".to_owned()),
     });
@@ -397,7 +373,6 @@ fn the_largest_span_facts_round_trip_in_both_run_frames() {
         work: SharedWork::ThreadTask {
             timeout_ms: TaskTimeoutMs::new(5_000).unwrap(),
         },
-        workflow: in_workflow(MAX_WORKFLOW_NODE_INDEX),
         trace: RunTrace::NoCarrier,
         input: TaskInputText::new("{}".to_owned()),
     });
@@ -429,7 +404,6 @@ fn shared_run_meta() -> Value {
         "claimed_at": "2026-11-16T09:30:00Z",
         "orphan_self_heal": false,
         "work": {"kind": "thread_task", "timeout_ms": 5000},
-        "workflow": {"kind": "not_in_workflow"},
         "trace": {"kind": "no_carrier"},
     })
 }
@@ -504,92 +478,6 @@ fn each_malformed_queue_name_is_refused_with_its_field() {
                 MalformedFrame::WrongType {
                     field: field(),
                     expected: ExpectedType::Text,
-                },
-            ),
-        ],
-    );
-}
-
-#[test]
-fn each_malformed_workflow_is_refused_with_its_field() {
-    let node = |workflow_id: Value, node_index: Value| json!({"kind": "in_workflow", "workflow_id": workflow_id, "node_index": node_index});
-    let past_the_largest = MAX_WORKFLOW_NODE_INDEX + 1;
-    assert_run_field_refusals(
-        "workflow",
-        &[
-            (
-                None,
-                MalformedFrame::MissingField {
-                    field: "workflow".to_owned(),
-                },
-            ),
-            (
-                Some(Value::Null),
-                MalformedFrame::WrongType {
-                    field: "workflow".to_owned(),
-                    expected: ExpectedType::Object,
-                },
-            ),
-            (
-                Some(json!({"kind": "in_dag"})),
-                MalformedFrame::UnknownKind {
-                    field: "workflow.kind".to_owned(),
-                    kind: BoundedText::cut("in_dag"),
-                },
-            ),
-            (
-                Some(json!({"kind": "not_in_workflow", "node_index": 0})),
-                MalformedFrame::UnknownField {
-                    field: "workflow.node_index".to_owned(),
-                },
-            ),
-            (
-                Some(json!({"kind": "in_workflow", "node_index": 0})),
-                MalformedFrame::MissingField {
-                    field: "workflow.workflow_id".to_owned(),
-                },
-            ),
-            (
-                Some(json!({"kind": "in_workflow", "workflow_id": WORKFLOW})),
-                MalformedFrame::MissingField {
-                    field: "workflow.node_index".to_owned(),
-                },
-            ),
-            (
-                Some(node(json!("f001"), json!(0))),
-                MalformedFrame::WrongType {
-                    field: "workflow.workflow_id".to_owned(),
-                    expected: ExpectedType::TaskId,
-                },
-            ),
-            (
-                Some(node(json!(WORKFLOW), json!(past_the_largest))),
-                MalformedFrame::OutOfBounds {
-                    field: "workflow.node_index".to_owned(),
-                },
-            ),
-            (
-                Some(node(json!(WORKFLOW), json!(-1))),
-                MalformedFrame::OutOfBounds {
-                    field: "workflow.node_index".to_owned(),
-                },
-            ),
-            (
-                Some(node(json!(WORKFLOW), json!("3"))),
-                MalformedFrame::WrongType {
-                    field: "workflow.node_index".to_owned(),
-                    expected: ExpectedType::WholeNumber,
-                },
-            ),
-            (
-                Some(json!({
-                    "kind": "in_workflow",
-                    "workflow_id": WORKFLOW,
-                    "node_index": 0,
-                    "root_workflow_id": WORKFLOW,
-                })),
-                MalformedFrame::UnknownField {
-                    field: "workflow.root_workflow_id".to_owned(),
                 },
             ),
         ],

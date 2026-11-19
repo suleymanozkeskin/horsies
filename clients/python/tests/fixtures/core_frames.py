@@ -33,15 +33,6 @@ TRACEPARENT: Final = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'
 QUEUE_NAME: Final = 'default'
 """The queue of the run frames of the tests."""
 
-NOT_IN_WORKFLOW: Final[dict[str, object]] = {'kind': 'not_in_workflow'}
-"""The workflow of a run frame whose task no workflow node links."""
-
-
-def in_workflow(workflow_id: uuid.UUID, node_index: int) -> dict[str, object]:
-    """The workflow of a run frame whose task the node at ``node_index`` of
-    the workflow ``workflow_id`` links."""
-    return {'kind': 'in_workflow', 'workflow_id': str(workflow_id), 'node_index': node_index}
-
 
 def carrier_trace(carrier: dict[str, str]) -> dict[str, object]:
     """The trace of a run frame whose task row stores ``carrier``, as the
@@ -76,11 +67,10 @@ def run_meta(
     claimed_at: datetime = CLAIMED_AT,
     orphan_self_heal: bool = False,
     work: dict[str, object] | None = None,
-    workflow: dict[str, object] = NOT_IN_WORKFLOW,
     trace: dict[str, object] = NO_CARRIER,
 ) -> dict[str, object]:
     """The metadata of an isolated run frame; ``work`` defaults to the run,
-    ``workflow`` to no node, ``trace`` to no carrier."""
+    ``trace`` to no carrier."""
     return {
         'kind': 'run',
         'task_id': str(task_id),
@@ -91,7 +81,6 @@ def run_meta(
         'claimed_at': claimed_at.isoformat(),
         'orphan_self_heal': orphan_self_heal,
         'work': work if work is not None else {'kind': 'run'},
-        'workflow': workflow,
         'trace': trace,
     }
 
@@ -106,7 +95,6 @@ def run_frame(
     claimed_at: datetime = CLAIMED_AT,
     orphan_self_heal: bool = False,
     work: dict[str, object] | None = None,
-    workflow: dict[str, object] = NOT_IN_WORKFLOW,
     trace: dict[str, object] = NO_CARRIER,
     input_json: str = '{}',
 ) -> core.RunFrame:
@@ -121,7 +109,6 @@ def run_frame(
             claimed_at=claimed_at,
             orphan_self_heal=orphan_self_heal,
             work=work,
-            workflow=workflow,
             trace=trace,
         ),
         input_json.encode('utf-8'),
@@ -151,11 +138,10 @@ def shared_run_meta(
     worker_id: str = WORKER_ID,
     claimed_at: datetime = CLAIMED_AT,
     orphan_self_heal: bool = False,
-    workflow: dict[str, object] = NOT_IN_WORKFLOW,
     trace: dict[str, object] = NO_CARRIER,
 ) -> dict[str, object]:
-    """The metadata of a shared run frame; ``workflow`` defaults to no
-    node, ``trace`` to no carrier."""
+    """The metadata of a shared run frame; ``trace`` defaults to no
+    carrier."""
     return {
         'kind': 'shared_run',
         'dispatch': dispatch,
@@ -167,7 +153,6 @@ def shared_run_meta(
         'claimed_at': claimed_at.isoformat(),
         'orphan_self_heal': orphan_self_heal,
         'work': work,
-        'workflow': workflow,
         'trace': trace,
     }
 
@@ -183,7 +168,6 @@ def shared_run_frame(
     worker_id: str = WORKER_ID,
     claimed_at: datetime = CLAIMED_AT,
     orphan_self_heal: bool = False,
-    workflow: dict[str, object] = NOT_IN_WORKFLOW,
     trace: dict[str, object] = NO_CARRIER,
     input_json: str = '{}',
 ) -> core.SharedRunFrame:
@@ -199,7 +183,6 @@ def shared_run_frame(
             worker_id=worker_id,
             claimed_at=claimed_at,
             orphan_self_heal=orphan_self_heal,
-            workflow=workflow,
             trace=trace,
         ),
         input_json.encode('utf-8'),
