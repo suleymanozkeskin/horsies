@@ -97,6 +97,13 @@ pub enum ErrorCode {
     TaskInvalidReturnType,
     TaskInvalidOptions,
     TaskInvalidQueue,
+    /// A code that a task declares fails the code-text rule: it is empty,
+    /// not `UPPER_SNAKE_CASE`, or the name of an exception class. A
+    /// reserved name or the name of a built-in code is
+    /// `CheckReservedCodeCollision`.
+    TaskInvalidErrorCode,
+    /// A task declares one error code more than once.
+    TaskDuplicateErrorCode,
 
     // Config/broker (HRS-200–HRS-299)
     ConfigInvalidQueueMode,
@@ -171,6 +178,8 @@ impl ErrorCode {
             Self::TaskInvalidReturnType => "HRS-101",
             Self::TaskInvalidOptions => "HRS-102",
             Self::TaskInvalidQueue => "HRS-103",
+            Self::TaskInvalidErrorCode => "HRS-112",
+            Self::TaskDuplicateErrorCode => "HRS-113",
             Self::ConfigInvalidQueueMode => "HRS-200",
             Self::ConfigInvalidClusterCap => "HRS-201",
             Self::ConfigInvalidPrefetch => "HRS-202",
@@ -238,7 +247,9 @@ impl ErrorCode {
             Self::TaskNoReturnType
             | Self::TaskInvalidReturnType
             | Self::TaskInvalidOptions
-            | Self::TaskInvalidQueue => ErrorCategory::Task,
+            | Self::TaskInvalidQueue
+            | Self::TaskInvalidErrorCode
+            | Self::TaskDuplicateErrorCode => ErrorCategory::Task,
 
             Self::ConfigInvalidQueueMode
             | Self::ConfigInvalidClusterCap
@@ -311,6 +322,8 @@ impl ErrorCode {
                 | Self::TaskInvalidReturnType
                 | Self::TaskInvalidOptions
                 | Self::TaskInvalidQueue
+                | Self::TaskInvalidErrorCode
+                | Self::TaskDuplicateErrorCode
         )
     }
 
@@ -680,6 +693,22 @@ mod tests {
     fn error_code_category_task() {
         assert_eq!(ErrorCode::TaskNoReturnType.category(), ErrorCategory::Task);
         assert_eq!(ErrorCode::TaskInvalidQueue.category(), ErrorCategory::Task);
+    }
+
+    /// Python `clients/python/horsies/core/errors.py`: `HRS-112` is
+    /// `TASK_INVALID_ERROR_CODE` and `HRS-113` is
+    /// `TASK_DUPLICATE_ERROR_CODE`.
+    #[test]
+    fn the_declared_code_refusals_are_task_codes_with_python_numbers() {
+        for (code, text) in [
+            (ErrorCode::TaskInvalidErrorCode, "HRS-112"),
+            (ErrorCode::TaskDuplicateErrorCode, "HRS-113"),
+        ] {
+            assert_eq!(code.as_code_str(), text);
+            assert_eq!(code.category(), ErrorCategory::Task);
+            assert!(code.is_task_error());
+            assert!(!code.is_config_error());
+        }
     }
 
     #[test]

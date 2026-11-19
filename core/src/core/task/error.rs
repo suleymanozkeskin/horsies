@@ -335,6 +335,14 @@ mod code_text;
 
 pub use code_text::{check_error_code_text, CodeTextRefusal};
 
+// The codes that a task declares and the `error_code` metric label.
+mod declared;
+
+pub use declared::{
+    error_code_label, DeclaredCodeRefusal, DeclaredCodesRefused, DeclaredErrorCode,
+    DeclaredErrorCodes, ErrorCodeLabel, UNDECLARED_LABEL,
+};
+
 /// An error code that task code chose.
 ///
 /// Only [`UserCode::parse`] builds one, so a user code never has the name of a built-in code or of a reserved
