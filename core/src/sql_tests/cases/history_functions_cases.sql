@@ -612,7 +612,7 @@ SELECT fixture_check(
     (SELECT count(*) = 5
             AND count(DISTINCT h.terminal_at) = 1 AND min(h.terminal_at) = now()
             AND count(DISTINCT h.result_digest) = 1
-            AND min(h.result_digest) = sha256(convert_to('{"expired":true}', 'UTF8'))
+            AND bool_and(h.result_digest = sha256(convert_to('{"expired":true}', 'UTF8')))
             AND bool_and(h.status = 'EXPIRED' AND h.terminalization_kind = 'EXPIRE_PENDING'
                          AND h.error_code = 'TASK_EXPIRED' AND h.final_failed_reason IS NULL)
      FROM horsies_task_history AS h WHERE h.task_id IN (SELECT id FROM ids WHERE name LIKE 'batch\_%'))

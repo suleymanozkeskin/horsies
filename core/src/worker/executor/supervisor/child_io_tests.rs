@@ -20,7 +20,7 @@ const TEST_WAIT: Duration = Duration::from_secs(10);
 
 fn shell(script: &str) -> ChildCommand {
     ChildCommand {
-        program: "/bin/sh".into(),
+        program: crate::test_support::SCRIPT_SHELL.into(),
         args: vec!["-c".into(), script.into()],
     }
 }
@@ -72,7 +72,7 @@ async fn the_child_gets_its_command_arguments_then_its_socket_and_the_worker_pid
     let path = test_file("argv");
     let script = format!(r#"printf '%s %s %s' "$0" "$#" "$2" > "{}""#, path.display());
     let command = ChildCommand {
-        program: "/bin/sh".into(),
+        program: crate::test_support::SCRIPT_SHELL.into(),
         args: vec!["-c".into(), script.into(), "-O".into()],
     };
     let spawner = Spawner::start().unwrap();

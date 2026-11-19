@@ -1,5 +1,5 @@
 //! Tests of the supervisor: the pure rules, then real child processes
-//! started through the spawner thread (`/bin/sh` scripts).
+//! started through the spawner thread (bash scripts).
 
 use std::io::Read;
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -413,16 +413,43 @@ fn the_mailbox_holds_four_frames_per_seat_and_two() {
 // Real children through the spawner thread
 // ---------------------------------------------------------------------------
 
-/// A `/bin/sh` child. The spawner appends the socket descriptor and the
+/// A bash child. The spawner appends the socket descriptor and the
 /// worker pid, so the script reads the descriptor as `$0`.
 fn shell(script: &str) -> ChildCommand {
     ChildCommand {
-        program: "/bin/sh".into(),
+        program: crate::test_support::SCRIPT_SHELL.into(),
         args: vec!["-c".into(), script.into()],
     }
 }
 
 const TEST_WAIT: Duration = Duration::from_secs(10);
+
+/// The buffer size that a request of [`SOCKET_BUFFER_BYTES`] gets for
+/// `option`. Linux caps the request at `net.core.wmem_max` (send) or
+/// `net.core.rmem_max` (receive) and reports twice what it keeps.
+#[cfg(target_os = "linux")]
+fn granted_buffer_bytes(option: libc::c_int) -> libc::c_int {
+    let limit_file = match option {
+        libc::SO_SNDBUF => "/proc/sys/net/core/wmem_max",
+        libc::SO_RCVBUF => "/proc/sys/net/core/rmem_max",
+        other => panic!("socket option {other} is not a buffer size"),
+    };
+    let limit: libc::c_int = std::fs::read_to_string(limit_file)
+        .unwrap_or_else(|error| panic!("read {limit_file}: {error}"))
+        .trim()
+        .parse()
+        .unwrap_or_else(|error| panic!("parse {limit_file}: {error}"));
+    SOCKET_BUFFER_BYTES.min(limit)
+}
+
+/// The buffer size that a request of [`SOCKET_BUFFER_BYTES`] gets for
+/// `option`. Other systems (macOS: `kern.ipc.maxsockbuf`) refuse a request
+/// over their limit and the socket pair fails, so a spawned child has the
+/// whole request.
+#[cfg(not(target_os = "linux"))]
+fn granted_buffer_bytes(_option: libc::c_int) -> libc::c_int {
+    SOCKET_BUFFER_BYTES
+}
 
 fn stop(spawner: Spawner) {
     assert_eq!(spawner.stop(TEST_WAIT), SpawnerStopReport::AllReaped);
@@ -453,7 +480,11 @@ async fn the_child_gets_its_socket_end_and_the_buffer_sizes() {
         .unwrap();
     for option in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
         let size = socket::buffer_size(child.socket.as_raw_fd(), option).unwrap();
-        assert!(size >= SOCKET_BUFFER_BYTES, "option {option}: {size}");
+        let granted = granted_buffer_bytes(option);
+        assert!(
+            size >= granted,
+            "option {option}: {size}, granted {granted}"
+        );
     }
     child.socket.set_read_timeout(Some(TEST_WAIT)).unwrap();
     let mut text = String::new();

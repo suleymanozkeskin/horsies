@@ -7,7 +7,7 @@
 //!   [`BEAT_CONNECT_TIMEOUT`]).
 //! - A write fails, then lands, on a pool that reaches the test database
 //!   through a gate that closes every connection until a deadline.
-//! - Children are `/bin/sh` processes that the spawner thread starts.
+//! - Children are shell processes that the spawner thread starts.
 
 use std::net::TcpListener;
 use std::num::NonZeroUsize;
@@ -1078,7 +1078,7 @@ fn scripted_child(claimed: &ClaimedTask, after_run: &str) -> ChildCommand {
         take_run = drop_socket_bytes(run_frame_bytes(claimed).len()),
     );
     ChildCommand {
-        program: "/bin/sh".into(),
+        program: crate::test_support::SCRIPT_SHELL.into(),
         args: vec!["-c".into(), script.into()],
     }
 }
