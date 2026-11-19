@@ -46,6 +46,7 @@ fn claimed_wire(n: u128) -> ClaimWireRow {
         retry_count: Some(1),
         max_retries: Some(3),
         trace_carrier: None,
+        trace_id: None,
         priority: Some(40),
         enqueued_at: Some(due()),
         short_by: None,
@@ -85,6 +86,7 @@ fn claimed_rows_come_in_claim_order_with_no_short_take() {
             retry_count: 1,
             max_retries: 3,
             trace: crate::events::RunTrace::NoCarrier,
+            trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
             priority: Priority::try_from(40).unwrap(),
             enqueued_at: due(),
             read,
@@ -189,6 +191,13 @@ fn rows_the_claim_never_returns_are_a_defect() {
             "short_with_a_task_column",
             vec![ClaimWireRow {
                 id: Some(task(1)),
+                ..short_wire(1)
+            }],
+        ),
+        (
+            "short_with_a_trace_id",
+            vec![ClaimWireRow {
+                trace_id: Some(vec![7; 16]),
                 ..short_wire(1)
             }],
         ),
@@ -621,4 +630,42 @@ fn each_miss_reason_reads_back_from_its_text() {
     ] {
         assert_eq!(StartMiss::from_wire(miss.as_str()), Some(miss));
     }
+}
+
+/// The stored trace id of a claimed row reaches the claimed row as its 16
+/// bytes; `NULL` claims with no trace id; another length was not written by
+/// a send and claims with no trace id.
+#[test]
+fn a_claimed_row_carries_its_stored_trace_id() {
+    let pass = decode_claim_pass(
+        vec![
+            ClaimWireRow {
+                trace_id: Some((1..=16).collect()),
+                ..claimed_wire(1)
+            },
+            claimed_wire(2),
+            ClaimWireRow {
+                trace_id: Some(vec![1; 15]),
+                ..claimed_wire(3)
+            },
+        ],
+        read(),
+    )
+    .expect("claimed rows with and without a trace id read");
+
+    let mut expected = [0_u8; 16];
+    for (byte, value) in expected.iter_mut().zip(1_u8..) {
+        *byte = value;
+    }
+    assert_eq!(pass.claimed[0].trace_id, StoredTraceId::TraceId(expected));
+    assert_eq!(pass.claimed[1].trace_id, StoredTraceId::NoTraceId);
+    assert_eq!(pass.claimed[2].trace_id, StoredTraceId::NoTraceId);
+    assert_eq!(
+        pass.claimed[0]
+            .trace_id
+            .log_field()
+            .map(|field| format!("{field}")),
+        Some("0102030405060708090a0b0c0d0e0f10".to_owned())
+    );
+    assert!(pass.claimed[1].trace_id.log_field().is_none());
 }

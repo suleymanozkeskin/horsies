@@ -35,7 +35,7 @@ use super::defects::{
     count_defect, AfterDefect, CatchPanic, GenerationEnd, Served, SlotDefect, SlotDefects,
     TasksFinished,
 };
-use super::dispatch::{AttemptEnd, NotRunCause, TimeoutCancel};
+use super::dispatch::{AttemptEnd, AttemptLog, NotRunCause, TimeoutCancel};
 use super::pool::{Answer, ExitNotSeen, MemoryLimit, PoolShared, QueuedRun, TaskLimit};
 use super::route::IsolatedDeadline;
 use super::seat_runs::SHARED_BACKSTOP_MARGIN;
@@ -288,10 +288,18 @@ async fn serve_generation(
             frame,
             deadline,
             answer,
+            log,
         } = run;
         let mut answer = TaskAnswer::new(answer);
-        let ran =
-            CatchPanic::new(run_one(shared, &mut channel, frame, deadline, &mut answer)).await;
+        let ran = CatchPanic::new(run_one(
+            shared,
+            &mut channel,
+            frame,
+            log,
+            deadline,
+            &mut answer,
+        ))
+        .await;
         let after = match ran {
             Ok(after) => after,
             Err(payload) => {
@@ -441,6 +449,7 @@ async fn run_one(
     shared: &PoolShared,
     channel: &mut ChildChannel,
     frame: RunFrame,
+    log: AttemptLog,
     deadline: IsolatedDeadline,
     answer: &mut TaskAnswer,
 ) -> AfterRun {
@@ -457,7 +466,7 @@ async fn run_one(
             // No beat would cover the task: it is not sent, and the child
             // is killed with the slot's lost-child path.
             tracing::error!(
-                task_id = %task_id,
+                task_id = %task_id, attempt = log.attempt.get(), trace_id = log.trace_id.log_field(),
                 pid = channel.pid().get(),
                 "the runner heartbeats failed closed; the task is not sent",
             );
@@ -486,7 +495,7 @@ async fn run_one(
             // Nothing reached the child: the frame failed in the slot's
             // own path, which is a defect (Python `_serve_slot`).
             tracing::error!(
-                task_id = %task_id,
+                task_id = %task_id, attempt = log.attempt.get(), trace_id = log.trace_id.log_field(),
                 error = %error,
                 "the run frame could not be encoded: {error}",
             );
@@ -496,7 +505,7 @@ async fn run_one(
             return AfterRun::Defect(SlotDefect::frame_not_encoded(&error));
         }
         Err(failure @ (SendFailure::Write(_) | SendFailure::TimedOut)) => {
-            tracing::warn!(task_id = %task_id, failure = %failure, "the run frame could not be sent");
+            tracing::warn!(task_id = %task_id, attempt = log.attempt.get(), trace_id = log.trace_id.log_field(), failure = %failure, "the run frame could not be sent");
             drop(held);
             let lost = lost_after_kill(channel).await;
             answer.send(end_of_loss(shared, channel, lost).await);
@@ -518,14 +527,23 @@ async fn run_one(
             if returned.task_id == task_id =>
         {
             tracing::debug!(
-                task_id = %task_id,
+                task_id = %task_id, attempt = log.attempt.get(), trace_id = log.trace_id.log_field(),
                 left = returned.left.count().get(),
                 "the body returned with work left on its loop; the deadline no longer applies",
             );
-            end_after_return(shared, channel, task_id, returned.returned, held, answer).await
+            end_after_return(
+                shared,
+                channel,
+                task_id,
+                log,
+                returned.returned,
+                held,
+                answer,
+            )
+            .await
         }
         FirstAnswer::Wait(FrameWait::Frame(other)) => {
-            tracing::error!(task_id = %task_id, frame = ?other, "an isolated child sent a frame out of turn");
+            tracing::error!(task_id = %task_id, attempt = log.attempt.get(), trace_id = log.trace_id.log_field(), frame = ?other, "an isolated child sent a frame out of turn");
             drop(held);
             let lost = channel.discard_violating_child().await;
             answer.send(end_of_loss(shared, channel, lost).await);
@@ -658,6 +676,7 @@ async fn end_after_return(
     shared: &PoolShared,
     channel: &mut ChildChannel,
     task_id: uuid::Uuid,
+    log: AttemptLog,
     returned: BodyEnd,
     held: HeldDispatch,
     answer: &mut TaskAnswer,
@@ -678,7 +697,7 @@ async fn end_after_return(
             if stuck.task_id == task_id =>
         {
             tracing::warn!(
-                task_id = %task_id,
+                task_id = %task_id, attempt = log.attempt.get(), trace_id = log.trace_id.log_field(),
                 alive = stuck.still.count().get(),
                 "the work a task left did not stop; killing its child",
             );
@@ -700,7 +719,7 @@ async fn end_after_return(
             AfterRun::ChildGone(TasksFinished::AtLeastOne)
         }
         FirstAnswer::Wait(FrameWait::Frame(other)) => {
-            tracing::error!(task_id = %task_id, frame = ?other, "an isolated child sent a frame out of turn");
+            tracing::error!(task_id = %task_id, attempt = log.attempt.get(), trace_id = log.trace_id.log_field(), frame = ?other, "an isolated child sent a frame out of turn");
             drop(held);
             let lost = channel.discard_violating_child().await;
             answer.send(end_once_seen(shared, channel, lost, returned_end).await);

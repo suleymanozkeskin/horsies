@@ -558,7 +558,7 @@ impl WorkerChildren {
         let route = match dispatch_route(task.execution, self.service().plan(), &task.options) {
             Ok(route) => route,
             Err(unserved) => {
-                tracing::error!(task_id = %task.task_id, "{unserved}; the row goes back to the queue");
+                tracing::error!(task_id = %task.task_id, attempt = task.retry.attempt().get(), trace_id = task.trace_id.log_field(), "{unserved}; the row goes back to the queue");
                 return Submitted::NotDispatched(NotRunCause::NoChildOfItsKind);
             }
         };
