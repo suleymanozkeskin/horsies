@@ -21,6 +21,8 @@ use std::time::Duration;
 #[cfg(feature = "metrics-endpoint")]
 use std::sync::Arc;
 
+use crate::worker::executor::handler_child::{handler_child_json, HandlerChildState};
+
 #[cfg(feature = "metrics-endpoint")]
 mod serve;
 
@@ -105,7 +107,10 @@ impl RunningEndpoint {
 }
 
 /// The `telemetry` column of a worker snapshot: the state of the metrics
-/// endpoint of the worker. Pure.
+/// endpoint (`endpoint`) and of the handler child (`handler_child`,
+/// [`handler_child_json`]) of the worker. Pure.
+///
+/// The `endpoint` member:
 ///
 /// - `{"endpoint": {"state": "off"}}`: no `--metrics-listen`.
 /// - `{"endpoint": {"state": "binding", "host": .., "port": ..}}`: the first
@@ -116,11 +121,17 @@ impl RunningEndpoint {
 ///   "bind_failed" | "thread_refused" | "runtime_refused", "detail": ..},
 ///   "down_since": RFC 3339}}`; a `bind_failed` cause also has
 ///   `failed_binds`, the failed binds in a row.
-pub(crate) fn telemetry_json(endpoint: &WorkerEndpoint) -> serde_json::Value {
+pub(crate) fn telemetry_json(
+    endpoint: &WorkerEndpoint,
+    handler_child: &HandlerChildState,
+) -> serde_json::Value {
     let endpoint = match endpoint {
         WorkerEndpoint::NoMetricsEndpoint => serde_json::json!({ "state": "off" }),
         #[cfg(feature = "metrics-endpoint")]
         WorkerEndpoint::Listen(endpoint) => endpoint.state_json(),
     };
-    serde_json::json!({ "endpoint": endpoint })
+    serde_json::json!({
+        "endpoint": endpoint,
+        "handler_child": handler_child_json(handler_child),
+    })
 }

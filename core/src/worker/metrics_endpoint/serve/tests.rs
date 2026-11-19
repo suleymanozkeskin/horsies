@@ -11,6 +11,7 @@ use super::*;
 use crate::telemetry::endpoint::bind_loopback_free_port;
 use crate::telemetry::exposition::PROMETHEUS_TEXT_CONTENT_TYPE;
 use crate::test_support::telemetry::worker_registry;
+use crate::worker::executor::handler_child::HandlerChildState;
 use crate::worker::executor::protocol::ProcessId;
 use crate::worker::executor::slots::{ChildLayout, PoolBoard, SlotPhase};
 use crate::worker::liveness::LockHoldView;
@@ -206,7 +207,10 @@ async fn a_port_in_use_is_down_with_its_cause_then_serves_once_free() {
         }
         other => panic!("expected a failed bind, got {other:?}"),
     }
-    let column = telemetry_json(&WorkerEndpoint::Listen(Arc::clone(&endpoint)));
+    let column = telemetry_json(
+        &WorkerEndpoint::Listen(Arc::clone(&endpoint)),
+        &HandlerChildState::Off,
+    );
     assert_eq!(column["endpoint"]["state"], "down");
     assert_eq!(column["endpoint"]["host"], "127.0.0.1");
     assert_eq!(column["endpoint"]["port"], port);
@@ -221,7 +225,10 @@ async fn a_port_in_use_is_down_with_its_cause_then_serves_once_free() {
     let (head, body) = answer(port, "GET", "/livez").await;
     assert!(head.starts_with("http/1.1 200 ok\r\n"), "{head}");
     assert_eq!(body, "live: the worker starts\n");
-    let column = telemetry_json(&WorkerEndpoint::Listen(Arc::clone(&endpoint)));
+    let column = telemetry_json(
+        &WorkerEndpoint::Listen(Arc::clone(&endpoint)),
+        &HandlerChildState::Off,
+    );
     assert_eq!(column["endpoint"]["state"], "serving");
     assert_eq!(
         column["endpoint"]["local_address"],
@@ -236,16 +243,25 @@ async fn a_port_in_use_is_down_with_its_cause_then_serves_once_free() {
 #[test]
 fn the_telemetry_column_names_each_endpoint_state() {
     assert_eq!(
-        telemetry_json(&WorkerEndpoint::NoMetricsEndpoint),
-        serde_json::json!({ "endpoint": { "state": "off" } })
+        telemetry_json(&WorkerEndpoint::NoMetricsEndpoint, &HandlerChildState::Off),
+        serde_json::json!({
+            "endpoint": { "state": "off" },
+            "handler_child": { "state": "off" },
+        })
     );
 
     let endpoint = loopback_endpoint(9100);
-    let listen = || telemetry_json(&WorkerEndpoint::Listen(Arc::clone(&endpoint)));
+    let listen = || {
+        telemetry_json(
+            &WorkerEndpoint::Listen(Arc::clone(&endpoint)),
+            &HandlerChildState::Off,
+        )
+    };
     assert_eq!(
         listen(),
         serde_json::json!({
-            "endpoint": { "state": "binding", "host": "127.0.0.1", "port": 9100 }
+            "endpoint": { "state": "binding", "host": "127.0.0.1", "port": 9100 },
+            "handler_child": { "state": "off" },
         })
     );
 
@@ -281,7 +297,8 @@ fn the_telemetry_column_names_each_endpoint_state() {
                     "failed_binds": 2,
                 },
                 "down_since": "2026-11-19T10:00:00.000000+00:00",
-            }
+            },
+            "handler_child": { "state": "off" },
         })
     );
 
@@ -296,7 +313,8 @@ fn the_telemetry_column_names_each_endpoint_state() {
                 "host": "127.0.0.1",
                 "port": 9100,
                 "local_address": "127.0.0.1:9100",
-            }
+            },
+            "handler_child": { "state": "off" },
         })
     );
 
@@ -316,7 +334,10 @@ fn the_telemetry_column_names_each_endpoint_state() {
     ] {
         let refused = loopback_endpoint(9100);
         refused.state.down(cause, first);
-        let column = telemetry_json(&WorkerEndpoint::Listen(Arc::clone(&refused)));
+        let column = telemetry_json(
+            &WorkerEndpoint::Listen(Arc::clone(&refused)),
+            &HandlerChildState::Off,
+        );
         assert_eq!(column["endpoint"]["state"], "down");
         assert_eq!(column["endpoint"]["cause"]["kind"], kind);
         assert_eq!(
