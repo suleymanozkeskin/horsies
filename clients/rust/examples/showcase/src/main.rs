@@ -196,7 +196,7 @@ fn check() -> Result<(), String> {
 mod web {
     use clap::{Args, ValueEnum};
     use horsies::web::{
-        Actions, AllowAll, MonitoringConfig, MonitoringUiConfig, TrustedHeader, ViewOnly,
+        Actions, AllowAll, MonitoringConfig, MonitoringUiConfig, TraceLink, TrustedHeader, ViewOnly,
     };
     use horsies::SchemaMode;
 
@@ -237,6 +237,7 @@ mod web {
         let monitoring = MonitoringConfig {
             ui: MonitoringUiConfig {
                 custom_css_url: options.custom_css_url.clone(),
+                trace_link: TraceLink::NoTraceLink,
             },
             actions: match options.enable_actions {
                 true => Actions::Enabled,

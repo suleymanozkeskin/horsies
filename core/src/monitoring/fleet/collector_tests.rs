@@ -11,7 +11,8 @@ use tokio::time::Instant;
 use super::*;
 use crate::monitoring::fleet::{
     ClassSeats, FleetQueryFailure, HeldStatus, HeldTasks, LastRun, LiveWorkerCounts, PendingCount,
-    PendingTasks, ScheduleLastRun, SeatCount, StreamOldest, FLEET_QUERY_TIMEOUT,
+    PendingTasks, ScheduleLastRun, SeatCount, StreamOldest, TelemetryDownCounts,
+    FLEET_QUERY_TIMEOUT,
 };
 use crate::{
     CustomQueueConfig, IntervalSchedule, ScheduleConfig, SchedulePattern, StreamCoverage,
@@ -160,6 +161,10 @@ fn full_state() -> FleetState {
                 },
                 shared_thread: SeatCount::default(),
             },
+            telemetry_down: TelemetryDownCounts {
+                endpoint: 1,
+                handler_child: 0,
+            },
         }),
         class_coverage: answered(ClassCoverage {
             checked_at: at(),
@@ -269,6 +274,32 @@ fn workers_and_seats_have_a_series_per_state_and_class_with_zeros() {
             "horsies_fleet_seats_in_use{execution=\"SHARED_THREAD\"} 0",
         ])
     );
+    assert_eq!(
+        samples(&text, "horsies_fleet_workers_telemetry_down"),
+        lines(&[
+            "horsies_fleet_workers_telemetry_down{part=\"endpoint\"} 1",
+            "horsies_fleet_workers_telemetry_down{part=\"handler_child\"} 0",
+        ])
+    );
+}
+
+/// The workers part gives the telemetry gauge: a workers part without an
+/// answer leaves it with no series, as the other gauges of the part.
+#[test]
+fn a_workers_part_without_an_answer_leaves_the_telemetry_down_gauge_with_no_series() {
+    let collector = FleetCollector::new(labels());
+    let _first = collector.record(&full_state());
+    let mut state = full_state();
+    state.workers = timed_out(FleetQuery::Workers);
+
+    let _second = collector.record(&state);
+
+    let text = collector.render();
+    assert_eq!(
+        samples(&text, "horsies_fleet_workers_telemetry_down"),
+        Vec::<String>::new()
+    );
+    assert_eq!(samples(&text, "horsies_fleet_seats"), Vec::<String>::new());
 }
 
 #[test]
@@ -424,10 +455,6 @@ fn the_exposition_holds_each_collector_metric_once_with_its_type() {
             "{name}"
         );
     }
-    assert_eq!(
-        samples(&text, "horsies_fleet_workers_telemetry_down"),
-        Vec::<String>::new()
-    );
     assert!(text.contains("# TYPE horsies_telemetry_series_dropped_total counter\n"));
     assert!(text.contains(
         "horsies_exporter_collect_duration_seconds_sum{query=\"workers\"} 0.02\n\

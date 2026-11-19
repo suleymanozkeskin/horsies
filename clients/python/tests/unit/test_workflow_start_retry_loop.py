@@ -47,6 +47,7 @@ def _broker(answer: object = None, *, raises: BaseException | None = None) -> An
     """A broker whose core handle answers the start with ``answer``, or
     raises ``raises``."""
     broker = MagicMock()
+    broker.app = None
     match raises:
         case None:
             broker._core_handle.start_workflow_async = AsyncMock(return_value=answer)
@@ -195,6 +196,7 @@ class TestSyncWrapperForwarding:
         """start_workflow passes resend_on_transient_err into the request."""
         spec = _make_spec()
         broker = MagicMock()
+        broker.app = None
         broker._core_handle.start_workflow.return_value = MagicMock(spec=core.WorkflowStarted)
 
         with (

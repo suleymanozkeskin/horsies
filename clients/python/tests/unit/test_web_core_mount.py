@@ -24,6 +24,7 @@ from starlette.requests import Request
 from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.queues import CustomQueueConfig, QueueMode
 from horsies.web import (
     INTENT_HEADER,
     INTENT_VALUE,
@@ -444,3 +445,38 @@ class TestThePage:
 
         assert core == (200, 'text/html; charset=utf-8', PYTHON_INJECTED_BLOCK)
 
+
+class TestFleetMetrics:
+    """`GET /metrics` is the fleet text of the core's handler behind the view
+    verdict; its label names come from the app config."""
+
+    pytestmark = [asyncio_tests]
+
+    async def test_a_refused_view_is_403(self) -> None:
+        core = await answer_of('GET', '/metrics', view=False, act=True)
+
+        assert core == Answer(status=403, body=NOT_AUTHORIZED, calls=('can_view',))
+
+    async def test_an_allowed_view_is_the_fleet_text(self) -> None:
+        core = await answer_of('GET', '/metrics', view=True, act=False)
+
+        assert core.status == 200
+        assert core.calls == ('can_view',)
+        assert isinstance(core.body, str)
+        assert '# TYPE horsies_queue_tasks gauge\n' in core.body
+
+
+class TestFleetMetricLabels:
+    """The label names of `/metrics` are checked when the app is built."""
+
+    def test_a_queue_name_that_is_the_fallback_text_is_refused(self) -> None:
+        app = Horsies(
+            AppConfig(
+                broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
+                queue_mode=QueueMode.CUSTOM,
+                custom_queues=[CustomQueueConfig(name='(unknown)')],
+            )
+        )
+
+        with pytest.raises(ValueError, match=r'\(unknown\)'):
+            create_monitoring_app(app, auth_policy=AllowAll())
