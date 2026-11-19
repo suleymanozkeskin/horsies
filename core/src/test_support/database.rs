@@ -64,6 +64,16 @@ const SETUP_LOCK_SQL: &str =
 const SETUP_UNLOCK_SQL: &str =
     "SELECT pg_advisory_unlock(hashtextextended('horsies_core_test_database_setup', 0))";
 
+/// The first server version whose `CREATE DATABASE` takes an ICU default
+/// collation (`LOCALE_PROVIDER icu`): PostgreSQL 15.
+const ICU_DATABASE_SERVER_VERSION: i32 = 150_000;
+
+/// Whether the default collation of the connected database ignores
+/// punctuation at the first level: `_b` sorts as `b`, between `a` and `ok`.
+/// Code-point order sorts `_b` first.
+const IGNORES_PUNCTUATION_SQL: &str =
+    "SELECT ARRAY(SELECT k FROM unnest(ARRAY['ok', '_b', 'a']) AS k ORDER BY k) = ARRAY['a', '_b', 'ok']";
+
 /// The inactive databases whose name starts with `$1`.
 const INACTIVE_DATABASES_SQL: &str = "SELECT d.datname::text
      FROM pg_database AS d
@@ -263,6 +273,30 @@ enum Source {
     Template,
     /// An empty database.
     Empty,
+    /// An empty database whose default collation ignores punctuation at the
+    /// first level ([`punctuation_blind_options`]).
+    EmptyIgnoringPunctuation,
+}
+
+/// The `CREATE DATABASE` options of a default collation that ignores
+/// punctuation at the first level, as glibc's `en_US.UTF-8` does: ICU
+/// `und-u-ka-shifted` from PostgreSQL 15; before it, the libc locale
+/// `en_US.utf8`, which the Debian images of PostgreSQL hold.
+async fn punctuation_blind_options() -> String {
+    let admin = admin_connection().await;
+    let version: i32 = admin
+        .query_one("SELECT current_setting('server_version_num')::integer", &[])
+        .await
+        .unwrap_or_else(|error| panic!("read the server version: {error}"))
+        .get(0);
+    match version >= ICU_DATABASE_SERVER_VERSION {
+        true => "TEMPLATE template0 ENCODING 'UTF8' LOCALE_PROVIDER icu \
+                 ICU_LOCALE 'und-u-ka-shifted' LOCALE 'C'"
+            .to_owned(),
+        false => "TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'en_US.utf8' \
+                  LC_CTYPE 'en_US.utf8'"
+            .to_owned(),
+    }
 }
 
 /// Creates a test database and schedules its drop at the shutdown of the
@@ -273,6 +307,10 @@ async fn create_database(source: Source, entry: RuntimeEntry) -> String {
         Source::Empty => {
             sweep_once().await;
             String::new()
+        }
+        Source::EmptyIgnoringPunctuation => {
+            sweep_once().await;
+            punctuation_blind_options().await
         }
     };
     let name = format!(
@@ -364,6 +402,30 @@ impl TestDatabase {
     /// An empty database.
     pub(crate) async fn create_empty() -> TestDatabase {
         TestDatabase::open(create_database(Source::Empty, RuntimeEntry::NoEntry).await).await
+    }
+
+    /// An empty database whose default collation ignores punctuation at the
+    /// first level, as glibc's `en_US.UTF-8` does.
+    ///
+    /// # Panics
+    ///
+    /// When the server cannot create such a database, or creates one whose
+    /// collation sorts `_b` before `a`: the test cannot run.
+    pub(crate) async fn create_empty_ignoring_punctuation() -> TestDatabase {
+        let name = create_database(Source::EmptyIgnoringPunctuation, RuntimeEntry::NoEntry).await;
+        let database = TestDatabase::open(name).await;
+        let ignores: bool = database
+            .client
+            .query_one(IGNORES_PUNCTUATION_SQL, &[])
+            .await
+            .unwrap_or_else(|error| panic!("read the collation order: {error}"))
+            .get(0);
+        assert!(
+            ignores,
+            "database {} sorts '_b' before 'a': the test needs a default collation that ignores punctuation",
+            database.name
+        );
+        database
     }
 
     async fn open(name: String) -> TestDatabase {
