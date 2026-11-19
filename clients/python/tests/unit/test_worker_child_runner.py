@@ -1898,7 +1898,14 @@ class TestAttemptElapsedMs:
 class TestStartAttempt:
     def test_a_started_row_runs_the_task_after_one_call(self) -> None:
         handle = _FakeChildHandle(
-            starts=[_record(core.AttemptStarted, task_id=uuid.UUID(TASK_ID), started_at=STARTED_AT)],
+            starts=[
+                _record(
+                    core.AttemptStarted,
+                    task_id=uuid.UUID(TASK_ID),
+                    started_at=STARTED_AT,
+                    workflow='NOT_IN_WORKFLOW',
+                ),
+            ],
         )
 
         result = _start_with(handle)
@@ -1944,7 +1951,14 @@ class TestStartAttempt:
         from horsies.core.worker.child_runner import StartWithin
 
         handle = _FakeChildHandle(
-            starts=[_record(core.AttemptStarted, task_id=uuid.UUID(TASK_ID), started_at=STARTED_AT)],
+            starts=[
+                _record(
+                    core.AttemptStarted,
+                    task_id=uuid.UUID(TASK_ID),
+                    started_at=STARTED_AT,
+                    workflow='NOT_IN_WORKFLOW',
+                ),
+            ],
         )
 
         assert _start_with(handle, start_check=lambda: StartWithin(milliseconds=250)) == STARTED
