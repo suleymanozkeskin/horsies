@@ -370,14 +370,18 @@ def register(app: Horsies) -> None:
         return TaskResult(ok=email)
 ```
 
-A `TaskError` takes the code as a plain `str`: pass `ChargeCode.CARD_DECLINED.value`, not the member. Declaring is optional, and the default is `()`. A user code that the task does not declare still works everywhere; its metric label is `undeclared`. The decorator refuses:
+A `TaskError` takes the code as a plain `str`: pass `ChargeCode.CARD_DECLINED.value`, not the member. Declaring is optional, and the default is `()`. A user code that the task does not declare still works everywhere; its metric label is `undeclared`.
+
+The codes that the exception mappers can produce are declared with no second declaration: the values of the task's `exception_mapper` and of `AppConfig.exception_mapper` (as the app config holds it when the task is defined). A code that a task body returns directly needs `error_codes=`.
+
+The decorator refuses:
 
 - a value that is neither an `Enum` class nor a tuple (a list, a string, an `Enum` member): `HRS-102`;
 - a code that is empty, not `UPPER_SNAKE_CASE`, or an exception class name: `HRS-112`;
 - a built-in code or `WORKFLOW_STOPPED`: `HRS-212`;
 - a code given twice: `HRS-113`.
 
-The task function keeps the codes in `task_error_codes`, in the order of the declaration. `horsies check` lists them.
+The task function keeps the codes in `task_error_codes`: the declared codes in the order of the declaration, then each mapper code that is not in the list yet, first the task's mapper, then the app's. `horsies check` lists them.
 
 ### Assign to Queue (CUSTOM Mode)
 

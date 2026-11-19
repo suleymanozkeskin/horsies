@@ -43,7 +43,10 @@ before you upgrade a 0.7 deployment.
   (`HRS-102`), a code that is empty, not `UPPER_SNAKE_CASE` or an exception
   class name (`HRS-112`, new `TASK_INVALID_ERROR_CODE`), a built-in code or
   `WORKFLOW_STOPPED` (`HRS-212`), and a code given twice (`HRS-113`, new
-  `TASK_DUPLICATE_ERROR_CODE`).
+  `TASK_DUPLICATE_ERROR_CODE`). The codes of the task's `exception_mapper`
+  and of `AppConfig.exception_mapper` are added to `task_error_codes` with
+  no second declaration; a code that the body returns directly needs
+  `error_codes=`.
 
 ### Changed
 

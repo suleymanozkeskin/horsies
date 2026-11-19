@@ -4,6 +4,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use horsies_core::catalog::CODE_CATALOGS;
+use horsies_core::events::EVENT_CONTRACT;
 use horsies_core::manifest_schema::{
     PRODUCER_MANIFEST, SCHEDULER_MANIFEST, WORKER_MANIFEST, WORKFLOW_SPEC_DATA,
 };
@@ -15,6 +16,7 @@ use crate::error_classes::{
     error_modules, exception_modules, render_error_detail_module, render_error_module,
     render_exception_module, render_new_type_module, ERROR_DETAIL_MODULE,
 };
+use crate::events::{render_events_module, EVENTS_MODULE_FILE};
 use crate::manifest::{
     render_manifest_module, DumpEncoder, MANIFEST_MODULE_FILE, SCHEDULER_MANIFEST_MODULE_FILE,
     WORKER_MANIFEST_MODULE_FILE, WORKFLOW_SPEC_MODULE_FILE,
@@ -162,6 +164,10 @@ pub fn render_all() -> Vec<GeneratedFile> {
         });
     }
     files.push(GeneratedFile {
+        relative_path: catalog_folder.join(EVENTS_MODULE_FILE),
+        text: render_events_module(&EVENT_CONTRACT),
+    });
+    files.push(GeneratedFile {
         relative_path: PathBuf::from(CORE_STUB_FILE),
         text: render_core_stub(&CORE_MODULE),
     });
@@ -306,11 +312,11 @@ mod tests {
         // worker_manifest.py, scheduler_manifest.py, workflow_spec.py,
         // one file per constant module, error_detail.py, one file per new
         // type, one file per error module, one file per exception-class
-        // module, _core.pyi
+        // module, events.py, _core.pyi
         assert_eq!(
             files.len(),
             modules.len()
-                + 6
+                + 7
                 + CONSTANT_MODULES.len()
                 + 1
                 + TEXT_NEW_TYPES.len()

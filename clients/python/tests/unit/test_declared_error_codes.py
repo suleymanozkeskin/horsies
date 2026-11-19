@@ -4,13 +4,15 @@ The decorator takes an `Enum` class (its member values) or a tuple of code
 texts. It refuses a value of another form (HRS-102), a code that fails the
 code-text rule (HRS-112), a built-in or reserved name (HRS-212) and a code
 given twice (HRS-113), and it keeps the declared codes on the task
-function. `horsies check` lists them.
+function, with the codes of the task's and the app's exception mappers.
+`horsies check` lists them.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic import SecretStr
@@ -23,6 +25,7 @@ from horsies.core.declared_error_codes import (
     RepeatedCodeRefused,
     ReservedNameRefused,
     parse_declared_error_codes,
+    with_mapper_codes,
 )
 from horsies.core.errors import (
     ErrorCode,
@@ -51,12 +54,15 @@ class LowerCaseCodes(Enum):
     DECLINED = 'declined'
 
 
-def _app() -> Horsies:
+def _app(
+    exception_mapper: Mapping[type[BaseException], str] | None = None,
+) -> Horsies:
     return Horsies(
         AppConfig(
             broker=PostgresConfig(
                 database_url=SecretStr('postgresql://user:pass@127.0.0.1:1/none'),
             ),
+            exception_mapper=dict(exception_mapper or {}),
         ),
     )
 
@@ -155,6 +161,54 @@ class TestParse:
         ]
 
 
+class TestWithMapperCodes:
+    def test_the_declared_codes_come_first_then_each_mapper_in_entry_order(
+        self,
+    ) -> None:
+        assert with_mapper_codes(
+            ('CARD_DECLINED',),
+            {TimeoutError: 'GATEWAY_SLOW', KeyError: 'MISSING_ACCOUNT'},
+            {ValueError: 'BAD_AMOUNT'},
+        ) == ('CARD_DECLINED', 'GATEWAY_SLOW', 'MISSING_ACCOUNT', 'BAD_AMOUNT')
+
+    def test_a_code_comes_once_at_its_first_place(self) -> None:
+        assert with_mapper_codes(
+            ('GATEWAY_SLOW',),
+            {TimeoutError: 'GATEWAY_SLOW', KeyError: 'BAD_AMOUNT'},
+            {ValueError: 'BAD_AMOUNT', OSError: 'GATEWAY_SLOW'},
+        ) == ('GATEWAY_SLOW', 'BAD_AMOUNT')
+
+    def test_a_task_with_no_mapper_takes_the_app_mapper_codes(self) -> None:
+        assert with_mapper_codes((), None, {ValueError: 'BAD_AMOUNT'}) == (
+            'BAD_AMOUNT',
+        )
+
+    def test_no_declaration_and_no_mapper_entry_is_no_code(self) -> None:
+        assert with_mapper_codes((), None, {}) == ()
+        assert with_mapper_codes((), {}, {}) == ()
+
+    @pytest.mark.parametrize(
+        'value',
+        ['TASK_TIMEOUT', 'UNHANDLED_EXCEPTION', 'WORKFLOW_STOPPED', 'timeout', '', 7],
+    )
+    def test_a_mapper_value_that_is_not_a_user_code_is_not_added(
+        self,
+        value: object,
+    ) -> None:
+        mapper = cast('Mapping[type[BaseException], str]', {TimeoutError: value})
+        assert with_mapper_codes(('CARD_DECLINED',), mapper, mapper) == (
+            'CARD_DECLINED',
+        )
+
+    def test_the_result_is_a_declared_set_that_the_parser_accepts(self) -> None:
+        codes = with_mapper_codes(
+            ('CARD_DECLINED',),
+            {TimeoutError: 'GATEWAY_SLOW', KeyError: 'TASK_TIMEOUT'},
+            {ValueError: 'CARD_DECLINED', OSError: 'WORKFLOW_STOPPED'},
+        )
+        assert parse_declared_error_codes(codes) == Ok(codes)
+
+
 class TestDecorator:
     def test_a_task_declares_no_code_by_default(self) -> None:
         app = _app()
@@ -247,3 +301,47 @@ class TestDecorator:
             ('charge', ('CARD_DECLINED', 'RATE_LIMITED')),
             ('send_mail', ('BOUNCED',)),
         ]
+
+    def test_the_mapper_codes_of_the_task_and_the_app_are_declared(self) -> None:
+        app = _app({ValueError: 'BAD_AMOUNT'})
+
+        @app.task(
+            'charge',
+            error_codes=('CARD_DECLINED',),
+            exception_mapper={TimeoutError: 'GATEWAY_SLOW'},
+        )
+        def charge(*, amount: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=amount)
+
+        assert charge.task_error_codes == (
+            'CARD_DECLINED',
+            'GATEWAY_SLOW',
+            'BAD_AMOUNT',
+        )
+
+    def test_a_mapper_code_that_the_task_also_declares_is_not_a_repeat(
+        self,
+    ) -> None:
+        app = _app({ValueError: 'CARD_DECLINED'})
+
+        @app.task(
+            'charge',
+            error_codes=('CARD_DECLINED',),
+            exception_mapper={TimeoutError: 'CARD_DECLINED'},
+        )
+        def charge(*, amount: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=amount)
+
+        assert charge.task_error_codes == ('CARD_DECLINED',)
+
+    def test_the_app_lists_a_task_whose_only_codes_come_from_a_mapper(
+        self,
+    ) -> None:
+        app = _app({ValueError: 'BAD_AMOUNT'})
+
+        @app.task('resize')
+        def resize(*, width: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=width)
+
+        del resize
+        assert app.declared_error_codes() == {'resize': ('BAD_AMOUNT',)}

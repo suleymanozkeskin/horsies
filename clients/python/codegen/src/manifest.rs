@@ -295,7 +295,9 @@ fn words(root: &str) -> String {
     snake_case(root).replace('_', " ")
 }
 
-fn snake_case(name: &str) -> String {
+/// `ProducerManifest` as `producer_manifest`: an underscore before each
+/// upper-case letter but the first, then all lower case.
+pub(crate) fn snake_case(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 4);
     for (position, character) in name.char_indices() {
         if position > 0 && character.is_uppercase() {

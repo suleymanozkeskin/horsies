@@ -8,6 +8,8 @@
 //! - [`exposition`]: the Prometheus text of a registry.
 //! - [`trace_carrier`]: the carrier that a client hands the core at a send,
 //!   its bounds, and the text that a row stores.
+//! - [`worker`]: the telemetry value of a worker parent: the metric handles
+//!   of its lifecycle points, and the bounded queue of its events.
 
 pub mod catalog;
 pub mod declared;
@@ -17,3 +19,4 @@ pub mod registry;
 #[cfg(test)]
 mod registry_tests;
 pub mod trace_carrier;
+pub mod worker;

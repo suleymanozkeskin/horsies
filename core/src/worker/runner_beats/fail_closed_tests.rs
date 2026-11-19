@@ -1009,6 +1009,7 @@ fn claimed_task() -> ClaimedTask {
             max_retries: 0,
         },
         options: read_stored_options(Some("{}")),
+        trace: crate::events::RunTrace::NoCarrier,
     }
 }
 

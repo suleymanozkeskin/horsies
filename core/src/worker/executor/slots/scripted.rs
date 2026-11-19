@@ -71,6 +71,7 @@ pub(super) fn task(number: u128, execution: ExecutionClass) -> ClaimedTask {
             max_retries: 0,
         },
         options: read_stored_options(Some("{}")),
+        trace: crate::events::RunTrace::NoCarrier,
     }
 }
 
