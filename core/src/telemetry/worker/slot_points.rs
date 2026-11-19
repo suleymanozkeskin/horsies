@@ -6,7 +6,7 @@
 //! |---|---|---|
 //! | [`WorkerTelemetry::child_started`] | `ChildStarted` | `horsies.worker.children.started`, `horsies.worker.child.boot.duration` |
 //! | [`WorkerTelemetry::child_replaced`] | `ChildReplaced` | `horsies.worker.children.replaced` |
-//! | [`WorkerTelemetry::slot_down`] | `SlotDown` | none (the slot board gives `horsies.worker.slots.down` at a scrape) |
+//! | [`WorkerTelemetry::slot_down`] | `SlotDown` | none (each worker snapshot sets `horsies.worker.slots.down`, `snapshot_points`) |
 //! | [`WorkerTelemetry::slot_recovered`] | `SlotRecovered` | none |
 
 use std::time::Duration;

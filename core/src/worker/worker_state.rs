@@ -17,6 +17,7 @@ use crate::core::config::app::AppConfig;
 use crate::core::config::worker_profile::{TaskLimitSetting, WorkerProfile};
 use crate::core::task::execution::Execution;
 
+use crate::telemetry::worker::WorkerTelemetry;
 use crate::worker::children::ChildrenView;
 use crate::worker::config::WorkerConfig;
 use crate::worker::executor::handler_child::HandlerChildView;
@@ -24,6 +25,12 @@ use crate::worker::executor::slots::{DownState, PoolService};
 use crate::worker::executor::supervisor::BootFailureCause;
 use crate::worker::metrics_endpoint::{telemetry_json, WorkerEndpoint};
 use crate::worker::recovery::ReaperHealth;
+
+mod gauge_facts;
+
+pub use gauge_facts::{
+    down_by_kind, seats_in_use_of, seats_of, ClassCounts, ParentRss, SeatsInUse,
+};
 
 /// One worker snapshot. Every NOT NULL column of the baseline table is named
 /// (the baseline has no column defaults); `children_memory_mb` is left NULL:
@@ -118,8 +125,15 @@ pub fn class_capacity_json(budgets: &[BudgetColumn]) -> serde_json::Value {
 /// `class_capacity_json(self.cfg.claim_plan(), self._claim_capacity())`).
 /// Pure.
 pub fn class_capacity_of(service: &PoolService) -> serde_json::Value {
+    class_capacity_json(&budget_columns(service))
+}
+
+/// Each budget of the plan of the worker's slots now, with its capacity in
+/// service and the classes it claims: the entries of the `class_capacity`
+/// column. Pure.
+pub fn budget_columns(service: &PoolService) -> Vec<BudgetColumn> {
     let plan = service.plan();
-    let columns: Vec<BudgetColumn> = service
+    service
         .capacities()
         .into_iter()
         .map(|capacity| BudgetColumn {
@@ -127,8 +141,7 @@ pub fn class_capacity_of(service: &PoolService) -> serde_json::Value {
             capacity: capacity.in_service,
             serves: plan.served_by(capacity.budget),
         })
-        .collect();
-    class_capacity_json(&columns)
+        .collect()
 }
 
 /// The columns of a worker snapshot that the children and the claim limits
@@ -167,6 +180,9 @@ impl ClaimColumns {
 
 /// Resource metrics collected from sysinfo.
 struct ResourceMetrics {
+    /// The RSS of the worker parent: `memory_usage_mb` and the `parent`
+    /// series of `horsies.worker.memory.rss` come from this one read.
+    parent_rss: ParentRss,
     memory_usage_mb: Option<f64>,
     memory_percent: Option<f64>,
     cpu_percent: Option<f64>,
@@ -199,12 +215,14 @@ fn collect_resource_metrics(sys: &mut System, pid: Pid) -> ResourceMetrics {
         let cpu_percent = process.cpu_usage() as f64;
 
         ResourceMetrics {
+            parent_rss: ParentRss::Bytes(rss_bytes),
             memory_usage_mb: Some((memory_mb * 100.0).round() / 100.0),
             memory_percent: Some((memory_percent * 100.0).round() / 100.0),
             cpu_percent: Some((cpu_percent * 100.0).round() / 100.0),
         }
     } else {
         ResourceMetrics {
+            parent_rss: ParentRss::Unreadable,
             memory_usage_mb: None,
             memory_percent: None,
             cpu_percent: None,
@@ -217,14 +235,29 @@ fn collect_resource_metrics(sys: &mut System, pid: Pid) -> ResourceMetrics {
 struct HeldRows {
     running: i32,
     claimed: i32,
+    /// The rows of each class that the claim counts against a budget:
+    /// `RUNNING`, and `CLAIMED` with a live lease (the in-flight rule of
+    /// the fleet read and the class report).
+    in_flight: ClassCounts,
 }
 
-/// The count of the RUNNING and the CLAIMED rows of a worker: `$1` the
-/// worker id.
+/// The count of the RUNNING and the CLAIMED rows of a worker, and of its
+/// rows in flight per class: `$1` the worker id. A `CLAIMED` row always has
+/// a lease (`horsies_tasks` check `(status = 'CLAIMED') = (claim_expires_at
+/// IS NOT NULL)`).
 static HELD_ROWS: TypedStatement = TypedStatement::new(
     "worker_held_rows",
     "SELECT COUNT(*) FILTER (WHERE status = 'RUNNING') AS running,
-            COUNT(*) FILTER (WHERE status = 'CLAIMED') AS claimed
+            COUNT(*) FILTER (WHERE status = 'CLAIMED') AS claimed,
+            COUNT(*) FILTER (WHERE execution = 'ISOLATED'
+                               AND (status = 'RUNNING' OR claim_expires_at > now()))
+                AS isolated_in_flight,
+            COUNT(*) FILTER (WHERE execution = 'SHARED_ASYNC'
+                               AND (status = 'RUNNING' OR claim_expires_at > now()))
+                AS shared_async_in_flight,
+            COUNT(*) FILTER (WHERE execution = 'SHARED_THREAD'
+                               AND (status = 'RUNNING' OR claim_expires_at > now()))
+                AS shared_thread_in_flight
      FROM horsies_tasks
      WHERE claimed_by_worker_id = $1 AND status IN ('RUNNING', 'CLAIMED')",
     &[ParameterType::Text],
@@ -258,9 +291,10 @@ static INSERT_WORKER_STATE: TypedStatement = TypedStatement::new(
     ],
 );
 
-/// Count the RUNNING and the CLAIMED rows of this worker in one statement
-/// on `connection` (Python `_count_only_running_for_worker` and
-/// `_count_claimed_for_worker`, two statements on one session).
+/// Count the RUNNING and the CLAIMED rows of this worker, and its rows in
+/// flight per class, in one statement on `connection` (Python
+/// `_count_only_running_for_worker` and `_count_claimed_for_worker`, two
+/// statements on one session).
 ///
 /// Errors: [`BrokerError::Statement`] for a failed statement;
 /// [`BrokerError::RowDecode`] when the row does not read.
@@ -275,10 +309,24 @@ async fn query_held_rows(
     let row = one_row(rows, statement)?;
     let running: i64 = column(&row, statement, "running")?;
     let claimed: i64 = column(&row, statement, "claimed")?;
+    let isolated: i64 = column(&row, statement, "isolated_in_flight")?;
+    let shared_async: i64 = column(&row, statement, "shared_async_in_flight")?;
+    let shared_thread: i64 = column(&row, statement, "shared_thread_in_flight")?;
     Ok(HeldRows {
         running: i32::try_from(running).unwrap_or(i32::MAX),
         claimed: i32::try_from(claimed).unwrap_or(i32::MAX),
+        in_flight: ClassCounts {
+            isolated: count_u32(isolated),
+            shared_async: count_u32(shared_async),
+            shared_thread: count_u32(shared_thread),
+        },
     })
+}
+
+/// A `count(*)` of the held rows as `u32`: at most `u32::MAX`. A count is
+/// never negative.
+fn count_u32(count: i64) -> u32 {
+    u32::try_from(count).unwrap_or(u32::MAX)
 }
 
 /// What a worker snapshot is built from. The resource reader keeps its
@@ -297,8 +345,23 @@ pub(crate) struct SnapshotSource {
     pub endpoint: WorkerEndpoint,
     /// The handler child of the worker, for the `telemetry` column.
     pub handler_child: HandlerChildView,
+    /// Where each snapshot sets the worker gauges of the values it writes.
+    pub telemetry: WorkerTelemetry,
     sys: System,
     sys_pid: Pid,
+}
+
+/// What one snapshot reads from the slot board and the process. Its columns
+/// and the worker gauges are written from this one read.
+struct ProcessRead {
+    /// The down slots: the `slots_down` column.
+    down: Vec<(usize, DownState)>,
+    /// The down slots of each kind.
+    down_by_kind: ClassCounts,
+    /// The budgets: the `class_capacity` column.
+    budgets: Vec<BudgetColumn>,
+    /// The memory and CPU of the worker parent.
+    resources: ResourceMetrics,
 }
 
 impl SnapshotSource {
@@ -316,6 +379,7 @@ impl SnapshotSource {
         worker_started_at: DateTime<Utc>,
         endpoint: WorkerEndpoint,
         handler_child: HandlerChildView,
+        telemetry: WorkerTelemetry,
     ) -> Self {
         let sys_pid = Pid::from(pid as usize);
         let mut sys = System::new();
@@ -337,9 +401,30 @@ impl SnapshotSource {
             worker_started_at,
             endpoint,
             handler_child,
+            telemetry,
             sys,
             sys_pid,
         }
+    }
+
+    /// Read the slot board and the process once, for the columns and the
+    /// gauges of one snapshot.
+    fn read_process(&mut self) -> ProcessRead {
+        let down = self.children.down_slots();
+        let down_by_kind = down_by_kind(&down, |slot| self.children.kind_of(slot));
+        ProcessRead {
+            down,
+            down_by_kind,
+            budgets: budget_columns(&self.children.service()),
+            resources: collect_resource_metrics(&mut self.sys, self.sys_pid),
+        }
+    }
+
+    /// Set the gauges of the slots and of the parent's memory from `read`.
+    fn record_process(&self, read: &ProcessRead) {
+        self.telemetry
+            .slots_read(seats_of(&read.budgets), read.down_by_kind);
+        self.telemetry.parent_rss_read(read.resources.parent_rss);
     }
 
     /// The `recovery_config` column: the recovery config, the two retention
@@ -392,10 +477,44 @@ pub(crate) enum SnapshotFailure {
     InsertFailed(BrokerError),
 }
 
-/// Count the held rows and insert one snapshot, on one connection of `pool`
-/// that passes the reserve gate ([`CheckoutClass::Batch`]): the snapshot is
-/// monitoring, not a per-task write (Python `_update_worker_state`: the
-/// counts and the insert on one session, under one `try`).
+/// The rows that this worker holds, counted on `connection`, which the
+/// insert of the same snapshot then uses.
+struct CountedRows {
+    connection: PooledConnection,
+    held: HeldRows,
+}
+
+/// Check out one connection of `pool` that passes the reserve gate
+/// ([`CheckoutClass::Batch`]) and count the rows that `worker_id` holds on
+/// it.
+///
+/// Errors: [`BrokerError::Statement`] for a failed checkout or statement;
+/// [`BrokerError::RowDecode`] when the row does not read.
+async fn count_held_rows(
+    pool: &CorePool,
+    log: StatementLog,
+    worker_id: &str,
+) -> Result<CountedRows, BrokerError> {
+    let mut connection = pool.checkout(CheckoutClass::Batch).await.map_err(|cause| {
+        BrokerError::Statement(StatementFailure::NotSent {
+            statement: HELD_ROWS.name(),
+            cause: NotSentCause::Checkout(cause),
+        })
+    })?;
+    let held = query_held_rows(&mut connection, log, worker_id).await?;
+    Ok(CountedRows { connection, held })
+}
+
+/// Read the slots and the process, count the held rows and insert one
+/// snapshot, on one connection of `pool` that passes the reserve gate
+/// ([`CheckoutClass::Batch`]): the snapshot is monitoring, not a per-task
+/// write (Python `_update_worker_state`: the counts and the insert on one
+/// session, under one `try`).
+///
+/// The worker gauges get the values of this snapshot: the seats, the down
+/// slots and the parent's RSS from the read, before the count; the seats in
+/// use after the count, or no series when the count fails. The gauges are
+/// set before the insert: an insert that fails leaves them set.
 ///
 /// Errors: [`SnapshotFailure`].
 pub(crate) async fn write_snapshot(
@@ -403,20 +522,22 @@ pub(crate) async fn write_snapshot(
     log: StatementLog,
     source: &mut SnapshotSource,
 ) -> Result<(), SnapshotFailure> {
-    let mut connection = pool.checkout(CheckoutClass::Batch).await.map_err(|cause| {
-        SnapshotFailure::NotCounted(BrokerError::Statement(StatementFailure::NotSent {
-            statement: HELD_ROWS.name(),
-            cause: NotSentCause::Checkout(cause),
-        }))
-    })?;
-    let held = query_held_rows(&mut connection, log, &source.worker_id)
-        .await
-        .map_err(SnapshotFailure::NotCounted)?;
+    let read = source.read_process();
+    source.record_process(&read);
+    let counted = count_held_rows(pool, log, &source.worker_id).await;
+    source.telemetry.held_rows_read(match &counted {
+        Ok(counted) => SeatsInUse::Counted(seats_in_use_of(&read.budgets, counted.held.in_flight)),
+        Err(_) => SeatsInUse::NotCounted,
+    });
+    let CountedRows {
+        mut connection,
+        held,
+    } = counted.map_err(SnapshotFailure::NotCounted)?;
 
-    let slots_down = slots_down_json(&source.children.down_slots());
-    let class_capacity = class_capacity_of(&source.children.service());
+    let slots_down = slots_down_json(&read.down);
+    let class_capacity = class_capacity_json(&read.budgets);
     let telemetry = telemetry_json(&source.endpoint, &source.handler_child.state());
-    let metrics = collect_resource_metrics(&mut source.sys, source.sys_pid);
+    let metrics = read.resources;
     let recovery_value = source.recovery_value().await;
     let processes = source.claim_columns.processes as i32;
     let max_claim_batch = source.claim_columns.max_claim_batch as i32;
@@ -471,6 +592,9 @@ pub(crate) async fn write_snapshot(
 /// (`class_capacity`). `claim_columns` are the profile's
 /// ([`ClaimColumns::of_profile`]). `endpoint` and `handler_child` give the
 /// state of the metrics endpoint and of the handler child (`telemetry`).
+/// Each snapshot sets the worker gauges of `telemetry` from the values it
+/// writes ([`write_snapshot`]); a tick with no pool sets none, so the gauges
+/// keep the values of the last snapshot.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_worker_state_loop(
     broker: Arc<PostgresBroker>,
@@ -485,6 +609,7 @@ pub(crate) fn spawn_worker_state_loop(
     worker_started_at: DateTime<Utc>,
     endpoint: WorkerEndpoint,
     handler_child: HandlerChildView,
+    telemetry: WorkerTelemetry,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -502,6 +627,7 @@ pub(crate) fn spawn_worker_state_loop(
             worker_started_at,
             endpoint,
             handler_child,
+            telemetry,
         );
 
         // The first snapshot is written at start, then one per interval
@@ -604,6 +730,7 @@ mod tests {
             Utc::now(),
             WorkerEndpoint::NoMetricsEndpoint,
             HandlerChildView::off(),
+            WorkerTelemetry::Off,
             cancel.clone(),
         );
         let result = tokio::time::timeout(Duration::from_secs(10), async {
@@ -992,6 +1119,7 @@ mod tests {
             Utc::now(),
             WorkerEndpoint::NoMetricsEndpoint,
             HandlerChildView::off(),
+            WorkerTelemetry::Off,
             cancel.clone(),
         );
         type Columns = (
@@ -1058,6 +1186,17 @@ mod tests {
     /// A snapshot source of one isolated child with no claim limit, for
     /// `worker_id`.
     fn one_child_source(worker_id: &str) -> SnapshotSource {
+        isolated_source(worker_id, isolated_children(1), 1, WorkerTelemetry::Off)
+    }
+
+    /// A snapshot source for `worker_id` of the `isolated` isolated children
+    /// of `children`, with no claim limit, whose gauges go to `telemetry`.
+    fn isolated_source(
+        worker_id: &str,
+        children: ChildrenView,
+        isolated: u32,
+        telemetry: WorkerTelemetry,
+    ) -> SnapshotSource {
         use crate::worker::recovery::new_reaper_health;
 
         SnapshotSource::new(
@@ -1067,12 +1206,221 @@ mod tests {
             WorkerConfig::default(),
             AppConfig::for_database_url("postgresql://unused/test"),
             new_reaper_health(),
-            isolated_children(1),
-            isolated_claim_columns(1),
+            children,
+            isolated_claim_columns(isolated),
             Utc::now(),
             WorkerEndpoint::NoMetricsEndpoint,
             HandlerChildView::off(),
+            telemetry,
         )
+    }
+
+    /// One `ISOLATED` row that `worker_id` holds in `status`; a `CLAIMED`
+    /// row has a lease that ends `lease_s` seconds from now (in the past
+    /// when negative).
+    async fn held_row(pool: &TestPool, worker_id: &str, status: &str, lease_s: f64) {
+        sql::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, input, execution, retention_class_key,
+                sent_at, created_at, command_fingerprint_version, command_fingerprint,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, retry_count, max_retries, is_workflow_task, updated_at,
+                retain_rerun_input
+            ) VALUES (
+                gen_random_uuid(), 'snapshot_gauge_task', 'default', 100, 'null', 'ISOLATED',
+                'forever', now(), now(), 1, sha256(convert_to(gen_random_uuid()::text, 'UTF8')),
+                $1::text, now() - interval '10 s', now(), $2::text,
+                CASE WHEN $1::text = 'CLAIMED'
+                     THEN now() + make_interval(secs => $3::double precision) END,
+                CASE WHEN $1::text = 'RUNNING' THEN now() END,
+                0, 0, FALSE, now(), FALSE
+            )",
+        )
+        .bind(status)
+        .bind(worker_id)
+        .bind(lease_s)
+        .execute(pool)
+        .await
+        .expect("insert a held row");
+    }
+
+    /// The gauge values of `metric` by label texts, sorted.
+    fn gauge_values(
+        registry: &crate::telemetry::registry::Registry,
+        metric: crate::telemetry::catalog::MetricId,
+    ) -> Vec<(Vec<String>, f64)> {
+        crate::test_support::telemetry::series_of(registry, metric)
+            .into_iter()
+            .map(|(labels, value)| match value {
+                crate::telemetry::registry::SampleValue::Gauge(value) => (labels, value),
+                other => panic!("{metric:?} is a gauge, got {other:?}"),
+            })
+            .collect()
+    }
+
+    /// One series per class, in label order.
+    fn per_class(isolated: f64, shared_async: f64, shared_thread: f64) -> Vec<(Vec<String>, f64)> {
+        vec![
+            (vec!["ISOLATED".to_owned()], isolated),
+            (vec!["SHARED_ASYNC".to_owned()], shared_async),
+            (vec!["SHARED_THREAD".to_owned()], shared_thread),
+        ]
+    }
+
+    /// A snapshot gives the worker gauges the values that it writes: the
+    /// seats of `class_capacity`, the down slots of `slots_down`, the rows
+    /// in flight of its count up to the seats, and the RSS behind
+    /// `memory_usage_mb`. An expired lease holds no seat.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_snapshot_sets_the_worker_gauges_from_the_values_it_writes() {
+        use crate::telemetry::catalog::MetricId;
+        use crate::worker::executor::slots::SlotPhase;
+        use std::num::NonZeroU32;
+
+        let pool = crate::test_support::migrated_pool().await;
+        let worker_id = uuid::Uuid::new_v4().to_string();
+        let board = Arc::new(PoolBoard::new(ChildLayout {
+            isolated: 3,
+            shared_async: 0,
+            shared_thread: 0,
+        }));
+        board.set(
+            2,
+            SlotPhase::Down(DownState {
+                cause: BootFailureCause::ThreadStartRefused,
+                detail: "can't start new thread".to_owned(),
+                down_since: Utc::now(),
+                failed_boots: NonZeroU32::MIN,
+            }),
+        );
+        let children = ChildrenView::new(
+            board,
+            SeatsPerChild {
+                shared_async: 0,
+                shared_thread: 0,
+            },
+        );
+        held_row(&pool, &worker_id, "RUNNING", 0.0).await;
+        held_row(&pool, &worker_id, "CLAIMED", 60.0).await;
+        held_row(&pool, &worker_id, "CLAIMED", -60.0).await;
+        let watched = crate::test_support::telemetry::WatchedTelemetry::new();
+        let control = crate::broker::pools::core_pool_for_test_url(pool.url());
+
+        let written = write_snapshot(
+            &control,
+            StatementLog::Off,
+            &mut isolated_source(&worker_id, children, 3, watched.telemetry.clone()),
+        )
+        .await;
+        type Columns = (serde_json::Value, serde_json::Value, i32, i32, f64);
+        let columns: Columns = sql::query_as(
+            "SELECT class_capacity, slots_down, tasks_running, tasks_claimed, memory_usage_mb
+             FROM horsies_worker_states WHERE worker_id = $1",
+        )
+        .bind(&worker_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the snapshot");
+        sql::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&pool)
+            .await
+            .expect("delete the snapshot");
+        sql::query("DELETE FROM horsies_tasks WHERE claimed_by_worker_id = $1")
+            .bind(&worker_id)
+            .execute(&pool)
+            .await
+            .expect("delete the held rows");
+        control.close();
+
+        assert!(written.is_ok(), "{written:?}");
+        let (class_capacity, slots_down, tasks_running, tasks_claimed, memory_usage_mb) = columns;
+        assert_eq!(class_capacity["ISOLATED"]["capacity"], 2);
+        assert_eq!(slots_down[0]["slot"], 2);
+        assert_eq!((tasks_running, tasks_claimed), (1, 2));
+        let registry = &watched.registry;
+        assert_eq!(
+            gauge_values(registry, MetricId::Seats),
+            per_class(2.0, 0.0, 0.0)
+        );
+        assert_eq!(
+            gauge_values(registry, MetricId::SlotsDown),
+            per_class(1.0, 0.0, 0.0)
+        );
+        assert_eq!(
+            gauge_values(registry, MetricId::SeatsInUse),
+            per_class(2.0, 0.0, 0.0)
+        );
+        let rss = gauge_values(registry, MetricId::MemoryRss);
+        let [(process, bytes)] = rss.as_slice() else {
+            panic!("one memory series: {rss:?}");
+        };
+        assert_eq!(*process, vec!["parent".to_owned()]);
+        assert_eq!(
+            (bytes / 1024.0 / 1024.0 * 100.0).round() / 100.0,
+            memory_usage_mb
+        );
+    }
+
+    /// A count of the held rows that fails leaves the seats in use with no
+    /// series, and the read before the count still sets the seats.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_failed_count_leaves_the_seats_in_use_with_no_series() {
+        use crate::telemetry::catalog::MetricId;
+
+        let migrated = crate::test_support::migrated_pool().await;
+        let shadowed =
+            crate::broker::pools::unpinged_single_connection_core_pool_for_url(migrated.url());
+        {
+            let mut connection = shadowed
+                .checkout(CheckoutClass::Batch)
+                .await
+                .expect("check out the one connection");
+            let _created = connection
+                .execute(
+                    &SHADOW_TASKS_TABLE.bind().finish(),
+                    StatementBound::ConnectionTimeouts,
+                )
+                .await
+                .expect("create the shadow table");
+        }
+        let control = crate::broker::pools::core_pool_for_test_url(migrated.url());
+        let worker_id = uuid::Uuid::new_v4().to_string();
+        let watched = crate::test_support::telemetry::WatchedTelemetry::new();
+        let mut source = isolated_source(
+            &worker_id,
+            isolated_children(2),
+            2,
+            watched.telemetry.clone(),
+        );
+
+        let counted = write_snapshot(&control, StatementLog::Off, &mut source).await;
+        let in_use_after_a_count = gauge_values(&watched.registry, MetricId::SeatsInUse);
+        let failed = write_snapshot(&shadowed, StatementLog::Off, &mut source).await;
+
+        sql::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&migrated)
+            .await
+            .expect("delete the snapshots");
+        shadowed.close();
+        control.close();
+        assert!(counted.is_ok(), "{counted:?}");
+        assert_eq!(in_use_after_a_count, per_class(0.0, 0.0, 0.0));
+        assert!(
+            matches!(failed, Err(SnapshotFailure::NotCounted(_))),
+            "{failed:?}"
+        );
+        assert_eq!(
+            gauge_values(&watched.registry, MetricId::SeatsInUse),
+            Vec::new()
+        );
+        assert_eq!(
+            gauge_values(&watched.registry, MetricId::Seats),
+            per_class(2.0, 0.0, 0.0)
+        );
     }
 
     /// The snapshot rows of `worker_id`.
@@ -1203,6 +1551,7 @@ mod tests {
             Utc::now(),
             WorkerEndpoint::NoMetricsEndpoint,
             HandlerChildView::off(),
+            WorkerTelemetry::Off,
             cancel.clone(),
         );
         let written = tokio::time::timeout(Duration::from_secs(10), async {
