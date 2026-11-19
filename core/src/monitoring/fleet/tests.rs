@@ -26,12 +26,33 @@ fn observer(database: &MonitoringTestDatabase) -> PostgresBroker {
 }
 
 /// One snapshot of `worker_id` on queue `a`, `age_s` seconds old in database
-/// time, with 4 processes.
+/// time, with 4 processes, no metrics endpoint and no handler child.
 async fn snapshot(
     pool: &TestPool,
     worker_id: &str,
     class_capacity: Value,
     slots_down: Value,
+    age_s: f64,
+) {
+    let telemetry = json!({"endpoint": {"state": "off"}, "handler_child": {"state": "off"}});
+    snapshot_with_telemetry(
+        pool,
+        worker_id,
+        class_capacity,
+        slots_down,
+        telemetry,
+        age_s,
+    )
+    .await;
+}
+
+/// As [`snapshot`], with `telemetry` as its `telemetry` column.
+async fn snapshot_with_telemetry(
+    pool: &TestPool,
+    worker_id: &str,
+    class_capacity: Value,
+    slots_down: Value,
+    telemetry: Value,
     age_s: f64,
 ) {
     sql::query(
@@ -46,13 +67,14 @@ async fn snapshot(
             0, 4, ARRAY['a']::text[],
             '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
             0, 0, now() - interval '1 hour',
-            $3, $4, jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
+            $3, $4, $5
         )",
     )
     .bind(worker_id)
     .bind(age_s)
     .bind(slots_down)
     .bind(class_capacity)
+    .bind(telemetry)
     .execute(pool)
     .await
     .expect("insert a worker snapshot");
@@ -368,6 +390,109 @@ async fn the_class_parts_give_workers_seats_waits_and_coverage() {
     database.drop().await;
 }
 
+/// The live workers whose latest snapshot records a telemetry part as down,
+/// per part. The handler child member comes from the core's writer of the
+/// column. A down state in an older snapshot of a worker, a worker outside
+/// the live window, another state (`binding`, `starting`) and a snapshot
+/// with no member of a part do not count.
+#[tokio::test]
+async fn the_workers_part_counts_the_live_workers_whose_telemetry_part_is_down() {
+    use crate::worker::executor::handler_child::{
+        AfterDown, HandlerChildDown, HandlerChildState, HandlerDownCause,
+    };
+    use crate::worker::metrics_endpoint::{telemetry_json, WorkerEndpoint, TELEMETRY_PART_DOWN};
+
+    let database = MonitoringTestDatabase::create().await;
+    let pool = &database.pool;
+    let budgets = json!({"ISOLATED": {"capacity": 2, "serves": ["ISOLATED"]}});
+    let handler_down = telemetry_json(
+        &WorkerEndpoint::NoMetricsEndpoint,
+        &HandlerChildState::Down(HandlerChildDown {
+            cause: HandlerDownCause::StartHookFailed,
+            detail: "the start hook raised".to_owned(),
+            since: chrono::Utc::now(),
+            next: AfterDown::StaysDown,
+        }),
+    );
+    let endpoint_down = |handler_child: Value| {
+        json!({
+            "endpoint": {
+                "state": TELEMETRY_PART_DOWN,
+                "host": "0.0.0.0",
+                "port": 9100,
+                "cause": {"kind": "thread_refused", "detail": "no thread"},
+                "down_since": "2026-11-19T11:00:00.000000+00:00",
+            },
+            "handler_child": handler_child,
+        })
+    };
+    let gone_age = crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S as f64 + 5.0;
+    let snapshots = [
+        (
+            "w-endpoint",
+            endpoint_down(json!({"state": "up", "pid": 4243})),
+            5.0,
+        ),
+        (
+            "w-both",
+            endpoint_down(handler_down["handler_child"].clone()),
+            5.0,
+        ),
+        ("w-handler", handler_down.clone(), 5.0),
+        // Down in an older snapshot, up in the latest.
+        ("w-back", handler_down.clone(), 20.0),
+        (
+            "w-back",
+            json!({"endpoint": {"state": "off"}, "handler_child": {"state": "up", "pid": 4244}}),
+            5.0,
+        ),
+        (
+            "w-gone",
+            endpoint_down(handler_down["handler_child"].clone()),
+            gone_age,
+        ),
+        (
+            "w-other",
+            json!({
+                "endpoint": {"state": "binding", "host": "0.0.0.0", "port": 9100},
+                "handler_child": {"state": "starting"},
+            }),
+            5.0,
+        ),
+        ("w-no-member", json!({"endpoint": {"state": "off"}}), 5.0),
+    ];
+    for (worker_id, telemetry, age_s) in snapshots {
+        snapshot_with_telemetry(
+            pool,
+            worker_id,
+            budgets.clone(),
+            json!([]),
+            telemetry,
+            age_s,
+        )
+        .await;
+    }
+
+    let state = read_fleet_state(&observer(&database)).await;
+
+    let workers = state.workers.outcome.expect("the workers part answers");
+    assert_eq!(
+        workers.telemetry_down,
+        TelemetryDownCounts {
+            endpoint: 2,
+            handler_child: 2,
+        }
+    );
+    assert_eq!(
+        workers.workers,
+        LiveWorkerCounts {
+            serving: 6,
+            degraded: 0
+        }
+    );
+    database.drop().await;
+}
+
 /// The slot health is read only by the workers part: the class coverage
 /// reads the same snapshot and still answers.
 #[tokio::test]
@@ -583,7 +708,11 @@ async fn the_task_statements_read_no_task_row_by_a_sequential_scan() {
             "$1",
             &crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S.to_string(),
         )
-        .replace("$2", &(crate::LIVE_SNAPSHOT_ROW_LIMIT + 1).to_string());
+        .replace("$2", &(crate::LIVE_SNAPSHOT_ROW_LIMIT + 1).to_string())
+        .replace(
+            "$3",
+            &format!("'{}'", crate::worker::metrics_endpoint::TELEMETRY_PART_DOWN),
+        );
     let statements: [(String, &[&str]); 3] = [
         (
             queue_tasks,

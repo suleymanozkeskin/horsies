@@ -30,7 +30,7 @@ use crate::telemetry::declared::{
     DeclaredNames, DeclaredNamesRefused, ErrorCodeValues, QueueName, ScheduleName,
 };
 use crate::telemetry::exposition::render;
-use crate::telemetry::labels::{FleetQuery, FleetWorkerState, LiveWorkflowStatus};
+use crate::telemetry::labels::{FleetQuery, FleetWorkerState, LiveWorkflowStatus, TelemetryPart};
 use crate::telemetry::registry::{
     Counter, Gauge, HandleRefused, Histogram, ProcessFacts, Recorded, Registry, RegistryLabels,
     Replaced,
@@ -50,13 +50,13 @@ use super::{
 /// The least time between the starts of two reads of the fleet state.
 pub const FLEET_COLLECT_INTERVAL: Duration = Duration::from_secs(15);
 
-/// The metrics of the fleet collector. `horsies.fleet.workers.telemetry_down`
-/// is not one of them: no worker records the state of its telemetry yet.
-pub const FLEET_COLLECTOR_METRICS: [MetricId; 13] = [
+/// The metrics of the fleet collector.
+pub const FLEET_COLLECTOR_METRICS: [MetricId; 14] = [
     MetricId::QueueTasks,
     MetricId::QueuePendingMoreThan,
     MetricId::QueueOldestPendingAge,
     MetricId::FleetWorkers,
+    MetricId::FleetWorkersTelemetryDown,
     MetricId::FleetSeats,
     MetricId::FleetSeatsInUse,
     MetricId::FleetUnservedClasses,
@@ -126,6 +126,7 @@ struct FleetGauges {
     pending_more_than: Gauge<StreamLabels>,
     oldest_pending_age: Gauge<StreamLabels>,
     workers: Gauge<(FleetWorkerState,)>,
+    telemetry_down: Gauge<(TelemetryPart,)>,
     seats: Gauge<(Execution,)>,
     seats_in_use: Gauge<(Execution,)>,
     unserved_classes: Gauge<StreamLabels>,
@@ -155,6 +156,7 @@ impl FleetGauges {
             pending_more_than: handle(registry.gauge(MetricId::QueuePendingMoreThan)),
             oldest_pending_age: handle(registry.gauge(MetricId::QueueOldestPendingAge)),
             workers: handle(registry.gauge(MetricId::FleetWorkers)),
+            telemetry_down: handle(registry.gauge(MetricId::FleetWorkersTelemetryDown)),
             seats: handle(registry.gauge(MetricId::FleetSeats)),
             seats_in_use: handle(registry.gauge(MetricId::FleetSeatsInUse)),
             unserved_classes: handle(registry.gauge(MetricId::FleetUnservedClasses)),
@@ -311,6 +313,11 @@ impl FleetCollector {
             Err(_) => WorkerSeries::default(),
         };
         recorded.replaced(self.gauges.workers.replace_all(series.workers));
+        recorded.replaced(
+            self.gauges
+                .telemetry_down
+                .replace_all(series.telemetry_down),
+        );
         recorded.replaced(self.gauges.seats.replace_all(series.seats));
         recorded.replaced(self.gauges.seats_in_use.replace_all(series.seats_in_use));
     }

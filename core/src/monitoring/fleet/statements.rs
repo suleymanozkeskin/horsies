@@ -9,6 +9,7 @@ use crate::broker::class_coverage_reads::{
     PENDING_STREAM_READ_LIMIT,
 };
 use crate::db::{BoundStatement, ParameterType, TypedStatement};
+use crate::worker::metrics_endpoint::TELEMETRY_PART_DOWN;
 
 use super::{HELD_GROUP_LIMIT, PENDING_COUNT_LIMIT, SCHEDULE_LIMIT};
 
@@ -115,19 +116,28 @@ SELECT
                      '[]'::jsonb)
      FROM head_page p) AS heads";
 
-/// The live workers, their slot health and the rows they hold. `$1` the
-/// live window in seconds, `$2` the snapshot row limit + 1.
+/// The live workers, their slot health, the rows they hold and their
+/// telemetry parts that are down. `$1` the live window in seconds, `$2` the
+/// snapshot row limit + 1, `$3` the state of a part that is down
+/// ([`TELEMETRY_PART_DOWN`]).
 ///
 /// - `recent`, `live`: the latest snapshot of each worker inside the live
 ///   window, as the fleet check (`CLASS_COVERAGE_SQL`), a range of
 ///   `horsies_worker_states_snapshot_at`; each live entry also holds the
-///   snapshot's `processes` and `slots_down`.
+///   snapshot's `processes` and `slots_down`, and the `state` of the
+///   `endpoint` and `handler_child` members of its `telemetry` column: two
+///   short texts, and no other part of the column leaves the server.
 /// - `in_flight`: the rows each live worker holds, per class, as the claim
 ///   counts them (`RUNNING`, and `CLAIMED` with a live lease), as the class
 ///   report; read through `horsies_tasks_status`.
+/// - `endpoint_down`, `handler_child_down`: the live workers whose part is
+///   down. A snapshot with another state, or with no member of the part,
+///   does not count.
 pub(super) const WORKERS_SQL: &str = "\
 WITH recent AS (
-    SELECT w.worker_id, w.snapshot_at, w.queues, w.class_capacity, w.processes, w.slots_down
+    SELECT w.worker_id, w.snapshot_at, w.queues, w.class_capacity, w.processes, w.slots_down,
+           w.telemetry #>> '{endpoint,state}' AS endpoint_state,
+           w.telemetry #>> '{handler_child,state}' AS handler_child_state
     FROM horsies_worker_states w
     WHERE w.snapshot_at >= now() - make_interval(secs => $1::double precision)
     ORDER BY w.snapshot_at DESC
@@ -135,7 +145,7 @@ WITH recent AS (
 ),
 live AS (
     SELECT DISTINCT ON (r.worker_id) r.worker_id, r.snapshot_at, r.queues, r.class_capacity,
-           r.processes, r.slots_down
+           r.processes, r.slots_down, r.endpoint_state, r.handler_child_state
     FROM recent r
     ORDER BY r.worker_id, r.snapshot_at DESC
 ),
@@ -159,7 +169,9 @@ SELECT
         'slots_down', l.slots_down)), '[]'::jsonb)
      FROM live l) AS live,
     (SELECT coalesce(jsonb_agg(jsonb_build_array(f.worker_id, f.execution, f.held)), '[]'::jsonb)
-     FROM in_flight f) AS in_flight";
+     FROM in_flight f) AS in_flight,
+    (SELECT count(*) FROM live l WHERE l.endpoint_state = $3::text) AS endpoint_down,
+    (SELECT count(*) FROM live l WHERE l.handler_child_state = $3::text) AS handler_child_down";
 
 /// The `RUNNING` and `PAUSED` workflows, each counted on its partial index
 /// (`idx_horsies_workflows_running_recovery_scan`,
@@ -206,7 +218,11 @@ pub(super) static OLDEST_PENDING: TypedStatement = TypedStatement::new(
 pub(super) static WORKERS: TypedStatement = TypedStatement::new(
     "fleet_workers",
     WORKERS_SQL,
-    &[ParameterType::Float8, ParameterType::Int8],
+    &[
+        ParameterType::Float8,
+        ParameterType::Int8,
+        ParameterType::Text,
+    ],
 );
 
 pub(super) static WORKFLOWS: TypedStatement =
@@ -236,12 +252,14 @@ pub(super) fn oldest_pending_statement() -> BoundStatement<'static> {
         .finish()
 }
 
-/// [`WORKERS_SQL`] with the live window and its limit. Pure.
+/// [`WORKERS_SQL`] with the live window, its limit and the state of a part
+/// that is down. Pure.
 pub(super) fn workers_statement() -> BoundStatement<'static> {
     WORKERS
         .bind()
         .value(&LIVE_WINDOW_SECONDS)
         .value(&LIVE_SNAPSHOT_READ_LIMIT)
+        .value(&TELEMETRY_PART_DOWN)
         .finish()
 }
 

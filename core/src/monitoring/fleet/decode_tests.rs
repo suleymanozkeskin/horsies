@@ -5,7 +5,9 @@ use chrono::{DateTime, TimeDelta, TimeZone, Utc};
 use serde_json::{json, Value};
 
 use super::*;
-use crate::telemetry::labels::{FleetWorkerState, LiveTaskStatus, LiveWorkflowStatus};
+use crate::telemetry::labels::{
+    FleetWorkerState, LiveTaskStatus, LiveWorkflowStatus, TelemetryPart,
+};
 use crate::{StreamWait, LIVE_SNAPSHOT_ROW_LIMIT};
 
 const ISOLATED: Execution = Execution::Isolated;
@@ -78,6 +80,8 @@ fn workers_part(live: Vec<Value>, in_flight: Value) -> WorkersRow {
         recent_rows: i64::try_from(live.len()).expect("a few test entries"),
         live: Value::Array(live),
         in_flight,
+        endpoint_down: 0,
+        handler_child_down: 0,
     }
 }
 
@@ -102,6 +106,12 @@ fn each_label_value_maps_to_its_count() {
     };
     assert_eq!(workflows.of(LiveWorkflowStatus::Running), 9);
     assert_eq!(workflows.of(LiveWorkflowStatus::Paused), 2);
+    let telemetry_down = TelemetryDownCounts {
+        endpoint: 4,
+        handler_child: 1,
+    };
+    assert_eq!(telemetry_down.of(TelemetryPart::Endpoint), 4);
+    assert_eq!(telemetry_down.of(TelemetryPart::HandlerChild), 1);
     assert_eq!(HeldStatus::Claimed.live_status(), LiveTaskStatus::Claimed);
     assert_eq!(HeldStatus::Running.live_status(), LiveTaskStatus::Running);
 }
@@ -291,6 +301,35 @@ fn workers_count_by_slot_health_and_sum_seats_per_budget_class() {
     assert_eq!(workers.seats.of(THREAD), SeatCount::default());
 }
 
+/// The statement counts the live workers whose part is down; the decode
+/// keeps each count under its part.
+#[test]
+fn the_workers_part_holds_the_live_workers_whose_telemetry_part_is_down() {
+    let budgets = json!({"ISOLATED": {"capacity": 2, "serves": ["ISOLATED"]}});
+    let row = WorkersRow {
+        endpoint_down: 2,
+        handler_child_down: 1,
+        ..workers_part(
+            vec![
+                live_entry("w1", budgets.clone(), json!([])),
+                live_entry("w2", budgets.clone(), json!([])),
+                live_entry("w3", budgets, json!([])),
+            ],
+            json!([]),
+        )
+    };
+
+    let workers = fleet_workers(row).expect("readable snapshots");
+
+    assert_eq!(
+        workers.telemetry_down,
+        TelemetryDownCounts {
+            endpoint: 2,
+            handler_child: 1,
+        }
+    );
+}
+
 #[test]
 fn no_live_worker_gives_zero_workers_and_zero_seats() {
     let workers = fleet_workers(workers_part(vec![], json!([]))).expect("an empty fleet");
@@ -305,6 +344,13 @@ fn no_live_worker_gives_zero_workers_and_zero_seats() {
     for execution in Execution::ALL {
         assert_eq!(workers.seats.of(execution), SeatCount::default());
     }
+    assert_eq!(
+        workers.telemetry_down,
+        TelemetryDownCounts {
+            endpoint: 0,
+            handler_child: 0,
+        }
+    );
 }
 
 #[test]
