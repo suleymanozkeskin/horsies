@@ -82,6 +82,12 @@ pub use crate::broker::{
     WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
+// The node read of a task by its id: the workflow facts of the span of an
+// attempt that the worker ended, read in the handler child.
+pub use crate::broker::{
+    TaskWorkflowNode, TASK_WORKFLOW_NODE_CHECKOUT_WAIT, TASK_WORKFLOW_NODE_READ_END,
+    TASK_WORKFLOW_NODE_STATEMENT_BOUND,
+};
 // The bounded limit of a result wait; a client checks it before the read.
 pub use crate::broker::wait_limit::{BoundedWait, WaitLimit, WaitLimitRefused, MAX_WAIT_LIMIT_MS};
 
