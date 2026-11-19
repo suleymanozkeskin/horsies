@@ -44,6 +44,7 @@ fn row(name: &str, task_name: &str, execution: Execution) -> ClaimedRow {
         claimed_at: claim_time(name),
         retry_count: 0,
         max_retries: 0,
+        trace: crate::events::RunTrace::NoCarrier,
     }
 }
 

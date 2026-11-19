@@ -16,6 +16,7 @@ use crate::broker::claims::{
 use crate::broker::core_rows::StatementLog;
 use crate::broker::pools::core_pool_for_test_url;
 use crate::core::task::Execution;
+use crate::events::{RunTrace, TraceCarrierText};
 use crate::test_support::sql::{self, TestPool};
 
 const QUEUE: &str = "lifecycle_claim_start_release";
@@ -94,6 +95,51 @@ mod claim {
         assert_eq!(pass.take, ClaimTake::Full);
         assert_eq!(status_of(&pool, task_id).await, "CLAIMED");
         cleanup_tasks(&pool, &[task_id]).await;
+    }
+
+    /// The claim returns the trace carrier that the send stored on the row,
+    /// as its text; a row with no carrier claims with no carrier.
+    #[tokio::test]
+    #[serial]
+    async fn a_claimed_row_carries_its_stored_trace_carrier() {
+        let carrier =
+            r#"{"traceparent":"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}"#;
+        let pool = pool().await;
+        let traced = seed_task(&pool, &pending("SHARED_THREAD")).await;
+        let untraced = seed_task(&pool, &pending("SHARED_THREAD")).await;
+        sql::query(
+            "UPDATE horsies_tasks SET trace_carrier = $2, \
+             trace_id = decode(repeat('ab', 16), 'hex') WHERE id = $1",
+        )
+        .bind(traced)
+        .bind(carrier)
+        .execute(&pool)
+        .await
+        .expect("store a trace carrier on the row");
+
+        let pass = claim_pass(
+            &core_pool_for_test_url(pool.url()),
+            StatementLog::Off,
+            &claim_request(QUEUE),
+        )
+        .await
+        .expect("claim pass");
+
+        let trace_of = |task_id: Uuid| {
+            pass.claimed
+                .iter()
+                .find(|row| row.id == task_id)
+                .map(|row| row.trace.clone())
+                .expect("the pass claimed the seeded row")
+        };
+        assert_eq!(
+            trace_of(traced),
+            RunTrace::Carrier {
+                text: TraceCarrierText::new(carrier.to_owned()).expect("a short carrier"),
+            }
+        );
+        assert_eq!(trace_of(untraced), RunTrace::NoCarrier);
+        cleanup_tasks(&pool, &[traced, untraced]).await;
     }
 
     /// A class that no route names is not served: its row stays PENDING.

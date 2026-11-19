@@ -47,6 +47,7 @@ fn task(execution: ExecutionClass, stored: &str) -> ClaimedTask {
             max_retries: 2,
         },
         options: options(stored),
+        trace: crate::events::RunTrace::NoCarrier,
     }
 }
 

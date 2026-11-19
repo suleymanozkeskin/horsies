@@ -70,6 +70,7 @@ fn dispatched(task_id: Uuid, generation: DateTime<Utc>) -> ClaimedTask {
             max_retries: 0,
         },
         options: read_stored_options(None),
+        trace: crate::events::RunTrace::NoCarrier,
     }
 }
 
