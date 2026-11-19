@@ -24,13 +24,26 @@ The worker does not know the workflow node of a workflow task: the start
 write of the child read it, and the event carries `WORKFLOW_NOT_KNOWN`. For
 such an attempt the handler child reads the node by the task id with one
 bounded read of the core (`WorkflowNodeReader`, `CoreHandle.task_workflow_node`),
-so the span has the workflow attributes of the span of a child. A read that
-fails, or that finds no node, leaves the span with no workflow attribute
-(`WorkflowNotKnown`); a failed read is counted (`NodeReadFailures`) and
-logged, the first and then one per `NODE_READ_FAILURE_LOG_EVERY`. The read
-runs on the control thread of the handler child, within
-`TASK_WORKFLOW_NODE_READ_END` of the core (12 s at most, 2 s when the
-cancel of a statement past its bound is answered).
+so the span has the workflow attributes of the span of a child. The read
+never runs on the control thread, which routes the events to the handlers:
+
+- The control thread puts the span in the node read queue
+  (`NodeReadQueue`, at most `NODE_READ_QUEUE_SPANS`) and goes on. A full
+  queue makes the span at once with `WorkflowNotKnown`.
+- One reader thread (`start_node_reader`) reads the node of each span in
+  turn, within `TASK_WORKFLOW_NODE_READ_END` of the core (12 s at most, 2 s
+  when the cancel of a statement past its bound is answered), then makes
+  the span.
+- At the stop, the reader thread gets the drain time of the handler
+  threads; each span left is made with `WorkflowNotKnown`
+  (`end_node_reads_at_stop`).
+
+A read that finds no node leaves the span with no workflow attribute
+(`WorkflowNotKnown`). A read that fails (`read_failed`), and a span made
+with no read (`not_read`), are counted (`SpanReadFailures`, sent in the
+`handler_stats` frames to the metric
+`horsies.spans.worker_ended.read_failures`) and logged: the first of each
+reason, then one line per `NODE_READ_FAILURE_LOG_EVERY`.
 
 Telemetry never stops the handler child: a recorder (the user's SDK) that
 raises is logged once per process, and the event still goes to the handlers.
@@ -42,9 +55,12 @@ This module imports no `opentelemetry` module.
 
 from __future__ import annotations
 
+import collections
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Final, Protocol, assert_never
 
 from horsies._catalog.events import AnyEvent, AttemptEndDecidedByWorker, AttemptEnded
@@ -62,6 +78,8 @@ from horsies.core.telemetry.attempt_span import (
     StopFlush,
     bounded_flush,
 )
+from horsies.core.types.result import Err, Ok, Result
+from horsies.core.worker.child_frames import NO_SPAN_READS, SpanReadCounts
 from horsies.core.worker.run_return import InWorkflow, NotInWorkflow
 
 _logger = get_logger('telemetry')
@@ -74,15 +92,21 @@ threads get `HANDLER_DRAIN_S` (2 s): 2 s + 1 s and the last stats frame
 stay under 10 s."""
 
 
+NODE_READ_QUEUE_SPANS: Final = 1_000
+"""The most spans that wait for the node read of their workflow task. The
+control thread never waits for a read: a span that does not fit is made at
+once with `WorkflowNotKnown` and counted `not_read`."""
+
 NODE_READ_FAILURE_LOG_EVERY: Final = 1_000
-"""After the first failed node read, one log line per this many."""
+"""After the first span of each reason made with no workflow node, one log
+line per this many of that reason."""
 
 
 @dataclass(frozen=True, slots=True)
 class WorkflowNotKnown:
     """A workflow node links the task, and the handler child has no node for
-    it: the read failed, or it found no node. The span has no workflow
-    attribute."""
+    it: the read failed, found no node, or did not run. The span has no
+    workflow attribute."""
 
 
 type EndedWorkflow = InWorkflow | NotInWorkflow | WorkflowNotKnown
@@ -115,26 +139,47 @@ class WorkflowNodeReader(Protocol):
         ...
 
 
-class NodeReadFailures:
-    """The count of the failed node reads of this child. The control thread
-    records; any thread reads."""
+class NotReadCause(Enum):
+    """Why the node read of a span did not run."""
+
+    QUEUE_FULL = 'QUEUE_FULL'
+    """The node read queue held `NODE_READ_QUEUE_SPANS` spans."""
+    CHILD_STOPPED = 'CHILD_STOPPED'
+    """The handler child stopped before the read ended."""
+
+
+def _not_read_text(cause: NotReadCause) -> str:
+    match cause:
+        case NotReadCause.QUEUE_FULL:
+            return 'the node read queue is full'
+        case NotReadCause.CHILD_STOPPED:
+            return 'the handler child stopped before the read ended'
+
+
+class SpanReadFailures:
+    """The spans of attempts of workflow tasks that the worker ended, which
+    this child made with no workflow node since it started, by reason
+    (`horsies.spans.worker_ended.read_failures` in the worker parent).
+    Safe between threads: the reader thread records `read_failed`; the
+    control thread and the stop record `not_read`; the main thread reads
+    the totals for the `handler_stats` frames."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._count = 0
+        self._read_failed = 0
+        self._not_read = 0
 
-    @property
-    def count(self) -> int:
-        """The failed reads since the child started."""
+    def counts(self) -> SpanReadCounts:
+        """The totals since the child started."""
         with self._lock:
-            return self._count
+            return SpanReadCounts(read_failed=self._read_failed, not_read=self._not_read)
 
-    def record(self, task_id: uuid.UUID, detail: str) -> None:
-        """Count one failed read of the node of `task_id`, and log it: the
-        first, then one line per `NODE_READ_FAILURE_LOG_EVERY`."""
+    def record_read_failed(self, task_id: uuid.UUID, detail: str) -> None:
+        """Count one failed node read of `task_id`, and log it: the first,
+        then one line per `NODE_READ_FAILURE_LOG_EVERY`."""
         with self._lock:
-            self._count += 1
-            count = self._count
+            self._read_failed += 1
+            count = self._read_failed
         if count == 1 or count % NODE_READ_FAILURE_LOG_EVERY == 0:
             _logger.warning(
                 'The workflow node of task %s was not read for the span of its '
@@ -144,6 +189,181 @@ class NodeReadFailures:
                 count,
                 detail,
             )
+
+    def record_not_read(self, task_id: uuid.UUID, cause: NotReadCause) -> None:
+        """Count one span of `task_id` made with no node read, and log it:
+        the first, then one line per `NODE_READ_FAILURE_LOG_EVERY`."""
+        with self._lock:
+            self._not_read += 1
+            count = self._not_read
+        if count == 1 or count % NODE_READ_FAILURE_LOG_EVERY == 0:
+            _logger.warning(
+                'The span of the attempt of task %s that the worker ended was '
+                'made with no workflow node read (%d so far): %s. The span has '
+                'no workflow attribute.',
+                task_id,
+                count,
+                _not_read_text(cause),
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class WaitingSpan:
+    """The span of an attempt of a workflow task that the worker ended,
+    which waits for the read of its workflow node."""
+
+    ended: AttemptEnded
+    decided: AttemptEndDecidedByWorker
+
+
+@dataclass(frozen=True, slots=True)
+class SpanQueued:
+    """The node read queue took the span."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReadQueueFull:
+    """The node read queue holds `NODE_READ_QUEUE_SPANS` spans; the span is
+    not in it."""
+
+
+type ReadOffered = SpanQueued | ReadQueueFull
+"""What an offer of one span to the node read queue gave."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReadQueueClosed:
+    """The node read queue is closed: the reader thread ends."""
+
+
+@dataclass(frozen=True, slots=True)
+class SpanClaimed:
+    """The reader thread makes the span that it read the node of."""
+
+
+@dataclass(frozen=True, slots=True)
+class TakenAtStop:
+    """The stop took the span while its node was read, and made it."""
+
+
+type ReadClaim = SpanClaimed | TakenAtStop
+"""Who makes the span whose node read ended."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ReaderIdle:
+    """The reader thread holds no span."""
+
+
+@dataclass(frozen=True, slots=True)
+class _Reading:
+    """The reader thread reads the node of `waiting`."""
+
+    waiting: WaitingSpan
+
+
+@dataclass(frozen=True, slots=True)
+class _Making:
+    """The reader thread makes the span whose node it read."""
+
+
+type _ReaderState = _ReaderIdle | _Reading | _Making
+
+
+class NodeReadQueue:
+    """The bounded queue of the spans that wait for their node read, and
+    the span of the reader thread. The control thread offers, the reader
+    thread takes, claims and ends each span, the main thread closes it at
+    the stop. Safe between threads.
+
+    `offer` never blocks: a queue that holds `capacity` spans refuses the
+    span. `close` takes the spans left and the span whose node is read; the
+    span that the reader thread makes then stays with the reader thread.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        assert capacity >= 1, f'the node read queue holds at least one span, got {capacity}'
+        self._capacity: Final = capacity
+        self._spans: collections.deque[WaitingSpan] = collections.deque()
+        self._changed: Final = threading.Condition()
+        self._reader: _ReaderState = _ReaderIdle()
+        self._closed = False
+
+    def offer(self, waiting: WaitingSpan) -> ReadOffered:
+        """Queue `waiting` when the queue has room. An offer after `close`
+        is a defect: the control thread ends before the stop closes it."""
+        with self._changed:
+            assert not self._closed, 'a span was offered to a closed node read queue'
+            if len(self._spans) >= self._capacity:
+                return ReadQueueFull()
+            self._spans.append(waiting)
+            self._changed.notify_all()
+            return SpanQueued()
+
+    def take(self) -> WaitingSpan | ReadQueueClosed:
+        """Reader thread: the next span, after a wait for one;
+        `ReadQueueClosed` once the queue is closed."""
+        with self._changed:
+            while not self._spans and not self._closed:
+                _ = self._changed.wait()
+            if self._closed:
+                return ReadQueueClosed()
+            waiting = self._spans.popleft()
+            self._reader = _Reading(waiting=waiting)
+            return waiting
+
+    def claim(self) -> ReadClaim:
+        """Reader thread, after the read: `SpanClaimed` when the reader
+        thread makes the span; `TakenAtStop` when `close` took it."""
+        with self._changed:
+            if self._closed:
+                return TakenAtStop()
+            self._reader = _Making()
+            return SpanClaimed()
+
+    def made(self) -> None:
+        """Reader thread: the claimed span is made."""
+        with self._changed:
+            self._reader = _ReaderIdle()
+            self._changed.notify_all()
+
+    def wait_idle(self, timeout_s: float) -> None:
+        """Main thread: wait at most `timeout_s` for an empty queue and a
+        reader thread that holds no span."""
+        deadline = time.monotonic() + timeout_s
+        with self._changed:
+            while self._spans or self._reader_holds_a_span():
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return
+                _ = self._changed.wait(left)
+
+    def _reader_holds_a_span(self) -> bool:
+        match self._reader:
+            case _ReaderIdle():
+                return False
+            case _Reading() | _Making():
+                return True
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def close(self) -> tuple[WaitingSpan, ...]:
+        """Main thread, at the stop: close the queue, and take the spans
+        left and the span whose node the reader thread reads."""
+        with self._changed:
+            self._closed = True
+            left = list(self._spans)
+            self._spans.clear()
+            match self._reader:
+                case _Reading(waiting=waiting):
+                    left.insert(0, waiting)
+                    self._reader = _ReaderIdle()
+                case _ReaderIdle() | _Making():
+                    pass
+                case _ as unreachable:
+                    assert_never(unreachable)
+            self._changed.notify_all()
+            return tuple(left)
 
 
 class EndedAttemptSpanRecorder(Protocol):
@@ -158,7 +378,8 @@ class EndedAttemptSpanRecorder(Protocol):
     ) -> None:
         """Make and end the span of the attempt of `ended`, whose end is
         `decided` and whose workflow node is `workflow`. May raise: the
-        caller logs it."""
+        caller logs it. Called from the control thread, the reader thread
+        and the main thread."""
         ...
 
     def flush(self, timeout_millis: int) -> ProviderFlush:
@@ -175,13 +396,17 @@ class NoEndedAttemptSpans:
 
 @dataclass(frozen=True, slots=True)
 class OtelEndedAttemptSpans:
-    """A span for each attempt that the worker ended, through `recorder`;
-    the node of a workflow task through `nodes`, with its failed reads
-    counted in `read_failures`."""
+    """A span for each attempt that the worker ended, through `recorder`.
+    The node of a workflow task is read through `nodes` on the reader
+    thread (`start_node_reader`), from `read_queue`; the spans made with no
+    node are counted in `read_failures`."""
 
     recorder: EndedAttemptSpanRecorder
     nodes: WorkflowNodeReader
-    read_failures: NodeReadFailures = field(default_factory=NodeReadFailures)
+    read_failures: SpanReadFailures = field(default_factory=SpanReadFailures)
+    read_queue: NodeReadQueue = field(
+        default_factory=lambda: NodeReadQueue(NODE_READ_QUEUE_SPANS),
+    )
 
 
 type EndedAttemptSpans = NoEndedAttemptSpans | OtelEndedAttemptSpans
@@ -200,7 +425,8 @@ def ended_attempt_spans_of(
     (`worker_ended_spans_of`), reading the node of a workflow task through
     `nodes`. `MAKE_SPANS` imports the OpenTelemetry API
     (`horsies.core.telemetry.ended_attempt_otel`), which the config check
-    found installed; `NO_SPANS` and `NoTracing` import nothing."""
+    found installed; `NO_SPANS` and `NoTracing` import nothing. The caller
+    starts the reader thread (`start_node_reader`)."""
     match tracing:
         case NoTracing():
             return NO_ENDED_ATTEMPT_SPANS
@@ -222,12 +448,109 @@ def ended_attempt_spans_of(
             )
 
 
+def span_read_counts_of(spans: EndedAttemptSpans) -> SpanReadCounts:
+    """The spans made with no workflow node since the child started, for
+    the `handler_stats` frame."""
+    match spans:
+        case NoEndedAttemptSpans():
+            return NO_SPAN_READS
+        case OtelEndedAttemptSpans(read_failures=read_failures):
+            return read_failures.counts()
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+@dataclass(frozen=True, slots=True)
+class ReaderThreadRefused:
+    """The OS refused the reader thread: `exception_name`, `detail`."""
+
+    exception_name: str
+    detail: str
+
+
+def start_node_reader(spans: EndedAttemptSpans) -> Result[None, ReaderThreadRefused]:
+    """Start the reader thread of `OtelEndedAttemptSpans`, a daemon thread
+    that reads the node of each waiting span, then makes it
+    (`read_nodes_for_spans`); `NoEndedAttemptSpans` starts none. `Err`: the
+    OS refused the thread."""
+    match spans:
+        case NoEndedAttemptSpans():
+            return Ok(None)
+        case OtelEndedAttemptSpans() as otel:
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    reader = threading.Thread(
+        target=read_nodes_for_spans,
+        args=(otel,),
+        name='horsies-span-node-reader',
+        daemon=True,
+    )
+    try:
+        reader.start()
+    except RuntimeError as refused:
+        return Err(ReaderThreadRefused(exception_name=type(refused).__name__, detail=str(refused)))
+    return Ok(None)
+
+
+def read_nodes_for_spans(spans: OtelEndedAttemptSpans) -> None:
+    """Reader thread body: for each span of `spans.read_queue`, read its
+    node (one bounded read of the core), then make it, until the queue is
+    closed. A failed read gives `WorkflowNotKnown` and is counted
+    `read_failed`. A span that the stop took while its node was read is
+    made by the stop."""
+    while True:
+        match spans.read_queue.take():
+            case ReadQueueClosed():
+                return
+            case WaitingSpan() as waiting:
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        task_id = waiting.ended.task_id
+        workflow = workflow_of_read(task_id, spans.nodes.read(task_id), spans.read_failures)
+        match spans.read_queue.claim():
+            case SpanClaimed():
+                _ = _make_span(spans.recorder, waiting.ended, waiting.decided, workflow)
+                spans.read_queue.made()
+            case TakenAtStop():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+
+
+def workflow_of_read(
+    task_id: uuid.UUID,
+    read: NodeRead,
+    read_failures: SpanReadFailures,
+) -> EndedWorkflow:
+    """The workflow node of the span of `task_id` that `read` gave:
+    `WorkflowNotKnown` when the read found no node, or failed (counted
+    `read_failed` in `read_failures`)."""
+    match read:
+        case InWorkflow() as node:
+            return node
+        case NodeNotLinked():
+            return WorkflowNotKnown()
+        case NodeReadFailed(detail=detail):
+            read_failures.record_read_failed(task_id, detail)
+            return WorkflowNotKnown()
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 @dataclass(frozen=True, slots=True)
 class EndedSpanMade:
     """The recorder made and ended the span of the attempt, with the
     workflow node `workflow`."""
 
     workflow: EndedWorkflow
+
+
+@dataclass(frozen=True, slots=True)
+class EndedSpanWaitsForNode:
+    """The span of the attempt of a workflow task waits in the node read
+    queue; the reader thread makes it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,15 +573,20 @@ class EndedSpanRaised:
     exception: Exception
 
 
-type EndedSpanStep = EndedSpanMade | EndedSpansOff | NotEndedByWorker | EndedSpanRaised
+type EndedSpanStep = (
+    EndedSpanMade | EndedSpanWaitsForNode | EndedSpansOff | NotEndedByWorker | EndedSpanRaised
+)
 """What the step of one event did."""
 
 
 def make_ended_attempt_span(spans: EndedAttemptSpans, event: AnyEvent) -> EndedSpanStep:
-    """The step of the handler child for one event, before the handlers get
-    it: with `OtelEndedAttemptSpans`, the span of an `AttemptEnded` whose end
-    is `AttemptEndDecidedByWorker`. An `Exception` of the recorder is logged
-    once per process and goes no further."""
+    """The step of the control thread for one event, before the handlers
+    get it: with `OtelEndedAttemptSpans`, the span of an `AttemptEnded`
+    whose end is `AttemptEndDecidedByWorker`. A plain task gets its span at
+    once. A workflow task (`WORKFLOW_NOT_KNOWN`) goes to the node read
+    queue; a full queue makes its span at once with `WorkflowNotKnown`,
+    counted `not_read`. Never waits for a read. An `Exception` of the
+    recorder is logged once per process and goes no further."""
     match spans:
         case NoEndedAttemptSpans():
             return EndedSpansOff()
@@ -271,40 +599,56 @@ def make_ended_attempt_span(spans: EndedAttemptSpans, event: AnyEvent) -> EndedS
             pass
         case _:
             return NotEndedByWorker()
-    workflow = ended_workflow_of(ended, decided, otel.nodes, otel.read_failures)
+    match decided.workflow:
+        case 'NOT_IN_WORKFLOW':
+            return _make_span(otel.recorder, ended, decided, NotInWorkflow())
+        case 'WORKFLOW_NOT_KNOWN':
+            pass
+    match otel.read_queue.offer(WaitingSpan(ended=ended, decided=decided)):
+        case SpanQueued():
+            return EndedSpanWaitsForNode()
+        case ReadQueueFull():
+            otel.read_failures.record_not_read(ended.task_id, NotReadCause.QUEUE_FULL)
+            return _make_span(otel.recorder, ended, decided, WorkflowNotKnown())
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def end_node_reads_at_stop(spans: EndedAttemptSpans, timeout_s: float) -> int:
+    """At the stop, after the control thread ended: give the reader thread
+    at most `timeout_s` for the spans that wait, then close the queue and
+    make each span left with `WorkflowNotKnown`, counted `not_read`. The
+    span that the reader thread makes at the close stays with it. Returns
+    the spans made here."""
+    match spans:
+        case NoEndedAttemptSpans():
+            return 0
+        case OtelEndedAttemptSpans() as otel:
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    otel.read_queue.wait_idle(timeout_s)
+    left = otel.read_queue.close()
+    for waiting in left:
+        otel.read_failures.record_not_read(waiting.ended.task_id, NotReadCause.CHILD_STOPPED)
+        _ = _make_span(otel.recorder, waiting.ended, waiting.decided, WorkflowNotKnown())
+    return len(left)
+
+
+def _make_span(
+    recorder: EndedAttemptSpanRecorder,
+    ended: AttemptEnded,
+    decided: AttemptEndDecidedByWorker,
+    workflow: EndedWorkflow,
+) -> EndedSpanMade | EndedSpanRaised:
+    """Make the span through `recorder`; an `Exception` of the recorder is
+    logged once per process."""
     try:
-        otel.recorder.make(ended, decided, workflow)
+        recorder.make(ended, decided, workflow)
     except Exception as failure:
         _RECORDER_FAILURES.report(failure)
         return EndedSpanRaised(exception=failure)
     return EndedSpanMade(workflow=workflow)
-
-
-def ended_workflow_of(
-    ended: AttemptEnded,
-    decided: AttemptEndDecidedByWorker,
-    nodes: WorkflowNodeReader,
-    read_failures: NodeReadFailures,
-) -> EndedWorkflow:
-    """The workflow node of the attempt of `ended`: `NotInWorkflow` for a
-    plain task, with no read; for a workflow task, the node that `nodes`
-    reads, or `WorkflowNotKnown` when the read failed (counted in
-    `read_failures`) or found no node."""
-    match decided.workflow:
-        case 'NOT_IN_WORKFLOW':
-            return NotInWorkflow()
-        case 'WORKFLOW_NOT_KNOWN':
-            pass
-    match nodes.read(ended.task_id):
-        case InWorkflow() as node:
-            return node
-        case NodeNotLinked():
-            return WorkflowNotKnown()
-        case NodeReadFailed(detail=detail):
-            read_failures.record(ended.task_id, detail)
-            return WorkflowNotKnown()
-        case _ as unreachable:
-            assert_never(unreachable)
 
 
 def flush_ended_attempt_spans_at_stop(spans: EndedAttemptSpans) -> StopFlush:

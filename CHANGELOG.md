@@ -120,8 +120,12 @@ before you upgrade a 0.7 deployment.
   reads the node by the task id, with one read of the core bounded at 1 s
   for a connection and 1 s for the statement, only for such an attempt, and
   the span gets `horsies.workflow.id`, `horsies.workflow.node` and
-  `horsies.workflow.root_id`; a read that fails leaves them out, and the
-  handler child counts and logs it.
+  `horsies.workflow.root_id`. The read runs on one reader thread with a
+  queue of at most 1,000 spans, so it never holds an event. A read that
+  fails, a full queue, and a span still queued at the stop leave the
+  workflow attributes out; the new worker metric
+  `horsies.spans.worker_ended.read_failures{reason="read_failed"|"not_read"}`
+  counts them, and the handler child logs them.
   `OtelTracing(worker_ended_spans=...)` takes the new `WorkerEndedSpans`:
   `MAKE_SPANS` (the default), with which the worker starts its handler child
   also when the app has no handler, or `NO_SPANS`. Set the tracer provider

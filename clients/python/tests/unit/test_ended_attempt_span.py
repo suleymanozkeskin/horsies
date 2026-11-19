@@ -2,8 +2,10 @@
 
 The events come as the wire text of an ``events`` frame, as the core writes
 them, through the dispatch of the control thread (``EventDispatch``). The
-spans go to the in-memory exporter of the OpenTelemetry SDK through a
-recorder of a provider of the test; the global tracer provider is not set.
+span of a workflow task waits for the read of its node on the reader thread
+(``start_node_reader``). The spans go to the in-memory exporter of the
+OpenTelemetry SDK through a recorder of a provider of the test; the global
+tracer provider is not set.
 """
 
 # pyright: reportPrivateUsage=false
@@ -15,9 +17,11 @@ import logging
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Final, cast
 
@@ -51,20 +55,32 @@ from horsies.core.telemetry.ended_attempt_span import (
     EndedSpanMade,
     EndedSpanRaised,
     EndedSpansOff,
+    EndedSpanWaitsForNode,
     EndedWorkflow,
     NodeNotLinked,
     NodeRead,
     NodeReadFailed,
+    NodeReadQueue,
     NoEndedAttemptSpans,
     NotEndedByWorker,
     OtelEndedAttemptSpans,
+    ReaderThreadRefused,
+    WorkflowNodeReader,
     WorkflowNotKnown,
+    end_node_reads_at_stop,
     ended_attempt_spans_of,
     flush_ended_attempt_spans_at_stop,
     make_ended_attempt_span,
+    span_read_counts_of,
+    start_node_reader,
 )
 from horsies.core.types.result import Err, Ok
-from horsies.core.worker.child_frames import NoTraceCarrier, StoredTraceCarrier
+from horsies.core.worker.child_frames import (
+    NO_SPAN_READS,
+    NoTraceCarrier,
+    SpanReadCounts,
+    StoredTraceCarrier,
+)
 from horsies.core.worker.core_run import WorkerLaunch, worker_manifest_json
 from horsies.core.worker.handler_child import EventDispatch, decode_event_text
 from horsies.core.worker.run_return import InWorkflow, NotInWorkflow
@@ -106,6 +122,70 @@ def _no_reads() -> _StubNodes:
     return _StubNodes(NodeReadFailed(detail='a plain task reads no node'))
 
 
+_WAIT_S: Final = 5.0
+READER_THREAD_NAME: Final = 'horsies-span-node-reader'
+
+
+class _HeldNodes:
+    """A node reader whose reads wait for `release`, then give `answer`.
+    `entered` is set at the first read."""
+
+    def __init__(self, answer: NodeRead) -> None:
+        self.answer = answer
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self._lock = threading.Lock()
+        self._reads: list[uuid.UUID] = []
+
+    @property
+    def reads(self) -> list[uuid.UUID]:
+        with self._lock:
+            return list(self._reads)
+
+    def read(self, task_id: uuid.UUID) -> NodeRead:
+        with self._lock:
+            self._reads.append(task_id)
+        self.entered.set()
+        _ = self.release.wait(_WAIT_S)
+        return self.answer
+
+
+def _start_reader(spans: OtelEndedAttemptSpans) -> threading.Thread:
+    """Start the reader thread of `spans`, and return it."""
+    before = set(threading.enumerate())
+    match start_node_reader(spans):
+        case Ok():
+            pass
+        case Err(refused):
+            pytest.fail(f'the reader thread starts, got {refused}')
+    started = [t for t in threading.enumerate() if t not in before and t.name == READER_THREAD_NAME]
+    assert len(started) == 1, started
+    return started[0]
+
+
+def _read_waiting_spans(spans: OtelEndedAttemptSpans) -> None:
+    """Start the reader thread of `spans`, wait until it made each waiting
+    span, then close the queue and wait for the thread to end."""
+    reader = _start_reader(spans)
+    spans.read_queue.wait_idle(_WAIT_S)
+    assert spans.read_queue.close() == ()
+    reader.join(_WAIT_S)
+    assert not reader.is_alive()
+
+
+def _workflow_event() -> events.AnyEvent:
+    return _event(
+        _ended_text(
+            reason=TIMEOUT_KILL.reason,
+            code=TIMEOUT_KILL.code,
+            execution=TIMEOUT_KILL.execution,
+            child_kind=TIMEOUT_KILL.child_kind,
+            trace_wire=['NoCarrier'],
+            workflow='WORKFLOW_NOT_KNOWN',
+        ),
+    )
+
+
 def _to_microsecond(nanos: int) -> int:
     """`nanos` cut to the microsecond that a decoded event keeps."""
     return nanos // 1_000 * 1_000
@@ -127,7 +207,7 @@ class _Traced:
     def recorder(
         self,
         parentage: ChildOfSend | LinkedToSend,
-        nodes: _StubNodes | None = None,
+        nodes: WorkflowNodeReader | None = None,
     ) -> OtelEndedAttemptSpans:
         return OtelEndedAttemptSpans(
             recorder=OtelEndedAttemptRecorder(
@@ -369,6 +449,10 @@ class TestTheSpanOfAnAttemptThatTheWorkerEnded:
                 ),
             ],
         )
+        assert traced.named(SPAN_NAME) == []
+        assert nodes.reads == []
+
+        _read_waiting_spans(spans)
 
         made = traced.named(SPAN_NAME)
         assert len(made) == 1
@@ -382,7 +466,7 @@ class TestTheSpanOfAnAttemptThatTheWorkerEnded:
             'horsies.workflow.root_id': str(ROOT_WORKFLOW_ID),
         }
         assert nodes.reads == [TASK_ID]
-        assert spans.read_failures.count == 0
+        assert spans.read_failures.counts() == NO_SPAN_READS
 
     @pytest.mark.parametrize(
         ('answer', 'failures'),
@@ -412,13 +496,14 @@ class TestTheSpanOfAnAttemptThatTheWorkerEnded:
 
         with caplog.at_level(logging.WARNING, logger='horsies.telemetry'):
             step = make_ended_attempt_span(spans, event)
+            _read_waiting_spans(spans)
 
-        assert step == EndedSpanMade(workflow=WorkflowNotKnown())
+        assert step == EndedSpanWaitsForNode()
         span = traced.named(SPAN_NAME)[0]
         assert send.context is not None and span.context is not None
         assert dict(span.attributes or {}) == _expected_attributes(TIMEOUT_KILL)
         assert span.context.trace_id == send.context.trace_id
-        assert spans.read_failures.count == failures
+        assert spans.read_failures.counts() == SpanReadCounts(read_failed=failures, not_read=0)
         logged = [r for r in caplog.records if str(TASK_ID) in r.getMessage()]
         assert len(logged) == failures
 
@@ -437,7 +522,7 @@ class TestTheSpanOfAnAttemptThatTheWorkerEnded:
 
         assert make_ended_attempt_span(spans, event) == EndedSpanMade(workflow=NotInWorkflow())
         assert nodes.reads == []
-        assert spans.read_failures.count == 0
+        assert spans.read_failures.counts() == NO_SPAN_READS
 
     def test_an_end_that_the_child_reported_or_not_known_and_other_events_make_no_span(
         self,
@@ -474,6 +559,109 @@ class TestTheSpanOfAnAttemptThatTheWorkerEnded:
 
         assert steps == [NotEndedByWorker(), NotEndedByWorker(), NotEndedByWorker()]
         assert traced.spans() == ()
+
+
+class TestTheNodeReader:
+    def test_a_full_queue_makes_the_span_at_once_with_no_node_and_counts_it(
+        self,
+        traced: _Traced,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        nodes = _StubNodes(
+            InWorkflow(workflow_id=WORKFLOW_ID, node_index=4, root_workflow_id=ROOT_WORKFLOW_ID),
+        )
+        spans = replace(traced.recorder(ChildOfSend(), nodes), read_queue=NodeReadQueue(1))
+
+        with caplog.at_level(logging.WARNING, logger='horsies.telemetry'):
+            steps = [make_ended_attempt_span(spans, _workflow_event()) for _ in range(2)]
+
+        assert steps == [EndedSpanWaitsForNode(), EndedSpanMade(workflow=WorkflowNotKnown())]
+        made = traced.named(SPAN_NAME)
+        assert len(made) == 1
+        assert dict(made[0].attributes or {}) == _expected_attributes(TIMEOUT_KILL)
+        assert nodes.reads == []
+        assert span_read_counts_of(spans) == SpanReadCounts(read_failed=0, not_read=1)
+        logged = [r for r in caplog.records if str(TASK_ID) in r.getMessage()]
+        assert len(logged) == 1
+        assert 'the node read queue is full' in logged[0].getMessage()
+        assert len(spans.read_queue.close()) == 1
+
+    def test_the_dispatch_does_not_wait_for_a_read(self, traced: _Traced) -> None:
+        nodes = _HeldNodes(
+            InWorkflow(workflow_id=WORKFLOW_ID, node_index=4, root_workflow_id=ROOT_WORKFLOW_ID),
+        )
+        spans = traced.recorder(ChildOfSend(), nodes)
+        reader = _start_reader(spans)
+
+        started = time.monotonic()
+        first = make_ended_attempt_span(spans, _workflow_event())
+        assert nodes.entered.wait(_WAIT_S)
+        later = [make_ended_attempt_span(spans, _workflow_event()) for _ in range(2)]
+        took = time.monotonic() - started
+
+        assert [first, *later] == [EndedSpanWaitsForNode()] * 3
+        assert took < 1.0, took
+        assert traced.named(SPAN_NAME) == []
+        nodes.release.set()
+        spans.read_queue.wait_idle(_WAIT_S)
+        assert spans.read_queue.close() == ()
+        reader.join(_WAIT_S)
+        made = traced.named(SPAN_NAME)
+        assert len(made) == 3
+        assert all(
+            (span.attributes or {}).get('horsies.workflow.node') == 4 for span in made
+        )
+        assert nodes.reads == [TASK_ID] * 3
+        assert span_read_counts_of(spans) == NO_SPAN_READS
+
+    def test_the_stop_makes_each_span_left_once_with_no_node(self, traced: _Traced) -> None:
+        nodes = _HeldNodes(
+            InWorkflow(workflow_id=WORKFLOW_ID, node_index=4, root_workflow_id=ROOT_WORKFLOW_ID),
+        )
+        spans = traced.recorder(ChildOfSend(), nodes)
+        reader = _start_reader(spans)
+        _ = make_ended_attempt_span(spans, _workflow_event())
+        assert nodes.entered.wait(_WAIT_S)
+        _ = [make_ended_attempt_span(spans, _workflow_event()) for _ in range(2)]
+
+        made_at_stop = end_node_reads_at_stop(spans, 0.05)
+        nodes.release.set()
+        reader.join(_WAIT_S)
+
+        assert not reader.is_alive()
+        assert made_at_stop == 3
+        made = traced.named(SPAN_NAME)
+        assert len(made) == 3
+        assert all(dict(span.attributes or {}) == _expected_attributes(TIMEOUT_KILL) for span in made)
+        assert nodes.reads == [TASK_ID]
+        assert span_read_counts_of(spans) == SpanReadCounts(read_failed=0, not_read=3)
+
+    def test_spans_off_count_nothing_and_start_no_thread(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def refuse(_thread: threading.Thread) -> None:
+            raise AssertionError('no reader thread with no spans')
+
+        monkeypatch.setattr(threading.Thread, 'start', refuse)
+
+        assert start_node_reader(NO_ENDED_ATTEMPT_SPANS) == Ok(None)
+        assert span_read_counts_of(NO_ENDED_ATTEMPT_SPANS) == NO_SPAN_READS
+        assert end_node_reads_at_stop(NO_ENDED_ATTEMPT_SPANS, 0.0) == 0
+
+    def test_a_refused_reader_thread_is_an_error(
+        self,
+        traced: _Traced,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def refuse(_thread: threading.Thread) -> None:
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(threading.Thread, 'start', refuse)
+
+        assert start_node_reader(traced.recorder(ChildOfSend())) == Err(
+            ReaderThreadRefused(exception_name='RuntimeError', detail="can't start new thread"),
+        )
 
 
 class TestNoSpans:

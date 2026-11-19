@@ -298,8 +298,11 @@ ended (a timeout kill `TASK_TIMEOUT`, a blocked-loop kill, a lost child
 parent from the stored carrier, start at the placement, status ERROR with
 `error.type`, `horsies.span.source = "worker"`. For a workflow task the
 handler child reads the node by the task id (one bounded core read, only for
-these attempts) and sets `horsies.workflow.*`; a failed read leaves them out
-and is counted and logged. The worker then starts the handler child also
+these attempts, on one reader thread with a queue of at most 1,000 spans:
+never on the event path) and sets `horsies.workflow.*`. A failed read, a
+full queue and a span still queued at the stop leave them out; the worker
+metric `horsies.spans.worker_ended.read_failures{reason}` (`read_failed`,
+`not_read`) counts them. The worker then starts the handler child also
 with no handler;
 set the tracer provider in `on_handler_child_start`. `NO_SPANS` turns it off.
 

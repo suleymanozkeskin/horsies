@@ -23,7 +23,7 @@ never ended:
   `attempt_otel.workflow_attributes`), with the kind of the child as
   `horsies.task.execution`, and `horsies.span.source` = `worker`. The
   workflow node of a workflow task is the one that the handler child read
-  (`ended_attempt_span.ended_workflow_of`); with `WorkflowNotKnown` the span
+  (`ended_attempt_span.workflow_of_read`); with `WorkflowNotKnown` the span
   has no `horsies.workflow.*` attribute, and the carrier still places it in
   the trace of the workflow start.
 

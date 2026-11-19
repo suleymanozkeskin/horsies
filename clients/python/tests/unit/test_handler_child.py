@@ -52,6 +52,7 @@ from horsies.core.telemetry.attempt_span import StopFlush
 from horsies.core.telemetry.ended_attempt_span import (
     NO_ENDED_ATTEMPT_SPANS,
     EndedAttemptSpans,
+    NodeRead,
     NodeReadFailed,
     OtelEndedAttemptSpans,
 )
@@ -60,9 +61,11 @@ from horsies.core.worker import child_main, handler_child
 from horsies.core.worker.child_frames import (
     BootFailedFrame,
     ChildFrame,
+    NO_SPAN_READS,
     HandlerCounts,
     HandlerStatsFrame,
     ReadyFrame,
+    SpanReadCounts,
 )
 from horsies.core.worker.child_main import ParentFrameReader, read_python_init_frame
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
@@ -78,6 +81,7 @@ from horsies.core.worker.handler_child import (
     RunningHandler,
     decode_event_text,
     run_handler_child_start_hooks,
+    start_ended_span_reader,
     start_handlers,
     stats_frame,
 )
@@ -741,6 +745,76 @@ class TestServedChild:
         assert [type(spans) for spans in flushed] == [OtelEndedAttemptSpans]
         assert child.exit_codes == [0]
 
+    def test_a_held_node_read_never_holds_an_event_and_the_stop_counts_it(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        exporter = InMemorySpanExporter()
+        provider = TracerProvider(shutdown_on_exit=False)
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+        def provider_tracer(*_args: object, **_kwargs: object) -> Tracer:
+            return provider.get_tracer('horsies')
+
+        monkeypatch.setattr(ended_attempt_otel.trace, 'get_tracer', provider_tracer)
+        monkeypatch.setattr(handler_child, 'HANDLER_DRAIN_S', 0.1)
+        entered = threading.Event()
+        release = threading.Event()
+
+        class _HeldReader:
+            def read(self, task_id: uuid.UUID) -> NodeRead:
+                del task_id
+                entered.set()
+                _ = release.wait(_WAIT_S)
+                return NodeReadFailed(detail='released after the stop')
+
+        def held_reader(_app: Horsies) -> _HeldReader:
+            return _HeldReader()
+
+        monkeypatch.setattr(handler_child, 'AppNodeReader', held_reader)
+        app = Horsies(
+            config=AppConfig(
+                broker=PostgresConfig(
+                    database_url=SecretStr('postgresql://user:pass@localhost/db')
+                ),
+                tracing=OtelTracing(),
+            ),
+        )
+        handled: list[str] = []
+
+        def on_end(event: AttemptEnded) -> None:
+            handled.append(type(event.end).__name__)
+
+        app.on_event(AttemptEnded)(on_end)
+        child = _ServedChild(monkeypatch, app)
+        child.start()
+        _wait_until(lambda: bool(child.snapshot()), 'the ready frame')
+
+        child.send(
+            _events_bytes(
+                [
+                    dict(WIRE_TEXTS)['attempt_ended_by_worker_in_workflow'],
+                    dict(WIRE_TEXTS)['attempt_ended_by_worker'],
+                ],
+            ),
+        )
+        _wait_until(lambda: len(handled) == 2, 'both events at the handler')
+        assert entered.is_set()
+        assert len(exporter.get_finished_spans()) == 1
+        child.send(_stop_bytes())
+        child.join()
+        release.set()
+        child.close()
+        provider.shutdown()
+
+        made = exporter.get_finished_spans()
+        assert len(made) == 2
+        assert all('horsies.workflow.id' not in (span.attributes or {}) for span in made)
+        last = child.snapshot()[-1]
+        assert isinstance(last, HandlerStatsFrame)
+        assert last.span_reads == SpanReadCounts(read_failed=0, not_read=1)
+        assert child.exit_codes == [0]
+
     def test_stats_frames_come_at_the_interval_with_the_totals(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1103,13 +1177,36 @@ def test_a_stats_frame_holds_each_handler_once_in_order() -> None:
     app.on_event(TaskClaimed)(_ignoring('second'))
     running = _started(app)
 
-    frame = stats_frame(running)
+    frame = stats_frame(running, NO_ENDED_ATTEMPT_SPANS)
     _stop(running)
 
     handlers: tuple[EventHandler, ...] = app.get_event_handlers()
     assert [counts.handler for counts in frame.handlers] == [
         handler.name for handler in handlers
     ]
+    assert frame.span_reads == NO_SPAN_READS
+
+
+def test_a_refused_reader_thread_fails_the_boot(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = Horsies(
+        config=AppConfig(
+            broker=PostgresConfig(database_url=SecretStr('postgresql://user:pass@localhost/db')),
+            tracing=OtelTracing(),
+        ),
+    )
+    spans = handler_child.ended_attempt_spans_of(app.config.tracing, AppNodeReader(app))
+
+    def refuse(_thread: threading.Thread) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, 'start', refuse)
+
+    match start_ended_span_reader(spans):
+        case Err(BootFailedFrame(cause=ThreadStartRefused())):
+            pass
+        case other:
+            pytest.fail(f'a refused reader thread is a refused thread, got {other}')
+    assert start_ended_span_reader(NO_ENDED_ATTEMPT_SPANS) == Ok(None)
 
 
 class _NodeHandle:
