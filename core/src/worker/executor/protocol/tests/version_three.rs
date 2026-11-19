@@ -867,9 +867,9 @@ fn a_batch_holds_one_to_the_most_events() {
 }
 
 /// The wire form of an `AttemptEnded` of an attempt that the worker ended,
-/// with the largest numbers, a task name of 255 and a queue name of 52
-/// characters that JSON writes as 6 bytes each, and the internal carrier
-/// `text`.
+/// with the largest numbers, the longest names of each closed set, a task
+/// name of 255, a queue name of 52 and a worker id of 255 characters that
+/// JSON writes as 6 bytes each, and the internal carrier `text`.
 fn largest_attempt_ended(text: &str) -> crate::events::Event {
     let wire = json!([
         "AttemptEnded",
@@ -877,13 +877,17 @@ fn largest_attempt_ended(text: &str) -> crate::events::Event {
         "0192f6a1-7b3c-7d4e-8f00-0123456789ab",
         "\u{1}".repeat(crate::events::MAX_EVENT_TASK_NAME_CHARS),
         "\u{1}".repeat(crate::events::MAX_EVENT_QUEUE_NAME_CHARS),
-        "SHARED_ASYNC",
+        "SHARED_THREAD",
         crate::events::MAX_ATTEMPT,
         [
             "DecidedByWorker",
             "NEIGHBOUR_BLOCKED_LOOP",
+            "WORKFLOW_RECOVERY_LIMIT_REACHED",
             ["Carrier", text],
-            i64::MAX
+            i64::MAX,
+            "SHARED_THREAD",
+            "\u{1}".repeat(crate::events::MAX_EVENT_WORKER_ID_CHARS),
+            "WORKFLOW_NOT_KNOWN"
         ],
         u64::MAX,
     ]);
