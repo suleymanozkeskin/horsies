@@ -510,6 +510,7 @@ fn claimed(task_id: Uuid, queue: &str, generation: DateTime<Utc>, kind: TaskKind
             max_retries: 0,
         },
         options: read_stored_options(None),
+        trace: crate::events::RunTrace::NoCarrier,
     }
 }
 

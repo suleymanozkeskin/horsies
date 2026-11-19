@@ -32,6 +32,7 @@ fn claimed_wire(n: u128) -> ClaimWireRow {
         claimed_at: Some(instant()),
         retry_count: Some(1),
         max_retries: Some(3),
+        trace_carrier: None,
         short_by: None,
     }
 }
@@ -67,6 +68,7 @@ fn claimed_rows_come_in_claim_order_with_no_short_take() {
             claimed_at: instant(),
             retry_count: 1,
             max_retries: 3,
+            trace: crate::events::RunTrace::NoCarrier,
         }
     );
 }
@@ -136,6 +138,13 @@ fn rows_the_claim_never_returns_are_a_defect() {
                 ..short_wire(1)
             }],
         ),
+        (
+            "short_with_a_trace_carrier",
+            vec![ClaimWireRow {
+                trace_carrier: Some(CARRIER_TEXT.to_owned()),
+                ..short_wire(1)
+            }],
+        ),
         ("short_by_zero", vec![short_wire(0)]),
         ("short_by_negative", vec![short_wire(-1)]),
         (
@@ -190,6 +199,50 @@ fn a_claimed_row_of_a_class_outside_the_enum_is_refused_with_its_task() {
         )),
         "{refused}"
     );
+}
+
+/// A stored carrier of the send, as the core's encoder writes it.
+const CARRIER_TEXT: &str =
+    r#"{"traceparent":"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}"#;
+
+/// The stored carrier of a claimed row reaches the claimed row as its text;
+/// a row with no carrier (`NULL`) claims with no carrier.
+#[test]
+fn a_claimed_row_carries_its_stored_trace_carrier() {
+    let pass = decode_claim_pass(vec![
+        ClaimWireRow {
+            trace_carrier: Some(CARRIER_TEXT.to_owned()),
+            ..claimed_wire(1)
+        },
+        claimed_wire(2),
+    ])
+    .expect("claimed rows with and without a carrier read");
+
+    assert_eq!(
+        pass.claimed[0].trace,
+        RunTrace::Carrier {
+            text: TraceCarrierText::new(CARRIER_TEXT.to_owned()).expect("a short carrier"),
+        }
+    );
+    assert_eq!(pass.claimed[1].trace, RunTrace::NoCarrier);
+}
+
+/// A stored text over the carrier bound was not written by a send. It does
+/// not fail the claim: the row claims with no carrier.
+#[test]
+fn a_stored_carrier_over_its_bound_claims_with_no_carrier() {
+    let over = format!(
+        r#"{{"k":"{}"}}"#,
+        "v".repeat(crate::events::MAX_EVENT_TRACE_CARRIER_CHARS)
+    );
+    let pass = decode_claim_pass(vec![ClaimWireRow {
+        trace_carrier: Some(over),
+        ..claimed_wire(1)
+    }])
+    .expect("a carrier over its bound does not fail the claim");
+
+    assert_eq!(pass.claimed.len(), 1);
+    assert_eq!(pass.claimed[0].trace, RunTrace::NoCarrier);
 }
 
 // --- claim pass arguments -----------------------------------------------------

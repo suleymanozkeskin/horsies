@@ -33,6 +33,7 @@ fn row(name: &str, queue_name: &str) -> ClaimedRow {
         claimed_at: generation(),
         retry_count: 0,
         max_retries: 0,
+        trace: crate::events::RunTrace::NoCarrier,
     }
 }
 

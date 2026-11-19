@@ -35,7 +35,7 @@ use crate::db::{
     ChannelName, CheckoutClass, ParameterType, PayloadEvent, PayloadFilter, PayloadSubscription,
     Reserve, StatementBound, TypedStatement, WakeEvent, WakeSubscription,
 };
-use crate::telemetry::registry::OptionalCounter;
+use crate::telemetry::worker::WorkerTelemetry;
 use crate::worker::backoff::RetryBackoff;
 use crate::worker::children::{
     attempt_end, baseline_limits, exit_not_seen, pending_task_limit, plan_placement, preload_plan,
@@ -720,6 +720,7 @@ fn claimed_of(row: ClaimedRow) -> Claimed {
                 max_retries: row.max_retries,
             },
             options: read_stored_options(row.task_options.as_deref()),
+            trace: row.trace,
         },
         input: TaskInputText::new(row.input),
     }
@@ -877,6 +878,9 @@ pub struct Worker {
     on_started: OnStarted,
     /// Set when the start ended and the claim loop begins.
     serving: AtomicBool,
+    /// The metrics and the events of the lifecycle points; off unless the
+    /// host turns it on.
+    telemetry: WorkerTelemetry,
 }
 
 impl Worker {
@@ -926,12 +930,18 @@ impl Worker {
             hostname,
             on_started: OnStarted::Nothing,
             serving: AtomicBool::new(false),
+            telemetry: WorkerTelemetry::Off,
         })
     }
 
     /// This worker with `on_started` as its start hook.
     pub fn with_on_started(self, on_started: OnStarted) -> Self {
         Self { on_started, ..self }
+    }
+
+    /// This worker with `telemetry` at its lifecycle points.
+    pub fn with_telemetry(self, telemetry: WorkerTelemetry) -> Self {
+        Self { telemetry, ..self }
     }
 
     /// This worker stopped by `stop`: a request through it, also one made
@@ -1181,9 +1191,7 @@ impl Worker {
             self.app_config.recovery.clone(),
             self.app_config.retention.clone(),
             health,
-            // The worker builds no metric registry yet: no failure is
-            // counted, and the failure log works the same.
-            OptionalCounter::NotRecorded,
+            self.telemetry.recovery_failures(),
             self.cancel.clone(),
         )
     }
@@ -2548,6 +2556,7 @@ mod tests {
             kind: TaskKind::Plain,
             retry,
             options: crate::worker::retry::read_stored_options(task_options),
+            trace: crate::events::RunTrace::NoCarrier,
         }
     }
 
@@ -3264,6 +3273,7 @@ mod tests {
             claimed_at,
             retry_count: 1,
             max_retries: 3,
+            trace: crate::events::RunTrace::NoCarrier,
         };
 
         let claimed = claimed_of(row);
@@ -3282,6 +3292,7 @@ mod tests {
                     max_retries: 3,
                 },
                 options: read_stored_options(Some(r#"{"timeout_ms": 2000}"#)),
+                trace: crate::events::RunTrace::NoCarrier,
             }
         );
         assert_eq!(claimed.input.as_str(), r#"{"n": 1}"#);
@@ -3715,6 +3726,7 @@ mod tests {
             claimed_at,
             retry_count,
             max_retries,
+            trace: crate::events::RunTrace::NoCarrier,
         })
     }
 

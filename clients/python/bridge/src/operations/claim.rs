@@ -301,6 +301,7 @@ mod tests {
             claimed_at: Utc::now(),
             retry_count: 0,
             max_retries: 3,
+            trace: horsies_core::events::RunTrace::NoCarrier,
         }
     }
 
