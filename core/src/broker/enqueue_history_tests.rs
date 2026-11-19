@@ -546,7 +546,7 @@ async fn an_enqueue_outcome_outside_the_contract_panics_with_the_outcome_and_the
              p_fingerprint_version smallint, p_fingerprint bytea, p_lineage_kind text,
              p_rerun_of_task_id uuid, p_rerun_root_task_id uuid, p_key_kind text,
              p_key_digest bytea, p_key_scope_version smallint, p_key_window interval,
-             p_send_kind text
+             p_send_kind text, p_trace_kind text, p_trace_carrier text, p_trace_id bytea
          ) RETURNS TABLE(outcome text, task_id uuid)
          LANGUAGE sql AS $$ SELECT 'SOMETHING_ELSE'::text, p_task_id $$;",
     )

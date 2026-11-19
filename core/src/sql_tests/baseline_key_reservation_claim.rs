@@ -87,7 +87,7 @@ const SEND_SQL: &str = r#"
     SELECT outcome, task_id FROM horsies_enqueue_task(
         $1::uuid, 'key.claim', 'q_key_claim', 100, '{"order_id":"order-1"}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL,
         now(), 'NOW', NULL, NULL, 1::smallint, $2::bytea, 'FIRST_RUN', NULL, NULL,
-        'KEYED', $3::bytea, 1::smallint, interval '1 hour', 'FIRST')
+        'KEYED', $3::bytea, 1::smallint, interval '1 hour', 'FIRST', 'NO_CARRIER', NULL, NULL)
 "#;
 
 /// The key of every claim and send.

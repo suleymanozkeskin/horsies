@@ -483,9 +483,10 @@ $$;
 -- ENQUEUED with no task: the rows are built here (ids from horsies_uuidv7() in index order, the input of
 -- horsies_workflow_task_input) and inserted through horsies_insert_task_rows, the one column list of a new task row,
 -- with the values of a workflow task row: is_workflow_task TRUE, no command fingerprint (the "no fingerprint"
--- variant), no key digest, no lineage, retain_rerun_input FALSE, sent_at of the workflow, enqueued_at, created_at and
--- updated_at p_row_time, max_retries, execution and retention_class_key from the node row, and good_until cast from
--- the good_until member of the stored task options (NULL for no options, empty options, or a null or absent member).
+-- variant), no key digest, no lineage, retain_rerun_input FALSE, sent_at, trace_carrier and trace_id of the workflow
+-- (one read of the workflow row), enqueued_at, created_at and updated_at p_row_time, max_retries, execution and
+-- retention_class_key from the node row, and good_until cast from the good_until member of the stored task options
+-- (NULL for no options, empty options, or a null or absent member).
 -- Then one link UPDATE of the nodes. The insert trigger sends the wake of each queue.
 -- p_row_time is the caller's: horsies_workflow_promote passes now(), the start of the transaction, as Python's
 -- workflow task insert in its multi-statement transaction. A NULL p_row_time with a row to mint raises 22023.
@@ -533,6 +534,11 @@ BEGIN
           AND n.task_id IS NULL
         ORDER BY n.task_index
     ),
+    workflow_row AS MATERIALIZED (
+        SELECT w.sent_at, w.trace_carrier, w.trace_id
+        FROM horsies_workflows w
+        WHERE w.id = p_workflow_id
+    ),
     built_rows AS (
         SELECT array_agg(b.task_id) AS task_ids,
                array_agg(b.task_name::text) AS task_names,
@@ -545,7 +551,9 @@ BEGIN
                array_agg(b.max_retries) AS max_retries,
                array_agg(b.good_until) AS good_untils,
                count(*)::integer AS row_count,
-               (SELECT w.sent_at FROM horsies_workflows w WHERE w.id = p_workflow_id) AS sent_at
+               (SELECT w.sent_at FROM workflow_row w) AS sent_at,
+               (SELECT w.trace_carrier FROM workflow_row w) AS trace_carrier,
+               (SELECT w.trace_id FROM workflow_row w) AS trace_id
         FROM built b
     ),
     inserted AS (
@@ -557,7 +565,8 @@ BEGIN
             array_fill(b.sent_at, ARRAY[b.row_count]), array_fill(p_row_time, ARRAY[b.row_count]),
             array_fill(TRUE, ARRAY[b.row_count]), array_fill(NULL::smallint, ARRAY[b.row_count]),
             array_fill(NULL::bytea, ARRAY[b.row_count]), array_fill(NULL::bytea, ARRAY[b.row_count]),
-            array_fill(NULL::uuid, ARRAY[b.row_count]), array_fill(NULL::uuid, ARRAY[b.row_count]), p_row_time,
+            array_fill(NULL::uuid, ARRAY[b.row_count]), array_fill(NULL::uuid, ARRAY[b.row_count]),
+            array_fill(b.trace_carrier, ARRAY[b.row_count]), array_fill(b.trace_id, ARRAY[b.row_count]), p_row_time,
             'NONE'
         ) AS r
         WHERE b.row_count > 0
@@ -2839,8 +2848,9 @@ END;
 $$;
 
 -- Internal: inserts the top row of a starting tree (the first of the workflow arrays), RUNNING, with
--- p_root_workflow_id (the top-level id for a top-level start, the root of the parent's tree for a child start) and
--- the start call time, with ON CONFLICT (id) DO NOTHING. Returns FALSE when the id exists already (nothing written),
+-- p_root_workflow_id (the top-level id for a top-level start, the root of the parent's tree for a child start), the
+-- start call time and the trace pair (p_trace_carrier and p_trace_id, both NULL for none), with ON CONFLICT (id) DO
+-- NOTHING. Returns FALSE when the id exists already (nothing written),
 -- else TRUE. The other workflow rows go in one at a time, as their parent's roots are taken
 -- (horsies_workflow_start_child_row).
 -- Locks: the new row and the unique index entry of its id. Python: INSERT_WORKFLOW_SQL and INSERT_CHILD_WORKFLOW_SQL
@@ -2849,7 +2859,7 @@ CREATE FUNCTION horsies_workflow_start_top_row(
     p_workflow_ids uuid[], p_names text[], p_definition_keys text[], p_on_errors text[],
     p_output_task_indexes integer[], p_success_policies text[], p_parent_workflow_ids uuid[],
     p_parent_task_indexes integer[], p_depths integer[], p_sent_at timestamp with time zone,
-    p_root_workflow_id uuid
+    p_root_workflow_id uuid, p_trace_carrier text, p_trace_id bytea
 ) RETURNS boolean
     LANGUAGE plpgsql
     SET plan_cache_mode TO 'force_generic_plan'
@@ -2860,11 +2870,11 @@ BEGIN
     INSERT INTO horsies_workflows (
         id, name, definition_key, status, on_error, output_task_index, success_policy, result, error,
         parent_workflow_id, parent_task_index, root_workflow_id, depth, sent_at, created_at, started_at,
-        completed_at, updated_at
+        completed_at, updated_at, trace_carrier, trace_id
     ) VALUES (
         p_workflow_ids[1], p_names[1], p_definition_keys[1], 'RUNNING', p_on_errors[1], p_output_task_indexes[1],
         p_success_policies[1]::jsonb, NULL, NULL, p_parent_workflow_ids[1], p_parent_task_indexes[1],
-        p_root_workflow_id, p_depths[1], p_sent_at, now(), now(), NULL, now()
+        p_root_workflow_id, p_depths[1], p_sent_at, now(), now(), NULL, now(), p_trace_carrier, p_trace_id
     )
     ON CONFLICT (id) DO NOTHING
     RETURNING id INTO v_inserted;
@@ -2873,8 +2883,8 @@ END;
 $$;
 
 -- Internal: the pre-built child at position p_position of the workflow arrays (a position after the first). The child
--- row goes in (RUNNING, p_root_workflow_id, the start call time), and its sub-workflow root node goes from READY to
--- RUNNING, linked to the child, with started_at.
+-- row goes in (RUNNING, p_root_workflow_id, the start call time, the trace pair of the start), and its sub-workflow
+-- root node goes from READY to RUNNING, linked to the child, with started_at.
 -- Precondition: the parent workflow is RUNNING (horsies_workflow_start_tree reads it before the call).
 -- horsies_workflow_tree_check refused a child row that names no sub-workflow root of its parent, or a node that
 -- another child row names, so the link writes one row; another count raises internal_error (a defect).
@@ -2885,7 +2895,7 @@ CREATE FUNCTION horsies_workflow_start_child_row(
     p_position integer, p_workflow_ids uuid[], p_names text[], p_definition_keys text[], p_on_errors text[],
     p_output_task_indexes integer[], p_success_policies text[], p_parent_workflow_ids uuid[],
     p_parent_task_indexes integer[], p_depths integer[], p_sent_at timestamp with time zone,
-    p_root_workflow_id uuid
+    p_root_workflow_id uuid, p_trace_carrier text, p_trace_id bytea
 ) RETURNS uuid
     LANGUAGE plpgsql
     SET plan_cache_mode TO 'force_generic_plan'
@@ -2897,12 +2907,12 @@ BEGIN
     INSERT INTO horsies_workflows (
         id, name, definition_key, status, on_error, output_task_index, success_policy, result, error,
         parent_workflow_id, parent_task_index, root_workflow_id, depth, sent_at, created_at, started_at,
-        completed_at, updated_at
+        completed_at, updated_at, trace_carrier, trace_id
     ) VALUES (
         v_child, p_names[p_position], p_definition_keys[p_position], 'RUNNING', p_on_errors[p_position],
         p_output_task_indexes[p_position], p_success_policies[p_position]::jsonb, NULL, NULL,
         p_parent_workflow_ids[p_position], p_parent_task_indexes[p_position], p_root_workflow_id,
-        p_depths[p_position], p_sent_at, now(), now(), NULL, now()
+        p_depths[p_position], p_sent_at, now(), now(), NULL, now(), p_trace_carrier, p_trace_id
     );
     UPDATE horsies_workflow_tasks n
     SET status = 'RUNNING', sub_workflow_id = v_child, started_at = now()
@@ -3020,7 +3030,7 @@ CREATE FUNCTION horsies_workflow_start_tree(
     p_workflow_ids uuid[], p_names text[], p_definition_keys text[], p_on_errors text[],
     p_output_task_indexes integer[], p_success_policies text[], p_parent_workflow_ids uuid[],
     p_parent_task_indexes integer[], p_depths integer[], p_sent_at timestamp with time zone,
-    p_root_workflow_id uuid,
+    p_root_workflow_id uuid, p_trace_carrier text, p_trace_id bytea,
     p_node_workflow_ids uuid[], p_node_task_indexes integer[], p_node_ids text[], p_node_task_names text[],
     p_node_inputs text[], p_node_queue_names text[], p_node_priorities integer[], p_node_dependencies text[],
     p_node_args_from text[], p_node_workflow_ctx_from text[], p_node_allow_failed_deps boolean[],
@@ -3076,13 +3086,13 @@ BEGIN
                 v_child := horsies_workflow_start_child_row(
                     v_root.child_position::integer, p_workflow_ids, p_names, p_definition_keys, p_on_errors,
                     p_output_task_indexes, p_success_policies, p_parent_workflow_ids, p_parent_task_indexes, p_depths,
-                    p_sent_at, p_root_workflow_id
+                    p_sent_at, p_root_workflow_id, p_trace_carrier, p_trace_id
                 );
                 RETURN QUERY SELECT * FROM horsies_workflow_start_tree(
                     v_child, p_level + 1, p_top_workflow_id,
                     p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes,
                     p_success_policies, p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_sent_at,
-                    p_root_workflow_id,
+                    p_root_workflow_id, p_trace_carrier, p_trace_id,
                     p_node_workflow_ids, p_node_task_indexes, p_node_ids, p_node_task_names, p_node_inputs,
                     p_node_queue_names, p_node_priorities, p_node_dependencies, p_node_args_from,
                     p_node_workflow_ctx_from, p_node_allow_failed_deps, p_node_join_types, p_node_min_successes,
@@ -3232,8 +3242,11 @@ $$;
 -- each child that the core pre-built for a sub-workflow root, with its parent, parent index and depth), the start
 -- call time p_sent_at, every node row of the tree (dependencies, args_from and workflow_ctx_from as one JSON text per
 -- node; the typed facts max_retries, execution, good_until and retention_class_key set on task nodes; the params
--- choice sub_workflow_params set on sub-workflow nodes), and the
--- failed-node records (a sub-workflow root whose child could not be built: its node, and its error envelope).
+-- choice sub_workflow_params set on sub-workflow nodes), the failed-node records (a sub-workflow root whose child
+-- could not be built: its node, and its error envelope), and the trace of the start: p_trace_kind NO_CARRIER
+-- (p_trace_carrier and p_trace_id NULL) or CARRIER (the canonical JSON text of the core's carrier encoder and a
+-- 16-byte trace id). Every workflow row of the tree stores the pair, and the task rows of their nodes copy it
+-- (horsies_workflow_node_tasks_insert). A start that answers EXISTS keeps the pair of the stored row.
 -- Steps:
 -- 1. Insert the top-level row with ON CONFLICT (id) DO NOTHING. No row: return EXISTS with the stored name in
 --    detail and write nothing (the core maps the same name to the existing handle and another name to
@@ -3292,7 +3305,10 @@ CREATE FUNCTION horsies_workflow_start(
     p_node_sub_workflow_params text[],
     p_failed_workflow_ids uuid[],
     p_failed_task_indexes integer[],
-    p_failed_results text[]
+    p_failed_results text[],
+    p_trace_kind text,
+    p_trace_carrier text,
+    p_trace_id bytea
 ) RETURNS SETOF horsies_workflow_step_row
     LANGUAGE plpgsql
     SET plan_cache_mode TO 'force_generic_plan'
@@ -3302,6 +3318,20 @@ DECLARE
     v_name text;
 BEGIN
     PERFORM horsies_workflow_require(p_sent_at IS NOT NULL, 'sent_at must not be NULL');
+    PERFORM horsies_workflow_require(
+        p_trace_kind IN ('NO_CARRIER', 'CARRIER'), 'the trace kind must be NO_CARRIER or CARRIER'
+    );
+    CASE p_trace_kind
+        WHEN 'NO_CARRIER' THEN
+            PERFORM horsies_workflow_require(
+                num_nulls(p_trace_carrier, p_trace_id) = 2, 'a start with no carrier has no trace values'
+            );
+        WHEN 'CARRIER' THEN
+            PERFORM horsies_workflow_require(
+                num_nulls(p_trace_carrier, p_trace_id) = 0 AND octet_length(p_trace_id) = 16,
+                'a start with a carrier names its text and its 16-byte trace id'
+            );
+    END CASE;
     PERFORM horsies_workflow_tree_check(
         NULL, NULL, 0, p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes,
         p_success_policies, p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_node_workflow_ids,
@@ -3314,7 +3344,7 @@ BEGIN
 
     IF NOT horsies_workflow_start_top_row(
         p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes, p_success_policies,
-        p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_sent_at, v_top
+        p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_sent_at, v_top, p_trace_carrier, p_trace_id
     ) THEN
         SELECT w.name INTO v_name FROM horsies_workflows w WHERE w.id = v_top;
         RETURN NEXT horsies_workflow_outcome_row('EXISTS', v_top, FALSE, v_name);
@@ -3323,7 +3353,7 @@ BEGIN
     RETURN QUERY SELECT * FROM horsies_workflow_start_tree(
         v_top, 1, v_top,
         p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes, p_success_policies,
-        p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_sent_at, v_top,
+        p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_sent_at, v_top, p_trace_carrier, p_trace_id,
         p_node_workflow_ids, p_node_task_indexes, p_node_ids, p_node_task_names, p_node_inputs, p_node_queue_names,
         p_node_priorities, p_node_dependencies, p_node_args_from, p_node_workflow_ctx_from,
         p_node_allow_failed_deps, p_node_join_types, p_node_min_successes, p_node_task_options, p_node_max_retries,
@@ -3346,7 +3376,9 @@ $$;
 -- - TREE: the child tree that the core built, in the arrays of horsies_workflow_start: the child row first, with the
 --   parent pair (p_parent_workflow_id, p_parent_task_index) and the depth of the parent workflow plus one, then the
 --   pre-built children of its sub-workflow roots; every node of the tree; the failed-node records (a sub-workflow
---   root of the tree whose own child could not be built). p_sent_at is the call time of the child start.
+--   root of the tree whose own child could not be built). p_sent_at is the call time of the child start. Every
+--   workflow row of the child tree copies the trace pair (trace_carrier, trace_id) of the parent workflow row, so
+--   the tasks of a sub-workflow at any depth carry the trace of the top-level start.
 -- - FAILURE: p_failure_result, the error envelope of a child that could not be built (a definition that does not
 --   load, a failing build callback, an args_from key or value that the callback refuses, the depth limit). It must
 --   be an error envelope (22023 otherwise).
@@ -3468,7 +3500,8 @@ BEGIN
             );
     END CASE;
 
-    SELECT w.status, w.depth, coalesce(w.root_workflow_id, w.id) AS root_workflow_id INTO v_parent
+    SELECT w.status, w.depth, coalesce(w.root_workflow_id, w.id) AS root_workflow_id, w.trace_carrier, w.trace_id
+    INTO v_parent
     FROM horsies_workflows w
     WHERE w.id = p_parent_workflow_id
     FOR UPDATE;
@@ -3497,7 +3530,8 @@ BEGIN
             );
             IF NOT horsies_workflow_start_top_row(
                 p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes, p_success_policies,
-                p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_sent_at, v_parent.root_workflow_id
+                p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_sent_at, v_parent.root_workflow_id,
+                v_parent.trace_carrier, v_parent.trace_id
             ) THEN
                 RAISE EXCEPTION 'child workflow % of workflow % node % exists already', v_child, p_parent_workflow_id,
                     p_parent_task_index USING ERRCODE = 'unique_violation';
@@ -3507,6 +3541,7 @@ BEGIN
                 v_child, 1, v_child,
                 p_workflow_ids, p_names, p_definition_keys, p_on_errors, p_output_task_indexes, p_success_policies,
                 p_parent_workflow_ids, p_parent_task_indexes, p_depths, p_sent_at, v_parent.root_workflow_id,
+                v_parent.trace_carrier, v_parent.trace_id,
                 p_node_workflow_ids, p_node_task_indexes, p_node_ids, p_node_task_names, p_node_inputs,
                 p_node_queue_names, p_node_priorities, p_node_dependencies, p_node_args_from,
                 p_node_workflow_ctx_from, p_node_allow_failed_deps, p_node_join_types, p_node_min_successes,

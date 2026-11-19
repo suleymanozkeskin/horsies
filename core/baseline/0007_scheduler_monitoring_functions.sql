@@ -215,6 +215,9 @@ BEGIN
             array_fill(NULL::bytea, ARRAY[v_slot_count]),
             array_fill(NULL::uuid, ARRAY[v_slot_count]),
             array_fill(NULL::uuid, ARRAY[v_slot_count]),
+            -- No trace: a fire has no producer span.
+            array_fill(NULL::text, ARRAY[v_slot_count]),
+            array_fill(NULL::bytea, ARRAY[v_slot_count]),
             v_now,
             'NONE'
         ) AS r;

@@ -35,12 +35,13 @@ use crate::db::{ParameterType, TypedStatement};
 /// `integer` by the server, as Python's statement does, so a value outside
 /// the integer range is the server's refusal. The window is made into the
 /// exact `interval` (`$21::bigint * interval '1 microsecond'`); NULL for an
-/// unkeyed send.
+/// unkeyed send. The trace is `NO_CARRIER`: the send stores no carrier.
 pub(crate) static ENQUEUE_TASK: TypedStatement = TypedStatement::new(
     "enqueue_task",
     "SELECT outcome, task_id FROM horsies_enqueue_task(\
      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::integer, $16, $17, \
-     'FIRST_RUN', NULL, NULL, $18, $19, $20, $21::bigint * interval '1 microsecond', $22)",
+     'FIRST_RUN', NULL, NULL, $18, $19, $20, $21::bigint * interval '1 microsecond', $22, \
+     'NO_CARRIER', NULL, NULL)",
     &[
         ParameterType::Uuid,
         ParameterType::Text,
