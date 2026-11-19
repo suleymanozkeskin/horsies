@@ -64,12 +64,12 @@ python-source = "."
 features = ["extension-module"]
 # maturin packs every file under clients/python/horsies/ that .gitignore does not
 # exclude. The skill files are listed so that the package data is stated, not
-# implied. The baseline SQL files and the web UI build
-# (core/webui-dist) are compiled into horsies._core; the sdist
-# carries the SQL files so that a build from the sdist can compile them.
+# implied. The baseline SQL files and the web UI build (core/webui-dist) are
+# compiled into horsies._core. The sdist carries them as files of the path
+# dependency horsies-core (core/), so a build from the sdist can compile them;
+# maturin refuses an include pattern with `..`.
 include = [
     { path = "horsies/.agents/skills/horsies/*.md", format = ["sdist", "wheel"] },
-    { path = "../../core/baseline/*.sql", format = "sdist" },
 ]
 
 [dependency-groups]
