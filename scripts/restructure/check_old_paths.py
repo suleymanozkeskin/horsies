@@ -14,7 +14,8 @@ finds:
   ``tests/`` path is relative to the project, as pytest node ids are);
 - a path under a ``tests/`` entry that moved on its own (``tests/dualrun/``,
   the unit tests of the harnesses in ``tests/unit/``), in any file;
-- a GitHub source link to such a path;
+- a GitHub source link to such a path, or such a path after
+  ``$WORKSPACE/`` or ``./``;
 - a Python path built from literals that start at such a folder
   (``ROOT / 'crates' / 'horsies-core'``);
 - the module paths ``showcase.acme`` and ``tests.dualrun``;
@@ -88,6 +89,13 @@ OLD_DERIVED_NAME: Final = re.compile(
 
 OLD_MODULE: Final = re.compile(r'(?<![A-Za-z0-9_.])(?:showcase\.acme|tests\.dualrun)\b')
 
+ROOTED_PATH: Final = re.compile(
+    r'(?:\$WORKSPACE/|(?<![A-Za-z0-9_./-])\./)'
+    r'(?P<path>[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_.*-]*)+)',
+)
+"""A path after ``$WORKSPACE/`` (trybuild) or ``./``, which the citation
+pattern does not start at: ``./rust/scripts/coverage.sh``."""
+
 GITHUB_PATH: Final = re.compile(
     r'github\.com/suleymanozkeskin/horsies/(?:blob|tree|edit|raw)/[A-Za-z0-9_.-]+/(?P<path>[A-Za-z0-9_.@/-]+)',
 )
@@ -141,6 +149,11 @@ def findings_in_line(line: str, citing_file: str, tree: rules.Tree) -> list[str]
     found = [
         match.group('path')
         for match in rules.CITATION.finditer(line)
+        if old_path_cited(match.group('path'), citing_file, tree)
+    ]
+    found += [
+        match.group('path')
+        for match in ROOTED_PATH.finditer(line)
         if old_path_cited(match.group('path'), citing_file, tree)
     ]
     found += [
@@ -265,6 +278,10 @@ PLANTED: Final = (
     ('README.md', 'core/src/lib.rs and clients/python/horsies/__init__.py', False),
     ('README.md', 'tests/parity/runner.py', False),
     ('README.md', 'tests/dualrun/capture.py', True),
+    ('README.md', '  --> $WORKSPACE/crates/horsies/src/workflow/node.rs', True),
+    ('README.md', '  --> $WORKSPACE/core/src/lib.rs', False),
+    ('README.md', 'Usage: ./rust/scripts/coverage.sh [summary]', True),
+    ('README.md', 'Usage: ./core/src/lib.rs', False),
     ('clients/python/tests/unit/test_a.py', 'tests/dualrun/capture.py', True),
     ('README.md', 'tests/parity/snapshot/capture.py', False),
     ('README.md', 'from tests.dualrun.capture import capture_snapshot', True),

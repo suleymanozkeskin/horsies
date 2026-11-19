@@ -1501,6 +1501,43 @@ EDITS: Final[tuple[Edit, ...]] = (
         '    from tests.integration.history_seeding import ensure_history_seedable\n',
         '    from tests.history_seeding import ensure_history_seedable\n',
     ),
+    *(
+        # The snapshot tests are in the top-level package `tests`: they run
+        # from the repository root with the pytest settings of the Python
+        # project, as the unit tests of the other cross-client harnesses do.
+        Edit(
+            '.github/workflows/tests.yml',
+            f'run: uv run --no-sync pytest tests/parity/snapshot/ -m {marker} -v --tb=short',
+            'run: uv run --no-sync pytest -c clients/python/pyproject.toml --rootdir . '
+            f'tests/parity/snapshot/ -m {marker} -v --tb=short',
+        )
+        for marker in ('unit', 'integration')
+    ),
+    *(
+        # trybuild compares the compiler's paths, which start at the workspace.
+        Edit(
+            f'clients/rust/macros/tests/compile_fail/{name}.stderr',
+            '  --> $WORKSPACE/crates/horsies/src/workflow/node.rs',
+            '  --> $WORKSPACE/clients/rust/horsies/src/workflow/node.rs',
+        )
+        for name in ('arg_from_wrong_field_token', 'arg_from_wrong_source_type')
+    ),
+    Edit(
+        'clients/rust/scripts/coverage.sh',
+        'Usage: ./rust/scripts/coverage.sh [',
+        'Usage: ./clients/rust/scripts/coverage.sh [',
+    ),
+    Edit(
+        # The snapshot files are in the top-level package `tests`; pyright
+        # resolves `tests` there for them, and `horsies` in this folder.
+        'clients/python/pyrightconfig.clean.json',
+        '  "reportUnnecessaryTypeIgnoreComment": "error"\n}',
+        '  "reportUnnecessaryTypeIgnoreComment": "error",\n'
+        '  "executionEnvironments": [\n'
+        '    { "root": "../../tests", "extraPaths": ["../..", "."] }\n'
+        '  ]\n'
+        '}',
+    ),
     Edit(
         'clients/rust/tests/frozen-crate-test-fates.tsv',
         'Built and checked by rust/tests/frozen_fates.py.',
