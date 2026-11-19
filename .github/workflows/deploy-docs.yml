@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - 'website/**'
+      - 'core/src/telemetry/catalog_snapshot.txt'
       - '.github/workflows/deploy-docs.yml'
   pull_request:
     branches: [main]
     paths:
       - 'website/**'
+      - 'core/src/telemetry/catalog_snapshot.txt'
       - '.github/workflows/deploy-docs.yml'
 
 concurrency:

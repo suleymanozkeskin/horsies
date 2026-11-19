@@ -153,6 +153,12 @@ export default defineConfig({
 							],
 						},
 						{
+							label: 'Observability',
+							items: [
+								{ label: 'Metric Reference', slug: 'observability/metric-reference' },
+							],
+						},
+						{
 							label: 'Operations',
 							items: [
 								{ label: 'Atomic Enqueue & Topology', slug: 'operations/atomic-enqueue-and-topology' },
