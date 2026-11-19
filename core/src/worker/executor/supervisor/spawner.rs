@@ -186,6 +186,11 @@ enum Request {
         command: ChildCommand,
         reply: oneshot::Sender<Result<SpawnedChild, SpawnError>>,
     },
+    /// A spawn by `exec` alone, also while a preload process runs.
+    SpawnExec {
+        command: ChildCommand,
+        reply: oneshot::Sender<Result<SpawnedChild, SpawnError>>,
+    },
     Kill {
         child: ChildId,
         reply: oneshot::Sender<KillOutcome>,
@@ -320,18 +325,35 @@ impl SpawnerHandle {
     /// descriptor and stdin from `/dev/null`.
     pub async fn spawn(&self, command: ChildCommand) -> Result<SpawnedChild, SpawnError> {
         let (reply, answer) = oneshot::channel();
+        self.queue_spawn(Request::Spawn { command, reply })?;
+        answer.await.unwrap_or(Err(SpawnError::SpawnerStopped))
+    }
+
+    /// Start a child with `exec`, as [`SpawnerHandle::spawn`] does with no
+    /// preload process: never by a fork from the preload process, also
+    /// while one runs. The handler child starts this way: the preload
+    /// process holds the import of the task children.
+    pub async fn spawn_exec(&self, command: ChildCommand) -> Result<SpawnedChild, SpawnError> {
+        let (reply, answer) = oneshot::channel();
+        self.queue_spawn(Request::SpawnExec { command, reply })?;
+        answer.await.unwrap_or(Err(SpawnError::SpawnerStopped))
+    }
+
+    /// Queue a spawn request and wake the spawner thread.
+    ///
+    /// Errors: [`SpawnError::SpawnerStopped`] after the stop;
+    /// [`SpawnError::QueueFull`] at [`MAX_QUEUED_REQUESTS`].
+    fn queue_spawn(&self, request: Request) -> Result<(), SpawnError> {
         {
             let mut queue = self.shared.lock();
             match (queue.intake, queue.requests.len() >= MAX_QUEUED_REQUESTS) {
                 (Intake::ShuttingDown, _) => return Err(SpawnError::SpawnerStopped),
                 (Intake::Open, true) => return Err(SpawnError::QueueFull),
-                (Intake::Open, false) => {
-                    queue.requests.push_back(Request::Spawn { command, reply })
-                }
+                (Intake::Open, false) => queue.requests.push_back(request),
             }
         }
         self.shared.waker.wake();
-        answer.await.unwrap_or(Err(SpawnError::SpawnerStopped))
+        Ok(())
     }
 
     /// Start the preload process of `plan` and wait until it is ready or its
@@ -580,6 +602,10 @@ impl SpawnerLoop {
     fn serve(&mut self, request: Request) {
         match request {
             Request::Spawn { command, reply } => self.spawn_or_fork(command, reply),
+            Request::SpawnExec { command, reply } => {
+                let result = self.spawn(&command);
+                self.answer_spawn(reply, result);
+            }
             Request::Kill { child, reply } => {
                 // The requester may have gone away; the kill is sent anyway.
                 let _ = reply.send(self.kill(child));

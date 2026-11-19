@@ -1,0 +1,192 @@
+# Unit tests of horsies-alerts.yaml:
+#   promtool test rules deploy/prometheus/horsies-alerts.test.yaml
+#
+# Each alert has a case that fires and a series or a case that stays quiet.
+# promtool compares the firing alerts only: a pending alert is not listed.
+
+rule_files:
+  - horsies-alerts.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: HorsiesOldestPendingTaskTooOld fires per queue and class after 5 minutes, once for two fleet collectors
+    interval: 1m
+    input_series:
+      - series: 'horsies_queue_oldest_pending_age_seconds{job="horsies-fleet", instance="fleet-1:9465", queue="reports", execution="ISOLATED"}'
+        values: '400x10'
+      - series: 'horsies_queue_oldest_pending_age_seconds{job="horsies-fleet", instance="fleet-2:9465", queue="reports", execution="ISOLATED"}'
+        values: '380x10'
+      - series: 'horsies_queue_oldest_pending_age_seconds{job="horsies-fleet", instance="fleet-1:9465", queue="default", execution="SHARED_ASYNC"}'
+        values: '10x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: HorsiesOldestPendingTaskTooOld
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: HorsiesOldestPendingTaskTooOld
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              queue: reports
+              execution: ISOLATED
+            exp_annotations:
+              summary: "The oldest pending task of queue reports (ISOLATED) waits 6m 40s."
+              description: "A task of this queue and execution class is due and not claimed for more than 5 minutes. Check the workers that serve the class, their seats in use, and HorsiesUnservedClass."
+
+  - name: HorsiesTaskFailureRatioHigh fires for a task with more than 10% of at least 10 attempts not completed
+    interval: 1m
+    input_series:
+      # send_email: 5 completed and 5 failed attempts a minute.
+      - series: 'horsies_task_attempts_total{job="horsies-worker", instance="worker-1:9464", task="send_email", queue="default", execution="ISOLATED", outcome="COMPLETED"}'
+        values: '0+5x20'
+      - series: 'horsies_task_attempts_total{job="horsies-worker", instance="worker-1:9464", task="send_email", queue="default", execution="ISOLATED", outcome="FAILED", error_code="TASK_EXCEPTION"}'
+        values: '0+5x20'
+      # resize: no failed attempt.
+      - series: 'horsies_task_attempts_total{job="horsies-worker", instance="worker-1:9464", task="resize", queue="default", execution="ISOLATED", outcome="COMPLETED"}'
+        values: '0+10x20'
+      - series: 'horsies_task_attempts_total{job="horsies-worker", instance="worker-1:9464", task="resize", queue="default", execution="ISOLATED", outcome="FAILED", error_code="TASK_EXCEPTION"}'
+        values: '0x20'
+      # rare: every attempt fails, but fewer than 10 attempts in 10 minutes.
+      - series: 'horsies_task_attempts_total{job="horsies-worker", instance="worker-1:9464", task="rare", queue="default", execution="ISOLATED", outcome="FAILED", error_code="TASK_EXCEPTION"}'
+        values: '0+0.5x20'
+    alert_rule_test:
+      # send_email is pending from the second minute: not firing before 5 minutes.
+      - eval_time: 4m
+        alertname: HorsiesTaskFailureRatioHigh
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: HorsiesTaskFailureRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              queue: default
+              task: send_email
+            exp_annotations:
+              summary: "50% of the attempts of task send_email on queue default did not complete in the last 10 minutes."
+              description: "More than 10% of at least 10 attempts ended FAILED or WORKER_FAILURE. horsies_task_attempts_total{outcome!=\"COMPLETED\"} by error_code shows the causes."
+
+  - name: HorsiesNoLiveWorker fires once when every fleet collector counts no live worker
+    interval: 1m
+    input_series:
+      - series: 'horsies_fleet_workers{job="horsies-fleet", instance="fleet-1:9465", state="serving"}'
+        values: '0x10'
+      - series: 'horsies_fleet_workers{job="horsies-fleet", instance="fleet-1:9465", state="degraded"}'
+        values: '0x10'
+      - series: 'horsies_fleet_workers{job="horsies-fleet", instance="fleet-2:9465", state="serving"}'
+        values: '0x10'
+      - series: 'horsies_fleet_workers{job="horsies-fleet", instance="fleet-2:9465", state="degraded"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: HorsiesNoLiveWorker
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: HorsiesNoLiveWorker
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "No live worker: no worker wrote a snapshot inside the live window."
+              description: "No task is claimed until a worker starts. The fleet collector still answers, so the database is reachable."
+
+  - name: HorsiesNoLiveWorker stays quiet with one degraded worker
+    interval: 1m
+    input_series:
+      - series: 'horsies_fleet_workers{job="horsies-fleet", instance="fleet-1:9465", state="serving"}'
+        values: '0x10'
+      - series: 'horsies_fleet_workers{job="horsies-fleet", instance="fleet-1:9465", state="degraded"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: HorsiesNoLiveWorker
+        exp_alerts: []
+
+  - name: HorsiesUnservedClass fires for the queue and class that no live worker serves
+    interval: 1m
+    input_series:
+      - series: 'horsies_fleet_unserved_classes{job="horsies-fleet", instance="fleet-1:9465", queue="reports", execution="SHARED_THREAD"}'
+        values: '1x10'
+      - series: 'horsies_fleet_unserved_classes{job="horsies-fleet", instance="fleet-1:9465", queue="default", execution="ISOLATED"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: HorsiesUnservedClass
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: HorsiesUnservedClass
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              queue: reports
+              execution: SHARED_THREAD
+            exp_annotations:
+              summary: "Queue reports has pending SHARED_THREAD tasks, and no live worker serves this queue and class."
+              description: "These tasks stay PENDING until a worker whose profile serves the queue and the execution class starts."
+
+  - name: HorsiesEventsDropped fires at the first dropped event of a worker and cause
+    interval: 1m
+    input_series:
+      - series: 'horsies_telemetry_events_dropped_total{job="horsies-worker", instance="worker-1:9464", cause="queue_full"}'
+        values: '0 0 0 5 5 5 5'
+      - series: 'horsies_telemetry_events_dropped_total{job="horsies-worker", instance="worker-1:9464", cause="child_down"}'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: HorsiesEventsDropped
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: HorsiesEventsDropped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: horsies-worker
+              instance: "worker-1:9464"
+              cause: queue_full
+            exp_annotations:
+              summary: "A worker dropped lifecycle events in the last 10 minutes (cause queue_full)."
+              description: "queue_full: the handler child reads slower than the worker sends. child_down: the handler child is not running. Task outcomes do not change; the event handlers miss these events."
+
+  - name: HorsiesTelemetryDown fires for the telemetry part that live workers have down
+    interval: 1m
+    input_series:
+      - series: 'horsies_fleet_workers_telemetry_down{job="horsies-fleet", instance="fleet-1:9465", part="endpoint"}'
+        values: '2x10'
+      - series: 'horsies_fleet_workers_telemetry_down{job="horsies-fleet", instance="fleet-1:9465", part="handler_child"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: HorsiesTelemetryDown
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: HorsiesTelemetryDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              part: endpoint
+            exp_annotations:
+              summary: "2 live workers have their endpoint down."
+              description: "endpoint: the metrics endpoint of the worker does not serve. handler_child: the event handler child does not run. The workers still run their tasks."
+
+  - name: HorsiesFleetQueryFailed fires for the failed query of its fleet collector
+    interval: 1m
+    input_series:
+      - series: 'horsies_exporter_collect_failed{job="horsies-fleet", instance="fleet-1:9465", query="oldest_pending"}'
+        values: '1x10'
+      - series: 'horsies_exporter_collect_failed{job="horsies-fleet", instance="fleet-1:9465", query="workers"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: HorsiesFleetQueryFailed
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: HorsiesFleetQueryFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: horsies-fleet
+              instance: "fleet-1:9465"
+              query: oldest_pending
+            exp_annotations:
+              summary: "The fleet collector query oldest_pending failed or passed its time limit at its last run."
+              description: "The gauges of this query have no series while it fails, so the alerts on them stay quiet. The log of horsies metrics has the cause."

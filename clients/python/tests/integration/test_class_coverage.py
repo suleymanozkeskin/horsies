@@ -91,13 +91,13 @@ async def _snapshot(
                 max_claim_batch, max_claim_per_worker, queues,
                 queue_priorities, queue_max_concurrency, recovery_config,
                 tasks_running, tasks_claimed, worker_started_at,
-                slots_down, class_capacity
+                slots_down, class_capacity, telemetry
             ) VALUES (
                 :worker_id, now() - make_interval(secs => CAST(:age AS integer)),
                 'itest-host',
                 4242, 4, 0, 4, :queues, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
                 0, 0, now() - interval '1 hour',
-                '[]'::jsonb, CAST(:class_capacity AS JSONB)
+                '[]'::jsonb, CAST(:class_capacity AS JSONB), jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
             )
         """),
         {

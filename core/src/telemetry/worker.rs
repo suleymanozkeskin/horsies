@@ -358,6 +358,13 @@ impl EventQueue {
         }
     }
 
+    /// Close the queue to new events: an offer after it drops its event and
+    /// counts `child_down`. The events that wait stay, for
+    /// [`EventQueue::take_waiting`].
+    pub fn close(&mut self) {
+        self.receiver.close();
+    }
+
     /// Take the events that wait now, at most `limit`, in the order of
     /// their offers; none when the queue is empty or the link is gone.
     /// Never waits.

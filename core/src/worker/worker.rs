@@ -36,17 +36,20 @@ use crate::db::{
     Reserve, StatementBound, TypedStatement, WakeEvent, WakeSubscription,
 };
 use crate::telemetry::labels::{ClaimPassResult, ReleaseReason};
-use crate::telemetry::worker::WorkerTelemetry;
+use crate::telemetry::worker::{EventQueue, TelemetryOn, WorkerTelemetry};
 use crate::worker::backoff::RetryBackoff;
 use crate::worker::children::{
-    attempt_end, baseline_limits, exit_not_seen, pending_task_limit, plan_placement, preload_plan,
-    ChildLaunch, ChildrenStopped, PoolFacts, WorkerChildren,
+    attempt_end, baseline_limits, exit_not_seen, handler_child_config, pending_task_limit,
+    plan_placement, preload_plan, ChildLaunch, ChildrenStopped, PoolFacts, WorkerChildren,
 };
 use crate::worker::claim_pass::{
     claim_for_dispatch, BrokerClaimSteps, ClaimBatchLimit, ClaimPassCounts, RegisteredClasses,
 };
 use crate::worker::config::WorkerConfig;
 use crate::worker::error::WorkerError;
+use crate::worker::executor::handler_child::{
+    HandlerChildMetrics, HandlerChildRun, HandlerChildStopped, HandlerChildView,
+};
 use crate::worker::executor::placement::WorkerThreads;
 use crate::worker::executor::protocol::TaskInputText;
 use crate::worker::executor::slots::outcome::EndWrites;
@@ -57,7 +60,8 @@ use crate::worker::executor::slots::{
     PoolFailure, PoolStopReport, RetryFacts, Settlement, Submitted, TaskKind,
 };
 use crate::worker::executor::supervisor::{
-    PreloadMode, PreloadStart, PreloadUnsupported, Spawner, SpawnerStopReport, CHILD_KILL_WAIT,
+    PreloadMode, PreloadStart, PreloadUnsupported, Spawner, SpawnerHandle, SpawnerStopReport,
+    CHILD_KILL_WAIT,
 };
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
 use crate::worker::finalize_batch::stop::drain_then_close;
@@ -67,6 +71,7 @@ use crate::worker::liveness::{
     liveness_connect_plan, start_liveness_lock, LivenessRule, LivenessStartError,
     StartedLivenessLock,
 };
+use crate::worker::metrics_endpoint::WorkerEndpoint;
 use crate::worker::profile_fit::{log_connection_fit_at_boot, log_memory_fit_at_boot};
 use crate::worker::queue_cap_hold::{admit_held_rows, QueueCapHold, StartCheckCaps, StartCount};
 use crate::worker::recovery::{new_reaper_health, spawn_reaper, ReaperHealth};
@@ -598,11 +603,78 @@ fn preload_outcome(mode: PreloadMode, start: PreloadStart) -> PreloadOutcome {
 }
 
 /// The children of a started worker, the spawner thread that starts them,
-/// and the registry of the tasks that children hold.
+/// the registry of the tasks that children hold, and the handler child.
 struct RunningChildren {
     children: WorkerChildren,
     spawner: Spawner,
     live: LiveDispatches,
+    handler: RunningHandlerChild,
+}
+
+/// The handler child of a worker, chosen when the worker is built.
+enum HandlerChildSetup {
+    /// No event handler and no worker-ended span: no child and no event
+    /// queue.
+    NoHandlerChild,
+    /// One handler child, which reads the event queue of the telemetry
+    /// value of the worker.
+    HandlerChild(std::sync::Mutex<HandlerChildStart>),
+}
+
+/// The parts of the handler child before and after its start.
+enum HandlerChildStart {
+    /// The child has not started: the reader's end of the event queue and
+    /// the metric handles of the child.
+    NotStarted {
+        queue: EventQueue,
+        metrics: HandlerChildMetrics,
+    },
+    /// A run of this worker started the child. The queue went with it, so a
+    /// later run of the same worker has no handler child.
+    Started,
+}
+
+/// The handler child of a run.
+enum RunningHandlerChild {
+    /// The worker has no handler child, or an earlier run of it took the
+    /// child.
+    NotRun,
+    Running(HandlerChildRun),
+}
+
+impl RunningHandlerChild {
+    /// The state of the child, for the worker snapshot.
+    fn view(&self) -> HandlerChildView {
+        match self {
+            Self::NotRun => HandlerChildView::off(),
+            Self::Running(run) => run.view(),
+        }
+    }
+
+    /// Wait for the end of the first boot of the child, at most its ready
+    /// bound, or for the stop. The worker claims after it in every case.
+    async fn first_boot(&self, cancel: &CancellationToken) {
+        match self {
+            Self::NotRun => {}
+            Self::Running(run) => {
+                tokio::select! {
+                    _state = run.first_boot() => {}
+                    () = cancel.cancelled() => {}
+                }
+            }
+        }
+    }
+
+    /// Stop the child within its stop bounds; never fails. A supervision
+    /// past its bounds is aborted and logged by the stop.
+    async fn stop(self) {
+        match self {
+            Self::NotRun => {}
+            Self::Running(run) => match run.stop().await {
+                HandlerChildStopped::Ended | HandlerChildStopped::Aborted => {}
+            },
+        }
+    }
 }
 
 impl RunningChildren {
@@ -642,6 +714,7 @@ impl RunningChildren {
     /// `pool.stop(0)`).
     async fn stop_after_failed_start(self) {
         Self::stop_pools(self.children, Duration::ZERO).await;
+        self.handler.stop().await;
         Self::stop_spawner(self.spawner).await;
     }
 }
@@ -917,6 +990,11 @@ pub struct Worker {
     /// The metrics and the events of the lifecycle points; off unless the
     /// host turns it on.
     telemetry: WorkerTelemetry,
+    /// The metrics endpoint of `--metrics-listen`; none unless the host
+    /// turns it on.
+    endpoint: WorkerEndpoint,
+    /// The handler child; none unless the host turns it on.
+    handler_child: HandlerChildSetup,
 }
 
 impl Worker {
@@ -967,6 +1045,8 @@ impl Worker {
             on_started: OnStarted::Nothing,
             serving: AtomicBool::new(false),
             telemetry: WorkerTelemetry::Off,
+            endpoint: WorkerEndpoint::NoMetricsEndpoint,
+            handler_child: HandlerChildSetup::NoHandlerChild,
         })
     }
 
@@ -978,6 +1058,99 @@ impl Worker {
     /// This worker with `telemetry` at its lifecycle points.
     pub fn with_telemetry(self, telemetry: WorkerTelemetry) -> Self {
         Self { telemetry, ..self }
+    }
+
+    /// This worker with `telemetry` at its lifecycle points and a metrics
+    /// endpoint on `address` that serves the registry of `telemetry`
+    /// (`--metrics-listen HOST:PORT`).
+    ///
+    /// The run starts the endpoint thread first and stops it last, after
+    /// the drain. A bind that fails never stops the worker: the thread binds
+    /// again with the slot backoff, and the snapshot shows the endpoint
+    /// down with its cause. `GET /livez` and `GET /readyz` answer once the
+    /// address is bound (`crate::worker::probes`).
+    #[cfg(feature = "metrics-endpoint")]
+    pub fn with_metrics_endpoint(
+        self,
+        address: crate::telemetry::listen::ListenAddress,
+        telemetry: Arc<crate::telemetry::worker::TelemetryOn>,
+    ) -> Self {
+        let endpoint = crate::worker::metrics_endpoint::ListenEndpoint::new(
+            address,
+            Arc::clone(telemetry.registry()),
+        );
+        Self {
+            telemetry: WorkerTelemetry::On(telemetry),
+            endpoint: WorkerEndpoint::Listen(Arc::new(endpoint)),
+            ..self
+        }
+    }
+
+    /// The facts of the `horsies.worker.info` series of this worker: the
+    /// version of the core, the profile, the worker id.
+    pub fn worker_facts(&self) -> crate::telemetry::registry::WorkerFacts {
+        crate::telemetry::registry::WorkerFacts {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            profile: self.profile.name.clone(),
+            worker_id: self.worker_id.clone(),
+        }
+    }
+
+    /// This worker with a handler child: `telemetry` at its lifecycle
+    /// points, whose events go to `queue`, and the handler child that reads
+    /// the queue and records in `metrics`. `telemetry` and `queue` are the
+    /// two ends of one `TelemetryOn::with_event_queue`; a worker with a
+    /// metrics endpoint gives both builders the same telemetry value.
+    ///
+    /// The run starts the child after the first generation of the task
+    /// children and waits for its ready frame at most its ready bound before
+    /// the first claim; it stops the child after the outcome writes
+    /// drained. Nothing of the child stops the worker
+    /// (`crate::worker::executor::handler_child`).
+    pub fn with_handler_child(
+        self,
+        telemetry: Arc<TelemetryOn>,
+        queue: EventQueue,
+        metrics: HandlerChildMetrics,
+    ) -> Self {
+        let start = HandlerChildStart::NotStarted { queue, metrics };
+        Self {
+            telemetry: WorkerTelemetry::On(telemetry),
+            handler_child: HandlerChildSetup::HandlerChild(std::sync::Mutex::new(start)),
+            ..self
+        }
+    }
+
+    /// Start the handler child of this worker on `spawner`, on the CPUs of
+    /// the children of `placement`: nothing when the worker has none.
+    fn start_handler_child(
+        &self,
+        spawner: SpawnerHandle,
+        placement: &crate::worker::executor::placement::CpuPlacement,
+    ) -> RunningHandlerChild {
+        let start = match &self.handler_child {
+            HandlerChildSetup::NoHandlerChild => return RunningHandlerChild::NotRun,
+            HandlerChildSetup::HandlerChild(start) => start,
+        };
+        let taken = {
+            let mut start = start.lock().unwrap_or_else(PoisonError::into_inner);
+            std::mem::replace(&mut *start, HandlerChildStart::Started)
+        };
+        match taken {
+            HandlerChildStart::NotStarted { queue, metrics } => {
+                let config = handler_child_config(&self.launch, placement);
+                RunningHandlerChild::Running(HandlerChildRun::start(
+                    config, queue, metrics, spawner,
+                ))
+            }
+            HandlerChildStart::Started => {
+                tracing::error!(
+                    "the handler child of this worker started in an earlier run, with its event \
+                     queue; this run has no handler child"
+                );
+                RunningHandlerChild::NotRun
+            }
+        }
     }
 
     /// This worker stopped by `stop`: a request through it, also one made
@@ -1106,6 +1279,7 @@ impl Worker {
             children,
             spawner,
             live,
+            handler: RunningHandlerChild::NotRun,
         };
         let limits = baseline_limits(profile);
         let threads = WorkerThreads::of_this_process();
@@ -1120,7 +1294,12 @@ impl Worker {
             }
         };
         match started {
-            Ok(ChildrenStart::Started { .. }) => Ok(Some(running)),
+            Ok(ChildrenStart::Started { .. }) => {
+                // After the task children, before the database steps: the
+                // handler child boots while the worker starts.
+                let handler = self.start_handler_child(running.spawner.handle(), &placement);
+                Ok(Some(RunningChildren { handler, ..running }))
+            }
             Ok(ChildrenStart::Stopped) => {
                 running.stop_after_failed_start().await;
                 Ok(None)
@@ -1243,7 +1422,19 @@ impl Worker {
     /// the service loops, the pools with the profile's drain timeout, the
     /// outcome writes and the finalize batcher, the runner heartbeats last,
     /// then the spawner thread.
+    ///
+    /// With a metrics endpoint (`Worker::with_metrics_endpoint`), its
+    /// thread starts before every step and stops after the last one, so the
+    /// probes answer during the start and the last scrape sees the drain.
     pub async fn run(&self) -> Result<(), WorkerError> {
+        let endpoint = self.endpoint.start();
+        let ended = self.run_steps().await;
+        endpoint.stop().await;
+        ended
+    }
+
+    /// The steps of [`Worker::run`], from the memory fit to the stop.
+    async fn run_steps(&self) -> Result<(), WorkerError> {
         // Machine facts of the profile: a warning, never a refusal (Python
         // `_log_memory_fit`, before the schema step).
         let _logged = log_memory_fit_at_boot(&self.profile);
@@ -1501,6 +1692,7 @@ impl Worker {
             if self.cancel.is_cancelled() {
                 return None;
             }
+            self.endpoint.claim_turn_within(Duration::ZERO);
             reap_finished(writes);
             let pass = self
                 .claim_and_dispatch(&steps, children, writer, writes, hold)
@@ -1529,9 +1721,11 @@ impl Worker {
                         "Worker loop error: {error}. Retrying in {delay:.1}s (attempt {})",
                         claim_backoff.attempts(),
                     );
+                    let wait = Duration::from_secs_f64(delay);
+                    self.endpoint.claim_turn_within(wait);
                     tokio::select! {
                         _ = self.cancel.cancelled() => return None,
-                        _ = tokio::time::sleep(Duration::from_secs_f64(delay)) => {}
+                        _ = tokio::time::sleep(wait) => {}
                     }
                     continue;
                 }
@@ -1545,6 +1739,7 @@ impl Worker {
                     return Some(error);
                 }
             }
+            self.endpoint.claim_turn_within(poll_interval);
             match wait_for_claim_wake(
                 &self.cancel,
                 &self.capacity_released,
@@ -1583,6 +1778,7 @@ impl Worker {
             children,
             spawner,
             live,
+            handler,
         } = running;
 
         // Print the startup banner before any log lines.
@@ -1615,6 +1811,7 @@ impl Worker {
                         children,
                         spawner,
                         live,
+                        handler,
                     }
                     .stop_after_failed_start()
                     .await;
@@ -1636,6 +1833,7 @@ impl Worker {
                     children,
                     spawner,
                     live,
+                    handler,
                 }
                 .stop_after_failed_start()
                 .await;
@@ -1646,6 +1844,7 @@ impl Worker {
                     children,
                     spawner,
                     live,
+                    handler,
                 }
                 .stop_after_failed_start()
                 .await;
@@ -1676,24 +1875,40 @@ impl Worker {
             .with_telemetry(self.telemetry.clone()),
         );
         let stops = ChildrenStopCell::default();
-        let services =
-            match self.spawn_services(&children, &live, &stops, ping_responder, liveness_holder) {
-                Ok(services) => services,
-                Err(error) => {
-                    self.cancel.cancel();
-                    RunningChildren {
-                        children,
-                        spawner,
-                        live,
-                    }
-                    .stop_after_failed_start()
-                    .await;
-                    liveness.stop().await;
-                    return Err(error);
+        let services = match self.spawn_services(
+            &children,
+            &live,
+            &stops,
+            ping_responder,
+            liveness_holder,
+            handler.view(),
+        ) {
+            Ok(services) => services,
+            Err(error) => {
+                self.cancel.cancel();
+                RunningChildren {
+                    children,
+                    spawner,
+                    live,
+                    handler,
                 }
-            };
+                .stop_after_failed_start()
+                .await;
+                liveness.stop().await;
+                return Err(error);
+            }
+        };
+        // The handler child gets its ready bound; the worker claims after it
+        // in every case.
+        handler.first_boot(&self.cancel).await;
         // The start ended: the first generation is in, and no claim ran.
         self.serving.store(true, Ordering::Release);
+        #[cfg(feature = "metrics-endpoint")]
+        self.endpoint
+            .claiming(|| crate::worker::probes::ServingFacts {
+                board: Arc::clone(children.board()),
+                lock: liveness.hold_view(),
+            });
         match &self.on_started {
             OnStarted::Nothing => {}
             OnStarted::Call(hook) => hook().await,
@@ -1710,6 +1925,7 @@ impl Worker {
         let fatal_claim_error = self
             .claim_loop(&children, &writer, &mut writes, &mut hold, &claim_wakes)
             .await;
+        self.endpoint.stopping();
 
         // Stop the claim loop and every service loop on every exit path,
         // including a fatal claim error that broke the loop without a prior
@@ -1724,6 +1940,9 @@ impl Worker {
         // work left only. A write that the drain cancels leaves its row in
         // the batcher, and the close still writes it.
         let _stopped = drain_then_close(&mut writes, OUTCOME_WRITE_DRAIN, &batcher).await;
+        // The events of the drain are in the queue: the handler child gets
+        // them within its stop flush, then its stop frame.
+        handler.stop().await;
         // Last: the runner heartbeats covered the drain above, and their
         // watchdog keeps the exit bound of a fail-closed stop until here.
         let services = services.stop_runner_beats().await;
@@ -1793,6 +2012,7 @@ impl Worker {
         stops: &ChildrenStopCell,
         ping_responder: JoinHandle<()>,
         liveness_holder: JoinHandle<()>,
+        handler_child: HandlerChildView,
     ) -> Result<Services, WorkerError> {
         let claimer_interval =
             Duration::from_millis(self.app_config.recovery.claimer_heartbeat_interval_ms);
@@ -1819,6 +2039,8 @@ impl Worker {
             children.view(),
             ClaimColumns::of_profile(&self.profile.profile),
             Utc::now(),
+            self.endpoint.clone(),
+            handler_child,
             self.cancel.clone(),
         );
         // Runner heartbeats: one fenced statement per interval for every
@@ -2960,6 +3182,73 @@ mod tests {
         }
     }
 
+    /// A worker with a handler child starts it once the first generation of
+    /// its task children is in; the child boots by itself and is up, and
+    /// the stop of the start stops it with the pools.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_worker_with_a_handler_child_starts_it_with_the_pools() {
+        use crate::events::EventTypeName;
+        use crate::telemetry::worker::{DeclaredCodesByTask, SentEventTypes, EVENT_QUEUE_CAPACITY};
+        use crate::worker::executor::handler_child::HandlerChildState;
+
+        let registry = crate::test_support::telemetry::worker_registry();
+        // No type is sent: the idle scripted child takes no events frame.
+        let (on, queue) = TelemetryOn::with_event_queue(
+            Arc::clone(&registry),
+            DeclaredCodesByTask::none(),
+            EVENT_QUEUE_CAPACITY,
+            SentEventTypes::of(std::iter::empty::<EventTypeName>()),
+        )
+        .expect("the telemetry of a worker registry");
+        let metrics = HandlerChildMetrics::of(&registry).expect("the handles of a worker registry");
+        let worker =
+            worker_of_one_child(crate::worker::executor::slots::scripted::idle_child_of_any_kind())
+                .with_handler_child(Arc::new(on), queue, metrics);
+
+        let started = tokio::time::timeout(Duration::from_secs(60), worker.start_pools())
+            .await
+            .expect("the start ends within the bound");
+        let running = match started {
+            Ok(Some(running)) => running,
+            Ok(None) => panic!("the start ended with no stop request"),
+            Err(error) => panic!("the start failed: {error}"),
+        };
+        let view = running.handler.view();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !matches!(view.state(), HandlerChildState::Up { .. }) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the handler child is up");
+
+        tokio::time::timeout(Duration::from_secs(60), running.stop_after_failed_start())
+            .await
+            .expect("the stop ends within the bound");
+    }
+
+    /// A worker with no handler child starts none: its view is off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_worker_with_no_handler_child_starts_none() {
+        use crate::worker::executor::handler_child::HandlerChildState;
+
+        let worker =
+            worker_of_one_child(crate::worker::executor::slots::scripted::idle_child_of_any_kind());
+
+        let started = tokio::time::timeout(Duration::from_secs(60), worker.start_pools())
+            .await
+            .expect("the start ends within the bound");
+        let running = match started {
+            Ok(Some(running)) => running,
+            Ok(None) => panic!("the start ended with no stop request"),
+            Err(error) => panic!("the start failed: {error}"),
+        };
+
+        assert!(matches!(running.handler, RunningHandlerChild::NotRun));
+        assert_eq!(running.handler.view().state(), HandlerChildState::Off);
+        running.stop_after_failed_start().await;
+    }
+
     /// Python `test_worker_helpers.py::TestSlotPoolSetup::test_start_failure_raises_and_keeps_the_pool_for_cleanup`:
     /// a pool that cannot start its first child ends the start with the
     /// pool failure. The core start stops the pools and the spawner thread
@@ -3371,14 +3660,47 @@ mod tests {
         let pools = at("RunningChildren::stop_pools(children, drain).await");
         let held = at("return_held_rows(&mut hold, &writer, &mut writes, &self.telemetry);");
         let writes = at("drain_then_close(&mut writes, OUTCOME_WRITE_DRAIN, &batcher)");
+        let handler = at("handler.stop().await");
         let beats = at("services.stop_runner_beats().await");
         let spawner = at("RunningChildren::stop_spawner(spawner).await");
         assert!(claim_loop < cancel);
         assert!(cancel < pools);
         assert!(pools < held);
         assert!(held < writes);
-        assert!(writes < beats);
+        assert!(writes < handler);
+        assert!(handler < beats);
         assert!(beats < spawner);
+    }
+
+    /// The handler child starts once the first generation of the task
+    /// children is in, and the worker waits for its first boot (bounded)
+    /// before it is serving and claims.
+    #[test]
+    fn the_handler_child_boots_after_the_task_children_and_before_the_first_claim() {
+        let source = include_str!("worker.rs");
+        let section = |start: &str| {
+            &source[source
+                .find(start)
+                .unwrap_or_else(|| panic!("{start} in worker.rs"))..]
+        };
+        let start_pools = section("async fn start_pools(");
+        let started = start_pools
+            .find("Ok(ChildrenStart::Started { .. }) =>")
+            .expect("the first generation is in");
+        let handler_start = start_pools
+            .find("self.start_handler_child(")
+            .expect("the handler child starts in start_pools");
+        assert!(started < handler_start);
+        let serve = section("async fn serve(");
+        let first_boot = serve
+            .find("handler.first_boot(&self.cancel).await")
+            .expect("serve waits for the first boot");
+        let serving = serve
+            .find("self.serving.store(true, Ordering::Release)")
+            .expect("serve marks the worker serving");
+        let claim_loop = serve.find(".claim_loop(&children").expect("the claim loop");
+        assert!(first_boot < serving);
+        assert!(serving < claim_loop);
     }
 
     /// Python `Worker.stop`: the drain line names each task that the drain
@@ -5829,6 +6151,9 @@ mod claim_config_tests;
 
 #[cfg(test)]
 mod live_worker_tests;
+
+#[cfg(all(test, feature = "metrics-endpoint"))]
+mod metrics_endpoint_tests;
 
 #[cfg(test)]
 mod start_tests;
