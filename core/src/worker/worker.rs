@@ -35,6 +35,7 @@ use crate::db::{
     ChannelName, CheckoutClass, ParameterType, PayloadEvent, PayloadFilter, PayloadSubscription,
     Reserve, StatementBound, TypedStatement, WakeEvent, WakeSubscription,
 };
+use crate::telemetry::registry::OptionalCounter;
 use crate::worker::backoff::RetryBackoff;
 use crate::worker::children::{
     attempt_end, baseline_limits, exit_not_seen, pending_task_limit, plan_placement, preload_plan,
@@ -1180,6 +1181,9 @@ impl Worker {
             self.app_config.recovery.clone(),
             self.app_config.retention.clone(),
             health,
+            // The worker builds no metric registry yet: no failure is
+            // counted, and the failure log works the same.
+            OptionalCounter::NotRecorded,
             self.cancel.clone(),
         )
     }

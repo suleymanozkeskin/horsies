@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
 use crate::db::CheckoutClass;
+use crate::telemetry::trace_carrier::{SendTrace, StoredTrace};
 use crate::workflow_engine::child_spec::{ChildSpecSource, ClientSpec};
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::start_statement::{
@@ -91,12 +92,19 @@ impl PostgresBroker {
     ///    runs once per start, also when the id exists and on a retry.
     /// 2. Each attempt: the schema install (once per handle), the client
     ///    family check (once per handle), then `horsies_workflow_start` with
-    ///    `sent_at` as the start call time: one statement in autocommit, or a
-    ///    transaction with the child starts it owes when the tree has a
-    ///    failed-node record.
+    ///    `sent_at` as the start call time and the trace carrier of `trace`:
+    ///    one statement in autocommit, or a transaction with the child starts
+    ///    it owes when the tree has a failed-node record. Every workflow row
+    ///    of the tree and every task row of its nodes stores the carrier; a
+    ///    child that a later step starts copies it from its parent.
     /// 3. After the commit, the parent advances that those child starts owe,
     ///    one transaction per level. A failed advance is logged and left to
     ///    workflow recovery; the start returns its outcome.
+    ///
+    /// `trace`: [`SendTrace::NoCarrier`], or the carrier of the start call's
+    /// span. The carrier is checked once, before the first attempt: a
+    /// carrier that breaks a bound is not stored, the tree keeps no carrier,
+    /// and the process logs one warning. It never refuses the start.
     ///
     /// `resend_on_transient_err`: a retryable failure of step 2 runs the
     /// step again, at most [`START_RETRY_COUNT`] times, after a wait of
@@ -109,17 +117,19 @@ impl PostgresBroker {
         spec: &ClientSpec,
         workflow_id: Uuid,
         sent_at: DateTime<Utc>,
+        trace: SendTrace,
         resend_on_transient_err: bool,
         source: &dyn ChildSpecSource,
     ) -> Result<ClientStartOutcome, ClientStartError> {
         let arguments = client_start_arguments(spec, workflow_id, source)
             .await
             .map_err(ClientStartError::Start)?;
+        let trace = StoredTrace::of_send(trace);
         resend_while_transient(
             spec.name(),
             workflow_id,
             resend_on_transient_err,
-            || self.client_start_attempt(spec, workflow_id, &arguments, sent_at, source),
+            || self.client_start_attempt(spec, workflow_id, &arguments, sent_at, &trace, source),
             tokio::time::sleep,
         )
         .await
@@ -132,6 +142,7 @@ impl PostgresBroker {
         workflow_id: Uuid,
         arguments: &StartArguments,
         sent_at: DateTime<Utc>,
+        trace: &StoredTrace,
         source: &dyn ChildSpecSource,
     ) -> Result<ClientStartOutcome, ClientStartError> {
         self.ensure_schema_initialized()
@@ -140,7 +151,7 @@ impl PostgresBroker {
         self.ensure_client_family_for_write()
             .await
             .map_err(|error| ClientStartError::Start(WorkflowError::Broker(error)))?;
-        let started = start_tree(self, arguments, sent_at, source)
+        let started = start_tree(self, arguments, sent_at, trace, source)
             .await
             .map_err(ClientStartError::Start)?;
         let outcome = match started.outcome {

@@ -22,6 +22,7 @@ use crate::broker::PostgresBroker;
 use crate::core::workflow::node::SubWorkflowParams;
 use crate::core::{AnyNode, OnError, OperationalErrorCode, TaskError, TaskResult, WorkflowSpec};
 use crate::db::{BoundStatement, CheckoutClass, ParameterBinder, ParameterType, TypedStatement};
+use crate::telemetry::trace_carrier::StoredTrace;
 use crate::workflow_engine::args_merge::{
     child_build_input, child_static_input, merge_args_from_sync, read_args_from, ArgsFromMerge,
     ArgsFromRead, ChildBuildInput, ChildStaticInput, DepResult, MergedNodeKind,
@@ -42,13 +43,13 @@ use crate::workflow_engine::steps::{
 
 /// `horsies_workflow_start`: the workflow rows of the tree (top-level first),
 /// the start call time, the node rows, the failed-node records, and the
-/// trace `NO_CARRIER` (the start stores no carrier).
+/// trace kind, carrier text and trace id (`StoredTrace::columns`).
 pub(crate) static START: TypedStatement = TypedStatement::new(
     "horsies_workflow_start",
     step_row_select!(
         "horsies_workflow_start($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, \
          $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, \
-         $33, $34, $35, 'NO_CARRIER', NULL, NULL)"
+         $33, $34, $35, $36, $37, $38)"
     ),
     &[
         // Workflow rows.
@@ -90,6 +91,10 @@ pub(crate) static START: TypedStatement = TypedStatement::new(
         ParameterType::UuidArray,
         ParameterType::Int4Array,
         ParameterType::TextArray,
+        // Trace.
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Bytea,
     ],
 );
 
@@ -955,20 +960,43 @@ impl StartArguments {
     }
 }
 
-/// The bound start statement, with `sent_at` as the start call time.
+/// The trace parameters of the start statement (`StoredTrace::columns`).
+struct TraceColumns<'a> {
+    kind: &'static str,
+    carrier: Option<&'a str>,
+    trace_id: Option<&'a [u8]>,
+}
+
+impl<'a> TraceColumns<'a> {
+    fn of(trace: &'a StoredTrace) -> TraceColumns<'a> {
+        let (kind, carrier, trace_id) = trace.columns();
+        TraceColumns {
+            kind,
+            carrier,
+            trace_id,
+        }
+    }
+}
+
+/// The bound start statement, with `sent_at` as the start call time and the
+/// trace parameters of `trace`.
 fn start_statement<'a>(
     arguments: &'a StartArguments,
     sent_at: &'a DateTime<Utc>,
+    trace: &'a TraceColumns<'a>,
 ) -> BoundStatement<'a> {
     let binder = arguments.bind_workflows(START.bind()).value(sent_at);
     arguments
         .bind_failed_records(arguments.bind_nodes(binder))
+        .value(&trace.kind)
+        .value(&trace.carrier)
+        .value(&trace.trace_id)
         .finish()
 }
 
 /// Starts the tree as producer work ([`CheckoutClass::Batch`]), with
-/// `sent_at` as the start call time of every workflow and task row of the
-/// tree.
+/// `sent_at` as the start call time and `trace` as the trace of every
+/// workflow and task row of the tree.
 ///
 /// | Arguments | Statements |
 /// |---|---|
@@ -989,9 +1017,11 @@ pub(crate) async fn start_tree(
     broker: &PostgresBroker,
     arguments: &StartArguments,
     sent_at: DateTime<Utc>,
+    trace: &StoredTrace,
     build: &dyn ChildSpecSource,
 ) -> Result<StartedTree, WorkflowError> {
-    let statement = start_statement(arguments, &sent_at);
+    let trace = TraceColumns::of(trace);
+    let statement = start_statement(arguments, &sent_at, &trace);
     let (disposition, detail, parent_advances) = match arguments.has_failed_records() {
         false => {
             let rows = run_alone(broker, CheckoutClass::Batch, &statement).await?;

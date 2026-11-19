@@ -758,6 +758,7 @@ pub(super) async fn try_start(
             &child_specs.client_spec(spec),
             workflow_id,
             Utc::now(),
+            crate::telemetry::trace_carrier::SendTrace::NoCarrier,
             false,
             child_specs,
         )

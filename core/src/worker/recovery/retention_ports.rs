@@ -81,6 +81,7 @@ async fn run_maintenance_pass(
         &mut next_partition_maintenance,
         &mut orphan_state,
         &mut UnheldOwners::default(),
+        &mut RecoveryFailures::new(OptionalCounter::NotRecorded),
     )
     .await;
     let snapshot = health.read().await.clone();
@@ -254,6 +255,7 @@ async fn expired_worker_states_go_and_recent_ones_stay() {
             crate::ClientFamily::Rust,
         ),
         &retention,
+        &mut RecoveryFailures::new(OptionalCounter::NotRecorded),
     )
     .await;
 
@@ -338,6 +340,7 @@ async fn expired_terminal_workflows_go_and_running_or_recent_ones_stay() {
             crate::ClientFamily::Rust,
         ),
         &retention,
+        &mut RecoveryFailures::new(OptionalCounter::NotRecorded),
     )
     .await;
 
