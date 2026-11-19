@@ -65,6 +65,9 @@ pub struct TaskAttemptInfo {
 /// The task row behind a task detail or a workflow node (Python
 /// `LeafTaskInfo`). `execution` is the stored class of a live task, and
 /// `None` for a task read from history, which does not keep the class.
+/// `trace_id` is the trace id of the span that sent the task, as 32
+/// lowercase hex digits, live and in history; `None` for a task sent with no
+/// trace.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct LeafTaskInfo {
@@ -88,6 +91,7 @@ pub struct LeafTaskInfo {
     #[serde(serialize_with = "time_text::optional_utc")]
     pub good_until: Option<DateTime<Utc>>,
     pub execution: Option<Execution>,
+    pub trace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,6 +288,9 @@ pub struct WorkflowEdge {
     pub to_index: i32,
 }
 
+/// One run with its nodes and edges (Python `WorkflowRunDetail`).
+/// `trace_id` is the trace id of the span that started the run, as 32
+/// lowercase hex digits; `None` for a start with no trace.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkflowRunDetail {
@@ -292,6 +299,7 @@ pub struct WorkflowRunDetail {
     pub edges: Vec<WorkflowEdge>,
     pub failed_count: i64,
     pub failed_indices: Vec<i32>,
+    pub trace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

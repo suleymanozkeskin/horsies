@@ -98,7 +98,8 @@ DETAIL_JSON: Final = (
     '"error_code": null, "failed_reason": null, "retry_count": 0, "max_retries": 3, '
     '"enqueued_at": "2026-11-17T11:00:00Z", "started_at": "2026-11-17T11:00:01Z", '
     '"completed_at": null, "failed_at": null, "queue_s": 1, "exec_s": 42, '
-    '"worker_hostname": "host-1", "good_until": null, "execution": "SHARED_THREAD"}, '
+    '"worker_hostname": "host-1", "good_until": null, "execution": "SHARED_THREAD", '
+    '"trace_id": "0af7651916cd43dd8448eb211c80319c"}, '
     '"task_name": "t", "queue_name": "default", "priority": 100, "is_workflow_task": true, '
     '"error_category": null, "attempts": [], '
     '"workflow_id": "0190a1b2-c3d4-7e5f-8a6b-000000000001", "workflow_task_index": 2}'
@@ -194,6 +195,7 @@ class TestAnswers:
         match result:
             case Ok(TaskDetail(leaf=leaf, workflow_id=workflow_id)):
                 assert leaf.execution is Execution.SHARED_THREAD
+                assert leaf.trace_id == '0af7651916cd43dd8448eb211c80319c'
                 assert workflow_id == '0190a1b2-c3d4-7e5f-8a6b-000000000001'
             case _:
                 raise AssertionError(f'expected the task: {result!r}')
@@ -347,7 +349,7 @@ RUN_JSON: Final = (
     '{"run": {"id": "0190a1b2-c3d4-7e5f-8a6b-000000000001", "name": "alpha.flow", '
     '"definition_key": null, "status": "RUNNING", "created_at": "2026-11-17T11:00:00Z", '
     '"completed_at": null, "wall_s": 60}, "nodes": [], "edges": [], "failed_count": 0, '
-    '"failed_indices": []}'
+    '"failed_indices": [], "trace_id": null}'
 )
 SCHEDULES_JSON: Final = (
     '[{"schedule_name": "nightly", "last_run_at": null, "next_run_at": "2026-11-18T00:00:00Z", '
