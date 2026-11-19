@@ -517,6 +517,8 @@ class TestWorkflowCtx:
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
+                queue_name='default',
+                attempt=1,
                 trace=NoTraceCarrier(),
             )
         )
@@ -588,6 +590,8 @@ class TestWorkflowCtx:
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
+                queue_name='default',
+                attempt=1,
                 trace=NoTraceCarrier(),
             )
         )
@@ -662,6 +666,8 @@ class TestWorkflowCtx:
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
+                queue_name='default',
+                attempt=1,
                 trace=NoTraceCarrier(),
             )
         )
@@ -951,6 +957,8 @@ class TestWorkflowCtx:
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
+                queue_name='default',
+                attempt=1,
                 trace=NoTraceCarrier(),
             )
         )

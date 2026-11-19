@@ -123,6 +123,10 @@ pub struct TraceCarrier {
 pub struct RunFrameRecord {
     task_id: Uuid,
     task_name: String,
+    /// The queue of the task row.
+    queue_name: String,
+    /// The attempt that the claim runs, from 1: the retry count plus 1.
+    attempt: u32,
     worker_id: String,
     /// The claim generation; each write of the attempt is fenced on it.
     claimed_at: DateTime<Utc>,
@@ -159,6 +163,10 @@ pub struct SharedRunFrameRecord {
     dispatch: u64,
     task_id: Uuid,
     task_name: String,
+    /// As `RunFrame.queue_name`.
+    queue_name: String,
+    /// As `RunFrame.attempt`.
+    attempt: u32,
     worker_id: String,
     claimed_at: DateTime<Utc>,
     /// As `RunFrame.orphan_self_heal`.
@@ -390,6 +398,8 @@ fn run_object(py: Python<'_>, run: RunFrame) -> PyResult<Py<PyAny>> {
     RunFrameRecord {
         task_id: run.task_id,
         task_name: run.task_name,
+        queue_name: run.queue_name.into_string(),
+        attempt: run.attempt.get(),
         worker_id: run.worker_id,
         claimed_at: run.claimed_at,
         orphan_self_heal: self_heal_flag(run.orphan_self_heal),
@@ -406,6 +416,8 @@ fn shared_run_object(py: Python<'_>, run: SharedRunFrame) -> PyResult<Py<PyAny>>
         dispatch: run.dispatch.get(),
         task_id: run.task_id,
         task_name: run.task_name,
+        queue_name: run.queue_name.into_string(),
+        attempt: run.attempt.get(),
         worker_id: run.worker_id,
         claimed_at: run.claimed_at,
         orphan_self_heal: self_heal_flag(run.orphan_self_heal),

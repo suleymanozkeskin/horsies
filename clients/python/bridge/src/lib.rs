@@ -256,6 +256,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::result::RawResultRecordRecord>()?;
     module.add_class::<operations::result::RawResultAbsent>()?;
     module.add_class::<operations::start::AttemptStarted>()?;
+    module.add_class::<operations::start::RunWorkflowNode>()?;
     module.add_class::<operations::start::AttemptMissed>()?;
     module.add_class::<operations::start::DeadlineBeforeStart>()?;
     module.add_class::<operations::start::StartFailed>()?;

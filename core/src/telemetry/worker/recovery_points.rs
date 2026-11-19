@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::{TelemetryOn, WorkerTelemetry};
 use crate::broker::stale_recovery::RecoveredTask;
-use crate::events::{self, Event, TaskRecovered};
+use crate::events::{self, TaskRecovered};
 use crate::telemetry::labels::RecoveryAction;
 
 impl WorkerTelemetry {
@@ -51,14 +51,12 @@ impl TelemetryOn {
         action: RecoveryAction,
     ) {
         let _counted = self.metrics.recovery_tasks.add((action,), 1);
-        let _emitted = self.emit(|| {
-            Event::TaskRecovered(TaskRecovered {
-                at: Utc::now(),
-                task_id,
-                task_name: events::TaskName::cut(task_name),
-                queue: events::QueueName::cut(queue_name),
-                action,
-            })
+        let _emitted = self.emit(|| TaskRecovered {
+            at: Utc::now(),
+            task_id,
+            task_name: events::TaskName::cut(task_name),
+            queue: events::QueueName::cut(queue_name),
+            action,
         });
     }
 }

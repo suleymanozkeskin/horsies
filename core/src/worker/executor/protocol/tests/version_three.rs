@@ -1,7 +1,8 @@
-//! The content that version 3 adds: the trace of the run frames, the start
-//! of the frames that end a run, the handler kind, the `events` frame and
-//! the `handler_stats` frame. Pinned bytes for each, a refusal for each
-//! malformed new field, and the named mismatch of a version-2 peer.
+//! The content that version 3 adds: the trace, the queue and the attempt of
+//! the run frames, the start of the frames that end a run, the handler
+//! kind, the `events` frame and the `handler_stats` frame. Pinned bytes for
+//! each, a refusal for each malformed new field, and the named mismatch of
+//! a version-2 peer.
 
 use serde_json::{json, Value};
 
@@ -104,6 +105,8 @@ fn the_run_frames_carry_the_stored_trace_carrier() {
         &ParentFrame::Run(RunFrame {
             task_id: task_id(T5),
             task_name: "app.tasks.add".to_owned(),
+            queue_name: default_queue(),
+            attempt: AttemptNumber::SMALLEST,
             worker_id: "worker-1".to_owned(),
             claimed_at: whole_second_claim_time(),
             orphan_self_heal: OrphanSelfHeal::Off,
@@ -114,9 +117,11 @@ fn the_run_frames_carry_the_stored_trace_carrier() {
         &framed(
             concat!(
                 r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.add","worker_id":"worker-1","#,
+                r#""task_name":"app.tasks.add","queue_name":"default","attempt":1,"#,
+                r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"#,
-                r#""work":{"kind":"run"},"trace":{"kind":"carrier","text":"#,
+                r#""work":{"kind":"run"},"#,
+                r#""trace":{"kind":"carrier","text":"#,
                 r#""{\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\"}"}}"#,
             ),
             b"{}",
@@ -127,6 +132,8 @@ fn the_run_frames_carry_the_stored_trace_carrier() {
             dispatch: DispatchNumber::new(4).unwrap(),
             task_id: task_id(T5),
             task_name: "app.tasks.fetch".to_owned(),
+            queue_name: default_queue(),
+            attempt: AttemptNumber::SMALLEST,
             worker_id: "worker-1".to_owned(),
             claimed_at: whole_second_claim_time(),
             orphan_self_heal: OrphanSelfHeal::On,
@@ -140,7 +147,8 @@ fn the_run_frames_carry_the_stored_trace_carrier() {
             concat!(
                 r#"{"kind":"shared_run","dispatch":4,"#,
                 r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.fetch","worker_id":"worker-1","#,
+                r#""task_name":"app.tasks.fetch","queue_name":"default","attempt":1,"#,
+                r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":true,"#,
                 r#""work":{"kind":"thread_task","timeout_ms":5000},"#,
                 r#""trace":{"kind":"carrier","text":"#,
@@ -157,6 +165,8 @@ fn run_meta_without_trace() -> Value {
         "kind": "run",
         "task_id": T1,
         "task_name": "t",
+        "queue_name": "default",
+        "attempt": 1,
         "worker_id": "w",
         "claimed_at": "2026-11-16T09:30:00Z",
         "orphan_self_heal": false,
@@ -258,6 +268,8 @@ fn a_shared_run_frame_without_its_trace_is_refused() {
         "dispatch": 1,
         "task_id": T1,
         "task_name": "t",
+        "queue_name": "default",
+        "attempt": 1,
         "worker_id": "w",
         "claimed_at": "2026-11-16T09:30:00Z",
         "orphan_self_heal": false,
@@ -268,6 +280,207 @@ fn a_shared_run_frame_without_its_trace_is_refused() {
         MalformedFrame::MissingField {
             field: "trace".to_owned(),
         },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The queue and the attempt of the run frames
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_run_frames_carry_the_queue_and_the_attempt() {
+    assert_parent_bytes(
+        &ParentFrame::Run(RunFrame {
+            task_id: task_id(T5),
+            task_name: "app.tasks.add".to_owned(),
+            queue_name: QueueName::new("emails".to_owned()).unwrap(),
+            attempt: AttemptNumber::try_from(3).unwrap(),
+            worker_id: "worker-1".to_owned(),
+            claimed_at: whole_second_claim_time(),
+            orphan_self_heal: OrphanSelfHeal::Off,
+            work: IsolatedWork::Run,
+            trace: RunTrace::NoCarrier,
+            input: TaskInputText::new("{}".to_owned()),
+        }),
+        &framed(
+            concat!(
+                r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                r#""task_name":"app.tasks.add","queue_name":"emails","attempt":3,"#,
+                r#""worker_id":"worker-1","#,
+                r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"#,
+                r#""work":{"kind":"run"},"trace":{"kind":"no_carrier"}}"#,
+            ),
+            b"{}",
+        ),
+    );
+    assert_parent_bytes(
+        &ParentFrame::SharedRun(SharedRunFrame {
+            dispatch: DispatchNumber::new(4).unwrap(),
+            task_id: task_id(T5),
+            task_name: "app.tasks.fetch".to_owned(),
+            queue_name: QueueName::new("emails".to_owned()).unwrap(),
+            attempt: AttemptNumber::try_from(2).unwrap(),
+            worker_id: "worker-1".to_owned(),
+            claimed_at: whole_second_claim_time(),
+            orphan_self_heal: OrphanSelfHeal::Off,
+            work: SharedWork::ThreadTask {
+                timeout_ms: TaskTimeoutMs::new(5_000).unwrap(),
+            },
+            trace: RunTrace::NoCarrier,
+            input: TaskInputText::new("{}".to_owned()),
+        }),
+        &framed(
+            concat!(
+                r#"{"kind":"shared_run","dispatch":4,"#,
+                r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                r#""task_name":"app.tasks.fetch","queue_name":"emails","attempt":2,"#,
+                r#""worker_id":"worker-1","#,
+                r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"#,
+                r#""work":{"kind":"thread_task","timeout_ms":5000},"#,
+                r#""trace":{"kind":"no_carrier"}}"#,
+            ),
+            b"{}",
+        ),
+    );
+}
+
+/// The largest attempt and a queue name of 52 characters round trip in both
+/// run frames.
+#[test]
+fn the_largest_attempt_and_queue_name_round_trip_in_both_run_frames() {
+    let queue_name = QueueName::new("q".repeat(crate::events::MAX_EVENT_QUEUE_NAME_CHARS)).unwrap();
+    let run = ParentFrame::Run(RunFrame {
+        task_id: task_id(T5),
+        task_name: "t".to_owned(),
+        queue_name: queue_name.clone(),
+        attempt: AttemptNumber::LARGEST,
+        worker_id: "w".to_owned(),
+        claimed_at: claim_time(),
+        orphan_self_heal: OrphanSelfHeal::Off,
+        work: IsolatedWork::Run,
+        trace: RunTrace::NoCarrier,
+        input: TaskInputText::new("{}".to_owned()),
+    });
+    let shared = ParentFrame::SharedRun(SharedRunFrame {
+        dispatch: DispatchNumber::new(3).unwrap(),
+        task_id: task_id(T5),
+        task_name: "t".to_owned(),
+        queue_name,
+        attempt: AttemptNumber::LARGEST,
+        worker_id: "w".to_owned(),
+        claimed_at: claim_time(),
+        orphan_self_heal: OrphanSelfHeal::Off,
+        work: SharedWork::ThreadTask {
+            timeout_ms: TaskTimeoutMs::new(5_000).unwrap(),
+        },
+        trace: RunTrace::NoCarrier,
+        input: TaskInputText::new("{}".to_owned()),
+    });
+    for frame in [run, shared] {
+        let bytes = encode_parent_frame(&frame).unwrap().to_bytes();
+        assert_eq!(decode_parent_bytes(&bytes).unwrap(), frame);
+    }
+}
+
+/// The metadata of an isolated run frame with every field.
+fn run_meta() -> Value {
+    with_field(
+        &run_meta_without_trace(),
+        "trace",
+        Some(json!({"kind": "no_carrier"})),
+    )
+}
+
+/// The metadata of a shared run frame with every field.
+fn shared_run_meta() -> Value {
+    json!({
+        "kind": "shared_run",
+        "dispatch": 1,
+        "task_id": T1,
+        "task_name": "t",
+        "queue_name": "default",
+        "attempt": 1,
+        "worker_id": "w",
+        "claimed_at": "2026-11-16T09:30:00Z",
+        "orphan_self_heal": false,
+        "work": {"kind": "thread_task", "timeout_ms": 5000},
+        "trace": {"kind": "no_carrier"},
+    })
+}
+
+/// Each refusal of `cases`, for the field `key` of both run frames.
+fn assert_run_field_refusals(key: &str, cases: &[(Option<Value>, MalformedFrame)]) {
+    for meta in [run_meta(), shared_run_meta()] {
+        for (value, expected) in cases {
+            let changed = with_field(&meta, key, value.clone());
+            assert_eq!(
+                &malformed_parent_meta(&changed, b"{}"),
+                expected,
+                "{key}: {value:?} in {}",
+                meta["kind"]
+            );
+        }
+    }
+}
+
+#[test]
+fn each_malformed_attempt_is_refused_with_its_field() {
+    let field = || "attempt".to_owned();
+    let past_the_largest = u64::from(crate::events::MAX_ATTEMPT) + 1;
+    assert_run_field_refusals(
+        "attempt",
+        &[
+            (None, MalformedFrame::MissingField { field: field() }),
+            (
+                Some(json!(0)),
+                MalformedFrame::OutOfBounds { field: field() },
+            ),
+            (
+                Some(json!(-1)),
+                MalformedFrame::OutOfBounds { field: field() },
+            ),
+            (
+                Some(json!(past_the_largest)),
+                MalformedFrame::OutOfBounds { field: field() },
+            ),
+            (
+                Some(json!("1")),
+                MalformedFrame::WrongType {
+                    field: field(),
+                    expected: ExpectedType::WholeNumber,
+                },
+            ),
+            (
+                Some(json!(1.5)),
+                MalformedFrame::WrongType {
+                    field: field(),
+                    expected: ExpectedType::WholeNumber,
+                },
+            ),
+        ],
+    );
+}
+
+#[test]
+fn each_malformed_queue_name_is_refused_with_its_field() {
+    let field = || "queue_name".to_owned();
+    let over_bound = "q".repeat(crate::events::MAX_EVENT_QUEUE_NAME_CHARS + 1);
+    assert_run_field_refusals(
+        "queue_name",
+        &[
+            (None, MalformedFrame::MissingField { field: field() }),
+            (
+                Some(json!(over_bound)),
+                MalformedFrame::OutOfBounds { field: field() },
+            ),
+            (
+                Some(json!(5)),
+                MalformedFrame::WrongType {
+                    field: field(),
+                    expected: ExpectedType::Text,
+                },
+            ),
+        ],
     );
 }
 

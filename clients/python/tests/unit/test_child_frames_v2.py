@@ -1244,6 +1244,58 @@ class TestVersionThreeParentFrames:
     def test_a_run_frame_with_no_carrier_gives_none(self) -> None:
         assert run_trace_of(run_frame(task_id=TASK_ID).trace) == NoTraceCarrier()
 
+    def test_a_run_frame_gives_its_queue_and_its_attempt(self) -> None:
+        frame = run_frame(task_id=TASK_ID, queue_name='emails', attempt=3)
+        assert (frame.queue_name, frame.attempt) == ('emails', 3)
+        shared = shared_run_frame(
+            dispatch=7,
+            task_id=TASK_ID,
+            work=thread_work(5_000),
+            queue_name='emails',
+            attempt=2,
+        )
+        assert (shared.queue_name, shared.attempt) == ('emails', 2)
+
+    def test_the_largest_attempt_and_queue_name_decode(self) -> None:
+        frame = run_frame(task_id=TASK_ID, queue_name='q' * 52, attempt=2**31)
+        assert (len(frame.queue_name), frame.attempt) == (52, 2**31)
+
+    @pytest.mark.parametrize(
+        ('key', 'value'),
+        [
+            ('attempt', None),
+            ('attempt', 0),
+            ('attempt', -1),
+            ('attempt', 2**31 + 1),
+            ('attempt', '1'),
+            ('attempt', 1.5),
+            ('queue_name', None),
+            ('queue_name', 5),
+            ('queue_name', 'q' * 53),
+        ],
+    )
+    @pytest.mark.parametrize('kind', ['run', 'shared_run'])
+    def test_every_malformed_attempt_and_queue_name_is_refused(
+        self,
+        kind: str,
+        key: str,
+        value: object,
+    ) -> None:
+        match _parent({**_run_of_kind(kind), key: value}, b'{}'):
+            case core.FrameRefused(reason=reason):
+                assert key in reason
+            case other:
+                pytest.fail(f'a malformed {key} is refused, got {other!r}')
+
+    @pytest.mark.parametrize('key', ['queue_name', 'attempt'])
+    @pytest.mark.parametrize('kind', ['run', 'shared_run'])
+    def test_a_run_frame_without_its_queue_or_attempt_is_refused(self, kind: str, key: str) -> None:
+        match _parent(_without(_run_of_kind(kind), key), b'{}'):
+            case core.FrameRefused(reason=reason):
+                assert key in reason
+            case other:
+                pytest.fail(f'a run frame without its {key} is refused, got {other!r}')
+
     @pytest.mark.parametrize(
         'trace',
         [

@@ -25,7 +25,7 @@ use crate::core::codec::check_json_text;
 use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
 use crate::core::config::{PostgresConfig, PostgresConfigError};
 use crate::core::mask_database_url;
-use crate::events::{RunTrace, TraceCarrierText};
+use crate::events::{AttemptNumber, QueueName, RunTrace, TraceCarrierText};
 
 /// The database URL a child connects with. It holds a password, so it
 /// travels in the init frame (never in argv, which `ps` shows) and its debug
@@ -299,6 +299,10 @@ pub enum SharedWork {
 pub struct RunFrame {
     pub task_id: Uuid,
     pub task_name: String,
+    /// The queue of the task row.
+    pub queue_name: QueueName,
+    /// The attempt that the claim runs: the retry count of the row plus 1.
+    pub attempt: AttemptNumber,
     /// The worker that holds the claim. The child fences each write of the
     /// attempt on it and on `claimed_at`.
     pub worker_id: String,
@@ -322,6 +326,10 @@ pub struct SharedRunFrame {
     pub dispatch: DispatchNumber,
     pub task_id: Uuid,
     pub task_name: String,
+    /// As [`RunFrame::queue_name`].
+    pub queue_name: QueueName,
+    /// As [`RunFrame::attempt`].
+    pub attempt: AttemptNumber,
     pub worker_id: String,
     pub claimed_at: DateTime<Utc>,
     /// As [`RunFrame::orphan_self_heal`].
@@ -389,6 +397,8 @@ enum ParentWire<'a> {
     Run {
         task_id: Uuid,
         task_name: &'a str,
+        queue_name: &'a str,
+        attempt: u32,
         worker_id: &'a str,
         claimed_at: String,
         orphan_self_heal: bool,
@@ -399,6 +409,8 @@ enum ParentWire<'a> {
         dispatch: u64,
         task_id: Uuid,
         task_name: &'a str,
+        queue_name: &'a str,
+        attempt: u32,
         worker_id: &'a str,
         claimed_at: String,
         orphan_self_heal: bool,
@@ -677,6 +689,8 @@ pub fn encode_parent_frame(frame: &ParentFrame) -> Result<EncodedFrame<'_>, Fram
             &ParentWire::Run {
                 task_id: run.task_id,
                 task_name: &run.task_name,
+                queue_name: run.queue_name.as_str(),
+                attempt: run.attempt.get(),
                 worker_id: &run.worker_id,
                 // The claim generation keeps every sub-second digit, so the
                 // child fences on the exact value.
@@ -692,6 +706,8 @@ pub fn encode_parent_frame(frame: &ParentFrame) -> Result<EncodedFrame<'_>, Fram
                 dispatch: run.dispatch.get(),
                 task_id: run.task_id,
                 task_name: &run.task_name,
+                queue_name: run.queue_name.as_str(),
+                attempt: run.attempt.get(),
                 worker_id: &run.worker_id,
                 claimed_at: time_text(&run.claimed_at),
                 orphan_self_heal: self_heal_flag(run.orphan_self_heal),
@@ -1007,6 +1023,8 @@ fn decode_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<RunFrame, MalformedF
         "kind",
         "task_id",
         "task_name",
+        "queue_name",
+        "attempt",
         "worker_id",
         "claimed_at",
         "orphan_self_heal",
@@ -1016,6 +1034,8 @@ fn decode_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<RunFrame, MalformedF
     Ok(RunFrame {
         task_id: fields.task_id("task_id")?,
         task_name: fields.owned_text("task_name")?,
+        queue_name: fields.bounded_text("queue_name")?,
+        attempt: config_count(fields, "attempt")?,
         worker_id: fields.owned_text("worker_id")?,
         claimed_at: fields.time("claimed_at")?,
         orphan_self_heal: OrphanSelfHeal::of_recovery_flag(fields.flag("orphan_self_heal")?),
@@ -1031,6 +1051,8 @@ fn decode_shared_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<SharedRunFram
         "dispatch",
         "task_id",
         "task_name",
+        "queue_name",
+        "attempt",
         "worker_id",
         "claimed_at",
         "orphan_self_heal",
@@ -1041,6 +1063,8 @@ fn decode_shared_run(fields: &Fields<'_>, body: Vec<u8>) -> Result<SharedRunFram
         dispatch: fields.dispatch("dispatch")?,
         task_id: fields.task_id("task_id")?,
         task_name: fields.owned_text("task_name")?,
+        queue_name: fields.bounded_text("queue_name")?,
+        attempt: config_count(fields, "attempt")?,
         worker_id: fields.owned_text("worker_id")?,
         claimed_at: fields.time("claimed_at")?,
         orphan_self_heal: OrphanSelfHeal::of_recovery_flag(fields.flag("orphan_self_heal")?),

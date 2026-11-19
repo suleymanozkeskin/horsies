@@ -20,6 +20,9 @@
 //! - The run frames (`run`, `shared_run`) carry `trace`: the trace carrier
 //!   that the send stored on the task row (`carrier` with its text, one JSON
 //!   object of texts), or `no_carrier`.
+//! - The run frames carry the queue and the attempt of the run, for the
+//!   attempt span and the log records of the child: `queue_name` and
+//!   `attempt` (the retry count of the row plus 1, from 1).
 //! - The frames that end a run carry `started_at`, the time that the start
 //!   write returned to the child. `result` and `shared_result` carry
 //!   `reported` with the time, or `not_reported` for a run that stopped

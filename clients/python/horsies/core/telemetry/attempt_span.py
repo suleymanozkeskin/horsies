@@ -54,6 +54,7 @@ from horsies.core.worker.run_return import (
     EncodedResult,
     ResultEnvelope,
     ResultOutcome,
+    RunWorkflow,
 )
 
 _logger = get_logger('telemetry')
@@ -71,14 +72,19 @@ MILLISECONDS_PER_SECOND: Final = 1000
 
 @dataclass(frozen=True, slots=True)
 class AttemptSubject:
-    """The attempt that a span covers: the run of task `task_id` for the
-    claim of `worker_id`, in a child of the class `execution`. `trace` is
-    the carrier that the send stored on the row."""
+    """The attempt that a span covers: attempt `attempt` (from 1) of task
+    `task_id` of the queue `queue_name`, for the claim of `worker_id`, in a
+    child of the class `execution`. `workflow` is the workflow node that
+    links the task, and `trace` the carrier that the send stored on the
+    row."""
 
     task_id: str
     task_name: str
+    queue_name: str
+    attempt: int
     worker_id: str
     execution: Execution
+    workflow: RunWorkflow
     trace: RunTrace
 
 
@@ -286,7 +292,12 @@ def _running_task(
             ids: SpanIds | NoSpanIds = NoSpanIds()
         case _:
             ids = span.ids
-    return RunningTask(task_id=subject.task_id, task_name=subject.task_name, span=ids)
+    return RunningTask(
+        task_id=subject.task_id,
+        task_name=subject.task_name,
+        attempt=subject.attempt,
+        span=ids,
+    )
 
 
 def _make_current(span: OpenAttemptSpan | _NoSpan) -> _SpanContext:

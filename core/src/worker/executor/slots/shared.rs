@@ -25,6 +25,7 @@ use super::pool::{
 use super::seat_runs::{place_on_shared_child, OpenChildLoad, Placement, SharedChildKind};
 use super::shared_slot::run_shared_slot;
 use crate::broker::OrphanSelfHeal;
+use crate::events::QueueName;
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     ChildKind, DispatchNumber, InitFrame, SharedRunFrame, SharedWork, TaskInputText,
@@ -359,6 +360,8 @@ impl SharedPool {
                     dispatch,
                     task_id: task.task_id,
                     task_name: task.task_name.clone(),
+                    queue_name: QueueName::cut(&task.queue_name),
+                    attempt: task.retry.attempt(),
                     worker_id: self.shared.config.worker_id.clone(),
                     claimed_at: task.claimed_at,
                     orphan_self_heal: self.shared.config.orphan_self_heal,

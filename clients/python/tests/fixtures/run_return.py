@@ -14,6 +14,7 @@ from typing import Final, assert_never
 
 from horsies.core.worker.run_return import (
     CoreStoppedBeforeStart,
+    NotInWorkflow,
     ResultEnvelope,
     RunReturn,
     SetRunning,
@@ -25,8 +26,8 @@ from horsies.core.worker.run_return import (
 STARTED_AT: Final = datetime(2026, 11, 17, 10, 0, 1, 250000, tzinfo=UTC)
 """The time of the start write of the runs of the tests."""
 
-STARTED: Final = StartedRunning(STARTED_AT)
-"""The start of the runs of the tests."""
+STARTED: Final = StartedRunning(STARTED_AT, NotInWorkflow())
+"""The start of the runs of the tests: a task that no workflow node links."""
 
 
 def set_running(result: ResultEnvelope) -> SetRunning:

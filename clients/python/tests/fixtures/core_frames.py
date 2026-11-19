@@ -30,6 +30,9 @@ NO_CARRIER: Final[dict[str, object]] = {'kind': 'no_carrier'}
 TRACEPARENT: Final = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'
 """A W3C ``traceparent`` value."""
 
+QUEUE_NAME: Final = 'default'
+"""The queue of the run frames of the tests."""
+
 
 def carrier_trace(carrier: dict[str, str]) -> dict[str, object]:
     """The trace of a run frame whose task row stores ``carrier``, as the
@@ -58,6 +61,8 @@ def run_meta(
     *,
     task_id: uuid.UUID,
     task_name: str = 'task',
+    queue_name: str = QUEUE_NAME,
+    attempt: int = 1,
     worker_id: str = WORKER_ID,
     claimed_at: datetime = CLAIMED_AT,
     orphan_self_heal: bool = False,
@@ -70,6 +75,8 @@ def run_meta(
         'kind': 'run',
         'task_id': str(task_id),
         'task_name': task_name,
+        'queue_name': queue_name,
+        'attempt': attempt,
         'worker_id': worker_id,
         'claimed_at': claimed_at.isoformat(),
         'orphan_self_heal': orphan_self_heal,
@@ -82,6 +89,8 @@ def run_frame(
     *,
     task_id: uuid.UUID,
     task_name: str = 'task',
+    queue_name: str = QUEUE_NAME,
+    attempt: int = 1,
     worker_id: str = WORKER_ID,
     claimed_at: datetime = CLAIMED_AT,
     orphan_self_heal: bool = False,
@@ -94,6 +103,8 @@ def run_frame(
         run_meta(
             task_id=task_id,
             task_name=task_name,
+            queue_name=queue_name,
+            attempt=attempt,
             worker_id=worker_id,
             claimed_at=claimed_at,
             orphan_self_heal=orphan_self_heal,
@@ -122,6 +133,8 @@ def shared_run_meta(
     task_id: uuid.UUID,
     work: dict[str, object],
     task_name: str = 'task',
+    queue_name: str = QUEUE_NAME,
+    attempt: int = 1,
     worker_id: str = WORKER_ID,
     claimed_at: datetime = CLAIMED_AT,
     orphan_self_heal: bool = False,
@@ -134,6 +147,8 @@ def shared_run_meta(
         'dispatch': dispatch,
         'task_id': str(task_id),
         'task_name': task_name,
+        'queue_name': queue_name,
+        'attempt': attempt,
         'worker_id': worker_id,
         'claimed_at': claimed_at.isoformat(),
         'orphan_self_heal': orphan_self_heal,
@@ -148,6 +163,8 @@ def shared_run_frame(
     task_id: uuid.UUID,
     work: dict[str, object],
     task_name: str = 'task',
+    queue_name: str = QUEUE_NAME,
+    attempt: int = 1,
     worker_id: str = WORKER_ID,
     claimed_at: datetime = CLAIMED_AT,
     orphan_self_heal: bool = False,
@@ -161,6 +178,8 @@ def shared_run_frame(
             task_id=task_id,
             work=work,
             task_name=task_name,
+            queue_name=queue_name,
+            attempt=attempt,
             worker_id=worker_id,
             claimed_at=claimed_at,
             orphan_self_heal=orphan_self_heal,

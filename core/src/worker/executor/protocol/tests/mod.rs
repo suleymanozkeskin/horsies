@@ -20,6 +20,7 @@ use crate::core::config::socket::{
 };
 use crate::core::config::{PostgresConfig, PostgresConfigError};
 use crate::core::task::error::OutcomeCode;
+use crate::events::{AttemptNumber, QueueName};
 
 const T1: &str = "0190f5a2-7b1c-7d3e-8f00-000000000001";
 const T2: &str = "0190f5a2-7b1c-7d3e-8f00-000000000002";
@@ -137,6 +138,11 @@ fn claim_time() -> DateTime<Utc> {
 
 fn whole_second_claim_time() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 11, 16, 9, 30, 0).unwrap()
+}
+
+/// The queue of the run frames of these tests.
+fn default_queue() -> QueueName {
+    QueueName::new("default".to_owned()).unwrap()
 }
 
 fn pool() -> ChildPool {
@@ -646,6 +652,8 @@ fn the_isolated_run_frame_carries_the_input_as_its_body() {
         &ParentFrame::Run(RunFrame {
             task_id: task_id(T5),
             task_name: "app.tasks.add".to_owned(),
+            queue_name: default_queue(),
+            attempt: AttemptNumber::SMALLEST,
             worker_id: "worker-1".to_owned(),
             claimed_at: claim_time(),
             orphan_self_heal: OrphanSelfHeal::On,
@@ -656,9 +664,11 @@ fn the_isolated_run_frame_carries_the_input_as_its_body() {
         &framed(
             concat!(
                 r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.add","worker_id":"worker-1","#,
+                r#""task_name":"app.tasks.add","queue_name":"default","attempt":1,"#,
+                r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00.123456Z","orphan_self_heal":true,"#,
-                r#""work":{"kind":"run"},"trace":{"kind":"no_carrier"}}"#,
+                r#""work":{"kind":"run"},"#,
+                r#""trace":{"kind":"no_carrier"}}"#,
             ),
             br#"{"a":1,"b":2}"#,
         ),
@@ -671,6 +681,8 @@ fn the_isolated_run_frame_carries_a_refusal_of_stored_options() {
         &ParentFrame::Run(RunFrame {
             task_id: task_id(T5),
             task_name: "app.tasks.add".to_owned(),
+            queue_name: default_queue(),
+            attempt: AttemptNumber::SMALLEST,
             worker_id: "worker-1".to_owned(),
             claimed_at: whole_second_claim_time(),
             orphan_self_heal: OrphanSelfHeal::Off,
@@ -683,7 +695,8 @@ fn the_isolated_run_frame_carries_a_refusal_of_stored_options() {
         &framed(
             concat!(
                 r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.add","worker_id":"worker-1","#,
+                r#""task_name":"app.tasks.add","queue_name":"default","attempt":1,"#,
+                r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"#,
                 r#""work":{"kind":"refusal","#,
                 r#""refusal":{"kind":"value_invalid","reason":"timeout_ms is below 1000"}},"#,
@@ -701,6 +714,8 @@ fn the_shared_run_frame_carries_the_seat_work() {
             dispatch: DispatchNumber::new(9).unwrap(),
             task_id: task_id(T5),
             task_name: "app.tasks.fetch".to_owned(),
+            queue_name: default_queue(),
+            attempt: AttemptNumber::SMALLEST,
             worker_id: "worker-1".to_owned(),
             claimed_at: whole_second_claim_time(),
             orphan_self_heal: OrphanSelfHeal::Off,
@@ -714,7 +729,8 @@ fn the_shared_run_frame_carries_the_seat_work() {
             concat!(
                 r#"{{"kind":"shared_run","dispatch":9,"#,
                 r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.fetch","worker_id":"worker-1","#,
+                r#""task_name":"app.tasks.fetch","queue_name":"default","attempt":1,"#,
+                r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{},"#,
                 r#""trace":{{"kind":"no_carrier"}}}}"#,
             ),
@@ -1128,6 +1144,8 @@ fn the_claim_generation_round_trips_exactly() {
     let frame = ParentFrame::Run(RunFrame {
         task_id: task_id(T5),
         task_name: "t".to_owned(),
+        queue_name: default_queue(),
+        attempt: AttemptNumber::SMALLEST,
         worker_id: "w".to_owned(),
         claimed_at,
         orphan_self_heal: OrphanSelfHeal::Off,
@@ -1150,6 +1168,8 @@ fn the_orphan_self_heal_round_trips_in_both_run_frames() {
         let run = ParentFrame::Run(RunFrame {
             task_id: task_id(T5),
             task_name: "t".to_owned(),
+            queue_name: default_queue(),
+            attempt: AttemptNumber::SMALLEST,
             worker_id: "w".to_owned(),
             claimed_at: claim_time(),
             orphan_self_heal: self_heal,
@@ -1161,6 +1181,8 @@ fn the_orphan_self_heal_round_trips_in_both_run_frames() {
             dispatch: DispatchNumber::new(3).unwrap(),
             task_id: task_id(T5),
             task_name: "t".to_owned(),
+            queue_name: default_queue(),
+            attempt: AttemptNumber::SMALLEST,
             worker_id: "w".to_owned(),
             claimed_at: claim_time(),
             orphan_self_heal: self_heal,
@@ -1181,7 +1203,7 @@ fn the_orphan_self_heal_round_trips_in_both_run_frames() {
 #[test]
 fn a_run_frame_without_its_orphan_self_heal_is_refused() {
     let run = format!(
-        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"run"}}}}"#
+        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"run"}},"trace":{{"kind":"no_carrier"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&run, b"{}")),
@@ -1190,7 +1212,7 @@ fn a_run_frame_without_its_orphan_self_heal_is_refused() {
         },
     );
     let shared = format!(
-        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"thread_task","timeout_ms":5000}}}}"#
+        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"thread_task","timeout_ms":5000}},"trace":{{"kind":"no_carrier"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&shared, b"{}")),
@@ -1206,9 +1228,10 @@ fn a_claim_generation_with_an_offset_is_read() {
     let run = framed(
         concat!(
             r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-            r#""task_name":"t","worker_id":"w","#,
+            r#""task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","#,
             r#""claimed_at":"2026-11-16T09:30:00.123456+00:00","orphan_self_heal":false,"#,
-            r#""work":{"kind":"run"},"trace":{"kind":"no_carrier"}}"#,
+            r#""work":{"kind":"run"},"#,
+            r#""trace":{"kind":"no_carrier"}}"#,
         ),
         b"{}",
     );
@@ -1307,7 +1330,7 @@ fn a_body_on_a_frame_without_one_is_refused() {
 #[test]
 fn input_that_is_not_utf8_is_refused() {
     let meta = format!(
-        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{{"kind":"run"}},"trace":{{"kind":"no_carrier"}}}}"#
+        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{{"kind":"run"}},"trace":{{"kind":"no_carrier"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&meta, &[0x7b, 0xff])),
@@ -1383,7 +1406,7 @@ fn a_stuck_report_names_live_work() {
 #[test]
 fn seat_work_outside_its_bounds_is_refused() {
     let meta = format!(
-        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{{"kind":"task","timeout_ms":999,"cancel_grace_ms":1000}}}}"#
+        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{{"kind":"task","timeout_ms":999,"cancel_grace_ms":1000}},"trace":{{"kind":"no_carrier"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&meta, b"{}")),

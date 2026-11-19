@@ -1130,6 +1130,8 @@ def run_child_task(
         claimed_at=frame.claimed_at,
         task_loop=task_loop,
         orphan_self_heal=frame.orphan_self_heal,
+        queue_name=frame.queue_name,
+        attempt=frame.attempt,
         trace=run_trace_of(frame.trace),
     )
 
