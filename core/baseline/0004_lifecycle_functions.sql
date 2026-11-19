@@ -508,8 +508,10 @@ $$;
 -- Locks: the advisory cap locks in key order (p_lock_keys), then the row locks of the taken rows (FOR UPDATE SKIP
 -- LOCKED). No task advisory lock; the claim never waits on a row.
 -- Returns rows of kind CLAIMED (one per taken row: id, task_name, queue_name, input, task_options, execution,
--- is_workflow_task, claimed_at, retry_count, max_retries) and at most one row of kind SHORT (short_by). retry_count
--- and max_retries let a failed attempt be written in one statement with no read.
+-- is_workflow_task, claimed_at, retry_count, max_retries, priority, enqueued_at, trace_carrier, trace_id) and at most
+-- one row of kind SHORT (short_by). retry_count and max_retries let a failed attempt be written in one statement with
+-- no read. enqueued_at is the due time of the row (a retry and a delayed send set it), so claimed_at - enqueued_at is
+-- the wait in the queue on the database clock. trace_carrier and trace_id are the stored trace pair (NULL for none).
 -- Python 0.7.0 (`v0.7.0` package): horsies_claim (core/schemas/migrations.py:713-1003), HORSIES_CLAIM_SQL
 -- (core/worker/sql.py:102-120), the claim pass (core/worker/claiming.py:282-296).
 CREATE FUNCTION horsies_claim(
@@ -538,6 +540,10 @@ CREATE FUNCTION horsies_claim(
     claimed_at timestamp with time zone,
     retry_count integer,
     max_retries integer,
+    priority integer,
+    enqueued_at timestamp with time zone,
+    trace_carrier text,
+    trace_id bytea,
     short_by integer
 )
     LANGUAGE plpgsql
@@ -679,6 +685,10 @@ CREATE FUNCTION horsies_claim_candidates(
     claimed_at timestamp with time zone,
     retry_count integer,
     max_retries integer,
+    priority integer,
+    enqueued_at timestamp with time zone,
+    trace_carrier text,
+    trace_id bytea,
     short_by integer
 )
     LANGUAGE plpgsql
@@ -767,10 +777,12 @@ BEGIN
             SELECT locked_expired.id FROM locked_expired
         ))
         RETURNING t.id, t.task_name, t.queue_name, t.input, t.task_options, t.execution,
-                  t.is_workflow_task, t.claimed_at, t.retry_count, t.max_retries, t.priority, t.enqueued_at
+                  t.is_workflow_task, t.claimed_at, t.retry_count, t.max_retries, t.priority, t.enqueued_at,
+                  t.trace_carrier, t.trace_id
     )
     SELECT 'CLAIMED'::text, u.id, u.task_name::text, u.queue_name::text, u.input, u.task_options,
-           u.execution, u.is_workflow_task, u.claimed_at, u.retry_count, u.max_retries, NULL::integer
+           u.execution, u.is_workflow_task, u.claimed_at, u.retry_count, u.max_retries, u.priority, u.enqueued_at,
+           u.trace_carrier, u.trace_id, NULL::integer
     FROM updated u
     ORDER BY COALESCE((p_queue_priority ->> u.queue_name)::int, 100) ASC,
              u.priority ASC, u.enqueued_at ASC, u.id ASC;
@@ -779,7 +791,8 @@ BEGIN
     IF v_taken < v_planned THEN
         RETURN QUERY
         SELECT 'SHORT'::text, NULL::uuid, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text,
-               NULL::boolean, NULL::timestamptz, NULL::integer, NULL::integer, v_planned - v_taken;
+               NULL::boolean, NULL::timestamptz, NULL::integer, NULL::integer, NULL::integer, NULL::timestamptz,
+               NULL::text, NULL::bytea, v_planned - v_taken;
     END IF;
 END;
 $$;
@@ -869,7 +882,9 @@ $$;
 -- of the row (pid, host, process name).
 -- Locks: the task row (FOR NO KEY UPDATE, read by id alone so only the primary key serves it), then the linked node
 -- row (FOR UPDATE), the order that the move uses. No task advisory lock and no workflow lock: nothing moves.
--- Returns one row: outcome STARTED with started_at, or MISSED with miss_reason.
+-- Returns one row: outcome STARTED with started_at, or MISSED with miss_reason. A STARTED workflow task also returns
+-- the workflow id and the task index of its node (read with the node row the start locks); both are NULL for a plain
+-- task and for a miss.
 -- Python 0.7.0 (`v0.7.0` package): the RUNNING write (core/worker/child_runner.py:711-761, set_running_params
 -- :899-925), the workflow guard (:740-748), the node write (:763-781), _confirm_ownership_and_set_running
 -- (:1141-1257). Its RUNNING write also inserted a runner beat (first_beat, :753-759).
@@ -880,13 +895,21 @@ CREATE FUNCTION horsies_start_attempt(
     p_worker_pid integer,
     p_worker_hostname text,
     p_worker_process_name text
-) RETURNS TABLE(outcome text, miss_reason text, started_at timestamp with time zone)
+) RETURNS TABLE(
+    outcome text,
+    miss_reason text,
+    started_at timestamp with time zone,
+    workflow_id uuid,
+    workflow_task_index integer
+)
     LANGUAGE plpgsql
     AS $$
 #variable_conflict use_column
 DECLARE
     v_task record;
     v_link record;
+    v_workflow_id uuid;
+    v_workflow_task_index integer;
 BEGIN
     IF num_nulls(
         p_task_id, p_worker_id, p_claimed_at, p_worker_pid, p_worker_hostname, p_worker_process_name
@@ -902,13 +925,13 @@ BEGIN
     FOR NO KEY UPDATE;
 
     IF NOT FOUND THEN
-        RETURN QUERY SELECT 'MISSED'::text, 'NOT_HELD'::text, NULL::timestamptz;
+        RETURN QUERY SELECT 'MISSED'::text, 'NOT_HELD'::text, NULL::timestamptz, NULL::uuid, NULL::integer;
         RETURN;
     END IF;
     IF v_task.status = 'CLAIMED'
        AND v_task.claimed_by_worker_id = p_worker_id
        AND v_task.good_until <= NOW() THEN
-        RETURN QUERY SELECT 'MISSED'::text, 'DEADLINE_PASSED'::text, NULL::timestamptz;
+        RETURN QUERY SELECT 'MISSED'::text, 'DEADLINE_PASSED'::text, NULL::timestamptz, NULL::uuid, NULL::integer;
         RETURN;
     END IF;
     IF (
@@ -916,34 +939,37 @@ BEGIN
         AND v_task.claimed_by_worker_id = p_worker_id
         AND v_task.claimed_at = p_claimed_at
     ) IS NOT TRUE THEN
-        RETURN QUERY SELECT 'MISSED'::text, 'NOT_HELD'::text, NULL::timestamptz;
+        RETURN QUERY SELECT 'MISSED'::text, 'NOT_HELD'::text, NULL::timestamptz, NULL::uuid, NULL::integer;
         RETURN;
     END IF;
     IF v_task.claim_expires_at <= NOW() THEN
-        RETURN QUERY SELECT 'MISSED'::text, 'LEASE_EXPIRED'::text, NULL::timestamptz;
+        RETURN QUERY SELECT 'MISSED'::text, 'LEASE_EXPIRED'::text, NULL::timestamptz, NULL::uuid, NULL::integer;
         RETURN;
     END IF;
 
     IF v_task.is_workflow_task THEN
         -- The node by task_id (ix_horsies_workflow_tasks_task_id), its workflow by primary key, unlocked.
-        SELECT n.id AS node_id, n.status AS node_status,
+        SELECT n.id AS node_id, n.status AS node_status, n.workflow_id, n.task_index,
                (SELECT w.status FROM horsies_workflows w WHERE w.id = n.workflow_id) AS workflow_status
         INTO v_link
         FROM horsies_workflow_tasks n
         WHERE n.task_id = p_task_id
         FOR UPDATE;
         IF FOUND AND v_link.workflow_status = 'PAUSED' THEN
-            RETURN QUERY SELECT 'MISSED'::text, 'WORKFLOW_PAUSED'::text, NULL::timestamptz;
+            RETURN QUERY SELECT 'MISSED'::text, 'WORKFLOW_PAUSED'::text, NULL::timestamptz, NULL::uuid, NULL::integer;
             RETURN;
         END IF;
         IF FOUND AND v_link.workflow_status = 'CANCELLED' THEN
-            RETURN QUERY SELECT 'MISSED'::text, 'WORKFLOW_CANCELLED'::text, NULL::timestamptz;
+            RETURN QUERY
+            SELECT 'MISSED'::text, 'WORKFLOW_CANCELLED'::text, NULL::timestamptz, NULL::uuid, NULL::integer;
             RETURN;
         END IF;
         IF NOT FOUND OR v_link.node_status NOT IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING') THEN
-            RETURN QUERY SELECT 'MISSED'::text, 'NODE_NOT_LINKED'::text, NULL::timestamptz;
+            RETURN QUERY SELECT 'MISSED'::text, 'NODE_NOT_LINKED'::text, NULL::timestamptz, NULL::uuid, NULL::integer;
             RETURN;
         END IF;
+        v_workflow_id := v_link.workflow_id;
+        v_workflow_task_index := v_link.task_index;
     END IF;
 
     UPDATE horsies_tasks t
@@ -965,7 +991,7 @@ BEGIN
         END IF;
     END IF;
 
-    RETURN QUERY SELECT 'STARTED'::text, NULL::text, NOW();
+    RETURN QUERY SELECT 'STARTED'::text, NULL::text, NOW(), v_workflow_id, v_workflow_task_index;
 END
 $$;
 
