@@ -308,8 +308,8 @@ class TestResolvedTypeHints:
         assert hints["return"] is str
 
     def test_class_with_call_fallback(self) -> None:
-        # Arrange: a class where get_type_hints on the instance fails
-        # but __call__ succeeds
+        # Arrange: an instance of a class with __call__. get_type_hints of
+        # the instance raises on Python 3.13 and returns {} on Python 3.14.
         class CallableClass:
             def __call__(self, x: int) -> str:
                 ...  # pragma: no cover
@@ -319,8 +319,8 @@ class TestResolvedTypeHints:
         # Act
         hints = _resolved_type_hints(instance)
 
-        # Assert — should get hints from either the instance or __call__
-        assert "x" in hints or "return" in hints
+        # Assert: the hints of __call__, on every supported Python
+        assert hints == {"x": int, "return": str}
 
     def test_all_targets_fail_returns_empty_dict(self) -> None:
         # Arrange: patch get_type_hints to always raise
