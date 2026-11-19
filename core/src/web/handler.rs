@@ -22,12 +22,14 @@ use http::{HeaderName, HeaderValue, Method, StatusCode};
 use tower::ServiceExt;
 
 use crate::broker::PostgresBroker;
+use crate::monitoring::fleet::FleetLabels;
 use crate::workflow_engine::child_spec::ChildSpecSource;
 
 use super::app::{build_router, MountPath, WebState};
 use super::auth::{MonitoringAuthPolicy, MonitoringRequest, INTENT_HEADER};
 use super::common::ApiError;
 use super::events::{EventBroadcaster, EventFrames};
+use super::fleet_metrics::WebFleetMetrics;
 use super::schema::SchemaProbe;
 use super::spa::{EmbeddedAssets, MonitoringUiConfig};
 use super::task_stats_cache::{ReadCache, TaskStatsCache};
@@ -178,6 +180,10 @@ pub struct MonitoringHandlerConfig {
     /// How long an event stream waits without an event before it sends a
     /// heartbeat frame ([`super::HEARTBEAT`] in production).
     pub heartbeat: Duration,
+    /// The queue and schedule names that `/metrics` takes as label values:
+    /// the app config's ([`FleetLabels::of_config`]). Other names are
+    /// `(unknown)`.
+    pub fleet_labels: FleetLabels,
 }
 
 /// The monitoring app of one broker as a framework-neutral handler.
@@ -192,12 +198,17 @@ impl MonitoringHandler {
     /// The handler of `broker`. The resume route builds the sub-workflow
     /// children that a resume owes through `children`. Starts nothing: the
     /// event broadcaster subscribes on the broker's listener at the first
-    /// subscriber.
+    /// subscriber, and the first `/metrics` request starts the reads of the
+    /// fleet state.
     pub fn new(
         broker: Arc<PostgresBroker>,
         children: Arc<dyn ChildSpecSource>,
         config: MonitoringHandlerConfig,
     ) -> Self {
+        let fleet_metrics = Arc::new(WebFleetMetrics::new(
+            Arc::clone(&broker),
+            config.fleet_labels,
+        ));
         let state = WebState {
             schema_probe: Arc::new(SchemaProbe::new(Arc::clone(&broker))),
             task_stats_cache: Arc::new(TaskStatsCache::new()),
@@ -212,6 +223,7 @@ impl MonitoringHandler {
             children,
             heartbeat: config.heartbeat,
             client_version: config.client_version,
+            fleet_metrics,
         };
         Self::from_state(state)
     }
@@ -299,11 +311,11 @@ impl MonitoringHandler {
 }
 
 /// The access that a request needs, from its method and its path inside the
-/// mount, as the routes of the Python app guard them: every read route and
-/// the event stream need `can_view`; `/api/meta` asks `can_act` to report
-/// it; an action route needs `can_view` and `can_act`, or only `can_view`
-/// while actions are disabled (`actions_enabled` false: the act guard
-/// refuses without asking). Every other path is public. Pure.
+/// mount, as the routes of the Python app guard them: every read route,
+/// `/metrics` and the event stream need `can_view`; `/api/meta` asks
+/// `can_act` to report it; an action route needs `can_view` and `can_act`,
+/// or only `can_view` while actions are disabled (`actions_enabled` false:
+/// the act guard refuses without asking). Every other path is public. Pure.
 pub fn route_access(actions_enabled: bool, method: &Method, path: &str) -> RouteAccess {
     let segments: Vec<&str> = path.strip_prefix('/').unwrap_or(path).split('/').collect();
     let action = match actions_enabled {
@@ -330,6 +342,7 @@ pub fn route_access(actions_enabled: bool, method: &Method, path: &str) -> Route
         }
         ("GET", ["api", "workers", "ping" | "schedules" | "classes"]) => AccessNeed::View,
         ("GET", ["api", "workers", id, "history"]) if named(id) => AccessNeed::View,
+        ("GET", ["metrics"]) => AccessNeed::View,
         ("POST", ["api", "tasks", id, "cancel"]) if named(id) => action,
         ("POST", ["api", "workflows", id, "pause" | "resume" | "cancel"]) if named(id) => action,
         _ => AccessNeed::Public,
