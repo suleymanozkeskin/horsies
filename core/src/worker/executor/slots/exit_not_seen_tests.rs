@@ -304,7 +304,8 @@ async fn a_result_that_reaches_the_socket_after_the_deadline_is_not_read() {
     )
     .unwrap();
     let script = after_one_run(&format!(
-        r#"( exec perl -MPOSIX -e 'defined POSIX::setsid() or die "setsid: $!"; exec @ARGV or die "exec: $!"' /bin/sh "{late_writer}" "$0" ) & exec sleep 60"#
+        r#"( exec perl -MPOSIX -e 'defined POSIX::setsid() or die "setsid: $!"; exec @ARGV or die "exec: $!"' {shell} "{late_writer}" "$0" ) & exec sleep 60"#,
+        shell = crate::test_support::SCRIPT_SHELL,
     ));
     let held =
         HeldPool::start_with_kill_wait(&script, ExitNotSeen::LeaveToRecovery, LONG_KILL_WAIT);

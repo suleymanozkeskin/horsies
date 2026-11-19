@@ -63,7 +63,7 @@ fn other_platforms_have_no_preload_path_and_spawn_with_exec() {
             PreloadStart::Unsupported(not_linux)
         );
         let command = ChildCommand {
-            program: "/bin/sh".into(),
+            program: crate::test_support::SCRIPT_SHELL.into(),
             args: vec![
                 "-c".into(),
                 r#"printf exec__ >&"$0"; dd bs=1 count=1 <&"$0" >/dev/null 2>&1; exit 8"#.into(),

@@ -17,6 +17,12 @@ pub(crate) use database::{
 };
 pub(crate) use log_capture::{CapturedEvent, LogCapture};
 
+/// The shell of the scripted children. A script reads and writes the socket
+/// descriptor that the spawner appends (`>&"$0"`), and that descriptor can
+/// have two digits. dash, the `/bin/sh` of Debian and Ubuntu, takes one
+/// digit only in a redirection ("Bad fd number"); bash takes any.
+pub(crate) const SCRIPT_SHELL: &str = "/bin/bash";
+
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio_postgres::AsyncMessage;

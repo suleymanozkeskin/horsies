@@ -100,7 +100,7 @@ async fn run_order(
 ) -> Result<TaskOutcome<PaymentCapture, UserCode>, WorkflowReadError> {
     let showcase =
         build_app_for_url(url, SchemaMode::MigrateAndValidate).expect("the showcase app");
-    let _worker = support::WorkerProcess::start();
+    let _worker = support::WorkerProcess::start(&showcase).await;
     let handle = showcase
         .workflows
         .order_fulfillment
@@ -153,7 +153,7 @@ async fn order_fulfillment_courier_retry_records_attempts_before_success() {
     let order = seed_order_with_id(&store, order_id, "courier", 4, 1).await;
     let showcase = build_app_for_url(settings.sqlx_url(), SchemaMode::MigrateAndValidate)
         .expect("the showcase app");
-    let _worker = support::WorkerProcess::start();
+    let _worker = support::WorkerProcess::start(&showcase).await;
     let handle = showcase
         .tasks
         .book_courier

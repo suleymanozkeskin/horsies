@@ -553,6 +553,26 @@ jobs:
       - name: Test the core derives
         run: cargo test -p horsies-core-derive
 
+      # The core tests run in parallel, and one of them holds 66 sessions at
+      # once (core/src/sql_tests/baseline_key_reservation_claim.rs). The
+      # image's max_connections of 100 refuses some of them (SQLSTATE 53300).
+      # ALTER SYSTEM takes effect at the restart.
+      - name: Raise max_connections of the test server to 300
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$POSTGRES_CONTAINER" psql -U postgres -c "ALTER SYSTEM SET max_connections = 300"
+          docker restart "$POSTGRES_CONTAINER"
+          for attempt in $(seq 1 30); do
+            if docker exec "$POSTGRES_CONTAINER" pg_isready -U postgres -q; then
+              docker exec "$POSTGRES_CONTAINER" psql -U postgres -Atc "SHOW max_connections"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the test server accepts no connection 30 s after its restart" >&2
+          exit 1
+
       # The core's tests create one database per test, copied from a
       # template that each test process installs, on the server of
       # DATABASE_URL (core/src/test_support/database.rs).

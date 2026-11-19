@@ -11,7 +11,7 @@
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use acme_showcase::app::WORKER_PROFILE;
+use acme_showcase::app::{ShowcaseApp, WORKER_PROFILE};
 use acme_showcase::settings::{resolve_database_settings, DatabaseSettings, ACME_URL_VARIABLE};
 use acme_showcase::store::{ensure_database, Store};
 
@@ -45,7 +45,17 @@ pub struct WorkerProcess {
 }
 
 impl WorkerProcess {
-    pub fn start() -> Self {
+    /// Installs the schema through the handle of `showcase` (its first read
+    /// runs the migrations and the coverage pass), then starts the worker.
+    /// A worker start that finds the partition coverage gate held by another
+    /// process, with no heartbeat leaf for the present instant, is refused;
+    /// on a new database the first send of the test would hold that gate.
+    pub async fn start(showcase: &ShowcaseApp) -> Self {
+        let _ping = showcase
+            .app
+            .ping_database()
+            .await
+            .expect("the schema installs before the worker starts");
         let child = Command::new(env!("CARGO_BIN_EXE_acme"))
             .args(["worker", "--profile", WORKER_PROFILE])
             .stdin(Stdio::null())

@@ -221,6 +221,18 @@ async fn workflow_function_cases_pass() {
         .await;
 }
 
+/// The same cases on a database whose default collation ignores `_`, as
+/// glibc's `en_US.UTF-8` does: the envelope checks sort the keys of a result
+/// by code point, so `__h_task_result__` stays first.
+#[tokio::test]
+async fn workflow_function_cases_pass_under_a_collation_that_ignores_punctuation() {
+    let database = BaselineDatabase::create_ignoring_punctuation(&[FIXTURES_SQL]).await;
+    let session = database.session().await;
+    session
+        .run_script_rolled_back("baseline_workflow_functions.sql", CASES_SQL)
+        .await;
+}
+
 /// The values of the one row of `statement`.
 ///
 /// # Panics

@@ -61,6 +61,9 @@ def test_transaction_pool_rejected_as_session_url(
 async def test_statement_pool_fails_loudly_for_runtime_transactions(
     pgbouncer_urls: PgbouncerUrls,
 ) -> None:
+    """The first use of a statement-pooled main URL is refused: the pool
+    cannot keep a transaction, so a send again fails the same way and is not
+    retryable. The message names the cause."""
     config = PostgresConfig(
         database_url=pgbouncer_urls.statement,
         session_database_url=pgbouncer_urls.direct,
@@ -76,6 +79,7 @@ async def test_statement_pool_fails_loudly_for_runtime_transactions(
         enqueue_r = await _enqueue_probe(broker, task_name="pgbouncer_statement_probe")
         assert is_err(enqueue_r)
         assert enqueue_r.err_value.code.value == "ENQUEUE_FAILED"
-        assert enqueue_r.err_value.retryable is True
+        assert enqueue_r.err_value.retryable is False
+        assert "PgBouncer statement pooling" in enqueue_r.err_value.message
     finally:
         await broker.close_async()
