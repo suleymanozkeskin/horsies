@@ -271,6 +271,9 @@
     },
     "status": "string",
     "task_id": "uuid",
+    "trace_id": {
+      "nullable": "string"
+    },
     "worker_hostname": {
       "nullable": "string"
     }
@@ -445,6 +448,9 @@
         },
         "status": "string",
         "task_id": "uuid",
+        "trace_id": {
+          "nullable": "string"
+        },
         "worker_hostname": {
           "nullable": "string"
         }
@@ -743,6 +749,9 @@
           "nullable": "integer"
         }
       }
+    },
+    "trace_id": {
+      "nullable": "string"
     }
   },
   "WorkflowRunSummary": {
@@ -834,6 +843,9 @@
           },
           "status": "string",
           "task_id": "uuid",
+          "trace_id": {
+            "nullable": "string"
+          },
           "worker_hostname": {
             "nullable": "string"
           }
