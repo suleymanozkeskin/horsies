@@ -24,6 +24,7 @@ use super::harness::{describe, Session};
 use crate::core::history::archive::attempts::{decode_attempt_snapshot, encode_attempt_snapshot};
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
 use crate::core::lifecycle::{decode_outcome_row, TerminalizationOutcome};
+use crate::test_support::history::{covered_beat_instant, CoveredLeaf, SeedInstant};
 use crate::test_support::TestDatabase;
 
 mod already_applied;
@@ -239,15 +240,6 @@ const FIRST_HEARTBEAT_HOUR_SQL: &str = "
     SELECT min(lower_anchor)
     FROM horsies_task_history_leaf_catalog
     WHERE class_key = 'heartbeats'
-";
-
-/// Creates the heartbeat leaf of the UTC hour that holds `$1`, or finds it
-/// conformant, and returns the outcome of `horsies_create_heartbeat_leaf`.
-const HEARTBEAT_LEAF_SQL: &str = "
-    SELECT outcome
-    FROM horsies_create_heartbeat_leaf(
-        date_trunc('hour', CAST($1 AS timestamptz), 'UTC')
-    )
 ";
 
 /// A heartbeat of the task, sent at `$3` in the role `$2`. Parameter `$1` is
@@ -643,50 +635,28 @@ async fn age(
     .await;
 }
 
-/// What [`heartbeat`] found for the leaf of the hour of its heartbeat.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HeartbeatLeaf {
-    /// No leaf held the hour; the helper created it.
-    Created,
-    /// A conformant leaf held the hour already.
-    AlreadyConformant,
-}
-
-/// A heartbeat of the task in `role`, sent at `sent_at`. The heartbeats
-/// table is partitioned by the hour of `sent_at`, and the coverage pass
-/// creates the leaves from the hour in which it ran on. So the helper first
-/// creates the leaf of the hour that holds `sent_at`
-/// ([`HEARTBEAT_LEAF_SQL`]), and then inserts the heartbeat.
+/// A heartbeat of the task in `role`, sent at `sent_at`, in the hourly leaf
+/// that the seed guard creates for it (the coverage pass creates the leaves
+/// from the hour in which it ran on). Returns how the guard found that leaf.
 ///
 /// # Panics
 ///
-/// When a statement fails, or the leaf creation returns an outcome other
-/// than CREATED or ALREADY_CONFORMANT.
+/// When a statement fails, or the guard cannot cover the instant.
 async fn heartbeat(
     session: &Session,
     task_id: Uuid,
     sent_at: DateTime<Utc>,
     role: &str,
-) -> HeartbeatLeaf {
-    let outcome: String = session
-        .client()
-        .query_one(HEARTBEAT_LEAF_SQL, &[&sent_at])
-        .await
-        .unwrap_or_else(|error| panic!("create the heartbeat leaf: {}", describe(&error)))
-        .get(0);
-    let leaf = match outcome.as_str() {
-        "CREATED" => HeartbeatLeaf::Created,
-        "ALREADY_CONFORMANT" => HeartbeatLeaf::AlreadyConformant,
-        refused => panic!("the heartbeat leaf of the hour of {sent_at}: {refused}"),
-    };
+) -> CoveredLeaf {
+    let covered = covered_beat_instant(session.client(), SeedInstant::At(sent_at)).await;
     let _sent = run(
         session,
         "insert a heartbeat",
         HEARTBEAT_SQL,
-        &[&task_id, &role, &sent_at],
+        &[&task_id, &role, &covered.at()],
     )
     .await;
-    leaf
+    covered.leaf()
 }
 
 /// A RUNNING workflow task of [`WORKER`] with its RUNNING node in a RUNNING

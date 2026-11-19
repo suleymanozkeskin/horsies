@@ -23,6 +23,7 @@ use crate::monitoring::{
     TaskBreakdownQuery, TaskFacetsQuery, TaskFilters, TaskGroupBy, TaskListQuery, TaskStatsQuery,
     TaskSummary,
 };
+use crate::test_support::history::{covered_history_instant, stored_class_key, SeedInstant};
 use crate::test_support::sql::{self, TestPool};
 
 /// The status cards in their fixed order (Python `_STATUS_ORDER`).
@@ -902,9 +903,12 @@ async fn the_history_window_holds_its_lower_bound_and_not_its_upper_bound() {
         (before_lower.id, lower - Duration::microseconds(1)),
         (at_upper.id, upper),
     ] {
+        let class_key = stored_class_key(&database.pool, task_id).await;
+        let terminal_at =
+            covered_history_instant(&database.pool, &class_key, SeedInstant::At(terminal_at)).await;
         sql::query("UPDATE horsies_task_history SET terminal_at = $2 WHERE task_id = $1")
             .bind(task_id)
-            .bind(terminal_at)
+            .bind(terminal_at.at())
             .execute(&database.pool)
             .await
             .expect("date the history row");

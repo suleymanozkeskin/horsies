@@ -334,11 +334,19 @@ impl Executed {
     }
 }
 
-/// Where a statement runs: a session that the pool checks out for it, or the
-/// test's own session (also the session of an open transaction).
+/// Where a statement runs: a session that the pool checks out for it, the
+/// test's own session (also the session of an open transaction), or a
+/// driver client that a test holds outside this module.
 pub(crate) enum Target<'t> {
     Pool(&'t TestPool),
     Connection(&'t mut TestConnection),
+    Client(&'t Client),
+}
+
+impl<'t> From<&'t Client> for Target<'t> {
+    fn from(client: &'t Client) -> Target<'t> {
+        Target::Client(client)
+    }
 }
 
 impl<'t> From<&'t TestPool> for Target<'t> {
@@ -380,6 +388,7 @@ impl Target<'_> {
                 connection.session().rows(sql, params).await
             }
             Target::Connection(connection) => connection.rows(sql, params).await,
+            Target::Client(client) => Ok(client.query_typed(sql, &typed_params(params)).await?),
         }
     }
 
@@ -391,6 +400,7 @@ impl Target<'_> {
                 connection.session().count(sql, params).await
             }
             Target::Connection(connection) => connection.count(sql, params).await,
+            Target::Client(client) => Ok(client.execute_typed(sql, &typed_params(params)).await?),
         }
     }
 
@@ -403,6 +413,7 @@ impl Target<'_> {
                 connection.session().script(sql).await
             }
             Target::Connection(connection) => connection.script(sql).await,
+            Target::Client(client) => Ok(command_count(&client.simple_query(sql).await?)),
         }
     }
 }
@@ -821,14 +832,19 @@ impl TestConnection {
     async fn script(&mut self, sql: &str) -> Result<u64, Error> {
         self.send_dropped_ends().await?;
         let messages = self.client.simple_query(sql).await?;
-        Ok(messages
-            .iter()
-            .map(|message| match message {
-                SimpleQueryMessage::CommandComplete(count) => *count,
-                _ => 0,
-            })
-            .sum())
+        Ok(command_count(&messages))
     }
+}
+
+/// The sum of the command tag counts of a simple query's messages.
+fn command_count(messages: &[SimpleQueryMessage]) -> u64 {
+    messages
+        .iter()
+        .map(|message| match message {
+            SimpleQueryMessage::CommandComplete(count) => *count,
+            _ => 0,
+        })
+        .sum()
 }
 
 /// The values of `params` with their declared types, as the driver takes

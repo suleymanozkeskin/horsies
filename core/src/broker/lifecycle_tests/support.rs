@@ -36,6 +36,7 @@ use crate::core::lifecycle::{
     UnreportedAttemptOutcome, WorkflowSuccessOutcome,
 };
 use crate::db::{CheckoutClass, CorePool, StatementBound, StatementFailure, TypedStatement};
+use crate::test_support::history::{covered_beat_instant, SeedInstant};
 use crate::test_support::sql::{self, TestConnection, TestListener, TestPool, TestPoolOptions};
 
 /// The worker that holds the seeded claims.
@@ -725,21 +726,23 @@ pub(super) async fn ensure_recent_heartbeat_leaves(pool: &TestPool) {
     transaction.commit().await.expect("commit heartbeat leaves");
 }
 
-/// Insert one heartbeat sent `seconds_ago` before the connection's `NOW()`.
-/// Call `ensure_recent_heartbeat_leaves` first.
+/// Insert one heartbeat sent `ago` before the connection's `NOW()`, in the
+/// hourly leaf that the seed guard creates for it. In a transaction the
+/// guard and the insert read one `NOW()`.
 pub(super) async fn insert_beat(
     connection: &mut TestConnection,
     task_id: Uuid,
     role: BeatRole,
-    seconds_ago: f64,
+    ago: Duration,
 ) {
+    let sent_at = covered_beat_instant(&mut *connection, SeedInstant::BeforeNow(ago)).await;
     sql::query(
         "INSERT INTO horsies_heartbeats (task_id, role, sent_at, sender_id, hostname, pid)
-         VALUES ($1, $2, NOW() - make_interval(secs => $3::float8), $4, 'lifecycle-host', 4242)",
+         VALUES ($1, $2, $3, $4, 'lifecycle-host', 4242)",
     )
     .bind(task_id)
     .bind(role.as_sql())
-    .bind(seconds_ago)
+    .bind(sent_at.at())
     .bind(WORKER)
     .execute(connection)
     .await
@@ -747,10 +750,9 @@ pub(super) async fn insert_beat(
 }
 
 /// Insert one heartbeat in its own transaction.
-pub(super) async fn beat(pool: &TestPool, task_id: Uuid, role: BeatRole, seconds_ago: f64) {
-    ensure_recent_heartbeat_leaves(pool).await;
+pub(super) async fn beat(pool: &TestPool, task_id: Uuid, role: BeatRole, ago: Duration) {
     let mut connection = pool.acquire().await.expect("acquire for heartbeat");
-    insert_beat(&mut *connection, task_id, role, seconds_ago).await;
+    insert_beat(&mut *connection, task_id, role, ago).await;
 }
 
 /// The constraint that a refusal must name.

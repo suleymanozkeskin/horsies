@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome, WorkerOwned};
+use crate::test_support::history::{covered_history_instant, stored_class_key, SeedInstant};
 use crate::test_support::migrated_pool;
 use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 use crate::test_support::terminal_writes::{self, TerminalFailure};
@@ -1002,16 +1003,24 @@ async fn live_and_history_aggregates_merge_before_caps() {
     outside_window.error_code = Some("W2_OUTSIDE_WINDOW".to_owned());
     seed_task(&pool, &outside_window).await;
     fail_task(&pool, outside_window.id, "W2_OUTSIDE_WINDOW").await;
+    let outside_class = stored_class_key(&pool, outside_window.id).await;
+    let outside_end = covered_history_instant(
+        &pool,
+        &outside_class,
+        SeedInstant::BeforeNow(Duration::minutes(5)),
+    )
+    .await;
     sql::query(
         "UPDATE horsies_task_history
-         SET sent_at = NOW() - INTERVAL '7 minutes',
-             enqueued_at = NOW() - INTERVAL '7 minutes',
-             started_at = NOW() - INTERVAL '6 minutes',
-             created_at = NOW() - INTERVAL '7 minutes',
-             terminal_at = NOW() - INTERVAL '5 minutes'
+         SET sent_at = $2 - INTERVAL '2 minutes',
+             enqueued_at = $2 - INTERVAL '2 minutes',
+             started_at = $2 - INTERVAL '1 minute',
+             created_at = $2 - INTERVAL '2 minutes',
+             terminal_at = $2
          WHERE task_id = $1",
     )
     .bind(outside_window.id)
+    .bind(outside_end.at())
     .execute(&pool)
     .await
     .expect("age W2 history outside window");

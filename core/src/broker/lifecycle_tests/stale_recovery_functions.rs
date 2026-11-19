@@ -18,6 +18,7 @@
 //! the counting proxy on a core pool of one connection, after the statement
 //! is prepared on the connection, with no checkout ping.
 
+use chrono::Duration;
 use serial_test::serial;
 use uuid::Uuid;
 
@@ -156,9 +157,9 @@ mod scan {
         let beaten = stale_task(&pool).await;
         let finalizing = stale_task(&pool).await;
         let old_beat = stale_task(&pool).await;
-        beat(&pool, beaten, BeatRole::Runner, 0.0).await;
+        beat(&pool, beaten, BeatRole::Runner, Duration::zero()).await;
         set_finalizing(&pool, finalizing, Since::SecondsAgo(0.0)).await;
-        beat(&pool, old_beat, BeatRole::Runner, 540.0).await;
+        beat(&pool, old_beat, BeatRole::Runner, Duration::seconds(540)).await;
 
         let candidates = scan_stale_running(&core, StatementLog::Off, thresholds(), whole_scan())
             .await
@@ -418,7 +419,7 @@ mod finish {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
         let task_id = stale_task(&pool).await;
-        beat(&pool, task_id, BeatRole::Runner, 0.0).await;
+        beat(&pool, task_id, BeatRole::Runner, Duration::zero()).await;
 
         let outcome = recover(&core, &finish(task_id, StaleRetry::NoRetry)).await;
 
@@ -722,13 +723,13 @@ mod requeue {
         let linked = stale_claim(&pool, Origin::WorkflowNode).await;
         let workflow_id = link_workflow_task(&pool, linked, "ENQUEUED", "RUNNING").await;
         set_finalizing(&pool, silent, Since::SecondsAgo(0.0)).await;
-        beat(&pool, beaten, BeatRole::Claimer, 0.0).await;
+        beat(&pool, beaten, BeatRole::Claimer, Duration::zero()).await;
         sql::query("UPDATE horsies_tasks SET claimed_at = NOW() WHERE id = $1")
             .bind(fresh)
             .execute(&pool)
             .await
             .expect("claim the row again now");
-        beat(&pool, fresh, BeatRole::Claimer, 1_200.0).await;
+        beat(&pool, fresh, BeatRole::Claimer, Duration::seconds(1_200)).await;
 
         let requeued = requeue_stale_claimed(&core, StatementLog::Off, claim_threshold())
             .await
