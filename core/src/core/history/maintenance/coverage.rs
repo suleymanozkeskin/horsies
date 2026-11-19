@@ -279,7 +279,9 @@ pub(crate) async fn ensure_periodic_coverage_in_pool(
 /// costs one probe statement (`horsies_coverage_probe`). A damaged set takes
 /// the coverage gate when [`takes_coverage_gate`] says so, probes again under
 /// it, and repairs: the registration when the probe finds it unhealthy, then
-/// one transaction per damaged leaf. A created history leaf is published by
+/// one transaction per damaged leaf, and one more round for the leaves of a
+/// UTC hour or day that started during the repair
+/// ([`LEAF_REPAIR_ROUNDS`]). A created history leaf is published by
 /// its own creation; the last step publishes the readers
 /// (`horsies_publish_history_readers`) only when the probe still finds them
 /// stale. Every checkout is reserved work ([`maintenance_connection`]).
@@ -356,97 +358,219 @@ async fn end_gate(gate: Transaction<'_>) {
     let _released: RollbackOutcome = gate.rollback().await;
 }
 
+/// The rounds of leaf repair of one pass. A probe expects the leaves of its
+/// own `statement_timestamp()`, so when the start of a UTC hour (or day)
+/// falls between the probe that a round repairs and the final probe of the
+/// round, the final probe expects a newest leaf that the round did not try
+/// ([`CoverageProbe::has_damage_beyond`]). The second round repairs the
+/// final probe of the first.
+const LEAF_REPAIR_ROUNDS: u32 = 2;
+
+/// The leaves that one round of repair created, and the contained failures
+/// of the round (`<class key>: <cause>`, one per class that stopped).
+#[derive(Debug, Default)]
+struct LeafRepair {
+    created_history: u64,
+    created_heartbeats: u64,
+    failures: Vec<String>,
+}
+
+/// The step after one round of leaf repair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterRepairRound {
+    /// The final probe of the round is healthy.
+    Ensured,
+    /// No leaf of the round failed, a round is left, and the final probe
+    /// finds a damaged leaf that the repaired probe did not list.
+    RepairAgain,
+    /// A leaf of the round failed, no round is left, or the final probe
+    /// finds damage that the round already tried.
+    Failed,
+}
+
+/// The step after round `round` repaired `repaired`, made `repair` and
+/// ended with `final_probe`. Pure.
+fn after_repair_round(
+    repaired: &CoverageProbe,
+    repair: &LeafRepair,
+    final_probe: &CoverageProbe,
+    round: u32,
+) -> AfterRepairRound {
+    let repairable = repair.failures.is_empty()
+        && round < LEAF_REPAIR_ROUNDS
+        && final_probe.has_damage_beyond(repaired);
+    match (final_probe.is_healthy(), repairable) {
+        (true, _) => AfterRepairRound::Ensured,
+        (false, true) => AfterRepairRound::RepairAgain,
+        (false, false) => AfterRepairRound::Failed,
+    }
+}
+
 /// Repairs one damaged probe while the caller holds the gate, if any
-/// (Python `_repair_partition_coverage`). A leaf that fails stops its class;
-/// the other classes and the heartbeat leaves are still served.
+/// (Python `_repair_partition_coverage`): the registration, then up to
+/// [`LEAF_REPAIR_ROUNDS`] rounds of leaf repair, each ended by the final
+/// probe ([`final_coverage_probe`]). A leaf that fails stops its class; the
+/// other classes and the heartbeat leaves are still served.
 async fn repair_partition_coverage(
     pool: &CorePool,
     log: StatementLog,
     request: &CoverageRequest,
-    mut probe: CoverageProbe,
+    probe: CoverageProbe,
 ) -> Result<CoverageOutcome, HistoryError> {
-    if !probe.registration_healthy {
-        {
-            let mut connection = maintenance_connection(pool, &REGISTER_CLASSES).await?;
-            let mut transaction = connection.begin(IsolationLevel::ServerDefault).await?;
-            register_retention_classes(&mut transaction, log, request).await?;
-            transaction.commit().await?;
-        }
-        probe = probe_in_pool(pool, log, request).await?;
-        if !probe.registration_healthy {
-            return Ok(CoverageOutcome::Failed(CoverageEnsureFailed {
-                stage: "verify_registration",
-                class_key: None,
-                refusal: "registered retention class shape is not conformant".to_owned(),
-                heartbeat_covered_now: probe.heartbeat_covered_now,
-                absent_leaves: probe.absent_leaves,
-            }));
-        }
-    }
-
+    let mut repaired = match repair_registration(pool, log, request, probe).await? {
+        RegistrationStep::Healthy(probe) => probe,
+        RegistrationStep::Refused(failed) => return Ok(CoverageOutcome::Failed(failed)),
+    };
     let mut created_history = 0_u64;
     let mut created_heartbeats = 0_u64;
-    let mut failures: Vec<String> = Vec::new();
+    let mut republished = false;
+    let mut round: u32 = 1;
+    loop {
+        let repair = repair_damaged_leaves(pool, log, &repaired).await;
+        let (final_probe, published) = final_coverage_probe(pool, log, request).await?;
+        created_history += repair.created_history;
+        created_heartbeats += repair.created_heartbeats;
+        republished |= published;
+        match after_repair_round(&repaired, &repair, &final_probe, round) {
+            AfterRepairRound::Ensured => {
+                return Ok(CoverageOutcome::Ensured(CoverageEnsured {
+                    created_history_leaves: created_history,
+                    created_heartbeat_leaves: created_heartbeats,
+                    republished,
+                    heartbeat_covered_now: final_probe.heartbeat_covered_now,
+                    history_covered_through: final_probe.history_covered_through,
+                    heartbeats_covered_through: final_probe.heartbeats_covered_through,
+                    absent_leaves: final_probe.absent_leaves,
+                }));
+            }
+            AfterRepairRound::RepairAgain => {
+                repaired = final_probe;
+                round += 1;
+            }
+            AfterRepairRound::Failed => {
+                return Ok(CoverageOutcome::Failed(failed_repair(
+                    final_probe,
+                    &repair.failures,
+                )));
+            }
+        }
+    }
+}
+
+/// The outcome of the registration step of a repair.
+enum RegistrationStep {
+    /// The probe to repair, with a healthy registration.
+    Healthy(CoverageProbe),
+    /// The registration is still not conformant after it was written.
+    Refused(CoverageEnsureFailed),
+}
+
+/// The registration step of a repair: nothing when `probe` finds the
+/// registration healthy; else one registration transaction
+/// (`horsies_register_retention_classes`) and a new probe.
+///
+/// Errors: the checkout, the registration or the probe failed
+/// ([`HistoryError::Statement`]); nothing of the registration committed,
+/// except after `OutcomeUnknown` at `COMMIT`.
+async fn repair_registration(
+    pool: &CorePool,
+    log: StatementLog,
+    request: &CoverageRequest,
+    probe: CoverageProbe,
+) -> Result<RegistrationStep, HistoryError> {
+    if probe.registration_healthy {
+        return Ok(RegistrationStep::Healthy(probe));
+    }
+    {
+        let mut connection = maintenance_connection(pool, &REGISTER_CLASSES).await?;
+        let mut transaction = connection.begin(IsolationLevel::ServerDefault).await?;
+        register_retention_classes(&mut transaction, log, request).await?;
+        transaction.commit().await?;
+    }
+    let probe = probe_in_pool(pool, log, request).await?;
+    if probe.registration_healthy {
+        return Ok(RegistrationStep::Healthy(probe));
+    }
+    Ok(RegistrationStep::Refused(CoverageEnsureFailed {
+        stage: "verify_registration",
+        class_key: None,
+        refusal: "registered retention class shape is not conformant".to_owned(),
+        heartbeat_covered_now: probe.heartbeat_covered_now,
+        absent_leaves: probe.absent_leaves,
+    }))
+}
+
+/// One round of leaf repair: one transaction per damaged leaf of `probe`
+/// ([`maintain_leaf`]), the history leaves first. An error or a refusal of
+/// a history leaf stops its class; one of a heartbeat leaf stops the
+/// heartbeat leaves. Each is recorded in [`LeafRepair::failures`], so the
+/// round itself does not fail.
+async fn repair_damaged_leaves(
+    pool: &CorePool,
+    log: StatementLog,
+    probe: &CoverageProbe,
+) -> LeafRepair {
+    let mut repair = LeafRepair::default();
     let mut failed_classes: Vec<String> = Vec::new();
     for leaf in &probe.damaged_history {
         if failed_classes.contains(&leaf.class_key) {
             continue;
         }
         match maintain_leaf(pool, log, DamagedLeaf::History(leaf)).await {
-            Ok(LeafCreation::Created { .. }) => created_history += 1,
+            Ok(LeafCreation::Created { .. }) => repair.created_history += 1,
             Ok(
                 LeafCreation::AlreadyConformant { .. }
                 | LeafCreation::IndexRepaired { .. }
                 | LeafCreation::CoveredByOpenEndedLeaf { .. },
             ) => {}
             Ok(refusal) => {
-                failures.push(format!("{}: {refusal:?}", leaf.class_key));
+                repair
+                    .failures
+                    .push(format!("{}: {refusal:?}", leaf.class_key));
                 failed_classes.push(leaf.class_key.clone());
             }
             Err(error) => {
-                failures.push(format!("{}: {error}", leaf.class_key));
+                repair.failures.push(format!("{}: {error}", leaf.class_key));
                 failed_classes.push(leaf.class_key.clone());
             }
         }
     }
     for leaf in &probe.damaged_heartbeats {
         match maintain_leaf(pool, log, DamagedLeaf::Heartbeat(leaf)).await {
-            Ok(LeafCreation::Created { .. }) => created_heartbeats += 1,
+            Ok(LeafCreation::Created { .. }) => repair.created_heartbeats += 1,
             Ok(LeafCreation::AlreadyConformant { .. } | LeafCreation::IndexRepaired { .. }) => {}
             Ok(refusal) => {
-                failures.push(format!("{HEARTBEAT_CLASS_KEY}: {refusal:?}"));
+                repair
+                    .failures
+                    .push(format!("{HEARTBEAT_CLASS_KEY}: {refusal:?}"));
                 break;
             }
             Err(error) => {
-                failures.push(format!("{HEARTBEAT_CLASS_KEY}: {error}"));
+                repair
+                    .failures
+                    .push(format!("{HEARTBEAT_CLASS_KEY}: {error}"));
                 break;
             }
         }
     }
+    repair
+}
 
-    let (final_probe, republished) = final_coverage_probe(pool, log, request).await?;
-    if final_probe.is_healthy() {
-        return Ok(CoverageOutcome::Ensured(CoverageEnsured {
-            created_history_leaves: created_history,
-            created_heartbeat_leaves: created_heartbeats,
-            republished,
-            heartbeat_covered_now: final_probe.heartbeat_covered_now,
-            history_covered_through: final_probe.history_covered_through,
-            heartbeats_covered_through: final_probe.heartbeats_covered_through,
-            absent_leaves: final_probe.absent_leaves,
-        }));
-    }
+/// The failed outcome of a repair whose last round ended with the unhealthy
+/// `final_probe`: the round's failures, or what the probe still finds wrong
+/// when no leaf failed. Pure.
+fn failed_repair(final_probe: CoverageProbe, failures: &[String]) -> CoverageEnsureFailed {
     let refusal = match failures.is_empty() {
         true => final_probe.unresolved_detail(),
         false => failures.join("; "),
     };
-    Ok(CoverageOutcome::Failed(CoverageEnsureFailed {
+    CoverageEnsureFailed {
         stage: "ensure_leaf_coverage",
         class_key: final_probe.first_damaged_class_key(),
         refusal,
         heartbeat_covered_now: final_probe.heartbeat_covered_now,
         absent_leaves: final_probe.absent_leaves,
-    }))
+    }
 }
 
 /// The last step of a repair, on one connection: a probe, and when it
@@ -541,5 +665,223 @@ mod gate_rule_tests {
             startup_verdict(failed(false)),
             StartupCoverageOutcome::Refused(CoverageOutcome::Failed(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod repair_round_tests {
+    use chrono::TimeZone;
+
+    use super::*;
+    use crate::core::history::partitions::catalog::LeafLowerBound;
+
+    /// A probe with healthy flags whose damaged leaves are `history` and
+    /// `heartbeats`.
+    fn probe(history: &[&str], heartbeats: &[&str]) -> CoverageProbe {
+        let anchor = Utc
+            .with_ymd_and_hms(2026, 11, 19, 4, 0, 0)
+            .single()
+            .expect("a valid instant");
+        CoverageProbe {
+            damaged_history: history
+                .iter()
+                .map(|leaf_name| DamagedHistoryLeaf {
+                    class_key: "standard_30d".to_owned(),
+                    leaf_name: (*leaf_name).to_owned(),
+                    lower: LeafLowerBound::At(anchor),
+                })
+                .collect(),
+            damaged_heartbeats: heartbeats
+                .iter()
+                .map(|leaf_name| DamagedHeartbeatLeaf {
+                    leaf_name: (*leaf_name).to_owned(),
+                    lower_anchor: anchor,
+                })
+                .collect(),
+            registration_healthy: true,
+            publication_healthy: true,
+            heartbeat_covered_now: true,
+            history_covered_through: HistoryCoverage::Forever,
+            heartbeats_covered_through: anchor,
+            absent_leaves: Vec::new(),
+        }
+    }
+
+    fn failed_round() -> LeafRepair {
+        LeafRepair {
+            failures: vec!["standard_30d: Busy".to_owned()],
+            ..LeafRepair::default()
+        }
+    }
+
+    #[test]
+    fn a_healthy_final_probe_is_ensured() {
+        let repaired = probe(&[], &["hb_05"]);
+        assert_eq!(
+            after_repair_round(&repaired, &LeafRepair::default(), &probe(&[], &[]), 1),
+            AfterRepairRound::Ensured,
+        );
+    }
+
+    /// The start of an hour between the two probes: the final probe expects
+    /// the leaf of the new hour, which the repaired probe did not list.
+    #[test]
+    fn a_heartbeat_leaf_that_the_repaired_probe_did_not_list_gets_another_round() {
+        let repaired = probe(&[], &["hb_05"]);
+        assert_eq!(
+            after_repair_round(
+                &repaired,
+                &LeafRepair::default(),
+                &probe(&[], &["hb_06"]),
+                1,
+            ),
+            AfterRepairRound::RepairAgain,
+        );
+    }
+
+    /// The start of a UTC day between the two probes, for a history leaf.
+    #[test]
+    fn a_history_leaf_that_the_repaired_probe_did_not_list_gets_another_round() {
+        let repaired = probe(&["day_21"], &[]);
+        assert_eq!(
+            after_repair_round(
+                &repaired,
+                &LeafRepair::default(),
+                &probe(&["day_22"], &[]),
+                1,
+            ),
+            AfterRepairRound::RepairAgain,
+        );
+    }
+
+    #[test]
+    fn the_last_round_is_failed() {
+        let repaired = probe(&[], &["hb_05"]);
+        assert_eq!(
+            after_repair_round(
+                &repaired,
+                &LeafRepair::default(),
+                &probe(&[], &["hb_06"]),
+                LEAF_REPAIR_ROUNDS,
+            ),
+            AfterRepairRound::Failed,
+        );
+    }
+
+    #[test]
+    fn a_round_with_a_failed_leaf_is_failed() {
+        let repaired = probe(&[], &["hb_05"]);
+        assert_eq!(
+            after_repair_round(&repaired, &failed_round(), &probe(&[], &["hb_06"]), 1),
+            AfterRepairRound::Failed,
+        );
+    }
+
+    /// A leaf that the round tried and that is still damaged, or damage
+    /// outside the leaves: another round would repeat the same work.
+    #[test]
+    fn damage_that_the_round_tried_is_failed() {
+        let repaired = probe(&["day_21"], &["hb_05"]);
+        assert_eq!(
+            after_repair_round(
+                &repaired,
+                &LeafRepair::default(),
+                &probe(&["day_21"], &["hb_05"]),
+                1,
+            ),
+            AfterRepairRound::Failed,
+        );
+        let mut stale_readers = probe(&[], &[]);
+        stale_readers.publication_healthy = false;
+        assert_eq!(
+            after_repair_round(&repaired, &LeafRepair::default(), &stale_readers, 1),
+            AfterRepairRound::Failed,
+        );
+    }
+}
+
+#[cfg(test)]
+mod repair_round_database_tests {
+    use serial_test::serial;
+
+    use super::*;
+    use crate::broker::pools::core_pool_for_test_url;
+    use crate::core::history::heartbeats::partitioning::hourly_leaf_name;
+    use crate::test_support::sql::{self, TestPool};
+    use crate::test_support::{migrated_pool, MIGRATED_HEARTBEAT_HOURS, MIGRATED_HISTORY_DAYS};
+
+    /// The start of the current UTC hour of the database clock.
+    async fn database_hour(pool: &TestPool) -> DateTime<Utc> {
+        sql::query_scalar("SELECT date_trunc('hour', statement_timestamp(), 'UTC')")
+            .fetch_one(pool)
+            .await
+            .expect("read the database hour")
+    }
+
+    /// Drops the leaf `leaf_name` and its catalog row (Python `_forget_leaf`).
+    async fn forget_leaf(pool: &TestPool, leaf_name: &str) {
+        sql::query(&format!("DROP TABLE {leaf_name}"))
+            .execute(pool)
+            .await
+            .expect("drop the leaf");
+        sql::query("DELETE FROM horsies_task_history_leaf_catalog WHERE leaf_name = $1")
+            .bind(leaf_name)
+            .execute(pool)
+            .await
+            .expect("forget the catalog row");
+    }
+
+    async fn relation_exists(pool: &TestPool, relation: &str) -> bool {
+        sql::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+            .bind(relation)
+            .fetch_one(pool)
+            .await
+            .expect("read relation presence")
+    }
+
+    /// A repair whose probe was taken one hour before its final probe: the
+    /// probe does not list the newest damaged heartbeat leaf of the final
+    /// probe. With one round the pass is `Failed` at `ensure_leaf_coverage`
+    /// with `unresolved coverage state: <that leaf>`; the second round
+    /// creates the leaf and the pass is `Ensured`. The test holds when the
+    /// hour of the database clock changes during it: the final probe then
+    /// lists one more unlisted leaf, which the same second round creates.
+    #[tokio::test]
+    #[serial]
+    async fn a_leaf_of_an_hour_that_starts_during_the_repair_is_created_by_the_next_round() {
+        let pool = migrated_pool().await;
+        let hour = database_hour(&pool).await;
+        for ahead in [1, 2] {
+            let leaf_name = hourly_leaf_name(hour + Duration::hours(ahead)).expect("leaf name");
+            forget_leaf(&pool, &leaf_name).await;
+        }
+        let core = core_pool_for_test_url(pool.url());
+        let request = CoverageRequest::new(MIGRATED_HISTORY_DAYS, MIGRATED_HEARTBEAT_HOURS, &[])
+            .expect("the coverage request of the test database");
+        let mut repaired = probe_in_pool(&core, StatementLog::Off, &request)
+            .await
+            .expect("probe");
+        let unlisted = repaired
+            .damaged_heartbeats
+            .pop()
+            .expect("the probe lists the forgotten leaves");
+        assert!(
+            !repaired.damaged_heartbeats.is_empty(),
+            "the repaired probe keeps a damaged heartbeat leaf: {repaired:?}"
+        );
+
+        let outcome = repair_partition_coverage(&core, StatementLog::Off, &request, repaired)
+            .await
+            .expect("repair");
+        core.close();
+
+        match outcome {
+            CoverageOutcome::Ensured(ensured) => assert!(
+                ensured.created_heartbeat_leaves >= 2,
+                "both forgotten leaves are created: {ensured:?}"
+            ),
+            CoverageOutcome::Failed(failed) => panic!("expected an ensured pass, got {failed:?}"),
+        }
+        assert!(relation_exists(&pool, &unlisted.leaf_name).await);
     }
 }

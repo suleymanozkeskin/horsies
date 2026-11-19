@@ -45,8 +45,8 @@ const MIGRATED_POOL_CONNECTIONS: u32 = 5;
 
 /// The history horizon (days) and the heartbeat horizon (hours) of the
 /// coverage pass of [`migrated_pool`].
-const MIGRATED_HISTORY_DAYS: u32 = 2;
-const MIGRATED_HEARTBEAT_HOURS: u32 = 2;
+pub(crate) const MIGRATED_HISTORY_DAYS: u32 = 2;
+pub(crate) const MIGRATED_HEARTBEAT_HOURS: u32 = 2;
 
 /// The database of the running test ([`database_of_this_test`]): a copy of
 /// the test template, with one coverage pass at the first call in the test
