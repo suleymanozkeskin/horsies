@@ -28,8 +28,14 @@
 //! - workflows: the partial indexes of `RUNNING` and `PAUSED` workflows;
 //! - schedules: the primary key of `horsies_schedule_state`;
 //! - schema version: the primary key of `horsies_migrations`.
+//!
+//! [`FleetCollector`] holds the fleet state as gauges and renders their
+//! Prometheus text; [`collect_fleet_state`] reads the state at most once per
+//! [`FLEET_COLLECT_INTERVAL`] and records each read.
 
+mod collector;
 mod decode;
+mod gauges;
 mod read;
 mod statements;
 
@@ -45,6 +51,10 @@ use crate::db::Transience;
 use crate::telemetry::labels::{FleetQuery, FleetWorkerState, LiveTaskStatus, LiveWorkflowStatus};
 use crate::{ClassCoverage, StreamWait, PENDING_STREAM_LIMIT};
 
+pub use collector::{
+    collect_fleet_state, FleetCollector, FleetLabels, FleetRecorded, FLEET_COLLECTOR_METRICS,
+    FLEET_COLLECT_INTERVAL,
+};
 pub use read::read_fleet_state;
 
 /// The bound of each statement of the fleet read. After it the core sends a

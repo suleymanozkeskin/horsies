@@ -202,6 +202,21 @@ pub enum Recorded {
     OutsideLabelSet { label: LabelName },
 }
 
+/// What a replacement of the series of a gauge did.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Replaced {
+    /// The series that the metric holds after the replacement.
+    pub held: usize,
+    /// The series past [`MAX_SERIES_PER_METRIC`]: dropped and counted in
+    /// `horsies.telemetry.series.dropped{metric}`.
+    pub dropped_at_series_bound: usize,
+    /// The series with a label value outside the label sets of this
+    /// registry (a value of the declared names of another registry):
+    /// dropped.
+    pub outside_label_set: usize,
+}
+
 /// The facts of a worker process, the labels of `horsies.worker.info`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerFacts {
@@ -487,6 +502,41 @@ impl<C: Cell> Family<C> {
     }
 }
 
+impl Family<GaugeCell> {
+    /// Replace every series with the series of `values`, under one write
+    /// lock: a snapshot sees the old series or the new ones. A key given
+    /// twice keeps its last value.
+    fn replace(&self, values: impl IntoIterator<Item = (SeriesKey, f64)>) -> Replaced {
+        let mut fresh: HashMap<SeriesKey, GaugeCell> = HashMap::new();
+        let mut dropped_at_series_bound: usize = 0;
+        let mut outside_label_set: usize = 0;
+        for (key, value) in values {
+            match (
+                self.label_outside(key),
+                fresh.contains_key(&key) || fresh.len() < MAX_SERIES_PER_METRIC,
+            ) {
+                (Some(_), _) => outside_label_set += 1,
+                (None, true) => {
+                    let cell = GaugeCell::new(());
+                    cell.0.store(value.to_bits(), Ordering::Relaxed);
+                    let _replaced = fresh.insert(key, cell);
+                }
+                (None, false) => {
+                    self.drops.count(self.metric);
+                    dropped_at_series_bound += 1;
+                }
+            }
+        }
+        let held = fresh.len();
+        *write_series(&self.series) = fresh;
+        Replaced {
+            held,
+            dropped_at_series_bound,
+            outside_label_set,
+        }
+    }
+}
+
 /// The samples that the series bound dropped, by metric.
 struct SeriesDrops([AtomicU64; MetricId::ALL.len()]);
 
@@ -576,6 +626,21 @@ impl<L: LabelSet> Gauge<L> {
         self.family.update(labels.key(), |cell| {
             cell.0.store(value.to_bits(), Ordering::Relaxed);
         })
+    }
+
+    /// Replace every series of the metric with `series`, for a gauge whose
+    /// series are the facts of one reading (the fleet collector). A
+    /// snapshot sees the old series or the new ones, never a mix. A label
+    /// set given twice keeps its last value. No series leaves the metric
+    /// with none. A series past [`MAX_SERIES_PER_METRIC`] is dropped and
+    /// counted in `horsies.telemetry.series.dropped{metric}`; a series with
+    /// a label value outside the label sets of this registry is dropped.
+    pub fn replace_all<I: IntoIterator<Item = (L, f64)>>(&self, series: I) -> Replaced {
+        self.family.replace(
+            series
+                .into_iter()
+                .map(|(labels, value)| (labels.key(), value)),
+        )
     }
 }
 

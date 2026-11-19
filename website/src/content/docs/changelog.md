@@ -47,6 +47,14 @@ before you upgrade a 0.7 deployment.
   and of `AppConfig.exception_mapper` are added to `task_error_codes` with
   no second declaration; a code that the body returns directly needs
   `error_codes=`.
+- **`AppConfig.tracing` and the extra `horsies[otel]`.** `tracing` takes
+  `OtelTracing()` or `NoTracing()` (the default). `OtelTracing()` needs the
+  OpenTelemetry API, which `pip install 'horsies[otel]'` installs
+  (`opentelemetry-api` 1.30 or later); without it the config is refused
+  with `HRS-220` (new `CONFIG_OTEL_API_MISSING`), which names the extra.
+  With `NoTracing()` horsies does not import `opentelemetry`. The success
+  text of `horsies check` ends with `tracing: OpenTelemetry` or
+  `tracing: off`.
 
 ### Changed
 

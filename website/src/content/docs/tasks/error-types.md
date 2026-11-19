@@ -334,7 +334,7 @@ Use the `horsies check` command to validate your configuration, task registry, a
 horsies check myapp.instance:app
 ```
 
-On success it prints the task count and the declared error codes of each task that declares some:
+On success it prints the task count, the declared error codes of each task that declares some, and the tracing setting (`OpenTelemetry` for `AppConfig(tracing=OtelTracing())`, else `off`):
 
 ```text
 ok: all validations passed
@@ -342,9 +342,10 @@ ok: all validations passed
   declared error codes:
     charge_card: CARD_DECLINED, RATE_LIMITED
     send_receipt: BOUNCED
+  tracing: off
 ```
 
-With no declared code, the last line is `  declared error codes: none`.
+With no declared code, the codes line is `  declared error codes: none`.
 
 ## HorsiesError Structure
 
