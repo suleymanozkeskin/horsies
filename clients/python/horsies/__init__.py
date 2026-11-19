@@ -104,6 +104,7 @@ from .core.models.payload import PayloadPolicy
 from .core.models.recovery import RecoveryConfig
 from .core.models.retention import RetentionConfig
 from .core.models.resilience import WorkerResilienceConfig
+from .core.models.tracing import NoTracing, OtelTracing
 from .core.models.worker_profile import (
     ClaimLimits,
     ExecutorThreads,
@@ -351,6 +352,9 @@ __all__ = [
     'RetentionChoice',
     'RetentionConfig',
     'WorkerResilienceConfig',
+    # Tracing
+    'OtelTracing',
+    'NoTracing',
     # Worker profiles
     'WorkerProfile',
     'IsolatedChildren',

@@ -54,6 +54,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - exception_mapper: ExceptionMapper (global {ExceptionClass: "ERROR_CODE"})
 - default_unhandled_error_code: str (default "UNHANDLED_EXCEPTION")
 - resend_on_transient_err: bool (default False, auto-retry transient ENQUEUE_FAILED for both task send and workflow start)
+- tracing: OtelTracing() | NoTracing() (default NoTracing(); OtelTracing() traces the sends with the OpenTelemetry API and records the producer metrics with its meter; needs the extra horsies[otel], else HRS-220; with NoTracing() horsies does not import opentelemetry)
 - worker_profiles: dict[str, WorkerProfile] (default {}; `horsies worker <app> --profile <name>` runs one; every profile is validated at construction, HRS-218)
 
 ### WorkerProfile
@@ -655,6 +656,7 @@ Config/broker (HRS-200-HRS-299):
 - HRS-217 CHECK_LIVE_ASYNC_CONTEXT (check(live=True) called inside a running event loop; the live check did not run)
 - HRS-218 CONFIG_INVALID_WORKER_PROFILE (a worker profile is not valid; the message names the profile and the field path)
 - HRS-219 CHECK_WORKER_CONNECTIONS (check(live=True): one worker of a profile opens more Postgres connections itself than the server allows, or the limit could not be read; not compared, but stated in the error: task code that sends opens the task_send_pool of its child kind in its child per event loop it sends from)
+- HRS-220 CONFIG_OTEL_API_MISSING (AppConfig(tracing=OtelTracing()) and the OpenTelemetry API is not installed; install horsies[otel])
 Registry (HRS-300-HRS-399):
 <!-- members: ErrorCode part -->
 - HRS-300 TASK_NOT_REGISTERED

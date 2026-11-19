@@ -38,6 +38,7 @@ app = Horsies(config)
 | `exception_mapper` | `ExceptionMapper` | `ExceptionMapper()` | Maps exceptions to `TaskError` codes |
 | `default_unhandled_error_code` | `str` | `"UNHANDLED_EXCEPTION"` | Error code for uncaught exceptions |
 | `resend_on_transient_err` | `bool` | `False` | Auto-retry transient enqueue failures in workflow start |
+| `tracing` | `OtelTracing \| NoTracing` | `NoTracing()` | `OtelTracing()` traces the sends with the OpenTelemetry API and records the producer metrics with its meter. It needs the extra `horsies[otel]` (`pip install 'horsies[otel]'`); without it the config is refused with `HRS-220`. With `NoTracing()` horsies does not import `opentelemetry` |
 | `worker_profiles` | `dict[str, WorkerProfile]` | `{}` | Named worker settings. `horsies worker <app> --profile <name>` runs the profile of that name; see [Worker Profiles](../../workers/worker-profiles) |
 
 Every config model refuses unknown keys. This includes the nested models (`PostgresConfig`, `RecoveryConfig`, `PayloadPolicy`, `CustomQueueConfig`, `RetentionConfig`, `WorkerResilienceConfig`, `ScheduleConfig`) and the schedule patterns. A misspelled field raises `ValidationError` with the type `extra_forbidden`.

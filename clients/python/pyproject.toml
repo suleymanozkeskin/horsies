@@ -46,6 +46,10 @@ web = ["fastapi>=0.115.0", "uvicorn>=0.30.0"]
 # another version fails at import.
 pg-binary = ["psycopg[binary]>=3.3.7"]
 pg-c = ["psycopg[c]>=3.3.7"]
+# The OpenTelemetry API, for `AppConfig(tracing=OtelTracing())`: spans of the
+# sends and producer metrics. The user's SDK decides what is exported. 1.30
+# is the first API whose histograms take explicit bucket bounds.
+otel = ["opentelemetry-api>=1.30"]
 
 [project.urls]
 Homepage = "https://github.com/suleymanozkeskin/horsies"
@@ -87,6 +91,10 @@ dev = [
     "jinja2>=3.1.0",
     # The uvloop cases of tests/extension; uvloop has no Windows build.
     "uvloop>=0.21.0; sys_platform != 'win32'",
+    # The tracing tests: the API of horsies[otel], and the SDK for its
+    # in-memory span exporter and metric reader.
+    "opentelemetry-api>=1.30",
+    "opentelemetry-sdk>=1.30",
 ]
 
 [tool.pytest.ini_options]
