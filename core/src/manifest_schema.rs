@@ -689,6 +689,7 @@ mod tests {
                 "SHARED_THREAD_CHILDREN",
                 "SHARED_THREAD_SEATS",
                 "DRAIN_TIMEOUT_MS",
+                "LISTEN_PORT",
                 "QUEUE_CONCURRENCY",
                 "QUEUE_PRIORITY",
                 "MILLISECONDS",
