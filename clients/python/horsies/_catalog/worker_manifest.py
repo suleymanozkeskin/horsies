@@ -98,6 +98,7 @@ __all__ = [
     'PayloadLimit',
     'PayloadManifest',
     'Execution',
+    'TaskManifest',
     'ChildCommandManifest',
     'PreloadLaunchCommand',
     'PreloadLaunchNoPreloadProgram',
@@ -1126,6 +1127,22 @@ serializes as its stored value.
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class TaskManifest:
+    """The facts of one registered task."""
+
+    execution: Execution
+    """How a worker runs the task."""
+
+    error_codes: tuple[str, ...]
+    """The user error codes that the task declares, each once: the values
+    of its `error_code` metric label besides the built-in codes and
+    `undeclared` (`error_code_label`). Empty when it declares none. The
+    parser refuses a code that fails the code-text rule, the name of a
+    built-in code and a repeated code (`DeclaredErrorCodes::parse`).
+    """
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ChildCommandManifest:
     """The program that starts each child and its first arguments, the
     interpreter flags included. The core appends the descriptor number of
@@ -1245,10 +1262,8 @@ class WorkerManifest:
 
     payload: PayloadManifest
 
-    tasks: dict[str, Execution]
-    """The execution class of each task that the worker registered, by task
-    name.
-    """
+    tasks: dict[str, TaskManifest]
+    """The facts of each task that the worker registered, by task name."""
 
     child_launch: ChildLaunchManifest
 

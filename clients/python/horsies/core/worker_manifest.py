@@ -4,8 +4,9 @@
 (Pydantic) meets the input of the core's worker (the manifest generated from
 horsies-core, `clients/python/horsies/_catalog/worker_manifest.py`). It maps every worker
 profile, the database settings, the queue and claim settings, the recovery,
-retention, resilience and payload settings, the registered task classes and
-the child launch. It does not pick the profile: the core checks the profile
+retention, resilience and payload settings, the facts of each registered
+task (its execution class and its declared error codes) and the child
+launch. It does not pick the profile: the core checks the profile
 set and picks the requested profile, so each client sends the set and the
 `--profile` value as they are.
 
@@ -85,19 +86,29 @@ _ONE_MILLISECOND: Final = timedelta(milliseconds=1)
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class TaskFacts:
+    """The facts of one registered task that the worker manifest carries:
+    its execution class and the error codes that it declares, in the order
+    of the declaration (`task_error_codes`, which the decorator checked)."""
+
+    execution: Execution
+    error_codes: tuple[str, ...]
+
+
 def to_worker_manifest(
     config: AppConfig,
     *,
     profile: str | None,
-    tasks: Mapping[str, Execution],
+    tasks: Mapping[str, TaskFacts],
     child_launch: wire.ChildLaunchManifest,
     idempotency_reservation_window: timedelta,
 ) -> wire.WorkerManifest:
     """The worker manifest of `config`.
 
     Pure: no I/O. `profile` is the `--profile` value (`None` when the option
-    was not passed); `tasks` is the execution class of each registered task
-    by name; `child_launch` comes from `python_child_launch`; the window is
+    was not passed); `tasks` holds the facts of each registered task by
+    name; `child_launch` comes from `python_child_launch`; the window is
     one that `validate_reservation_window` accepted. `config` passed
     AppConfig validation, which keeps every value within its manifest bound;
     a value above it fails an assertion (`worker_claim_manifest`,
@@ -122,8 +133,17 @@ def to_worker_manifest(
         retention=retention_manifest(config.retention),
         resilience=resilience_manifest(config.resilience),
         payload=payload_manifest(config.payload),
-        tasks={name: execution_of(execution) for name, execution in tasks.items()},
+        tasks={name: task_manifest(facts) for name, facts in tasks.items()},
         child_launch=child_launch,
+    )
+
+
+def task_manifest(facts: TaskFacts) -> wire.TaskManifest:
+    """The manifest record of one registered task. Pure. The core parser
+    checks the codes again and keeps them sorted by text."""
+    return wire.TaskManifest(
+        execution=execution_of(facts.execution),
+        error_codes=facts.error_codes,
     )
 
 

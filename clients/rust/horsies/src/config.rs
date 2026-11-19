@@ -23,7 +23,7 @@ pub(crate) use scheduler_manifest::{
     schedule_input_text, scheduler_manifest, ScheduleManifestRefused,
 };
 pub(crate) use worker_manifest::{
-    rust_child_launch, task_classes, worker_manifest, ChildLaunchRefused, ManifestBoundRefused,
+    rust_child_launch, task_records, worker_manifest, ChildLaunchRefused, ManifestBoundRefused,
 };
 
 pub use horsies_core::core::config::bounded::{BoundedU32, OutOfBounds};

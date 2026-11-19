@@ -36,9 +36,9 @@ use crate::worker_manifest::{
     IsolatedRecycleManifest, MemoryLimit, ParentPoolManifest, PausedWorkflowExpiry, PayloadLimit,
     PayloadManifest, PoolMaxSize, Preload, PreloadLaunch, QueueConcurrency, QueueRetention, Queues,
     RecoveryManifest, ResilienceManifest, RetentionManifest, RetryAttemptLimit, SharedAsync,
-    SharedPoolManifest, SharedRecycleManifest, SharedThread, TaskLimit, TerminalRecordRetention,
-    WorkerClaimManifest, WorkerDatabaseManifest, WorkerLogLevel, WorkerManifest,
-    WorkerProfileManifest, WorkerStateRetention, WORKER_MANIFEST_VERSION,
+    SharedPoolManifest, SharedRecycleManifest, SharedThread, TaskLimit, TaskManifest,
+    TerminalRecordRetention, WorkerClaimManifest, WorkerDatabaseManifest, WorkerLogLevel,
+    WorkerManifest, WorkerProfileManifest, WorkerStateRetention, WORKER_MANIFEST_VERSION,
 };
 use crate::workflow_engine::spec_data::{
     SpecDefinitionKey, SpecJoin, SpecNode, SpecNodeBody, SpecOnError, SpecOutput,
@@ -265,6 +265,7 @@ pub const WORKER_MANIFEST: ManifestModule = ManifestModule {
         <PayloadLimit as ManifestItem>::ITEM,
         <PayloadManifest as ManifestItem>::ITEM,
         <Execution as ManifestItem>::ITEM,
+        <TaskManifest as ManifestItem>::ITEM,
         <ChildCommandManifest as ManifestItem>::ITEM,
         <PreloadLaunch as ManifestItem>::ITEM,
         <ChildProgram as ManifestItem>::ITEM,
@@ -407,12 +408,17 @@ mod tests {
         end: IntEnd,
     }
 
+    /// A text that every text field of a manifest takes: a database URL is
+    /// not checked by the parser, and a declared error code must be
+    /// `UPPER_SNAKE_CASE` and not a built-in code.
+    const SAMPLE_TEXT: &str = "SAMPLE_TEXT";
+
     /// A sample value of `value`.
     fn sample(sampling: Sampling, value: PythonValue, depth: usize) -> Value {
         assert!(depth <= MAX_SAMPLE_DEPTH, "the manifest nests too deep");
         match value {
             PythonValue::Bool => Value::Bool(sampling.pick % 2 == 1),
-            PythonValue::Str => Value::String("postgresql://user:secret@localhost/db".to_owned()),
+            PythonValue::Str => Value::String(SAMPLE_TEXT.to_owned()),
             PythonValue::Int(bound) => match sampling.end {
                 IntEnd::Min => Value::from(bound.min),
                 IntEnd::Max => Value::from(bound.max),
