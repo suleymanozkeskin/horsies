@@ -1,6 +1,9 @@
 //! P4 staged-read parity and disposable-database tests.
 
-use crate::test_support::history::{create_history_leaf_of, database_now, register_period_class};
+use crate::test_support::history::{
+    covered_history_instant, create_history_leaf_of, database_now, register_period_class,
+    SeedInstant,
+};
 use crate::test_support::sql::{self, CallError, TestConnection, TestPool, TestPoolOptions};
 use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
@@ -214,6 +217,10 @@ async fn seed_history_row_with_payload(
     result_payload: &[u8],
 ) -> StoredAttemptSnapshot {
     let attempts = attempt_snapshot(anchor);
+    // The leaf of `anchor` is the test's own (`create_test_leaf`); the guard
+    // finds it, or creates the leaf of a day that the test did not.
+    let terminal_at =
+        covered_history_instant(&mut *connection, class_key, SeedInstant::At(anchor)).await;
     let sql = format!(
         "INSERT INTO {TASK_HISTORY_PARENT} (
              task_id, task_name, queue_name, priority,
@@ -240,7 +247,7 @@ async fn seed_history_row_with_payload(
         .bind(vec![7_u8; 32])
         .bind(status)
         .bind(kind)
-        .bind(anchor)
+        .bind(terminal_at.at())
         .bind(class_key)
         .bind(result_payload)
         .bind(archive_digest(result_payload).to_vec())

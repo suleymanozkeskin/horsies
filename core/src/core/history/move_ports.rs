@@ -20,7 +20,7 @@ use crate::core::history::errors::HISTORY_LEAF_MISSING_SQLSTATE;
 use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
 use crate::core::history::periods::RetentionDays;
 use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
-use crate::test_support::history::{create_heartbeat_leaf, register_period_class};
+use crate::test_support::history::{covered_beat_instant, register_period_class, SeedInstant};
 use crate::test_support::terminal_writes::{self, StaleFailure};
 
 const PORT_WORKER: &str = "port-move-worker";
@@ -147,13 +147,11 @@ async fn a_heartbeat_beyond_the_recency_bound_cannot_flip_the_verdict() {
         .fetch_one(&mut *transaction)
         .await
         .expect("database now");
-    let beat_at = now - Duration::minutes(80);
-    let beat_hour = beat_at
-        .date_naive()
-        .and_hms_opt(chrono::Timelike::hour(&beat_at), 0, 0)
-        .expect("hour start")
-        .and_utc();
-    let _created = create_heartbeat_leaf(&mut *transaction, beat_hour).await;
+    let beat_at = covered_beat_instant(
+        &mut *transaction,
+        SeedInstant::At(now - Duration::minutes(80)),
+    )
+    .await;
     let task_id = seed_task(
         &mut transaction,
         &RunningTask {
@@ -167,7 +165,7 @@ async fn a_heartbeat_beyond_the_recency_bound_cannot_flip_the_verdict() {
          VALUES ($1, 'runner', $2, $3, 'port-host', 13)",
     )
     .bind(task_id)
-    .bind(beat_at)
+    .bind(beat_at.at())
     .bind(PORT_WORKER)
     .execute(&mut *transaction)
     .await

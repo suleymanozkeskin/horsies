@@ -93,7 +93,7 @@ async fn a_stale_heartbeat_seeded_at_thirty_seconds_past_the_hour_is_failed() {
     .await;
     assert_eq!(
         leaf,
-        HeartbeatLeaf::Created,
+        CoveredLeaf::Created,
         "the heartbeat is in the hour before the first covered hour"
     );
 

@@ -544,7 +544,13 @@ mod fail_stale {
         .execute(&mut *transaction)
         .await
         .expect("age the start");
-        insert_beat(&mut *transaction, task_id, BeatRole::Runner, 1.25).await;
+        insert_beat(
+            &mut *transaction,
+            task_id,
+            BeatRole::Runner,
+            Duration::milliseconds(1_250),
+        )
+        .await;
         let outcomes = terminal_writes::fail_stale_task(
             &mut *transaction,
             task_id,
@@ -584,7 +590,7 @@ mod fail_stale {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
         set_started(&pool, task_id, Since::SecondsAgo(STALE_AFTER_SECONDS * 2.0)).await;
-        beat(&pool, task_id, BeatRole::Claimer, 1.0).await;
+        beat(&pool, task_id, BeatRole::Claimer, Duration::seconds(1)).await;
 
         let outcomes = terminal_writes::fail_stale_task(&pool, task_id, &stale_failure())
             .await

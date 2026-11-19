@@ -1,10 +1,18 @@
 //! Fixtures of the history tests, through the functions that the core's
 //! coverage pass calls (`baseline/0008_history_maintenance_functions.sql`),
 //! on the test client: the registration of a retention class, the creation
-//! of a history leaf or a heartbeat leaf, the guard of a seeded heartbeat
-//! instant ([`covered_beat_instant`]), and the database clock.
+//! of a history leaf or a heartbeat leaf, the guards of a seeded instant
+//! ([`covered_beat_instant`], [`covered_history_instant`]), and the database
+//! clock.
+//!
+//! The guards are the one way a test seeds a row of a partitioned table
+//! (`horsies_heartbeats`, `horsies_task_history`) at an instant other than
+//! the database clock: `tests/partition_seed_guard.rs` fails every such seed
+//! of test code whose function does not call a guard. This module is the
+//! guard, and its own tests seed without it on purpose.
 
 use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::commands::LeafRef;
@@ -202,7 +210,7 @@ fn creation_row(created: LeafCreated) -> LeafCreationRow {
     }
 }
 
-/// Where a seeded heartbeat lies in time.
+/// Where a seeded instant lies in time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SeedInstant {
     /// This long before `NOW()` of the seed's transaction.
@@ -211,15 +219,80 @@ pub(crate) enum SeedInstant {
     At(DateTime<Utc>),
 }
 
+/// How a guard found the leaf that holds a seeded instant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoveredLeaf {
+    /// No leaf held the instant; the guard created it.
+    Created,
+    /// A conformant leaf held the instant.
+    AlreadyConformant,
+    /// A leaf held the instant; the guard repaired its indexes.
+    IndexRepaired,
+    /// The open-ended leaf of the `forever` class holds every instant.
+    CoveredByOpenEnded,
+}
+
+/// The table whose leaf a guard creates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuardedTable {
+    /// `horsies_heartbeats`: hourly leaves.
+    Heartbeats,
+    /// `horsies_task_history`: daily leaves per period class, one open-ended
+    /// leaf for `forever`.
+    History,
+}
+
+/// The leaf state of a creation `outcome` that lets a seed land, or `None`
+/// for an outcome that does not (`BUSY`, `CATALOG_CONFLICT`,
+/// `CLASS_ABSENT`). `horsies_create_heartbeat_leaf` never answers
+/// `COVERED_BY_OPEN_ENDED`.
+fn covered_leaf(table: GuardedTable, outcome: &str) -> Option<CoveredLeaf> {
+    match (table, outcome) {
+        (_, "CREATED") => Some(CoveredLeaf::Created),
+        (_, "ALREADY_CONFORMANT") => Some(CoveredLeaf::AlreadyConformant),
+        (_, "INDEX_REPAIRED") => Some(CoveredLeaf::IndexRepaired),
+        (GuardedTable::History, "COVERED_BY_OPEN_ENDED") => Some(CoveredLeaf::CoveredByOpenEnded),
+        (GuardedTable::Heartbeats | GuardedTable::History, _) => None,
+    }
+}
+
 /// A heartbeat `sent_at` whose hourly leaf exists. Only
 /// [`covered_beat_instant`] constructs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CoveredBeatInstant(DateTime<Utc>);
+pub(crate) struct CoveredBeatInstant {
+    at: DateTime<Utc>,
+    leaf: CoveredLeaf,
+}
 
 impl CoveredBeatInstant {
     /// The instant, for the `sent_at` of the seed.
     pub(crate) fn at(self) -> DateTime<Utc> {
-        self.0
+        self.at
+    }
+
+    /// How the guard found the leaf of the instant.
+    pub(crate) fn leaf(self) -> CoveredLeaf {
+        self.leaf
+    }
+}
+
+/// A history `terminal_at` whose leaf of its retention class exists. Only
+/// [`covered_history_instant`] constructs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CoveredHistoryInstant {
+    at: DateTime<Utc>,
+    leaf: CoveredLeaf,
+}
+
+impl CoveredHistoryInstant {
+    /// The instant, for the `terminal_at` of the seed.
+    pub(crate) fn at(self) -> DateTime<Utc> {
+        self.at
+    }
+
+    /// How the guard found the leaf of the instant.
+    pub(crate) fn leaf(self) -> CoveredLeaf {
+        self.leaf
     }
 }
 
@@ -236,6 +309,30 @@ const BEAT_INSTANT_AT_SQL: &str = "
     SELECT s.at, l.outcome
     FROM (SELECT $1::timestamptz AS at) AS s
     CROSS JOIN LATERAL horsies_create_heartbeat_leaf(date_trunc('hour', s.at, 'UTC')) AS l";
+
+/// The instant `$2` microseconds before `NOW()`, with the outcome of
+/// `horsies_create_history_leaf` of class `$1` for its UTC day.
+const HISTORY_INSTANT_BEFORE_NOW_SQL: &str = "
+    SELECT s.at, l.outcome
+    FROM (SELECT NOW() - $2 * INTERVAL '1 microsecond' AS at) AS s
+    CROSS JOIN LATERAL horsies_create_history_leaf($1, date_trunc('day', s.at, 'UTC')) AS l";
+
+/// The instant `$2`, with the outcome of `horsies_create_history_leaf` of
+/// class `$1` for its UTC day.
+const HISTORY_INSTANT_AT_SQL: &str = "
+    SELECT s.at, l.outcome
+    FROM (SELECT $2::timestamptz AS at) AS s
+    CROSS JOIN LATERAL horsies_create_history_leaf($1, date_trunc('day', s.at, 'UTC')) AS l";
+
+/// The microseconds of a seed offset.
+///
+/// # Panics
+///
+/// When the offset does not fit in microseconds: the test cannot run.
+fn offset_micros(ago: chrono::Duration) -> i64 {
+    ago.num_microseconds()
+        .expect("a seed offset fits in microseconds")
+}
 
 /// The guard of every heartbeat seed whose `sent_at` is not the `NOW()` of
 /// a statement after the coverage pass: it creates the hourly leaf of the
@@ -258,11 +355,8 @@ pub(crate) async fn covered_beat_instant<'t>(
 ) -> CoveredBeatInstant {
     let (at, outcome): (DateTime<Utc>, String) = match instant {
         SeedInstant::BeforeNow(ago) => {
-            let micros = ago
-                .num_microseconds()
-                .expect("a seed offset fits in microseconds");
             sql::query_as(BEAT_INSTANT_BEFORE_NOW_SQL)
-                .bind(micros)
+                .bind(offset_micros(ago))
                 .fetch_one(target)
                 .await
         }
@@ -274,10 +368,67 @@ pub(crate) async fn covered_beat_instant<'t>(
         }
     }
     .expect("create the heartbeat leaf of the seeded instant");
-    match outcome.as_str() {
-        "CREATED" | "ALREADY_CONFORMANT" | "INDEX_REPAIRED" => CoveredBeatInstant(at),
-        refused => panic!("the heartbeat leaf of the hour of {at}: {refused}"),
+    match covered_leaf(GuardedTable::Heartbeats, &outcome) {
+        Some(leaf) => CoveredBeatInstant { at, leaf },
+        None => panic!("the heartbeat leaf of the hour of {at}: {outcome}"),
     }
+}
+
+/// The guard of every history seed whose `terminal_at` is not the `NOW()`
+/// of a statement after the coverage pass: it creates the daily leaf of
+/// class `class_key` for the instant (`horsies_create_history_leaf`, which
+/// publishes the readers over a created leaf), or finds it conformant, and
+/// returns the instant. A coverage pass creates the leaves of its own day
+/// and later days only, so a seed in the past fails with SQLSTATE 23514 when
+/// the test starts just after a UTC midnight. The class must be registered;
+/// for `forever` the open-ended leaf holds every instant.
+///
+/// # Panics
+///
+/// When the statement fails or the leaf outcome is not `CREATED`,
+/// `ALREADY_CONFORMANT`, `INDEX_REPAIRED` or `COVERED_BY_OPEN_ENDED`: the
+/// test cannot run.
+pub(crate) async fn covered_history_instant<'t>(
+    target: impl Into<Target<'t>>,
+    class_key: &str,
+    instant: SeedInstant,
+) -> CoveredHistoryInstant {
+    let (at, outcome): (DateTime<Utc>, String) = match instant {
+        SeedInstant::BeforeNow(ago) => {
+            sql::query_as(HISTORY_INSTANT_BEFORE_NOW_SQL)
+                .bind(class_key)
+                .bind(offset_micros(ago))
+                .fetch_one(target)
+                .await
+        }
+        SeedInstant::At(at) => {
+            sql::query_as(HISTORY_INSTANT_AT_SQL)
+                .bind(class_key)
+                .bind(at)
+                .fetch_one(target)
+                .await
+        }
+    }
+    .expect("create the history leaf of the seeded instant");
+    match covered_leaf(GuardedTable::History, &outcome) {
+        Some(leaf) => CoveredHistoryInstant { at, leaf },
+        None => panic!("the {class_key} history leaf of the day of {at}: {outcome}"),
+    }
+}
+
+/// The retention class of the history row of `task_id`: the class whose
+/// leaf [`covered_history_instant`] creates when a test moves the row.
+///
+/// # Panics
+///
+/// When the statement fails or no history row has the id: the test cannot
+/// run.
+pub(crate) async fn stored_class_key<'t>(target: impl Into<Target<'t>>, task_id: Uuid) -> String {
+    sql::query_scalar("SELECT retention_class_key FROM horsies_task_history WHERE task_id = $1")
+        .bind(task_id)
+        .fetch_one(target)
+        .await
+        .expect("read the retention class of the history row")
 }
 
 /// The statement timestamp of the database.
@@ -302,7 +453,11 @@ mod tests {
     use chrono::Duration;
     use uuid::Uuid;
 
-    use super::{covered_beat_instant, database_now, SeedInstant};
+    use super::{
+        covered_beat_instant, covered_history_instant, covered_leaf, database_now,
+        register_period_class, CoveredLeaf, GuardedTable, SeedInstant,
+    };
+    use crate::core::history::periods::RetentionDays;
     use crate::test_support::sql::{self, TestPool};
 
     /// The start of the earliest heartbeat leaf of the database: the hour
@@ -356,6 +511,7 @@ mod tests {
 
         assert_eq!(code, "23514");
         assert_eq!(covered.at(), before);
+        assert_eq!(covered.leaf(), CoveredLeaf::Created);
         assert_eq!(landed.expect("the guarded beat lands"), 1);
         pool.close().await;
     }
@@ -385,5 +541,80 @@ mod tests {
         );
         assert_eq!(landed.expect("the guarded beat lands"), 1);
         pool.close().await;
+    }
+
+    /// The leaves of `class_key` that hold `at` and are not dropped.
+    async fn leaves_holding(
+        pool: &TestPool,
+        class_key: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> i64 {
+        sql::query_scalar(
+            "SELECT count(*) FROM horsies_task_history_leaf_catalog
+             WHERE class_key = $1 AND lower_anchor <= $2 AND upper_anchor > $2
+               AND dropped_at IS NULL",
+        )
+        .bind(class_key)
+        .bind(at)
+        .fetch_one(pool)
+        .await
+        .expect("read the leaves of the class")
+    }
+
+    /// A class registered after the coverage pass has no leaf: the guard
+    /// creates the leaf of the seed's day, and finds it at the next call.
+    #[tokio::test]
+    async fn a_history_seed_in_a_day_without_a_leaf_gets_the_leaf_of_its_day() {
+        let pool = crate::test_support::migrated_pool().await;
+        let days = RetentionDays::parse_period(Duration::days(9)).expect("a nine-day period");
+        let _registered = register_period_class(&pool, days).await;
+        let class_key = days.class_key();
+
+        let created =
+            covered_history_instant(&pool, &class_key, SeedInstant::BeforeNow(Duration::days(3)))
+                .await;
+        let found = covered_history_instant(&pool, &class_key, SeedInstant::At(created.at())).await;
+
+        assert_eq!(created.leaf(), CoveredLeaf::Created);
+        assert_eq!(found.leaf(), CoveredLeaf::AlreadyConformant);
+        assert_eq!(found.at(), created.at());
+        assert_eq!(leaves_holding(&pool, &class_key, created.at()).await, 1);
+        pool.close().await;
+    }
+
+    /// The open-ended leaf of `forever` holds every instant.
+    #[tokio::test]
+    async fn a_forever_seed_is_held_by_the_open_ended_leaf() {
+        let pool = crate::test_support::migrated_pool().await;
+        let long_ago = database_now(&pool).await - Duration::days(400);
+
+        let covered = covered_history_instant(&pool, "forever", SeedInstant::At(long_ago)).await;
+
+        assert_eq!(covered.leaf(), CoveredLeaf::CoveredByOpenEnded);
+        assert_eq!(covered.at(), long_ago);
+        pool.close().await;
+    }
+
+    /// The outcomes that let no seed land, and the outcome that the
+    /// heartbeat leaf function never gives.
+    #[test]
+    fn outcomes_that_cover_no_instant_are_refused() {
+        for table in [GuardedTable::Heartbeats, GuardedTable::History] {
+            for outcome in ["BUSY", "CATALOG_CONFLICT", "CLASS_ABSENT", ""] {
+                assert_eq!(covered_leaf(table, outcome), None, "{table:?} {outcome}");
+            }
+        }
+        assert_eq!(
+            covered_leaf(GuardedTable::Heartbeats, "COVERED_BY_OPEN_ENDED"),
+            None
+        );
+        assert_eq!(
+            covered_leaf(GuardedTable::History, "COVERED_BY_OPEN_ENDED"),
+            Some(CoveredLeaf::CoveredByOpenEnded)
+        );
+        assert_eq!(
+            covered_leaf(GuardedTable::Heartbeats, "INDEX_REPAIRED"),
+            Some(CoveredLeaf::IndexRepaired)
+        );
     }
 }

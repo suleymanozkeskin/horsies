@@ -20,6 +20,7 @@ use crate::broker::PostgresBroker;
 use crate::core::history::reads::pages::HistoryWindow;
 use crate::core::lifecycle::TerminalizationOutcome;
 use crate::monitoring::resolve_monitoring_window;
+use crate::test_support::history::{covered_history_instant, stored_class_key, SeedInstant};
 use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 use crate::test_support::terminal_writes::{self, TerminalFailure};
 use crate::test_support::TestDatabase;
@@ -407,7 +408,9 @@ pub(super) async fn seed_failures(pool: &TestPool, prefix: &str, error_codes: &[
 }
 
 /// Date the history row of `task_id`: enqueued, started (or never started)
-/// and ended the given number of seconds ago.
+/// and ended the given number of seconds ago. The terminal time comes from
+/// the seed guard, which creates the leaf of its day; the other times keep
+/// their distance to it.
 pub(super) async fn set_history_times(
     pool: &TestPool,
     task_id: Uuid,
@@ -415,18 +418,26 @@ pub(super) async fn set_history_times(
     started_seconds_ago: Option<i64>,
     terminal_seconds_ago: i64,
 ) {
+    let class_key = stored_class_key(pool, task_id).await;
+    let terminal_at = covered_history_instant(
+        pool,
+        &class_key,
+        SeedInstant::BeforeNow(Duration::seconds(terminal_seconds_ago)),
+    )
+    .await;
     sql::query(
         "UPDATE horsies_task_history
-         SET enqueued_at = NOW() - make_interval(secs => $2),
+         SET enqueued_at = $5 - make_interval(secs => $2 - $4),
              started_at = CASE WHEN $3::bigint IS NULL THEN NULL
-                               ELSE NOW() - make_interval(secs => $3) END,
-             terminal_at = NOW() - make_interval(secs => $4)
+                               ELSE $5 - make_interval(secs => $3 - $4) END,
+             terminal_at = $5
          WHERE task_id = $1",
     )
     .bind(task_id)
     .bind(enqueued_seconds_ago)
     .bind(started_seconds_ago)
     .bind(terminal_seconds_ago)
+    .bind(terminal_at.at())
     .execute(pool)
     .await
     .expect("date the history row");
