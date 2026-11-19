@@ -61,6 +61,7 @@ from tests.fixtures.core_frames import (
     shared_run_frame,
     stop_frame,
 )
+from tests.fixtures.run_return import STARTED as STARTED_RUN
 
 EXECUTOR_THREADS = 4
 """The size of the default executor of a test child."""
@@ -268,7 +269,7 @@ class _Steps:
     """The replaced database steps, as the seat sees them."""
 
     def __init__(self) -> None:
-        self.confirm = AsyncMock(return_value=None)
+        self.confirm = AsyncMock(return_value=STARTED_RUN)
         self.mark = AsyncMock(return_value=MarkerDone())
 
 

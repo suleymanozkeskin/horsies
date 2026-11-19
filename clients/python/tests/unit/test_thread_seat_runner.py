@@ -61,6 +61,7 @@ from tests.fixtures.core_frames import (
     shared_run_frame,
     thread_work,
 )
+from tests.fixtures.run_return import STARTED, STARTED_AT
 
 pytestmark = [pytest.mark.unit]
 
@@ -139,7 +140,7 @@ class _Steps:
     """The replaced database steps, as the seat thread sees them."""
 
     def __init__(self) -> None:
-        self.confirm = MagicMock(return_value=None)
+        self.confirm = MagicMock(return_value=STARTED)
         self.mark = MagicMock(return_value=MarkerDone())
 
 
@@ -354,6 +355,7 @@ class _SlowHandle:
         self.started.append(task_id)
         record = MagicMock(spec=core.AttemptStarted)
         record.task_id = task_id
+        record.started_at = STARTED_AT
         return record
 
 
