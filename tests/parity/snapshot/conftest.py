@@ -7,14 +7,18 @@ from collections.abc import Callable, Iterator
 import pytest
 
 from horsies.core.types.result import Err, Ok
-from tests.parity.snapshot.databases import DualRunDatabase, create_database, drop_database
-from tests.session_database import base_database_url
+from tests.parity.snapshot.databases import (
+    DualRunDatabase,
+    create_database,
+    drop_database,
+    server_url,
+)
 
 
 @pytest.fixture(scope='session')
 def dualrun_server_url() -> str:
     """URL of the test server (``HORSIES_TEST_DATABASE_URL``, else the local default)."""
-    return base_database_url()
+    return server_url()
 
 
 @pytest.fixture

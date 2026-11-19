@@ -78,6 +78,7 @@
     "../../tests/parity/snapshot/worker_run.py",
     "../../tests/parity/snapshot/test_catalog.py",
     "../../tests/parity/snapshot/test_compare.py",
+    "../../tests/parity/snapshot/test_databases.py",
     "../../tests/parity/snapshot/test_notification_capture.py",
     "../../tests/parity/snapshot/test_run_measures.py",
     "../../tests/parity/snapshot/test_self_comparison.py",
