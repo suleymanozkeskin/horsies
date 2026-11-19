@@ -638,6 +638,25 @@ before you upgrade a 0.7 deployment.
   of a refused stale recovery has a null `last_heartbeat_at` until the first
   runner heartbeat of the attempt.
 
+- **A reaper step that keeps failing writes fewer log lines.** A step that
+  fails still runs again later, and its health in the worker snapshot does
+  not change. Its log is now:
+  - the first failure: one line with the cause;
+  - then one line per 10 failures in a row, with the count and the last
+    cause;
+  - the first run without a failure after failures: one INFO line with the
+    count.
+
+  Each line has the field `step`: `owner_gone`, `stale_claimed_requeue`,
+  `orphan_task_audit`, `stale_running_recovery`, `pending_expiry`,
+  `workflow_recovery`, `phase2_recovery`, `retention_cleanup`,
+  `ended_worker_rows`, `paused_workflow_expiry`, `partition_coverage`,
+  `key_reservation_cleanup`, `partition_pruning`. The failure lines are
+  ERROR, and WARNING for `pending_expiry`, as before. A busy orphan audit
+  lock is not a failure; it keeps its WARNING line. A coverage pass that
+  stops (its health state `failed`) now counts as a failure of
+  `partition_coverage` and logs by the same rule; before, it wrote no line.
+
 ### Fixed
 
 - **The schema install creates the history leaves of the current day, so a

@@ -39,15 +39,19 @@ use crate::db::{
     Transaction, TypedStatement,
 };
 use crate::log_targets::STALE_RUNNING_PASS;
+use crate::telemetry::labels::RecoveryStep;
+use crate::telemetry::registry::OptionalCounter;
 
 use crate::worker::class_coverage_log::{check_class_coverage, ClassCoverageLog};
 use crate::worker::liveness::OWNER_GONE_SPAN;
 use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
 use crate::workflow_engine::child_spec::ChildSpecSource;
 
+pub(crate) mod failure_log;
 mod maintenance_due;
 pub(crate) mod owner_gone;
 
+use failure_log::RecoveryFailures;
 use maintenance_due::MaintenanceDue;
 pub(crate) use owner_gone::{forget_ended_workers, owner_gone_step, UnheldOwners};
 
@@ -216,6 +220,7 @@ mod p7_maintenance_tests {
         run_retention_cleanup(
             &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
             &config,
+            &mut RecoveryFailures::new(OptionalCounter::NotRecorded),
         )
         .await;
 
@@ -293,6 +298,7 @@ mod p7_maintenance_tests {
             &mut next_partition_maintenance,
             &mut orphan_state,
             &mut UnheldOwners::default(),
+            &mut RecoveryFailures::new(OptionalCounter::NotRecorded),
         )
         .await;
 
@@ -337,6 +343,7 @@ mod p7_maintenance_tests {
             &mut next_partition_maintenance,
             &mut orphan_state,
             &mut UnheldOwners::default(),
+            &mut RecoveryFailures::new(OptionalCounter::NotRecorded),
         )
         .await;
 
@@ -434,6 +441,7 @@ mod p7_maintenance_tests {
             &mut next_partition_maintenance,
             &mut orphan_state,
             &mut UnheldOwners::default(),
+            &mut RecoveryFailures::new(OptionalCounter::NotRecorded),
         )
         .await;
 
@@ -495,6 +503,7 @@ mod p7_maintenance_tests {
             &mut next_partition_maintenance,
             &mut orphan_state,
             &mut UnheldOwners::default(),
+            &mut RecoveryFailures::new(OptionalCounter::NotRecorded),
         )
         .await;
 
@@ -683,6 +692,7 @@ mod p7_maintenance_tests {
             &mut next_partition_maintenance,
             &mut orphan_state,
             &mut UnheldOwners::default(),
+            &mut RecoveryFailures::new(OptionalCounter::NotRecorded),
         )
         .await;
 
@@ -922,7 +932,8 @@ pub fn new_reaper_health() -> ReaperHealth {
 /// work ([`CheckoutClass::Reserved`]), the partition maintenance on the
 /// session-work pool. The caller has checked the client family of the
 /// handle (`Worker::start_database`); the reaper's partition maintenance
-/// writes without a second check.
+/// writes without a second check. Each failed step adds 1 to
+/// `failure_counter` (`horsies.recovery.pass.failures{step}`).
 #[allow(clippy::needless_pass_by_value)]
 pub fn spawn_reaper(
     broker: Arc<PostgresBroker>,
@@ -930,6 +941,7 @@ pub fn spawn_reaper(
     config: RecoveryConfig,
     retention: RetentionConfig,
     health: ReaperHealth,
+    failure_counter: OptionalCounter<(RecoveryStep,)>,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -942,6 +954,9 @@ pub fn spawn_reaper(
         // When this reaper first read each worker's liveness lock free; it
         // lives as long as the loop.
         let mut unheld_owners = UnheldOwners::default();
+        // The failures in a row of each step, for the failure log; they live
+        // as long as the loop.
+        let mut failures = RecoveryFailures::new(failure_counter);
         // The fleet check runs after each pass, from one check interval after
         // the start on.
         let mut coverage_log =
@@ -972,6 +987,7 @@ pub fn spawn_reaper(
                     &mut next_partition_maintenance,
                     &mut orphan_state,
                     &mut unheld_owners,
+                    &mut failures,
                 )
                 .await;
                 check_class_coverage(&broker, &mut coverage_log).await;
@@ -1165,6 +1181,7 @@ async fn run_reaper_pass(
     next_partition_maintenance: &mut MaintenanceDue,
     orphan_state: &mut OrphanSweepState,
     unheld_owners: &mut UnheldOwners,
+    failures: &mut RecoveryFailures,
 ) {
     // The tasks of workers whose liveness lock stays free, on the main core
     // pool with the reserve. It runs when either recovery of task rows is on.
@@ -1184,6 +1201,7 @@ async fn run_reaper_pass(
         };
         match step {
             Ok(step) if step.gone_owners > 0 => {
+                failures.succeeded(RecoveryStep::OwnerGone);
                 tracing::warn!(
                     target: STALE_RUNNING_PASS,
                     gone_owners = step.gone_owners,
@@ -1192,21 +1210,18 @@ async fn run_reaper_pass(
                     "reaper recovered the tasks of workers whose liveness lock stayed free",
                 );
             }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::error!(
-                    %error,
-                    "Reaper owner-gone step failed and runs again on the next pass: {error}",
-                );
-            }
+            Ok(_) => failures.succeeded(RecoveryStep::OwnerGone),
+            Err(error) => failures.failed(RecoveryStep::OwnerGone, &error),
         }
     }
 
     // The order: requeue stale CLAIMED rows,
     // audit orphaned workflow tasks, fail stale RUNNING rows, expire PENDING
     // rows, then the workflow and maintenance steps. No step stops for the
-    // life of the process: a step that keeps failing logs an error on every
-    // pass and its health keeps reporting the failure.
+    // life of the process: a step that keeps failing runs again on later
+    // passes, its health keeps reporting the failure, and its log follows
+    // `failure_log` (the first failure, one line per
+    // `RECOVERY_FAILURE_LOG_EVERY` failures in a row, the recovery).
     // The stale CLAIMED requeue runs on the main core pool with the reserve.
     if config.auto_requeue_stale_claimed {
         match ThresholdMs::from_millis(config.claimed_stale_threshold_ms) {
@@ -1219,24 +1234,17 @@ async fn run_reaper_pass(
                 };
                 match requeued {
                     Ok(count) if count > 0 => {
+                        failures.succeeded(RecoveryStep::StaleClaimedRequeue);
                         tracing::info!(count, "reaper requeued stale CLAIMED tasks");
                     }
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            "Reaper requeue_stale_claimed failed and runs again on the next \
-                             pass: {e}",
-                        );
-                    }
-                    _ => {}
+                    Ok(_) => failures.succeeded(RecoveryStep::StaleClaimedRequeue),
+                    Err(error) => failures.failed(RecoveryStep::StaleClaimedRequeue, &error),
                 }
             }
-            Err(error) => {
-                tracing::error!(
-                    %error,
-                    "reaper: the stale CLAIMED threshold is out of range: {error}",
-                );
-            }
+            Err(error) => failures.failed(
+                RecoveryStep::StaleClaimedRequeue,
+                &format_args!("the stale CLAIMED threshold is out of range: {error}"),
+            ),
         }
     }
 
@@ -1259,7 +1267,7 @@ async fn run_reaper_pass(
             };
             match page.map(|page| OrphanTaskAuditReport::ready(page, started)) {
                 Ok(report) => {
-                    orphan_state.permanent_failures = 0;
+                    failures.succeeded(RecoveryStep::OrphanTaskAudit);
                     if report.cancelled > 0 {
                         tracing::warn!(
                             count = report.cancelled,
@@ -1277,34 +1285,22 @@ async fn run_reaper_pass(
                     let (kind, snapshot) = orphan_audit_failure_snapshot(&error, started);
                     health.write().await.orphan_task_recovery = Some(snapshot);
                     match kind {
+                        // Another worker holds the audit lock: the audit did
+                        // not run, so its failures in a row do not change.
                         OrphanAuditFailureKind::Refusal => {
-                            orphan_state.permanent_failures = 0;
                             tracing::warn!(
                                 %error,
                                 "Reaper orphan workflow-task audit lock was busy: {error}; the \
                                  next scheduled audit will retry",
                             );
                         }
-                        OrphanAuditFailureKind::Transient => {
-                            orphan_state.permanent_failures = 0;
-                            tracing::error!(
-                                %error,
-                                "Reaper orphan workflow-task audit failed transiently and will \
-                                 retry on its next schedule: {error}",
-                            );
-                        }
+                        OrphanAuditFailureKind::Transient => failures.failed(
+                            RecoveryStep::OrphanTaskAudit,
+                            &format_args!("transient: {error}"),
+                        ),
+                        // The audit never stops on a live worker.
                         OrphanAuditFailureKind::Permanent => {
-                            // The audit never stops on a live worker: each
-                            // failing pass logs, and the health snapshot
-                            // above keeps reporting the failure.
-                            orphan_state.permanent_failures =
-                                orphan_state.permanent_failures.saturating_add(1);
-                            tracing::error!(
-                                %error,
-                                consecutive_failures = orphan_state.permanent_failures,
-                                "Reaper orphan workflow-task audit failed and runs again on its \
-                                 next schedule: {error}",
-                            );
+                            failures.failed(RecoveryStep::OrphanTaskAudit, &error);
                         }
                     }
                 }
@@ -1331,24 +1327,17 @@ async fn run_reaper_pass(
                 };
                 match recovered {
                     Ok(count) if count > 0 => {
+                        failures.succeeded(RecoveryStep::StaleRunningRecovery);
                         tracing::warn!(count, "reaper marked stale RUNNING tasks as FAILED");
                     }
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            "Reaper mark_stale_tasks_as_failed failed and runs again on the \
-                             next pass: {e}",
-                        );
-                    }
-                    _ => {}
+                    Ok(_) => failures.succeeded(RecoveryStep::StaleRunningRecovery),
+                    Err(error) => failures.failed(RecoveryStep::StaleRunningRecovery, &error),
                 }
             }
-            Err(error) => {
-                tracing::error!(
-                    %error,
-                    "reaper: the stale RUNNING thresholds are out of range: {error}",
-                );
-            }
+            Err(error) => failures.failed(
+                RecoveryStep::StaleRunningRecovery,
+                &format_args!("the stale RUNNING thresholds are out of range: {error}"),
+            ),
         }
     }
 
@@ -1363,19 +1352,19 @@ async fn run_reaper_pass(
     };
     match expired {
         Ok(PendingExpiryPass::Drained { expired: count }) if count > 0 => {
+            failures.succeeded(RecoveryStep::PendingExpiry);
             tracing::info!(count, "reaper expired unclaimed PENDING tasks");
         }
-        Ok(PendingExpiryPass::Drained { .. }) => {}
+        Ok(PendingExpiryPass::Drained { .. }) => failures.succeeded(RecoveryStep::PendingExpiry),
         Ok(PendingExpiryPass::BoundReached { expired: count }) => {
+            failures.succeeded(RecoveryStep::PendingExpiry);
             tracing::warn!(
                 expired = count,
                 batches = PENDING_EXPIRY_MAX_BATCHES_PER_PASS,
                 "pending expiry reached its per-pass bound; the next pass goes on",
             );
         }
-        Err(failed) => {
-            tracing::warn!(error = %failed, "Reaper expire_pending_tasks failed: {failed}");
-        }
+        Err(failed) => failures.failed(RecoveryStep::PendingExpiry, &failed),
     }
 
     // Exact outbox recovery. Each candidate owns its transaction; retaining
@@ -1389,19 +1378,19 @@ async fn run_reaper_pass(
             config.workflow_recovery_failure_limit,
         )
         .await;
-    health.write().await.workflow_recovery = Some(match workflow_recovery {
-        Ok(report) => serde_json::to_value(report).unwrap_or_else(
-            |error| serde_json::json!({"state": "error", "error": error.to_string()}),
-        ),
+    let workflow_health = match workflow_recovery {
+        Ok(report) => {
+            failures.succeeded(RecoveryStep::WorkflowRecovery);
+            serde_json::to_value(report).unwrap_or_else(
+                |error| serde_json::json!({"state": "error", "error": error.to_string()}),
+            )
+        }
         Err(failure) => {
-            tracing::error!(
-                error = %failure.error,
-                "Workflow recovery error: {}",
-                failure.error,
-            );
+            failures.failed(RecoveryStep::WorkflowRecovery, &failure.error);
             failure.into_health_snapshot()
         }
-    });
+    };
+    health.write().await.workflow_recovery = Some(workflow_health);
 
     // Discovery and each record run on the main core pool with the reserve.
     let phase2 = crate::workflow_engine::phase2_recovery::drive_phase2_recovery_with(
@@ -1412,8 +1401,9 @@ async fn run_reaper_pass(
         config.phase2_quarantine_after_attempts,
     )
     .await;
-    health.write().await.phase2_recovery = Some(match phase2 {
+    let phase2_health = match phase2 {
         Ok(summary) => {
+            failures.succeeded(RecoveryStep::Phase2Recovery);
             if summary.applied > 0 || summary.retained > 0 || summary.failed > 0 {
                 tracing::info!(?summary, "phase-2 recovery pass completed");
             }
@@ -1422,31 +1412,27 @@ async fn run_reaper_pass(
             )
         }
         Err(error) => {
-            tracing::error!(%error, "Phase-2 recovery error: {error}");
+            failures.failed(RecoveryStep::Phase2Recovery, &error);
             serde_json::json!({"state": "error", "error": error.to_string()})
         }
-    });
+    };
+    health.write().await.phase2_recovery = Some(phase2_health);
 
     // Retention cleanup (runs every retention_sweep_interval_s), then the
     // liveness rows of ended workers, on the main core pool with the reserve.
     if tokio::time::Instant::now() >= *next_retention_cleanup {
-        run_retention_cleanup(broker, retention).await;
+        run_retention_cleanup(broker, retention, failures).await;
         let forgotten = match broker.core_pools_for_write() {
             Ok((open, _write)) => forget_ended_workers(open.main(), broker.statement_log()).await,
             Err(error) => Err(error),
         };
         match forgotten {
-            Ok(0) => {}
+            Ok(0) => failures.succeeded(RecoveryStep::EndedWorkerRows),
             Ok(count) => {
+                failures.succeeded(RecoveryStep::EndedWorkerRows);
                 tracing::info!(count, "reaper deleted the liveness rows of ended workers");
             }
-            Err(error) => {
-                tracing::error!(
-                    %error,
-                    "Reaper failed to delete the liveness rows of ended workers and runs it again \
-                     at the next retention sweep: {error}",
-                );
-            }
+            Err(error) => failures.failed(RecoveryStep::EndedWorkerRows, &error),
         }
         *next_retention_cleanup =
             tokio::time::Instant::now() + Duration::from_secs(retention.retention_sweep_interval_s);
@@ -1455,15 +1441,14 @@ async fn run_reaper_pass(
     if let Some(age) = retention.paused_workflow_auto_cancel_after {
         match crate::workflow_engine::lifecycle::expire_paused_workflows(broker, age, 50).await {
             Ok(count) if count > 0 => {
+                failures.succeeded(RecoveryStep::PausedWorkflowExpiry);
                 tracing::info!(
                     count,
                     "expired paused workflows past the declared age policy"
                 );
             }
-            Err(error) => {
-                tracing::error!(%error, "Paused-workflow expiry sweep error: {error}");
-            }
-            _ => {}
+            Ok(_) => failures.succeeded(RecoveryStep::PausedWorkflowExpiry),
+            Err(error) => failures.failed(RecoveryStep::PausedWorkflowExpiry, &error),
         }
     }
 
@@ -1482,35 +1467,43 @@ async fn run_reaper_pass(
             Err(refused) => Err(CoveragePassError::History(refused)),
         };
         let coverage_health = match coverage {
-            Ok(outcome) => {
-                let encoded = match &outcome {
-                    CoverageOutcome::Ensured(ensured) => serde_json::json!({
-                        "state": "ensured",
-                        "created_history_leaves": ensured.created_history_leaves,
-                        "created_heartbeat_leaves": ensured.created_heartbeat_leaves,
-                        "republished": ensured.republished,
-                        "heartbeat_covered_now": ensured.heartbeat_covered_now,
-                        "history_covered_through": ensured.history_covered_through,
-                        "heartbeats_covered_through": ensured.heartbeats_covered_through,
-                        "absent_leaves": ensured.absent_leaves,
-                    }),
-                    CoverageOutcome::Failed(failed) => serde_json::json!({
-                        "state": "failed",
-                        "stage": failed.stage.as_str(),
-                        "class_key": failed.class_key,
-                        "refusal": failed.refusal,
-                        "heartbeat_covered_now": failed.heartbeat_covered_now,
-                        "absent_leaves": failed.absent_leaves,
-                    }),
-                };
-                Some(encoded)
+            Ok(CoverageOutcome::Ensured(ensured)) => {
+                failures.succeeded(RecoveryStep::PartitionCoverage);
+                serde_json::json!({
+                    "state": "ensured",
+                    "created_history_leaves": ensured.created_history_leaves,
+                    "created_heartbeat_leaves": ensured.created_heartbeat_leaves,
+                    "republished": ensured.republished,
+                    "heartbeat_covered_now": ensured.heartbeat_covered_now,
+                    "history_covered_through": ensured.history_covered_through,
+                    "heartbeats_covered_through": ensured.heartbeats_covered_through,
+                    "absent_leaves": ensured.absent_leaves,
+                })
+            }
+            Ok(CoverageOutcome::Failed(failed)) => {
+                failures.failed(
+                    RecoveryStep::PartitionCoverage,
+                    &format_args!(
+                        "the coverage pass stopped at {}: {}",
+                        failed.stage.as_str(),
+                        failed.refusal,
+                    ),
+                );
+                serde_json::json!({
+                    "state": "failed",
+                    "stage": failed.stage.as_str(),
+                    "class_key": failed.class_key,
+                    "refusal": failed.refusal,
+                    "heartbeat_covered_now": failed.heartbeat_covered_now,
+                    "absent_leaves": failed.absent_leaves,
+                })
             }
             Err(error) => {
-                tracing::error!(%error, "Partition coverage ensure error: {error}");
-                Some(serde_json::json!({"state": "error", "error": error.to_string()}))
+                failures.failed(RecoveryStep::PartitionCoverage, &error);
+                serde_json::json!({"state": "error", "error": error.to_string()})
             }
         };
-        health.write().await.partition_coverage = coverage_health;
+        health.write().await.partition_coverage = Some(coverage_health);
 
         // Coverage and pruning are independently contained: either half runs
         // and publishes health even when the other refuses.
@@ -1524,31 +1517,36 @@ async fn run_reaper_pass(
         .await
         {
             Ok(ReservationCleanupPass::Complete { deleted }) => {
+                failures.succeeded(RecoveryStep::KeyReservationCleanup);
                 serde_json::json!({"state": "complete", "deleted": deleted})
             }
             Ok(ReservationCleanupPass::Truncated { deleted }) => {
+                failures.succeeded(RecoveryStep::KeyReservationCleanup);
                 serde_json::json!({"state": "truncated", "deleted": deleted})
             }
             Err(error) => {
-                tracing::error!(%error, "expired key reservation cleanup failed: {error}");
+                failures.failed(RecoveryStep::KeyReservationCleanup, &error);
                 serde_json::json!({"state": "error", "error": error.to_string()})
             }
         };
         let pruning_health = match prune {
-            Ok(prune) => serde_json::json!({
-                "finalized": prune.finalized_leaves.len(),
-                "detached": prune.detached_count(),
-                "dropped": prune.dropped_count(),
-                "refusals": prune.refusals,
-                "errors": prune.errors,
-                "reach": match prune.reach {
-                    PruneReach::WithinBounds => "within_bounds",
-                    PruneReach::Truncated => "truncated",
-                },
-                "key_reservations": key_reservations,
-            }),
+            Ok(prune) => {
+                failures.succeeded(RecoveryStep::PartitionPruning);
+                serde_json::json!({
+                    "finalized": prune.finalized_leaves.len(),
+                    "detached": prune.detached_count(),
+                    "dropped": prune.dropped_count(),
+                    "refusals": prune.refusals,
+                    "errors": prune.errors,
+                    "reach": match prune.reach {
+                        PruneReach::WithinBounds => "within_bounds",
+                        PruneReach::Truncated => "truncated",
+                    },
+                    "key_reservations": key_reservations,
+                })
+            }
             Err(error) => {
-                tracing::error!(%error, "Partition pruning error: {error}");
+                failures.failed(RecoveryStep::PartitionPruning, &error);
                 serde_json::json!({
                     "state": "error",
                     "error": error.to_string(),
@@ -1903,19 +1901,17 @@ pub(crate) mod on_test_pool {
     }
 }
 
-/// Per-reaper state of the orphan audit: when it next runs, and how many
-/// permanent failures in a row it had (for the log only; the audit never
-/// stops on a live worker).
+/// Per-reaper state of the orphan audit: when it next runs. Its failures in
+/// a row are in the reaper's [`RecoveryFailures`]; the audit never stops on
+/// a live worker.
 struct OrphanSweepState {
     next_audit: tokio::time::Instant,
-    permanent_failures: u32,
 }
 
 impl Default for OrphanSweepState {
     fn default() -> Self {
         Self {
             next_audit: tokio::time::Instant::now(),
-            permanent_failures: 0,
         }
     }
 }
@@ -1937,28 +1933,26 @@ mod orphan_audit_schedule_tests {
     #[test]
     fn orphan_task_audit_uses_its_own_interval() {
         let now = tokio::time::Instant::now();
-        let mut state = OrphanSweepState {
-            next_audit: now,
-            permanent_failures: 0,
-        };
+        let mut state = OrphanSweepState { next_audit: now };
         let interval = Duration::from_secs(60);
         assert!(state.schedule_if_due(now, interval));
         assert!(!state.schedule_if_due(now + Duration::from_secs(59), interval));
         assert!(state.schedule_if_due(now + Duration::from_secs(60), interval));
     }
 
-    /// The orphan audit never stops on a live worker: permanent failures in
-    /// a row do not change its schedule (Python stops it after 3; the core
+    /// The orphan audit never stops on a live worker: its failures in a
+    /// row do not change its schedule (Python stops it after 3; the core
     /// does not).
     #[test]
     fn orphan_audit_stays_scheduled_after_permanent_failures() {
         let now = tokio::time::Instant::now();
-        let mut state = OrphanSweepState {
-            next_audit: now,
-            permanent_failures: u32::MAX,
-        };
+        let mut state = OrphanSweepState { next_audit: now };
+        let mut failures = RecoveryFailures::new(OptionalCounter::NotRecorded);
         let interval = Duration::from_secs(60);
         assert!(state.schedule_if_due(now, interval));
+        for _ in 0..3 {
+            failures.failed(RecoveryStep::OrphanTaskAudit, &"permanent");
+        }
         assert!(state.schedule_if_due(now + interval, interval));
     }
 
@@ -2234,16 +2228,22 @@ async fn retention_pass(
 /// (`None` = disabled). Deletes run in bounded batches under one pass time
 /// budget ([`RETENTION_PASS_TIME_BUDGET`]); each step runs at least one
 /// batch. Every batch is one statement in autocommit on the main core pool,
-/// as reserved work. A failure is logged as an error; the batches before it
-/// stay committed, and the backlog resumes on the next pass.
+/// as reserved work. A failure goes to `failures` (its log and its counter);
+/// the batches before it stay committed, and the backlog resumes on the next
+/// pass.
 ///
 /// Called by the reaper loop every `retention_sweep_interval_s`.
-pub async fn run_retention_cleanup(broker: &PostgresBroker, config: &RetentionConfig) {
+pub async fn run_retention_cleanup(
+    broker: &PostgresBroker,
+    config: &RetentionConfig,
+    failures: &mut RecoveryFailures,
+) {
     // Shared wall-clock budget across the statements. A backlog that
     // outlives the budget resumes next pass.
     let deadline = tokio::time::Instant::now() + RETENTION_PASS_TIME_BUDGET;
     match retention_pass(broker, config, deadline).await {
         Ok(deleted) => {
+            failures.succeeded(RecoveryStep::RetentionCleanup);
             if deleted.worker_states + deleted.workflows > 0 {
                 tracing::info!(
                     deleted_worker_states = deleted.worker_states,
@@ -2252,9 +2252,7 @@ pub async fn run_retention_cleanup(broker: &PostgresBroker, config: &RetentionCo
                 );
             }
         }
-        Err(error) => {
-            tracing::error!(%error, "Retention cleanup error: {error}");
-        }
+        Err(error) => failures.failed(RecoveryStep::RetentionCleanup, &error),
     }
 }
 
@@ -2415,6 +2413,7 @@ mod tests {
                     &mut next_partition_maintenance,
                     &mut orphan_state,
                     &mut UnheldOwners::default(),
+                    &mut RecoveryFailures::new(OptionalCounter::NotRecorded),
                 ),
             ),
         )
