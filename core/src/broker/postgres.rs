@@ -4751,6 +4751,7 @@ mod stale_and_expired_list_tests {
     //! order, and the expired record's `enqueued_at` and `expired_for`.
     use super::*;
     use crate::broker::result_types::BrokerErrorCode;
+    use crate::test_support::history::{covered_beat_instant, SeedInstant};
     use crate::test_support::sql::{self, TestPool, TestPoolOptions};
     use serial_test::serial;
 
@@ -4805,13 +4806,20 @@ mod stale_and_expired_list_tests {
         task_id
     }
 
-    async fn runner_beat(pool: &TestPool, task_id: Uuid, minutes_ago: i32) {
+    /// A runner beat of `task_id` sent `minutes_ago` minutes before the
+    /// database clock, in the hourly leaf that the guard creates for it.
+    async fn runner_beat(pool: &TestPool, task_id: Uuid, minutes_ago: i64) {
+        let sent_at = covered_beat_instant(
+            pool,
+            SeedInstant::BeforeNow(chrono::Duration::minutes(minutes_ago)),
+        )
+        .await;
         sql::query(
             "INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid)
-             VALUES ($1, 'list-worker', 'runner', NOW() - $2 * INTERVAL '1 minute', 'h', 1)",
+             VALUES ($1, 'list-worker', 'runner', $2, 'h', 1)",
         )
         .bind(task_id)
-        .bind(minutes_ago)
+        .bind(sent_at.at())
         .execute(pool)
         .await
         .expect("seed a runner beat");

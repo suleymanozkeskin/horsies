@@ -1,11 +1,14 @@
 //! Worker runs that hold one task in a scripted child.
 //!
 //! - The child is a bash script ([`child_holding_its_first_run`]): it
-//!   boots, reads the run frame and answers nothing, so the task stays held
-//!   in the child.
-//! - The test writes the start of the attempt as a child does
-//!   (`horsies_start_attempt`): the row is RUNNING under the worker's claim,
-//!   and the runner heartbeats of the worker cover it.
+//!   boots, reads the run frame, writes its pid file and answers nothing,
+//!   so the task stays held in the child.
+//! - Once the pid file is there, the test writes the start of the attempt
+//!   as a child does (`horsies_start_attempt`): the row is RUNNING under the
+//!   worker's claim, and the runner heartbeats of the worker cover it. A
+//!   start before the run frame reaches the child is an order that no child
+//!   produces: a child that ends before it takes the run is replaced, and
+//!   the run goes to the next child.
 //! - Each test runs on a copy of the installed test template.
 
 use std::path::{Path, PathBuf};
@@ -43,6 +46,9 @@ const STOP_BOUND: Duration = Duration::from_secs(60);
 /// The runner heartbeat interval of the heartbeat tests: the smallest that
 /// the config takes.
 const BEAT_INTERVAL_MS: u64 = 1_000;
+
+/// The last lines of the worker log that a failed wait shows.
+const FAILURE_LOG_LINES: usize = 200;
 
 /// The beat sender of the start that a test writes for the child.
 const CHILD_BEAT_SENDER: &str = "scripted-child";
@@ -158,26 +164,25 @@ async fn insert_pending_task(pool: &TestPool) -> Uuid {
     task_id
 }
 
-/// Wait until the worker claimed `task_id`, then write the start of its
-/// attempt as the child does ([`START_AS_THE_CHILD_SQL`]).
-async fn start_as_the_child(pool: &TestPool, task_id: Uuid) {
-    let outcome = tokio::time::timeout(WAIT, async {
-        loop {
-            let started: Option<String> = sql::query_scalar(START_AS_THE_CHILD_SQL)
-                .bind(task_id)
-                .bind(CHILD_BEAT_SENDER)
-                .fetch_optional(pool)
-                .await
-                .expect("write the start of the attempt");
-            match started {
-                Some(outcome) => break outcome,
-                None => tokio::time::sleep(POLL).await,
-            }
+/// Wait until the child holds the run of `task_id` (its pid file is
+/// there), then write the start of the attempt as the child does
+/// ([`START_AS_THE_CHILD_SQL`]). Returns the pid of the child.
+async fn start_as_the_child(pool: &TestPool, task_id: Uuid, pid_file: &Path) -> i32 {
+    tokio::time::timeout(WAIT, async {
+        while !pid_file.exists() {
+            tokio::time::sleep(POLL).await;
         }
     })
     .await
-    .expect("the worker claims the task");
-    assert_eq!(outcome, "STARTED");
+    .expect("the worker claims the task and sends the run to the child");
+    let started: Option<String> = sql::query_scalar(START_AS_THE_CHILD_SQL)
+        .bind(task_id)
+        .bind(CHILD_BEAT_SENDER)
+        .fetch_optional(pool)
+        .await
+        .expect("write the start of the attempt");
+    assert_eq!(started.as_deref(), Some("STARTED"));
+    child_pid(pid_file)
 }
 
 /// The pid that the child wrote to `pid_file`.
@@ -211,7 +216,7 @@ async fn a_task_held_in_a_child_gets_the_runner_beats_of_the_worker() {
     let cancel = worker.cancel_token();
     let run = tokio::spawn(async move { worker.run().await });
 
-    start_as_the_child(&pool, task_id).await;
+    let _pid = start_as_the_child(&pool, task_id, &pid_file).await;
     let beats = tokio::time::timeout(WAIT, async {
         loop {
             let beats: i64 = sql::query_scalar(
@@ -289,7 +294,7 @@ async fn runner_beats_that_cannot_land_stop_the_worker_with_runner_heartbeat_los
     let task_id = insert_pending_task(&pool).await;
     let run = tokio::spawn(async move { worker.run().await });
 
-    start_as_the_child(&pool, task_id).await;
+    let pid = start_as_the_child(&pool, task_id, &pid_file).await;
     let ended = tokio::time::timeout(STOP_BOUND, run)
         .await
         .expect("the watchdog stops the worker within the bound")
@@ -317,7 +322,6 @@ async fn runner_beats_that_cannot_land_stop_the_worker_with_runner_heartbeat_los
         ),
         "the run end is RUNNER_HEARTBEAT_LOST"
     );
-    let pid = child_pid(&pid_file);
     // SAFETY: signal 0 sends nothing; it only checks that the process exists.
     let exists = unsafe { libc::kill(pid, 0) } == 0;
     assert!(
@@ -385,8 +389,7 @@ async fn the_stop_waits_for_an_outcome_write_that_is_tried_again() {
     let cancel = worker.cancel_token();
     let run = tokio::spawn(async move { worker.run().await });
 
-    start_as_the_child(&pool, task_id).await;
-    let pid = child_pid(&pid_file);
+    let pid = start_as_the_child(&pool, task_id, &pid_file).await;
     // SAFETY: SIGKILL to the pid of the test's own child process.
     let killed = unsafe { libc::kill(pid, libc::SIGKILL) };
     assert_eq!(killed, 0, "kill the child {pid}");
@@ -402,13 +405,28 @@ async fn the_stop_waits_for_an_outcome_write_that_is_tried_again() {
             .expect("read the tries of the attempt write")
         }
     };
-    tokio::time::timeout(WAIT, async {
+    let first_try = tokio::time::timeout(WAIT, async {
         while tries().await < 1 {
             tokio::time::sleep(POLL).await;
         }
     })
-    .await
-    .expect("the crash write of the attempt starts its first try");
+    .await;
+    match first_try {
+        Ok(()) => {}
+        Err(_elapsed) => {
+            // The log of the worker names the end that the slot read.
+            let events = capture.events();
+            let worker_lines: Vec<String> = events
+                .iter()
+                .skip(events.len().saturating_sub(FAILURE_LOG_LINES))
+                .map(|event| format!("{} {}: {:?}", event.level, event.message, event.fields))
+                .collect();
+            panic!(
+                "the crash write of the attempt did not start its first try within {WAIT:?} \
+                 after the kill of the child {pid}; worker log: {worker_lines:#?}"
+            );
+        }
+    }
     cancel.cancel();
     let ended = tokio::time::timeout(STOP_BOUND, run)
         .await
