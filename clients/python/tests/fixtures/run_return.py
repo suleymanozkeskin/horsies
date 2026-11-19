@@ -1,4 +1,4 @@
-"""The end of a run of the version-2 child, for tests that call
+"""The end of a run of the version-3 child, for tests that call
 ``_run_task_entry``.
 
 ``envelope_of`` and ``stop_reason_of`` read the end of a run. ``wire_of``
@@ -9,16 +9,30 @@ worker reads the version-2 end itself.
 
 from __future__ import annotations
 
-from typing import assert_never
+from datetime import UTC, datetime
+from typing import Final, assert_never
 
 from horsies.core.worker.run_return import (
     CoreStoppedBeforeStart,
     ResultEnvelope,
     RunReturn,
     SetRunning,
+    StartedRunning,
     StopReason,
     StoppedBeforeRunning,
 )
+
+STARTED_AT: Final = datetime(2026, 11, 17, 10, 0, 1, 250000, tzinfo=UTC)
+"""The time of the start write of the runs of the tests."""
+
+STARTED: Final = StartedRunning(STARTED_AT)
+"""The start of the runs of the tests."""
+
+
+def set_running(result: ResultEnvelope) -> SetRunning:
+    """The return of a run that set its row RUNNING at ``STARTED_AT`` and
+    ended with ``result``."""
+    return SetRunning(result, STARTED_AT)
 
 type WireResult = tuple[bool, str, str | None]
 """The version-1 wire tuple: whether a result envelope was produced, the

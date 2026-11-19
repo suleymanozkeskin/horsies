@@ -840,6 +840,7 @@ fn run_frame_bytes(claimed: &ClaimedTask) -> Vec<u8> {
         orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work: IsolatedWork::Run,
         input: TaskInputText::new("{}".to_owned()),
+        trace: crate::events::RunTrace::NoCarrier,
     }))
     .unwrap()
     .to_bytes()
@@ -921,6 +922,9 @@ async fn an_isolated_slot_reports_the_result_of_its_child() {
         end: RunEnd::Result(ResultEnvelopeText::new(
             r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned(),
         )),
+        started_at: crate::events::AttemptStart::Reported {
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        },
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
         child: ChildAfterFrame::ServesOn,

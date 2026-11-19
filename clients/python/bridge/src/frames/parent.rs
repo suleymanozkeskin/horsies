@@ -7,11 +7,14 @@
 //! Rust: only `CoreChildHandle.from_init` reads them, so the URL never
 //! becomes a Python value of the child.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
+use horsies_core::events::RunTrace;
 use horsies_core::frame_protocol::{
-    ChildKind, ChildLogLevel, ChildPool, ChildProgram, InitFrame, IsolatedWork, MalformedFrame,
-    ParentFrame, ParentFrameRefusal, ProtocolMismatch, ReceivedProtocol, RunFrame, SharedRunFrame,
-    SharedWork, StoredOptionsRefusal, PROTOCOL_VERSION,
+    ChildKind, ChildLogLevel, ChildPool, ChildProgram, EventsFrame, InitFrame, IsolatedWork,
+    MalformedFrame, ParentFrame, ParentFrameRefusal, ProtocolMismatch, ReceivedProtocol, RunFrame,
+    SharedRunFrame, SharedWork, StoredOptionsRefusal, PROTOCOL_VERSION,
 };
 use horsies_core::OrphanSelfHeal;
 use pyo3::prelude::*;
@@ -62,6 +65,13 @@ pub struct SharedThreadChildKind {
     task_send_pool: u64,
 }
 
+/// A handler child: it runs the event handlers of the app and no task. A
+/// handler may send tasks, through a pool of `task_send_pool` connections.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+pub struct HandlerChildKind {
+    task_send_pool: u64,
+}
+
 /// The first frame to a child or to the preload process.
 #[pyclass(module = "horsies._core", name = "InitFrame", frozen)]
 pub struct InitFrameRecord {
@@ -73,7 +83,8 @@ pub struct InitFrameRecord {
     log_level: &'static str,
     #[pyo3(get)]
     process_name: String,
-    /// `IsolatedChildKind`, `SharedAsyncChildKind` or `SharedThreadChildKind`.
+    /// `IsolatedChildKind`, `SharedAsyncChildKind`, `SharedThreadChildKind`
+    /// or `HandlerChildKind`.
     #[pyo3(get)]
     child_kind: Py<PyAny>,
     /// The decoded frame: the database URL and the connection settings stay
@@ -99,6 +110,14 @@ pub struct StoredOptionsRefused {
     reason: String,
 }
 
+/// The trace carrier that the send stored on the task row: the keys and the
+/// values that the propagator of the sender wrote. The child extracts it
+/// with the app's propagator.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+pub struct TraceCarrier {
+    carrier: BTreeMap<String, String>,
+}
+
 /// Run one task in an isolated child. The parent holds the deadline.
 #[pyclass(module = "horsies._core", name = "RunFrame", frozen, get_all)]
 pub struct RunFrameRecord {
@@ -113,6 +132,8 @@ pub struct RunFrameRecord {
     orphan_self_heal: bool,
     /// `'RUN'`, or `StoredOptionsRefused`.
     work: Py<PyAny>,
+    /// `TraceCarrier`, or `'NO_CARRIER'`.
+    trace: Py<PyAny>,
     /// The JSON text of the task input.
     input: Py<PyString>,
 }
@@ -144,7 +165,17 @@ pub struct SharedRunFrameRecord {
     orphan_self_heal: bool,
     /// `AsyncTaskWork`, `ThreadTaskWork` or `StoredOptionsRefused`.
     work: Py<PyAny>,
+    /// `TraceCarrier`, or `'NO_CARRIER'`.
+    trace: Py<PyAny>,
     input: Py<PyString>,
+}
+
+/// Lifecycle events for a handler child, in the order that the core emitted
+/// them. `events` holds the JSON text of each event; the generated decoder
+/// reads the value that `json.loads` gives for it.
+#[pyclass(module = "horsies._core", name = "EventsFrame", frozen, get_all)]
+pub struct EventsFrameRecord {
+    events: Vec<String>,
 }
 
 /// Exit normally. Sent only to a child with no task.
@@ -182,6 +213,7 @@ pub fn parent_frame_object(py: Python<'_>, frame: ParentFrame) -> PyResult<Py<Py
         ParentFrame::Init(init) => init_object(py, init),
         ParentFrame::Run(run) => run_object(py, run),
         ParentFrame::SharedRun(run) => shared_run_object(py, run),
+        ParentFrame::Events(events) => events_object(py, &events),
         ParentFrame::Stop => StopFrameRecord {}.into_py_any(py),
     }
 }
@@ -263,6 +295,10 @@ fn child_kind_object(py: Python<'_>, kind: ChildKind) -> PyResult<Py<PyAny>> {
             task_send_pool: child.task_send_pool.get(),
         }
         .into_py_any(py),
+        ChildKind::Handler(child) => HandlerChildKind {
+            task_send_pool: child.task_send_pool.get(),
+        }
+        .into_py_any(py),
     }
 }
 
@@ -315,6 +351,31 @@ fn shared_work_object(py: Python<'_>, work: SharedWork) -> PyResult<Py<PyAny>> {
     }
 }
 
+/// The trace of a run frame. The frame decoder reads only a carrier text
+/// that is one JSON object of texts, so its keys and values always read.
+fn trace_object(py: Python<'_>, trace: RunTrace) -> PyResult<Py<PyAny>> {
+    match trace {
+        RunTrace::Carrier { text } => {
+            let carrier: BTreeMap<String, String> = serde_json::from_str(text.as_str())
+                .unwrap_or_else(|error| {
+                    unreachable!(
+                        "the frame decoder reads only a carrier text that is one JSON object \
+                         of texts: {error}"
+                    )
+                });
+            TraceCarrier { carrier }.into_py_any(py)
+        }
+        RunTrace::NoCarrier => "NO_CARRIER".into_py_any(py),
+    }
+}
+
+fn events_object(py: Python<'_>, events: &EventsFrame) -> PyResult<Py<PyAny>> {
+    EventsFrameRecord {
+        events: events.events.events().map(str::to_owned).collect(),
+    }
+    .into_py_any(py)
+}
+
 /// The `orphan_self_heal` argument of the stop before start: `True` for on.
 /// Pure.
 fn self_heal_flag(self_heal: OrphanSelfHeal) -> bool {
@@ -333,6 +394,7 @@ fn run_object(py: Python<'_>, run: RunFrame) -> PyResult<Py<PyAny>> {
         claimed_at: run.claimed_at,
         orphan_self_heal: self_heal_flag(run.orphan_self_heal),
         work: isolated_work_object(py, run.work)?,
+        trace: trace_object(py, run.trace)?,
         input,
     }
     .into_py_any(py)
@@ -348,6 +410,7 @@ fn shared_run_object(py: Python<'_>, run: SharedRunFrame) -> PyResult<Py<PyAny>>
         claimed_at: run.claimed_at,
         orphan_self_heal: self_heal_flag(run.orphan_self_heal),
         work: shared_work_object(py, run.work)?,
+        trace: trace_object(py, run.trace)?,
         input,
     }
     .into_py_any(py)
@@ -360,12 +423,15 @@ pub fn add_parent_frame_classes(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<IsolatedChildKind>()?;
     module.add_class::<SharedAsyncChildKind>()?;
     module.add_class::<SharedThreadChildKind>()?;
+    module.add_class::<HandlerChildKind>()?;
     module.add_class::<InitFrameRecord>()?;
     module.add_class::<StoredOptionsRefused>()?;
     module.add_class::<RunFrameRecord>()?;
     module.add_class::<AsyncTaskWork>()?;
     module.add_class::<ThreadTaskWork>()?;
     module.add_class::<SharedRunFrameRecord>()?;
+    module.add_class::<TraceCarrier>()?;
+    module.add_class::<EventsFrameRecord>()?;
     module.add_class::<StopFrameRecord>()?;
     module.add_class::<FrameRefused>()?;
     module.add_class::<ParentProtocolMismatch>()?;

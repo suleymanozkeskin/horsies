@@ -21,6 +21,7 @@ from horsies import _core as core
 from horsies.core.models.tasks import MIN_TASK_TIMEOUT_MS
 from horsies.core.worker import thread_child
 from horsies.core.worker.child_frames import (
+    AttemptStart,
     ChildFrame,
     DeadlineFiredFrame,
     RssMb,
@@ -28,6 +29,8 @@ from horsies.core.worker.child_frames import (
     SeatEnd,
     SeatTimedOut,
     SharedResultFrame,
+    StartNotReported,
+    StartReported,
     ThreadSeatWork,
     WorkFrame,
 )
@@ -43,7 +46,6 @@ from horsies.core.worker.shared_child import (
     CHILD_DEFECT_EXIT_CODE,
     MarkerDue,
     NoMarker,
-    SetRunning,
     StoppedBeforeRunning,
 )
 from horsies.core.worker.child_runner import (
@@ -69,6 +71,7 @@ from tests.fixtures.core_frames import (
     stop_frame,
     thread_work,
 )
+from tests.fixtures.run_return import STARTED_AT, set_running
 
 pytestmark = [pytest.mark.unit]
 
@@ -211,7 +214,7 @@ class TestRunTable:
         clock.now += 0.999
         table._fire_due()
 
-        _ = table.returned(1, SetRunning(OK_END))
+        _ = table.returned(1, set_running(OK_END))
         table.finish(1, RssMb(5.0))
 
         assert writer.frames == [
@@ -219,6 +222,7 @@ class TestRunTable:
                 dispatch=1,
                 task_id=_task_id(1),
                 end=OK_END,
+                started=StartReported(STARTED_AT),
                 rss=RssMb(5.0),
             ),
         ]
@@ -234,7 +238,7 @@ class TestRunTable:
         table.add(frame, _thread_work(frame))
         stopped = core.CoreStopped('log forwarder', 'planned panic')
 
-        assert table.returned(1, SetRunning(OK_END)) == MarkerDue()
+        assert table.returned(1, set_running(OK_END)) == MarkerDue()
         table.marked(1, MarkerMetStoppedCore(stopped))
         table.finish(1, RssMb(5.0))
 
@@ -243,6 +247,7 @@ class TestRunTable:
                 dispatch=1,
                 task_id=_task_id(1),
                 end=CoreStoppedAfterBody(result=OK_END, stopped=stopped),
+                started=StartReported(STARTED_AT),
                 rss=RssMb(5.0),
             ),
         ]
@@ -252,7 +257,7 @@ class TestRunTable:
         frame = _frame(1)
         table.add(frame, _thread_work(frame))
 
-        _ = table.returned(1, SetRunning(OK_END))
+        _ = table.returned(1, set_running(OK_END))
         table.marked(1, MarkerDone())
         table.finish(1, RssMb(5.0))
 
@@ -269,7 +274,7 @@ class TestRunTable:
         clock.now += 1.0
         table._fire_due()
 
-        _ = table.returned(1, SetRunning(OK_END))
+        _ = table.returned(1, set_running(OK_END))
         table.finish(1, RssMb(5.0))
 
         assert writer.frames == [
@@ -278,6 +283,7 @@ class TestRunTable:
                 dispatch=1,
                 task_id=_task_id(1),
                 end=SeatTimedOut(),
+                started=StartReported(STARTED_AT),
                 rss=RssMb(5.0),
             ),
         ]
@@ -286,7 +292,7 @@ class TestRunTable:
         table, writer, clock = self._table()
         frame = _frame(1)
         table.add(frame, _thread_work(frame))
-        _ = table.returned(1, SetRunning(OK_END))
+        _ = table.returned(1, set_running(OK_END))
         table.finish(1, RssMb(5.0))
         clock.now += 60.0
 
@@ -356,7 +362,7 @@ class TestRunTable:
         table.add(frame, _thread_work(frame))
         clock.now += 0.9
 
-        marker = table.returned(1, SetRunning(OK_END))
+        marker = table.returned(1, set_running(OK_END))
         clock.now += 0.5
         table._fire_due()
         table.finish(1, RssMb(5.0))
@@ -367,6 +373,7 @@ class TestRunTable:
                 dispatch=1,
                 task_id=_task_id(1),
                 end=OK_END,
+                started=StartReported(STARTED_AT),
                 rss=RssMb(5.0),
             ),
         ]
@@ -378,7 +385,7 @@ class TestRunTable:
         clock.now += 1.0
         table._fire_due()
 
-        assert table.returned(1, SetRunning(OK_END)) == NoMarker()
+        assert table.returned(1, set_running(OK_END)) == NoMarker()
 
     def test_a_return_at_its_deadline_not_yet_fired_writes_no_marker(self) -> None:
         """The deadline thread has not fired yet: the run keeps what it
@@ -388,16 +395,20 @@ class TestRunTable:
         table.add(frame, _thread_work(frame))
         clock.now += 1.0
 
-        assert table.returned(1, SetRunning(OK_END)) == NoMarker()
+        assert table.returned(1, set_running(OK_END)) == NoMarker()
         table.finish(1, RssMb(5.0))
         assert writer.results()[0].end == OK_END
 
     @pytest.mark.parametrize('past_deadline_s', [0.0, 0.5])
     @pytest.mark.parametrize(
-        ('returned', 'end'),
+        ('returned', 'end', 'started'),
         [
-            (SetRunning(OK_END), OK_END),
-            (StoppedBeforeRunning('CLAIM_LOST'), StoppedBeforeRunning('CLAIM_LOST')),
+            (set_running(OK_END), OK_END, StartReported(STARTED_AT)),
+            (
+                StoppedBeforeRunning('CLAIM_LOST'),
+                StoppedBeforeRunning('CLAIM_LOST'),
+                StartNotReported(),
+            ),
         ],
     )
     def test_a_return_at_or_past_its_deadline_not_yet_fired_keeps_its_end(
@@ -405,6 +416,7 @@ class TestRunTable:
         past_deadline_s: float,
         returned: ThreadSeatReturn,
         end: SeatEnd,
+        started: AttemptStart,
     ) -> None:
         """Only a deadline that fired before the return makes the run a
         timeout. A return at or past a deadline that the deadline thread has
@@ -421,7 +433,9 @@ class TestRunTable:
         table.finish(1, RssMb(5.0))
 
         assert writer.frames == [
-            SharedResultFrame(dispatch=1, task_id=_task_id(1), end=end, rss=RssMb(5.0)),
+            SharedResultFrame(
+                dispatch=1, task_id=_task_id(1), end=end, started=started, rss=RssMb(5.0),
+            ),
         ]
 
     def test_a_run_that_stopped_before_running_writes_no_marker(self) -> None:
@@ -437,7 +451,7 @@ class TestRunTable:
         table.add(frame, _thread_work(frame))
         clock.now += 10**6
 
-        assert table.returned(1, SetRunning(OK_END)) == MarkerDue()
+        assert table.returned(1, set_running(OK_END)) == MarkerDue()
 
     def test_a_start_before_the_deadline_is_allowed_with_the_time_left(self) -> None:
         """The core checks the time left again once the pool gave the
@@ -498,6 +512,7 @@ class TestRunTable:
                 dispatch=1,
                 task_id=_task_id(1),
                 end=SeatTimedOut(),
+                started=StartNotReported(),
                 rss=RssMb(5.0),
             ),
         ]
@@ -521,6 +536,7 @@ class TestRunTable:
                 dispatch=1,
                 task_id=_task_id(1),
                 end=SeatTimedOut(),
+                started=StartNotReported(),
                 rss=RssMb(5.0),
             ),
         ]
@@ -577,7 +593,7 @@ class _Program:
         end = ResultEnvelope(self._behaviors[frame.task_name]())
         if frame.task_name in self.not_running:
             return StoppedBeforeRunning('CLAIM_LOST')
-        return SetRunning(end)
+        return set_running(end)
 
     def mark_finalizing(self, frame: core.SharedRunFrame) -> MarkerDone:
         with self._lock:
@@ -826,7 +842,7 @@ class TestServeRuns:
             try:
                 _until(lambda: len(taker.given) == 2)
                 for dispatch in (1, 2):
-                    _ = table.returned(dispatch, SetRunning(OK_END))
+                    _ = table.returned(dispatch, set_running(OK_END))
                     table.finish(dispatch, RssMb(1.0))
             finally:
                 inbox.put(stop_frame())

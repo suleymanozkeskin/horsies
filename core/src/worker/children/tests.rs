@@ -199,6 +199,7 @@ fn each_kind_gets_the_task_send_pool_of_its_setting() {
         Some(ChildKind::Isolated(child)) => child.task_send_pool.get(),
         Some(ChildKind::SharedAsync(child)) => child.task_send_pool.get(),
         Some(ChildKind::SharedThread(child)) => child.task_send_pool.get(),
+        Some(ChildKind::Handler(_)) => panic!("a slot pool builds a task child"),
         None => panic!("each kind has a pool"),
     });
     assert_eq!(sends, [3, 5, 7]);

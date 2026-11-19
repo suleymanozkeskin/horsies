@@ -532,6 +532,7 @@ impl IsolatedPool {
                     claimed_at: task.claimed_at,
                     orphan_self_heal: self.shared.config.orphan_self_heal,
                     work,
+                    trace: task.trace.clone(),
                     input,
                 },
                 deadline,

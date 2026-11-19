@@ -28,6 +28,24 @@ pub const MAX_PRELOAD_REASON_CHARS: usize = 4096;
 /// stored text and cuts it to this bound.
 pub const MAX_REFUSAL_REASON_CHARS: usize = 4096;
 
+/// The most events of one `events` frame. A frame carries one event or
+/// more.
+pub const MAX_EVENTS_PER_FRAME: usize = 256;
+/// The most bytes of the wire form of one event in an `events` frame. The
+/// largest event is the `AttemptEnded` of an attempt that the worker ended:
+/// its internal trace carrier has at most
+/// [`crate::telemetry::trace_carrier::MAX_TRACE_CARRIER_BYTES`] bytes of
+/// printable ASCII, which the JSON escape at most doubles, and its task name
+/// has at most 255 characters of at most 6 JSON bytes each. Together with
+/// its other fields that is less than 6,200 bytes.
+pub const MAX_EVENT_WIRE_BYTES: usize = 8 * 1024;
+/// The most event handlers of one handler child, and so the most entries of
+/// one `handler_stats` frame.
+pub const MAX_EVENT_HANDLERS: usize = 32;
+/// The most characters of the name of an event handler. A name has one
+/// character or more.
+pub const MAX_HANDLER_NAME_CHARS: usize = 255;
+
 /// The most seats of one shared async child.
 pub const MAX_SEATS_PER_SHARED_ASYNC_CHILD: u64 = 1000;
 /// The most seats of one shared thread child.

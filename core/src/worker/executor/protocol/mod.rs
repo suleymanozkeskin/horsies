@@ -14,8 +14,26 @@
 //! Nothing is pickled: each frame is built from a fixed set of fields, and a
 //! field outside that set makes the frame malformed.
 //!
-//! Version 2 ([`PROTOCOL_VERSION`]) keeps the framing of version 1 and
-//! changes the content:
+//! Version 3 ([`PROTOCOL_VERSION`]) keeps the framing and the content of
+//! version 2, and adds:
+//!
+//! - The run frames (`run`, `shared_run`) carry `trace`: the trace carrier
+//!   that the send stored on the task row (`carrier` with its text, one JSON
+//!   object of texts), or `no_carrier`.
+//! - The frames that end a run carry `started_at`, the time that the start
+//!   write returned to the child. `result` and `shared_result` carry
+//!   `reported` with the time, or `not_reported` for a run that stopped
+//!   before running; `body_returned`, `leftover_cancel` and
+//!   `leftover_stuck` carry the time, since the body ran.
+//! - The child kind `handler` in the init frame: a child that runs the
+//!   event handlers of the app and no task.
+//! - The parent frame `events`: a batch of lifecycle events for a handler
+//!   child. The body is the JSON array of their wire forms
+//!   ([`EventBatch`]).
+//! - The child frame `handler_stats`: the cumulative error and drop counts
+//!   of each event handler of a handler child, and its RSS.
+//!
+//! Version 2 kept the framing of version 1 and changed the content:
 //!
 //! - The run frames carry the one `input` value as the whole body, in place
 //!   of the `args` and `kwargs` texts and their two size fields.
@@ -44,6 +62,7 @@
 
 mod bounds;
 mod child_frames;
+mod event_batch;
 mod exit_codes;
 mod header;
 mod metadata;
@@ -60,17 +79,20 @@ pub use bounds::{
     AsyncSeats, CancelGraceMs, ExecutorThreads, PoolMaxSize, PoolMinSize, TaskSendPool,
     TaskTimeoutMs, ThreadSeats, MAX_BLOCKED_WHERE_CHARS, MAX_BOOT_DETAIL_CHARS,
     MAX_BOOT_ERROR_NAME_CHARS, MAX_CANCEL_GRACE_MS, MAX_CHILD_POOL_CONNECTIONS,
-    MAX_EXECUTOR_THREADS, MAX_FAILURE_DETAIL_CHARS, MAX_LEFTOVER_NAME_CHARS,
+    MAX_EVENTS_PER_FRAME, MAX_EVENT_HANDLERS, MAX_EVENT_WIRE_BYTES, MAX_EXECUTOR_THREADS,
+    MAX_FAILURE_DETAIL_CHARS, MAX_HANDLER_NAME_CHARS, MAX_LEFTOVER_NAME_CHARS,
     MAX_LEFTOVER_TASK_NAMES, MAX_PRELOAD_REASON_CHARS, MAX_REFUSAL_REASON_CHARS,
     MAX_SEATS_PER_SHARED_ASYNC_CHILD, MAX_SEATS_PER_SHARED_THREAD_CHILD, MIN_CANCEL_GRACE_MS,
 };
 pub use child_frames::{
     decode_child_frame, encode_child_frame, BodyEnd, BodyReturnedFrame, BootFailedFrame,
-    ChildAfterFrame, ChildFrame, ChildFrameRefusal, LeftWorkEnd, LeftWorkEndedFrame,
-    LeftWorkStuckFrame, LeftoverCancelFrame, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit,
-    NoLeftWork, ReadyFrame, ReportedBootCause, ResultFrame, RunEnd, RunRef, RunStuckFrame, SeatEnd,
-    SharedResultFrame, ShortageErrno, StopReason,
+    ChildAfterFrame, ChildFrame, ChildFrameRefusal, HandlerCounts, HandlerCountsInvalid,
+    HandlerCountsList, HandlerStatsFrame, LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame,
+    LeftoverCancelFrame, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit, NoLeftWork, ReadyFrame,
+    ReportedBootCause, ResultFrame, RunEnd, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame,
+    ShortageErrno, StopReason,
 };
+pub use event_batch::{EventBatch, EventCountOutOfBounds, WireEvent, WireEventRefusal};
 pub use exit_codes::{
     ChildExitCode, BAD_ARGUMENTS_EXIT_CODE, BAD_PARENT_FRAME_EXIT_CODE, BOOT_FAILED_EXIT_CODE,
     CHILD_HOOK_FAILED_EXIT_CODE, CORE_STOPPED_EXIT_CODE, PARENT_GONE_EXIT_CODE,
@@ -84,9 +106,9 @@ pub use header::{
 pub use metadata::{ExpectedType, MalformedFrame, ProtocolMismatch, ReceivedProtocol};
 pub use parent_frames::{
     decode_parent_frame, encode_parent_frame, ChildConnection, ChildKind, ChildLogLevel, ChildPool,
-    ChildProgram, DatabaseUrl, InitFrame, IsolatedChild, IsolatedWork, ParentFrame,
-    ParentFrameRefusal, PythonProgram, RunFrame, ServerSessions, SharedAsyncChild, SharedRunFrame,
-    SharedThreadChild, SharedWork, StoredOptionsRefusal, TaskKind,
+    ChildProgram, DatabaseUrl, EventsFrame, HandlerChild, InitFrame, IsolatedChild, IsolatedWork,
+    ParentFrame, ParentFrameRefusal, PythonProgram, RunFrame, ServerSessions, SharedAsyncChild,
+    SharedRunFrame, SharedThreadChild, SharedWork, StoredOptionsRefusal, TaskKind,
 };
 pub use preload_frames::{
     decode_preload_frame, encode_preload_frame, PreloadFrame, SPAWN_REQUEST_BYTE,
@@ -98,11 +120,11 @@ pub use reader::{
 pub use timing::{ISOLATED_LEFTOVER_GRACE, LOOP_BLOCK_LIMIT, STUCK_REPORT_DELAY};
 pub use values::{
     BlockedWhere, BootDetail, BootErrorName, BoundedCount, BoundedText, DispatchNumber,
-    FailureDetail, LeftoverName, LoopHoldsTasks, NameCountMismatch, PreloadReason, ProcessId,
-    RefusalReason, ResultEnvelopeText, RssMb, RssReading, StuckWork, StuckWorkInvalid,
+    FailureDetail, HandlerName, LeftoverName, LoopHoldsTasks, NameCountMismatch, PreloadReason,
+    ProcessId, RefusalReason, ResultEnvelopeText, RssMb, RssReading, StuckWork, StuckWorkInvalid,
     TaskInputText, TextOverBound,
 };
 
 /// The version of the frame content. `init` and `ready` carry it; a child
 /// or a parent that reads another number stops with a named mismatch.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;

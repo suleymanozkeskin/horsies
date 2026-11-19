@@ -159,6 +159,7 @@ pub(super) fn run_frame(task: &ClaimedTask) -> ParentFrame {
         orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work: IsolatedWork::Run,
         input: input(),
+        trace: crate::events::RunTrace::NoCarrier,
     })
 }
 
@@ -173,6 +174,7 @@ pub(super) fn shared_run_frame(task: &ClaimedTask, dispatch: u64, work: SharedWo
         orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work,
         input: input(),
+        trace: crate::events::RunTrace::NoCarrier,
     })
 }
 
@@ -197,6 +199,9 @@ pub(super) fn result_frame(task: &ClaimedTask, value: u32) -> ChildFrame {
     ChildFrame::Result(ResultFrame {
         task_id: task.task_id,
         end: RunEnd::Result(ok_envelope(value)),
+        started_at: crate::events::AttemptStart::Reported {
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        },
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
         child: ChildAfterFrame::ServesOn,
@@ -217,6 +222,9 @@ pub(super) fn shared_result_with_rss(run: RunRef, value: u32, rss: RssReading) -
     ChildFrame::SharedResult(SharedResultFrame {
         run,
         end: SeatEnd::Finished(RunEnd::Result(ok_envelope(value))),
+        started_at: crate::events::AttemptStart::Reported {
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        },
         rss,
         child: ChildAfterFrame::ServesOn,
     })
@@ -227,6 +235,9 @@ pub(super) fn shared_timed_out(run: RunRef) -> ChildFrame {
     ChildFrame::SharedResult(SharedResultFrame {
         run,
         end: SeatEnd::TimedOut,
+        started_at: crate::events::AttemptStart::Reported {
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        },
         rss: RssReading::Unreadable,
         child: ChildAfterFrame::ServesOn,
     })
@@ -249,6 +260,7 @@ pub(super) fn leftover_cancel(run: RunRef, value: u32) -> ChildFrame {
     ChildFrame::LeftoverCancel(LeftoverCancelFrame {
         run,
         returned: BodyEnd::Result(ok_envelope(value)),
+        started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
     })
 }
 
@@ -257,6 +269,7 @@ pub(super) fn leftover_stuck(run: RunRef, value: u32) -> ChildFrame {
         run,
         work: stuck_work(),
         returned: BodyEnd::Result(ok_envelope(value)),
+        started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
     })
 }
 
@@ -716,6 +729,7 @@ pub(super) fn shared_class(init: &InitFrame) -> ExecutionClass {
         ChildKind::SharedAsync(_) => ExecutionClass::SharedAsync,
         ChildKind::SharedThread(_) => ExecutionClass::SharedThread,
         ChildKind::Isolated(_) => ExecutionClass::Isolated,
+        ChildKind::Handler(_) => panic!("a scripted slot child is a task child"),
     }
 }
 

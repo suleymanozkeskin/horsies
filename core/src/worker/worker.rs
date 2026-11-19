@@ -3818,6 +3818,7 @@ mod tests {
             claimed_at: task.claimed_at,
             orphan_self_heal: self_heal,
             work,
+            trace: task.trace.clone(),
             input: claimed.input.clone(),
         };
         crate::worker::executor::child_host::in_process::run_isolated_in_process(

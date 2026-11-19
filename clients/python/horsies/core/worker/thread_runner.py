@@ -26,6 +26,7 @@ from horsies.core.worker.run_return import (
     CoreStoppedBeforeStart,
     MarkerEnd,
     ResultEnvelope,
+    StartedRunning,
 )
 from horsies.core.worker.shared_child import StoppedBeforeRunning
 from horsies.core.worker.thread_child import ThreadSeatReturn
@@ -126,9 +127,10 @@ def run_thread_seat_task(
         start_check=start_check,
     )
     match ownership_result:
-        case None:
+        case StartedRunning() as started:
             return set_running_or_end_child(
                 str(frame.task_id),
+                started,
                 _run_after_running(frame, work),
             )
         case StoppedBeforeRunning() | CoreStoppedBeforeStart():

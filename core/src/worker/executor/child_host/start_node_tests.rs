@@ -196,7 +196,7 @@ async fn workflow_task_still_transitions_node_to_running() {
 
     let started = start_attempt(&context, &facts(task_id, claimed_at)).await;
 
-    assert!(matches!(started, Started::Running));
+    assert!(matches!(started, Started::Running { .. }));
     let (node_status, node_started_at): (String, Option<DateTime<Utc>>) = sql::query_as(
         "SELECT status, started_at FROM horsies_workflow_tasks WHERE workflow_id = $1",
     )
@@ -247,7 +247,7 @@ async fn running_replay_preserves_the_first_node_start() {
 
     let started = start_attempt(&context, &facts(task_id, claimed_at)).await;
 
-    assert!(matches!(started, Started::Running));
+    assert!(matches!(started, Started::Running { .. }));
     let persisted: DateTime<Utc> =
         sql::query_scalar("SELECT started_at FROM horsies_workflow_tasks WHERE workflow_id = $1")
             .bind(workflow_id)
@@ -279,7 +279,7 @@ async fn plain_task_starts_running_without_workflow_update() {
 
     let started = start_attempt(&context, &facts(task_id, claimed_at)).await;
 
-    assert!(matches!(started, Started::Running));
+    assert!(matches!(started, Started::Running { .. }));
     let status: String = sql::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
         .bind(task_id)
         .fetch_one(&pool)
@@ -322,7 +322,7 @@ async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
 
         let started = start_attempt(&context, &facts(task_id, claimed_at)).await;
         let outcome = match started {
-            Started::Running => "running",
+            Started::Running { .. } => "running",
             Started::Stopped(StopReason::OrphanCancelled) => "aborted",
             Started::Stopped(other) => panic!("unexpected stop of the start: {other:?}"),
         };

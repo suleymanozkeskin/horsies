@@ -97,6 +97,7 @@ from horsies.core.worker.child_main import (
 from horsies.core.worker.child_frames import (
     MAX_LEFTOVER_TASK_NAMES,
     BootFailedFrame,
+    AttemptStart,
     ChildFrame,
     DeadlineFiredFrame,
     LeftoverCancelFrame,
@@ -108,6 +109,8 @@ from horsies.core.worker.child_frames import (
     SeatEnd,
     SeatTimedOut,
     SharedResultFrame,
+    StartNotReported,
+    StartReported,
     boot_failed_frame,
 )
 from horsies.core.worker.loop_watchdog import LoopWatchdog
@@ -248,6 +251,7 @@ def bounded_result_frame(task_name: str, frame: FrameWithResult) -> FrameWithRes
                 dispatch=frame.dispatch,
                 task_id=frame.task_id,
                 returned=bounded_envelope(task_name, returned),
+                started_at=frame.started_at,
             )
         case LeftoverStuckFrame(returned=returned):
             return LeftoverStuckFrame(
@@ -257,6 +261,7 @@ def bounded_result_frame(task_name: str, frame: FrameWithResult) -> FrameWithRes
                 executor_items=frame.executor_items,
                 names=frame.names,
                 returned=bounded_envelope(task_name, returned),
+                started_at=frame.started_at,
             )
         case _ as unreachable:
             assert_never(unreachable)
@@ -276,6 +281,7 @@ def _bounded_shared_result(
                 dispatch=frame.dispatch,
                 task_id=frame.task_id,
                 end=bounded_end(task_name, finished),
+                started=frame.started,
                 rss=frame.rss,
             )
         case SeatTimedOut():
@@ -721,12 +727,14 @@ class SeatLoop:
             self._check_end(dispatch)
             return
         seat.stop = _LeftoverCancel(left)
+        returned = _returned_run(seat)
         self._writer.send_result(
             seat.frame.task_name,
             LeftoverCancelFrame(
                 dispatch=dispatch,
                 task_id=seat.frame.task_id,
-                returned=_returned_result(seat),
+                returned=returned.result,
+                started_at=returned.started_at,
             ),
         )
         self._cancel_round(dispatch, 0)
@@ -791,6 +799,7 @@ class SeatLoop:
             case _LeftoverCancel(left=left):
                 seat.stop = _LeftoverStuck(left)
                 _log_left_work(seat.frame, left, _LeftWorkEnd.STUCK)
+                returned = _returned_run(seat)
                 self._writer.send_result(
                     seat.frame.task_name,
                     LeftoverStuckFrame(
@@ -799,7 +808,8 @@ class SeatLoop:
                         tasks=len(tasks),
                         executor_items=alive.executor_items,
                         names=bounded_names,
-                        returned=_returned_result(seat),
+                        returned=returned.result,
+                        started_at=returned.started_at,
                     ),
                 )
             case (
@@ -978,6 +988,7 @@ class SeatLoop:
                 dispatch=dispatch,
                 task_id=seat.frame.task_id,
                 end=end,
+                started=_start_of(seat),
                 rss=self._read_rss(),
             ),
         )
@@ -1081,13 +1092,14 @@ def _returned_end(
             assert_never(unreachable)
 
 
-def _returned_result(seat: _Seat) -> ResultEnvelope:
-    """The result envelope of a run whose body returned and left work. A run
-    that stopped before its start ran no task code and left no work, so a
-    stop here is a defect: ``AssertionError``."""
-    match _returned_end(seat):
-        case ResultEnvelope() as result:
-            return result
+def _returned_run(seat: _Seat) -> SetRunning:
+    """The return of a run whose body returned and left work: its result
+    envelope and the time of its start write. A run that stopped before its
+    start ran no task code and left no work, so a stop here is a defect:
+    ``AssertionError``."""
+    match _seat_return(seat):
+        case SetRunning() as returned:
+            return returned
         case StoppedBeforeRunning() as stopped:
             raise AssertionError(
                 f'run {seat.frame.dispatch} stopped before running ({stopped.reason}) '
@@ -1098,6 +1110,24 @@ def _returned_result(seat: _Seat) -> ResultEnvelope:
                 f'run {seat.frame.dispatch} stopped before running (its core '
                 'stopped) and left work',
             )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _start_of(seat: _Seat) -> AttemptStart:
+    """The start of a run whose coroutine ended: the time of its start
+    write when it set its row RUNNING. A run that stopped before its start
+    has none, and neither has a run whose deadline cancelled its coroutine
+    during the start write (the cancel then leaves the coroutine; after the
+    start, the seat runner maps it into the end of the body)."""
+    task = seat.task
+    if task.cancelled() or task.exception() is not None:
+        return StartNotReported()
+    match task.result():
+        case SetRunning(started_at=started_at):
+            return StartReported(started_at)
+        case StoppedBeforeRunning() | CoreStoppedBeforeStart():
+            return StartNotReported()
         case _ as unreachable:
             assert_never(unreachable)
 

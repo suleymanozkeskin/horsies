@@ -87,6 +87,7 @@ from horsies.core.worker.run_return import (
     ResultEnvelope,
     RunReturn,
     SetRunning,
+    StartedRunning,
     StoppedBeforeRunning,
 )
 from horsies.core.worker.task_loop import (
@@ -761,10 +762,11 @@ def _confirm_until_not_resumed(
     *,
     orphan_self_heal: bool,
     start_check: Callable[[], StartCheck] = start_always_allowed,
-) -> StoppedBeforeRunning | None | DeadlineBeforeStart | CoreStoppedBeforeStart:
+) -> StartedRunning | StoppedBeforeRunning | DeadlineBeforeStart | CoreStoppedBeforeStart:
     """Run the RUNNING transition again when a resume came before the stop.
 
-    Returns None to start the task, or the stop that ends it
+    Returns ``StartedRunning`` with the time of the start write to start the
+    task, or the stop that ends it
     (``CoreStoppedBeforeStart``: the core of the child stopped). A
     workflow resumed on every one of ``_PRE_START_CONFIRM_ATTEMPTS`` tries
     returns OWNERSHIP_UNCONFIRMED; the worker then releases the claim
@@ -783,7 +785,7 @@ def _confirm_until_not_resumed(
             case _WorkflowResumedBeforeStart():
                 continue
             case (
-                None
+                StartedRunning()
                 | StoppedBeforeRunning()
                 | DeadlineBeforeStart()
                 | CoreStoppedBeforeStart()
@@ -807,13 +809,14 @@ def _confirm_ownership_and_set_running(
     orphan_self_heal: bool,
     start_check: Callable[[], StartCheck] = start_always_allowed,
 ) -> (
-    StoppedBeforeRunning
-    | None
+    StartedRunning
+    | StoppedBeforeRunning
     | _WorkflowResumedBeforeStart
     | DeadlineBeforeStart
     | CoreStoppedBeforeStart
 ):
-    """Set the row RUNNING. None: started.
+    """Set the row RUNNING. ``StartedRunning``: started, at the time that
+    the start write returned.
 
     One ``horsies_start_attempt`` statement through the core handle of the
     child (``CoreChildHandle.start_attempt``), fenced to ``worker_id`` and the
@@ -862,8 +865,8 @@ def _confirm_ownership_and_set_running(
             deadline_in_ms=deadline_in_ms,
         )
         match record:
-            case core.AttemptStarted():
-                return None
+            case core.AttemptStarted(started_at=started_at):
+                return StartedRunning(started_at)
             case core.AttemptMissed(reason=reason):
                 return _after_missed_start(
                     handle,
@@ -1032,9 +1035,11 @@ def encoded_body_end(
 
 def set_running_or_end_child(
     task_id: str,
+    started: StartedRunning,
     ran: ResultEnvelope | BodyInterrupted,
 ) -> SetRunning:
-    """The return of a run whose body ran after its RUNNING update.
+    """The return of a run whose body ran after its RUNNING update at
+    ``started``.
 
     ``BodyInterrupted`` ends the child at once with no report
     (``end_child_after_core_refusal``): the body has no result, so the
@@ -1042,7 +1047,7 @@ def set_running_or_end_child(
     policy of the task applies. Does not return then."""
     match ran:
         case ResultEnvelope():
-            return SetRunning(ran)
+            return SetRunning(ran, started.started_at)
         case BodyInterrupted(refusal=refusal):
             end_child_after_core_refusal(refusal, f'During the body of task {task_id}')
         case _ as unreachable:
@@ -1605,7 +1610,7 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
         orphan_self_heal=orphan_self_heal,
     )
     match ownership_result:
-        case None:
+        case StartedRunning() as started:
             pass
         case StoppedBeforeRunning() | CoreStoppedBeforeStart():
             return ownership_result
@@ -1617,6 +1622,7 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
             assert_never(unreachable)
     return set_running_or_end_child(
         task_id,
+        started,
         _run_isolated_after_running(
             task_name,
             input_json,

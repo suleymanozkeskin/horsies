@@ -494,6 +494,9 @@ fn logging_children(dir: &TestDir, tasks: &[ClaimedTask], runs: usize, rss: RssR
             let result = ChildFrame::Result(ResultFrame {
                 task_id: task.task_id,
                 end: RunEnd::Result(super::scripted::ok_envelope(value)),
+                started_at: crate::events::AttemptStart::Reported {
+                    started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+                },
                 rss,
                 task_loop: NoLeftWork::NoTaskLoop,
                 child: ChildAfterFrame::ServesOn,

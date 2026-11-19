@@ -69,7 +69,7 @@ from horsies.core.worker.child_runner import (
     _serialization_error_response,
     attempt_elapsed_ms,
 )
-from horsies.core.worker.run_return import SetRunning, StoppedBeforeRunning
+from horsies.core.worker.run_return import SetRunning, StartedRunning, StoppedBeforeRunning
 from tests.fixtures.core_frames import init_frame, isolated_kind, pool
 from tests.fixtures.run_return import envelope_of
 
@@ -80,6 +80,13 @@ TASK_ID = '0b4d8a52-7d0e-4a0e-9d11-6b2f1f7c9e02'
 # ---------------------------------------------------------------------------
 # Shared fakes
 # ---------------------------------------------------------------------------
+
+
+STARTED_AT: Final = datetime(2026, 11, 17, 10, 0, 1, tzinfo=timezone.utc)
+"""The time that the fake start write returns."""
+
+STARTED: Final = StartedRunning(STARTED_AT)
+"""The start that a stubbed ownership confirm returns."""
 
 
 def _record(record_class: type, **fields: object) -> MagicMock:
@@ -394,6 +401,7 @@ class TestChildBoot:
 
         mock_init_core_handle.assert_called_once_with(init)
         handed: core.InitFrame = mock_init_core_handle.call_args.args[0]
+        assert isinstance(handed.child_kind, core.IsolatedChildKind), handed.child_kind
         child_pool = handed.child_kind.pool
         assert (child_pool.min_size, child_pool.max_size, child_pool.check) == (0, 1, False)
 
@@ -806,7 +814,7 @@ class TestStopBeforeStart:
 
 def _make_run_task_patches(
     *,
-    ownership: Any = None,
+    ownership: Any = STARTED,
     task_fn: Any = None,
     task_missing: bool = False,
 ) -> dict[str, Any]:
@@ -1873,12 +1881,12 @@ class TestAttemptElapsedMs:
 class TestStartAttempt:
     def test_a_started_row_runs_the_task_after_one_call(self) -> None:
         handle = _FakeChildHandle(
-            starts=[_record(core.AttemptStarted, task_id=uuid.UUID(TASK_ID))],
+            starts=[_record(core.AttemptStarted, task_id=uuid.UUID(TASK_ID), started_at=STARTED_AT)],
         )
 
         result = _start_with(handle)
 
-        assert result is None
+        assert result == STARTED
         assert handle.calls == [
             (
                 'start_attempt',
@@ -1919,10 +1927,10 @@ class TestStartAttempt:
         from horsies.core.worker.child_runner import StartWithin
 
         handle = _FakeChildHandle(
-            starts=[_record(core.AttemptStarted, task_id=uuid.UUID(TASK_ID))],
+            starts=[_record(core.AttemptStarted, task_id=uuid.UUID(TASK_ID), started_at=STARTED_AT)],
         )
 
-        assert _start_with(handle, start_check=lambda: StartWithin(milliseconds=250)) is None
+        assert _start_with(handle, start_check=lambda: StartWithin(milliseconds=250)) == STARTED
         assert handle.calls[0][2]['deadline_in_ms'] == 250
 
     def test_a_deadline_that_passed_before_the_check_sends_nothing(self) -> None:
@@ -2158,7 +2166,7 @@ class TestChildWritesNoRunnerHeartbeat:
         handle = MagicMock()
         patches: dict[str, Any] = {
             'horsies.core.worker.child_runner._confirm_ownership_and_set_running': MagicMock(
-                return_value=None,
+                return_value=STARTED,
             ),
             'horsies.core.worker.child_runner.get_current_app': MagicMock(
                 return_value=app,
