@@ -287,7 +287,7 @@ async fn a_program_that_does_not_exist_fails_the_pool_after_three_attempts() {
 async fn a_spawn_failure_counts_while_another_slot_serves() {
     let dir = TestDir::new();
     let program = dir.path().join("sh");
-    std::os::unix::fs::symlink("/bin/sh", &program).unwrap();
+    std::os::unix::fs::symlink(crate::test_support::SCRIPT_SHELL, &program).unwrap();
     let command = ChildCommand {
         program: program.clone(),
         args: vec!["-c".into(), idle_child(&isolated_init()).into()],

@@ -1,7 +1,7 @@
 //! Tests of the preload fork path, Linux only, with a scripted preload
 //! process: a `python3` program that reads the init frame, writes preload
 //! frames, and answers each spawn request by a real double fork whose
-//! child runs a `/bin/sh` script on the socket it was given.
+//! child runs a bash script on the socket it was given.
 //!
 //! The subreaper flag and the orphan sweep act on the whole process, and a
 //! test process holds many spawners, so each test runs in a child process
@@ -55,6 +55,9 @@ const TEST_WAIT: Duration = Duration::from_secs(20);
 ///   process in its own session with a second thread, writes `<helper pid>
 ///   <thread id>` to `<file>`, and reports the thread id as the forked
 ///   child. A pidfd of a thread that leads no process cannot open.
+///
+/// `{script_shell}` stands for [`crate::test_support::SCRIPT_SHELL`], the
+/// program of the forked child; [`plan`] puts it in.
 const SCRIPTED_PRELOAD: &str = r#"
 import ctypes, json, os, signal, socket, struct, sys, threading, time
 
@@ -170,7 +173,7 @@ while True:
                 time.sleep(0.0002)
             ctypes.CDLL(None).prctl(1, signal.SIGKILL, 0, 0, 0)
             os.set_inheritable(child_fd, True)
-            os.execv('/bin/sh', ['/bin/sh', '-c', CHILD, str(child_fd), str(worker_pid)])
+            os.execv('{script_shell}', ['{script_shell}', '-c', CHILD, str(child_fd), str(worker_pid)])
         if behaviour == 'exit_at_once':
             os.waitid(os.P_PID, child, os.WEXITED | os.WNOWAIT)
         os.write(write_end, str(child).encode())
@@ -197,7 +200,7 @@ const EXEC_MARK: &[u8; 6] = b"exec__";
 
 fn exec_command() -> ChildCommand {
     ChildCommand {
-        program: "/bin/sh".into(),
+        program: crate::test_support::SCRIPT_SHELL.into(),
         args: vec!["-c".into(), EXEC_CHILD.into()],
     }
 }
@@ -224,7 +227,13 @@ fn plan(behaviour: &str) -> PreloadPlan {
     PreloadPlan {
         command: ChildCommand {
             program: "python3".into(),
-            args: vec!["-c".into(), SCRIPTED_PRELOAD.into(), behaviour.into()],
+            args: vec![
+                "-c".into(),
+                SCRIPTED_PRELOAD
+                    .replace("{script_shell}", crate::test_support::SCRIPT_SHELL)
+                    .into(),
+                behaviour.into(),
+            ],
         },
         mode: PreloadMode::Library,
         init: init(),
@@ -548,7 +557,7 @@ fn every_exit_of_both_paths_is_reaped_once() {
             let mut children = Vec::new();
             for index in 0..4_u32 {
                 let command = ChildCommand {
-                    program: "/bin/sh".into(),
+                    program: crate::test_support::SCRIPT_SHELL.into(),
                     args: vec![
                         "-c".into(),
                         format!(

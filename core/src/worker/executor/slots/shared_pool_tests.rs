@@ -1,5 +1,5 @@
 //! Tests of the board of every slot, and of shared pools driven by
-//! scripted children (`/bin/sh` scripts that write frames with `printf`).
+//! scripted children (bash scripts that write frames with `printf`).
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -224,7 +224,7 @@ fn scripted_child(kind: SharedChildKindOfTest, frames: &[ChildFrame], after: &st
         frames = child_frames(frames),
     );
     ChildCommand {
-        program: "/bin/sh".into(),
+        program: crate::test_support::SCRIPT_SHELL.into(),
         args: vec!["-c".into(), script.into()],
     }
 }

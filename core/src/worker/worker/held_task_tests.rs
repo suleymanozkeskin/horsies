@@ -1,6 +1,6 @@
 //! Worker runs that hold one task in a scripted child.
 //!
-//! - The child is a `/bin/sh` script ([`child_holding_its_first_run`]): it
+//! - The child is a bash script ([`child_holding_its_first_run`]): it
 //!   boots, reads the run frame and answers nothing, so the task stays held
 //!   in the child.
 //! - The test writes the start of the attempt as a child does
