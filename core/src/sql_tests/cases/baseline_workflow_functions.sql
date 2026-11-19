@@ -72,7 +72,7 @@ BEGIN
             ARRAY['default'], ARRAY[50], ARRAY['[]'], ARRAY[NULL::text], ARRAY[NULL::text], ARRAY[FALSE],
             ARRAY['all'], ARRAY[NULL::integer], ARRAY[NULL::text], ARRAY[0], ARRAY['ISOLATED'],
             ARRAY[NULL::timestamptz], ARRAY['forever'], ARRAY[FALSE], ARRAY[NULL::text], ARRAY[NULL::text],
-            ARRAY[NULL::text], ARRAY[]::uuid[], ARRAY[]::integer[], ARRAY[]::text[])
+            ARRAY[NULL::text], ARRAY[]::uuid[], ARRAY[]::integer[], ARRAY[]::text[], 'NO_CARRIER', NULL, NULL)
     $q$, '22023', 'start refuses node arrays of different lengths');
     PERFORM wft_refused($q$
         SELECT * FROM wft_start1('00000000-0000-7000-8000-000000000102', 'fail', '[{"idx":0},{"idx":0}]')
@@ -1750,7 +1750,7 @@ BEGIN
             ARRAY['default'], ARRAY[50], ARRAY['[]'], ARRAY[NULL::text], ARRAY[NULL::text], ARRAY[FALSE],
             ARRAY['all'], ARRAY[NULL::integer], ARRAY[NULL::text], ARRAY[NULL::integer], ARRAY[NULL::text],
             ARRAY[NULL::timestamptz], ARRAY[NULL::text], ARRAY[TRUE], ARRAY['child.wf'], ARRAY['child.key'],
-            ARRAY[NULL::text], ARRAY[]::uuid[], ARRAY[]::integer[], ARRAY[]::text[])
+            ARRAY[NULL::text], ARRAY[]::uuid[], ARRAY[]::integer[], ARRAY[]::text[], 'NO_CARRIER', NULL, NULL)
     $q$, '23514', 'start refuses a sub-workflow node with no params choice (table CHECK)');
 END $$;
 
@@ -1883,8 +1883,8 @@ BEGIN
             p_max_retries integer[], p_good_untils timestamp with time zone[], p_sent_ats timestamp with time zone[],
             p_enqueued_ats timestamp with time zone[], p_is_workflow_tasks boolean[],
             p_fingerprint_versions smallint[], p_fingerprints bytea[], p_key_digests bytea[],
-            p_rerun_of_task_ids uuid[], p_rerun_root_task_ids uuid[], p_row_time timestamp with time zone,
-            p_conflict_lock text
+            p_rerun_of_task_ids uuid[], p_rerun_root_task_ids uuid[], p_trace_carriers text[], p_trace_ids bytea[],
+            p_row_time timestamp with time zone, p_conflict_lock text
         ) RETURNS TABLE(ordinality bigint, task_id uuid, outcome text) LANGUAGE sql AS $f$
             SELECT u.position, u.id, 'PAYLOAD_MISMATCH'::text FROM unnest(p_ids) WITH ORDINALITY AS u(id, position)
         $f$;
@@ -3031,4 +3031,126 @@ BEGIN
                           'unreadable result: the workflow error of a required FAILED node names the cause: '
                           || v_stored);
     END LOOP;
+END $$;
+
+-- Trace pair: start, promotion, child start, moves --------------------------------------------------------------------
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000fa1';
+    v_child uuid := '00000000-0000-7000-8000-000000000fa2';
+    v_carrier text := '{"traceparent":"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}';
+    v_trace_id bytea := decode('0af7651916cd43dd8448eb211c80319c', 'hex');
+    v_root_task uuid;
+BEGIN
+    -- Root 0 has a pre-built child; node 1 depends on root 2, so a later promotion mints its task row.
+    PERFORM * FROM wft_start(
+        jsonb_build_array(
+            jsonb_build_object('id', v_wf, 'on_error', 'fail'),
+            jsonb_build_object('id', v_child, 'on_error', 'fail', 'parent', v_wf, 'parent_index', 0, 'depth', 1)),
+        jsonb_build_array(
+            jsonb_build_object('idx', 0, 'sub', true),
+            jsonb_build_object('idx', 1, 'deps', jsonb_build_array(2)),
+            jsonb_build_object('idx', 2),
+            jsonb_build_object('wf', v_child, 'idx', 0)),
+        '[]', v_carrier, v_trace_id
+    );
+    PERFORM wft_check((wft_workflow(v_wf)).trace_carrier = v_carrier AND (wft_workflow(v_wf)).trace_id = v_trace_id
+                      AND (wft_workflow(v_child)).trace_carrier = v_carrier
+                      AND (wft_workflow(v_child)).trace_id = v_trace_id,
+                      'trace: every workflow row of a started tree stores the pair of the start');
+    PERFORM wft_check((SELECT count(*) FROM horsies_tasks
+                       WHERE id IN (wft_task_of(v_wf, 2), wft_task_of(v_child, 0))
+                         AND trace_carrier = v_carrier AND trace_id = v_trace_id) = 2,
+                      'trace: the task rows of the roots copy the pair of their workflow');
+    v_root_task := wft_task_of(v_wf, 2);
+    PERFORM wft_finish(v_wf, 2, wft_ok('1'));
+    PERFORM wft_check((SELECT trace_carrier = v_carrier AND trace_id = v_trace_id FROM horsies_tasks
+                       WHERE id = wft_task_of(v_wf, 1)),
+                      'trace: a task row that a later promotion mints copies the pair of its workflow');
+    PERFORM wft_check((SELECT trace_id = v_trace_id FROM horsies_task_history WHERE task_id = v_root_task),
+                      'trace: the move of one row copies the trace id to history');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000fa3';
+    v_child uuid := '00000000-0000-7000-8000-000000000fa4';
+    v_carrier text := '{"b3":"80f198ee56343ba864fe8b2a57d3eff7-e457b5a2e4d86bd1-1"}';
+    v_trace_id bytea := decode('80f198ee56343ba864fe8b2a57d3eff7', 'hex');
+BEGIN
+    -- Node 1 is a sub-workflow node behind root 0: its child starts in the step that owes it, with no trace argument.
+    PERFORM * FROM wft_start(
+        jsonb_build_array(jsonb_build_object('id', v_wf, 'on_error', 'fail')),
+        '[{"idx":0},{"idx":1,"deps":[0],"sub":true}]', '[]', v_carrier, v_trace_id
+    );
+    PERFORM wft_finish(v_wf, 0, wft_ok('1'));
+    PERFORM * FROM wft_child_start(v_wf, 1,
+        jsonb_build_array(
+            jsonb_build_object('id', v_child, 'on_error', 'fail', 'parent', v_wf, 'parent_index', 1, 'depth', 1)),
+        jsonb_build_array(jsonb_build_object('wf', v_child, 'idx', 0))
+    );
+    PERFORM wft_check((wft_workflow(v_child)).trace_carrier = v_carrier
+                      AND (wft_workflow(v_child)).trace_id = v_trace_id,
+                      'trace: a deferred child start copies the pair of its parent workflow');
+    PERFORM wft_check((SELECT trace_carrier = v_carrier AND trace_id = v_trace_id FROM horsies_tasks
+                       WHERE id = wft_task_of(v_child, 0)),
+                      'trace: the task rows of a deferred child copy the pair');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000fa5';
+    v_carrier text := '{"traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}';
+    v_trace_id bytea := decode('4bf92f3577b34da6a3ce929d0e0e4736', 'hex');
+    v_tasks uuid[];
+    v_row record;
+BEGIN
+    PERFORM * FROM wft_start(
+        jsonb_build_array(jsonb_build_object('id', v_wf, 'on_error', 'fail')), '[{"idx":0},{"idx":1}]', '[]',
+        v_carrier, v_trace_id
+    );
+    v_tasks := ARRAY[wft_task_of(v_wf, 0), wft_task_of(v_wf, 1)];
+    SELECT * INTO v_row FROM horsies_workflow_cancel(v_wf);
+    PERFORM wft_check(v_row.outcome = 'CANCELLED', 'trace: the workflow is cancelled');
+    PERFORM wft_check((SELECT count(*) FROM horsies_task_history
+                       WHERE task_id = ANY(v_tasks) AND trace_id = v_trace_id) = 2,
+                      'trace: the batch move copies the trace id of each row to history');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000fa6';
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0}]');
+    PERFORM wft_check((wft_workflow(v_wf)).trace_carrier IS NULL AND (wft_workflow(v_wf)).trace_id IS NULL
+                      AND (SELECT trace_carrier IS NULL AND trace_id IS NULL FROM horsies_tasks
+                           WHERE id = wft_task_of(v_wf, 0)),
+                      'trace: a start with no carrier stores no pair, and its task rows hold none');
+    PERFORM wft_refused($q$
+        UPDATE horsies_workflows SET trace_carrier = '{}' WHERE id = '00000000-0000-7000-8000-000000000fa6'
+    $q$, '23514', 'trace: a workflow row refuses a carrier with no trace id (table CHECK)');
+    PERFORM wft_refused($q$
+        UPDATE horsies_workflows SET trace_carrier = '{}', trace_id = '\x00'::bytea
+        WHERE id = '00000000-0000-7000-8000-000000000fa6'
+    $q$, '23514', 'trace: a workflow row refuses a trace id that is not 16 bytes (table CHECK)');
+END $$;
+
+DO $$
+BEGIN
+    PERFORM wft_refused($q$
+        SELECT * FROM wft_start_traced('00000000-0000-7000-8000-000000000fa7', 'MAYBE', NULL, NULL)
+    $q$, '22023', 'trace: start refuses an unknown trace kind');
+    PERFORM wft_refused($q$
+        SELECT * FROM wft_start_traced('00000000-0000-7000-8000-000000000fa7', 'NO_CARRIER', '{}', NULL)
+    $q$, '22023', 'trace: start refuses a carrier text with NO_CARRIER');
+    PERFORM wft_refused($q$
+        SELECT * FROM wft_start_traced('00000000-0000-7000-8000-000000000fa7', 'CARRIER', '{}', NULL)
+    $q$, '22023', 'trace: start refuses CARRIER with no trace id');
+    PERFORM wft_refused($q$
+        SELECT * FROM wft_start_traced('00000000-0000-7000-8000-000000000fa7', 'CARRIER', '{}',
+                                       decode('0af7651916cd43dd8448eb211c8031', 'hex'))
+    $q$, '22023', 'trace: start refuses a trace id that is not 16 bytes');
+    PERFORM wft_check(NOT EXISTS (SELECT 1 FROM horsies_workflows WHERE id = '00000000-0000-7000-8000-000000000fa7'),
+                      'trace: start refusals write nothing');
 END $$;

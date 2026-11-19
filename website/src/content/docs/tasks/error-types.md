@@ -268,6 +268,8 @@ def validate_order(*, order_id: str) -> TaskResult[dict[str, JsonValue], TaskErr
     return TaskResult(ok={"status": "valid"})
 ```
 
+Declare a task's codes with `error_codes=` to give each one its own value of the `error_code` metric label; another user code counts as `undeclared` there. See [Declare Error Codes](/horsies/tasks/defining-tasks/#declare-error-codes).
+
 User-defined codes are auto-retried when listed in `auto_retry_for`:
 
 ```python
@@ -331,6 +333,18 @@ Use the `horsies check` command to validate your configuration, task registry, a
 ```bash
 horsies check myapp.instance:app
 ```
+
+On success it prints the task count and the declared error codes of each task that declares some:
+
+```text
+ok: all validations passed
+  3 task(s) registered
+  declared error codes:
+    charge_card: CARD_DECLINED, RATE_LIMITED
+    send_receipt: BOUNCED
+```
+
+With no declared code, the last line is `  declared error codes: none`.
 
 ## HorsiesError Structure
 

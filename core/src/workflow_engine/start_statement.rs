@@ -41,13 +41,14 @@ use crate::workflow_engine::steps::{
 };
 
 /// `horsies_workflow_start`: the workflow rows of the tree (top-level first),
-/// the start call time, the node rows, and the failed-node records.
+/// the start call time, the node rows, the failed-node records, and the
+/// trace `NO_CARRIER` (the start stores no carrier).
 pub(crate) static START: TypedStatement = TypedStatement::new(
     "horsies_workflow_start",
     step_row_select!(
         "horsies_workflow_start($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, \
          $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, \
-         $33, $34, $35)"
+         $33, $34, $35, 'NO_CARRIER', NULL, NULL)"
     ),
     &[
         // Workflow rows.

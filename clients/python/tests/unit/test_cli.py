@@ -1122,6 +1122,7 @@ class TestCheckCommand:
         app = _make_mock_app()
         app.check.return_value = []
         app.list_tasks.return_value = ['task1', 'task2']
+        app.declared_error_codes.return_value = {}
         mock_discover.return_value = (app, 'app', 'my.mod', None)
         args = _make_check_namespace()
 
@@ -1131,8 +1132,41 @@ class TestCheckCommand:
         assert exc_info.value.code == 0
 
         captured = capsys.readouterr()
-        assert 'ok: all validations passed' in captured.out
-        assert '2 task(s) registered' in captured.out
+        assert captured.out == (
+            'ok: all validations passed\n'
+            '  2 task(s) registered\n'
+            '  declared error codes: none\n'
+        )
+
+    @patch('horsies.core.cli.setup_logging', autospec=True)
+    @patch('horsies.core.cli.discover_app', autospec=True)
+    def test_the_success_text_lists_the_declared_error_codes(
+        self,
+        mock_discover: MagicMock,
+        _mock_logging: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        app = _make_mock_app()
+        app.check.return_value = []
+        app.list_tasks.return_value = ['resize', 'send_mail', 'charge']
+        app.declared_error_codes.return_value = {
+            'send_mail': ('BOUNCED',),
+            'charge': ('RATE_LIMITED', 'CARD_DECLINED'),
+        }
+        mock_discover.return_value = (app, 'app', 'my.mod', None)
+
+        with pytest.raises(SystemExit) as exc_info:
+            check_command(_make_check_namespace())
+        assert exc_info.value.code == 0
+
+        # The text of the Rust client's `CheckPassed`, line for line.
+        assert capsys.readouterr().out == (
+            'ok: all validations passed\n'
+            '  3 task(s) registered\n'
+            '  declared error codes:\n'
+            '    charge: RATE_LIMITED, CARD_DECLINED\n'
+            '    send_mail: BOUNCED\n'
+        )
 
 
 # ---------------------------------------------------------------------------

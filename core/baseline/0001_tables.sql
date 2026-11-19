@@ -96,6 +96,12 @@ CREATE TABLE horsies_tasks (
     retain_rerun_input boolean NOT NULL,
     rerun_of_task_id uuid,
     rerun_root_task_id uuid,
+    -- Trace, written once at enqueue: the carrier of the producer's propagator as the core's canonical JSON text, and
+    -- the 16-byte trace id of the producer span. Both NULL when the send carried none, or when the carrier broke a
+    -- bound of the core's check. A schedule fire writes none; a workflow task copies its workflow's pair. Not part of
+    -- the command fingerprint: a send that answers from an existing row keeps the pair of that row.
+    trace_carrier text,
+    trace_id bytea,
     CONSTRAINT horsies_tasks_pkey PRIMARY KEY (id),
     CONSTRAINT horsies_tasks_status_live CHECK (
         status IN ('PENDING', 'CLAIMED', 'RUNNING')
@@ -135,6 +141,10 @@ CREATE TABLE horsies_tasks (
     CONSTRAINT horsies_tasks_rerun_lineage_pair CHECK (
         (rerun_of_task_id IS NULL AND rerun_root_task_id IS NULL)
         OR (rerun_of_task_id IS NOT NULL AND rerun_root_task_id IS NOT NULL)
+    ),
+    CONSTRAINT horsies_tasks_trace_pair CHECK (
+        (trace_carrier IS NULL AND trace_id IS NULL)
+        OR (trace_carrier IS NOT NULL AND trace_id IS NOT NULL AND octet_length(trace_id) = 16)
     )
 );
 
@@ -249,6 +259,11 @@ CREATE TABLE horsies_workflows (
     started_at timestamp with time zone,
     completed_at timestamp with time zone,
     updated_at timestamp with time zone NOT NULL,
+    -- Trace, written once at the start: the carrier and the trace id of the start call's span (the forms of
+    -- horsies_tasks.trace_carrier and trace_id). Every workflow row of a started tree holds the pair of the start; a
+    -- deferred child start copies its parent's pair; the task rows of the nodes copy the pair of their workflow.
+    trace_carrier text,
+    trace_id bytea,
     CONSTRAINT horsies_workflows_pkey PRIMARY KEY (id),
     CONSTRAINT horsies_workflows_status_known CHECK (
         status IN ('PENDING', 'RUNNING', 'PAUSED', 'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
@@ -259,6 +274,10 @@ CREATE TABLE horsies_workflows (
         (parent_workflow_id IS NULL) = (parent_task_index IS NULL)
     ),
     CONSTRAINT horsies_workflows_root_depth CHECK ((depth = 0) = (parent_workflow_id IS NULL)),
+    CONSTRAINT horsies_workflows_trace_pair CHECK (
+        (trace_carrier IS NULL AND trace_id IS NULL)
+        OR (trace_carrier IS NOT NULL AND trace_id IS NOT NULL AND octet_length(trace_id) = 16)
+    ),
     CONSTRAINT horsies_workflows_parent_workflow_id_fkey FOREIGN KEY (parent_workflow_id)
         REFERENCES horsies_workflows (id) ON DELETE CASCADE
 );
@@ -640,6 +659,9 @@ CREATE TABLE horsies_task_history (
     rerun_input_version smallint,
     rerun_input_digest bytea,
     rerun_input_inline bytea,
+    -- Trace id of the producer span, copied from the live row (NULL when the live row had none). The carrier is not
+    -- kept: no attempt runs after the move.
+    trace_id bytea,
     CONSTRAINT horsies_task_history_result_domain CHECK (
         terminalization_kind <> 'CANCEL_ADMIN' OR (result_payload IS NULL AND result_digest IS NULL)
     ),

@@ -11849,7 +11849,9 @@
      "MODULE_EXEC_ERROR": "'HRS-210'",
      "TASK_CANCEL_GRACE_OUT_OF_RANGE": "'HRS-111'",
      "TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC": "'HRS-110'",
+     "TASK_DUPLICATE_ERROR_CODE": "'HRS-113'",
      "TASK_DUPLICATE_NAME": "'HRS-301'",
+     "TASK_INVALID_ERROR_CODE": "'HRS-112'",
      "TASK_INVALID_OPTIONS": "'HRS-102'",
      "TASK_INVALID_QUEUE": "'HRS-103'",
      "TASK_INVALID_RETURN_TYPE": "'HRS-101'",
@@ -12671,6 +12673,22 @@
        }
       ],
       "returns": "list[horsies.core.errors.HorsiesError]"
+     }
+    },
+    "declared_error_codes": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       }
+      ],
+      "returns": "dict[str, tuple[str, ...]]"
      }
     },
     "discover_tasks": {
@@ -13562,6 +13580,12 @@
          "default": "None",
          "kind": "KEYWORD_ONLY",
          "name": "default_unhandled_error_code"
+        },
+        {
+         "annotation": "tuple[str, ...] | type[enum.Enum]",
+         "default": "()",
+         "kind": "KEYWORD_ONLY",
+         "name": "error_codes"
         }
        ],
        "returns": "horsies.core.task_decorator.SharedAsyncTaskDecorator"
@@ -13616,6 +13640,12 @@
          "default": "None",
          "kind": "KEYWORD_ONLY",
          "name": "default_unhandled_error_code"
+        },
+        {
+         "annotation": "tuple[str, ...] | type[enum.Enum]",
+         "default": "()",
+         "kind": "KEYWORD_ONLY",
+         "name": "error_codes"
         }
        ],
        "returns": "horsies.core.task_decorator.SharedThreadTaskDecorator"
@@ -13676,6 +13706,12 @@
          "default": "None",
          "kind": "KEYWORD_ONLY",
          "name": "default_unhandled_error_code"
+        },
+        {
+         "annotation": "tuple[str, ...] | type[enum.Enum]",
+         "default": "()",
+         "kind": "KEYWORD_ONLY",
+         "name": "error_codes"
         }
        ],
        "returns": "horsies.core.task_decorator.CancelGraceRefusedDecorator"
@@ -13718,6 +13754,12 @@
          "default": "None",
          "kind": "KEYWORD_ONLY",
          "name": "default_unhandled_error_code"
+        },
+        {
+         "annotation": "tuple[str, ...] | type[enum.Enum]",
+         "default": "()",
+         "kind": "KEYWORD_ONLY",
+         "name": "error_codes"
         },
         {
          "annotation": "None | int",
@@ -13778,6 +13820,12 @@
          "default": "None",
          "kind": "KEYWORD_ONLY",
          "name": "default_unhandled_error_code"
+        },
+        {
+         "annotation": "tuple[str, ...] | type[enum.Enum]",
+         "default": "()",
+         "kind": "KEYWORD_ONLY",
+         "name": "error_codes"
         },
         {
          "annotation": "None | int",
@@ -13850,6 +13898,12 @@
          "default": "None",
          "kind": "KEYWORD_ONLY",
          "name": "default_unhandled_error_code"
+        },
+        {
+         "annotation": "tuple[str, ...] | type[enum.Enum]",
+         "default": "()",
+         "kind": "KEYWORD_ONLY",
+         "name": "error_codes"
         }
        ],
        "returns": "horsies.core.task_decorator.TaskDecorator"
@@ -28550,6 +28604,7 @@
    "protocol": true,
    "shape": {
     "attributes": {
+     "task_error_codes": "tuple[str, ...]",
      "task_name": "str",
      "task_options_json": "None | str",
      "task_queue_name": "None | str"
@@ -29315,6 +29370,7 @@
    "protocol": true,
    "shape": {
     "attributes": {
+     "task_error_codes": "tuple[str, ...]",
      "task_name": "str",
      "task_options_json": "None | str",
      "task_queue_name": "None | str"
@@ -29683,6 +29739,7 @@
    "protocol": true,
    "shape": {
     "attributes": {
+     "task_error_codes": "tuple[str, ...]",
      "task_name": "str",
      "task_options_json": "None | str",
      "task_queue_name": "None | str"

@@ -48,12 +48,14 @@
 -- conflict is never SAME_COMMAND. Callers that mint the ids (workflow start, node task insert) treat every outcome
 -- other than INSERTED as a defect.
 --
--- Arguments: one parallel array per column (built-in types, one element per row). p_row_time: the created_at and
--- updated_at of every row. The caller passes the time that the Python writer of that row used: the time of the
--- writing statement (statement_timestamp()) or the start of its transaction (now()). p_conflict_lock: NONE (the
--- conflict read takes no lock) or FOR_UPDATE (it locks the conflicting rows in id order, for a caller that writes
--- the row next). Refused (22023): a NULL array, arrays of different lengths, a NULL element in a NOT NULL column,
--- a repeated id, a NULL p_row_time, an unknown p_conflict_lock.
+-- Arguments: one parallel array per column (built-in types, one element per row). p_trace_carriers and p_trace_ids
+-- hold NULL for a row with no trace; the table CHECK horsies_tasks_trace_pair refuses a lone half of the pair and a
+-- trace id that is not 16 bytes (23514). p_row_time: the created_at and updated_at of every row. The caller passes
+-- the time that the Python writer of that row used: the time of the writing statement (statement_timestamp()) or the
+-- start of its transaction (now()). p_conflict_lock: NONE (the conflict read takes no lock) or FOR_UPDATE (it locks
+-- the conflicting rows in id order, for a caller that writes the row next). Refused (22023): a NULL array, arrays of
+-- different lengths, a NULL element in a NOT NULL column, a repeated id, a NULL p_row_time, an unknown
+-- p_conflict_lock.
 --
 -- Locks: the inserted rows; with FOR_UPDATE also the conflicting rows, in id order.
 -- Returns one row per input row: its 1-based position, its id, and INSERTED, SAME_COMMAND, PAYLOAD_MISMATCH or
@@ -83,6 +85,8 @@ CREATE FUNCTION horsies_insert_task_rows(
     p_key_digests bytea[],
     p_rerun_of_task_ids uuid[],
     p_rerun_root_task_ids uuid[],
+    p_trace_carriers text[],
+    p_trace_ids bytea[],
     p_row_time timestamp with time zone,
     p_conflict_lock text
 ) RETURNS TABLE(ordinality bigint, task_id uuid, outcome text)
@@ -106,7 +110,7 @@ BEGIN
         p_ids, p_task_names, p_queue_names, p_priorities, p_inputs, p_task_options, p_executions,
         p_retention_class_keys, p_retain_rerun_inputs, p_max_retries, p_good_untils, p_sent_ats, p_enqueued_ats,
         p_is_workflow_tasks, p_fingerprint_versions, p_fingerprints, p_key_digests, p_rerun_of_task_ids,
-        p_rerun_root_task_ids
+        p_rerun_root_task_ids, p_trace_carriers, p_trace_ids
     ) <> 0 THEN
         RAISE EXCEPTION 'horsies_insert_task_rows: row arrays must be non-NULL'
             USING ERRCODE = 'invalid_parameter_value';
@@ -120,7 +124,8 @@ BEGIN
        OR cardinality(p_sent_ats) <> v_count OR cardinality(p_enqueued_ats) <> v_count
        OR cardinality(p_is_workflow_tasks) <> v_count OR cardinality(p_fingerprint_versions) <> v_count
        OR cardinality(p_fingerprints) <> v_count OR cardinality(p_key_digests) <> v_count
-       OR cardinality(p_rerun_of_task_ids) <> v_count OR cardinality(p_rerun_root_task_ids) <> v_count THEN
+       OR cardinality(p_rerun_of_task_ids) <> v_count OR cardinality(p_rerun_root_task_ids) <> v_count
+       OR cardinality(p_trace_carriers) <> v_count OR cardinality(p_trace_ids) <> v_count THEN
         RAISE EXCEPTION 'horsies_insert_task_rows: row array lengths differ'
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
@@ -151,7 +156,7 @@ BEGIN
             enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at, started_at, finalizing_at,
             finalizing_by_worker_id, worker_pid, worker_hostname, worker_process_name, retry_count, max_retries,
             next_retry_at, good_until, is_workflow_task, updated_at, retain_rerun_input, rerun_of_task_id,
-            rerun_root_task_id
+            rerun_root_task_id, trace_carrier, trace_id
         )
         SELECT
             r.id, r.task_name, r.queue_name, r.priority, r.input, r.task_options, r.execution,
@@ -160,16 +165,17 @@ BEGIN
             r.enqueued_at, NULL, NULL, NULL, NULL, NULL,
             NULL, NULL, NULL, NULL, 0, r.max_retries,
             NULL, r.good_until, r.is_workflow_task, p_row_time, r.retain_rerun_input, r.rerun_of_task_id,
-            r.rerun_root_task_id
+            r.rerun_root_task_id, r.trace_carrier, r.trace_id
         FROM unnest(
             p_ids, p_task_names, p_queue_names, p_priorities, p_inputs, p_task_options, p_executions,
             p_retention_class_keys, p_retain_rerun_inputs, p_max_retries, p_good_untils, p_sent_ats,
             p_enqueued_ats, p_is_workflow_tasks, p_fingerprint_versions, p_fingerprints, p_key_digests,
-            p_rerun_of_task_ids, p_rerun_root_task_ids
+            p_rerun_of_task_ids, p_rerun_root_task_ids, p_trace_carriers, p_trace_ids
         ) AS r(
             id, task_name, queue_name, priority, input, task_options, execution, retention_class_key,
             retain_rerun_input, max_retries, good_until, sent_at, enqueued_at, is_workflow_task,
-            fingerprint_version, fingerprint, key_digest, rerun_of_task_id, rerun_root_task_id
+            fingerprint_version, fingerprint, key_digest, rerun_of_task_id, rerun_root_task_id, trace_carrier,
+            trace_id
         )
         ORDER BY r.id
         ON CONFLICT (id) DO NOTHING
@@ -251,7 +257,7 @@ $$;
 --   expired TERMINAL reservation of the same key; an expired reservation already counts as absent.)
 -- - The insert trigger sends task_new, the queue wake (payload 'new') and horsies_task_status.
 --
--- Arguments: every value of the row; three variants, each a kind text plus its columns:
+-- Arguments: every value of the row; four variants, each a kind text plus its columns:
 -- - p_start_kind NOW | AT (p_start_at) | AFTER_DELAY (p_start_delay_s, whole seconds >= 0): enqueued_at is
 --   statement_timestamp(), the given time, or statement_timestamp() plus the delay. A slot of another kind must be
 --   NULL. A send in autocommit has statement_timestamp() = NOW(); a rerun in its caller's transaction is dated by
@@ -259,6 +265,10 @@ $$;
 -- - p_lineage_kind FIRST_RUN | RERUN (p_rerun_of_task_id and p_rerun_root_task_id).
 -- - p_key_kind UNKEYED | KEYED (p_key_digest, p_key_scope_version, p_key_window: the reservation window, exact to the
 --   microsecond, more than 0 and at most 30 days; the key claim refuses another window with 22023).
+-- - p_trace_kind NO_CARRIER | CARRIER (p_trace_carrier, the canonical JSON text of the core's carrier encoder, and
+--   p_trace_id, 16 bytes). The core checks the carrier before the call, and sends a carrier that breaks a bound as
+--   NO_CARRIER. The pair is not part of the fingerprint: a send that answers SAME_COMMAND, KEY_REPLAY or from history
+--   keeps the pair of the row it found.
 -- p_send_kind FIRST | REPEAT. The fingerprint version and the 32-byte fingerprint are required: a plain send always
 -- carries one. Column shapes (queue name length, retention class key, priority and retry ranges, execution class)
 -- are the table's CHECKs.
@@ -297,7 +307,10 @@ CREATE FUNCTION horsies_enqueue_task(
     p_key_digest bytea,
     p_key_scope_version smallint,
     p_key_window interval,
-    p_send_kind text
+    p_send_kind text,
+    p_trace_kind text,
+    p_trace_carrier text,
+    p_trace_id bytea
 ) RETURNS TABLE(outcome text, task_id uuid)
     LANGUAGE plpgsql
     AS $$
@@ -313,7 +326,7 @@ BEGIN
     IF num_nulls(
         p_task_id, p_task_name, p_queue_name, p_priority, p_input, p_execution, p_retention_class_key,
         p_retain_rerun_input, p_max_retries, p_sent_at, p_start_kind, p_fingerprint_version, p_fingerprint,
-        p_lineage_kind, p_key_kind, p_send_kind
+        p_lineage_kind, p_key_kind, p_send_kind, p_trace_kind
     ) <> 0 THEN
         RAISE EXCEPTION 'horsies_enqueue_task: a required argument is NULL'
             USING ERRCODE = 'invalid_parameter_value';
@@ -381,6 +394,21 @@ BEGIN
         RAISE EXCEPTION 'horsies_enqueue_task: unknown send kind'
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
+    CASE p_trace_kind
+        WHEN 'NO_CARRIER' THEN
+            IF num_nulls(p_trace_carrier, p_trace_id) <> 2 THEN
+                RAISE EXCEPTION 'horsies_enqueue_task: a send with no carrier has no trace values'
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+        WHEN 'CARRIER' THEN
+            IF num_nulls(p_trace_carrier, p_trace_id) <> 0 OR octet_length(p_trace_id) <> 16 THEN
+                RAISE EXCEPTION 'horsies_enqueue_task: a send with a carrier names its text and its 16-byte trace id'
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+        ELSE
+            RAISE EXCEPTION 'horsies_enqueue_task: unknown trace kind'
+                USING ERRCODE = 'invalid_parameter_value';
+    END CASE;
 
     -- 1. The key reservation. The claim refuses a digest that is not 32 bytes and a window outside 0..30 days.
     IF v_keyed THEN
@@ -431,7 +459,8 @@ BEGIN
         ARRAY[p_max_retries], ARRAY[p_good_until], ARRAY[p_sent_at], ARRAY[v_enqueued_at], ARRAY[FALSE],
         ARRAY[p_fingerprint_version], ARRAY[p_fingerprint],
         ARRAY[CASE WHEN v_keyed THEN p_key_digest END], ARRAY[p_rerun_of_task_id], ARRAY[p_rerun_root_task_id],
-        statement_timestamp(), CASE WHEN v_keyed THEN 'FOR_UPDATE' ELSE 'NONE' END
+        ARRAY[p_trace_carrier], ARRAY[p_trace_id], statement_timestamp(),
+        CASE WHEN v_keyed THEN 'FOR_UPDATE' ELSE 'NONE' END
     ) AS i;
 
     -- 4. A keyed send on a live row of the same command binds its key; the row is locked by the read in step 3.
@@ -479,8 +508,10 @@ $$;
 -- Locks: the advisory cap locks in key order (p_lock_keys), then the row locks of the taken rows (FOR UPDATE SKIP
 -- LOCKED). No task advisory lock; the claim never waits on a row.
 -- Returns rows of kind CLAIMED (one per taken row: id, task_name, queue_name, input, task_options, execution,
--- is_workflow_task, claimed_at, retry_count, max_retries) and at most one row of kind SHORT (short_by). retry_count
--- and max_retries let a failed attempt be written in one statement with no read.
+-- is_workflow_task, claimed_at, retry_count, max_retries, priority, enqueued_at, trace_carrier, trace_id) and at most
+-- one row of kind SHORT (short_by). retry_count and max_retries let a failed attempt be written in one statement with
+-- no read. enqueued_at is the due time of the row (a retry and a delayed send set it), so claimed_at - enqueued_at is
+-- the wait in the queue on the database clock. trace_carrier and trace_id are the stored trace pair (NULL for none).
 -- Python 0.7.0 (`v0.7.0` package): horsies_claim (core/schemas/migrations.py:713-1003), HORSIES_CLAIM_SQL
 -- (core/worker/sql.py:102-120), the claim pass (core/worker/claiming.py:282-296).
 CREATE FUNCTION horsies_claim(
@@ -509,6 +540,10 @@ CREATE FUNCTION horsies_claim(
     claimed_at timestamp with time zone,
     retry_count integer,
     max_retries integer,
+    priority integer,
+    enqueued_at timestamp with time zone,
+    trace_carrier text,
+    trace_id bytea,
     short_by integer
 )
     LANGUAGE plpgsql
@@ -650,6 +685,10 @@ CREATE FUNCTION horsies_claim_candidates(
     claimed_at timestamp with time zone,
     retry_count integer,
     max_retries integer,
+    priority integer,
+    enqueued_at timestamp with time zone,
+    trace_carrier text,
+    trace_id bytea,
     short_by integer
 )
     LANGUAGE plpgsql
@@ -738,10 +777,12 @@ BEGIN
             SELECT locked_expired.id FROM locked_expired
         ))
         RETURNING t.id, t.task_name, t.queue_name, t.input, t.task_options, t.execution,
-                  t.is_workflow_task, t.claimed_at, t.retry_count, t.max_retries, t.priority, t.enqueued_at
+                  t.is_workflow_task, t.claimed_at, t.retry_count, t.max_retries, t.priority, t.enqueued_at,
+                  t.trace_carrier, t.trace_id
     )
     SELECT 'CLAIMED'::text, u.id, u.task_name::text, u.queue_name::text, u.input, u.task_options,
-           u.execution, u.is_workflow_task, u.claimed_at, u.retry_count, u.max_retries, NULL::integer
+           u.execution, u.is_workflow_task, u.claimed_at, u.retry_count, u.max_retries, u.priority, u.enqueued_at,
+           u.trace_carrier, u.trace_id, NULL::integer
     FROM updated u
     ORDER BY COALESCE((p_queue_priority ->> u.queue_name)::int, 100) ASC,
              u.priority ASC, u.enqueued_at ASC, u.id ASC;
@@ -750,7 +791,8 @@ BEGIN
     IF v_taken < v_planned THEN
         RETURN QUERY
         SELECT 'SHORT'::text, NULL::uuid, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text,
-               NULL::boolean, NULL::timestamptz, NULL::integer, NULL::integer, v_planned - v_taken;
+               NULL::boolean, NULL::timestamptz, NULL::integer, NULL::integer, NULL::integer, NULL::timestamptz,
+               NULL::text, NULL::bytea, v_planned - v_taken;
     END IF;
 END;
 $$;
@@ -840,7 +882,9 @@ $$;
 -- of the row (pid, host, process name).
 -- Locks: the task row (FOR NO KEY UPDATE, read by id alone so only the primary key serves it), then the linked node
 -- row (FOR UPDATE), the order that the move uses. No task advisory lock and no workflow lock: nothing moves.
--- Returns one row: outcome STARTED with started_at, or MISSED with miss_reason.
+-- Returns one row: outcome STARTED with started_at, or MISSED with miss_reason. A STARTED workflow task also returns
+-- the workflow id and the task index of its node (read with the node row the start locks); both are NULL for a plain
+-- task and for a miss.
 -- Python 0.7.0 (`v0.7.0` package): the RUNNING write (core/worker/child_runner.py:711-761, set_running_params
 -- :899-925), the workflow guard (:740-748), the node write (:763-781), _confirm_ownership_and_set_running
 -- (:1141-1257). Its RUNNING write also inserted a runner beat (first_beat, :753-759).
@@ -851,13 +895,21 @@ CREATE FUNCTION horsies_start_attempt(
     p_worker_pid integer,
     p_worker_hostname text,
     p_worker_process_name text
-) RETURNS TABLE(outcome text, miss_reason text, started_at timestamp with time zone)
+) RETURNS TABLE(
+    outcome text,
+    miss_reason text,
+    started_at timestamp with time zone,
+    workflow_id uuid,
+    workflow_task_index integer
+)
     LANGUAGE plpgsql
     AS $$
 #variable_conflict use_column
 DECLARE
     v_task record;
     v_link record;
+    v_workflow_id uuid;
+    v_workflow_task_index integer;
 BEGIN
     IF num_nulls(
         p_task_id, p_worker_id, p_claimed_at, p_worker_pid, p_worker_hostname, p_worker_process_name
@@ -873,13 +925,13 @@ BEGIN
     FOR NO KEY UPDATE;
 
     IF NOT FOUND THEN
-        RETURN QUERY SELECT 'MISSED'::text, 'NOT_HELD'::text, NULL::timestamptz;
+        RETURN QUERY SELECT 'MISSED'::text, 'NOT_HELD'::text, NULL::timestamptz, NULL::uuid, NULL::integer;
         RETURN;
     END IF;
     IF v_task.status = 'CLAIMED'
        AND v_task.claimed_by_worker_id = p_worker_id
        AND v_task.good_until <= NOW() THEN
-        RETURN QUERY SELECT 'MISSED'::text, 'DEADLINE_PASSED'::text, NULL::timestamptz;
+        RETURN QUERY SELECT 'MISSED'::text, 'DEADLINE_PASSED'::text, NULL::timestamptz, NULL::uuid, NULL::integer;
         RETURN;
     END IF;
     IF (
@@ -887,34 +939,37 @@ BEGIN
         AND v_task.claimed_by_worker_id = p_worker_id
         AND v_task.claimed_at = p_claimed_at
     ) IS NOT TRUE THEN
-        RETURN QUERY SELECT 'MISSED'::text, 'NOT_HELD'::text, NULL::timestamptz;
+        RETURN QUERY SELECT 'MISSED'::text, 'NOT_HELD'::text, NULL::timestamptz, NULL::uuid, NULL::integer;
         RETURN;
     END IF;
     IF v_task.claim_expires_at <= NOW() THEN
-        RETURN QUERY SELECT 'MISSED'::text, 'LEASE_EXPIRED'::text, NULL::timestamptz;
+        RETURN QUERY SELECT 'MISSED'::text, 'LEASE_EXPIRED'::text, NULL::timestamptz, NULL::uuid, NULL::integer;
         RETURN;
     END IF;
 
     IF v_task.is_workflow_task THEN
         -- The node by task_id (ix_horsies_workflow_tasks_task_id), its workflow by primary key, unlocked.
-        SELECT n.id AS node_id, n.status AS node_status,
+        SELECT n.id AS node_id, n.status AS node_status, n.workflow_id, n.task_index,
                (SELECT w.status FROM horsies_workflows w WHERE w.id = n.workflow_id) AS workflow_status
         INTO v_link
         FROM horsies_workflow_tasks n
         WHERE n.task_id = p_task_id
         FOR UPDATE;
         IF FOUND AND v_link.workflow_status = 'PAUSED' THEN
-            RETURN QUERY SELECT 'MISSED'::text, 'WORKFLOW_PAUSED'::text, NULL::timestamptz;
+            RETURN QUERY SELECT 'MISSED'::text, 'WORKFLOW_PAUSED'::text, NULL::timestamptz, NULL::uuid, NULL::integer;
             RETURN;
         END IF;
         IF FOUND AND v_link.workflow_status = 'CANCELLED' THEN
-            RETURN QUERY SELECT 'MISSED'::text, 'WORKFLOW_CANCELLED'::text, NULL::timestamptz;
+            RETURN QUERY
+            SELECT 'MISSED'::text, 'WORKFLOW_CANCELLED'::text, NULL::timestamptz, NULL::uuid, NULL::integer;
             RETURN;
         END IF;
         IF NOT FOUND OR v_link.node_status NOT IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING') THEN
-            RETURN QUERY SELECT 'MISSED'::text, 'NODE_NOT_LINKED'::text, NULL::timestamptz;
+            RETURN QUERY SELECT 'MISSED'::text, 'NODE_NOT_LINKED'::text, NULL::timestamptz, NULL::uuid, NULL::integer;
             RETURN;
         END IF;
+        v_workflow_id := v_link.workflow_id;
+        v_workflow_task_index := v_link.task_index;
     END IF;
 
     UPDATE horsies_tasks t
@@ -936,7 +991,7 @@ BEGIN
         END IF;
     END IF;
 
-    RETURN QUERY SELECT 'STARTED'::text, NULL::text, NOW();
+    RETURN QUERY SELECT 'STARTED'::text, NULL::text, NOW(), v_workflow_id, v_workflow_task_index;
 END
 $$;
 

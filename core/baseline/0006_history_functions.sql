@@ -75,10 +75,11 @@ $$;
 -- horsies_move_task_to_history(p_task horsies_tasks, ...): move one live task to history.
 --
 -- Guarantee: inside the caller's transaction, the live row p_task becomes exactly one history row, and every effect
--- of finishing happens together or not at all: the history row (with the rerun input envelope and the attempt
--- snapshot), the clock exception when the id's UUIDv7 birth is more than 5 s later than p_terminal_at, the phase-2
--- pending row (deferred kinds of a workflow task), the TERMINAL window of the task's key reservation, the delete of
--- the attempt rows and of the live row, and the task_done and horsies_task_status notifications (sent at commit).
+-- of finishing happens together or not at all: the history row (with the rerun input envelope, the attempt
+-- snapshot and the trace id of the live row), the clock exception when the id's UUIDv7 birth is more than 5 s later
+-- than p_terminal_at, the phase-2 pending row (deferred kinds of a workflow task), the TERMINAL window of the task's
+-- key reservation, the delete of the attempt rows and of the live row, and the task_done and horsies_task_status
+-- notifications (sent at commit).
 -- Precondition: the caller holds pg_advisory_xact_lock(hashtextextended(id::text, 731)), then read p_task with
 -- SELECT * FROM horsies_tasks WHERE id = $1 FOR UPDATE, then checked its own fence. p_task is the stored row: a
 -- caller that changes the live row before the move passes the row its UPDATE returned.
@@ -290,7 +291,7 @@ BEGIN
         retry_count, max_retries, last_claimed_worker_id, last_worker_hostname, last_worker_pid,
         last_worker_process_name, rerun_of_task_id, rerun_root_task_id, workflow_id, is_workflow_task,
         history_schema_version, attempt_archive_version, attempt_snapshot, attempt_snapshot_digest,
-        rerun_input_disposition, rerun_input_version, rerun_input_digest, rerun_input_inline
+        rerun_input_disposition, rerun_input_version, rerun_input_digest, rerun_input_inline, trace_id
     ) VALUES (
         p_task.id, p_task.task_name, p_task.queue_name, p_task.priority, p_task.command_fingerprint_version,
         p_task.command_fingerprint,
@@ -302,7 +303,7 @@ BEGIN
         p_task.worker_pid, p_task.worker_process_name, p_task.rerun_of_task_id, p_task.rerun_root_task_id,
         v_workflow_id, p_task.is_workflow_task,
         1, 1, v_attempt_snapshot, sha256(v_attempt_snapshot),
-        v_rerun_disposition, v_rerun_version, v_rerun_digest, v_rerun_inline
+        v_rerun_disposition, v_rerun_version, v_rerun_digest, v_rerun_inline, p_task.trace_id
     );
     GET DIAGNOSTICS v_history_rows = ROW_COUNT;
     IF v_history_rows <> 1 THEN
@@ -356,10 +357,11 @@ $$;
 --
 -- Guarantee: inside the caller's transaction, every listed live task becomes exactly one history row, or none
 -- does. One terminal time and one result digest serve the whole batch; each attempt snapshot is encoded once; the
--- rerun envelope is built only for rows that are eligible and retained (the single move's ladder); clock
--- exceptions, phase-2 pending rows (EXPIRE_PENDING workflow tasks) and key reservation windows are written for
--- every row that needs one; attempt rows and live rows are deleted; one task_done and one horsies_task_status
--- notification per task, in the order of p_task_ids. An empty array moves nothing.
+-- rerun envelope is built only for rows that are eligible and retained (the single move's ladder); each history row
+-- keeps the trace id of its live row; clock exceptions, phase-2 pending rows (EXPIRE_PENDING workflow tasks) and
+-- key reservation windows are written for every row that needs one; attempt rows and live rows are deleted; one
+-- task_done and one horsies_task_status notification per task, in the order of p_task_ids. An empty array moves
+-- nothing.
 -- Precondition: the caller locked every listed row (discovery FOR UPDATE SKIP LOCKED, or FOR UPDATE in sorted id
 -- order), passes NOW() as p_terminal_at, and reads its outcome rows from the locked live rows before this call.
 -- Kinds: EXPIRE_PENDING (status EXPIRED, deferred phase 2); PAUSE_ABANDON_WORKFLOW, PAUSE_ABANDON_CLAIM_BATCH,
@@ -509,7 +511,7 @@ BEGIN
         retry_count, max_retries, last_claimed_worker_id, last_worker_hostname, last_worker_pid,
         last_worker_process_name, rerun_of_task_id, rerun_root_task_id, workflow_id, is_workflow_task,
         history_schema_version, attempt_archive_version, attempt_snapshot, attempt_snapshot_digest,
-        rerun_input_disposition, rerun_input_version, rerun_input_digest, rerun_input_inline
+        rerun_input_disposition, rerun_input_version, rerun_input_digest, rerun_input_inline, trace_id
     )
     SELECT
         t.id, t.task_name, t.queue_name, t.priority, t.command_fingerprint_version, t.command_fingerprint,
@@ -523,7 +525,8 @@ BEGIN
         d.disposition,
         CASE WHEN d.disposition = 'INLINE' THEN 1::smallint END,
         CASE WHEN d.disposition = 'INLINE' THEN sha256(e.envelope) END,
-        CASE WHEN d.disposition = 'INLINE' THEN e.envelope END
+        CASE WHEN d.disposition = 'INLINE' THEN e.envelope END,
+        t.trace_id
     FROM horsies_tasks AS t
     JOIN attempt_data ON attempt_data.id = t.id
     LEFT JOIN horsies_workflow_tasks AS n ON n.task_id = t.id

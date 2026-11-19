@@ -261,7 +261,7 @@ SELECT test_check(
 FROM test_last_fire AS f;
 
 SELECT test_check(
-    'fire: the slot row is an unkeyed send with the task options, retry limit, class and fingerprint',
+    'fire: the slot row is an unkeyed send with the task options, retry limit, class and fingerprint, and no trace',
     t.status = 'PENDING' AND t.sent_at = date_trunc('minute', now()) - interval '1 minute'
     AND t.enqueued_at = t.created_at AND t.updated_at = t.created_at AND t.created_at > now() - interval '1 minute'
     AND t.task_name = 'app.scheduled' AND t.queue_name = 'default' AND t.priority = 70
@@ -269,7 +269,7 @@ SELECT test_check(
     AND t.max_retries = 2 AND t.retry_count = 0 AND t.retention_class_key = 'standard_30d' AND t.retain_rerun_input
     AND t.command_fingerprint_version = 1 AND t.command_fingerprint = sha256('cmd-single'::bytea)
     AND t.good_until IS NULL AND t.idempotency_key_digest IS NULL AND NOT t.is_workflow_task
-    AND t.rerun_of_task_id IS NULL AND t.claimed_at IS NULL,
+    AND t.rerun_of_task_id IS NULL AND t.claimed_at IS NULL AND t.trace_carrier IS NULL AND t.trace_id IS NULL,
     row_to_json(t)::text
 )
 FROM horsies_tasks AS t
@@ -458,7 +458,7 @@ CREATE OR REPLACE FUNCTION horsies_insert_task_rows(
     p_max_retries integer[], p_good_untils timestamp with time zone[], p_sent_ats timestamp with time zone[],
     p_enqueued_ats timestamp with time zone[], p_is_workflow_tasks boolean[], p_fingerprint_versions smallint[],
     p_fingerprints bytea[], p_key_digests bytea[], p_rerun_of_task_ids uuid[], p_rerun_root_task_ids uuid[],
-    p_row_time timestamp with time zone, p_conflict_lock text
+    p_trace_carriers text[], p_trace_ids bytea[], p_row_time timestamp with time zone, p_conflict_lock text
 ) RETURNS TABLE(ordinality bigint, task_id uuid, outcome text)
     LANGUAGE sql AS $$
     SELECT u.position, u.id, 'CONFLICT_UNVERIFIABLE'::text FROM unnest(p_ids) WITH ORDINALITY AS u(id, position)
@@ -764,9 +764,11 @@ INSERT INTO horsies_workflow_tasks (
     NULL, NULL, FALSE, 'all', NULL, NULL, 3, 'SHARED_ASYNC', NULL, 'forever', 'NONE', 'RUNNING',
     '00000000-0000-4000-8000-0000000000c1', FALSE, NULL, NULL, NULL, NULL, NULL, NULL, NULL, now(), now(), NULL
 );
+UPDATE horsies_tasks SET trace_carrier = '{"traceparent":"c1"}', trace_id = decode(repeat('c1', 16), 'hex')
+WHERE id = '00000000-0000-4000-8000-0000000000c1';
 
 SELECT test_check(
-    'detail: LIVE carries the live columns, the node link and the attempts in ascending order',
+    'detail: LIVE carries the live columns, the node link, the trace id and the attempts in ascending order',
     d.location = 'LIVE' AND d.task_name = 'app.live' AND d.status = 'RUNNING' AND d.execution = 'SHARED_ASYNC'
     AND d.retry_count = 1 AND d.max_retries = 3 AND d.worker_id = 'w-live' AND d.worker_hostname = 'host-live'
     AND d.worker_pid = 4242 AND d.good_until IS NOT NULL
@@ -776,7 +778,8 @@ SELECT test_check(
     AND (convert_from(d.attempt_snapshot, 'UTF8')::jsonb -> 0 ->> 0) = '1'
     AND (convert_from(d.attempt_snapshot, 'UTF8')::jsonb -> 1 ->> 0) = '2'
     AND (convert_from(d.attempt_snapshot, 'UTF8')::jsonb -> 1 ->> 1) = 'FAILED'
-    AND d.attempt_snapshot = horsies_encode_task_attempts('00000000-0000-4000-8000-0000000000c1'),
+    AND d.attempt_snapshot = horsies_encode_task_attempts('00000000-0000-4000-8000-0000000000c1')
+    AND d.trace_id = decode(repeat('c1', 16), 'hex'),
     row_to_json(d)::text
 )
 FROM horsies_monitoring_task_detail('00000000-0000-4000-8000-0000000000c1', FALSE, TRUE) AS d;
@@ -790,9 +793,11 @@ FROM horsies_monitoring_task_detail('00000000-0000-4000-8000-0000000000c1', TRUE
 
 SELECT test_history_task('00000000-0000-4000-8000-0000000000c2', 'FAILED', 'app.done', 'q-h', 'w-hist',
                          now() - interval '3 hours', now() - interval '2 hours', now() - interval '1 hour', 2, 'E_X');
+UPDATE horsies_task_history SET trace_id = decode(repeat('c2', 16), 'hex')
+WHERE task_id = '00000000-0000-4000-8000-0000000000c2';
 
 SELECT test_check(
-    'detail: HISTORY carries the history row, the result and the attempt snapshot with its digest',
+    'detail: HISTORY carries the history row, the result, the trace id and the attempt snapshot with its digest',
     d.location = 'HISTORY' AND d.task_name = 'app.done' AND d.queue_name = 'q-h' AND d.status = 'FAILED'
     AND d.terminalization_kind = 'FAIL_RUNNING'
     AND d.terminal_at = (SELECT h.terminal_at FROM horsies_task_history AS h WHERE h.task_id = d.task_id)
@@ -803,7 +808,7 @@ SELECT test_check(
     AND d.result_digest = sha256(d.result_payload)
     AND d.attempt_archive_version = 1 AND convert_from(d.attempt_snapshot, 'UTF8') = '[]'
     AND d.attempt_snapshot_digest = sha256(d.attempt_snapshot)
-    AND d.workflow_id IS NULL AND d.absence_reason IS NULL,
+    AND d.workflow_id IS NULL AND d.absence_reason IS NULL AND d.trace_id = decode(repeat('c2', 16), 'hex'),
     row_to_json(d)::text
 )
 FROM horsies_monitoring_task_detail('00000000-0000-4000-8000-0000000000c2', TRUE, TRUE) AS d;
@@ -820,7 +825,7 @@ FROM horsies_monitoring_task_detail('00000000-0000-4000-8000-0000000000c2', FALS
 SELECT test_check(
     'detail: an id that is not a UUIDv7 is ABSENT with NOT_CLASSIFIED',
     d.location = 'ABSENT' AND d.task_id = '00000000-0000-4000-8000-0000000000c9'
-    AND d.absence_reason = 'NOT_CLASSIFIED' AND d.task_name IS NULL,
+    AND d.absence_reason = 'NOT_CLASSIFIED' AND d.task_name IS NULL AND d.trace_id IS NULL,
     row_to_json(d)::text
 )
 FROM horsies_monitoring_task_detail('00000000-0000-4000-8000-0000000000c9', TRUE, TRUE) AS d;
