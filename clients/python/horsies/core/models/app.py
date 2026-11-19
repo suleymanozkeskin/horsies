@@ -1,5 +1,5 @@
 # app/core/models/app.py
-from typing import List, Optional
+from typing import ClassVar, List, Optional
 from pydantic import BaseModel, model_validator, Field, ConfigDict
 from horsies._catalog.worker_manifest import (
     CLAIM_COUNT_MAX,
@@ -19,6 +19,7 @@ from horsies.core.models.tracing import (
     tracing_errors,
     tracing_label,
 )
+from horsies.core.models.log_format import LogFormatSetting, TextLogs
 from horsies.core.models.schedule import ScheduleConfig, SchedulePattern
 from horsies.core.models.worker_profile import (
     WorkerProfile,
@@ -107,7 +108,11 @@ def worker_bound_errors(
 
 
 class AppConfig(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True, extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+        extra='forbid',
+    )
 
     queue_mode: QueueMode = QueueMode.DEFAULT
     custom_queues: Optional[List[CustomQueueConfig]] = None
@@ -143,6 +148,9 @@ class AppConfig(BaseModel):
     # Spans and producer metrics through the OpenTelemetry API
     # (`OtelTracing`, needs `horsies[otel]`), or none (`NoTracing`).
     tracing: TracingSetting = Field(default_factory=NoTracing)
+    # The format of the horsies log records in the processes that load the
+    # app: one line of text (`TextLogs`) or one JSON object (`JsonLogs`).
+    log_format: LogFormatSetting = Field(default_factory=TextLogs)
 
     @model_validator(mode='after')
     def validate_queue_configuration(self):

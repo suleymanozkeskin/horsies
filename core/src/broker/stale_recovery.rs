@@ -17,7 +17,12 @@
 //!   asks for, the terminal failure (`FAIL_STALE`), or a refusal that writes
 //!   nothing.
 //! - `horsies_requeue_stale_claims`: one bounded batch of CLAIMED rows whose
-//!   claimer stopped beating, back to PENDING.
+//!   claimer stopped beating, back to PENDING. It returns each row it
+//!   requeued (`RecoveredTask`).
+//!
+//! The scan and the requeue return the task name and the queue of each row,
+//! for the recovery events of the worker (`TaskRecovered`); the scan also
+//! returns the stored trace id, for the reaper's records.
 //!
 //! The last three take the evidence of their judgement (`StaleEvidence`):
 //! the beat age (`BEAT_AGE`, Python's rule), or a gone owner (`OWNER_GONE`):
@@ -38,11 +43,13 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use crate::broker::claims::stored_trace_id_of;
 use crate::broker::core_rows::{column, one_row, read_rows, RowDecodeError, StatementLog};
 use crate::core::lifecycle::{decode_stale_attempt_row, StaleAttemptOutcome};
 use crate::db::{
     BoundStatement, CheckoutClass, CorePool, ParameterType, Row, StatementBound, TypedStatement,
 };
+use crate::telemetry::trace_carrier::StoredTraceId;
 
 use super::error::BrokerError;
 
@@ -212,7 +219,7 @@ static FINISH_STALE_ATTEMPT: TypedStatement = TypedStatement::new(
 /// threshold (ms), owner, claim bound, batch size.
 static REQUEUE_STALE_CLAIMS: TypedStatement = TypedStatement::new(
     "requeue_stale_claims",
-    "SELECT horsies_requeue_stale_claims($1, $2, $3, $4, $5) AS requeued",
+    "SELECT task_id, task_name, queue_name FROM horsies_requeue_stale_claims($1, $2, $3, $4, $5)",
     &[
         ParameterType::Text,
         ParameterType::Int4,
@@ -233,6 +240,12 @@ static RETRY_WAKE: TypedStatement = TypedStatement::new(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StaleCandidate {
     pub(crate) task_id: Uuid,
+    /// The task name and the queue of the row, for the recovery event.
+    pub(crate) task_name: String,
+    pub(crate) queue_name: String,
+    /// The trace id that the send stored on the row, for the records of the
+    /// recovery.
+    pub(crate) trace_id: StoredTraceId,
     /// The retry facts of the row, for the retry decision.
     pub(crate) retry_count: i32,
     pub(crate) max_retries: i32,
@@ -553,8 +566,12 @@ fn stale_candidate(
     row: &Row,
     statement: &TypedStatement,
 ) -> Result<StaleCandidate, RowDecodeError> {
+    let task_id = column(row, statement, "task_id")?;
     Ok(StaleCandidate {
-        task_id: column(row, statement, "task_id")?,
+        task_id,
+        task_name: column(row, statement, "task_name")?,
+        queue_name: column(row, statement, "queue_name")?,
+        trace_id: stored_trace_id_of(task_id, column(row, statement, "trace_id")?),
         retry_count: column(row, statement, "retry_count")?,
         max_retries: column(row, statement, "max_retries")?,
         task_options: column(row, statement, "task_options")?,
@@ -686,6 +703,15 @@ enum RequeueEvidence<'a> {
     OwnerGone(&'a GoneOwner),
 }
 
+/// One task row that a recovery statement changed, as the statement
+/// returned it: its id, task name and queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecoveredTask {
+    pub(crate) task_id: Uuid,
+    pub(crate) task_name: String,
+    pub(crate) queue_name: String,
+}
+
 /// Requeue one bounded batch of stale CLAIMED rows: at most `batch` rows
 /// whose claim is older than `stale_after` and whose claimer sent no beat
 /// within it go back to PENDING with every claim and run field cleared. A
@@ -694,17 +720,17 @@ enum RequeueEvidence<'a> {
 /// wake (as Python).
 ///
 /// One statement on `pool`, checked out as reserved work; it commits alone.
-/// Returns the number of rows requeued.
+/// Returns each row requeued, at most `batch`.
 ///
-/// Errors: [`BrokerError::Statement`]; [`BrokerError::RowDecode`] when the
-/// statement returns no count; [`BrokerError::ClaimContract`] for a count
-/// outside 0 to `batch`.
+/// Errors: [`BrokerError::Statement`]; [`BrokerError::RowDecode`] for a row
+/// that does not have the statement's columns; [`BrokerError::ClaimContract`]
+/// for more rows than `batch`.
 pub(crate) async fn requeue_stale_claims(
     pool: &CorePool,
     log: StatementLog,
     stale_after: ThresholdMs,
     batch: RecoveryBatch,
-) -> Result<u32, BrokerError> {
+) -> Result<Vec<RecoveredTask>, BrokerError> {
     requeue_batch(pool, log, RequeueEvidence::BeatAge(stale_after), batch).await
 }
 
@@ -715,7 +741,7 @@ pub(crate) async fn requeue_stale_claims(
 /// another transaction holds is skipped. Sends no queue wake.
 ///
 /// One statement on `pool`, checked out as reserved work; it commits alone.
-/// Returns the number of rows requeued.
+/// Returns each row requeued, at most `batch`.
 ///
 /// Errors: as [`requeue_stale_claims`].
 pub(crate) async fn requeue_gone_owner_claims(
@@ -723,7 +749,7 @@ pub(crate) async fn requeue_gone_owner_claims(
     log: StatementLog,
     owner: &GoneOwner,
     batch: RecoveryBatch,
-) -> Result<u32, BrokerError> {
+) -> Result<Vec<RecoveredTask>, BrokerError> {
     requeue_batch(pool, log, RequeueEvidence::OwnerGone(owner), batch).await
 }
 
@@ -733,7 +759,7 @@ async fn requeue_batch(
     log: StatementLog,
     evidence: RequeueEvidence<'_>,
     batch: RecoveryBatch,
-) -> Result<u32, BrokerError> {
+) -> Result<Vec<RecoveredTask>, BrokerError> {
     let statement = &REQUEUE_STALE_CLAIMS;
     let (kind, stale_after_ms, owner, claimed_before): (
         &str,
@@ -758,15 +784,25 @@ async fn requeue_batch(
         .value(&claimed_before)
         .value(&batch_size)
         .finish();
-    let row = one_row(run_reserved(pool, log, &bound).await?, statement)?;
-    let requeued: i32 = column(&row, statement, "requeued")?;
-    match u32::try_from(requeued) {
-        Ok(count) if requeued <= batch_size => Ok(count),
-        Ok(_) | Err(_) => Err(BrokerError::ClaimContract(format!(
-            "{}: requeued {requeued} rows with a batch of {batch_size}",
+    let rows = run_reserved(pool, log, &bound).await?;
+    let requeued = read_rows(&rows, statement, recovered_task)?;
+    let within_batch = usize::try_from(batch_size).is_ok_and(|bound| requeued.len() <= bound);
+    match within_batch {
+        true => Ok(requeued),
+        false => Err(BrokerError::ClaimContract(format!(
+            "{}: requeued {} rows with a batch of {batch_size}",
             statement.name(),
+            requeued.len(),
         ))),
     }
+}
+
+fn recovered_task(row: &Row, statement: &TypedStatement) -> Result<RecoveredTask, RowDecodeError> {
+    Ok(RecoveredTask {
+        task_id: column(row, statement, "task_id")?,
+        task_name: column(row, statement, "task_name")?,
+        queue_name: column(row, statement, "queue_name")?,
+    })
 }
 
 /// Rows per statement of a stale CLAIMED requeue pass (Python
@@ -808,7 +844,8 @@ pub struct StaleClaimsRequeueFailed {
 /// in batches of [`STALE_CLAIMED_REQUEUE_BATCH`] rows until a batch is
 /// short, and at most [`STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS`] batches.
 /// Each batch is one statement checked out as reserved work, and commits
-/// alone. Logs nothing; each caller reports the end of the pass.
+/// alone. `requeued` gets the rows of each batch once it committed, in
+/// batch order. Logs nothing; each caller reports the end of the pass.
 ///
 /// Errors: [`StaleClaimsRequeueFailed`] with the rows of the batches before
 /// the failed one.
@@ -816,12 +853,14 @@ pub(crate) async fn requeue_stale_claimed_pass(
     pool: &CorePool,
     log: StatementLog,
     stale_after: ThresholdMs,
+    requeued: impl FnMut(&[RecoveredTask]),
 ) -> Result<StaleClaimsRequeuePass, StaleClaimsRequeueFailed> {
     let full_batch = STALE_CLAIMED_REQUEUE_BATCH.get().unsigned_abs();
     requeue_pass_with(
         full_batch,
         STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
         || requeue_stale_claims(pool, log, stale_after, STALE_CLAIMED_REQUEUE_BATCH),
+        requeued,
     )
     .await
 }
@@ -830,7 +869,8 @@ pub(crate) async fn requeue_stale_claimed_pass(
 /// [`requeue_gone_owner_claims`] in batches of
 /// [`STALE_CLAIMED_REQUEUE_BATCH`] rows until a batch is short, and at most
 /// [`STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS`] batches. Each batch commits
-/// alone. Logs nothing.
+/// alone. `requeued` gets the rows of each batch once it committed. Logs
+/// nothing.
 ///
 /// Errors: [`StaleClaimsRequeueFailed`] with the rows of the batches before
 /// the failed one.
@@ -838,46 +878,51 @@ pub(crate) async fn requeue_gone_owner_pass(
     pool: &CorePool,
     log: StatementLog,
     owner: &GoneOwner,
+    requeued: impl FnMut(&[RecoveredTask]),
 ) -> Result<StaleClaimsRequeuePass, StaleClaimsRequeueFailed> {
     let full_batch = STALE_CLAIMED_REQUEUE_BATCH.get().unsigned_abs();
     requeue_pass_with(
         full_batch,
         STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
         || requeue_gone_owner_claims(pool, log, owner, STALE_CLAIMED_REQUEUE_BATCH),
+        requeued,
     )
     .await
 }
 
 /// The loop of a requeue pass: at most `max_batches` calls of
 /// `requeue_batch`, each of which requeues at most `full_batch` rows and
-/// returns how many it requeued. Stops at the first short batch, at the
-/// first failure, or after `max_batches` full batches.
+/// returns them; `requeued` gets the rows of each batch. Stops at the first
+/// short batch, at the first failure, or after `max_batches` full batches.
 async fn requeue_pass_with<F, Fut>(
     full_batch: u32,
     max_batches: u32,
     mut requeue_batch: F,
+    mut requeued: impl FnMut(&[RecoveredTask]),
 ) -> Result<StaleClaimsRequeuePass, StaleClaimsRequeueFailed>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<u32, BrokerError>>,
+    Fut: std::future::Future<Output = Result<Vec<RecoveredTask>, BrokerError>>,
 {
-    let mut requeued: u64 = 0;
+    let mut count: u64 = 0;
     for _ in 0..max_batches {
         let rows = match requeue_batch().await {
             Ok(rows) => rows,
             Err(error) => {
                 return Err(StaleClaimsRequeueFailed {
-                    requeued_before: requeued,
+                    requeued_before: count,
                     error,
                 })
             }
         };
-        requeued += u64::from(rows);
-        if rows < full_batch {
-            return Ok(StaleClaimsRequeuePass::Drained { requeued });
+        requeued(&rows);
+        count += u64::try_from(rows.len()).unwrap_or(u64::MAX);
+        let short = u32::try_from(rows.len()).is_ok_and(|rows| rows < full_batch);
+        if short {
+            return Ok(StaleClaimsRequeuePass::Drained { requeued: count });
         }
     }
-    Ok(StaleClaimsRequeuePass::BoundReached { requeued })
+    Ok(StaleClaimsRequeuePass::BoundReached { requeued: count })
 }
 
 /// Run one bound statement alone on `pool` as reserved work.
@@ -926,8 +971,20 @@ mod tests {
         );
     }
 
-    /// The pass of `requeue_pass_with` over planned batch answers, and the
-    /// number of batches it ran.
+    /// `count` requeued rows, each with its own id.
+    fn requeued_rows(count: u32) -> Vec<RecoveredTask> {
+        (0..count)
+            .map(|_| RecoveredTask {
+                task_id: Uuid::new_v4(),
+                task_name: "t.task".to_owned(),
+                queue_name: "default".to_owned(),
+            })
+            .collect()
+    }
+
+    /// The pass of `requeue_pass_with` over planned batch answers (a count
+    /// of rows, or a failure), the number of batches it ran, and the row
+    /// count of each batch that the pass handed on.
     async fn planned_pass(
         full_batch: u32,
         max_batches: u32,
@@ -935,42 +992,55 @@ mod tests {
     ) -> (
         Result<StaleClaimsRequeuePass, StaleClaimsRequeueFailed>,
         usize,
+        Vec<usize>,
     ) {
         let mut answers = std::collections::VecDeque::from(answers);
         let mut batches = 0;
-        let pass = requeue_pass_with(full_batch, max_batches, || {
-            batches += 1;
-            std::future::ready(answers.pop_front().expect("a planned batch answer"))
-        })
+        let mut handed_on = Vec::new();
+        let pass = requeue_pass_with(
+            full_batch,
+            max_batches,
+            || {
+                batches += 1;
+                let answer = answers.pop_front().expect("a planned batch answer");
+                std::future::ready(answer.map(requeued_rows))
+            },
+            |rows| handed_on.push(rows.len()),
+        )
         .await;
-        (pass, batches)
+        (pass, batches, handed_on)
     }
 
     #[tokio::test]
     async fn a_short_batch_ends_the_pass_as_drained() {
-        let (pass, batches) = planned_pass(500, 200, vec![Ok(500), Ok(500), Ok(7)]).await;
+        let (pass, batches, handed_on) =
+            planned_pass(500, 200, vec![Ok(500), Ok(500), Ok(7)]).await;
         assert_eq!(
             pass.expect("no batch failed"),
             StaleClaimsRequeuePass::Drained { requeued: 1007 }
         );
         assert_eq!(batches, 3);
+        assert_eq!(handed_on, vec![500, 500, 7]);
     }
 
     #[tokio::test]
     async fn full_batches_up_to_the_bound_end_the_pass_with_the_bound_reached() {
-        let (pass, batches) = planned_pass(2, 3, vec![Ok(2), Ok(2), Ok(2)]).await;
+        let (pass, batches, handed_on) = planned_pass(2, 3, vec![Ok(2), Ok(2), Ok(2)]).await;
         assert_eq!(
             pass.expect("no batch failed"),
             StaleClaimsRequeuePass::BoundReached { requeued: 6 }
         );
         assert_eq!(batches, 3);
+        assert_eq!(handed_on, vec![2, 2, 2]);
     }
 
     /// Every column of a `horsies_stale_running_scan` row, with a NULL
     /// `started_at`.
     static SCAN_ROW_WITHOUT_A_START: TypedStatement = TypedStatement::new(
         "scan_row_without_a_start",
-        "SELECT gen_random_uuid() AS task_id, 0 AS retry_count, 3 AS max_retries, \
+        "SELECT gen_random_uuid() AS task_id, 'scan.task'::text AS task_name, \
+                'default'::text AS queue_name, NULL::bytea AS trace_id, \
+                0 AS retry_count, 3 AS max_retries, \
                 NULL::text AS task_options, NULL::timestamptz AS good_until, \
                 'w-1'::text AS claimed_by_worker_id, 7 AS worker_pid, \
                 'host-a'::text AS worker_hostname, 'proc-a'::text AS worker_process_name, \
@@ -1012,10 +1082,13 @@ mod tests {
     #[tokio::test]
     async fn a_failed_batch_reports_the_rows_of_the_batches_before_it() {
         let failure = BrokerError::ClaimContract("planned failure".to_owned());
-        let (pass, batches) = planned_pass(500, 200, vec![Ok(500), Err(failure)]).await;
+        let (pass, batches, handed_on) = planned_pass(500, 200, vec![Ok(500), Err(failure)]).await;
         let failed = pass.expect_err("the second batch failed");
         assert_eq!(failed.requeued_before, 500);
         assert!(matches!(failed.error, BrokerError::ClaimContract(_)));
         assert_eq!(batches, 2);
+        // The rows of the committed batch are handed on; the failed batch
+        // has none.
+        assert_eq!(handed_on, vec![500]);
     }
 }

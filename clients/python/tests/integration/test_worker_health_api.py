@@ -46,13 +46,13 @@ _INSERT_WORKER_STATE = text("""
         max_claim_batch, max_claim_per_worker, queues,
         queue_priorities, queue_max_concurrency, recovery_config,
         tasks_running, tasks_claimed, worker_started_at,
-        slots_down, class_capacity
+        slots_down, class_capacity, telemetry
     ) VALUES (
         :worker_id, :snapshot_at, :hostname, :pid, :processes,
         :max_claim_batch, :max_claim_per_worker, :queues,
         '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
         :tasks_running, :tasks_claimed, :worker_started_at,
-        '[]'::jsonb, '{}'::jsonb
+        '[]'::jsonb, '{}'::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
     )
 """)
 
@@ -200,13 +200,13 @@ _INSERT_WORKER_STATE_WITH_SLOTS = text("""
         max_claim_batch, max_claim_per_worker, queues,
         queue_priorities, queue_max_concurrency, recovery_config,
         tasks_running, tasks_claimed, worker_started_at, slots_down,
-        class_capacity
+        class_capacity, telemetry
     ) VALUES (
         :worker_id, NOW(), 'itest-host', 4242, 2,
         2, 2, ARRAY['default'],
         '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
         0, 0, NOW(), CAST(:slots_down AS JSONB),
-        '{}'::jsonb
+        '{}'::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
     )
 """)
 
@@ -296,13 +296,13 @@ _INSERT_WORKER_STATE_WITH_CAPACITY = text("""
         max_claim_batch, max_claim_per_worker, queues,
         queue_priorities, queue_max_concurrency, recovery_config,
         tasks_running, tasks_claimed, worker_started_at, slots_down,
-        class_capacity
+        class_capacity, telemetry
     ) VALUES (
         :worker_id, NOW(), 'itest-host', 4242, 2,
         2, 2, ARRAY['default'],
         '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
         0, 0, NOW(), '[]'::jsonb,
-        CAST(:class_capacity AS JSONB)
+        CAST(:class_capacity AS JSONB), jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
     )
 """)
 

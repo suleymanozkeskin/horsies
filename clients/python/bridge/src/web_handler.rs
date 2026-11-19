@@ -25,7 +25,8 @@ use std::time::Duration;
 use horsies_core::web::{
     route_access, AccessGrant as CoreGrant, AccessNeed, Bytes, EventFrames, EventStreamItem,
     Method, MonitoringHandler as CoreHandler, MonitoringHandlerConfig, MonitoringUiConfig,
-    RequestParts, ResponseForm, ResponseParts, Verdict, DEGRADED_FRAME, MAX_REQUEST_BODY_BYTES,
+    RequestParts, ResponseForm, ResponseParts, TraceLink, TraceLinkTemplate, Verdict,
+    DEGRADED_FRAME, MAX_REQUEST_BODY_BYTES,
 };
 use horsies_core::{BrokerError, ChildSpecSource};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -481,6 +482,14 @@ fn heartbeat_of(heartbeat_ms: u64) -> Result<Duration, String> {
     }
 }
 
+/// The trace link of a template text: `NoTraceLink` for `None`. Pure.
+fn trace_link_of(template: Option<&str>) -> Result<TraceLink, horsies_core::web::TraceLinkRefusal> {
+    match template {
+        None => Ok(TraceLink::NoTraceLink),
+        Some(text) => TraceLinkTemplate::parse(text).map(TraceLink::Template),
+    }
+}
+
 /// The monitoring handler of one `CoreHandle`.
 #[pyclass(module = "horsies._core", name = "MonitoringHandler", frozen)]
 pub struct MonitoringHandler {
@@ -493,26 +502,38 @@ impl MonitoringHandler {
     /// The handler of `handle`'s broker. `client_version` is the version
     /// that `/api/meta` reports; `heartbeat_ms` the wait of an event stream
     /// without an event before its heartbeat frame (1 to 3,600,000);
-    /// `queue_names` and `schedule_names` the label values of `/metrics`
-    /// (every other name is `(unknown)`). Starts nothing: the first call
-    /// builds the handler. A handle without a child spec source raises
-    /// `RuntimeError`; a heartbeat out of bounds, or a name that is empty
-    /// or `(unknown)`, raises `ValueError`.
+    /// `trace_link_template` the template of the trace link of a task
+    /// detail, or `None` for the trace id as text; `queue_names` and
+    /// `schedule_names` the label values of `/metrics` (every other name is
+    /// `(unknown)`). Starts nothing: the first call builds the handler. A
+    /// handle without a child spec source raises `RuntimeError`; a heartbeat
+    /// out of bounds, a template that `trace_link_refusal` refuses, or a name
+    /// that is empty or `(unknown)`, raises `ValueError`.
     #[new]
     #[pyo3(signature = (
-        handle, *, actions_enabled, custom_css_url, client_version, heartbeat_ms, queue_names,
+        handle,
+        *,
+        actions_enabled,
+        custom_css_url,
+        trace_link_template,
+        client_version,
+        heartbeat_ms,
+        queue_names,
         schedule_names
     ))]
     fn new(
         handle: &Bound<'_, CoreHandle>,
         actions_enabled: bool,
         custom_css_url: Option<String>,
+        trace_link_template: Option<String>,
         client_version: String,
         heartbeat_ms: u64,
         queue_names: Vec<String>,
         schedule_names: Vec<String>,
     ) -> PyResult<Self> {
         let heartbeat = heartbeat_of(heartbeat_ms).map_err(PyValueError::new_err)?;
+        let trace_link = trace_link_of(trace_link_template.as_deref())
+            .map_err(|refused| PyValueError::new_err(refused.to_string()))?;
         let fleet_labels = fleet_labels(queue_names, schedule_names)
             .map_err(|refused| PyValueError::new_err(refused.message))?;
         let handle = handle.get();
@@ -529,7 +550,10 @@ impl MonitoringHandler {
                     child_source,
                     config: MonitoringHandlerConfig {
                         actions_enabled,
-                        ui: MonitoringUiConfig { custom_css_url },
+                        ui: MonitoringUiConfig {
+                            custom_css_url,
+                            trace_link,
+                        },
                         client_version,
                         heartbeat,
                         fleet_labels,

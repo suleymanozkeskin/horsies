@@ -25,6 +25,7 @@ use super::pool::{
 use super::seat_runs::{place_on_shared_child, OpenChildLoad, Placement, SharedChildKind};
 use super::shared_slot::run_shared_slot;
 use crate::broker::OrphanSelfHeal;
+use crate::events::QueueName;
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     ChildKind, DispatchNumber, InitFrame, SharedRunFrame, SharedWork, TaskInputText,
@@ -62,8 +63,9 @@ pub struct SharedPoolConfig {
     pub kill_wait: Duration,
 }
 
-/// The kind of the shared children of an init frame. An isolated init
-/// frame for a shared pool is a defect of the caller: it crashes loud.
+/// The kind of the shared children of an init frame. An isolated or a
+/// handler init frame for a shared pool is a defect of the caller: it
+/// crashes loud.
 fn shared_kind_of(init: &InitFrame) -> (SharedChildKind, ExecutionClass, NonZeroUsize) {
     let (kind, class, seats) = match init.child_kind {
         ChildKind::SharedAsync(child) => (
@@ -77,6 +79,7 @@ fn shared_kind_of(init: &InitFrame) -> (SharedChildKind, ExecutionClass, NonZero
             child.seats.get(),
         ),
         ChildKind::Isolated(_) => panic!("a shared pool was given an isolated init frame"),
+        ChildKind::Handler(_) => panic!("a shared pool was given a handler init frame"),
     };
     let seats = usize::try_from(seats)
         .ok()
@@ -357,10 +360,13 @@ impl SharedPool {
                     dispatch,
                     task_id: task.task_id,
                     task_name: task.task_name.clone(),
+                    queue_name: QueueName::cut(&task.queue_name),
+                    attempt: task.retry.attempt(),
                     worker_id: self.shared.config.worker_id.clone(),
                     claimed_at: task.claimed_at,
                     orphan_self_heal: self.shared.config.orphan_self_heal,
                     work,
+                    trace: task.trace.clone(),
                     input,
                 },
                 answer: Answer::watched(sender, watch, self.shared.class),

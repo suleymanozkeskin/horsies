@@ -1,9 +1,10 @@
 //! Tests of the frame codec: byte examples of the Python codec, pinned
-//! version-2 metadata, every refusal, and the read buffer.
+//! version-3 metadata, every refusal, and the read buffer.
 
 mod field_checks;
 mod frame_steps;
 mod python_vectors;
+mod version_three;
 
 use std::num::NonZeroU64;
 
@@ -19,6 +20,7 @@ use crate::core::config::socket::{
 };
 use crate::core::config::{PostgresConfig, PostgresConfigError};
 use crate::core::task::error::OutcomeCode;
+use crate::events::{AttemptNumber, QueueName};
 
 const T1: &str = "0190f5a2-7b1c-7d3e-8f00-000000000001";
 const T2: &str = "0190f5a2-7b1c-7d3e-8f00-000000000002";
@@ -138,6 +140,11 @@ fn whole_second_claim_time() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 11, 16, 9, 30, 0).unwrap()
 }
 
+/// The queue of the run frames of these tests.
+fn default_queue() -> QueueName {
+    QueueName::new("default".to_owned()).unwrap()
+}
+
 fn pool() -> ChildPool {
     ChildPool {
         min_size: PoolMinSize::new(0).unwrap(),
@@ -156,6 +163,21 @@ fn isolated_kind() -> ChildKind {
 fn envelope(text: &str) -> ResultEnvelopeText {
     ResultEnvelopeText::new(text.to_owned())
 }
+
+/// The start time of the attempts of these tests.
+fn start_time() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 11, 16, 9, 30, 1).unwrap() + chrono::Duration::microseconds(250_000)
+}
+
+/// A start that the child reported, at [`start_time`].
+fn reported() -> crate::events::AttemptStart {
+    crate::events::AttemptStart::Reported {
+        started_at: start_time(),
+    }
+}
+
+/// The wire text of [`reported`].
+const REPORTED: &str = r#"{"kind":"reported","time":"2026-11-16T09:30:01.250Z"}"#;
 
 // ---------------------------------------------------------------------------
 // Byte examples of the Python codec: frames whose content did not change
@@ -325,13 +347,13 @@ fn a_version_one_init_frame_is_a_protocol_mismatch() {
 #[test]
 fn another_version_is_named_before_the_fields_are_read() {
     let init = framed(
-        r#"{"kind":"init","protocol":3,"a_field_of_version_3":true}"#,
+        r#"{"kind":"init","protocol":4,"a_field_of_version_4":true}"#,
         b"",
     );
     assert_eq!(
         decode_parent_bytes(&init),
         Err(ParentFrameRefusal::ProtocolMismatch(ProtocolMismatch {
-            received: ReceivedProtocol::Named(3),
+            received: ReceivedProtocol::Named(4),
         })),
     );
     let ready = framed(r#"{"kind":"ready","protocol":1,"pid":5}"#, b"");
@@ -359,7 +381,7 @@ fn a_protocol_that_is_not_a_whole_number_is_malformed() {
 }
 
 // ---------------------------------------------------------------------------
-// Version-2 content, pinned
+// Version-3 content, pinned
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -370,7 +392,7 @@ fn the_ready_frame_names_the_protocol() {
             rss: rss(27.25),
         }),
         &framed(
-            r#"{"kind":"ready","protocol":2,"pid":4242,"rss_mb":27.25}"#,
+            r#"{"kind":"ready","protocol":3,"pid":4242,"rss_mb":27.25}"#,
             b"",
         ),
     );
@@ -389,7 +411,7 @@ fn the_init_frame_of_a_rust_child() {
         }),
         &framed(
             concat!(
-                r#"{"kind":"init","protocol":2,"program":{"kind":"rust"},"log_level":"info","#,
+                r#"{"kind":"init","protocol":3,"program":{"kind":"rust"},"log_level":"info","#,
                 r#""database_url":"postgresql://u@h/db","#,
                 r#""connection":{"tcp_keepalives":{"kind":"on","idle_seconds":30,"#,
                 r#""interval_seconds":10,"probes":3},"tcp_user_timeout":{"kind":"after","#,
@@ -427,7 +449,7 @@ fn the_init_frame_of_a_python_child() {
         }),
         &framed(
             concat!(
-                r#"{"kind":"init","protocol":2,"program":{"kind":"python","#,
+                r#"{"kind":"init","protocol":3,"program":{"kind":"python","#,
                 r#""app_locator":"app:app","imports":["app.tasks"],"sys_path_roots":["/srv"],"#,
                 r#""parent_sys_path":["/srv","/usr/lib"],"parent_argv":["horsies","worker"]},"#,
                 r#""log_level":"warning","database_url":"postgresql://u@h/db","#,
@@ -472,7 +494,7 @@ fn the_init_frame_carries_keepalives_off_and_transaction_mode() {
         &ParentFrame::Init(init_with(transaction_mode_connection())),
         &framed(
             concat!(
-                r#"{"kind":"init","protocol":2,"program":{"kind":"rust"},"log_level":"info","#,
+                r#"{"kind":"init","protocol":3,"program":{"kind":"rust"},"log_level":"info","#,
                 r#""database_url":"postgresql://u@pooler/db","#,
                 r#""connection":{"tcp_keepalives":{"kind":"off"},"#,
                 r#""tcp_user_timeout":{"kind":"system_default"},"#,
@@ -523,7 +545,7 @@ fn init_bytes_with_connection(connection: &str) -> Vec<u8> {
     framed(
         &format!(
             concat!(
-                r#"{{"kind":"init","protocol":2,"program":{{"kind":"rust"}},"#,
+                r#"{{"kind":"init","protocol":3,"program":{{"kind":"rust"}},"#,
                 r#""log_level":"info","database_url":"postgresql://u@h/db","#,
                 r#""connection":{},"process_name":"c","#,
                 r#""child_kind":{{"kind":"isolated","pool":{{"min_size":0,"max_size":1,"#,
@@ -569,7 +591,7 @@ fn a_keepalive_value_outside_its_bounds_is_refused() {
 fn an_init_frame_without_its_connection_settings_is_refused() {
     let init = framed(
         concat!(
-            r#"{"kind":"init","protocol":2,"program":{"kind":"rust"},"log_level":"info","#,
+            r#"{"kind":"init","protocol":3,"program":{"kind":"rust"},"log_level":"info","#,
             r#""database_url":"postgresql://u@h/db","process_name":"c","#,
             r#""child_kind":{"kind":"isolated","pool":{"min_size":0,"max_size":1,"#,
             r#""check":true},"task_send_pool":2}}"#,
@@ -630,18 +652,23 @@ fn the_isolated_run_frame_carries_the_input_as_its_body() {
         &ParentFrame::Run(RunFrame {
             task_id: task_id(T5),
             task_name: "app.tasks.add".to_owned(),
+            queue_name: default_queue(),
+            attempt: AttemptNumber::SMALLEST,
             worker_id: "worker-1".to_owned(),
             claimed_at: claim_time(),
             orphan_self_heal: OrphanSelfHeal::On,
             work: IsolatedWork::Run,
+            trace: crate::events::RunTrace::NoCarrier,
             input: TaskInputText::new(r#"{"a":1,"b":2}"#.to_owned()),
         }),
         &framed(
             concat!(
                 r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.add","worker_id":"worker-1","#,
+                r#""task_name":"app.tasks.add","queue_name":"default","attempt":1,"#,
+                r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00.123456Z","orphan_self_heal":true,"#,
-                r#""work":{"kind":"run"}}"#,
+                r#""work":{"kind":"run"},"#,
+                r#""trace":{"kind":"no_carrier"}}"#,
             ),
             br#"{"a":1,"b":2}"#,
         ),
@@ -654,21 +681,26 @@ fn the_isolated_run_frame_carries_a_refusal_of_stored_options() {
         &ParentFrame::Run(RunFrame {
             task_id: task_id(T5),
             task_name: "app.tasks.add".to_owned(),
+            queue_name: default_queue(),
+            attempt: AttemptNumber::SMALLEST,
             worker_id: "worker-1".to_owned(),
             claimed_at: whole_second_claim_time(),
             orphan_self_heal: OrphanSelfHeal::Off,
             work: IsolatedWork::Refusal(StoredOptionsRefusal::TimeoutValueInvalid(
                 RefusalReason::new("timeout_ms is below 1000".to_owned()).unwrap(),
             )),
+            trace: crate::events::RunTrace::NoCarrier,
             input: TaskInputText::new("null".to_owned()),
         }),
         &framed(
             concat!(
                 r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.add","worker_id":"worker-1","#,
+                r#""task_name":"app.tasks.add","queue_name":"default","attempt":1,"#,
+                r#""worker_id":"worker-1","#,
                 r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"#,
                 r#""work":{"kind":"refusal","#,
-                r#""refusal":{"kind":"value_invalid","reason":"timeout_ms is below 1000"}}}"#,
+                r#""refusal":{"kind":"value_invalid","reason":"timeout_ms is below 1000"}},"#,
+                r#""trace":{"kind":"no_carrier"}}"#,
             ),
             b"null",
         ),
@@ -682,10 +714,13 @@ fn the_shared_run_frame_carries_the_seat_work() {
             dispatch: DispatchNumber::new(9).unwrap(),
             task_id: task_id(T5),
             task_name: "app.tasks.fetch".to_owned(),
+            queue_name: default_queue(),
+            attempt: AttemptNumber::SMALLEST,
             worker_id: "worker-1".to_owned(),
             claimed_at: whole_second_claim_time(),
             orphan_self_heal: OrphanSelfHeal::Off,
             work,
+            trace: crate::events::RunTrace::NoCarrier,
             input: TaskInputText::new("{}".to_owned()),
         })
     };
@@ -694,8 +729,10 @@ fn the_shared_run_frame_carries_the_seat_work() {
             concat!(
                 r#"{{"kind":"shared_run","dispatch":9,"#,
                 r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""task_name":"app.tasks.fetch","worker_id":"worker-1","#,
-                r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{}}}"#,
+                r#""task_name":"app.tasks.fetch","queue_name":"default","attempt":1,"#,
+                r#""worker_id":"worker-1","#,
+                r#""claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{},"#,
+                r#""trace":{{"kind":"no_carrier"}}}}"#,
             ),
             work
         )
@@ -733,10 +770,14 @@ fn the_shared_run_frame_carries_the_seat_work() {
 
 #[test]
 fn the_result_frame_carries_a_closed_run_end() {
-    let frame = |end: RunEnd, rss_reading: RssReading, task_loop: NoLeftWork| {
+    let frame = |end: RunEnd,
+                 started_at: crate::events::AttemptStart,
+                 rss_reading: RssReading,
+                 task_loop: NoLeftWork| {
         ChildFrame::Result(ResultFrame {
             task_id: task_id(T5),
             end,
+            started_at,
             rss: rss_reading,
             task_loop,
             child: ChildAfterFrame::ServesOn,
@@ -745,14 +786,18 @@ fn the_result_frame_carries_a_closed_run_end() {
     assert_child_bytes(
         &frame(
             RunEnd::Result(envelope(r#"{"ok":3}"#)),
+            reported(),
             rss(30.5),
             NoLeftWork::NoTaskLoop,
         ),
         &framed(
-            concat!(
-                r#"{"kind":"result","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""end":{"kind":"result"},"rss_mb":30.5,"task_loop":{"kind":"none"},"#,
-                r#""child":"serves_on"}"#,
+            &format!(
+                concat!(
+                    r#"{{"kind":"result","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                    r#""end":{{"kind":"result"}},"started_at":{},"rss_mb":30.5,"#,
+                    r#""task_loop":{{"kind":"none"}},"child":"serves_on"}}"#,
+                ),
+                REPORTED
             ),
             br#"{"ok":3}"#,
         ),
@@ -760,6 +805,7 @@ fn the_result_frame_carries_a_closed_run_end() {
     assert_child_bytes(
         &frame(
             RunEnd::StoppedBeforeRunning(StopReason::ClaimLost),
+            crate::events::AttemptStart::NotReported,
             RssReading::Unreadable,
             NoLeftWork::LoopHoldsNoTask,
         ),
@@ -767,6 +813,7 @@ fn the_result_frame_carries_a_closed_run_end() {
             concat!(
                 r#"{"kind":"result","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
                 r#""end":{"kind":"stopped_before_running","reason":"CLAIM_LOST"},"#,
+                r#""started_at":{"kind":"not_reported"},"#,
                 r#""rss_mb":null,"task_loop":{"kind":"empty"},"child":"serves_on"}"#,
             ),
             b"",
@@ -775,14 +822,19 @@ fn the_result_frame_carries_a_closed_run_end() {
     assert_child_bytes(
         &frame(
             RunEnd::WorkerFailure(FailureDetail::new("encode failed".to_owned()).unwrap()),
+            reported(),
             rss(31.0),
             NoLeftWork::NoTaskLoop,
         ),
         &framed(
-            concat!(
-                r#"{"kind":"result","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""end":{"kind":"worker_failure","detail":"encode failed"},"rss_mb":31.0,"#,
-                r#""task_loop":{"kind":"none"},"child":"serves_on"}"#,
+            &format!(
+                concat!(
+                    r#"{{"kind":"result","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                    r#""end":{{"kind":"worker_failure","detail":"encode failed"}},"#,
+                    r#""started_at":{},"rss_mb":31.0,"#,
+                    r#""task_loop":{{"kind":"none"}},"child":"serves_on"}}"#,
+                ),
+                REPORTED
             ),
             b"",
         ),
@@ -795,14 +847,19 @@ fn the_shared_result_frame_carries_a_seat_end() {
         &ChildFrame::SharedResult(SharedResultFrame {
             run: run_ref(9, T5),
             end: SeatEnd::TimedOut,
+            started_at: reported(),
             rss: rss(31.0),
             child: ChildAfterFrame::ServesOn,
         }),
         &framed(
-            concat!(
-                r#"{"kind":"shared_result","dispatch":9,"#,
-                r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""end":{"kind":"timed_out"},"rss_mb":31.0,"child":"serves_on"}"#,
+            &format!(
+                concat!(
+                    r#"{{"kind":"shared_result","dispatch":9,"#,
+                    r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                    r#""end":{{"kind":"timed_out"}},"started_at":{},"rss_mb":31.0,"#,
+                    r#""child":"serves_on"}}"#,
+                ),
+                REPORTED
             ),
             b"",
         ),
@@ -811,14 +868,19 @@ fn the_shared_result_frame_carries_a_seat_end() {
         &ChildFrame::SharedResult(SharedResultFrame {
             run: run_ref(9, T5),
             end: SeatEnd::Finished(RunEnd::Result(envelope("[1,2]"))),
+            started_at: reported(),
             rss: RssReading::Unreadable,
             child: ChildAfterFrame::ServesOn,
         }),
         &framed(
-            concat!(
-                r#"{"kind":"shared_result","dispatch":9,"#,
-                r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""end":{"kind":"result"},"rss_mb":null,"child":"serves_on"}"#,
+            &format!(
+                concat!(
+                    r#"{{"kind":"shared_result","dispatch":9,"#,
+                    r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                    r#""end":{{"kind":"result"}},"started_at":{},"rss_mb":null,"#,
+                    r#""child":"serves_on"}}"#,
+                ),
+                REPORTED
             ),
             b"[1,2]",
         ),
@@ -833,6 +895,7 @@ fn a_result_frame_names_a_child_that_ends_itself() {
         &ChildFrame::Result(ResultFrame {
             task_id: task_id(T5),
             end: RunEnd::StoppedBeforeRunning(StopReason::OwnershipUnconfirmed),
+            started_at: crate::events::AttemptStart::NotReported,
             rss: RssReading::Unreadable,
             task_loop: NoLeftWork::NoTaskLoop,
             child: ChildAfterFrame::EndsItself,
@@ -841,6 +904,7 @@ fn a_result_frame_names_a_child_that_ends_itself() {
             concat!(
                 r#"{"kind":"result","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
                 r#""end":{"kind":"stopped_before_running","reason":"OWNERSHIP_UNCONFIRMED"},"#,
+                r#""started_at":{"kind":"not_reported"},"#,
                 r#""rss_mb":null,"task_loop":{"kind":"none"},"child":"ends_itself"}"#,
             ),
             b"",
@@ -850,14 +914,19 @@ fn a_result_frame_names_a_child_that_ends_itself() {
         &ChildFrame::SharedResult(SharedResultFrame {
             run: run_ref(9, T5),
             end: SeatEnd::Finished(RunEnd::Result(envelope("[1,2]"))),
+            started_at: reported(),
             rss: RssReading::Unreadable,
             child: ChildAfterFrame::EndsItself,
         }),
         &framed(
-            concat!(
-                r#"{"kind":"shared_result","dispatch":9,"#,
-                r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""end":{"kind":"result"},"rss_mb":null,"child":"ends_itself"}"#,
+            &format!(
+                concat!(
+                    r#"{{"kind":"shared_result","dispatch":9,"#,
+                    r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
+                    r#""end":{{"kind":"result"}},"started_at":{},"rss_mb":null,"#,
+                    r#""child":"ends_itself"}}"#,
+                ),
+                REPORTED
             ),
             b"[1,2]",
         ),
@@ -869,7 +938,7 @@ fn a_result_frame_names_a_child_that_ends_itself() {
 #[test]
 fn a_result_frame_without_a_known_child_value_is_refused() {
     let without = format!(
-        r#"{{"kind":"result","task_id":"{T1}","end":{{"kind":"stopped_before_running","reason":"CLAIM_LOST"}},"rss_mb":null,"task_loop":{{"kind":"none"}}}}"#
+        r#"{{"kind":"result","task_id":"{T1}","end":{{"kind":"stopped_before_running","reason":"CLAIM_LOST"}},"started_at":{{"kind":"not_reported"}},"rss_mb":null,"task_loop":{{"kind":"none"}}}}"#
     );
     assert_eq!(
         malformed_child(&framed(&without, b"")),
@@ -878,7 +947,7 @@ fn a_result_frame_without_a_known_child_value_is_refused() {
         },
     );
     let unknown = format!(
-        r#"{{"kind":"shared_result","dispatch":1,"task_id":"{T1}","end":{{"kind":"timed_out"}},"rss_mb":null,"child":"retires"}}"#
+        r#"{{"kind":"shared_result","dispatch":1,"task_id":"{T1}","end":{{"kind":"timed_out"}},"started_at":{{"kind":"not_reported"}},"rss_mb":null,"child":"retires"}}"#
     );
     assert_eq!(
         malformed_child(&framed(&unknown, b"")),
@@ -897,12 +966,14 @@ fn reports_after_a_return_carry_what_the_body_returned() {
         &ChildFrame::BodyReturned(BodyReturnedFrame {
             task_id: task_id(T5),
             returned: returned.clone(),
+            started_at: start_time(),
             left,
         }),
         &framed(
             concat!(
                 r#"{"kind":"body_returned","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""returned":{"kind":"result"},"left":{"count":1,"names":["poll"]}}"#,
+                r#""returned":{"kind":"result"},"started_at":"2026-11-16T09:30:01.250Z","#,
+                r#""left":{"count":1,"names":["poll"]}}"#,
             ),
             br#"{"ok":null}"#,
         ),
@@ -911,12 +982,13 @@ fn reports_after_a_return_carry_what_the_body_returned() {
         &ChildFrame::LeftoverCancel(LeftoverCancelFrame {
             run: run_ref(2, T5),
             returned: returned.clone(),
+            started_at: start_time(),
         }),
         &framed(
             concat!(
                 r#"{"kind":"leftover_cancel","dispatch":2,"#,
                 r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-                r#""returned":{"kind":"result"}}"#,
+                r#""returned":{"kind":"result"},"started_at":"2026-11-16T09:30:01.250Z"}"#,
             ),
             br#"{"ok":null}"#,
         ),
@@ -926,13 +998,15 @@ fn reports_after_a_return_carry_what_the_body_returned() {
             run: run_ref(2, T5),
             work: StuckWork::new(0, 2, Vec::new()).unwrap(),
             returned: BodyEnd::WorkerFailure(FailureDetail::new("x".to_owned()).unwrap()),
+            started_at: start_time(),
         }),
         &framed(
             concat!(
                 r#"{"kind":"leftover_stuck","dispatch":2,"#,
                 r#""task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
                 r#""tasks":0,"executor_items":2,"names":[],"#,
-                r#""returned":{"kind":"worker_failure","detail":"x"}}"#,
+                r#""returned":{"kind":"worker_failure","detail":"x"},"#,
+                r#""started_at":"2026-11-16T09:30:01.250Z"}"#,
             ),
             b"",
         ),
@@ -952,6 +1026,7 @@ fn every_stop_reason_round_trips() {
         let frame = ChildFrame::SharedResult(SharedResultFrame {
             run: run_ref(1, T1),
             end: SeatEnd::Finished(RunEnd::StoppedBeforeRunning(reason)),
+            started_at: crate::events::AttemptStart::NotReported,
             rss: RssReading::Unreadable,
             child: ChildAfterFrame::ServesOn,
         });
@@ -964,7 +1039,7 @@ fn every_stop_reason_round_trips() {
 /// of the frame.
 fn run_end_of(end: &str) -> Result<RunEnd, MalformedFrame> {
     let meta = format!(
-        r#"{{"kind":"result","task_id":"{T1}","end":{end},"rss_mb":null,"task_loop":{{"kind":"none"}},"child":"serves_on"}}"#
+        r#"{{"kind":"result","task_id":"{T1}","end":{end},"started_at":{{"kind":"not_reported"}},"rss_mb":null,"task_loop":{{"kind":"none"}},"child":"serves_on"}}"#
     );
     match decode_child_bytes(&framed(&meta, b"")) {
         Ok(ChildFrame::Result(frame)) => Ok(frame.end),
@@ -1010,6 +1085,7 @@ fn the_expired_stop_reason_is_spelled_as_the_task_expired_code() {
     let frame = ChildFrame::Result(ResultFrame {
         task_id: task_id(T1),
         end: RunEnd::StoppedBeforeRunning(StopReason::TaskExpired),
+        started_at: crate::events::AttemptStart::NotReported,
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
         child: ChildAfterFrame::ServesOn,
@@ -1030,6 +1106,7 @@ fn a_worker_failure_keeps_its_text_and_an_unknown_stop_reason_is_refused() {
         let frame = ChildFrame::Result(ResultFrame {
             task_id: task_id(T1),
             end: RunEnd::WorkerFailure(FailureDetail::new(detail.to_owned()).unwrap()),
+            started_at: crate::events::AttemptStart::NotReported,
             rss: RssReading::Unreadable,
             task_loop: NoLeftWork::NoTaskLoop,
             child: ChildAfterFrame::ServesOn,
@@ -1067,10 +1144,13 @@ fn the_claim_generation_round_trips_exactly() {
     let frame = ParentFrame::Run(RunFrame {
         task_id: task_id(T5),
         task_name: "t".to_owned(),
+        queue_name: default_queue(),
+        attempt: AttemptNumber::SMALLEST,
         worker_id: "w".to_owned(),
         claimed_at,
         orphan_self_heal: OrphanSelfHeal::Off,
         work: IsolatedWork::Run,
+        trace: crate::events::RunTrace::NoCarrier,
         input: TaskInputText::new("{}".to_owned()),
     });
     let bytes = encode_parent_frame(&frame).unwrap().to_bytes();
@@ -1088,22 +1168,28 @@ fn the_orphan_self_heal_round_trips_in_both_run_frames() {
         let run = ParentFrame::Run(RunFrame {
             task_id: task_id(T5),
             task_name: "t".to_owned(),
+            queue_name: default_queue(),
+            attempt: AttemptNumber::SMALLEST,
             worker_id: "w".to_owned(),
             claimed_at: claim_time(),
             orphan_self_heal: self_heal,
             work: IsolatedWork::Run,
+            trace: crate::events::RunTrace::NoCarrier,
             input: TaskInputText::new("{}".to_owned()),
         });
         let shared = ParentFrame::SharedRun(SharedRunFrame {
             dispatch: DispatchNumber::new(3).unwrap(),
             task_id: task_id(T5),
             task_name: "t".to_owned(),
+            queue_name: default_queue(),
+            attempt: AttemptNumber::SMALLEST,
             worker_id: "w".to_owned(),
             claimed_at: claim_time(),
             orphan_self_heal: self_heal,
             work: SharedWork::ThreadTask {
                 timeout_ms: TaskTimeoutMs::new(5_000).unwrap(),
             },
+            trace: crate::events::RunTrace::NoCarrier,
             input: TaskInputText::new("{}".to_owned()),
         });
         for frame in [run, shared] {
@@ -1117,7 +1203,7 @@ fn the_orphan_self_heal_round_trips_in_both_run_frames() {
 #[test]
 fn a_run_frame_without_its_orphan_self_heal_is_refused() {
     let run = format!(
-        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"run"}}}}"#
+        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"run"}},"trace":{{"kind":"no_carrier"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&run, b"{}")),
@@ -1126,7 +1212,7 @@ fn a_run_frame_without_its_orphan_self_heal_is_refused() {
         },
     );
     let shared = format!(
-        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"thread_task","timeout_ms":5000}}}}"#
+        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","work":{{"kind":"thread_task","timeout_ms":5000}},"trace":{{"kind":"no_carrier"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&shared, b"{}")),
@@ -1142,9 +1228,10 @@ fn a_claim_generation_with_an_offset_is_read() {
     let run = framed(
         concat!(
             r#"{"kind":"run","task_id":"0190f5a2-7b1c-7d3e-8f00-000000000005","#,
-            r#""task_name":"t","worker_id":"w","#,
+            r#""task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","#,
             r#""claimed_at":"2026-11-16T09:30:00.123456+00:00","orphan_self_heal":false,"#,
-            r#""work":{"kind":"run"}}"#,
+            r#""work":{"kind":"run"},"#,
+            r#""trace":{"kind":"no_carrier"}}"#,
         ),
         b"{}",
     );
@@ -1243,7 +1330,7 @@ fn a_body_on_a_frame_without_one_is_refused() {
 #[test]
 fn input_that_is_not_utf8_is_refused() {
     let meta = format!(
-        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{{"kind":"run"}}}}"#
+        r#"{{"kind":"run","task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{{"kind":"run"}},"trace":{{"kind":"no_carrier"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&meta, &[0x7b, 0xff])),
@@ -1319,7 +1406,7 @@ fn a_stuck_report_names_live_work() {
 #[test]
 fn seat_work_outside_its_bounds_is_refused() {
     let meta = format!(
-        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{{"kind":"task","timeout_ms":999,"cancel_grace_ms":1000}}}}"#
+        r#"{{"kind":"shared_run","dispatch":1,"task_id":"{T1}","task_name":"t","queue_name":"default","attempt":1,"worker_id":"w","claimed_at":"2026-11-16T09:30:00Z","orphan_self_heal":false,"work":{{"kind":"task","timeout_ms":999,"cancel_grace_ms":1000}},"trace":{{"kind":"no_carrier"}}}}"#
     );
     assert_eq!(
         malformed_parent(&framed(&meta, b"{}")),
@@ -1332,7 +1419,7 @@ fn seat_work_outside_its_bounds_is_refused() {
 #[test]
 fn a_negative_or_fractional_number_is_refused() {
     let negative = framed(
-        r#"{"kind":"ready","protocol":2,"pid":-1,"rss_mb":null}"#,
+        r#"{"kind":"ready","protocol":3,"pid":-1,"rss_mb":null}"#,
         b"",
     );
     assert_eq!(
@@ -1342,7 +1429,7 @@ fn a_negative_or_fractional_number_is_refused() {
         },
     );
     let fraction = framed(
-        r#"{"kind":"ready","protocol":2,"pid":1.5,"rss_mb":null}"#,
+        r#"{"kind":"ready","protocol":3,"pid":1.5,"rss_mb":null}"#,
         b"",
     );
     assert_eq!(
@@ -1353,7 +1440,7 @@ fn a_negative_or_fractional_number_is_refused() {
         },
     );
     let negative_rss = framed(
-        r#"{"kind":"ready","protocol":2,"pid":1,"rss_mb":-1.0}"#,
+        r#"{"kind":"ready","protocol":3,"pid":1,"rss_mb":-1.0}"#,
         b"",
     );
     assert_eq!(

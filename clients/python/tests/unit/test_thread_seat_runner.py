@@ -61,6 +61,7 @@ from tests.fixtures.core_frames import (
     shared_run_frame,
     thread_work,
 )
+from tests.fixtures.run_return import STARTED, STARTED_AT
 
 pytestmark = [pytest.mark.unit]
 
@@ -139,7 +140,7 @@ class _Steps:
     """The replaced database steps, as the seat thread sees them."""
 
     def __init__(self) -> None:
-        self.confirm = MagicMock(return_value=None)
+        self.confirm = MagicMock(return_value=STARTED)
         self.mark = MagicMock(return_value=MarkerDone())
 
 
@@ -239,7 +240,7 @@ def test_a_refusal_fails_the_task_after_running_and_before_resolve(
     assert envelope == child_runner._stored_timeout_refusal_response(
         'thread_double',
         TimeoutValueInvalid(reason=reason),
-    )
+    ).envelope
     error = _result(envelope, int).unwrap_err()
     assert error.error_code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR
     assert error.data == {
@@ -354,6 +355,7 @@ class _SlowHandle:
         self.started.append(task_id)
         record = MagicMock(spec=core.AttemptStarted)
         record.task_id = task_id
+        record.started_at = STARTED_AT
         return record
 
 

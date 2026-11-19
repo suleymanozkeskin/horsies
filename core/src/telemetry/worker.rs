@@ -7,10 +7,12 @@
 //! - [`WorkerTelemetry::On`] with [`EventRoute::NoHandlerChild`]: a point
 //!   records its metrics; no event is built.
 //! - [`WorkerTelemetry::On`] with [`EventRoute::HandlerChildLink`]: a point
-//!   also builds its event and offers it to the event queue
+//!   also builds its event, when the handler child takes events of its type
+//!   ([`SentEventTypes`]), and offers it to the event queue
 //!   ([`EventLink::offer`]). An offer never waits: a full queue drops the
 //!   event and counts `queue_full`, a closed queue drops it and counts
-//!   `child_down` (`horsies.telemetry.events.dropped{cause}`).
+//!   `child_down` (`horsies.telemetry.events.dropped{cause}`). An event of
+//!   a type that the child does not take is not built.
 //!
 //! A point never fails and never changes what the worker does. A sample
 //! past the series bound of its metric is counted by the registry; an event
@@ -24,10 +26,12 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 
 use crate::core::task::{DeclaredErrorCodes, Execution};
-use crate::events::Event;
+use crate::events::{Event, EventTypeName, UnionEvent};
 use crate::telemetry::catalog::MetricId;
 use crate::telemetry::declared::{self, DeclaredValue, ErrorCodeValue};
-use crate::telemetry::labels::{ClaimPassResult, EventDropCause, RecoveryStep, ReleaseReason};
+use crate::telemetry::labels::{
+    ClaimPassResult, EventDropCause, RecoveryAction, RecoveryStep, ReleaseReason, ReplaceReason,
+};
 use crate::telemetry::registry::{Counter, HandleRefused, Histogram, OptionalCounter, Registry};
 use crate::worker::executor::protocol::StopReason;
 use crate::worker::executor::slots::outcome::WriteStage;
@@ -35,6 +39,7 @@ use crate::TaskAttemptOutcome;
 
 mod end_points;
 mod points;
+mod recovery_points;
 mod slot_points;
 #[cfg(test)]
 mod tests;
@@ -78,6 +83,40 @@ impl WorkerTelemetry {
             Self::On(on) => OptionalCounter::Recording(on.metrics.recovery_failures.clone()),
         }
     }
+}
+
+/// The event types that a worker sends to its handler child. A point does
+/// not build an event of another type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SentEventTypes(u32);
+
+// One bit per event type.
+const _: () = assert!(EventTypeName::ALL.len() <= u32::BITS as usize);
+
+impl SentEventTypes {
+    /// Every event type.
+    pub fn all() -> Self {
+        Self::of(EventTypeName::ALL.iter().copied())
+    }
+
+    /// The types of `names`; a name given twice counts once.
+    pub fn of(names: impl IntoIterator<Item = EventTypeName>) -> Self {
+        Self(
+            names
+                .into_iter()
+                .fold(0, |bits, name| bits | type_bit(name)),
+        )
+    }
+
+    /// Whether the events of the type `name` are sent.
+    pub fn sends(self, name: EventTypeName) -> bool {
+        self.0 & type_bit(name) != 0
+    }
+}
+
+/// The bit of `name` in a [`SentEventTypes`].
+fn type_bit(name: EventTypeName) -> u32 {
+    1_u32 << (name as u32)
 }
 
 /// Where the events of the points go.
@@ -152,8 +191,10 @@ struct PointMetrics {
     starts_refused: Counter<(StopReason,)>,
     finalize_retries: Counter<(WriteStage,)>,
     claim_passes: Counter<(ClaimPassResult,)>,
+    recovery_tasks: Counter<(RecoveryAction,)>,
     recovery_failures: Counter<(RecoveryStep,)>,
     children_started: Counter<(Execution,)>,
+    children_replaced: Counter<(Execution, ReplaceReason)>,
     child_boot: Histogram<(Execution,)>,
 }
 
@@ -175,8 +216,10 @@ impl PointMetrics {
             starts_refused: registry.counter(MetricId::TaskStartsRefused)?,
             finalize_retries: registry.counter(MetricId::FinalizeRetries)?,
             claim_passes: registry.counter(MetricId::ClaimPasses)?,
+            recovery_tasks: registry.counter(MetricId::RecoveryTasks)?,
             recovery_failures: registry.counter(MetricId::RecoveryPassFailures)?,
             children_started: registry.counter(MetricId::ChildrenStarted)?,
+            children_replaced: registry.counter(MetricId::ChildrenReplaced)?,
             child_boot: registry.histogram(MetricId::ChildBootDuration)?,
         })
     }
@@ -187,6 +230,9 @@ impl PointMetrics {
 pub enum Emitted {
     /// No handler child is linked: the event was not built.
     NotBuilt,
+    /// The handler child takes no event of this type: the event was not
+    /// built.
+    TypeNotSent,
     /// The event was built and offered to the event queue.
     Offered(Offer),
 }
@@ -212,8 +258,8 @@ impl TelemetryOn {
     }
 
     /// Telemetry that records the metrics of `registry` and offers each
-    /// event to a queue of at most `capacity` events. The writer of the
-    /// handler child reads the queue that this returns.
+    /// event of a type in `sent` to a queue of at most `capacity` events.
+    /// The writer of the handler child reads the queue that this returns.
     ///
     /// Errors: as [`TelemetryOn::metrics_only`], and when `registry` does
     /// not hold `horsies.telemetry.events.dropped`. Nothing is changed.
@@ -221,10 +267,11 @@ impl TelemetryOn {
         registry: Arc<Registry>,
         codes: DeclaredCodesByTask,
         capacity: NonZeroUsize,
+        sent: SentEventTypes,
     ) -> Result<(Self, EventQueue), HandleRefused> {
         let dropped = registry.counter(MetricId::EventsDropped)?;
         let metrics = PointMetrics::of(&registry)?;
-        let (link, queue) = event_link(capacity, dropped);
+        let (link, queue) = event_link(capacity, dropped, sent);
         let on = Self {
             registry,
             codes,
@@ -240,12 +287,15 @@ impl TelemetryOn {
     }
 
     /// Build the event of a point with `build` and offer it to the event
-    /// queue, when a handler child is linked. With no handler child, `build`
-    /// is not called. Never waits.
-    pub(crate) fn emit(&self, build: impl FnOnce() -> Event) -> Emitted {
+    /// queue, when a handler child is linked and takes events of the type
+    /// `E`. Otherwise `build` is not called. Never waits.
+    pub(crate) fn emit<E: UnionEvent>(&self, build: impl FnOnce() -> E) -> Emitted {
         match &self.events {
             EventRoute::NoHandlerChild => Emitted::NotBuilt,
-            EventRoute::HandlerChildLink(link) => Emitted::Offered(link.offer(build())),
+            EventRoute::HandlerChildLink(link) => match link.sent.sends(E::NAME) {
+                true => Emitted::Offered(link.offer(build().into())),
+                false => Emitted::TypeNotSent,
+            },
         }
     }
 }
@@ -263,6 +313,8 @@ pub enum Offer {
 pub struct EventLink {
     sender: mpsc::Sender<Event>,
     dropped: Counter<(EventDropCause,)>,
+    /// The event types that the points build and offer.
+    sent: SentEventTypes,
 }
 
 impl EventLink {
@@ -306,6 +358,13 @@ impl EventQueue {
         }
     }
 
+    /// Close the queue to new events: an offer after it drops its event and
+    /// counts `child_down`. The events that wait stay, for
+    /// [`EventQueue::take_waiting`].
+    pub fn close(&mut self) {
+        self.receiver.close();
+    }
+
     /// Take the events that wait now, at most `limit`, in the order of
     /// their offers; none when the queue is empty or the link is gone.
     /// Never waits.
@@ -321,12 +380,21 @@ impl EventQueue {
     }
 }
 
-/// A queue of at most `capacity` events: the link that offers them, with
-/// the counter of its drops, and the queue that reads them.
+/// A queue of at most `capacity` events of the types `sent`: the link that
+/// offers them, with the counter of its drops, and the queue that reads
+/// them.
 fn event_link(
     capacity: NonZeroUsize,
     dropped: Counter<(EventDropCause,)>,
+    sent: SentEventTypes,
 ) -> (EventLink, EventQueue) {
     let (sender, receiver) = mpsc::channel(capacity.get());
-    (EventLink { sender, dropped }, EventQueue { receiver })
+    (
+        EventLink {
+            sender,
+            dropped,
+            sent,
+        },
+        EventQueue { receiver },
+    )
 }

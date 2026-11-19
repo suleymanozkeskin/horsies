@@ -1,20 +1,24 @@
 //! Frames from a child to the worker parent.
 
+use std::collections::HashSet;
 use std::num::NonZeroU64;
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
+use super::bounds::MAX_EVENT_HANDLERS;
 use super::header::{pack, EncodedFrame, FrameEncodeError, NO_BODY};
 use super::metadata::{
-    check_protocol, no_body, parse_metadata, text_body, Fields, MalformedFrame, ProtocolCheck,
-    ProtocolMismatch,
+    check_protocol, no_body, parse_metadata, text_body, time_text, Fields, MalformedFrame,
+    ProtocolCheck, ProtocolMismatch,
 };
 use super::values::{
-    BlockedWhere, BootDetail, BootErrorName, DispatchNumber, FailureDetail, LeftoverName,
-    LoopHoldsTasks, ProcessId, ResultEnvelopeText, RssReading, StuckWork,
+    BlockedWhere, BootDetail, BootErrorName, DispatchNumber, FailureDetail, HandlerName,
+    LeftoverName, LoopHoldsTasks, ProcessId, ResultEnvelopeText, RssReading, StuckWork,
 };
 use super::PROTOCOL_VERSION;
+use crate::events::AttemptStart;
 
 pub use crate::core::boot_failure::ShortageErrno;
 
@@ -221,21 +225,28 @@ pub struct BootFailedFrame {
 }
 
 /// An isolated task ended and left no work on a task loop.
+///
+/// `started_at` is the start of the attempt: `Reported` for an end with a
+/// result envelope, `NotReported` for a stop before running, either for a
+/// worker failure.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResultFrame {
     pub task_id: Uuid,
     pub end: RunEnd,
+    pub started_at: AttemptStart,
     pub rss: RssReading,
     pub task_loop: NoLeftWork,
     pub child: ChildAfterFrame,
 }
 
 /// The body of an isolated task returned, and work that it started is still
-/// on the task loop. The deadline no longer applies.
+/// on the task loop. The deadline no longer applies. The body ran, so the
+/// attempt started at `started_at`, the time of its start write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BodyReturnedFrame {
     pub task_id: Uuid,
     pub returned: BodyEnd,
+    pub started_at: DateTime<Utc>,
     pub left: LoopHoldsTasks,
 }
 
@@ -257,10 +268,14 @@ pub struct LeftWorkStuckFrame {
 }
 
 /// A run of a shared child ended; its seat is free.
+///
+/// `started_at` is the start of the attempt, by the rule of
+/// [`ResultFrame::started_at`]; a timed out run reports it or not.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SharedResultFrame {
     pub run: RunRef,
     pub end: SeatEnd,
+    pub started_at: AttemptStart,
     pub rss: RssReading,
     pub child: ChildAfterFrame,
 }
@@ -274,19 +289,22 @@ pub struct RunStuckFrame {
 
 /// The body of a run returned before its deadline, and work with its mark
 /// was still alive one cancel grace later; the child cancels it in rounds.
+/// The body ran, so the attempt started at `started_at`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeftoverCancelFrame {
     pub run: RunRef,
     pub returned: BodyEnd,
+    pub started_at: DateTime<Utc>,
 }
 
 /// The work a run left after its return did not stop after its cancel
-/// rounds.
+/// rounds. The body ran, so the attempt started at `started_at`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeftoverStuckFrame {
     pub run: RunRef,
     pub work: StuckWork,
     pub returned: BodyEnd,
+    pub started_at: DateTime<Utc>,
 }
 
 /// The event loop of a shared async child has not turned for `blocked_ms`.
@@ -296,6 +314,86 @@ pub struct LoopBlockedFrame {
     pub culprit: LoopCulprit,
     pub blocked_ms: u64,
     pub location: BlockedWhere,
+}
+
+/// The cumulative counts of one event handler since its child started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandlerCounts {
+    /// The name of the handler; not empty.
+    pub handler: HandlerName,
+    /// The events for which the handler failed.
+    pub errors: u64,
+    /// The events that the full queue of the handler dropped.
+    pub dropped: u64,
+}
+
+/// The counts of each event handler of a handler child: at most
+/// [`MAX_EVENT_HANDLERS`] handlers, each name once and not empty. A child
+/// with no handler has none. Only [`HandlerCountsList::new`] builds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandlerCountsList(Vec<HandlerCounts>);
+
+/// Why a list of handler counts is not valid.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum HandlerCountsInvalid {
+    #[error(
+        "a handler_stats frame counts at most {max} handlers, not {count}",
+        max = MAX_EVENT_HANDLERS
+    )]
+    TooMany { count: usize },
+    #[error("a handler has an empty name")]
+    EmptyName,
+    #[error("the handler '{name}' is counted twice")]
+    RepeatedName { name: HandlerName },
+}
+
+impl HandlerCountsList {
+    /// The counts of `handlers`, in their order. Pure.
+    ///
+    /// Errors: [`HandlerCountsInvalid`].
+    pub fn new(handlers: Vec<HandlerCounts>) -> Result<Self, HandlerCountsInvalid> {
+        match handlers.len() <= MAX_EVENT_HANDLERS {
+            true => {}
+            false => {
+                return Err(HandlerCountsInvalid::TooMany {
+                    count: handlers.len(),
+                })
+            }
+        }
+        check_handler_names(&handlers)?;
+        Ok(Self(handlers))
+    }
+
+    pub fn handlers(&self) -> &[HandlerCounts] {
+        &self.0
+    }
+}
+
+/// Every name of `handlers` is not empty and is there once. Pure.
+fn check_handler_names(handlers: &[HandlerCounts]) -> Result<(), HandlerCountsInvalid> {
+    let mut names = HashSet::with_capacity(handlers.len());
+    for counts in handlers {
+        let name = counts.handler.as_str();
+        match (name.is_empty(), names.insert(name)) {
+            (true, _) => return Err(HandlerCountsInvalid::EmptyName),
+            (false, false) => {
+                return Err(HandlerCountsInvalid::RepeatedName {
+                    name: counts.handler.clone(),
+                })
+            }
+            (false, true) => {}
+        }
+    }
+    Ok(())
+}
+
+/// The counts of each event handler of a handler child since it started,
+/// and its RSS. The child sends one at a fixed interval. Each holds the
+/// totals, so a lost frame loses no count.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HandlerStatsFrame {
+    pub handlers: HandlerCountsList,
+    pub rss: RssReading,
 }
 
 /// A frame from a child to the worker parent.
@@ -317,6 +415,7 @@ pub enum ChildFrame {
     LeftoverCancel(LeftoverCancelFrame),
     LeftoverStuck(LeftoverStuckFrame),
     LoopBlocked(LoopBlockedFrame),
+    HandlerStats(HandlerStatsFrame),
 }
 
 /// Why the parent refuses a child frame. Each refusal kills the child.
@@ -356,6 +455,7 @@ enum ChildWire<'a> {
     Result {
         task_id: Uuid,
         end: EndWire<'a>,
+        started_at: StartWire,
         rss_mb: Option<f64>,
         task_loop: TaskLoopWire,
         child: &'static str,
@@ -363,6 +463,7 @@ enum ChildWire<'a> {
     BodyReturned {
         task_id: Uuid,
         returned: EndWire<'a>,
+        started_at: String,
         left: HeldWire<'a>,
     },
     LeftWorkEnded {
@@ -378,6 +479,7 @@ enum ChildWire<'a> {
         dispatch: u64,
         task_id: Uuid,
         end: EndWire<'a>,
+        started_at: StartWire,
         rss_mb: Option<f64>,
         child: &'static str,
     },
@@ -400,6 +502,7 @@ enum ChildWire<'a> {
         dispatch: u64,
         task_id: Uuid,
         returned: EndWire<'a>,
+        started_at: String,
     },
     LeftoverStuck {
         dispatch: u64,
@@ -408,6 +511,7 @@ enum ChildWire<'a> {
         executor_items: u64,
         names: &'a [LeftoverName],
         returned: EndWire<'a>,
+        started_at: String,
     },
     LoopBlocked {
         culprit: CulpritWire,
@@ -415,6 +519,24 @@ enum ChildWire<'a> {
         #[serde(rename = "where")]
         location: &'a str,
     },
+    HandlerStats {
+        handlers: Vec<HandlerCountsWire<'a>>,
+        rss_mb: Option<f64>,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum StartWire {
+    Reported { time: String },
+    NotReported,
+}
+
+#[derive(Serialize)]
+struct HandlerCountsWire<'a> {
+    handler: &'a str,
+    errors: u64,
+    dropped: u64,
 }
 
 #[derive(Serialize)]
@@ -524,6 +646,27 @@ fn held_wire(held: &LoopHoldsTasks) -> HeldWire<'_> {
     }
 }
 
+fn start_wire(started_at: AttemptStart) -> StartWire {
+    match started_at {
+        AttemptStart::Reported { started_at } => StartWire::Reported {
+            time: time_text(&started_at),
+        },
+        AttemptStart::NotReported => StartWire::NotReported,
+    }
+}
+
+fn handler_counts_wire(handlers: &HandlerCountsList) -> Vec<HandlerCountsWire<'_>> {
+    handlers
+        .handlers()
+        .iter()
+        .map(|counts| HandlerCountsWire {
+            handler: counts.handler.as_str(),
+            errors: counts.errors,
+            dropped: counts.dropped,
+        })
+        .collect()
+}
+
 fn culprit_wire(culprit: LoopCulprit) -> CulpritWire {
     match culprit {
         LoopCulprit::Run(run) => CulpritWire::Run {
@@ -560,6 +703,7 @@ pub fn encode_child_frame(frame: &ChildFrame) -> Result<EncodedFrame<'_>, FrameE
                 &ChildWire::Result {
                     task_id: result.task_id,
                     end,
+                    started_at: start_wire(result.started_at),
                     rss_mb: result.rss.wire(),
                     task_loop: task_loop_wire(result.task_loop),
                     child: result.child.as_str(),
@@ -573,6 +717,7 @@ pub fn encode_child_frame(frame: &ChildFrame) -> Result<EncodedFrame<'_>, FrameE
                 &ChildWire::BodyReturned {
                     task_id: returned.task_id,
                     returned: end,
+                    started_at: time_text(&returned.started_at),
                     left: held_wire(&returned.left),
                 },
                 body,
@@ -600,6 +745,7 @@ pub fn encode_child_frame(frame: &ChildFrame) -> Result<EncodedFrame<'_>, FrameE
                     dispatch: result.run.dispatch.get(),
                     task_id: result.run.task_id,
                     end,
+                    started_at: start_wire(result.started_at),
                     rss_mb: result.rss.wire(),
                     child: result.child.as_str(),
                 },
@@ -637,6 +783,7 @@ pub fn encode_child_frame(frame: &ChildFrame) -> Result<EncodedFrame<'_>, FrameE
                     dispatch: cancel.run.dispatch.get(),
                     task_id: cancel.run.task_id,
                     returned: end,
+                    started_at: time_text(&cancel.started_at),
                 },
                 body,
             )
@@ -651,6 +798,7 @@ pub fn encode_child_frame(frame: &ChildFrame) -> Result<EncodedFrame<'_>, FrameE
                     executor_items: stuck.work.executor_items(),
                     names: stuck.work.names(),
                     returned: end,
+                    started_at: time_text(&stuck.started_at),
                 },
                 body,
             )
@@ -660,6 +808,13 @@ pub fn encode_child_frame(frame: &ChildFrame) -> Result<EncodedFrame<'_>, FrameE
                 culprit: culprit_wire(blocked.culprit),
                 blocked_ms: blocked.blocked_ms,
                 location: blocked.location.as_str(),
+            },
+            NO_BODY,
+        ),
+        ChildFrame::HandlerStats(stats) => pack(
+            &ChildWire::HandlerStats {
+                handlers: handler_counts_wire(&stats.handlers),
+                rss_mb: stats.rss.wire(),
             },
             NO_BODY,
         ),
@@ -695,6 +850,7 @@ pub fn decode_child_frame(meta: &[u8], body: Vec<u8>) -> Result<ChildFrame, Chil
         "leftover_cancel" => ChildFrame::LeftoverCancel(decode_leftover_cancel(&fields, body)?),
         "leftover_stuck" => ChildFrame::LeftoverStuck(decode_leftover_stuck(&fields, body)?),
         "loop_blocked" => ChildFrame::LoopBlocked(decode_loop_blocked(&fields, &body)?),
+        "handler_stats" => ChildFrame::HandlerStats(decode_handler_stats(&fields, &body)?),
         other => return Err(fields.unknown_kind(other).into()),
     };
     Ok(frame)
@@ -831,11 +987,60 @@ fn decode_child_after(fields: &Fields<'_>) -> Result<ChildAfterFrame, MalformedF
         .ok_or_else(|| fields.broken_rule("child", "is not one of serves_on, ends_itself"))
 }
 
+/// The start of an attempt: `reported` with its time, or `not_reported`.
+fn decode_start(start: &Fields<'_>) -> Result<AttemptStart, MalformedFrame> {
+    match start.kind()? {
+        "reported" => {
+            start.only(&["kind", "time"])?;
+            Ok(AttemptStart::Reported {
+                started_at: start.time("time")?,
+            })
+        }
+        "not_reported" => {
+            start.only(&["kind"])?;
+            Ok(AttemptStart::NotReported)
+        }
+        other => Err(start.unknown_kind(other)),
+    }
+}
+
+/// The start of an attempt that ended with `end`, read from the
+/// `started_at` field. A stop before running has no start; a result
+/// envelope comes after the start write; a worker failure may come before
+/// or after it.
+fn decode_start_of(fields: &Fields<'_>, end: &RunEnd) -> Result<AttemptStart, MalformedFrame> {
+    let started_at = decode_start(&fields.object("started_at")?)?;
+    match (end, started_at) {
+        (RunEnd::StoppedBeforeRunning(_), AttemptStart::Reported { .. }) => Err(fields
+            .broken_rule(
+                "started_at",
+                "a run that stopped before running has no start",
+            )),
+        (RunEnd::Result(_), AttemptStart::NotReported) => Err(fields.broken_rule(
+            "started_at",
+            "a run that ended with a result envelope reports its start",
+        )),
+        (RunEnd::StoppedBeforeRunning(_), AttemptStart::NotReported)
+        | (RunEnd::Result(_), AttemptStart::Reported { .. })
+        | (RunEnd::WorkerFailure(_), _) => Ok(started_at),
+    }
+}
+
 fn decode_result(fields: &Fields<'_>, body: Vec<u8>) -> Result<ResultFrame, MalformedFrame> {
-    fields.only(&["kind", "task_id", "end", "rss_mb", "task_loop", "child"])?;
+    fields.only(&[
+        "kind",
+        "task_id",
+        "end",
+        "started_at",
+        "rss_mb",
+        "task_loop",
+        "child",
+    ])?;
+    let end = decode_run_end(&fields.object("end")?, body)?;
     Ok(ResultFrame {
         task_id: fields.task_id("task_id")?,
-        end: decode_run_end(&fields.object("end")?, body)?,
+        started_at: decode_start_of(fields, &end)?,
+        end,
         rss: fields.rss("rss_mb")?,
         task_loop: decode_task_loop(&fields.object("task_loop")?)?,
         child: decode_child_after(fields)?,
@@ -846,10 +1051,11 @@ fn decode_body_returned(
     fields: &Fields<'_>,
     body: Vec<u8>,
 ) -> Result<BodyReturnedFrame, MalformedFrame> {
-    fields.only(&["kind", "task_id", "returned", "left"])?;
+    fields.only(&["kind", "task_id", "returned", "started_at", "left"])?;
     Ok(BodyReturnedFrame {
         task_id: fields.task_id("task_id")?,
         returned: decode_body_end(&fields.object("returned")?, body)?,
+        started_at: fields.time("started_at")?,
         left: decode_held(&fields.object("left")?)?,
     })
 }
@@ -892,10 +1098,24 @@ fn decode_shared_result(
     fields: &Fields<'_>,
     body: Vec<u8>,
 ) -> Result<SharedResultFrame, MalformedFrame> {
-    fields.only(&["kind", "dispatch", "task_id", "end", "rss_mb", "child"])?;
+    fields.only(&[
+        "kind",
+        "dispatch",
+        "task_id",
+        "end",
+        "started_at",
+        "rss_mb",
+        "child",
+    ])?;
+    let end = decode_seat_end(&fields.object("end")?, body)?;
+    let started_at = match &end {
+        SeatEnd::Finished(run_end) => decode_start_of(fields, run_end)?,
+        SeatEnd::TimedOut => decode_start(&fields.object("started_at")?)?,
+    };
     Ok(SharedResultFrame {
         run: decode_run_ref(fields)?,
-        end: decode_seat_end(&fields.object("end")?, body)?,
+        end,
+        started_at,
         rss: fields.rss("rss_mb")?,
         child: decode_child_after(fields)?,
     })
@@ -943,10 +1163,11 @@ fn decode_leftover_cancel(
     fields: &Fields<'_>,
     body: Vec<u8>,
 ) -> Result<LeftoverCancelFrame, MalformedFrame> {
-    fields.only(&["kind", "dispatch", "task_id", "returned"])?;
+    fields.only(&["kind", "dispatch", "task_id", "returned", "started_at"])?;
     Ok(LeftoverCancelFrame {
         run: decode_run_ref(fields)?,
         returned: decode_body_end(&fields.object("returned")?, body)?,
+        started_at: fields.time("started_at")?,
     })
 }
 
@@ -962,11 +1183,13 @@ fn decode_leftover_stuck(
         "executor_items",
         "names",
         "returned",
+        "started_at",
     ])?;
     Ok(LeftoverStuckFrame {
         run: decode_run_ref(fields)?,
         work: decode_stuck_work(fields)?,
         returned: decode_body_end(&fields.object("returned")?, body)?,
+        started_at: fields.time("started_at")?,
     })
 }
 
@@ -994,5 +1217,44 @@ fn decode_loop_blocked(
         culprit: decode_culprit(&fields.object("culprit")?)?,
         blocked_ms: fields.whole("blocked_ms")?,
         location: fields.bounded_text("where")?,
+    })
+}
+
+fn decode_handler_counts(counts: &Fields<'_>) -> Result<HandlerCounts, MalformedFrame> {
+    counts.only(&["handler", "errors", "dropped"])?;
+    Ok(HandlerCounts {
+        handler: counts.bounded_text("handler")?,
+        errors: counts.whole("errors")?,
+        dropped: counts.whole("dropped")?,
+    })
+}
+
+fn decode_handler_stats(
+    fields: &Fields<'_>,
+    body: &[u8],
+) -> Result<HandlerStatsFrame, MalformedFrame> {
+    fields.only(&["kind", "handlers", "rss_mb"])?;
+    no_body("handler_stats", body)?;
+    match fields.list_len("handlers")? <= MAX_EVENT_HANDLERS {
+        true => {}
+        false => return Err(fields.out_of_bounds("handlers")),
+    }
+    let handlers = fields
+        .objects("handlers")?
+        .iter()
+        .map(decode_handler_counts)
+        .collect::<Result<Vec<_>, _>>()?;
+    let handlers = HandlerCountsList::new(handlers).map_err(|invalid| match invalid {
+        HandlerCountsInvalid::TooMany { .. } => fields.out_of_bounds("handlers"),
+        HandlerCountsInvalid::EmptyName => {
+            fields.broken_rule("handlers", "a handler has an empty name")
+        }
+        HandlerCountsInvalid::RepeatedName { .. } => {
+            fields.broken_rule("handlers", "names a handler twice")
+        }
+    })?;
+    Ok(HandlerStatsFrame {
+        handlers,
+        rss: fields.rss("rss_mb")?,
     })
 }

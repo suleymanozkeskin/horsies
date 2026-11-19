@@ -147,6 +147,16 @@ fn set_panic_rule(rule: &str) -> PyResult<()> {
     process_core::set_panic_rule(rule).map_err(errors::panic_rule_error)
 }
 
+/// Why the core refuses `template` as the trace link template of the
+/// monitoring page (the rule that does not hold), or `None` when it accepts
+/// it. Pure: no I/O, and it starts no runtime.
+#[pyfunction]
+fn trace_link_refusal(template: &str) -> Option<String> {
+    horsies_core::web::TraceLinkTemplate::parse(template)
+        .err()
+        .map(|refused| refused.to_string())
+}
+
 /// Read the effective level of every `horsies` logger again, after a change
 /// of the logging configuration. Does nothing before the core started; the
 /// start reads the levels.
@@ -194,6 +204,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::arguments::StartNow>()?;
     module.add_class::<operations::arguments::StartAfterDelay>()?;
     module.add_class::<operations::arguments::StartAt>()?;
+    module.add_class::<operations::arguments::NoTraceCarrier>()?;
+    module.add_class::<operations::arguments::TraceCarrier>()?;
     module.add_class::<operations::cancel::TaskCancelledRecord>()?;
     module.add_class::<operations::attempt_records::AttemptAlreadyApplied>()?;
     module.add_class::<operations::attempt_records::AttemptLostClaim>()?;
@@ -260,6 +272,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::result::RawResultRecordRecord>()?;
     module.add_class::<operations::result::RawResultAbsent>()?;
     module.add_class::<operations::start::AttemptStarted>()?;
+    module.add_class::<operations::start::RunWorkflowNode>()?;
     module.add_class::<operations::start::AttemptMissed>()?;
     module.add_class::<operations::start::DeadlineBeforeStart>()?;
     module.add_class::<operations::start::StartFailed>()?;
@@ -396,6 +409,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(set_panic_rule, module)?)?;
+    module.add_function(wrap_pyfunction!(trace_link_refusal, module)?)?;
     frames::add_frames(module)?;
     errors::add_errors(module)?;
     core_failures::add_failure_classes(module)?;

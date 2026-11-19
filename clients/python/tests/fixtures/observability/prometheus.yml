@@ -1,0 +1,20 @@
+# Prometheus of tests/e2e/test_observability_stack.py: scrapes the worker
+# endpoint and the fleet collector that the test starts on the host, at the
+# static targets of deploy/otel-collector/collector.yaml, and evaluates the
+# shipped alert rules.
+
+global:
+  scrape_interval: 2s
+  scrape_timeout: 1s
+  evaluation_interval: 2s
+
+rule_files:
+  - /etc/prometheus/rules/horsies-alerts.yaml
+
+scrape_configs:
+  - job_name: horsies-worker
+    static_configs:
+      - targets: ['127.0.0.1:9464']
+  - job_name: horsies-fleet
+    static_configs:
+      - targets: ['127.0.0.1:9465']

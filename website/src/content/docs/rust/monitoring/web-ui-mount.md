@@ -45,7 +45,7 @@ fn monitoring_routes(app: &Horsies) -> Result<Router, Box<dyn std::error::Error>
 
 | Field | Type | Default |
 |-------|------|---------|
-| `ui` | `MonitoringUiConfig { custom_css_url: Option<String> }` | No stylesheet |
+| `ui` | `MonitoringUiConfig { custom_css_url: Option<String>, trace_link: TraceLink }` | No stylesheet; `TraceLink::NoTraceLink` (the task detail shows the trace id as text). `TraceLink::Template(TraceLinkTemplate::parse(text)?)` links it: an `http` or `https` URL with one `{trace_id}`, at most 2,048 bytes of printable ASCII |
 | `actions` | `Actions::Enabled` or `Actions::Disabled` | `Enabled` |
 
 - With `Actions::Disabled`, every action route answers 403 and the policy's `can_act` is not called.

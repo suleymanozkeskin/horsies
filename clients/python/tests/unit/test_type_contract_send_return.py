@@ -37,7 +37,9 @@ from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.worker import child_runner
 from horsies.core.worker.task_loop import TaskLoop
+from horsies.core.worker.child_frames import NoTraceCarrier
 from horsies.core.worker.child_runner import RunTheTask
+from horsies.core.worker.run_return import NotInWorkflow, StartedRunning
 from tests.fixtures.run_return import wire_of
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
@@ -455,7 +457,12 @@ def _run_child(
         patch.object(
             child_runner,
             '_confirm_ownership_and_set_running',
-            MagicMock(return_value=None),
+            MagicMock(
+                return_value=StartedRunning(
+                    datetime(2026, 11, 17, 10, 0, 1, tzinfo=timezone.utc),
+                    NotInWorkflow(),
+                ),
+            ),
         ),
         patch.object(child_runner, 'get_current_app', MagicMock(return_value=app)),
     ):
@@ -469,6 +476,9 @@ def _run_child(
                 claimed_at=CLAIMED_AT,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
+                queue_name='default',
+                attempt=1,
+                trace=NoTraceCarrier(),
             )
         )
 

@@ -21,7 +21,13 @@ from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models import tracing as tracing_module
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tracing import NoTracing, OtelTracing, tracing_label
+from horsies.core.models.tracing import (
+    ChildOfSend,
+    LinkedToSend,
+    NoTracing,
+    OtelTracing,
+    tracing_label,
+)
 from horsies.core.telemetry.otel_api import (
     OTEL_API_MODULES,
     OtelApiInstalled,
@@ -120,6 +126,26 @@ class TestSetting:
                 {'broker': _BROKER, 'tracing': {'kind': 'zipkin'}},
             )
 
+    def test_an_attempt_span_is_a_child_of_the_send_span_by_default(self) -> None:
+        assert OtelTracing().parentage == ChildOfSend()
+
+    def test_the_parentage_is_read_from_its_kind(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _presence_is(monkeypatch, OtelApiInstalled())
+        config = AppConfig.model_validate(
+            {
+                'broker': _BROKER,
+                'tracing': {'kind': 'otel_tracing', 'parentage': {'kind': 'linked_to_send'}},
+            },
+        )
+        assert config.tracing == OtelTracing(parentage=LinkedToSend())
+
+    def test_a_parentage_of_another_kind_is_refused(self) -> None:
+        with pytest.raises(ValidationError):
+            OtelTracing.model_validate({'parentage': {'kind': 'follows_from'}})
+
     def test_the_label_names_the_setting(self) -> None:
         assert tracing_label(OtelTracing()) == 'OpenTelemetry'
         assert tracing_label(NoTracing()) == 'off'
@@ -152,6 +178,34 @@ class TestWithoutTheApi:
                 ),
             )
             assert config.tracing == NoTracing()
+            loaded = sorted(
+                name for name in sys.modules
+                if name == 'opentelemetry' or name.startswith('opentelemetry.')
+            )
+            print(loaded)
+            ''',
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == '[]'
+
+    def test_an_app_with_no_tracing_has_no_send_telemetry_and_no_opentelemetry(
+        self,
+    ) -> None:
+        result = _run_without_opentelemetry(
+            '''
+            import sys
+            from pydantic import SecretStr
+            from horsies import AppConfig, Horsies, PostgresConfig
+            from horsies.core.telemetry.send_telemetry import NoSendTelemetry
+
+            app = Horsies(
+                AppConfig(
+                    broker=PostgresConfig(
+                        database_url=SecretStr('postgresql://u:p@127.0.0.1:1/none'),
+                    ),
+                ),
+            )
+            assert isinstance(app.send_telemetry(), NoSendTelemetry)
             loaded = sorted(
                 name for name in sys.modules
                 if name == 'opentelemetry' or name.startswith('opentelemetry.')

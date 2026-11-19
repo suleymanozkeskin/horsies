@@ -24,6 +24,7 @@ const META: MonitoringMeta = {
   schema_compatible: true,
   schema_state: 'MATCH',
   actions_disabled_reason: null,
+  trace_link_template: null,
 };
 
 const jsonResponse = (status: number, body: unknown): Response =>

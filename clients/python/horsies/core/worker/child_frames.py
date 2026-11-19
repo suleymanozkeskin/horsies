@@ -1,11 +1,13 @@
 """The frames of a worker child and of the preload process, on the core frame
-codec at version 2 (``horsies._core``).
+codec at version 3 (``horsies._core``).
 
 The parent frames come from the core as its classes: ``core.InitFrame``,
-``core.RunFrame``, ``core.SharedRunFrame`` and ``core.StopFrame``
-(``core.FrameReader``, ``core.decode_parent_frame``). The init frame keeps
-the database URL and the connection settings in the core; the child builds
-its core handle from it (``CoreChildHandle.from_init``).
+``core.RunFrame``, ``core.SharedRunFrame``, ``core.EventsFrame`` and
+``core.StopFrame`` (``core.FrameReader``, ``core.decode_parent_frame``). The
+init frame keeps the database URL and the connection settings in the core;
+the child builds its core handle from it (``CoreChildHandle.from_init``). A
+task child takes no ``core.EventsFrame``: only a handler child does. The
+trace carrier of a run frame reads with ``run_trace_of``.
 
 The frames that a child sends are the frozen values of this module. Child
 code builds and matches them; ``encode_child_frame`` and
@@ -19,8 +21,11 @@ This module holds no state. ``encode_child_frame`` and
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
+from types import MappingProxyType
 from typing import Final, Literal, assert_never
 
 from horsies import _core as core
@@ -75,7 +80,17 @@ MAX_BOOT_DETAIL_CHARS: Final = 2000
 """The longest exception text of a boot failure frame (the core cuts the
 same)."""
 
-type ParentFrame = core.InitFrame | core.RunFrame | core.SharedRunFrame | core.StopFrame
+MAX_EVENT_HANDLERS: Final = PROTOCOL_NUMBERS.max_event_handlers
+"""The most event handlers of one handler child, and so the most counts of
+one ``HandlerStatsFrame``."""
+
+MAX_HANDLER_NAME_CHARS: Final = PROTOCOL_NUMBERS.max_handler_name_chars
+"""The most characters of the name of an event handler. A name has one
+character or more; the core refuses another name, never cuts it."""
+
+type ParentFrame = (
+    core.InitFrame | core.RunFrame | core.SharedRunFrame | core.EventsFrame | core.StopFrame
+)
 """A frame from the worker parent."""
 
 type WorkFrame = core.RunFrame | core.SharedRunFrame | core.StopFrame
@@ -83,6 +98,36 @@ type WorkFrame = core.RunFrame | core.SharedRunFrame | core.StopFrame
 
 type ThreadSeatWork = core.ThreadTaskWork | core.StoredOptionsRefused
 """The work of a run on a seat of a shared thread child."""
+
+
+@dataclass(frozen=True, slots=True)
+class StoredTraceCarrier:
+    """The trace carrier that the send stored on the task row: the keys and
+    the values that the propagator of the sender wrote. The child extracts
+    it with the propagator of the app."""
+
+    carrier: Mapping[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class NoTraceCarrier:
+    """The task row has no trace carrier: the send carried none."""
+
+
+type RunTrace = StoredTraceCarrier | NoTraceCarrier
+"""The trace carrier of a run."""
+
+
+def run_trace_of(trace: core.StoredTraceCarrier | Literal['NO_CARRIER']) -> RunTrace:
+    """The trace carrier of a run frame (``core.RunFrame.trace``,
+    ``core.SharedRunFrame.trace``), frozen. Pure."""
+    match trace:
+        case 'NO_CARRIER':
+            return NoTraceCarrier()
+        case core.StoredTraceCarrier(carrier=carrier):
+            return StoredTraceCarrier(carrier=MappingProxyType(dict(carrier)))
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def stored_refusal_of(refused: core.StoredOptionsRefused) -> TimeoutRefusal:
@@ -111,6 +156,25 @@ class RssUnreadable:
 
 
 type RssReading = RssMb | RssUnreadable
+
+
+@dataclass(frozen=True, slots=True)
+class StartReported:
+    """The run set its row RUNNING: ``started_at`` is the time that its start
+    write returned (an aware ``datetime``)."""
+
+    started_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class StartNotReported:
+    """The run has no start to report: it stopped before running, or its
+    deadline cancelled it during the start write."""
+
+
+type AttemptStart = StartReported | StartNotReported
+"""The start of the attempt that a frame ends. A result envelope comes after
+the start write; a stop before running has no start."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,10 +274,12 @@ it no other run."""
 
 @dataclass(frozen=True, slots=True)
 class ResultFrame:
-    """An isolated task ended and left no work on a task loop."""
+    """An isolated task ended and left no work on a task loop. ``started``
+    is the start of its attempt."""
 
     task_id: uuid.UUID
     end: RunEnd
+    started: AttemptStart
     rss: RssReading
     task_loop: NoLeftWork
 
@@ -231,11 +297,13 @@ type SeatEnd = RunEnd | SeatTimedOut
 @dataclass(frozen=True, slots=True)
 class SharedResultFrame:
     """The task of run ``dispatch`` has ended, and its seat is free. ``rss``
-    is the RSS of the child after it."""
+    is the RSS of the child after it; ``started`` is the start of its
+    attempt."""
 
     dispatch: int
     task_id: uuid.UUID
     end: SeatEnd
+    started: AttemptStart
     rss: RssReading
 
 
@@ -276,17 +344,20 @@ class RunStuckFrame:
 class LeftoverCancelFrame:
     """The body of run ``dispatch`` returned before its deadline, and its
     marked work was alive one cancel grace later: the child cancels that
-    work. ``returned`` is what the body returned, the end of the run."""
+    work. ``returned`` is what the body returned, the end of the run; the
+    body ran, so the run started at ``started_at``."""
 
     dispatch: int
     task_id: uuid.UUID
     returned: ResultEnvelope
+    started_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
 class LeftoverStuckFrame:
     """The work that run ``dispatch`` left after its return did not stop
-    after its cancel rounds. ``returned`` is the end of the run."""
+    after its cancel rounds. ``returned`` is the end of the run; the body
+    ran, so the run started at ``started_at``."""
 
     dispatch: int
     task_id: uuid.UUID
@@ -294,16 +365,19 @@ class LeftoverStuckFrame:
     executor_items: int
     names: tuple[str, ...]
     returned: ResultEnvelope
+    started_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
 class BodyReturnedFrame:
     """The body of an isolated task returned, and work it started is still on
     the task loop. ``returned`` is the end of the run; the child reports the
-    end of that work next."""
+    end of that work next. The body ran, so the run started at
+    ``started_at``."""
 
     task_id: uuid.UUID
     returned: ResultEnvelope
+    started_at: datetime
     left: LoopHoldsTasks
 
 
@@ -364,6 +438,28 @@ class LoopBlockedFrame:
     where: str
 
 
+@dataclass(frozen=True, slots=True)
+class HandlerCounts:
+    """The counts of one event handler since its child started: ``errors``
+    events for which it failed, ``dropped`` events that its full queue
+    dropped. ``handler`` is its name, 1 to ``MAX_HANDLER_NAME_CHARS``
+    characters."""
+
+    handler: str
+    errors: int
+    dropped: int
+
+
+@dataclass(frozen=True, slots=True)
+class HandlerStatsFrame:
+    """The counts of each event handler of a handler child, each name once,
+    at most ``MAX_EVENT_HANDLERS``, and the RSS of the child. Each frame
+    holds the totals since the child started."""
+
+    handlers: tuple[HandlerCounts, ...]
+    rss: RssReading
+
+
 type ChildFrame = (
     ReadyFrame
     | BootFailedFrame
@@ -378,6 +474,7 @@ type ChildFrame = (
     | LeftoverCancelFrame
     | LeftoverStuckFrame
     | LoopBlockedFrame
+    | HandlerStatsFrame
 )
 """A frame from a child to the worker parent."""
 
@@ -446,6 +543,16 @@ def _cause(
             return 'THREAD_START_REFUSED'
         case ResourceShortage(errno_name=errno_name):
             return core.ResourceShortage(errno=errno_name.value)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _started_at(started: AttemptStart) -> datetime | Literal['NOT_REPORTED']:
+    match started:
+        case StartReported(started_at=started_at):
+            return started_at
+        case StartNotReported():
+            return 'NOT_REPORTED'
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -542,13 +649,16 @@ type CoreChildFrame = (
     | core.LeftoverCancelFrame
     | core.LeftoverStuckFrame
     | core.LoopBlockedFrame
+    | core.HandlerStatsFrame
 )
 
 
 def core_child_frame(frame: ChildFrame) -> CoreChildFrame:
     """The core class of a child frame. A value outside its bound (a pid of
-    0, a report whose names do not match its count) is a defect of the child:
-    the core class raises ``ValueError``."""
+    0, a report whose names do not match its count, a start that does not
+    fit the end of its run, a handler name that is empty, over its bound or
+    counted twice) is a defect of the child: the core class raises
+    ``ValueError``."""
     match frame:
         case ReadyFrame(pid=pid, rss=rss):
             return core.ReadyFrame(pid=pid, rss_mb=_rss(rss))
@@ -556,27 +666,38 @@ def core_child_frame(frame: ChildFrame) -> CoreChildFrame:
             return core.BootFailedFrame(
                 cause=_cause(cause), error_name=error_name, detail=detail,
             )
-        case ResultFrame(task_id=task_id, end=end, rss=rss, task_loop=task_loop):
+        case ResultFrame(
+            task_id=task_id, end=end, started=started, rss=rss, task_loop=task_loop,
+        ):
             return core.ResultFrame(
                 task_id=task_id,
                 end=_run_end(end),
+                started_at=_started_at(started),
                 rss_mb=_rss(rss),
                 task_loop=_task_loop(task_loop),
                 child=child_after_frame(end),
             )
-        case BodyReturnedFrame(task_id=task_id, returned=returned, left=left):
+        case BodyReturnedFrame(
+            task_id=task_id, returned=returned, started_at=started_at, left=left,
+        ):
             return core.BodyReturnedFrame(
-                task_id=task_id, returned=_returned(returned), left=_left(left),
+                task_id=task_id,
+                returned=_returned(returned),
+                started_at=started_at,
+                left=_left(left),
             )
         case LeftWorkEndedFrame(task_id=task_id, end=end, rss=rss):
             return core.LeftWorkEndedFrame(task_id=task_id, end=end.value, rss_mb=_rss(rss))
         case LeftWorkStuckFrame(task_id=task_id, still=still):
             return core.LeftWorkStuckFrame(task_id=task_id, still=_left(still))
-        case SharedResultFrame(dispatch=dispatch, task_id=task_id, end=end, rss=rss):
+        case SharedResultFrame(
+            dispatch=dispatch, task_id=task_id, end=end, started=started, rss=rss,
+        ):
             return core.SharedResultFrame(
                 dispatch=dispatch,
                 task_id=task_id,
                 end=_seat_end(end),
+                started_at=_started_at(started),
                 rss_mb=_rss(rss),
                 child=child_after_frame(end),
             )
@@ -596,9 +717,14 @@ def core_child_frame(frame: ChildFrame) -> CoreChildFrame:
                 task_id=task_id,
                 work=_stuck(tasks, executor_items, names),
             )
-        case LeftoverCancelFrame(dispatch=dispatch, task_id=task_id, returned=returned):
+        case LeftoverCancelFrame(
+            dispatch=dispatch, task_id=task_id, returned=returned, started_at=started_at,
+        ):
             return core.LeftoverCancelFrame(
-                dispatch=dispatch, task_id=task_id, returned=_returned(returned),
+                dispatch=dispatch,
+                task_id=task_id,
+                returned=_returned(returned),
+                started_at=started_at,
             )
         case LeftoverStuckFrame(
             dispatch=dispatch,
@@ -607,16 +733,30 @@ def core_child_frame(frame: ChildFrame) -> CoreChildFrame:
             executor_items=executor_items,
             names=names,
             returned=returned,
+            started_at=started_at,
         ):
             return core.LeftoverStuckFrame(
                 dispatch=dispatch,
                 task_id=task_id,
                 work=_stuck(tasks, executor_items, names),
                 returned=_returned(returned),
+                started_at=started_at,
             )
         case LoopBlockedFrame(culprit=culprit, blocked_ms=blocked_ms, where=where):
             return core.LoopBlockedFrame(
                 culprit=_culprit(culprit), blocked_ms=blocked_ms, location=where,
+            )
+        case HandlerStatsFrame(handlers=handlers, rss=rss):
+            return core.HandlerStatsFrame(
+                handlers=[
+                    core.HandlerCounts(
+                        handler=counts.handler,
+                        errors=counts.errors,
+                        dropped=counts.dropped,
+                    )
+                    for counts in handlers
+                ],
+                rss_mb=_rss(rss),
             )
         case _ as unreachable:
             assert_never(unreachable)

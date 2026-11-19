@@ -3,10 +3,11 @@
 
 use std::fmt;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use super::bounds::{MAX_EVENTS_PER_FRAME, MAX_EVENT_WIRE_BYTES};
 use super::values::{BoundedCount, BoundedText, DispatchNumber, RssMb, RssReading};
 use super::PROTOCOL_VERSION;
 use crate::core::codec::{check_json_bytes, StrictJsonError};
@@ -23,6 +24,7 @@ pub enum ExpectedType {
     Flag,
     Object,
     ListOfText,
+    ListOfObjects,
     TaskId,
     Rfc3339Time,
 }
@@ -36,6 +38,7 @@ impl fmt::Display for ExpectedType {
             Self::Flag => "true or false",
             Self::Object => "an object",
             Self::ListOfText => "a list of texts",
+            Self::ListOfObjects => "a list of objects",
             Self::TaskId => "a UUID text",
             Self::Rfc3339Time => "an RFC 3339 time",
         };
@@ -78,6 +81,20 @@ pub enum MalformedFrame {
     },
     #[error("field '{field}': {rule}")]
     BrokenRule { field: String, rule: &'static str },
+    #[error("the body of an events frame is not strict JSON: {0}")]
+    EventsBodyNotJson(StrictJsonError),
+    #[error("the body of an events frame is not a JSON array")]
+    EventsBodyNotArray,
+    #[error(
+        "an events frame carries 1 to {max} events, not {count}",
+        max = MAX_EVENTS_PER_FRAME
+    )]
+    EventCount { count: usize },
+    #[error(
+        "event {index} of an events frame has {bytes} bytes; the bound is {max}",
+        max = MAX_EVENT_WIRE_BYTES
+    )]
+    EventOverBound { index: usize, bytes: usize },
 }
 
 /// The protocol version that a peer named.
@@ -132,6 +149,12 @@ pub(super) fn no_body(kind: &'static str, body: &[u8]) -> Result<(), MalformedFr
             body_bytes: body.len(),
         }),
     }
+}
+
+/// A time as RFC 3339 text in UTC with every sub-second digit it has, so the
+/// peer reads the exact value. Pure.
+pub(super) fn time_text(time: &DateTime<Utc>) -> String {
+    time.to_rfc3339_opts(SecondsFormat::AutoSi, true)
 }
 
 /// The protocol version that a frame names, compared with this build.
@@ -324,6 +347,34 @@ impl<'a> Fields<'a> {
         DateTime::parse_from_rfc3339(self.text(key)?)
             .map(|time| time.with_timezone(&Utc))
             .map_err(|_| self.wrong_type(key, ExpectedType::Rfc3339Time))
+    }
+
+    /// The objects of the list in field `key`, each with its path
+    /// (`key[index]`).
+    pub(super) fn objects(&self, key: &str) -> Result<Vec<Fields<'a>>, MalformedFrame> {
+        let items = match self.value(key)? {
+            Value::Array(items) => items,
+            _ => return Err(self.wrong_type(key, ExpectedType::ListOfObjects)),
+        };
+        items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| match item {
+                Value::Object(map) => Ok(Fields {
+                    map,
+                    path: format!("{}[{index}]", self.field_path(key)),
+                }),
+                _ => Err(self.wrong_type(key, ExpectedType::ListOfObjects)),
+            })
+            .collect()
+    }
+
+    /// The number of items of the list in field `key`.
+    pub(super) fn list_len(&self, key: &str) -> Result<usize, MalformedFrame> {
+        match self.value(key)? {
+            Value::Array(items) => Ok(items.len()),
+            _ => Err(self.wrong_type(key, ExpectedType::ListOfObjects)),
+        }
     }
 
     /// The object in field `key`, with its path.

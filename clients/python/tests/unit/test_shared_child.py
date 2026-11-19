@@ -43,6 +43,8 @@ from horsies.core.worker.child_frames import (
     RunStuckFrame,
     SeatTimedOut,
     SharedResultFrame,
+    StartNotReported,
+    StartReported,
 )
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.worker.run_return import (
@@ -58,7 +60,6 @@ from horsies.core.worker.shared_child import (
     FrameWriter,
     SeatLoop,
     SeatReturn,
-    SetRunning,
     StoppedBeforeRunning,
     bounded_result_frame,
 )
@@ -71,6 +72,7 @@ from tests.fixtures.core_frames import (
     shared_run_frame,
     stop_frame,
 )
+from tests.fixtures.run_return import STARTED_AT, set_running
 
 EXECUTOR_THREADS = 4
 """The size of the default executor of a test child."""
@@ -147,7 +149,7 @@ class _ScriptedSeats:
         value = await self._behaviors[frame.task_name]()
         if frame.task_name in self.not_running:
             return StoppedBeforeRunning('CLAIM_LOST')
-        return SetRunning(ResultEnvelope(str(value)))
+        return set_running(ResultEnvelope(str(value)))
 
     async def mark_finalizing(self, frame: core.SharedRunFrame) -> MarkerEnd:
         self.markers.append(frame.dispatch)
@@ -326,6 +328,9 @@ class TestDeadline:
                 dispatch=1,
                 task_id=_task_id(1),
                 end=SeatTimedOut(),
+                # The cancel left the coroutine of the run: it returned no
+                # start.
+                started=StartNotReported(),
                 rss=RssMb(10.0),
             ),
         ]
@@ -404,6 +409,7 @@ class TestDeadline:
                 dispatch=1,
                 task_id=_task_id(1),
                 end=ResultEnvelope('3'),
+                started=StartReported(STARTED_AT),
                 rss=RssMb(10.0),
             ),
         ]
@@ -446,6 +452,7 @@ class TestDeadline:
                 dispatch=1,
                 task_id=_task_id(1),
                 end=ResultEnvelope('refused'),
+                started=StartReported(STARTED_AT),
                 rss=RssMb(10.0),
             ),
         ]
@@ -1644,6 +1651,7 @@ class TestFrameWriter:
             dispatch=4,
             task_id=_task_id(4),
             end=ResultEnvelope('x' * 11),
+            started=StartReported(STARTED_AT),
             rss=RssMb(1.0),
         )
         writer.send_result('fetch', big)
@@ -1667,6 +1675,7 @@ class TestBoundedResultFrame:
             dispatch=1,
             task_id=_task_id(1),
             returned=ResultEnvelope('x' * 11),
+            started_at=STARTED_AT,
         )
 
         bounded = bounded_result_frame('fetch', frame)
@@ -1680,6 +1689,7 @@ class TestBoundedResultFrame:
             dispatch=1,
             task_id=_task_id(1),
             end=SeatTimedOut(),
+            started=StartNotReported(),
             rss=RssMb(1.0),
         )
         assert bounded_result_frame('x', frame) == frame
@@ -1689,6 +1699,7 @@ class TestBoundedResultFrame:
             dispatch=1,
             task_id=_task_id(1),
             end=ResultEnvelope('{}'),
+            started=StartReported(STARTED_AT),
             rss=RssMb(1.0),
         )
         assert bounded_result_frame('x', frame) == frame

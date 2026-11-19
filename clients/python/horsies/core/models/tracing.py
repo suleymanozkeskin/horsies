@@ -1,10 +1,11 @@
 """The tracing setting of `AppConfig`: `OtelTracing` or `NoTracing`.
 
-`OtelTracing` traces the sends and workflow starts of the app with the
-OpenTelemetry API, and records the producer metrics with the OpenTelemetry
-meter. The API comes with the extra `horsies[otel]`; the user's SDK, set in
-the process, decides what is exported. `NoTracing` (the default) makes no
-span and records no metric, and the client does not import `opentelemetry`.
+`OtelTracing` traces the sends and workflow starts of the app and each
+attempt that a worker child runs, with the OpenTelemetry API, and records the
+producer metrics with the OpenTelemetry meter. The API comes with the extra
+`horsies[otel]`; the user's SDK, set in the process, decides what is
+exported. `NoTracing` (the default) makes no span and records no metric, and
+the client does not import `opentelemetry`.
 """
 
 from __future__ import annotations
@@ -23,16 +24,46 @@ from horsies.core.telemetry.otel_api import (
 )
 
 
+class ChildOfSend(BaseModel):
+    """The span of an attempt is a child of the span that sent the task:
+    the send and its attempts are one trace. The default."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid', frozen=True)
+
+    kind: Literal['child_of_send'] = 'child_of_send'
+
+
+class LinkedToSend(BaseModel):
+    """The span of an attempt starts a trace of its own, with a link to the
+    span that sent the task."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid', frozen=True)
+
+    kind: Literal['linked_to_send'] = 'linked_to_send'
+
+
+AttemptParentage = Annotated[
+    Union[ChildOfSend, LinkedToSend],
+    Field(discriminator='kind'),
+]
+"""How the span of an attempt relates to the span that sent its task."""
+
+
 class OtelTracing(BaseModel):
     """Spans and producer metrics through the OpenTelemetry API.
 
     Needs the extra `horsies[otel]`; a config with `OtelTracing` and no
     OpenTelemetry API is refused when it is built (`HRS-220`).
+
+    `parentage` places the span of each attempt: `ChildOfSend()` (the
+    default) or `LinkedToSend()`. A task sent with no span has an attempt
+    span with no parent in both.
     """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid', frozen=True)
 
     kind: Literal['otel_tracing'] = 'otel_tracing'
+    parentage: AttemptParentage = Field(default_factory=ChildOfSend)
 
 
 class NoTracing(BaseModel):

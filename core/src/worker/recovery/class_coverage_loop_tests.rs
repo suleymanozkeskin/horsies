@@ -96,14 +96,14 @@ async fn async_children_snapshot(pool: &TestPool) {
             max_claim_batch, max_claim_per_worker, queues,
             queue_priorities, queue_max_concurrency, recovery_config,
             tasks_running, tasks_claimed, worker_started_at,
-            slots_down, class_capacity
+            slots_down, class_capacity, telemetry
         ) VALUES (
             'w-async', now(), 'itest-host', 4242, 4,
             0, 4, ARRAY['a'],
             '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
             0, 0, now() - interval '1 hour',
             '[]'::jsonb,
-            '{\"SHARED_ASYNC\": {\"capacity\": 40, \"serves\": [\"SHARED_ASYNC\"]}}'::jsonb
+            '{\"SHARED_ASYNC\": {\"capacity\": 40, \"serves\": [\"SHARED_ASYNC\"]}}'::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
         )",
     )
     .execute(pool)
@@ -168,7 +168,7 @@ async fn a_started_reaper_logs_an_unserved_isolated_stream() {
         },
         retention,
         new_reaper_health(),
-        crate::telemetry::registry::OptionalCounter::NotRecorded,
+        crate::telemetry::worker::WorkerTelemetry::Off,
         cancel.clone(),
     );
 

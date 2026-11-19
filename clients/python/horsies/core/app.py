@@ -44,6 +44,7 @@ from horsies.core.exception_mapper import (
     validate_exception_mapper,
     validate_error_code_string,
 )
+from horsies.core.telemetry.send_telemetry import SendTelemetry, send_telemetry_of
 from horsies.core.declared_error_codes import (
     NO_ERROR_CODES,
     CodeRefusal,
@@ -67,6 +68,7 @@ from horsies.core.errors import (
     WorkflowValidationError,
 )
 import inspect
+import logging
 import os
 import threading
 import types
@@ -426,13 +428,17 @@ class Horsies:
         self.run_schema_migrations = run_schema_migrations
         self._broker: Optional['PostgresBroker'] = None
         self._broker_init_lock = threading.Lock()
+        # The spans and producer metrics of the sends and workflow starts,
+        # chosen once from config.tracing. NoTracing imports no
+        # opentelemetry module.
+        self._send_telemetry: SendTelemetry = send_telemetry_of(config.tracing)
         # The pool that get_broker() opens. A worker child sets its
         # task-send pool before it imports task modules.
         self._broker_pool: _ConfigBrokerPool | _TaskSendBrokerPool = _ConfigBrokerPool()
-        self.tasks: TaskRegistry[
-            'TaskFunction[Any, Any] | AsyncTaskFunction[Any, Any]'
-        ] = TaskRegistry()
-        self.logger = get_logger('app')
+        self.tasks: 'TaskRegistry[TaskFunction[Any, Any] | AsyncTaskFunction[Any, Any]]' = (
+            TaskRegistry()
+        )
+        self.logger: logging.Logger = get_logger('app')
         self._discovered_task_modules: list[str] = []
         self._workflow_builders: list[_WorkflowBuilderMeta] = []
         # When True, task sends/schedules are suppressed (used during import/discovery)
@@ -1619,6 +1625,13 @@ class Horsies:
             for name in sorted(self.tasks.keys_list())
             if self.tasks[name].task_error_codes
         }
+
+    def send_telemetry(self) -> SendTelemetry:
+        """The telemetry of the task sends and workflow starts of this app,
+        chosen from `config.tracing` when the app was built:
+        `NoSendTelemetry`, or `OtelSendTelemetry` with its recorder
+        (`horsies.core.telemetry.send_telemetry`). Pure."""
+        return self._send_telemetry
 
     def get_broker(self) -> 'PostgresBroker':
         """Get the configured PostgreSQL broker for this app.

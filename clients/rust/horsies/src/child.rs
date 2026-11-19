@@ -76,7 +76,8 @@ impl Horsies {
     /// Returns the child's exit code: 0 at the stop frame; otherwise the
     /// code of [`ChildHostExit`] (71 to 78 for a parent or protocol failure,
     /// 173 for a failed start hook). The child keeps the log setup that the
-    /// binary installed before this call.
+    /// binary installed before this call. With the feature `otel`, each task
+    /// body runs inside its attempt span (`horsies::otel`).
     pub fn serve_child(self, args: ChildArgs) -> ExitCode {
         self.serve_child_with_logs(args, ChildLogSetup::NoSetup)
     }
@@ -96,6 +97,7 @@ impl Horsies {
             producer_manifest: parts.producer_manifest,
             log_setup,
             family: ClientFamily::Rust,
+            body_scope: crate::telemetry::body_scope(),
         };
         ExitCode::from(exit_byte(run_child_host(app, args).code()))
     }

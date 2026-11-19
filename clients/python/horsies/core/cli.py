@@ -34,7 +34,8 @@ from horsies.core.errors import (
     ValidationReport,
 )
 from horsies.core.fleet_metrics import listen_address, run_fleet_metrics
-from horsies.core.logging import get_logger
+from horsies.core.logging import TEXT_LOGS, get_logger
+from horsies.core.models.log_format import JsonLogs, TextLogs
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.tracing import NoTracing, OtelTracing, tracing_label
 from horsies.core.models.worker_profile import (
@@ -357,12 +358,14 @@ def discover_app(module_locator: str) -> tuple[Horsies, str, str, str | None]:
     return app, var_name, module_name, sys_path_root
 
 
-def setup_logging(loglevel: str) -> None:
-    """Configure logging level globally."""
+def setup_logging(loglevel: str, log_format: TextLogs | JsonLogs = TEXT_LOGS) -> None:
+    """Configure the horsies logging of this process at ``loglevel``, in
+    ``log_format``. A command calls it first with the default format, then
+    with ``AppConfig.log_format`` once it has found the app."""
     from horsies.core.logging import configure_logging
 
     level = getattr(logging, loglevel.upper(), logging.INFO)
-    configure_logging(level)
+    configure_logging(level, log_format=log_format)
 
 
 @dataclass(frozen=True, slots=True)
@@ -489,6 +492,7 @@ def worker_command(args: argparse.Namespace) -> None:
     except Exception as e:
         logger.error(f'Failed to discover app: {e}')
         sys.exit(1)
+    setup_logging(loglevel, app.config.log_format)
 
     # The profile is chosen before anything starts. AppConfig validation
     # already checked every profile when the app module built the config;
@@ -579,6 +583,7 @@ def scheduler_command(args: argparse.Namespace) -> None:
     except Exception as e:
         logger.error(f'Failed to discover app: {e}')
         sys.exit(1)
+    setup_logging(loglevel, app.config.log_format)
 
     # Validate schedule config
     if not app.config.schedule:
@@ -710,6 +715,7 @@ def check_command(args: argparse.Namespace) -> None:
     except Exception as e:
         logger.error(f'Failed to discover app: {e}')
         sys.exit(1)
+    setup_logging(loglevel, app.config.log_format)
 
     # Run phased validation
     live: bool = args.live
@@ -954,6 +960,25 @@ def resolve_web_auth_policy(args: argparse.Namespace) -> Any:
             _web_arg_error(f'unknown --auth value {args.auth!r}')
 
 
+def resolve_web_ui_config(args: argparse.Namespace) -> Any:
+    """The page settings of a ``horsies web`` invocation: the trace link
+    of ``--trace-link``, or none. A template that the core refuses is a bad
+    invocation (exit 2) that names the rule."""
+    from horsies.web import MonitoringUIConfig, NoTraceLink, TraceLinkTemplate
+
+    template: str | None = args.trace_link
+    match template:
+        case None:
+            return MonitoringUIConfig(trace_link=NoTraceLink())
+        case str():
+            try:
+                return MonitoringUIConfig(
+                    trace_link=TraceLinkTemplate(template=template),
+                )
+            except ConfigurationError as refused:
+                _web_arg_error(f'invalid --trace-link: {"; ".join(refused.notes)}')
+
+
 def web_command(args: argparse.Namespace) -> None:
     """Handle the web command — serve the monitoring UI.
 
@@ -968,6 +993,9 @@ def web_command(args: argparse.Namespace) -> None:
     except ImportError as e:
         print(f'error: {e}', file=sys.stderr)
         sys.exit(1)
+
+    # An argument error, so it is found before the app is resolved.
+    ui_config = resolve_web_ui_config(args)
 
     try:
         app = resolve_web_app(args)
@@ -997,6 +1025,7 @@ def web_command(args: argparse.Namespace) -> None:
     monitoring_app = create_monitoring_app(
         app,
         auth_policy=policy,
+        config=ui_config,
         actions_enabled=args.enable_actions,
     )
 
@@ -1282,6 +1311,15 @@ Examples:
             action='store_true',
             default=False,
             help='Allow cancel/pause/resume (default: view-only)',
+        )
+        web_parser.add_argument(
+            '--trace-link',
+            default=None,
+            metavar='TEMPLATE',
+            help=(
+                "Link of a task's trace id in the task detail: an http or https "
+                'URL with one {trace_id} (default: the id as text)'
+            ),
         )
         web_parser.add_argument(
             '--loglevel',

@@ -54,7 +54,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - exception_mapper: ExceptionMapper (global {ExceptionClass: "ERROR_CODE"})
 - default_unhandled_error_code: str (default "UNHANDLED_EXCEPTION")
 - resend_on_transient_err: bool (default False, auto-retry transient ENQUEUE_FAILED for both task send and workflow start)
-- tracing: OtelTracing() | NoTracing() (default NoTracing(); OtelTracing() traces the sends with the OpenTelemetry API and records the producer metrics with its meter; needs the extra horsies[otel], else HRS-220; with NoTracing() horsies does not import opentelemetry)
+- tracing: OtelTracing(parentage: ChildOfSend() | LinkedToSend()) | NoTracing() (default NoTracing(); OtelTracing() traces the sends and each attempt that a worker runs with the OpenTelemetry API and records the producer metrics with its meter; the attempt span is a child of the send span with ChildOfSend() (default), or a new trace with a link to it with LinkedToSend(); needs the extra horsies[otel], else HRS-220; with NoTracing() horsies does not import opentelemetry)
+- log_format: TextLogs() | JsonLogs() (default TextLogs(); JsonLogs() writes one JSON object per line with the keys ts, level, logger, message, process, task_id, task_name, attempt, trace_id, span_id, exc)
 - worker_profiles: dict[str, WorkerProfile] (default {}; `horsies worker <app> --profile <name>` runs one; every profile is validated at construction, HRS-218)
 
 ### WorkerProfile
@@ -657,6 +658,7 @@ Config/broker (HRS-200-HRS-299):
 - HRS-218 CONFIG_INVALID_WORKER_PROFILE (a worker profile is not valid; the message names the profile and the field path)
 - HRS-219 CHECK_WORKER_CONNECTIONS (check(live=True): one worker of a profile opens more Postgres connections itself than the server allows, or the limit could not be read; not compared, but stated in the error: task code that sends opens the task_send_pool of its child kind in its child per event loop it sends from)
 - HRS-220 CONFIG_OTEL_API_MISSING (AppConfig(tracing=OtelTracing()) and the OpenTelemetry API is not installed; install horsies[otel])
+- HRS-221 CONFIG_INVALID_TRACE_LINK (a TraceLinkTemplate of MonitoringUIConfig that the core refuses: not an http or https URL with a host, not exactly one {trace_id}, another brace, a byte outside printable ASCII, or more than 2,048 bytes)
 Registry (HRS-300-HRS-399):
 <!-- members: ErrorCode part -->
 - HRS-300 TASK_NOT_REGISTERED
@@ -730,12 +732,13 @@ Registry (HRS-300-HRS-399):
   - Boot warns (never refuses) when count x MemoryLimit.mb is above the usable memory: the cgroup limit (the group that /proc/self/cgroup names, v1 memory group else v2 group; the smallest memory.limit_in_bytes / memory.max of the group and its parents, so a systemd MemoryMax or --cgroupns=host counts; without /proc/self/cgroup the files at the mount point; "max" or no file = no limit) when below the host RAM, else the host RAM; the warning names the source ("container limit" or "host RAM"), and when one worker opens more Postgres connections itself than the server has usable slots; a memory limit at or below the warmed child baseline still refuses to start
 - `horsies scheduler <module> [--loglevel LEVEL]`
 - `horsies check <module> [--live] [--loglevel LEVEL]`
-- `horsies web <module> [--host HOST] [--port PORT] [--auth none|trusted-header] [--trusted-header HEADER] [--enable-actions] [--loglevel LEVEL]` — serve the monitoring web UI (requires the `horsies[web]` extra)
+- `horsies web <module> [--host HOST] [--port PORT] [--auth none|trusted-header] [--trusted-header HEADER] [--enable-actions] [--trace-link TEMPLATE] [--loglevel LEVEL]` — serve the monitoring web UI (requires the `horsies[web]` extra)
   - `horsies web --database-url URL [--session-database-url URL] [--pgbouncer-transaction-mode] [...]` — monitor a database without importing an app module (registry-less)
   - Pass either `<module>` or `--database-url`, not both
   - Defaults: `--host 127.0.0.1`, `--port 8600`, `--auth none`, `--trusted-header X-Forwarded-User`, actions off (view-only)
   - `--auth none` is allowed only on a loopback host; a non-loopback host requires `--auth trusted-header`
   - `--enable-actions` allows cancel/pause/resume
+  - `--trace-link TEMPLATE` links a task's trace id in the task detail: an http or https URL with one {trace_id} (MonitoringUIConfig(trace_link=TraceLinkTemplate(template=...)) when mounting; a refused template is HRS-221 CONFIG_INVALID_TRACE_LINK)
 - `horsies get-docs [--output DIR] [--ref main]` — fetch the docs of the installed version's release tag for AI agents (default: .horsies-docs/); a development version has no tag and fails unless `--ref main` is given
 - `horsies skills install --target DIR [--force]` — copy the packaged skill folder to `DIR/horsies/`; refuses to replace a changed copy without `--force`
 - Module format: `myapp.config:app` (dotted:attr) or `app/config.py:app` (file:attr)

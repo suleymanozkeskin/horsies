@@ -254,6 +254,7 @@ horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
 | `--trusted-header NAME` | `X-Forwarded-User` | The identity header that the proxy sets, in `trusted-header` mode |
 | `--enable-actions` | off | Allow task cancel and workflow pause, resume and cancel. Without it the UI is view only |
 | `--custom-css-url URL` | none | A stylesheet URL that the page loads after its own stylesheet |
+| `--trace-link TEMPLATE` | none | The link of a task's trace id in the task detail: an `http` or `https` URL with one `{trace_id}`. A template that breaks a rule exits 2 and names the rule |
 | `--loglevel LEVEL` | `INFO` | See [Logs](#logs) |
 
 A config file:

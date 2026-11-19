@@ -37,18 +37,20 @@ use super::defects::{
 };
 use super::dispatch::{AttemptEnd, AttemptLog, NotRunCause, TimeoutCancel};
 use super::pool::{Answer, ExitNotSeen, MemoryLimit, PoolShared, QueuedRun, TaskLimit};
+use super::replacement::{reason_of_loss, tell_replaced, ChildLeave, GenerationChild};
 use super::route::IsolatedDeadline;
 use super::seat_runs::SHARED_BACKSTOP_MARGIN;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::child_writes::{longer, FINALIZING_MARKER_END};
 use crate::db::CANCEL_REQUEST_BOUND;
+use crate::telemetry::labels::ReplaceReason;
 use crate::worker::executor::protocol::{
     BodyEnd, ChildAfterFrame, ChildFrame, ParentFrame, ProcessId, RssReading, RunEnd, RunFrame,
     TaskTimeoutMs, ISOLATED_LEFTOVER_GRACE, STUCK_REPORT_DELAY,
 };
 use crate::worker::executor::supervisor::{
     log_core_stopped_child, ChildChannel, ChildExit, ChildLost, EndWithoutTask, ExitState,
-    FrameWait, LossCause, MailboxBound, SendFailure,
+    FrameWait, LossCause, MailboxBound, SendFailure, CHANNEL_LOST_GRACE,
 };
 use crate::worker::runner_beats::{DispatchRunner, HeldChild, HeldDispatch, RegistryClosed};
 
@@ -116,9 +118,12 @@ enum AfterRun {
     /// itself (its core stopped): the slot sends it no task and waits for
     /// its exit.
     EndsItself,
-    /// The child is lost or killed. The task finished when its body
-    /// returned before.
-    ChildGone(TasksFinished),
+    /// The child is lost or killed for `reason`. The task finished when
+    /// its body returned before.
+    ChildGone {
+        finished: TasksFinished,
+        reason: ReplaceReason,
+    },
     /// A slot defect: the child is killed and the task answered.
     Defect(SlotDefect),
 }
@@ -211,16 +216,23 @@ enum FirstAnswer {
 pub(super) async fn run_slot(shared: Arc<PoolShared>, index: usize) {
     let mut defects = SlotDefects::default();
     loop {
-        let served = CatchPanic::new(boot_and_serve(&shared, index, &mut defects)).await;
-        let defect = match served {
+        let mut child = GenerationChild::NotBooted;
+        let served =
+            CatchPanic::new(boot_and_serve(&shared, index, &mut defects, &mut child)).await;
+        let (defect, leave) = match served {
             Ok(Served::PoolEnded) => return,
-            Ok(Served::Generation(GenerationEnd::Ended)) => None,
-            Ok(Served::Generation(GenerationEnd::Defect(defect))) => Some(defect),
+            Ok(Served::Generation(GenerationEnd::Ended(leave))) => (None, leave),
+            Ok(Served::Generation(GenerationEnd::Defect(defect))) => {
+                (Some(defect), ChildLeave::For(ReplaceReason::SlotDefect))
+            }
             Err(payload) => {
                 // The child of the generation was dropped with it; its
                 // channel kills it on drop.
                 shared.board.set(index, SlotPhase::Retiring);
-                Some(SlotDefect::panicked(payload.as_ref()))
+                (
+                    Some(SlotDefect::panicked(payload.as_ref())),
+                    ChildLeave::For(ReplaceReason::SlotDefect),
+                )
             }
         };
         if let Some(defect) = defect {
@@ -231,13 +243,22 @@ pub(super) async fn run_slot(shared: Arc<PoolShared>, index: usize) {
         }
         match shared.board.not_serving() {
             true => return,
-            false => shared.board.set(index, SlotPhase::Booting),
+            false => {
+                tell_replaced(&shared.board, index, child, leave);
+                shared.board.set(index, SlotPhase::Booting);
+            }
         }
     }
 }
 
-/// Boot a child for the slot and serve it.
-async fn boot_and_serve(shared: &PoolShared, index: usize, defects: &mut SlotDefects) -> Served {
+/// Boot a child for the slot and serve it. `child` names the booted child
+/// once the boot gave one.
+async fn boot_and_serve(
+    shared: &PoolShared,
+    index: usize,
+    defects: &mut SlotDefects,
+    child: &mut GenerationChild,
+) -> Served {
     let boot = BootSlot {
         board: &shared.board,
         index,
@@ -251,6 +272,7 @@ async fn boot_and_serve(shared: &PoolShared, index: usize, defects: &mut SlotDef
     };
     match boot_child(&boot).await {
         Booted::Child(channel) => {
+            *child = GenerationChild::Booted(channel.pid());
             Served::Generation(serve_generation(shared, index, channel, defects).await)
         }
         Booted::PoolStopped | Booted::PoolFailed => Served::PoolEnded,
@@ -260,11 +282,40 @@ async fn boot_and_serve(shared: &PoolShared, index: usize, defects: &mut SlotDef
 /// How a child that takes no more tasks leaves the slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChildLeaves {
-    /// The slot retires the child with the stop frame, or disposes of a
-    /// child that already ended.
-    Retired,
+    /// The slot retires the child for `ReplaceReason` with the stop frame,
+    /// or disposes of a child that already ended.
+    Retired(ReplaceReason),
     /// The child said that it ends itself: the slot waits for its exit.
     EndsItself,
+    /// The slot waited for work, and the child takes none.
+    Idle(IdleEnd),
+}
+
+/// Why a child that waits for work takes none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleEnd {
+    /// The pools stop or failed.
+    PoolNotServing,
+    /// The child exited, or its channel closed, while it held no task.
+    ChildEnded,
+    /// The exit watch of the child closed: no exit of it can be seen.
+    ExitWatchClosed,
+}
+
+/// What the wait for work gave.
+enum NextRun {
+    Run(QueuedRun),
+    /// The child takes no task.
+    NoRun(IdleEnd),
+}
+
+/// Whether a child that served a task serves on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterTask {
+    ServeOn,
+    /// The child reached a recycle limit: `ReplaceReason::TaskCount` or
+    /// `ReplaceReason::MemoryLimit`.
+    Recycle(ReplaceReason),
 }
 
 /// Serve tasks on one child until it is lost, retires, ends itself, or the
@@ -279,8 +330,9 @@ async fn serve_generation(
     let mut tasks_done: u64 = 0;
     let mut notice = ReadyNotice::AtFirstWait;
     let leaves = loop {
-        let Some(run) = next_run(shared, &channel, notice).await else {
-            break ChildLeaves::Retired;
+        let run = match next_run(shared, &channel, notice).await {
+            NextRun::Run(run) => run,
+            NextRun::NoRun(idle) => break ChildLeaves::Idle(idle),
         };
         notice = ReadyNotice::Quiet;
         tasks_done = tasks_done.saturating_add(1);
@@ -311,29 +363,32 @@ async fn serve_generation(
         match after {
             AfterRun::Serve { rss } => {
                 defects.task_finished();
-                if let Some(reason) = recycle_reason(shared, tasks_done, rss) {
-                    tracing::debug!(
-                        slot = index,
-                        pid = channel.pid().get(),
-                        reason,
-                        "retiring a child"
-                    );
-                    break ChildLeaves::Retired;
+                match after_task(shared, tasks_done, rss) {
+                    AfterTask::ServeOn => {}
+                    AfterTask::Recycle(reason) => {
+                        tracing::debug!(
+                            slot = index,
+                            pid = channel.pid().get(),
+                            reason = ?reason,
+                            "retiring a child"
+                        );
+                        break ChildLeaves::Retired(reason);
+                    }
                 }
             }
             AfterRun::Retire => {
                 defects.task_finished();
-                break ChildLeaves::Retired;
+                break ChildLeaves::Retired(ReplaceReason::LeftoverWork);
             }
             AfterRun::EndsItself => {
                 defects.task_finished();
                 break ChildLeaves::EndsItself;
             }
-            AfterRun::ChildGone(finished) => {
+            AfterRun::ChildGone { finished, reason } => {
                 defects.note(finished);
                 shared.board.set(index, SlotPhase::Retiring);
                 let _ = channel.dispose_lost().await;
-                return GenerationEnd::Ended;
+                return GenerationEnd::Ended(ChildLeave::For(reason));
             }
             AfterRun::Defect(defect) => {
                 shared.board.set(index, SlotPhase::Retiring);
@@ -343,21 +398,71 @@ async fn serve_generation(
         }
     };
     shared.board.set(index, SlotPhase::Retiring);
+    GenerationEnd::Ended(leave_slot(channel, leaves).await)
+}
+
+/// End a child that takes no more tasks as `leaves` says, and give why it
+/// left.
+async fn leave_slot(mut channel: ChildChannel, leaves: ChildLeaves) -> ChildLeave {
     let pid = channel.pid();
-    let ended = channel.has_exited() || channel.channel_closed();
+    let exited = channel.has_exited();
+    let ended = exited || channel.channel_closed();
     match (leaves, ended) {
         (ChildLeaves::EndsItself, _) => {
             log_end_without_task(pid, channel.await_own_end().await);
+            ChildLeave::For(ReplaceReason::CoreStopped)
         }
-        (ChildLeaves::Retired, true) => {
+        (ChildLeaves::Retired(reason), true) => {
             // The child ended by itself while it held no task.
             log_end_without_task(pid, channel.dispose_lost().await);
+            ChildLeave::For(reason)
         }
-        (ChildLeaves::Retired, false) => {
+        (ChildLeaves::Retired(reason), false) => {
             let _ = channel.retire().await;
+            ChildLeave::For(reason)
+        }
+        (ChildLeaves::Idle(idle), true) => {
+            // The child ended by itself while it held no task. A channel
+            // that closed before the exit was seen waits for the exit as
+            // long as the channel's own rule for a closed channel
+            // ([`CHANNEL_LOST_GRACE`]), so a child that died is told apart
+            // from a channel lost while its child lived.
+            let exited = match (idle, exited) {
+                (IdleEnd::ChildEnded, false) => {
+                    let _ = channel.wait_exit(CHANNEL_LOST_GRACE).await;
+                    channel.has_exited()
+                }
+                (IdleEnd::ChildEnded, true)
+                | (IdleEnd::PoolNotServing | IdleEnd::ExitWatchClosed, _) => exited,
+            };
+            let exit = channel.dispose_lost().await;
+            log_end_without_task(pid, exit);
+            idle_leave(idle, exited, exit)
+        }
+        (ChildLeaves::Idle(idle), false) => {
+            let exit = channel.retire().await;
+            idle_leave(idle, exited, exit)
         }
     }
-    GenerationEnd::Ended
+}
+
+/// Why a child that held no task left the slot: the stop of the pools, its
+/// own end, or a closed exit watch. `exited` says whether its exit was seen
+/// before the slot disposed of it, and `exit` is its exit. Pure.
+fn idle_leave(idle: IdleEnd, exited: bool, exit: ChildExit) -> ChildLeave {
+    match (idle, EndWithoutTask::of(exit), exited) {
+        (IdleEnd::PoolNotServing, _, _) => ChildLeave::AtPoolStop,
+        (IdleEnd::ExitWatchClosed, _, _) => ChildLeave::For(ReplaceReason::SpawnerStopped),
+        (IdleEnd::ChildEnded, EndWithoutTask::CoreStopped, _) => {
+            ChildLeave::For(ReplaceReason::CoreStopped)
+        }
+        (IdleEnd::ChildEnded, EndWithoutTask::Other, true) => {
+            ChildLeave::For(ReplaceReason::ChildDied)
+        }
+        (IdleEnd::ChildEnded, EndWithoutTask::Other, false) => {
+            ChildLeave::For(ReplaceReason::ChannelLost)
+        }
+    }
 }
 
 /// Log the end of a child that held no task when it ended with the
@@ -369,8 +474,9 @@ fn log_end_without_task(pid: ProcessId, exit: ChildExit) {
     }
 }
 
-/// Why a child that served a task retires, if it does.
-fn recycle_reason(shared: &PoolShared, tasks_done: u64, rss: RssReading) -> Option<&'static str> {
+/// Whether a child that served `tasks_done` tasks, with the RSS `rss` at
+/// its last result, serves on or retires at a recycle limit. Pure.
+fn after_task(shared: &PoolShared, tasks_done: u64, rss: RssReading) -> AfterTask {
     let count_reached = match shared.config.tasks_per_child {
         TaskLimit::Off => false,
         TaskLimit::After(limit) => tasks_done >= limit.get(),
@@ -383,32 +489,30 @@ fn recycle_reason(shared: &PoolShared, tasks_done: u64, rss: RssReading) -> Opti
         (MemoryLimit::Off, _) | (MemoryLimit::AtMb(_), RssReading::Unreadable) => false,
     };
     match (count_reached, memory_reached) {
-        (true, _) => Some("task count"),
-        (false, true) => Some("memory limit"),
-        (false, false) => None,
+        (true, _) => AfterTask::Recycle(ReplaceReason::TaskCount),
+        (false, true) => AfterTask::Recycle(ReplaceReason::MemoryLimit),
+        (false, false) => AfterTask::ServeOn,
     }
 }
 
-/// Wait for work. `None`: this child must not take any. While it waits,
-/// the slot counts as idle in the free slots of its pool. With
-/// [`ReadyNotice::AtFirstWait`], the first time the slot waits with no task
-/// queued it notes the ready child on the board, after it counts as idle:
-/// the claim pass that the note wakes counts this slot as free.
-async fn next_run(
-    shared: &PoolShared,
-    channel: &ChildChannel,
-    mut notice: ReadyNotice,
-) -> Option<QueuedRun> {
+/// Wait for work. [`NextRun::NoRun`]: this child must not take any, and
+/// why. While it waits, the slot counts as idle in the free slots of its
+/// pool. With [`ReadyNotice::AtFirstWait`], the first time the slot waits
+/// with no task queued it notes the ready child on the board, after it
+/// counts as idle: the claim pass that the note wakes counts this slot as
+/// free.
+async fn next_run(shared: &PoolShared, channel: &ChildChannel, mut notice: ReadyNotice) -> NextRun {
     let mut exit = channel.exit_watch();
     let mut idle = shared.idle_slot();
     loop {
-        let cannot_serve =
-            shared.board.not_serving() || channel.has_exited() || channel.channel_closed();
-        if cannot_serve {
-            return None;
+        let child_ended = channel.has_exited() || channel.channel_closed();
+        match (shared.board.not_serving(), child_ended) {
+            (true, _) => return NextRun::NoRun(IdleEnd::PoolNotServing),
+            (false, true) => return NextRun::NoRun(IdleEnd::ChildEnded),
+            (false, false) => {}
         }
         if let Some(run) = idle.take() {
-            return Some(run);
+            return NextRun::Run(run);
         }
         match notice {
             ReadyNotice::AtFirstWait => {
@@ -423,7 +527,7 @@ async fn next_run(
             () = shared.board.failed.cancelled() => {}
             changed = exit.changed() => {
                 if changed.is_err() {
-                    return None;
+                    return NextRun::NoRun(IdleEnd::ExitWatchClosed);
                 }
             }
         }
@@ -473,7 +577,10 @@ async fn run_one(
             answer.send(AttemptEnd::NotDispatched(
                 NotRunCause::RunnerBeatsFailedClosed,
             ));
-            return AfterRun::ChildGone(TasksFinished::NoTask);
+            return AfterRun::ChildGone {
+                finished: TasksFinished::NoTask,
+                reason: ReplaceReason::KilledByParent,
+            };
         }
     };
     answer.child_took_it(channel.pid());
@@ -509,7 +616,10 @@ async fn run_one(
             drop(held);
             let lost = lost_after_kill(channel).await;
             answer.send(end_of_loss(shared, channel, lost).await);
-            return AfterRun::ChildGone(TasksFinished::NoTask);
+            return AfterRun::ChildGone {
+                finished: TasksFinished::NoTask,
+                reason: reason_of_loss(&lost),
+            };
         }
     };
     match first {
@@ -547,18 +657,27 @@ async fn run_one(
             drop(held);
             let lost = channel.discard_violating_child().await;
             answer.send(end_of_loss(shared, channel, lost).await);
-            AfterRun::ChildGone(TasksFinished::NoTask)
+            AfterRun::ChildGone {
+                finished: TasksFinished::NoTask,
+                reason: reason_of_loss(&lost),
+            }
         }
         FirstAnswer::Wait(FrameWait::Lost(lost)) => {
             drop(held);
             answer.send(end_of_loss(shared, channel, lost).await);
-            AfterRun::ChildGone(TasksFinished::NoTask)
+            AfterRun::ChildGone {
+                finished: TasksFinished::NoTask,
+                reason: reason_of_loss(&lost),
+            }
         }
         FirstAnswer::Wait(FrameWait::Expired) => {
             drop(held);
             let timed_out = timeout_end(timeout);
             answer.send(end_after_kill(shared, channel, timed_out).await);
-            AfterRun::ChildGone(TasksFinished::NoTask)
+            AfterRun::ChildGone {
+                finished: TasksFinished::NoTask,
+                reason: ReplaceReason::AtDeadline,
+            }
         }
         FirstAnswer::DrainDeadline => {
             // Python `_kill_at_deadline` kills with `kill_for_caller`, so the
@@ -568,7 +687,10 @@ async fn run_one(
             shared.drain_kills.note([task_id]);
             let lost = lost_after_kill(channel).await;
             answer.send(end_of_loss(shared, channel, lost).await);
-            AfterRun::ChildGone(TasksFinished::NoTask)
+            AfterRun::ChildGone {
+                finished: TasksFinished::NoTask,
+                reason: reason_of_loss(&lost),
+            }
         }
     }
 }
@@ -703,12 +825,19 @@ async fn end_after_return(
             );
             drop(held);
             answer.send(end_after_kill(shared, channel, returned_end).await);
-            AfterRun::ChildGone(TasksFinished::AtLeastOne)
+            AfterRun::ChildGone {
+                finished: TasksFinished::AtLeastOne,
+                reason: ReplaceReason::LeftoverWork,
+            }
         }
         FirstAnswer::Wait(FrameWait::Expired) => {
+            // The child did not report how the work it holds ended.
             drop(held);
             answer.send(end_after_kill(shared, channel, returned_end).await);
-            AfterRun::ChildGone(TasksFinished::AtLeastOne)
+            AfterRun::ChildGone {
+                finished: TasksFinished::AtLeastOne,
+                reason: ReplaceReason::LeftoverWork,
+            }
         }
         FirstAnswer::DrainDeadline => {
             drop(held);
@@ -716,19 +845,28 @@ async fn end_after_return(
             // (Python `_kill_at_deadline`: the handle still has its child).
             shared.drain_kills.note([task_id]);
             answer.send(end_after_kill(shared, channel, returned_end).await);
-            AfterRun::ChildGone(TasksFinished::AtLeastOne)
+            AfterRun::ChildGone {
+                finished: TasksFinished::AtLeastOne,
+                reason: ReplaceReason::KilledByParent,
+            }
         }
         FirstAnswer::Wait(FrameWait::Frame(other)) => {
             tracing::error!(task_id = %task_id, attempt = log.attempt.get(), trace_id = log.trace_id.log_field(), frame = ?other, "an isolated child sent a frame out of turn");
             drop(held);
             let lost = channel.discard_violating_child().await;
             answer.send(end_once_seen(shared, channel, lost, returned_end).await);
-            AfterRun::ChildGone(TasksFinished::AtLeastOne)
+            AfterRun::ChildGone {
+                finished: TasksFinished::AtLeastOne,
+                reason: reason_of_loss(&lost),
+            }
         }
         FirstAnswer::Wait(FrameWait::Lost(lost)) => {
             drop(held);
             answer.send(end_once_seen(shared, channel, lost, returned_end).await);
-            AfterRun::ChildGone(TasksFinished::AtLeastOne)
+            AfterRun::ChildGone {
+                finished: TasksFinished::AtLeastOne,
+                reason: reason_of_loss(&lost),
+            }
         }
     }
 }

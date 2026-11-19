@@ -4,10 +4,14 @@
 //! state, so a call cannot pass two states at once. A value that the Python client should have refused first raises
 //! `TypeError` or `ValueError` here: it is a defect of the client.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
+use horsies_core::telemetry::trace_carrier::{PropagatedTrace, SendTrace};
 use horsies_core::ThresholdMs;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 /// Start the task as soon as a worker can claim it.
 #[pyclass(module = "horsies._core", frozen)]
@@ -75,6 +79,75 @@ impl StartArgument<'_> {
                 seconds: delay.get().seconds,
             },
             Self::At(at) => StartRule::At(at.get().at),
+        }
+    }
+}
+
+/// The send carries no trace carrier: tracing is off, or the propagator
+/// wrote no key.
+#[pyclass(module = "horsies._core", frozen)]
+pub struct NoTraceCarrier {}
+
+#[pymethods]
+impl NoTraceCarrier {
+    #[new]
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+/// The carrier that the client's propagator injected for the span of a
+/// send or a workflow start, and the 16-byte trace id of that span. The core
+/// checks its bounds at the send; a carrier that breaks a bound is not
+/// stored and never fails the send (`horsies_core::telemetry::trace_carrier`).
+#[pyclass(module = "horsies._core", frozen)]
+pub struct TraceCarrier {
+    carrier: BTreeMap<String, String>,
+    trace_id: Vec<u8>,
+}
+
+#[pymethods]
+impl TraceCarrier {
+    #[new]
+    fn new(carrier: BTreeMap<String, String>, trace_id: &Bound<'_, PyBytes>) -> Self {
+        Self {
+            carrier,
+            trace_id: trace_id.as_bytes().to_vec(),
+        }
+    }
+
+    /// The map that the propagator injected into.
+    #[getter]
+    fn carrier(&self) -> BTreeMap<String, String> {
+        self.carrier.clone()
+    }
+
+    /// The trace id of the propagated span.
+    #[getter]
+    fn trace_id<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.trace_id)
+    }
+}
+
+/// The trace argument of a send or a start: one of the two trace classes.
+#[derive(FromPyObject)]
+pub enum TraceArgument<'py> {
+    NoCarrier(Bound<'py, NoTraceCarrier>),
+    Carrier(Bound<'py, TraceCarrier>),
+}
+
+impl TraceArgument<'_> {
+    /// The core's trace of the send. Pure.
+    pub fn send_trace(self) -> SendTrace {
+        match self {
+            Self::NoCarrier(_) => SendTrace::NoCarrier,
+            Self::Carrier(carrier) => {
+                let carrier = carrier.get();
+                SendTrace::Propagated(PropagatedTrace {
+                    carrier: carrier.carrier.clone(),
+                    trace_id: carrier.trace_id.clone(),
+                })
+            }
         }
     }
 }

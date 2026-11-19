@@ -307,6 +307,50 @@ impl SharedConfirmation {
     }
 }
 
+/// Whether the liveness lock is held now, as the holder last found it.
+#[cfg(feature = "metrics-endpoint")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LockHold {
+    /// The last lock statement confirmed the lock.
+    Held,
+    /// The session was lost, or a new one could not take the lock; `cause`
+    /// names why. The holder takes the lock again with the reconnect
+    /// backoff.
+    NotHeld { cause: String },
+}
+
+/// A read of what the holder of the liveness lock last found: the readiness
+/// probe of the worker endpoint reads it. Clones read one holder.
+#[cfg(feature = "metrics-endpoint")]
+#[derive(Clone)]
+pub(crate) struct LockHoldView(SharedConfirmation);
+
+#[cfg(feature = "metrics-endpoint")]
+impl LockHoldView {
+    /// Whether the lock is held now. Takes the lock of the shared record for
+    /// one copy; never waits on the database.
+    pub(crate) fn hold(&self) -> LockHold {
+        match self.0.read().hold {
+            Hold::Confirmed => LockHold::Held,
+            Hold::Lost { cause } => LockHold::NotHeld { cause },
+        }
+    }
+
+    /// A view of a lock held now, for the tests of its readers.
+    #[cfg(test)]
+    pub(crate) fn held_for_test() -> Self {
+        Self(SharedConfirmation::new(Instant::now()))
+    }
+
+    /// A view of a lock lost for `cause`, for the tests of its readers.
+    #[cfg(test)]
+    pub(crate) fn lost_for_test(cause: &str) -> Self {
+        let shared = SharedConfirmation::new(Instant::now());
+        shared.lose(cause.to_owned());
+        Self(shared)
+    }
+}
+
 /// Whether the worker holds a task whose row a peer could recover.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TasksAtRisk {
@@ -346,6 +390,9 @@ struct WatchContext {
 /// A running liveness lock: its holder task, its watchdog thread, and the
 /// signal that the holder closed its connection.
 pub(crate) struct RunningLivenessLock {
+    /// What the holder last found, for the readiness probe.
+    #[cfg(feature = "metrics-endpoint")]
+    shared: SharedConfirmation,
     holder_cancel: CancellationToken,
     released: oneshot::Receiver<()>,
     watch_stop: Sender<()>,
@@ -402,6 +449,8 @@ pub(crate) async fn start_liveness_lock(
         regain_bound_s = rule.regain_bound.as_secs_f64(),
         "the worker liveness lock is held",
     );
+    #[cfg(feature = "metrics-endpoint")]
+    let view = shared.clone();
     let holder_cancel = CancellationToken::new();
     let (released_sender, released) = oneshot::channel();
     let holder = tokio::spawn(
@@ -422,6 +471,8 @@ pub(crate) async fn start_liveness_lock(
     );
     Ok(StartedLivenessLock {
         running: RunningLivenessLock {
+            #[cfg(feature = "metrics-endpoint")]
+            shared: view,
             holder_cancel,
             released,
             watch_stop,
@@ -432,6 +483,12 @@ pub(crate) async fn start_liveness_lock(
 }
 
 impl RunningLivenessLock {
+    /// A read of what the holder last found, for the readiness probe.
+    #[cfg(feature = "metrics-endpoint")]
+    pub(crate) fn hold_view(&self) -> LockHoldView {
+        LockHoldView(self.shared.clone())
+    }
+
     /// Stop the watchdog, then the holder, and wait at most the statement
     /// bound for its connection to close: the server then releases the lock.
     /// Call it after every task of the worker ended.

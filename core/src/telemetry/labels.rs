@@ -246,9 +246,12 @@ pub const ERROR_CODE_FIXED: &[ValueGroup] = &[
 pub const ERROR_CODE_VALUES: LabelValues =
     LabelValues::FixedThenDeclared(ERROR_CODE_FIXED, DeclaredSource::UserErrorCodes);
 
+/// The value of the `result` label of a send that succeeded.
+pub const SEND_OK_RESULT: &str = "ok";
+
 /// The values of the `result` label of a send: `ok`, or the send error code.
 pub const SEND_RESULT_VALUES: LabelValues = LabelValues::Fixed(&[
-    ValueGroup::Listed(&["ok"]),
+    ValueGroup::Listed(&[SEND_OK_RESULT]),
     ValueGroup::Codes(<TaskSendErrorCode as CodeEnum>::CATALOG),
 ]);
 
@@ -438,10 +441,13 @@ pub enum ReplaceReason {
     LeftoverWork,
     /// A run on the child passed its deadline.
     AtDeadline,
+    /// The core of the child stopped, and the child ended itself (exit
+    /// code 80).
+    CoreStopped,
 }
 
 impl ReplaceReason {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::ChildDied,
         Self::ChannelLost,
         Self::ProtocolViolation,
@@ -455,6 +461,7 @@ impl ReplaceReason {
         Self::LoopBlocked,
         Self::LeftoverWork,
         Self::AtDeadline,
+        Self::CoreStopped,
     ];
 }
 
@@ -473,6 +480,7 @@ impl LabelValue for ReplaceReason {
         "loop_blocked",
         "leftover_work",
         "at_deadline",
+        "core_stopped",
     ])]);
 
     fn position(self) -> u32 {
@@ -490,6 +498,7 @@ impl LabelValue for ReplaceReason {
             Self::LoopBlocked => 10,
             Self::LeftoverWork => 11,
             Self::AtDeadline => 12,
+            Self::CoreStopped => 13,
         }
     }
 }
@@ -993,7 +1002,7 @@ mod tests {
             LabelValues::Fixed(groups) => group_texts(groups),
             other => panic!("the send result label has fixed values, not {other:?}"),
         };
-        assert_eq!(send_results.first(), Some(&"ok"));
+        assert_eq!(send_results.first(), Some(&SEND_OK_RESULT));
         assert_eq!(send_results.len(), 1 + TaskSendErrorCode::VARIANTS.len());
         for source in [
             DeclaredSource::TaskNames,

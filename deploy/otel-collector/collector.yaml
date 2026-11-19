@@ -1,0 +1,96 @@
+# OpenTelemetry Collector: scrape the Prometheus endpoints of horsies and
+# export the series through OTLP.
+#
+# Made for otel/opentelemetry-collector-contrib 0.165.0 (the image that the
+# container test pins: clients/python/tests/fixtures/observability/compose.yaml).
+#
+# Scrape jobs:
+# - horsies-worker: the endpoint of each worker process,
+#   `horsies worker <app> --profile <name> --metrics-listen HOST:PORT`.
+# - horsies-fleet: the fleet collector, `horsies metrics <app> --listen HOST:PORT`.
+#   Run one fleet collector per database. Two of them give two copies of each
+#   fleet series, with different `service.instance.id` values.
+#
+# The series keep their Prometheus names (`horsies_task_attempts_total`,
+# `horsies_task_run_duration_seconds`): `trim_metric_suffixes` is off.
+#
+# This file expands environment variables: `${env:NAME}`. Write `$$` for a
+# `$` in the Prometheus config, for example `$$1` in a relabel replacement.
+
+receivers:
+  # Static targets. Replace the addresses with the HOST:PORT that each process
+  # serves on. The addresses below fit a Collector on the same host as one
+  # worker and the fleet collector.
+  prometheus:
+    config:
+      global:
+        scrape_interval: 15s
+        scrape_timeout: 10s
+      scrape_configs:
+        - job_name: horsies-worker
+          static_configs:
+            - targets:
+                - 127.0.0.1:9464
+        - job_name: horsies-fleet
+          static_configs:
+            - targets:
+                - 127.0.0.1:9465
+
+  # Kubernetes pods. To use it, put `prometheus/kubernetes` in place of
+  # `prometheus` in `service.pipelines.metrics.receivers`.
+  # - A worker pod has the label `app.kubernetes.io/component: horsies-worker`;
+  #   a fleet collector pod has `app.kubernetes.io/component: horsies-metrics`.
+  # - The container port of the endpoint has the name `metrics`.
+  # - The Collector runs in the cluster, and its service account may get,
+  #   list and watch pods.
+  # The receiver sets `k8s.namespace.name`, `k8s.pod.name` and the other
+  # Kubernetes resource attributes from the discovery labels.
+  prometheus/kubernetes:
+    config:
+      global:
+        scrape_interval: 15s
+        scrape_timeout: 10s
+      scrape_configs:
+        - job_name: horsies-worker
+          kubernetes_sd_configs:
+            - role: pod
+              selectors:
+                - role: pod
+                  label: app.kubernetes.io/component=horsies-worker
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_pod_container_port_name]
+              regex: metrics
+              action: keep
+        - job_name: horsies-fleet
+          kubernetes_sd_configs:
+            - role: pod
+              selectors:
+                - role: pod
+                  label: app.kubernetes.io/component=horsies-metrics
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_pod_container_port_name]
+              regex: metrics
+              action: keep
+
+processors:
+  # Refuses data while the Collector is above the limit, so a burst does not
+  # end the process. Put it first in each pipeline.
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+
+exporters:
+  # OTLP over gRPC with TLS. OTLP_ENDPOINT is HOST:PORT of the OTLP receiver
+  # of your backend or of a gateway Collector.
+  otlp_grpc:
+    endpoint: ${env:OTLP_ENDPOINT}
+    sending_queue:
+      batch: {}
+
+service:
+  pipelines:
+    metrics:
+      receivers: [prometheus]
+      processors: [memory_limiter]
+      exporters: [otlp_grpc]

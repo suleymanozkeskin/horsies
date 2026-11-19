@@ -8,7 +8,9 @@
 //! `AppConfig.resend_on_transient_err` the core runs a retryable failure of
 //! the start again, with the same workflow id and start time, up to 3
 //! times. In a worker child the start goes through the child's producer
-//! handle, as a send does.
+//! handle, as a send does. With the feature `otel`, the start runs inside
+//! one span, and the core stores its trace carrier on every row of the
+//! tree (`crate::telemetry`).
 
 use std::sync::Arc;
 
@@ -17,8 +19,8 @@ use horsies_core::core::workflow::validate_start_retry;
 use horsies_core::handle::CoreHandle;
 use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
-    child_producer, ChildProducer, ClientStartError, ClientStartOutcome, StartRefusalCause,
-    WorkflowError, WorkflowStartError,
+    child_producer, ChildProducer, ClientSpec, ClientStartError, ClientStartOutcome,
+    StartRefusalCause, WorkflowError, WorkflowStartError,
 };
 use uuid::Uuid;
 
@@ -26,6 +28,7 @@ use super::handle::WorkflowHandle;
 use super::registry::WorkflowRegistry;
 use super::spec::WorkflowSpec;
 use crate::process_state::refuse_in_a_fork;
+use crate::telemetry::{CallEnd, WorkflowStartSpan, WorkflowStartSubject};
 use crate::{Horsies, HorsiesError};
 
 /// What a start sends with: the app's handle, its workflow registry and
@@ -116,20 +119,45 @@ impl WorkflowStarter {
         spec.check_output_type::<T>().map_err(validation)?;
         let client = self.workflows.prepare(spec).map_err(validation)?;
         refuse_in_a_fork(format_args!("start of workflow '{}'", spec.name()));
+        let span = WorkflowStartSpan::open(&WorkflowStartSubject {
+            workflow_id,
+            workflow_name: spec.name(),
+        });
+        let started = self
+            .start_prepared(spec.name(), &client, workflow_id, span.trace())
+            .await;
+        span.end(match &started {
+            Ok(_) => CallEnd::Succeeded,
+            Err(error) => CallEnd::Failed(error.code()),
+        });
+        started
+    }
+
+    /// The database calls of a start of the prepared spec `client` of the
+    /// workflow `workflow_name` as `workflow_id`, with the trace carrier
+    /// `trace`: the connect of the handle, then the core's start of the
+    /// tree. Outcomes and errors: those of [`Self::start`] after its checks.
+    async fn start_prepared<T: 'static>(
+        &self,
+        workflow_name: &str,
+        client: &ClientSpec,
+        workflow_id: Uuid,
+        trace: SendTrace,
+    ) -> Result<WorkflowHandle<T>, WorkflowStartError> {
         let handle = self.operation_handle();
         let broker = handle.initialized_broker().await.map_err(|error| {
             WorkflowStartError::start_failed(
-                spec.name(),
+                workflow_name,
                 workflow_id,
                 ClientStartError::SchemaInstall(error),
             )
         })?;
         let started = broker
             .start_client_workflow(
-                &client,
+                client,
                 workflow_id,
                 Utc::now(),
-                SendTrace::NoCarrier,
+                trace,
                 self.workflows.config().resend_on_transient_err,
                 &*self.workflows,
             )
@@ -139,9 +167,9 @@ impl WorkflowStarter {
                 WorkflowHandle::new(workflow_id, handle, Arc::clone(&self.workflows)),
             ),
             Ok(ClientStartOutcome::IdTaken { existing_name }) => Err(
-                WorkflowStartError::id_conflict(spec.name(), workflow_id, existing_name),
+                WorkflowStartError::id_conflict(workflow_name, workflow_id, existing_name),
             ),
-            Err(error) => Err(start_error(error, spec.name(), workflow_id)),
+            Err(error) => Err(start_error(error, workflow_name, workflow_id)),
         }
     }
 

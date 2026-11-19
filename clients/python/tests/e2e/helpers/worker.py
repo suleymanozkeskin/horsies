@@ -304,9 +304,12 @@ def run_worker(
     profile: str,
     timeout: float = 10.0,
     ready_check: ReadyCheck | None = None,
+    extra_arguments: Sequence[str] = (),
 ) -> Generator[subprocess.Popen[str], None, None]:
     """Start a worker with the named profile of the instance, yield, then
-    terminate it. The profile holds every worker setting."""
+    terminate it. The profile holds every worker setting.
+    ``extra_arguments`` go after the other arguments of ``horsies worker``,
+    for example ``('--metrics-listen=127.0.0.1:9464',)``."""
     _enter_worker_context()
 
     cmd = [
@@ -317,6 +320,7 @@ def run_worker(
         instance_path,
         f'--profile={profile}',
         '--loglevel=warning',
+        *extra_arguments,
     ]
 
     env = worker_env()

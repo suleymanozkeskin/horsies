@@ -43,6 +43,7 @@ use super::spa::{
     inject, runtime_config_json, safe_asset_path, EmbeddedAssets, MemoryAssets, MonitoringUiConfig,
 };
 use super::task_stats_cache::{ReadCache, TaskStatsCache};
+use super::trace_link::{TraceLink, TraceLinkTemplate};
 
 /// A policy of the router tests that allows reads and actions.
 struct AllowAll;
@@ -511,6 +512,42 @@ async fn query_and_path_validation_preserve_location_input_and_window_refusals()
     );
     assert_eq!(body["detail"][0]["input"], "0");
     assert_eq!(body["detail"][0]["ctx"], serde_json::json!({"ge": 1}));
+}
+
+/// `/api/meta` reports the template of the trace link, or null when the
+/// page shows the trace id as text.
+#[tokio::test]
+async fn the_meta_reports_the_trace_link_template_or_null() {
+    const TEMPLATE: &str = "https://grafana.example.com/explore?traceId={trace_id}";
+    let schema = status(SchemaState::Match, Some(crate::expected_schema_version()));
+    let mut linked = test_state(
+        lazy_pool(),
+        Arc::new(AllowAll),
+        fixed_probe(schema),
+        true,
+        MemoryAssets::standard(),
+    );
+    linked.ui_config.trace_link =
+        TraceLink::Template(TraceLinkTemplate::parse(TEMPLATE).expect("the template is valid"));
+    let plain = test_router(Arc::new(AllowAll), schema, true);
+
+    let linked_meta = json(
+        build_router(linked)
+            .oneshot(request(Method::GET, "/api/meta"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let plain_meta = json(
+        plain
+            .oneshot(request(Method::GET, "/api/meta"))
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(linked_meta["trace_link_template"], TEMPLATE);
+    assert_eq!(plain_meta["trace_link_template"], serde_json::Value::Null);
 }
 
 #[tokio::test]
@@ -993,12 +1030,12 @@ async fn worker_list_carries_the_slot_health() {
             max_claim_batch, max_claim_per_worker, queues,
             queue_priorities, queue_max_concurrency, recovery_config,
             tasks_running, tasks_claimed, worker_started_at,
-            slots_down, class_capacity
+            slots_down, class_capacity, telemetry
         ) VALUES (
             $1, now(), 'itest-host', 4242, 2, 0, 2,
             ARRAY['default'], '{}'::jsonb, '{\"default\": 3}'::jsonb, '{}'::jsonb,
             0, 0, now(),
-            $2, '{}'::jsonb
+            $2, '{}'::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
         )",
     )
     .bind(&worker_id)
@@ -1138,12 +1175,12 @@ async fn a_snapshot_ten_minutes_old_in_database_time_is_stale() {
             max_claim_batch, max_claim_per_worker, queues,
             queue_priorities, queue_max_concurrency, recovery_config,
             tasks_running, tasks_claimed, worker_started_at,
-            slots_down, class_capacity
+            slots_down, class_capacity, telemetry
         ) VALUES (
             $1, now() - interval '10 minutes', 'itest-host', 4242, 2, 0, 2,
             ARRAY['default'], '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
             0, 0, now() - interval '1 hour',
-            '[]'::jsonb, '{}'::jsonb
+            '[]'::jsonb, '{}'::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
         )",
     )
     .bind(&worker_id)
@@ -1196,12 +1233,12 @@ async fn class_report_answers_with_streams_and_budgets() {
             max_claim_batch, max_claim_per_worker, queues,
             queue_priorities, queue_max_concurrency, recovery_config,
             tasks_running, tasks_claimed, worker_started_at,
-            slots_down, class_capacity
+            slots_down, class_capacity, telemetry
         ) VALUES (
             $1, now(), 'itest-host', 4242, 2, 0, 2,
             ARRAY[$2::text], '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
             0, 0, now(), '[]'::jsonb,
-            '{\"SHARED_ASYNC\": {\"capacity\": 8, \"serves\": [\"SHARED_ASYNC\"]}}'::jsonb
+            '{\"SHARED_ASYNC\": {\"capacity\": 8, \"serves\": [\"SHARED_ASYNC\"]}}'::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
         )",
     )
     .bind(&worker_id)

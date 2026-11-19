@@ -19,6 +19,7 @@ use chrono::{DateTime, Utc};
 use horsies_core::db::KeptOpen;
 use horsies_core::manifest::parse_producer_manifest;
 use horsies_core::{child_handle_setup, PoolProfile, WriteDeadline};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use uuid::Uuid;
 
@@ -77,17 +78,19 @@ impl CoreChildHandle {
         })
     }
 
-    /// Build the child handle of the child that `init` boots: the database
-    /// URL, the connection settings and the pool of the child kind come from
-    /// the frame (`min_size` kept open, `max_size` connections with no
-    /// overflow, `check` as the ping at checkout). Starts nothing; the URL
-    /// stays in the core.
+    /// Build the child handle of the task child that `init` boots: the
+    /// database URL, the connection settings and the pool of the child kind
+    /// come from the frame (`min_size` kept open, `max_size` connections
+    /// with no overflow, `check` as the ping at checkout). Starts nothing;
+    /// the URL stays in the core. The init frame of a handler child raises
+    /// `ValueError`: a handler child runs no task and has no child handle.
     #[staticmethod]
-    fn from_init(init: &Bound<'_, InitFrameRecord>) -> Self {
-        let setup = child_handle_setup(init.get().frame());
-        Self {
+    fn from_init(init: &Bound<'_, InitFrameRecord>) -> PyResult<Self> {
+        let setup = child_handle_setup(init.get().frame())
+            .map_err(|refused| PyValueError::new_err(refused.to_string()))?;
+        Ok(Self {
             connection: BrokerConnection::new(setup.manifest, setup.profile),
-        }
+        })
     }
 
     /// Start one claimed task (`horsies_start_attempt`): `AttemptStarted`,

@@ -47,9 +47,9 @@ pub(super) const WORKER_ID: &str = "worker-1";
 /// The longest wait of a test for the answer of one task.
 pub(super) const ANSWER_WAIT: Duration = Duration::from_secs(60);
 /// The longest wait of a test for a state of the board.
-pub(super) const STATE_WAIT: Duration = Duration::from_secs(30);
+pub(crate) const STATE_WAIT: Duration = Duration::from_secs(30);
 /// The bound of the spawner stop at the end of a test.
-pub(super) const SPAWNER_STOP_WAIT: Duration = Duration::from_secs(10);
+pub(crate) const SPAWNER_STOP_WAIT: Duration = Duration::from_secs(10);
 
 /// The claim generation of every scripted task.
 pub(super) fn claimed_at() -> DateTime<Utc> {
@@ -154,11 +154,14 @@ pub(super) fn run_frame(task: &ClaimedTask) -> ParentFrame {
     ParentFrame::Run(RunFrame {
         task_id: task.task_id,
         task_name: task.task_name.clone(),
+        queue_name: crate::events::QueueName::cut(&task.queue_name),
+        attempt: task.retry.attempt(),
         worker_id: WORKER_ID.to_owned(),
         claimed_at: task.claimed_at,
         orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work: IsolatedWork::Run,
         input: input(),
+        trace: crate::events::RunTrace::NoCarrier,
     })
 }
 
@@ -168,11 +171,14 @@ pub(super) fn shared_run_frame(task: &ClaimedTask, dispatch: u64, work: SharedWo
         dispatch: DispatchNumber::new(dispatch).unwrap(),
         task_id: task.task_id,
         task_name: task.task_name.clone(),
+        queue_name: crate::events::QueueName::cut(&task.queue_name),
+        attempt: task.retry.attempt(),
         worker_id: WORKER_ID.to_owned(),
         claimed_at: task.claimed_at,
         orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work,
         input: input(),
+        trace: crate::events::RunTrace::NoCarrier,
     })
 }
 
@@ -197,6 +203,9 @@ pub(super) fn result_frame(task: &ClaimedTask, value: u32) -> ChildFrame {
     ChildFrame::Result(ResultFrame {
         task_id: task.task_id,
         end: RunEnd::Result(ok_envelope(value)),
+        started_at: crate::events::AttemptStart::Reported {
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        },
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
         child: ChildAfterFrame::ServesOn,
@@ -217,6 +226,9 @@ pub(super) fn shared_result_with_rss(run: RunRef, value: u32, rss: RssReading) -
     ChildFrame::SharedResult(SharedResultFrame {
         run,
         end: SeatEnd::Finished(RunEnd::Result(ok_envelope(value))),
+        started_at: crate::events::AttemptStart::Reported {
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        },
         rss,
         child: ChildAfterFrame::ServesOn,
     })
@@ -227,6 +239,9 @@ pub(super) fn shared_timed_out(run: RunRef) -> ChildFrame {
     ChildFrame::SharedResult(SharedResultFrame {
         run,
         end: SeatEnd::TimedOut,
+        started_at: crate::events::AttemptStart::Reported {
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        },
         rss: RssReading::Unreadable,
         child: ChildAfterFrame::ServesOn,
     })
@@ -249,6 +264,7 @@ pub(super) fn leftover_cancel(run: RunRef, value: u32) -> ChildFrame {
     ChildFrame::LeftoverCancel(LeftoverCancelFrame {
         run,
         returned: BodyEnd::Result(ok_envelope(value)),
+        started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
     })
 }
 
@@ -257,6 +273,7 @@ pub(super) fn leftover_stuck(run: RunRef, value: u32) -> ChildFrame {
         run,
         work: stuck_work(),
         returned: BodyEnd::Result(ok_envelope(value)),
+        started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
     })
 }
 
@@ -303,7 +320,7 @@ pub(super) fn send_later(seconds: &str, frames: &[ChildFrame]) -> String {
 
 /// The byte count of one read of a script.
 #[derive(Debug, Clone, Copy)]
-pub(super) enum ScriptCount<'a> {
+pub(crate) enum ScriptCount<'a> {
     /// A count known when the script is built.
     Known(usize),
     /// The shell variable of this name holds the count when the step runs.
@@ -323,7 +340,7 @@ impl ScriptCount<'_> {
 /// standard output, for a command substitution. `dd` with one-byte blocks
 /// reads one byte per `read`, so it never takes a byte past `count`. One
 /// `read` per byte: for headers and metadata, not for large bodies.
-pub(super) fn read_bytes(count: ScriptCount<'_>) -> String {
+pub(crate) fn read_bytes(count: ScriptCount<'_>) -> String {
     format!(r#"dd bs=1 count={} <&"$0" 2>/dev/null"#, count.shell_word())
 }
 
@@ -345,7 +362,7 @@ pub(super) fn take(frame: &ParentFrame) -> String {
 }
 
 /// Write `frames` to the parent.
-pub(super) fn send(frames: &[ChildFrame]) -> String {
+pub(crate) fn send(frames: &[ChildFrame]) -> String {
     format!(r#"printf '{}' >&"$0"; "#, child_frames_text(frames))
 }
 
@@ -374,7 +391,7 @@ pub(super) fn exit_at_stop() -> String {
 
 /// Read the next parent frame of any kind: its header, then its metadata
 /// into `$meta`, then its body. Exit 0 when it is the stop frame.
-pub(super) fn read_frame() -> String {
+pub(crate) fn read_frame() -> String {
     let stop_meta = encode_parent_frame(&ParentFrame::Stop)
         .unwrap()
         .head()
@@ -506,7 +523,7 @@ pub(super) fn idle_child(init: &InitFrame) -> String {
 
 /// Take a unique number from 1 up in `dir` as `$n`: the boot count of the
 /// children of a test.
-pub(super) fn ticket(dir: &TestDir) -> String {
+pub(crate) fn ticket(dir: &TestDir) -> String {
     format!(
         r#"n=1; while ! mkdir "{}/ticket-$n" 2>/dev/null; do n=$((n + 1)); done; "#,
         dir.path().display()
@@ -514,7 +531,7 @@ pub(super) fn ticket(dir: &TestDir) -> String {
 }
 
 /// The children that took a ticket.
-pub(super) fn tickets(dir: &TestDir) -> usize {
+pub(crate) fn tickets(dir: &TestDir) -> usize {
     std::fs::read_dir(dir.path())
         .unwrap()
         .filter(|entry| {
@@ -556,7 +573,7 @@ pub(super) fn fail_boot(_template: &InitFrame, failure: &ChildFrame) -> String {
     )
 }
 
-pub(super) fn shell(script: &str) -> ChildCommand {
+pub(crate) fn shell(script: &str) -> ChildCommand {
     ChildCommand {
         program: crate::test_support::SCRIPT_SHELL.into(),
         args: vec!["-c".into(), script.into()],
@@ -661,7 +678,7 @@ pub(super) async fn answer_of(receiver: oneshot::Receiver<AttemptEnd>) -> Attemp
 }
 
 /// Poll `reached` every 10 ms until it holds; fail the test after `bound`.
-pub(super) async fn until(what: &str, bound: Duration, mut reached: impl FnMut() -> bool) {
+pub(crate) async fn until(what: &str, bound: Duration, mut reached: impl FnMut() -> bool) {
     let deadline = tokio::time::Instant::now() + bound;
     while !reached() {
         assert!(
@@ -716,6 +733,7 @@ pub(super) fn shared_class(init: &InitFrame) -> ExecutionClass {
         ChildKind::SharedAsync(_) => ExecutionClass::SharedAsync,
         ChildKind::SharedThread(_) => ExecutionClass::SharedThread,
         ChildKind::Isolated(_) => ExecutionClass::Isolated,
+        ChildKind::Handler(_) => panic!("a scripted slot child is a task child"),
     }
 }
 
@@ -724,21 +742,21 @@ pub(super) fn shared_class(init: &InitFrame) -> ExecutionClass {
 // ---------------------------------------------------------------------------
 
 /// A directory of one test, removed at the end of the test.
-pub(super) struct TestDir(PathBuf);
+pub(crate) struct TestDir(PathBuf);
 
 impl TestDir {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let path = std::env::temp_dir().join(format!("horsies-slots-{}", Uuid::new_v4().simple()));
         std::fs::create_dir_all(&path).unwrap();
         Self(path)
     }
 
-    pub(super) fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.0
     }
 
     /// The path of `name` in the directory, as script text.
-    pub(super) fn file(&self, name: &str) -> String {
+    pub(crate) fn file(&self, name: &str) -> String {
         self.0.join(name).display().to_string()
     }
 

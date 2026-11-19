@@ -16,6 +16,7 @@ from uuid import UUID
 
 import pytest
 
+from horsies.core.telemetry.send_telemetry import NO_SEND_TELEMETRY
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies._core import (
     CoreConnectionError,
@@ -27,9 +28,11 @@ from horsies._core import (
     Enqueued,
     EnqueueRequest,
     HandleClosed,
+    NoTraceCarrier,
     StartAfterDelay as CoreStartAfterDelay,
     StartAt as CoreStartAt,
     StartNow as CoreStartNow,
+    TraceCarrier,
     SchemaInstalled,
     SchemaInstallNotRun,
     RawResultAbsent,
@@ -360,6 +363,7 @@ def _core_request(**values: Any) -> EnqueueRequest:
         'retention_class_key': 'standard_30d',
         'rerun_input': 'APP_DEFAULT',
         'send_kind': 'FIRST',
+        'trace': NoTraceCarrier(),
         **values,
     }
     return EnqueueRequest(**request)
@@ -415,6 +419,34 @@ class TestEnqueueThroughCore:
         assert built['rerun_input'] == 'DROP'
         assert isinstance(built['start'], CoreStartAfterDelay)
         broker._core_handle.enqueue_async.assert_awaited_once_with(request_class.return_value)
+
+    @pytest.mark.asyncio
+    async def test_the_request_carries_the_trace_of_the_send(self) -> None:
+        broker = self._broker_answering(MagicMock(spec=Enqueued, task_id=SEND_TASK_ID))
+        carrier = TraceCarrier({'traceparent': '00-ab-cd-01'}, bytes(range(1, 17)))
+        with patch('horsies.core.brokers.postgres.EnqueueRequest') as request_class:
+            _ = await self._send(broker, trace=carrier)
+            _ = await self._send(broker)
+
+        traced, untraced = request_class.call_args_list
+        assert traced.kwargs['trace'] is carrier
+        assert isinstance(untraced.kwargs['trace'], NoTraceCarrier)
+
+    def test_a_blocking_send_carries_the_trace_of_the_send(self) -> None:
+        broker = self._broker_answering(MagicMock(spec=Enqueued, task_id=SEND_TASK_ID))
+        carrier = TraceCarrier({'traceparent': '00-ab-cd-01'}, bytes(range(1, 17)))
+        with patch('horsies.core.brokers.postgres.EnqueueRequest') as request_class:
+            result = broker.enqueue(
+                'my_task',
+                'default',
+                task_id=SEND_TASK_ID,
+                send_kind=SendKind.FIRST,
+                sent_at=datetime.now(timezone.utc),
+                trace=carrier,
+            )
+
+        assert result == Ok(SEND_TASK_ID)
+        assert request_class.call_args.kwargs['trace'] is carrier
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -2106,6 +2138,7 @@ class TestEnqueueInputRefusal:
         app.config.resend_on_transient_err = False
         app.config.payload = PayloadPolicy()
         app.are_sends_suppressed.return_value = False
+        app.send_telemetry.return_value = NO_SEND_TELEMETRY
         app.validate_queue_name.return_value = 'default'
         app.get_broker.return_value = broker
 

@@ -44,6 +44,7 @@ from horsies.core.worker.task_loop import (
     TaskLoop,
 )
 from tests.fixtures.core_frames import init_frame, run_frame
+from tests.fixtures.run_return import set_running
 
 pytestmark = [pytest.mark.unit]
 
@@ -150,10 +151,14 @@ class TestTheMarkerOfARun:
     RUNNING; the frames around it tell the parent how the run ended."""
 
     def test_a_run_with_no_task_loop_writes_its_marker_before_its_result(self) -> None:
-        after, events, metas = _report(TaskLoop(), SetRunning(ResultEnvelope(ENVELOPE)))
+        after, events, metas = _report(TaskLoop(), set_running(ResultEnvelope(ENVELOPE)))
 
         assert events == [MARKER, 'result']
         assert metas[0]['task_loop'] == {'kind': 'none'}
+        assert metas[0]['started_at'] == {
+            'kind': 'reported',
+            'time': '2026-11-17T10:00:01.250Z',
+        }
         assert after is child_main._AfterRun.SERVES
 
     def test_an_async_run_that_leaves_no_work_writes_its_marker_then_reports_at_once(
@@ -165,7 +170,7 @@ class TestTheMarkerOfARun:
 
         task_loop.run(awaits_its_work())
         started = time.monotonic()
-        after, events, metas = _report(task_loop, SetRunning(ResultEnvelope(ENVELOPE)))
+        after, events, metas = _report(task_loop, set_running(ResultEnvelope(ENVELOPE)))
         elapsed = time.monotonic() - started
 
         assert events == [MARKER, 'result']
@@ -185,10 +190,11 @@ class TestTheMarkerOfARun:
             steps.append('ended')
 
         _ = _leave(task_loop, flush())
-        after, events, metas = _report(task_loop, SetRunning(ResultEnvelope(ENVELOPE)))
+        after, events, metas = _report(task_loop, set_running(ResultEnvelope(ENVELOPE)))
 
         assert steps == ['ended']
         assert events == ['body_returned', MARKER, 'left_work_ended']
+        assert metas[0]['started_at'] == '2026-11-17T10:00:01.250Z'
         assert metas[-1]['end'] == 'in_grace'
         assert after is child_main._AfterRun.TO_RETIRE
 
@@ -201,7 +207,7 @@ class TestTheMarkerOfARun:
             await asyncio.Event().wait()
 
         left = _leave(task_loop, wait_forever())
-        after, events, metas = _report(task_loop, SetRunning(ResultEnvelope(ENVELOPE)))
+        after, events, metas = _report(task_loop, set_running(ResultEnvelope(ENVELOPE)))
 
         assert left.cancelled()
         assert events == ['body_returned', MARKER, 'left_work_ended']
@@ -224,7 +230,7 @@ class TestTheMarkerOfARun:
                     continue
 
         left = _leave(task_loop, ignore_cancel())
-        after, events, _metas = _report(task_loop, SetRunning(ResultEnvelope(ENVELOPE)))
+        after, events, _metas = _report(task_loop, set_running(ResultEnvelope(ENVELOPE)))
 
         assert events == ['body_returned', 'left_work_stuck']
         assert after is child_main._AfterRun.TO_RETIRE
@@ -244,7 +250,7 @@ class TestTheMarkerOfARun:
         with pytest.raises(_Exited) as exited:
             _report(
                 TaskLoop(),
-                SetRunning(ResultEnvelope(ENVELOPE)),
+                set_running(ResultEnvelope(ENVELOPE)),
                 MarkerMetStoppedCore(stopped),
                 events,
                 metas,
@@ -271,7 +277,7 @@ class TestTheMarkerOfARun:
         with pytest.raises(_Exited) as exited:
             _report(
                 task_loop,
-                SetRunning(ResultEnvelope(ENVELOPE)),
+                set_running(ResultEnvelope(ENVELOPE)),
                 MarkerMetStoppedCore(stopped),
                 events,
                 metas,
@@ -289,6 +295,7 @@ class TestTheMarkerOfARun:
             'kind': 'stopped_before_running',
             'reason': 'CLAIM_LOST',
         }
+        assert metas[0]['started_at'] == {'kind': 'not_reported'}
         assert after is child_main._AfterRun.SERVES
 
 

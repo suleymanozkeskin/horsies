@@ -27,6 +27,7 @@ const META: MonitoringMeta = {
   schema_compatible: true,
   schema_state: 'MATCH',
   actions_disabled_reason: null,
+  trace_link_template: null,
 };
 
 const IDLE_CONTROLS: EntityActionControls = {
@@ -58,6 +59,7 @@ function workflowBoundTask(
       exec_s: null,
       worker_hostname: null,
       good_until: null,
+      trace_id: null,
     },
     task_name: 'demo',
     queue_name: 'default',

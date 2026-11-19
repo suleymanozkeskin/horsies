@@ -9,7 +9,9 @@
 //! Python's checkout wait and connection age of a child pool, and no schema
 //! work. The database URL never becomes a Python value of the child.
 
-use super::host::{kept_open_of, pool_of, CHILD_POOL_CHECKOUT_WAIT_SECONDS, CHILD_POOL_MAX_AGE};
+use super::host::{
+    kept_open_of, pool_of, OwnWritesPool, CHILD_POOL_CHECKOUT_WAIT_SECONDS, CHILD_POOL_MAX_AGE,
+};
 use crate::broker::PoolProfile;
 use crate::core::history::identity::keys::IDEMPOTENCY_WINDOW_DEFAULT_MICROS;
 use crate::manifest::{
@@ -29,9 +31,21 @@ pub struct ChildHandleSetup {
     pub profile: PoolProfile,
 }
 
-/// The core handle setup of the child that `init` boots. Pure.
-pub fn child_handle_setup(init: &InitFrame) -> ChildHandleSetup {
-    let pool = pool_of(init.child_kind);
+/// The init frame of a handler child: it has no core handle, since it runs
+/// no task and writes nothing through one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("a handler child has no core handle: it runs no task")]
+pub struct HandlerChildHasNoHandle;
+
+/// The core handle setup of the task child that `init` boots. Pure.
+///
+/// Errors: [`HandlerChildHasNoHandle`] for the init frame of a handler
+/// child.
+pub fn child_handle_setup(init: &InitFrame) -> Result<ChildHandleSetup, HandlerChildHasNoHandle> {
+    let pool = match pool_of(init.child_kind) {
+        OwnWritesPool::Pool(pool) => pool,
+        OwnWritesPool::NoOwnWrites => return Err(HandlerChildHasNoHandle),
+    };
     let connections = u32::try_from(pool.max_size.get())
         .ok()
         .and_then(|count| PoolSize::try_from(count).ok())
@@ -52,7 +66,7 @@ pub fn child_handle_setup(init: &InitFrame) -> ChildHandleSetup {
         .ok()
         .and_then(|micros| ReservationWindowMicros::try_from(micros).ok())
         .expect("the default reservation window is inside its bounds");
-    ChildHandleSetup {
+    Ok(ChildHandleSetup {
         manifest: ProducerManifest {
             manifest_version: ManifestVersion::CURRENT,
             database: DatabaseManifest {
@@ -78,7 +92,7 @@ pub fn child_handle_setup(init: &InitFrame) -> ChildHandleSetup {
             kept_open: kept_open_of(pool),
             check: pool.check,
         },
-    }
+    })
 }
 
 #[cfg(test)]
@@ -90,7 +104,8 @@ mod tests {
     use crate::db::KeptOpen;
     use crate::worker::executor::protocol::{
         ChildConnection, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl as InitUrl,
-        IsolatedChild, PoolMaxSize, PoolMinSize, SharedThreadChild, TaskSendPool, ThreadSeats,
+        HandlerChild, IsolatedChild, PoolMaxSize, PoolMinSize, SharedThreadChild, TaskSendPool,
+        ThreadSeats,
     };
 
     fn init(child_kind: ChildKind, connection: ChildConnection) -> InitFrame {
@@ -124,7 +139,8 @@ mod tests {
                 task_send_pool: TaskSendPool::new(2).expect("a task-send pool"),
             }),
             ChildConnection::default(),
-        ));
+        ))
+        .expect("an isolated child has a core handle");
         let database = &setup.manifest.database;
         assert_eq!(
             database.database_url.expose(),
@@ -175,7 +191,8 @@ mod tests {
                 task_send_pool: TaskSendPool::new(1).expect("a task-send pool"),
             }),
             connection,
-        ));
+        ))
+        .expect("a shared thread child has a core handle");
         let database = &setup.manifest.database;
         assert!(database.pgbouncer_transaction_mode);
         match &database.session_database {
@@ -197,5 +214,17 @@ mod tests {
                 check: false,
             }
         );
+    }
+
+    /// A handler child runs no task: its init frame gives no core handle.
+    #[test]
+    fn a_handler_child_has_no_core_handle() {
+        let refused = child_handle_setup(&init(
+            ChildKind::Handler(HandlerChild {
+                task_send_pool: TaskSendPool::new(1).expect("a task-send pool"),
+            }),
+            ChildConnection::default(),
+        ));
+        assert_eq!(refused, Err(HandlerChildHasNoHandle));
     }
 }

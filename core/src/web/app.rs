@@ -46,6 +46,9 @@ pub(crate) struct MetaResponse {
     /// version numbers (Python `clients/python/horsies/web/app.py:64-99`).
     pub schema_state: SchemaState,
     pub actions_disabled_reason: Option<String>,
+    /// The template of the trace link of a task detail, with one
+    /// `{trace_id}`; `None` when the page shows the trace id as text.
+    pub trace_link_template: Option<String>,
 }
 
 #[derive(Clone)]
@@ -87,9 +90,14 @@ pub(crate) fn build_router(state: WebState) -> Router {
         .merge(action_routes)
         .fallback(api_not_found)
         .layer(middleware::from_fn(log_invalid_input));
-    let metrics = Router::new()
-        .route("/metrics", get(read_fleet_metrics))
-        .route_layer(middleware::from_fn_with_state(state.clone(), view_guard));
+    // The guard wraps the GET route only (`MethodRouter::route_layer`):
+    // another method answers 405 without a view verdict, as `route_access`
+    // marks it public. `Router::route_layer` would wrap the 405 too.
+    let metrics = Router::new().route(
+        "/metrics",
+        get(read_fleet_metrics)
+            .route_layer(middleware::from_fn_with_state(state.clone(), view_guard)),
+    );
     Router::new()
         .nest("/api", api)
         .merge(metrics)
@@ -238,6 +246,11 @@ async fn read_meta(State(state): State<WebState>, request: Request) -> Response 
         schema_compatible: schema.compatible(),
         schema_state: schema.state,
         actions_disabled_reason: disabled_reason,
+        trace_link_template: state
+            .ui_config
+            .trace_link
+            .template_text()
+            .map(str::to_owned),
     })
     .into_response()
 }
