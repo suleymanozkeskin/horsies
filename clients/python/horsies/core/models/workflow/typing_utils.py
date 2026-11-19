@@ -103,20 +103,28 @@ def _valid_kwarg_names(
     return names
 
 
+def _hint_source(target: Callable[..., Any]) -> Callable[..., Any]:
+    """The object whose annotations describe a call of ``target``. Pure.
+
+    A function, a method, a builtin or a class is its own source. Any other
+    callable (an instance of a class with ``__call__``) has its bound
+    ``__call__`` as the source: ``get_type_hints`` of such an instance raises
+    ``TypeError`` on Python 3.13 and returns ``{}`` on Python 3.14.
+    """
+    match bool(inspect.isroutine(target) or inspect.isclass(target)):
+        case True:
+            return target
+        case False:
+            return target.__call__
+
+
 def _resolved_type_hints(fn: Callable[..., Any]) -> dict[str, Any]:
     """Return resolved type hints for a callable, or {} when unavailable."""
     inspect_target: Callable[..., Any] = _get_inspect_target(fn)
-    targets: list[Callable[..., Any]] = [inspect_target]
-    call_attr = getattr(inspect_target, '__call__', None)
-    if callable(call_attr):
-        targets.append(call_attr)
-
-    for target in targets:
-        try:
-            return get_type_hints(target)
-        except Exception:
-            continue
-    return {}
+    try:
+        return get_type_hints(_hint_source(inspect_target))
+    except Exception:
+        return {}
 
 
 def _extract_taskresult_ok_type(annotation: Any) -> Any | None:
