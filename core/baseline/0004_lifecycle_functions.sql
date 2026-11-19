@@ -2709,8 +2709,8 @@ $$;
 -- Arguments: p_batch_size positive, p_error_code required (22023).
 -- Locks: the taken rows (FOR UPDATE SKIP LOCKED), with no advisory lock, so a batch never waits on a row lock and
 -- joins no deadlock cycle.
--- Returns one row of the shared outcome columns per moved row (APPLIED, ordinality NULL), earliest deadline first;
--- no row when nothing is due.
+-- Returns one row per moved row (APPLIED, ordinality NULL), earliest deadline first; no row when nothing is due. A row
+-- has the shared outcome columns, then the task name and the queue of the moved row (the caller's recovery events).
 -- Python 0.7.0 (`v0.7.0` package): horsies_expire_pending_tasks (core/schemas/terminalization.py:797-844), its call
 -- (core/lifecycle/persistence.py:173-177), PostgresBroker.expire_pending_tasks.
 CREATE FUNCTION horsies_expire_pending_tasks(
@@ -2727,7 +2727,9 @@ CREATE FUNCTION horsies_expire_pending_tasks(
     observed_worker_id text,
     observed_claimed_at timestamp with time zone,
     guard_kind text,
-    observed_guard jsonb
+    observed_guard jsonb,
+    task_name text,
+    queue_name text
 )
     LANGUAGE plpgsql
     AS $$
@@ -2764,7 +2766,8 @@ BEGIN
     -- at once; it does not end the function.
     RETURN QUERY SELECT
         t.id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'EXPIRE_PENDING'::text,
-        t.status::text, t.claimed_by_worker_id::text, t.claimed_at, NULL::text, NULL::jsonb
+        t.status::text, t.claimed_by_worker_id::text, t.claimed_at, NULL::text, NULL::jsonb,
+        t.task_name::text, t.queue_name::text
     FROM horsies_tasks t
     WHERE t.id = ANY(v_ids)
     ORDER BY t.good_until ASC;
@@ -2891,8 +2894,8 @@ $$;
 -- Arguments: p_batch_size positive (22023). An absent cursor row is refused with data_corrupted (XX001).
 -- Locks: the cursor row (FOR UPDATE NOWAIT: a second sweep fails at once with 55P03), then the candidate rows (FOR
 -- UPDATE SKIP LOCKED), with no advisory lock.
--- Returns one row of the shared outcome columns per moved row (APPLIED, ordinality NULL); no row when the page has
--- no orphan.
+-- Returns one row per moved row (APPLIED, ordinality NULL); no row when the page has no orphan. A row has the shared
+-- outcome columns, then the task name and the queue of the moved row (the caller's recovery events).
 -- Python 0.7.0 (`v0.7.0` package): horsies_cancel_orphaned_tasks (core/schemas/terminalization.py), its call
 -- (core/lifecycle/persistence.py:193-197), PostgresBroker.terminate_orphaned_workflow_tasks.
 CREATE FUNCTION horsies_cancel_orphaned_tasks(p_batch_size integer) RETURNS TABLE(
@@ -2905,7 +2908,9 @@ CREATE FUNCTION horsies_cancel_orphaned_tasks(p_batch_size integer) RETURNS TABL
     observed_worker_id text,
     observed_claimed_at timestamp with time zone,
     guard_kind text,
-    observed_guard jsonb
+    observed_guard jsonb,
+    task_name text,
+    queue_name text
 )
     LANGUAGE plpgsql
     AS $$
@@ -3027,7 +3032,8 @@ BEGIN
     -- at once; it does not end the function.
     RETURN QUERY SELECT
         t.id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'CANCEL_ORPHAN_SWEEP'::text,
-        t.status::text, t.claimed_by_worker_id::text, t.claimed_at, NULL::text, NULL::jsonb
+        t.status::text, t.claimed_by_worker_id::text, t.claimed_at, NULL::text, NULL::jsonb,
+        t.task_name::text, t.queue_name::text
     FROM horsies_tasks t
     WHERE t.id = ANY(v_ids);
 

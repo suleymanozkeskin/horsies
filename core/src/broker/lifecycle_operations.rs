@@ -498,7 +498,9 @@ impl PostgresBroker {
             .await
             .map_err(not_started)?;
         let (open, _write) = self.core_pools_for_write().map_err(not_started)?;
-        expire_pending_pass(open.main(), self.statement_log()).await
+        // A pass of a client handle runs outside a worker: no worker
+        // telemetry is told of the expired rows.
+        expire_pending_pass(open.main(), self.statement_log(), |_rows| {}).await
     }
 
     /// One page of the orphan sweep (Python
@@ -517,7 +519,9 @@ impl PostgresBroker {
     pub async fn audit_orphaned_workflow_tasks(&self) -> Result<OrphanAuditPage, BrokerError> {
         self.ensure_client_family_for_write().await?;
         let (open, _write) = self.core_pools_for_write()?;
-        cancel_orphan_page(open.main(), self.statement_log()).await
+        // A page of a client handle runs outside a worker: no worker
+        // telemetry is told of the cancelled rows.
+        cancel_orphan_page(open.main(), self.statement_log(), |_rows| {}).await
     }
 
     /// Expire one CLAIMED task of `worker_id` whose deadline passed before its
