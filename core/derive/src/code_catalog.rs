@@ -3,9 +3,10 @@
 //!
 //! The enum is the one source: its unit variants are the members, their
 //! `///` comments are the member docs, and the enum's `///` comment is the
-//! class doc. The wire value of a variant is its name in
-//! SCREAMING_SNAKE_CASE (serde's `rename_all = "SCREAMING_SNAKE_CASE"` rule),
-//! unless the variant sets `#[code_catalog(value = "...")]`.
+//! class doc. The Python member name of a variant is its name in
+//! SCREAMING_SNAKE_CASE (serde's `rename_all = "SCREAMING_SNAKE_CASE"` rule).
+//! Its wire value is the same text, unless the variant sets
+//! `#[code_catalog(value = "...")]`.
 //!
 //! Container attribute: `#[code_catalog(module = "...", base = "...")]`,
 //! with `base` one of `str_enum` (`class X(str, Enum)`) and `enum`
@@ -15,7 +16,8 @@
 //! A lifecycle status names its terminal members: each terminal variant
 //! sets `#[code_catalog(terminal)]`, and the enum sets
 //! `terminal_states = "..."`, the Python name of the frozenset constant of
-//! those members. One without the other is refused.
+//! those members. One without the other is refused. The constant holds the
+//! Python member names of the terminal variants.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -79,11 +81,12 @@ pub fn derive_code_catalog(input: DeriveInput) -> syn::Result<TokenStream> {
 
     let Members {
         variants,
+        names,
         values,
         docs,
-        terminal_values,
+        terminal_names,
     } = read_members(data)?;
-    let terminal_states = terminal_states(settings.terminal_states, &terminal_values, ident)?;
+    let terminal_states = terminal_states(settings.terminal_states, &terminal_names, ident)?;
 
     Ok(quote! {
         impl ::horsies_core::catalog::CodeEnum for #ident {
@@ -95,6 +98,7 @@ pub fn derive_code_catalog(input: DeriveInput) -> syn::Result<TokenStream> {
                     doc: #enum_doc,
                     members: &[
                         #(::horsies_core::catalog::CatalogMember {
+                            name: #names,
                             value: #values,
                             doc: #docs,
                         },)*
@@ -116,18 +120,22 @@ pub fn derive_code_catalog(input: DeriveInput) -> syn::Result<TokenStream> {
 /// The members of an enum, in declaration order.
 struct Members<'a> {
     variants: Vec<&'a syn::Ident>,
+    /// The Python member names.
+    names: Vec<String>,
+    /// The wire values.
     values: Vec<String>,
     docs: Vec<String>,
-    /// The values of the `#[code_catalog(terminal)]` variants.
-    terminal_values: Vec<String>,
+    /// The Python member names of the `#[code_catalog(terminal)]` variants.
+    terminal_names: Vec<String>,
 }
 
 fn read_members(data: &DataEnum) -> syn::Result<Members<'_>> {
     let mut members = Members {
         variants: Vec::with_capacity(data.variants.len()),
+        names: Vec::with_capacity(data.variants.len()),
         values: Vec::with_capacity(data.variants.len()),
         docs: Vec::with_capacity(data.variants.len()),
-        terminal_values: Vec::new(),
+        terminal_names: Vec::new(),
     };
     for variant in &data.variants {
         if !matches!(variant.fields, Fields::Unit) {
@@ -137,15 +145,17 @@ fn read_members(data: &DataEnum) -> syn::Result<Members<'_>> {
             ));
         }
         let variant_settings = variant_settings(&variant.attrs)?;
+        let name = screaming_snake_case(&variant.ident.to_string());
         let value = match variant_settings.value {
             Some(value) => value,
-            None => screaming_snake_case(&variant.ident.to_string()),
+            None => name.clone(),
         };
         match variant_settings.role {
-            MemberRole::Terminal => members.terminal_values.push(value.clone()),
+            MemberRole::Terminal => members.terminal_names.push(name.clone()),
             MemberRole::NotTerminal => {}
         }
         members.variants.push(&variant.ident);
+        members.names.push(name);
         members.values.push(value);
         members.docs.push(doc_text(&variant.attrs));
     }
@@ -156,17 +166,17 @@ fn read_members(data: &DataEnum) -> syn::Result<Members<'_>> {
 /// variants come together or not at all.
 fn terminal_states(
     constant: TerminalConstant,
-    terminal_values: &[String],
+    terminal_names: &[String],
     ident: &syn::Ident,
 ) -> syn::Result<TokenStream> {
-    match (constant, terminal_values.is_empty()) {
+    match (constant, terminal_names.is_empty()) {
         (TerminalConstant::NotNamed, true) => {
             Ok(quote!(::horsies_core::catalog::TerminalStates::NotALifecycle))
         }
         (TerminalConstant::Named(constant), false) => Ok(quote!(
             ::horsies_core::catalog::TerminalStates::Lifecycle {
                 constant: #constant,
-                members: &[#(#terminal_values,)*],
+                members: &[#(#terminal_names,)*],
             }
         )),
         (TerminalConstant::Named(_), true) => Err(syn::Error::new_spanned(
@@ -327,8 +337,29 @@ mod tests {
         })
         .expect("the derive accepts the enum");
         assert!(text.contains(
-            "terminal_states:::horsies_core::catalog::TerminalStates::Lifecycle{constant:\"RUN_TERMINAL_STATES\",members:&[\"COMPLETED\",\"GAVE_UP\",],}"
+            "terminal_states:::horsies_core::catalog::TerminalStates::Lifecycle{constant:\"RUN_TERMINAL_STATES\",members:&[\"COMPLETED\",\"FAILED\",],}"
         ));
+    }
+
+    #[test]
+    fn a_member_is_named_after_its_variant_and_a_value_key_sets_only_its_value() {
+        let text = derive_text(syn::parse_quote! {
+            #[code_catalog(module = "error_codes", base = "str_enum")]
+            enum StartCode {
+                /// The workflow has no name.
+                #[code_catalog(value = "HRS-001")]
+                WorkflowNoName,
+                QueueFull,
+            }
+        })
+        .expect("the derive accepts the enum");
+        assert!(text.contains(
+            "::horsies_core::catalog::CatalogMember{name:\"WORKFLOW_NO_NAME\",value:\"HRS-001\",doc:\"Theworkflowhasnoname.\",}"
+        ));
+        assert!(text.contains(
+            "::horsies_core::catalog::CatalogMember{name:\"QUEUE_FULL\",value:\"QUEUE_FULL\",doc:\"\",}"
+        ));
+        assert!(text.contains("Self::WorkflowNoName=>\"HRS-001\""));
     }
 
     #[test]

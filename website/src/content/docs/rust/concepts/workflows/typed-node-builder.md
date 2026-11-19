@@ -63,7 +63,7 @@ fn checkout_spec(order: Order) -> Result<WorkflowSpec, HorsiesError> {
 
 | Source | Returns |
 |--------|---------|
-| `task_name::node()` | `Result<TaskNode<T, task_name::Input>, HorsiesError>`: the node of the function of the first `task_name::register` in the process. Refuses before it |
+| `task_name::node()` | `Result<TaskNode<T, task_name::Input>, HorsiesError>`: the node of the function of the first `task_name::register` in the process. Refuses before it with `HRS-302` (`ErrorCode::WorkflowUnregisteredTask`) |
 | `function.node()` | `TaskNode<T, A>` of a `TaskFunction<A, T, E>` |
 | `task_name::params::<name>()` | `InputField<task_name::Input, F>`: the token of the parameter `<name>` of type `F` |
 

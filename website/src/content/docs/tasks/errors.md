@@ -315,3 +315,4 @@ deployment pattern.
 | ---- | ---- | ----------- |
 | HRS-300 | `TASK_NOT_REGISTERED` | Task not found in registry |
 | HRS-301 | `TASK_DUPLICATE_NAME` | Duplicate task name |
+| HRS-302 | `WORKFLOW_UNREGISTERED_TASK` | A workflow node names a task that is not registered in this process. Only the Rust client raises it: `<task>::node()` before `<task>::register(&mut app)` |

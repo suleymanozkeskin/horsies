@@ -111,7 +111,9 @@
     "tests/promql_references.py",
     "tests/unit/test_promql_references.py",
     "tests/observability_deploy.py",
-    "tests/unit/test_observability_deploy_files.py"
+    "tests/unit/test_observability_deploy_files.py",
+    "horsies/core/errors.py",
+    "tests/unit/test_error_code_catalog.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error",
   "executionEnvironments": [
