@@ -15,8 +15,8 @@
 //!   of the losses in a row.
 //! - While no child is up, the events drop and count `child_down`.
 //!
-//! - [`state`]: the state of the child, and its form in the worker
-//!   snapshot.
+//! - [`state`]: the state of the child, and its form in the `telemetry`
+//!   column of the worker snapshot.
 //! - `supervise`: the boot and the restart rules.
 //! - `serve`: a ready child: the writer of the event queue, the
 //!   `handler_stats` frames and the stop.
@@ -52,7 +52,7 @@ mod supervise;
 mod tests;
 
 pub use state::{
-    telemetry_json, AfterDown, HandlerChildDown, HandlerChildState, HandlerChildView,
+    handler_child_json, AfterDown, HandlerChildDown, HandlerChildState, HandlerChildView,
     HandlerDownCause,
 };
 
@@ -91,6 +91,10 @@ pub const HANDLER_CHILD_STABLE: Duration = SLOT_DOWN_MAX_DELAY;
 
 /// The process name of the handler child.
 pub const HANDLER_CHILD_PROCESS_NAME: &str = "horsies-child-handler";
+
+/// The connections of the pool through which the handlers of the child send
+/// tasks. A handler that sends while another one sends waits for it.
+pub const HANDLER_TASK_SEND_CONNECTIONS: u64 = 1;
 
 /// The most passes of the writer over the queue at the stop: the passes
 /// that a full queue takes in batches of [`EVENT_BATCH_MAX`], and one.
