@@ -162,6 +162,34 @@ class TestWithoutTheApi:
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == '[]'
 
+    def test_an_app_with_no_tracing_has_no_send_telemetry_and_no_opentelemetry(
+        self,
+    ) -> None:
+        result = _run_without_opentelemetry(
+            '''
+            import sys
+            from pydantic import SecretStr
+            from horsies import AppConfig, Horsies, PostgresConfig
+            from horsies.core.telemetry.send_telemetry import NoSendTelemetry
+
+            app = Horsies(
+                AppConfig(
+                    broker=PostgresConfig(
+                        database_url=SecretStr('postgresql://u:p@127.0.0.1:1/none'),
+                    ),
+                ),
+            )
+            assert isinstance(app.send_telemetry(), NoSendTelemetry)
+            loaded = sorted(
+                name for name in sys.modules
+                if name == 'opentelemetry' or name.startswith('opentelemetry.')
+            )
+            print(loaded)
+            ''',
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == '[]'
+
     def test_otel_tracing_is_refused_with_hrs_220(self) -> None:
         result = _run_without_opentelemetry(
             '''

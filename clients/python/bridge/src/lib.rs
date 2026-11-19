@@ -190,6 +190,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::arguments::StartNow>()?;
     module.add_class::<operations::arguments::StartAfterDelay>()?;
     module.add_class::<operations::arguments::StartAt>()?;
+    module.add_class::<operations::arguments::NoTraceCarrier>()?;
+    module.add_class::<operations::arguments::TraceCarrier>()?;
     module.add_class::<operations::cancel::TaskCancelledRecord>()?;
     module.add_class::<operations::attempt_records::AttemptAlreadyApplied>()?;
     module.add_class::<operations::attempt_records::AttemptLostClaim>()?;

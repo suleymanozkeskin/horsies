@@ -148,6 +148,11 @@ const START_AFTER_DELAY_PARAMETERS: &[StubParameter] = &[positional("seconds", "
 
 const START_AT_PARAMETERS: &[StubParameter] = &[positional("at", "datetime.datetime")];
 
+const TRACE_CARRIER_PARAMETERS: &[StubParameter] = &[
+    positional("carrier", "dict[str, str]"),
+    positional("trace_id", "bytes"),
+];
+
 const CORE_HANDLE_PARAMETERS: &[StubParameter] = &[
     positional("manifest_json", "str"),
     keyword("pool_profile", "Literal['PRODUCER', 'WORKER']"),
@@ -170,6 +175,7 @@ const ENQUEUE_REQUEST_PARAMETERS: &[StubParameter] = &[
     keyword("retention_class_key", "str"),
     keyword("rerun_input", "Literal['APP_DEFAULT', 'KEEP', 'DROP']"),
     keyword("send_kind", "Literal['FIRST', 'REPEAT']"),
+    keyword("trace", "NoTraceCarrier | TraceCarrier"),
 ];
 
 const ENQUEUE_PARAMETERS: &[StubParameter] = &[positional("request", "EnqueueRequest")];
@@ -468,6 +474,7 @@ const WORKFLOW_START_REQUEST_PARAMETERS: &[StubParameter] = &[
     keyword("workflow_id", "uuid.UUID"),
     keyword("sent_at", "datetime.datetime"),
     keyword("resend_on_transient_err", "bool"),
+    keyword("trace", "NoTraceCarrier | TraceCarrier"),
 ];
 const CHILD_SPEC_BUILT_PARAMETERS: &[StubParameter] = &[keyword("spec_json", "str")];
 const CHILD_SPEC_REFUSED_PARAMETERS: &[StubParameter] =
@@ -1301,8 +1308,25 @@ const ARGUMENT_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
+        name: "NoTraceCarrier",
+        doc: "The send carries no trace carrier: tracing is off, or the propagator wrote no key.",
+        constructor: Constructor::Parameters(&[]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "TraceCarrier",
+        doc: "The carrier that the client's propagator injected for the span of a send or a\nworkflow start, and the 16-byte trace id of that span. The core checks its bounds at\nthe send; a carrier that breaks a bound is not stored and never fails the send.",
+        constructor: Constructor::Parameters(TRACE_CARRIER_PARAMETERS),
+        properties: &[
+            property("carrier", "dict[str, str]"),
+            property("trace_id", "bytes"),
+        ],
+        methods: &[],
+    },
+    StubClass {
         name: "EnqueueRequest",
-        doc: "One frozen send. None for good_until, task_options_json or idempotency_key\nmeans no deadline, no options, no key. retention_class_key is 'forever' or\n'standard_<days>d'; the core checks it at the send. send_kind is FIRST for the first send\nof the task id and REPEAT for a send retry: a task that finished then answers from history.",
+        doc: "One frozen send. None for good_until, task_options_json or idempotency_key\nmeans no deadline, no options, no key. retention_class_key is 'forever' or\n'standard_<days>d'; the core checks it at the send. send_kind is FIRST for the first send\nof the task id and REPEAT for a send retry: a task that finished then answers from history.\ntrace is NoTraceCarrier or the TraceCarrier of the send's span.",
         constructor: Constructor::Parameters(ENQUEUE_REQUEST_PARAMETERS),
         properties: &[property("task_id", "uuid.UUID")],
         methods: &[],
@@ -2806,7 +2830,7 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "WorkflowStartRequest",
-        doc: "One frozen workflow start. spec_json is the workflow spec data of the spec; spec data\nthat the core refuses raises ValueError with the field path. A naive sent_at raises\nTypeError.",
+        doc: "One frozen workflow start. spec_json is the workflow spec data of the spec; spec data\nthat the core refuses raises ValueError with the field path. A naive sent_at raises\nTypeError. trace is NoTraceCarrier or the TraceCarrier of the start's span; every row of\nthe tree stores it.",
         constructor: Constructor::Parameters(WORKFLOW_START_REQUEST_PARAMETERS),
         properties: &[],
         methods: &[],

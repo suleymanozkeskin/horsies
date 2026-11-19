@@ -21,6 +21,7 @@ use crate::manifest::{
     render_manifest_module, DumpEncoder, MANIFEST_MODULE_FILE, SCHEDULER_MANIFEST_MODULE_FILE,
     WORKER_MANIFEST_MODULE_FILE, WORKFLOW_SPEC_MODULE_FILE,
 };
+use crate::producer_metrics::{render_producer_metrics_module, PRODUCER_METRICS_MODULE_FILE};
 use crate::python_text::GENERATED_HEADER;
 use crate::surface::CORE_MODULE;
 use horsies_core::error_catalog::TEXT_NEW_TYPES;
@@ -166,6 +167,10 @@ pub fn render_all() -> Vec<GeneratedFile> {
     files.push(GeneratedFile {
         relative_path: catalog_folder.join(EVENTS_MODULE_FILE),
         text: render_events_module(&EVENT_CONTRACT),
+    });
+    files.push(GeneratedFile {
+        relative_path: catalog_folder.join(PRODUCER_METRICS_MODULE_FILE),
+        text: render_producer_metrics_module(),
     });
     files.push(GeneratedFile {
         relative_path: PathBuf::from(CORE_STUB_FILE),

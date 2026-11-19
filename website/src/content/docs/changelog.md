@@ -55,6 +55,20 @@ before you upgrade a 0.7 deployment.
   With `NoTracing()` horsies does not import `opentelemetry`. The success
   text of `horsies check` ends with `tracing: OpenTelemetry` or
   `tracing: off`.
+- **Spans of the sends and workflow starts, and the producer metrics.**
+  With `AppConfig(tracing=OtelTracing())`, each `send`, `send_async`,
+  `schedule`, `schedule_async` and retry is one span of kind PRODUCER,
+  `send <task_name>`, a child of the caller's current span, around every
+  broker call of the send. Each workflow start is one span
+  `start <workflow_name>`. The carrier that the configured propagator
+  injects goes to the core with the trace id of the span, and the task row
+  (or every row of the workflow tree) stores it. A send that returns an
+  error sets the status ERROR and `error.type` to its code. Each send
+  records `horsies.task.sent` (task, queue, result) and
+  `horsies.task.send.duration` (queue) with the user's meter. A failure of
+  the user's OpenTelemetry SDK never changes the outcome of a send.
+  `PostgresBroker.enqueue` and `enqueue_async` take `trace=`
+  (`TraceCarrier` or the default `NO_TRACE_CARRIER`).
 
 ### Changed
 
