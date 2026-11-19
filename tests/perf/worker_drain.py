@@ -89,7 +89,14 @@ WORKER_APP_LOCATOR: Final = 'tests.perf.worker_drain_app:app'
 """The app that ``horsies worker`` loads: ``worker_drain_app.py``."""
 
 CHECKOUT_ROOT: Final = Path(__file__).resolve().parents[2]
-"""The working directory of the worker, which holds ``pyproject.toml``."""
+"""The repository root: the working directory of the worker and its
+``PYTHONPATH``. ``WORKER_APP_LOCATOR`` names a module of the top-level
+package ``tests``. The ``horsies`` CLI adds its working directory to
+``sys.path`` only when that folder holds a ``pyproject.toml``, and the
+repository root holds none (the Python project is ``clients/python/``)."""
+
+IMPORT_PATH_VARIABLE: Final = 'PYTHONPATH'
+"""The variable that puts ``CHECKOUT_ROOT`` first on the worker's ``sys.path``."""
 
 DRAIN_DSN_VARIABLE: Final = 'HORSIES_PERF_DRAIN_DSN'
 """The environment variable that gives the worker the database URL."""
@@ -207,7 +214,10 @@ def start_drain_worker(dsn: str) -> StartedWorker | WorkerStartFailed:
         app_locator=WORKER_APP_LOCATOR,
         profile=DRAIN_PROFILE_NAME,
         loglevel=WORKER_LOGLEVEL,
-        environment={DRAIN_DSN_VARIABLE: dsn},
+        environment={
+            DRAIN_DSN_VARIABLE: dsn,
+            IMPORT_PATH_VARIABLE: str(CHECKOUT_ROOT),
+        },
         working_directory=CHECKOUT_ROOT,
         clock_ns=time.perf_counter_ns,
     )
