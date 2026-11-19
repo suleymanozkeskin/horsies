@@ -7,9 +7,10 @@ pub mod result;
 pub mod send_types;
 
 pub use error::{
-    BuiltInTaskCode, ContractCode, ExceptionRecord, OperationalErrorCode, OutcomeCode,
-    RetrievalCode, StoredErrorRefused, SubWorkflowFailure, TaskError, TaskErrorCode, TaskErrorKind,
-    UserCode, UserCodeRefused,
+    error_code_label, BuiltInTaskCode, ContractCode, DeclaredCodeRefusal, DeclaredCodesRefused,
+    DeclaredErrorCode, DeclaredErrorCodes, ErrorCodeLabel, ExceptionRecord, OperationalErrorCode,
+    OutcomeCode, RetrievalCode, StoredErrorRefused, SubWorkflowFailure, TaskError, TaskErrorCode,
+    TaskErrorKind, UserCode, UserCodeRefused, UNDECLARED_LABEL,
 };
 pub use execution::{Execution, ExecutionClass, InvalidExecution};
 pub use fn_trait::{AsyncTaskFn, BlockingTaskFn, RawTaskResult, RegisteredTask};
