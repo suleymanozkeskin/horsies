@@ -19,18 +19,19 @@ Two sequences:
 
 from __future__ import annotations
 
-import asyncio
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final, LiteralString
 
 import psycopg
 from psycopg import sql
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import create_async_engine
 
+from horsies.core.history.ddl.classes import (
+    DEFAULT_RETENTION_CLASS_KEY,
+    DEFAULT_RETENTION_DAYS,
+)
 from horsies.core.types.result import Err, Ok, Result
 from tests.parity.snapshot.capture import (
     CaptureError,
@@ -52,7 +53,6 @@ from tests.parity.snapshot.values import (
     RunWindowInvalid,
     make_run_window,
 )
-from tests.sqlalchemy_url import sqlalchemy_url
 
 FUNCTION_CALLS_SQL: Final = (
     Path(__file__).parents[3]
@@ -264,24 +264,113 @@ _MARK_DETACHED_SQL: Final[LiteralString] = """
 """
 
 
-async def _seed(url: str) -> None:
-    """The production coverage pass: class registration, leaves, heartbeat leaves, staged readers."""
-    from tests.history_seeding import ensure_history_seedable
+_SEED_HISTORY_HORIZON_DAYS: Final = 2
+"""Daily history leaves of the default class from today through this many days ahead."""
 
-    engine = create_async_engine(sqlalchemy_url(url))
-    try:
-        async with engine.begin() as connection:
-            await ensure_history_seedable(connection)
-    finally:
-        await engine.dispose()
+_SEED_HEARTBEAT_HORIZON_HOURS: Final = 2
+"""Hourly heartbeat leaves from this hour through this many hours ahead."""
+
+_SEED_HEARTBEAT_CLASS_HORIZON_HOURS: Final = 3
+"""The heartbeat horizon that the class rows store."""
+
+_REGISTER_CLASSES_SQL: Final[LiteralString] = """
+    SELECT class_key, outcome FROM horsies_register_retention_classes(
+        CAST(%(days)s AS smallint[]), CAST(%(hours)s AS smallint))
+"""
+
+_CREATE_HISTORY_LEAF_SQL: Final[LiteralString] = """
+    SELECT outcome, leaf_name, conflict_kind FROM horsies_create_history_leaf(
+        CAST(%(class_key)s AS text), CAST(%(lower_anchor)s AS timestamptz))
+"""
+
+_CREATE_HEARTBEAT_LEAF_SQL: Final[LiteralString] = """
+    SELECT outcome, leaf_name, conflict_kind FROM horsies_create_heartbeat_leaf(
+        CAST(%(lower_anchor)s AS timestamptz))
+"""
+
+_PUBLISH_READERS_SQL: Final[LiteralString] = """
+    SELECT outcome FROM horsies_publish_history_readers()
+"""
+
+_REGISTERED_OUTCOMES: Final = frozenset({'REGISTERED', 'VERIFIED', 'HORIZON_UPDATED'})
+_COVERED_OUTCOMES: Final = frozenset({'CREATED', 'ALREADY_CONFORMANT', 'INDEX_REPAIRED'})
+_PUBLICATION_OUTCOMES: Final = frozenset({'PUBLISHED', 'ALREADY_CURRENT'})
+
+
+def _register_default_class(connection: Connection) -> None:
+    """Register the default class with the seed heartbeat horizon.
+
+    Raises ``AssertionError`` for an outcome outside ``_REGISTERED_OUTCOMES``.
+    """
+    rows = connection.execute(
+        _REGISTER_CLASSES_SQL,
+        {'days': [DEFAULT_RETENTION_DAYS], 'hours': _SEED_HEARTBEAT_CLASS_HORIZON_HOURS},
+    ).fetchall()
+    for class_key, outcome in rows:
+        if outcome not in _REGISTERED_OUTCOMES:
+            raise AssertionError(f'retention class {class_key} unusable: {outcome}')
+
+
+def _cover_leaf(
+    connection: Connection, query: LiteralString, parameters: dict[str, object],
+) -> None:
+    """Create or confirm one leaf. Raises ``AssertionError`` for an outcome outside ``_COVERED_OUTCOMES``."""
+    leaf = connection.execute(query, parameters).fetchone()
+    assert leaf is not None, 'a leaf coverage function returns one row'
+    outcome, leaf_name, conflict_kind = leaf
+    if outcome not in _COVERED_OUTCOMES:
+        raise AssertionError(f'leaf coverage refused: {outcome} {leaf_name} {conflict_kind}')
+
+
+def _run_coverage_pass(connection: Connection) -> None:
+    """The steps of the core's coverage pass through its baseline functions, in the caller's transaction.
+
+    The class rows (``horsies_register_retention_classes``), the daily leaves
+    of the default class from today (``horsies_create_history_leaf``), the
+    hourly heartbeat leaves from this hour (``horsies_create_heartbeat_leaf``),
+    then the readers (``horsies_publish_history_readers``). Days and hours
+    are UTC, from the database clock. Every step is idempotent. Raises ``psycopg.Error`` on a
+    database error and ``AssertionError`` for an outcome that the pass does
+    not accept.
+    """
+    _register_default_class(connection)
+    clock = connection.execute('SELECT now()').fetchone()
+    assert clock is not None and isinstance(clock[0], datetime), clock
+    now = clock[0].astimezone(UTC)
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    for day_offset in range(_SEED_HISTORY_HORIZON_DAYS + 1):
+        _cover_leaf(
+            connection,
+            _CREATE_HISTORY_LEAF_SQL,
+            {
+                'class_key': DEFAULT_RETENTION_CLASS_KEY,
+                'lower_anchor': today + timedelta(days=day_offset),
+            },
+        )
+    this_hour = now.replace(minute=0, second=0, microsecond=0)
+    for hour_offset in range(_SEED_HEARTBEAT_HORIZON_HOURS + 1):
+        _cover_leaf(
+            connection,
+            _CREATE_HEARTBEAT_LEAF_SQL,
+            {'lower_anchor': this_hour + timedelta(hours=hour_offset)},
+        )
+    published = connection.execute(_PUBLISH_READERS_SQL).fetchone()
+    assert published is not None, 'horsies_publish_history_readers returns one row'
+    if published[0] not in _PUBLICATION_OUTCOMES:
+        raise AssertionError(f'reader publication returned {published[0]!r}')
 
 
 def seed_history(database: DualRunDatabase) -> Result[None, SelfCheckStepFailed]:
-    """Run the production coverage pass on an installed database."""
+    """Run the production coverage pass on an installed database, in one transaction.
+
+    A database error is ``Err``; the transaction rolls back.
+    """
     try:
-        asyncio.run(_seed(database.url))
-    except (psycopg.Error, SQLAlchemyError) as exc:
-        return _failed('run the coverage pass', str(exc))
+        with psycopg.connect(database.url, autocommit=True) as connection:
+            with connection.transaction():
+                _run_coverage_pass(connection)
+    except psycopg.Error as exc:
+        return _failed('run the coverage pass', exc)
     return Ok(None)
 
 

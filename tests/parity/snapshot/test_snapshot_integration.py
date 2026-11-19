@@ -38,7 +38,7 @@ from tests.parity.snapshot.scenario import (
     ScenarioVariant,
     write_scenario,
 )
-from tests.parity.snapshot.selfcheck import seed_history, straddles
+from tests.parity.snapshot.selfcheck import SelfCheckStepFailed, seed_history, straddles
 from tests.parity.snapshot.values import (
     CalendarUnit,
     Cell,
@@ -304,6 +304,55 @@ def test_table_over_the_row_limit_fails_the_capture(
     assert outcome == Err(
         TableRowLimitExceeded(table='horsies_retention_classes', limit=1)
     )
+
+
+_SEED_LEAVES_SQL: Final[LiteralString] = """
+    SELECT
+        (SELECT count(*) FROM horsies_task_history_leaf_catalog
+         WHERE class_key = 'standard_30d' AND lower_bound_kind = 'AT'
+           AND lower_anchor IN (SELECT date_trunc('day', now(), 'UTC') + make_interval(days => d)
+                                FROM generate_series(0, 2) AS d)),
+        (SELECT count(*) FROM horsies_task_history_leaf_catalog
+         WHERE class_key = 'heartbeats' AND lower_bound_kind = 'AT'
+           AND lower_anchor IN (SELECT date_trunc('hour', now(), 'UTC') + make_interval(hours => h)
+                                FROM generate_series(0, 2) AS h))
+"""
+"""The daily ``standard_30d`` leaves from today and the hourly heartbeat
+leaves from this hour that the pass covers (UTC), three of each."""
+
+
+def test_coverage_pass_stores_its_heartbeat_horizon_and_covers_its_leaves(
+    empty_database: MakeDatabase,
+) -> None:
+    database = _installed(empty_database)
+
+    outcome = seed_history(database)
+
+    assert outcome == Ok(None)
+    with psycopg.connect(database.url, autocommit=True) as connection:
+        horizon = connection.execute(
+            'SELECT heartbeat_horizon_hours FROM horsies_retention_classes '
+            "WHERE class_key = 'heartbeats'",
+        ).fetchone()
+        leaves = connection.execute(_SEED_LEAVES_SQL).fetchone()
+    # The install stores the heartbeat horizon of the default retention (6);
+    # the pass registers the default class again with its own horizon.
+    assert horizon == (3,)
+    assert leaves == (3, 3)
+
+
+def test_coverage_pass_on_a_database_without_the_schema_is_a_failed_step(
+    empty_database: MakeDatabase,
+) -> None:
+    database = empty_database()
+
+    outcome = seed_history(database)
+
+    match outcome:
+        case Err(SelfCheckStepFailed(step='run the coverage pass', cause=cause)):
+            assert 'horsies_register_retention_classes' in cause
+        case _:
+            pytest.fail(f'seed_history returned {outcome}, not the failed step')
 
 
 def _seeded_daily_leaf(make: MakeDatabase) -> tuple[DualRunDatabase, str]:
