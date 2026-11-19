@@ -19,6 +19,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
     parse_workflow_spec_data, BrokerError, ChildSpecUnavailable, ClientSpec, ClientStartError,
     ClientStartOutcome, WorkflowError, WorkflowStartError,
@@ -212,6 +213,7 @@ pub async fn start_workflow_operation(
             &parts.spec,
             parts.workflow_id,
             parts.sent_at,
+            SendTrace::NoCarrier,
             parts.resend_on_transient_err,
             &source,
         )

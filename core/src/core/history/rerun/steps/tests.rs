@@ -410,6 +410,52 @@ fn an_unkeyed_write_carries_the_source_lineage_and_no_key() {
 }
 
 #[test]
+fn a_write_of_a_rerun_with_no_trace_carries_no_carrier() {
+    let parameters = write(None).statement().parameters().to_vec();
+    assert_eq!(parameters.len(), 23);
+    assert_eq!(
+        parameters[20],
+        StatementValue::Text("NO_CARRIER".to_owned())
+    );
+    assert_eq!(parameters[21], StatementValue::Null(CallerType::Text));
+    assert_eq!(parameters[22], StatementValue::Null(CallerType::Bytea));
+}
+
+#[test]
+fn a_write_of_a_traced_rerun_carries_the_carrier_text_and_the_trace_id() {
+    use std::collections::BTreeMap;
+
+    use crate::telemetry::trace_carrier::{PropagatedTrace, SendTrace};
+
+    let trace_id: Vec<u8> = (1..=16).collect();
+    let command = command(None).with_trace(SendTrace::Propagated(PropagatedTrace {
+        carrier: BTreeMap::from([("traceparent".to_owned(), "00-ab-cd-01".to_owned())]),
+        trace_id: trace_id.clone(),
+    }));
+    let read = rerun_read(&command, &policy());
+    let prepared = prepare_rerun_write(
+        &read,
+        &CallerRow::new(history_values()),
+        &command,
+        &policy(),
+        ClientFamily::Rust,
+        sent_at(),
+    )
+    .expect("a row of the read's columns");
+    let write = match prepared {
+        RerunPreparation::Write(write) => write,
+        other => panic!("expected a write, got {other:?}"),
+    };
+    let parameters = write.statement().parameters();
+    assert_eq!(parameters[20], StatementValue::Text("CARRIER".to_owned()));
+    assert_eq!(
+        parameters[21],
+        StatementValue::Text("{\"traceparent\":\"00-ab-cd-01\"}".to_owned())
+    );
+    assert_eq!(parameters[22], StatementValue::Bytea(trace_id));
+}
+
+#[test]
 fn a_keyed_write_carries_the_scoped_digest_and_the_exact_window() {
     let write = write(Some("rerun-key-1"));
     let parameters = write.statement().parameters();

@@ -286,6 +286,7 @@ mod tests {
                 &children.client_spec(spec),
                 workflow_id,
                 sent_at,
+                crate::telemetry::trace_carrier::SendTrace::NoCarrier,
                 false,
                 children,
             )

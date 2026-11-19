@@ -646,6 +646,72 @@ fn a_build_that_the_client_did_not_run_refuses_the_start() {
     }
 }
 
+/// A start with a carrier stores the checked carrier text and the trace id
+/// on every workflow row of the tree (the parent and its pre-built child)
+/// and on the task rows of their nodes.
+#[tokio::test]
+#[serial]
+async fn a_traced_start_stores_its_carrier_on_every_row_of_the_tree() {
+    use std::collections::BTreeMap;
+
+    use crate::telemetry::trace_carrier::{PropagatedTrace, SendTrace};
+
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    ));
+    let workflow_id = Uuid::new_v4();
+    let spec = spec_of(
+        "traced_parent",
+        vec![subworkflow_root(0), task_node(1, vec![])],
+    );
+    let trace_id: Vec<u8> = (1..=16).collect();
+    let trace = SendTrace::Propagated(PropagatedTrace {
+        carrier: BTreeMap::from([("traceparent".to_owned(), "00-0102-03-01".to_owned())]),
+        trace_id: trace_id.clone(),
+    });
+
+    let children = children_with_child();
+    let started = broker
+        .start_client_workflow(
+            &children.client_spec(&spec),
+            workflow_id,
+            chrono::Utc::now(),
+            trace,
+            false,
+            &children,
+        )
+        .await
+        .expect("start");
+    assert_eq!(started, ClientStartOutcome::Started);
+
+    let stored = (
+        Some("{\"traceparent\":\"00-0102-03-01\"}".to_owned()),
+        Some(trace_id),
+    );
+    let workflows: Vec<(Option<String>, Option<Vec<u8>>)> = sql::query_as(
+        "SELECT trace_carrier, trace_id FROM horsies_workflows
+         WHERE id = $1 OR parent_workflow_id = $1 ORDER BY depth",
+    )
+    .bind(workflow_id)
+    .fetch_all(&pool)
+    .await
+    .expect("the workflow rows of the tree");
+    assert_eq!(workflows, vec![stored.clone(), stored.clone()]);
+    let tasks: Vec<(Option<String>, Option<Vec<u8>>)> = sql::query_as(
+        "SELECT t.trace_carrier, t.trace_id FROM horsies_tasks t
+         JOIN horsies_workflow_tasks n ON n.task_id = t.id
+         JOIN horsies_workflows w ON w.id = n.workflow_id
+         WHERE w.id = $1 OR w.parent_workflow_id = $1",
+    )
+    .bind(workflow_id)
+    .fetch_all(&pool)
+    .await
+    .expect("the task rows of the tree");
+    assert_eq!(tasks, vec![stored.clone(), stored]);
+}
+
 /// The one statement writes the parent, its pre-built child linked from the
 /// RUNNING sub-workflow node, and the child's root task row (ENQUEUED node,
 /// PENDING task).
@@ -666,6 +732,7 @@ async fn the_start_writes_the_tree_in_one_statement() {
             &children.client_spec(&spec),
             workflow_id,
             chrono::Utc::now(),
+            crate::telemetry::trace_carrier::SendTrace::NoCarrier,
             false,
             &children,
         )
