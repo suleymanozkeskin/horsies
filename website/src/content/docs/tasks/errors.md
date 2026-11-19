@@ -123,7 +123,7 @@ Each client refuses a bad set when the task is defined:
 | An empty code, a code that is not `UPPER_SNAKE_CASE`, or an exception class name (`TimeoutError`) | `HRS-112` |
 | A code given twice | `HRS-113` |
 
-Declaring is optional. The client APIs: [Python](/horsies/tasks/defining-tasks/#declare-error-codes) (`error_codes=` of `@app.task`), [Rust](/horsies/rust/tasks/errors/#the-code-type) (`UserErrorCode::CODES` of the task's code type, with no other user work).
+Declaring is optional. The client APIs: [Python](/horsies/tasks/defining-tasks/#declare-error-codes) (`error_codes=` of `@app.task`, plus the values of the task's and the app's exception mappers, with no second declaration), [Rust](/horsies/rust/tasks/errors/#the-code-type) (`UserErrorCode::CODES` of the task's code type, with no other user work).
 
 ## Call Error Codes
 
