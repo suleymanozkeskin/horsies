@@ -138,12 +138,12 @@ const START_SQL: &str = "SELECT outcome, miss_reason
 const KEYED_SEND_SQL: &str = r#"SELECT outcome FROM horsies_enqueue_task(
     $1::uuid, 'lc.task', 'q_sessions', 100, '{"x":1}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL,
     $2::timestamptz, 'NOW', NULL, NULL, 1::smallint, sha256('lc'::bytea), 'FIRST_RUN', NULL, NULL,
-    'KEYED', sha256('session-key'::bytea), 1::smallint, interval '1 hour', 'FIRST')"#;
+    'KEYED', sha256('session-key'::bytea), 1::smallint, interval '1 hour', 'FIRST', 'NO_CARRIER', NULL, NULL)"#;
 
 const REPEAT_SEND_SQL: &str = r#"SELECT outcome FROM horsies_enqueue_task(
     $1::uuid, 'lc.task', 'q_sessions', 100, '{"x":1}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL,
     $2::timestamptz, 'NOW', NULL, NULL, 1::smallint, sha256('lc'::bytea), 'FIRST_RUN', NULL, NULL,
-    'UNKEYED', NULL, NULL, NULL, 'REPEAT')"#;
+    'UNKEYED', NULL, NULL, NULL, 'REPEAT', 'NO_CARRIER', NULL, NULL)"#;
 
 const SESSION_KEY_RESERVATIONS_SQL: &str = "SELECT count(*) FROM horsies_key_reservations
     WHERE idempotency_key_digest = sha256('session-key'::bytea)";
@@ -155,7 +155,7 @@ const CLAIM_SQL: &str = r#"SELECT row_kind, short_by FROM horsies_claim(
 const WAKE_SEND_SQL: &str = "SELECT * FROM horsies_enqueue_task(
     $1::uuid, 'lc.task', 'q_wake', 100, '{}', NULL, 'ISOLATED', 'forever', TRUE, 3, NULL, now(), 'NOW', NULL,
     NULL, 1::smallint, sha256('wake'::bytea), 'FIRST_RUN', NULL, NULL, 'UNKEYED', NULL, NULL, NULL,
-    'FIRST')";
+    'FIRST', 'NO_CARRIER', NULL, NULL)";
 const WAKE_BATCH_SUCCESS_SQL: &str = "SELECT * FROM horsies_complete_tasks_fused(
     ARRAY[$1::uuid, $2::uuid]::uuid[], ARRAY[$3::timestamptz, $4::timestamptz]::timestamptz[],
     ARRAY['{}', '{}'], 'w1', TRUE)";

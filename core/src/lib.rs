@@ -30,6 +30,7 @@ pub mod scheduler_manifest;
 mod sql_tests;
 #[cfg(test)]
 mod stored_form_vectors;
+pub mod telemetry;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(feature = "web")]
