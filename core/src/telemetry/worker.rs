@@ -27,7 +27,9 @@ use crate::core::task::{DeclaredErrorCodes, Execution};
 use crate::events::Event;
 use crate::telemetry::catalog::MetricId;
 use crate::telemetry::declared::{self, DeclaredValue, ErrorCodeValue};
-use crate::telemetry::labels::{ClaimPassResult, EventDropCause, RecoveryStep, ReleaseReason};
+use crate::telemetry::labels::{
+    ClaimPassResult, EventDropCause, RecoveryStep, ReleaseReason, ReplaceReason,
+};
 use crate::telemetry::registry::{Counter, HandleRefused, Histogram, OptionalCounter, Registry};
 use crate::worker::executor::protocol::StopReason;
 use crate::worker::executor::slots::outcome::WriteStage;
@@ -154,6 +156,7 @@ struct PointMetrics {
     claim_passes: Counter<(ClaimPassResult,)>,
     recovery_failures: Counter<(RecoveryStep,)>,
     children_started: Counter<(Execution,)>,
+    children_replaced: Counter<(Execution, ReplaceReason)>,
     child_boot: Histogram<(Execution,)>,
 }
 
@@ -177,6 +180,7 @@ impl PointMetrics {
             claim_passes: registry.counter(MetricId::ClaimPasses)?,
             recovery_failures: registry.counter(MetricId::RecoveryPassFailures)?,
             children_started: registry.counter(MetricId::ChildrenStarted)?,
+            children_replaced: registry.counter(MetricId::ChildrenReplaced)?,
             child_boot: registry.histogram(MetricId::ChildBootDuration)?,
         })
     }

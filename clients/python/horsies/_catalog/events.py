@@ -79,7 +79,7 @@ __all__ = [
     'decode_event',
 ]
 
-EVENT_CONTRACT_VERSION: Final = 2
+EVENT_CONTRACT_VERSION: Final = 3
 """The version of the event contract that this module reads."""
 
 
@@ -400,7 +400,7 @@ type RecoveryAction = Literal['RUNNING_FAILED', 'RUNNING_RETRIED', 'CLAIM_REQUEU
 """
 
 
-type ReplaceReason = Literal['CHILD_DIED', 'CHANNEL_LOST', 'PROTOCOL_VIOLATION', 'PROTOCOL_MISMATCH', 'KILLED_BY_PARENT', 'SLOT_DEFECT', 'SPAWNER_STOPPED', 'TASK_COUNT', 'MEMORY_LIMIT', 'SECOND_CANCEL', 'LOOP_BLOCKED', 'LEFTOVER_WORK', 'AT_DEADLINE']
+type ReplaceReason = Literal['CHILD_DIED', 'CHANNEL_LOST', 'PROTOCOL_VIOLATION', 'PROTOCOL_MISMATCH', 'KILLED_BY_PARENT', 'SLOT_DEFECT', 'SPAWNER_STOPPED', 'TASK_COUNT', 'MEMORY_LIMIT', 'SECOND_CANCEL', 'LOOP_BLOCKED', 'LEFTOVER_WORK', 'AT_DEADLINE', 'CORE_STOPPED']
 """Why a child ended and was replaced (the `reason` label of
 `horsies.worker.children.replaced`): the loss causes of a child, and the
 reasons why a child retires after a task. The `reason` of a
@@ -431,6 +431,8 @@ reasons why a child retires after a task. The `reason` of a
 `LEFTOVER_WORK`: Work that a task left after its return needed a cancel.
 
 `AT_DEADLINE`: A run on the child passed its deadline.
+
+`CORE_STOPPED`: The core of the child stopped, and the child ended itself (exit code 80).
 """
 
 
@@ -1529,6 +1531,8 @@ def _read_replace_reason(value: object, at: _At) -> Result[ReplaceReason, Malfor
             return Ok('LEFTOVER_WORK')
         case 'AT_DEADLINE':
             return Ok('AT_DEADLINE')
+        case 'CORE_STOPPED':
+            return Ok('CORE_STOPPED')
         case str():
             return at.refuse(f'ReplaceReason has no value {value[:_MAX_REFUSED_NAME_CHARS]!r}')
         case _:
