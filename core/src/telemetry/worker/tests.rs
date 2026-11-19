@@ -306,11 +306,11 @@ fn declaring_telemetry() -> WatchedTelemetry {
     use crate::telemetry::registry::{ProcessFacts, RegistryLabels, WorkerFacts};
     let declared = DeclaredErrorCodes::parse(["RATE_LIMITED"]).unwrap();
     let registry = Registry::for_worker(RegistryLabels {
-        tasks: DeclaredNames::new(["app.tasks.send_email"]).unwrap(),
-        queues: DeclaredNames::new(["default"]).unwrap(),
+        tasks: DeclaredNames::new(["app.tasks.send_email"]).declared,
+        queues: DeclaredNames::new(["default"]).declared,
         handlers: DeclaredNames::none(),
         schedules: DeclaredNames::none(),
-        error_codes: ErrorCodeValues::new([&declared]).unwrap(),
+        error_codes: ErrorCodeValues::new([&declared]).declared,
         process: ProcessFacts::Worker(WorkerFacts {
             version: "0.8.0".to_owned(),
             profile: "default".to_owned(),

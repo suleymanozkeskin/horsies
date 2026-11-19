@@ -6,7 +6,10 @@ once per collect interval; a scrape renders the last read and never reads,
 so scrapes add no load on the database. A failed read is
 `horsies_exporter_collect_failed{query} 1` in the text, never an end of the
 command. The `queue` and `schedule` label values are the queues and the
-schedules of the app config; every other name is `(unknown)`.
+schedules of the app config; every other name is `(unknown)`. A config name
+that cannot be a label value of its own (empty, `(unknown)`, or past the
+bound of names) counts in the `(unknown)` series too, and the run logs one
+WARNING line that names it.
 """
 
 from __future__ import annotations
@@ -19,7 +22,6 @@ from types import FrameType
 from typing import Final, assert_never
 
 from horsies._core import (
-    FleetLabelsRefused,
     FleetMetricsFailed,
     FleetMetricsServer,
     FleetMetricsStopped,
@@ -111,8 +113,8 @@ def run_fleet_metrics(
 ) -> int:
     """Serve the fleet metrics of the database of `app` on `listen` until
     `SIGTERM` or `SIGINT`, on the main thread. Returns the exit code of
-    `horsies metrics`: 0 at a stop, 1 when the broker does not build, a queue
-    or schedule name cannot be a label value, or the address does not bind.
+    `horsies metrics`: 0 at a stop, 1 when the broker does not build or the
+    address does not bind.
     """
     try:
         broker = app.get_broker()
@@ -120,22 +122,12 @@ def run_fleet_metrics(
         logger.error(str(error))
         return EXIT_FAILED
     names = fleet_label_names(app)
-    match prepare_fleet_metrics(
+    server = prepare_fleet_metrics(
         broker._core_handle,  # pyright: ignore[reportPrivateUsage]
         listen=listen,
         queue_names=list(names.queues),
         schedule_names=list(names.schedules),
-    ):
-        case FleetMetricsServer() as server:
-            pass
-        case FleetLabelsRefused(message=message):
-            logger.error(
-                'The queue or schedule names of the config are not valid metric labels: %s',
-                message,
-            )
-            return EXIT_FAILED
-        case _ as unreachable:
-            assert_never(unreachable)
+    )
     _install_stop_handlers(server, logger)
     try:
         end = server.run()
