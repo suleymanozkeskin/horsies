@@ -12,10 +12,12 @@ finds:
 - a path ``tests/<entry>`` whose entry moved to ``clients/python/tests/``,
   in a file outside the Python project (inside ``clients/python/``, a
   ``tests/`` path is relative to the project, as pytest node ids are);
+- a path under a ``tests/`` entry that moved on its own (``tests/dualrun/``,
+  the unit tests of the harnesses in ``tests/unit/``), in any file;
 - a GitHub source link to such a path;
 - a Python path built from literals that start at such a folder
   (``ROOT / 'crates' / 'horsies-core'``);
-- the module path ``showcase.acme``;
+- the module paths ``showcase.acme`` and ``tests.dualrun``;
 - a path from one old crate folder to another (``../horsies-core``);
 - a name built from an old path (``crates_horsies_agents_skills``).
 
@@ -84,7 +86,7 @@ OLD_DERIVED_NAME: Final = re.compile(
 )
 """A name built from an old path with ``_`` for ``/``: ``crates_horsies_agents_skills``."""
 
-OLD_MODULE: Final = re.compile(r'(?<![A-Za-z0-9_.])showcase\.acme\b')
+OLD_MODULE: Final = re.compile(r'(?<![A-Za-z0-9_.])(?:showcase\.acme|tests\.dualrun)\b')
 
 GITHUB_PATH: Final = re.compile(
     r'github\.com/suleymanozkeskin/horsies/(?:blob|tree|edit|raw)/[A-Za-z0-9_.-]+/(?P<path>[A-Za-z0-9_.@/-]+)',
@@ -121,6 +123,11 @@ def old_path_cited(cited: str, citing_file: str, tree: rules.Tree) -> bool:
         return (len(parts) == 1 and parts[0] in BARE_FOLDERS_FLAGGED) or rules.move_of(
             clean
         ) is not None
+    match rules.move_of(clean):
+        case rules.Move(old=old) if parts[0] == 'tests' and old != 'tests':
+            return True
+        case _:
+            pass
     if parts[0] == 'tests' and rules.is_under(citing_file, rules.PYTHON_PROJECT):
         return False
     if parts[0] == 'tests' and len(parts) > 1:
@@ -219,6 +226,7 @@ PLANTED_TREE: Final = rules.Tree.of(
         'clients/python/tests/unit/test_a.py',
         'clients/python/horsies/__init__.py',
         'tests/parity/runner.py',
+        'tests/parity/snapshot/capture.py',
         'website/src/content/docs/rust/tasks.md',
         'website/src/content/docs/index.md',
     ),
@@ -256,6 +264,11 @@ PLANTED: Final = (
     ('README.md', 'horsies = { path = "../horsies" }', False),
     ('README.md', 'core/src/lib.rs and clients/python/horsies/__init__.py', False),
     ('README.md', 'tests/parity/runner.py', False),
+    ('README.md', 'tests/dualrun/capture.py', True),
+    ('clients/python/tests/unit/test_a.py', 'tests/dualrun/capture.py', True),
+    ('README.md', 'tests/parity/snapshot/capture.py', False),
+    ('README.md', 'from tests.dualrun.capture import capture_snapshot', True),
+    ('README.md', 'from tests.parity.snapshot.capture import capture_snapshot', False),
     ('README.md', 'horsies = { features = ["horsies/web"] }', False),
     ('README.md', 'https://example.com/python/horsies/core', False),
     ('core/src/lib.rs', 'tests/fixtures/stored_forms/README.md', False),

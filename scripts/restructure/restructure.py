@@ -142,16 +142,20 @@ def planned_moves(tree: rules.Tree) -> list[tuple[str, str]]:
     """The ``git mv`` steps: one per move, split into its entries where a Stay is inside it."""
     steps: list[tuple[str, str]] = []
     for move in rules.MOVES:
-        steps.extend(entries_to_move(move.old, tree))
+        steps.extend(entries_to_move(move.old, tree, move))
     return steps
 
 
-def entries_to_move(folder: str, tree: rules.Tree) -> list[tuple[str, str]]:
-    """``(old, new)`` for ``folder``, or for its entries when a Stay is inside it.
+def entries_to_move(
+    folder: str, tree: rules.Tree, move: rules.Move
+) -> list[tuple[str, str]]:
+    """``(old, new)`` for ``folder`` of ``move``, or for its entries when a Stay is inside it.
 
+    An entry that a Stay keeps, or that another move with a longer old path
+    moves (``tests/dualrun`` inside ``tests``), is not a step of ``move``.
     The depth is bounded by the depth of the deepest Stay.
     """
-    if rules.stay_of(folder) is not None:
+    if rules.stay_of(folder) is not None or rules.move_of(folder) != move:
         return []
     if not any(rules.is_under(stay.path, folder) for stay in rules.STAYS):
         return [(folder, rules.new_path_of(folder))]
@@ -165,7 +169,7 @@ def entries_to_move(folder: str, tree: rules.Tree) -> list[tuple[str, str]]:
     )
     steps: list[tuple[str, str]] = []
     for child in children:
-        steps.extend(entries_to_move(child, tree))
+        steps.extend(entries_to_move(child, tree, move))
     return steps
 
 
@@ -661,9 +665,10 @@ core/ holds the core crate and its derives (core/derive/); clients/python/
 the package, the extension module crate, the generator, the Python tests
 and examples; clients/rust/ the Rust client, its macros, tests and
 examples. tests/ keeps the cross-client parity and perf harnesses and the
-stored-form vectors, with the unit tests of perf and of the vectors. Every
-file keeps its bytes; the next commit changes the paths. This commit alone
-does not build.
+stored-form vectors, with the unit tests of perf and of the vectors; the
+snapshot modules of the parity harness move from tests/dualrun/ to
+tests/parity/snapshot/. Every file keeps its bytes; the next commit changes
+the paths. This commit alone does not build.
 """
 
 EDIT_MESSAGE: Final = """\
@@ -672,7 +677,8 @@ Point every path at the 0.8.0 layout
 The Cargo workspace, the crate manifests, pyproject.toml, the pyright
 configs, the CI workflows, the docs and the tests follow the move. tests/
 and clients/python/tests/ are two packages named `tests`: the cross-client
-harnesses, and the tests of the Python client.
+harnesses, and the tests of the Python client. The four Python client test
+modules that the cross-client harnesses import are links in tests/.
 """
 
 

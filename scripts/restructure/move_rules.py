@@ -13,9 +13,11 @@ The restructure puts the core crate and each client in its own folder:
                       crates/horsies-macros), tests/ (was rust/tests),
                       examples/ (was rust/examples, with rust/showcase at
                       examples/showcase/), scripts/ (was rust/scripts)
-    tests/            cross-client only: parity/, perf/ with its compose file
-                      and its unit tests, stored_form_vectors.py with its unit
-                      tests
+    tests/            cross-client only: parity/ with the kept snapshot files
+                      at parity/snapshot/ (was tests/dualrun), perf/ with its
+                      compose file and its unit tests, stored_form_vectors.py
+                      with its unit tests, and links to the four Python client
+                      test modules that these harnesses import
     webui/ website/ scripts/   unchanged
 
 This module holds the data of the move and the pure text rules. It does no
@@ -66,6 +68,7 @@ PERF_UNIT_TESTS: Final = (
     'test_perf_run_exit.py',
     'test_perf_seed_ids.py',
     'test_perf_statistics.py',
+    'test_perf_worker_process.py',
 )
 """The unit tests of the perf harness, in tests/unit/ before the move and next
 to the harness, in tests/perf/, after it."""
@@ -93,6 +96,7 @@ MOVES: Final = (
     Move('showcase', 'clients/python/examples'),
     *(Move(f'tests/unit/{name}', f'tests/perf/{name}') for name in PERF_UNIT_TESTS),
     *(Move(f'tests/unit/{name}', f'tests/{name}') for name in STORED_FORM_UNIT_TESTS),
+    Move('tests/dualrun', 'tests/parity/snapshot'),
     Move('tests', 'clients/python/tests'),
     Move('crates/horsies', 'clients/rust/horsies'),
     Move('crates/horsies-macros', 'clients/rust/macros'),
@@ -106,7 +110,8 @@ MOVES: Final = (
 is inside the new folder of another move comes after it:
 ``crates/horsies-core`` before ``crates/horsies-core-derive``,
 ``rust/examples`` before ``rust/showcase``. The unit tests of the cross-client
-harnesses leave ``tests/unit/`` before ``tests`` moves."""
+harnesses leave ``tests/unit/``, and the kept snapshot files leave
+``tests/dualrun/``, before ``tests`` moves."""
 
 STAYS: Final = (
     Stay('tests/__init__.py', 'the package `tests` of the cross-client harnesses'),
@@ -142,18 +147,12 @@ class OpenImport:
     decision: str
 
 
-PARITY_IMPORTS: Final = (
-    'The Python side of the parity harness (tests/parity/) imports tests.dualrun '
-    'and tests.session_database, modules of the package `tests` of the Python '
-    'client. With no package split, the top-level package `tests` does not hold '
-    'them. Open: tests/parity/ moves to clients/python/tests/parity/, or these '
-    'imports change.'
-)
-
-OPEN_IMPORTS: Final = (
-    OpenImport('tests/parity', 'tests.dualrun', PARITY_IMPORTS),
-    OpenImport('tests/parity', 'tests.session_database', PARITY_IMPORTS),
-)
+OPEN_IMPORTS: Final[tuple[OpenImport, ...]] = ()
+"""Empty: every ``tests.`` import of the moved tree names a module of its own
+package. The parity harness imports its snapshot modules from
+``tests.parity.snapshot`` (``MODULE_RENAMES``), and the four Python client
+test modules that the cross-client harnesses import are links in ``tests/``
+(``NEW_LINKS``)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +181,31 @@ NEW_FILES: Final = (
     ),
 )
 
+CLIENT_TEST_MODULE_LINKS: Final = (
+    ('tests/session_database.py', '../clients/python/tests/session_database.py'),
+    ('tests/sqlalchemy_url.py', '../clients/python/tests/sqlalchemy_url.py'),
+    (
+        'tests/attempt_snapshot_support.py',
+        '../clients/python/tests/attempt_snapshot_support.py',
+    ),
+    (
+        'tests/history_seeding.py',
+        '../clients/python/tests/integration/history_seeding.py',
+    ),
+)
+"""Modules of the Python client's package ``tests`` that the cross-client
+harnesses import: the server URL of the test session (parity and snapshot
+conftests), the SQLAlchemy URL (parity send, snapshot self-check, perf), and
+the history coverage pass of the snapshot self-check with the module it
+imports. Each is a link, so each module keeps one definition and is a module
+of both packages ``tests``; none imports a ``tests.`` module that the
+top-level package does not hold."""
+
 NEW_LINKS: Final = (
+    *(
+        NewLink(path, target, 'a Python client test module of a cross-client harness')
+        for path, target in CLIENT_TEST_MODULE_LINKS
+    ),
     NewLink(
         'clients/python/README.md',
         '../../README.md',
@@ -546,9 +569,11 @@ def rewrite_github_links(text: str, context: FileContext) -> Rewrite:
 
 MODULE_RENAMES: Final = (
     (re.compile(r'(?<![A-Za-z0-9_.])showcase\.acme\b'), 'examples.acme'),
+    (re.compile(r'(?<![A-Za-z0-9_.])tests\.dualrun\b'), 'tests.parity.snapshot'),
 )
 """Python module paths that follow a folder rename: ``showcase/acme`` is
-``clients/python/examples/acme``, imported from ``clients/python/``."""
+``clients/python/examples/acme``, imported from ``clients/python/``;
+``tests/dualrun`` is ``tests/parity/snapshot``."""
 
 
 def rewrite_module_names(text: str, context: FileContext) -> Rewrite:
@@ -1468,6 +1493,13 @@ EDITS: Final[tuple[Edit, ...]] = (
         "        'horsies/',\n"
         '    ),\n'
         ')\n',
+    ),
+    Edit(
+        # The coverage pass is a module of the Python client's integration
+        # tests; the top-level package holds it as a link (NEW_LINKS).
+        'tests/parity/snapshot/selfcheck.py',
+        '    from tests.integration.history_seeding import ensure_history_seedable\n',
+        '    from tests.history_seeding import ensure_history_seedable\n',
     ),
     Edit(
         'clients/rust/tests/frozen-crate-test-fates.tsv',
