@@ -142,6 +142,7 @@ async fn run_node_a(pool: &TestPool, workflow_id: Uuid) -> RunningNode {
                 max_retries,
             },
             options: read_stored_options(task_options.as_deref()),
+            trace: crate::events::RunTrace::NoCarrier,
         },
     }
 }

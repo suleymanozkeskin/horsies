@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::core::task::error::OperationalErrorCode;
+use crate::events::RunTrace;
 use crate::worker::executor::protocol::{
     FailureDetail, ProcessId, RunEnd, TaskInputText, TaskTimeoutMs,
 };
@@ -49,6 +50,9 @@ pub struct ClaimedTask {
     pub kind: TaskKind,
     pub retry: RetryFacts,
     pub options: StoredOptions,
+    /// The trace carrier that the send stored on the row. The run frame
+    /// carries it to the child.
+    pub trace: RunTrace,
 }
 
 /// A claimed row and its input.

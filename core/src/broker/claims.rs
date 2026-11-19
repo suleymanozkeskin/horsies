@@ -41,6 +41,7 @@ use crate::core::task::Execution;
 use crate::db::{
     CheckoutClass, CorePool, ParameterType, PooledConnection, Row, StatementBound, TypedStatement,
 };
+use crate::events::{RunTrace, TraceCarrierText};
 
 /// The most rows one release statement takes (the bound of
 /// `horsies_release_claims`).
@@ -239,6 +240,9 @@ pub struct ClaimedRow {
     pub claimed_at: DateTime<Utc>,
     pub retry_count: i32,
     pub max_retries: i32,
+    /// The trace carrier that the send stored on the row
+    /// (`trace_carrier`), for the run frame of each attempt.
+    pub trace: RunTrace,
 }
 
 /// Whether the pass took every row of its plan.
@@ -273,6 +277,7 @@ struct ClaimWireRow {
     claimed_at: Option<DateTime<Utc>>,
     retry_count: Option<i32>,
     max_retries: Option<i32>,
+    trace_carrier: Option<String>,
     short_by: Option<i32>,
 }
 
@@ -369,11 +374,13 @@ fn claim_wire_row(row: &Row, statement: &TypedStatement) -> Result<ClaimWireRow,
         claimed_at: column(row, statement, "claimed_at")?,
         retry_count: column(row, statement, "retry_count")?,
         max_retries: column(row, statement, "max_retries")?,
+        trace_carrier: column(row, statement, "trace_carrier")?,
         short_by: column(row, statement, "short_by")?,
     })
 }
 
-/// The claimed rows in claim order and at most one `SHORT` row. Pure.
+/// The claimed rows in claim order and at most one `SHORT` row. Pure but
+/// the warning of a stored carrier over its bound ([`stored_trace_of`]).
 ///
 /// Errors: the contract breach as text: a row kind other than `CLAIMED` and
 /// `SHORT`, a second `SHORT` row, a `CLAIMED` row with a column missing or
@@ -428,7 +435,38 @@ fn decode_claimed_row(row: ClaimWireRow) -> Result<ClaimedRow, String> {
         claimed_at: row.claimed_at.ok_or_else(|| required("claimed_at"))?,
         retry_count: row.retry_count.ok_or_else(|| required("retry_count"))?,
         max_retries: row.max_retries.ok_or_else(|| required("max_retries"))?,
+        trace: stored_trace_of(id, row.trace_carrier),
     })
+}
+
+/// The trace of a claimed row from its stored `trace_carrier`: no carrier
+/// for `NULL`, else the carrier text.
+///
+/// The send stores a carrier of at most
+/// [`crate::telemetry::trace_carrier::MAX_TRACE_CARRIER_BYTES`] bytes, so a
+/// stored text over [`crate::events::MAX_EVENT_TRACE_CARRIER_CHARS`]
+/// characters was not written by a send. A trace never fails a claim: the
+/// row runs with no carrier, and a warning names the task and the length.
+fn stored_trace_of(task_id: Uuid, trace_carrier: Option<String>) -> RunTrace {
+    let text = match trace_carrier {
+        None => return RunTrace::NoCarrier,
+        Some(text) => text,
+    };
+    match TraceCarrierText::new(text) {
+        Ok(text) => RunTrace::Carrier { text },
+        Err(over) => {
+            tracing::warn!(
+                task_id = %task_id,
+                chars = over.chars,
+                bound = over.bound,
+                "claimed task {task_id} has a stored trace carrier of {} characters, over the \
+                 bound of {}; the attempt runs with no carrier",
+                over.chars,
+                over.bound,
+            );
+            RunTrace::NoCarrier
+        }
+    }
 }
 
 fn decode_short_row(row: ClaimWireRow) -> Result<NonZeroU32, String> {
@@ -444,6 +482,7 @@ fn decode_short_row(row: ClaimWireRow) -> Result<NonZeroU32, String> {
         claimed_at,
         retry_count,
         max_retries,
+        trace_carrier,
         short_by,
     } = row;
     let task_columns = [
@@ -457,6 +496,7 @@ fn decode_short_row(row: ClaimWireRow) -> Result<NonZeroU32, String> {
         claimed_at.is_some(),
         retry_count.is_some(),
         max_retries.is_some(),
+        trace_carrier.is_some(),
     ];
     if task_columns.contains(&true) {
         return Err("a SHORT row of horsies_claim carries a task column".to_owned());

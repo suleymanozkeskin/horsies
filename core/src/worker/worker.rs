@@ -720,6 +720,7 @@ fn claimed_of(row: ClaimedRow) -> Claimed {
                 max_retries: row.max_retries,
             },
             options: read_stored_options(row.task_options.as_deref()),
+            trace: row.trace,
         },
         input: TaskInputText::new(row.input),
     }
@@ -2548,6 +2549,7 @@ mod tests {
             kind: TaskKind::Plain,
             retry,
             options: crate::worker::retry::read_stored_options(task_options),
+            trace: crate::events::RunTrace::NoCarrier,
         }
     }
 
@@ -3264,6 +3266,7 @@ mod tests {
             claimed_at,
             retry_count: 1,
             max_retries: 3,
+            trace: crate::events::RunTrace::NoCarrier,
         };
 
         let claimed = claimed_of(row);
@@ -3282,6 +3285,7 @@ mod tests {
                     max_retries: 3,
                 },
                 options: read_stored_options(Some(r#"{"timeout_ms": 2000}"#)),
+                trace: crate::events::RunTrace::NoCarrier,
             }
         );
         assert_eq!(claimed.input.as_str(), r#"{"n": 1}"#);
@@ -3715,6 +3719,7 @@ mod tests {
             claimed_at,
             retry_count,
             max_retries,
+            trace: crate::events::RunTrace::NoCarrier,
         })
     }
 

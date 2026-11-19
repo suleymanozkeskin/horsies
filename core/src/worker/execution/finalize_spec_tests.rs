@@ -235,6 +235,7 @@ async fn claimed_task(pool: &TestPool, task_id: Uuid) -> ClaimedTask {
             max_retries,
         },
         options: read_stored_options(task_options.as_deref()),
+        trace: crate::events::RunTrace::NoCarrier,
     }
 }
 
