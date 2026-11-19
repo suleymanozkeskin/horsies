@@ -124,9 +124,10 @@ impl Horsies {
     /// the profile and the connection settings; then the core's worker
     /// parent on the process runtime, which connects with the resilience
     /// retry, starts the children and claims. An app with an event handler
-    /// ([`Horsies::on_event`]) also gets a handler child: the worker waits
-    /// at most 30 s for it before the first claim, and a handler child that
-    /// fails never stops the worker.
+    /// ([`Horsies::on_event`]), or with the spans of the attempts that the
+    /// worker ended (the default with the feature `otel`), also gets a
+    /// handler child: the worker waits at most 30 s for it before the first
+    /// claim, and a handler child that fails never stops the worker.
     ///
     /// Errors: [`WorkerRunError`]. The run returns `Ok` only at a stop
     /// request.
@@ -180,6 +181,7 @@ impl Horsies {
             self.config(),
             self.tasks(),
             self.event_handlers().manifest(),
+            self.worker_ended_spans(),
             start.profile,
             launch,
         )
@@ -301,6 +303,33 @@ mod tests {
         assert_eq!(launch.command.args, vec![crate::CHILD_MODE_ARGUMENT]);
         assert_eq!(launch.log_level, WorkerLogLevel::Error);
         assert!(WorkerPlan::of_manifest(&manifest).is_ok());
+    }
+
+    /// The manifest carries the worker-ended span switch of the app:
+    /// `MakeSpans` by default with the feature `otel`, `NoSpans` without
+    /// it, and `NoSpans` after `set_worker_ended_spans(NoSpans)`.
+    #[test]
+    fn the_manifest_carries_the_worker_ended_span_switch_of_the_app() {
+        use horsies_core::worker_manifest::WorkerEndedSpans;
+
+        let manifest = app()
+            .worker_manifest_of(WorkerStart::profile("web"))
+            .unwrap();
+        assert_eq!(
+            manifest.worker_ended_spans,
+            crate::telemetry::DEFAULT_WORKER_ENDED_SPANS
+        );
+        #[cfg(feature = "otel")]
+        {
+            assert_eq!(manifest.worker_ended_spans, WorkerEndedSpans::MakeSpans);
+            let mut off = app();
+            off.set_worker_ended_spans(WorkerEndedSpans::NoSpans);
+            let manifest = off.worker_manifest_of(WorkerStart::profile("web")).unwrap();
+            assert_eq!(manifest.worker_ended_spans, WorkerEndedSpans::NoSpans);
+            assert!(WorkerPlan::of_manifest(&manifest).is_ok());
+        }
+        #[cfg(not(feature = "otel"))]
+        assert_eq!(manifest.worker_ended_spans, WorkerEndedSpans::NoSpans);
     }
 
     /// The worker of `config` with the profile `web`: the app accepts the

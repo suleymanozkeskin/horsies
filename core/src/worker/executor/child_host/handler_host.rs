@@ -12,9 +12,11 @@
 //! 4. the writer and the control thread of the socket;
 //! 5. the ready frame.
 //!
-//! Service: each event of an `events` frame is decoded on its own, and goes
-//! to the queue of each handler of its type with no wait. An event that
-//! does not decode is logged and reaches no handler. A `handler_stats`
+//! Service: each event of an `events` frame is decoded on its own. The span
+//! of an attempt that the worker ended is made first
+//! ([`EndedSpanScope::make_for`]), then the event goes to the queue of each
+//! handler of its type with no wait. An event that does not decode is
+//! logged and reaches no handler. A `handler_stats`
 //! frame goes out every [`HANDLER_STATS_INTERVAL`]. A run frame or a second
 //! init frame ends the child with the bad-frame code.
 //!
@@ -29,6 +31,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
+use super::ended_spans::EndedSpanScope;
 use super::handlers::{
     HandlerChildApp, HandlerTallies, RunningHandlers, HANDLER_DRAIN, HANDLER_ERROR_LOG_EVERY,
     HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS, HANDLER_STATS_INTERVAL,
@@ -110,6 +113,7 @@ pub(super) fn boot_and_serve_handlers_on(
     let HandlerChildApp {
         handlers,
         start_hook,
+        ended_spans,
     } = app;
     if let Err(exit) = run_start_hook(
         runtime,
@@ -141,6 +145,7 @@ pub(super) fn boot_and_serve_handlers_on(
     }));
     let end = runtime.block_on(serve_handlers(
         running,
+        &ended_spans,
         writer,
         &mut frames,
         HandlerChildTimes::CHILD,
@@ -165,13 +170,15 @@ fn start_links(
 }
 
 /// Serve a ready handler child: the events of the parent frames go to the
-/// handlers of `running`, and a `handler_stats` frame goes out each
+/// handlers of `running`, after the span that `ended_spans` makes for an
+/// attempt that the worker ended, and a `handler_stats` frame goes out each
 /// `times.stats_every`, until the stop frame, the end of the control thread
 /// or a frame that a handler child does not take. After the stop frame the
 /// handlers get `times.drain`, and the last `handler_stats` frame is
 /// written within `times.last_stats`.
 pub(super) async fn serve_handlers(
     running: RunningHandlers,
+    ended_spans: &EndedSpanScope,
     writer: FrameWriter,
     frames: &mut mpsc::Receiver<ParentFrame>,
     times: HandlerChildTimes,
@@ -182,7 +189,7 @@ pub(super) async fn serve_handlers(
         tallies.clone(),
         times.stats_every,
     ));
-    let end = dispatch_frames(&running, frames).await;
+    let end = dispatch_frames(&running, ended_spans, frames).await;
     stats.abort();
     // The task ends at an await, so no stats frame of it follows the last
     // one.
@@ -202,9 +209,11 @@ pub(super) async fn serve_handlers(
 }
 
 /// Take the parent frames until the stop frame, the end of the control
-/// thread, or a frame that a handler child does not take.
+/// thread, or a frame that a handler child does not take. Each decoded
+/// event gets its span step first, then goes to the handlers.
 async fn dispatch_frames(
     running: &RunningHandlers,
+    ended_spans: &EndedSpanScope,
     frames: &mut mpsc::Receiver<ParentFrame>,
 ) -> ServeEnd {
     let mut undecoded: u64 = 0;
@@ -215,7 +224,10 @@ async fn dispatch_frames(
             Some(ParentFrame::Events(frame)) => {
                 for text in frame.events.events() {
                     match decode_wire_event(text) {
-                        Ok(event) => running.offer(&event),
+                        Ok(event) => {
+                            let _step = ended_spans.make_for(&event);
+                            running.offer(&event);
+                        }
                         Err(refusal) => {
                             undecoded = undecoded.saturating_add(1);
                             log_undecoded(undecoded, &refusal);

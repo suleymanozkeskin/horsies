@@ -28,6 +28,7 @@
 
 mod args;
 mod body_scope;
+mod ended_spans;
 mod handle_setup;
 mod handler_host;
 mod handlers;
@@ -41,6 +42,8 @@ mod run;
 mod run_work;
 mod seats;
 
+#[cfg(test)]
+mod ended_spans_tests;
 #[cfg(test)]
 mod handler_tests;
 #[cfg(test)]
@@ -56,6 +59,7 @@ mod tests;
 
 pub use args::{child_mode, ChildArgs, ChildArgsError, ChildMode, CHILD_MODE_ARGUMENT};
 pub use body_scope::{BodyCarrier, BodyOutcome, BodyRun, BodyScope, BodySpans};
+pub use ended_spans::{EndedAttempt, EndedSpanMaker, EndedSpanScope};
 pub use handle_setup::{child_handle_setup, ChildHandleSetup, HandlerChildHasNoHandle};
 pub use handlers::{
     EventHandlerRefused, EventHandlerSet, HandlerChildApp, HandlerError, HANDLER_DRAIN,

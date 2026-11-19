@@ -141,17 +141,18 @@ pub use crate::worker::finalize_batch::{
 // cancel signal of their run with `run_cancel_signal`. A result wait reads
 // `process_role` first: a process that runs task bodies refuses it. The
 // event handlers of the app (`EventHandlerSet`) run in the handler child of
-// the same binary (`HandlerChildApp`).
+// the same binary (`HandlerChildApp`), which also makes the span of each
+// attempt that the worker ended through the client's `EndedSpanMaker`.
 pub use crate::worker::executor::child_host::{
     child_command, child_handle_setup, child_mode, child_producer, process_role, run_cancel_signal,
     run_child_host, spawn_in_run, thread_role, wait_inside_task_message, BodyCarrier, BodyOutcome,
     BodyRun, BodyScope, BodySpans, ChildApp, ChildArgs, ChildArgsError, ChildHandleSetup,
     ChildHookFailure, ChildHostExit, ChildLogSetup, ChildMode, ChildProducer, ChildStartFuture,
-    ChildStartHook, EventHandlerRefused, EventHandlerSet, HandlerChildApp, HandlerChildHasNoHandle,
-    HandlerError, NamedChildStartHook, ProcessRole, RunCancelSignal, RunSignalRefused,
-    RunSpawnRefused, ThreadRole, CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND, HANDLER_DRAIN,
-    HANDLER_ERROR_LOG_EVERY, HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS,
-    HANDLER_STATS_INTERVAL, MAX_RUN_WORK,
+    ChildStartHook, EndedAttempt, EndedSpanMaker, EndedSpanScope, EventHandlerRefused,
+    EventHandlerSet, HandlerChildApp, HandlerChildHasNoHandle, HandlerError, NamedChildStartHook,
+    ProcessRole, RunCancelSignal, RunSignalRefused, RunSpawnRefused, ThreadRole,
+    CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND, HANDLER_DRAIN, HANDLER_ERROR_LOG_EVERY,
+    HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS, HANDLER_STATS_INTERVAL, MAX_RUN_WORK,
 };
 
 // The parent-child frame codec, for the Python child program and the

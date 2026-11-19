@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use horsies_core::handle::CoreHandle;
 use horsies_core::manifest::ProducerManifest;
+use horsies_core::worker_manifest::WorkerEndedSpans;
 use horsies_core::{
     ClientFamily, CoverageRequest, EventHandlerSet, NamedChildStartHook, PoolProfile,
     RegisteredTask, TaskRegistry,
@@ -81,6 +82,10 @@ pub struct Horsies {
     child_start_hooks: Vec<ChildStartFn>,
     event_handlers: EventHandlerSet,
     handler_child_start_hooks: Vec<ChildStartFn>,
+    /// Whether the handler child makes the span of each attempt that the
+    /// worker ended: `MakeSpans` by default with the feature `otel`
+    /// (`Horsies::set_worker_ended_spans`), `NoSpans` without it.
+    worker_ended_spans: WorkerEndedSpans,
 }
 
 /// One start hook of a worker child, with its name, called once in the
@@ -89,14 +94,15 @@ pub(crate) type ChildStartFn = NamedChildStartHook;
 
 /// What child mode takes from the app: the tasks, the start hooks of a task
 /// child in registration order, the producer manifest of the app's handle,
-/// and what a handler child runs: the event handlers and the start hooks of
-/// the handler child.
+/// and what a handler child runs: the event handlers, the start hooks of
+/// the handler child, and the worker-ended span switch.
 pub(crate) struct ChildParts {
     pub(crate) tasks: TaskRegistry,
     pub(crate) start_hooks: Vec<ChildStartFn>,
     pub(crate) producer_manifest: ProducerManifest,
     pub(crate) event_handlers: EventHandlerSet,
     pub(crate) handler_child_start_hooks: Vec<ChildStartFn>,
+    pub(crate) worker_ended_spans: WorkerEndedSpans,
 }
 
 impl Horsies {
@@ -149,6 +155,7 @@ impl Horsies {
             child_start_hooks: Vec::new(),
             event_handlers: EventHandlerSet::new(),
             handler_child_start_hooks: Vec::new(),
+            worker_ended_spans: crate::telemetry::DEFAULT_WORKER_ENDED_SPANS,
         }
     }
 
@@ -355,6 +362,19 @@ impl Horsies {
         self.handler_child_start_hooks.push(hook);
     }
 
+    /// The worker-ended span switch: the `worker_ended_spans` of the worker
+    /// manifest, and the span scope of the handler child.
+    pub(crate) fn worker_ended_spans(&self) -> WorkerEndedSpans {
+        self.worker_ended_spans
+    }
+
+    /// Keep `spans` as the worker-ended span switch
+    /// (`Horsies::set_worker_ended_spans`, feature `otel`).
+    #[cfg(feature = "otel")]
+    pub(crate) fn put_worker_ended_spans(&mut self, spans: WorkerEndedSpans) {
+        self.worker_ended_spans = spans;
+    }
+
     /// The parts of the app that child mode serves from. Consumes the app:
     /// a child process serves until its end.
     pub(crate) fn into_child_parts(self) -> ChildParts {
@@ -364,6 +384,7 @@ impl Horsies {
             start_hooks: self.child_start_hooks,
             event_handlers: self.event_handlers,
             handler_child_start_hooks: self.handler_child_start_hooks,
+            worker_ended_spans: self.worker_ended_spans,
         }
     }
 }
@@ -381,6 +402,7 @@ impl std::fmt::Debug for Horsies {
                 "handler_child_start_hooks",
                 &self.handler_child_start_hooks.len(),
             )
+            .field("worker_ended_spans", &self.worker_ended_spans)
             .finish()
     }
 }

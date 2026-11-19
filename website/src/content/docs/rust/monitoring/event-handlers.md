@@ -93,7 +93,7 @@ async fn connect_audit_sink() -> Result<(), String> {
 
 | Fact | Behaviour |
 |------|-----------|
-| Start | When the app has a handler: after the task children, before the first claim |
+| Start | When the app has a handler, or makes the spans of the attempts that the worker ended (the default with the feature `otel`): after the task children, before the first claim |
 | Ready wait | The worker waits at most 30 s for its ready frame, then claims in every case |
 | Boot failure that repeats | A failed start hook, no ready frame in time: the child stays down until the worker restarts |
 | Boot failure that can clear | A resource shortage, a refused thread: the child boots again after the slot backoff |
@@ -101,6 +101,40 @@ async fn connect_audit_sink() -> Result<(), String> {
 | Full event queue of the worker | Each event drops and counts in `horsies.telemetry.events.dropped{cause="queue_full"}`. The worker never waits for the child |
 
 Each state snapshot of the worker writes the state of its handler child in the `telemetry` column of `horsies_worker_states`: `off`, `starting`, `up` with its pid, or `down` with its cause.
+
+## Spans of the Attempts That the Worker Ended
+
+With the feature `otel`, a task body runs inside its attempt span in the task child (`horsies::otel`). When the worker ends the attempt itself, that child is gone and the span never ends:
+
+- an isolated task killed at its timeout (`TASK_TIMEOUT`);
+- a shared async child killed for a blocked runtime (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`);
+- a child lost before it reported the end, with its exit seen (`WORKER_CRASHED`).
+
+The handler child makes a span for each such attempt from its `AttemptEnded` event, with the global tracer provider and propagator of that process. It is the default with the feature: the worker starts its handler child also when the app has no handler. Set the provider in `main` before `horsies::cli::run`, or in an `on_handler_child_start` hook, and shut it down after `run` returns, so that a batch processor exports the last spans of the child. `Horsies::set_worker_ended_spans(WorkerEndedSpans::NoSpans)` turns the spans off:
+
+<!-- rust-check: skip partial -- set_worker_ended_spans is built with the feature otel, which the docs check does not enable -->
+```rust
+use horsies::otel::WorkerEndedSpans;
+
+fn no_worker_ended_spans(app: &mut Horsies) {
+    app.set_worker_ended_spans(WorkerEndedSpans::NoSpans);
+}
+```
+
+| Item | Value |
+|------|-------|
+| Name and kind | `run <task_name>`, CONSUMER |
+| Parent | The span that sent the task, from the carrier that the send stored; a task with no carrier gets a root span |
+| Start | When the task reached its child (wall clock of the worker), earlier than the start of the body |
+| End | When the end reached the worker |
+| Status | ERROR, with `error.type` = the error code of the attempt |
+| Attributes | `horsies.task.id`, `horsies.task.name`, `horsies.task.attempt`, `horsies.task.execution` (the kind of the child), `horsies.queue`, `horsies.worker.id`, `messaging.system`, `messaging.operation.type`, `messaging.destination.name`, `messaging.message.id`, and `horsies.span.source` = `worker` |
+
+Limits:
+
+- A span that the body made and exported before the kill keeps the id of the lost span as its parent. A trace shows it next to the span of the worker, not under it.
+- The span of a workflow task has no `horsies.workflow.id`, `horsies.workflow.node` or `horsies.workflow.root_id`: the start of the child reads the workflow node, and a child whose attempt the worker ended reported nothing. The span stays in the trace of the workflow start through the stored carrier.
+- Without the feature `otel` the app makes no such span, and the worker starts no handler child for it.
 
 ## Things to Avoid
 
@@ -144,6 +178,12 @@ app.on_event_blocking::<AttemptEnded>("audit.write", write_audit_row)?;
 | `handler` | `impl Fn(E) -> Result<(), HandlerError> + Send + Sync + 'static` | The blocking handler |
 
 **Errors:** as `on_event`.
+
+### `Horsies::set_worker_ended_spans(spans: WorkerEndedSpans)` (feature `otel`)
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `spans` | `horsies::otel::WorkerEndedSpans` | `MakeSpans` (the default with the feature): the handler child makes the span of each attempt that the worker ended. `NoSpans`: no such span |
 
 ### `Horsies::on_handler_child_start(hook)`
 

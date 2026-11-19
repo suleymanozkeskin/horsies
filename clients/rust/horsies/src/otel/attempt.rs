@@ -18,10 +18,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use horsies_core::telemetry::labels::LabelName;
-use horsies_core::{BodyOutcome, BodyRun, BodyScope, BodySpans, OutcomeCode, RunWorkflow};
+use horsies_core::{
+    BodyOutcome, BodyRun, BodyScope, BodySpans, Execution, OutcomeCode, RunWorkflow,
+};
 use opentelemetry::global;
 use opentelemetry::trace::Status;
+use opentelemetry::KeyValue;
 use tracing_opentelemetry::{OpenTelemetrySpanExt, SetParentError};
+use uuid::Uuid;
 
 use super::carrier::{attempt_parent_of, AttemptParent};
 use super::{
@@ -72,13 +76,9 @@ pub(super) fn attempt_span(run: &BodyRun<'_>, parent: AttemptParent) -> tracing:
     let name = format!("run {}", run.task_name);
     let _name = span.record("otel.name", name.as_str());
     let _kind = span.record("otel.kind", "consumer");
-    span.set_attribute(EXECUTION_KEY, run.execution.as_str());
-    span.set_attribute(WORKER_ID_KEY, run.worker_id.to_owned());
-    span.set_attribute(LabelName::Queue.attribute_key(), run.queue_name.to_owned());
-    span.set_attribute(MESSAGING_SYSTEM_KEY, MESSAGING_SYSTEM);
-    span.set_attribute(MESSAGING_OPERATION_TYPE_KEY, PROCESS_OPERATION);
-    span.set_attribute(MESSAGING_DESTINATION_NAME_KEY, run.queue_name.to_owned());
-    span.set_attribute(MESSAGING_MESSAGE_ID_KEY, run.task_id.to_string());
+    for attribute in run_attributes(run.task_id, run.queue_name, run.worker_id, run.execution) {
+        span.set_attribute(attribute.key, attribute.value);
+    }
     set_workflow_attributes(&span, run.workflow);
     match parent {
         AttemptParent::NoCarrier => {}
@@ -88,6 +88,28 @@ pub(super) fn attempt_span(run: &BodyRun<'_>, parent: AttemptParent) -> tracing:
         },
     }
     span
+}
+
+/// The attributes of an attempt span that are not fields of its `tracing`
+/// span ([`body_span`]): the class of the child `execution`, the worker
+/// `worker_id`, the queue `queue_name`, and the messaging attributes of the
+/// task `task_id`. The span of an attempt that the worker ended has the same
+/// set ([`super::ended`]). Pure.
+pub(super) fn run_attributes(
+    task_id: Uuid,
+    queue_name: &str,
+    worker_id: &str,
+    execution: Execution,
+) -> [KeyValue; 7] {
+    [
+        KeyValue::new(EXECUTION_KEY, execution.as_str()),
+        KeyValue::new(WORKER_ID_KEY, worker_id.to_owned()),
+        KeyValue::new(LabelName::Queue.attribute_key(), queue_name.to_owned()),
+        KeyValue::new(MESSAGING_SYSTEM_KEY, MESSAGING_SYSTEM),
+        KeyValue::new(MESSAGING_OPERATION_TYPE_KEY, PROCESS_OPERATION),
+        KeyValue::new(MESSAGING_DESTINATION_NAME_KEY, queue_name.to_owned()),
+        KeyValue::new(MESSAGING_MESSAGE_ID_KEY, task_id.to_string()),
+    ]
 }
 
 /// Set `horsies.workflow.id`, `horsies.workflow.node` (the node index) and

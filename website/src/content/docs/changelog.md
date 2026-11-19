@@ -1556,6 +1556,22 @@ unless it starts with "Added".
   and each worker child write one JSON object per log record, with the
   event's fields at the top level and the record's spans with their
   fields. `cli::run(app)` keeps the text format.
+- **Added: the span of an attempt that the worker ended** (feature
+  `otel`). The handler child of a worker makes the span of each attempt
+  that the worker ended itself: an isolated task killed at its timeout
+  (`TASK_TIMEOUT`), a shared async child killed for a blocked runtime
+  (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`), and a child lost with its
+  exit seen (`WORKER_CRASHED`). The task child of such an attempt is gone,
+  so its own span never ends. The span is `run <task_name>` of kind
+  CONSUMER under the span that sent the task, with the global tracer
+  provider and propagator of the handler child, from the time the task
+  reached its child to the time the end reached the worker, with status
+  ERROR, `error.type` = the code, the attributes of the span of a child and
+  `horsies.span.source = "worker"`; a workflow task gets no
+  `horsies.workflow.*` attribute. It is the default with the feature: the
+  worker then starts its handler child also when the app has no handler.
+  `Horsies::set_worker_ended_spans(horsies::otel::WorkerEndedSpans::NoSpans)`
+  turns it off.
 
 ## 0.7.0 — 2026-11-15
 

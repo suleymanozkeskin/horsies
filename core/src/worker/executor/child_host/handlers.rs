@@ -29,6 +29,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
 
+use super::ended_spans::EndedSpanScope;
 use super::host::ChildStartHook;
 use super::panic::{catch_body_panic, CatchPanic, PanicRecord};
 use crate::events::{Event, EventTypeName, UnionEvent};
@@ -310,9 +311,10 @@ impl EventHandlerSet {
     }
 }
 
-/// What a handler child of the app runs: the event handlers, and the start
-/// hooks of the handler child (Python `on_handler_child_start`). A task
-/// child reads neither.
+/// What a handler child of the app runs: the event handlers, the start
+/// hooks of the handler child (Python `on_handler_child_start`), and the
+/// spans of the attempts that the worker ended. A task child reads none of
+/// them.
 pub struct HandlerChildApp {
     pub handlers: EventHandlerSet,
     /// The start hooks of the handler child. They run once in each handler
@@ -322,14 +324,20 @@ pub struct HandlerChildApp {
     /// panics or runs longer ends the child with exit code 173: the worker
     /// keeps the handler child down until it restarts, and runs its tasks.
     pub start_hook: ChildStartHook,
+    /// The spans of the attempts that the worker ended
+    /// (`child_host::ended_spans`). The child makes each span before the
+    /// handlers get the event.
+    pub ended_spans: EndedSpanScope,
 }
 
 impl HandlerChildApp {
-    /// No event handler and no start hook of the handler child.
+    /// No event handler, no start hook of the handler child, and no span of
+    /// an attempt that the worker ended.
     pub fn without_handlers() -> Self {
         Self {
             handlers: EventHandlerSet::new(),
             start_hook: ChildStartHook::NoHook,
+            ended_spans: EndedSpanScope::NoSpans,
         }
     }
 }
