@@ -2133,6 +2133,8 @@ const MONITORING_HANDLER_PARAMETERS: &[StubParameter] = &[
     keyword("custom_css_url", "str | None"),
     keyword("client_version", "str"),
     keyword("heartbeat_ms", "int"),
+    keyword("queue_names", "list[str]"),
+    keyword("schedule_names", "list[str]"),
 ];
 
 /// The classes of the monitoring reads and the web handler.
@@ -2543,7 +2545,7 @@ const MONITORING_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "MonitoringHandler",
-        doc: "The monitoring web app of the broker of a CoreHandle, for the FastAPI mount of\ncreate_monitoring_app. Starts nothing: the first call builds it. A handle without a child\nspec source raises RuntimeError; heartbeat_ms outside 1 to 3,600,000 raises ValueError.",
+        doc: "The monitoring web app of the broker of a CoreHandle, for the FastAPI mount of\ncreate_monitoring_app. Starts nothing: the first call builds it. queue_names and\nschedule_names are the label values of /metrics; other names are (unknown). A handle\nwithout a child spec source raises RuntimeError; heartbeat_ms outside 1 to 3,600,000, or a\nname that is empty or (unknown), raises ValueError.",
         constructor: Constructor::Parameters(MONITORING_HANDLER_PARAMETERS),
         properties: &[
             property("max_request_body_bytes", "int"),
@@ -3583,6 +3585,67 @@ const WORKER_CLASSES: &[StubClass] = &[
     },
 ];
 
+const FLEET_METRICS_SERVER_METHODS: &[StubFunction] = &[
+    StubFunction {
+        name: "run",
+        parameters: &[],
+        returns: TypeText::Plain("FleetMetricsStopped | FleetMetricsFailed"),
+        doc: "Bind the address and serve the fleet metrics until a stop request. Main thread only: the\nsignal handlers run between wait slices, and there is no total bound. A failed read is a\nfailure gauge in the text. Raises NotMainThread off the main thread, RuntimeError for a\nsecond run, and, after the run ended, the exception of a signal handler.",
+    },
+    StubFunction {
+        name: "request_stop",
+        parameters: &[],
+        returns: TypeText::Plain("StopRequested"),
+        doc: "Ask the run to stop: the requests in flight end, then the run answers\nFleetMetricsStopped. Idempotent; any thread; returns at once.",
+    },
+];
+
+/// The classes of the fleet metrics server (`horsies metrics`).
+const FLEET_METRICS_CLASSES: &[StubClass] = &[
+    StubClass {
+        name: "ListenAddress",
+        doc: "A HOST:PORT address of a metrics endpoint; an IPv6 host without its brackets.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("host", "str"), property("port", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "ListenAddressRefused",
+        doc: "A text that is not a HOST:PORT address. message names the text and the rule.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "FleetLabelsRefused",
+        doc: "A queue or schedule name that cannot be a label value: it is empty or (unknown), or a\nkind holds too many names. message names it.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "FleetMetricsServer",
+        doc: "The fleet metrics server of one CoreHandle, not run yet. It reads the fleet state at\nmost once per collect interval and serves the last read at GET /metrics.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: FLEET_METRICS_SERVER_METHODS,
+    },
+    StubClass {
+        name: "FleetMetricsStopped",
+        doc: "The run ended at a stop request.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "FleetMetricsFailed",
+        doc: "The address did not bind, or the server failed. message names the address and the\ncause.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str")],
+        methods: &[],
+    },
+];
+
 const CLASS_COUNT: usize = HANDLE_CLASSES.len()
     + ARGUMENT_CLASSES.len()
     + RECORD_CLASSES.len()
@@ -3590,7 +3653,8 @@ const CLASS_COUNT: usize = HANDLE_CLASSES.len()
     + WORKFLOW_CLASSES.len()
     + HISTORY_CLASSES.len()
     + FRAME_CLASSES.len()
-    + WORKER_CLASSES.len();
+    + WORKER_CLASSES.len()
+    + FLEET_METRICS_CLASSES.len();
 
 const CLASSES: [StubClass; CLASS_COUNT] = {
     let mut classes = [HANDLE_CLASSES[0]; CLASS_COUNT];
@@ -3640,6 +3704,13 @@ const CLASSES: [StubClass; CLASS_COUNT] = {
         classes[worker_start + worker_position] = WORKER_CLASSES[worker_position];
         worker_position += 1;
     }
+    let fleet_metrics_start = worker_start + WORKER_CLASSES.len();
+    let mut fleet_metrics_position = 0;
+    while fleet_metrics_position < FLEET_METRICS_CLASSES.len() {
+        classes[fleet_metrics_start + fleet_metrics_position] =
+            FLEET_METRICS_CLASSES[fleet_metrics_position];
+        fleet_metrics_position += 1;
+    }
     classes
 };
 
@@ -3685,6 +3756,18 @@ const FUNCTIONS: &[StubFunction] = &[
         parameters: &[],
         returns: TypeText::Plain("uuid.UUID | IdMintRefused"),
         doc: "Mint a new task id (UUIDv7). Starts no runtime.",
+    },
+    StubFunction {
+        name: "parse_listen_address",
+        parameters: &[positional("text", "str")],
+        returns: TypeText::Plain("ListenAddress | ListenAddressRefused"),
+        doc: "The address of text: HOST:PORT or [IPV6]:PORT, the port 1 to 65535. Pure: starts no\nruntime. The host is resolved at the bind.",
+    },
+    StubFunction {
+        name: "prepare_fleet_metrics",
+        parameters: &[positional("handle", "CoreHandle"), keyword("listen", "ListenAddress"), keyword("queue_names", "list[str]"), keyword("schedule_names", "list[str]")],
+        returns: TypeText::Plain("FleetMetricsServer | FleetLabelsRefused"),
+        doc: "The fleet metrics server of the database of handle on listen, with the queue and\nschedule names of the app config as label values. Pure: starts no runtime.",
     },
     StubFunction {
         name: "prepare_rerun_write",

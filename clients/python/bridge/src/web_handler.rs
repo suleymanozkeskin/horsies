@@ -22,7 +22,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use horsies_core::monitoring::fleet::FleetLabels;
 use horsies_core::web::{
     route_access, AccessGrant as CoreGrant, AccessNeed, Bytes, EventFrames, EventStreamItem,
     Method, MonitoringHandler as CoreHandler, MonitoringHandlerConfig, MonitoringUiConfig,
@@ -38,6 +37,7 @@ use tokio::sync::{watch, Mutex, OnceCell};
 use crate::bridge::completion_queue::call_async;
 use crate::bridge::CallKind;
 use crate::child_spec::{PythonChildSpecSource, RaisedExceptions, RegisteredSource};
+use crate::fleet_metrics::fleet_labels;
 use crate::handle::{checked_core, BrokerConnection, CoreHandle};
 use crate::process_core::Core;
 
@@ -492,20 +492,29 @@ pub struct MonitoringHandler {
 impl MonitoringHandler {
     /// The handler of `handle`'s broker. `client_version` is the version
     /// that `/api/meta` reports; `heartbeat_ms` the wait of an event stream
-    /// without an event before its heartbeat frame (1 to 3,600,000).
-    /// Starts nothing: the first call builds the handler. A handle without
-    /// a child spec source raises `RuntimeError`; a heartbeat out of bounds
-    /// raises `ValueError`.
+    /// without an event before its heartbeat frame (1 to 3,600,000);
+    /// `queue_names` and `schedule_names` the label values of `/metrics`
+    /// (every other name is `(unknown)`). Starts nothing: the first call
+    /// builds the handler. A handle without a child spec source raises
+    /// `RuntimeError`; a heartbeat out of bounds, or a name that is empty
+    /// or `(unknown)`, raises `ValueError`.
     #[new]
-    #[pyo3(signature = (handle, *, actions_enabled, custom_css_url, client_version, heartbeat_ms))]
+    #[pyo3(signature = (
+        handle, *, actions_enabled, custom_css_url, client_version, heartbeat_ms, queue_names,
+        schedule_names
+    ))]
     fn new(
         handle: &Bound<'_, CoreHandle>,
         actions_enabled: bool,
         custom_css_url: Option<String>,
         client_version: String,
         heartbeat_ms: u64,
+        queue_names: Vec<String>,
+        schedule_names: Vec<String>,
     ) -> PyResult<Self> {
         let heartbeat = heartbeat_of(heartbeat_ms).map_err(PyValueError::new_err)?;
+        let fleet_labels = fleet_labels(queue_names, schedule_names)
+            .map_err(|refused| PyValueError::new_err(refused.message))?;
         let handle = handle.get();
         let child_source = handle.registered_child_spec_source().ok_or_else(|| {
             PyRuntimeError::new_err(
@@ -523,10 +532,7 @@ impl MonitoringHandler {
                         ui: MonitoringUiConfig { custom_css_url },
                         client_version,
                         heartbeat,
-                        // The constructor takes no queue or schedule names:
-                        // every queue and schedule of `/metrics` is
-                        // `(unknown)`.
-                        fleet_labels: FleetLabels::none(),
+                        fleet_labels,
                     },
                 },
                 built: OnceCell::new(),
