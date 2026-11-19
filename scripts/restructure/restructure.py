@@ -291,12 +291,13 @@ def apply_edits(repo: Path) -> tuple[set[str], list[Failure]]:
 
 def check_index(old_files: Iterable[str], new_files: Iterable[str]) -> list[Failure]:
     """The index holds exactly the moved old files and the added ones, and no
-    file that moves is still at its old path."""
+    file that moves is still at its old path (a link added there is not
+    that file)."""
     old = set(old_files)
-    expected = {rules.new_path_of(path) for path in old}
-    expected |= {new_file.path for new_file in rules.NEW_FILES} | {
+    added = {new_file.path for new_file in rules.NEW_FILES} | {
         link.path for link in rules.NEW_LINKS
     }
+    expected = {rules.new_path_of(path) for path in old} | added
     actual = set(new_files)
     failures = [
         Failure(path, 'expected in the index after the move, missing')
@@ -308,7 +309,7 @@ def check_index(old_files: Iterable[str], new_files: Iterable[str]) -> list[Fail
     ]
     failures += [
         Failure(path, 'a tracked file that moves is still at its old path')
-        for path in sorted(actual & old)
+        for path in sorted((actual & old) - added)
         if rules.new_path_of(path) != path
     ]
     return failures
