@@ -5,9 +5,9 @@
 //! the queues and claim settings of the app, the recovery, retention,
 //! resilience and payload settings of the worker's loops (`sections`), the
 //! execution class and the declared error codes of each registered task,
-//! and how a child and the preload process start. The client resolves its user config (Pydantic in Python)
-//! into it; the core picks and checks the profile
-//! ([`select_worker_profile`]), so one resolver serves every client.
+//! and how a child and the preload process start. The client resolves its
+//! user config (Pydantic in Python) into it; the core picks and checks the
+//! profile ([`select_worker_profile`]), so one resolver serves every client.
 //!
 //! As the producer manifest ([`crate::manifest`]), it holds values only: no
 //! field has a default, and an unknown field is refused. A manifest that the
