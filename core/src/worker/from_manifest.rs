@@ -134,13 +134,15 @@ impl Worker {
     /// With [`MetricsEndpointPlan::ListenAddress`], the worker gets the
     /// registry of its tasks and queues, and the metrics endpoint of the
     /// address (`Worker::with_metrics_endpoint`). The endpoint binds when
-    /// the run starts.
+    /// the run starts. A task or queue name that cannot be a label value of
+    /// its own (empty, the fallback text of its label, or past the bound of
+    /// names) is not declared: its samples count in the fallback series, and
+    /// one WARNING line names it.
     ///
     /// Errors: [`WorkerError::Broker`] when the broker config or the core
     /// handle is refused; [`WorkerError::Config`] as [`Worker::of_child_specs`],
-    /// and with an endpoint when a task or queue name cannot be a label value
-    /// (empty, the fallback text of its label, or past the bound of names)
-    /// or the core is built without the feature `metrics-endpoint`.
+    /// and with an endpoint when the core is built without the feature
+    /// `metrics-endpoint`.
     pub async fn from_plan(
         plan: WorkerPlan,
         child_specs: Arc<dyn ChildSpecSource>,
@@ -168,10 +170,12 @@ impl Worker {
 }
 
 /// `worker` with the registry of `task_codes` and `queues`, and the metrics
-/// endpoint of `address`. Pure: the endpoint thread starts with the run.
+/// endpoint of `address`. The endpoint thread starts with the run. Logs one
+/// WARNING line that names each task or queue name that the registry does
+/// not declare.
 ///
-/// Errors: [`WorkerError::Config`] when a task or queue name cannot be a
-/// label value.
+/// Errors: none in this build; the signature is the one of a build without
+/// the feature `metrics-endpoint`.
 #[cfg(feature = "metrics-endpoint")]
 fn serve_metrics(
     worker: Worker,
@@ -179,16 +183,16 @@ fn serve_metrics(
     task_codes: &BTreeMap<String, DeclaredErrorCodes>,
     queues: &[String],
 ) -> Result<Worker, WorkerError> {
+    use crate::telemetry::declared::warn_folded_names;
     use crate::telemetry::worker::TelemetryOn;
     use crate::telemetry::worker_registry::{worker_registry, WorkerRegistry};
 
-    let WorkerRegistry { registry, codes } =
-        worker_registry(task_codes, queues, worker.worker_facts()).map_err(|refused| {
-            WorkerError::Config(format!(
-                "--metrics-listen {address}: the task and queue names are the values of the \
-                 metric labels: {refused}"
-            ))
-        })?;
+    let WorkerRegistry {
+        registry,
+        codes,
+        folded,
+    } = worker_registry(task_codes, queues, worker.worker_facts());
+    warn_folded_names(&format!("--metrics-listen {address}"), &folded);
     let telemetry = match TelemetryOn::metrics_only(registry, codes) {
         Ok(telemetry) => telemetry,
         // `worker_registry` builds the registry of every worker metric.

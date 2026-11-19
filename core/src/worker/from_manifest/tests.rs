@@ -218,12 +218,17 @@ fn a_listen_address_plans_the_endpoint_with_the_codes_of_each_task() {
 }
 
 /// With an endpoint, the worker of the plan builds the registry of its
-/// tasks and queues; a queue named as the fallback of the `queue` label is
-/// a config error that names the flag. Nothing connects.
+/// tasks and queues. A queue named as the fallback of the `queue` label is
+/// not refused: the worker builds, and one WARNING line that names the flag
+/// names the queue and its reason. Nothing connects.
 #[cfg(feature = "metrics-endpoint")]
 #[tokio::test]
-async fn the_worker_of_an_endpoint_plan_builds_and_a_fallback_queue_name_is_refused() {
+async fn the_worker_of_an_endpoint_plan_builds_and_a_fallback_queue_name_is_one_warning() {
+    let capture = crate::test_support::LogCapture::new();
+    let _default = capture.set_default();
     let endpoint = json!({"kind": "LISTEN_ADDRESS", "host": "127.0.0.1", "port": 9100});
+    let start = "--metrics-listen 127.0.0.1:9100: ";
+
     let plan = WorkerPlan::of_manifest(&parsed(&manifest_with_endpoint(endpoint.clone())))
         .expect("a plan");
     let built = Worker::from_plan(
@@ -233,25 +238,28 @@ async fn the_worker_of_an_endpoint_plan_builds_and_a_fallback_queue_name_is_refu
     )
     .await;
     assert!(built.is_ok(), "{:?}", built.err());
+    assert_eq!(
+        capture.lines_starting(tracing::Level::WARN, start),
+        Vec::new()
+    );
 
     let mut document = manifest_with_endpoint(endpoint);
     document["claim"]["queues"]["queues"][0]["name"] = json!("(unknown)");
     let plan = WorkerPlan::of_manifest(&parsed(&document)).expect("a plan");
-    match Worker::from_plan(
+    let built = Worker::from_plan(
         plan,
         crate::test_support::child_specs::no_child_specs(),
         ClientFamily::Rust,
     )
-    .await
-    {
-        Err(WorkerError::Config(message)) => {
-            assert!(
-                message.starts_with("--metrics-listen 127.0.0.1:9100: "),
-                "{message}"
-            );
-            assert!(message.contains("(unknown)"), "{message}");
-        }
-        Err(other) => panic!("expected a config error, got {other}"),
-        Ok(_worker) => panic!("a queue named (unknown) is not a label value"),
-    }
+    .await;
+    assert!(built.is_ok(), "{:?}", built.err());
+    let warnings = capture.lines_starting(tracing::Level::WARN, start);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0]
+            .message
+            .ends_with("\"(unknown)\" in the queue names (the fallback text of the label)"),
+        "{}",
+        warnings[0].message
+    );
 }
