@@ -21,7 +21,7 @@ export default defineConfig({
   build: {
     // The committed build that horsies-core embeds and serves for both
     // clients. It lives outside the Vite root, hence the explicit empty.
-    outDir: '../crates/horsies-core/webui-dist',
+    outDir: '../core/webui-dist',
     emptyOutDir: true,
   },
   server: {

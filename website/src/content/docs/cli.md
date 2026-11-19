@@ -242,7 +242,7 @@ Each agent tool reads a different folder, so `--target` has no default. The comm
 
 Horsies ships guidance-oriented skill files as one skill folder in the package,
 `horsies/.agents/skills/horsies/`. The wheel contains it; a source checkout has
-it at `python/horsies/.agents/skills/horsies/`. Copy it into your project with
+it at `clients/python/horsies/.agents/skills/horsies/`. Copy it into your project with
 [`horsies skills install`](#horsies-skills-install).
 
 Available files:

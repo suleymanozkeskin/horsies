@@ -1,6 +1,6 @@
 // `GET /api/meta` — deployment capabilities the SPA gates its UI on.
 
-/** The server's schema verdict, as `SchemaState` in `python/horsies/web/schema.py`. */
+/** The server's schema verdict, as `SchemaState` in `clients/python/horsies/web/schema.py`. */
 export type ServerSchemaState =
   | 'MATCH'
   | 'MISMATCH'

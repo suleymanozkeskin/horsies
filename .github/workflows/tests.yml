@@ -15,6 +15,11 @@ concurrency:
 
 permissions: {}
 
+# The Python project is clients/python/. A step that runs uv at the
+# repository root uses its pyproject.toml, uv.lock and .venv.
+env:
+  UV_PROJECT: ${{ github.workspace }}/clients/python
+
 jobs:
   # One dev wheel of horsies, with horsies._core for Linux x86_64, per run.
   # The Python jobs install this wheel and import horsies from it: no job
@@ -51,7 +56,7 @@ jobs:
       - name: Build the dev wheel
         env:
           MATURIN_PEP517_ARGS: --profile dev
-        run: uv build --wheel --python 3.13 --out-dir dist
+        run: uv build clients/python --wheel --python 3.13 --out-dir dist
 
       - name: Upload the dev wheel
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -86,35 +91,41 @@ jobs:
       - name: Install dependencies and the dev wheel
         run: |
           uv sync --dev --no-install-project
-          uv pip install --no-deps dist/horsies-*.whl
+          uv pip install --python clients/python/.venv --no-deps dist/horsies-*.whl
 
       # Strict pyright over the paths listed in pyrightconfig.clean.json. The
       # list holds files that are clean today, and the type pins.
       - name: Typecheck clean paths
-        run: uv run --no-sync pyright -p pyrightconfig.clean.json
+        run: uv run --no-sync pyright -p clients/python/pyrightconfig.clean.json
 
       # Type-check the python blocks of the docs and the skill files. The
       # extractor writes one file per page; blocks marked "check: skip" are
-      # left out. See tests/docs_examples/extract.py.
+      # left out. See clients/python/tests/docs_examples/extract.py.
       - name: Typecheck doc examples
         run: |
-          uv run --no-sync python tests/docs_examples/extract.py build/doc_examples
-          uv run --no-sync pyright -p pyrightconfig.docs.json
+          uv run --no-sync python clients/python/tests/docs_examples/extract.py clients/python/build/doc_examples
+          uv run --no-sync pyright -p clients/python/pyrightconfig.docs.json
 
       - name: Run unit tests
-        run: uv run --no-sync pytest tests/unit/ -v --tb=short
+        run: uv run --no-sync pytest clients/python/tests/unit/ -v --tb=short
+
+      # The unit tests of the cross-client harnesses in the top-level tests/:
+      # the perf harness and the stored-form vectors. They run from the
+      # repository root with the pytest settings of the Python project.
+      - name: Run the unit tests of the cross-client harnesses
+        run: uv run --no-sync pytest -c clients/python/pyproject.toml --rootdir . tests/perf/ tests/test_stored_form_*.py -v --tb=short
 
       # The pure tests of the dual-run snapshot: rules, normalize, compare.
       - name: Run dual-run unit tests
-        run: uv run --no-sync pytest tests/dualrun/ -m unit -v --tb=short
+        run: uv run --no-sync pytest -c clients/python/pyproject.toml --rootdir . tests/parity/snapshot/ -m unit -v --tb=short
 
-      # The public API of the installed wheel against tests/public_api/
+      # The public API of the installed wheel against clients/python/tests/public_api/
       # baseline.json and baseline-pyright.json: exports, the deep imports of
       # the docs, the skill files and the showcase, signatures, fields, enum
       # members, the pyright completeness score and diagnostics. An intended
       # change updates the baseline with `python -m tests.public_api.runner`.
       - name: Compare the public API with the baseline
-        run: uv run --no-sync pytest tests/public_api/ -v --tb=short
+        run: uv run --no-sync pytest clients/python/tests/public_api/ -v --tb=short
 
   dualrun:
     needs: [scope, python-wheel]
@@ -157,19 +168,19 @@ jobs:
       - name: Install dependencies and the dev wheel
         run: |
           uv sync --dev --no-install-project
-          uv pip install --no-deps dist/horsies-*.whl
+          uv pip install --python clients/python/.venv --no-deps dist/horsies-*.whl
 
       - name: Run dual-run integration tests
         env:
           DB_PASSWORD: testpassword
-        run: uv run --no-sync pytest tests/dualrun/ -m integration -v --tb=short
+        run: uv run --no-sync pytest -c clients/python/pyproject.toml --rootdir . tests/parity/snapshot/ -m integration -v --tb=short
 
   extension:
     needs: [scope, python-wheel]
     if: needs.scope.outputs.run_python == 'true'
     # The tests of horsies._core itself, each case in a fresh interpreter
-    # (tests/extension/). Most cases connect: the session database of
-    # tests/session_database.py, with the schema that
+    # (clients/python/tests/extension/). Most cases connect: the session database of
+    # clients/python/tests/session_database.py, with the schema that
     # CoreHandle.install_schema installs. The uvloop cases need uvloop from
     # the dev group.
     runs-on: ubuntu-latest
@@ -208,12 +219,12 @@ jobs:
       - name: Install dependencies and the dev wheel
         run: |
           uv sync --dev --no-install-project
-          uv pip install --no-deps dist/horsies-*.whl
+          uv pip install --python clients/python/.venv --no-deps dist/horsies-*.whl
 
       - name: Run the extension module tests
         env:
           DB_PASSWORD: testpassword
-        run: uv run --no-sync pytest tests/extension/ -v --tb=short
+        run: uv run --no-sync pytest clients/python/tests/extension/ -v --tb=short
 
   newest-pydantic:
     needs: [scope, python-wheel]
@@ -241,10 +252,10 @@ jobs:
       - name: Install dependencies with the newest pydantic, and the dev wheel
         run: |
           uv sync --dev --no-install-project --upgrade-package pydantic --upgrade-package pydantic-core
-          uv pip install --no-deps dist/horsies-*.whl
+          uv pip install --python clients/python/.venv --no-deps dist/horsies-*.whl
 
       - name: Run the type contract tests
-        run: uv run --no-sync pytest tests/unit/test_wire_shape.py tests/unit/test_strict_codec.py tests/unit/test_workflow_node_wire_kwargs.py tests/unit/test_signature_check.py tests/unit/test_type_contract_send_return.py -v --tb=short
+        run: uv run --no-sync pytest clients/python/tests/unit/test_wire_shape.py clients/python/tests/unit/test_strict_codec.py clients/python/tests/unit/test_workflow_node_wire_kwargs.py clients/python/tests/unit/test_signature_check.py clients/python/tests/unit/test_type_contract_send_return.py -v --tb=short
 
   showcase:
     needs: [scope, python-wheel]
@@ -267,7 +278,7 @@ jobs:
           # Same rule as the webui job: an unknown base runs rather than skips.
           if [ -z "$base" ] || [ "$base" = '0000000000000000000000000000000000000000' ]; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$base" HEAD -- showcase/ python/horsies/ crates/horsies-python/ crates/horsies-core/ crates/horsies-core-derive/ Cargo.toml Cargo.lock rust-toolchain.toml; then
+          elif git diff --quiet "$base" HEAD -- clients/python/examples/ clients/python/horsies/ clients/python/bridge/ core/ core/derive/ Cargo.toml Cargo.lock rust-toolchain.toml; then
             echo 'run=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run=true' >> "$GITHUB_OUTPUT"
@@ -290,20 +301,22 @@ jobs:
         if: steps.changed.outputs.run == 'true'
         run: |
           uv sync --dev --no-install-project
-          uv pip install --no-deps dist/horsies-*.whl
+          uv pip install --python clients/python/.venv --no-deps dist/horsies-*.whl
 
       # No --live: this validates config, imports, every workflow DAG, and each
       # registered builder without a database. It is what keeps the showcase
       # compiling against the library as the library changes, which is why a
-      # change to python/horsies/ or to the crates of horsies._core also
+      # change to clients/python/horsies/ or to the crates of horsies._core also
       # triggers this job.
       - name: Validate showcase app
         if: steps.changed.outputs.run == 'true'
-        run: uv run --no-sync horsies check showcase.acme.app:app
+        working-directory: clients/python
+        run: uv run --no-sync horsies check examples.acme.app:app
 
       - name: Typecheck showcase
         if: steps.changed.outputs.run == 'true'
-        run: uv run --no-sync pyright showcase/
+        working-directory: clients/python
+        run: uv run --no-sync pyright examples/
 
   webui:
     needs: scope
@@ -329,7 +342,7 @@ jobs:
           # that build below.
           if [ -z "$base" ] || [ "$base" = '0000000000000000000000000000000000000000' ]; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$base" HEAD -- webui/ crates/horsies-core/webui-dist/; then
+          elif git diff --quiet "$base" HEAD -- webui/ core/webui-dist/; then
             echo 'run=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run=true' >> "$GITHUB_OUTPUT"
@@ -364,7 +377,7 @@ jobs:
         working-directory: webui
         run: bun run build
 
-      # Builds into crates/horsies-core/webui-dist/, which horsies-core embeds,
+      # Builds into core/webui-dist/, which horsies-core embeds,
       # and fails if the committed build differs (webui/scripts/check-core-dist.sh).
       - name: Check the core's committed build
         if: steps.changed.outputs.run == 'true'
@@ -403,7 +416,7 @@ jobs:
           # The rust job checks and tests every crate of the workspace.
           # The Rust pages of the docs site hold the code blocks that
           # horsies-docs-check builds.
-          if git diff --quiet "$base" HEAD -- crates/ rust/ website/src/content/docs/rust/ Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml clippy.toml; then
+          if git diff --quiet "$base" HEAD -- core/ clients/rust/ clients/python/bridge/ clients/python/codegen/ website/src/content/docs/rust/ Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml clippy.toml; then
             echo 'run_rust=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run_rust=true' >> "$GITHUB_OUTPUT"
@@ -411,18 +424,17 @@ jobs:
           # The generator renders the catalogs and the stubs from horsies-core
           # (which derives its catalogs with horsies-core-derive). A change to
           # an input or to a committed output can make a committed file stale.
-          if git diff --quiet "$base" HEAD -- crates/horsies-core/ crates/horsies-core-derive/ crates/horsies-codegen/ python/horsies/_catalog/ python/horsies/_core.pyi Cargo.toml Cargo.lock rust-toolchain.toml; then
+          if git diff --quiet "$base" HEAD -- core/ core/derive/ clients/python/codegen/ clients/python/horsies/_catalog/ clients/python/horsies/_core.pyi Cargo.toml Cargo.lock rust-toolchain.toml; then
             echo 'run_generated=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run_generated=true' >> "$GITHUB_OUTPUT"
           fi
-          # horsies._core is built from crates/horsies-python, crates/horsies-core
-          # and crates/horsies-core-derive with the root Cargo and toolchain
-          # files, so a change there can change a Python result. A PR that
-          # changes only the Rust client, its macros, the generator, rust/, or
-          # the format and lint settings cannot: the Python jobs are skipped for
-          # it.
-          if git diff --quiet "$base" HEAD -- . ':(exclude)crates/horsies/' ':(exclude)crates/horsies-macros/' ':(exclude)crates/horsies-codegen/' ':(exclude)rust/' ':(exclude)rustfmt.toml' ':(exclude)clippy.toml'; then
+          # horsies._core is built from clients/python/bridge, core and
+          # core/derive with the root Cargo and toolchain files, so a change
+          # there can change a Python result. A PR that changes only the Rust
+          # client (clients/rust/), the generator, or the format and lint
+          # settings cannot: the Python jobs are skipped for it.
+          if git diff --quiet "$base" HEAD -- . ':(exclude)clients/rust/' ':(exclude)clients/python/codegen/' ':(exclude)rustfmt.toml' ':(exclude)clippy.toml'; then
             echo 'run_python=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run_python=true' >> "$GITHUB_OUTPUT"
@@ -444,7 +456,7 @@ jobs:
         run: cargo fmt --all --check
 
   # Every crate of the workspace. The check leaves out horsies-test-worker
-  # (rust/tests/worker/): its workflow tests still use the API of the old
+  # (clients/rust/tests/worker/): its workflow tests still use the API of the old
   # Rust client and move to the client of the core with #1410.
   rust:
     needs: scope
@@ -504,7 +516,7 @@ jobs:
 
       # Every `rust` block of website/src/content/docs/rust/ and of the Rust
       # skill files, as a module of the crate; the error names the page.
-      # The block markers: rust/tests/docs-check/src/lib.rs.
+      # The block markers: clients/rust/tests/docs-check/src/lib.rs.
       - name: Build the Rust code blocks of the docs and the skill files
         run: cargo check -p horsies-docs-check --all-targets
 
@@ -543,7 +555,7 @@ jobs:
 
       # The core's tests create one database per test, copied from a
       # template that each test process installs, on the server of
-      # DATABASE_URL (crates/horsies-core/src/test_support/database.rs).
+      # DATABASE_URL (core/src/test_support/database.rs).
       - name: Create the core test database
         run: docker exec ${{ job.services.postgres.id }} createdb -U postgres horsies-core
 
@@ -573,11 +585,11 @@ jobs:
           DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies
         run: cargo test -p horsies --features web,tokio-postgres,sqlx
 
-  # horsies-codegen renders the catalog modules under python/horsies/_catalog/
-  # and the stubs python/horsies/_core.pyi from horsies-core; the rendered
+  # horsies-codegen renders the catalog modules under clients/python/horsies/_catalog/
+  # and the stubs clients/python/horsies/_core.pyi from horsies-core; the rendered
   # files are committed. This job renders them again and fails when a
   # committed file differs, is missing, or is a retired generated file. The
-  # fix is `cargo run -p horsies-codegen -- write python/horsies`.
+  # fix is `cargo run -p horsies-codegen -- write clients/python/horsies`.
   generated-files:
     needs: scope
     if: needs.scope.outputs.run_generated == 'true'
@@ -598,7 +610,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Check the generated Python files
-        run: cargo run -p horsies-codegen -- check python/horsies
+        run: cargo run -p horsies-codegen -- check clients/python/horsies
 
   rust-showcase:
     needs: scope
@@ -621,7 +633,7 @@ jobs:
           # Same rule as the webui job: an unknown base runs rather than skips.
           if [ -z "$base" ] || [ "$base" = '0000000000000000000000000000000000000000' ]; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$base" HEAD -- rust/showcase/ crates/ Cargo.toml Cargo.lock rust-toolchain.toml; then
+          elif git diff --quiet "$base" HEAD -- clients/rust/examples/showcase/ core/ clients/python/bridge/ clients/python/codegen/ clients/rust/horsies/ clients/rust/macros/ Cargo.toml Cargo.lock rust-toolchain.toml; then
             echo 'run=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run=true' >> "$GITHUB_OUTPUT"
@@ -639,7 +651,7 @@ jobs:
 
       - name: Enforce repository-only package
         if: steps.changed.outputs.run == 'true'
-        run: grep -Eq '^publish[[:space:]]*=[[:space:]]*false[[:space:]]*$' rust/showcase/Cargo.toml
+        run: grep -Eq '^publish[[:space:]]*=[[:space:]]*false[[:space:]]*$' clients/rust/examples/showcase/Cargo.toml
 
       - name: Check default features
         if: steps.changed.outputs.run == 'true'

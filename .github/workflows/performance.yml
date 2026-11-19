@@ -14,6 +14,11 @@ on:
 
 permissions: {}
 
+# The Python project is clients/python/. A step that runs uv at the
+# repository root uses its pyproject.toml, uv.lock and .venv.
+env:
+  UV_PROJECT: ${{ github.workspace }}/clients/python
+
 jobs:
   harness:
     if: inputs.suite == 'full'

@@ -1,6 +1,6 @@
 """The scenarios of the parity runs.
 
-`rust/tests/parity/src/lib.rs` (`scenarios`) holds the same scenarios with
+`clients/rust/tests/parity/src/lib.rs` (`scenarios`) holds the same scenarios with
 the same names, sends, workflows and actions: each side runs its own copy,
 and the snapshot compare shows any difference between the two copies too.
 

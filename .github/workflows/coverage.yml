@@ -11,6 +11,11 @@ concurrency:
 
 permissions: {}
 
+# The Python project is clients/python/. A step that runs uv at the
+# repository root uses its pyproject.toml, uv.lock and .venv.
+env:
+  UV_PROJECT: ${{ github.workspace }}/clients/python
+
 jobs:
   coverage:
     runs-on: ubuntu-latest
@@ -47,8 +52,8 @@ jobs:
           DB_PASSWORD: testpassword
         run: |
           uv run coverage erase
-          uv run pytest tests/unit/ -q --tb=short --cov=horsies --cov-branch --cov-report=
-          uv run pytest tests/integration/ -q --tb=short --cov=horsies --cov-branch --cov-append --cov-report=
+          uv run pytest clients/python/tests/unit/ -q --tb=short --cov=horsies --cov-branch --cov-report=
+          uv run pytest clients/python/tests/integration/ -q --tb=short --cov=horsies --cov-branch --cov-append --cov-report=
           # Every normal-topology e2e file, derived by the shared runner; only
           # the PgBouncer smoke stays out — measuring it would need a second
           # topology in this job for a marginal coverage change.

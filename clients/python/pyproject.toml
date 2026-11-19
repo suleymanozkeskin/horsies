@@ -1,0 +1,140 @@
+[build-system]
+requires = ["maturin>=1.16,<2"]
+build-backend = "maturin"
+
+[project]
+name = "horsies"
+version = "0.7.0"
+description = "A Python library for distributed task execution"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.13"
+authors = [
+    { name = "Suleyman Ozkeskin" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Distributed Computing",
+    "Topic :: System :: Networking",
+    "Typing :: Typed",
+]
+keywords = [
+    "task-queue",
+    "workflow-engine",
+    "dag",
+    "scheduling",
+    "distributed",
+    "postgres",
+    "async",
+]
+dependencies = [
+    "greenlet>=3.3.0",
+    "psutil>=7.2.1",
+    "psycopg>=3.3.7",
+    "psycopg-pool>=3.2.0",
+    "pydantic>=2.12.5",
+    "sqlalchemy>=2.0.46",
+]
+
+[project.optional-dependencies]
+web = ["fastapi>=0.115.0", "uvicorn>=0.30.0"]
+# psycopg's own extras pin the C build to the psycopg version; a C build of
+# another version fails at import.
+pg-binary = ["psycopg[binary]>=3.3.7"]
+pg-c = ["psycopg[c]>=3.3.7"]
+
+[project.urls]
+Homepage = "https://github.com/suleymanozkeskin/horsies"
+Documentation = "https://suleymanozkeskin.github.io/horsies/"
+Repository = "https://github.com/suleymanozkeskin/horsies"
+Issues = "https://github.com/suleymanozkeskin/horsies/issues"
+
+[project.scripts]
+horsies = "horsies.core.cli:main"
+
+[tool.maturin]
+# The extension module horsies._core, built from clients/python/bridge.
+manifest-path = "bridge/Cargo.toml"
+module-name = "horsies._core"
+python-source = "."
+features = ["extension-module"]
+# maturin packs every file under clients/python/horsies/ that .gitignore does not
+# exclude. The skill files are listed so that the package data is stated, not
+# implied. The baseline SQL files and the web UI build (core/webui-dist) are
+# compiled into horsies._core. The sdist carries them as files of the path
+# dependency horsies-core (core/), so a build from the sdist can compile them;
+# maturin refuses an include pattern with `..`.
+include = [
+    { path = "horsies/.agents/skills/horsies/*.md", format = ["sdist", "wheel"] },
+]
+
+[dependency-groups]
+dev = [
+    "psycopg[binary]>=3.3.7",
+    "pyright>=1.1.409",
+    "ty>=0.0.34",
+    "python-dotenv>=1.2.1",
+    "pytest>=8.3.4",
+    "pytest-asyncio>=0.25.0",
+    "pytest-cov>=7.0.0",
+    "httpx>=0.28.1",
+    "beautifulsoup4>=4.12.0",
+    "fastapi>=0.115.0",
+    "jinja2>=3.1.0",
+    # The uvloop cases of tests/extension; uvloop has no Windows build.
+    "uvloop>=0.21.0; sys_platform != 'win32'",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "e2e: end-to-end tests requiring database and worker process",
+    "integration: integration tests requiring a live database",
+    "pgbouncer: tests requiring the local PgBouncer fixture stack",
+    "flaky: timing-sensitive tests that may fail under load",
+    "allow_library_data_refusal: the test builds a bad TaskError on purpose and passes it through a library path",
+]
+
+[tool.pyright]
+typeCheckingMode = "strict"
+# The package is in this folder (horsies/); pyright resolves it here with or
+# without an install.
+extraPaths = ["."]
+
+
+[tool.ruff.lint]
+ignore = ["E712"]
+select = ["Q"]
+
+[tool.ruff.format]
+quote-style = "single"
+
+
+
+[tool.ruff.lint.flake8-quotes]
+docstring-quotes = "single"
+
+
+[tool.uv]
+exclude-newer = "7 days"
+# uv rebuilds the local install when one of these changes: the Rust sources of
+# horsies._core and the files that it compiles in.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "../../Cargo.toml" },
+    { file = "../../Cargo.lock" },
+    { file = "bridge/Cargo.toml" },
+    { file = "bridge/**/*.rs" },
+    { file = "../../core/Cargo.toml" },
+    { file = "../../core/derive/Cargo.toml" },
+    { file = "../../core/**/*.rs" },
+    { file = "../../core/baseline/*.sql" },
+    { file = "../../core/migrations/*.sql" },
+    { file = "../../core/webui-dist/**/*" },
+]

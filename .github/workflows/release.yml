@@ -22,6 +22,11 @@ concurrency:
 
 permissions: {}
 
+# The Python project is clients/python/. A step that runs uv at the
+# repository root uses its pyproject.toml, uv.lock and .venv.
+env:
+  UV_PROJECT: ${{ github.workspace }}/clients/python
+
 jobs:
   # The wheel and every published crate carry one version: pyproject.toml,
   # horsies-core-derive, horsies-core, horsies-macros and horsies, and each
@@ -50,14 +55,14 @@ jobs:
 
           # (file, key path) of every value that must equal the one version.
           SOURCES = (
-              ("pyproject.toml", ("project", "version")),
-              ("crates/horsies-core-derive/Cargo.toml", ("package", "version")),
-              ("crates/horsies-core/Cargo.toml", ("package", "version")),
-              ("crates/horsies-core/Cargo.toml", ("dependencies", "horsies-core-derive", "version")),
-              ("crates/horsies-macros/Cargo.toml", ("package", "version")),
-              ("crates/horsies/Cargo.toml", ("package", "version")),
-              ("crates/horsies/Cargo.toml", ("dependencies", "horsies-core", "version")),
-              ("crates/horsies/Cargo.toml", ("dependencies", "horsies-macros", "version")),
+              ("clients/python/pyproject.toml", ("project", "version")),
+              ("core/derive/Cargo.toml", ("package", "version")),
+              ("core/Cargo.toml", ("package", "version")),
+              ("core/Cargo.toml", ("dependencies", "horsies-core-derive", "version")),
+              ("clients/rust/macros/Cargo.toml", ("package", "version")),
+              ("clients/rust/horsies/Cargo.toml", ("package", "version")),
+              ("clients/rust/horsies/Cargo.toml", ("dependencies", "horsies-core", "version")),
+              ("clients/rust/horsies/Cargo.toml", ("dependencies", "horsies-macros", "version")),
           )
 
           values = {}
@@ -109,10 +114,10 @@ jobs:
         run: rm -rf dist
 
       - name: Build distributions
-        run: uv build
+        run: uv build clients/python --out-dir dist
 
       - name: Verify the wheel serves the web UI from horsies._core
-        # horsies._core embeds crates/horsies-core/webui-dist. The installed
+        # horsies._core embeds core/webui-dist. The installed
         # wheel serves the page and its script with no database: a wheel
         # whose page answers 503 installs cleanly and then fails every
         # dashboard, so this is release-blocking rather than advisory.
@@ -240,18 +245,18 @@ jobs:
           core="target/package/horsies-core-${VERSION}.crate"
           core_files="$(tar -tzf "$core" | sed "s|^horsies-core-${VERSION}/||")"
           for folder in baseline webui-dist; do
-            expected="$(git ls-files -- "crates/horsies-core/$folder" | sed 's|^crates/horsies-core/||' | LC_ALL=C sort)"
+            expected="$(git ls-files -- "core/$folder" | sed 's|^core/||' | LC_ALL=C sort)"
             actual="$(printf '%s\n' "$core_files" | { grep "^$folder/" || true; } | LC_ALL=C sort)"
             if [ -z "$expected" ]; then
-              echo "::error::crates/horsies-core/$folder/ has no tracked files"
+              echo "::error::core/$folder/ has no tracked files"
               exit 1
             fi
             if [ "$expected" != "$actual" ]; then
-              echo "::error::$core does not hold exactly the tracked files of crates/horsies-core/$folder/"
+              echo "::error::$core does not hold exactly the tracked files of core/$folder/"
               diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
               exit 1
             fi
-            echo "OK: $core holds the $(printf '%s\n' "$expected" | wc -l | tr -d ' ') tracked files of crates/horsies-core/$folder/"
+            echo "OK: $core holds the $(printf '%s\n' "$expected" | wc -l | tr -d ' ') tracked files of core/$folder/"
           done
           client="target/package/horsies-${VERSION}.crate"
           client_files="$(tar -tzf "$client" | sed "s|^horsies-${VERSION}/||")"

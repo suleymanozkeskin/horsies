@@ -1,0 +1,40 @@
+[package]
+name = "horsies-python"
+version = "0.1.0"
+edition = "2021"
+description = "The PyO3 extension module horsies._core: the call bridge from Python to horsies-core"
+license = "MIT"
+repository = "https://github.com/suleymanozkeskin/horsies"
+publish = false
+
+[lib]
+# The module name: maturin builds this crate as `horsies._core`.
+name = "_core"
+crate-type = ["cdylib"]
+
+[features]
+default = []
+# maturin enables this feature for the wheel build. Without it, PyO3 links
+# libpython, which `cargo test` of this crate needs.
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+# The Python package ships the web app, so the core's web layer is always on;
+# the schema read of the web gate comes from it.
+horsies-core = { path = "../../../core", features = ["web"] }
+pyo3 = { version = "=0.30.1", features = ["abi3-py313", "chrono", "uuid"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+futures-util = "0.3"
+tracing = "0.1"
+chrono = "0.4"
+uuid = "1"
+serde_json = "1"
+
+# musl's malloc is slow under allocation from many threads, and the core is
+# multi-threaded. glibc targets keep the system allocator until a measurement
+# shows a gain there too.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
+[lints]
+workspace = true

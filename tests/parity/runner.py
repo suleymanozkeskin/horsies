@@ -28,7 +28,7 @@ database. One side, on an empty `dualrun_` database:
 6. Stop each process with `SIGTERM`; kill its process group after
    `STOP_WAIT`.
 7. Read the clock again, capture the snapshot with the whole-run catalog
-   (`tests/dualrun/worker_run.py`), and read the report: the task of each
+   (`tests/parity/snapshot/worker_run.py`), and read the report: the task of each
    send and rerun, each node of each started workflow, the status of each
    started workflow, the ping answers, the run count of the schedule and
    each slot task, keyed by position.
@@ -72,17 +72,17 @@ import psycopg
 
 from horsies.core.types.result import Err, Ok, Result
 from tests.parity import app as parity
-from tests.dualrun.capture import capture_snapshot, read_database_clock
-from tests.dualrun.compare import (
+from tests.parity.snapshot.capture import capture_snapshot, read_database_clock
+from tests.parity.snapshot.compare import (
     ColumnDifference,
     DiffEntry,
     SnapshotDiff,
     compare_snapshots,
 )
-from tests.dualrun.databases import DualRunDatabase
-from tests.dualrun.normalize import NormalizedSnapshot
-from tests.dualrun.values import ExactValue, RunWindow, make_run_window
-from tests.dualrun.worker_run import (
+from tests.parity.snapshot.databases import DualRunDatabase
+from tests.parity.snapshot.normalize import NormalizedSnapshot
+from tests.parity.snapshot.values import ExactValue, RunWindow, make_run_window
+from tests.parity.snapshot.worker_run import (
     WHOLE_RUN_CATALOG,
     PairJudgement,
     compared_part,
@@ -101,7 +101,7 @@ PYTHON_APP_LOCATOR: Final = 'tests.parity.app:app'
 TERMINAL_WAIT: Final = timedelta(seconds=120)
 WORKER_READY_LINE: Final = 'worker ready'
 """The line that the core worker logs once its startup coverage and its
-children are done (`crates/horsies-core/src/worker/worker.rs`)."""
+children are done (`core/src/worker/worker.rs`)."""
 READY_LOG_BYTES: Final = 1_000_000
 """The tail of a worker log that the ready check reads."""
 TERMINAL_POLL: Final = timedelta(milliseconds=250)

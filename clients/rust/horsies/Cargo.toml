@@ -1,0 +1,99 @@
+[package]
+name = "horsies"
+version = "0.1.0-alpha.36"
+edition = "2021"
+rust-version = "1.91"
+description = "Rust client of the horsies task queue and workflow engine"
+license = "MIT"
+repository = "https://github.com/suleymanozkeskin/horsies"
+readme = "README.md"
+keywords = ["task-queue", "workflow", "distributed", "postgresql", "async"]
+categories = ["asynchronous", "database"]
+
+[features]
+default = ["cli"]
+# The CLI runner (`horsies::cli::run`) and the shipped `horsies` binary.
+cli = [
+    "dep:clap",
+    "dep:owo-colors",
+    "dep:tempfile",
+    "dep:toml",
+    "dep:tracing-subscriber",
+]
+# The axum mount of the core's monitoring handler (`horsies::web`), and the
+# server of the shipped binary's `horsies web`.
+web = ["dep:axum", "dep:futures-util", "horsies-core/web", "tokio/net"]
+# The rerun adapter for a `tokio_postgres::Transaction`.
+tokio-postgres = ["dep:tokio-postgres"]
+# The rerun adapter for a `sqlx::Transaction<'_, Postgres>`.
+sqlx = ["dep:sqlx"]
+
+[[bin]]
+name = "horsies"
+path = "src/bin/horsies.rs"
+required-features = ["cli"]
+
+# The tests of the shipped binary run it.
+[[test]]
+name = "web_cli"
+required-features = ["cli"]
+
+[[test]]
+name = "tools_cli"
+required-features = ["cli"]
+
+[dependencies]
+horsies-core = { version = "0.1.0-alpha.36", path = "../../../core" }
+horsies-macros = { version = "0.1.0-alpha.36", path = "../macros" }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+# `unbounded_depth`: a task input or a returned value that the strict reader
+# bounded at 300 levels decodes past serde_json's own limit of 128.
+# `raw_value`: a workflow node's input keeps the text of each member.
+# `preserve_order`: an object keeps its members in insertion order, as the
+# core's objects do (the core enables it too).
+serde_json = { version = "1", features = ["raw_value", "unbounded_depth", "preserve_order"] }
+# The field path of a decode failure of a task input or a returned value.
+serde_path_to_error = "0.1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "signal", "macros"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+# The host name that a worker child writes with each start (the core's
+# worker uses the same crate).
+gethostname = "0.4"
+axum = { version = "0.8", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+# The event stream body of the web mount and the bounded read of a request
+# body.
+futures-util = { version = "0.3", optional = true }
+owo-colors = { version = "4", optional = true }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+    "uuid",
+    "chrono",
+], optional = true }
+tempfile = { version = "3", optional = true }
+# The same pin as the core's statement layer.
+tokio-postgres = { version = "=0.7.18", features = [
+    "with-uuid-1",
+    "with-chrono-0_4",
+], optional = true }
+toml = { version = "0.8", optional = true }
+tracing-subscriber = { version = "0.3", features = [
+    "env-filter",
+    "fmt",
+], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+# `oneshot` of the web mount's tests.
+tower = { version = "0.5", features = ["util"] }
+# The encode buffer of the tokio-postgres rerun adapter's tests.
+bytes = "1"
+# The fork of `tests/fork_refusal.rs`.
+libc = "0.2"
+
+[lints]
+workspace = true
