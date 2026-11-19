@@ -2753,14 +2753,11 @@ async fn metrics_needs_the_view_verdict() {
     }
 }
 
-/// The most answers that the test reads while it waits for the first read
-/// of the fleet state.
-const METRICS_POLLS: usize = 200;
-
 /// `/metrics` answers 403 after a refused view and 405 for another method.
 /// After an allowed view it answers the fleet text with the Prometheus
-/// content type; the first answer starts the reads, and a database that
-/// refuses connections shows as a failed read of each query.
+/// content type. The first answer comes after the first read: a database
+/// that refuses connections shows in it as a failed read of each query,
+/// with no fleet series, and the status is still 200.
 #[tokio::test]
 async fn metrics_serves_the_fleet_text_behind_the_view_verdict() {
     let handler = granted_handler(true);
@@ -2798,29 +2795,24 @@ async fn metrics_serves_the_fleet_text_behind_the_view_verdict() {
         body.contains("# TYPE horsies_queue_tasks gauge\n"),
         "{body}"
     );
-
-    let mut text = String::new();
-    for _ in 0..METRICS_POLLS {
-        let answer = handler
-            .handle(
-                parts(Method::GET, "/metrics"),
-                grant(Verdict::Allowed, Verdict::NotAsked),
-            )
-            .await;
-        text = String::from_utf8(answer.body.to_vec()).expect("the text is UTF-8");
-        match text.contains("horsies_exporter_collect_failed{query=") {
-            true => break,
-            false => tokio::time::sleep(Duration::from_millis(50)).await,
-        }
-    }
-    for query in ["queue_tasks", "workers", "schema_version"] {
+    for query in [
+        "queue_tasks",
+        "oldest_pending",
+        "workers",
+        "class_coverage",
+        "workflows",
+        "schedules",
+        "schema_version",
+    ] {
         assert!(
-            text.contains(&format!(
+            body.contains(&format!(
                 "horsies_exporter_collect_failed{{query=\"{query}\"}} 1\n"
             )),
-            "{query}: {text}"
+            "{query}: {body}"
         );
     }
+    assert!(!body.contains("\nhorsies_queue_tasks{"), "{body}");
+    assert!(!body.contains("\nhorsies_schema_version "), "{body}");
 }
 
 /// A broker without a session URL has no listener: the stream sends the

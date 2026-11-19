@@ -92,6 +92,12 @@ LEAF_NAME: Final = GeneratedName()
 """Leaf names carry the day or hour of their range."""
 SCAN_POSITION: Final = NormalisedId(family=IdFamily.SCAN_POSITION)
 """A cursor position: a workflow id or a task id, by scan."""
+TRACE: Final = EXACT
+"""``trace_carrier`` and ``trace_id`` of a task, a workflow and a history row.
+No client passes a trace carrier to the core yet (both send
+``SendTrace::NoCarrier``), so both sides store NULL; a carrier that one side
+stores and the other does not is a difference. A carrier holds the trace id
+of its own run, so a client that passes one needs a rule of its own."""
 
 _PROCESS_SAMPLE: Final = Ignored(
     reason=(
@@ -465,6 +471,8 @@ _WORKFLOWS: Final = TableRules(
         ('started_at', RUN_CLOCK),
         ('completed_at', RUN_CLOCK),
         ('updated_at', RUN_CLOCK),
+        ('trace_carrier', TRACE),
+        ('trace_id', TRACE),
     ),
     order_by=(
         'id',
@@ -558,6 +566,8 @@ _TASKS: Final = TableRules(
         ('retain_rerun_input', EXACT),
         ('rerun_of_task_id', TASK_ID),
         ('rerun_root_task_id', TASK_ID),
+        ('trace_carrier', TRACE),
+        ('trace_id', TRACE),
     ),
     order_by=(
         'id',
@@ -620,6 +630,7 @@ _TASK_HISTORY: Final = TableRules(
         ('rerun_input_version', EXACT),
         ('rerun_input_digest', DigestOf(column='rerun_input_inline')),
         ('rerun_input_inline', RERUN_ENVELOPE),
+        ('trace_id', TRACE),
     ),
     order_by=(
         'task_id',
