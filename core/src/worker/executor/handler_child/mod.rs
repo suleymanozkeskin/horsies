@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::telemetry::catalog::MetricId;
 use crate::telemetry::declared::{DeclaredNames, DeclaredValue, HandlerName};
-use crate::telemetry::labels::{EventDropCause, MemoryProcess};
+use crate::telemetry::labels::{EventDropCause, MemoryProcess, SpanReadFailure};
 use crate::telemetry::registry::{Counter, Gauge, HandleRefused, Registry};
 use crate::telemetry::worker::{EventQueue, EVENT_QUEUE_CAPACITY};
 use crate::worker::executor::placement::ChildCpus;
@@ -147,6 +147,8 @@ pub struct HandlerChildMetrics {
     handler_errors: Counter<(DeclaredValue<HandlerName>,)>,
     /// `horsies.telemetry.handler.dropped{handler}`.
     handler_dropped: Counter<(DeclaredValue<HandlerName>,)>,
+    /// `horsies.spans.worker_ended.read_failures{reason}`.
+    span_read_failures: Counter<(SpanReadFailure,)>,
     /// `horsies.worker.memory.rss{process}`.
     rss: Gauge<(MemoryProcess,)>,
     /// The handler names that the registry declares.
@@ -166,6 +168,7 @@ impl HandlerChildMetrics {
             events_dropped: registry.counter(MetricId::EventsDropped)?,
             handler_errors: registry.counter(MetricId::HandlerErrors)?,
             handler_dropped: registry.counter(MetricId::HandlerDropped)?,
+            span_read_failures: registry.counter(MetricId::SpanReadFailures)?,
             rss: registry.gauge(MetricId::MemoryRss)?,
             handlers: registry.labels().handlers.clone(),
         })

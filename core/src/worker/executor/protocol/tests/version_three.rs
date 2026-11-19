@@ -939,6 +939,10 @@ fn the_handler_stats_frame_carries_the_counts_of_each_handler() {
                 counts("app.handlers.on_end", 2, 0),
             ])
             .unwrap(),
+            span_reads: SpanReadCounts {
+                read_failed: 4,
+                not_read: 1,
+            },
             rss: rss(40.5),
         }),
         &framed(
@@ -946,6 +950,7 @@ fn the_handler_stats_frame_carries_the_counts_of_each_handler() {
                 r#"{"kind":"handler_stats","handlers":["#,
                 r#"{"handler":"app.handlers.on_claim","errors":0,"dropped":3},"#,
                 r#"{"handler":"app.handlers.on_end","errors":2,"dropped":0}],"#,
+                r#""span_read_failed":4,"span_not_read":1,"#,
                 r#""rss_mb":40.5}"#,
             ),
             b"",
@@ -954,10 +959,11 @@ fn the_handler_stats_frame_carries_the_counts_of_each_handler() {
     assert_child_bytes(
         &ChildFrame::HandlerStats(HandlerStatsFrame {
             handlers: HandlerCountsList::new(Vec::new()).unwrap(),
+            span_reads: SpanReadCounts::default(),
             rss: RssReading::Unreadable,
         }),
         &framed(
-            r#"{"kind":"handler_stats","handlers":[],"rss_mb":null}"#,
+            r#"{"kind":"handler_stats","handlers":[],"span_read_failed":0,"span_not_read":0,"rss_mb":null}"#,
             b"",
         ),
     );
@@ -969,6 +975,8 @@ fn each_malformed_handler_stats_frame_is_refused_with_its_field() {
     let meta = json!({
         "kind": "handler_stats",
         "handlers": [entry("a")],
+        "span_read_failed": 0,
+        "span_not_read": 0,
         "rss_mb": 1.0,
     });
     let too_many: Vec<Value> = (0..=MAX_EVENT_HANDLERS)
@@ -1063,6 +1071,20 @@ fn each_malformed_handler_stats_frame_is_refused_with_its_field() {
             MalformedFrame::WrongType {
                 field: "rss_mb".to_owned(),
                 expected: ExpectedType::Number,
+            },
+        ),
+        (
+            "span_read_failed",
+            None,
+            MalformedFrame::MissingField {
+                field: "span_read_failed".to_owned(),
+            },
+        ),
+        (
+            "span_not_read",
+            Some(json!(-1)),
+            MalformedFrame::OutOfBounds {
+                field: "span_not_read".to_owned(),
             },
         ),
     ];

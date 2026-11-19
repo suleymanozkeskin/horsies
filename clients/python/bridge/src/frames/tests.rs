@@ -539,10 +539,14 @@ cases = [
             core.HandlerCounts(handler='a', errors=0, dropped=0),
             core.HandlerCounts(handler='a', errors=1, dropped=0),
         ],
+        span_read_failed=0,
+        span_not_read=0,
         rss_mb=1.0,
     ),
     lambda: core.HandlerStatsFrame(
         handlers=[core.HandlerCounts(handler=f'h{n}', errors=0, dropped=0) for n in range(33)],
+        span_read_failed=0,
+        span_not_read=0,
         rss_mb=1.0,
     ),
 ]
@@ -702,9 +706,13 @@ fn a_handler_stats_frame_reaches_the_parent() {
         core.HandlerCounts(handler='app.handlers.on_claim', errors=0, dropped=3),
         core.HandlerCounts(handler='app.handlers.on_end', errors=2, dropped=0),
     ],
+    span_read_failed=4,
+    span_not_read=1,
     rss_mb=40.5,
 ))
-empty = core.encode_child_frame(core.HandlerStatsFrame(handlers=[], rss_mb='UNREADABLE'))
+empty = core.encode_child_frame(core.HandlerStatsFrame(
+    handlers=[], span_read_failed=0, span_not_read=0, rss_mb='UNREADABLE',
+))
 ",
             &[],
         )
@@ -729,6 +737,10 @@ empty = core.encode_child_frame(core.HandlerStatsFrame(handlers=[], rss_mb='UNRE
                     ("app.handlers.on_claim", 0, 3),
                     ("app.handlers.on_end", 2, 0)
                 ]
+            );
+            assert_eq!(
+                (stats.span_reads.read_failed, stats.span_reads.not_read),
+                (4, 1)
             );
             assert!(matches!(stats.rss, RssReading::Mb(rss) if rss.get() == 40.5));
         }

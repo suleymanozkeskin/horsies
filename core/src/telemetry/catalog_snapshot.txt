@@ -169,7 +169,7 @@ horsies.telemetry.series.dropped
   unit: 1
   recorder: worker
   help: Samples that were dropped because their metric holds its greatest number of series, by metric.
-  label metric (horsies.metric): "horsies.task.attempts" "horsies.task.attempts.end_not_known" "horsies.task.run.duration" "horsies.task.queue.duration" "horsies.task.slot_wait.duration" "horsies.task.record.duration" "horsies.task.retries" "horsies.task.claims.released" "horsies.task.starts.refused" "horsies.finalize.retries" "horsies.recovery.tasks" "horsies.recovery.pass.failures" "horsies.worker.children.started" "horsies.worker.children.replaced" "horsies.worker.child.boot.duration" "horsies.worker.seats" "horsies.worker.seats.in_use" "horsies.worker.slots.down" "horsies.worker.claim.passes" "horsies.worker.memory.rss" "horsies.telemetry.events.dropped" "horsies.telemetry.series.dropped" "horsies.telemetry.handler.errors" "horsies.telemetry.handler.dropped" "horsies.worker.info" "horsies.task.sent" "horsies.task.send.duration" "horsies.queue.tasks" "horsies.queue.pending.more_than" "horsies.queue.oldest_pending.age" "horsies.fleet.workers" "horsies.fleet.workers.telemetry_down" "horsies.fleet.seats" "horsies.fleet.seats.in_use" "horsies.fleet.unserved_classes" "horsies.workflows" "horsies.schedule.last_run.age" "horsies.schema.version" "horsies.exporter.collect.duration" "horsies.exporter.collect.errors" "horsies.exporter.collect.failed"
+  label metric (horsies.metric): "horsies.task.attempts" "horsies.task.attempts.end_not_known" "horsies.task.run.duration" "horsies.task.queue.duration" "horsies.task.slot_wait.duration" "horsies.task.record.duration" "horsies.task.retries" "horsies.task.claims.released" "horsies.task.starts.refused" "horsies.finalize.retries" "horsies.recovery.tasks" "horsies.recovery.pass.failures" "horsies.worker.children.started" "horsies.worker.children.replaced" "horsies.worker.child.boot.duration" "horsies.worker.seats" "horsies.worker.seats.in_use" "horsies.worker.slots.down" "horsies.worker.claim.passes" "horsies.worker.memory.rss" "horsies.telemetry.events.dropped" "horsies.telemetry.series.dropped" "horsies.telemetry.handler.errors" "horsies.telemetry.handler.dropped" "horsies.spans.worker_ended.read_failures" "horsies.worker.info" "horsies.task.sent" "horsies.task.send.duration" "horsies.queue.tasks" "horsies.queue.pending.more_than" "horsies.queue.oldest_pending.age" "horsies.fleet.workers" "horsies.fleet.workers.telemetry_down" "horsies.fleet.seats" "horsies.fleet.seats.in_use" "horsies.fleet.unserved_classes" "horsies.workflows" "horsies.schedule.last_run.age" "horsies.schema.version" "horsies.exporter.collect.duration" "horsies.exporter.collect.errors" "horsies.exporter.collect.failed"
 horsies.telemetry.handler.errors
   prometheus: horsies_telemetry_handler_errors_total
   kind: counter
@@ -184,6 +184,13 @@ horsies.telemetry.handler.dropped
   recorder: worker
   help: Events that the full queue of an event handler dropped, by handler.
   label handler (horsies.handler): declared handler names, fallback "(unknown)"
+horsies.spans.worker_ended.read_failures
+  prometheus: horsies_spans_worker_ended_read_failures_total
+  kind: counter
+  unit: 1
+  recorder: worker
+  help: Spans of attempts of workflow tasks that the worker ended, made with no workflow node, by reason.
+  label reason (horsies.reason): "read_failed" "not_read"
 horsies.worker.info
   prometheus: horsies_worker_info
   kind: gauge

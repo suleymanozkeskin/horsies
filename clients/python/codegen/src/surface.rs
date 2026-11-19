@@ -3548,7 +3548,7 @@ const FRAME_CLASSES: &[StubClass] = &[
     StubClass {
         name: "HandlerStatsFrame",
         doc: "The counts of each event handler of a handler child since it started, each name once,\nand its RSS.",
-        constructor: Constructor::Parameters(&[keyword("handlers", "list[HandlerCounts]"), keyword("rss_mb", "float | Literal['UNREADABLE']")]),
+        constructor: Constructor::Parameters(&[keyword("handlers", "list[HandlerCounts]"), keyword("span_read_failed", "int"), keyword("span_not_read", "int"), keyword("rss_mb", "float | Literal['UNREADABLE']")]),
         properties: &[],
         methods: &[],
     },
