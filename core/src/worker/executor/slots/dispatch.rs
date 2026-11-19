@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::core::task::error::OperationalErrorCode;
-use crate::events::RunTrace;
+use crate::events::{AttemptNumber, RunTrace};
 use crate::worker::executor::protocol::{
     FailureDetail, ProcessId, RunEnd, TaskInputText, TaskTimeoutMs,
 };
@@ -31,6 +31,27 @@ pub use crate::worker::executor::protocol::TaskKind;
 pub struct RetryFacts {
     pub retry_count: i32,
     pub max_retries: i32,
+}
+
+impl RetryFacts {
+    /// The attempt that this claim runs ([`attempt_of`]).
+    pub fn attempt(&self) -> AttemptNumber {
+        attempt_of(self.retry_count)
+    }
+}
+
+/// The attempt that a claim of a row with `retry_count` runs: the count
+/// plus 1. The claim refuses a row with a count below 0; such a count here
+/// reads as 0. Pure and total: a count of 0 to `i32::MAX` gives 1 to
+/// `MAX_ATTEMPT`.
+pub fn attempt_of(retry_count: i32) -> AttemptNumber {
+    let from_zero = u32::try_from(retry_count).unwrap_or(0);
+    match AttemptNumber::try_from(from_zero + 1) {
+        Ok(attempt) => attempt,
+        Err(outside) => unreachable!(
+            "a retry count of 0 to i32::MAX gives an attempt of 1 to MAX_ATTEMPT: {outside}"
+        ),
+    }
 }
 
 /// One claimed row, as the executor needs it. The claim returns every
@@ -196,11 +217,39 @@ impl AttemptEnd {
     }
 }
 
+/// The terminal state that an applied terminal write set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalState {
+    /// A success write: the task is `COMPLETED`.
+    Completed,
+    /// A failed-attempt write with no retry: the task is `FAILED`.
+    Failed,
+}
+
+/// What an applied write of an attempt end left the row in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WrittenEnd {
+    /// The task is terminal. A replay that found its own committed write
+    /// reads as the state of that write: a failed-attempt replay finds a
+    /// committed retry as a lost claim, not as its own write.
+    Terminal(TerminalState),
+    /// The failed attempt scheduled a retry: the task is `PENDING` with
+    /// `retry_count`, due at `next_retry_at`.
+    RetryScheduled {
+        retry_count: i32,
+        next_retry_at: DateTime<Utc>,
+    },
+    /// The claim went back to the queue: the task is `PENDING` with the same
+    /// retry count.
+    ClaimReleased,
+}
+
 /// How the write of one attempt end settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Settlement {
-    /// The statement applied (or a replay found its own write).
-    Written,
+    /// The statement applied (or a replay found its own write), and left
+    /// the row as its [`WrittenEnd`] says.
+    Written(WrittenEnd),
     /// The child wrote what the case needs; nothing was owed.
     NothingOwed,
     /// The statement found the row not held by this claim and wrote nothing.

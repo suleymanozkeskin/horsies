@@ -41,7 +41,7 @@ use crate::core::task::Execution;
 use crate::db::{
     CheckoutClass, CorePool, ParameterType, PooledConnection, Row, StatementBound, TypedStatement,
 };
-use crate::events::{RunTrace, TraceCarrierText};
+use crate::events::{Priority, RunTrace, TraceCarrierText};
 
 /// The most rows one release statement takes (the bound of
 /// `horsies_release_claims`).
@@ -238,11 +238,39 @@ pub struct ClaimedRow {
     pub is_workflow_task: bool,
     /// The claim generation of this claim.
     pub claimed_at: DateTime<Utc>,
+    /// The retries the row used before this claim, from 0.
     pub retry_count: i32,
     pub max_retries: i32,
     /// The trace carrier that the send stored on the row
     /// (`trace_carrier`), for the run frame of each attempt.
     pub trace: RunTrace,
+    /// The priority of the row's queue: 1 is claimed first, 100 last.
+    pub priority: Priority,
+    /// When the row was due: its send, the end of its send delay, or its
+    /// retry time (database clock). `claimed_at - enqueued_at` is its wait
+    /// in the queue.
+    pub enqueued_at: DateTime<Utc>,
+    /// When this worker read the claim result.
+    pub read: ClaimRead,
+}
+
+/// When the worker read a claim result: the monotonic time, where the
+/// durations that start at the claim begin, and the wall time of the
+/// worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimRead {
+    pub at: tokio::time::Instant,
+    pub wall: DateTime<Utc>,
+}
+
+impl ClaimRead {
+    /// The read at this moment.
+    pub fn now() -> Self {
+        Self {
+            at: tokio::time::Instant::now(),
+            wall: Utc::now(),
+        }
+    }
 }
 
 /// Whether the pass took every row of its plan.
@@ -278,6 +306,8 @@ struct ClaimWireRow {
     retry_count: Option<i32>,
     max_retries: Option<i32>,
     trace_carrier: Option<String>,
+    priority: Option<i32>,
+    enqueued_at: Option<DateTime<Utc>>,
     short_by: Option<i32>,
 }
 
@@ -341,7 +371,7 @@ pub(crate) async fn claim_pass(
         .iter()
         .map(|row| claim_wire_row(row, statement))
         .collect::<Result<Vec<_>, _>>()?;
-    let pass = decode_claim_pass(wire).map_err(BrokerError::ClaimContract)?;
+    let pass = decode_claim_pass(wire, ClaimRead::now()).map_err(BrokerError::ClaimContract)?;
     tracing::debug!(
         worker_id = %request.worker_id,
         count = pass.claimed.len(),
@@ -375,23 +405,27 @@ fn claim_wire_row(row: &Row, statement: &TypedStatement) -> Result<ClaimWireRow,
         retry_count: column(row, statement, "retry_count")?,
         max_retries: column(row, statement, "max_retries")?,
         trace_carrier: column(row, statement, "trace_carrier")?,
+        priority: column(row, statement, "priority")?,
+        enqueued_at: column(row, statement, "enqueued_at")?,
         short_by: column(row, statement, "short_by")?,
     })
 }
 
-/// The claimed rows in claim order and at most one `SHORT` row. Pure but
+/// The claimed rows in claim order and at most one `SHORT` row; each
+/// claimed row carries `read`, when the worker read the result. Pure but
 /// the warning of a stored carrier over its bound ([`stored_trace_of`]).
 ///
 /// Errors: the contract breach as text: a row kind other than `CLAIMED` and
 /// `SHORT`, a second `SHORT` row, a `CLAIMED` row with a column missing or
 /// with `short_by`, a `SHORT` row with a task column or a count that is not
-/// above 0, an unknown execution class.
-fn decode_claim_pass(rows: Vec<ClaimWireRow>) -> Result<ClaimPass, String> {
+/// above 0, an unknown execution class, a retry count below 0, a priority
+/// outside 1 to 100.
+fn decode_claim_pass(rows: Vec<ClaimWireRow>, read: ClaimRead) -> Result<ClaimPass, String> {
     let mut claimed = Vec::with_capacity(rows.len());
     let mut take = ClaimTake::Full;
     for row in rows {
         match row.row_kind.as_str() {
-            "CLAIMED" => claimed.push(decode_claimed_row(row)?),
+            "CLAIMED" => claimed.push(decode_claimed_row(row, read)?),
             "SHORT" => {
                 let short_by = decode_short_row(row)?;
                 take = match take {
@@ -407,7 +441,7 @@ fn decode_claim_pass(rows: Vec<ClaimWireRow>) -> Result<ClaimPass, String> {
     Ok(ClaimPass { claimed, take })
 }
 
-fn decode_claimed_row(row: ClaimWireRow) -> Result<ClaimedRow, String> {
+fn decode_claimed_row(row: ClaimWireRow, read: ClaimRead) -> Result<ClaimedRow, String> {
     if row.short_by.is_some() {
         return Err("a CLAIMED row of horsies_claim carries short_by".to_owned());
     }
@@ -422,6 +456,23 @@ fn decode_claimed_row(row: ClaimWireRow) -> Result<ClaimedRow, String> {
              {execution_text:?}, which is not an Execution value"
         )
     })?;
+    // The table holds `retry_count >= 0` and `priority BETWEEN 1 AND 100`.
+    let retry_count = row.retry_count.ok_or_else(|| required("retry_count"))?;
+    if retry_count < 0 {
+        return Err(format!(
+            "a CLAIMED row of horsies_claim: claimed task {id} has retry count {retry_count}"
+        ));
+    }
+    let stored_priority = row.priority.ok_or_else(|| required("priority"))?;
+    let priority = u32::try_from(stored_priority)
+        .ok()
+        .and_then(|priority| Priority::try_from(priority).ok())
+        .ok_or_else(|| {
+            format!(
+                "a CLAIMED row of horsies_claim: claimed task {id} has priority \
+                 {stored_priority}, outside 1 to 100"
+            )
+        })?;
     Ok(ClaimedRow {
         id,
         task_name: row.task_name.ok_or_else(|| required("task_name"))?,
@@ -433,9 +484,12 @@ fn decode_claimed_row(row: ClaimWireRow) -> Result<ClaimedRow, String> {
             .is_workflow_task
             .ok_or_else(|| required("is_workflow_task"))?,
         claimed_at: row.claimed_at.ok_or_else(|| required("claimed_at"))?,
-        retry_count: row.retry_count.ok_or_else(|| required("retry_count"))?,
+        retry_count,
         max_retries: row.max_retries.ok_or_else(|| required("max_retries"))?,
         trace: stored_trace_of(id, row.trace_carrier),
+        priority,
+        enqueued_at: row.enqueued_at.ok_or_else(|| required("enqueued_at"))?,
+        read,
     })
 }
 
@@ -483,6 +537,8 @@ fn decode_short_row(row: ClaimWireRow) -> Result<NonZeroU32, String> {
         retry_count,
         max_retries,
         trace_carrier,
+        priority,
+        enqueued_at,
         short_by,
     } = row;
     let task_columns = [
@@ -497,6 +553,8 @@ fn decode_short_row(row: ClaimWireRow) -> Result<NonZeroU32, String> {
         retry_count.is_some(),
         max_retries.is_some(),
         trace_carrier.is_some(),
+        priority.is_some(),
+        enqueued_at.is_some(),
     ];
     if task_columns.contains(&true) {
         return Err("a SHORT row of horsies_claim carries a task column".to_owned());

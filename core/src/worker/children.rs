@@ -38,8 +38,8 @@ use crate::worker::executor::protocol::{
 use crate::worker::executor::slots::{
     dispatch_route, AttemptEnd, BaselineLimits, ChildLayout, Claimed, DispatchRoute, DownState,
     ExecutionClass, ExitNotSeen, FreeCapacity, IsolatedPool, IsolatedPoolConfig, MemoryLimit,
-    NotRunCause, PoolBoard, PoolService, PoolStopReport, SharedPool, SharedPoolConfig,
-    SharedSlotService, SlotPhase, Submitted, TaskLimit,
+    NotRunCause, PlacementWatch, PoolBoard, PoolService, PoolStopReport, SharedPool,
+    SharedPoolConfig, SharedSlotService, SlotPhase, Submitted, TaskLimit,
 };
 use crate::worker::executor::supervisor::{
     ChildCommand, PreloadMode, PreloadPlan, SpawnerHandle, CHILD_KILL_WAIT,
@@ -548,6 +548,12 @@ impl WorkerChildren {
     /// not serve, or a route to a kind with no pool, never reaches a child:
     /// `NotDispatched(NoChildOfItsKind)`; its claim goes back to the queue.
     pub fn submit(&self, claimed: Claimed) -> Submitted {
+        self.submit_watched(claimed, PlacementWatch::Unwatched)
+    }
+
+    /// As [`WorkerChildren::submit`]; `watch` is told when a child takes the
+    /// task. A task that reaches no child drops `watch` untold.
+    pub fn submit_watched(&self, claimed: Claimed, watch: PlacementWatch) -> Submitted {
         let Claimed { task, input } = claimed;
         let route = match dispatch_route(task.execution, self.service().plan(), &task.options) {
             Ok(route) => route,
@@ -563,11 +569,13 @@ impl WorkerChildren {
             &self.shared_thread,
         ) {
             (DispatchRoute::Isolated { work, deadline }, Some(pool), _, _) => {
-                pool.submit(&task, input, work, deadline)
+                pool.submit_watched(&task, input, work, deadline, watch)
             }
-            (DispatchRoute::SharedAsync(work), _, Some(pool), _) => pool.submit(&task, input, work),
+            (DispatchRoute::SharedAsync(work), _, Some(pool), _) => {
+                pool.submit_watched(&task, input, work, watch)
+            }
             (DispatchRoute::SharedThread(work), _, _, Some(pool)) => {
-                pool.submit(&task, input, work)
+                pool.submit_watched(&task, input, work, watch)
             }
             (
                 DispatchRoute::Isolated { .. }

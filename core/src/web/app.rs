@@ -1,5 +1,5 @@
 //! The router of the monitoring handler and its state: the routes, the
-//! access guards, `/api/meta` and the page.
+//! access guards, `/api/meta`, `/metrics` and the page.
 
 use std::sync::Arc;
 
@@ -13,6 +13,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::broker::PostgresBroker;
+use crate::telemetry::endpoint::metrics_response;
 use crate::workflow_engine::child_spec::ChildSpecSource;
 
 use super::auth::{
@@ -20,6 +21,7 @@ use super::auth::{
 };
 use super::common::{ApiError, CodeBody, DetailBody, InvalidInputRefused, INVALID_INPUT};
 use super::events::EventBroadcaster;
+use super::fleet_metrics::WebFleetMetrics;
 use super::routes;
 use super::schema::{
     SchemaIncompatible, SchemaProbe, SchemaState, SCHEMA_INCOMPATIBLE, SCHEMA_UNKNOWN,
@@ -64,6 +66,8 @@ pub(crate) struct WebState {
     /// The version that `/api/meta` reports: the package version of the
     /// client that serves the app.
     pub client_version: String,
+    /// The fleet collector of `/metrics`.
+    pub fleet_metrics: Arc<WebFleetMetrics>,
 }
 
 /// The mount path of a request that the framework-neutral handler serves:
@@ -83,8 +87,12 @@ pub(crate) fn build_router(state: WebState) -> Router {
         .merge(action_routes)
         .fallback(api_not_found)
         .layer(middleware::from_fn(log_invalid_input));
+    let metrics = Router::new()
+        .route("/metrics", get(read_fleet_metrics))
+        .route_layer(middleware::from_fn_with_state(state.clone(), view_guard));
     Router::new()
         .nest("/api", api)
+        .merge(metrics)
         .route("/", get(serve_spa))
         .fallback(serve_spa)
         .with_state(state)
@@ -232,6 +240,12 @@ async fn read_meta(State(state): State<WebState>, request: Request) -> Response 
         actions_disabled_reason: disabled_reason,
     })
     .into_response()
+}
+
+/// `GET /metrics`: the Prometheus text of the fleet collector. The first
+/// request starts its reads.
+async fn read_fleet_metrics(State(state): State<WebState>) -> Response {
+    metrics_response(state.fleet_metrics.render())
 }
 
 async fn serve_spa(State(state): State<WebState>, request: Request) -> Response {

@@ -1344,7 +1344,9 @@ pub(super) async fn worker_phase_one(
             capacity_notified,
             phase_two,
         },
-        Ok(FinalizeOutcome::Retried | FinalizeOutcome::Finalized | FinalizeOutcome::Refused) => {
+        Ok(
+            FinalizeOutcome::Retried { .. } | FinalizeOutcome::Finalized | FinalizeOutcome::Refused,
+        ) => {
             panic!("phase 1 of task {} owes no phase 2", task.task_id)
         }
         Err(error) => panic!("phase 1 of task {}: {error}", task.task_id),

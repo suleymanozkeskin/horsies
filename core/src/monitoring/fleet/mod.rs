@@ -37,6 +37,8 @@ mod collector;
 mod decode;
 mod gauges;
 mod read;
+#[cfg(feature = "metrics-endpoint")]
+mod serve;
 mod statements;
 
 #[cfg(test)]
@@ -52,10 +54,12 @@ use crate::telemetry::labels::{FleetQuery, FleetWorkerState, LiveTaskStatus, Liv
 use crate::{ClassCoverage, StreamWait, PENDING_STREAM_LIMIT};
 
 pub use collector::{
-    collect_fleet_state, FleetCollector, FleetLabels, FleetRecorded, FLEET_COLLECTOR_METRICS,
-    FLEET_COLLECT_INTERVAL,
+    collect_fleet_state, collect_fleet_state_through, FleetCollector, FleetLabels, FleetRecorded,
+    FLEET_COLLECTOR_METRICS, FLEET_COLLECT_INTERVAL,
 };
-pub use read::read_fleet_state;
+pub use read::{read_fleet_state, read_fleet_state_through};
+#[cfg(feature = "metrics-endpoint")]
+pub use serve::serve_fleet_metrics;
 
 /// The bound of each statement of the fleet read. After it the core sends a
 /// cancel request; the part answers [`FleetQueryFailure::TimedOut`].

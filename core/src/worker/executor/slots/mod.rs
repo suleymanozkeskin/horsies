@@ -33,6 +33,8 @@ pub mod shared_stop;
 pub mod start;
 
 #[cfg(test)]
+mod attempt_points_tests;
+#[cfg(test)]
 mod boot_tests;
 #[cfg(test)]
 mod claim_plan_tests;
@@ -52,6 +54,8 @@ mod isolated_verdict_tests;
 mod outcome_tests;
 #[cfg(all(test, target_os = "linux"))]
 mod placement_tests;
+#[cfg(test)]
+mod placement_watch_tests;
 #[cfg(test)]
 mod plain_success_tests;
 #[cfg(test)]
@@ -102,14 +106,14 @@ pub use crate::broker::OrphanSelfHeal;
 pub use defects::{SlotDefect, SLOT_DEFECT_LIMIT};
 pub use dispatch::{
     AttemptEnd, CancelEnd, Claimed, ClaimedTask, ExecutionClass, LoopKillCode, NotRunCause,
-    RetryFacts, Settlement, TaskKind, TimeoutCancel,
+    RetryFacts, Settlement, TaskKind, TerminalState, TimeoutCancel, WrittenEnd,
 };
 #[cfg(test)]
 pub(crate) use outcome::test_successes;
 pub use outcome::OutcomeWriter;
 pub use pool::{
-    ExitNotSeen, IsolatedPool, IsolatedPoolConfig, MemoryLimit, PoolStopReport, Submitted,
-    TaskLimit,
+    watched_placement, ChildPlacement, ExitNotSeen, IsolatedPool, IsolatedPoolConfig, MemoryLimit,
+    Placed, PlacementReceipt, PlacementWatch, PoolStopReport, Submitted, TaskLimit,
 };
 pub use route::{
     describe_claim_plan, dispatch_route, unserved_classes_line, ClaimPlan, ClaimRoute,

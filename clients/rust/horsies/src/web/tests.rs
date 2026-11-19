@@ -110,6 +110,28 @@ async fn the_page_is_public() {
     assert!(content_type.starts_with("text/html"), "{content_type}");
 }
 
+/// `GET /metrics` asks `can_view`: a refusal is 403, an allowed view is the
+/// fleet text with the content type of the Prometheus text format.
+#[tokio::test]
+async fn metrics_is_the_fleet_text_behind_the_view_verdict() {
+    let refused = router(&app(), MonitoringConfig::default(), trusted());
+    let (status, _headers, _body) = send(refused, request(Method::GET, "/metrics")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let viewing = router(&app(), MonitoringConfig::default(), ViewOnly);
+    let (status, headers, body) = send(viewing, request(Method::GET, "/metrics")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers[CONTENT_TYPE].to_str().unwrap(),
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("# TYPE horsies_queue_tasks gauge\n"),
+        "{text}"
+    );
+}
+
 /// A read route asks `can_view`; a refusal is 403 `Not authorized.`.
 #[tokio::test]
 async fn a_refused_view_is_403() {
