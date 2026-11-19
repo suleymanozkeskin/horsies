@@ -16,7 +16,7 @@ use chrono::Utc;
 use super::{TelemetryOn, WorkerTelemetry};
 use crate::core::task::Execution;
 use crate::events::{
-    ChildReplaced, ChildStarted, Event, SlotDown, SlotDownCause, SlotIndex, SlotRecovered,
+    ChildReplaced, ChildStarted, SlotDown, SlotDownCause, SlotIndex, SlotRecovered,
 };
 use crate::telemetry::labels::ReplaceReason;
 use crate::worker::executor::protocol::ProcessId;
@@ -112,14 +112,12 @@ impl TelemetryOn {
         let Some(slot) = slot_index(index) else {
             return;
         };
-        let _emitted = self.emit(|| {
-            Event::ChildStarted(ChildStarted {
-                at: Utc::now(),
-                child_kind: kind,
-                slot,
-                child_pid,
-                boot_duration,
-            })
+        let _emitted = self.emit(|| ChildStarted {
+            at: Utc::now(),
+            child_kind: kind,
+            slot,
+            child_pid,
+            boot_duration,
         });
     }
 
@@ -134,14 +132,12 @@ impl TelemetryOn {
         let Some(slot) = slot_index(index) else {
             return;
         };
-        let _emitted = self.emit(|| {
-            Event::ChildReplaced(ChildReplaced {
-                at: Utc::now(),
-                child_kind: kind,
-                slot,
-                child_pid,
-                reason,
-            })
+        let _emitted = self.emit(|| ChildReplaced {
+            at: Utc::now(),
+            child_kind: kind,
+            slot,
+            child_pid,
+            reason,
         });
     }
 
@@ -149,13 +145,11 @@ impl TelemetryOn {
         let (Some(slot), Some(cause)) = (slot_index(index), down_cause(cause)) else {
             return;
         };
-        let _emitted = self.emit(|| {
-            Event::SlotDown(SlotDown {
-                at: Utc::now(),
-                child_kind: kind,
-                slot,
-                cause,
-            })
+        let _emitted = self.emit(|| SlotDown {
+            at: Utc::now(),
+            child_kind: kind,
+            slot,
+            cause,
         });
     }
 
@@ -163,12 +157,10 @@ impl TelemetryOn {
         let Some(slot) = slot_index(index) else {
             return;
         };
-        let _emitted = self.emit(|| {
-            Event::SlotRecovered(SlotRecovered {
-                at: Utc::now(),
-                child_kind: kind,
-                slot,
-            })
+        let _emitted = self.emit(|| SlotRecovered {
+            at: Utc::now(),
+            child_kind: kind,
+            slot,
         });
     }
 }
