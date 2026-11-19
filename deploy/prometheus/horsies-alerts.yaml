@@ -1,0 +1,87 @@
+# Prometheus alert rules for horsies.
+#
+# The series come from two scrape jobs: the worker endpoints
+# (`horsies worker ... --metrics-listen HOST:PORT`) and the fleet collector
+# (`horsies metrics ... --listen HOST:PORT`). Each metric name and label is in
+# core/src/telemetry/catalog_snapshot.txt.
+#
+# The fleet series are aggregated with `max`, so two fleet collectors give
+# one alert. The worker series are added up with `sum` over the workers.
+#
+# The thresholds are starting points. Change them for your queues; see
+# README.md for a threshold per queue.
+
+groups:
+  - name: horsies
+    rules:
+      # The backlog alert. The queue depth is exact only up to 1,000 per
+      # queue and execution class (horsies_queue_pending_more_than holds the
+      # rest), so the backlog is the age of the oldest due PENDING task.
+      - alert: HorsiesOldestPendingTaskTooOld
+        expr: max by (queue, execution) (horsies_queue_oldest_pending_age_seconds) > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The oldest pending task of queue {{ $labels.queue }} ({{ $labels.execution }}) waits {{ $value | humanizeDuration }}."
+          description: "A task of this queue and execution class is due and not claimed for more than 5 minutes. Check the workers that serve the class, their seats in use, and HorsiesUnservedClass."
+
+      - alert: HorsiesTaskFailureRatioHigh
+        expr: |
+          (
+            sum by (queue, task) (rate(horsies_task_attempts_total{outcome!="COMPLETED"}[10m]))
+            /
+            sum by (queue, task) (rate(horsies_task_attempts_total[10m]))
+          ) > 0.1
+          and
+          sum by (queue, task) (increase(horsies_task_attempts_total[10m])) >= 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of the attempts of task {{ $labels.task }} on queue {{ $labels.queue }} did not complete in the last 10 minutes."
+          description: "More than 10% of at least 10 attempts ended FAILED or WORKER_FAILURE. horsies_task_attempts_total{outcome!=\"COMPLETED\"} by error_code shows the causes."
+
+      - alert: HorsiesNoLiveWorker
+        expr: sum(max by (state) (horsies_fleet_workers)) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No live worker: no worker wrote a snapshot inside the live window."
+          description: "No task is claimed until a worker starts. The fleet collector still answers, so the database is reachable."
+
+      - alert: HorsiesUnservedClass
+        expr: max by (queue, execution) (horsies_fleet_unserved_classes) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Queue {{ $labels.queue }} has pending {{ $labels.execution }} tasks, and no live worker serves this queue and class."
+          description: "These tasks stay PENDING until a worker whose profile serves the queue and the execution class starts."
+
+      - alert: HorsiesEventsDropped
+        expr: increase(horsies_telemetry_events_dropped_total[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "A worker dropped lifecycle events in the last 10 minutes (cause {{ $labels.cause }})."
+          description: "queue_full: the handler child reads slower than the worker sends. child_down: the handler child is not running. Task outcomes do not change; the event handlers miss these events."
+
+      - alert: HorsiesTelemetryDown
+        expr: max by (part) (horsies_fleet_workers_telemetry_down) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} live workers have their {{ $labels.part }} down."
+          description: "endpoint: the metrics endpoint of the worker does not serve. handler_child: the event handler child does not run. The workers still run their tasks."
+
+      - alert: HorsiesFleetQueryFailed
+        expr: horsies_exporter_collect_failed == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The fleet collector query {{ $labels.query }} failed or passed its time limit at its last run."
+          description: "The gauges of this query have no series while it fails, so the alerts on them stay quiet. The log of horsies metrics has the cause."
