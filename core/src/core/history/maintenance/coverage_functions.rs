@@ -4,7 +4,7 @@
 //! (`horsies_register_retention_classes`) and the leaf creation
 //! (`horsies_create_history_leaf`, `horsies_create_heartbeat_leaf`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, Timelike, Utc};
 
@@ -180,6 +180,30 @@ impl CoverageProbe {
             (None, false) => Some(HEARTBEAT_CLASS_KEY.to_owned()),
             (None, true) => None,
         }
+    }
+
+    /// Whether this probe finds a damaged leaf that `repaired` did not list.
+    /// The expected leaves of a probe follow its `statement_timestamp()`: a
+    /// probe taken after the start of a new UTC hour (or day) expects the
+    /// newest leaf of that hour (or day), which an earlier probe did not
+    /// expect, so a repair of the earlier probe did not try it.
+    pub(crate) fn has_damage_beyond(&self, repaired: &CoverageProbe) -> bool {
+        let listed: BTreeSet<&str> = repaired.damaged_leaf_names().collect();
+        self.damaged_leaf_names()
+            .any(|leaf_name| !listed.contains(leaf_name))
+    }
+
+    /// The names of the damaged history leaves, then of the damaged
+    /// heartbeat leaves.
+    fn damaged_leaf_names(&self) -> impl Iterator<Item = &str> {
+        self.damaged_history
+            .iter()
+            .map(|leaf| leaf.leaf_name.as_str())
+            .chain(
+                self.damaged_heartbeats
+                    .iter()
+                    .map(|leaf| leaf.leaf_name.as_str()),
+            )
     }
 
     /// What the probe still finds wrong, for a failed pass that recorded no
