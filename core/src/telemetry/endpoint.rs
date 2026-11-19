@@ -4,7 +4,8 @@
 //!
 //! The router decides the routes: a path that no route takes answers 404,
 //! and a method that its route does not take answers 405. A `GET` route
-//! also answers `HEAD`.
+//! also answers `HEAD`. axum stays internal to the core: the public items
+//! name no axum type.
 
 use std::future::Future;
 use std::io;
@@ -94,7 +95,7 @@ pub(crate) async fn bind_loopback_free_port() -> BoundEndpoint {
 /// flight then end before the return.
 ///
 /// Errors: [`EndpointFailed::Serve`].
-pub async fn serve_endpoint<S>(
+pub(crate) async fn serve_endpoint<S>(
     endpoint: BoundEndpoint,
     router: Router,
     stop: S,
@@ -111,7 +112,7 @@ where
 
 /// The answer of `GET /metrics`: `text` with the content type of the
 /// Prometheus text format.
-pub fn metrics_response(text: String) -> Response {
+pub(crate) fn metrics_response(text: String) -> Response {
     ([(CONTENT_TYPE, PROMETHEUS_TEXT_CONTENT_TYPE)], text).into_response()
 }
 

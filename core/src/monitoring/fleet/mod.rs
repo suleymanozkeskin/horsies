@@ -59,7 +59,7 @@ pub use collector::{
 };
 pub use read::{read_fleet_state, read_fleet_state_through};
 #[cfg(feature = "metrics-endpoint")]
-pub use serve::{fleet_metrics_router, serve_fleet_metrics};
+pub use serve::serve_fleet_metrics;
 
 /// The bound of each statement of the fleet read. After it the core sends a
 /// cancel request; the part answers [`FleetQueryFailure::TimedOut`].

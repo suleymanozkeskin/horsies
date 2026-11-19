@@ -18,7 +18,7 @@ use super::{collect_fleet_state_through, FleetCollector, FleetLabels};
 /// The router of the fleet metrics: `GET /metrics` answers the text of
 /// `collector` (`HEAD` too). Another path answers 404, another method 405.
 /// A request reads nothing from the database.
-pub fn fleet_metrics_router(collector: Arc<FleetCollector>) -> Router {
+pub(crate) fn fleet_metrics_router(collector: Arc<FleetCollector>) -> Router {
     Router::new()
         .route("/metrics", get(serve_metrics))
         .with_state(collector)
