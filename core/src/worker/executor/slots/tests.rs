@@ -859,7 +859,7 @@ fn scripted_child(claimed: &ClaimedTask, after_run: &str) -> ChildCommand {
         run = drop_bytes(ScriptCount::Known(run_frame_bytes(claimed).len())),
     );
     ChildCommand {
-        program: "/bin/sh".into(),
+        program: crate::test_support::SCRIPT_SHELL.into(),
         args: vec!["-c".into(), script.into()],
     }
 }

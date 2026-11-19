@@ -896,7 +896,7 @@ BEGIN
                        FROM horsies_workflow_tasks n WHERE n.workflow_id = v_wf AND n.task_index BETWEEN 1 AND 8),
                       'readable node data: every node is enqueued with a task');
     v_input := (SELECT input::jsonb FROM horsies_tasks WHERE id = wft_task_of(v_wf, 1));
-    PERFORM wft_check((SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(v_input) AS k)
+    PERFORM wft_check((SELECT array_agg(k ORDER BY k COLLATE "C") FROM jsonb_object_keys(v_input) AS k)
                       = ARRAY['__h_workflow_meta__', 'a']
                       AND v_input -> 'a' -> 'inner' = wft_ok('7')::jsonb,
                       'readable node data: an array input gives no static members');
@@ -914,7 +914,7 @@ BEGIN
     PERFORM wft_check((SELECT input::jsonb -> 'a' -> 'inner' FROM horsies_tasks WHERE id = wft_task_of(v_wf, 5))
                       = wft_ok('7')::jsonb,
                       'readable node data: a jsonb string holding an object text is read as that object');
-    PERFORM wft_check((SELECT bool_and((SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(t.input::jsonb) AS k)
+    PERFORM wft_check((SELECT bool_and((SELECT array_agg(k ORDER BY k COLLATE "C") FROM jsonb_object_keys(t.input::jsonb) AS k)
                                        = ARRAY['__h_workflow_meta__', 'k'])
                        FROM horsies_tasks t
                        WHERE t.id IN (wft_task_of(v_wf, 6), wft_task_of(v_wf, 7), wft_task_of(v_wf, 8))),

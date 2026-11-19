@@ -68,7 +68,28 @@ impl BaselineDatabase {
     ///
     /// When a statement fails: the test cannot run.
     pub(super) async fn create(setup: &[&str]) -> BaselineDatabase {
-        let database = TestDatabase::create_empty().await;
+        BaselineDatabase::install(TestDatabase::create_empty().await, setup).await
+    }
+
+    /// [`BaselineDatabase::create`] on a database whose default collation
+    /// ignores punctuation at the first level, as glibc's `en_US.UTF-8`
+    /// does.
+    ///
+    /// # Panics
+    ///
+    /// When the server cannot create such a database, or when a statement
+    /// fails: the test cannot run.
+    pub(super) async fn create_ignoring_punctuation(setup: &[&str]) -> BaselineDatabase {
+        BaselineDatabase::install(
+            TestDatabase::create_empty_ignoring_punctuation().await,
+            setup,
+        )
+        .await
+    }
+
+    /// Applies the baseline migration text and then each text of `setup` to
+    /// the empty `database`, in one transaction that commits.
+    async fn install(database: TestDatabase, setup: &[&str]) -> BaselineDatabase {
         let client = database.client();
         run(client, "BEGIN", "BEGIN").await;
         run(client, "the baseline migration", &baseline_sql()).await;

@@ -1,4 +1,4 @@
-//! Scripted children for the tests of the slots: `/bin/sh` programs that
+//! Scripted children for the tests of the slots: bash programs that
 //! read each parent frame by its length and write child frames with
 //! `printf`. The spawner appends the socket descriptor and the worker pid,
 //! so a script reads the descriptor as `$0`.
@@ -551,7 +551,7 @@ pub(super) fn fail_boot(_template: &InitFrame, failure: &ChildFrame) -> String {
 
 pub(super) fn shell(script: &str) -> ChildCommand {
     ChildCommand {
-        program: "/bin/sh".into(),
+        program: crate::test_support::SCRIPT_SHELL.into(),
         args: vec!["-c".into(), script.into()],
     }
 }

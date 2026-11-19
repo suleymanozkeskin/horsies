@@ -543,7 +543,7 @@ async fn a_failed_replacement_fails_the_pool_and_releases_waiting_tasks() {
     let first = task(1, ExecutionClass::Isolated);
     let second = task(2, ExecutionClass::Isolated);
     let program = dir.path().join("sh");
-    std::os::unix::fs::symlink("/bin/sh", &program).unwrap();
+    std::os::unix::fs::symlink(crate::test_support::SCRIPT_SHELL, &program).unwrap();
     let script = format!(
         r#"{}{}rm "{}"; {}"#,
         boot(&isolated_init()),

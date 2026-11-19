@@ -26,7 +26,7 @@ fn child_script(before_boot: &str, after_ready: &str) -> ChildCommand {
         ready = printf_bytes(&ready),
     );
     ChildCommand {
-        program: "/bin/sh".into(),
+        program: crate::test_support::SCRIPT_SHELL.into(),
         args: vec!["-c".into(), script.into()],
     }
 }

@@ -170,6 +170,8 @@ $$;
 -- - 'ABSENT': NULL;
 -- - 'UNREADABLE': anything else (not JSON, an empty text included, another shape, an err slot without an error_code).
 --   No writer stores an empty text, so it is corrupt data, not "no result".
+-- The keys sort by code point (COLLATE "C"): a default collation such as glibc's en_US.UTF-8 ignores '_' and sorts
+-- '__h_task_result__' between 'err' and 'ok'.
 -- Locks: none.
 CREATE FUNCTION horsies_workflow_result_kind(p_text text) RETURNS text
     LANGUAGE plpgsql IMMUTABLE
@@ -188,7 +190,7 @@ BEGIN
         OR (v_value ->> '__h_task_result__') <> 'true' THEN
         RETURN 'UNREADABLE';
     END IF;
-    v_keys := ARRAY(SELECT k FROM json_object_keys(v_value) AS k ORDER BY k);
+    v_keys := ARRAY(SELECT k FROM json_object_keys(v_value) AS k ORDER BY k COLLATE "C");
     IF v_keys = ARRAY['__h_outputless_terminals__', '__h_task_result__', 'err', 'ok']
         AND (v_value ->> '__h_outputless_terminals__') = 'true' THEN
         RETURN 'OUTPUTLESS';
