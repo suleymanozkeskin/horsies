@@ -205,9 +205,8 @@ async def run_seat_task(frame: core.SharedRunFrame) -> SeatReturn:
     """Run one task on a seat, up to its result.
 
     The steps of ``_run_task_entry`` but the finalizing marker: the RUNNING
-    transition with the first runner heartbeat through the core handle of
-    the child, then the task call and the result encode
-    (``_run_after_running``). A stop before the RUNNING
+    transition through the core handle of the child, then the task call and
+    the result encode (``_run_after_running``). A stop before the RUNNING
     update commits returns ``StoppedBeforeRunning``; every other end returns
     ``SetRunning``, but a body that a refusal of the core of the child
     ended: the child ends at once (``set_running_or_end_child``). The seat

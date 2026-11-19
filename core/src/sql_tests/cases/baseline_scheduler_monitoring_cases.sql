@@ -628,6 +628,23 @@ SELECT test_raises('stale list refuses a threshold over one year',
                    'SELECT * FROM horsies_list_stale_tasks(525601)', '22023');
 SELECT test_raises('stale list refuses a NULL threshold', 'SELECT * FROM horsies_list_stale_tasks(NULL)', '22023');
 
+-- a7: a retried task whose new attempt started 30 minutes ago; the only runner beat is of its earlier attempt, 40
+-- minutes ago. The row is removed after the check, so the bound cases below count the rows they expect.
+SELECT test_live_task('00000000-0000-4000-8000-0000000000a7', 'RUNNING', 'app.restarted', 'default', 'w1',
+                      now() - interval '2 hours', now() - interval '30 minutes', 1, NULL);
+INSERT INTO horsies_heartbeats (task_id, role, sent_at, sender_id, hostname, pid) VALUES
+    ('00000000-0000-4000-8000-0000000000a7', 'runner', now() - interval '40 minutes', 'w1', 'h', 1);
+SELECT test_check(
+    'stale list: a runner beat of an earlier attempt, older than the start, is not the last heartbeat',
+    count(*) FILTER (WHERE s.task_id = '00000000-0000-4000-8000-0000000000a7') = 1
+    AND bool_and(s.last_heartbeat IS NULL) FILTER (WHERE s.task_id = '00000000-0000-4000-8000-0000000000a7'),
+    array_agg(s.row_kind || ':' || COALESCE(s.task_id::text, s.list_state) || ':'
+              || COALESCE(s.last_heartbeat::text, 'none'))::text
+)
+FROM horsies_list_stale_tasks(10) AS s;
+DELETE FROM horsies_heartbeats WHERE task_id = '00000000-0000-4000-8000-0000000000a7';
+DELETE FROM horsies_tasks WHERE id = '00000000-0000-4000-8000-0000000000a7';
+
 COMMIT;
 BEGIN;
 INSERT INTO horsies_tasks (

@@ -73,7 +73,6 @@ fn start(task_id: Uuid) -> StartAttempt {
         worker_pid: 4242,
         worker_hostname: "lifecycle-host".to_owned(),
         worker_process_name: "lifecycle-process".to_owned(),
-        beat_sender_id: WORKER.to_owned(),
     }
 }
 
@@ -98,7 +97,7 @@ async fn finalizing_at_is_set(pool: &TestPool, task_id: Uuid) -> bool {
 
 /// Python `test_a_sync_running_update_is_one_statement` (cases `isolated`
 /// and `shared_thread`) and `test_a_shared_async_running_update_is_one_statement`:
-/// the start of a plain task, with its first runner beat, is one round trip,
+/// the start of a plain task is one round trip,
 /// with an open window and with a window of a minute.
 #[tokio::test]
 #[serial]

@@ -727,8 +727,10 @@ impl RunnerBeatWatch {
     }
 }
 
-/// The writer loop: wait one interval (the first beat is written with the
-/// RUNNING transition), then beat; a failed write is retried sooner.
+/// The writer loop: wait one interval, then beat; a failed write is retried
+/// sooner. The start writes no beat: a task gets its first beat at the first
+/// pass after its start, and until then the stale RUNNING rule judges it
+/// from its `started_at`.
 async fn run_beats(
     pool: Arc<CorePool>,
     sender: BeatSender,

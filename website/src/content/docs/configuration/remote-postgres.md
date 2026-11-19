@@ -150,7 +150,7 @@ autocommit, so a check doubles their round trips. At the defaults:
 | Phase 2 of a workflow task (node, dependents, workflow completion, capacity wake) | worker | 7 to 12, in one transaction; see [Worker Architecture](/horsies/workers/worker-architecture/#5-result-handling) |
 | Claim pass (`horsies_claim`) | worker | 1 |
 | Wake of a retry that comes due | worker | 1 |
-| RUNNING update of a plain task, with its first runner heartbeat | child | 1 |
+| RUNNING update of a plain task | child | 1 |
 | Finalizing marker | child | 1 |
 | RUNNING update of a workflow task and the start of its node | child | 4 (BEGIN, update, node, COMMIT) |
 

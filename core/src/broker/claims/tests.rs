@@ -454,8 +454,8 @@ fn count_rows_that_break_the_contract_fail_closed() {
     }
 }
 
-/// The start names its process as Python's `start_attempt_params`: the
-/// process name `worker-<pid>` and the beat sender `<worker_id>:<pid>`.
+/// The start names its process by its pid: the process name
+/// `worker-<pid>`.
 #[test]
 fn a_start_names_its_process_by_its_pid() {
     let start = StartAttempt::of_process(
@@ -470,7 +470,6 @@ fn a_start_names_its_process_by_its_pid() {
     assert_eq!(start.worker_pid, 4242);
     assert_eq!(start.worker_hostname, "host-1");
     assert_eq!(start.worker_process_name, "worker-4242");
-    assert_eq!(start.beat_sender_id, "worker-a:4242");
 }
 
 /// Each miss reason reads back from its own text.

@@ -626,13 +626,14 @@ async fn a_marker_that_cannot_reach_the_database_lets_the_run_go_on() {
 
 /// Python `test_task_row_statements.py::test_the_start_names_the_claim_generation_and_this_process`
 /// (the claim generation: `a_start_of_another_claim_generation_is_a_lost_claim`;
-/// the pid and process name:
-/// `a_held_claim_starts_running_with_the_process_of_its_child`): the first
-/// runner beat names the sender `<worker>:<pid>`, the host and the pid of
-/// the child.
+/// the pid, host and process name:
+/// `a_held_claim_starts_running_with_the_process_of_its_child`): the start
+/// of the child writes no heartbeat. The runner beats of the attempt come
+/// from the worker process, and the stale RUNNING rule judges the attempt
+/// from its `started_at` until the first one.
 #[tokio::test]
 #[serial]
-async fn the_first_runner_beat_names_the_worker_and_the_process_of_the_child() {
+async fn the_start_of_the_child_writes_no_heartbeat() {
     let pool = migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
     let (context, _peer) = context(pool.clone());
@@ -640,20 +641,13 @@ async fn the_first_runner_beat_names_the_worker_and_the_process_of_the_child() {
     let started = start_attempt(&context, &facts(task_id, generation)).await;
 
     assert!(matches!(started, Started::Running));
-    let beats: Vec<(String, String, String, i32)> = sql::query_as(
-        "SELECT role, sender_id, hostname, pid FROM horsies_heartbeats WHERE task_id = $1",
-    )
-    .bind(task_id)
-    .fetch_all(&pool)
-    .await
-    .expect("read the beats");
-    let [(role, sender_id, hostname, pid)] = beats.as_slice() else {
-        panic!("one beat, got {beats:?}");
-    };
-    assert_eq!(role, "runner");
-    assert_eq!(sender_id, &format!("{WORKER_ID}:{PID}"));
-    assert_eq!(hostname, "start-host");
-    assert_eq!(*pid, PID);
+    let beats: i64 =
+        sql::query_scalar("SELECT count(*) FROM horsies_heartbeats WHERE task_id = $1")
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count the beats");
+    assert_eq!(beats, 0);
     remove_task(&pool, task_id).await;
 }
 

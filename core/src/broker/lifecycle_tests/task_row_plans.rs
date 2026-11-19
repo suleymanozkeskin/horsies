@@ -15,7 +15,7 @@ use super::support::*;
 
 /// The installed start, as `regprocedure` text.
 const START_FUNCTION: &str =
-    "horsies_start_attempt(uuid,text,timestamp with time zone,integer,text,text,text)";
+    "horsies_start_attempt(uuid,text,timestamp with time zone,integer,text,text)";
 /// First and last words of the start's row read in its body.
 const ROW_READ_START: &str = "SELECT t.status";
 const ROW_READ_END: &str = "FOR NO KEY UPDATE";

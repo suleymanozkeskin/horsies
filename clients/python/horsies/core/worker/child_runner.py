@@ -813,7 +813,7 @@ def _confirm_ownership_and_set_running(
     | DeadlineBeforeStart
     | CoreStoppedBeforeStart
 ):
-    """Set the row RUNNING with its first runner heartbeat. None: started.
+    """Set the row RUNNING. None: started.
 
     One ``horsies_start_attempt`` statement through the core handle of the
     child (``CoreChildHandle.start_attempt``), fenced to ``worker_id`` and the
@@ -1587,9 +1587,9 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
     ended, after the work that the task left on its task loop
     (``child_main.mark_child_task_finalizing``, ``mark_run_finalizing``).
 
-    The child writes the first runner heartbeat, in the RUNNING transition.
-    The worker process writes the later ones while this child holds the
-    task.
+    The child writes no runner heartbeat. The worker process writes them
+    while this child holds the task; until the first one, the stale RUNNING
+    rule judges the attempt from its ``started_at``.
     """
     logger.info(f'Starting task execution: {task_name} ({task_id})')
 

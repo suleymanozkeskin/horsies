@@ -1900,7 +1900,7 @@ const RECORD_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "AttemptStarted",
-        doc: "The row is RUNNING with its first runner beat, from started_at on the database clock.",
+        doc: "The row is RUNNING (and, for a workflow task, its node RUNNING), from started_at on the database clock. The start writes no runner beat.",
         constructor: Constructor::NoConstructor,
         properties: &[
             property("task_id", "uuid.UUID"),

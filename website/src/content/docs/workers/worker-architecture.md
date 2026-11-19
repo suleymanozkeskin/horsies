@@ -130,7 +130,7 @@ Key features:
 
 In child process:
 
-1. Set the row RUNNING, with the first runner heartbeat in the same statement. A workflow task also sets its node RUNNING, in one transaction with the row
+1. Set the row RUNNING. A workflow task also sets its node RUNNING, in one transaction with the row
 2. Resolve task from registry by name
 3. Deserialize arguments
 4. Call task function. An `async def` task runs on the event loop that the child created at boot. The child keeps that loop until it stops, and the loop runs only while an async task runs
@@ -216,7 +216,7 @@ A shared async child runs `SHARED_ASYNC` tasks of the claimed rows. It has four 
 - The writer thread writes the frames of the child. The loop queues a frame and returns, so a worker that reads slowly never stops the loop.
 - The watchdog thread watches the event loop. When the loop has not turned for 5 seconds, it names the task that holds the loop, with the source line, and reports it to the worker through the writer thread.
 
-The start steps, after the import of the app and the `on_child_process_start` hooks: the child opens an async connection pool on its loop, runs the [`on_shared_async_child_start` hooks](/horsies/workers/child-process-hooks/#shared-async-child-start-hooks), and sends its ready frame. Each task then runs on the loop: the RUNNING update with the first runner heartbeat, the task body, and the finalizing marker. Each write goes through the async pool, so no write of the child blocks the loop.
+The start steps, after the import of the app and the `on_child_process_start` hooks: the child opens an async connection pool on its loop, runs the [`on_shared_async_child_start` hooks](/horsies/workers/child-process-hooks/#shared-async-child-start-hooks), and sends its ready frame. Each task then runs on the loop: the RUNNING update, the task body, and the finalizing marker. Each write goes through the async pool, so no write of the child blocks the loop.
 
 The worker places each `SHARED_ASYNC` task on the open shared child with the fewest tasks in flight and a free seat. Each result frame names its run, and a free seat takes the next queued task at once. The runner heartbeats of every task of the child come from the worker process, as for an isolated child.
 
@@ -244,7 +244,7 @@ A shared thread child runs `SHARED_THREAD` tasks of the claimed rows. Its thread
 - The deadline thread reports each deadline at its time.
 - The writer thread writes the frames of the child.
 
-The child boots as an isolated child does: the import of the app, the `on_child_process_start` hooks, and one sync connection pool. Then it starts its threads and sends its ready frame. A refused thread fails the boot (`ThreadStartRefused`), and that cause can clear. Each task runs on its seat thread: the RUNNING update with the first runner heartbeat, the task body, and the finalizing marker. The seat threads share the sync pool of the child.
+The child boots as an isolated child does: the import of the app, the `on_child_process_start` hooks, and one sync connection pool. Then it starts its threads and sends its ready frame. A refused thread fails the boot (`ThreadStartRefused`), and that cause can clear. Each task runs on its seat thread: the RUNNING update, the task body, and the finalizing marker. The seat threads share the sync pool of the child.
 
 The worker places each `SHARED_THREAD` task on the open shared thread child with the fewest tasks in flight and a free seat. The runner heartbeats of every task of the child come from the worker process.
 

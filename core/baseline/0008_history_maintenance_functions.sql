@@ -24,7 +24,7 @@
 -- horsies_history_leaf_name(p_class_key text, p_lower_anchor timestamptz): the relation name of the daily leaf of a
 -- PERIOD class that starts at p_lower_anchor: horsies_task_history_<class key>_YYYY_MM_DD (UTC day). The longest
 -- name (standard_1825d) is 46 bytes; with _enqueued_idx it is 59, under the 63-byte identifier limit.
--- Replaces: history/partitions/catalog.py:157-164 (daily_leaf_name).
+-- Replaces (`v0.7.0` package): core/history/partitions/catalog.py:157-164 (daily_leaf_name).
 CREATE FUNCTION horsies_history_leaf_name(p_class_key text, p_lower_anchor timestamp with time zone) RETURNS text
     LANGUAGE sql STABLE STRICT
     AS $$
@@ -33,7 +33,7 @@ $$;
 
 -- horsies_heartbeat_leaf_name(p_lower_anchor timestamptz): the relation name of the hourly heartbeat leaf that
 -- starts at p_lower_anchor: horsies_heartbeats_YYYY_MM_DD_HH24 (UTC hour).
--- Replaces: history/heartbeats/partitioning.py:120-127 (hourly_leaf_name).
+-- Replaces (`v0.7.0` package): core/history/heartbeats/partitioning.py:120-127 (hourly_leaf_name).
 CREATE FUNCTION horsies_heartbeat_leaf_name(p_lower_anchor timestamp with time zone) RETURNS text
     LANGUAGE sql STABLE STRICT
     AS $$
@@ -53,9 +53,9 @@ $$;
 -- p_leaf_kind returns no row.
 -- A plain SQL table function: a caller that names it in FROM gets it inlined into its own plan.
 -- Reads: pg_class, pg_index, pg_am, pg_attribute, pg_opclass, pg_type, pg_cast. Locks: none.
--- Replaces: the index shape checks of the coverage probe (history/maintenance/coverage.py:271-443),
--- history/partitions/catalog.py:658-839 (read_leaf_physical_state) and history/partitions/locks.py:172-209
--- (read_index_relation_state).
+-- Replaces (`v0.7.0` package): the index shape checks of the coverage probe
+-- (core/history/maintenance/coverage.py:271-443), core/history/partitions/catalog.py:658-839 (read_leaf_physical_state)
+-- and core/history/partitions/locks.py:172-209 (read_index_relation_state).
 CREATE FUNCTION horsies_history_leaf_indexes(p_leaf_kind text, p_leaf_name text) RETURNS TABLE(index_name text, index_columns text, holder text, conformant boolean)
     LANGUAGE sql STABLE
     AS $$
@@ -154,9 +154,9 @@ $$;
 -- A plain SQL table function, inlined into the coverage probe's plan.
 -- Reads: horsies_task_history_leaf_catalog_pkey, pg_class, pg_inherits, pg_index. Locks: none. Changes nothing.
 -- Returns: one row.
--- Replaces: history/partitions/manager.py:601-680 (_read_daily_leaf_creation_state),
--- history/heartbeats/partitioning.py:448-515 (_read_hourly_leaf_creation_state), and the conformance of the coverage
--- probe (history/maintenance/coverage.py:271-443).
+-- Replaces (`v0.7.0` package): core/history/partitions/manager.py:601-680 (_read_daily_leaf_creation_state),
+-- core/history/heartbeats/partitioning.py:448-515 (_read_hourly_leaf_creation_state), and the conformance of the
+-- coverage probe (core/history/maintenance/coverage.py:271-443).
 CREATE FUNCTION horsies_history_leaf_state(p_leaf_kind text, p_class_key text, p_parent_name text, p_leaf_name text, p_lower_bound_kind text, p_lower_anchor timestamp with time zone, p_upper_anchor timestamp with time zone) RETURNS TABLE(state text, conflict_kind text)
     LANGUAGE sql STABLE
     AS $$
@@ -231,8 +231,8 @@ $$;
 -- probe_position counts from 0 in that order. A cataloged leaf whose relation is gone is left out
 -- (horsies_history_absent_leaves names it): a probe of a missing relation fails at execution.
 -- Reads: horsies_task_history_leaf_catalog, horsies_retention_classes_pkey. Locks: none.
--- Replaces: history/partitions/catalog.py:436-507 (read_manifest_leaf_rows, which reads each catalog row again) and
--- history/reads/lookup_generation.py:139-187 (manifest_from_catalog).
+-- Replaces (`v0.7.0` package): core/history/partitions/catalog.py:436-507 (read_manifest_leaf_rows, which reads each
+-- catalog row again) and core/history/reads/lookup_generation.py:139-187 (manifest_from_catalog).
 CREATE FUNCTION horsies_history_reader_manifest() RETURNS TABLE(leaf_name text, probe_position integer, lower_bound_kind text, lower_anchor timestamp with time zone, upper_anchor timestamp with time zone)
     LANGUAGE sql STABLE
     AS $$
@@ -253,8 +253,8 @@ $$;
 -- horsies_history_absent_leaves(): the history leaves that the catalog records as attached whose relation is gone,
 -- in name order. They were removed out of band: the readers leave them out, and the catalog keeps their rows for an
 -- operator. Empty on a healthy database.
--- Replaces: the absent_leaves column of the coverage probe (history/maintenance/coverage.py:501-509) and the absent
--- relations of read_manifest_leaf_rows.
+-- Replaces (`v0.7.0` package): the absent_leaves column of the coverage probe
+-- (core/history/maintenance/coverage.py:501-509) and the absent relations of read_manifest_leaf_rows.
 CREATE FUNCTION horsies_history_absent_leaves() RETURNS text[]
     LANGUAGE sql STABLE
     AS $$
@@ -274,7 +274,8 @@ $$;
 -- Renderer version 2 is the reader bodies of horsies_render_history_reader (version 1 had no command fingerprint
 -- and no sent_at in the provenance row). A change of any rendered body changes the version here, so the first
 -- coverage pass after the migration that ships it republishes, also when the manifest is the same.
--- Replaces: MANIFEST_STAMP_SQL (history/reads/publisher.py:85-104), which has no renderer version.
+-- Replaces (`v0.7.0` package): MANIFEST_STAMP_SQL (core/history/reads/publisher.py:85-104), which has no renderer
+-- version.
 CREATE FUNCTION horsies_history_reader_stamp() RETURNS text
     LANGUAGE sql STABLE
     AS $$
@@ -302,8 +303,8 @@ $$;
 -- another renderer wrote (another stamp), a leaf created, detached or dropped since the last publication, and a
 -- leaf whose relation is gone all answer FALSE.
 -- Reads: the manifest and the catalog; pg_proc and pg_description by the four signatures. Locks: none.
--- Replaces: history/reads/publisher.py:178-188 (is_current), :212-224 (published_readers_stamped) and :259-309
--- (published_manifest_matches_catalog).
+-- Replaces (`v0.7.0` package): core/history/reads/publisher.py:178-188 (is_current), :212-224
+-- (published_readers_stamped) and :259-309 (published_manifest_matches_catalog).
 CREATE FUNCTION horsies_history_readers_current() RETURNS boolean
     LANGUAGE sql STABLE
     AS $$
@@ -357,11 +358,11 @@ $$;
 -- A change of any rendered text needs a new renderer version in horsies_history_reader_stamp.
 -- Refusals: 22023 invalid_parameter_value for another p_reader. Reads: the manifest table. Changes nothing.
 -- Returns: the statement text.
--- Replaces: history/reads/lookup_generation.py:190-596 (the five renderers and _staged_function). Changes from it:
--- the lookup reader is not rendered (no production caller); the provenance reader has no live probe and no
--- include_live argument, returns plain columns with is_workflow_task, the command fingerprint and sent_at, and no row
--- on absence; the fallback probes include the open-ended leaf, because a UUIDv7 can encode a birth after
--- 9999-01-01.
+-- Replaces (`v0.7.0` package): core/history/reads/lookup_generation.py:190-594 (the five renderers and
+-- _staged_function). Changes from it: the lookup reader is not rendered (no production caller); the provenance reader
+-- has no live probe and no include_live argument, returns plain columns with is_workflow_task, the command fingerprint
+-- and sent_at, and no row on absence; the fallback probes include the open-ended leaf, because a UUIDv7 can encode a
+-- birth after 9999-01-01.
 CREATE FUNCTION horsies_render_history_reader(p_reader text) RETURNS text
     LANGUAGE plpgsql STABLE
     SET "TimeZone" TO 'UTC'
@@ -520,9 +521,9 @@ $renderer$;
 -- Lock order: the publication lock; the manifest rows (DELETE, INSERT); the four functions (CREATE OR REPLACE,
 -- COMMENT). No relation lock on a leaf.
 -- Returns: one row.
--- Replaces: history/reads/publisher.py:133-176 (StagedLoaderPublisher.republish): a catalog read and one catalog row
--- read per attached leaf, five renders, an overload DROP, the manifest DELETE and INSERT and the stamp DO block,
--- about 10 statements plus one per attached leaf, with no lock against a concurrent publisher.
+-- Replaces (`v0.7.0` package): core/history/reads/publisher.py:133-176 (StagedLoaderPublisher.republish): a catalog
+-- read and one catalog row read per attached leaf, five renders, an overload DROP, the manifest DELETE and INSERT and
+-- the stamp DO block, about 10 statements plus one per attached leaf, with no lock against a concurrent publisher.
 CREATE FUNCTION horsies_publish_history_readers() RETURNS TABLE(outcome text, manifest_stamp text, probed_leaves integer, absent_leaves text[])
     LANGUAGE plpgsql
     SET "TimeZone" TO 'UTC'
@@ -646,8 +647,8 @@ $$;
 -- pg_index; the manifest and the reader comments. Locks: none.
 -- Returns: (registered PERIOD classes) x (p_history_horizon_days + 1) + 1 + (p_heartbeat_horizon_hours + 1) rows;
 -- for example 16 for the default class only, 7 days and 6 hours.
--- Replaces: history/maintenance/coverage.py:103-528 (_COVERAGE_PROBE_SQL) with :655-739 (the SET LOCAL TIME ZONE and
--- the probe read): two statements.
+-- Replaces (`v0.7.0` package): core/history/maintenance/coverage.py:103-528 (_COVERAGE_PROBE_SQL) with :655-739 (the
+-- SET LOCAL TIME ZONE and the probe read): two statements.
 CREATE FUNCTION horsies_coverage_probe(p_declared_days smallint[], p_history_horizon_days smallint, p_heartbeat_horizon_hours smallint) RETURNS TABLE(checked_at timestamp with time zone, leaf_kind text, class_key text, parent_name text, leaf_name text, lower_bound_kind text, lower_anchor timestamp with time zone, upper_bound_kind text, upper_anchor timestamp with time zone, conformant boolean, registration_healthy boolean, publication_healthy boolean, absent_leaves text[])
     LANGUAGE plpgsql STABLE
     SET "TimeZone" TO 'UTC'
@@ -774,9 +775,10 @@ $$;
 -- leaf catalog insert's foreign key check does not wait on).
 -- Indexes: horsies_retention_classes_pkey.
 -- Returns: one row per class.
--- Replaces: history/ddl/classes.py:96-163 (register_finite_retention_class: a read, an INSERT and a CREATE TABLE per
--- new class) for the default and each declared class, and history/heartbeats/partitioning.py:200-281
--- (register_heartbeat_class: a pg_partitioned_table check, a read, then an INSERT or an UPDATE).
+-- Replaces (`v0.7.0` package): core/history/ddl/classes.py:96-163 (register_finite_retention_class: a read, an INSERT
+-- and a CREATE TABLE per new class) for the default and each declared class, and
+-- core/history/heartbeats/partitioning.py:200-281 (register_heartbeat_class: a pg_partitioned_table check, a read, then
+-- an INSERT or an UPDATE).
 CREATE FUNCTION horsies_register_retention_classes(p_days smallint[], p_heartbeat_horizon_hours smallint) RETURNS TABLE(class_key text, class_kind text, outcome text, previous_heartbeat_horizon_hours smallint)
     LANGUAGE plpgsql
     AS $$
@@ -999,10 +1001,11 @@ $$;
 -- isolation than READ COMMITTED (the publication).
 -- Locks and indexes: horsies_create_partition_leaf; horsies_retention_classes_pkey.
 -- Returns: one row.
--- Replaces: history/partitions/manager.py:323-367 (create_daily_leaf) and :423-598 (_create_or_verify_history_leaf):
--- 24 statements per created leaf (the class read; two state reads of 5 statements each, because the bound read pins
--- and restores the session time zone; the try-lock; savepoint, LOCK and release; CREATE TABLE; the bound capture,
--- 4 statements; the catalog INSERT; two CREATE INDEX; ANALYZE). Python publishes once at the end of the pass.
+-- Replaces (`v0.7.0` package): core/history/partitions/manager.py:323-367 (create_daily_leaf) and :423-598
+-- (_create_or_verify_history_leaf): 24 statements per created leaf (the class read; two state reads of 5 statements
+-- each, because the bound read pins and restores the session time zone; the try-lock; savepoint, LOCK and release;
+-- CREATE TABLE; the bound capture, 4 statements; the catalog INSERT; two CREATE INDEX; ANALYZE). 0.7.0 publishes once
+-- at the end of the pass.
 CREATE FUNCTION horsies_create_history_leaf(p_class_key text, p_lower_anchor timestamp with time zone) RETURNS TABLE(outcome text, leaf_name text, conflict_kind text)
     LANGUAGE plpgsql
     SET "TimeZone" TO 'UTC'
@@ -1081,8 +1084,8 @@ $$;
 -- hour start.
 -- Locks and indexes: horsies_create_partition_leaf; horsies_retention_classes_pkey.
 -- Returns: one row.
--- Replaces: history/heartbeats/partitioning.py:319-445 (create_hourly_heartbeat_leaf): 22 statements per created
--- leaf (as a history leaf, with one CREATE INDEX and no ANALYZE).
+-- Replaces (`v0.7.0` package): core/history/heartbeats/partitioning.py:319-445 (create_hourly_heartbeat_leaf): 22
+-- statements per created leaf (as a history leaf, with one CREATE INDEX and no ANALYZE).
 CREATE FUNCTION horsies_create_heartbeat_leaf(p_lower_anchor timestamp with time zone) RETURNS TABLE(outcome text, leaf_name text, conflict_kind text)
     LANGUAGE plpgsql
     SET "TimeZone" TO 'UTC'
@@ -1122,8 +1125,9 @@ $$;
 -- PAUSE_ABANDON_CLAIM_BATCH, PAUSE_ABANDON_WORKFLOW); WORKFLOW_CANCEL (WORKFLOW_CANCEL_CLAIM,
 -- WORKFLOW_CANCEL_CLAIM_BATCH, WORKFLOW_CANCEL_WORKFLOW).
 -- Returns: the class name; NULL for a kind outside the 15 kinds.
--- Replaces: EQUIVALENCE_CLASSES (lifecycle/operations.py:87-119), which Python renders into each caller's array
--- argument (history/terminalization/move.py:39-62). This table is the one owner of the classes in SQL.
+-- Replaces (`v0.7.0` package): EQUIVALENCE_CLASSES (core/lifecycle/operations.py:87-119), which 0.7.0 renders into each
+-- caller's array argument (core/history/terminalization/move.py:39-62). This table is the one owner of the classes in
+-- SQL.
 CREATE FUNCTION horsies_terminalization_family(p_kind text) RETURNS text
     LANGUAGE sql IMMUTABLE STRICT
     AS $$
@@ -1174,11 +1178,11 @@ $$;
 -- Lock order: the live row FOR UPDATE (the caller holds the task advisory lock).
 -- Indexes: horsies_tasks_pkey; the leaf task_id indexes (provenance reader).
 -- Returns: one row.
--- Replaces: history/terminalization/outcome.py:43-114 (MISS_CLASSIFIER_DDL). Changes from it: the caller passes its
--- kind and this function owns the equivalence classes, instead of each caller writing the class as an array
--- literal; the caller names its fence kind, instead of a NULL argument turning a part of the fence off; the
--- provenance reader takes no include_live argument and has no live probe, so the LIVE-after-miss refusal has
--- nothing to check.
+-- Replaces (`v0.7.0` package): core/history/terminalization/outcome.py:43-114 (MISS_CLASSIFIER_DDL). Changes from it:
+-- the caller passes its kind and this function owns the equivalence classes, instead of each caller writing the class
+-- as an array literal; the caller names its fence kind, instead of a NULL argument turning a part of the fence off; the
+-- provenance reader takes no include_live argument and has no live probe, so the LIVE-after-miss refusal has nothing to
+-- check.
 CREATE FUNCTION horsies_terminalization_miss(p_task_id uuid, p_kind text, p_fence_kind text, p_worker_id text, p_claimed_at timestamp with time zone) RETURNS SETOF horsies_terminalization_outcome
     LANGUAGE plpgsql
     AS $$

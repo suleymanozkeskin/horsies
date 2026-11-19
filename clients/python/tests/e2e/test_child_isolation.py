@@ -282,15 +282,14 @@ async def test_child_stops_when_the_parent_dies(
 
 
 async def _beats_from_the_worker_process(broker: PostgresBroker, task_id: UUID) -> int:
-    """Runner beats that the worker process wrote. The child's first beat
-    names the child pid in its sender id; the worker's beats name the worker."""
+    """Runner beats of the task. The worker process writes every one: the
+    start of the child writes none."""
     async with current_resources(broker).session_factory() as session:
         count = await session.scalar(
             text("""
                 SELECT COUNT(*) FROM horsies_heartbeats
                 WHERE task_id = CAST(:id AS uuid)
                   AND role = 'runner'
-                  AND position(':' IN sender_id) = 0
             """),
             {'id': str(task_id)},
         )

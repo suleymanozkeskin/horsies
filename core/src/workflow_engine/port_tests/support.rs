@@ -654,7 +654,6 @@ pub(super) async fn start_claimed_task(
             worker_pid: START_WORKER_PID,
             worker_hostname: SEEDED_WORKER_HOSTNAME.to_owned(),
             worker_process_name: SEEDED_WORKER_PROCESS_NAME.to_owned(),
-            beat_sender_id: format!("{WORKER}:{START_WORKER_PID}"),
         },
         crate::broker::child_writes::WriteDeadline::start_attempt(),
     )

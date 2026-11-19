@@ -481,8 +481,8 @@ $$;
 -- Returns rows of kind CLAIMED (one per taken row: id, task_name, queue_name, input, task_options, execution,
 -- is_workflow_task, claimed_at, retry_count, max_retries) and at most one row of kind SHORT (short_by). retry_count
 -- and max_retries let a failed attempt be written in one statement with no read.
--- Python: horsies_claim (core/schemas/migrations.py:713-1003), HORSIES_CLAIM_SQL (core/worker/sql.py:102-120), the
--- claim pass (core/worker/claiming.py:282-296).
+-- Python 0.7.0 (`v0.7.0` package): horsies_claim (core/schemas/migrations.py:713-1003), HORSIES_CLAIM_SQL
+-- (core/worker/sql.py:102-120), the claim pass (core/worker/claiming.py:282-296).
 CREATE FUNCTION horsies_claim(
     p_worker_id text,
     p_queues jsonb,
@@ -626,7 +626,7 @@ $$;
 -- from now(), the finalizing marker cleared.
 -- Locks: the row locks of the taken rows only.
 -- Returns the CLAIMED rows in claim order and one SHORT row when fewer rows were taken than planned.
--- Python: horsies_claim_candidates (core/schemas/migrations.py:1005).
+-- Python 0.7.0 (`v0.7.0` package): horsies_claim_candidates (core/schemas/migrations.py:1005).
 CREATE FUNCTION horsies_claim_candidates(
     p_total integer,
     p_available jsonb,
@@ -764,7 +764,7 @@ $$;
 -- Locks: none.
 -- Returns one row: this worker's CLAIMED count, this worker's in-flight count, the cluster in-flight count, the
 -- per-queue counts of the capped queues (JSON object), the per-budget counts of this worker (JSON object).
--- Python: horsies_claim_in_flight (core/schemas/migrations.py:629).
+-- Python 0.7.0 (`v0.7.0` package): horsies_claim_in_flight (core/schemas/migrations.py:629).
 CREATE FUNCTION horsies_claim_in_flight(
     p_worker_id text,
     p_capped text[],
@@ -816,15 +816,19 @@ $$;
 -- Start
 ------------------------------------------------------------------------------------------------------------------------
 
--- horsies_start_attempt: the RUNNING write of one claimed task, plain or workflow, with its first runner beat.
+-- horsies_start_attempt: the RUNNING write of one claimed task, plain or workflow.
 --
 -- Guarantee:
 -- - The row becomes RUNNING only when it is CLAIMED by p_worker_id at the claim generation p_claimed_at, its lease
 --   has not expired, its good_until has not passed, and, for a workflow task, its workflow is not PAUSED or
 --   CANCELLED and its node is linked (node status ENQUEUED, READY, PENDING or RUNNING). is_workflow_task comes from
 --   the locked row.
--- - The first runner beat and, for a workflow task, the node's RUNNING write commit with the start. A node that is
---   RUNNING already (a retried attempt) keeps its first started_at. A start that does not apply writes nothing.
+-- - For a workflow task, the node's RUNNING write commits with the start. A node that is RUNNING already (a retried
+--   attempt) keeps its first started_at. A start that does not apply writes nothing.
+-- - The start writes no runner beat. started_at is the start of this attempt: the stale RUNNING probes
+--   (horsies_stale_running_scan, horsies_finish_stale_attempt) read only the runner beats sent at or after it, so a
+--   beat of an earlier attempt of the task never counts for this attempt, and an attempt with no such beat is judged
+--   from started_at.
 -- - The start sends no status event (the update trigger skips RUNNING).
 -- - A miss ends its row lock with the statement, so the miss path that follows (expiry, or the stop of a workflow
 --   task) never runs while this lock is held.
@@ -832,21 +836,21 @@ $$;
 --   generation, good_until passed: the expiry applies), NOT_HELD (absent, or the status, owner or claim generation
 --   differs), LEASE_EXPIRED, WORKFLOW_PAUSED, WORKFLOW_CANCELLED, NODE_NOT_LINKED.
 --
--- Arguments: every argument is required (22023): the task, the worker, the claim generation, the process facts of
--- the row (pid, host, process name) and the sender of the first beat.
+-- Arguments: every argument is required (22023): the task, the worker, the claim generation and the process facts
+-- of the row (pid, host, process name).
 -- Locks: the task row (FOR NO KEY UPDATE, read by id alone so only the primary key serves it), then the linked node
 -- row (FOR UPDATE), the order that the move uses. No task advisory lock and no workflow lock: nothing moves.
 -- Returns one row: outcome STARTED with started_at, or MISSED with miss_reason.
--- Python: the RUNNING write and its first beat (core/worker/child_runner.py:711-761, set_running_params :899-925),
--- the workflow guard (:740-748), the node write (:763-781), _confirm_ownership_and_set_running (:1141-1257).
+-- Python 0.7.0 (`v0.7.0` package): the RUNNING write (core/worker/child_runner.py:711-761, set_running_params
+-- :899-925), the workflow guard (:740-748), the node write (:763-781), _confirm_ownership_and_set_running
+-- (:1141-1257). Its RUNNING write also inserted a runner beat (first_beat, :753-759).
 CREATE FUNCTION horsies_start_attempt(
     p_task_id uuid,
     p_worker_id text,
     p_claimed_at timestamp with time zone,
     p_worker_pid integer,
     p_worker_hostname text,
-    p_worker_process_name text,
-    p_beat_sender_id text
+    p_worker_process_name text
 ) RETURNS TABLE(outcome text, miss_reason text, started_at timestamp with time zone)
     LANGUAGE plpgsql
     AS $$
@@ -856,8 +860,7 @@ DECLARE
     v_link record;
 BEGIN
     IF num_nulls(
-        p_task_id, p_worker_id, p_claimed_at, p_worker_pid, p_worker_hostname, p_worker_process_name,
-        p_beat_sender_id
+        p_task_id, p_worker_id, p_claimed_at, p_worker_pid, p_worker_hostname, p_worker_process_name
     ) <> 0 THEN
         RAISE EXCEPTION 'horsies_start_attempt: every argument is required'
             USING ERRCODE = 'invalid_parameter_value';
@@ -923,9 +926,6 @@ BEGIN
         worker_process_name = p_worker_process_name,
         updated_at = NOW()
     WHERE t.id = p_task_id;
-
-    INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid)
-    VALUES (p_task_id, p_beat_sender_id, 'runner', NOW(), p_worker_hostname, p_worker_pid);
 
     IF v_task.is_workflow_task THEN
         IF v_link.node_status <> 'RUNNING' THEN
@@ -1050,7 +1050,7 @@ $$;
 -- Locks: the task advisory lock, then the row by id alone (FOR UPDATE; the primary key serves it), then the move.
 -- A row that fails the fence stays locked for the miss classifier, which locks it by id too.
 -- Returns one row of the shared outcome columns (ordinality NULL).
--- Python: horsies_complete_task_fused (core/history/terminalization/move.py:678-763), its call
+-- Python 0.7.0 (`v0.7.0` package): horsies_complete_task_fused (core/history/terminalization/move.py:678-763), its call
 -- (core/lifecycle/persistence.py:123-133), the plain success (core/worker/finalize.py:1384-1436).
 CREATE FUNCTION horsies_complete_task_fused(
     p_task_id uuid,
@@ -1150,8 +1150,8 @@ $$;
 -- Locks: per row in task id order, the task advisory lock, then the row lock, then the move. A holder of another
 -- row of the batch takes one task, takes rows in ascending id order, or never waits, so no lock cycle can form.
 -- Returns one row per input row, with ordinality = its 1-based position in the input arrays.
--- Python: horsies_complete_tasks_fused (core/history/terminalization/move.py:764-843), its call
--- (core/lifecycle/persistence.py:134-147, :627-671), the batcher (core/worker/finalize.py:1375-1436).
+-- Python 0.7.0 (`v0.7.0` package): horsies_complete_tasks_fused (core/history/terminalization/move.py:764-843), its
+-- call (core/lifecycle/persistence.py:134-147, :627-671), the batcher (core/worker/finalize.py:1375-1436).
 CREATE FUNCTION horsies_complete_tasks_fused(
     p_task_ids uuid[],
     p_claimed_ats timestamp with time zone[],
@@ -1224,8 +1224,8 @@ $$;
 -- Locks: the task advisory lock, then the row by id alone (FOR UPDATE), then the node row (in the move).
 -- Returns one row: the shared outcome columns, queue_name and task_name (APPLIED only), node_has_dependents and
 -- downstream_subworkflow (APPLIED only; NULL on every other outcome).
--- Python: horsies_finish_workflow_success (core/history/terminalization/move.py:1285-1392), its call
--- (core/worker/finalize.py:1322-1372).
+-- Python 0.7.0 (`v0.7.0` package): horsies_finish_workflow_success (core/history/terminalization/move.py:1285-1392),
+-- its call (core/worker/finalize.py:1322-1372).
 CREATE FUNCTION horsies_finish_workflow_success(
     p_task_id uuid,
     p_worker_id text,
@@ -1361,9 +1361,9 @@ $$;
 -- retry_disposition (APPLIED: NOT_REQUESTED or PAST_DEADLINE), retry_count and next_retry_at (RETRY_SCHEDULED),
 -- good_until (PAST_DEADLINE), is_workflow_task, queue_name, task_name (APPLIED; queue_name also RETRY_SCHEDULED and
 -- RELEASED), node_has_dependents and downstream_subworkflow (APPLIED of a workflow task; else NULL).
--- Python: horsies_finish_failed_attempt (core/history/terminalization/move.py:1045-1262), READ_IN_FLIGHT_ATTEMPT_SQL
--- (core/worker/sql.py:306-314) and its read (core/worker/failed_attempt.py:101-130), the call
--- (core/worker/failed_attempt.py:298-330, core/worker/finalize.py:1467-1523), the killed-child path
+-- Python 0.7.0 (`v0.7.0` package): horsies_finish_failed_attempt (core/history/terminalization/move.py:1045-1262),
+-- READ_IN_FLIGHT_ATTEMPT_SQL (core/worker/sql.py:306-314) and its read (core/worker/failed_attempt.py:101-130), the
+-- call (core/worker/failed_attempt.py:298-330, core/worker/finalize.py:1467-1523), the killed-child path
 -- (core/worker/dispatch.py:357-410) with UNCLAIM_CLAIMED_TASK_SQL (core/worker/sql.py:237-255).
 CREATE FUNCTION horsies_finish_failed_attempt(
     p_task_id uuid,
@@ -1794,10 +1794,12 @@ $$;
 --
 -- p_evidence names what makes a RUNNING row a candidate, a closed set:
 -- - BEAT_AGE (both thresholds, >= 0; no owner and no claim bound): a row with a start, no finalizing marker newer
---   than p_finalizing_stale_after_ms, and no runner beat newer than p_stale_after_ms (the latest beat, or the start
---   when there is none). The beat probe reads only beats newer than the larger threshold: an older beat satisfies
---   the staleness test for every value, so the bound cannot change the verdict, and it keeps the probe on the
---   current hourly leaves.
+--   than p_finalizing_stale_after_ms, and no runner beat of this attempt newer than p_stale_after_ms (its latest
+--   beat sent at or after started_at, or started_at when there is none). A beat sent before started_at belongs to
+--   an earlier attempt of the task: the start writes no beat, so such a beat would otherwise stand for a new attempt
+--   that has not beaten yet. The beat probe also reads only beats newer than the larger threshold: an older beat
+--   satisfies the staleness test for every value, so the bound cannot change the verdict, and it keeps the probe on
+--   the current hourly leaves.
 -- - OWNER_GONE (p_owner_worker_id and p_claimed_before; no threshold): a row with a start that p_owner_worker_id
 --   claimed before p_claimed_before. The caller judged the owner gone: horsies_unheld_worker_owners returned it in
 --   two reads far enough apart, at one generation. A gone owner writes no beat and finalizes nothing, so the beat
@@ -1811,7 +1813,7 @@ $$;
 -- Returns one row per candidate: the facts the caller needs for the retry decision (retry_count, max_retries,
 -- task_options, good_until), for the crash result (claimed_by_worker_id, worker_pid, worker_hostname,
 -- worker_process_name, started_at) and for the fence of OWNER_GONE (claimed_at), and db_now (clock_timestamp()).
--- Python: SELECT_STALE_RUNNING_TASKS_SQL (core/brokers/postgres.py:766-788) and its session
+-- Python 0.7.0 (`v0.7.0` package): SELECT_STALE_RUNNING_TASKS_SQL (core/brokers/postgres.py:766-788) and its session
 -- (core/brokers/postgres.py:3972-3984), for BEAT_AGE. OWNER_GONE is a core addition.
 CREATE FUNCTION horsies_stale_running_scan(
     p_evidence text,
@@ -1884,6 +1886,7 @@ BEGIN
                         AND h.sent_at >= NOW() - make_interval(
                             secs => GREATEST(p_stale_after_ms, p_finalizing_stale_after_ms) / 1000.0
                         )
+                        AND h.sent_at >= t.started_at
                       ORDER BY h.sent_at DESC
                       LIMIT 1
                   ),
@@ -1914,11 +1917,13 @@ $$;
 --   beat age.
 --
 -- Guarantee:
--- - Judged under the task advisory lock and the row lock, on one capture of the row, its latest runner beat (inside
---   the recency bound of horsies_stale_running_scan; BEAT_AGE only) and NOW().
--- - BEAT_AGE: RUNNING, started, no finalizing marker newer than p_finalizing_stale_after_ms, no runner beat newer
---   than p_stale_after_ms. A fresh row is SOURCE_STATE_CONFLICT with guard STALENESS and its evidence; a row that is
---   not RUNNING is classified by horsies_terminalization_miss (FAIL_STALE, fence NONE).
+-- - Judged under the task advisory lock and the row lock, on one capture of the row, its latest runner beat (the
+--   bounds of horsies_stale_running_scan: sent at or after started_at, inside the recency bound; BEAT_AGE only) and
+--   NOW().
+-- - BEAT_AGE: RUNNING, started, no finalizing marker newer than p_finalizing_stale_after_ms, no runner beat of this
+--   attempt newer than p_stale_after_ms (started_at when it has none). A fresh row is SOURCE_STATE_CONFLICT with
+--   guard STALENESS and its evidence, whose last_heartbeat_at is NULL until the first runner beat of the attempt; a
+--   row that is not RUNNING is classified by horsies_terminalization_miss (FAIL_STALE, fence NONE).
 -- - OWNER_GONE: RUNNING and started under p_owner_worker_id at the claim generation p_owner_claimed_at, whatever its
 --   beats and its finalizing marker. Any other row is classified by horsies_terminalization_miss (FAIL_STALE, fence
 --   OWNER_AND_GENERATION): another owner or generation is LOST_CLAIM.
@@ -1941,10 +1946,10 @@ $$;
 -- Locks: the task advisory lock, then the row by id alone (FOR UPDATE), then (the move of a workflow task) the node.
 -- Returns one row with the columns of horsies_finish_failed_attempt (outcome APPLIED, RETRY_SCHEDULED, or a
 -- refusal; never RELEASED). observed_worker_id and observed_claimed_at are those of the silent claim.
--- Python: mark_stale_tasks_as_failed (core/brokers/postgres.py:3932-4215) with SELECT_STALE_TASK_FOR_UPDATE_SQL
--- (:790-817), UPSERT_TASK_ATTEMPT_SQL (core/worker/sql.py:502-527), SCHEDULE_STALE_TASK_RETRY_SQL
--- (core/worker/sql.py:316-353) and horsies_fail_stale_task (core/history/terminalization/move.py:901-1014), for
--- BEAT_AGE. OWNER_GONE is a core addition.
+-- Python 0.7.0 (`v0.7.0` package): mark_stale_tasks_as_failed (core/brokers/postgres.py:3932-4215) with
+-- SELECT_STALE_TASK_FOR_UPDATE_SQL (:790-817), UPSERT_TASK_ATTEMPT_SQL (core/worker/sql.py:502-527),
+-- SCHEDULE_STALE_TASK_RETRY_SQL (core/worker/sql.py:316-353) and horsies_fail_stale_task
+-- (core/history/terminalization/move.py:901-1014), for BEAT_AGE. OWNER_GONE is a core addition.
 CREATE FUNCTION horsies_finish_stale_attempt(
     p_task_id uuid,
     p_evidence text,
@@ -2056,6 +2061,7 @@ BEGIN
                  AND h.sent_at >= NOW() - make_interval(
                      secs => GREATEST(p_stale_after_ms, p_finalizing_stale_after_ms) / 1000.0
                  )
+                 AND h.sent_at >= t.started_at
                ORDER BY h.sent_at DESC
                LIMIT 1
            ) END AS last_heartbeat,
@@ -2342,8 +2348,9 @@ $$;
 -- Locks: the rows, read by id in task id order (FOR NO KEY UPDATE), the order of the batched success, so a release
 -- cannot form a lock cycle with a batch that holds a re-claimed row. Nothing moves, so no advisory lock.
 -- Returns one row per input row: its 1-based position, its id, RELEASED or NOT_HELD.
--- Python: UNCLAIM_CLAIMED_TASK_SQL (core/worker/sql.py:237-255, called per row at core/worker/dispatch.py:254-280),
--- RETURN_CLAIMED_TASK_AS_ISOLATED_SQL (core/worker/sql.py:263-282) with its wake (core/worker/claiming.py:459-484).
+-- Python 0.7.0 (`v0.7.0` package): UNCLAIM_CLAIMED_TASK_SQL (core/worker/sql.py:237-255, called per row at
+-- core/worker/dispatch.py:254-280), RETURN_CLAIMED_TASK_AS_ISOLATED_SQL (core/worker/sql.py:263-282) with its wake
+-- (core/worker/claiming.py:459-484).
 CREATE FUNCTION horsies_release_claims(
     p_task_ids uuid[],
     p_claimed_ats timestamp with time zone[],
@@ -2450,7 +2457,7 @@ $$;
 --   history row is TASK_ABSENT.
 -- Locks: the task advisory lock, then the whole row by id (FOR UPDATE), the row that the move takes.
 -- Returns one row of the shared outcome columns; observed_status is the status the cancel saw.
--- Python: cancel_task and _diagnose_live_miss (monitoring/task_actions.py:205-217, :280-430),
+-- Python 0.7.0 (`v0.7.0` package): cancel_task (monitoring/task_actions.py:326-431) and _diagnose_live_miss (:290-323),
 -- horsies_cancel_locked_task (core/history/terminalization/move.py:2046-2096).
 CREATE FUNCTION horsies_cancel_task(p_task_id uuid, p_include_running boolean) RETURNS TABLE(
     task_id uuid,
@@ -2554,7 +2561,7 @@ $$;
 -- Locks: the task advisory lock, then the whole row by id (FOR UPDATE), the row that the move takes. Every writer of
 -- good_until locks this row, so the deadline read under the lock holds until the move.
 -- Returns one row of the shared outcome columns (ordinality NULL).
--- Python: horsies_expire_owned_claim (core/schemas/terminalization.py:670-782), its call
+-- Python 0.7.0 (`v0.7.0` package): horsies_expire_owned_claim (core/schemas/terminalization.py:670-782), its call
 -- (core/lifecycle/persistence.py:167-171), the expiry of the child miss path.
 CREATE FUNCTION horsies_expire_owned_claim(
     p_task_id uuid,
@@ -2640,7 +2647,7 @@ $$;
 -- joins no deadlock cycle.
 -- Returns one row of the shared outcome columns per moved row (APPLIED, ordinality NULL), earliest deadline first;
 -- no row when nothing is due.
--- Python: horsies_expire_pending_tasks (core/schemas/terminalization.py:797-844), its call
+-- Python 0.7.0 (`v0.7.0` package): horsies_expire_pending_tasks (core/schemas/terminalization.py:797-844), its call
 -- (core/lifecycle/persistence.py:173-177), PostgresBroker.expire_pending_tasks.
 CREATE FUNCTION horsies_expire_pending_tasks(
     p_batch_size integer,
@@ -2720,7 +2727,7 @@ $$;
 -- Locks: the task advisory lock, then the whole row by id (FOR UPDATE), the row that the move takes; the node link is
 -- read beside it, unlocked.
 -- Returns one row of the shared outcome columns (ordinality NULL).
--- Python: horsies_cancel_owned_orphan (core/schemas/terminalization.py:950), its call
+-- Python 0.7.0 (`v0.7.0` package): horsies_cancel_owned_orphan (core/schemas/terminalization.py:950), its call
 -- (core/lifecycle/persistence.py:186-191), the orphan self-heal of the worker's finalize.
 CREATE FUNCTION horsies_cancel_owned_orphan(
     p_task_id uuid,
@@ -2822,7 +2829,7 @@ $$;
 -- UPDATE SKIP LOCKED), with no advisory lock.
 -- Returns one row of the shared outcome columns per moved row (APPLIED, ordinality NULL); no row when the page has
 -- no orphan.
--- Python: horsies_cancel_orphaned_tasks (core/schemas/terminalization.py), its call
+-- Python 0.7.0 (`v0.7.0` package): horsies_cancel_orphaned_tasks (core/schemas/terminalization.py), its call
 -- (core/lifecycle/persistence.py:193-197), PostgresBroker.terminate_orphaned_workflow_tasks.
 CREATE FUNCTION horsies_cancel_orphaned_tasks(p_batch_size integer) RETURNS TABLE(
     task_id uuid,

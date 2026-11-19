@@ -4,11 +4,10 @@ A shared async child runs many tasks on one event loop, so no write of the
 child may block that loop. These functions are the async form of the writes
 that an isolated child makes in ``child_runner``:
 
-- the RUNNING transition with the first runner heartbeat
-  (``horsies_start_attempt``), and its miss path (the expiry before start,
-  the stop of a workflow task, a lost claim), through the awaitable methods
-  of the core handle of the child (``CoreChildHandle``), with the bound of
-  one start attempt in the core;
+- the RUNNING transition (``horsies_start_attempt``), and its miss path
+  (the expiry before start, the stop of a workflow task, a lost claim),
+  through the awaitable methods of the core handle of the child
+  (``CoreChildHandle``), with the bound of one start attempt in the core;
 - the finalizing marker after the task body, through the awaitable
   ``CoreChildHandle.mark_finalizing_async``.
 
@@ -131,7 +130,7 @@ async def _confirm_ownership_and_set_running(
     *,
     orphan_self_heal: bool,
 ) -> StoppedBeforeRunning | None | _WorkflowResumedBeforeStart | CoreStoppedBeforeStart:
-    """Set the row RUNNING with its first runner heartbeat. None: started.
+    """Set the row RUNNING. None: started.
 
     Same contract as the sync function of this name in ``child_runner``. A
     failure record of the core and a ``CoreError`` of the core boundary

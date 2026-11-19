@@ -89,7 +89,7 @@ outer = app.get_result(task_id, timeout_ms=5000)
 
 Find RUNNING tasks whose workers have not sent a heartbeat within the threshold. Indicates a crashed or unresponsive worker.
 
-**Returns:** `Ok(list[dict])` with keys: `id` (a `uuid.UUID`), `worker_hostname`, `worker_pid`, `worker_process_name`, `last_heartbeat`, `started_at`, `task_name`. Rows are ordered by `last_heartbeat` (rows with no heartbeat first), then by `id`. At most 10,000 rows (`TASK_LIST_ROW_BOUND`) come back; when more rows match, the first 10,000 come back and a warning is logged.
+**Returns:** `Ok(list[dict])` with keys: `id` (a `uuid.UUID`), `worker_hostname`, `worker_pid`, `worker_process_name`, `last_heartbeat`, `started_at`, `task_name`. `last_heartbeat` is the latest runner heartbeat since `started_at`, and `None` when the task has none: the start writes no heartbeat, and a heartbeat of an earlier attempt of a retried task does not count. Rows are ordered by `last_heartbeat` (rows with no heartbeat first), then by `id`. At most 10,000 rows (`TASK_LIST_ROW_BOUND`) come back; when more rows match, the first 10,000 come back and a warning is logged.
 
 **Errors:** `INVALID_INPUT` when `stale_threshold_minutes` is not an `int` from 0 to 525,600 (one year); nothing is read. `MONITORING_QUERY_FAILED` when the read fails.
 

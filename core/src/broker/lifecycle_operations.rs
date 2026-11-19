@@ -358,8 +358,8 @@ impl PostgresBroker {
     /// `shared_lifecycle._set_running_on_a_connection`, the start statement
     /// only): `horsies_start_attempt`, one statement in autocommit on the
     /// main core pool, checked out as reserved work. Under the claim fence
-    /// it writes the RUNNING row, the first runner beat and, for a workflow
-    /// task, the node, or nothing on a miss. When `window` has closed by the
+    /// it writes the RUNNING row and, for a workflow task, the node, or
+    /// nothing on a miss; it writes no runner beat. When `window` has closed by the
     /// time the pool gives the connection, no statement runs and the row
     /// stays CLAIMED ([`WindowedStart::WindowClosed`]). The path after a miss
     /// (the expiry, the workflow stop) is the caller's, within the rest of

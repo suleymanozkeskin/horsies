@@ -55,7 +55,7 @@ A worker that `list_worker_states` lists and `ping_workers` does not return did 
 
 `get_worker_state_history` takes a `WorkerHistoryLimit`: `AllRetained` (every retained snapshot) or `Newest(NonZeroU32)` (the newest `n`).
 
-`get_stale_tasks` takes a `StaleMinutes`. `StaleMinutes::parse(minutes)` accepts 0 to `MAX_STALE_THRESHOLD_MINUTES` (525,600, one year) whole minutes and refuses another value with `StaleThresholdRefusal`. A RUNNING task is stale when its latest runner beat, or its start when it has no beat, is older than the threshold. The read does not recover the task: the reaper does.
+`get_stale_tasks` takes a `StaleMinutes`. `StaleMinutes::parse(minutes)` accepts 0 to `MAX_STALE_THRESHOLD_MINUTES` (525,600, one year) whole minutes and refuses another value with `StaleThresholdRefusal`. A RUNNING task is stale when its latest runner beat since its start, or its start when it has no such beat, is older than the threshold. `StaleTaskRow.last_heartbeat` is that beat, `None` when the task has none: the start writes no beat, and a beat of an earlier attempt of a retried task does not count. The read does not recover the task: the reaper does.
 
 `get_expired_tasks` lists PENDING tasks past their `good_until`, oldest deadline first. No worker claims them.
 

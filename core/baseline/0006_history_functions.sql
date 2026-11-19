@@ -118,9 +118,9 @@ $$;
 -- horsies_task_history_clock_exceptions_pkey (guard, ON CONFLICT); horsies_task_attempts (task_id, attempt);
 -- horsies_key_reservations_pkey; horsies_tasks_pkey (delete).
 -- Returns: nothing.
--- Replaces: history/terminalization/move.py:423-620 (the move body), which reads the locked live row again (:476)
--- after a second advisory lock (:472), counts the node links, and reads the live row a third time for the clock
--- exception (history/terminalization/duplicate_guard.py:123-143).
+-- Replaces (`v0.7.0` package): core/history/terminalization/move.py:423-620 (the move body), which reads the locked
+-- live row again (:476) after a second advisory lock (:472), counts the node links, and reads the live row a third time
+-- for the clock exception (core/history/terminalization/duplicate_guard.py:123-143).
 CREATE FUNCTION horsies_move_task_to_history(p_task horsies_tasks, p_terminal_status text, p_terminalization_kind text, p_terminal_at timestamp with time zone, p_result text, p_error_code text, p_failed_reason text) RETURNS void
     LANGUAGE plpgsql
     AS $$
@@ -380,9 +380,10 @@ $$;
 -- horsies_task_history_clock_exceptions_pkey; horsies_task_attempts (task_id, attempt);
 -- horsies_key_reservations_pkey.
 -- Returns: nothing.
--- Replaces: history/terminalization/move.py:1582-1741 (the shared move stage) and :1493-1580 (the batch history
--- insert), which Python renders into six functions. The link check keeps only the refusal of a deferred workflow
--- task without its node row: the unique index ix_horsies_workflow_tasks_task_id makes a second link impossible.
+-- Replaces (`v0.7.0` package): core/history/terminalization/move.py:1582-1741 (the shared move stage) and :1493-1580
+-- (the batch history insert), which 0.7.0 renders into six functions. The link check keeps only the refusal of a
+-- deferred workflow task without its node row: the unique index ix_horsies_workflow_tasks_task_id makes a second link
+-- impossible.
 CREATE FUNCTION horsies_move_tasks_to_history(p_task_ids uuid[], p_terminal_status text, p_terminalization_kind text, p_terminal_at timestamp with time zone, p_result text, p_error_code text, p_failed_reason text) RETURNS void
     LANGUAGE plpgsql
     AS $$
@@ -617,8 +618,9 @@ $$;
 -- horsies_task_history_leaf_catalog_interval_unique read backward (leaves of one class are daily and never
 -- overlap, so the latest lower anchor has the latest upper anchor). Locks: none.
 -- Returns: one of the three values above; NULL for a NULL id.
--- Replaces: history/reads/detail.py:353-380 (_classify_absence) and history/partitions/catalog.py:510-548
--- (read_attached_birth_floor), which read min_birth_at, a column that no writer sets on a fresh database.
+-- Replaces (`v0.7.0` package): core/history/reads/detail.py:353-380 (_classify_absence) and
+-- core/history/partitions/catalog.py:510-548 (read_attached_birth_floor), which read min_birth_at, a column that no
+-- writer sets on a fresh database.
 CREATE FUNCTION horsies_task_absence_reason(p_task_id uuid) RETURNS text
     LANGUAGE sql STABLE STRICT
     AS $$
@@ -665,8 +667,8 @@ $$;
 -- horsies_client_family_pkey, horsies_tasks_pkey and the leaf task_id indexes (detail reader), and the absence
 -- reads.
 -- Returns: one row.
--- Replaces: history/rerun/operations.py:224-261 (the class check, the detail read) and
--- history/reads/detail.py:209-245 with :353-380 (the detail read and the absence read): 2 to 3 statements.
+-- Replaces (`v0.7.0` package): core/history/rerun/operations.py:224-261 (the class check, the detail read) and
+-- core/history/reads/detail.py:209-245 with :353-380 (the detail read and the absence read): 2 to 3 statements.
 CREATE FUNCTION horsies_rerun_source_read(p_source_task_id uuid, p_retention_class_key text) RETURNS TABLE(class_registered boolean, client_family text, location text, absence_reason text, task_id uuid, task_name text, queue_name text, priority integer, max_retries integer, status text, terminalization_kind text, terminal_at timestamp with time zone, is_workflow_task boolean, rerun_root_task_id uuid, attempt_archive_version smallint, attempt_snapshot bytea, attempt_snapshot_digest bytea, rerun_input_disposition text, rerun_input_version smallint, rerun_input_digest bytea, rerun_input_inline bytea)
     LANGUAGE plpgsql STABLE
     AS $$
@@ -734,8 +736,8 @@ $$;
 -- Indexes: horsies_retention_classes_pkey; per class, horsies_task_history_leaf_catalog_active
 -- (class_key, upper_anchor) WHERE dropped_at IS NULL; pg_inherits by inhrelid. Locks: none.
 -- Returns: zero or more rows.
--- Replaces: history/maintenance/pruning.py:95-127 (two candidate queries) and the inspection per candidate that
--- finds the interrupted detaches (:283-333).
+-- Replaces (`v0.7.0` package): core/history/maintenance/pruning.py:95-127 (two candidate queries) and the inspection
+-- per candidate that finds the interrupted detaches (:283-333).
 CREATE FUNCTION horsies_prune_candidates(p_limit integer) RETURNS TABLE(leaf_name text, class_key text, class_kind text, lower_anchor timestamp with time zone, upper_anchor timestamp with time zone, expires_at timestamp with time zone, attachment text, detach_recorded boolean)
     LANGUAGE plpgsql STABLE
     SET "TimeZone" TO 'UTC'
@@ -814,9 +816,9 @@ $$;
 -- Indexes: horsies_task_history_leaf_catalog_pkey, horsies_retention_classes_pkey,
 -- horsies_workflow_phase2_pending_locator_idx (blocker count). Locks: none.
 -- Returns: one row.
--- Replaces: history/partitions/manager.py:147-269 (inspect_leaf), :1235-1260 (_pending_blocker_count),
--- history/partitions/catalog.py:259-297 (read_retention_class), :344-388 (read_leaf_catalog_row) and :658-840
--- (read_leaf_physical_state): five to six statements per inspection.
+-- Replaces (`v0.7.0` package): core/history/partitions/manager.py:147-269 (inspect_leaf), :1235-1260
+-- (_pending_blocker_count), core/history/partitions/catalog.py:259-297 (read_retention_class), :344-388
+-- (read_leaf_catalog_row) and :658-840 (read_leaf_physical_state): five to six statements per inspection.
 CREATE FUNCTION horsies_inspect_history_leaf(p_leaf_name text) RETURNS TABLE(state text, class_key text, class_kind text, parent_name text, lower_anchor timestamp with time zone, upper_anchor timestamp with time zone, expires_at timestamp with time zone, blocker_count bigint, attachment text, conflict_kind text)
     LANGUAGE plpgsql STABLE
     SET "TimeZone" TO 'UTC'
@@ -997,8 +999,8 @@ $$;
 -- Lock order: the catalog row, then the publication lock (the record of a DETACHED leaf); the session leaf lock,
 -- then (the caller's statement) the relation locks of the detach.
 -- Returns: one row: the outcome and the inspection columns.
--- Replaces: history/partitions/manager.py:763-876 (detach_expired_leaf up to the DETACH) and :969-1044
--- (finalize_interrupted_detach up to the FINALIZE): two inspections and the lock, about 12 statements.
+-- Replaces (`v0.7.0` package): core/history/partitions/manager.py:763-876 (detach_expired_leaf up to the DETACH) and
+-- :969-1044 (finalize_interrupted_detach up to the FINALIZE): two inspections and the lock, about 12 statements.
 CREATE FUNCTION horsies_begin_leaf_detach(p_leaf_name text) RETURNS TABLE(outcome text, class_key text, class_kind text, parent_name text, lower_anchor timestamp with time zone, upper_anchor timestamp with time zone, expires_at timestamp with time zone, blocker_count bigint, attachment text, conflict_kind text)
     LANGUAGE plpgsql
     AS $$
@@ -1069,8 +1071,8 @@ $$;
 -- Lock order: the catalog row (FOR UPDATE). Indexes: horsies_task_history_leaf_catalog_pkey,
 -- horsies_task_lookup_manifest_pkey.
 -- Returns: one row.
--- Replaces: history/partitions/manager.py:1222-1233 (_record_detached) and the freshness check before the
--- publication (:1208-1220, _republish_if_stale).
+-- Replaces (`v0.7.0` package): core/history/partitions/manager.py:1222-1233 (_record_detached) and the freshness check
+-- before the publication (:1208-1220, _republish_if_stale).
 CREATE FUNCTION horsies_record_leaf_detached(p_leaf_name text) RETURNS TABLE(outcome text, manifest_names_leaf boolean)
     LANGUAGE plpgsql
     AS $$
@@ -1128,7 +1130,7 @@ $$;
 -- the catalog row. Indexes: horsies_task_history_leaf_catalog_pkey, horsies_task_lookup_manifest_pkey,
 -- horsies_task_history_clock_exceptions_leaf_idx.
 -- Returns: one row: the outcome and the inspection columns.
--- Replaces: history/partitions/manager.py:1046-1104 (drop_detached_leaf) and :1181-1206
+-- Replaces (`v0.7.0` package): core/history/partitions/manager.py:1046-1104 (drop_detached_leaf) and :1181-1206
 -- (_delete_leaf_clock_exceptions): about 10 statements.
 CREATE FUNCTION horsies_drop_detached_leaf(p_leaf_name text) RETURNS TABLE(outcome text, class_key text, class_kind text, parent_name text, lower_anchor timestamp with time zone, upper_anchor timestamp with time zone, expires_at timestamp with time zone, blocker_count bigint, attachment text, conflict_kind text)
     LANGUAGE plpgsql
