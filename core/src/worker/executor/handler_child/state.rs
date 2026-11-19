@@ -93,10 +93,16 @@ impl HandlerChildView {
     /// last state.
     pub async fn settled(&self, bound: Duration) -> HandlerChildState {
         let mut state = self.0.clone();
-        let wait = state.wait_for(|now| !matches!(now, HandlerChildState::Starting));
-        match tokio::time::timeout(bound, wait).await {
+        // A local, so the borrow of `state` that it holds ends before
+        // `state` is dropped.
+        let waited = tokio::time::timeout(
+            bound,
+            state.wait_for(|now| !matches!(now, HandlerChildState::Starting)),
+        )
+        .await;
+        match waited {
             Ok(Ok(settled)) => settled.clone(),
-            Ok(Err(_gone)) | Err(_) => self.state(),
+            Ok(Err(_)) | Err(_) => self.state(),
         }
     }
 }
