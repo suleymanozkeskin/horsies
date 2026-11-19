@@ -1,10 +1,11 @@
 //! The points of the child slots of a worker: a child sent its ready frame,
-//! a slot went down after a boot failure that can clear, and a down slot
-//! serves again.
+//! a slot replaced its child, a slot went down after a boot failure that can
+//! clear, and a down slot serves again.
 //!
 //! | Point | Event | Metrics |
 //! |---|---|---|
 //! | [`WorkerTelemetry::child_started`] | `ChildStarted` | `horsies.worker.children.started`, `horsies.worker.child.boot.duration` |
+//! | [`WorkerTelemetry::child_replaced`] | `ChildReplaced` | `horsies.worker.children.replaced` |
 //! | [`WorkerTelemetry::slot_down`] | `SlotDown` | none (the slot board gives `horsies.worker.slots.down` at a scrape) |
 //! | [`WorkerTelemetry::slot_recovered`] | `SlotRecovered` | none |
 
@@ -14,7 +15,10 @@ use chrono::Utc;
 
 use super::{TelemetryOn, WorkerTelemetry};
 use crate::core::task::Execution;
-use crate::events::{ChildStarted, Event, SlotDown, SlotDownCause, SlotIndex, SlotRecovered};
+use crate::events::{
+    ChildReplaced, ChildStarted, Event, SlotDown, SlotDownCause, SlotIndex, SlotRecovered,
+};
+use crate::telemetry::labels::ReplaceReason;
 use crate::worker::executor::protocol::ProcessId;
 use crate::worker::executor::supervisor::BootFailureCause;
 
@@ -62,6 +66,21 @@ impl WorkerTelemetry {
         }
     }
 
+    /// The child `child_pid` of slot `index`, of kind `kind`, left the slot
+    /// for `reason`, and the slot boots a new child.
+    pub(crate) fn child_replaced(
+        &self,
+        kind: Execution,
+        index: usize,
+        child_pid: ProcessId,
+        reason: ReplaceReason,
+    ) {
+        match self {
+            Self::Off => {}
+            Self::On(on) => on.child_replaced(kind, index, child_pid, reason),
+        }
+    }
+
     /// Slot `index`, of kind `kind`, went down after a failed boot of
     /// `cause`.
     pub(crate) fn slot_down(&self, kind: Execution, index: usize, cause: BootFailureCause) {
@@ -100,6 +119,28 @@ impl TelemetryOn {
                 slot,
                 child_pid,
                 boot_duration,
+            })
+        });
+    }
+
+    fn child_replaced(
+        &self,
+        kind: Execution,
+        index: usize,
+        child_pid: ProcessId,
+        reason: ReplaceReason,
+    ) {
+        let _counted = self.metrics.children_replaced.add((kind, reason), 1);
+        let Some(slot) = slot_index(index) else {
+            return;
+        };
+        let _emitted = self.emit(|| {
+            Event::ChildReplaced(ChildReplaced {
+                at: Utc::now(),
+                child_kind: kind,
+                slot,
+                child_pid,
+                reason,
             })
         });
     }

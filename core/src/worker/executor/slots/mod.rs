@@ -25,6 +25,7 @@ pub mod dispatch;
 pub mod isolated;
 pub mod outcome;
 pub mod pool;
+pub mod replacement;
 pub mod route;
 pub mod seat_runs;
 pub mod shared;
