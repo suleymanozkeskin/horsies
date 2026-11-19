@@ -29,7 +29,7 @@ use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
-use super::arguments::utc_instant;
+use super::arguments::{utc_instant, TraceArgument};
 use crate::catalog_errors::catalog_error;
 use crate::child_spec::PythonChildSpecSource;
 use crate::handle::BrokerConnection;
@@ -37,6 +37,8 @@ use crate::handle::BrokerConnection;
 /// One frozen workflow start. `spec_json` is the workflow spec data of the
 /// spec; spec data that the core refuses raises `ValueError` with the field
 /// path (a defect of the client). A naive `sent_at` raises `TypeError`.
+/// `trace` is `NoTraceCarrier` or the `TraceCarrier` of the start's span;
+/// every workflow row and task row of the tree stores it.
 #[pyclass(module = "horsies._core", frozen)]
 pub struct WorkflowStartRequest {
     parts: Arc<StartParts>,
@@ -48,6 +50,7 @@ pub struct StartParts {
     pub workflow_id: Uuid,
     pub sent_at: DateTime<Utc>,
     pub resend_on_transient_err: bool,
+    pub trace: SendTrace,
 }
 
 impl WorkflowStartRequest {
@@ -59,12 +62,13 @@ impl WorkflowStartRequest {
 #[pymethods]
 impl WorkflowStartRequest {
     #[new]
-    #[pyo3(signature = (*, spec_json, workflow_id, sent_at, resend_on_transient_err))]
+    #[pyo3(signature = (*, spec_json, workflow_id, sent_at, resend_on_transient_err, trace))]
     fn new(
         spec_json: &str,
         workflow_id: Uuid,
         sent_at: Bound<'_, PyAny>,
         resend_on_transient_err: bool,
+        trace: TraceArgument<'_>,
     ) -> PyResult<Self> {
         let spec = parse_workflow_spec_data(spec_json)
             .map_err(|refused| PyValueError::new_err(refused.to_string()))?;
@@ -74,6 +78,7 @@ impl WorkflowStartRequest {
                 workflow_id,
                 sent_at: utc_instant(&sent_at)?,
                 resend_on_transient_err,
+                trace: trace.send_trace(),
             }),
         })
     }
@@ -213,7 +218,7 @@ pub async fn start_workflow_operation(
             &parts.spec,
             parts.workflow_id,
             parts.sent_at,
-            SendTrace::NoCarrier,
+            parts.trace.clone(),
             parts.resend_on_transient_err,
             &source,
         )

@@ -227,7 +227,11 @@ mount: the page and its assets, `/api/...` and the event stream
   definitions registered on `app` at the first request. Mount the router
   from the app's own binary, after the registrations, when the UI must
   resume such workflows.
-- `MonitoringConfig { ui: MonitoringUiConfig { custom_css_url }, actions }`.
+- `MonitoringConfig { ui: MonitoringUiConfig { custom_css_url, trace_link }, actions }`.
+  `trace_link` is `TraceLink::NoTraceLink` (the task detail shows the trace
+  id as text) or `TraceLink::Template(TraceLinkTemplate::parse(text)?)`: an
+  `http` or `https` URL with one `{trace_id}`, at most 2,048 bytes of
+  printable ASCII. `horsies web --trace-link TEMPLATE` sets it.
   `MonitoringConfig::default()` has `Actions::Enabled`. With
   `Actions::Disabled` every action route is 403 without a policy call.
 

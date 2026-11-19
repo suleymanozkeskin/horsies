@@ -42,6 +42,7 @@ horsies web --database-url "postgresql://..."   # registry-less
 | `--auth` | `none` | `none` (loopback only) or `trusted-header` |
 | `--trusted-header` | `X-Forwarded-User` | The reverse proxy MUST strip/set this header itself, or the mode is spoofable |
 | `--enable-actions` | off | Off → view-only policy; on → actions allowed |
+| `--trace-link` | — | `http`/`https` URL with one `{trace_id}`: the task detail links the trace id; a bad template exits 2 (`MonitoringUIConfig(trace_link=TraceLinkTemplate(template=...))` when mounting; `HRS-221`) |
 | `--session-database-url` | — | Direct URL for LISTEN when `--database-url` is transaction-pooled |
 | `--pgbouncer-transaction-mode` | off | Pair with `--session-database-url` |
 

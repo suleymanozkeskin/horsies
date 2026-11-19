@@ -52,7 +52,9 @@ use crate::workflow::WorkflowRegistry;
 use crate::Horsies;
 
 pub use auth::{AllowAll, MonitoringAuthPolicy, MonitoringRequest, TrustedHeader, ViewOnly};
-pub use horsies_core::web::{MonitoringUiConfig, INTENT_HEADER, INTENT_VALUE};
+pub use horsies_core::web::{
+    MonitoringUiConfig, TraceLink, TraceLinkRefusal, TraceLinkTemplate, INTENT_HEADER, INTENT_VALUE,
+};
 
 /// Whether the action routes (task cancel, workflow pause, resume and
 /// cancel) run. Disabled actions answer 403 without asking the policy's

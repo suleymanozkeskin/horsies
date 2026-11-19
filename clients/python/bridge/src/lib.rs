@@ -27,6 +27,9 @@
 //!   parent-child frame codec through pure calls (`frames`).
 //! - `prepare_worker` builds the worker of a worker manifest, and
 //!   `PreparedWorker.run` runs it on the main thread (`worker`).
+//! - `prepare_fleet_metrics` builds the fleet metrics server of a
+//!   `CoreHandle`, and `FleetMetricsServer.run` serves it on the main thread
+//!   (`fleet_metrics`).
 //! - A `MonitoringHandler` serves the monitoring web app of a `CoreHandle`
 //!   for the FastAPI mount of `create_monitoring_app` (`web_handler`).
 //! - An operation that answers with a value of a core error catalog returns
@@ -39,6 +42,7 @@ mod child_handle;
 mod child_spec;
 mod core_failures;
 mod errors;
+mod fleet_metrics;
 mod frames;
 mod handle;
 mod logging;
@@ -143,6 +147,16 @@ fn set_panic_rule(rule: &str) -> PyResult<()> {
     process_core::set_panic_rule(rule).map_err(errors::panic_rule_error)
 }
 
+/// Why the core refuses `template` as the trace link template of the
+/// monitoring page (the rule that does not hold), or `None` when it accepts
+/// it. Pure: no I/O, and it starts no runtime.
+#[pyfunction]
+fn trace_link_refusal(template: &str) -> Option<String> {
+    horsies_core::web::TraceLinkTemplate::parse(template)
+        .err()
+        .map(|refused| refused.to_string())
+}
+
 /// Read the effective level of every `horsies` logger again, after a change
 /// of the logging configuration. Does nothing before the core started; the
 /// start reads the levels.
@@ -190,6 +204,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::arguments::StartNow>()?;
     module.add_class::<operations::arguments::StartAfterDelay>()?;
     module.add_class::<operations::arguments::StartAt>()?;
+    module.add_class::<operations::arguments::NoTraceCarrier>()?;
+    module.add_class::<operations::arguments::TraceCarrier>()?;
     module.add_class::<operations::cancel::TaskCancelledRecord>()?;
     module.add_class::<operations::attempt_records::AttemptAlreadyApplied>()?;
     module.add_class::<operations::attempt_records::AttemptLostClaim>()?;
@@ -357,6 +373,12 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<worker::WorkerBootFailed>()?;
     module.add_class::<worker::WorkerFailed>()?;
     module.add_class::<worker::StopRequested>()?;
+    module.add_class::<fleet_metrics::ListenAddress>()?;
+    module.add_class::<fleet_metrics::ListenAddressRefused>()?;
+    module.add_class::<fleet_metrics::FleetLabelsRefused>()?;
+    module.add_class::<fleet_metrics::FleetMetricsServer>()?;
+    module.add_class::<fleet_metrics::FleetMetricsStopped>()?;
+    module.add_class::<fleet_metrics::FleetMetricsFailed>()?;
     module.add_function(wrap_pyfunction!(baseline_sql_files, module)?)?;
     module.add_function(wrap_pyfunction!(core_state, module)?)?;
     module.add_function(wrap_pyfunction!(mint_task_id, module)?)?;
@@ -373,12 +395,21 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(worker::prepare_worker, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        fleet_metrics::parse_listen_address,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        fleet_metrics::prepare_fleet_metrics,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(refresh_log_levels, module)?)?;
     module.add_function(wrap_pyfunction!(
         operations::monitoring_window::resolve_monitoring_window,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(set_panic_rule, module)?)?;
+    module.add_function(wrap_pyfunction!(trace_link_refusal, module)?)?;
     frames::add_frames(module)?;
     errors::add_errors(module)?;
     core_failures::add_failure_classes(module)?;
