@@ -22,7 +22,7 @@ use crate::worker::executor::protocol::StopReason;
 use crate::worker::executor::slots::outcome::WriteStage;
 use crate::{
     ContractCode, Execution, OperationalErrorCode, OutcomeCode, RetrievalCode, TaskAttemptOutcome,
-    TaskSendErrorCode,
+    TaskSendErrorCode, UNDECLARED_LABEL,
 };
 
 /// The name of a label.
@@ -152,7 +152,9 @@ pub enum DeclaredSource {
     QueueNames,
     /// The names of the registered event handlers.
     HandlerNames,
-    /// The user error codes that the tasks declare.
+    /// The user error codes that the tasks declare
+    /// (`DeclaredErrorCodes` of each task); the fallback is
+    /// [`UNDECLARED_LABEL`].
     UserErrorCodes,
     /// The names of the schedules of the config.
     ScheduleNames,
@@ -164,7 +166,7 @@ impl DeclaredSource {
         match self {
             Self::TaskNames => "(unregistered)",
             Self::QueueNames | Self::HandlerNames | Self::ScheduleNames => "(unknown)",
-            Self::UserErrorCodes => "undeclared",
+            Self::UserErrorCodes => UNDECLARED_LABEL,
         }
     }
 
