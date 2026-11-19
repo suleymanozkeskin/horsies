@@ -21,6 +21,7 @@ use crate::manifest::{
     render_manifest_module, DumpEncoder, MANIFEST_MODULE_FILE, SCHEDULER_MANIFEST_MODULE_FILE,
     WORKER_MANIFEST_MODULE_FILE, WORKFLOW_SPEC_MODULE_FILE,
 };
+use crate::producer_metrics::{render_producer_metrics_module, PRODUCER_METRICS_MODULE_FILE};
 use crate::python_text::GENERATED_HEADER;
 use crate::surface::CORE_MODULE;
 use horsies_core::error_catalog::TEXT_NEW_TYPES;
@@ -168,6 +169,10 @@ pub fn render_all() -> Vec<GeneratedFile> {
         text: render_events_module(&EVENT_CONTRACT),
     });
     files.push(GeneratedFile {
+        relative_path: catalog_folder.join(PRODUCER_METRICS_MODULE_FILE),
+        text: render_producer_metrics_module(),
+    });
+    files.push(GeneratedFile {
         relative_path: PathBuf::from(CORE_STUB_FILE),
         text: render_core_stub(&CORE_MODULE),
     });
@@ -312,11 +317,11 @@ mod tests {
         // worker_manifest.py, scheduler_manifest.py, workflow_spec.py,
         // one file per constant module, error_detail.py, one file per new
         // type, one file per error module, one file per exception-class
-        // module, events.py, _core.pyi
+        // module, events.py, producer_metrics.py, _core.pyi
         assert_eq!(
             files.len(),
             modules.len()
-                + 7
+                + 8
                 + CONSTANT_MODULES.len()
                 + 1
                 + TEXT_NEW_TYPES.len()

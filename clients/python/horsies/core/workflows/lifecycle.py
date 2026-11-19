@@ -35,6 +35,18 @@ from horsies.core.workflows.start_types import (
     WorkflowStartValidationFailed,
 )
 from horsies.core.workflows.sql import SubWorkflowParams
+from horsies.core.telemetry.send_telemetry import (
+    NO_SEND_TELEMETRY,
+    NO_TRACE_CARRIER,
+    NoSendTelemetry,
+    OtelSendTelemetry,
+    SendTelemetry,
+    TraceArgument,
+    WorkflowStartSubject,
+    traced,
+    traced_async,
+    workflow_start_end,
+)
 
 logger = get_logger('workflow.engine')
 
@@ -166,13 +178,56 @@ async def start_workflow_async(
         returns the existing handle (best-effort idempotent by workflow_id,
         not payload-verified); with another name, ``WorkflowStartIdConflict``.
     """
+    wf_id = workflow_id or str(uuid.uuid4())
+    workflow_sent_at = sent_at or datetime.now(timezone.utc)
+
+    async def start(trace: TraceArgument) -> WorkflowStartResult[WorkflowHandle[OutT]]:
+        return await _start_async_with_trace(
+            spec, broker, workflow_id, wf_id, workflow_sent_at,
+            resend_on_transient_err, trace,
+        )
+
+    match _start_telemetry(broker):
+        case NoSendTelemetry():
+            return await start(NO_TRACE_CARRIER)
+        case OtelSendTelemetry(recorder=recorder):
+            return await traced_async(
+                lambda: recorder.start_workflow_start(
+                    WorkflowStartSubject(workflow_name=spec.name, workflow_id=wf_id),
+                ),
+                start,
+                workflow_start_end,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _start_telemetry(broker: 'PostgresBroker') -> SendTelemetry:
+    """The send telemetry of the app of ``broker``; ``NO_SEND_TELEMETRY``
+    for a broker that no app built. Pure."""
+    match broker.app:
+        case None:
+            return NO_SEND_TELEMETRY
+        case app:
+            return app.send_telemetry()
+
+
+async def _start_async_with_trace(
+    spec: 'WorkflowSpec[OutT]',
+    broker: 'PostgresBroker',
+    workflow_id: str | None,
+    wf_id: str,
+    sent_at: datetime,
+    resend_on_transient_err: bool,
+    trace: TraceArgument,
+) -> WorkflowStartResult[WorkflowHandle[OutT]]:
+    """The start of ``start_workflow_async`` under ``wf_id``, with the trace
+    ``trace``."""
     from horsies._core import CoreError
     from horsies.core.types.core_failure import call_refusal_or_raise
 
-    wf_id = workflow_id or str(uuid.uuid4())
-    workflow_sent_at = sent_at or datetime.now(timezone.utc)
     match _start_request(
-        spec, broker, workflow_id, wf_id, workflow_sent_at, resend_on_transient_err,
+        spec, broker, workflow_id, wf_id, sent_at, resend_on_transient_err, trace,
     ):
         case Err(err_value=refused):
             return Err(refused)
@@ -194,10 +249,12 @@ def _start_request(
     wf_id: str,
     sent_at: datetime,
     resend_on_transient_err: bool,
+    trace: TraceArgument,
 ) -> Result[tuple[WorkflowStartRequest, uuid.UUID], WorkflowStartValidationFailed]:
     """The start request of ``spec`` under ``wf_id`` and the UUID that it
     sends, or the validation that refuses it. No I/O. ``workflow_id`` is the
     id that the caller gave, if any: only a given id is checked to be a UUID.
+    The request carries ``trace``, which every row of the tree stores.
 
     The prevalidation and the spec as data of ``start_workflow`` and
     ``start_workflow_async``. A ``WorkflowValidationError`` of the checks,
@@ -281,6 +338,7 @@ def _start_request(
             workflow_id=workflow_key,
             sent_at=sent_at,
             resend_on_transient_err=resend_on_transient_err,
+            trace=trace,
         ),
         workflow_key,
     ))
@@ -395,6 +453,40 @@ def start_workflow(
     Raises:
         As ``start_workflow_async()``.
     """
+    wf_id = workflow_id or str(uuid.uuid4())
+
+    def start(trace: TraceArgument) -> WorkflowStartResult[WorkflowHandle[OutT]]:
+        return _start_with_trace(
+            spec, broker, workflow_id, wf_id, sent_at, resend_on_transient_err, trace,
+        )
+
+    match _start_telemetry(broker):
+        case NoSendTelemetry():
+            return start(NO_TRACE_CARRIER)
+        case OtelSendTelemetry(recorder=recorder):
+            return traced(
+                lambda: recorder.start_workflow_start(
+                    WorkflowStartSubject(workflow_name=spec.name, workflow_id=wf_id),
+                ),
+                start,
+                workflow_start_end,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _start_with_trace(
+    spec: 'WorkflowSpec[OutT]',
+    broker: 'PostgresBroker',
+    workflow_id: str | None,
+    wf_id: str,
+    sent_at: datetime | None,
+    resend_on_transient_err: bool,
+    trace: TraceArgument,
+) -> WorkflowStartResult[WorkflowHandle[OutT]]:
+    """The start of ``start_workflow`` under ``wf_id``, with the trace
+    ``trace``: ``ASYNC_CONTEXT`` on a thread that runs an event loop, else
+    the blocking core call."""
     from horsies._core import CoreError
     from horsies.core.types.core_failure import call_refusal_or_raise
     from horsies.core.utils.loop_runner import (
@@ -402,7 +494,6 @@ def start_workflow(
         in_running_event_loop,
     )
 
-    wf_id = workflow_id or str(uuid.uuid4())
     if in_running_event_loop():
         return Err(WorkflowStartAsyncContext(
             message=async_context_message(
@@ -414,7 +505,7 @@ def start_workflow(
         ))
     workflow_sent_at = sent_at or datetime.now(timezone.utc)
     match _start_request(
-        spec, broker, workflow_id, wf_id, workflow_sent_at, resend_on_transient_err,
+        spec, broker, workflow_id, wf_id, workflow_sent_at, resend_on_transient_err, trace,
     ):
         case Err(err_value=refused):
             return Err(refused)
