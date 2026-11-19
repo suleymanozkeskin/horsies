@@ -516,13 +516,33 @@ class StartAt:
 
 
 @final
+class NoTraceCarrier:
+    """The send carries no trace carrier: tracing is off, or the propagator wrote no key."""
+    def __init__(self) -> None: ...
+
+
+@final
+class TraceCarrier:
+    """The carrier that the client's propagator injected for the span of a send or a
+    workflow start, and the 16-byte trace id of that span. The core checks its bounds at
+    the send; a carrier that breaks a bound is not stored and never fails the send.
+    """
+    def __init__(self, carrier: dict[str, str], trace_id: bytes) -> None: ...
+    @property
+    def carrier(self) -> dict[str, str]: ...
+    @property
+    def trace_id(self) -> bytes: ...
+
+
+@final
 class EnqueueRequest:
     """One frozen send. None for good_until, task_options_json or idempotency_key
     means no deadline, no options, no key. retention_class_key is 'forever' or
     'standard_<days>d'; the core checks it at the send. send_kind is FIRST for the first send
     of the task id and REPEAT for a send retry: a task that finished then answers from history.
+    trace is NoTraceCarrier or the TraceCarrier of the send's span.
     """
-    def __init__(self, *, task_id: uuid.UUID, task_name: str, queue_name: str, priority: int, input_json: str, sent_at: datetime.datetime, start: StartNow | StartAfterDelay | StartAt, good_until: datetime.datetime | None, task_options_json: str | None, idempotency_key: str | None, retention_class_key: str, rerun_input: Literal['APP_DEFAULT', 'KEEP', 'DROP'], send_kind: Literal['FIRST', 'REPEAT']) -> None: ...
+    def __init__(self, *, task_id: uuid.UUID, task_name: str, queue_name: str, priority: int, input_json: str, sent_at: datetime.datetime, start: StartNow | StartAfterDelay | StartAt, good_until: datetime.datetime | None, task_options_json: str | None, idempotency_key: str | None, retention_class_key: str, rerun_input: Literal['APP_DEFAULT', 'KEEP', 'DROP'], send_kind: Literal['FIRST', 'REPEAT'], trace: NoTraceCarrier | TraceCarrier) -> None: ...
     @property
     def task_id(self) -> uuid.UUID: ...
 
@@ -2133,9 +2153,10 @@ class ChildSpecRefused:
 class WorkflowStartRequest:
     """One frozen workflow start. spec_json is the workflow spec data of the spec; spec data
     that the core refuses raises ValueError with the field path. A naive sent_at raises
-    TypeError.
+    TypeError. trace is NoTraceCarrier or the TraceCarrier of the start's span; every row of
+    the tree stores it.
     """
-    def __init__(self, *, spec_json: str, workflow_id: uuid.UUID, sent_at: datetime.datetime, resend_on_transient_err: bool) -> None: ...
+    def __init__(self, *, spec_json: str, workflow_id: uuid.UUID, sent_at: datetime.datetime, resend_on_transient_err: bool, trace: NoTraceCarrier | TraceCarrier) -> None: ...
 
 
 @final
