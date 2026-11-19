@@ -128,6 +128,17 @@ before you upgrade a 0.7 deployment.
   not read within 5 s, and answers 431 for a head over 8 KiB. The worker
   snapshot (`horsies_worker_states.telemetry`) shows the endpoint `off`,
   `binding`, `serving`, or `down` with its address and cause.
+- **The worker's log records of an attempt carry `attempt` and
+  `trace_id`.** Each log record of the worker that names a claimed task
+  has the field `attempt` (the retry count of the row plus 1) and, when
+  the send stored a trace id, `trace_id` (32 lowercase hex digits). This
+  covers the claim, the placement, the run in a slot, the outcome write,
+  the retry wake and the workflow step after a task outcome. The records
+  of that workflow step name a retry of its write `phase2_retry` (bound
+  `phase2_retries`), and a retry of the advance of a parent workflow
+  `advance_retry` (bound `advance_retries`). In Python each field is an
+  attribute of the `LogRecord`, so `JsonLogs` writes `attempt` and
+  `trace_id` for them.
 
 ### Changed
 
