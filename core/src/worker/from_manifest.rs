@@ -8,7 +8,10 @@
 //! - [`Worker::from_plan`]: builds the broker of the worker process (its
 //!   pools are lazy, so nothing connects) for the client family of the
 //!   caller, and the worker, whose workflow steps build sub-workflow children
-//!   with the client's child spec source.
+//!   with the client's child spec source. With a handler child
+//!   ([`HandlerChildPlan`]), it also builds the telemetry of the worker: its
+//!   metric registry, the event queue of its points and the child that
+//!   reads it.
 //!
 //! The manifest holds values only, each inside its bounds, so every mapping
 //! here is total except the profile choice and the broker config check.
@@ -17,6 +20,15 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use crate::core::task::DeclaredErrorCodes;
+use crate::events::EventTypeName;
+use crate::telemetry::declared::{DeclaredNames, DeclaredNamesRefused, ErrorCodeValues};
+use crate::telemetry::registry::{ProcessFacts, Registry, RegistryLabels, WorkerFacts};
+use crate::telemetry::worker::{
+    DeclaredCodesByTask, SentEventTypes, TelemetryOn, EVENT_QUEUE_CAPACITY,
+};
+use crate::worker::executor::handler_child::HandlerChildMetrics;
 
 use crate::broker::client_family::ClientFamily;
 use crate::broker::{BrokerError, PostgresBroker};
@@ -36,7 +48,8 @@ use crate::worker::executor::supervisor::ChildCommand;
 use crate::worker::worker::Worker;
 use crate::worker_manifest::{
     ChildCommandManifest, ChildProgram as ManifestChildProgram, ClaimLease, ClusterWideCap,
-    PreloadLaunch, QueueConcurrency, Queues, TaskManifest, WorkerLogLevel, WorkerManifest,
+    EventHandlers, PreloadLaunch, QueueConcurrency, Queues, TaskManifest, WorkerEndedSpans,
+    WorkerLogLevel, WorkerManifest,
 };
 use crate::workflow_engine::child_spec::ChildSpecSource;
 
@@ -55,6 +68,107 @@ pub struct WorkerPlan {
     /// The broker config of the worker process: the resolved parent pool of
     /// the profile with no overflow, and the worker pre-ping.
     pub broker_config: PostgresConfig,
+    /// The telemetry of the worker: its handler child and the names of its
+    /// metric labels.
+    pub telemetry: TelemetryPlan,
+}
+
+/// The handler child that a worker manifest asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandlerChildPlan {
+    /// The app has no event handler and worker-ended spans are off: no
+    /// handler child and no event queue.
+    NoHandlerChild,
+    /// One handler child. The worker sends it the events of the types
+    /// `sent`; `handlers` are the values of the `handler` label of its
+    /// metrics, in the order of the manifest.
+    HandlerChild {
+        sent: SentEventTypes,
+        handlers: Vec<String>,
+    },
+}
+
+impl HandlerChildPlan {
+    /// The handler child of `handlers` and `spans`: one child when the app
+    /// has a handler or when the child makes the worker-ended spans. The
+    /// child gets the event types of the handlers, and `AttemptEnded` for
+    /// the spans. Pure.
+    pub fn of(handlers: &EventHandlers, spans: WorkerEndedSpans) -> Self {
+        let span_types: &[EventTypeName] = match spans {
+            WorkerEndedSpans::MakeSpans => &[EventTypeName::AttemptEnded],
+            WorkerEndedSpans::NoSpans => &[],
+        };
+        match (handlers, spans) {
+            (EventHandlers::NoHandlers, WorkerEndedSpans::NoSpans) => Self::NoHandlerChild,
+            (EventHandlers::NoHandlers, WorkerEndedSpans::MakeSpans) => Self::HandlerChild {
+                sent: SentEventTypes::of(span_types.iter().copied()),
+                handlers: Vec::new(),
+            },
+            (EventHandlers::Handlers { handlers }, _) => Self::HandlerChild {
+                sent: SentEventTypes::of(
+                    handlers
+                        .handlers()
+                        .iter()
+                        .map(|handler| handler.event_type)
+                        .chain(span_types.iter().copied()),
+                ),
+                handlers: handlers
+                    .handlers()
+                    .iter()
+                    .map(|handler| handler.name.as_str().to_owned())
+                    .collect(),
+            },
+        }
+    }
+}
+
+/// The telemetry of a worker from its manifest.
+#[derive(Debug, Clone)]
+pub struct TelemetryPlan {
+    pub handler_child: HandlerChildPlan,
+    /// The values of the `task` label: every registered task.
+    pub task_names: Vec<String>,
+    /// The values of the `queue` label: every queue of the app.
+    pub queue_names: Vec<String>,
+    /// The user error codes that each task declares, for the `error_code`
+    /// label.
+    pub declared_codes: HashMap<String, DeclaredErrorCodes>,
+}
+
+impl TelemetryPlan {
+    /// The telemetry of `manifest`, whose queues are `queue_names`. Pure.
+    fn of_manifest(manifest: &WorkerManifest, queue_names: Vec<String>) -> Self {
+        Self {
+            handler_child: HandlerChildPlan::of(&manifest.handlers, manifest.worker_ended_spans),
+            task_names: manifest.tasks.keys().cloned().collect(),
+            queue_names,
+            declared_codes: manifest
+                .tasks
+                .iter()
+                .map(|(name, task)| (name.clone(), task.error_codes.clone()))
+                .collect(),
+        }
+    }
+
+    /// The label values of the registry of a worker with `facts` and the
+    /// handler names `handlers`. Pure.
+    ///
+    /// Errors: [`DeclaredNamesRefused`] for a name that a label cannot take
+    /// (empty, or the fallback text of its label), or too many names.
+    fn registry_labels(
+        &self,
+        handlers: &[String],
+        facts: WorkerFacts,
+    ) -> Result<RegistryLabels, DeclaredNamesRefused> {
+        Ok(RegistryLabels {
+            tasks: DeclaredNames::new(self.task_names.iter().cloned())?,
+            queues: DeclaredNames::new(self.queue_names.iter().cloned())?,
+            handlers: DeclaredNames::new(handlers.iter().cloned())?,
+            schedules: DeclaredNames::none(),
+            error_codes: ErrorCodeValues::new(self.declared_codes.values())?,
+            process: ProcessFacts::Worker(facts),
+        })
+    }
 }
 
 /// Why a manifest gives no worker plan.
@@ -87,6 +201,7 @@ impl WorkerPlan {
         })?;
         let app_config = app_config_of(manifest, app_broker);
         let worker_config = worker_config_of(manifest, &app_config);
+        let telemetry = TelemetryPlan::of_manifest(manifest, worker_config.queues.clone());
         Ok(Self {
             launch: launch_of(manifest, connection),
             registered: registered_of(&manifest.tasks),
@@ -94,6 +209,7 @@ impl WorkerPlan {
             app_config,
             worker_config,
             profile,
+            telemetry,
         })
     }
 }
@@ -118,7 +234,7 @@ impl Worker {
         family: ClientFamily,
     ) -> Result<Self, WorkerError> {
         let broker = worker_broker(&plan.broker_config, family).await?;
-        Worker::of_child_specs(
+        let worker = Worker::of_child_specs(
             Arc::new(broker),
             child_specs,
             plan.app_config,
@@ -126,8 +242,54 @@ impl Worker {
             plan.profile,
             plan.launch,
             plan.registered,
-        )
+        )?;
+        Ok(with_planned_telemetry(worker, &plan.telemetry))
     }
+}
+
+/// `worker` with the telemetry of `plan`: with a handler child, a worker
+/// registry with the label names of the plan, the telemetry value of the
+/// points with an event queue of the sent types, and the child that reads
+/// it. With none, `worker` as it is: no registry, no queue, no child.
+///
+/// Label names that a registry refuses leave the worker with no handler
+/// child, with one error line: telemetry never stops a worker.
+fn with_planned_telemetry(worker: Worker, plan: &TelemetryPlan) -> Worker {
+    let (sent, handlers) = match &plan.handler_child {
+        HandlerChildPlan::NoHandlerChild => return worker,
+        HandlerChildPlan::HandlerChild { sent, handlers } => (*sent, handlers),
+    };
+    let labels = match plan.registry_labels(handlers, worker.worker_facts()) {
+        Ok(labels) => labels,
+        Err(refused) => {
+            tracing::error!(
+                "the metric labels of the worker are refused: {refused}; the worker runs with no \
+                 handler child"
+            );
+            return worker;
+        }
+    };
+    let registry = match Registry::for_worker(labels) {
+        Ok(registry) => Arc::new(registry),
+        Err(refused) => panic!("the registry of a worker has the facts of a worker: {refused}"),
+    };
+    let codes = DeclaredCodesByTask::new(plan.declared_codes.clone());
+    let (on, queue) = match TelemetryOn::with_event_queue(
+        Arc::clone(&registry),
+        codes,
+        EVENT_QUEUE_CAPACITY,
+        sent,
+    ) {
+        Ok(built) => built,
+        Err(refused) => panic!("a worker registry holds the metrics of the points: {refused}"),
+    };
+    let metrics = match HandlerChildMetrics::of(&registry) {
+        Ok(metrics) => metrics,
+        Err(refused) => {
+            panic!("a worker registry holds the metrics of the handler child: {refused}")
+        }
+    };
+    worker.with_handler_child(Arc::new(on), queue, metrics)
 }
 
 /// The broker of the worker process for a client of `family`, with lazy

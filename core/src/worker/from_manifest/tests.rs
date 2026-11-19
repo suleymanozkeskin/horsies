@@ -175,3 +175,152 @@ async fn the_install_of_the_worker_broker_records_the_family_of_its_caller() {
         database.drop().await;
     }
 }
+
+/// A manifest of the batch profile whose app has `handlers` and the span
+/// switch `spans`.
+fn plan_with(handlers: serde_json::Value, spans: &str) -> WorkerPlan {
+    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    document["handlers"] = handlers;
+    document["worker_ended_spans"] = json!(spans);
+    WorkerPlan::of_manifest(&parsed(&document)).expect("a plan")
+}
+
+/// No handler and no worker-ended span: no handler child.
+#[test]
+fn no_handler_and_no_span_plan_no_handler_child() {
+    assert_eq!(
+        batch_plan().telemetry.handler_child,
+        HandlerChildPlan::NoHandlerChild
+    );
+}
+
+/// The handlers plan one child, sent the event type of each handler and
+/// no other; their names are the handler label values, in order.
+#[test]
+fn the_handlers_plan_one_child_sent_their_types() {
+    let plan = plan_with(
+        json!({"kind": "HANDLERS", "handlers": [
+            {"name": "app.hooks.on_end", "event_type": "AttemptEnded"},
+            {"name": "app.hooks.on_claim", "event_type": "TaskClaimed"},
+            {"name": "app.hooks.on_claim_audit", "event_type": "TaskClaimed"}
+        ]}),
+        "NO_SPANS",
+    );
+
+    assert_eq!(
+        plan.telemetry.handler_child,
+        HandlerChildPlan::HandlerChild {
+            sent: SentEventTypes::of([EventTypeName::AttemptEnded, EventTypeName::TaskClaimed]),
+            handlers: vec![
+                "app.hooks.on_end".to_owned(),
+                "app.hooks.on_claim".to_owned(),
+                "app.hooks.on_claim_audit".to_owned(),
+            ],
+        }
+    );
+}
+
+/// Worker-ended spans plan a child also with no handler: it gets the
+/// `AttemptEnded` events, with or without a handler of that type.
+#[test]
+fn worker_ended_spans_plan_a_child_sent_attempt_ended() {
+    let spans_only = plan_with(json!({"kind": "NO_HANDLERS"}), "MAKE_SPANS");
+    let with_a_handler = plan_with(
+        json!({"kind": "HANDLERS", "handlers": [
+            {"name": "app.hooks.on_claim", "event_type": "TaskClaimed"}
+        ]}),
+        "MAKE_SPANS",
+    );
+
+    assert_eq!(
+        spans_only.telemetry.handler_child,
+        HandlerChildPlan::HandlerChild {
+            sent: SentEventTypes::of([EventTypeName::AttemptEnded]),
+            handlers: Vec::new(),
+        }
+    );
+    assert_eq!(
+        with_a_handler.telemetry.handler_child,
+        HandlerChildPlan::HandlerChild {
+            sent: SentEventTypes::of([EventTypeName::TaskClaimed, EventTypeName::AttemptEnded]),
+            handlers: vec!["app.hooks.on_claim".to_owned()],
+        }
+    );
+}
+
+/// The label names of the plan: every registered task, every queue, and
+/// the declared codes of each task.
+#[test]
+fn the_label_names_are_the_tasks_the_queues_and_the_declared_codes() {
+    let plan = batch_plan();
+
+    let mut tasks = plan.telemetry.task_names.clone();
+    tasks.sort();
+    assert_eq!(
+        tasks,
+        ["app.tasks.add", "app.tasks.fetch", "app.tasks.resize"]
+    );
+    assert_eq!(plan.telemetry.queue_names, ["high", "low"]);
+    let fetch: Vec<&str> = plan.telemetry.declared_codes["app.tasks.fetch"]
+        .iter()
+        .map(|code| code.as_str())
+        .collect();
+    assert_eq!(fetch, ["NOT_FOUND", "RATE_LIMITED"]);
+}
+
+/// Telemetry off: with no handler and no worker-ended span, the worker
+/// has no telemetry value, so no event queue, and no handler child.
+#[tokio::test]
+async fn with_no_handler_and_no_span_the_worker_has_no_queue_and_no_child() {
+    let worker = Worker::from_plan(
+        batch_plan(),
+        crate::test_support::child_specs::no_child_specs(),
+        ClientFamily::Rust,
+    )
+    .await
+    .expect("the batch plan gives a worker");
+
+    let (telemetry, handler_child) = worker.telemetry_setup();
+
+    assert!(matches!(
+        telemetry,
+        crate::telemetry::worker::WorkerTelemetry::Off
+    ));
+    assert!(matches!(
+        handler_child,
+        crate::worker::worker::HandlerChildSetup::NoHandlerChild
+    ));
+}
+
+/// A handler gives the worker its telemetry value with an event queue, a
+/// registry that declares the handler's name, and the handler child.
+#[tokio::test]
+async fn a_handler_gives_the_worker_a_queue_a_child_and_its_label() {
+    let plan = plan_with(
+        json!({"kind": "HANDLERS", "handlers": [
+            {"name": "app.hooks.on_end", "event_type": "AttemptEnded"}
+        ]}),
+        "NO_SPANS",
+    );
+    let worker = Worker::from_plan(
+        plan,
+        crate::test_support::child_specs::no_child_specs(),
+        ClientFamily::Rust,
+    )
+    .await
+    .expect("the plan gives a worker");
+
+    let (telemetry, handler_child) = worker.telemetry_setup();
+
+    let crate::telemetry::worker::WorkerTelemetry::On(on) = telemetry else {
+        panic!("a worker with a handler records its telemetry");
+    };
+    assert_eq!(
+        on.registry().labels().handlers.names(),
+        ["app.hooks.on_end".to_owned()]
+    );
+    assert!(matches!(
+        handler_child,
+        crate::worker::worker::HandlerChildSetup::HandlerChild(_)
+    ));
+}
