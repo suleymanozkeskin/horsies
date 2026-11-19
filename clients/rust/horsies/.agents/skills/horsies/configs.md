@@ -371,6 +371,15 @@ fn main() -> ExitCode {
   `-c`/`--concurrency`, `--max-claim-batch`, `--max-claim-per-worker`,
   `--coalesce-notifies`, `--check-interval`, `--dry-run`) exit 2 with
   what replaces each.
+- `horsies::cli::run_with_log_format(app, LogFormat::Json)` writes one JSON
+  object per record (`timestamp`, `level`, `target`, the event's fields at
+  the top level, `span`, `spans`) in the runner and in each child.
+  `run(app)` is `run_with_log_format(app, LogFormat::Text)`.
+- Each task body runs inside the `tracing` span `run` (target
+  `horsies::attempt`, `horsies::ATTEMPT_SPAN_TARGET`) with the fields
+  `horsies.task.id`, `horsies.task.name` and `horsies.task.attempt`; the
+  filter of `run` passes it at every level. The core's records of an
+  attempt carry `task_id`, `attempt` and `trace_id`.
 
 | Exit code of `run` | Meaning |
 |---|---|
