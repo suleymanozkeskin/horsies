@@ -1,0 +1,25 @@
+# Merged over deploy/otel-collector/collector.yaml by the second --config of
+# the collector service (compose.yaml). Maps merge; a list replaces the list
+# of the first file.
+#
+# - The scrape interval of both jobs is 2 s, so the test waits seconds, not
+#   minutes, for the first scrapes.
+# - The pipeline exports to the file exporter only: one OTLP JSON object per
+#   line in $HORSIES_OTLP_OUTPUT_DIR/metrics.jsonl on the host.
+
+receivers:
+  prometheus:
+    config:
+      global:
+        scrape_interval: 2s
+        scrape_timeout: 1s
+
+exporters:
+  file:
+    path: /otlp/metrics.jsonl
+    flush_interval: 1s
+
+service:
+  pipelines:
+    metrics:
+      exporters: [file]
