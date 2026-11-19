@@ -21,6 +21,7 @@ use crate::core::history::maintenance::coverage::ensure_partition_coverage_in_po
 use crate::core::history::names::TASK_HISTORY_FOREVER_LEAF;
 use crate::core::history::periods::RetentionDays;
 use crate::core::lifecycle::TerminalizationOutcome;
+use crate::telemetry::registry::OptionalCounter;
 use crate::test_support::history::{create_history_leaf_of, database_now, register_period_class};
 use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 use crate::test_support::terminal_writes;
@@ -82,6 +83,7 @@ async fn run_maintenance_pass(
         &mut orphan_state,
         &mut UnheldOwners::default(),
         &mut RecoveryFailures::new(OptionalCounter::NotRecorded),
+        &WorkerTelemetry::Off,
     )
     .await;
     let snapshot = health.read().await.clone();

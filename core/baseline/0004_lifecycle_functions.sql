@@ -1865,9 +1865,10 @@ $$;
 -- Arguments: an evidence of the set with exactly its arguments, thresholds of 0 ms or more, p_batch_size 1..10000;
 -- anything else is refused with 22023.
 -- Locks: none.
--- Returns one row per candidate: the facts the caller needs for the retry decision (retry_count, max_retries,
--- task_options, good_until), for the crash result (claimed_by_worker_id, worker_pid, worker_hostname,
--- worker_process_name, started_at) and for the fence of OWNER_GONE (claimed_at), and db_now (clock_timestamp()).
+-- Returns one row per candidate: the task name, the queue and the stored trace id (the caller's records and
+-- recovery events), the facts the caller needs for the retry decision (retry_count, max_retries, task_options,
+-- good_until), for the crash result (claimed_by_worker_id, worker_pid, worker_hostname, worker_process_name,
+-- started_at) and for the fence of OWNER_GONE (claimed_at), and db_now (clock_timestamp()).
 -- Python 0.7.0 (`v0.7.0` package): SELECT_STALE_RUNNING_TASKS_SQL (core/brokers/postgres.py:766-788) and its session
 -- (core/brokers/postgres.py:3972-3984), for BEAT_AGE. OWNER_GONE is a core addition.
 CREATE FUNCTION horsies_stale_running_scan(
@@ -1879,6 +1880,9 @@ CREATE FUNCTION horsies_stale_running_scan(
     p_batch_size integer
 ) RETURNS TABLE(
     task_id uuid,
+    task_name text,
+    queue_name text,
+    trace_id bytea,
     retry_count integer,
     max_retries integer,
     task_options text,
@@ -1922,9 +1926,9 @@ BEGIN
     CASE p_evidence
         WHEN 'BEAT_AGE' THEN
             RETURN QUERY
-            SELECT t.id, t.retry_count, t.max_retries, t.task_options, t.good_until,
-                   t.claimed_by_worker_id::text, t.claimed_at, t.worker_pid, t.worker_hostname::text,
-                   t.worker_process_name::text, t.started_at, clock_timestamp()
+            SELECT t.id, t.task_name::text, t.queue_name::text, t.trace_id, t.retry_count, t.max_retries,
+                   t.task_options, t.good_until, t.claimed_by_worker_id::text, t.claimed_at, t.worker_pid,
+                   t.worker_hostname::text, t.worker_process_name::text, t.started_at, clock_timestamp()
             FROM horsies_tasks t
             WHERE t.status = 'RUNNING'
               AND t.started_at IS NOT NULL
@@ -1950,9 +1954,9 @@ BEGIN
             LIMIT p_batch_size;
         WHEN 'OWNER_GONE' THEN
             RETURN QUERY
-            SELECT t.id, t.retry_count, t.max_retries, t.task_options, t.good_until,
-                   t.claimed_by_worker_id::text, t.claimed_at, t.worker_pid, t.worker_hostname::text,
-                   t.worker_process_name::text, t.started_at, clock_timestamp()
+            SELECT t.id, t.task_name::text, t.queue_name::text, t.trace_id, t.retry_count, t.max_retries,
+                   t.task_options, t.good_until, t.claimed_by_worker_id::text, t.claimed_at, t.worker_pid,
+                   t.worker_hostname::text, t.worker_process_name::text, t.started_at, clock_timestamp()
             FROM horsies_tasks t
             WHERE t.status = 'RUNNING'
               AND t.started_at IS NOT NULL
@@ -2286,7 +2290,8 @@ $$;
 -- Arguments: an evidence of the set with exactly its arguments, a threshold of 0 ms or more, p_batch_size
 -- 1..10000; anything else is refused with 22023.
 -- Locks: the candidate rows only (FOR UPDATE SKIP LOCKED); no advisory lock, never waits.
--- Returns the number of rows requeued.
+-- Returns one row per requeued row: its id, task name and queue (the caller's count and recovery events), at most
+-- p_batch_size rows.
 -- Python: REQUEUE_STALE_CLAIMED_SQL (core/brokers/postgres.py:852-903) and requeue_stale_claimed (:4308-4333), for
 -- BEAT_AGE. OWNER_GONE is a core addition.
 CREATE FUNCTION horsies_requeue_stale_claims(
@@ -2295,12 +2300,16 @@ CREATE FUNCTION horsies_requeue_stale_claims(
     p_owner_worker_id text,
     p_claimed_before timestamp with time zone,
     p_batch_size integer
-) RETURNS integer
+) RETURNS TABLE(
+    task_id uuid,
+    task_name text,
+    queue_name text
+)
     LANGUAGE plpgsql
     AS $$
+#variable_conflict use_column
 DECLARE
     v_stale uuid[];
-    v_requeued integer;
 BEGIN
     CASE p_evidence
         WHEN 'BEAT_AGE' THEN
@@ -2371,6 +2380,7 @@ BEGIN
                 FOR UPDATE OF t SKIP LOCKED
             );
     END CASE;
+    RETURN QUERY
     UPDATE horsies_tasks t
     SET status = 'PENDING',
         claimed_at = NULL,
@@ -2383,9 +2393,8 @@ BEGIN
         finalizing_at = NULL,
         finalizing_by_worker_id = NULL,
         updated_at = NOW()
-    WHERE t.id = ANY (v_stale);
-    GET DIAGNOSTICS v_requeued = ROW_COUNT;
-    RETURN v_requeued;
+    WHERE t.id = ANY (v_stale)
+    RETURNING t.id, t.task_name::text, t.queue_name::text;
 END
 $$;
 

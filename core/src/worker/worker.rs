@@ -1228,7 +1228,7 @@ impl Worker {
             self.app_config.recovery.clone(),
             self.app_config.retention.clone(),
             health,
-            self.telemetry.recovery_failures(),
+            self.telemetry.clone(),
             self.cancel.clone(),
         )
     }

@@ -295,8 +295,8 @@ fn baseline_is_one_migration_built_from_every_listed_file() {
 #[test]
 fn the_checksum_of_the_baseline_is_pinned() {
     const PINNED_CHECKSUM_HEX: &str = concat!(
-        "da75b41631b3be9cc4194c61d991b0e09869bd59c8759125",
-        "fec3228034d9e0c8205ecfbf52fad6f9f82e32fb6d1907e1",
+        "fc5b7fcc3e36f0ca5fc947c3e7d4d47985b8fb08bad2c824",
+        "83337c6bc2e31a7ac14d1dc6257aec3e4bc659cd04b33451",
     );
     let baseline = &embedded_migrations()[0];
     assert_eq!(baseline.version, BASELINE_MIGRATION_VERSION);
