@@ -378,7 +378,9 @@ def create_monitoring_app(
     ``GET /metrics`` serves the fleet metrics of the app's database behind
     ``can_view``. Its ``queue`` and ``schedule`` label values are the queues and
     the schedules of ``app.config``; other names are ``(unknown)``. A queue or
-    schedule named ``(unknown)`` raises ``ValueError``.
+    schedule name that cannot be a label value of its own (empty,
+    ``(unknown)``, or past the bound of names) counts in the ``(unknown)``
+    series, and the first request logs one WARNING line that names it.
     """
     broker = app.get_broker()
     ui_config = config or MonitoringUIConfig()

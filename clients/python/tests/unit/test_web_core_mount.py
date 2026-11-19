@@ -467,9 +467,10 @@ class TestFleetMetrics:
 
 
 class TestFleetMetricLabels:
-    """The label names of `/metrics` are checked when the app is built."""
+    """A queue name that cannot be a label value of its own does not stop the
+    build: the core counts its samples in the `(unknown)` series."""
 
-    def test_a_queue_name_that_is_the_fallback_text_is_refused(self) -> None:
+    def test_a_queue_name_that_is_the_fallback_text_is_not_refused(self) -> None:
         app = Horsies(
             AppConfig(
                 broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
@@ -478,5 +479,6 @@ class TestFleetMetricLabels:
             )
         )
 
-        with pytest.raises(ValueError, match=r'\(unknown\)'):
-            create_monitoring_app(app, auth_policy=AllowAll())
+        mounted = create_monitoring_app(app, auth_policy=AllowAll())
+
+        assert isinstance(mounted, FastAPI)

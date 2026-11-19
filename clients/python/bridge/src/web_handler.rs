@@ -22,6 +22,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use horsies_core::telemetry::declared::{warn_folded_names, Folded, FoldedNames};
 use horsies_core::web::{
     route_access, AccessGrant as CoreGrant, AccessNeed, Bytes, EventFrames, EventStreamItem,
     Method, MonitoringHandler as CoreHandler, MonitoringHandlerConfig, MonitoringUiConfig,
@@ -352,6 +353,9 @@ struct HandlerPlan {
     connection: BrokerConnection,
     child_source: RegisteredSource,
     config: MonitoringHandlerConfig,
+    /// The queue and schedule names that the labels of `/metrics` do not
+    /// declare; the build logs them.
+    folded: FoldedNames,
 }
 
 /// A built handler and the child spec source that its resume route uses.
@@ -369,11 +373,13 @@ struct HandlerState {
 impl HandlerState {
     /// The built handler. The first call connects the handle's broker (no
     /// connection opens) and builds the handler; a failure is returned and
-    /// not kept.
+    /// not kept. The build logs one WARNING line that names each queue or
+    /// schedule name that `/metrics` does not declare.
     async fn built(&self, core: &'static Core) -> Result<Arc<BuiltHandler>, BrokerError> {
         self.built
             .get_or_try_init(|| async {
                 let broker = self.plan.connection.broker().await?;
+                warn_folded_names(&"the fleet metrics of /metrics", &self.plan.folded);
                 let child_source = Arc::new(PythonChildSpecSource::new(
                     core,
                     Arc::clone(&self.plan.child_source),
@@ -505,10 +511,12 @@ impl MonitoringHandler {
     /// `trace_link_template` the template of the trace link of a task
     /// detail, or `None` for the trace id as text; `queue_names` and
     /// `schedule_names` the label values of `/metrics` (every other name is
-    /// `(unknown)`). Starts nothing: the first call builds the handler. A
-    /// handle without a child spec source raises `RuntimeError`; a heartbeat
-    /// out of bounds, a template that `trace_link_refusal` refuses, or a name
-    /// that is empty or `(unknown)`, raises `ValueError`.
+    /// `(unknown)`). A name that cannot be a label value of its own (empty,
+    /// `(unknown)`, or past the bound of names) counts in the `(unknown)`
+    /// series, and the build logs one WARNING line that names it. Starts
+    /// nothing: the first call builds the handler. A handle without a child
+    /// spec source raises `RuntimeError`; a heartbeat out of bounds or a
+    /// template that `trace_link_refusal` refuses raises `ValueError`.
     #[new]
     #[pyo3(signature = (
         handle,
@@ -534,8 +542,10 @@ impl MonitoringHandler {
         let heartbeat = heartbeat_of(heartbeat_ms).map_err(PyValueError::new_err)?;
         let trace_link = trace_link_of(trace_link_template.as_deref())
             .map_err(|refused| PyValueError::new_err(refused.to_string()))?;
-        let fleet_labels = fleet_labels(queue_names, schedule_names)
-            .map_err(|refused| PyValueError::new_err(refused.message))?;
+        let Folded {
+            declared: fleet_labels,
+            folded,
+        } = fleet_labels(queue_names, schedule_names);
         let handle = handle.get();
         let child_source = handle.registered_child_spec_source().ok_or_else(|| {
             PyRuntimeError::new_err(
@@ -558,6 +568,7 @@ impl MonitoringHandler {
                         heartbeat,
                         fleet_labels,
                     },
+                    folded,
                 },
                 built: OnceCell::new(),
             }),
