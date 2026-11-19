@@ -1170,6 +1170,16 @@ non-loopback hosts require `--auth trusted-header`; actions are off unless
 `--enable-actions`. Never executes DDL. See `monitoring.md` for the full
 reference including the registry-less capability boundary.
 
+### `horsies metrics`
+
+```bash
+horsies metrics <module> --listen HOST:PORT [--loglevel INFO]
+```
+
+Serves the fleet metrics of the app's database at `GET /metrics`.
+`--listen` is required: `HOST:PORT` or `[IPV6]:PORT`, port 1 to 65535. See
+`monitoring.md`, Fleet Metrics.
+
 ### `horsies get-docs`
 
 ```bash

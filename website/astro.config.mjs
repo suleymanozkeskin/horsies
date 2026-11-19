@@ -156,8 +156,10 @@ export default defineConfig({
 							label: 'Observability',
 							items: [
 								{ label: 'Metric Reference', slug: 'observability/metric-reference' },
+								{ label: 'Fleet Collector', slug: 'observability/fleet-collector' },
 								{ label: 'Tracing', slug: 'observability/tracing' },
 								{ label: 'Logs', slug: 'observability/logs' },
+								{ label: 'Dashboards and Alerts', slug: 'observability/dashboards-and-alerts' },
 							],
 						},
 						{
