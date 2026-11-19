@@ -36,6 +36,8 @@ from horsies.core.types.status import TaskStatus
 from tests.attempt_snapshot_support import AttemptRecord, encode_attempt_snapshot
 from tests.integration.history_seeding import (
     HISTORY_SEED_CLASS_KEY,
+    CoveredInstant,
+    cover_history_instant,
     ensure_history_seedable,
 )
 
@@ -480,6 +482,7 @@ def _attempt_record(row: AttemptRow) -> AttemptRecord:
 def _history_params(
     task: TaskRow,
     ended: EndedTask,
+    terminal_at: CoveredInstant,
     attempts: Sequence[AttemptRow],
     workflow_id: str | None,
 ) -> dict[str, object]:
@@ -507,7 +510,7 @@ def _history_params(
         'claimed_at': task.claimed_at,
         'started_at': task.started_at,
         'good_until': task.good_until,
-        'terminal_at': ended.terminal_at,
+        'terminal_at': terminal_at,
         'status': task.status.value,
         'terminalization_kind': _FIXTURE_TERMINALIZATION_KIND[task.status].value,
         'retry_count': task.retry_count,
@@ -671,11 +674,17 @@ async def insert_rows(session: AsyncSession, *rows: SeedRow) -> None:
                     _INSERT_TASK_SQL, _live_task_params(task, live),
                 )
             case EndedTask() as ended:
+                # A task that ended before the coverage (a few seconds
+                # ago, just after midnight UTC) needs the leaf of its day.
+                terminal_at = await cover_history_instant(
+                    connection, HISTORY_SEED_CLASS_KEY, ended.terminal_at,
+                )
                 await connection.execute(
                     _INSERT_HISTORY_SQL,
                     _history_params(
                         task,
                         ended,
+                        terminal_at,
                         [row for row in attempts if row.task_id == task.id],
                         workflow_of_task.get(task.id),
                     ),

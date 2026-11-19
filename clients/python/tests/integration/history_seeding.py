@@ -9,6 +9,10 @@ functions of the core's coverage pass; every step is idempotent
 (registration answers VERIFIED, leaf creation ALREADY_CONFORMANT, and
 republication rewrites the same manifest).
 
+`cover_heartbeat_instant` and `cover_history_instant` guard a seed whose
+instant is not the ``now()`` of a statement after the coverage: they create
+the leaf of the instant's hour or day first.
+
 `force_terminal` moves a seeded row to history with a terminal status;
 `stored_history_status` sets the stored status of a history row for a
 block. `read_attempts`, `read_attempt_history` and `read_attempt_workers`
@@ -21,7 +25,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Final
+from typing import Final, NewType
 from uuid import UUID
 
 from sqlalchemy import text
@@ -162,6 +166,70 @@ async def ensure_history_seedable(connection: AsyncConnection) -> None:
             )
     await publish_history_readers(connection)
     await connection.execute(ITEST_TASK_ROWS_VIEW_DDL)
+
+
+CoveredInstant = NewType('CoveredInstant', datetime)
+"""An instant whose partition leaf exists. Only `cover_heartbeat_instant`
+and `cover_history_instant` construct it."""
+
+
+async def cover_heartbeat_instant(
+    connection: AsyncConnection, instant: datetime,
+) -> CoveredInstant:
+    """The guard of a heartbeat seed: create the hourly leaf of ``instant``
+    (``horsies_create_heartbeat_leaf``), or find it conformant, and return
+    the instant for the seed's ``sent_at``.
+
+    A coverage creates the leaves of its own hour and later hours only. A
+    seed in the past falls in the hour before the coverage when the test
+    starts just after the hour, and its insert is refused with SQLSTATE
+    23514 (no partition for the row). The leaf of the seed's own hour
+    removes that dependence on the clock. The heartbeat class must be
+    registered. Any other outcome fails the caller with an
+    ``AssertionError``.
+    """
+    hour = instant.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    leaf = (
+        await connection.execute(_CREATE_HEARTBEAT_LEAF_SQL, {'lower_anchor': hour})
+    ).one()
+    if leaf.outcome not in _COVERED_OUTCOMES:
+        raise AssertionError(
+            f'heartbeat leaf of {instant} refused: {leaf.outcome} {leaf.leaf_name} '
+            f'{leaf.conflict_kind}'
+        )
+    return CoveredInstant(instant)
+
+
+async def cover_history_instant(
+    connection: AsyncConnection, class_key: str, instant: datetime,
+) -> CoveredInstant:
+    """The guard of a history seed of the period class ``class_key``:
+    create the daily leaf of the UTC day of ``instant``
+    (``horsies_create_history_leaf``), or find it conformant, publish the
+    readers when the leaf is new, and return the instant for the seed's
+    ``terminal_at``.
+
+    A seed in the past falls in the day before the coverage when the test
+    starts just after midnight UTC, and its insert is refused with SQLSTATE
+    23514. The class must be registered. Any other outcome fails the caller
+    with an ``AssertionError``.
+    """
+    day = instant.astimezone(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+    leaf = (
+        await connection.execute(
+            _CREATE_HISTORY_LEAF_SQL, {'class_key': class_key, 'lower_anchor': day},
+        )
+    ).one()
+    if leaf.outcome not in _COVERED_OUTCOMES:
+        raise AssertionError(
+            f'history leaf of {class_key} for {instant} refused: {leaf.outcome} '
+            f'{leaf.leaf_name} {leaf.conflict_kind}'
+        )
+    if leaf.outcome == 'CREATED':
+        await publish_history_readers(connection)
+    return CoveredInstant(instant)
 
 
 ITEST_TASK_ROWS_VIEW_DDL = text(
@@ -314,7 +382,6 @@ async def force_terminal(
     error_code: str | None = None,
     failed_reason: str | None = None,
     kind: str | None = None,
-    aged_seconds: float | None = None,
 ) -> None:
     """Put a live task where a real terminalization would have left it.
 
@@ -350,9 +417,7 @@ async def force_terminal(
                        sha256(convert_to(CAST(id AS text), 'UTF8'))
                    ),
                    :status, :kind,
-                   NOW() - make_interval(
-                       secs => CAST(COALESCE(:aged_seconds, 0)
-                                    AS double precision)),
+                   NOW(),
                    COALESCE(retention_class_key, :default_class),
                    sent_at, enqueued_at, claimed_at, started_at, created_at,
                    retry_count, max_retries,
@@ -376,7 +441,6 @@ async def force_terminal(
             'payload': payload,
             'error_code': error_code,
             'failed_reason': failed_reason,
-            'aged_seconds': aged_seconds,
             'default_class': HISTORY_SEED_CLASS_KEY,
             'snapshot_version': snapshot.version,
             'snapshot_payload': snapshot.payload,

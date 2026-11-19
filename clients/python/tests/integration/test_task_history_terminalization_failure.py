@@ -11,7 +11,7 @@ staleness guard's single-capture evidence contract.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -19,6 +19,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from tests.integration.history_seeding import cover_heartbeat_instant
 from tests.integration.task_history_harness import (
     HistorySchema,
     insert_live_task,
@@ -161,32 +162,22 @@ class TestStalenessGuard:
                 started_at_offset=timedelta(minutes=-10),
             )
             # The heartbeat table has no default partition: the beat's
-            # hour needs its leaf. prepare_move_storage registered the
-            # heartbeat class (horsies_register_retention_classes).
-            landing = (await connection.execute(text('SELECT now()'))).scalar_one()
-            assert isinstance(landing, datetime), landing
-            created = (
-                await connection.execute(
-                    text(
-                        'SELECT outcome FROM horsies_create_heartbeat_leaf('
-                        'CAST(:lower AS timestamptz))'
-                    ),
-                    {
-                        'lower': landing.astimezone(timezone.utc).replace(
-                            minute=0, second=0, microsecond=0,
-                        ),
-                    },
-                )
+            # hour needs its leaf (cover_heartbeat_instant).
+            # prepare_move_storage registered the heartbeat class
+            # (horsies_register_retention_classes).
+            landing = (
+                await connection.execute(text('SELECT statement_timestamp()'))
             ).scalar_one()
-            assert created == 'CREATED'
+            assert isinstance(landing, datetime), landing
+            sent_at = await cover_heartbeat_instant(connection, landing)
             await connection.execute(
                 text(
                     'INSERT INTO horsies_heartbeats '
                     '(task_id, sender_id, role, sent_at, hostname, pid) '
                     "VALUES (CAST(:task_id AS uuid), :worker, 'runner', "
-                    "statement_timestamp(), 'it-host', 4242)"
+                    "CAST(:sent_at AS timestamptz), 'it-host', 4242)"
                 ),
-                {'task_id': task_id, 'worker': WORKER},
+                {'task_id': task_id, 'worker': WORKER, 'sent_at': sent_at},
             )
             refusal = await fail_stale(connection, task_id)
             assert refusal.outcome == 'SOURCE_STATE_CONFLICT'
