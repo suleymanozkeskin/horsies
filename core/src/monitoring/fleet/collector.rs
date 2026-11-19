@@ -26,9 +26,7 @@ use tokio_util::sync::CancellationToken;
 use crate::core::task::Execution;
 use crate::handle::CoreHandle;
 use crate::telemetry::catalog::MetricId;
-use crate::telemetry::declared::{
-    DeclaredNames, DeclaredNamesRefused, ErrorCodeValues, QueueName, ScheduleName,
-};
+use crate::telemetry::declared::{DeclaredNames, ErrorCodeValues, Folded, QueueName, ScheduleName};
 use crate::telemetry::exposition::render;
 use crate::telemetry::labels::{FleetQuery, FleetWorkerState, LiveWorkflowStatus, TelemetryPart};
 use crate::telemetry::registry::{
@@ -94,11 +92,12 @@ impl FleetLabels {
     /// `QueueMode::Default`, the custom queues in `QueueMode::Custom`, and
     /// the name of each schedule of the schedule config. Pure.
     ///
-    /// Errors: [`DeclaredNamesRefused`] for a name that is empty or is the
-    /// fallback text `(unknown)`, or for more than
+    /// Never refuses: a name that is empty, is the fallback text
+    /// `(unknown)`, or comes after
     /// [`MAX_DECLARED_NAMES`](crate::telemetry::declared::MAX_DECLARED_NAMES)
-    /// names of one kind.
-    pub fn of_config(config: &AppConfig) -> Result<Self, DeclaredNamesRefused> {
+    /// names of its kind is not declared, and `folded` names it. Its samples
+    /// count in the `(unknown)` series.
+    pub fn of_config(config: &AppConfig) -> Folded<Self> {
         let queues: Vec<&str> = match config.queue_mode {
             QueueMode::Default => vec![DEFAULT_QUEUE_NAME],
             QueueMode::Custom => config
@@ -113,10 +112,15 @@ impl FleetLabels {
             .iter()
             .flat_map(|schedule| schedule.schedules.iter())
             .map(|schedule| schedule.name.as_str());
-        Ok(Self {
-            queues: DeclaredNames::new(queues)?,
-            schedules: DeclaredNames::new(schedules)?,
-        })
+        let queues = DeclaredNames::new(queues);
+        let schedules = DeclaredNames::new(schedules);
+        Folded {
+            declared: Self {
+                queues: queues.declared,
+                schedules: schedules.declared,
+            },
+            folded: queues.folded.and(schedules.folded),
+        }
     }
 }
 

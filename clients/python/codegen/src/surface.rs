@@ -2584,7 +2584,7 @@ const MONITORING_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "MonitoringHandler",
-        doc: "The monitoring web app of the broker of a CoreHandle, for the FastAPI mount of\ncreate_monitoring_app. Starts nothing: the first call builds it. queue_names and\nschedule_names are the label values of /metrics; other names are (unknown). A handle\nwithout a child spec source raises RuntimeError; heartbeat_ms outside 1 to 3,600,000, or a\nname that is empty or (unknown), raises ValueError.",
+        doc: "The monitoring web app of the broker of a CoreHandle, for the FastAPI mount of\ncreate_monitoring_app. Starts nothing: the first call builds it. queue_names and\nschedule_names are the label values of /metrics; other names are (unknown). A name that\ncannot be a label value of its own (empty, (unknown), or past the bound of names) counts\nin the (unknown) series; the first call logs one WARNING line that names it. A handle\nwithout a child spec source raises RuntimeError; heartbeat_ms outside 1 to 3,600,000\nraises ValueError.",
         constructor: Constructor::Parameters(MONITORING_HANDLER_PARAMETERS),
         properties: &[
             property("max_request_body_bytes", "int"),
@@ -3664,7 +3664,7 @@ const FLEET_METRICS_SERVER_METHODS: &[StubFunction] = &[
         name: "run",
         parameters: &[],
         returns: TypeText::Plain("FleetMetricsStopped | FleetMetricsFailed"),
-        doc: "Bind the address and serve the fleet metrics until a stop request. Main thread only: the\nsignal handlers run between wait slices, and there is no total bound. A failed read is a\nfailure gauge in the text. Raises NotMainThread off the main thread, RuntimeError for a\nsecond run, and, after the run ended, the exception of a signal handler.",
+        doc: "Log one WARNING line that names each queue or schedule name that is not declared, bind\nthe address, and serve the fleet metrics until a stop request. Main thread only: the\nsignal handlers run between wait slices, and there is no total bound. A failed read is a\nfailure gauge in the text. Raises NotMainThread off the main thread, RuntimeError for a\nsecond run, and, after the run ended, the exception of a signal handler.",
     },
     StubFunction {
         name: "request_stop",
@@ -3686,13 +3686,6 @@ const FLEET_METRICS_CLASSES: &[StubClass] = &[
     StubClass {
         name: "ListenAddressRefused",
         doc: "A text that is not a HOST:PORT address. message names the text and the rule.",
-        constructor: Constructor::NoConstructor,
-        properties: &[property("message", "str")],
-        methods: &[],
-    },
-    StubClass {
-        name: "FleetLabelsRefused",
-        doc: "A queue or schedule name that cannot be a label value: it is empty or (unknown), or a\nkind holds too many names. message names it.",
         constructor: Constructor::NoConstructor,
         properties: &[property("message", "str")],
         methods: &[],
@@ -3840,8 +3833,8 @@ const FUNCTIONS: &[StubFunction] = &[
     StubFunction {
         name: "prepare_fleet_metrics",
         parameters: &[positional("handle", "CoreHandle"), keyword("listen", "ListenAddress"), keyword("queue_names", "list[str]"), keyword("schedule_names", "list[str]")],
-        returns: TypeText::Plain("FleetMetricsServer | FleetLabelsRefused"),
-        doc: "The fleet metrics server of the database of handle on listen, with the queue and\nschedule names of the app config as label values. Pure: starts no runtime.",
+        returns: TypeText::Plain("FleetMetricsServer"),
+        doc: "The fleet metrics server of the database of handle on listen, with the queue and\nschedule names of the app config as label values. A name that cannot be a label value of\nits own (empty, (unknown), or past the bound of names) is not declared: its samples count\nin the (unknown) series. Pure: starts no runtime.",
     },
     StubFunction {
         name: "prepare_rerun_write",

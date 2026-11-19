@@ -14,6 +14,11 @@ use crate::monitoring::fleet::{
     PendingTasks, ScheduleLastRun, SeatCount, StreamOldest, TelemetryDownCounts,
     FLEET_QUERY_TIMEOUT,
 };
+use crate::telemetry::declared::{
+    warn_folded_names, FoldReason, FoldedName, FoldedNames, MAX_DECLARED_NAMES,
+};
+use crate::telemetry::labels::DeclaredSource;
+use crate::test_support::LogCapture;
 use crate::{
     CustomQueueConfig, IntervalSchedule, ScheduleConfig, SchedulePattern, StreamCoverage,
     StreamCoverageState, StreamWait, TaskSchedule,
@@ -109,8 +114,8 @@ fn never_ran(name: &str) -> ScheduleLastRun {
 /// The queues `a` and `b`, and the schedule `nightly`.
 fn labels() -> FleetLabels {
     FleetLabels {
-        queues: DeclaredNames::new(["a", "b"]).expect("valid test queue names"),
-        schedules: DeclaredNames::new(["nightly"]).expect("valid test schedule names"),
+        queues: DeclaredNames::new(["a", "b"]).declared,
+        schedules: DeclaredNames::new(["nightly"]).declared,
     }
 }
 
@@ -362,7 +367,7 @@ fn workflows_schedules_and_the_schema_version_have_their_series() {
 #[test]
 fn undeclared_names_share_the_fallback_series_counts_add_up_and_ages_take_the_largest() {
     let collector = FleetCollector::new(FleetLabels {
-        queues: DeclaredNames::new(["a"]).expect("a valid test queue name"),
+        queues: DeclaredNames::new(["a"]).declared,
         schedules: DeclaredNames::none(),
     });
     let mut state = full_state();
@@ -558,8 +563,11 @@ fn a_series_of_an_earlier_read_that_the_next_read_does_not_hold_is_gone() {
 
 #[test]
 fn the_labels_of_a_default_config_are_the_default_queue_and_no_schedule() {
-    let labels = FleetLabels::of_config(&AppConfig::for_database_url("postgresql://db/app"))
-        .expect("the default config gives valid labels");
+    let Folded {
+        declared: labels,
+        folded,
+    } = FleetLabels::of_config(&AppConfig::for_database_url("postgresql://db/app"));
+    assert_eq!(folded, FoldedNames::none());
     assert_eq!(labels.queues.names().to_vec(), vec!["default".to_owned()]);
     assert_eq!(labels.schedules.names().to_vec(), Vec::<String>::new());
 }
@@ -585,7 +593,11 @@ fn the_labels_of_a_custom_config_are_its_queues_and_its_schedules() {
         "cleanup",
         SchedulePattern::Interval(IntervalSchedule::default()),
     )]));
-    let labels = FleetLabels::of_config(&config).expect("valid labels");
+    let Folded {
+        declared: labels,
+        folded,
+    } = FleetLabels::of_config(&config);
+    assert_eq!(folded, FoldedNames::none());
     assert_eq!(
         labels.queues.names().to_vec(),
         vec!["fast".to_owned(), "slow".to_owned()]
@@ -596,20 +608,121 @@ fn the_labels_of_a_custom_config_are_its_queues_and_its_schedules() {
     );
 }
 
-#[test]
-fn a_config_name_that_is_the_fallback_text_is_refused() {
-    let mut config = AppConfig::for_database_url("postgresql://db/app");
-    config.schedule = Some(ScheduleConfig::new(vec![TaskSchedule::new(
-        "(unknown)",
+fn queue(name: &str) -> CustomQueueConfig {
+    CustomQueueConfig {
+        name: name.to_owned(),
+        priority: 1,
+        max_concurrency: None,
+    }
+}
+
+fn schedule(name: &str) -> TaskSchedule {
+    TaskSchedule::new(
+        name,
         "cleanup",
         SchedulePattern::Interval(IntervalSchedule::default()),
-    )]));
+    )
+}
+
+/// A config name that cannot be a label value of its own (the fallback
+/// text, the empty text, a name after the bound) is not declared: no
+/// refusal, each is named once with its reason, and its samples count in
+/// the `(unknown)` series. A declared name keeps its own series.
+#[test]
+fn a_config_name_that_cannot_be_a_label_value_counts_in_the_unknown_series() {
+    let mut config = AppConfig::for_database_url("postgresql://db/app");
+    config.queue_mode = QueueMode::Custom;
+    let mut queues = vec![queue("fast")];
+    queues.extend((1..MAX_DECLARED_NAMES).map(|index| queue(&format!("queue_{index}"))));
+    queues.extend([
+        queue("(unknown)"),
+        queue(""),
+        queue("late"),
+        queue("(unknown)"),
+    ]);
+    config.custom_queues = Some(queues);
+    config.schedule = Some(ScheduleConfig::new(vec![
+        schedule("nightly"),
+        schedule("(unknown)"),
+    ]));
+
+    let Folded {
+        declared: labels,
+        folded,
+    } = FleetLabels::of_config(&config);
+
+    let named = |set: DeclaredSource, name: &str, reason: FoldReason| FoldedName {
+        set,
+        name: name.to_owned(),
+        reason,
+    };
     assert_eq!(
-        FleetLabels::of_config(&config).err(),
-        Some(DeclaredNamesRefused::FallbackName {
-            set: crate::telemetry::labels::DeclaredSource::ScheduleNames,
-            name: "(unknown)".to_owned(),
-        })
+        folded.names().to_vec(),
+        vec![
+            named(
+                DeclaredSource::QueueNames,
+                "(unknown)",
+                FoldReason::FallbackText
+            ),
+            named(DeclaredSource::QueueNames, "", FoldReason::EmptyName),
+            named(DeclaredSource::QueueNames, "late", FoldReason::PastBound),
+            named(
+                DeclaredSource::ScheduleNames,
+                "(unknown)",
+                FoldReason::FallbackText
+            ),
+        ]
+    );
+    assert_eq!(labels.queues.names().len(), MAX_DECLARED_NAMES);
+    assert_eq!(
+        labels.schedules.names().to_vec(),
+        vec!["nightly".to_owned()]
+    );
+
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
+    warn_folded_names(&"the fleet metrics", &folded);
+    let warnings = capture.lines_starting(tracing::Level::WARN, "");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(
+        warnings[0].message,
+        "the fleet metrics: these names are not declared, and their samples count in the \
+         fallback series of their label: \"(unknown)\" in the queue names (the fallback text of \
+         the label); \"\" in the queue names (an empty name); \"late\" in the queue names (past \
+         the bound of 100000 names); \"(unknown)\" in the schedule names (the fallback text of \
+         the label)"
+    );
+
+    let collector = FleetCollector::new(labels);
+    let mut state = full_state();
+    state.queue_tasks = answered(QueueTasks {
+        pending: vec![
+            pending("fast", ISOLATED, PendingCount::Exact(1)),
+            pending("(unknown)", ISOLATED, PendingCount::Exact(2)),
+            pending("", ISOLATED, PendingCount::Exact(3)),
+            pending("late", ISOLATED, PendingCount::Exact(4)),
+        ],
+        held: Vec::new(),
+    });
+    state.schedules = answered(ScheduleRuns {
+        checked_at: at(),
+        schedules: vec![ran("nightly", 10), ran("(unknown)", 70)],
+    });
+    let _recorded = collector.record(&state);
+    let text = collector.render();
+    assert_eq!(
+        samples(&text, "horsies_queue_tasks"),
+        lines(&[
+            "horsies_queue_tasks{queue=\"(unknown)\",execution=\"ISOLATED\",status=\"PENDING\"} 9",
+            "horsies_queue_tasks{queue=\"fast\",execution=\"ISOLATED\",status=\"PENDING\"} 1",
+        ])
+    );
+    assert_eq!(
+        samples(&text, "horsies_schedule_last_run_age_seconds"),
+        lines(&[
+            "horsies_schedule_last_run_age_seconds{schedule=\"(unknown)\"} 70",
+            "horsies_schedule_last_run_age_seconds{schedule=\"nightly\"} 10",
+        ])
     );
 }
 

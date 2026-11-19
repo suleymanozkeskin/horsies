@@ -1,15 +1,15 @@
 """Unit tests of `horsies metrics` (clients/python/horsies/core/fleet_metrics.py).
 
-The command refuses its arguments before it discovers the app, takes its
-label names from the app config, and refuses names that cannot be label
-values before it serves. Serving itself is the core's
-(`core/src/monitoring/fleet/serve.rs`); no database is reached here.
+The command refuses its arguments before it discovers the app and takes its
+label names from the app config. A name that cannot be a label value of its
+own is not refused: the core counts its samples in the `(unknown)` series.
+Serving itself is the core's (`core/src/monitoring/fleet/serve.rs`); no
+database is reached here.
 """
 
 from __future__ import annotations
 
 import argparse
-import logging
 import sys
 from datetime import time as datetime_time
 from typing import Any, Final
@@ -17,15 +17,13 @@ from typing import Any, Final
 import pytest
 from pydantic import SecretStr
 
-from horsies._core import ListenAddress
+from horsies._core import FleetMetricsServer, ListenAddress, prepare_fleet_metrics
 from horsies.core import cli
 from horsies.core.app import Horsies
 from horsies.core.fleet_metrics import (
-    EXIT_FAILED,
     FleetLabelNames,
     fleet_label_names,
     listen_address,
-    run_fleet_metrics,
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
@@ -162,19 +160,22 @@ class TestLabelNames:
             queues=('fast', 'slow'), schedules=('nightly',)
         )
 
-    def test_a_name_that_is_the_fallback_text_ends_the_command_before_it_serves(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_a_name_that_cannot_be_a_label_value_is_not_refused(self) -> None:
         app = Horsies(
             AppConfig(
                 broker=broker_config(),
-                schedule=ScheduleConfig(schedules=[daily('(unknown)')]),
+                schedule=ScheduleConfig(
+                    schedules=[daily('(unknown)'), daily('nightly')]
+                ),
             )
         )
-        logger = logging.getLogger('metrics-cli-test')
+        names = fleet_label_names(app)
 
-        with caplog.at_level(logging.ERROR, logger='metrics-cli-test'):
-            code = run_fleet_metrics(app, listen_address('127.0.0.1:9100'), logger)
+        server = prepare_fleet_metrics(
+            app.get_broker()._core_handle,  # pyright: ignore[reportPrivateUsage]
+            listen=listen_address('127.0.0.1:9100'),
+            queue_names=[*names.queues, ''],
+            schedule_names=list(names.schedules),
+        )
 
-        assert code == EXIT_FAILED
-        assert '(unknown)' in caplog.text
+        assert isinstance(server, FleetMetricsServer)
