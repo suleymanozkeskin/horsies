@@ -28,9 +28,11 @@ arbitrary-precision = ["serde_json/arbitrary_precision"]
 pgbouncer-fixture-tests = []
 # The HTTP server of a metrics endpoint: `horsies metrics` serves the fleet
 # collector's `GET /metrics` with it (`telemetry::endpoint`,
-# `monitoring::fleet::serve_fleet_metrics`). It reuses optional dependencies of
-# `web`; no crate is added.
-metrics-endpoint = ["dep:axum", "tokio/net"]
+# `monitoring::fleet::serve_fleet_metrics`). The server runs each connection
+# on hyper's HTTP/1 builder, which sets the header read timeout and the read
+# buffer bound that `axum::serve` does not expose. axum builds hyper and
+# hyper-util with these features already, so no crate is added.
+metrics-endpoint = ["dep:axum", "dep:hyper", "dep:hyper-util", "tokio/net"]
 # The monitoring handler. It turns `metrics-endpoint` on too: the core tests
 # run with `--features web`, and the Python bridge, which builds `web`, serves
 # `horsies metrics`.
@@ -57,6 +59,8 @@ horsies-core-derive = { version = "0.1.0-alpha.36", path = "derive" }
 async-stream = { version = "0.3", optional = true }
 async-trait = { version = "0.1", optional = true }
 axum = { version = "0.8", optional = true }
+hyper = { version = "1", optional = true, features = ["server", "http1"] }
+hyper-util = { version = "0.1", optional = true, features = ["tokio", "server", "service", "http1"] }
 # The HTTP types of the public `web` API (`web::{Bytes, HeaderName,
 # HeaderValue, Method, StatusCode}`): axum re-exports the same types, and
 # stays internal to the router of the handler.
