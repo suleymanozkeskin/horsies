@@ -365,3 +365,28 @@ fn every_send_starts_with_no_carrier() {
     assert_eq!(SendTrace::default(), SendTrace::NoCarrier);
     assert_eq!(StoredTrace::default(), StoredTrace::NoCarrier);
 }
+
+/// The text of a trace id is the 32 lowercase hex digits that W3C Trace
+/// Context writes.
+#[test]
+fn a_trace_id_is_written_as_32_lowercase_hex_digits() {
+    assert_eq!(trace_id_text(&TRACE_ID), "0af7651916cd43dd8448eb211c80319c");
+    assert_eq!(trace_id_text(&[0xff; TRACE_ID_BYTES]), "f".repeat(32));
+}
+
+/// A stored trace id: none for a row with no trace, the text for 16 bytes,
+/// and a refusal that names the length for any other length.
+#[test]
+fn a_stored_trace_id_is_its_text_none_or_a_length_refusal() {
+    assert_eq!(stored_trace_id_text(None), Ok(None));
+    assert_eq!(
+        stored_trace_id_text(Some(TRACE_ID.as_slice())),
+        Ok(Some("0af7651916cd43dd8448eb211c80319c".to_owned()))
+    );
+    for bytes in [0, 15, 17] {
+        assert_eq!(
+            stored_trace_id_text(Some(vec![1; bytes].as_slice())),
+            Err(StoredTraceIdLength { bytes })
+        );
+    }
+}

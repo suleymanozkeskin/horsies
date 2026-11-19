@@ -35,6 +35,7 @@ use crate::TaskAttemptOutcome;
 
 mod end_points;
 mod points;
+mod slot_points;
 #[cfg(test)]
 mod tests;
 
@@ -56,6 +57,15 @@ pub enum WorkerTelemetry {
     /// The points record their metrics, and offer their events when a
     /// handler child is linked.
     On(Arc<TelemetryOn>),
+}
+
+impl std::fmt::Debug for WorkerTelemetry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Off => formatter.write_str("WorkerTelemetry::Off"),
+            Self::On(_) => formatter.write_str("WorkerTelemetry::On"),
+        }
+    }
 }
 
 impl WorkerTelemetry {
@@ -143,6 +153,8 @@ struct PointMetrics {
     finalize_retries: Counter<(WriteStage,)>,
     claim_passes: Counter<(ClaimPassResult,)>,
     recovery_failures: Counter<(RecoveryStep,)>,
+    children_started: Counter<(Execution,)>,
+    child_boot: Histogram<(Execution,)>,
 }
 
 impl PointMetrics {
@@ -164,6 +176,8 @@ impl PointMetrics {
             finalize_retries: registry.counter(MetricId::FinalizeRetries)?,
             claim_passes: registry.counter(MetricId::ClaimPasses)?,
             recovery_failures: registry.counter(MetricId::RecoveryPassFailures)?,
+            children_started: registry.counter(MetricId::ChildrenStarted)?,
+            child_boot: registry.histogram(MetricId::ChildBootDuration)?,
         })
     }
 }

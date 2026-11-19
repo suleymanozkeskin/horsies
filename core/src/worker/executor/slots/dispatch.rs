@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::core::task::error::OperationalErrorCode;
 use crate::events::{AttemptNumber, RunTrace};
+use crate::telemetry::trace_carrier::StoredTraceId;
 use crate::worker::executor::protocol::{
     FailureDetail, ProcessId, RunEnd, TaskInputText, TaskTimeoutMs,
 };
@@ -74,6 +75,29 @@ pub struct ClaimedTask {
     /// The trace carrier that the send stored on the row. The run frame
     /// carries it to the child.
     pub trace: RunTrace,
+    /// The trace id that the send stored on the row, for the log records of
+    /// the attempt.
+    pub trace_id: StoredTraceId,
+}
+
+impl ClaimedTask {
+    /// The log fields of this attempt.
+    pub fn log(&self) -> AttemptLog {
+        AttemptLog {
+            attempt: self.retry.attempt(),
+            trace_id: self.trace_id,
+        }
+    }
+}
+
+/// The log fields of one attempt besides its task id: the attempt number
+/// and the trace id of the send. Each log record of the worker parent that
+/// names the task of an attempt carries both (`attempt = log.attempt.get()`,
+/// `trace_id = log.trace_id.log_field()`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttemptLog {
+    pub attempt: AttemptNumber,
+    pub trace_id: StoredTraceId,
 }
 
 /// A claimed row and its input.

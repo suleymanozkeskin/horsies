@@ -17,7 +17,7 @@ use tokio::task::JoinSet;
 
 use super::board::{PoolBoard, PoolHealth, SlotPhase};
 use super::budgets::SharedSlotService;
-use super::dispatch::{AttemptEnd, ClaimedTask, ExecutionClass, NotRunCause};
+use super::dispatch::{AttemptEnd, AttemptLog, ClaimedTask, ExecutionClass, NotRunCause};
 use super::pool::{
     not_run_cause, stop_slots, Answer, DrainKills, ExitNotSeen, MemoryLimit, PlacementWatch,
     PoolStopReport, Submitted, TaskLimit,
@@ -89,6 +89,8 @@ fn shared_kind_of(init: &InitFrame) -> (SharedChildKind, ExecutionClass, NonZero
 pub(super) struct QueuedSeatRun {
     pub(super) frame: SharedRunFrame,
     pub(super) answer: Answer,
+    /// The log fields of the attempt.
+    pub(super) log: AttemptLog,
 }
 
 /// Whether a slot's child takes new tasks, as placement sees it.
@@ -362,6 +364,7 @@ impl SharedPool {
                     input,
                 },
                 answer: Answer::watched(sender, watch, self.shared.class),
+                log: task.log(),
             });
             placer.choose(self.shared.seats)
         };

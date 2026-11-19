@@ -1313,7 +1313,7 @@ fn every_read_into_value_of_the_core_and_the_rust_client_is_listed() {
 
 #[test]
 fn each_listed_site_has_a_reason_and_a_file_of_a_scanned_crate() {
-    assert_eq!(KNOWN_SITES.len(), 27);
+    assert_eq!(KNOWN_SITES.len(), 30);
     for site in KNOWN_SITES {
         assert!(!site.allowed.reason().is_empty(), "{}", site.file);
         assert!(site.count > 0, "{}", site.file);

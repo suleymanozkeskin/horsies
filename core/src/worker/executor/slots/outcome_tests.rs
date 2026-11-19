@@ -71,6 +71,7 @@ fn dispatched(task_id: Uuid, generation: DateTime<Utc>) -> ClaimedTask {
         },
         options: read_stored_options(None),
         trace: crate::events::RunTrace::NoCarrier,
+        trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
     }
 }
 

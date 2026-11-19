@@ -53,6 +53,8 @@ use crate::db::Transience;
 use crate::telemetry::labels::{FleetQuery, FleetWorkerState, LiveTaskStatus, LiveWorkflowStatus};
 use crate::{ClassCoverage, StreamWait, PENDING_STREAM_LIMIT};
 
+#[cfg(feature = "web")]
+pub(crate) use collector::log_recorded;
 pub use collector::{
     collect_fleet_state, collect_fleet_state_through, FleetCollector, FleetLabels, FleetRecorded,
     FLEET_COLLECTOR_METRICS, FLEET_COLLECT_INTERVAL,

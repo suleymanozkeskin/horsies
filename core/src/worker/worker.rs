@@ -723,6 +723,7 @@ fn claimed_of(row: ClaimedRow) -> Claimed {
             },
             options: read_stored_options(row.task_options.as_deref()),
             trace: row.trace,
+            trace_id: row.trace_id,
         },
         input: TaskInputText::new(row.input),
     }
@@ -782,7 +783,7 @@ fn return_held_rows(
                     AttemptEnd::NotDispatched(NotRunCause::HeldForQueueCap),
                 )
                 .await;
-            tracing::debug!(task_id = %task.task_id, settlement = ?settled, "held row returned");
+            tracing::debug!(task_id = %task.task_id, attempt = task.retry.attempt().get(), trace_id = task.trace_id.log_field(), settlement = ?settled, "held row returned");
         });
     }
 }
@@ -1053,6 +1054,7 @@ impl Worker {
             ),
             exit_not_seen: exit_not_seen(&self.app_config.recovery),
             placement,
+            telemetry: self.telemetry.clone(),
         }
     }
 
@@ -1473,7 +1475,7 @@ impl Worker {
         let settle = async move {
             let settled =
                 follow_attempt(writer.as_ref(), &telemetry, &task, read, receipt, submitted).await;
-            tracing::debug!(task_id = %task.task_id, settlement = ?settled, "attempt end settled");
+            tracing::debug!(task_id = %task.task_id, attempt = task.retry.attempt().get(), trace_id = task.trace_id.log_field(), settlement = ?settled, "attempt end settled");
         };
         writes.spawn(settle_then_release(settle, count, released));
     }
@@ -2602,6 +2604,7 @@ mod tests {
             retry,
             options: crate::worker::retry::read_stored_options(task_options),
             trace: crate::events::RunTrace::NoCarrier,
+            trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
         }
     }
 
@@ -3319,6 +3322,7 @@ mod tests {
             retry_count: 1,
             max_retries: 3,
             trace: crate::events::RunTrace::NoCarrier,
+            trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
             priority: crate::events::Priority::try_from(100).unwrap(),
             enqueued_at: claimed_at,
             read: crate::broker::claims::ClaimRead::now(),
@@ -3341,6 +3345,7 @@ mod tests {
                 },
                 options: read_stored_options(Some(r#"{"timeout_ms": 2000}"#)),
                 trace: crate::events::RunTrace::NoCarrier,
+                trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
             }
         );
         assert_eq!(claimed.input.as_str(), r#"{"n": 1}"#);
@@ -3775,6 +3780,7 @@ mod tests {
             retry_count,
             max_retries,
             trace: crate::events::RunTrace::NoCarrier,
+            trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
             priority: crate::events::Priority::try_from(100).unwrap(),
             enqueued_at: claimed_at,
             read: crate::broker::claims::ClaimRead::now(),
