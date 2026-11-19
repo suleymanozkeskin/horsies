@@ -13,7 +13,8 @@ use crate::telemetry::labels::{
 };
 use crate::telemetry::registry::{
     FamilySnapshot, HandleRefused, ProcessFacts, Recorded, Registry, RegistryLabels,
-    RegistryRefused, SampleValue, WorkerFacts, MAX_LABELS_PER_METRIC, MAX_SERIES_PER_METRIC,
+    RegistryRefused, Replaced, SampleValue, WorkerFacts, MAX_LABELS_PER_METRIC,
+    MAX_SERIES_PER_METRIC,
 };
 use crate::{
     error_code_label, BuiltInTaskCode, ContractCode, DeclaredErrorCodes, ErrorCodeLabel, Execution,
@@ -691,4 +692,98 @@ fn gauge_values_print_in_the_prometheus_form() {
     assert_eq!(gauge_text(4.0), "4");
     assert_eq!(gauge_text(0.25), "0.25");
     assert_eq!(gauge_text(1e21), "1000000000000000000000");
+}
+
+// ---------------------------------------------------------------------------
+// Gauge replacement
+// ---------------------------------------------------------------------------
+
+/// The labels of a process that is not a worker, with the queues `queues`.
+fn collector_labels(queues: &[String]) -> RegistryLabels {
+    let mut labels = labels_of(&["a"], &DeclaredErrorCodes::NONE);
+    labels.process = ProcessFacts::NotAWorker;
+    labels.queues = DeclaredNames::new(queues.iter().cloned()).expect("valid test queue names");
+    labels
+}
+
+#[test]
+fn a_gauge_replacement_holds_only_the_new_series_and_no_series_clears_it() {
+    let registry =
+        Registry::new(&[MetricId::FleetSeats], collector_labels(&[])).expect("the registry builds");
+    let seats = registry
+        .gauge::<(Execution,)>(MetricId::FleetSeats)
+        .expect("the handle of the metric");
+    assert_eq!(seats.set((Execution::Isolated,), 4.0), Recorded::Added);
+    let replaced = seats.replace_all([
+        ((Execution::SharedAsync,), 2.0),
+        ((Execution::SharedThread,), 1.0),
+        ((Execution::SharedThread,), 3.0),
+    ]);
+    assert_eq!(
+        replaced,
+        Replaced {
+            held: 2,
+            dropped_at_series_bound: 0,
+            outside_label_set: 0,
+        }
+    );
+    let text = render(&registry);
+    assert!(!text.contains("horsies_fleet_seats{execution=\"ISOLATED\"}"));
+    assert!(text.contains("horsies_fleet_seats{execution=\"SHARED_ASYNC\"} 2\n"));
+    assert!(text.contains("horsies_fleet_seats{execution=\"SHARED_THREAD\"} 3\n"));
+
+    let cleared = seats.replace_all(Vec::new());
+    assert_eq!(cleared.held, 0);
+    assert!(!render(&registry).contains("horsies_fleet_seats{"));
+}
+
+#[test]
+fn a_gauge_replacement_past_the_series_bound_drops_and_counts_the_rest() {
+    let names: Vec<String> = (0..=MAX_SERIES_PER_METRIC)
+        .map(|index| format!("queue_{index}"))
+        .collect();
+    let registry = Registry::new(&[MetricId::FleetUnservedClasses], collector_labels(&names))
+        .expect("the registry builds");
+    let unserved = registry
+        .gauge::<(DeclaredValue<QueueName>, Execution)>(MetricId::FleetUnservedClasses)
+        .expect("the handle of the metric");
+    let queues = &registry.labels().queues;
+    let replaced = unserved.replace_all(
+        names
+            .iter()
+            .map(|name| ((queues.value_of(name), Execution::Isolated), 1.0)),
+    );
+    assert_eq!(
+        replaced,
+        Replaced {
+            held: MAX_SERIES_PER_METRIC,
+            dropped_at_series_bound: 1,
+            outside_label_set: 0,
+        }
+    );
+    assert_eq!(registry.series_dropped(MetricId::FleetUnservedClasses), 1);
+}
+
+#[test]
+fn a_gauge_replacement_drops_a_value_of_the_declared_names_of_another_registry() {
+    let one = vec!["a".to_owned()];
+    let three = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+    let registry = Registry::new(&[MetricId::FleetUnservedClasses], collector_labels(&one))
+        .expect("the registry builds");
+    let other = DeclaredNames::<QueueName>::new(three).expect("valid test queue names");
+    let unserved = registry
+        .gauge::<(DeclaredValue<QueueName>, Execution)>(MetricId::FleetUnservedClasses)
+        .expect("the handle of the metric");
+    let replaced = unserved.replace_all([
+        ((other.value_of("a"), Execution::Isolated), 1.0),
+        ((other.value_of("c"), Execution::Isolated), 1.0),
+    ]);
+    assert_eq!(
+        replaced,
+        Replaced {
+            held: 1,
+            dropped_at_series_bound: 0,
+            outside_label_set: 1,
+        }
+    );
 }
