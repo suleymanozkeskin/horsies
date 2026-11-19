@@ -1,8 +1,8 @@
 ---
 title: CLI Reference
-summary: horsies::cli::run(app) runs the worker, the scheduler or the check of a Rust app from the app's own binary and serves its worker children; the shipped horsies binary has web, get-docs and skills install.
+summary: horsies::cli::run(app) runs the worker, the scheduler, the check or the fleet metrics server of a Rust app from the app's own binary and serves its worker children; the shipped horsies binary has web, get-docs and skills install.
 related: [configuration/app-config, ../workers/worker-architecture, ../scheduling/scheduler-overview, ../workers/heartbeats-recovery, ../monitoring/web-ui-deployment]
-tags: [rust, cli, worker, scheduler, check, web, get-docs, skills]
+tags: [rust, cli, worker, scheduler, check, metrics, web, get-docs, skills]
 ---
 
 # CLI Reference
@@ -11,7 +11,7 @@ A Rust app has two command-line programs:
 
 | Program | Commands | Why |
 |---------|----------|-----|
-| The app's own binary, through `horsies::cli::run(app)` | `worker`, `scheduler`, `check`, and child mode | The tasks are compiled into this binary, and the worker starts it again for each child |
+| The app's own binary, through `horsies::cli::run(app)` | `worker`, `scheduler`, `check`, `metrics`, and child mode | The tasks are compiled into this binary, and the worker starts it again for each child |
 | The shipped `horsies` binary | `web`, `get-docs`, `skills install` | These commands need no task of the app |
 
 Both are in the `cli` feature of the crate, which is on by default.
@@ -48,7 +48,7 @@ The contract of `run(app: Horsies) -> ExitCode`:
 1. Child mode first. The worker starts this binary again for each child, with the arguments `--horsies-child <fd> <pid>`. `run` reads them before any other argument, serves the child until the worker stops it, and returns the child's exit code (see [Exit Codes](#exit-codes)). A child start with arguments that cannot be used exits with code 73.
 2. Every line of `main` before `run` runs in each child too. Build the app there (config, registrations, state, start hooks), and start nothing else: each child would start it again.
 3. `run` blocks the calling thread until the command ends. Call it from a plain `fn main`. Inside a tokio runtime it prints why and returns exit code 1.
-4. Any other process runs the command of its arguments: `worker`, `scheduler` or `check`. `run` installs the logs of the command (see [Logs](#logs)) and returns its exit code.
+4. Any other process runs the command of its arguments: `worker`, `scheduler`, `check` or `metrics`. `run` installs the logs of the command (see [Logs](#logs)) and returns its exit code.
 
 ## A Binary That Owns Its `main`
 
@@ -120,6 +120,7 @@ fn run_worker(app: Horsies) -> ExitCode {
 | `<binary> worker --profile <name> [--loglevel LEVEL]` | Starts a worker of one profile of `AppConfig.worker_profiles` | [`horsies worker`](/horsies/cli/#horsies-worker) |
 | `<binary> scheduler [--loglevel LEVEL]` | Starts the scheduler of `AppConfig.schedule` | [`horsies scheduler`](/horsies/cli/#horsies-scheduler) |
 | `<binary> check [--live] [--loglevel LEVEL]` | Checks the app without starting a service | [`horsies check`](/horsies/cli/#horsies-check) |
+| `<binary> metrics --listen HOST:PORT [--loglevel LEVEL]` | Serves the fleet metrics of the app's database at `GET /metrics` | [`horsies metrics`](/horsies/cli/#horsies-metrics) |
 
 An unknown command, or no command, is an argument error: exit code 2.
 
@@ -166,6 +167,21 @@ An unknown command, or no command, is an argument error: exit code 2.
 | `--loglevel LEVEL` | `WARNING` | See [Logs](#logs) |
 
 A check that passes prints its text on stdout and exits with code 0. A refused check prints its report on stderr and exits with code 1. `--live` installs no schema.
+
+### `metrics`
+
+```bash
+./myapp metrics --listen 0.0.0.0:9465
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--listen HOST:PORT` | required | The address to serve on: `HOST:PORT`, or `[IPV6]:PORT`. The port is 1 to 65535. There is no default |
+| `--loglevel LEVEL` | `INFO` | See [Logs](#logs) |
+
+- The command serves the fleet metrics of the app's database at `GET /metrics`, in the Prometheus text format. What the metrics hold and when the command reads them: [Fleet Collector](/horsies/observability/fleet-collector/).
+- The connection runs no schema step and opens no listener.
+- An address that does not parse is an argument error: exit code 2. The command exits with code 0 at `SIGTERM` or `SIGINT`, and with code 1 when the config does not build a handle or the address does not bind. A database that does not answer does not end it.
 
 ## Logs
 

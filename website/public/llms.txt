@@ -17,7 +17,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - `tasks.md` -> task APIs, send/retry flows, serialization, error handling
 - `workflows.md` -> DAG construction, WorkflowHandle semantics, HRS-001-HRS-038 validation
 - `configs.md` -> AppConfig, queues, recovery/retention/resilience, scheduling, CLI/runtime settings
-- `monitoring.md` -> `horsies.monitoring` query API, task cancel action, `horsies[web]` dashboard, `create_monitoring_app`, `horsies web` CLI, authorization policies, schema-compatibility states
+- `monitoring.md` -> `horsies.monitoring` query API, task cancel action, `horsies[web]` dashboard, `create_monitoring_app`, `horsies web` CLI, `horsies metrics` and `GET /metrics`, authorization policies, schema-compatibility states
 - These are markdown guidance files (no bundled scripts) designed for on-demand agent loading
 
 ## Quick Reference
@@ -740,6 +740,7 @@ Registry (HRS-300-HRS-399):
   - `--auth none` is allowed only on a loopback host; a non-loopback host requires `--auth trusted-header`
   - `--enable-actions` allows cancel/pause/resume
   - `--trace-link TEMPLATE` links a task's trace id in the task detail: an http or https URL with one {trace_id} (MonitoringUIConfig(trace_link=TraceLinkTemplate(template=...)) when mounting; a refused template is HRS-221 CONFIG_INVALID_TRACE_LINK)
+- `horsies metrics <module> --listen HOST:PORT [--loglevel LEVEL]` — serve the fleet metrics of the app's database at GET /metrics (Prometheus text 0.0.4); `--listen` is required (HOST:PORT or [IPV6]:PORT); reads at start, then at most once per 15 s, each statement within 2 s; a failed query has no series and sets horsies_exporter_collect_failed{query} 1; exit 2 bad address, 0 on SIGTERM/SIGINT, 1 when the app does not load or the address does not bind. `horsies web` and create_monitoring_app also serve GET /metrics behind can_view. See /horsies/observability/fleet-collector/
 - `horsies get-docs [--output DIR] [--ref main]` — fetch the docs of the installed version's release tag for AI agents (default: .horsies-docs/); a development version has no tag and fails unless `--ref main` is given
 - `horsies skills install --target DIR [--force]` — copy the packaged skill folder to `DIR/horsies/`; refuses to replace a changed copy without `--force`
 - Module format: `myapp.config:app` (dotted:attr) or `app/config.py:app` (file:attr)
@@ -814,6 +815,15 @@ Each entry: Title -- summary -> URL
 - Web UI Deployment & Authentication -- mounted and standalone modes, authorization policies, bind rules, identity, connection and schema contracts -> /horsies/monitoring/web-ui-deployment/
 - Web UI Mount -- the Python mount: the horsies[web] extra, create_monitoring_app, MonitoringAuthPolicy, AllowAll, ViewOnly, TrustedHeader, MonitoringUIConfig, static assets -> /horsies/monitoring/web-ui-mount/
 - Action Semantics -- what task cancel, task rerun, and workflow pause, resume, and cancel do -> /horsies/monitoring/action-semantics/
+
+### Observability
+- Metric Reference -- every metric of the core's catalog: OpenTelemetry and Prometheus names, kind, unit, labels and values, duration buckets, series bounds (generated) -> /horsies/observability/metric-reference/
+- Fleet Collector -- horsies metrics and GET /metrics of the web UI: read cadence, the bounded queue depth, the oldest pending age, failed queries, label values -> /horsies/observability/fleet-collector/
+- Tracing -- the send, start and attempt spans, the stored trace carrier and its bounds, propagators, attributes, status, the limits -> /horsies/observability/tracing/
+- Tracing Setup -- horsies[otel], AppConfig(tracing=OtelTracing()), the SDK of the sending process and of each worker child, the propagator, producer metrics -> /horsies/observability/tracing-setup/
+- Logs -- the task_id, attempt and trace_id fields of the worker's records, the log context of a task body, the JSON format of each client -> /horsies/observability/logs/
+- Log Setup -- AppConfig(log_format=JsonLogs()), TaskContextFilter, JsonLogsFormatter -> /horsies/observability/log-setup/
+- Dashboards and Alerts -- the Grafana dashboard and the Prometheus alert rules in deploy/, what each alert means -> /horsies/observability/dashboards-and-alerts/
 
 ### Operations
 - Atomic Enqueue and Topology -- send after commit, resend_on_transient_err, idempotency_key window and limits, no send API joins a caller transaction -> /horsies/operations/atomic-enqueue-and-topology/

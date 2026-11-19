@@ -215,8 +215,10 @@ fn monitoring_routes(app: &Horsies) -> Result<Router, Box<dyn std::error::Error>
 ```
 
 `router(&app, config, policy) -> axum::Router` serves every path of the
-mount: the page and its assets, `/api/...` and the event stream
-(`GET /api/events`).
+mount: the page and its assets, `/api/...`, the event stream
+(`GET /api/events`), and `GET /metrics`: the fleet metrics of the app's
+database behind the view verdict (the same gauges as `<binary> metrics`,
+read when the last read is 15 s old or more).
 
 - Building the router does no I/O. The core handler is built at the first
   request on the app's handle. A request whose broker cannot be built is

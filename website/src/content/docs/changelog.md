@@ -127,6 +127,46 @@ before you upgrade a 0.7 deployment.
   `advance_retry` (bound `advance_retries`). In Python each field is an
   attribute of the `LogRecord`, so `JsonLogs` writes `attempt` and
   `trace_id` for them.
+- **`horsies metrics` serves the fleet metrics of a database.**
+  `horsies metrics <app> --listen HOST:PORT` serves `GET /metrics` in the
+  Prometheus text format 0.0.4 (no OpenMetrics): the live tasks by queue,
+  execution class and status, the age of the oldest due `PENDING` task,
+  the live workers, their seats and seats in use, the classes that no live
+  worker serves, the workers whose metrics endpoint or handler child is
+  down, the workflows that are not terminal, the time since the last run
+  of each schedule, and the schema version. `--listen` is required and has
+  no default. The command reads the database at start, then at most once
+  per 15 seconds, one statement at a time, each within 2 seconds; a scrape
+  never starts a read. The `PENDING` count of a queue and class stops at
+  1,000: past it, `horsies_queue_pending_more_than` holds the lower bound.
+  A query that fails leaves its gauges with no series and sets
+  `horsies_exporter_collect_failed{query}` to 1; it never ends the
+  command. The `queue` and `schedule` label values are the names of the
+  app config, and every other name is `(unknown)`; a config name that
+  cannot be a label value of its own counts in `(unknown)` too, with one
+  WARNING line. Exit codes: 2 for an address that does not parse, 0 at
+  `SIGTERM` or `SIGINT`, 1 when the app does not load, the broker does not
+  build, or the address does not bind.
+- **`GET /metrics` of the web UI.** `horsies web` and
+  `create_monitoring_app` serve the same fleet metrics at `GET /metrics`,
+  behind `can_view` of the access policy. A request reads the database
+  when no read has run or the last read started 15 seconds or more before
+  it; any other request answers the last read. Another method answers 405.
+- **A Grafana dashboard, Prometheus alert rules and an OpenTelemetry
+  Collector config in `deploy/`.** `deploy/grafana/horsies-dashboard.json`
+  (uid `horsies-overview`, Grafana 12.2 or later),
+  `deploy/prometheus/horsies-alerts.yaml` with its `promtool` tests
+  (`HorsiesOldestPendingTaskTooOld`, `HorsiesTaskFailureRatioHigh`,
+  `HorsiesNoLiveWorker`, `HorsiesUnservedClass`, `HorsiesEventsDropped`,
+  `HorsiesTelemetryDown`, `HorsiesFleetQueryFailed`), and
+  `deploy/otel-collector/collector.yaml`, which scrapes the metrics
+  endpoints and exports OTLP. A test checks each metric, label and label
+  value that they name against the metric catalog of the core.
+- **`horsies_worker_states.telemetry`.** Each worker snapshot records the
+  state of the metrics endpoint (`off`, `binding`, `serving`, `down`) and
+  of the handler child (`off`, `starting`, `up`, `down`) of the worker.
+  The fleet metric `horsies.fleet.workers.telemetry_down{part}` counts the
+  live workers whose latest snapshot has a part `down`.
 
 ### Changed
 
@@ -1620,6 +1660,13 @@ unless it starts with "Added".
 - **`task_name::node()` before `task_name::register` refuses with
   `HRS-302`** (`ErrorCode::WorkflowUnregisteredTask`). Before, its
   `HorsiesError` had no code.
+- **Added: `<binary> metrics --listen HOST:PORT`** in `horsies::cli::run`:
+  the fleet metrics of the app's database at `GET /metrics`, as Python
+  `horsies metrics` serves them. The connection runs no schema step. Exit
+  codes: 2 for an address that does not parse, 0 at `SIGTERM` or `SIGINT`,
+  1 when the config does not build a handle or the address does not bind.
+  `horsies::web::router` serves `GET /metrics` too, behind the view
+  verdict.
 
 ## 0.7.0 — 2026-11-15
 

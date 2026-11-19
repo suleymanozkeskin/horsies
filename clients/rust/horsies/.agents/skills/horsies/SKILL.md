@@ -325,6 +325,7 @@ owns. See `tasks.md`, Rerun a Terminal Task.
 ./myapp worker --profile <name> [--loglevel LEVEL]   # the app's own binary
 ./myapp scheduler [--loglevel LEVEL]
 ./myapp check [--live] [--loglevel LEVEL]
+./myapp metrics --listen HOST:PORT [--loglevel LEVEL]   # the fleet metrics at GET /metrics
 horsies web --database-url URL                       # the shipped binary (feature web)
 horsies get-docs [--output DIR] [--ref main]
 horsies skills install --target DIR [--force]        # copy this skill folder to DIR/horsies/
