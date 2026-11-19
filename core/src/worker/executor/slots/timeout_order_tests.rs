@@ -289,7 +289,7 @@ async fn a_timeout_of_a_plain_task_owes_no_phase_two() {
         .settle(&claimed(task_id, &queue, generation), timed_out())
         .await;
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     assert_eq!(live_row(&pool, task_id).await, None);
     let pending_phase_two: i64 = sql::query_scalar(
         "SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1",
@@ -315,7 +315,7 @@ async fn a_timeout_of_a_row_still_claimed_puts_it_back_in_the_queue() {
         .settle(&claimed(task_id, &queue, generation), timed_out())
         .await;
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     let row = live_row(&pool, task_id).await.expect("the row stays live");
     assert_eq!(row["status"], "PENDING");
     assert_eq!(row["claimed_by_worker_id"], serde_json::Value::Null);
@@ -432,8 +432,8 @@ async fn a_timeout_fails_a_running_row_once_and_its_replay_writes_nothing() {
     let first = writer.settle(&task, timed_out()).await;
     let replay = writer.settle(&task, timed_out()).await;
 
-    assert_eq!(first, Settlement::Written);
-    assert_eq!(replay, Settlement::Written);
+    assert!(matches!(first, Settlement::Written(_)), "{:?}", first);
+    assert!(matches!(replay, Settlement::Written(_)), "{:?}", replay);
     assert_eq!(live_row(&pool, task_id).await, None);
     let history: serde_json::Value =
         sql::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
@@ -553,7 +553,7 @@ fn phase_two_owed(written: Result<UnreportedAttemptWrite, FinalizeError>) -> Pha
             }
         }
         Ok(UnreportedAttemptWrite::Written(
-            FinalizeOutcome::Retried | FinalizeOutcome::Finalized | FinalizeOutcome::Refused,
+            FinalizeOutcome::Retried { .. } | FinalizeOutcome::Finalized | FinalizeOutcome::Refused,
         )) => panic!("the timeout write of a workflow task owes no phase 2"),
         Ok(UnreportedAttemptWrite::ClaimReleased) => {
             panic!("the timeout write released a RUNNING row")
@@ -630,7 +630,7 @@ async fn a_timeout_of_a_workflow_task_fails_it_then_phase_two_runs() {
 
     let settled = writer(pool.clone()).settle(&task, timed_out()).await;
 
-    assert_eq!(settled, Settlement::Written);
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     assert_eq!(live_row(&pool, task_id).await, None);
     let history: serde_json::Value =
         sql::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")

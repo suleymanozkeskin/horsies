@@ -22,7 +22,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::broker::claims::{ClaimClasses, ClaimPassRequest, ClaimedRow};
+use crate::broker::claims::{ClaimClasses, ClaimPassRequest, ClaimRead, ClaimedRow};
 use crate::broker::health::WORKER_PING_CHANNEL;
 use crate::broker::process_listener::{default_payload_capacity, fixed_channel};
 use crate::broker::PostgresBroker;
@@ -49,11 +49,12 @@ use crate::worker::config::WorkerConfig;
 use crate::worker::error::WorkerError;
 use crate::worker::executor::placement::WorkerThreads;
 use crate::worker::executor::protocol::TaskInputText;
+use crate::worker::executor::slots::outcome::EndWrites;
 use crate::worker::executor::slots::{
     describe_claim_plan, guard_new_kind_baselines, start_children, unserved_classes_line,
     AttemptEnd, BaselineOverLimit, ChildrenStart, ChildrenStartFailed, ClaimRoute, Claimed,
-    ClaimedTask, NotRunCause, OrphanSelfHeal, OutcomeWriter, PoolBoard, PoolFailure,
-    PoolStopReport, RetryFacts, TaskKind,
+    ClaimedTask, NotRunCause, OrphanSelfHeal, OutcomeWriter, PlacementReceipt, PoolBoard,
+    PoolFailure, PoolStopReport, RetryFacts, Settlement, Submitted, TaskKind,
 };
 use crate::worker::executor::supervisor::{
     PreloadMode, PreloadStart, PreloadUnsupported, Spawner, SpawnerStopReport, CHILD_KILL_WAIT,
@@ -725,6 +726,31 @@ fn claimed_of(row: ClaimedRow) -> Claimed {
         },
         input: TaskInputText::new(row.input),
     }
+}
+
+/// Follow one submitted attempt to the end of its write: its placement on a
+/// child, its end, and the write of the end, with the lifecycle points of
+/// `telemetry` at each step: `AttemptPlaced`, then `AttemptEnded` (or
+/// `AttemptNotStarted`, or `ClaimReleased` for a task that reached no
+/// child), then `AttemptRecorded`. The result envelope of a reported end is
+/// read once, by `writer`. `read` is when the worker read the claim result
+/// of the task. Returns how the write settled.
+pub(crate) async fn follow_attempt<W: EndWrites>(
+    writer: &W,
+    telemetry: &WorkerTelemetry,
+    task: &ClaimedTask,
+    read: ClaimRead,
+    receipt: PlacementReceipt,
+    submitted: Submitted,
+) -> Settlement {
+    let placement = receipt.placement().await;
+    telemetry.attempt_placed(task, read, &placement);
+    let end = attempt_end(submitted).await;
+    let read_end = writer.read_end(task, end);
+    let noted = telemetry.attempt_ended(task, &placement, W::view(&read_end));
+    let settled = writer.write_end(task, read_end).await;
+    telemetry.attempt_recorded(task, noted, settled);
+    settled
 }
 
 /// Return each row that waited for its queue cap to the queue, at the stop
@@ -1445,10 +1471,8 @@ impl Worker {
         let writer = Arc::clone(writer);
         let released = Arc::clone(&self.capacity_released);
         let settle = async move {
-            let placement = receipt.placement().await;
-            telemetry.attempt_placed(&task, read, &placement);
-            let end = attempt_end(submitted).await;
-            let settled = writer.settle(&task, end).await;
+            let settled =
+                follow_attempt(writer.as_ref(), &telemetry, &task, read, receipt, submitted).await;
             tracing::debug!(task_id = %task.task_id, settlement = ?settled, "attempt end settled");
         };
         writes.spawn(settle_then_release(settle, count, released));
@@ -1639,13 +1663,16 @@ impl Worker {
             self.cancel.clone(),
         );
 
-        let writer = Arc::new(OutcomeWriter::new(
-            Arc::clone(&self.broker),
-            Arc::clone(&self.child_specs),
-            self.worker_id.clone(),
-            self.app_config.payload.clone(),
-            batcher.clone(),
-        ));
+        let writer = Arc::new(
+            OutcomeWriter::new(
+                Arc::clone(&self.broker),
+                Arc::clone(&self.child_specs),
+                self.worker_id.clone(),
+                self.app_config.payload.clone(),
+                batcher.clone(),
+            )
+            .with_telemetry(self.telemetry.clone()),
+        );
         let stops = ChildrenStopCell::default();
         let services =
             match self.spawn_services(&children, &live, &stops, ping_responder, liveness_holder) {

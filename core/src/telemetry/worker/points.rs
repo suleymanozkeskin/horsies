@@ -14,18 +14,14 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
-use super::{TelemetryOn, WorkerTelemetry};
+use super::{QueueLabel, TaskLabel, TelemetryOn, WorkerTelemetry};
 use crate::broker::claims::{ClaimRead, ClaimedRow};
 use crate::events::{self, AttemptPlaced, ClaimReleased, Event, TaskClaimed};
-use crate::telemetry::declared::{self, DeclaredValue};
 use crate::telemetry::labels::{ClaimPassResult, ReleaseReason};
 use crate::worker::executor::slots::dispatch::attempt_of;
 use crate::worker::executor::slots::{
     watched_placement, ChildPlacement, ClaimedTask, Placed, PlacementReceipt, PlacementWatch,
 };
-
-/// The value of the `queue` label.
-type QueueLabel = DeclaredValue<declared::QueueName>;
 
 impl WorkerTelemetry {
     /// The claim statement returned `rows`, read at `rows[..].read`: one
@@ -89,8 +85,13 @@ impl WorkerTelemetry {
 
 impl TelemetryOn {
     /// The value of the `queue` label of `queue_name`.
-    fn queue_label(&self, queue_name: &str) -> QueueLabel {
+    pub(super) fn queue_label(&self, queue_name: &str) -> QueueLabel {
         self.registry.labels().queues.value_of(queue_name)
+    }
+
+    /// The value of the `task` label of `task_name`.
+    pub(super) fn task_label(&self, task_name: &str) -> TaskLabel {
+        self.registry.labels().tasks.value_of(task_name)
     }
 
     fn claimed(&self, row: &ClaimedRow) {
@@ -136,7 +137,13 @@ impl TelemetryOn {
         });
     }
 
-    fn released(&self, task_id: Uuid, task_name: &str, queue_name: &str, reason: ReleaseReason) {
+    pub(super) fn released(
+        &self,
+        task_id: Uuid,
+        task_name: &str,
+        queue_name: &str,
+        reason: ReleaseReason,
+    ) {
         let _recorded = self.metrics.claims_released.add((reason,), 1);
         let _emitted = self.emit(|| {
             Event::ClaimReleased(ClaimReleased {

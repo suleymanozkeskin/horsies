@@ -33,6 +33,8 @@ pub mod shared_stop;
 pub mod start;
 
 #[cfg(test)]
+mod attempt_points_tests;
+#[cfg(test)]
 mod boot_tests;
 #[cfg(test)]
 mod claim_plan_tests;
@@ -104,7 +106,7 @@ pub use crate::broker::OrphanSelfHeal;
 pub use defects::{SlotDefect, SLOT_DEFECT_LIMIT};
 pub use dispatch::{
     AttemptEnd, CancelEnd, Claimed, ClaimedTask, ExecutionClass, LoopKillCode, NotRunCause,
-    RetryFacts, Settlement, TaskKind, TimeoutCancel,
+    RetryFacts, Settlement, TaskKind, TerminalState, TimeoutCancel, WrittenEnd,
 };
 #[cfg(test)]
 pub(crate) use outcome::test_successes;

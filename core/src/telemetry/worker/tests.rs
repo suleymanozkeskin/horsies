@@ -9,10 +9,21 @@ use std::sync::Arc;
 use chrono::Utc;
 
 use super::*;
-use crate::core::task::Execution;
-use crate::events::{SlotIndex, SlotRecovered};
+use crate::broker::claims::ClaimRead;
+use crate::core::task::error::OperationalErrorCode;
+use crate::core::task::{Execution, TaskErrorCode, UserCode};
+use crate::events::{
+    self, AttemptErrorCode, AttemptRecord, AttemptStart, ChildResult, RetryCount, RunTrace,
+    SlotIndex, SlotRecovered, WorkerDecision,
+};
+use crate::telemetry::labels::ReleaseReason;
 use crate::telemetry::registry::SampleValue;
-use crate::test_support::telemetry::{series_of, worker_registry};
+use crate::test_support::telemetry::{series_of, worker_registry, WatchedTelemetry};
+use crate::worker::executor::protocol::StopReason;
+use crate::worker::executor::slots::outcome::{EndView, ResultRead};
+use crate::worker::executor::slots::{
+    ChildPlacement, LoopKillCode, NotRunCause, Settlement, TerminalState, WrittenEnd,
+};
 
 /// An event of slot `slot`.
 fn slot_event(slot: u32) -> Event {
@@ -30,8 +41,12 @@ fn capacity(events: usize) -> NonZeroUsize {
 #[tokio::test]
 async fn an_offer_to_a_full_queue_drops_the_event_and_counts_queue_full() {
     let registry = worker_registry();
-    let (on, mut queue) = TelemetryOn::with_event_queue(Arc::clone(&registry), capacity(2))
-        .expect("the telemetry of a worker registry");
+    let (on, mut queue) = TelemetryOn::with_event_queue(
+        Arc::clone(&registry),
+        DeclaredCodesByTask::none(),
+        capacity(2),
+    )
+    .expect("the telemetry of a worker registry");
 
     let emitted: Vec<Emitted> = (0..3).map(|slot| on.emit(|| slot_event(slot))).collect();
 
@@ -67,8 +82,12 @@ fn slots_of(events: &[Event]) -> Vec<u32> {
 #[tokio::test]
 async fn an_offer_after_the_reader_is_gone_drops_the_event_and_counts_child_down() {
     let registry = worker_registry();
-    let (on, queue) = TelemetryOn::with_event_queue(Arc::clone(&registry), capacity(2))
-        .expect("the telemetry of a worker registry");
+    let (on, queue) = TelemetryOn::with_event_queue(
+        Arc::clone(&registry),
+        DeclaredCodesByTask::none(),
+        capacity(2),
+    )
+    .expect("the telemetry of a worker registry");
     drop(queue);
 
     let emitted = on.emit(|| slot_event(0));
@@ -85,8 +104,9 @@ async fn an_offer_after_the_reader_is_gone_drops_the_event_and_counts_child_down
 
 #[tokio::test]
 async fn the_queue_ends_after_the_link_is_gone_and_its_events_are_read() {
-    let (on, mut queue) = TelemetryOn::with_event_queue(worker_registry(), capacity(4))
-        .expect("the telemetry of a worker registry");
+    let (on, mut queue) =
+        TelemetryOn::with_event_queue(worker_registry(), DeclaredCodesByTask::none(), capacity(4))
+            .expect("the telemetry of a worker registry");
     let _first = on.emit(|| slot_event(0));
     drop(on);
 
@@ -103,7 +123,7 @@ async fn the_queue_ends_after_the_link_is_gone_and_its_events_are_read() {
 #[test]
 fn with_no_handler_child_a_point_builds_no_event() {
     let registry = worker_registry();
-    let on = TelemetryOn::metrics_only(Arc::clone(&registry))
+    let on = TelemetryOn::metrics_only(Arc::clone(&registry), DeclaredCodesByTask::none())
         .expect("the telemetry of a worker registry");
     let built = Cell::new(false);
 
@@ -121,7 +141,8 @@ fn with_no_handler_child_a_point_builds_no_event() {
 fn the_reaper_counts_its_failures_only_with_telemetry_on() {
     let off = WorkerTelemetry::Off.recovery_failures();
     let on = WorkerTelemetry::On(Arc::new(
-        TelemetryOn::metrics_only(worker_registry()).expect("the telemetry of a worker registry"),
+        TelemetryOn::metrics_only(worker_registry(), DeclaredCodesByTask::none())
+            .expect("the telemetry of a worker registry"),
     ))
     .recovery_failures();
 
@@ -149,7 +170,7 @@ fn claimed_task(execution: Execution) -> crate::worker::executor::slots::Claimed
 }
 
 /// A placement of a task on an isolated child, one second after `read`.
-fn placed_after(read: crate::broker::claims::ClaimRead) -> crate::worker::executor::slots::Placed {
+fn placed_after(read: ClaimRead) -> crate::worker::executor::slots::Placed {
     use crate::worker::executor::protocol::ProcessId;
     crate::worker::executor::slots::Placed {
         child_pid: ProcessId::new(4242).unwrap(),
@@ -161,10 +182,9 @@ fn placed_after(read: crate::broker::claims::ClaimRead) -> crate::worker::execut
 
 #[test]
 fn a_placed_task_gives_one_attempt_placed_with_its_child_and_one_slot_wait() {
-    use crate::worker::executor::slots::ChildPlacement;
-    let mut watched = crate::test_support::telemetry::WatchedTelemetry::new();
+    let mut watched = WatchedTelemetry::new();
     let task = claimed_task(Execution::SharedAsync);
-    let read = crate::broker::claims::ClaimRead::now();
+    let read = ClaimRead::now();
     let placed = placed_after(read);
 
     watched
@@ -196,10 +216,10 @@ fn a_placed_task_gives_one_attempt_placed_with_its_child_and_one_slot_wait() {
 
 #[test]
 fn a_task_that_no_child_took_or_telemetry_off_gives_no_placement() {
-    use crate::worker::executor::slots::{ChildPlacement, PlacementReceipt, PlacementWatch};
-    let mut watched = crate::test_support::telemetry::WatchedTelemetry::new();
+    use crate::worker::executor::slots::{PlacementReceipt, PlacementWatch};
+    let mut watched = WatchedTelemetry::new();
     let task = claimed_task(Execution::Isolated);
-    let read = crate::broker::claims::ClaimRead::now();
+    let read = ClaimRead::now();
 
     watched
         .telemetry
@@ -212,4 +232,364 @@ fn a_task_that_no_child_took_or_telemetry_off_gives_no_placement() {
         WorkerTelemetry::Off.placement_watch(),
         (PlacementWatch::Unwatched, PlacementReceipt::Unwatched)
     ));
+}
+
+/// A watched telemetry value whose registry declares the queue `default`
+/// and the task `app.tasks.send_email`, which declares `RATE_LIMITED`.
+fn declaring_telemetry() -> WatchedTelemetry {
+    use crate::core::task::DeclaredErrorCodes;
+    use crate::telemetry::declared::{DeclaredNames, ErrorCodeValues};
+    use crate::telemetry::registry::{ProcessFacts, RegistryLabels, WorkerFacts};
+    let declared = DeclaredErrorCodes::parse(["RATE_LIMITED"]).unwrap();
+    let registry = Registry::for_worker(RegistryLabels {
+        tasks: DeclaredNames::new(["app.tasks.send_email"]).unwrap(),
+        queues: DeclaredNames::new(["default"]).unwrap(),
+        handlers: DeclaredNames::none(),
+        schedules: DeclaredNames::none(),
+        error_codes: ErrorCodeValues::new([&declared]).unwrap(),
+        process: ProcessFacts::Worker(WorkerFacts {
+            version: "0.8.0".to_owned(),
+            profile: "default".to_owned(),
+            worker_id: "worker-1".to_owned(),
+        }),
+    })
+    .unwrap();
+    let codes = DeclaredCodesByTask::new(
+        [("app.tasks.send_email".to_owned(), declared)]
+            .into_iter()
+            .collect(),
+    );
+    WatchedTelemetry::with(Arc::new(registry), codes)
+}
+
+fn user_code(code: &str) -> TaskErrorCode {
+    TaskErrorCode::User(UserCode::parse(code).unwrap())
+}
+
+/// How the event of a run end is expected to read.
+#[derive(Debug)]
+enum ExpectedEnd {
+    Reported(ChildResult),
+    Decided(WorkerDecision),
+}
+
+/// Each end of a run on a child gives one `AttemptEnded` with its end, and
+/// one count of `horsies.task.attempts` with its outcome and code label: a
+/// declared user code is its own label, another user code is `undeclared`.
+#[test]
+fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
+    let value = ResultRead::Value;
+    let declared = ResultRead::TaskError(user_code("RATE_LIMITED"));
+    let other = ResultRead::TaskError(user_code("OTHER_CODE"));
+    let unreadable = ResultRead::Unreadable;
+    let failed_with = |code: &str| {
+        ExpectedEnd::Reported(ChildResult::Failed {
+            error_code: AttemptErrorCode::from(&user_code(code)),
+        })
+    };
+    let cases: Vec<(EndView<'_>, ExpectedEnd, &str, &str)> = vec![
+        (
+            EndView::Result(&value),
+            ExpectedEnd::Reported(ChildResult::Completed),
+            "COMPLETED",
+            "",
+        ),
+        (
+            EndView::Result(&declared),
+            failed_with("RATE_LIMITED"),
+            "FAILED",
+            "RATE_LIMITED",
+        ),
+        (
+            EndView::Result(&other),
+            failed_with("OTHER_CODE"),
+            "FAILED",
+            "undeclared",
+        ),
+        (
+            EndView::Result(&unreadable),
+            ExpectedEnd::Reported(ChildResult::Failed {
+                error_code: AttemptErrorCode::BuiltIn {
+                    code: OperationalErrorCode::WorkerSerializationError.into(),
+                },
+            }),
+            "FAILED",
+            "WORKER_SERIALIZATION_ERROR",
+        ),
+        (
+            EndView::WorkerFailure,
+            ExpectedEnd::Reported(ChildResult::WorkerFailure),
+            "WORKER_FAILURE",
+            "BROKER_ERROR",
+        ),
+        (
+            EndView::TimedOut,
+            ExpectedEnd::Decided(WorkerDecision::TimedOut),
+            "FAILED",
+            "TASK_TIMEOUT",
+        ),
+        (
+            EndView::KilledForLoop(LoopKillCode::TaskBlockedLoop),
+            ExpectedEnd::Decided(WorkerDecision::TaskBlockedLoop),
+            "FAILED",
+            "TASK_BLOCKED_LOOP",
+        ),
+        (
+            EndView::KilledForLoop(LoopKillCode::NeighbourBlockedLoop),
+            ExpectedEnd::Decided(WorkerDecision::NeighbourBlockedLoop),
+            "FAILED",
+            "NEIGHBOUR_BLOCKED_LOOP",
+        ),
+        (
+            EndView::Crashed,
+            ExpectedEnd::Decided(WorkerDecision::ChildLost),
+            "FAILED",
+            "WORKER_CRASHED",
+        ),
+    ];
+    for (view, expected, outcome, code) in cases {
+        let mut watched = declaring_telemetry();
+        let task = claimed_task(Execution::Isolated);
+        let read = ClaimRead::now();
+        let placed = placed_after(read);
+
+        let noted = watched
+            .telemetry
+            .attempt_ended(&task, &ChildPlacement::Placed(placed), view);
+
+        let events = watched.events();
+        let expected_end = match expected {
+            ExpectedEnd::Reported(result) => events::AttemptEnd::ReportedByChild {
+                result,
+                start: AttemptStart::NotReported,
+            },
+            ExpectedEnd::Decided(reason) => events::AttemptEnd::DecidedByWorker {
+                reason,
+                trace: RunTrace::NoCarrier,
+                placed_at: placed.wall,
+            },
+        };
+        match events.as_slice() {
+            [Event::AttemptEnded(ended)] => {
+                assert_eq!(ended.end, expected_end, "{view:?}");
+                assert_eq!(ended.execution, Execution::Isolated, "{view:?}");
+                assert_eq!(ended.attempt.get(), 3, "{view:?}");
+            }
+            other => panic!("{view:?} gives one AttemptEnded, not {other:?}"),
+        }
+        assert!(matches!(noted, EndNoted::Seen { .. }), "{view:?}");
+        assert_eq!(
+            watched.series(MetricId::TaskAttempts),
+            vec![(
+                vec![
+                    "app.tasks.send_email".to_owned(),
+                    "default".to_owned(),
+                    "ISOLATED".to_owned(),
+                    outcome.to_owned(),
+                    code.to_owned(),
+                ],
+                SampleValue::Counter(1)
+            )],
+            "{view:?}"
+        );
+    }
+}
+
+/// A child killed with its exit not seen: `NotKnown`, counted in
+/// `end_not_known` and in no outcome.
+#[test]
+fn an_end_not_known_counts_apart_from_the_outcomes() {
+    let mut watched = declaring_telemetry();
+    let task = claimed_task(Execution::Isolated);
+    let placed = placed_after(ClaimRead::now());
+
+    let _noted = watched.telemetry.attempt_ended(
+        &task,
+        &ChildPlacement::Placed(placed),
+        EndView::EndUnknown {
+            pid: placed.child_pid,
+        },
+    );
+
+    match watched.events().as_slice() {
+        [Event::AttemptEnded(ended)] => assert_eq!(
+            ended.end,
+            events::AttemptEnd::NotKnown {
+                child_pid: placed.child_pid
+            }
+        ),
+        other => panic!("one AttemptEnded, not {other:?}"),
+    }
+    assert!(watched.series(MetricId::TaskAttempts).is_empty());
+    assert_eq!(
+        watched.series(MetricId::TaskAttemptsEndNotKnown),
+        vec![(
+            vec![
+                "app.tasks.send_email".to_owned(),
+                "default".to_owned(),
+                "ISOLATED".to_owned(),
+            ],
+            SampleValue::Counter(1)
+        )]
+    );
+}
+
+/// A stop before RUNNING gives `AttemptNotStarted` and no `AttemptEnded`; a
+/// task that reached no child gives `ClaimReleased` and nothing to record.
+#[test]
+fn a_stop_before_running_and_a_task_with_no_child_give_their_own_events() {
+    let mut watched = declaring_telemetry();
+    let task = claimed_task(Execution::Isolated);
+
+    let stopped = watched.telemetry.attempt_ended(
+        &task,
+        &ChildPlacement::Placed(placed_after(ClaimRead::now())),
+        EndView::StoppedBeforeRunning(StopReason::WorkflowStopped),
+    );
+    let not_run = watched.telemetry.attempt_ended(
+        &task,
+        &ChildPlacement::NotPlaced,
+        EndView::NotDispatched(NotRunCause::QueueFull),
+    );
+
+    match watched.events().as_slice() {
+        [Event::AttemptNotStarted(not_started), Event::ClaimReleased(released)] => {
+            assert_eq!(not_started.reason, StopReason::WorkflowStopped);
+            assert_eq!(released.reason, ReleaseReason::QueueFull);
+        }
+        other => panic!("AttemptNotStarted then ClaimReleased, not {other:?}"),
+    }
+    assert!(matches!(stopped, EndNoted::Seen { .. }));
+    assert_eq!(not_run, EndNoted::NothingToRecord);
+    assert_eq!(
+        watched.series(MetricId::TaskStartsRefused),
+        vec![(vec!["workflow_stopped".to_owned()], SampleValue::Counter(1))]
+    );
+    assert_eq!(
+        watched.series(MetricId::TaskClaimsReleased),
+        vec![(vec!["queue_full".to_owned()], SampleValue::Counter(1))]
+    );
+}
+
+/// Each settlement gives one `AttemptRecorded` with its record; a scheduled
+/// retry also counts in `horsies.task.retries` under the code of the end.
+#[test]
+fn each_settlement_gives_one_attempt_recorded_with_its_record() {
+    let next_retry_at = Utc::now();
+    let cases = [
+        (
+            Settlement::Written(WrittenEnd::Terminal(TerminalState::Completed)),
+            AttemptRecord::Completed,
+        ),
+        (
+            Settlement::Written(WrittenEnd::Terminal(TerminalState::Failed)),
+            AttemptRecord::Failed,
+        ),
+        (
+            Settlement::Written(WrittenEnd::RetryScheduled {
+                retry_count: 4,
+                next_retry_at,
+            }),
+            AttemptRecord::RetryScheduled {
+                retry_count: RetryCount::try_from(4).unwrap(),
+                next_retry_at,
+            },
+        ),
+        (
+            Settlement::Written(WrittenEnd::ClaimReleased),
+            AttemptRecord::ClaimReleased,
+        ),
+        (Settlement::NothingOwed, AttemptRecord::NothingOwed),
+        (Settlement::NotHeld, AttemptRecord::NotHeld),
+        (Settlement::LeftToRecovery, AttemptRecord::LeftToRecovery),
+        (
+            Settlement::RetriesExhausted,
+            AttemptRecord::RetriesExhausted,
+        ),
+        (Settlement::WriteFailed, AttemptRecord::WriteFailed),
+    ];
+    for (settled, record) in cases {
+        let mut watched = declaring_telemetry();
+        let task = claimed_task(Execution::SharedAsync);
+        let declared = user_code("RATE_LIMITED");
+        let noted = EndNoted::Seen {
+            seen: tokio::time::Instant::now(),
+            error_code: watched.registry.labels().error_codes.value_of(
+                crate::core::task::error_code_label(
+                    &crate::core::task::DeclaredErrorCodes::parse(["RATE_LIMITED"]).unwrap(),
+                    &declared,
+                ),
+            ),
+        };
+
+        watched.telemetry.attempt_recorded(&task, noted, settled);
+
+        match watched.events().as_slice() {
+            [Event::AttemptRecorded(recorded)] => {
+                assert_eq!(recorded.record, record, "{settled:?}");
+            }
+            other => panic!("{settled:?} gives one AttemptRecorded, not {other:?}"),
+        }
+        let retries = match settled {
+            Settlement::Written(WrittenEnd::RetryScheduled { .. }) => vec![(
+                vec![
+                    "app.tasks.send_email".to_owned(),
+                    "default".to_owned(),
+                    "RATE_LIMITED".to_owned(),
+                ],
+                SampleValue::Counter(1),
+            )],
+            _ => Vec::new(),
+        };
+        assert_eq!(
+            watched.series(MetricId::TaskRetries),
+            retries,
+            "{settled:?}"
+        );
+    }
+}
+
+/// Nothing to record, or telemetry off: no `AttemptRecorded`.
+#[test]
+fn nothing_to_record_gives_no_attempt_recorded() {
+    let mut watched = declaring_telemetry();
+    let task = claimed_task(Execution::Isolated);
+    let settled = Settlement::Written(WrittenEnd::Terminal(TerminalState::Completed));
+
+    watched
+        .telemetry
+        .attempt_recorded(&task, EndNoted::NothingToRecord, settled);
+    WorkerTelemetry::Off.attempt_recorded(
+        &task,
+        EndNoted::Seen {
+            seen: tokio::time::Instant::now(),
+            error_code: crate::telemetry::declared::ErrorCodeValue::NO_ERROR_CODE,
+        },
+        settled,
+    );
+
+    assert!(watched.events().is_empty());
+    assert!(watched.series(MetricId::TaskRecordDuration).is_empty());
+}
+
+/// Each finalize write sent again counts once under its stage.
+#[test]
+fn each_finalize_retry_counts_under_its_stage() {
+    use crate::worker::executor::slots::outcome::WriteStage;
+    let watched = declaring_telemetry();
+
+    watched.telemetry.finalize_retried(WriteStage::PhaseOne);
+    watched.telemetry.finalize_retried(WriteStage::PhaseOne);
+    watched
+        .telemetry
+        .finalize_retried(WriteStage::CrashRecovery);
+    WorkerTelemetry::Off.finalize_retried(WriteStage::TimeoutWrite);
+
+    assert_eq!(
+        watched.series(MetricId::FinalizeRetries),
+        vec![
+            (vec!["future".to_owned()], SampleValue::Counter(1)),
+            (vec!["phase1_persist".to_owned()], SampleValue::Counter(2)),
+        ]
+    );
 }
