@@ -550,6 +550,8 @@ class TestErrorCode:
             ErrorCode.TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT,
             ErrorCode.TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC,
             ErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE,
+            ErrorCode.TASK_INVALID_ERROR_CODE,
+            ErrorCode.TASK_DUPLICATE_ERROR_CODE,
         ]
         for code in task_codes:
             # HRS-100-HRS-199 range

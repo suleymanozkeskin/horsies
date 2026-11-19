@@ -343,6 +343,42 @@ A task entry has priority over a global entry. A task that returns `TaskResult(e
 
 Only the exact class matches; a subclass does not. Map each subclass that you expect.
 
+#### Declare Error Codes
+
+`error_codes` declares the task's own error codes: the values of the `error_code` label of its worker metrics besides the built-in codes and `undeclared` ([Declared Error Codes](/horsies/tasks/errors/#declared-error-codes)). Pass an `Enum` class, whose member values are the codes, or a tuple of strings:
+
+```python
+from enum import Enum
+
+from horsies import Horsies, TaskError, TaskResult
+
+
+class ChargeCode(Enum):
+    CARD_DECLINED = "CARD_DECLINED"
+    RATE_LIMITED = "RATE_LIMITED"
+
+
+def register(app: Horsies) -> None:
+    @app.task("charge_card", error_codes=ChargeCode)
+    def charge_card(*, amount_cents: int) -> TaskResult[str, TaskError]:
+        if amount_cents > 100_000:
+            return TaskResult(err=TaskError(error_code=ChargeCode.CARD_DECLINED.value))
+        return TaskResult(ok="charged")
+
+    @app.task("send_receipt", error_codes=("BOUNCED",))
+    def send_receipt(*, email: str) -> TaskResult[str, TaskError]:
+        return TaskResult(ok=email)
+```
+
+A `TaskError` takes the code as a plain `str`: pass `ChargeCode.CARD_DECLINED.value`, not the member. Declaring is optional, and the default is `()`. A user code that the task does not declare still works everywhere; its metric label is `undeclared`. The decorator refuses:
+
+- a value that is neither an `Enum` class nor a tuple (a list, a string, an `Enum` member): `HRS-102`;
+- a code that is empty, not `UPPER_SNAKE_CASE`, or an exception class name: `HRS-112`;
+- a built-in code or `WORKFLOW_STOPPED`: `HRS-212`;
+- a code given twice: `HRS-113`.
+
+The task function keeps the codes in `task_error_codes`, in the order of the declaration. `horsies check` lists them.
+
 ### Assign to Queue (CUSTOM Mode)
 
 ```python
@@ -512,6 +548,7 @@ def task_two() -> TaskResult[str, TaskError]:
 | `retry_policy` | `RetryPolicy` | No | Retry timing, backoff, and auto-retry triggers |
 | `exception_mapper` | `dict[type[BaseException], str]` | No | Maps exception classes to error codes |
 | `default_unhandled_error_code` | `str` | No | Error code for unmapped exceptions (overrides global) |
+| `error_codes` | `type[Enum] \| tuple[str, ...]` | No | The task's own error codes: an `Enum` class (its member values) or a tuple of strings. Default `()`. See [Declare Error Codes](#declare-error-codes) |
 | `timeout_ms` | `int` | No | Execution time limit in milliseconds, from 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295), measured from the moment a child takes the task. On expiry the child process is killed and the task fails with `TASK_TIMEOUT` |
 | `execution` | `Execution` | No | How a worker runs the task: `ISOLATED` (default), `SHARED_ASYNC` or `SHARED_THREAD`. See [Choose the Execution Class](#choose-the-execution-class) |
 | `cancel_grace_ms` | `int` | No | `SHARED_ASYNC` only. The time to stop after a cancel, from 100 to 10,000 ms. Default 1,000 ms |
