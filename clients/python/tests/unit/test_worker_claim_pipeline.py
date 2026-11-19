@@ -32,7 +32,11 @@ from horsies.core.worker.child_runner import (
     StartWithin,
     _confirm_ownership_and_set_running,
 )
-from horsies.core.worker.run_return import CoreStoppedBeforeStart, StoppedBeforeRunning
+from horsies.core.worker.run_return import (
+    CoreStoppedBeforeStart,
+    StartedRunning,
+    StoppedBeforeRunning,
+)
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
@@ -113,6 +117,10 @@ class TestLeaseHeartbeatValidation:
 TASK_ID = '0b4d8a52-7d0e-4a0e-9d11-6b2f1f7c9e02'
 
 
+STARTED_AT = datetime(2026, 11, 17, 10, 0, 1, tzinfo=timezone.utc)
+"""The time that the fake start write returns."""
+
+
 def _record(record_class: type, **fields: object) -> MagicMock:
     """A stand-in for a record of ``horsies._core``, which has no Python
     constructor: a class pattern matches it."""
@@ -160,14 +168,15 @@ class TestOwnershipGateBehavioral:
     3. Exception path (the core cannot run the call)
     """
 
-    def test_ownership_confirmed_returns_none_after_one_call(self) -> None:
-        """When the start answers STARTED, ownership is confirmed; the
-        statement committed alone in autocommit."""
-        handle = _FakeHandle(_record(core.AttemptStarted))
+    def test_ownership_confirmed_returns_the_start_after_one_call(self) -> None:
+        """When the start answers STARTED, ownership is confirmed with the
+        time of the start write; the statement committed alone in
+        autocommit."""
+        handle = _FakeHandle(_record(core.AttemptStarted, started_at=STARTED_AT))
 
         result = _start(handle)
 
-        assert result is None, 'Ownership confirmed should return None'
+        assert result == StartedRunning(STARTED_AT), 'Ownership confirmed gives its start'
         assert len(handle.calls) == 1
 
     def test_ownership_lost_returns_claim_lost_with_no_other_call(self) -> None:
@@ -206,7 +215,7 @@ class TestOwnershipGateBehavioral:
         """The start check runs right before the start. A deadline that fired
         first stops the run there: no RUNNING update, and the row stays
         CLAIMED."""
-        handle = _FakeHandle(_record(core.AttemptStarted))
+        handle = _FakeHandle(_record(core.AttemptStarted, started_at=STARTED_AT))
         checks: list[str] = []
 
         def deadline_fired() -> StartCheck:
@@ -220,22 +229,22 @@ class TestOwnershipGateBehavioral:
         assert handle.calls == []
 
     def test_an_allowed_start_runs_the_update(self) -> None:
-        handle = _FakeHandle(_record(core.AttemptStarted))
+        handle = _FakeHandle(_record(core.AttemptStarted, started_at=STARTED_AT))
 
         result = _start(handle, start_check=StartAllowed)
 
-        assert result is None
+        assert result == StartedRunning(STARTED_AT)
         assert len(handle.calls) == 1
         assert handle.calls[0]['deadline_in_ms'] is None
 
     def test_a_start_within_a_deadline_sends_the_time_left(self) -> None:
         """The core checks the time left once the pool gave the connection,
         before the statement."""
-        handle = _FakeHandle(_record(core.AttemptStarted))
+        handle = _FakeHandle(_record(core.AttemptStarted, started_at=STARTED_AT))
 
         result = _start(handle, start_check=lambda: StartWithin(milliseconds=1500))
 
-        assert result is None
+        assert result == StartedRunning(STARTED_AT)
         assert handle.calls[0]['deadline_in_ms'] == 1500
 
     def test_a_deadline_that_passes_while_the_pool_waits_runs_no_statement(self) -> None:

@@ -59,6 +59,7 @@ from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_frames import (
     MAX_BODY_BYTES,
     PROTOCOL_NUMBERS,
+    AttemptStart,
     BodyReturnedFrame,
     BootFailedFrame,
     ChildFrame,
@@ -77,6 +78,8 @@ from horsies.core.worker.child_frames import (
     RunEnd,
     SeatEnd,
     SeatTimedOut,
+    StartNotReported,
+    StartReported,
     boot_failed_frame,
     encode_child_frame,
 )
@@ -303,6 +306,8 @@ def _read_parent_frames(
             match reader.next_frame():
                 case core.InitFrame():
                     _exit_bad_parent_frame('Parent sent a second init frame')
+                case core.EventsFrame():
+                    _exit_bad_parent_frame('Parent sent an events frame to a task child')
                 case core.RunFrame() | core.SharedRunFrame() | core.StopFrame() as frame:
                     work.put(frame)
                 case _ as unreachable:
@@ -341,8 +346,10 @@ def ignore_stop_signals() -> None:
 
 def read_init_frame(sock: socket.socket, reader: ParentFrameReader) -> core.InitFrame:
     """Read the first frame with ``reader``, bounded. Exits when the parent
-    never sends it, when it is another frame, and when it names a program
-    other than the Python child (``python_program_of``)."""
+    never sends it, when it is another frame, when it names a program other
+    than the Python child (``python_program_of``), and when it names the kind
+    of a handler child: this program serves task children only
+    (``task_child_kind_of``)."""
     sock.settimeout(INIT_FRAME_TIMEOUT_S)
     try:
         frame = reader.next_frame()
@@ -350,12 +357,34 @@ def read_init_frame(sock: socket.socket, reader: ParentFrameReader) -> core.Init
         os._exit(PARENT_GONE_EXIT_CODE)
     sock.settimeout(None)
     match frame:
+        case core.InitFrame(child_kind=core.HandlerChildKind()):
+            _exit_bad_parent_frame(
+                'Parent sent the init frame of a handler child to a task child',
+            )
         case core.InitFrame(program=core.PythonProgram()):
             return frame
         case core.InitFrame():
             _exit_bad_parent_frame('Parent sent the init frame of a Rust child')
-        case core.RunFrame() | core.SharedRunFrame() | core.StopFrame():
+        case core.RunFrame() | core.SharedRunFrame() | core.EventsFrame() | core.StopFrame():
             _exit_bad_parent_frame('First parent frame was not an init frame')
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+type TaskChildKind = (
+    core.IsolatedChildKind | core.SharedAsyncChildKind | core.SharedThreadChildKind
+)
+"""The kind of a child that runs tasks."""
+
+
+def task_child_kind_of(init: core.InitFrame) -> TaskChildKind:
+    """The task kind of an init frame that ``read_init_frame`` took. The
+    kind of a handler child here is a defect: ``AssertionError``."""
+    match init.child_kind:
+        case core.IsolatedChildKind() | core.SharedAsyncChildKind() | core.SharedThreadChildKind():
+            return init.child_kind
+        case core.HandlerChildKind():
+            raise AssertionError('read_init_frame refuses the init frame of a handler child')
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -570,32 +599,45 @@ def _report_run(
     (``MarkerMetStoppedCore``): the frame reports the result of the body,
     and the worker writes it (``end_child_after_frame``).
     """
+    started: AttemptStart
     match returned:
-        case SetRunning(result=result):
+        case SetRunning(result=result, started_at=started_at):
             end: RunEnd = bounded_envelope(frame.task_name, result)
+            started = StartReported(started_at)
         case StoppedBeforeRunning() | CoreStoppedBeforeStart():
             end = returned
+            started = StartNotReported()
         case _ as unreachable:
             assert_never(unreachable)
-    match task_loop.report(), end:
-        case NoTaskLoop() | LoopHoldsNoTask() as nothing_left, _:
+    match task_loop.report(), end, started:
+        case NoTaskLoop() | LoopHoldsNoTask() as nothing_left, _, _:
             reported = _marked_end(frame, end, mark_finalizing)
             _send_child_frame(
                 sock,
                 ResultFrame(
                     task_id=frame.task_id,
                     end=reported,
+                    started=started,
                     rss=_read_rss(),
                     task_loop=nothing_left,
                 ),
             )
             end_child_after_frame(reported, frame.task_id)
             return _AfterRun.SERVES
-        case LoopHoldsTasks() as left, ResultEnvelope() as body_result:
+        case (
+            LoopHoldsTasks() as left,
+            ResultEnvelope() as body_result,
+            StartReported(started_at=body_started_at),
+        ):
             pass
+        case LoopHoldsTasks(), ResultEnvelope(), StartNotReported():
+            raise AssertionError(
+                f'task {frame.task_id} returned a body with no start',
+            )
         case (
             LoopHoldsTasks(),
             StoppedBeforeRunning() | CoreStoppedBeforeStart() | CoreStoppedAfterBody(),
+            _,
         ):
             raise AssertionError(
                 f'task {frame.task_id} stopped before running and left work on '
@@ -605,7 +647,12 @@ def _report_run(
             assert_never(unreachable)
     _send_child_frame(
         sock,
-        BodyReturnedFrame(task_id=frame.task_id, returned=body_result, left=left),
+        BodyReturnedFrame(
+            task_id=frame.task_id,
+            returned=body_result,
+            started_at=body_started_at,
+            left=left,
+        ),
     )
     match _end_left_work_or_exit(task_loop, frame):
         case LeftWorkEnd() as left_end:
@@ -765,7 +812,7 @@ def _boot_or_exit(
             pass
         case Err(failed):
             fail_boot(sock, failed)
-    match init.child_kind:
+    match task_child_kind_of(init):
         case core.IsolatedChildKind():
             pass
         case core.SharedAsyncChildKind():
@@ -952,7 +999,7 @@ def serve(
     init = read_init_frame(sock, reader)
     work = ParentFrameInbox()
     task_loop = _boot_or_exit(sock, reader, init, boot, work)
-    match init.child_kind:
+    match task_child_kind_of(init):
         case core.IsolatedChildKind():
             _serve_isolated(sock, init, work, task_loop, runners)
         case core.SharedAsyncChildKind() as kind:

@@ -62,8 +62,9 @@ pub struct SharedPoolConfig {
     pub kill_wait: Duration,
 }
 
-/// The kind of the shared children of an init frame. An isolated init
-/// frame for a shared pool is a defect of the caller: it crashes loud.
+/// The kind of the shared children of an init frame. An isolated or a
+/// handler init frame for a shared pool is a defect of the caller: it
+/// crashes loud.
 fn shared_kind_of(init: &InitFrame) -> (SharedChildKind, ExecutionClass, NonZeroUsize) {
     let (kind, class, seats) = match init.child_kind {
         ChildKind::SharedAsync(child) => (
@@ -77,6 +78,7 @@ fn shared_kind_of(init: &InitFrame) -> (SharedChildKind, ExecutionClass, NonZero
             child.seats.get(),
         ),
         ChildKind::Isolated(_) => panic!("a shared pool was given an isolated init frame"),
+        ChildKind::Handler(_) => panic!("a shared pool was given a handler init frame"),
     };
     let seats = usize::try_from(seats)
         .ok()
@@ -347,6 +349,7 @@ impl SharedPool {
                     claimed_at: task.claimed_at,
                     orphan_self_heal: self.shared.config.orphan_self_heal,
                     work,
+                    trace: task.trace.clone(),
                     input,
                 },
                 answer: Answer::new(sender),

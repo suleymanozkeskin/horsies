@@ -92,12 +92,42 @@ fn returned_result() -> BodyEnd {
     BodyEnd::Result(envelope(r#"{"x":1}"#))
 }
 
+/// Malformed forms of the `started_at` of a frame that ends a run: the
+/// start of the attempt, `reported` with its time or `not_reported`.
+fn bad_start() -> Vec<Option<Value>> {
+    vec![
+        None,
+        Some(Value::Null),
+        Some(json!("2026-11-16T09:30:01Z")),
+        Some(json!({"kind": "started"})),
+        Some(json!({"kind": "reported"})),
+        Some(json!({"kind": "reported", "time": "yesterday"})),
+        Some(json!({"kind": "reported", "time": 1700000000})),
+        Some(json!({"kind": "not_reported", "time": "2026-11-16T09:30:01Z"})),
+    ]
+}
+
+/// Malformed forms of the `started_at` of a frame whose body ran: the time
+/// of the start write, as RFC 3339 text.
+fn bad_start_time() -> Vec<Option<Value>> {
+    vec![
+        None,
+        Some(Value::Null),
+        Some(json!(1700000000)),
+        Some(json!("yesterday")),
+        Some(json!({"kind": "reported", "time": "2026-11-16T09:30:01Z"})),
+    ]
+}
+
 /// Python `TestSharedFrames::test_every_shared_result_field_is_checked`.
 #[test]
 fn every_shared_result_field_is_checked() {
     let frame = child_bytes(&ChildFrame::SharedResult(SharedResultFrame {
         run: run_ref(7, T1),
         end: SeatEnd::TimedOut,
+        started_at: crate::events::AttemptStart::Reported {
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        },
         rss: rss(1.0),
         child: ChildAfterFrame::ServesOn,
     }));
@@ -121,6 +151,11 @@ fn every_shared_result_field_is_checked() {
             ("child", Some(json!(1))),
         ],
     );
+    let cases: Vec<(&str, Option<Value>)> = bad_start()
+        .into_iter()
+        .map(|value| ("started_at", value))
+        .collect();
+    assert_each_change_refused(&frame, &cases);
 }
 
 /// Python `TestSharedFrames::test_a_timed_out_end_carries_no_body`.
@@ -129,6 +164,9 @@ fn a_timed_out_seat_end_carries_no_body() {
     let frame = child_bytes(&ChildFrame::SharedResult(SharedResultFrame {
         run: run_ref(7, T1),
         end: SeatEnd::TimedOut,
+        started_at: crate::events::AttemptStart::Reported {
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        },
         rss: RssReading::Unreadable,
         child: ChildAfterFrame::ServesOn,
     }));
@@ -158,6 +196,7 @@ fn the_child_decoder_refuses_a_parent_frame() {
             cancel_grace_ms: CancelGraceMs::new(5_000).unwrap(),
         },
         input: TaskInputText::new("{}".to_owned()),
+        trace: crate::events::RunTrace::NoCarrier,
     }))
     .unwrap()
     .to_bytes();
@@ -236,12 +275,29 @@ fn every_blocked_loop_field_is_checked() {
     );
 }
 
+/// The start of a leftover cancel is the time of its start write: every
+/// malformed form of it is refused.
+#[test]
+fn every_leftover_cancel_start_is_checked() {
+    let frame = child_bytes(&ChildFrame::LeftoverCancel(LeftoverCancelFrame {
+        run: run_ref(3, T1),
+        returned: returned_result(),
+        started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+    }));
+    let cases: Vec<(&str, Option<Value>)> = bad_start_time()
+        .into_iter()
+        .map(|value| ("started_at", value))
+        .collect();
+    assert_each_change_refused(&frame, &cases);
+}
+
 /// Python `TestLeftoverFrames::test_a_leftover_cancel_without_a_finished_return_is_malformed`.
 #[test]
 fn a_leftover_cancel_needs_what_the_body_returned() {
     let frame = child_bytes(&ChildFrame::LeftoverCancel(LeftoverCancelFrame {
         run: run_ref(3, T1),
         returned: returned_result(),
+        started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
     }));
     let timed_out = changed(&frame, "returned", Some(&json!({"kind": "timed_out"})));
     let decoded = decode_child_bytes(&timed_out);
@@ -261,6 +317,7 @@ fn leftover_stuck_bytes() -> Vec<u8> {
         run: run_ref(3, T1),
         work: StuckWork::new(2, 1, names(&["keepalive", "refill"])).unwrap(),
         returned: returned_result(),
+        started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
     }))
 }
 
@@ -282,6 +339,11 @@ fn every_leftover_stuck_field_is_checked() {
         ("dispatch", Some(json!(0))),
         ("task_id", Some(Value::Null)),
     ]);
+    cases.extend(
+        bad_start_time()
+            .into_iter()
+            .map(|value| ("started_at", value)),
+    );
     assert_each_change_refused(&leftover_stuck_bytes(), &cases);
 }
 
@@ -312,6 +374,7 @@ fn every_body_returned_field_is_checked() {
         returned: returned_result(),
         left: LoopHoldsTasks::new(NonZeroU64::new(2).unwrap(), names(&["flush", "keepalive"]))
             .unwrap(),
+        started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
     }));
     let mut cases: Vec<(&str, Option<Value>)> = vec![("task_id", Some(Value::Null))];
     cases.extend(
@@ -320,6 +383,11 @@ fn every_body_returned_field_is_checked() {
             .map(|value| ("returned", Some(value))),
     );
     cases.extend(bad_held().into_iter().map(|value| ("left", Some(value))));
+    cases.extend(
+        bad_start_time()
+            .into_iter()
+            .map(|value| ("started_at", value)),
+    );
     assert_each_change_refused(&frame, &cases);
 }
 
@@ -399,6 +467,9 @@ fn a_result_body_that_is_not_utf8_is_refused() {
     let frame = child_bytes(&ChildFrame::Result(ResultFrame {
         task_id: task_id(T1),
         end: RunEnd::Result(envelope("x")),
+        started_at: crate::events::AttemptStart::Reported {
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        },
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
         child: ChildAfterFrame::ServesOn,
@@ -477,6 +548,9 @@ fn every_result_field_is_checked() {
     let frame = child_bytes(&ChildFrame::Result(ResultFrame {
         task_id: task_id(T1),
         end: RunEnd::Result(envelope("x")),
+        started_at: crate::events::AttemptStart::Reported {
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        },
         rss: rss(1.0),
         task_loop: NoLeftWork::NoTaskLoop,
         child: ChildAfterFrame::ServesOn,
@@ -505,8 +579,15 @@ fn every_result_field_is_checked() {
             ("child", None),
             ("child", Some(json!("retires"))),
             ("child", Some(json!(1))),
+            // A result envelope comes after the start write.
+            ("started_at", Some(json!({"kind": "not_reported"}))),
         ],
     );
+    let cases: Vec<(&str, Option<Value>)> = bad_start()
+        .into_iter()
+        .map(|value| ("started_at", value))
+        .collect();
+    assert_each_change_refused(&frame, &cases);
 }
 
 /// Python `TestMalformedMetadata::test_every_boot_failed_field_is_checked`.
@@ -546,7 +627,7 @@ fn every_boot_failed_field_is_checked() {
 #[test]
 fn a_number_that_is_not_finite_is_not_json() {
     let decoded = decode_child_frame(
-        br#"{"kind":"ready","protocol":2,"pid":1,"rss_mb":NaN}"#,
+        br#"{"kind":"ready","protocol":3,"pid":1,"rss_mb":NaN}"#,
         Vec::new(),
     );
     assert!(

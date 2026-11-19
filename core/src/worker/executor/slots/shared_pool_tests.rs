@@ -214,6 +214,7 @@ fn scripted_child(kind: SharedChildKindOfTest, frames: &[ChildFrame], after: &st
         orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work: work_of(kind),
         input: TaskInputText::new("{}".to_owned()),
+        trace: crate::events::RunTrace::NoCarrier,
     }))
     .unwrap()
     .to_bytes();
@@ -287,6 +288,9 @@ async fn a_shared_seat_reports_the_result_of_its_run() {
     let result = ChildFrame::SharedResult(SharedResultFrame {
         run: run_ref(),
         end: SeatEnd::Finished(RunEnd::Result(ok_envelope())),
+        started_at: crate::events::AttemptStart::Reported {
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        },
         rss: RssReading::Unreadable,
         child: ChildAfterFrame::ServesOn,
     });
@@ -316,6 +320,9 @@ async fn a_stuck_async_run_ends_at_its_timeout_and_retries_isolated() {
         ChildFrame::SharedResult(SharedResultFrame {
             run: run_ref(),
             end: SeatEnd::TimedOut,
+            started_at: crate::events::AttemptStart::Reported {
+                started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            },
             rss: RssReading::Unreadable,
             child: ChildAfterFrame::ServesOn,
         }),

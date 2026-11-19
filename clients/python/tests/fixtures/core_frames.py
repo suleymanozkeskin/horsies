@@ -1,4 +1,4 @@
-"""Version-2 parent frames for tests of the Python child.
+"""Version-3 parent frames for tests of the Python child.
 
 The core gives a child its parent frames as core classes, which Python
 cannot build: each helper here writes the wire bytes of one frame (the
@@ -23,6 +23,19 @@ CLAIMED_AT: Final = datetime(2026, 11, 17, 10, 0, 0, 123456, tzinfo=UTC)
 WORKER_ID: Final = 'worker-1'
 
 type RefusalKind = Literal['options_unreadable', 'value_invalid', 'grace_invalid']
+
+NO_CARRIER: Final[dict[str, object]] = {'kind': 'no_carrier'}
+"""The trace of a run frame whose task row has no carrier."""
+
+TRACEPARENT: Final = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'
+"""A W3C ``traceparent`` value."""
+
+
+def carrier_trace(carrier: dict[str, str]) -> dict[str, object]:
+    """The trace of a run frame whose task row stores ``carrier``, as the
+    core's encoder writes its text: the keys in order, no whitespace."""
+    text = json.dumps(dict(sorted(carrier.items())), separators=(',', ':'))
+    return {'kind': 'carrier', 'text': text}
 
 
 def framed(meta: dict[str, object], body: bytes = b'') -> bytes:
@@ -49,8 +62,10 @@ def run_meta(
     claimed_at: datetime = CLAIMED_AT,
     orphan_self_heal: bool = False,
     work: dict[str, object] | None = None,
+    trace: dict[str, object] = NO_CARRIER,
 ) -> dict[str, object]:
-    """The metadata of an isolated run frame; ``work`` defaults to the run."""
+    """The metadata of an isolated run frame; ``work`` defaults to the run,
+    ``trace`` to no carrier."""
     return {
         'kind': 'run',
         'task_id': str(task_id),
@@ -59,6 +74,7 @@ def run_meta(
         'claimed_at': claimed_at.isoformat(),
         'orphan_self_heal': orphan_self_heal,
         'work': work if work is not None else {'kind': 'run'},
+        'trace': trace,
     }
 
 
@@ -70,6 +86,7 @@ def run_frame(
     claimed_at: datetime = CLAIMED_AT,
     orphan_self_heal: bool = False,
     work: dict[str, object] | None = None,
+    trace: dict[str, object] = NO_CARRIER,
     input_json: str = '{}',
 ) -> core.RunFrame:
     """An isolated run frame, as the core decodes it."""
@@ -81,6 +98,7 @@ def run_frame(
             claimed_at=claimed_at,
             orphan_self_heal=orphan_self_heal,
             work=work,
+            trace=trace,
         ),
         input_json.encode('utf-8'),
     )
@@ -107,8 +125,10 @@ def shared_run_meta(
     worker_id: str = WORKER_ID,
     claimed_at: datetime = CLAIMED_AT,
     orphan_self_heal: bool = False,
+    trace: dict[str, object] = NO_CARRIER,
 ) -> dict[str, object]:
-    """The metadata of a shared run frame."""
+    """The metadata of a shared run frame; ``trace`` defaults to no
+    carrier."""
     return {
         'kind': 'shared_run',
         'dispatch': dispatch,
@@ -118,6 +138,7 @@ def shared_run_meta(
         'claimed_at': claimed_at.isoformat(),
         'orphan_self_heal': orphan_self_heal,
         'work': work,
+        'trace': trace,
     }
 
 
@@ -130,6 +151,7 @@ def shared_run_frame(
     worker_id: str = WORKER_ID,
     claimed_at: datetime = CLAIMED_AT,
     orphan_self_heal: bool = False,
+    trace: dict[str, object] = NO_CARRIER,
     input_json: str = '{}',
 ) -> core.SharedRunFrame:
     """A shared run frame, as the core decodes it."""
@@ -142,6 +164,7 @@ def shared_run_frame(
             worker_id=worker_id,
             claimed_at=claimed_at,
             orphan_self_heal=orphan_self_heal,
+            trace=trace,
         ),
         input_json.encode('utf-8'),
     )
@@ -187,6 +210,19 @@ def shared_thread_kind(seats: int = 2) -> dict[str, object]:
     return {'kind': 'shared_thread', 'seats': seats, 'pool': pool(), 'task_send_pool': 1}
 
 
+def handler_kind(task_send_pool: int = 1) -> dict[str, object]:
+    """The kind of a handler child."""
+    return {'kind': 'handler', 'task_send_pool': task_send_pool}
+
+
+def events_frame(events: tuple[str, ...]) -> core.EventsFrame:
+    """An events frame whose body is the JSON array of ``events``, the wire
+    text of each event, as the core decodes it."""
+    frame = _decoded({'kind': 'events'}, f'[{",".join(events)}]'.encode('utf-8'))
+    assert isinstance(frame, core.EventsFrame), frame
+    return frame
+
+
 def init_meta(
     *,
     child_kind: dict[str, object] | None = None,
@@ -194,7 +230,7 @@ def init_meta(
     imports: tuple[str, ...] = (),
     log_level: str = 'info',
     database_url: str = 'postgresql://user:secret@127.0.0.1:1/none',
-    protocol: int = 2,
+    protocol: int = 3,
     parent_sys_path: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """The metadata of an init frame of a Python child. A child replaces its

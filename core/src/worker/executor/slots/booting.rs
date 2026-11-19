@@ -293,13 +293,15 @@ pub(super) fn outside_kill_line(index: usize, kills_in_a_row: u32) -> String {
 /// child, `<name>-shared-<index>` for a shared async child and
 /// `<name>-thread-<index>` for a shared thread child (Python `_Slot.init_for`,
 /// `_SharedSlot.init_for`). A Python child sets
-/// `multiprocessing.current_process().name` to it. Pure.
+/// `multiprocessing.current_process().name` to it. A handler child is not a
+/// slot: its template is a defect of the caller and crashes loud. Pure.
 pub(super) fn init_for_slot(template: &InitFrame, index: usize) -> InitFrame {
     let name = &template.process_name;
     let process_name = match template.child_kind {
         ChildKind::Isolated(_) => format!("{name}-{index}"),
         ChildKind::SharedAsync(_) => format!("{name}-shared-{index}"),
         ChildKind::SharedThread(_) => format!("{name}-thread-{index}"),
+        ChildKind::Handler(_) => panic!("a slot was given the init frame of a handler child"),
     };
     InitFrame {
         process_name,
@@ -419,7 +421,8 @@ async fn boot_reply(mut channel: ChildChannel, reply: FrameWait) -> BootAttempt 
             | ChildFrame::RunStuck(_)
             | ChildFrame::LeftoverCancel(_)
             | ChildFrame::LeftoverStuck(_)
-            | ChildFrame::LoopBlocked(_),
+            | ChildFrame::LoopBlocked(_)
+            | ChildFrame::HandlerStats(_),
         ) => {
             let lost = channel.discard_violating_child().await;
             let _ = channel.dispose().await;

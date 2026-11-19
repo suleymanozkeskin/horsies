@@ -27,6 +27,7 @@ from horsies.core.worker import shared_lifecycle
 from horsies.core.worker.run_return import (
     MarkerDone,
     MarkerEnd,
+    StartedRunning,
     StopReason,
     StoppedBeforeRunning,
 )
@@ -63,7 +64,10 @@ def _attempt_elapsed_ms(arguments: dict[str, object]) -> dict[str, object]:
     return rest
 
 
-_STARTED = _record(core.AttemptStarted)
+STARTED_AT = datetime(2026, 11, 17, 10, 0, 1, tzinfo=timezone.utc)
+"""The time that the fake start write returns."""
+
+_STARTED = _record(core.AttemptStarted, started_at=STARTED_AT)
 
 
 def _missed(reason: str) -> MagicMock:
@@ -159,7 +163,7 @@ class TestSetRunning:
     def test_a_started_row_runs_the_task_after_one_call(self) -> None:
         handle = _Handle(starts=[_STARTED])
 
-        assert _confirm(handle) is None
+        assert _confirm(handle) == StartedRunning(STARTED_AT)
 
         assert handle.calls == [
             (
@@ -180,7 +184,7 @@ class TestSetRunning:
         writes the node in the same statement."""
         handle = _Handle(starts=[_STARTED])
 
-        assert _confirm(handle) is None
+        assert _confirm(handle) == StartedRunning(STARTED_AT)
 
         assert handle.names() == ['start_attempt_async']
 
@@ -335,7 +339,7 @@ class TestMissedStart:
 
         result = _confirm(handle)
 
-        assert result is None
+        assert result == StartedRunning(STARTED_AT)
         assert handle.names() == [
             'start_attempt_async',
             'stop_workflow_task_before_start_async',

@@ -230,7 +230,8 @@ fn open_socket(fd: RawFd) -> io::Result<UnixStream> {
 }
 
 /// Read the first frame, bounded: it must be the init frame of this
-/// protocol version, for a Rust child.
+/// protocol version, for a Rust child that runs tasks. This host serves the
+/// task kinds only: the init frame of a handler child is a bad parent frame.
 fn read_init(socket: &UnixStream, reader: &mut FrameReader) -> Result<InitFrame, ChildHostExit> {
     socket
         .set_read_timeout(Some(INIT_FRAME_TIMEOUT))
@@ -249,7 +250,12 @@ fn read_init(socket: &UnixStream, reader: &mut FrameReader) -> Result<InitFrame,
         .map_err(|_| ChildHostExit::ParentGone)?;
     let init = match decode_parent_frame(&raw.meta, raw.body) {
         Ok(ParentFrame::Init(init)) => init,
-        Ok(ParentFrame::Run(_) | ParentFrame::SharedRun(_) | ParentFrame::Stop) => {
+        Ok(
+            ParentFrame::Run(_)
+            | ParentFrame::SharedRun(_)
+            | ParentFrame::Events(_)
+            | ParentFrame::Stop,
+        ) => {
             tracing::error!("the first parent frame was not an init frame");
             return Err(ChildHostExit::BadParentFrame);
         }
@@ -266,13 +272,27 @@ fn read_init(socket: &UnixStream, reader: &mut FrameReader) -> Result<InitFrame,
         }
     };
     match init.program {
-        ChildProgram::Rust => Ok(init),
+        ChildProgram::Rust => {}
         ChildProgram::Python(_) => {
             tracing::error!("a Rust child got the init frame of a Python child");
+            return Err(ChildHostExit::BadParentFrame);
+        }
+    }
+    match init.child_kind {
+        ChildKind::Isolated(_) | ChildKind::SharedAsync(_) | ChildKind::SharedThread(_) => Ok(init),
+        ChildKind::Handler(_) => {
+            tracing::error!(
+                "a Rust task child got the init frame of a handler child; this host serves \
+                 task children only",
+            );
             Err(ChildHostExit::BadParentFrame)
         }
     }
 }
+
+/// The invariant of the task-kind helpers: [`read_init`] refuses the init
+/// frame of a handler child, so the host never boots one.
+const HANDLER_KIND_REFUSED: &str = "read_init refuses the init frame of a handler child";
 
 /// The cause of an `io::Error` of a boot step: a resource shortage for a
 /// clearable errno, else `step_cause`.
@@ -358,11 +378,29 @@ fn boot_failed(
     }
 }
 
-pub(super) fn pool_of(kind: ChildKind) -> ChildPool {
+/// The pool of the own writes of a task child: the start, the marker and
+/// the release of each run. A handler child writes nothing itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OwnWritesPool {
+    Pool(ChildPool),
+    /// A handler child: it runs no task.
+    NoOwnWrites,
+}
+
+pub(super) fn pool_of(kind: ChildKind) -> OwnWritesPool {
     match kind {
-        ChildKind::Isolated(child) => child.pool,
-        ChildKind::SharedAsync(child) => child.pool,
-        ChildKind::SharedThread(child) => child.pool,
+        ChildKind::Isolated(child) => OwnWritesPool::Pool(child.pool),
+        ChildKind::SharedAsync(child) => OwnWritesPool::Pool(child.pool),
+        ChildKind::SharedThread(child) => OwnWritesPool::Pool(child.pool),
+        ChildKind::Handler(_) => OwnWritesPool::NoOwnWrites,
+    }
+}
+
+/// The pool of a task child that this host boots.
+fn task_pool_of(kind: ChildKind) -> ChildPool {
+    match pool_of(kind) {
+        OwnWritesPool::Pool(pool) => pool,
+        OwnWritesPool::NoOwnWrites => unreachable!("{HANDLER_KIND_REFUSED}"),
     }
 }
 
@@ -372,6 +410,7 @@ fn seats_of(kind: ChildKind) -> usize {
         ChildKind::Isolated(_) => 1,
         ChildKind::SharedAsync(child) => child.seats.get(),
         ChildKind::SharedThread(child) => child.seats.get(),
+        ChildKind::Handler(_) => unreachable!("{HANDLER_KIND_REFUSED}"),
     };
     usize::try_from(seats).unwrap_or(usize::MAX).max(1)
 }
@@ -382,6 +421,7 @@ fn runtime_threads(kind: ChildKind) -> usize {
         ChildKind::SharedAsync(child) => {
             usize::try_from(child.executor_threads.get()).unwrap_or(SMALL_RUNTIME_THREADS)
         }
+        ChildKind::Handler(_) => unreachable!("{HANDLER_KIND_REFUSED}"),
     }
 }
 
@@ -444,7 +484,7 @@ pub(super) fn kept_open_of(pool: ChildPool) -> KeptOpen {
 /// refused config or of a failed connect; a `min_size` above `max_size` is a
 /// refused config, as Python's `ValueError`.
 async fn connect(init: &InitFrame, family: ClientFamily) -> Result<PostgresBroker, String> {
-    let pool = pool_of(init.child_kind);
+    let pool = task_pool_of(init.child_kind);
     let config = child_broker_config(init.database_url.as_str(), &init.connection, pool);
     PostgresBroker::connect_child(&config, kept_open_of(pool), pool.check, family)
         .await
@@ -480,6 +520,7 @@ fn start_threads(
             seats,
         },
         ChildKind::SharedThread(_) => Serving::SharedThread { seats },
+        ChildKind::Handler(_) => unreachable!("{HANDLER_KIND_REFUSED}"),
     };
     let frames = start_control_thread(socket.try_clone()?, reader, bound)?;
     Ok((writer, serving, frames))

@@ -54,7 +54,11 @@ pub(super) struct RunFacts {
 
 /// How the start write ended.
 pub(super) enum Started {
-    Running,
+    /// The row is RUNNING; `started_at` is the time that the start write
+    /// returned (the database clock).
+    Running {
+        started_at: DateTime<Utc>,
+    },
     Stopped(StopReason),
 }
 
@@ -113,7 +117,7 @@ pub(super) async fn start_attempt(context: &HostContext, facts: &RunFacts) -> St
             Err(error) => Err(error),
         };
         let missed = match outcome {
-            Ok(StartOutcome::Started { .. }) => return Started::Running,
+            Ok(StartOutcome::Started { started_at }) => return Started::Running { started_at },
             Ok(StartOutcome::Missed(miss)) => {
                 after_missed_start(context, facts, miss, deadline).await
             }

@@ -118,6 +118,7 @@ async fn a_second_return_report_kills_the_child_and_keeps_the_first_return() {
                 vec![LeftoverName::cut("_write_after")],
             )
             .unwrap(),
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
         })
     };
     let script = format!(

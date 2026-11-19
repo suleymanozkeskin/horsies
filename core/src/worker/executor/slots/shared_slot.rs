@@ -639,6 +639,7 @@ async fn on_frame(
         ChildFrame::BodyReturned(_) => Err(BadFrame::WrongKind("body_returned")),
         ChildFrame::LeftWorkEnded(_) => Err(BadFrame::WrongKind("left_work_ended")),
         ChildFrame::LeftWorkStuck(_) => Err(BadFrame::WrongKind("left_work_stuck")),
+        ChildFrame::HandlerStats(_) => Err(BadFrame::WrongKind("handler_stats")),
     }
 }
 

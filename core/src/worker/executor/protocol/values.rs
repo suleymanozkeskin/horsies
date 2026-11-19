@@ -7,8 +7,8 @@ use serde::{Serialize, Serializer};
 
 use super::bounds::{
     MAX_BLOCKED_WHERE_CHARS, MAX_BOOT_DETAIL_CHARS, MAX_BOOT_ERROR_NAME_CHARS,
-    MAX_FAILURE_DETAIL_CHARS, MAX_LEFTOVER_NAME_CHARS, MAX_LEFTOVER_TASK_NAMES,
-    MAX_PRELOAD_REASON_CHARS, MAX_REFUSAL_REASON_CHARS,
+    MAX_FAILURE_DETAIL_CHARS, MAX_HANDLER_NAME_CHARS, MAX_LEFTOVER_NAME_CHARS,
+    MAX_LEFTOVER_TASK_NAMES, MAX_PRELOAD_REASON_CHARS, MAX_REFUSAL_REASON_CHARS,
 };
 
 /// Text of at most `MAX_CHARS` characters (Unicode scalar values, as
@@ -77,6 +77,9 @@ pub type FailureDetail = BoundedText<MAX_FAILURE_DETAIL_CHARS>;
 pub type PreloadReason = BoundedText<MAX_PRELOAD_REASON_CHARS>;
 /// The reason of a refusal of stored options.
 pub type RefusalReason = BoundedText<MAX_REFUSAL_REASON_CHARS>;
+/// The name of an event handler, at most [`MAX_HANDLER_NAME_CHARS`]
+/// characters. A `handler_stats` frame refuses an empty name.
+pub type HandlerName = BoundedText<MAX_HANDLER_NAME_CHARS>;
 
 /// A whole number from `MIN` to `MAX`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

@@ -21,6 +21,7 @@ from horsies.core.worker.child_frames import (
     ReadyFrame,
     ResultFrame,
     RssUnreadable,
+    StartReported,
     encode_child_frame,
 )
 from horsies.core.worker.child_main import (
@@ -31,6 +32,7 @@ from horsies.core.worker.child_main import (
 )
 from horsies.core.worker.run_return import ResultEnvelope
 from tests.fixtures.core_frames import framed, run_meta
+from tests.fixtures.run_return import STARTED_AT
 
 pytestmark = [pytest.mark.unit]
 
@@ -98,6 +100,8 @@ def _seen(frame: ParentFrame) -> _Seen:
             return 'init'
         case core.SharedRunFrame():
             return 'shared_run'
+        case core.EventsFrame():
+            return 'events'
 
 
 def _reader(data: bytes, chunk: int) -> tuple[ParentFrameReader, _ScriptedSocket]:
@@ -239,6 +243,7 @@ def test_a_large_child_frame_is_one_write() -> None:
     frame = ResultFrame(
         task_id=_task_id(0),
         end=ResultEnvelope(json.dumps({'ok': 'x' * (READ_CHUNK_BYTES * 2)})),
+        started=StartReported(STARTED_AT),
         rss=RssUnreadable(),
         task_loop=NoTaskLoop(),
     )

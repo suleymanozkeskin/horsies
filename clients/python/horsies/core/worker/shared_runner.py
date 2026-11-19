@@ -56,6 +56,7 @@ from horsies.core.worker.run_return import (
     CoreStoppedBeforeStart,
     MarkerEnd,
     ResultEnvelope,
+    StartedRunning,
 )
 from horsies.core.worker.shared_lifecycle import (
     confirm_until_not_resumed,
@@ -222,9 +223,10 @@ async def run_seat_task(frame: core.SharedRunFrame) -> SeatReturn:
         orphan_self_heal=frame.orphan_self_heal,
     )
     match ownership_result:
-        case None:
+        case StartedRunning() as started:
             return set_running_or_end_child(
                 str(frame.task_id),
+                started,
                 await _run_after_running(frame),
             )
         case StoppedBeforeRunning() | CoreStoppedBeforeStart():

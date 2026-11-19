@@ -21,6 +21,7 @@ the stop:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal, assert_never
 
 from horsies._core import CoreStopped, ForkedAfterCoreStart
@@ -56,12 +57,23 @@ class ResultEnvelope:
 
 
 @dataclass(frozen=True, slots=True)
+class StartedRunning:
+    """The start write set the row RUNNING. ``started_at`` is the time that
+    ``horsies_start_attempt`` returned for it, on the database clock (an
+    aware ``datetime``): the frame that ends the run reports it."""
+
+    started_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class SetRunning:
-    """The run set its row RUNNING, then ended with ``result``: the body ran,
-    or a refusal or a resolve error ended it after the RUNNING update. The
-    end of the run writes the finalizing marker when one is due."""
+    """The run set its row RUNNING at ``started_at``, then ended with
+    ``result``: the body ran, or a refusal or a resolve error ended it after
+    the RUNNING update. The end of the run writes the finalizing marker when
+    one is due."""
 
     result: ResultEnvelope
+    started_at: datetime
 
 
 @dataclass(frozen=True, slots=True)

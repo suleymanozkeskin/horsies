@@ -149,6 +149,7 @@ fn body_returned(task: &ClaimedTask, value: u32) -> ChildFrame {
         returned: BodyEnd::Result(ok_envelope(value)),
         left: LoopHoldsTasks::new(NonZeroU64::MIN, vec![LeftoverName::cut("_write_after")])
             .unwrap(),
+        started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
     })
 }
 

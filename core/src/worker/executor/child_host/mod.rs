@@ -38,7 +38,7 @@ mod stored_form_vector_tests;
 mod tests;
 
 pub use args::{child_mode, ChildArgs, ChildArgsError, ChildMode, CHILD_MODE_ARGUMENT};
-pub use handle_setup::{child_handle_setup, ChildHandleSetup};
+pub use handle_setup::{child_handle_setup, ChildHandleSetup, HandlerChildHasNoHandle};
 pub use host::{
     child_command, run_child_host, ChildApp, ChildHookFailure, ChildHostExit, ChildLogSetup,
     ChildStartFuture, ChildStartHook, NamedChildStartHook, CHILD_START_HOOK_BOUND,
