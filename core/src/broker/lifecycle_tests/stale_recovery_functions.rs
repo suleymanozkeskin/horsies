@@ -39,7 +39,12 @@ use crate::core::lifecycle::{
 };
 use crate::core::types::status::TaskStatus;
 use crate::db::CorePool;
+use crate::events::{Event, RecoveryAction};
+use crate::telemetry::catalog::MetricId;
+use crate::telemetry::registry::SampleValue;
+use crate::telemetry::worker::WorkerTelemetry;
 use crate::test_support::sql::{self, TestPool};
+use crate::test_support::telemetry::WatchedTelemetry;
 use crate::worker::recovery::{mark_stale_running_as_failed, requeue_stale_claimed};
 
 const QUEUE: &str = "q_stale";
@@ -678,8 +683,98 @@ mod finish {
     }
 }
 
+/// The recovery events of `task_ids` in `events`: the task id, the action,
+/// the task name and the queue of each, sorted by task id. The shared test
+/// database can hold rows of other tests, whose events are left out.
+fn recoveries_of(
+    events: Vec<Event>,
+    task_ids: &[Uuid],
+) -> Vec<(Uuid, RecoveryAction, String, String)> {
+    let mut told: Vec<(Uuid, RecoveryAction, String, String)> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::TaskRecovered(recovered) if task_ids.contains(&recovered.task_id) => Some((
+                recovered.task_id,
+                recovered.action,
+                recovered.task_name.as_str().to_owned(),
+                recovered.queue.as_str().to_owned(),
+            )),
+            _ => None,
+        })
+        .collect();
+    told.sort_by_key(|(task_id, ..)| *task_id);
+    told
+}
+
+/// The count of `horsies.recovery.tasks` under `action` in `watched`.
+fn recovered_count(watched: &WatchedTelemetry, action: &str) -> u64 {
+    watched
+        .series(MetricId::RecoveryTasks)
+        .into_iter()
+        .find(|(labels, _)| labels.as_slice() == [action.to_owned()])
+        .map_or(0, |(_, value)| match value {
+            SampleValue::Counter(count) => count,
+            other => panic!("horsies.recovery.tasks is a counter, not {other:?}"),
+        })
+}
+
 mod reaper_pass {
     use super::*;
+
+    /// With telemetry on, the pass tells each row whose recovery committed
+    /// once, with its task name and queue: the retried row as
+    /// `RunningRetried`, the failed row as `RunningFailed`. Each told row
+    /// counts once under its action. With telemetry off the pass writes the
+    /// same rows (`a_pass_retries_by_policy_fails_the_rest_and_wakes_the_retried_queue`).
+    #[tokio::test]
+    #[serial]
+    async fn a_pass_tells_each_recovered_row_once_with_its_action() {
+        let pool = pool().await;
+        let core = core_pool_for_test_url(pool.url());
+        let mut watched = WatchedTelemetry::new();
+        let retried = stale_task_with(&pool, Some(crash_retry_options()), 0, 1).await;
+        let failed = stale_task_with(&pool, None, 0, 0).await;
+
+        let recovered = mark_stale_running_as_failed(
+            &core,
+            StatementLog::Off,
+            thresholds(),
+            whole_scan(),
+            &watched.telemetry,
+        )
+        .await
+        .expect("stale pass");
+
+        assert!(recovered >= 2, "recovered {recovered}");
+        let mut expected = vec![
+            (
+                retried,
+                RecoveryAction::RunningRetried,
+                "lifecycle.test".to_owned(),
+                QUEUE.to_owned(),
+            ),
+            (
+                failed,
+                RecoveryAction::RunningFailed,
+                "lifecycle.test".to_owned(),
+                QUEUE.to_owned(),
+            ),
+        ];
+        expected.sort_by_key(|(task_id, ..)| *task_id);
+        assert_eq!(
+            recoveries_of(watched.events(), &[retried, failed]),
+            expected
+        );
+        assert!(recovered_count(&watched, "running_retried") >= 1);
+        assert!(recovered_count(&watched, "running_failed") >= 1);
+        assert_eq!(
+            recovered_count(&watched, "running_retried")
+                + recovered_count(&watched, "running_failed"),
+            recovered
+        );
+        core.close();
+        cleanup_tasks(&pool, &[retried, failed]).await;
+    }
 
     /// The reaper's pass on the two statements: a row whose policy names the
     /// crash is retried and its queue is woken with `retry:<task id>`
@@ -694,10 +789,15 @@ mod reaper_pass {
         let retried = stale_task_with(&pool, Some(crash_retry_options()), 0, 1).await;
         let failed = stale_task_with(&pool, None, 0, 0).await;
 
-        let recovered =
-            mark_stale_running_as_failed(&core, StatementLog::Off, thresholds(), whole_scan())
-                .await
-                .expect("stale pass");
+        let recovered = mark_stale_running_as_failed(
+            &core,
+            StatementLog::Off,
+            thresholds(),
+            whole_scan(),
+            &WorkerTelemetry::Off,
+        )
+        .await
+        .expect("stale pass");
 
         // The shared test database can hold stale rows of other tests.
         assert!(recovered >= 2, "recovered {recovered}");
@@ -724,6 +824,61 @@ mod reaper_pass {
 
 mod requeue {
     use super::*;
+
+    /// With telemetry on, the requeue tells each requeued row once as
+    /// `ClaimRequeued`, with its task name and queue, and counts it; the
+    /// count of the pass is the count of the told rows. With telemetry off
+    /// the pass requeues the same rows and tells nothing.
+    #[tokio::test]
+    #[serial]
+    async fn a_requeue_tells_each_requeued_row_once_and_nothing_with_telemetry_off() {
+        let pool = pool().await;
+        let core = core_pool_for_test_url(pool.url());
+        let mut watched = WatchedTelemetry::new();
+        let quiet = stale_claim(&pool, Origin::Send).await;
+
+        let requeued_off = requeue_stale_claimed(
+            &core,
+            StatementLog::Off,
+            claim_threshold(),
+            &WorkerTelemetry::Off,
+        )
+        .await
+        .expect("stale claim requeue with telemetry off");
+        let told_rows = [
+            stale_claim(&pool, Origin::Send).await,
+            stale_claim(&pool, Origin::Send).await,
+        ];
+        let requeued_on = requeue_stale_claimed(
+            &core,
+            StatementLog::Off,
+            claim_threshold(),
+            &watched.telemetry,
+        )
+        .await
+        .expect("stale claim requeue with telemetry on");
+
+        assert!(requeued_off >= 1, "requeued {requeued_off}");
+        assert_eq!(status_of(&pool, quiet).await, "PENDING");
+        let mut expected: Vec<(Uuid, RecoveryAction, String, String)> = told_rows
+            .iter()
+            .map(|task_id| {
+                (
+                    *task_id,
+                    RecoveryAction::ClaimRequeued,
+                    "lifecycle.test".to_owned(),
+                    "default".to_owned(),
+                )
+            })
+            .collect();
+        expected.sort_by_key(|(task_id, ..)| *task_id);
+        let events = watched.events();
+        assert_eq!(recoveries_of(events.clone(), &told_rows), expected);
+        assert!(recoveries_of(events, &[quiet]).is_empty());
+        assert_eq!(recovered_count(&watched, "claim_requeued"), requeued_on);
+        core.close();
+        cleanup_tasks(&pool, &[quiet, told_rows[0], told_rows[1]]).await;
+    }
 
     /// 5 minutes without a claimer beat (Python's 300000 ms).
     fn claim_threshold() -> ThresholdMs {
@@ -764,7 +919,10 @@ mod requeue {
         .await
         .expect("requeue");
 
-        assert_eq!(requeued, 2);
+        assert_eq!(requeued.len(), 2, "{requeued:?}");
+        for row in &requeued {
+            assert!(task_ids.contains(&row.task_id), "{row:?}");
+        }
         core.close();
         cleanup_tasks(&pool, &task_ids).await;
     }
@@ -793,9 +951,14 @@ mod requeue {
             .expect("claim the row again now");
         beat(&pool, fresh, BeatRole::Claimer, Duration::seconds(1_200)).await;
 
-        let requeued = requeue_stale_claimed(&core, StatementLog::Off, claim_threshold())
-            .await
-            .expect("stale claim requeue");
+        let requeued = requeue_stale_claimed(
+            &core,
+            StatementLog::Off,
+            claim_threshold(),
+            &WorkerTelemetry::Off,
+        )
+        .await
+        .expect("stale claim requeue");
 
         // The shared test database can hold stale claims of other tests.
         assert!(requeued >= 2, "requeued {requeued}");
@@ -924,7 +1087,10 @@ mod round_trips {
             .expect("requeue");
 
         assert_eq!(counted.proxy.round_trips(), 1);
-        assert_eq!(requeued, 1);
+        let [row] = requeued.as_slice() else {
+            panic!("one requeued row, not {requeued:?}");
+        };
+        assert_eq!(row.task_id, task_id);
         assert_eq!(status_of(&pool, task_id).await, "PENDING");
         counted.pool.close();
         cleanup_tasks(&pool, &[task_id]).await;
@@ -939,14 +1105,14 @@ mod round_trips {
         let pool = pool().await;
         drain_pending_expiry(&pool).await;
         let counted = counted_pool(&pool).await;
-        let _warm_up = expire_pending_pass(&counted.pool, StatementLog::Off)
+        let _warm_up = expire_pending_pass(&counted.pool, StatementLog::Off, |_rows| {})
             .await
             .expect("warm up");
         let task_id = seed_task(&pool, &TaskSeed::pending()).await;
         set_deadline(&pool, task_id, Deadline::PassedSecondsAgo(1.0)).await;
 
         counted.proxy.reset_round_trips();
-        let expired = expire_pending_pass(&counted.pool, StatementLog::Off)
+        let expired = expire_pending_pass(&counted.pool, StatementLog::Off, |_rows| {})
             .await
             .expect("pending expiry");
 

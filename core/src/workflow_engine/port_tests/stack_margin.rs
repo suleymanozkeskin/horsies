@@ -268,6 +268,7 @@ async fn finish_through_the_worker(
             child_specs,
             Phase2Work {
                 task_id: task.task_id,
+                log: crate::worker::executor::slots::AttemptLog::FIRST_UNTRACED,
                 queue_name: task.queue_name.clone(),
                 is_workflow_task: true,
                 capacity_notified: done.capacity_notified,

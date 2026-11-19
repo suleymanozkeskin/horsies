@@ -168,7 +168,7 @@ async fn a_started_reaper_logs_an_unserved_isolated_stream() {
         },
         retention,
         new_reaper_health(),
-        crate::telemetry::registry::OptionalCounter::NotRecorded,
+        crate::telemetry::worker::WorkerTelemetry::Off,
         cancel.clone(),
     );
 

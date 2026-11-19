@@ -586,8 +586,8 @@ async fn a_replayed_timeout_write_of_a_workflow_task_owes_phase_two_and_adds_no_
         TimeoutCancel::NoSignal,
     );
 
-    let first = persist_unreported_attempt(&broker, &command, true).await;
-    let replay = persist_unreported_attempt(&broker, &command, true).await;
+    let first = persist_unreported_attempt(&broker, &command, task.log(), true).await;
+    let replay = persist_unreported_attempt(&broker, &command, task.log(), true).await;
 
     assert_eq!(phase_two_owed(first), PhaseTwoOwed::WithTheStep);
     assert_eq!(phase_two_owed(replay), PhaseTwoOwed::AsAReplay);

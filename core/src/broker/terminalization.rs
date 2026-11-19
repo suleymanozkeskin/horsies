@@ -14,19 +14,26 @@
 //!   work that did not happen is what the row-per-transition contract exists
 //!   to prevent.
 //!
-//! Two forms run a command:
+//! The rows of the two discovery batches (`ExpirePendingTasks`,
+//! `CancelOrphanedTasks`) also name the task name and the queue of the row
+//! that they moved ([`MovedRow`]); every other command reports the outcome
+//! columns only.
+//!
+//! The forms that run a command:
 //! - [`terminalize`] runs the statement alone on a core pool, in autocommit:
 //!   the statement is its own transaction and its locks end with it. The
 //!   checkout is reserved work ([`CheckoutClass::Reserved`]): a lifecycle
 //!   write never waits on the reserve gate.
-//! - [`terminalize_and_commit_if`] runs the statement in a transaction of
-//!   its own on a core pool, checked out as reserved work, and commits it
-//!   only when the caller's check accepts every outcome.
+//! - [`terminalize_moved_and_commit_if`] runs a discovery batch in a
+//!   transaction of its own on a core pool, checked out as reserved work,
+//!   and commits it only when the caller's check accepts every row.
+//! - [`terminalize_moved_in_core_transaction`] runs a discovery batch in the
+//!   caller's open transaction.
 
 use crate::broker::child_writes::{query_within, WriteDeadline};
 use crate::broker::core_rows::{roll_back, StatementLog};
 use crate::core::lifecycle::operations::function_name_of;
-use crate::core::lifecycle::outcomes::decode_outcome_row;
+use crate::core::lifecycle::outcomes::{decode_moved_row, decode_outcome_row, MovedRow};
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome};
 use crate::db::{
     BoundStatement, CheckoutClass, CorePool, IsolationLevel, NotSentCause, ParameterType, Row,
@@ -166,6 +173,33 @@ fn statement_of(command: &TerminalizationCommand) -> &'static TypedStatement {
         TerminalizationCommand::CancelNodesOfCancelledWorkflow { .. } => {
             &CANCEL_NODES_OF_CANCELLED_WORKFLOW
         }
+    }
+}
+
+/// The columns of the rows that the command's function reports, per the wire
+/// contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowShape {
+    /// The outcome columns.
+    Outcome,
+    /// The outcome columns, then the task name and the queue of the row that
+    /// the batch moved: the two discovery batches.
+    MovedTask,
+}
+
+fn row_shape_of(command: &TerminalizationCommand) -> RowShape {
+    match command {
+        TerminalizationCommand::ExpirePendingTasks { .. }
+        | TerminalizationCommand::CancelOrphanedTasks { .. } => RowShape::MovedTask,
+        TerminalizationCommand::CompleteTaskFused { .. }
+        | TerminalizationCommand::ExpireOwnedClaim { .. }
+        | TerminalizationCommand::CancelOwnedOrphan { .. }
+        | TerminalizationCommand::AbandonOwnedNode { .. }
+        | TerminalizationCommand::CancelOwnedNode { .. }
+        | TerminalizationCommand::AbandonOwnedNodes { .. }
+        | TerminalizationCommand::CancelOwnedNodes { .. }
+        | TerminalizationCommand::AbandonNodesOfPausedWorkflows { .. }
+        | TerminalizationCommand::CancelNodesOfCancelledWorkflow { .. } => RowShape::Outcome,
     }
 }
 
@@ -316,13 +350,54 @@ async fn run_bound(
     Ok(rows)
 }
 
-fn decode_rows(rows: &[Row], operation: &str) -> Result<Vec<TerminalizationOutcome>, BrokerError> {
+/// The outcome of each row of the statement of `command`, read in the row
+/// shape of the command.
+fn decode_rows(
+    rows: &[Row],
+    command: &TerminalizationCommand,
+) -> Result<Vec<TerminalizationOutcome>, BrokerError> {
+    let operation = function_name_of(command);
     rows.iter()
         .map(|row| {
-            decode_outcome_row(row)
-                .map_err(|e| BrokerError::TerminalizationContract(format!("{operation}: {e}")))
+            let outcome = match row_shape_of(command) {
+                RowShape::Outcome => decode_outcome_row(row),
+                RowShape::MovedTask => decode_moved_row(row).map(|moved| moved.outcome),
+            };
+            outcome.map_err(|e| BrokerError::TerminalizationContract(format!("{operation}: {e}")))
         })
         .collect()
+}
+
+/// Each row of the statement of a discovery batch, with the task name and
+/// the queue of the row that it moved, and each outcome logged
+/// ([`log_terminalization_outcome`]). Pure but for the log.
+///
+/// Errors: [`BrokerError::TerminalizationContract`] when a row breaks the
+/// wire contract of a discovery batch, or `command` is not one.
+fn decode_moved_outcomes(
+    rows: &[Row],
+    command: &TerminalizationCommand,
+) -> Result<Vec<MovedRow>, BrokerError> {
+    let operation = function_name_of(command);
+    match row_shape_of(command) {
+        RowShape::MovedTask => {}
+        RowShape::Outcome => {
+            return Err(BrokerError::TerminalizationContract(format!(
+                "{operation} reports no moved task: it is not a discovery batch"
+            )))
+        }
+    }
+    let moved = rows
+        .iter()
+        .map(|row| {
+            decode_moved_row(row)
+                .map_err(|e| BrokerError::TerminalizationContract(format!("{operation}: {e}")))
+        })
+        .collect::<Result<Vec<MovedRow>, BrokerError>>()?;
+    for row in &moved {
+        log_terminalization_outcome(operation, &row.outcome);
+    }
+    Ok(moved)
 }
 
 fn enforce_cardinality(
@@ -523,9 +598,10 @@ pub(crate) async fn terminalize_within(
     decode_outcomes(&rows, command)
 }
 
-/// Run a command in a transaction of its own on `pool` and commit it only
-/// when `accept` accepts every outcome it reports. Returns what `accept`
-/// returns.
+/// Run a discovery batch in a transaction of its own on `pool` and commit it
+/// only when `accept` accepts every row it reports, each with the task name
+/// and the queue of the row that it moved ([`MovedRow`]). Returns what
+/// `accept` returns.
 ///
 /// `BEGIN`, the statement and `COMMIT` run on one connection checked out as
 /// reserved work, each bound by the connection's own timeouts: two round
@@ -537,14 +613,15 @@ pub(crate) async fn terminalize_within(
 ///   `COMMIT` or `ROLLBACK` failed. After a failed statement the connection
 ///   is discarded and the server rolls the transaction back.
 ///   `OutcomeUnknown` at `COMMIT`: the transaction may have committed.
-/// - [`BrokerError::TerminalizationContract`] when a row or the row count
-///   breaks the wire contract; the transaction is rolled back.
+/// - [`BrokerError::TerminalizationContract`] when a row breaks the wire
+///   contract of a discovery batch, or `command` is not one; the
+///   transaction is rolled back.
 /// - The error of `accept`; the transaction is rolled back.
-pub(crate) async fn terminalize_and_commit_if<T>(
+pub(crate) async fn terminalize_moved_and_commit_if<T>(
     pool: &CorePool,
     log: StatementLog,
     command: &TerminalizationCommand,
-    accept: impl FnOnce(&[TerminalizationOutcome]) -> Result<T, BrokerError>,
+    accept: impl FnOnce(&[MovedRow]) -> Result<T, BrokerError>,
 ) -> Result<T, BrokerError> {
     let mut connection = pool
         .checkout(CheckoutClass::Reserved)
@@ -564,7 +641,7 @@ pub(crate) async fn terminalize_and_commit_if<T>(
         command,
     )
     .await?;
-    match decode_outcomes(&rows, command).and_then(|outcomes| accept(&outcomes)) {
+    match decode_moved_outcomes(&rows, command).and_then(|moved| accept(&moved)) {
         Ok(accepted) => {
             transaction.commit().await?;
             Ok(accepted)
@@ -576,20 +653,23 @@ pub(crate) async fn terminalize_and_commit_if<T>(
     }
 }
 
-/// Run a command in the caller's open transaction on a core connection and
-/// decode everything it reports. The caller commits or rolls back; a
-/// statement that fails leaves the transaction aborted, so nothing of it
-/// commits. Each outcome is logged ([`log_terminalization_outcome`]).
+/// Run a discovery batch in the caller's open transaction on a core
+/// connection and read every row it reports, each with the task name and
+/// the queue of the row that it moved ([`MovedRow`]). The caller commits or
+/// rolls back; a statement that fails leaves the transaction aborted, so
+/// nothing of it commits. Each outcome is logged
+/// ([`log_terminalization_outcome`]).
 ///
 /// Errors: [`BrokerError::Statement`]; [`BrokerError::TerminalizationContract`]
-/// when a row or the row count breaks the wire contract.
-pub(crate) async fn terminalize_in_core_transaction(
+/// when a row breaks the wire contract of a discovery batch, or `command` is
+/// not one.
+pub(crate) async fn terminalize_moved_in_core_transaction(
     transaction: &mut crate::db::Transaction<'_>,
     log: StatementLog,
     command: &TerminalizationCommand,
-) -> Result<Vec<TerminalizationOutcome>, BrokerError> {
+) -> Result<Vec<MovedRow>, BrokerError> {
     let rows = run_command(&mut StatementTarget::Transaction(transaction), log, command).await?;
-    decode_outcomes(&rows, command)
+    decode_moved_outcomes(&rows, command)
 }
 
 /// Decode every row of a command's statement, enforce the cardinality of the
@@ -604,7 +684,7 @@ fn decode_outcomes(
 ) -> Result<Vec<TerminalizationOutcome>, BrokerError> {
     let operation = function_name_of(command);
     let outcomes = enforce_cardinality(
-        decode_rows(rows, operation)?,
+        decode_rows(rows, command)?,
         cardinality_of(command),
         operation,
     )?;
@@ -782,7 +862,7 @@ mod catalog_tests {
         (
             "horsies_expire_pending_tasks",
             "p_batch_size integer, p_result text, p_error_code text",
-            "TABLE(task_id uuid, ordinality bigint, outcome text, terminal_at timestamp with time zone, terminalization_kind text, observed_status text, observed_worker_id text, observed_claimed_at timestamp with time zone, guard_kind text, observed_guard jsonb)",
+            "TABLE(task_id uuid, ordinality bigint, outcome text, terminal_at timestamp with time zone, terminalization_kind text, observed_status text, observed_worker_id text, observed_claimed_at timestamp with time zone, guard_kind text, observed_guard jsonb, task_name text, queue_name text)",
             "plpgsql",
         ),
         (
@@ -794,7 +874,7 @@ mod catalog_tests {
         (
             "horsies_cancel_orphaned_tasks",
             "p_batch_size integer",
-            "TABLE(task_id uuid, ordinality bigint, outcome text, terminal_at timestamp with time zone, terminalization_kind text, observed_status text, observed_worker_id text, observed_claimed_at timestamp with time zone, guard_kind text, observed_guard jsonb)",
+            "TABLE(task_id uuid, ordinality bigint, outcome text, terminal_at timestamp with time zone, terminalization_kind text, observed_status text, observed_worker_id text, observed_claimed_at timestamp with time zone, guard_kind text, observed_guard jsonb, task_name text, queue_name text)",
             "plpgsql",
         ),
         (
@@ -999,11 +1079,68 @@ mod catalog_tests {
         let err = decode_outcome_row(row).expect_err("a core row of the wrong shape");
         assert!(err.to_string().contains("row shape"), "{err}");
     }
+
+    /// A row of a discovery batch: the ten outcome columns of an APPLIED
+    /// move, then the task name and the queue.
+    static MOVED_ROW: TypedStatement = TypedStatement::new(
+        "moved_row",
+        "SELECT '00000000-0000-7000-8000-000000000a01'::uuid AS task_id, NULL::bigint AS ordinality, \
+                'APPLIED'::text AS outcome, now() AS terminal_at, \
+                'EXPIRE_PENDING'::text AS terminalization_kind, 'PENDING'::text AS observed_status, \
+                NULL::text AS observed_worker_id, NULL::timestamptz AS observed_claimed_at, \
+                NULL::text AS guard_kind, NULL::jsonb AS observed_guard, \
+                'app.tasks.report'::text AS task_name, 'slow'::text AS queue_name",
+        &[],
+    );
+
+    /// The one row of `statement` on a core pool of the test database.
+    async fn one_core_row(statement: &'static TypedStatement) -> Row {
+        let pool = migrated_pool().await;
+        let core = crate::broker::pools::core_pool_for_test_url(pool.url());
+        let mut rows = core
+            .query(
+                CheckoutClass::Reserved,
+                &statement.bind().finish(),
+                StatementBound::ConnectionTimeouts,
+            )
+            .await
+            .expect("query on the core pool");
+        core.close();
+        assert_eq!(rows.len(), 1, "one row");
+        rows.remove(0)
+    }
+
+    /// A discovery row decodes to its outcome and the task name and queue of
+    /// the moved row; the outcome decoder refuses it, and the discovery
+    /// decoder refuses a row of the outcome columns alone.
+    #[tokio::test]
+    #[serial]
+    async fn a_discovery_row_names_the_moved_task_and_has_its_own_shape() {
+        let moved = one_core_row(&MOVED_ROW).await;
+        let wrong = one_core_row(&WRONG_ROW_SHAPE).await;
+
+        let decoded = decode_moved_row(&moved).expect("a discovery row decodes");
+
+        assert!(matches!(
+            decoded.outcome,
+            TerminalizationOutcome::Applied { .. }
+        ));
+        assert_eq!(
+            decoded.outcome.task_id(),
+            uuid::Uuid::from_u128(0x0000_0000_0000_7000_8000_0000_0000_0a01)
+        );
+        assert_eq!(decoded.task_name, "app.tasks.report");
+        assert_eq!(decoded.queue_name, "slow");
+        let refused = decode_outcome_row(&moved).expect_err("the outcome shape has ten columns");
+        assert!(refused.to_string().contains("row shape"), "{refused}");
+        let refused = decode_moved_row(&wrong).expect_err("a discovery row has twelve columns");
+        assert!(refused.to_string().contains("row shape"), "{refused}");
+    }
 }
 
 #[cfg(test)]
 mod statement_tests {
-    use super::{cardinality_of, statement_of, Cardinality};
+    use super::{cardinality_of, row_shape_of, statement_of, Cardinality, RowShape};
     use crate::core::lifecycle::function_name_of;
     use crate::core::lifecycle::tests::sample_commands;
 
@@ -1016,6 +1153,19 @@ mod statement_tests {
             let sql = statement_of(&command).sql();
             let call = format!("SELECT * FROM {}(", function_name_of(&command));
             assert!(sql.starts_with(&call), "{variant}: {sql}");
+        }
+    }
+
+    /// The two discovery batches report the moved task with each row; every
+    /// other command reports the outcome columns alone.
+    #[test]
+    fn only_the_discovery_batches_name_the_moved_task() {
+        for (variant, command) in sample_commands() {
+            let expected = match variant {
+                "ExpirePendingTasks" | "CancelOrphanedTasks" => RowShape::MovedTask,
+                _ => RowShape::Outcome,
+            };
+            assert_eq!(row_shape_of(&command), expected, "{variant}");
         }
     }
 

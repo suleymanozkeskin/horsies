@@ -620,10 +620,14 @@ async fn an_expired_child_task_fails_the_child_and_the_parent() {
     let child_id = child_of(&db.pool, workflow_id, 0).await;
 
     assert!(
-        expire_pending_pass(&core_pool_for_test_url(db.pool.url()), StatementLog::Off)
-            .await
-            .expect("expire_pending_pass")
-            .expired()
+        expire_pending_pass(
+            &core_pool_for_test_url(db.pool.url()),
+            StatementLog::Off,
+            |_rows| {}
+        )
+        .await
+        .expect("expire_pending_pass")
+        .expired()
             >= 1
     );
     assert!(recovery_pass(&db.pool, &child_specs).await >= 1);
