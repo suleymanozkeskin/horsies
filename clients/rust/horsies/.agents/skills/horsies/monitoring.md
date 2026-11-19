@@ -354,8 +354,11 @@ fn add_handlers(app: &mut Horsies) -> Result<(), HorsiesError> {
   carrier, start at the placement, status ERROR with `error.type`,
   `horsies.span.source = "worker"`. For a workflow task the handler child
   reads the node by the task id (one bounded core read, only for these
-  attempts) and sets `horsies.workflow.*`; a failed read leaves them out and
-  is counted and logged. It is the default (the worker then starts the
+  attempts, on one reader task with a queue of at most 1,000 spans: never
+  on the event path) and sets `horsies.workflow.*`. A failed read, a full
+  queue and a span still queued at the stop leave them out; the worker
+  metric `horsies.spans.worker_ended.read_failures{reason}` (`read_failed`,
+  `not_read`) counts them. It is the default (the worker then starts the
   handler child with no handler);
   `app.set_worker_ended_spans(horsies::otel::WorkerEndedSpans::NoSpans)`
   turns it off. Set the global tracer provider in `main` or in

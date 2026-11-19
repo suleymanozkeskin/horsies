@@ -20,8 +20,8 @@
 //!   attempt), with the kind of the child as `horsies.task.execution`, and
 //!   `horsies.span.source` = `worker`. The workflow node of a workflow task
 //!   is the one that the handler child read (`EndedWorkflow::Known`); with
-//!   `EndedWorkflow::WorkflowNotKnown` (a failed read, or no node) the span
-//!   has no `horsies.workflow.*` attribute.
+//!   `EndedWorkflow::WorkflowNotKnown` (a failed read, no node, or no read)
+//!   the span has no `horsies.workflow.*` attribute.
 //!
 //! The span is made with the OpenTelemetry API directly, not through a
 //! `tracing` span, so it takes its start and end times.

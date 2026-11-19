@@ -1596,9 +1596,14 @@ unless it starts with "Added".
   reads the node by the task id through its producer pool, with one read of
   the core bounded at 1 s for a connection and 1 s for the statement, only
   for such an attempt, and the span gets the `horsies.workflow.*`
-  attributes; a read that fails leaves them out, and the handler child
-  counts and logs it. It is the default with the feature: the
-  worker then starts its handler child also when the app has no handler.
+  attributes. The read runs on one reader task with a queue of at most
+  1,000 spans (`NODE_READ_QUEUE_SPANS`), so it never holds an event. A
+  read that fails, a full queue, and a span still queued at the stop leave
+  the workflow attributes out; the new worker metric
+  `horsies.spans.worker_ended.read_failures{reason="read_failed"|"not_read"}`
+  counts them, and the handler child logs them. It is the default with
+  the feature: the worker then starts its handler child also when the app
+  has no handler.
   `Horsies::set_worker_ended_spans(horsies::otel::WorkerEndedSpans::NoSpans)`
   turns it off.
 

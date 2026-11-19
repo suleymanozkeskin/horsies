@@ -159,7 +159,7 @@ pub use crate::worker::executor::child_host::{
     NamedChildStartHook, ProcessRole, RunCancelSignal, RunSignalRefused, RunSpawnRefused,
     ThreadRole, CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND, HANDLER_DRAIN,
     HANDLER_ERROR_LOG_EVERY, HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS,
-    HANDLER_STATS_INTERVAL, MAX_RUN_WORK,
+    HANDLER_STATS_INTERVAL, MAX_RUN_WORK, NODE_READER_STOP_BOUND, NODE_READ_QUEUE_SPANS,
 };
 
 // The parent-child frame codec, for the Python child program and the

@@ -132,11 +132,14 @@ fn no_worker_ended_spans(app: &mut Horsies) {
 
 The worker does not know the workflow node of a workflow task: the start of the child reads it. For an attempt of a workflow task that the worker ended, the handler child reads the node by the task id through its producer pool, with one read of the core: at most 1 second for a connection and 1 second for the statement. Only these attempts pay for the read.
 
+The read never holds an event: the span waits in a queue of at most 1,000 spans (`NODE_READ_QUEUE_SPANS`), and one reader task reads the node of each span in turn, then makes it. The events go to the handlers at once.
+
 Limits:
 
 - A span that the body made and exported before the kill keeps the id of the lost span as its parent. A trace shows it next to the span of the worker, not under it.
-- When the node read fails, or finds no node (the workflow was deleted), the span of a workflow task has no `horsies.workflow.*` attribute. The span stays in the trace of the workflow start through the stored carrier. The handler child counts each failed read and logs it with the task id: the first, then one line per 1,000.
-- The node read runs on the task that hands the events to the handlers. During a database outage each such attempt holds that task for the bound of the read.
+- When the node read fails, or finds no node (the workflow was deleted), the span of a workflow task has no `horsies.workflow.*` attribute. The span stays in the trace of the workflow start through the stored carrier.
+- When the queue of the reader is full, the span is made at once with no `horsies.workflow.*` attribute. At the stop of the worker, the reader gets the 2 seconds of the handlers; the span whose read still runs and each span still in the queue are then made with no `horsies.workflow.*` attribute, within 1 second (`NODE_READER_STOP_BOUND`).
+- The worker metric `horsies.spans.worker_ended.read_failures` counts the spans made with no workflow node, by `reason`: `read_failed` (the read ran and failed) and `not_read` (the queue was full, or the child stopped first). The handler child also logs them with the task id: the first of each reason, then one line per 1,000.
 - Without the feature `otel` the app makes no such span, and the worker starts no handler child for it.
 
 ## Things to Avoid

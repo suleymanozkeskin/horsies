@@ -62,8 +62,10 @@
 //! with the kind of the child as `horsies.task.execution`, and
 //! `horsies.span.source` = `worker`. For a workflow task the handler child
 //! reads the node by the task id (one bounded read of the core, only for
-//! such an attempt) and the span gets the workflow attributes; a read that
-//! fails leaves them out, and the handler child counts and logs it. A span
+//! such an attempt, on its reader task: never on the dispatch of the
+//! events) and the span gets the workflow attributes. A read that fails, a
+//! full reader queue and the stop leave them out; the worker metric
+//! `horsies.spans.worker_ended.read_failures` counts them. A span
 //! that the body exported before the kill keeps the lost span as its
 //! parent. [`Horsies::set_worker_ended_spans`] turns it off
 //! ([`WorkerEndedSpans::NoSpans`]); with the default
