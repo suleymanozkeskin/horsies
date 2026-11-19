@@ -1,6 +1,6 @@
 # app/core/cli.py
 """
-CLI for horsies worker, scheduler, and check commands.
+CLI for horsies worker, scheduler, check and metrics commands.
 
 Module path resolution follows Celery's approach:
 1. User provides dotted module path: `horsies worker app.configs.horsies:app`
@@ -33,6 +33,7 @@ from horsies.core.errors import (
     HorsiesError,
     ValidationReport,
 )
+from horsies.core.fleet_metrics import listen_address, run_fleet_metrics
 from horsies.core.logging import TEXT_LOGS, get_logger
 from horsies.core.models.log_format import JsonLogs, TextLogs
 from horsies.core.models.resilience import WorkerResilienceConfig
@@ -737,6 +738,32 @@ def check_command(args: argparse.Namespace) -> None:
         sys.exit(0)
 
 
+def metrics_command(args: argparse.Namespace) -> None:
+    """Handle the metrics command: serve the fleet metrics of the app's
+    database at `GET /metrics` on `--listen`.
+
+    Exit contract: 2 for arguments that do not parse (argparse); 0 at
+    `SIGTERM` or `SIGINT`; 1 when the app cannot be discovered, the broker
+    does not build, a queue or schedule name cannot be a label value, or the
+    address does not bind.
+    """
+    logger = get_logger('cli')
+    setup_logging(args.loglevel)
+    try:
+        module_locator: str = _resolve_module_argument(args)
+        app, _var_name, _module_name, _sys_path_root = discover_app(module_locator)
+    except HorsiesError as e:
+        logger.error(str(e))
+        sys.exit(1)
+    except ValueError as e:
+        logger.error(str(e))
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f'Failed to discover app: {e}')
+        sys.exit(1)
+    sys.exit(run_fleet_metrics(app, args.listen, logger))
+
+
 def check_passed_text(
     *,
     task_count: int,
@@ -1091,6 +1118,9 @@ Examples:
   # Validate configuration without starting services
   horsies check app.configs.horsies:app
   horsies check app.configs.horsies:app --live
+
+  # Serve the fleet metrics of the app's database at GET /metrics
+  horsies metrics app.configs.horsies:app --listen 127.0.0.1:9100
 """,
         )
         subparsers = parser.add_subparsers(dest='command', help='Available commands')
@@ -1189,6 +1219,37 @@ Examples:
             action='store_true',
             default=False,
             help='Also check broker connectivity (SELECT 1)',
+        )
+
+        # Metrics command
+        metrics_parser = subparsers.add_parser(
+            'metrics',
+            help="Serve the fleet metrics of the app's database at GET /metrics",
+        )
+        metrics_parser.add_argument(
+            '-m',
+            '--module',
+            dest='module',
+            help='Module path (e.g., app.configs.horsies:app)',
+        )
+        metrics_parser.add_argument(
+            'module_pos',
+            nargs='?',
+            help='Module path (e.g., app.configs.horsies:app)',
+        )
+        metrics_parser.add_argument(
+            '--listen',
+            required=True,
+            type=listen_address,
+            metavar='HOST:PORT',
+            help='Address to serve on: HOST:PORT or [IPV6]:PORT. Required; there is no default.',
+        )
+        metrics_parser.add_argument(
+            '--loglevel',
+            choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+            default='INFO',
+            type=str.upper,
+            help='Logging level (default: INFO)',
         )
 
         # Web command
@@ -1324,6 +1385,8 @@ Examples:
                 scheduler_command(args)
             case 'check':
                 check_command(args)
+            case 'metrics':
+                metrics_command(args)
             case 'web':
                 web_command(args)
             case 'get-docs':

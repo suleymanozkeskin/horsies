@@ -47,6 +47,7 @@ from horsies._core import (
     trace_link_refusal,
 )
 from horsies.core.app import Horsies
+from horsies.core.fleet_metrics import fleet_label_names
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.web.auth import INTENT_HEADER, MonitoringAuthPolicy
 from horsies.web.schema import SchemaState
@@ -373,9 +374,15 @@ def create_monitoring_app(
 
     No schema browser and no CORS middleware are exposed: the SPA is the only
     intended client and it is served same-origin.
+
+    ``GET /metrics`` serves the fleet metrics of the app's database behind
+    ``can_view``. Its ``queue`` and ``schedule`` label values are the queues and
+    the schedules of ``app.config``; other names are ``(unknown)``. A queue or
+    schedule named ``(unknown)`` raises ``ValueError``.
     """
     broker = app.get_broker()
     ui_config = config or MonitoringUIConfig()
+    names = fleet_label_names(app)
     handler = MonitoringHandler(
         broker._core_handle,  # pyright: ignore[reportPrivateUsage]
         actions_enabled=actions_enabled,
@@ -383,6 +390,8 @@ def create_monitoring_app(
         trace_link_template=trace_link_template_text(ui_config.trace_link),
         client_version=__version__,
         heartbeat_ms=EVENT_HEARTBEAT_MS,
+        queue_names=list(names.queues),
+        schedule_names=list(names.schedules),
     )
     events = MonitoringEvents(handler)
 
