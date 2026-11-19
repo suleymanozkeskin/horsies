@@ -117,17 +117,28 @@ pub mod __private {
         })
     }
 
-    /// Refuse a code type whose `CODES` holds a code that is not a user
-    /// code (`HRS-212`), with every such code in one error. Only a
-    /// hand-written `UserErrorCode` impl can have one.
-    pub fn refuse_foreign_user_codes<E: crate::UserErrorCode>(
-        task_name: &str,
-    ) -> Result<(), crate::HorsiesError> {
-        let mut report = crate::ValidationReport::new("task registration");
-        for refusal in crate::task::user_code_refusals::<E>(task_name) {
-            report.add(refusal);
-        }
-        report.into_result()
+    /// The `CODES` of the code type `E` of the async task function
+    /// `function`, whose input is `I`: the error codes that the task
+    /// declares. The argument only names the function's type.
+    /// `async_task_fn!` calls it; the registration checks the codes.
+    pub fn async_task_codes<I, F, Fut, T, E>(_function: &F) -> &'static [&'static str]
+    where
+        F: Fn(I) -> Fut,
+        Fut: std::future::Future<Output = Result<T, crate::TaskError<E>>>,
+        E: crate::UserErrorCode,
+    {
+        E::CODES
+    }
+
+    /// The `CODES` of the code type `E` of the blocking task function
+    /// `function`, whose input is `I`, as [`async_task_codes`].
+    /// `blocking_task_fn!` calls it.
+    pub fn blocking_task_codes<I, F, T, E>(_function: &F) -> &'static [&'static str]
+    where
+        F: Fn(I) -> Result<T, crate::TaskError<E>>,
+        E: crate::UserErrorCode,
+    {
+        E::CODES
     }
 
     /// The module that defines a task: the parent of the generated module

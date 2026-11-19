@@ -16,9 +16,7 @@ pub use runtime::TaskRuntime;
 pub use stored_datetime::StoredDateTime;
 pub use user_code::UserErrorCode;
 
-pub(crate) use user_code::{
-    is_free_user_code, is_retry_code, stored_retry_code, user_code_refusals,
-};
+pub(crate) use user_code::{is_free_user_code, is_retry_code, stored_retry_code};
 
 /// `#[derive(horsies::UserErrorCode)]`: one code per unit variant, its name
 /// in UPPER_SNAKE_CASE; a built-in or reserved name is a compile error.
