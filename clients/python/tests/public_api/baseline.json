@@ -8370,6 +8370,12 @@
       "default": "<factory>",
       "kind": "KEYWORD_ONLY",
       "name": "tracing"
+     },
+     {
+      "annotation": "Annotated[horsies.JsonLogs | horsies.TextLogs, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "<factory>",
+      "kind": "KEYWORD_ONLY",
+      "name": "log_format"
      }
     ],
     "returns": "None"
@@ -8546,6 +8552,13 @@
       "metadata": [],
       "name": "tracing",
       "type": "horsies.NoTracing | horsies.OtelTracing"
+     },
+     {
+      "alias": null,
+      "default": "factory TextLogs",
+      "metadata": [],
+      "name": "log_format",
+      "type": "horsies.JsonLogs | horsies.TextLogs"
      }
     ],
     "kind": "pydantic"
@@ -9628,6 +9641,50 @@
       ],
       "name": "day_of_week",
       "type": "list[Annotated[horsies.CronEvery | horsies.core.models.schedule.CronEnumRange[Weekday] | horsies.core.models.schedule.CronEnumStep[Weekday] | horsies.core.models.schedule.CronEnumValues[Weekday], FieldInfo(annotation=NoneType, required=True, discriminator='kind')]]"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies:ChildOfSend": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['child_of_send']",
+      "default": "'child_of_send'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.models.tracing.ChildOfSend",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "'forbid'",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'child_of_send'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['child_of_send']"
      }
     ],
     "kind": "pydantic"
@@ -14974,11 +15031,177 @@
     "~T"
    ]
   },
+  "horsies:JsonLogs": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['json_logs']",
+      "default": "'json_logs'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.models.log_format.JsonLogs",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "'forbid'",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'json_logs'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['json_logs']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies:JsonLogsFormatter": {
+   "abstract": false,
+   "bases": [
+    "logging.Formatter"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "None",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "fmt"
+     },
+     {
+      "annotation": "unannotated",
+      "default": "None",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "datefmt"
+     },
+     {
+      "annotation": "unannotated",
+      "default": "'%'",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "style"
+     },
+     {
+      "annotation": "unannotated",
+      "default": "True",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "validate"
+     },
+     {
+      "annotation": "unannotated",
+      "default": "None",
+      "kind": "KEYWORD_ONLY",
+      "name": "defaults"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies.core.logging.JsonLogsFormatter",
+   "kind": "class",
+   "members": {
+    "format": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "logging.LogRecord",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "record"
+       }
+      ],
+      "returns": "str"
+     }
+    }
+   },
+   "mro": [
+    "logging.Formatter",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": []
+  },
   "horsies:JsonValue": {
    "defined_as": "horsies.core.types.json_value.JsonValue",
    "kind": "type alias",
    "type_params": [],
    "value": "None | bool | dict[str, unresolved 'JsonValue'] | float | int | list[unresolved 'JsonValue'] | str"
+  },
+  "horsies:LinkedToSend": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['linked_to_send']",
+      "default": "'linked_to_send'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.models.tracing.LinkedToSend",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "'forbid'",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'linked_to_send'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['linked_to_send']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
   },
   "horsies:MemoryLimit": {
    "abstract": false,
@@ -16444,6 +16667,12 @@
       "default": "'otel_tracing'",
       "kind": "KEYWORD_ONLY",
       "name": "kind"
+     },
+     {
+      "annotation": "Annotated[horsies.ChildOfSend | horsies.LinkedToSend, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "<factory>",
+      "kind": "KEYWORD_ONLY",
+      "name": "parentage"
      }
     ],
     "returns": "None"
@@ -16469,6 +16698,13 @@
       "metadata": [],
       "name": "kind",
       "type": "Literal['otel_tracing']"
+     },
+     {
+      "alias": null,
+      "default": "factory ChildOfSend",
+      "metadata": [],
+      "name": "parentage",
+      "type": "horsies.ChildOfSend | horsies.LinkedToSend"
      }
     ],
     "kind": "pydantic"
@@ -20664,6 +20900,60 @@
    },
    "type_params": []
   },
+  "horsies:TaskContextFilter": {
+   "abstract": false,
+   "bases": [
+    "logging.Filter"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "''",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "name"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies.core.logging.TaskContextFilter",
+   "kind": "class",
+   "members": {
+    "filter": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "logging.LogRecord",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "record"
+       }
+      ],
+      "returns": "bool"
+     }
+    }
+   },
+   "mro": [
+    "logging.Filter",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": []
+  },
   "horsies:TaskError": {
    "abstract": false,
    "bases": [
@@ -22822,6 +23112,50 @@
      "PENDING": "'PENDING'",
      "RUNNING": "'RUNNING'"
     }
+   },
+   "type_params": []
+  },
+  "horsies:TextLogs": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['text_logs']",
+      "default": "'text_logs'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.models.log_format.TextLogs",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "'forbid'",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'text_logs'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['text_logs']"
+     }
+    ],
+    "kind": "pydantic"
    },
    "type_params": []
   },

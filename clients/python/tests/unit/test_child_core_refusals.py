@@ -52,9 +52,11 @@ from horsies.core.worker.run_return import (
     BodyInterrupted,
     CoreStoppedAfterBody,
     CoreStoppedBeforeStart,
+    EncodedResult,
     MarkerDone,
     MarkerMetStoppedCore,
     ResultEnvelope,
+    ResultSucceeded,
     StoppedBeforeRunning,
 )
 from horsies.core.worker.task_loop import TaskLoop
@@ -327,14 +329,15 @@ class TestTheEndOfABody:
     )
     def test_every_other_outcome_is_encoded(self, out: TaskResult[Any, TaskError]) -> None:
         task = object()
+        encoded = EncodedResult(ResultEnvelope(ENVELOPE), ResultSucceeded())
         with patch.object(
             child_runner,
             '_encode_task_outcome',
-            return_value=ResultEnvelope(ENVELOPE),
+            return_value=encoded,
         ) as encode:
             ended = child_runner.encoded_body_end('task', task, out)
 
-        assert ended == ResultEnvelope(ENVELOPE)
+        assert ended == encoded
         encode.assert_called_once_with('task', task, out)
 
     def test_an_interrupted_body_ends_the_child_with_no_report(

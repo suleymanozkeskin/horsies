@@ -66,6 +66,11 @@ from horsies.core.models.tasks import (
     MAX_TASK_TIMEOUT_MS,
     MIN_CANCEL_GRACE_MS,
     MIN_TASK_TIMEOUT_MS,
+    BuiltInTaskCode,
+    ContractCode,
+    Execution,
+    OutcomeCode,
+    RetrievalCode,
     TaskResult,
     TaskError,
     OperationalErrorCode,
@@ -76,19 +81,36 @@ from horsies.core.worker.stored_timeout import (
     TimeoutRefusal,
     TimeoutValueInvalid,
 )
-from horsies.core.worker.child_frames import PROTOCOL_NUMBERS, stored_refusal_of
+from horsies.core.worker.child_frames import (
+    PROTOCOL_NUMBERS,
+    RunTrace,
+    run_trace_of,
+    stored_refusal_of,
+)
 from horsies.core.worker.child_main import end_child_after_core_refusal
 from horsies.core.worker.run_return import (
     BodyInterrupted,
     CoreStoppedBeforeStart,
+    EncodedResult,
     MarkerDone,
     MarkerEnd,
     MarkerMetStoppedCore,
+    NothingRaised,
+    RaisedInRun,
     ResultEnvelope,
+    ResultFailed,
+    ResultOutcome,
+    ResultSucceeded,
     RunReturn,
     SetRunning,
     StartedRunning,
     StoppedBeforeRunning,
+)
+from horsies.core.telemetry.attempt_span import (
+    AttemptSubject,
+    attempt_spans_of,
+    run_in_attempt_span,
+    use_attempt_spans,
 )
 from horsies.core.worker.task_loop import (
     AsyncTaskPresence,
@@ -196,10 +218,40 @@ def isolated_work_of(work: Literal['RUN'] | core.StoredOptionsRefused) -> Isolat
             assert_never(unreachable)
 
 
+def error_code_text(code: BuiltInTaskCode | str) -> str:
+    """The text of an error code: the value of a built-in code, or the user's
+    code. Pure."""
+    match code:
+        case OperationalErrorCode() | ContractCode() | RetrievalCode() | OutcomeCode():
+            return code.value
+        case str():
+            return code
+
+
+def result_outcome_of(out: TaskResult[Any, TaskError]) -> ResultOutcome:
+    """What the envelope of ``out`` holds: its value, or its task error with
+    the code text and the live exception that the error keeps. Pure."""
+    match out.err:
+        case None:
+            return ResultSucceeded()
+        case TaskError(error_code=code, exception=BaseException() as exception):
+            return ResultFailed(error_code_text(code), RaisedInRun(exception))
+        case TaskError(error_code=code):
+            return ResultFailed(error_code_text(code), NothingRaised())
+
+
+def _encoded_error(tr: TaskResult[None, TaskError]) -> EncodedResult:
+    """The envelope of an error that the run built itself, and its outcome."""
+    return EncodedResult(
+        ResultEnvelope(serialize_error_payload(tr)),
+        result_outcome_of(tr),
+    )
+
+
 def _serialization_error_response(
     task_name: str,
     error: SerializationError,
-) -> ResultEnvelope:
+) -> EncodedResult:
     """Build a WORKER_SERIALIZATION_ERROR response for a serde failure."""
     logger.error(f'Serialization error for task {task_name}: {error}')
     tr: TaskResult[None, TaskError] = TaskResult(
@@ -209,13 +261,13 @@ def _serialization_error_response(
             data={'task_name': task_name},
         ),
     )
-    return ResultEnvelope(serialize_error_payload(tr))
+    return _encoded_error(tr)
 
 
 def _stored_timeout_refusal_response(
     task_name: str,
     refusal: TimeoutRefusal,
-) -> ResultEnvelope:
+) -> EncodedResult:
     """Build a WORKER_SERIALIZATION_ERROR response for a stored timeout.
 
     The row is RUNNING when this runs, so the normal persist path fails the
@@ -249,7 +301,7 @@ def _stored_timeout_refusal_response(
             data=data,
         ),
     )
-    return ResultEnvelope(serialize_error_payload(tr))
+    return _encoded_error(tr)
 
 
 from horsies.core.errors import ConfigurationError, ErrorCode
@@ -498,7 +550,8 @@ def import_app_for_child(
     Before the imports, the app takes the worker role and the task-send
     pool of the kind of the child (``task_send_pool`` connections, 1 or
     more), so a broker that an import or a task builds through
-    ``app.get_broker()`` opens that pool.
+    ``app.get_broker()`` opens that pool. Once the app is located, the
+    horsies log records of the process take its ``AppConfig.log_format``.
 
     A preload parent runs this before it forks, so children share the result.
 
@@ -527,6 +580,8 @@ def import_app_for_child(
             sys.path.insert(0, root)
 
     app = _locate_app(app_locator)  # uses import_by_path -> loads as 'instance'
+    # The records from here on take the app's format.
+    configure_logging(loglevel, log_format=app.config.log_format)
     _discard_inherited_broker(app)
     app.set_role('worker')
     app.set_task_send_pool(task_send_pool)
@@ -561,11 +616,13 @@ def finish_child_start(app: Horsies, init: core.InitFrame) -> None:
     these itself, after any fork.
 
     The process runs task bodies from here on, the
-    ``on_child_process_start`` hooks run, and the core handle of the child
-    is built from ``init`` (``_initialize_child_core_handle``). Every write
-    of the child goes through that handle; building it starts nothing. A
-    shared async child runs its async start hooks afterwards, on its event
-    loop (``shared_runner``).
+    ``on_child_process_start`` hooks run, the child chooses its attempt
+    spans from ``AppConfig.tracing`` (``use_attempt_spans``), and the core
+    handle of the child is built from ``init``
+    (``_initialize_child_core_handle``). Every write of the child goes
+    through that handle; building it starts nothing. A shared async child
+    runs its async start hooks afterwards, on its event loop
+    (``shared_runner``).
 
     Raises:
         Exception: a failure of a step propagates to the caller. A failing
@@ -578,6 +635,9 @@ def finish_child_start(app: Horsies, init: core.InitFrame) -> None:
     # task imports so app engines exist, and before the core handle of the
     # child is built, so a failing hook aborts cleanly.
     _run_child_start_hooks(app)
+    # After the hooks, where the user sets the OpenTelemetry SDK of the
+    # child; the tracer of the API follows a provider set later too.
+    use_attempt_spans(attempt_spans_of(app.config.tracing))
     _initialize_child_core_handle(init)
     logger.debug(f'[child {os.getpid()}] Core handle of the child built')
 
@@ -1018,7 +1078,7 @@ def encoded_body_end(
     task_name: str,
     task: Any,
     out: TaskResult[Any, TaskError],
-) -> ResultEnvelope | BodyInterrupted:
+) -> EncodedResult | BodyInterrupted:
     """The end of a body whose task call returned ``out``.
 
     ``BodyInterrupted``: a refusal of the core of this child ended the
@@ -1071,16 +1131,16 @@ def async_task_presence(app: Horsies) -> AsyncTaskPresence:
     return AsyncTaskPresence.NO_ASYNC_TASK
 
 
-def _resolution_failure(task_name: str, message: str) -> ResultEnvelope:
+def _resolution_failure(task_name: str, message: str) -> EncodedResult:
     """The result of a task the worker cannot resolve: WORKER_RESOLUTION_ERROR."""
-    tr: TaskResult[Any, TaskError] = TaskResult(
+    tr: TaskResult[None, TaskError] = TaskResult(
         err=TaskError(
             error_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR,
             message=message,
             data={'task_name': task_name},
         )
     )
-    return ResultEnvelope(serialize_error_payload(tr))
+    return _encoded_error(tr)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1194,7 +1254,7 @@ def _prepare_task_call(
     task_name: str,
     input_json: str,
     place: RunPlace,
-) -> _PreparedCall | ResultEnvelope:
+) -> _PreparedCall | EncodedResult:
     """Resolve a task from the registry and decode the arguments of its call.
 
     ``input_json`` is the stored input of the row, the body of the run
@@ -1497,7 +1557,7 @@ def _prepare_task_call(
     return _PreparedCall(task=task, app=app, args=args, kwargs=kwargs)
 
 
-def _task_exception_response(task_name: str, e: BaseException) -> ResultEnvelope:
+def _task_exception_response(task_name: str, e: BaseException) -> EncodedResult:
     """The result of a task that raised: ``TASK_EXCEPTION``. Logs it."""
     logger.error(f'Task exception: {task_name}: {exception_text(e)}')
     # If the task raised an exception, we wrap it in a TaskError
@@ -1509,19 +1569,20 @@ def _task_exception_response(task_name: str, e: BaseException) -> ResultEnvelope
             exception=e,  # pydantic will accept and we flatten on serialization if needed elsewhere
         )
     )
-    return ResultEnvelope(serialize_error_payload(tr))
+    return _encoded_error(tr)
 
 
 def _encode_task_outcome(
     task_name: str,
     task: Any,
     out: TaskResult[Any, TaskError],
-) -> ResultEnvelope:
+) -> EncodedResult:
     """Encode the result of a task call for the frame, against the declared
     ok type of the task, and read the ok value back with that type
     (``encode_returned_result``): the worker stores the envelope as it is. A
     value that does not fit, or that does not read back, ends the run with
-    ``WORKER_SERIALIZATION_ERROR``. An exception propagates. No I/O."""
+    ``WORKER_SERIALIZATION_ERROR``. The outcome is that of ``out``, or of
+    that failure. An exception propagates. No I/O."""
     # Strict-serde phase 5: result encoding routes through
     # ``encode_task_result(result, ok_type)`` so the wire envelope
     # uses ``__h_task_result__`` and the ok-slot is encoded against
@@ -1550,7 +1611,22 @@ def _encode_task_outcome(
     ser = dumps_json(envelope)
     if is_err(ser):
         return _serialization_error_response(task_name, ser.err_value)
-    return ResultEnvelope(ser.ok_value)
+    return EncodedResult(ResultEnvelope(ser.ok_value), result_outcome_of(out))
+
+
+def shared_attempt_subject(
+    frame: core.SharedRunFrame,
+    execution: Execution,
+) -> AttemptSubject:
+    """The attempt of the run of ``frame`` on a seat of a shared child of
+    the class ``execution``. Pure."""
+    return AttemptSubject(
+        task_id=str(frame.task_id),
+        task_name=frame.task_name,
+        worker_id=frame.worker_id,
+        execution=execution,
+        trace=run_trace_of(frame.trace),
+    )
 
 
 def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
@@ -1563,6 +1639,7 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
     claimed_at: datetime,
     task_loop: TaskLoop,
     orphan_self_heal: bool,
+    trace: RunTrace,
 ) -> RunReturn:
     """Run one task in an isolated child, up to its result.
 
@@ -1575,6 +1652,10 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
 
     An ``async def`` task runs on ``task_loop``, the one loop of this child.
     A ``def`` task runs on this thread with no running event loop.
+
+    The steps after the RUNNING update run inside the attempt span of the
+    run, whose parent the send's carrier ``trace`` gives
+    (``_run_isolated_after_running``).
 
     ``orphan_self_heal`` comes with the run from the worker (the app's
     ``RecoveryConfig.auto_terminate_orphaned_workflow_tasks``): with it, the
@@ -1624,22 +1705,50 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
         task_id,
         started,
         _run_isolated_after_running(
-            task_name,
             input_json,
-            task_id,
+            work,
+            task_loop,
+            AttemptSubject(
+                task_id=task_id,
+                task_name=task_name,
+                worker_id=master_worker_id,
+                execution=Execution.ISOLATED,
+                trace=trace,
+            ),
+        ),
+    )
+
+
+def _run_isolated_after_running(
+    input_json: str,
+    work: IsolatedWork,
+    task_loop: TaskLoop,
+    attempt: AttemptSubject,
+) -> ResultEnvelope | BodyInterrupted:
+    """The steps of an isolated run after its RUNNING update, inside the
+    span and the log context of ``attempt`` (``run_in_attempt_span``). The
+    span is current on this thread, so a ``def`` body and the coroutine of
+    an ``async def`` body, which the task loop runs in a copy of this
+    context, see it."""
+    return run_in_attempt_span(
+        attempt,
+        lambda: _isolated_steps(
+            attempt.task_name,
+            input_json,
+            attempt.task_id,
             work,
             task_loop,
         ),
     )
 
 
-def _run_isolated_after_running(
+def _isolated_steps(
     task_name: str,
     input_json: str,
     task_id: str,
     work: IsolatedWork,
     task_loop: TaskLoop,
-) -> ResultEnvelope | BodyInterrupted:
+) -> EncodedResult | BodyInterrupted:
     """The steps of an isolated run after its RUNNING update: the stored
     options refusal, the resolve, the call and the result encode. Any
     exception becomes ``TASK_EXCEPTION``. A body that a refusal of the core
@@ -1663,7 +1772,7 @@ def _run_isolated_after_running(
         match prepared:
             case _PreparedCall(task=task, args=args, kwargs=kwargs):
                 pass
-            case ResultEnvelope():
+            case EncodedResult():
                 return prepared
         out = _task_call_result(
             task_name,

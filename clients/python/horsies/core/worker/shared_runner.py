@@ -26,8 +26,9 @@ from horsies.core.models.boot_failure import (
     ChildPoolSetupFailed,
     ThreadStartRefusedError,
 )
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import Execution, TaskError, TaskResult
 from horsies.core.task_decorator import await_task_call_in_worker
+from horsies.core.telemetry.attempt_span import run_in_attempt_span_async
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_main import (
     boot_failure_from_exception,
@@ -44,6 +45,7 @@ from horsies.core.worker.child_runner import (
     _task_exception_response,
     encoded_body_end,
     set_running_or_end_child,
+    shared_attempt_subject,
 )
 from horsies.core.worker.current import get_current_app
 from horsies.core.worker.shared_child import (
@@ -54,6 +56,7 @@ from horsies.core.worker.shared_child import (
 from horsies.core.worker.run_return import (
     BodyInterrupted,
     CoreStoppedBeforeStart,
+    EncodedResult,
     MarkerEnd,
     ResultEnvelope,
     StartedRunning,
@@ -238,6 +241,20 @@ async def run_seat_task(frame: core.SharedRunFrame) -> SeatReturn:
 async def _run_after_running(
     frame: core.SharedRunFrame,
 ) -> ResultEnvelope | BodyInterrupted:
+    """The steps of a run after its RUNNING update (``_seat_steps``), inside
+    the span and the log context of its attempt
+    (``run_in_attempt_span_async``). They start inside the seat coroutine,
+    so the span is current in the context of this seat task only: the body,
+    and each task that the body starts, sees it; the other seats do not."""
+    return await run_in_attempt_span_async(
+        shared_attempt_subject(frame, Execution.SHARED_ASYNC),
+        lambda: _seat_steps(frame),
+    )
+
+
+async def _seat_steps(
+    frame: core.SharedRunFrame,
+) -> EncodedResult | BodyInterrupted:
     """The steps of a run after its RUNNING update, as in
     ``_run_task_entry``.
 
@@ -269,7 +286,7 @@ async def _run_after_running(
         match prepared:
             case _PreparedCall(task=task, args=args, kwargs=kwargs):
                 pass
-            case ResultEnvelope():
+            case EncodedResult():
                 return prepared
         out = await _seat_call_result(
             frame.task_name,

@@ -57,6 +57,48 @@ class ResultEnvelope:
 
 
 @dataclass(frozen=True, slots=True)
+class ResultSucceeded:
+    """The envelope holds the task's value."""
+
+
+@dataclass(frozen=True, slots=True)
+class RaisedInRun:
+    """An exception left the body or the steps of the run, and the run
+    mapped it to its task error. ``exception`` is the live exception."""
+
+    exception: BaseException
+
+
+@dataclass(frozen=True, slots=True)
+class NothingRaised:
+    """The task error holds no live exception: the body returned the error,
+    or the run built it before the body (a resolve or decode failure)."""
+
+
+@dataclass(frozen=True, slots=True)
+class ResultFailed:
+    """The envelope holds a task error. ``error_code`` is the text of its
+    code: the value of a built-in code, or the user's code."""
+
+    error_code: str
+    raised: RaisedInRun | NothingRaised
+
+
+type ResultOutcome = ResultSucceeded | ResultFailed
+"""What the envelope of a run holds: the task's value or a task error."""
+
+
+@dataclass(frozen=True, slots=True)
+class EncodedResult:
+    """The envelope of a run and what it holds. The run reads ``outcome``
+    where it builds the envelope, so nothing decodes the envelope text
+    again; the frame takes ``envelope`` only."""
+
+    envelope: ResultEnvelope
+    outcome: ResultOutcome
+
+
+@dataclass(frozen=True, slots=True)
 class StartedRunning:
     """The start write set the row RUNNING. ``started_at`` is the time that
     ``horsies_start_attempt`` returned for it, on the database clock (an

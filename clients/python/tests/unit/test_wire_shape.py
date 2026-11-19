@@ -90,6 +90,7 @@ from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker import child_runner
 from horsies.core.worker.task_loop import TaskLoop
+from horsies.core.worker.child_frames import NoTraceCarrier
 from horsies.core.worker.child_runner import RunTheTask
 from horsies.core.worker.run_return import StartedRunning
 from tests.fixtures.run_return import wire_of
@@ -1179,6 +1180,7 @@ def _run_child(app: Horsies, task_name: str) -> tuple[bool, str, str | None]:
                 claimed_at=CLAIMED_AT,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
+                trace=NoTraceCarrier(),
             )
         )
 
