@@ -26,6 +26,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::core::config::bounded::BoundedU32;
+use crate::core::config::no_member_after_the_tag;
 use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
 use crate::core::config::worker_profile::{
     select_worker_profile, ChildPreload, ClaimLimits, DrainTimeout, ExecutorThreadCount,
@@ -44,6 +45,7 @@ use crate::manifest::{
     WholeSeconds,
 };
 use crate::manifest_schema::{IntBound, ManifestValue, PythonItem, PythonValue};
+use crate::telemetry::listen::{ListenAddress, ListenHost, ListenPort};
 
 /// The one worker manifest version this core reads.
 pub const WORKER_MANIFEST_VERSION: u32 = 1;
@@ -257,6 +259,10 @@ pub struct WorkerManifest {
     pub profiles: BTreeMap<String, WorkerProfileManifest>,
     /// The profile that the start asks for (`horsies worker --profile`).
     pub profile: ProfileRequest,
+    /// The metrics endpoint that the start asks for (`horsies worker
+    /// --metrics-listen HOST:PORT`): a field of the process, not of the
+    /// app's config.
+    pub metrics_endpoint: MetricsEndpoint,
     pub claim: WorkerClaimManifest,
     pub recovery: RecoveryManifest,
     pub retention: RetentionManifest,
@@ -265,6 +271,32 @@ pub struct WorkerManifest {
     /// The facts of each task that the worker registered, by task name.
     pub tasks: BTreeMap<String, TaskManifest>,
     pub child_launch: ChildLaunchManifest,
+}
+
+/// The metrics endpoint of a worker process. There is no default address:
+/// `--metrics-listen HOST:PORT` turns it on and names its address.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
+#[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
+pub enum MetricsEndpoint {
+    /// Serve the worker metrics and the health probes on `host`:`port`.
+    ListenAddress {
+        /// A host name or an IP address; an IPv6 address without brackets.
+        host: ListenHost,
+        port: ListenPort,
+    },
+    /// No metrics endpoint.
+    #[serde(deserialize_with = "no_member_after_the_tag")]
+    NoMetricsEndpoint,
+}
+
+impl MetricsEndpoint {
+    /// The endpoint on `address`. Pure.
+    pub fn of_address(address: ListenAddress) -> Self {
+        let (host, port) = address.into_parts();
+        Self::ListenAddress { host, port }
+    }
 }
 
 /// The facts of one registered task.

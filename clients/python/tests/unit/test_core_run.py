@@ -20,6 +20,7 @@ import pytest
 from pydantic import SecretStr
 
 from horsies import _core
+from horsies._catalog import worker_manifest as wire
 from horsies.core.app import Horsies
 from horsies.core.errors import ConfigurationError, ErrorCode, HorsiesError
 from horsies.core.models.app import AppConfig
@@ -56,6 +57,7 @@ def _launch(profile: str) -> WorkerLaunch:
         sys_path_roots=(),
         profile=profile,
         loglevel='INFO',
+        metrics_endpoint=wire.MetricsEndpointNoMetricsEndpoint(),
     )
 
 

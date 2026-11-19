@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from horsies._catalog import worker_manifest as wire
 from horsies.core.app import Horsies
 from horsies.core.cli import (
     REMOVED_WORKER_FLAGS,
@@ -411,6 +412,64 @@ class TestMainEntrypoint:
             args = mock_cmd.call_args[0][0]
             assert args.profile == 'batch'
 
+    def test_worker_metrics_listen_is_no_endpoint_when_not_passed(self) -> None:
+        with (
+            patch('sys.argv', ['horsies', 'worker', 'my.mod:app']),
+            patch('horsies.core.cli.worker_command', autospec=True) as mock_cmd,
+        ):
+            main()
+            args = mock_cmd.call_args[0][0]
+            assert args.metrics_listen == wire.MetricsEndpointNoMetricsEndpoint()
+
+    @pytest.mark.parametrize(
+        ('text', 'host', 'port'),
+        [
+            ('0.0.0.0:9100', '0.0.0.0', 9100),
+            ('[::1]:9100', '::1', 9100),
+            ('metrics.internal:65535', 'metrics.internal', 65535),
+        ],
+    )
+    def test_worker_metrics_listen_parsed(self, text: str, host: str, port: int) -> None:
+        with (
+            patch('sys.argv', ['horsies', 'worker', 'my.mod:app', '--metrics-listen', text]),
+            patch('horsies.core.cli.worker_command', autospec=True) as mock_cmd,
+        ):
+            main()
+            args = mock_cmd.call_args[0][0]
+            assert args.metrics_listen == wire.MetricsEndpointListenAddress(
+                host=host,
+                port=port,
+            )
+
+    @pytest.mark.parametrize(
+        ('text', 'rule'),
+        [
+            ('9100', 'is not HOST:PORT'),
+            (':9100', 'has no host before the port'),
+            ('localhost:0', 'is not a number from 1 to 65535'),
+            ('localhost:65536', 'is not a number from 1 to 65535'),
+            ('::1:9100', 'write an IPv6 address in brackets'),
+            (f'{"a" * 254}:9100', 'has more than 253 bytes'),
+        ],
+    )
+    def test_worker_metrics_listen_that_does_not_parse_is_a_usage_error(
+        self,
+        text: str,
+        rule: str,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        with (
+            patch('sys.argv', ['horsies', 'worker', 'my.mod:app', '--metrics-listen', text]),
+            patch('horsies.core.cli.worker_command', autospec=True) as mock_cmd,
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 2
+            mock_cmd.assert_not_called()
+        stderr = capsys.readouterr().err
+        assert 'argument --metrics-listen' in stderr
+        assert rule in stderr
+
     def test_check_live_flag_parsed(self) -> None:
         with (
             patch('sys.argv', ['horsies', 'check', '--live', 'my.mod:app']),
@@ -482,6 +541,7 @@ def _make_worker_namespace(
     module: str = 'my.mod:app',
     loglevel: str = 'INFO',
     profile: str | None = 'default',
+    metrics_listen: wire.MetricsEndpoint = wire.MetricsEndpointNoMetricsEndpoint(),
 ) -> argparse.Namespace:
     """Build a valid argparse.Namespace for worker_command."""
     return argparse.Namespace(
@@ -489,6 +549,7 @@ def _make_worker_namespace(
         module_pos=None,
         loglevel=loglevel,
         profile=profile,
+        metrics_listen=metrics_listen,
     )
 
 
@@ -870,6 +931,21 @@ class TestWorkerCommandCoreRun:
         assert launch.sys_path_roots == ('/project',)
         assert launch.loglevel == 'DEBUG'
         app.import_task_modules.assert_called_once()
+
+    def test_the_metrics_endpoint_reaches_the_launch(self) -> None:
+        endpoint = wire.MetricsEndpointListenAddress(host='0.0.0.0', port=9100)
+        mock_run = _run_worker_command(
+            _make_mock_app(),
+            _make_worker_namespace(metrics_listen=endpoint),
+            EXIT_STOPPED,
+        )
+        assert _launch_of(mock_run).metrics_endpoint == endpoint
+        mock_run = _run_worker_command(
+            _make_mock_app(), _make_worker_namespace(), EXIT_STOPPED,
+        )
+        assert _launch_of(mock_run).metrics_endpoint == (
+            wire.MetricsEndpointNoMetricsEndpoint()
+        )
 
     def test_no_discovered_modules_still_proceeds(self) -> None:
         app = _make_mock_app()
