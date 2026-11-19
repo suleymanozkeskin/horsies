@@ -1239,7 +1239,24 @@
    },
    "defined_as": "horsies.core.models.schedule.DailySchedule",
    "kind": "class",
-   "members": {},
+   "members": {
+    "validate_time_of_day": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       }
+      ],
+      "returns": "typing.Self"
+     }
+    }
+   },
    "mro": [
     "pydantic.main.BaseModel",
     "object"
@@ -1637,7 +1654,24 @@
    },
    "defined_as": "horsies.core.models.schedule.MonthlySchedule",
    "kind": "class",
-   "members": {},
+   "members": {
+    "validate_time_of_day": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       }
+      ],
+      "returns": "typing.Self"
+     }
+    }
+   },
    "mro": [
     "pydantic.main.BaseModel",
     "object"
@@ -1993,6 +2027,22 @@
    "defined_as": "horsies.core.models.schedule.WeeklySchedule",
    "kind": "class",
    "members": {
+    "validate_time_of_day": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       }
+      ],
+      "returns": "typing.Self"
+     }
+    },
     "validate_unique_days": {
      "kind": "method",
      "overloads": [],
@@ -2088,7 +2138,7 @@
       "name": "groups"
      },
      {
-      "annotation": "horsies.monitoring.GroupRow",
+      "annotation": "horsies.monitoring.BreakdownCounts",
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "total"
@@ -2136,7 +2186,7 @@
       "default": "required",
       "metadata": [],
       "name": "total",
-      "type": "horsies.monitoring.GroupRow"
+      "type": "horsies.monitoring.BreakdownCounts"
      },
      {
       "alias": null,
@@ -2149,6 +2199,158 @@
     "kind": "pydantic"
    },
    "type_params": []
+  },
+  "horsies.monitoring:BreakdownCounts": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "total"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "pending"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "claimed"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "running"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "completed"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "failed"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "cancelled"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "expired"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "retried"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.BreakdownCounts",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "unset",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "total",
+      "type": "int"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "pending",
+      "type": "int"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "claimed",
+      "type": "int"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "running",
+      "type": "int"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "completed",
+      "type": "int"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "failed",
+      "type": "int"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "cancelled",
+      "type": "int"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "expired",
+      "type": "int"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "retried",
+      "type": "int"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:BreakdownGroup": {
+   "kind": "type form",
+   "text": "Annotated[horsies.monitoring.BreakdownUnclaimedGroup | horsies.monitoring.BreakdownValueGroup, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]"
   },
   "horsies.monitoring:BreakdownLimit": {
    "abstract": false,
@@ -2203,6 +2405,107 @@
     "frozen": true,
     "kind": "dataclass",
     "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:BreakdownUnclaimedGroup": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['unclaimed']",
+      "default": "'unclaimed'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.BreakdownUnclaimedGroup",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'unclaimed'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['unclaimed']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:BreakdownValueGroup": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['value']",
+      "default": "'value'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "value"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.BreakdownValueGroup",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'value'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['value']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "value",
+      "type": "str"
+     }
+    ],
+    "kind": "pydantic"
    },
    "type_params": []
   },
@@ -2333,12 +2636,6 @@
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "workers"
-     },
-     {
-      "annotation": "list[horsies.monitoring.ClassesNotRecordedInfo]",
-      "default": "required",
-      "kind": "KEYWORD_ONLY",
-      "name": "not_recorded"
      }
     ],
     "returns": "None"
@@ -2385,70 +2682,6 @@
       "metadata": [],
       "name": "workers",
       "type": "list[horsies.monitoring.WorkerClassLoadInfo]"
-     },
-     {
-      "alias": null,
-      "default": "required",
-      "metadata": [],
-      "name": "not_recorded",
-      "type": "list[horsies.monitoring.ClassesNotRecordedInfo]"
-     }
-    ],
-    "kind": "pydantic"
-   },
-   "type_params": []
-  },
-  "horsies.monitoring:ClassesNotRecordedInfo": {
-   "abstract": false,
-   "bases": [
-    "pydantic.main.BaseModel"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "KEYWORD_ONLY",
-      "name": "worker_id"
-     },
-     {
-      "annotation": "datetime.datetime",
-      "default": "required",
-      "kind": "KEYWORD_ONLY",
-      "name": "snapshot_at"
-     }
-    ],
-    "returns": "None"
-   },
-   "defined_as": "horsies.monitoring.models.ClassesNotRecordedInfo",
-   "kind": "class",
-   "members": {},
-   "mro": [
-    "pydantic.main.BaseModel",
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "config": {
-     "extra": "unset",
-     "frozen": "unset",
-     "strict": "unset"
-    },
-    "fields": [
-     {
-      "alias": null,
-      "default": "required",
-      "metadata": [],
-      "name": "worker_id",
-      "type": "str"
-     },
-     {
-      "alias": null,
-      "default": "required",
-      "metadata": [],
-      "name": "snapshot_at",
-      "type": "datetime.datetime"
      }
     ],
     "kind": "pydantic"
@@ -2817,17 +3050,11 @@
   "horsies.monitoring:GroupRow": {
    "abstract": false,
    "bases": [
-    "pydantic.main.BaseModel"
+    "horsies.monitoring.BreakdownCounts"
    ],
    "constructor": {
     "async": "sync",
     "parameters": [
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "KEYWORD_ONLY",
-      "name": "group"
-     },
      {
       "annotation": "int",
       "default": "required",
@@ -2881,6 +3108,12 @@
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "retried"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.BreakdownUnclaimedGroup | horsies.monitoring.BreakdownValueGroup, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "group"
      }
     ],
     "returns": "None"
@@ -2889,6 +3122,7 @@
    "kind": "class",
    "members": {},
    "mro": [
+    "horsies.monitoring.BreakdownCounts",
     "pydantic.main.BaseModel",
     "object"
    ],
@@ -2900,13 +3134,6 @@
      "strict": "unset"
     },
     "fields": [
-     {
-      "alias": null,
-      "default": "required",
-      "metadata": [],
-      "name": "group",
-      "type": "str"
-     },
      {
       "alias": null,
       "default": "required",
@@ -2969,6 +3196,13 @@
       "metadata": [],
       "name": "retried",
       "type": "int"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "group",
+      "type": "horsies.monitoring.BreakdownUnclaimedGroup | horsies.monitoring.BreakdownValueGroup"
      }
     ],
     "kind": "pydantic"
@@ -2984,7 +3218,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "task_id"
@@ -3096,7 +3330,7 @@
       "default": "required",
       "metadata": [],
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "alias": null,
@@ -3330,7 +3564,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.monitoring.errors.MonitoringQueryDbOperationFailed",
+   "defined_as": "horsies._catalog.monitoring_errors.MonitoringQueryDbOperationFailed",
    "kind": "class",
    "members": {
     "code": {
@@ -3377,7 +3611,7 @@
    "defined_as": "horsies.monitoring.errors.MonitoringQueryError",
    "kind": "type alias",
    "type_params": [],
-   "value": "horsies.monitoring.MonitoringQueryDbOperationFailed | horsies.monitoring.MonitoringQueryEventLoopLimit | horsies.monitoring.MonitoringQueryHistoryContractViolation"
+   "value": "horsies._catalog.monitoring_errors.MonitoringQueryCoreError"
   },
   "horsies.monitoring:MonitoringQueryErrorCode": {
    "abstract": false,
@@ -3397,7 +3631,7 @@
     ],
     "returns": "unannotated"
    },
-   "defined_as": "horsies.monitoring.errors.MonitoringQueryErrorCode",
+   "defined_as": "horsies._catalog.monitoring.MonitoringQueryErrorCode",
    "kind": "class",
    "members": {},
    "mro": [
@@ -3410,75 +3644,14 @@
     "kind": "enum",
     "members": {
      "DB_OPERATION_FAILED": "'DB_OPERATION_FAILED'",
-     "EVENT_LOOP_LIMIT": "'EVENT_LOOP_LIMIT'",
      "HISTORY_CONTRACT_VIOLATION": "'HISTORY_CONTRACT_VIOLATION'"
     }
    },
    "type_params": []
   },
   "horsies.monitoring:MonitoringQueryEventLoopLimit": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "message"
-     },
-     {
-      "annotation": "horsies.core.brokers.resources.EventLoopLimit",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "loop_limit"
-     }
-    ],
-    "returns": "None"
-   },
-   "defined_as": "horsies.monitoring.errors.MonitoringQueryEventLoopLimit",
-   "kind": "class",
-   "members": {
-    "code": {
-     "kind": "attribute",
-     "type": "horsies.monitoring.MonitoringQueryErrorCode",
-     "value": "horsies.monitoring.MonitoringQueryErrorCode.EVENT_LOOP_LIMIT"
-    },
-    "retryable": {
-     "kind": "attribute",
-     "type": "bool",
-     "value": "False"
-    }
-   },
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "fields": [
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "message",
-      "type": "str"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "loop_limit",
-      "type": "horsies.core.brokers.resources.EventLoopLimit"
-     }
-    ],
-    "frozen": true,
-    "kind": "dataclass",
-    "slots": true
-   },
-   "type_params": []
+   "cause": "module horsies.monitoring has no name MonitoringQueryEventLoopLimit",
+   "kind": "absent"
   },
   "horsies.monitoring:MonitoringQueryHistoryContractViolation": {
    "abstract": false,
@@ -3503,7 +3676,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.monitoring.errors.MonitoringQueryHistoryContractViolation",
+   "defined_as": "horsies._catalog.monitoring_errors.MonitoringQueryHistoryContractViolation",
    "kind": "class",
    "members": {
     "code": {
@@ -3761,7 +3934,7 @@
       "name": "next_run_at"
      },
      {
-      "annotation": "None | str",
+      "annotation": "None | uuid.UUID",
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "last_task_id"
@@ -3822,7 +3995,7 @@
       "default": "required",
       "metadata": [],
       "name": "last_task_id",
-      "type": "None | str"
+      "type": "None | uuid.UUID"
      },
      {
       "alias": null,
@@ -4222,7 +4395,7 @@
     ],
     "returns": "unannotated"
    },
-   "defined_as": "horsies.core.history.reads.detail.TaskAbsenceReason",
+   "defined_as": "horsies._catalog.history.TaskAbsenceReason",
    "kind": "class",
    "members": {},
    "mro": [
@@ -4262,7 +4435,7 @@
       "name": "retryable"
      },
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -4276,7 +4449,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.monitoring.task_actions.TaskActionDbOperationFailed",
+   "defined_as": "horsies._catalog.monitoring_errors.TaskActionDbOperationFailed",
    "kind": "class",
    "members": {
     "code": {
@@ -4310,7 +4483,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -4330,7 +4503,7 @@
    "defined_as": "horsies.monitoring.task_actions.TaskActionError",
    "kind": "type alias",
    "type_params": [],
-   "value": "horsies.monitoring.TaskActionDbOperationFailed | horsies.monitoring.TaskActionEventLoopLimit | horsies.monitoring.TaskActionNotCancellable | horsies.monitoring.TaskActionNotFound | horsies.monitoring.TaskActionStoredDataInvalid | horsies.monitoring.TaskActionWorkflowTask"
+   "value": "horsies._catalog.monitoring_errors.TaskActionCoreError"
   },
   "horsies.monitoring:TaskActionErrorCode": {
    "abstract": false,
@@ -4350,7 +4523,7 @@
     ],
     "returns": "unannotated"
    },
-   "defined_as": "horsies.monitoring.task_actions.TaskActionErrorCode",
+   "defined_as": "horsies._catalog.monitoring.TaskActionErrorCode",
    "kind": "class",
    "members": {},
    "mro": [
@@ -4363,7 +4536,6 @@
     "kind": "enum",
     "members": {
      "DB_OPERATION_FAILED": "'DB_OPERATION_FAILED'",
-     "EVENT_LOOP_LIMIT": "'EVENT_LOOP_LIMIT'",
      "STORED_DATA_INVALID": "'STORED_DATA_INVALID'",
      "TASK_IS_WORKFLOW_TASK": "'TASK_IS_WORKFLOW_TASK'",
      "TASK_NOT_CANCELLABLE": "'TASK_NOT_CANCELLABLE'",
@@ -4373,81 +4545,8 @@
    "type_params": []
   },
   "horsies.monitoring:TaskActionEventLoopLimit": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "message"
-     },
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "task_id"
-     },
-     {
-      "annotation": "horsies.core.brokers.resources.EventLoopLimit",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "loop_limit"
-     }
-    ],
-    "returns": "None"
-   },
-   "defined_as": "horsies.monitoring.task_actions.TaskActionEventLoopLimit",
-   "kind": "class",
-   "members": {
-    "code": {
-     "kind": "attribute",
-     "type": "horsies.monitoring.TaskActionErrorCode",
-     "value": "horsies.monitoring.TaskActionErrorCode.EVENT_LOOP_LIMIT"
-    },
-    "retryable": {
-     "kind": "attribute",
-     "type": "bool",
-     "value": "False"
-    }
-   },
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "fields": [
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "message",
-      "type": "str"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "task_id",
-      "type": "str"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "loop_limit",
-      "type": "horsies.core.brokers.resources.EventLoopLimit"
-     }
-    ],
-    "frozen": true,
-    "kind": "dataclass",
-    "slots": true
-   },
-   "type_params": []
+   "cause": "module horsies.monitoring has no name TaskActionEventLoopLimit",
+   "kind": "absent"
   },
   "horsies.monitoring:TaskActionNotCancellable": {
    "abstract": false,
@@ -4464,7 +4563,7 @@
       "name": "message"
      },
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -4478,7 +4577,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.monitoring.task_actions.TaskActionNotCancellable",
+   "defined_as": "horsies._catalog.monitoring_errors.TaskActionNotCancellable",
    "kind": "class",
    "members": {
     "code": {
@@ -4510,7 +4609,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -4541,7 +4640,7 @@
       "name": "message"
      },
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -4549,7 +4648,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.monitoring.task_actions.TaskActionNotFound",
+   "defined_as": "horsies._catalog.monitoring_errors.TaskActionNotFound",
    "kind": "class",
    "members": {
     "code": {
@@ -4581,7 +4680,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      }
     ],
     "frozen": true,
@@ -4605,7 +4704,7 @@
       "name": "message"
      },
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -4619,7 +4718,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.monitoring.task_actions.TaskActionStoredDataInvalid",
+   "defined_as": "horsies._catalog.monitoring_errors.TaskActionStoredDataInvalid",
    "kind": "class",
    "members": {
     "code": {
@@ -4651,7 +4750,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -4682,7 +4781,7 @@
       "name": "message"
      },
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -4696,7 +4795,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.monitoring.task_actions.TaskActionWorkflowTask",
+   "defined_as": "horsies._catalog.monitoring_errors.TaskActionWorkflowTask",
    "kind": "class",
    "members": {
     "code": {
@@ -4728,7 +4827,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -4901,7 +5000,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -4929,7 +5028,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -5102,7 +5201,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -5130,7 +5229,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -5304,7 +5403,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "id"
@@ -5434,7 +5533,7 @@
       "default": "required",
       "metadata": [],
       "name": "id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "alias": null,
@@ -5931,7 +6030,7 @@
       "name": "queues"
      },
      {
-      "annotation": "None | dict[str, int]",
+      "annotation": "dict[str, int]",
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "queue_max_concurrency"
@@ -5973,7 +6072,7 @@
       "name": "cpu_percent"
      },
      {
-      "annotation": "Literal['all_serving', 'not_recorded', 'slots_down']",
+      "annotation": "Literal['all_serving', 'slots_down']",
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "slot_health"
@@ -6077,7 +6176,7 @@
       "default": "required",
       "metadata": [],
       "name": "queue_max_concurrency",
-      "type": "None | dict[str, int]"
+      "type": "dict[str, int]"
      },
      {
       "alias": null,
@@ -6126,7 +6225,7 @@
       "default": "required",
       "metadata": [],
       "name": "slot_health",
-      "type": "Literal['all_serving', 'not_recorded', 'slots_down']"
+      "type": "Literal['all_serving', 'slots_down']"
      },
      {
       "alias": null,
@@ -6824,7 +6923,7 @@
       "name": "broker"
      },
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -6893,7 +6992,7 @@
       "name": "broker"
      },
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -7843,10 +7942,10 @@
     "kind": "enum",
     "members": {
      "ABSENT": "'ABSENT'",
-     "CUTOVER_REQUIRED": "'CUTOVER_REQUIRED'",
      "MATCH": "'MATCH'",
      "MISMATCH": "'MISMATCH'",
-     "UNKNOWN": "'UNKNOWN'"
+     "UNKNOWN": "'UNKNOWN'",
+     "ZERO_X": "'ZERO_X'"
     }
    },
    "type_params": []
@@ -8505,7 +8604,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.brokers.result_types.BrokerAsyncContext",
+   "defined_as": "horsies._catalog.broker_errors.BrokerAsyncContext",
    "kind": "class",
    "members": {
     "code": {
@@ -8543,7 +8642,7 @@
    "defined_as": "horsies.core.brokers.result_types.BrokerEnqueueError",
    "kind": "type alias",
    "type_params": [],
-   "value": "horsies.BrokerEnqueueFailed | horsies.BrokerEventLoopLimit | horsies.BrokerIdempotencyKeyConflict | horsies.BrokerInvalidInput | horsies.BrokerInvalidTaskOptions | horsies.BrokerPayloadMismatch"
+   "value": "horsies._catalog.broker_errors.BrokerCoreEnqueueError"
   },
   "horsies:BrokerEnqueueFailed": {
    "abstract": false,
@@ -8574,7 +8673,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.brokers.result_types.BrokerEnqueueFailed",
+   "defined_as": "horsies._catalog.broker_errors.BrokerEnqueueFailed",
    "kind": "class",
    "members": {
     "code": {
@@ -8635,7 +8734,7 @@
     ],
     "returns": "unannotated"
    },
-   "defined_as": "horsies.core.brokers.result_types.BrokerErrorCode",
+   "defined_as": "horsies._catalog.broker.BrokerErrorCode",
    "kind": "class",
    "members": {},
    "mro": [
@@ -8652,7 +8751,6 @@
      "CLOSE_FAILED": "'CLOSE_FAILED'",
      "DB_PING_FAILED": "'DB_PING_FAILED'",
      "ENQUEUE_FAILED": "'ENQUEUE_FAILED'",
-     "EVENT_LOOP_LIMIT": "'EVENT_LOOP_LIMIT'",
      "IDEMPOTENCY_KEY_CONFLICT": "'IDEMPOTENCY_KEY_CONFLICT'",
      "INVALID_INPUT": "'INVALID_INPUT'",
      "INVALID_JSON_PAYLOAD": "'INVALID_JSON_PAYLOAD'",
@@ -8660,7 +8758,6 @@
      "LISTENER_DISABLED": "'LISTENER_DISABLED'",
      "LISTENER_START_FAILED": "'LISTENER_START_FAILED'",
      "LISTENER_SUBSCRIBE_FAILED": "'LISTENER_SUBSCRIBE_FAILED'",
-     "LOOP_RUNNER_FAILED": "'LOOP_RUNNER_FAILED'",
      "MONITORING_QUERY_FAILED": "'MONITORING_QUERY_FAILED'",
      "NO_BROKER": "'NO_BROKER'",
      "NO_TYPE_AVAILABLE": "'NO_TYPE_AVAILABLE'",
@@ -8670,70 +8767,6 @@
      "WAIT_INSIDE_TASK": "'WAIT_INSIDE_TASK'",
      "WORKER_PING_FAILED": "'WORKER_PING_FAILED'"
     }
-   },
-   "type_params": []
-  },
-  "horsies:BrokerEventLoopLimit": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "message"
-     },
-     {
-      "annotation": "horsies.core.brokers.resources.EventLoopLimit",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "loop_limit"
-     }
-    ],
-    "returns": "None"
-   },
-   "defined_as": "horsies.core.brokers.result_types.BrokerEventLoopLimit",
-   "kind": "class",
-   "members": {
-    "code": {
-     "kind": "attribute",
-     "type": "horsies.BrokerErrorCode",
-     "value": "horsies.BrokerErrorCode.EVENT_LOOP_LIMIT"
-    },
-    "retryable": {
-     "kind": "attribute",
-     "type": "bool",
-     "value": "False"
-    }
-   },
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "fields": [
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "message",
-      "type": "str"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "loop_limit",
-      "type": "horsies.core.brokers.resources.EventLoopLimit"
-     }
-    ],
-    "frozen": true,
-    "kind": "dataclass",
-    "slots": true
    },
    "type_params": []
   },
@@ -8752,7 +8785,7 @@
       "name": "message"
      },
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "owner_task_id"
@@ -8760,7 +8793,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.brokers.result_types.BrokerIdempotencyKeyConflict",
+   "defined_as": "horsies._catalog.broker_errors.BrokerIdempotencyKeyConflict",
    "kind": "class",
    "members": {
     "code": {
@@ -8792,7 +8825,7 @@
       "init": true,
       "kw_only": false,
       "name": "owner_task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      }
     ],
     "frozen": true,
@@ -8824,7 +8857,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.brokers.result_types.BrokerInvalidInput",
+   "defined_as": "horsies._catalog.broker_errors.BrokerInvalidInput",
    "kind": "class",
    "members": {
     "code": {
@@ -8888,7 +8921,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.brokers.result_types.BrokerInvalidJsonPayload",
+   "defined_as": "horsies._catalog.broker_errors.BrokerInvalidJsonPayload",
    "kind": "class",
    "members": {
     "code": {
@@ -8952,7 +8985,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.brokers.result_types.BrokerInvalidTaskOptions",
+   "defined_as": "horsies._catalog.broker_errors.BrokerInvalidTaskOptions",
    "kind": "class",
    "members": {
     "code": {
@@ -9010,7 +9043,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.brokers.result_types.BrokerListenerDisabled",
+   "defined_as": "horsies._catalog.broker_errors.BrokerListenerDisabled",
    "kind": "class",
    "members": {
     "code": {
@@ -9036,70 +9069,6 @@
       "kw_only": false,
       "name": "message",
       "type": "str"
-     }
-    ],
-    "frozen": true,
-    "kind": "dataclass",
-    "slots": true
-   },
-   "type_params": []
-  },
-  "horsies:BrokerLoopRunnerFailed": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "message"
-     },
-     {
-      "annotation": "BaseException",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "exception"
-     }
-    ],
-    "returns": "None"
-   },
-   "defined_as": "horsies.core.brokers.result_types.BrokerLoopRunnerFailed",
-   "kind": "class",
-   "members": {
-    "code": {
-     "kind": "attribute",
-     "type": "horsies.BrokerErrorCode",
-     "value": "horsies.BrokerErrorCode.LOOP_RUNNER_FAILED"
-    },
-    "retryable": {
-     "kind": "attribute",
-     "type": "bool",
-     "value": "False"
-    }
-   },
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "fields": [
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "message",
-      "type": "str"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "exception",
-      "type": "BaseException"
      }
     ],
     "frozen": true,
@@ -9214,7 +9183,7 @@
    "defined_as": "horsies.core.brokers.result_types.BrokerOperationError",
    "kind": "type alias",
    "type_params": [],
-   "value": "horsies.BrokerAsyncContext | horsies.BrokerEnqueueFailed | horsies.BrokerEventLoopLimit | horsies.BrokerIdempotencyKeyConflict | horsies.BrokerInvalidInput | horsies.BrokerInvalidJsonPayload | horsies.BrokerInvalidTaskOptions | horsies.BrokerListenerDisabled | horsies.BrokerLoopRunnerFailed | horsies.BrokerNoTypeAvailable | horsies.BrokerNotAttached | horsies.BrokerOperationFailed | horsies.BrokerPayloadMismatch | horsies.BrokerWaitInsideTask"
+   "value": "horsies.BrokerNoTypeAvailable | horsies.BrokerNotAttached | horsies._catalog.broker_errors.BrokerCoreError"
   },
   "horsies:BrokerOperationFailed": {
    "abstract": false,
@@ -9251,7 +9220,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.brokers.result_types.BrokerOperationFailed",
+   "defined_as": "horsies._catalog.broker_errors.BrokerOperationFailed",
    "kind": "class",
    "members": {},
    "mro": [
@@ -9296,7 +9265,7 @@
    "type_params": []
   },
   "horsies:BrokerOperationFailedCode": {
-   "defined_as": "horsies.core.brokers.result_types.BrokerOperationFailedCode",
+   "defined_as": "horsies._catalog.broker_errors.BrokerOperationFailedCode",
    "kind": "type alias",
    "type_params": [],
    "value": "Literal[<BrokerErrorCode.CLEANUP_FAILED: 'CLEANUP_FAILED'>, <BrokerErrorCode.CLOSE_FAILED: 'CLOSE_FAILED'>, <BrokerErrorCode.DB_PING_FAILED: 'DB_PING_FAILED'>, <BrokerErrorCode.LISTENER_START_FAILED: 'LISTENER_START_FAILED'>, <BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED: 'LISTENER_SUBSCRIBE_FAILED'>, <BrokerErrorCode.MONITORING_QUERY_FAILED: 'MONITORING_QUERY_FAILED'>, <BrokerErrorCode.SCHEMA_INIT_FAILED: 'SCHEMA_INIT_FAILED'>, <BrokerErrorCode.TASK_INFO_QUERY_FAILED: 'TASK_INFO_QUERY_FAILED'>, <BrokerErrorCode.WORKER_PING_FAILED: 'WORKER_PING_FAILED'>]"
@@ -9318,7 +9287,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.brokers.result_types.BrokerPayloadMismatch",
+   "defined_as": "horsies._catalog.broker_errors.BrokerPayloadMismatch",
    "kind": "class",
    "members": {
     "code": {
@@ -9364,7 +9333,7 @@
    "defined_as": "horsies.core.brokers.result_types.BrokerSyncCallError",
    "kind": "type alias",
    "type_params": [],
-   "value": "horsies.BrokerAsyncContext | horsies.BrokerLoopRunnerFailed"
+   "value": "horsies.BrokerAsyncContext"
   },
   "horsies:BrokerWaitInsideTask": {
    "abstract": false,
@@ -9383,7 +9352,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.brokers.result_types.BrokerWaitInsideTask",
+   "defined_as": "horsies._catalog.broker_errors.BrokerWaitInsideTask",
    "kind": "class",
    "members": {
     "code": {
@@ -9831,20 +9800,23 @@
    "type_params": []
   },
   "horsies:ClassCapacity": {
-   "kind": "type form",
-   "text": "horsies.ClassBudgets | horsies.ClassCapacityNotRecorded"
-  },
-  "horsies:ClassCapacityNotRecorded": {
    "abstract": false,
    "bases": [
     "object"
    ],
    "constructor": {
     "async": "sync",
-    "parameters": [],
+    "parameters": [
+     {
+      "annotation": "tuple[horsies.ClassBudget, ...]",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "budgets"
+     }
+    ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.models.health.ClassCapacityNotRecorded",
+   "defined_as": "horsies.core.models.health.ClassBudgets",
    "kind": "class",
    "members": {},
    "mro": [
@@ -9852,12 +9824,24 @@
    ],
    "protocol": false,
    "shape": {
-    "fields": [],
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "budgets",
+      "type": "tuple[horsies.ClassBudget, ...]"
+     }
+    ],
     "frozen": true,
     "kind": "dataclass",
     "slots": true
    },
    "type_params": []
+  },
+  "horsies:ClassCapacityNotRecorded": {
+   "cause": "module horsies has no name ClassCapacityNotRecorded",
+   "kind": "absent"
   },
   "horsies:ClassCoverage": {
    "abstract": false,
@@ -9878,12 +9862,6 @@
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "live_workers"
-     },
-     {
-      "annotation": "tuple[horsies.ClassesNotRecorded, ...]",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "not_recorded"
      },
      {
       "annotation": "tuple[horsies.StreamCoverage, ...]",
@@ -9916,13 +9894,6 @@
       "kw_only": false,
       "name": "live_workers",
       "type": "int"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "not_recorded",
-      "type": "tuple[horsies.ClassesNotRecorded, ...]"
      },
      {
       "default": "required",
@@ -9963,12 +9934,6 @@
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "workers"
-     },
-     {
-      "annotation": "tuple[horsies.ClassesNotRecorded, ...]",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "not_recorded"
      }
     ],
     "returns": "None"
@@ -10002,66 +9967,6 @@
       "kw_only": false,
       "name": "workers",
       "type": "tuple[horsies.WorkerClassLoad, ...]"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "not_recorded",
-      "type": "tuple[horsies.ClassesNotRecorded, ...]"
-     }
-    ],
-    "frozen": true,
-    "kind": "dataclass",
-    "slots": true
-   },
-   "type_params": []
-  },
-  "horsies:ClassesNotRecorded": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "worker_id"
-     },
-     {
-      "annotation": "datetime.datetime",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "snapshot_at"
-     }
-    ],
-    "returns": "None"
-   },
-   "defined_as": "horsies.core.models.class_coverage.ClassesNotRecorded",
-   "kind": "class",
-   "members": {},
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "fields": [
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "worker_id",
-      "type": "str"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "snapshot_at",
-      "type": "datetime.datetime"
      }
     ],
     "frozen": true,
@@ -10092,7 +9997,7 @@
     ],
     "returns": "unannotated"
    },
-   "defined_as": "horsies.core.models.tasks.ContractCode",
+   "defined_as": "horsies._catalog.task_codes.ContractCode",
    "kind": "class",
    "members": {},
    "mro": [
@@ -10108,6 +10013,324 @@
      "RETURN_TYPE_MISMATCH": "'RETURN_TYPE_MISMATCH'",
      "WORKFLOW_CTX_MISSING_ID": "'WORKFLOW_CTX_MISSING_ID'"
     }
+   },
+   "type_params": []
+  },
+  "horsies:CoreCallTimedOut": {
+   "abstract": false,
+   "bases": [
+    "horsies._core.CoreError"
+   ],
+   "constructor": {
+    "unavailable": "ValueError: no signature found for builtin type <class 'horsies._core.CoreCallTimedOut'>"
+   },
+   "defined_as": "horsies._core.CoreCallTimedOut",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "horsies._core.CoreError",
+    "Exception",
+    "BaseException",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": []
+  },
+  "horsies:CoreConnectionError": {
+   "abstract": false,
+   "bases": [
+    "horsies._core.CoreDatabaseError"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "subject"
+     },
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "message"
+     },
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "retryable"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies._core.CoreConnectionError",
+   "kind": "class",
+   "members": {
+    "message": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'message' of 'horsies._core.CoreFailure' objects>"
+    },
+    "retryable": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'retryable' of 'horsies._core.CoreDatabaseError' objects>"
+    },
+    "subject": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'subject' of 'horsies._core.CoreFailure' objects>"
+    }
+   },
+   "mro": [
+    "horsies._core.CoreDatabaseError",
+    "horsies._core.CoreFailure",
+    "Exception",
+    "BaseException",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": []
+  },
+  "horsies:CoreContractViolation": {
+   "abstract": false,
+   "bases": [
+    "horsies._core.CoreFailure"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "subject"
+     },
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "message"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies._core.CoreContractViolation",
+   "kind": "class",
+   "members": {
+    "message": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'message' of 'horsies._core.CoreFailure' objects>"
+    },
+    "subject": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'subject' of 'horsies._core.CoreFailure' objects>"
+    }
+   },
+   "mro": [
+    "horsies._core.CoreFailure",
+    "Exception",
+    "BaseException",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": []
+  },
+  "horsies:CorePreconditionFailed": {
+   "abstract": false,
+   "bases": [
+    "horsies._core.CoreFailure"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "subject"
+     },
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "message"
+     },
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "retryable"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies._core.CorePreconditionFailed",
+   "kind": "class",
+   "members": {
+    "message": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'message' of 'horsies._core.CoreFailure' objects>"
+    },
+    "retryable": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'retryable' of 'horsies._core.CorePreconditionFailed' objects>"
+    },
+    "subject": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'subject' of 'horsies._core.CoreFailure' objects>"
+    }
+   },
+   "mro": [
+    "horsies._core.CoreFailure",
+    "Exception",
+    "BaseException",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": []
+  },
+  "horsies:CoreServerError": {
+   "abstract": false,
+   "bases": [
+    "horsies._core.CoreDatabaseError"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "subject"
+     },
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "sqlstate"
+     },
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "message"
+     },
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "retryable"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies._core.CoreServerError",
+   "kind": "class",
+   "members": {
+    "message": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'message' of 'horsies._core.CoreFailure' objects>"
+    },
+    "retryable": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'retryable' of 'horsies._core.CoreDatabaseError' objects>"
+    },
+    "sqlstate": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'sqlstate' of 'horsies._core.CoreServerError' objects>"
+    },
+    "subject": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'subject' of 'horsies._core.CoreFailure' objects>"
+    }
+   },
+   "mro": [
+    "horsies._core.CoreDatabaseError",
+    "horsies._core.CoreFailure",
+    "Exception",
+    "BaseException",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": []
+  },
+  "horsies:CoreStartFailed": {
+   "abstract": false,
+   "bases": [
+    "horsies._core.CoreError"
+   ],
+   "constructor": {
+    "unavailable": "ValueError: no signature found for builtin type <class 'horsies._core.CoreStartFailed'>"
+   },
+   "defined_as": "horsies._core.CoreStartFailed",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "horsies._core.CoreError",
+    "Exception",
+    "BaseException",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": []
+  },
+  "horsies:CoreStopped": {
+   "abstract": false,
+   "bases": [
+    "horsies._core.CoreError"
+   ],
+   "constructor": {
+    "unavailable": "ValueError: no signature found for builtin type <class 'horsies._core.CoreStopped'>"
+   },
+   "defined_as": "horsies._core.CoreStopped",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "horsies._core.CoreError",
+    "Exception",
+    "BaseException",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
    },
    "type_params": []
   },
@@ -10823,7 +11046,24 @@
    },
    "defined_as": "horsies.core.models.schedule.DailySchedule",
    "kind": "class",
-   "members": {},
+   "members": {
+    "validate_time_of_day": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       }
+      ],
+      "returns": "typing.Self"
+     }
+    }
+   },
    "mro": [
     "pydantic.main.BaseModel",
     "object"
@@ -11851,6 +12091,30 @@
    },
    "type_params": []
   },
+  "horsies:ForkedAfterCoreStart": {
+   "abstract": false,
+   "bases": [
+    "horsies._core.CoreError"
+   ],
+   "constructor": {
+    "unavailable": "ValueError: no signature found for builtin type <class 'horsies._core.ForkedAfterCoreStart'>"
+   },
+   "defined_as": "horsies._core.ForkedAfterCoreStart",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "horsies._core.CoreError",
+    "Exception",
+    "BaseException",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": []
+  },
   "horsies:HandleAsyncContext": {
    "abstract": false,
    "bases": [
@@ -11874,7 +12138,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.models.workflow.handle_types.HandleAsyncContext",
+   "defined_as": "horsies._catalog.workflow_handle_errors.HandleAsyncContext",
    "kind": "class",
    "members": {
     "code": {
@@ -11950,7 +12214,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.models.workflow.handle_types.HandleDbOperationFailed",
+   "defined_as": "horsies._catalog.workflow_handle_errors.HandleDbOperationFailed",
    "kind": "class",
    "members": {
     "code": {
@@ -12018,7 +12282,7 @@
     ],
     "returns": "unannotated"
    },
-   "defined_as": "horsies.core.models.workflow.handle_types.HandleErrorCode",
+   "defined_as": "horsies._catalog.workflow_handle.HandleErrorCode",
    "kind": "class",
    "members": {},
    "mro": [
@@ -12032,8 +12296,6 @@
     "members": {
      "ASYNC_CONTEXT": "'ASYNC_CONTEXT'",
      "DB_OPERATION_FAILED": "'DB_OPERATION_FAILED'",
-     "EVENT_LOOP_LIMIT": "'EVENT_LOOP_LIMIT'",
-     "LOOP_RUNNER_FAILED": "'LOOP_RUNNER_FAILED'",
      "RESUME_RECOVERY_FAILED": "'RESUME_RECOVERY_FAILED'",
      "STORED_DATA_INVALID": "'STORED_DATA_INVALID'",
      "WORKFLOW_NOT_FOUND": "'WORKFLOW_NOT_FOUND'"
@@ -12042,6 +12304,10 @@
    "type_params": []
   },
   "horsies:HandleEventLoopLimit": {
+   "cause": "module horsies has no name HandleEventLoopLimit",
+   "kind": "absent"
+  },
+  "horsies:HandleInvalidWorkflowId": {
    "abstract": false,
    "bases": [
     "object"
@@ -12059,31 +12325,20 @@
       "annotation": "str",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "workflow_id"
+      "name": "workflow_id_text"
      },
      {
-      "annotation": "horsies.core.brokers.resources.EventLoopLimit",
+      "annotation": "ValueError",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "loop_limit"
+      "name": "exception"
      }
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.models.workflow.handle_types.HandleEventLoopLimit",
+   "defined_as": "horsies.core.models.workflow.handle_types.HandleInvalidWorkflowId",
    "kind": "class",
-   "members": {
-    "code": {
-     "kind": "attribute",
-     "type": "horsies.HandleErrorCode",
-     "value": "horsies.HandleErrorCode.EVENT_LOOP_LIMIT"
-    },
-    "retryable": {
-     "kind": "attribute",
-     "type": "bool",
-     "value": "False"
-    }
-   },
+   "members": {},
    "mro": [
     "object"
    ],
@@ -12101,15 +12356,15 @@
       "default": "required",
       "init": true,
       "kw_only": false,
-      "name": "workflow_id",
+      "name": "workflow_id_text",
       "type": "str"
      },
      {
       "default": "required",
       "init": true,
       "kw_only": false,
-      "name": "loop_limit",
-      "type": "horsies.core.brokers.resources.EventLoopLimit"
+      "name": "exception",
+      "type": "ValueError"
      }
     ],
     "frozen": true,
@@ -12119,87 +12374,14 @@
    "type_params": []
   },
   "horsies:HandleLoopRunnerFailed": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "message"
-     },
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "workflow_id"
-     },
-     {
-      "annotation": "BaseException",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "exception"
-     }
-    ],
-    "returns": "None"
-   },
-   "defined_as": "horsies.core.models.workflow.handle_types.HandleLoopRunnerFailed",
-   "kind": "class",
-   "members": {
-    "code": {
-     "kind": "attribute",
-     "type": "horsies.HandleErrorCode",
-     "value": "horsies.HandleErrorCode.LOOP_RUNNER_FAILED"
-    },
-    "retryable": {
-     "kind": "attribute",
-     "type": "bool",
-     "value": "False"
-    }
-   },
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "fields": [
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "message",
-      "type": "str"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "workflow_id",
-      "type": "str"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "exception",
-      "type": "BaseException"
-     }
-    ],
-    "frozen": true,
-    "kind": "dataclass",
-    "slots": true
-   },
-   "type_params": []
+   "cause": "module horsies has no name HandleLoopRunnerFailed",
+   "kind": "absent"
   },
   "horsies:HandleOperationError": {
    "defined_as": "horsies.core.models.workflow.handle_types.HandleOperationError",
    "kind": "type alias",
    "type_params": [],
-   "value": "horsies.HandleAsyncContext | horsies.HandleDbOperationFailed | horsies.HandleEventLoopLimit | horsies.HandleLoopRunnerFailed | horsies.HandleResumeRecoveryFailed | horsies.HandleStoredDataInvalid | horsies.HandleWorkflowNotFound"
+   "value": "horsies._catalog.workflow_handle_errors.HandleCoreError"
   },
   "horsies:HandleResult": {
    "defined_as": "horsies.core.models.workflow.handle_types.HandleResult",
@@ -12238,7 +12420,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.models.workflow.handle_types.HandleResumeRecoveryFailed",
+   "defined_as": "horsies._catalog.workflow_handle_errors.HandleResumeRecoveryFailed",
    "kind": "class",
    "members": {
     "code": {
@@ -12315,7 +12497,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.models.workflow.handle_types.HandleStoredDataInvalid",
+   "defined_as": "horsies._catalog.workflow_handle_errors.HandleStoredDataInvalid",
    "kind": "class",
    "members": {
     "code": {
@@ -12386,7 +12568,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.models.workflow.handle_types.HandleWorkflowNotFound",
+   "defined_as": "horsies._catalog.workflow_handle_errors.HandleWorkflowNotFound",
    "kind": "class",
    "members": {
     "code": {
@@ -12666,7 +12848,7 @@
         "name": "self"
        },
        {
-        "annotation": "str",
+        "annotation": "uuid.UUID",
         "default": "required",
         "kind": "POSITIONAL_OR_KEYWORD",
         "name": "task_id"
@@ -12694,7 +12876,7 @@
         "name": "self"
        },
        {
-        "annotation": "str",
+        "annotation": "uuid.UUID",
         "default": "required",
         "kind": "POSITIONAL_OR_KEYWORD",
         "name": "task_id"
@@ -12722,7 +12904,7 @@
         "name": "self"
        },
        {
-        "annotation": "str",
+        "annotation": "uuid.UUID",
         "default": "required",
         "kind": "POSITIONAL_OR_KEYWORD",
         "name": "task_id"
@@ -12750,7 +12932,7 @@
         "name": "self"
        },
        {
-        "annotation": "str",
+        "annotation": "uuid.UUID",
         "default": "required",
         "kind": "POSITIONAL_OR_KEYWORD",
         "name": "task_id"
@@ -12794,7 +12976,7 @@
         "name": "self"
        },
        {
-        "annotation": "str",
+        "annotation": "uuid.UUID",
         "default": "required",
         "kind": "POSITIONAL_OR_KEYWORD",
         "name": "task_id"
@@ -12834,7 +13016,7 @@
         "name": "self"
        },
        {
-        "annotation": "str",
+        "annotation": "uuid.UUID",
         "default": "required",
         "kind": "POSITIONAL_OR_KEYWORD",
         "name": "task_id"
@@ -14841,7 +15023,24 @@
    },
    "defined_as": "horsies.core.models.schedule.MonthlySchedule",
    "kind": "class",
-   "members": {},
+   "members": {
+    "validate_time_of_day": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       }
+      ],
+      "returns": "typing.Self"
+     }
+    }
+   },
    "mro": [
     "pydantic.main.BaseModel",
     "object"
@@ -15112,7 +15311,7 @@
     "parameters": [],
     "returns": "None"
    },
-   "defined_as": "horsies.core.types.error_detail.NoCause",
+   "defined_as": "horsies._catalog.error_detail.NoCause",
    "kind": "class",
    "members": {},
    "mro": [
@@ -16064,7 +16263,7 @@
     ],
     "returns": "unannotated"
    },
-   "defined_as": "horsies.core.models.tasks.OperationalErrorCode",
+   "defined_as": "horsies._catalog.task_codes.OperationalErrorCode",
    "kind": "class",
    "members": {},
    "mro": [
@@ -16088,7 +16287,8 @@
      "WORKER_RESOLUTION_ERROR": "'WORKER_RESOLUTION_ERROR'",
      "WORKER_SERIALIZATION_ERROR": "'WORKER_SERIALIZATION_ERROR'",
      "WORKFLOW_ENQUEUE_FAILED": "'WORKFLOW_ENQUEUE_FAILED'",
-     "WORKFLOW_RECOVERY_LIMIT_REACHED": "'WORKFLOW_RECOVERY_LIMIT_REACHED'"
+     "WORKFLOW_RECOVERY_LIMIT_REACHED": "'WORKFLOW_RECOVERY_LIMIT_REACHED'",
+     "WORKFLOW_START_INCOMPLETE": "'WORKFLOW_START_INCOMPLETE'"
     }
    },
    "type_params": []
@@ -16111,7 +16311,7 @@
     ],
     "returns": "unannotated"
    },
-   "defined_as": "horsies.core.models.tasks.OutcomeCode",
+   "defined_as": "horsies._catalog.task_codes.OutcomeCode",
    "kind": "class",
    "members": {},
    "mro": [
@@ -16248,13 +16448,13 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "Annotated[None | int, FieldInfo(annotation=NoneType, required=True, metadata=[Ge(ge=1)])]",
+      "annotation": "Annotated[None | int, FieldInfo(annotation=NoneType, required=True, metadata=[Ge(ge=1), Le(le=18446744073709551615)])]",
       "default": "1048576",
       "kind": "KEYWORD_ONLY",
       "name": "warn_bytes"
      },
      {
-      "annotation": "Annotated[None | int, FieldInfo(annotation=NoneType, required=True, metadata=[Ge(ge=1)])]",
+      "annotation": "Annotated[None | int, FieldInfo(annotation=NoneType, required=True, metadata=[Ge(ge=1), Le(le=18446744073709551615)])]",
       "default": "None",
       "kind": "KEYWORD_ONLY",
       "name": "reject_bytes"
@@ -16281,7 +16481,8 @@
       "alias": null,
       "default": "1048576",
       "metadata": [
-       "Ge(ge=1)"
+       "Ge(ge=1)",
+       "Le(le=18446744073709551615)"
       ],
       "name": "warn_bytes",
       "type": "None | int"
@@ -16290,7 +16491,8 @@
       "alias": null,
       "default": "None",
       "metadata": [
-       "Ge(ge=1)"
+       "Ge(ge=1)",
+       "Le(le=18446744073709551615)"
       ],
       "name": "reject_bytes",
       "type": "None | int"
@@ -16681,6 +16883,21 @@
       "returns": "pydantic.types.SecretStr"
      }
     },
+    "validate_max_overflow": {
+     "kind": "classmethod",
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "int",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "v"
+       }
+      ],
+      "returns": "int"
+     }
+    },
     "validate_pgbouncer_configuration": {
      "kind": "method",
      "overloads": [],
@@ -16697,6 +16914,51 @@
       "returns": "horsies.PostgresConfig"
      }
     },
+    "validate_pool_recycle": {
+     "kind": "classmethod",
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "int",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "v"
+       }
+      ],
+      "returns": "int"
+     }
+    },
+    "validate_pool_size": {
+     "kind": "classmethod",
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "int",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "v"
+       }
+      ],
+      "returns": "int"
+     }
+    },
+    "validate_pool_timeout": {
+     "kind": "classmethod",
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "int",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "v"
+       }
+      ],
+      "returns": "int"
+     }
+    },
     "validate_session_database_url": {
      "kind": "classmethod",
      "signature": {
@@ -16710,6 +16972,22 @@
        }
       ],
       "returns": "None | pydantic.types.SecretStr"
+     }
+    },
+    "validate_tcp_settings": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       }
+      ],
+      "returns": "horsies.PostgresConfig"
      }
     },
     "with_exact_pool": {
@@ -17310,19 +17588,19 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "new_task_id"
      },
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "source_task_id"
      },
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "rerun_root_task_id"
@@ -17344,21 +17622,21 @@
       "init": true,
       "kw_only": false,
       "name": "new_task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
       "init": true,
       "kw_only": false,
       "name": "source_task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
       "init": true,
       "kw_only": false,
       "name": "rerun_root_task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      }
     ],
     "frozen": true,
@@ -17376,7 +17654,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -17404,7 +17682,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -17429,7 +17707,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -17439,12 +17717,6 @@
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "disposition"
-     },
-     {
-      "annotation": "None | str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "reference_locator"
      }
     ],
     "returns": "None"
@@ -17463,7 +17735,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -17471,13 +17743,6 @@
       "kw_only": false,
       "name": "disposition",
       "type": "str"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "reference_locator",
-      "type": "None | str"
      }
     ],
     "frozen": true,
@@ -17495,13 +17760,13 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
      },
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "reserved_by_task_id"
@@ -17523,14 +17788,14 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
       "init": true,
       "kw_only": false,
       "name": "reserved_by_task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      }
     ],
     "frozen": true,
@@ -17548,7 +17813,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "existing_task_id"
@@ -17570,7 +17835,7 @@
       "init": true,
       "kw_only": false,
       "name": "existing_task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      }
     ],
     "frozen": true,
@@ -17588,7 +17853,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -17616,7 +17881,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -17647,7 +17912,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -17675,7 +17940,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -17700,13 +17965,13 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
      },
      {
-      "annotation": "horsies.core.history.errors.HistoryContractError",
+      "annotation": "horsies._catalog.history_errors.HistoryContractError",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "exception"
@@ -17728,14 +17993,14 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
       "init": true,
       "kw_only": false,
       "name": "exception",
-      "type": "horsies.core.history.errors.HistoryContractError"
+      "type": "horsies._catalog.history_errors.HistoryContractError"
      }
     ],
     "frozen": true,
@@ -17753,7 +18018,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -17775,7 +18040,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      }
     ],
     "frozen": true,
@@ -17793,7 +18058,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "source_task_id"
@@ -17827,7 +18092,7 @@
       "init": true,
       "kw_only": false,
       "name": "source_task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -17990,6 +18255,22 @@
       "returns": "typing.Self"
      }
     },
+    "paused_expiry_age_is_within_the_bound": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       }
+      ],
+      "returns": "typing.Self"
+     }
+    },
     "queue_class": {
      "kind": "method",
      "overloads": [],
@@ -18009,7 +18290,7 @@
         "name": "queue_name"
        }
       ],
-      "returns": "None | horsies.core.history.periods.RetentionClassKey"
+      "returns": "None | horsies._catalog.retention_class.RetentionClassKey"
      }
     },
     "registrable_classes": {
@@ -18025,7 +18306,7 @@
         "name": "self"
        }
       ],
-      "returns": "tuple[tuple[horsies.core.history.periods.RetentionClassKey, datetime.timedelta], ...]"
+      "returns": "tuple[tuple[horsies._catalog.retention_class.RetentionClassKey, datetime.timedelta], ...]"
      }
     },
     "reject_removed_retention_classes": {
@@ -18202,7 +18483,7 @@
     ],
     "returns": "unannotated"
    },
-   "defined_as": "horsies.core.models.tasks.RetrievalCode",
+   "defined_as": "horsies._catalog.task_codes.RetrievalCode",
    "kind": "class",
    "members": {},
    "mro": [
@@ -18215,7 +18496,6 @@
     "kind": "enum",
     "members": {
      "ASYNC_CONTEXT": "'ASYNC_CONTEXT'",
-     "EVENT_LOOP_LIMIT": "'EVENT_LOOP_LIMIT'",
      "INVALID_INPUT": "'INVALID_INPUT'",
      "RESULT_NOT_AVAILABLE": "'RESULT_NOT_AVAILABLE'",
      "RESULT_NOT_READY": "'RESULT_NOT_READY'",
@@ -18536,6 +18816,40 @@
   "horsies:SchedulePattern": {
    "kind": "type form",
    "text": "horsies.CronSchedule | horsies.DailySchedule | horsies.HourlySchedule | horsies.IntervalSchedule | horsies.MonthlySchedule | horsies.WeeklySchedule"
+  },
+  "horsies:SendKind": {
+   "abstract": false,
+   "bases": [
+    "enum.Enum"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "VAR_POSITIONAL",
+      "name": "values"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies.core.brokers.enqueue_task.SendKind",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "enum.Enum",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "kind": "enum",
+    "members": {
+     "FIRST": "'FIRST'",
+     "REPEAT": "'REPEAT'"
+    }
+   },
+   "type_params": []
   },
   "horsies:SharedAsyncChildStartHook": {
    "kind": "type form",
@@ -19025,32 +19339,11 @@
   },
   "horsies:SlotHealth": {
    "kind": "type form",
-   "text": "horsies.AllSlotsServing | horsies.SlotHealthNotRecorded | horsies.SlotsDown"
+   "text": "horsies.AllSlotsServing | horsies.SlotsDown"
   },
   "horsies:SlotHealthNotRecorded": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [],
-    "returns": "None"
-   },
-   "defined_as": "horsies.core.models.health.SlotHealthNotRecorded",
-   "kind": "class",
-   "members": {},
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "fields": [],
-    "frozen": true,
-    "kind": "dataclass",
-    "slots": true
-   },
-   "type_params": []
+   "cause": "module horsies has no name SlotHealthNotRecorded",
+   "kind": "absent"
   },
   "horsies:SlotsDown": {
    "abstract": false,
@@ -19937,7 +20230,7 @@
     ],
     "returns": "unannotated"
    },
-   "defined_as": "horsies.core.history.reads.detail.TaskAbsenceReason",
+   "defined_as": "horsies._catalog.history.TaskAbsenceReason",
    "kind": "class",
    "members": {},
    "mro": [
@@ -19965,7 +20258,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -20059,7 +20352,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -20170,7 +20463,7 @@
     ],
     "returns": "unannotated"
    },
-   "defined_as": "horsies.core.types.status.TaskAttemptOutcome",
+   "defined_as": "horsies._catalog.status.TaskAttemptOutcome",
    "kind": "class",
    "members": {},
    "mro": [
@@ -20283,7 +20576,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -20469,7 +20762,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -20629,7 +20922,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -21418,7 +21711,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -21438,7 +21731,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.models.task_send_types.TaskSendAsyncContext",
+   "defined_as": "horsies._catalog.task_send_errors.TaskSendAsyncContext",
    "kind": "class",
    "members": {
     "code": {
@@ -21458,7 +21751,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -21490,7 +21783,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -21522,7 +21815,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.models.task_send_types.TaskSendEnqueueFailed",
+   "defined_as": "horsies._catalog.task_send_errors.TaskSendEnqueueFailed",
    "kind": "class",
    "members": {
     "code": {
@@ -21542,7 +21835,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -21583,7 +21876,7 @@
    "defined_as": "horsies.core.models.task_send_types.TaskSendError",
    "kind": "type alias",
    "type_params": [],
-   "value": "horsies.TaskSendAsyncContext | horsies.TaskSendEnqueueFailed | horsies.TaskSendEventLoopLimit | horsies.TaskSendIdempotencyKeyConflict | horsies.TaskSendLoopRunnerFailed | horsies.TaskSendPayloadMismatch | horsies.TaskSendPayloadTooLarge | horsies.TaskSendSuppressed | horsies.TaskSendValidationFailed"
+   "value": "horsies._catalog.task_send_errors.TaskSendCoreError"
   },
   "horsies:TaskSendErrorCode": {
    "abstract": false,
@@ -21603,7 +21896,7 @@
     ],
     "returns": "unannotated"
    },
-   "defined_as": "horsies.core.models.task_send_types.TaskSendErrorCode",
+   "defined_as": "horsies._catalog.task_send.TaskSendErrorCode",
    "kind": "class",
    "members": {},
    "mro": [
@@ -21617,9 +21910,7 @@
     "members": {
      "ASYNC_CONTEXT": "'ASYNC_CONTEXT'",
      "ENQUEUE_FAILED": "'ENQUEUE_FAILED'",
-     "EVENT_LOOP_LIMIT": "'EVENT_LOOP_LIMIT'",
      "IDEMPOTENCY_KEY_CONFLICT": "'IDEMPOTENCY_KEY_CONFLICT'",
-     "LOOP_RUNNER_FAILED": "'LOOP_RUNNER_FAILED'",
      "PAYLOAD_MISMATCH": "'PAYLOAD_MISMATCH'",
      "PAYLOAD_TOO_LARGE": "'PAYLOAD_TOO_LARGE'",
      "SEND_SUPPRESSED": "'SEND_SUPPRESSED'",
@@ -21629,50 +21920,8 @@
    "type_params": []
   },
   "horsies:TaskSendEventLoopLimit": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "message"
-     }
-    ],
-    "returns": "None"
-   },
-   "defined_as": "horsies.core.models.task_send_types.TaskSendEventLoopLimit",
-   "kind": "class",
-   "members": {
-    "code": {
-     "kind": "attribute",
-     "type": "horsies.TaskSendErrorCode",
-     "value": "horsies.TaskSendErrorCode.EVENT_LOOP_LIMIT"
-    }
-   },
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "fields": [
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "message",
-      "type": "str"
-     }
-    ],
-    "frozen": true,
-    "kind": "dataclass",
-    "slots": true
-   },
-   "type_params": []
+   "cause": "module horsies has no name TaskSendEventLoopLimit",
+   "kind": "absent"
   },
   "horsies:TaskSendIdempotencyKeyConflict": {
    "abstract": false,
@@ -21683,7 +21932,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -21701,7 +21950,7 @@
       "name": "message"
      },
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "owner_task_id"
@@ -21709,7 +21958,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.models.task_send_types.TaskSendIdempotencyKeyConflict",
+   "defined_as": "horsies._catalog.task_send_errors.TaskSendIdempotencyKeyConflict",
    "kind": "class",
    "members": {
     "code": {
@@ -21729,7 +21978,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -21750,7 +21999,7 @@
       "init": true,
       "kw_only": false,
       "name": "owner_task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      }
     ],
     "frozen": true,
@@ -21760,89 +22009,8 @@
    "type_params": []
   },
   "horsies:TaskSendLoopRunnerFailed": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "task_id"
-     },
-     {
-      "annotation": "horsies.TaskSendPayload",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "payload"
-     },
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "message"
-     },
-     {
-      "annotation": "BaseException",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "exception"
-     }
-    ],
-    "returns": "None"
-   },
-   "defined_as": "horsies.core.models.task_send_types.TaskSendLoopRunnerFailed",
-   "kind": "class",
-   "members": {
-    "code": {
-     "kind": "attribute",
-     "type": "horsies.TaskSendErrorCode",
-     "value": "horsies.TaskSendErrorCode.LOOP_RUNNER_FAILED"
-    }
-   },
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "fields": [
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "task_id",
-      "type": "str"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "payload",
-      "type": "horsies.TaskSendPayload"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "message",
-      "type": "str"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "exception",
-      "type": "BaseException"
-     }
-    ],
-    "frozen": true,
-    "kind": "dataclass",
-    "slots": true
-   },
-   "type_params": []
+   "cause": "module horsies has no name TaskSendLoopRunnerFailed",
+   "kind": "absent"
   },
   "horsies:TaskSendOptions": {
    "abstract": true,
@@ -22040,13 +22208,7 @@
       "annotation": "None | str",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "args_json"
-     },
-     {
-      "annotation": "None | str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "kwargs_json"
+      "name": "input_json"
      },
      {
       "annotation": "datetime.datetime",
@@ -22073,19 +22235,13 @@
       "name": "task_options"
      },
      {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "enqueue_sha"
-     },
-     {
       "annotation": "None | str",
       "default": "None",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "idempotency_key"
      },
      {
-      "annotation": "None | horsies.core.history.periods.RetentionClassKey",
+      "annotation": "None | horsies._catalog.retention_class.RetentionClassKey",
       "default": "'standard_30d'",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "retention_class_key"
@@ -22093,7 +22249,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.models.task_send_types.TaskSendPayload",
+   "defined_as": "horsies._catalog.task_send_errors.TaskSendPayload",
    "kind": "class",
    "members": {},
    "mro": [
@@ -22127,14 +22283,7 @@
       "default": "required",
       "init": true,
       "kw_only": false,
-      "name": "args_json",
-      "type": "None | str"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "kwargs_json",
+      "name": "input_json",
       "type": "None | str"
      },
      {
@@ -22166,13 +22315,6 @@
       "type": "None | str"
      },
      {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "enqueue_sha",
-      "type": "str"
-     },
-     {
       "default": "None",
       "init": true,
       "kw_only": false,
@@ -22184,7 +22326,7 @@
       "init": true,
       "kw_only": false,
       "name": "retention_class_key",
-      "type": "None | horsies.core.history.periods.RetentionClassKey"
+      "type": "None | horsies._catalog.retention_class.RetentionClassKey"
      }
     ],
     "frozen": true,
@@ -22202,7 +22344,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -22222,7 +22364,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.models.task_send_types.TaskSendPayloadMismatch",
+   "defined_as": "horsies._catalog.task_send_errors.TaskSendPayloadMismatch",
    "kind": "class",
    "members": {
     "code": {
@@ -22242,7 +22384,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -22294,7 +22436,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.models.task_send_types.TaskSendPayloadTooLarge",
+   "defined_as": "horsies._catalog.task_send_errors.TaskSendPayloadTooLarge",
    "kind": "class",
    "members": {
     "code": {
@@ -22349,7 +22491,7 @@
    "defined_as": "horsies.core.models.task_send_types.TaskSendRetryable",
    "kind": "type alias",
    "type_params": [],
-   "value": "horsies.TaskSendAsyncContext | horsies.TaskSendEnqueueFailed | horsies.TaskSendIdempotencyKeyConflict | horsies.TaskSendLoopRunnerFailed"
+   "value": "horsies.TaskSendAsyncContext | horsies.TaskSendEnqueueFailed | horsies.TaskSendIdempotencyKeyConflict"
   },
   "horsies:TaskSendSuppressed": {
    "abstract": false,
@@ -22368,7 +22510,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.models.task_send_types.TaskSendSuppressed",
+   "defined_as": "horsies._catalog.task_send_errors.TaskSendSuppressed",
    "kind": "class",
    "members": {
     "code": {
@@ -22420,7 +22562,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.models.task_send_types.TaskSendValidationFailed",
+   "defined_as": "horsies._catalog.task_send_errors.TaskSendValidationFailed",
    "kind": "class",
    "members": {
     "code": {
@@ -22473,7 +22615,7 @@
     ],
     "returns": "unannotated"
    },
-   "defined_as": "horsies.core.types.status.TaskStatus",
+   "defined_as": "horsies._catalog.status.TaskStatus",
    "kind": "class",
    "members": {
     "is_terminal": {
@@ -22523,6 +22665,30 @@
     "frozen": true,
     "kind": "dataclass",
     "slots": true
+   },
+   "type_params": []
+  },
+  "horsies:TooManyPendingCalls": {
+   "abstract": false,
+   "bases": [
+    "horsies._core.CoreError"
+   ],
+   "constructor": {
+    "unavailable": "ValueError: no signature found for builtin type <class 'horsies._core.TooManyPendingCalls'>"
+   },
+   "defined_as": "horsies._core.TooManyPendingCalls",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "horsies._core.CoreError",
+    "Exception",
+    "BaseException",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
    },
    "type_params": []
   },
@@ -22705,6 +22871,22 @@
    "defined_as": "horsies.core.models.schedule.WeeklySchedule",
    "kind": "class",
    "members": {
+    "validate_time_of_day": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       }
+      ],
+      "returns": "typing.Self"
+     }
+    },
     "validate_unique_days": {
      "kind": "method",
      "overloads": [],
@@ -23269,19 +23451,19 @@
       "name": "queues"
      },
      {
-      "annotation": "None | dict[str, int]",
+      "annotation": "dict[str, int]",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "queue_priorities"
      },
      {
-      "annotation": "None | dict[str, int]",
+      "annotation": "dict[str, int]",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "queue_max_concurrency"
      },
      {
-      "annotation": "None | dict[str, typing.Any]",
+      "annotation": "dict[str, typing.Any]",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "recovery_config"
@@ -23329,13 +23511,13 @@
       "name": "worker_started_at"
      },
      {
-      "annotation": "horsies.AllSlotsServing | horsies.SlotHealthNotRecorded | horsies.SlotsDown",
+      "annotation": "horsies.AllSlotsServing | horsies.SlotsDown",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "slot_health"
      },
      {
-      "annotation": "horsies.ClassBudgets | horsies.ClassCapacityNotRecorded",
+      "annotation": "horsies.ClassBudgets",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "class_capacity"
@@ -23420,21 +23602,21 @@
       "init": true,
       "kw_only": false,
       "name": "queue_priorities",
-      "type": "None | dict[str, int]"
+      "type": "dict[str, int]"
      },
      {
       "default": "required",
       "init": true,
       "kw_only": false,
       "name": "queue_max_concurrency",
-      "type": "None | dict[str, int]"
+      "type": "dict[str, int]"
      },
      {
       "default": "required",
       "init": true,
       "kw_only": false,
       "name": "recovery_config",
-      "type": "None | dict[str, typing.Any]"
+      "type": "dict[str, typing.Any]"
      },
      {
       "default": "required",
@@ -23490,14 +23672,14 @@
       "init": true,
       "kw_only": false,
       "name": "slot_health",
-      "type": "horsies.AllSlotsServing | horsies.SlotHealthNotRecorded | horsies.SlotsDown"
+      "type": "horsies.AllSlotsServing | horsies.SlotsDown"
      },
      {
       "default": "required",
       "init": true,
       "kw_only": false,
       "name": "class_capacity",
-      "type": "horsies.ClassBudgets | horsies.ClassCapacityNotRecorded"
+      "type": "horsies.ClassBudgets"
      }
     ],
     "frozen": true,
@@ -24177,7 +24359,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "workflow_id"
@@ -24230,6 +24412,27 @@
        }
       ],
       "returns": "horsies.HandleResult[None]"
+     }
+    },
+    "for_id": {
+     "kind": "staticmethod",
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "str",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "text"
+       },
+       {
+        "annotation": "horsies.core.brokers.postgres.PostgresBroker",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "broker"
+       }
+      ],
+      "returns": "horsies.Err[horsies.HandleInvalidWorkflowId] | horsies.Ok[horsies.WorkflowHandle[typing.Any]]"
      }
     },
     "get": {
@@ -24493,7 +24696,7 @@
       "init": true,
       "kw_only": false,
       "name": "workflow_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -24863,7 +25066,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.workflows.start_types.WorkflowStartAsyncContext",
+   "defined_as": "horsies._catalog.workflow_start_errors.WorkflowStartAsyncContext",
    "kind": "class",
    "members": {
     "code": {
@@ -25029,7 +25232,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.workflows.start_types.WorkflowStartEnqueueFailed",
+   "defined_as": "horsies._catalog.workflow_start_errors.WorkflowStartEnqueueFailed",
    "kind": "class",
    "members": {
     "code": {
@@ -25090,7 +25293,7 @@
    "defined_as": "horsies.core.workflows.start_types.WorkflowStartError",
    "kind": "type alias",
    "type_params": [],
-   "value": "horsies.WorkflowStartAsyncContext | horsies.WorkflowStartBrokerNotConfigured | horsies.WorkflowStartEnqueueFailed | horsies.WorkflowStartEventLoopLimit | horsies.WorkflowStartIdConflict | horsies.WorkflowStartLoopRunnerFailed | horsies.WorkflowStartValidationFailed"
+   "value": "horsies.WorkflowStartBrokerNotConfigured | horsies._catalog.workflow_start_errors.WorkflowStartCoreError"
   },
   "horsies:WorkflowStartErrorCode": {
    "abstract": false,
@@ -25110,7 +25313,7 @@
     ],
     "returns": "unannotated"
    },
-   "defined_as": "horsies.core.workflows.start_types.WorkflowStartErrorCode",
+   "defined_as": "horsies._catalog.workflow_start.WorkflowStartErrorCode",
    "kind": "class",
    "members": {},
    "mro": [
@@ -25125,8 +25328,6 @@
      "ASYNC_CONTEXT": "'ASYNC_CONTEXT'",
      "BROKER_NOT_CONFIGURED": "'BROKER_NOT_CONFIGURED'",
      "ENQUEUE_FAILED": "'ENQUEUE_FAILED'",
-     "EVENT_LOOP_LIMIT": "'EVENT_LOOP_LIMIT'",
-     "LOOP_RUNNER_FAILED": "'LOOP_RUNNER_FAILED'",
      "VALIDATION_FAILED": "'VALIDATION_FAILED'",
      "WORKFLOW_ID_CONFLICT": "'WORKFLOW_ID_CONFLICT'"
     }
@@ -25134,94 +25335,8 @@
    "type_params": []
   },
   "horsies:WorkflowStartEventLoopLimit": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "message"
-     },
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "workflow_name"
-     },
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "workflow_id"
-     },
-     {
-      "annotation": "horsies.core.brokers.resources.EventLoopLimit",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "loop_limit"
-     }
-    ],
-    "returns": "None"
-   },
-   "defined_as": "horsies.core.workflows.start_types.WorkflowStartEventLoopLimit",
-   "kind": "class",
-   "members": {
-    "code": {
-     "kind": "attribute",
-     "type": "horsies.WorkflowStartErrorCode",
-     "value": "horsies.WorkflowStartErrorCode.EVENT_LOOP_LIMIT"
-    },
-    "retryable": {
-     "kind": "attribute",
-     "type": "bool",
-     "value": "False"
-    }
-   },
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "fields": [
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "message",
-      "type": "str"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "workflow_name",
-      "type": "str"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "workflow_id",
-      "type": "str"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "loop_limit",
-      "type": "horsies.core.brokers.resources.EventLoopLimit"
-     }
-    ],
-    "frozen": true,
-    "kind": "dataclass",
-    "slots": true
-   },
-   "type_params": []
+   "cause": "module horsies has no name WorkflowStartEventLoopLimit",
+   "kind": "absent"
   },
   "horsies:WorkflowStartIdConflict": {
    "abstract": false,
@@ -25258,7 +25373,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.workflows.start_types.WorkflowStartIdConflict",
+   "defined_as": "horsies._catalog.workflow_start_errors.WorkflowStartIdConflict",
    "kind": "class",
    "members": {
     "code": {
@@ -25314,94 +25429,8 @@
    "type_params": []
   },
   "horsies:WorkflowStartLoopRunnerFailed": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "message"
-     },
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "workflow_name"
-     },
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "workflow_id"
-     },
-     {
-      "annotation": "BaseException",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "exception"
-     }
-    ],
-    "returns": "None"
-   },
-   "defined_as": "horsies.core.workflows.start_types.WorkflowStartLoopRunnerFailed",
-   "kind": "class",
-   "members": {
-    "code": {
-     "kind": "attribute",
-     "type": "horsies.WorkflowStartErrorCode",
-     "value": "horsies.WorkflowStartErrorCode.LOOP_RUNNER_FAILED"
-    },
-    "retryable": {
-     "kind": "attribute",
-     "type": "bool",
-     "value": "False"
-    }
-   },
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "fields": [
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "message",
-      "type": "str"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "workflow_name",
-      "type": "str"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "workflow_id",
-      "type": "str"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "exception",
-      "type": "BaseException"
-     }
-    ],
-    "frozen": true,
-    "kind": "dataclass",
-    "slots": true
-   },
-   "type_params": []
+   "cause": "module horsies has no name WorkflowStartLoopRunnerFailed",
+   "kind": "absent"
   },
   "horsies:WorkflowStartResult": {
    "defined_as": "horsies.core.workflows.start_types.WorkflowStartResult",
@@ -25415,7 +25444,7 @@
    "defined_as": "horsies.core.workflows.start_types.WorkflowStartRetryable",
    "kind": "type alias",
    "type_params": [],
-   "value": "horsies.WorkflowStartAsyncContext | horsies.WorkflowStartEnqueueFailed | horsies.WorkflowStartLoopRunnerFailed"
+   "value": "horsies.WorkflowStartAsyncContext | horsies.WorkflowStartEnqueueFailed"
   },
   "horsies:WorkflowStartValidationFailed": {
    "abstract": false,
@@ -25452,7 +25481,7 @@
     ],
     "returns": "None"
    },
-   "defined_as": "horsies.core.workflows.start_types.WorkflowStartValidationFailed",
+   "defined_as": "horsies._catalog.workflow_start_errors.WorkflowStartValidationFailed",
    "kind": "class",
    "members": {
     "code": {
@@ -25525,7 +25554,7 @@
     ],
     "returns": "unannotated"
    },
-   "defined_as": "horsies.core.models.workflow.enums.WorkflowStatus",
+   "defined_as": "horsies._catalog.status.WorkflowStatus",
    "kind": "class",
    "members": {
     "is_terminal": {
@@ -25716,7 +25745,7 @@
     ],
     "returns": "unannotated"
    },
-   "defined_as": "horsies.core.models.workflow.enums.WorkflowTaskStatus",
+   "defined_as": "horsies._catalog.status.WorkflowTaskStatus",
    "kind": "class",
    "members": {
     "is_terminal": {
@@ -26037,7 +26066,7 @@
       "name": "broker"
      },
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "workflow_id"
@@ -26060,7 +26089,7 @@
       "name": "broker"
      },
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "workflow_id"
@@ -26112,7 +26141,7 @@
       "name": "broker"
      },
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "workflow_id"
@@ -26135,7 +26164,7 @@
       "name": "broker"
      },
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "workflow_id"
@@ -26247,6 +26276,168 @@
  "format": 1,
  "package_version": "0.7.0",
  "reachable": {
+  "horsies._catalog.broker_errors.BrokerCoreEnqueueError": {
+   "defined_as": "horsies._catalog.broker_errors.BrokerCoreEnqueueError",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies.BrokerEnqueueFailed | horsies.BrokerIdempotencyKeyConflict | horsies.BrokerInvalidInput | horsies.BrokerInvalidTaskOptions | horsies.BrokerPayloadMismatch"
+  },
+  "horsies._catalog.broker_errors.BrokerCoreError": {
+   "defined_as": "horsies._catalog.broker_errors.BrokerCoreError",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies.BrokerAsyncContext | horsies.BrokerEnqueueFailed | horsies.BrokerIdempotencyKeyConflict | horsies.BrokerInvalidInput | horsies.BrokerInvalidJsonPayload | horsies.BrokerInvalidTaskOptions | horsies.BrokerListenerDisabled | horsies.BrokerOperationFailed | horsies.BrokerPayloadMismatch | horsies.BrokerWaitInsideTask"
+  },
+  "horsies._catalog.history_errors.HistoryContractError": {
+   "abstract": false,
+   "bases": [
+    "Exception"
+   ],
+   "constructor": {
+    "unavailable": "ValueError: no signature found for builtin type <class 'horsies._catalog.history_errors.HistoryContractError'>"
+   },
+   "defined_as": "horsies._catalog.history_errors.HistoryContractError",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "Exception",
+    "BaseException",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": []
+  },
+  "horsies._catalog.monitoring_errors.MonitoringQueryCoreError": {
+   "defined_as": "horsies._catalog.monitoring_errors.MonitoringQueryCoreError",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies.monitoring.MonitoringQueryDbOperationFailed | horsies.monitoring.MonitoringQueryHistoryContractViolation"
+  },
+  "horsies._catalog.monitoring_errors.TaskActionCoreError": {
+   "defined_as": "horsies._catalog.monitoring_errors.TaskActionCoreError",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies.monitoring.TaskActionDbOperationFailed | horsies.monitoring.TaskActionNotCancellable | horsies.monitoring.TaskActionNotFound | horsies.monitoring.TaskActionStoredDataInvalid | horsies.monitoring.TaskActionWorkflowTask"
+  },
+  "horsies._catalog.task_send_errors.TaskSendCoreError": {
+   "defined_as": "horsies._catalog.task_send_errors.TaskSendCoreError",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies.TaskSendAsyncContext | horsies.TaskSendEnqueueFailed | horsies.TaskSendIdempotencyKeyConflict | horsies.TaskSendPayloadMismatch | horsies.TaskSendPayloadTooLarge | horsies.TaskSendSuppressed | horsies.TaskSendValidationFailed"
+  },
+  "horsies._catalog.workflow_handle_errors.HandleCoreError": {
+   "defined_as": "horsies._catalog.workflow_handle_errors.HandleCoreError",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies.HandleAsyncContext | horsies.HandleDbOperationFailed | horsies.HandleResumeRecoveryFailed | horsies.HandleStoredDataInvalid | horsies.HandleWorkflowNotFound"
+  },
+  "horsies._catalog.workflow_start_errors.WorkflowStartCoreError": {
+   "defined_as": "horsies._catalog.workflow_start_errors.WorkflowStartCoreError",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies.WorkflowStartAsyncContext | horsies.WorkflowStartEnqueueFailed | horsies.WorkflowStartIdConflict | horsies.WorkflowStartValidationFailed"
+  },
+  "horsies._core.CoreDatabaseError": {
+   "abstract": false,
+   "bases": [
+    "horsies._core.CoreFailure"
+   ],
+   "constructor": {
+    "unavailable": "ValueError: no signature found for builtin type <class 'horsies._core.CoreDatabaseError'>"
+   },
+   "defined_as": "horsies._core.CoreDatabaseError",
+   "kind": "class",
+   "members": {
+    "message": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'message' of 'horsies._core.CoreFailure' objects>"
+    },
+    "retryable": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'retryable' of 'horsies._core.CoreDatabaseError' objects>"
+    },
+    "subject": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'subject' of 'horsies._core.CoreFailure' objects>"
+    }
+   },
+   "mro": [
+    "horsies._core.CoreFailure",
+    "Exception",
+    "BaseException",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": []
+  },
+  "horsies._core.CoreError": {
+   "abstract": false,
+   "bases": [
+    "Exception"
+   ],
+   "constructor": {
+    "unavailable": "ValueError: no signature found for builtin type <class 'horsies._core.CoreError'>"
+   },
+   "defined_as": "horsies._core.CoreError",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "Exception",
+    "BaseException",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": []
+  },
+  "horsies._core.CoreFailure": {
+   "abstract": false,
+   "bases": [
+    "Exception"
+   ],
+   "constructor": {
+    "unavailable": "ValueError: no signature found for builtin type <class 'horsies._core.CoreFailure'>"
+   },
+   "defined_as": "horsies._core.CoreFailure",
+   "kind": "class",
+   "members": {
+    "message": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'message' of 'horsies._core.CoreFailure' objects>"
+    },
+    "subject": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'subject' of 'horsies._core.CoreFailure' objects>"
+    }
+   },
+   "mro": [
+    "Exception",
+    "BaseException",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": []
+  },
   "horsies.core.app._WorkflowBuilderMeta": {
    "abstract": false,
    "bases": [
@@ -26310,253 +26501,6 @@
     "frozen": false,
     "kind": "dataclass",
     "slots": false
-   },
-   "type_params": []
-  },
-  "horsies.core.brokers.listener.PostgresListener": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "database_url"
-     },
-     {
-      "annotation": "int",
-      "default": "30000",
-      "kind": "KEYWORD_ONLY",
-      "name": "tcp_user_timeout_ms"
-     }
-    ],
-    "returns": "None"
-   },
-   "defined_as": "horsies.core.brokers.listener.PostgresListener",
-   "kind": "class",
-   "members": {
-    "close": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "coroutine",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       }
-      ],
-      "returns": "None"
-     }
-    },
-    "listen": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "coroutine",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       },
-       {
-        "annotation": "str",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "channel_name"
-       }
-      ],
-      "returns": "horsies.Err[horsies.BrokerOperationFailed] | horsies.Ok[asyncio.queues.Queue[psycopg.Notify]]"
-     }
-    },
-    "listen_many": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "coroutine",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       },
-       {
-        "annotation": "collections.abc.Sequence[str]",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "channel_names"
-       }
-      ],
-      "returns": "horsies.Err[horsies.BrokerOperationFailed] | horsies.Ok[list[asyncio.queues.Queue[psycopg.Notify]]]"
-     }
-    },
-    "listen_payload": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "coroutine",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       },
-       {
-        "annotation": "str",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "channel_name"
-       },
-       {
-        "annotation": "str",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "payload"
-       }
-      ],
-      "returns": "horsies.Err[horsies.BrokerOperationFailed] | horsies.Ok[asyncio.queues.Queue[psycopg.Notify]]"
-     }
-    },
-    "release_after_owner_loop_closed": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "coroutine",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       }
-      ],
-      "returns": "None"
-     }
-    },
-    "start": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "coroutine",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       }
-      ],
-      "returns": "horsies.Err[horsies.BrokerOperationFailed] | horsies.Ok[None]"
-     }
-    },
-    "unlisten": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "coroutine",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       },
-       {
-        "annotation": "str",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "channel_name"
-       },
-       {
-        "annotation": "None | asyncio.queues.Queue[psycopg.Notify]",
-        "default": "None",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "q"
-       }
-      ],
-      "returns": "None"
-     }
-    },
-    "unsubscribe": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "coroutine",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       },
-       {
-        "annotation": "str",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "channel_name"
-       },
-       {
-        "annotation": "None | asyncio.queues.Queue[psycopg.Notify]",
-        "default": "None",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "q"
-       }
-      ],
-      "returns": "None"
-     }
-    },
-    "unsubscribe_payload": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "coroutine",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       },
-       {
-        "annotation": "str",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "channel_name"
-       },
-       {
-        "annotation": "str",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "payload"
-       },
-       {
-        "annotation": "asyncio.queues.Queue[psycopg.Notify]",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "q"
-       }
-      ],
-      "returns": "None"
-     }
-    }
-   },
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "attributes": {},
-    "kind": "plain"
    },
    "type_params": []
   },
@@ -26657,38 +26601,6 @@
       "returns": "horsies.BrokerResult[None]"
      }
     },
-    "create_single_connection_engine": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "sync",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       }
-      ],
-      "returns": "sqlalchemy.ext.asyncio.engine.AsyncEngine"
-     }
-    },
-    "discard_inherited_resources": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "sync",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       }
-      ],
-      "returns": "None"
-     }
-    },
     "enqueue": {
      "kind": "method",
      "overloads": [],
@@ -26714,28 +26626,22 @@
         "name": "queue_name"
        },
        {
-        "annotation": "str",
+        "annotation": "uuid.UUID",
         "default": "required",
         "kind": "KEYWORD_ONLY",
         "name": "task_id"
        },
        {
-        "annotation": "str",
+        "annotation": "horsies.SendKind",
         "default": "required",
         "kind": "KEYWORD_ONLY",
-        "name": "enqueue_sha"
+        "name": "send_kind"
        },
        {
         "annotation": "None | str",
         "default": "None",
         "kind": "KEYWORD_ONLY",
-        "name": "args_json"
-       },
-       {
-        "annotation": "None | str",
-        "default": "None",
-        "kind": "KEYWORD_ONLY",
-        "name": "kwargs_json"
+        "name": "input_json"
        },
        {
         "annotation": "int",
@@ -26744,8 +26650,8 @@
         "name": "priority"
        },
        {
-        "annotation": "None | datetime.datetime",
-        "default": "None",
+        "annotation": "datetime.datetime",
+        "default": "required",
         "kind": "KEYWORD_ONLY",
         "name": "sent_at"
        },
@@ -26780,7 +26686,7 @@
         "name": "idempotency_key"
        },
        {
-        "annotation": "None | horsies.core.history.periods.RetentionClassKey",
+        "annotation": "None | horsies._catalog.retention_class.RetentionClassKey",
         "default": "'standard_30d'",
         "kind": "KEYWORD_ONLY",
         "name": "retention_class_key"
@@ -26792,7 +26698,7 @@
         "name": "retain_rerun_input"
        }
       ],
-      "returns": "horsies.Err[horsies.BrokerEnqueueError | horsies.BrokerSyncCallError] | horsies.Ok[str]"
+      "returns": "horsies.Err[horsies.BrokerEnqueueError | horsies.BrokerSyncCallError] | horsies.Ok[uuid.UUID]"
      }
     },
     "enqueue_async": {
@@ -26820,28 +26726,22 @@
         "name": "queue_name"
        },
        {
-        "annotation": "str",
+        "annotation": "uuid.UUID",
         "default": "required",
         "kind": "KEYWORD_ONLY",
         "name": "task_id"
        },
        {
-        "annotation": "str",
+        "annotation": "horsies.SendKind",
         "default": "required",
         "kind": "KEYWORD_ONLY",
-        "name": "enqueue_sha"
+        "name": "send_kind"
        },
        {
         "annotation": "None | str",
         "default": "None",
         "kind": "KEYWORD_ONLY",
-        "name": "args_json"
-       },
-       {
-        "annotation": "None | str",
-        "default": "None",
-        "kind": "KEYWORD_ONLY",
-        "name": "kwargs_json"
+        "name": "input_json"
        },
        {
         "annotation": "int",
@@ -26850,8 +26750,8 @@
         "name": "priority"
        },
        {
-        "annotation": "None | datetime.datetime",
-        "default": "None",
+        "annotation": "datetime.datetime",
+        "default": "required",
         "kind": "KEYWORD_ONLY",
         "name": "sent_at"
        },
@@ -26880,7 +26780,7 @@
         "name": "task_options"
        },
        {
-        "annotation": "None | horsies.core.history.periods.RetentionClassKey",
+        "annotation": "None | horsies._catalog.retention_class.RetentionClassKey",
         "default": "'standard_30d'",
         "kind": "KEYWORD_ONLY",
         "name": "retention_class_key"
@@ -26898,7 +26798,7 @@
         "name": "idempotency_key"
        }
       ],
-      "returns": "horsies.Err[horsies.BrokerEnqueueError] | horsies.Ok[str]"
+      "returns": "horsies.Err[horsies.BrokerEnqueueError] | horsies.Ok[uuid.UUID]"
      }
     },
     "ensure_schema_initialized": {
@@ -26914,7 +26814,7 @@
         "name": "self"
        }
       ],
-      "returns": "horsies.Err[horsies.BrokerEventLoopLimit | horsies.BrokerOperationFailed] | horsies.Ok[None]"
+      "returns": "horsies.Err[horsies.BrokerOperationFailed] | horsies.Ok[None]"
      }
     },
     "expire_pending_tasks": {
@@ -26994,7 +26894,7 @@
         "name": "self"
        },
        {
-        "annotation": "str",
+        "annotation": "uuid.UUID",
         "default": "required",
         "kind": "POSITIONAL_OR_KEYWORD",
         "name": "task_id"
@@ -27022,7 +26922,7 @@
         "name": "self"
        },
        {
-        "annotation": "str",
+        "annotation": "uuid.UUID",
         "default": "required",
         "kind": "POSITIONAL_OR_KEYWORD",
         "name": "task_id"
@@ -27072,7 +26972,7 @@
         "name": "self"
        },
        {
-        "annotation": "str",
+        "annotation": "uuid.UUID",
         "default": "required",
         "kind": "POSITIONAL_OR_KEYWORD",
         "name": "task_id"
@@ -27112,7 +27012,7 @@
         "name": "self"
        },
        {
-        "annotation": "str",
+        "annotation": "uuid.UUID",
         "default": "required",
         "kind": "POSITIONAL_OR_KEYWORD",
         "name": "task_id"
@@ -27305,78 +27205,6 @@
       "returns": "horsies.BrokerResult[int]"
      }
     },
-    "run_sync": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "sync",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       },
-       {
-        "annotation": "collections.abc.Callable[~P, collections.abc.Coroutine[typing.Any, typing.Any, ~T]]",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "coro_fn"
-       },
-       {
-        "annotation": "P",
-        "default": "required",
-        "kind": "VAR_POSITIONAL",
-        "name": "args"
-       },
-       {
-        "annotation": "P",
-        "default": "required",
-        "kind": "VAR_KEYWORD",
-        "name": "kwargs"
-       }
-      ],
-      "returns": "~T"
-     }
-    },
-    "select_resources": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "coroutine",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       }
-      ],
-      "returns": "horsies.Err[horsies.core.brokers.resources.EventLoopLimit] | horsies.Ok[horsies.core.brokers.resources.BrokerResources]"
-     }
-    },
-    "send_route": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "sync",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       },
-       {
-        "annotation": "None | str",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "idempotency_key"
-       }
-      ],
-      "returns": "horsies.core.brokers.postgres.SyncSendRoute"
-     }
-    },
     "terminate_orphaned_workflow_tasks": {
      "kind": "method",
      "overloads": [],
@@ -27392,22 +27220,6 @@
       ],
       "returns": "horsies.BrokerResult[int]"
      }
-    },
-    "validate_worker_database_paths": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "coroutine",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       }
-      ],
-      "returns": "None"
-     }
     }
    },
    "mro": [
@@ -27420,374 +27232,6 @@
    },
    "type_params": []
   },
-  "horsies.core.brokers.postgres.SyncSendRoute": {
-   "abstract": false,
-   "bases": [
-    "enum.Enum"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [
-     {
-      "annotation": "unannotated",
-      "default": "required",
-      "kind": "VAR_POSITIONAL",
-      "name": "values"
-     }
-    ],
-    "returns": "unannotated"
-   },
-   "defined_as": "horsies.core.brokers.postgres.SyncSendRoute",
-   "kind": "class",
-   "members": {},
-   "mro": [
-    "enum.Enum",
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "kind": "enum",
-    "members": {
-     "CALLER_THREAD": "'caller_thread'",
-     "LOOP_RUNNER": "'loop_runner'"
-    }
-   },
-   "type_params": []
-  },
-  "horsies.core.brokers.resources.BrokerResources": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [
-     {
-      "annotation": "sqlalchemy.ext.asyncio.engine.AsyncEngine",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "engine"
-     },
-     {
-      "annotation": "sqlalchemy.ext.asyncio.session.async_sessionmaker[sqlalchemy.ext.asyncio.session.AsyncSession]",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "session_factory"
-     },
-     {
-      "annotation": "horsies.core.brokers.resources.SessionEngine",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "session_engine"
-     },
-     {
-      "annotation": "horsies.core.history.maintenance.database.PartitionMaintenanceDatabase",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "partition_maintenance"
-     },
-     {
-      "annotation": "horsies.core.brokers.resources.ListenerState",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "listener"
-     }
-    ],
-    "returns": "None"
-   },
-   "defined_as": "horsies.core.brokers.resources.BrokerResources",
-   "kind": "class",
-   "members": {
-    "session_async_engine": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "sync",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       }
-      ],
-      "returns": "sqlalchemy.ext.asyncio.engine.AsyncEngine"
-     }
-    }
-   },
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "fields": [
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "engine",
-      "type": "sqlalchemy.ext.asyncio.engine.AsyncEngine"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "session_factory",
-      "type": "sqlalchemy.ext.asyncio.session.async_sessionmaker[sqlalchemy.ext.asyncio.session.AsyncSession]"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "session_engine",
-      "type": "horsies.core.brokers.resources.SessionEngine"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "partition_maintenance",
-      "type": "horsies.core.history.maintenance.database.PartitionMaintenanceDatabase"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "listener",
-      "type": "horsies.core.brokers.resources.ListenerState"
-     }
-    ],
-    "frozen": true,
-    "kind": "dataclass",
-    "slots": true
-   },
-   "type_params": []
-  },
-  "horsies.core.brokers.resources.EventLoopLimit": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [
-     {
-      "annotation": "int",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "limit"
-     },
-     {
-      "annotation": "tuple[str, ...]",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "held_thread_names"
-     },
-     {
-      "annotation": "str",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "current_thread_name"
-     }
-    ],
-    "returns": "None"
-   },
-   "defined_as": "horsies.core.brokers.resources.EventLoopLimit",
-   "kind": "class",
-   "members": {
-    "describe": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "sync",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       }
-      ],
-      "returns": "str"
-     }
-    }
-   },
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "fields": [
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "limit",
-      "type": "int"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "held_thread_names",
-      "type": "tuple[str, ...]"
-     },
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "current_thread_name",
-      "type": "str"
-     }
-    ],
-    "frozen": true,
-    "kind": "dataclass",
-    "slots": true
-   },
-   "type_params": []
-  },
-  "horsies.core.brokers.resources.ListenerDisabled": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [],
-    "returns": "None"
-   },
-   "defined_as": "horsies.core.brokers.resources.ListenerDisabled",
-   "kind": "class",
-   "members": {},
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "fields": [],
-    "frozen": true,
-    "kind": "dataclass",
-    "slots": true
-   },
-   "type_params": []
-  },
-  "horsies.core.brokers.resources.ListenerEnabled": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [
-     {
-      "annotation": "horsies.core.brokers.listener.PostgresListener",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "listener"
-     }
-    ],
-    "returns": "None"
-   },
-   "defined_as": "horsies.core.brokers.resources.ListenerEnabled",
-   "kind": "class",
-   "members": {},
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "fields": [
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "listener",
-      "type": "horsies.core.brokers.listener.PostgresListener"
-     }
-    ],
-    "frozen": true,
-    "kind": "dataclass",
-    "slots": true
-   },
-   "type_params": []
-  },
-  "horsies.core.brokers.resources.ListenerState": {
-   "defined_as": "horsies.core.brokers.resources.ListenerState",
-   "kind": "type alias",
-   "type_params": [],
-   "value": "horsies.core.brokers.resources.ListenerDisabled | horsies.core.brokers.resources.ListenerEnabled"
-  },
-  "horsies.core.brokers.resources.SessionEngine": {
-   "defined_as": "horsies.core.brokers.resources.SessionEngine",
-   "kind": "type alias",
-   "type_params": [],
-   "value": "horsies.core.brokers.resources.SessionEngineSeparate | horsies.core.brokers.resources.SessionEngineShared"
-  },
-  "horsies.core.brokers.resources.SessionEngineSeparate": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [
-     {
-      "annotation": "sqlalchemy.ext.asyncio.engine.AsyncEngine",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "engine"
-     }
-    ],
-    "returns": "None"
-   },
-   "defined_as": "horsies.core.brokers.resources.SessionEngineSeparate",
-   "kind": "class",
-   "members": {},
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "fields": [
-     {
-      "default": "required",
-      "init": true,
-      "kw_only": false,
-      "name": "engine",
-      "type": "sqlalchemy.ext.asyncio.engine.AsyncEngine"
-     }
-    ],
-    "frozen": true,
-    "kind": "dataclass",
-    "slots": true
-   },
-   "type_params": []
-  },
-  "horsies.core.brokers.resources.SessionEngineShared": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [],
-    "returns": "None"
-   },
-   "defined_as": "horsies.core.brokers.resources.SessionEngineShared",
-   "kind": "class",
-   "members": {},
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "fields": [],
-    "frozen": true,
-    "kind": "dataclass",
-    "slots": true
-   },
-   "type_params": []
-  },
   "horsies.core.brokers.result_types.RawResultRecord": {
    "abstract": false,
    "bases": [
@@ -27797,7 +27241,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "str",
+      "annotation": "uuid.UUID",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "task_id"
@@ -27837,7 +27281,7 @@
       "init": true,
       "kw_only": false,
       "name": "task_id",
-      "type": "str"
+      "type": "uuid.UUID"
      },
      {
       "default": "required",
@@ -28012,119 +27456,6 @@
     "frozen": false,
     "kind": "dataclass",
     "slots": false
-   },
-   "type_params": []
-  },
-  "horsies.core.history.errors.HistoryContractError": {
-   "abstract": false,
-   "bases": [
-    "Exception"
-   ],
-   "constructor": {
-    "unavailable": "ValueError: no signature found for builtin type <class 'horsies.core.history.errors.HistoryContractError'>"
-   },
-   "defined_as": "horsies.core.history.errors.HistoryContractError",
-   "kind": "class",
-   "members": {},
-   "mro": [
-    "Exception",
-    "BaseException",
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "attributes": {},
-    "kind": "plain"
-   },
-   "type_params": []
-  },
-  "horsies.core.history.maintenance.database.PartitionMaintenanceDatabase": {
-   "abstract": false,
-   "bases": [
-    "object"
-   ],
-   "constructor": {
-    "async": "sync",
-    "parameters": [
-     {
-      "annotation": "sqlalchemy.ext.asyncio.engine.AsyncEngine",
-      "default": "required",
-      "kind": "POSITIONAL_OR_KEYWORD",
-      "name": "engine"
-     },
-     {
-      "annotation": "int",
-      "default": "required",
-      "kind": "KEYWORD_ONLY",
-      "name": "connection_capacity"
-     }
-    ],
-    "returns": "None"
-   },
-   "defined_as": "horsies.core.history.maintenance.database.PartitionMaintenanceDatabase",
-   "kind": "class",
-   "members": {
-    "autocommit": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "sync",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       }
-      ],
-      "returns": "collections.abc.AsyncGenerator[sqlalchemy.ext.asyncio.engine.AsyncConnection]"
-     }
-    },
-    "begin": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "sync",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       }
-      ],
-      "returns": "collections.abc.AsyncGenerator[sqlalchemy.ext.asyncio.engine.AsyncConnection]"
-     }
-    },
-    "connect": {
-     "kind": "method",
-     "overloads": [],
-     "signature": {
-      "async": "sync",
-      "parameters": [
-       {
-        "annotation": "unannotated",
-        "default": "required",
-        "kind": "POSITIONAL_OR_KEYWORD",
-        "name": "self"
-       }
-      ],
-      "returns": "collections.abc.AsyncGenerator[sqlalchemy.ext.asyncio.engine.AsyncConnection]"
-     }
-    },
-    "coverage_gate_enabled": {
-     "kind": "property",
-     "settable": false,
-     "type": "bool"
-    }
-   },
-   "mro": [
-    "object"
-   ],
-   "protocol": false,
-   "shape": {
-    "attributes": {},
-    "kind": "plain"
    },
    "type_params": []
   },
@@ -30419,7 +29750,11 @@
    "horsies.core.models.schedule:WeeklySchedule",
    "horsies.core.types.result:is_err",
    "horsies.monitoring:Breakdown",
+   "horsies.monitoring:BreakdownCounts",
+   "horsies.monitoring:BreakdownGroup",
    "horsies.monitoring:BreakdownLimit",
+   "horsies.monitoring:BreakdownUnclaimedGroup",
+   "horsies.monitoring:BreakdownValueGroup",
    "horsies.monitoring:BudgetLoadInfo",
    "horsies.monitoring:ClassReportInfo",
    "horsies.monitoring:DownSlotInfo",
@@ -30513,6 +29848,7 @@
    "horsies:ClassBudgets",
    "horsies:ClassCapacityNotRecorded",
    "horsies:ContractCode",
+   "horsies:CoreServerError",
    "horsies:CronEnumRange",
    "horsies:CronEnumStep",
    "horsies:CronEnumValues",
