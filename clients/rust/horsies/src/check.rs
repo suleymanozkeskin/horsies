@@ -27,6 +27,8 @@
 //! 5. Worker connections: each worker profile against the server's
 //!    connection limit (none through a transaction pooler).
 
+use std::collections::BTreeMap;
+
 use horsies_core::core::task::error::check_error_code_text;
 use horsies_core::{
     check_worker_connections, ConnectivityRefusal, Execution, RegisteredTask, TaskOptions,
@@ -36,9 +38,10 @@ use crate::process_state::refuse_in_a_fork;
 use crate::{AppRole, ErrorCode, Horsies, HorsiesError, ValidationReport};
 
 /// The check passed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckPassed {
     task_count: usize,
+    declared_error_codes: BTreeMap<String, &'static [&'static str]>,
 }
 
 impl CheckPassed {
@@ -46,16 +49,36 @@ impl CheckPassed {
     pub fn task_count(&self) -> usize {
         self.task_count
     }
+
+    /// The error codes that each task declares (`UserErrorCode::CODES` of
+    /// its code type), by task name, for each task that declares at least
+    /// one. Each one is a value of the `error_code` metric label of its
+    /// task; another user code of the task counts as `undeclared`.
+    pub fn declared_error_codes(&self) -> &BTreeMap<String, &'static [&'static str]> {
+        &self.declared_error_codes
+    }
 }
 
 impl std::fmt::Display for CheckPassed {
-    /// Python's success text of `horsies check`.
+    /// Python's success text of `horsies check`: the task count, then the
+    /// declared error codes of each task that declares some, in task name
+    /// order, or `none`.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
             "ok: all validations passed\n  {} task(s) registered",
             self.task_count
-        )
+        )?;
+        match self.declared_error_codes.is_empty() {
+            true => write!(formatter, "\n  declared error codes: none"),
+            false => {
+                write!(formatter, "\n  declared error codes:")?;
+                for (task_name, codes) in &self.declared_error_codes {
+                    write!(formatter, "\n    {task_name}: {}", codes.join(", "))?;
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -185,10 +208,22 @@ impl Horsies {
         match schedule_errors.is_empty() {
             true => Ok(CheckPassed {
                 task_count: self.tasks().len(),
+                declared_error_codes: declared_error_codes(self.tasks().iter()),
             }),
             false => Err(CheckReport::of(phase, schedule_errors)),
         }
     }
+}
+
+/// The declared error codes of each task that declares at least one, by
+/// task name. The registration checked each set. Pure.
+fn declared_error_codes<'a>(
+    tasks: impl Iterator<Item = (&'a str, &'a RegisteredTask)>,
+) -> BTreeMap<String, &'static [&'static str]> {
+    tasks
+        .filter(|(_name, task)| !task.error_codes().is_empty())
+        .map(|(name, task)| (name.to_owned(), task.error_codes()))
+        .collect()
 }
 
 /// The report of a failed connect or ping (Python
@@ -562,9 +597,33 @@ mod tests {
         .unwrap();
         let passed = app.check().unwrap();
         assert_eq!(passed.task_count(), 0);
+        assert!(passed.declared_error_codes().is_empty());
         assert_eq!(
             passed.to_string(),
-            "ok: all validations passed\n  0 task(s) registered"
+            "ok: all validations passed\n  0 task(s) registered\n  declared error codes: none"
+        );
+    }
+
+    #[test]
+    fn the_check_reports_the_declared_codes_of_each_task_in_name_order() {
+        let mut app = Horsies::new(AppConfig::for_database_url(
+            "postgresql://localhost/horsies",
+        ))
+        .unwrap();
+        let declaring = |codes: &'static [&'static str]| RegisteredTask::Blocking {
+            task: Arc::new(EchoTask),
+            meta: TaskMeta::default().with_error_codes(codes),
+        };
+        app.register("resize", declaring(&[])).unwrap();
+        app.register("send_mail", declaring(&["BOUNCED"])).unwrap();
+        app.register("charge", declaring(&["RATE_LIMITED", "CARD_DECLINED"]))
+            .unwrap();
+        let passed = app.check().unwrap();
+        assert_eq!(passed.task_count(), 3);
+        assert_eq!(
+            passed.to_string(),
+            "ok: all validations passed\n  3 task(s) registered\n  declared error codes:\n    \
+             charge: RATE_LIMITED, CARD_DECLINED\n    send_mail: BOUNCED"
         );
     }
 

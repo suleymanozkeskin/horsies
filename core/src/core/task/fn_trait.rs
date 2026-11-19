@@ -77,6 +77,12 @@ pub struct TaskMeta {
     /// The module that defines the task: the `module` of the exception
     /// record of a panic of its body.
     pub module: TaskModule,
+    /// The user error codes that the task declares: the `CODES` of its code
+    /// type, which the Rust client's task macros fill. Empty for a task that
+    /// declares none, such as a hand-built [`RegisteredTask`]. The client
+    /// checks them when it registers the task
+    /// ([`crate::core::task::DeclaredErrorCodes::parse`]).
+    pub error_codes: &'static [&'static str],
 }
 
 /// The Rust module that defines a task.
@@ -97,6 +103,16 @@ impl TaskMeta {
     pub fn in_module(self, module_path: &'static str) -> Self {
         Self {
             module: TaskModule::Path(module_path),
+            ..self
+        }
+    }
+
+    /// The same metadata, for a task that declares the user error codes
+    /// `codes`. The task macros pass `UserErrorCode::CODES` of the task's
+    /// code type.
+    pub fn with_error_codes(self, codes: &'static [&'static str]) -> Self {
+        Self {
+            error_codes: codes,
             ..self
         }
     }
@@ -203,6 +219,13 @@ impl RegisteredTask {
                 meta.task_options = Some(task_options);
                 Self::Blocking { task, meta }
             }
+        }
+    }
+
+    /// The user error codes that the task declares ([`TaskMeta::error_codes`]).
+    pub fn error_codes(&self) -> &'static [&'static str] {
+        match self {
+            Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.error_codes,
         }
     }
 
@@ -324,6 +347,20 @@ mod tests {
         };
         assert!(blocking_task.is_blocking());
         assert!(!blocking_task.is_async());
+    }
+
+    #[test]
+    fn a_task_declares_no_error_code_unless_its_meta_names_some() {
+        let plain = RegisteredTask::Blocking {
+            task: Arc::new(DummyBlocking),
+            meta: TaskMeta::default(),
+        };
+        assert!(plain.error_codes().is_empty());
+        let declared = RegisteredTask::Async {
+            task: Arc::new(DummyAsync),
+            meta: TaskMeta::for_input::<()>().with_error_codes(&["RATE_LIMITED", "DECLINED"]),
+        };
+        assert_eq!(declared.error_codes(), ["RATE_LIMITED", "DECLINED"]);
     }
 
     #[test]

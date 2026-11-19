@@ -1440,6 +1440,16 @@ unless it starts with "Added".
   Python's text: no fraction for a whole second, 6 digits for a whole
   microsecond, 9 digits below the microsecond; the offset `Z` when it is 0.
   It reads any RFC 3339 fraction.
+- **Added: each task declares the error codes of its code type.** The task
+  macros (`#[task]`, `#[blocking_task]`, `async_task_fn!`,
+  `blocking_task_fn!`) fill the declared codes from `UserErrorCode::CODES`;
+  `RegisteredTask::error_codes()` returns them.
+  `Horsies::register` checks them for every task: a built-in or reserved
+  name is `HRS-212`, an empty code, a code that is not `UPPER_SNAKE_CASE` or
+  an exception class name is `HRS-112`, a code given twice is `HRS-113`.
+  Before, only the `#[task]` attribute checked a built-in or reserved name.
+  `CheckPassed::declared_error_codes()` returns them by task name, and the
+  success text of `check` lists them. `CheckPassed` is no longer `Copy`.
 
 ## [0.7.0] - 2026-11-15
 
