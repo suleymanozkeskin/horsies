@@ -1556,6 +1556,31 @@ unless it starts with "Added".
   and each worker child write one JSON object per log record, with the
   event's fields at the top level and the record's spans with their
   fields. `cli::run(app)` keeps the text format.
+- **Added: event handlers, `horsies::events`.** The module re-exports the
+  core's event types (`TaskClaimed`, `ClaimReleased`, `AttemptPlaced`,
+  `AttemptNotStarted`, `AttemptEnded`, `AttemptRecorded`, `TaskRecovered`,
+  `ChildStarted`, `ChildReplaced`, `SlotDown`, `SlotRecovered`) and their
+  value types. `Horsies::on_event::<E>(name, handler)` registers an async
+  handler of the events of type `E` (`AsyncFn(E) -> Result<(),
+  HandlerError>`), `on_event_blocking::<E>(name, handler)` a blocking one
+  (`Fn(E) -> Result<(), HandlerError>`). The worker manifest names each
+  handler and its type, so a worker of an app with a handler starts its
+  handler child: the binary in child mode, which runs each handler on a
+  thread of its own (an async handler on a current-thread runtime of that
+  thread) with a queue of `HANDLER_QUEUE_EVENTS` (10,000) events. A full
+  queue drops the event for that handler and counts it; a returned
+  `HandlerError` or a panic is counted and logged with the handler's name
+  (the first, then one line per `HANDLER_ERROR_LOG_EVERY`, 1,000), and the
+  handler takes its next event. The child reports the counts every
+  `HANDLER_STATS_INTERVAL` (5 s) in `horsies.telemetry.handler.errors` and
+  `horsies.telemetry.handler.dropped`, and at the stop gives the handlers
+  `HANDLER_DRAIN` (2 s) for their queues. A name is 1 to 255 characters,
+  not `(unknown)` and once per app; an app takes at most 32 handlers; a
+  refusal is a `HorsiesError`. `Horsies::on_handler_child_start(hook)`
+  runs a hook once in each handler child before its handlers start, 10 s
+  per hook; a failure ends the handler child with exit code 173, and the
+  worker keeps it down and runs on. The hooks of `on_child_start` run in
+  task children only.
 - **Added: the span of an attempt that the worker ended** (feature
   `otel`). The handler child of a worker makes the span of each attempt
   that the worker ended itself: an isolated task killed at its timeout
@@ -1567,8 +1592,12 @@ unless it starts with "Added".
   provider and propagator of the handler child, from the time the task
   reached its child to the time the end reached the worker, with status
   ERROR, `error.type` = the code, the attributes of the span of a child and
-  `horsies.span.source = "worker"`; a workflow task gets no
-  `horsies.workflow.*` attribute. It is the default with the feature: the
+  `horsies.span.source = "worker"`. For a workflow task the handler child
+  reads the node by the task id through its producer pool, with one read of
+  the core bounded at 1 s for a connection and 1 s for the statement, only
+  for such an attempt, and the span gets the `horsies.workflow.*`
+  attributes; a read that fails leaves them out, and the handler child
+  counts and logs it. It is the default with the feature: the
   worker then starts its handler child also when the app has no handler.
   `Horsies::set_worker_ended_spans(horsies::otel::WorkerEndedSpans::NoSpans)`
   turns it off.

@@ -13,7 +13,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use super::ended_spans::EndedSpanScope;
+use super::ended_spans::{EndedSpanScope, EndedSpans};
 use super::handler_host::{
     boot_and_serve_handlers_on, decode_wire_event, serve_handlers, HandlerChildTimes,
     UndecodedEvent,
@@ -409,14 +409,7 @@ async fn the_service_hands_out_the_events_and_reports_the_totals_of_each_handler
         last_stats: WAIT,
     };
     let service = tokio::spawn(async move {
-        serve_handlers(
-            running,
-            &EndedSpanScope::NoSpans,
-            writer,
-            &mut frames,
-            times,
-        )
-        .await
+        serve_handlers(running, &EndedSpans::none(), writer, &mut frames, times).await
     });
     let batch = events_frame(&[
         Event::from(slot_recovered(1)),
@@ -478,14 +471,7 @@ async fn an_init_frame_after_the_boot_ends_the_service_as_a_bad_frame() {
         stats_every: Duration::from_secs(60),
         ..HandlerChildTimes::CHILD
     };
-    let end = serve_handlers(
-        running,
-        &EndedSpanScope::NoSpans,
-        writer,
-        &mut frames,
-        times,
-    )
-    .await;
+    let end = serve_handlers(running, &EndedSpans::none(), writer, &mut frames, times).await;
     assert_eq!(end, ServeEnd::BadParentFrame);
 }
 

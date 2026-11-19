@@ -1587,8 +1587,12 @@ unless it starts with "Added".
   provider and propagator of the handler child, from the time the task
   reached its child to the time the end reached the worker, with status
   ERROR, `error.type` = the code, the attributes of the span of a child and
-  `horsies.span.source = "worker"`; a workflow task gets no
-  `horsies.workflow.*` attribute. It is the default with the feature: the
+  `horsies.span.source = "worker"`. For a workflow task the handler child
+  reads the node by the task id through its producer pool, with one read of
+  the core bounded at 1 s for a connection and 1 s for the statement, only
+  for such an attempt, and the span gets the `horsies.workflow.*`
+  attributes; a read that fails leaves them out, and the handler child
+  counts and logs it. It is the default with the feature: the
   worker then starts its handler child also when the app has no handler.
   `Horsies::set_worker_ended_spans(horsies::otel::WorkerEndedSpans::NoSpans)`
   turns it off.

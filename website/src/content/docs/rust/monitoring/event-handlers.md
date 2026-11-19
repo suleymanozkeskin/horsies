@@ -128,12 +128,15 @@ fn no_worker_ended_spans(app: &mut Horsies) {
 | Start | When the task reached its child (wall clock of the worker), earlier than the start of the body |
 | End | When the end reached the worker |
 | Status | ERROR, with `error.type` = the error code of the attempt |
-| Attributes | `horsies.task.id`, `horsies.task.name`, `horsies.task.attempt`, `horsies.task.execution` (the kind of the child), `horsies.queue`, `horsies.worker.id`, `messaging.system`, `messaging.operation.type`, `messaging.destination.name`, `messaging.message.id`, and `horsies.span.source` = `worker` |
+| Attributes | `horsies.task.id`, `horsies.task.name`, `horsies.task.attempt`, `horsies.task.execution` (the kind of the child), `horsies.queue`, `horsies.worker.id`, `messaging.system`, `messaging.operation.type`, `messaging.destination.name`, `messaging.message.id`, for a workflow task `horsies.workflow.id`, `horsies.workflow.node` and `horsies.workflow.root_id`, and `horsies.span.source` = `worker` |
+
+The worker does not know the workflow node of a workflow task: the start of the child reads it. For an attempt of a workflow task that the worker ended, the handler child reads the node by the task id through its producer pool, with one read of the core: at most 1 second for a connection and 1 second for the statement. Only these attempts pay for the read.
 
 Limits:
 
 - A span that the body made and exported before the kill keeps the id of the lost span as its parent. A trace shows it next to the span of the worker, not under it.
-- The span of a workflow task has no `horsies.workflow.id`, `horsies.workflow.node` or `horsies.workflow.root_id`: the start of the child reads the workflow node, and a child whose attempt the worker ended reported nothing. The span stays in the trace of the workflow start through the stored carrier.
+- When the node read fails, or finds no node (the workflow was deleted), the span of a workflow task has no `horsies.workflow.*` attribute. The span stays in the trace of the workflow start through the stored carrier. The handler child counts each failed read and logs it with the task id: the first, then one line per 1,000.
+- The node read runs on the task that hands the events to the handlers. During a database outage each such attempt holds that task for the bound of the read.
 - Without the feature `otel` the app makes no such span, and the worker starts no handler child for it.
 
 ## Things to Avoid

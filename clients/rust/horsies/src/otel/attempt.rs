@@ -112,21 +112,30 @@ pub(super) fn run_attributes(
     ]
 }
 
-/// Set `horsies.workflow.id`, `horsies.workflow.node` (the node index) and
-/// `horsies.workflow.root_id` on `span` for a task that a workflow node
-/// links; nothing for another task.
+/// Set the workflow attributes of `workflow` on `span`
+/// ([`workflow_attributes`]).
 fn set_workflow_attributes(span: &tracing::Span, workflow: RunWorkflow) {
+    for attribute in workflow_attributes(workflow) {
+        span.set_attribute(attribute.key, attribute.value);
+    }
+}
+
+/// `horsies.workflow.id`, `horsies.workflow.node` (the node index) and
+/// `horsies.workflow.root_id` for a task that a workflow node links; none
+/// for another task. The span of an attempt that the worker ended has the
+/// same set for the node that the handler child read. Pure.
+pub(super) fn workflow_attributes(workflow: RunWorkflow) -> Vec<KeyValue> {
     match workflow {
-        RunWorkflow::NotInWorkflow => {}
+        RunWorkflow::NotInWorkflow => Vec::new(),
         RunWorkflow::InWorkflow {
             workflow_id,
             node_index,
             root_workflow_id,
-        } => {
-            span.set_attribute(WORKFLOW_ID_KEY, workflow_id.to_string());
-            span.set_attribute(WORKFLOW_NODE_KEY, i64::from(node_index.get()));
-            span.set_attribute(WORKFLOW_ROOT_ID_KEY, root_workflow_id.to_string());
-        }
+        } => vec![
+            KeyValue::new(WORKFLOW_ID_KEY, workflow_id.to_string()),
+            KeyValue::new(WORKFLOW_NODE_KEY, i64::from(node_index.get())),
+            KeyValue::new(WORKFLOW_ROOT_ID_KEY, root_workflow_id.to_string()),
+        ],
     }
 }
 

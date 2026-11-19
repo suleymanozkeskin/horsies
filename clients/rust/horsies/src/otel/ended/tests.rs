@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
-use horsies_core::events::{AttemptNumber, WorkerDecision, WorkflowPlace};
-use horsies_core::{BodyCarrier, BuiltInTaskCode, Execution};
+use horsies_core::events::{AttemptNumber, WorkerDecision};
+use horsies_core::{BodyCarrier, BuiltInTaskCode, Execution, RunWorkflow, WorkflowNodeIndex};
 use opentelemetry::trace::{SpanId, SpanKind, TraceId, TracerProvider as _};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::SpanData;
@@ -77,7 +77,7 @@ fn ended_attempt<'a>(
     carrier: &'a BodyCarrier,
     end: WorkerEnd,
     error_code: &'a BuiltInTaskCode,
-    workflow: WorkflowPlace,
+    workflow: EndedWorkflow,
 ) -> EndedAttempt<'a> {
     EndedAttempt {
         task_id,
@@ -123,7 +123,7 @@ fn each_end_makes_one_span_under_the_send_with_its_times_status_and_attributes()
             &carrier,
             end,
             &code,
-            WorkflowPlace::NotInWorkflow,
+            EndedWorkflow::Known(RunWorkflow::NotInWorkflow),
         ));
 
         assert_eq!(spans.len(), 1, "{end:?}: {spans:?}");
@@ -164,10 +164,48 @@ fn each_end_makes_one_span_under_the_send_with_its_times_status_and_attributes()
     }
 }
 
-/// The worker does not know the node of a workflow task: its span has no
-/// workflow attribute, and the carrier keeps it in the trace of the send.
+/// A workflow task killed at its timeout gets the workflow attributes of
+/// the node that the handler child read: its workflow, its node index and
+/// the root of its tree.
 #[test]
-fn a_workflow_task_has_no_workflow_attribute_and_stays_in_the_trace() {
+fn a_workflow_task_killed_at_its_timeout_gets_the_attributes_of_its_node() {
+    let carrier = send_carrier();
+    let code = TIMEOUT_KILL.reason.error_code();
+    let workflow_id = Uuid::from_u128(0xf007);
+    let root_workflow_id = Uuid::from_u128(0xf001);
+    let spans = record_ended(&ended_attempt(
+        Uuid::new_v4(),
+        &carrier,
+        TIMEOUT_KILL,
+        &code,
+        EndedWorkflow::Known(RunWorkflow::InWorkflow {
+            workflow_id,
+            node_index: WorkflowNodeIndex::try_from(4).unwrap(),
+            root_workflow_id,
+        }),
+    ));
+
+    let span = span_named(&spans, SPAN_NAME);
+    let workflow_id_text = workflow_id.to_string();
+    let root_workflow_id_text = root_workflow_id.to_string();
+    for (key, value) in [
+        ("horsies.workflow.id", workflow_id_text.as_str()),
+        ("horsies.workflow.node", "4"),
+        ("horsies.workflow.root_id", root_workflow_id_text.as_str()),
+        ("error.type", "TASK_TIMEOUT"),
+        ("horsies.span.source", "worker"),
+    ] {
+        assert_eq!(attribute(span, key).as_deref(), Some(value), "{key}");
+    }
+    assert_eq!(span.attributes.len(), 15, "{:?}", span.attributes);
+    assert_eq!(span.parent_span_id, SpanId::from(SEND_SPAN_ID));
+}
+
+/// A node that the handler child did not read (a failed read, or no node)
+/// gives no workflow attribute; the carrier keeps the span in the trace of
+/// the send.
+#[test]
+fn a_workflow_task_whose_node_is_not_known_has_no_workflow_attribute() {
     let carrier = send_carrier();
     let code = TIMEOUT_KILL.reason.error_code();
     let spans = record_ended(&ended_attempt(
@@ -175,7 +213,7 @@ fn a_workflow_task_has_no_workflow_attribute_and_stays_in_the_trace() {
         &carrier,
         TIMEOUT_KILL,
         &code,
-        WorkflowPlace::WorkflowNotKnown,
+        EndedWorkflow::WorkflowNotKnown,
     ));
 
     let span = span_named(&spans, SPAN_NAME);
@@ -199,7 +237,7 @@ fn a_task_with_no_carrier_gets_a_root_span() {
         &carrier,
         CRASH,
         &code,
-        WorkflowPlace::NotInWorkflow,
+        EndedWorkflow::Known(RunWorkflow::NotInWorkflow),
     ));
 
     let span = span_named(&spans, SPAN_NAME);

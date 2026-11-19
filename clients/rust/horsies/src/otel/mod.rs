@@ -60,10 +60,12 @@
 //! the task reached its child to the time the end reached the worker,
 //! status ERROR with `error.type`, the attributes of the span of a child
 //! with the kind of the child as `horsies.task.execution`, and
-//! `horsies.span.source` = `worker`. The worker does not know the workflow
-//! node of a workflow task, so that span has no `horsies.workflow.*`
-//! attribute. A span that the body exported before the kill keeps the lost
-//! span as its parent. [`Horsies::set_worker_ended_spans`] turns it off
+//! `horsies.span.source` = `worker`. For a workflow task the handler child
+//! reads the node by the task id (one bounded read of the core, only for
+//! such an attempt) and the span gets the workflow attributes; a read that
+//! fails leaves them out, and the handler child counts and logs it. A span
+//! that the body exported before the kill keeps the lost span as its
+//! parent. [`Horsies::set_worker_ended_spans`] turns it off
 //! ([`WorkerEndedSpans::NoSpans`]); with the default
 //! ([`WorkerEndedSpans::MakeSpans`]) the worker starts its handler child also
 //! when the app has no event handler.

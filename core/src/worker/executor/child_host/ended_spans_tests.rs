@@ -2,8 +2,9 @@
 //! client gets the facts of the span once per such attempt, before the
 //! handlers get the event; no other event and no scope with no spans calls
 //! the client; a client that panics is caught and the handlers still get
-//! the event. No database and no process: the service writes to a socket
-//! pair.
+//! the event; the node of a workflow task is read, and a failed read gives
+//! `WorkflowNotKnown` and is counted. No database and no process: the node
+//! reads are stubs, and the service writes to a socket pair.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -17,12 +18,16 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::body_scope::BodyCarrier;
-use super::ended_spans::{EndedAttempt, EndedSpanMaker, EndedSpanScope, EndedSpanStep};
+use super::ended_spans::{
+    EndedAttempt, EndedSpanMaker, EndedSpanScope, EndedSpanStep, EndedSpans, EndedWorkflow,
+    NodeRead, NodeReadFuture, NodeReads,
+};
 use super::handler_host::{serve_handlers, HandlerChildTimes};
 use super::handlers::EventHandlerSet;
 use super::link::FrameWriter;
 use super::panic::install_panic_hook;
 use super::seats::ServeEnd;
+use crate::broker::claims::{RunWorkflow, WorkflowNodeIndex};
 use crate::core::config::bounded::BoundedU32;
 use crate::core::task::Execution;
 use crate::core::{BuiltInTaskCode, OperationalErrorCode, OutcomeCode};
@@ -48,6 +53,56 @@ fn placed_at() -> DateTime<Utc> {
 
 fn ended_at() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp_nanos(1_700_000_030_500_654_321)
+}
+
+/// The node that links the task of the workflow tests.
+fn linked_node() -> RunWorkflow {
+    RunWorkflow::InWorkflow {
+        workflow_id: Uuid::from_u128(0xf007),
+        node_index: WorkflowNodeIndex::try_from(4).unwrap(),
+        root_workflow_id: Uuid::from_u128(0xf001),
+    }
+}
+
+/// Node reads that answer `answer` and record each task id that they read.
+struct StubReads {
+    answer: NodeRead,
+    reads: Mutex<Vec<Uuid>>,
+}
+
+impl StubReads {
+    fn answering(answer: NodeRead) -> Arc<StubReads> {
+        Arc::new(StubReads {
+            answer,
+            reads: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn reads(&self) -> Vec<Uuid> {
+        self.reads.lock().unwrap().clone()
+    }
+}
+
+impl NodeReads for StubReads {
+    fn read(&self, task_id: Uuid) -> NodeReadFuture {
+        self.reads.lock().unwrap().push(task_id);
+        Box::pin(std::future::ready(self.answer.clone()))
+    }
+}
+
+/// The spans of `scope` with `reads`.
+fn spans_with(scope: EndedSpanScope, reads: &Arc<StubReads>) -> EndedSpans {
+    EndedSpans::with_reads(scope, Arc::clone(reads) as Arc<dyn NodeReads>)
+}
+
+/// The spans of a client that records each span to `seen`, with `reads`.
+fn recording_spans(seen: Sender<Seen>, reads: &Arc<StubReads>) -> EndedSpans {
+    spans_with(
+        EndedSpanScope::MakeSpans(Arc::new(RecordingSpans {
+            seen: Mutex::new(seen),
+        })),
+        reads,
+    )
 }
 
 /// The end of an attempt that the worker ended for `reason`, of a task whose
@@ -110,7 +165,7 @@ struct MadeSpan {
     attempt: u32,
     worker_id: String,
     execution: Execution,
-    workflow: WorkflowPlace,
+    workflow: EndedWorkflow,
     carrier: BodyCarrier,
     reason: WorkerDecision,
     error_code: BuiltInTaskCode,
@@ -137,10 +192,11 @@ impl MadeSpan {
     }
 }
 
-/// The span that the client gets for the attempt of
-/// `attempt_ended(decided(reason, workflow))`: the kind of its child, not
-/// the class of its task; the carrier read into its map.
-fn expected_span(reason: WorkerDecision, workflow: WorkflowPlace) -> MadeSpan {
+/// The span that the client gets for an attempt of
+/// `attempt_ended(decided(reason, ..))` with the workflow node `workflow`:
+/// the kind of its child, not the class of its task; the carrier read into
+/// its map.
+fn expected_span(reason: WorkerDecision, workflow: EndedWorkflow) -> MadeSpan {
     MadeSpan {
         task_id: Uuid::from_u128(7),
         task_name: TASK_NAME.to_owned(),
@@ -225,11 +281,11 @@ fn next_values<T>(receiver: &Receiver<T>, count: usize) -> Vec<T> {
         .collect()
 }
 
-/// Serve `scope` with one handler of `AttemptEnded`, which sends the kind
+/// Serve `spans` with one handler of `AttemptEnded`, which sends the kind
 /// of each end to `seen`, and hand it one events frame of `events`; stop
 /// after `count` values reached `seen`. Returns the values in order.
 async fn serve_and_see(
-    scope: EndedSpanScope,
+    spans: EndedSpans,
     seen_tx: Sender<Seen>,
     seen: &Receiver<Seen>,
     events: &[Event],
@@ -256,7 +312,7 @@ async fn serve_and_see(
     };
     let service =
         tokio::spawn(
-            async move { serve_handlers(running, &scope, writer, &mut frames, times).await },
+            async move { serve_handlers(running, &spans, writer, &mut frames, times).await },
         );
     parent
         .send(ParentFrame::Events(events_frame(events)))
@@ -270,13 +326,13 @@ async fn serve_and_see(
 
 /// The span of an attempt that the worker ended comes once, with the facts
 /// of its span, before the handler gets the event; an end that the child
-/// reported, an end not known and another event type get no span.
+/// reported, an end not known and another event type get no span; a plain
+/// task reads no node.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_span_of_an_attempt_that_the_worker_ended_comes_once_before_its_handlers() {
     let (seen_tx, seen) = channel::<Seen>();
-    let scope = EndedSpanScope::MakeSpans(Arc::new(RecordingSpans {
-        seen: Mutex::new(seen_tx.clone()),
-    }));
+    let reads = StubReads::answering(NodeRead::Failed("a plain task reads no node".to_owned()));
+    let spans = recording_spans(seen_tx.clone(), &reads);
     let events = [
         attempt_ended(decided(
             WorkerDecision::TimedOut,
@@ -287,14 +343,14 @@ async fn the_span_of_an_attempt_that_the_worker_ended_comes_once_before_its_hand
         slot_recovered(),
     ];
 
-    let order = serve_and_see(scope, seen_tx, &seen, &events, 4).await;
+    let order = serve_and_see(spans, seen_tx, &seen, &events, 4).await;
 
     assert_eq!(
         order,
         vec![
             Seen::Span(expected_span(
                 WorkerDecision::TimedOut,
-                WorkflowPlace::NotInWorkflow
+                EndedWorkflow::Known(RunWorkflow::NotInWorkflow)
             )),
             Seen::Handled("decided"),
             Seen::Handled("reported"),
@@ -302,16 +358,17 @@ async fn the_span_of_an_attempt_that_the_worker_ended_comes_once_before_its_hand
         ]
     );
     assert!(seen.try_recv().is_err(), "no other span");
+    assert!(reads.reads().is_empty(), "a plain task reads no node");
 }
 
 /// Each reason of the worker gives one span with the code of its attempt
-/// row and the workflow place of the event; `NoSpans` reads no event.
-#[test]
-fn each_reason_gives_one_span_with_its_code_and_no_spans_reads_nothing() {
+/// row; a workflow task (a timeout kill among them) gets the node that the
+/// read gave. `NoSpans` reads no event and no node.
+#[tokio::test]
+async fn each_reason_gives_one_span_with_its_code_and_the_node_that_was_read() {
     let (seen_tx, seen) = channel::<Seen>();
-    let scope = EndedSpanScope::MakeSpans(Arc::new(RecordingSpans {
-        seen: Mutex::new(seen_tx),
-    }));
+    let reads = StubReads::answering(NodeRead::Linked(linked_node()));
+    let spans = recording_spans(seen_tx, &reads);
     let cases = [
         (
             WorkerDecision::TimedOut,
@@ -332,12 +389,16 @@ fn each_reason_gives_one_span_with_its_code_and_no_spans_reads_nothing() {
     ];
     for (reason, code) in &cases {
         let event = attempt_ended(decided(*reason, WorkflowPlace::WorkflowNotKnown));
-        assert_eq!(scope.make_for(&event), EndedSpanStep::Made, "{reason:?}");
+        assert_eq!(
+            spans.make_for(&event).await,
+            EndedSpanStep::Made,
+            "{reason:?}"
+        );
         match seen.try_recv() {
             Ok(Seen::Span(span)) => {
                 assert_eq!(
                     span,
-                    expected_span(*reason, WorkflowPlace::WorkflowNotKnown),
+                    expected_span(*reason, EndedWorkflow::Known(linked_node())),
                     "{reason:?}"
                 );
                 assert_eq!(&span.error_code, code, "{reason:?}");
@@ -350,17 +411,55 @@ fn each_reason_gives_one_span_with_its_code_and_no_spans_reads_nothing() {
         attempt_ended(not_known()),
         slot_recovered(),
     ] {
-        assert_eq!(scope.make_for(&event), EndedSpanStep::NotEndedByWorker);
+        assert_eq!(
+            spans.make_for(&event).await,
+            EndedSpanStep::NotEndedByWorker
+        );
     }
     assert!(seen.try_recv().is_err());
+    assert_eq!(reads.reads(), vec![Uuid::from_u128(7); cases.len()]);
+    assert_eq!(spans.read_failures.count(), 0);
+    let off = spans_with(EndedSpanScope::NoSpans, &reads);
     let decided_event = attempt_ended(decided(
         WorkerDecision::TimedOut,
-        WorkflowPlace::NotInWorkflow,
+        WorkflowPlace::WorkflowNotKnown,
     ));
-    assert_eq!(
-        EndedSpanScope::NoSpans.make_for(&decided_event),
-        EndedSpanStep::SpansOff
-    );
+    assert_eq!(off.make_for(&decided_event).await, EndedSpanStep::SpansOff);
+    assert_eq!(reads.reads().len(), cases.len(), "spans off read no node");
+}
+
+/// A workflow task killed at its timeout whose node read fails gets its
+/// span with `WorkflowNotKnown`, and the failure is counted; a read that
+/// finds no node gives `WorkflowNotKnown` and counts nothing.
+#[tokio::test]
+async fn a_failed_read_gives_workflow_not_known_and_counts_the_failure() {
+    let cases = [
+        (NodeRead::Failed("the pool is closed".to_owned()), 1),
+        (NodeRead::NotLinked, 0),
+    ];
+    for (answer, failures) in cases {
+        let (seen_tx, seen) = channel::<Seen>();
+        let reads = StubReads::answering(answer.clone());
+        let spans = recording_spans(seen_tx, &reads);
+        let event = attempt_ended(decided(
+            WorkerDecision::TimedOut,
+            WorkflowPlace::WorkflowNotKnown,
+        ));
+
+        let step = spans.make_for(&event).await;
+
+        assert_eq!(step, EndedSpanStep::Made, "{answer:?}");
+        match seen.try_recv() {
+            Ok(Seen::Span(span)) => assert_eq!(
+                span,
+                expected_span(WorkerDecision::TimedOut, EndedWorkflow::WorkflowNotKnown),
+                "{answer:?}"
+            ),
+            other => panic!("{answer:?} gives one span, not {other:?}"),
+        }
+        assert_eq!(reads.reads(), vec![Uuid::from_u128(7)], "{answer:?}");
+        assert_eq!(spans.read_failures.count(), failures, "{answer:?}");
+    }
 }
 
 /// A client that panics is caught at each span; the handler still gets the
@@ -368,22 +467,28 @@ fn each_reason_gives_one_span_with_its_code_and_no_spans_reads_nothing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_client_that_panics_is_caught_and_the_handlers_still_get_the_event() {
     install_panic_hook();
-    let spans = Arc::new(PanickingSpans {
+    let maker = Arc::new(PanickingSpans {
         calls: AtomicUsize::new(0),
     });
-    let scope = EndedSpanScope::MakeSpans(Arc::clone(&spans) as Arc<dyn EndedSpanMaker>);
+    let reads = StubReads::answering(NodeRead::NotLinked);
+    let panicking = || {
+        spans_with(
+            EndedSpanScope::MakeSpans(Arc::clone(&maker) as Arc<dyn EndedSpanMaker>),
+            &reads,
+        )
+    };
     let event = attempt_ended(decided(
         WorkerDecision::ChildLost,
         WorkflowPlace::NotInWorkflow,
     ));
-    assert_eq!(scope.make_for(&event), EndedSpanStep::Panicked);
+    assert_eq!(panicking().make_for(&event).await, EndedSpanStep::Panicked);
 
     let (seen_tx, seen) = channel::<Seen>();
-    let order = serve_and_see(scope, seen_tx, &seen, &[event.clone(), event], 2).await;
+    let order = serve_and_see(panicking(), seen_tx, &seen, &[event.clone(), event], 2).await;
 
     assert_eq!(
         order,
         vec![Seen::Handled("decided"), Seen::Handled("decided")]
     );
-    assert_eq!(spans.calls.load(Ordering::Relaxed), 3);
+    assert_eq!(maker.calls.load(Ordering::Relaxed), 3);
 }

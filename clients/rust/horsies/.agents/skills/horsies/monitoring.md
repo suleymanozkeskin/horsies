@@ -352,8 +352,11 @@ fn add_handlers(app: &mut Horsies) -> Result<(), HorsiesError> {
   blocked-runtime kill, a lost child `WORKER_CRASHED`), whose span in the
   task child never ended: `run <task_name>`, CONSUMER, parent from the stored
   carrier, start at the placement, status ERROR with `error.type`,
-  `horsies.span.source = "worker"`, no `horsies.workflow.*` attributes. It
-  is the default (the worker then starts the handler child with no handler);
+  `horsies.span.source = "worker"`. For a workflow task the handler child
+  reads the node by the task id (one bounded core read, only for these
+  attempts) and sets `horsies.workflow.*`; a failed read leaves them out and
+  is counted and logged. It is the default (the worker then starts the
+  handler child with no handler);
   `app.set_worker_ended_spans(horsies::otel::WorkerEndedSpans::NoSpans)`
   turns it off. Set the global tracer provider in `main` or in
   `on_handler_child_start`.

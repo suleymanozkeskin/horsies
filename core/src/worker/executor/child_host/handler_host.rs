@@ -14,8 +14,8 @@
 //!
 //! Service: each event of an `events` frame is decoded on its own. The span
 //! of an attempt that the worker ended is made first
-//! ([`EndedSpanScope::make_for`]), then the event goes to the queue of each
-//! handler of its type with no wait. An event that does not decode is
+//! ([`EndedSpans::make_for`], with the node read of a workflow task), then
+//! the event goes to the queue of each handler of its type with no wait. An event that does not decode is
 //! logged and reaches no handler. A `handler_stats`
 //! frame goes out every [`HANDLER_STATS_INTERVAL`]. A run frame or a second
 //! init frame ends the child with the bad-frame code.
@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use super::ended_spans::EndedSpanScope;
+use super::ended_spans::EndedSpans;
 use super::handlers::{
     HandlerChildApp, HandlerTallies, RunningHandlers, HANDLER_DRAIN, HANDLER_ERROR_LOG_EVERY,
     HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS, HANDLER_STATS_INTERVAL,
@@ -143,6 +143,7 @@ pub(super) fn boot_and_serve_handlers_on(
         pid,
         rss: read_rss(),
     }));
+    let ended_spans = EndedSpans::of_this_process(ended_spans);
     let end = runtime.block_on(serve_handlers(
         running,
         &ended_spans,
@@ -178,7 +179,7 @@ fn start_links(
 /// written within `times.last_stats`.
 pub(super) async fn serve_handlers(
     running: RunningHandlers,
-    ended_spans: &EndedSpanScope,
+    ended_spans: &EndedSpans,
     writer: FrameWriter,
     frames: &mut mpsc::Receiver<ParentFrame>,
     times: HandlerChildTimes,
@@ -213,7 +214,7 @@ pub(super) async fn serve_handlers(
 /// event gets its span step first, then goes to the handlers.
 async fn dispatch_frames(
     running: &RunningHandlers,
-    ended_spans: &EndedSpanScope,
+    ended_spans: &EndedSpans,
     frames: &mut mpsc::Receiver<ParentFrame>,
 ) -> ServeEnd {
     let mut undecoded: u64 = 0;
@@ -225,7 +226,7 @@ async fn dispatch_frames(
                 for text in frame.events.events() {
                     match decode_wire_event(text) {
                         Ok(event) => {
-                            let _step = ended_spans.make_for(&event);
+                            let _step = ended_spans.make_for(&event).await;
                             running.offer(&event);
                         }
                         Err(refusal) => {

@@ -15,10 +15,12 @@
 //! - it starts when the task reached its child and ends when the end
 //!   reached the worker (wall clock of the worker);
 //! - status ERROR with `error.type` = the code of the attempt row;
-//! - the attributes of the span of a child ([`super::attempt::run_attributes`]
-//!   and the task id, name and attempt), with the kind of the child as
-//!   `horsies.task.execution`, and `horsies.span.source` = `worker`. The
-//!   worker does not know the workflow node of a workflow task, so the span
+//! - the attributes of the span of a child ([`super::attempt::run_attributes`],
+//!   [`super::attempt::workflow_attributes`], and the task id, name and
+//!   attempt), with the kind of the child as `horsies.task.execution`, and
+//!   `horsies.span.source` = `worker`. The workflow node of a workflow task
+//!   is the one that the handler child read (`EndedWorkflow::Known`); with
+//!   `EndedWorkflow::WorkflowNotKnown` (a failed read, or no node) the span
 //!   has no `horsies.workflow.*` attribute.
 //!
 //! The span is made with the OpenTelemetry API directly, not through a
@@ -29,13 +31,13 @@ use std::time::SystemTime;
 
 use horsies_core::telemetry::labels::LabelName;
 use horsies_core::worker_manifest::WorkerEndedSpans;
-use horsies_core::{EndedAttempt, EndedSpanMaker, EndedSpanScope};
+use horsies_core::{EndedAttempt, EndedSpanMaker, EndedSpanScope, EndedWorkflow};
 use opentelemetry::global;
 use opentelemetry::propagation::TextMapPropagator;
 use opentelemetry::trace::{Span as _, SpanBuilder, SpanKind, Status, Tracer};
 use opentelemetry::{Context, KeyValue};
 
-use super::attempt::run_attributes;
+use super::attempt::{run_attributes, workflow_attributes};
 use super::carrier::{attempt_parent_of, AttemptParent};
 use super::{instrumentation_scope, ERROR_TYPE_KEY, TASK_ID_KEY};
 use crate::Horsies;
@@ -115,7 +117,8 @@ pub(super) fn make_ended_span<T: Tracer>(
 }
 
 /// The attributes of the span of `attempt`: those of the span of a child,
-/// with no workflow attribute, and `horsies.span.source`. Pure.
+/// the workflow attributes of its node (none with `WorkflowNotKnown`), and
+/// `horsies.span.source`. Pure.
 pub(super) fn ended_span_attributes(attempt: &EndedAttempt<'_>) -> Vec<KeyValue> {
     let mut attributes = vec![
         KeyValue::new(TASK_ID_KEY, attempt.task_id.to_string()),
@@ -132,6 +135,10 @@ pub(super) fn ended_span_attributes(attempt: &EndedAttempt<'_>) -> Vec<KeyValue>
         attempt.worker_id,
         attempt.execution,
     ));
+    match attempt.workflow {
+        EndedWorkflow::Known(workflow) => attributes.extend(workflow_attributes(workflow)),
+        EndedWorkflow::WorkflowNotKnown => {}
+    }
     attributes
 }
 
