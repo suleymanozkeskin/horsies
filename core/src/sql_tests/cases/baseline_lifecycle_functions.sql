@@ -794,7 +794,7 @@ SELECT lc_task('00000000-0000-7000-8000-000000000d01', 'CLAIMED');
 SELECT lc_expect(
     'start: a held claim starts; a plain task has no workflow place',
     (SELECT concat_ws('|', outcome, miss_reason, started_at = now(),
-        workflow_id IS NULL AND workflow_task_index IS NULL) FROM horsies_start_attempt(
+        workflow_id IS NULL AND workflow_task_index IS NULL AND root_workflow_id IS NULL) FROM horsies_start_attempt(
         '00000000-0000-7000-8000-000000000d01', 'w1', now() - interval '1 second', 42, 'host-b', 'worker-42')),
     'STARTED|t|t'
 );
@@ -832,7 +832,8 @@ SELECT lc_expect(
 SELECT lc_expect(
     'start: an absent task is not held, with no start time and no workflow place',
     (SELECT concat_ws('|', outcome, miss_reason,
-        started_at IS NULL AND workflow_id IS NULL AND workflow_task_index IS NULL) FROM horsies_start_attempt(
+        started_at IS NULL AND workflow_id IS NULL AND workflow_task_index IS NULL AND root_workflow_id IS NULL)
+     FROM horsies_start_attempt(
         '00000000-0000-7000-8000-000000000dff', 'w1', now(), 42, 'h', 'p')),
     'MISSED|NOT_HELD|t'
 );
@@ -872,10 +873,10 @@ SELECT lc_task('00000000-0000-7000-8000-000000000d11', 'CLAIMED', 'w1', TRUE);
 SELECT lc_node('00000000-0000-7000-8000-000000000f11', '00000000-0000-7000-8000-000000000e01', 0, 'ENQUEUED',
                '00000000-0000-7000-8000-000000000d11');
 SELECT lc_expect(
-    'start: a workflow task starts with its node, and returns the workflow id and the node index',
-    (SELECT concat_ws('|', outcome, workflow_id, workflow_task_index) FROM horsies_start_attempt(
+    'start: a workflow task starts with its node, and returns the workflow id, the node index and the root',
+    (SELECT concat_ws('|', outcome, workflow_id, workflow_task_index, root_workflow_id) FROM horsies_start_attempt(
         '00000000-0000-7000-8000-000000000d11', 'w1', now() - interval '1 second', 42, 'h', 'p')),
-    'STARTED|00000000-0000-7000-8000-000000000e01|0'
+    'STARTED|00000000-0000-7000-8000-000000000e01|0|00000000-0000-7000-8000-000000000e01'
 );
 SELECT lc_expect(
     'start: the node is RUNNING from now',
@@ -898,6 +899,29 @@ SELECT lc_expect(
     (SELECT status || ':' || (now() - started_at)::text FROM horsies_workflow_tasks
      WHERE id = '00000000-0000-7000-8000-000000000f12'),
     'RUNNING:01:00:00'
+);
+-- e04 is a sub-workflow of e01 at its node 1: a task of e04 returns e01 as its root. e05 is a top-level workflow
+-- whose row stores no root: a task of e05 returns e05.
+SELECT lc_workflow('00000000-0000-7000-8000-000000000e04', 'RUNNING');
+UPDATE horsies_workflows
+SET parent_workflow_id = '00000000-0000-7000-8000-000000000e01', parent_task_index = 1, depth = 1,
+    root_workflow_id = '00000000-0000-7000-8000-000000000e01'
+WHERE id = '00000000-0000-7000-8000-000000000e04';
+SELECT lc_task('00000000-0000-7000-8000-000000000d17', 'CLAIMED', 'w1', TRUE);
+SELECT lc_node('00000000-0000-7000-8000-000000000f17', '00000000-0000-7000-8000-000000000e04', 3, 'ENQUEUED',
+               '00000000-0000-7000-8000-000000000d17');
+SELECT lc_workflow('00000000-0000-7000-8000-000000000e05', 'RUNNING');
+UPDATE horsies_workflows SET root_workflow_id = NULL WHERE id = '00000000-0000-7000-8000-000000000e05';
+SELECT lc_task('00000000-0000-7000-8000-000000000d18', 'CLAIMED', 'w1', TRUE);
+SELECT lc_node('00000000-0000-7000-8000-000000000f18', '00000000-0000-7000-8000-000000000e05', 0, 'ENQUEUED',
+               '00000000-0000-7000-8000-000000000d18');
+SELECT lc_expect(
+    'start: a task of a sub-workflow returns the root of its tree; a workflow with no stored root is its own root',
+    (SELECT string_agg(concat_ws('|', right(s.workflow_id::text, 3), s.workflow_task_index,
+        right(s.root_workflow_id::text, 3)), ',' ORDER BY t.id)
+     FROM (VALUES ('00000000-0000-7000-8000-000000000d17'::uuid), ('00000000-0000-7000-8000-000000000d18'::uuid)) t(id)
+     CROSS JOIN LATERAL horsies_start_attempt(t.id, 'w1', now() - interval '1 second', 42, 'h', 'p') s),
+    'e04|3|e01,e05|0|e05'
 );
 SELECT lc_workflow('00000000-0000-7000-8000-000000000e02', 'PAUSED');
 SELECT lc_task('00000000-0000-7000-8000-000000000d13', 'CLAIMED', 'w1', TRUE);

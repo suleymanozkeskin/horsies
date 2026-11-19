@@ -3814,6 +3814,8 @@ mod tests {
         let frame = crate::worker::executor::protocol::RunFrame {
             task_id: task.task_id,
             task_name: task.task_name.clone(),
+            queue_name: crate::events::QueueName::cut(&task.queue_name),
+            attempt: task.retry.attempt(),
             worker_id: "worker-1".to_owned(),
             claimed_at: task.claimed_at,
             orphan_self_heal: self_heal,

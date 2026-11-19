@@ -79,6 +79,7 @@ def inside_a_task() -> Iterator[RunningTask]:
     task = RunningTask(
         task_id='task-1',
         task_name='resize',
+        attempt=2,
         span=SpanIds(trace_id=TRACE_ID, span_id=SPAN_ID),
     )
     token = enter_running_task(task)
@@ -101,7 +102,7 @@ class TestTheRunningTask:
         assert running_task() == NoRunningTask()
 
     def test_leaving_restores_the_task_before(self) -> None:
-        token = enter_running_task(RunningTask('t', 'n', NoSpanIds()))
+        token = enter_running_task(RunningTask('t', 'n', 1, NoSpanIds()))
         leave_running_task(token)
 
         assert running_task() == NoRunningTask()
@@ -118,12 +119,13 @@ class TestTaskContextFilter:
         assert {name: record.__dict__[name] for name in TASK_CONTEXT_FIELDS} == {
             'task_id': 'task-1',
             'task_name': 'resize',
+            'attempt': 2,
             'trace_id': TRACE_ID,
             'span_id': SPAN_ID,
         }
 
     def test_a_record_in_a_task_with_no_span_has_no_ids(self) -> None:
-        token = enter_running_task(RunningTask('task-2', 'crop', NoSpanIds()))
+        token = enter_running_task(RunningTask('task-2', 'crop', 4, NoSpanIds()))
         try:
             record = _record()
             _ = TaskContextFilter().filter(record)
@@ -133,6 +135,7 @@ class TestTaskContextFilter:
         assert {name: record.__dict__[name] for name in TASK_CONTEXT_FIELDS} == {
             'task_id': 'task-2',
             'task_name': 'crop',
+            'attempt': 4,
             'trace_id': None,
             'span_id': None,
         }

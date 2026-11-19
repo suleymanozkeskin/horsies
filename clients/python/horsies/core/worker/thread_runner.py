@@ -28,6 +28,7 @@ from horsies.core.worker.run_return import (
     EncodedResult,
     MarkerEnd,
     ResultEnvelope,
+    RunWorkflow,
     StartedRunning,
 )
 from horsies.core.worker.shared_child import StoppedBeforeRunning
@@ -134,7 +135,7 @@ def run_thread_seat_task(
             return set_running_or_end_child(
                 str(frame.task_id),
                 started,
-                _run_after_running(frame, work),
+                _run_after_running(frame, work, started.workflow),
             )
         case StoppedBeforeRunning() | CoreStoppedBeforeStart():
             return ownership_result
@@ -153,13 +154,14 @@ def run_thread_seat_task(
 def _run_after_running(
     frame: core.SharedRunFrame,
     work: ThreadSeatWork,
+    workflow: RunWorkflow,
 ) -> ResultEnvelope | BodyInterrupted:
     """The steps of a run after its RUNNING update (``_thread_steps``),
-    inside the span and the log context of its attempt
-    (``run_in_attempt_span``). The span is current on the calling seat
-    thread only, so the other seats do not see it."""
+    inside the span and the log context of its attempt, whose start gave the
+    workflow node ``workflow`` (``run_in_attempt_span``). The span is current
+    on the calling seat thread only, so the other seats do not see it."""
     return run_in_attempt_span(
-        shared_attempt_subject(frame, Execution.SHARED_THREAD),
+        shared_attempt_subject(frame, Execution.SHARED_THREAD, workflow),
         lambda: _thread_steps(frame, work),
     )
 

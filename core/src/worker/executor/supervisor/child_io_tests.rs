@@ -99,6 +99,8 @@ async fn a_frame_reaches_the_child_whole_with_a_small_or_a_large_body() {
         let frame = ParentFrame::Run(RunFrame {
             task_id: Uuid::from_u128(1),
             task_name: "app.tasks.send".to_owned(),
+            queue_name: crate::events::QueueName::cut("default"),
+            attempt: crate::events::AttemptNumber::SMALLEST,
             worker_id: "worker-1".to_owned(),
             claimed_at: Utc.with_ymd_and_hms(2026, 11, 16, 9, 30, 0).unwrap(),
             orphan_self_heal: crate::broker::OrphanSelfHeal::Off,

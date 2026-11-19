@@ -102,9 +102,11 @@ from horsies.core.worker.run_return import (
     ResultOutcome,
     ResultSucceeded,
     RunReturn,
+    RunWorkflow,
     SetRunning,
     StartedRunning,
     StoppedBeforeRunning,
+    run_workflow_of,
 )
 from horsies.core.telemetry.attempt_span import (
     AttemptSubject,
@@ -925,8 +927,8 @@ def _confirm_ownership_and_set_running(
             deadline_in_ms=deadline_in_ms,
         )
         match record:
-            case core.AttemptStarted(started_at=started_at):
-                return StartedRunning(started_at)
+            case core.AttemptStarted(started_at=started_at, workflow=workflow):
+                return StartedRunning(started_at, run_workflow_of(workflow))
             case core.AttemptMissed(reason=reason):
                 return _after_missed_start(
                     handle,
@@ -1617,14 +1619,19 @@ def _encode_task_outcome(
 def shared_attempt_subject(
     frame: core.SharedRunFrame,
     execution: Execution,
+    workflow: RunWorkflow,
 ) -> AttemptSubject:
     """The attempt of the run of ``frame`` on a seat of a shared child of
-    the class ``execution``. Pure."""
+    the class ``execution``, whose start gave the workflow node
+    ``workflow``. Pure."""
     return AttemptSubject(
         task_id=str(frame.task_id),
         task_name=frame.task_name,
+        queue_name=frame.queue_name,
+        attempt=frame.attempt,
         worker_id=frame.worker_id,
         execution=execution,
+        workflow=workflow,
         trace=run_trace_of(frame.trace),
     )
 
@@ -1639,6 +1646,8 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
     claimed_at: datetime,
     task_loop: TaskLoop,
     orphan_self_heal: bool,
+    queue_name: str,
+    attempt: int,
     trace: RunTrace,
 ) -> RunReturn:
     """Run one task in an isolated child, up to its result.
@@ -1655,7 +1664,9 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
 
     The steps after the RUNNING update run inside the attempt span of the
     run, whose parent the send's carrier ``trace`` gives
-    (``_run_isolated_after_running``).
+    (``_run_isolated_after_running``). ``queue_name`` and ``attempt`` come
+    with the run from the worker, and the workflow node from the start, for
+    the span and the log records of the body.
 
     ``orphan_self_heal`` comes with the run from the worker (the app's
     ``RecoveryConfig.auto_terminate_orphaned_workflow_tasks``): with it, the
@@ -1711,8 +1722,11 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
             AttemptSubject(
                 task_id=task_id,
                 task_name=task_name,
+                queue_name=queue_name,
+                attempt=attempt,
                 worker_id=master_worker_id,
                 execution=Execution.ISOLATED,
+                workflow=started.workflow,
                 trace=trace,
             ),
         ),

@@ -72,6 +72,7 @@ from horsies.core.worker.child_runner import (
     attempt_elapsed_ms,
 )
 from horsies.core.worker.run_return import (
+    NotInWorkflow,
     NothingRaised,
     ResultFailed,
     SetRunning,
@@ -93,7 +94,7 @@ TASK_ID = '0b4d8a52-7d0e-4a0e-9d11-6b2f1f7c9e02'
 STARTED_AT: Final = datetime(2026, 11, 17, 10, 0, 1, tzinfo=timezone.utc)
 """The time that the fake start write returns."""
 
-STARTED: Final = StartedRunning(STARTED_AT)
+STARTED: Final = StartedRunning(STARTED_AT, NotInWorkflow())
 """The start that a stubbed ownership confirm returns."""
 
 
@@ -877,6 +878,8 @@ def _run_entry_defaults() -> dict[str, Any]:
         'claimed_at': CLAIMED_AT,
         'task_loop': TaskLoop(),
         'orphan_self_heal': True,
+        'queue_name': 'default',
+        'attempt': 1,
         'trace': NoTraceCarrier(),
     }
 
@@ -1895,7 +1898,14 @@ class TestAttemptElapsedMs:
 class TestStartAttempt:
     def test_a_started_row_runs_the_task_after_one_call(self) -> None:
         handle = _FakeChildHandle(
-            starts=[_record(core.AttemptStarted, task_id=uuid.UUID(TASK_ID), started_at=STARTED_AT)],
+            starts=[
+                _record(
+                    core.AttemptStarted,
+                    task_id=uuid.UUID(TASK_ID),
+                    started_at=STARTED_AT,
+                    workflow='NOT_IN_WORKFLOW',
+                ),
+            ],
         )
 
         result = _start_with(handle)
@@ -1941,7 +1951,14 @@ class TestStartAttempt:
         from horsies.core.worker.child_runner import StartWithin
 
         handle = _FakeChildHandle(
-            starts=[_record(core.AttemptStarted, task_id=uuid.UUID(TASK_ID), started_at=STARTED_AT)],
+            starts=[
+                _record(
+                    core.AttemptStarted,
+                    task_id=uuid.UUID(TASK_ID),
+                    started_at=STARTED_AT,
+                    workflow='NOT_IN_WORKFLOW',
+                ),
+            ],
         )
 
         assert _start_with(handle, start_check=lambda: StartWithin(milliseconds=250)) == STARTED

@@ -113,8 +113,8 @@ pub use crate::broker::child_writes::{
 pub use crate::broker::claims::{
     ClaimClasses, ClaimPass, ClaimPassRequest, ClaimRead, ClaimTake, ClaimedRow, QueueStartCheck,
     QueueStarts, ReleaseBatch, ReleaseBatchError, ReleaseClaims, ReleaseOutcome, ReleasePlacement,
-    StartAttempt, StartMiss, StartOutcome, StartWindow, UnheldBudget, WindowedStart,
-    MAX_RELEASED_CLAIMS,
+    RunWorkflow, StartAttempt, StartMiss, StartOutcome, StartWindow, UnheldBudget, WindowedStart,
+    WorkflowNodeIndex, MAX_RELEASED_CLAIMS, MAX_WORKFLOW_NODE_INDEX,
 };
 pub use crate::broker::expiry_and_orphans::{
     OrphanAuditPage, PendingExpiryFailed, PendingExpiryPass, TaskRowEnd, ORPHAN_AUDIT_PAGE_ROWS,
