@@ -43,6 +43,7 @@ use crate::db::{
 };
 use crate::events::{Priority, RunTrace, TraceCarrierText};
 use crate::telemetry::trace_carrier::{StoredTraceId, TRACE_ID_BYTES};
+use crate::worker::executor::protocol::{RunWorkflow, WorkflowNodeIndex, MAX_WORKFLOW_NODE_INDEX};
 
 /// The most rows one release statement takes (the bound of
 /// `horsies_release_claims`).
@@ -248,6 +249,9 @@ pub struct ClaimedRow {
     /// The trace id that the send stored on the row (`trace_id`), for the
     /// log records of each attempt.
     pub trace_id: StoredTraceId,
+    /// The workflow node that links the row (`workflow_id`,
+    /// `workflow_task_index`), for the run frame of each attempt.
+    pub workflow: RunWorkflow,
     /// The priority of the row's queue: 1 is claimed first, 100 last.
     pub priority: Priority,
     /// When the row was due: its send, the end of its send delay, or its
@@ -311,6 +315,8 @@ struct ClaimWireRow {
     max_retries: Option<i32>,
     trace_carrier: Option<String>,
     trace_id: Option<Vec<u8>>,
+    workflow_id: Option<Uuid>,
+    workflow_task_index: Option<i32>,
     priority: Option<i32>,
     enqueued_at: Option<DateTime<Utc>>,
     short_by: Option<i32>,
@@ -411,6 +417,8 @@ fn claim_wire_row(row: &Row, statement: &TypedStatement) -> Result<ClaimWireRow,
         max_retries: column(row, statement, "max_retries")?,
         trace_carrier: column(row, statement, "trace_carrier")?,
         trace_id: column(row, statement, "trace_id")?,
+        workflow_id: column(row, statement, "workflow_id")?,
+        workflow_task_index: column(row, statement, "workflow_task_index")?,
         priority: column(row, statement, "priority")?,
         enqueued_at: column(row, statement, "enqueued_at")?,
         short_by: column(row, statement, "short_by")?,
@@ -425,7 +433,8 @@ fn claim_wire_row(row: &Row, statement: &TypedStatement) -> Result<ClaimWireRow,
 /// `SHORT`, a second `SHORT` row, a `CLAIMED` row with a column missing or
 /// with `short_by`, a `SHORT` row with a task column or a count that is not
 /// above 0, an unknown execution class, a retry count below 0, a priority
-/// outside 1 to 100.
+/// outside 1 to 100, a workflow id without a node index or the reverse, a
+/// node index outside 0 to [`MAX_WORKFLOW_NODE_INDEX`].
 fn decode_claim_pass(rows: Vec<ClaimWireRow>, read: ClaimRead) -> Result<ClaimPass, String> {
     let mut claimed = Vec::with_capacity(rows.len());
     let mut take = ClaimTake::Full;
@@ -479,6 +488,7 @@ fn decode_claimed_row(row: ClaimWireRow, read: ClaimRead) -> Result<ClaimedRow, 
                  {stored_priority}, outside 1 to 100"
             )
         })?;
+    let workflow = claimed_workflow(id, row.workflow_id, row.workflow_task_index)?;
     Ok(ClaimedRow {
         id,
         task_name: row.task_name.ok_or_else(|| required("task_name"))?,
@@ -494,10 +504,54 @@ fn decode_claimed_row(row: ClaimWireRow, read: ClaimRead) -> Result<ClaimedRow, 
         max_retries: row.max_retries.ok_or_else(|| required("max_retries"))?,
         trace: stored_trace_of(id, row.trace_carrier),
         trace_id: stored_trace_id_of(id, row.trace_id),
+        workflow,
         priority,
         enqueued_at: row.enqueued_at.ok_or_else(|| required("enqueued_at"))?,
         read,
     })
+}
+
+/// The workflow node of the claimed row `task_id` from its `workflow_id` and
+/// `workflow_task_index`: no node when both are NULL, the node when both are
+/// set. Pure.
+///
+/// The claim reads both columns from one node row, and the workflow start
+/// writes each node index from a spec of at most
+/// [`crate::core::workflow::spec::MAX_WORKFLOW_NODES`] nodes.
+///
+/// Errors: the contract breach as text: one column NULL and the other set,
+/// or a node index outside 0 to [`MAX_WORKFLOW_NODE_INDEX`].
+fn claimed_workflow(
+    task_id: Uuid,
+    workflow_id: Option<Uuid>,
+    workflow_task_index: Option<i32>,
+) -> Result<RunWorkflow, String> {
+    match (workflow_id, workflow_task_index) {
+        (None, None) => Ok(RunWorkflow::NotInWorkflow),
+        (Some(workflow_id), Some(stored_index)) => {
+            let node_index = u64::try_from(stored_index)
+                .ok()
+                .and_then(WorkflowNodeIndex::new)
+                .ok_or_else(|| {
+                    format!(
+                        "a CLAIMED row of horsies_claim: claimed task {task_id} has node index \
+                         {stored_index}, outside 0 to {MAX_WORKFLOW_NODE_INDEX}"
+                    )
+                })?;
+            Ok(RunWorkflow::InWorkflow {
+                workflow_id,
+                node_index,
+            })
+        }
+        (Some(_), None) => Err(format!(
+            "a CLAIMED row of horsies_claim: claimed task {task_id} has a workflow id and no \
+             node index"
+        )),
+        (None, Some(_)) => Err(format!(
+            "a CLAIMED row of horsies_claim: claimed task {task_id} has a node index and no \
+             workflow id"
+        )),
+    }
 }
 
 /// The trace of a claimed row from its stored `trace_carrier`: no carrier
@@ -530,11 +584,12 @@ fn stored_trace_of(task_id: Uuid, trace_carrier: Option<String>) -> RunTrace {
     }
 }
 
-/// The trace id of a claimed row from its stored `trace_id`: none for
-/// `NULL`, else the 16 bytes. The table holds 16 bytes; another length was
-/// not written by a send, and it does not fail the claim: the row claims
-/// with no trace id, and a warning names the task and the length.
-fn stored_trace_id_of(task_id: Uuid, trace_id: Option<Vec<u8>>) -> StoredTraceId {
+/// The trace id of a row from its stored `trace_id`: none for `NULL`, else
+/// the 16 bytes. The table holds 16 bytes; another length was not written by
+/// a send, and it does not fail the read (the claim, the stale RUNNING scan):
+/// the row reads with no trace id, and a warning names the task and the
+/// length.
+pub(crate) fn stored_trace_id_of(task_id: Uuid, trace_id: Option<Vec<u8>>) -> StoredTraceId {
     let bytes = match trace_id {
         None => return StoredTraceId::NoTraceId,
         Some(bytes) => bytes,
@@ -545,7 +600,7 @@ fn stored_trace_id_of(task_id: Uuid, trace_id: Option<Vec<u8>>) -> StoredTraceId
             tracing::warn!(
                 task_id = %task_id,
                 bytes = bytes.len(),
-                "claimed task {task_id} has a stored trace id of {} bytes, not {TRACE_ID_BYTES}; \
+                "task {task_id} has a stored trace id of {} bytes, not {TRACE_ID_BYTES}; \
                  its log records carry no trace id",
                 bytes.len(),
             );
@@ -569,6 +624,8 @@ fn decode_short_row(row: ClaimWireRow) -> Result<NonZeroU32, String> {
         max_retries,
         trace_carrier,
         trace_id,
+        workflow_id,
+        workflow_task_index,
         priority,
         enqueued_at,
         short_by,
@@ -586,6 +643,8 @@ fn decode_short_row(row: ClaimWireRow) -> Result<NonZeroU32, String> {
         max_retries.is_some(),
         trace_carrier.is_some(),
         trace_id.is_some(),
+        workflow_id.is_some(),
+        workflow_task_index.is_some(),
         priority.is_some(),
         enqueued_at.is_some(),
     ];

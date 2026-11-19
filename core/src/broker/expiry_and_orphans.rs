@@ -25,12 +25,14 @@ use uuid::Uuid;
 use crate::broker::child_writes::WriteDeadline;
 use crate::broker::core_rows::{column, one_row, roll_back, StatementLog};
 use crate::broker::error::BrokerError;
+use crate::broker::stale_recovery::RecoveredTask;
 use crate::broker::terminalization::{
-    terminalize, terminalize_and_commit_if, terminalize_in_core_transaction, terminalize_within,
+    terminalize, terminalize_moved_and_commit_if, terminalize_moved_in_core_transaction,
+    terminalize_within,
 };
 use crate::core::lifecycle::{
-    AttemptWriteRefusal, BatchSize, ObservedTaskState, OwnedClaim, TerminalizationCommand,
-    TerminalizationKind, TerminalizationOutcome, WorkerOwned,
+    AttemptWriteRefusal, BatchSize, MovedRow, ObservedTaskState, OwnedClaim,
+    TerminalizationCommand, TerminalizationKind, TerminalizationOutcome, WorkerOwned,
 };
 use crate::core::{OutcomeCode, TaskError, TaskResult};
 use crate::db::{
@@ -165,7 +167,8 @@ pub(crate) fn prestart_expiry_result(
 /// batches. Each batch is one transaction of its own (`BEGIN`, the batch,
 /// `COMMIT`) on a connection checked out as reserved work, and commits only
 /// when every outcome is `APPLIED`. No attempt row is written: the task never
-/// started. Logs nothing; each caller reports the end of the pass.
+/// started. `expired` gets the rows of each batch once it committed, in
+/// batch order. Logs nothing; each caller reports the end of the pass.
 ///
 /// Errors: [`PendingExpiryFailed`] with the rows of the batches before the
 /// failed one. Its `error` is [`BrokerError::Statement`],
@@ -175,6 +178,7 @@ pub(crate) fn prestart_expiry_result(
 pub(crate) async fn expire_pending_pass(
     pool: &CorePool,
     log: StatementLog,
+    expired: impl FnMut(&[RecoveredTask]),
 ) -> Result<PendingExpiryPass, PendingExpiryFailed> {
     let not_started = |error: BrokerError| PendingExpiryFailed {
         expired_before: 0,
@@ -188,7 +192,8 @@ pub(crate) async fn expire_pending_pass(
     expire_pass_with(
         PENDING_EXPIRY_BATCH_ROWS.unsigned_abs(),
         PENDING_EXPIRY_MAX_BATCHES_PER_PASS,
-        || terminalize_and_commit_if(pool, log, &command, transitioned_count),
+        || terminalize_moved_and_commit_if(pool, log, &command, expired_tasks),
+        expired,
     )
     .await
 }
@@ -203,44 +208,63 @@ fn pending_expiry_batch() -> BatchSize {
 
 /// The loop of a pending expiry pass: at most `max_batches` calls of
 /// `expire_batch`, each of which expires at most `full_batch` rows and
-/// returns how many it expired. Stops at the first short batch, at the first
-/// failure, or after `max_batches` full batches.
+/// returns them; `expired` gets the rows of each batch. Stops at the first
+/// short batch, at the first failure, or after `max_batches` full batches.
 async fn expire_pass_with<F, Fut>(
     full_batch: u32,
     max_batches: u32,
     mut expire_batch: F,
+    mut expired: impl FnMut(&[RecoveredTask]),
 ) -> Result<PendingExpiryPass, PendingExpiryFailed>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<u64, BrokerError>>,
+    Fut: std::future::Future<Output = Result<Vec<RecoveredTask>, BrokerError>>,
 {
-    let mut expired: u64 = 0;
+    let mut count: u64 = 0;
     for _ in 0..max_batches {
         let rows = match expire_batch().await {
             Ok(rows) => rows,
             Err(error) => {
                 return Err(PendingExpiryFailed {
-                    expired_before: expired,
+                    expired_before: count,
                     error,
                 })
             }
         };
-        expired += rows;
-        if rows < u64::from(full_batch) {
-            return Ok(PendingExpiryPass::Drained { expired });
+        expired(&rows);
+        count += u64::try_from(rows.len()).unwrap_or(u64::MAX);
+        let short = u32::try_from(rows.len()).is_ok_and(|rows| rows < full_batch);
+        if short {
+            return Ok(PendingExpiryPass::Drained { expired: count });
         }
     }
-    Ok(PendingExpiryPass::BoundReached { expired })
+    Ok(PendingExpiryPass::BoundReached { expired: count })
 }
 
-/// The number of rows a pending expiry batch moved. The batch reports only
-/// the rows it moved (Python `expire_pending_tasks`), so any outcome other
-/// than `APPLIED` breaks the wire contract ([`refuse_unapplied`]). Pure.
+/// The tasks that a pending expiry batch moved, from its rows. The batch
+/// reports only the rows it moved (Python `expire_pending_tasks`), so any
+/// outcome other than `APPLIED` breaks the wire contract
+/// ([`refuse_unapplied`]). Pure.
 ///
 /// Errors: [`BrokerError::TerminalizationContract`].
-pub(crate) fn transitioned_count(outcomes: &[TerminalizationOutcome]) -> Result<u64, BrokerError> {
-    refuse_unapplied("horsies_expire_pending_tasks", outcomes)?;
-    Ok(outcomes.len() as u64)
+pub(crate) fn expired_tasks(rows: &[MovedRow]) -> Result<Vec<RecoveredTask>, BrokerError> {
+    moved_tasks("horsies_expire_pending_tasks", rows)
+}
+
+/// The task of each row of a discovery batch of `operation`, each of whose
+/// outcomes must be `APPLIED`. Pure.
+///
+/// Errors: as [`refuse_unapplied`].
+fn moved_tasks(operation: &str, rows: &[MovedRow]) -> Result<Vec<RecoveredTask>, BrokerError> {
+    refuse_unapplied(operation, rows.iter().map(|row| &row.outcome))?;
+    Ok(rows
+        .iter()
+        .map(|row| RecoveredTask {
+            task_id: row.outcome.task_id(),
+            task_name: row.task_name.clone(),
+            queue_name: row.queue_name.clone(),
+        })
+        .collect())
 }
 
 /// Refuse the outcomes of a discovery batch of `operation` unless each one
@@ -249,9 +273,9 @@ pub(crate) fn transitioned_count(outcomes: &[TerminalizationOutcome]) -> Result<
 ///
 /// Errors: [`BrokerError::TerminalizationContract`] naming `operation`, the
 /// task and the first outcome other than `APPLIED`.
-pub(crate) fn refuse_unapplied(
+pub(crate) fn refuse_unapplied<'a>(
     operation: &str,
-    outcomes: &[TerminalizationOutcome],
+    outcomes: impl IntoIterator<Item = &'a TerminalizationOutcome>,
 ) -> Result<(), BrokerError> {
     for outcome in outcomes {
         match outcome {
@@ -277,6 +301,7 @@ pub(crate) fn refuse_unapplied(
 /// checked out as reserved work (`BEGIN`, the page, the counts, `COMMIT`).
 /// The page cancels the scanned PENDING and CLAIMED workflow tasks that no
 /// runnable node links (`CANCEL_ORPHAN_SWEEP`) and moves the cursor.
+/// `cancelled` gets the rows of the page once it committed.
 ///
 /// Errors (nothing committed, except after a `COMMIT` whose reply was lost):
 /// - [`BrokerError::Statement`]: the checkout, `BEGIN`, the page, the counts
@@ -290,6 +315,7 @@ pub(crate) fn refuse_unapplied(
 pub(crate) async fn cancel_orphan_page(
     pool: &CorePool,
     log: StatementLog,
+    mut cancelled: impl FnMut(&[RecoveredTask]),
 ) -> Result<OrphanAuditPage, BrokerError> {
     let command = TerminalizationCommand::CancelOrphanedTasks {
         batch_size: orphan_audit_batch(),
@@ -307,7 +333,7 @@ pub(crate) async fn cancel_orphan_page(
     // Every early return below drops the transaction before its COMMIT: a
     // dropped transaction that is open or aborted discards its connection,
     // so nothing of it commits.
-    let outcomes = terminalize_in_core_transaction(&mut transaction, log, &command).await?;
+    let moved = terminalize_moved_in_core_transaction(&mut transaction, log, &command).await?;
     log.log(&ORPHAN_SCAN_COUNTS);
     let rows = transaction
         .query(
@@ -318,9 +344,10 @@ pub(crate) async fn cancel_orphan_page(
     let counts = one_row(rows, &ORPHAN_SCAN_COUNTS)?;
     let scanned: i32 = column(&counts, &ORPHAN_SCAN_COUNTS, "last_scan_rows")?;
     let candidates: i32 = column(&counts, &ORPHAN_SCAN_COUNTS, "last_candidate_rows")?;
-    match orphan_audit_page(scanned, candidates, &outcomes) {
-        Ok(page) => {
+    match orphan_audit_page(scanned, candidates, &moved) {
+        Ok((page, tasks)) => {
             transaction.commit().await?;
+            cancelled(&tasks);
             Ok(page)
         }
         Err(refused) => {
@@ -338,18 +365,18 @@ fn orphan_audit_batch() -> BatchSize {
     }
 }
 
-/// The page of an orphan audit from its cursor counts and outcomes (Python
-/// `audit_orphaned_workflow_tasks`). Pure.
+/// The page of an orphan audit from its cursor counts and rows (Python
+/// `audit_orphaned_workflow_tasks`), with the task of each row. Pure.
 ///
 /// Errors: [`BrokerError::TerminalizationContract`] for an outcome other
 /// than `APPLIED`, a negative count, or a candidate count that differs from
-/// the number of outcomes.
+/// the number of rows.
 fn orphan_audit_page(
     scanned: i32,
     candidates: i32,
-    outcomes: &[TerminalizationOutcome],
-) -> Result<OrphanAuditPage, BrokerError> {
-    refuse_unapplied("horsies_cancel_orphaned_tasks", outcomes)?;
+    rows: &[MovedRow],
+) -> Result<(OrphanAuditPage, Vec<RecoveredTask>), BrokerError> {
+    let tasks = moved_tasks("horsies_cancel_orphaned_tasks", rows)?;
     let (Ok(rows_selected), Ok(candidates_returned)) =
         (u32::try_from(scanned), u32::try_from(candidates))
     else {
@@ -359,15 +386,18 @@ fn orphan_audit_page(
         )));
     };
     match usize::try_from(candidates_returned) {
-        Ok(count) if count == outcomes.len() => Ok(OrphanAuditPage {
-            rows_selected,
-            candidates_returned,
-            cancelled: candidates_returned,
-        }),
+        Ok(count) if count == tasks.len() => Ok((
+            OrphanAuditPage {
+                rows_selected,
+                candidates_returned,
+                cancelled: candidates_returned,
+            },
+            tasks,
+        )),
         Ok(_) | Err(_) => Err(BrokerError::TerminalizationContract(format!(
             "horsies_cancel_orphaned_tasks: the cursor candidate count {candidates_returned} \
              differs from the {} outcome rows",
-            outcomes.len()
+            tasks.len()
         ))),
     }
 }
@@ -534,44 +564,81 @@ mod tests {
         }
     }
 
+    /// A moved row of `outcome`, of task `orphan.task` on queue `default`.
+    fn moved(outcome: TerminalizationOutcome) -> MovedRow {
+        MovedRow {
+            outcome,
+            task_name: "orphan.task".to_owned(),
+            queue_name: "default".to_owned(),
+        }
+    }
+
+    /// `count` expired rows, each with its own id.
+    fn expired_rows(count: u64) -> Vec<RecoveredTask> {
+        (0..count)
+            .map(|_| RecoveredTask {
+                task_id: Uuid::new_v4(),
+                task_name: "expired.task".to_owned(),
+                queue_name: "default".to_owned(),
+            })
+            .collect()
+    }
+
+    /// The pass of `expire_pass_with` over planned batch answers (a count
+    /// of rows, or a failure), the number of batches it ran, and the row
+    /// count of each batch that the pass handed on.
     async fn planned_pass(
         full_batch: u32,
         max_batches: u32,
         answers: Vec<Result<u64, BrokerError>>,
-    ) -> (Result<PendingExpiryPass, PendingExpiryFailed>, usize) {
+    ) -> (
+        Result<PendingExpiryPass, PendingExpiryFailed>,
+        usize,
+        Vec<usize>,
+    ) {
         let mut answers = std::collections::VecDeque::from(answers);
         let mut batches = 0;
-        let pass = expire_pass_with(full_batch, max_batches, || {
-            batches += 1;
-            std::future::ready(answers.pop_front().expect("a planned batch answer"))
-        })
+        let mut handed_on = Vec::new();
+        let pass = expire_pass_with(
+            full_batch,
+            max_batches,
+            || {
+                batches += 1;
+                let answer = answers.pop_front().expect("a planned batch answer");
+                std::future::ready(answer.map(expired_rows))
+            },
+            |rows| handed_on.push(rows.len()),
+        )
         .await;
-        (pass, batches)
+        (pass, batches, handed_on)
     }
 
     #[tokio::test]
     async fn a_short_batch_ends_the_pending_expiry_pass_as_drained() {
-        let (pass, batches) = planned_pass(500, 200, vec![Ok(500), Ok(500), Ok(2)]).await;
+        let (pass, batches, handed_on) =
+            planned_pass(500, 200, vec![Ok(500), Ok(500), Ok(2)]).await;
         assert_eq!(
             pass.expect("no batch failed"),
             PendingExpiryPass::Drained { expired: 1_002 }
         );
         assert_eq!(batches, 3);
+        assert_eq!(handed_on, vec![500, 500, 2]);
     }
 
     #[tokio::test]
     async fn full_batches_up_to_the_bound_end_the_pending_expiry_pass_with_the_bound_reached() {
-        let (pass, batches) = planned_pass(2, 3, vec![Ok(2), Ok(2), Ok(2)]).await;
+        let (pass, batches, handed_on) = planned_pass(2, 3, vec![Ok(2), Ok(2), Ok(2)]).await;
         assert_eq!(
             pass.expect("no batch failed"),
             PendingExpiryPass::BoundReached { expired: 6 }
         );
         assert_eq!(batches, 3);
+        assert_eq!(handed_on, vec![2, 2, 2]);
     }
 
     #[tokio::test]
     async fn a_failed_batch_stops_the_pending_expiry_pass_with_the_rows_before_it() {
-        let (pass, batches) = planned_pass(
+        let (pass, batches, handed_on) = planned_pass(
             2,
             5,
             vec![
@@ -584,6 +651,9 @@ mod tests {
         assert_eq!(failed.expired_before, 2);
         assert!(failed.to_string().contains("planned"), "{failed}");
         assert_eq!(batches, 2);
+        // The rows of the committed batch are handed on; the failed batch
+        // has none.
+        assert_eq!(handed_on, vec![2]);
     }
 
     #[test]
@@ -611,33 +681,53 @@ mod tests {
 
     #[test]
     fn a_discovery_outcome_other_than_applied_is_a_contract_error() {
-        let refused = transitioned_count(&[TerminalizationOutcome::TaskAbsent {
+        let refused = expired_tasks(&[moved(TerminalizationOutcome::TaskAbsent {
             task_id: task(),
             ordinality: None,
-        }]);
+        })]);
         assert!(
             matches!(refused, Err(BrokerError::TerminalizationContract(_))),
             "{refused:?}"
         );
-        assert_eq!(transitioned_count(&[]).expect("no outcome is no move"), 0);
         assert_eq!(
-            transitioned_count(&[applied(), applied()]).expect("two moves"),
-            2
+            expired_tasks(&[]).expect("no outcome is no move"),
+            Vec::new()
+        );
+        let two = expired_tasks(&[moved(applied()), moved(applied())]).expect("two moves");
+        assert_eq!(
+            two,
+            vec![
+                RecoveredTask {
+                    task_id: task(),
+                    task_name: "orphan.task".to_owned(),
+                    queue_name: "default".to_owned(),
+                };
+                2
+            ]
         );
     }
 
     #[test]
     fn an_orphan_page_counts_its_outcomes_and_refuses_counts_that_disagree() {
+        let (page, cancelled) =
+            orphan_audit_page(3, 2, &[moved(applied()), moved(applied())]).expect("a page");
         assert_eq!(
-            orphan_audit_page(3, 2, &[applied(), applied()]).expect("a page"),
+            page,
             OrphanAuditPage {
                 rows_selected: 3,
                 candidates_returned: 2,
                 cancelled: 2,
             }
         );
+        assert_eq!(
+            cancelled
+                .iter()
+                .map(|task| task.task_id)
+                .collect::<Vec<_>>(),
+            vec![task(), task()]
+        );
         assert!(matches!(
-            orphan_audit_page(3, 1, &[applied(), applied()]),
+            orphan_audit_page(3, 1, &[moved(applied()), moved(applied())]),
             Err(BrokerError::TerminalizationContract(_))
         ));
         assert!(matches!(
@@ -648,11 +738,11 @@ mod tests {
             orphan_audit_page(
                 1,
                 1,
-                &[TerminalizationOutcome::LostClaim {
+                &[moved(TerminalizationOutcome::LostClaim {
                     task_id: task(),
                     ordinality: None,
                     observed: observed(TaskStatus::Claimed),
-                }]
+                })]
             ),
             Err(BrokerError::TerminalizationContract(_))
         ));

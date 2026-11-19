@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker.child_runner import _confirm_ownership_and_set_running
-from horsies.core.worker.run_return import StoppedBeforeRunning
+from horsies.core.worker.run_return import StartedRunning, StoppedBeforeRunning
 from tests.integration.conftest import compute_test_command_fingerprint
 
 pytestmark = [pytest.mark.integration]
@@ -180,7 +180,7 @@ async def test_a_start_writes_no_runner_beat(
         orphan_self_heal=False,
     )
 
-    assert result is None
+    assert isinstance(result, StartedRunning), result
     assert await _task_status(session, task_id) == 'RUNNING'
     assert await _beat_count(session, task_id) == 0
 
@@ -244,7 +244,7 @@ async def test_running_node_keeps_its_tuple_and_first_start(
         orphan_self_heal=False,
     )
 
-    assert result is None
+    assert isinstance(result, StartedRunning), result
     assert await _task_status(session, task_id) == 'RUNNING'
     status, started_at, ctid_after = await _node_state(session, task_id)
     assert status == 'RUNNING'
@@ -270,7 +270,7 @@ async def test_waiting_node_moves_to_running_with_a_new_start(
         orphan_self_heal=False,
     )
 
-    assert result is None
+    assert isinstance(result, StartedRunning), result
     assert await _task_status(session, task_id) == 'RUNNING'
     status, started_at, _ = await _node_state(session, task_id)
     assert status == 'RUNNING'

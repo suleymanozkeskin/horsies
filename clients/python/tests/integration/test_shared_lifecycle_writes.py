@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies._catalog.child_bounds import CANCELLED_WRITE_END_SECONDS
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker import shared_lifecycle
-from horsies.core.worker.run_return import StoppedBeforeRunning
+from horsies.core.worker.run_return import StartedRunning, StoppedBeforeRunning
 from horsies.core.worker.shared_lifecycle import (
     confirm_until_not_resumed,
     mark_task_finalizing,
@@ -214,7 +214,7 @@ async def test_the_running_update_writes_no_beat_and_the_marker_follows(
     _ = await mark_task_finalizing(uuid.UUID(task_id), WORKER_ID, claimed_at)
     marked = await _row(session, task_id)
 
-    assert started is None
+    assert isinstance(started, StartedRunning), started
     assert running.status == 'RUNNING'
     assert running.worker_pid == os.getpid()
     assert running.finalizing_at is None

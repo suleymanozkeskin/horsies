@@ -73,6 +73,7 @@ pub(super) fn task(number: u128, execution: ExecutionClass) -> ClaimedTask {
         options: read_stored_options(Some("{}")),
         trace: crate::events::RunTrace::NoCarrier,
         trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
+        workflow: crate::worker::executor::protocol::RunWorkflow::NotInWorkflow,
     }
 }
 
@@ -154,11 +155,14 @@ pub(super) fn run_frame(task: &ClaimedTask) -> ParentFrame {
     ParentFrame::Run(RunFrame {
         task_id: task.task_id,
         task_name: task.task_name.clone(),
+        queue_name: crate::events::QueueName::cut(&task.queue_name),
+        attempt: task.retry.attempt(),
         worker_id: WORKER_ID.to_owned(),
         claimed_at: task.claimed_at,
         orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work: IsolatedWork::Run,
         input: input(),
+        workflow: task.workflow,
         trace: crate::events::RunTrace::NoCarrier,
     })
 }
@@ -169,11 +173,14 @@ pub(super) fn shared_run_frame(task: &ClaimedTask, dispatch: u64, work: SharedWo
         dispatch: DispatchNumber::new(dispatch).unwrap(),
         task_id: task.task_id,
         task_name: task.task_name.clone(),
+        queue_name: crate::events::QueueName::cut(&task.queue_name),
+        attempt: task.retry.attempt(),
         worker_id: WORKER_ID.to_owned(),
         claimed_at: task.claimed_at,
         orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work,
         input: input(),
+        workflow: task.workflow,
         trace: crate::events::RunTrace::NoCarrier,
     })
 }

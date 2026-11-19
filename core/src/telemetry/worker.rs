@@ -27,7 +27,9 @@ use crate::core::task::{DeclaredErrorCodes, Execution};
 use crate::events::Event;
 use crate::telemetry::catalog::MetricId;
 use crate::telemetry::declared::{self, DeclaredValue, ErrorCodeValue};
-use crate::telemetry::labels::{ClaimPassResult, EventDropCause, RecoveryStep, ReleaseReason};
+use crate::telemetry::labels::{
+    ClaimPassResult, EventDropCause, RecoveryAction, RecoveryStep, ReleaseReason, ReplaceReason,
+};
 use crate::telemetry::registry::{Counter, HandleRefused, Histogram, OptionalCounter, Registry};
 use crate::worker::executor::protocol::StopReason;
 use crate::worker::executor::slots::outcome::WriteStage;
@@ -35,6 +37,7 @@ use crate::TaskAttemptOutcome;
 
 mod end_points;
 mod points;
+mod recovery_points;
 mod slot_points;
 #[cfg(test)]
 mod tests;
@@ -152,8 +155,10 @@ struct PointMetrics {
     starts_refused: Counter<(StopReason,)>,
     finalize_retries: Counter<(WriteStage,)>,
     claim_passes: Counter<(ClaimPassResult,)>,
+    recovery_tasks: Counter<(RecoveryAction,)>,
     recovery_failures: Counter<(RecoveryStep,)>,
     children_started: Counter<(Execution,)>,
+    children_replaced: Counter<(Execution, ReplaceReason)>,
     child_boot: Histogram<(Execution,)>,
 }
 
@@ -175,8 +180,10 @@ impl PointMetrics {
             starts_refused: registry.counter(MetricId::TaskStartsRefused)?,
             finalize_retries: registry.counter(MetricId::FinalizeRetries)?,
             claim_passes: registry.counter(MetricId::ClaimPasses)?,
+            recovery_tasks: registry.counter(MetricId::RecoveryTasks)?,
             recovery_failures: registry.counter(MetricId::RecoveryPassFailures)?,
             children_started: registry.counter(MetricId::ChildrenStarted)?,
+            children_replaced: registry.counter(MetricId::ChildrenReplaced)?,
             child_boot: registry.histogram(MetricId::ChildBootDuration)?,
         })
     }

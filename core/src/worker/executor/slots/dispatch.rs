@@ -11,7 +11,7 @@ use crate::core::task::error::OperationalErrorCode;
 use crate::events::{AttemptNumber, RunTrace};
 use crate::telemetry::trace_carrier::StoredTraceId;
 use crate::worker::executor::protocol::{
-    FailureDetail, ProcessId, RunEnd, TaskInputText, TaskTimeoutMs,
+    FailureDetail, ProcessId, RunEnd, RunWorkflow, TaskInputText, TaskTimeoutMs,
 };
 use crate::worker::executor::supervisor::ChildLost;
 use crate::worker::retry::StoredOptions;
@@ -78,6 +78,9 @@ pub struct ClaimedTask {
     /// The trace id that the send stored on the row, for the log records of
     /// the attempt.
     pub trace_id: StoredTraceId,
+    /// The workflow node that links the row, as the claim read it. The run
+    /// frame carries it to the child.
+    pub workflow: RunWorkflow,
 }
 
 impl ClaimedTask {
@@ -98,6 +101,15 @@ impl ClaimedTask {
 pub struct AttemptLog {
     pub attempt: AttemptNumber,
     pub trace_id: StoredTraceId,
+}
+
+#[cfg(test)]
+impl AttemptLog {
+    /// The log fields of a first attempt whose row stores no trace id.
+    pub(crate) const FIRST_UNTRACED: Self = Self {
+        attempt: AttemptNumber::SMALLEST,
+        trace_id: StoredTraceId::NoTraceId,
+    };
 }
 
 /// A claimed row and its input.

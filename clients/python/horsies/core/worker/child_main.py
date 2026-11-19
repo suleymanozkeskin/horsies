@@ -55,6 +55,7 @@ from horsies.core.models.boot_failure import (
     shortage_or,
 )
 from horsies.core.models.tasks import OperationalErrorCode, TaskError, TaskResult
+from horsies.core.telemetry.attempt_span import flush_attempt_spans_at_stop
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_frames import (
     MAX_BODY_BYTES,
@@ -82,6 +83,8 @@ from horsies.core.worker.child_frames import (
     StartReported,
     boot_failed_frame,
     encode_child_frame,
+    run_trace_of,
+    run_workflow_of,
 )
 from horsies.core.worker.child_inbox import ParentFrameInbox
 from horsies.core.worker.run_return import (
@@ -831,6 +834,10 @@ def _boot_or_exit(
 def exit_after_stop(executor: ExecutorAfterClose) -> NoReturn:
     """End the process after a stop frame and the task loop close.
 
+    First the attempt spans of the child are flushed, within
+    ``ATTEMPT_SPAN_FLUSH_BOUND_S`` (``flush_attempt_spans_at_stop``); a flush
+    that fails or does not end is logged, and the exit goes on.
+
     ``ExecutorShutDown``: ``end_without_teardown(0)``: the child waits for its
     non-daemon threads and runs its ``atexit`` handlers, as ``sys.exit(0)``
     does, and skips the interpreter teardown.
@@ -843,6 +850,7 @@ def exit_after_stop(executor: ExecutorAfterClose) -> NoReturn:
     ``STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE``. ``atexit`` handlers do not
     run.
     """
+    _ = flush_attempt_spans_at_stop()
     match executor:
         case ExecutorShutDown():
             end_without_teardown(0)
@@ -1123,6 +1131,10 @@ def run_child_task(
         claimed_at=frame.claimed_at,
         task_loop=task_loop,
         orphan_self_heal=frame.orphan_self_heal,
+        queue_name=frame.queue_name,
+        attempt=frame.attempt,
+        workflow=run_workflow_of(frame.workflow),
+        trace=run_trace_of(frame.trace),
     )
 
 

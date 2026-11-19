@@ -50,6 +50,35 @@ before you upgrade a 0.7 deployment.
   With `NoTracing()` horsies does not import `opentelemetry`. The success
   text of `horsies check` ends with `tracing: OpenTelemetry` or
   `tracing: off`.
+- **The span and the log context of each attempt.** With `OtelTracing()`,
+  a worker child runs the steps of each attempt after its RUNNING update
+  inside one span of kind CONSUMER, `run <task_name>`. The span is the
+  current context of the body in an isolated child, on a seat of a shared
+  async child and on a seat of a shared thread child, so a span that the
+  body starts is its child. The configured propagator extracts the carrier
+  that the send stored. `OtelTracing(parentage=ChildOfSend())` (the default)
+  makes the attempt span a child of the send span; `LinkedToSend()` starts a
+  trace with a link to it. Attributes: `messaging.system`,
+  `messaging.operation.type`, `messaging.operation.name`,
+  `messaging.message.id`, `messaging.destination.name` (the queue),
+  `horsies.task.id`, `horsies.task.name`, `horsies.task.attempt` (from 1),
+  `horsies.task.execution`, `horsies.queue`, `horsies.worker.id`, and, for
+  a task that a workflow node links, `horsies.workflow.id` and
+  `horsies.workflow.node` (the index of the node). A task error sets the
+  status ERROR and `error.type` to its code, and the live exception that it
+  keeps is recorded on the span. Set the SDK of a child in
+  `on_child_process_start`. At its stop a child flushes the tracer provider
+  for at most 1 s. The span holds what the body returned; the end that the
+  worker decides for a timeout, a kill or a lost child is not on it.
+- **`AppConfig.log_format` and `TaskContextFilter`.** `log_format` takes
+  `TextLogs()` (the default) or `JsonLogs()`: one JSON object per line with
+  the keys `ts`, `level`, `logger`, `message`, `process`, `task_id`,
+  `task_name`, `attempt`, `trace_id`, `span_id` and `exc`. `horsies worker`,
+  `horsies scheduler`, `horsies check` and each worker child write in it
+  once they have loaded the app. `TaskContextFilter` puts `task_id`,
+  `task_name`, `trace_id` and `span_id` of the running task on each record
+  (`None` outside a task body); the horsies handler has it, and a handler
+  of your own takes it, with `JsonLogsFormatter` for the JSON lines.
 
 - **The trace id on the monitoring reads.** `LeafTaskInfo.trace_id` (the
   task detail and the workflow node detail) is the trace id of the span that

@@ -24,7 +24,8 @@ use crate::telemetry::registry::SampleValue;
 use crate::telemetry::worker::WorkerTelemetry;
 use crate::test_support::telemetry::WatchedTelemetry;
 use crate::worker::executor::protocol::{
-    ChildFrame, IsolatedWork, NoLeftWork, ResultEnvelopeText, ResultFrame, RssReading, RunEnd,
+    ChildAfterFrame, ChildFrame, IsolatedWork, NoLeftWork, ResultEnvelopeText, ResultFrame,
+    RssReading, RunEnd,
 };
 use crate::worker::executor::supervisor::Spawner;
 use crate::worker::worker::follow_attempt;
@@ -69,6 +70,7 @@ fn error_frame(task: &ClaimedTask, code: &str) -> ChildFrame {
         },
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
+        child: ChildAfterFrame::ServesOn,
     })
 }
 

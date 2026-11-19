@@ -18,6 +18,7 @@ from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.typed import decode_task_result
 from horsies.core.worker.current import set_current_app
 from horsies.core.worker.child_runner import _run_task_entry
+from horsies.core.worker.child_frames import NotInWorkflow, NoTraceCarrier
 from horsies.core.worker.task_loop import TaskLoop
 
 from .conftest import (
@@ -478,6 +479,10 @@ class TestArgsFromInjection:
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
+                queue_name='default',
+                attempt=1,
+                workflow=NotInWorkflow(),
+                trace=NoTraceCarrier(),
             )
         )
         assert ok is True
@@ -565,6 +570,10 @@ class TestArgsFromInjection:
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
+                queue_name='default',
+                attempt=1,
+                workflow=NotInWorkflow(),
+                trace=NoTraceCarrier(),
             )
         )
         assert ok is True
@@ -731,6 +740,10 @@ class TestArgsFromInjection:
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
+                queue_name='default',
+                attempt=1,
+                workflow=NotInWorkflow(),
+                trace=NoTraceCarrier(),
             )
         )
         assert ok is True
@@ -815,6 +828,10 @@ class TestArgsFromInjection:
                 claimed_at=claimed_at,
                 task_loop=TaskLoop(),
                 orphan_self_heal=True,
+                queue_name='default',
+                attempt=1,
+                workflow=NotInWorkflow(),
+                trace=NoTraceCarrier(),
             )
         )
         assert ok is True

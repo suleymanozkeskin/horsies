@@ -37,13 +37,13 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
-use super::{after_stale_attempt, stale_retry, StaleRecovery};
+use super::{after_stale_attempt, candidate_log, stale_retry, StaleRecovery};
 use crate::broker::core_rows::StatementLog;
 use crate::broker::stale_recovery::{
     finish_stale_attempt, forget_ended_worker_liveness, read_liveness_generations,
     read_unheld_owners, requeue_gone_owner_pass, scan_gone_owner_running, FinishStaleAttempt,
     GoneOwner, GoneOwnerCandidate, LivenessGeneration, OwnerClaim, OwnerGeneration, OwnerListReach,
-    RecoveryBatch, StaleClaimsRequeuePass, StaleEvidence, UnheldOwnerRead,
+    RecoveredTask, RecoveryBatch, StaleClaimsRequeuePass, StaleEvidence, UnheldOwnerRead,
     STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS, STALE_RUNNING_SCAN_BATCH, UNHELD_OWNER_BATCH,
 };
 use crate::broker::BrokerError;
@@ -53,6 +53,8 @@ use crate::core::python_text::python_isoformat_utc;
 use crate::core::{OperationalErrorCode, TaskError, TaskErrorKind, TaskResult};
 use crate::db::CorePool;
 use crate::log_targets::STALE_RUNNING_PASS;
+use crate::telemetry::labels::RecoveryAction;
+use crate::telemetry::worker::WorkerTelemetry;
 
 /// Liveness rows that one sweep of [`forget_ended_workers`] deletes at most.
 const LIVENESS_FORGET_BATCH: RecoveryBatch = match RecoveryBatch::new(1_000) {
@@ -211,7 +213,9 @@ pub(crate) struct OwnerGoneStep {
 /// of its RUNNING rows (with `auto_fail_stale_running`) and of its CLAIMED
 /// rows (with `auto_requeue_stale_claimed`). Each statement runs alone on
 /// `pool` as reserved work and commits alone. A recovery statement that
-/// fails is logged, and the step goes on with the next one.
+/// fails is logged, and the step goes on with the next one. Each row whose
+/// recovery committed is told to `telemetry` (`RunningRetried`,
+/// `RunningFailed`, `ClaimRequeued`).
 ///
 /// Errors: the [`BrokerError`] of the liveness read (the memory is
 /// unchanged) or of the read of the generations (the memory holds the
@@ -222,6 +226,7 @@ pub(crate) async fn owner_gone_step(
     config: &RecoveryConfig,
     memory: &mut UnheldOwners,
     span: Duration,
+    telemetry: &WorkerTelemetry,
 ) -> Result<OwnerGoneStep, BrokerError> {
     let started = Instant::now();
     let read = read_unheld_owners(pool, log, UNHELD_OWNER_BATCH).await?;
@@ -253,10 +258,10 @@ pub(crate) async fn owner_gone_step(
             owner.generation,
         );
         if config.auto_fail_stale_running {
-            step.running_recovered += recover_gone_owner_running(pool, log, owner).await;
+            step.running_recovered += recover_gone_owner_running(pool, log, owner, telemetry).await;
         }
         if config.auto_requeue_stale_claimed {
-            step.claims_requeued += requeue_gone_owner_claims(pool, log, owner).await;
+            step.claims_requeued += requeue_gone_owner_claims(pool, log, owner, telemetry).await;
         }
     }
     Ok(step)
@@ -281,8 +286,14 @@ pub(crate) async fn forget_ended_workers(
 
 /// Recover the RUNNING rows of a gone owner: at most one scan batch per
 /// step; the rest is read again at the next pass, where the owner is still
-/// gone. Returns the rows whose crash retry or failure committed.
-async fn recover_gone_owner_running(pool: &CorePool, log: StatementLog, owner: &GoneOwner) -> u64 {
+/// gone. Returns the rows whose crash retry or failure committed, each
+/// told to `telemetry`.
+async fn recover_gone_owner_running(
+    pool: &CorePool,
+    log: StatementLog,
+    owner: &GoneOwner,
+    telemetry: &WorkerTelemetry,
+) -> u64 {
     let candidates = match scan_gone_owner_running(pool, log, owner, STALE_RUNNING_SCAN_BATCH).await
     {
         Ok(candidates) => candidates,
@@ -299,12 +310,15 @@ async fn recover_gone_owner_running(pool: &CorePool, log: StatementLog, owner: &
     };
     let mut recovered: u64 = 0;
     for candidate in &candidates {
+        let attempt = candidate_log(&candidate.facts);
         let command = match gone_owner_attempt_command(candidate, owner) {
             Ok(command) => command,
             Err(error) => {
                 tracing::error!(
                     target: STALE_RUNNING_PASS,
                     task_id = %candidate.facts.task_id,
+                    attempt = attempt.attempt.get(),
+                    trace_id = attempt.trace_id.log_field(),
                     %error,
                     "Failed to serialize crash result for task {}: {error}",
                     candidate.facts.task_id,
@@ -313,14 +327,25 @@ async fn recover_gone_owner_running(pool: &CorePool, log: StatementLog, owner: &
             }
         };
         match finish_stale_attempt(pool, log, &command).await {
-            Ok(outcome) => match after_stale_attempt(pool, log, &command, outcome).await {
-                StaleRecovery::Recovered => recovered += 1,
+            Ok(outcome) => match after_stale_attempt(pool, log, &command, attempt, outcome).await {
+                StaleRecovery::Recovered(action) => {
+                    recovered += 1;
+                    let facts = &candidate.facts;
+                    telemetry.task_recovered(
+                        facts.task_id,
+                        &facts.task_name,
+                        &facts.queue_name,
+                        action,
+                    );
+                }
                 StaleRecovery::NotRecovered => {}
             },
             Err(error) => {
                 tracing::error!(
                     target: STALE_RUNNING_PASS,
                     task_id = %candidate.facts.task_id,
+                    attempt = attempt.attempt.get(),
+                    trace_id = attempt.trace_id.log_field(),
                     worker_id = %owner.worker_id,
                     %error,
                     "Reaper failed to recover task {} of gone worker {}: {error}",
@@ -334,9 +359,18 @@ async fn recover_gone_owner_running(pool: &CorePool, log: StatementLog, owner: &
 }
 
 /// Requeue the CLAIMED rows of a gone owner; returns the rows requeued,
-/// with those of the batches before a failure.
-async fn requeue_gone_owner_claims(pool: &CorePool, log: StatementLog, owner: &GoneOwner) -> u64 {
-    match requeue_gone_owner_pass(pool, log, owner).await {
+/// with those of the batches before a failure. Each row of each committed
+/// batch is told to `telemetry` as `ClaimRequeued`.
+async fn requeue_gone_owner_claims(
+    pool: &CorePool,
+    log: StatementLog,
+    owner: &GoneOwner,
+    telemetry: &WorkerTelemetry,
+) -> u64 {
+    let told = |requeued: &[RecoveredTask]| {
+        telemetry.tasks_recovered(requeued, RecoveryAction::ClaimRequeued);
+    };
+    match requeue_gone_owner_pass(pool, log, owner, told).await {
         Ok(StaleClaimsRequeuePass::Drained { requeued }) => requeued,
         Ok(StaleClaimsRequeuePass::BoundReached { requeued }) => {
             tracing::warn!(
@@ -712,6 +746,9 @@ mod tests {
         let candidate = GoneOwnerCandidate {
             facts: StaleCandidate {
                 task_id: Uuid::from_u128(7),
+                task_name: "gone.task".to_owned(),
+                queue_name: "default".to_owned(),
+                trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
                 retry_count: 0,
                 max_retries: 0,
                 task_options: None,

@@ -25,7 +25,7 @@ use crate::core::task::error::{BuiltInTaskCode, TaskError};
 use crate::core::task::result::TaskResult;
 use crate::core::task::Execution;
 use crate::test_support::sql::{self, TestListener, TestPool};
-use crate::worker::executor::slots::{ClaimedTask, RetryFacts, TaskKind};
+use crate::worker::executor::slots::{AttemptLog, ClaimedTask, RetryFacts, TaskKind};
 use crate::worker::recovery::on_test_pool::mark_stale_running_as_failed;
 use crate::worker::retry::read_stored_options;
 
@@ -237,6 +237,7 @@ async fn claimed_task(pool: &TestPool, task_id: Uuid) -> ClaimedTask {
         options: read_stored_options(task_options.as_deref()),
         trace: crate::events::RunTrace::NoCarrier,
         trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
+        workflow: crate::worker::executor::protocol::RunWorkflow::NotInWorkflow,
     }
 }
 
@@ -805,6 +806,7 @@ async fn phase_two_on(
         broker,
         &crate::test_support::child_specs::TestChildSpecs::empty(),
         task_id,
+        AttemptLog::FIRST_UNTRACED,
         queue,
         is_workflow_task,
         false,

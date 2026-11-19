@@ -152,6 +152,7 @@ async fn replay_does_not_create_duplicate_attempt() {
         options: read_stored_options(None),
         trace: crate::events::RunTrace::NoCarrier,
         trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
+        workflow: crate::worker::executor::protocol::RunWorkflow::NotInWorkflow,
     };
     let payload_policy = PayloadPolicy::default();
 

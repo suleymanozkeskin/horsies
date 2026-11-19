@@ -120,6 +120,7 @@ fn claimed(execution: ExecutionClass) -> ClaimedTask {
         options: read_stored_options(Some("{}")),
         trace: crate::events::RunTrace::NoCarrier,
         trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
+        workflow: crate::worker::executor::protocol::RunWorkflow::NotInWorkflow,
     }
 }
 
@@ -210,11 +211,14 @@ fn scripted_child(kind: SharedChildKindOfTest, frames: &[ChildFrame], after: &st
         dispatch: run_ref().dispatch,
         task_id: task.task_id,
         task_name: task.task_name.clone(),
+        queue_name: crate::events::QueueName::cut(&task.queue_name),
+        attempt: task.retry.attempt(),
         worker_id: "worker-1".to_owned(),
         claimed_at: task.claimed_at,
         orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work: work_of(kind),
         input: TaskInputText::new("{}".to_owned()),
+        workflow: task.workflow,
         trace: crate::events::RunTrace::NoCarrier,
     }))
     .unwrap()

@@ -3268,10 +3268,17 @@ const FRAME_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
+        name: "RunWorkflowNode",
+        doc: "The workflow node that links the task of a run, as the claim read it: the node at\nnode_index of the workflow workflow_id.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("workflow_id", "uuid.UUID"), property("node_index", "int")],
+        methods: &[],
+    },
+    StubClass {
         name: "RunFrame",
         doc: "Run one task in an isolated child. The parent holds the deadline.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("task_id", "uuid.UUID"), property("task_name", "str"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("orphan_self_heal", "bool"), property("work", "Literal['RUN'] | StoredOptionsRefused"), property("trace", "TraceCarrier | Literal['NO_CARRIER']"), property("input", "str")],
+        properties: &[property("task_id", "uuid.UUID"), property("task_name", "str"), property("queue_name", "str"), property("attempt", "int"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("orphan_self_heal", "bool"), property("work", "Literal['RUN'] | StoredOptionsRefused"), property("workflow", "RunWorkflowNode | Literal['NOT_IN_WORKFLOW']"), property("trace", "TraceCarrier | Literal['NO_CARRIER']"), property("input", "str")],
         methods: &[],
     },
     StubClass {
@@ -3292,7 +3299,7 @@ const FRAME_CLASSES: &[StubClass] = &[
         name: "SharedRunFrame",
         doc: "Run one task on a free seat of a shared child.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("dispatch", "int"), property("task_id", "uuid.UUID"), property("task_name", "str"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("orphan_self_heal", "bool"), property("work", "AsyncTaskWork | ThreadTaskWork | StoredOptionsRefused"), property("trace", "TraceCarrier | Literal['NO_CARRIER']"), property("input", "str")],
+        properties: &[property("dispatch", "int"), property("task_id", "uuid.UUID"), property("task_name", "str"), property("queue_name", "str"), property("attempt", "int"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("orphan_self_heal", "bool"), property("work", "AsyncTaskWork | ThreadTaskWork | StoredOptionsRefused"), property("workflow", "RunWorkflowNode | Literal['NOT_IN_WORKFLOW']"), property("trace", "TraceCarrier | Literal['NO_CARRIER']"), property("input", "str")],
         methods: &[],
     },
     StubClass {

@@ -239,7 +239,7 @@ mod tests {
             config,
             crate::core::RetentionConfig::default(),
             new_reaper_health(),
-            crate::telemetry::registry::OptionalCounter::NotRecorded,
+            crate::telemetry::worker::WorkerTelemetry::Off,
             cancel.clone(),
         );
         run_loop_death_case("reaper", cancel, handle).await;

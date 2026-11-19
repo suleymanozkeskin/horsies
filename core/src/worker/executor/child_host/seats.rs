@@ -144,10 +144,13 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
     let RunFrame {
         task_id,
         task_name,
+        queue_name: _,
+        attempt: _,
         worker_id,
         claimed_at,
         orphan_self_heal,
         work,
+        workflow: _,
         trace,
         input,
     } = run;

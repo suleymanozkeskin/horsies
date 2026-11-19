@@ -188,6 +188,8 @@ fn the_child_decoder_refuses_a_parent_frame() {
         dispatch: DispatchNumber::new(7).unwrap(),
         task_id: task_id(T1),
         task_name: "t".to_owned(),
+        queue_name: default_queue(),
+        attempt: AttemptNumber::SMALLEST,
         worker_id: "w".to_owned(),
         claimed_at: claim_time(),
         orphan_self_heal: OrphanSelfHeal::Off,
@@ -196,6 +198,7 @@ fn the_child_decoder_refuses_a_parent_frame() {
             cancel_grace_ms: CancelGraceMs::new(5_000).unwrap(),
         },
         input: TaskInputText::new("{}".to_owned()),
+        workflow: RunWorkflow::NotInWorkflow,
         trace: crate::events::RunTrace::NoCarrier,
     }))
     .unwrap()

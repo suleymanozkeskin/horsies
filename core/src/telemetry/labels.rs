@@ -441,10 +441,13 @@ pub enum ReplaceReason {
     LeftoverWork,
     /// A run on the child passed its deadline.
     AtDeadline,
+    /// The core of the child stopped, and the child ended itself (exit
+    /// code 80).
+    CoreStopped,
 }
 
 impl ReplaceReason {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::ChildDied,
         Self::ChannelLost,
         Self::ProtocolViolation,
@@ -458,6 +461,7 @@ impl ReplaceReason {
         Self::LoopBlocked,
         Self::LeftoverWork,
         Self::AtDeadline,
+        Self::CoreStopped,
     ];
 }
 
@@ -476,6 +480,7 @@ impl LabelValue for ReplaceReason {
         "loop_blocked",
         "leftover_work",
         "at_deadline",
+        "core_stopped",
     ])]);
 
     fn position(self) -> u32 {
@@ -493,6 +498,7 @@ impl LabelValue for ReplaceReason {
             Self::LoopBlocked => 10,
             Self::LeftoverWork => 11,
             Self::AtDeadline => 12,
+            Self::CoreStopped => 13,
         }
     }
 }

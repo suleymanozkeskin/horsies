@@ -724,6 +724,7 @@ fn claimed_of(row: ClaimedRow) -> Claimed {
             options: read_stored_options(row.task_options.as_deref()),
             trace: row.trace,
             trace_id: row.trace_id,
+            workflow: row.workflow,
         },
         input: TaskInputText::new(row.input),
     }
@@ -1228,7 +1229,7 @@ impl Worker {
             self.app_config.recovery.clone(),
             self.app_config.retention.clone(),
             health,
-            self.telemetry.recovery_failures(),
+            self.telemetry.clone(),
             self.cancel.clone(),
         )
     }
@@ -2605,6 +2606,7 @@ mod tests {
             options: crate::worker::retry::read_stored_options(task_options),
             trace: crate::events::RunTrace::NoCarrier,
             trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
+            workflow: crate::worker::executor::protocol::RunWorkflow::NotInWorkflow,
         }
     }
 
@@ -3302,14 +3304,18 @@ mod tests {
 
     /// Python `test_worker_helpers.py::TestDispatchOne::test_finalizer_gets_the_handle_and_the_claim_fields`:
     /// the task of a dispatch carries every claim field the outcome write
-    /// fences on, the class, the retry facts and the stored options read
-    /// once; the input travels apart.
+    /// fences on, the class, the retry facts, the stored options read once
+    /// and the node that links it; the input travels apart.
     #[test]
     fn a_claimed_row_becomes_the_task_of_its_dispatch() {
         use crate::core::task::Execution;
         use crate::worker::retry::read_stored_options;
 
         let claimed_at = Utc::now();
+        let node = crate::worker::executor::protocol::RunWorkflow::InWorkflow {
+            workflow_id: Uuid::from_u128(0xf0),
+            node_index: crate::worker::executor::protocol::WorkflowNodeIndex::new(2).unwrap(),
+        };
         let row = ClaimedRow {
             id: Uuid::from_u128(7),
             task_name: "app.tasks.work".to_owned(),
@@ -3323,6 +3329,7 @@ mod tests {
             max_retries: 3,
             trace: crate::events::RunTrace::NoCarrier,
             trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
+            workflow: node,
             priority: crate::events::Priority::try_from(100).unwrap(),
             enqueued_at: claimed_at,
             read: crate::broker::claims::ClaimRead::now(),
@@ -3346,6 +3353,7 @@ mod tests {
                 options: read_stored_options(Some(r#"{"timeout_ms": 2000}"#)),
                 trace: crate::events::RunTrace::NoCarrier,
                 trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
+                workflow: node,
             }
         );
         assert_eq!(claimed.input.as_str(), r#"{"n": 1}"#);
@@ -3781,6 +3789,7 @@ mod tests {
             max_retries,
             trace: crate::events::RunTrace::NoCarrier,
             trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
+            workflow: crate::worker::executor::protocol::RunWorkflow::NotInWorkflow,
             priority: crate::events::Priority::try_from(100).unwrap(),
             enqueued_at: claimed_at,
             read: crate::broker::claims::ClaimRead::now(),
@@ -3814,10 +3823,13 @@ mod tests {
         let frame = crate::worker::executor::protocol::RunFrame {
             task_id: task.task_id,
             task_name: task.task_name.clone(),
+            queue_name: crate::events::QueueName::cut(&task.queue_name),
+            attempt: task.retry.attempt(),
             worker_id: "worker-1".to_owned(),
             claimed_at: task.claimed_at,
             orphan_self_heal: self_heal,
             work,
+            workflow: task.workflow,
             trace: task.trace.clone(),
             input: claimed.input.clone(),
         };
@@ -3895,12 +3907,14 @@ mod tests {
             claimed_at: task.claimed_at,
         };
         let is_workflow_task = task.kind.is_workflow_task();
-        match persist_ok_result(broker, task_id, &value, fence, is_workflow_task).await {
+        let log = task.log();
+        match persist_ok_result(broker, task_id, log, &value, fence, is_workflow_task).await {
             Ok(FinalizeOutcome::Terminal {
                 capacity_notified,
                 phase_two,
             }) => Phase2Work {
                 task_id,
+                log,
                 queue_name: task.queue_name,
                 is_workflow_task,
                 capacity_notified,

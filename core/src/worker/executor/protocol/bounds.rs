@@ -4,6 +4,7 @@
 //! Text bounds count characters (Unicode scalar values), as Python's `len`.
 
 use super::values::BoundedCount;
+use crate::core::workflow::spec::MAX_WORKFLOW_NODES;
 pub use crate::worker::retry::{MAX_CANCEL_GRACE_MS, MIN_CANCEL_GRACE_MS};
 use crate::worker::retry::{MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS};
 
@@ -54,6 +55,9 @@ pub const MAX_SEATS_PER_SHARED_THREAD_CHILD: u64 = 256;
 pub const MAX_CHILD_POOL_CONNECTIONS: u64 = 1000;
 /// The most threads of the default executor of a shared async child.
 pub const MAX_EXECUTOR_THREADS: u64 = 256;
+/// The largest index of a workflow node: a workflow spec holds at most
+/// [`MAX_WORKFLOW_NODES`] nodes, numbered from 0.
+pub const MAX_WORKFLOW_NODE_INDEX: u64 = MAX_WORKFLOW_NODES as u64 - 1;
 
 /// The deadline of a task, in milliseconds after the child takes it.
 pub type TaskTimeoutMs = BoundedCount<MIN_TASK_TIMEOUT_MS, MAX_TASK_TIMEOUT_MS>;
@@ -72,3 +76,5 @@ pub type PoolMinSize = BoundedCount<0, MAX_CHILD_POOL_CONNECTIONS>;
 pub type PoolMaxSize = BoundedCount<1, MAX_CHILD_POOL_CONNECTIONS>;
 /// The connections of the pool that task code opens when it sends.
 pub type TaskSendPool = BoundedCount<1, MAX_CHILD_POOL_CONNECTIONS>;
+/// The index of a node in its workflow spec.
+pub type WorkflowNodeIndex = BoundedCount<0, MAX_WORKFLOW_NODE_INDEX>;
