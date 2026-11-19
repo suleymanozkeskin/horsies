@@ -8,17 +8,21 @@
 //! | [`WorkerTelemetry::claimed`] | `TaskClaimed` per row | `horsies.task.queue.duration` |
 //! | [`WorkerTelemetry::released`] | `ClaimReleased` | `horsies.task.claims.released` |
 //! | [`WorkerTelemetry::claim_pass`] | none | `horsies.worker.claim.passes` |
+//! | [`WorkerTelemetry::attempt_placed`] | `AttemptPlaced` | `horsies.task.slot_wait.duration` |
 
 use std::time::Duration;
 
 use uuid::Uuid;
 
 use super::{TelemetryOn, WorkerTelemetry};
-use crate::broker::claims::ClaimedRow;
-use crate::events::{self, ClaimReleased, Event, TaskClaimed};
+use crate::broker::claims::{ClaimRead, ClaimedRow};
+use crate::events::{self, AttemptPlaced, ClaimReleased, Event, TaskClaimed};
 use crate::telemetry::declared::{self, DeclaredValue};
 use crate::telemetry::labels::{ClaimPassResult, ReleaseReason};
 use crate::worker::executor::slots::dispatch::attempt_of;
+use crate::worker::executor::slots::{
+    watched_placement, ChildPlacement, ClaimedTask, Placed, PlacementReceipt, PlacementWatch,
+};
 
 /// The value of the `queue` label.
 type QueueLabel = DeclaredValue<declared::QueueName>;
@@ -45,6 +49,30 @@ impl WorkerTelemetry {
         match self {
             Self::Off => {}
             Self::On(on) => on.released(task_id, task_name, queue_name, reason),
+        }
+    }
+
+    /// The watch of the placement of one task: watched when telemetry is
+    /// on, so that [`WorkerTelemetry::attempt_placed`] gets the child.
+    pub(crate) fn placement_watch(&self) -> (PlacementWatch, PlacementReceipt) {
+        match self {
+            Self::Off => (PlacementWatch::Unwatched, PlacementReceipt::Unwatched),
+            Self::On(_) => watched_placement(),
+        }
+    }
+
+    /// A child took `task`, whose claim result the worker read at `read`:
+    /// one `AttemptPlaced` and one slot wait. A task that no child took
+    /// records nothing here.
+    pub(crate) fn attempt_placed(
+        &self,
+        task: &ClaimedTask,
+        read: ClaimRead,
+        placement: &ChildPlacement,
+    ) {
+        match (self, placement) {
+            (Self::Off, _) | (_, ChildPlacement::NotWatched | ChildPlacement::NotPlaced) => {}
+            (Self::On(on), ChildPlacement::Placed(placed)) => on.placed(task, read, placed),
         }
     }
 
@@ -86,6 +114,24 @@ impl TelemetryOn {
                 attempt: attempt_of(row.retry_count),
                 priority: row.priority,
                 queue_wait,
+            })
+        });
+    }
+
+    fn placed(&self, task: &ClaimedTask, read: ClaimRead, placed: &Placed) {
+        let slot_wait = placed.at.saturating_duration_since(read.at);
+        let _recorded = self.metrics.slot_wait.observe((task.execution,), slot_wait);
+        let _emitted = self.emit(|| {
+            Event::AttemptPlaced(AttemptPlaced {
+                at: placed.wall,
+                task_id: task.task_id,
+                task_name: events::TaskName::cut(&task.task_name),
+                queue: events::QueueName::cut(&task.queue_name),
+                execution: task.execution,
+                attempt: task.retry.attempt(),
+                child_kind: placed.child_kind,
+                child_pid: placed.child_pid,
+                slot_wait,
             })
         });
     }
