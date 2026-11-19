@@ -765,7 +765,7 @@ pub(crate) mod tests {
     #[horsies::task("node_before_register_probe")]
     async fn node_before_register_probe(
         order_id: u32,
-    ) -> Result<u32, crate::TaskError<std::convert::Infallible>> {
+    ) -> Result<u32, horsies::TaskError<std::convert::Infallible>> {
         Ok(order_id)
     }
 
