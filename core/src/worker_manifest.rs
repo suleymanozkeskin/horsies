@@ -368,17 +368,22 @@ impl TryFrom<Vec<HandlerManifest>> for HandlerList {
             }
             _ => {}
         }
-        let mut names = std::collections::HashSet::with_capacity(handlers.len());
-        match handlers
-            .iter()
-            .position(|handler| !names.insert(handler.name.as_str()))
-        {
+        match first_repeated_name(&handlers) {
             Some(index) => Err(format!(
                 "handler {index} has the name of an earlier handler; each name is once"
             )),
             None => Ok(Self(handlers)),
         }
     }
+}
+
+/// The position of the first handler whose name an earlier handler has.
+/// Pure.
+fn first_repeated_name(handlers: &[HandlerManifest]) -> Option<usize> {
+    let mut names = std::collections::HashSet::with_capacity(handlers.len());
+    handlers
+        .iter()
+        .position(|handler| !names.insert(handler.name.as_str()))
 }
 
 impl From<HandlerList> for Vec<HandlerManifest> {
