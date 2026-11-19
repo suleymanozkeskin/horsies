@@ -42,6 +42,7 @@ from horsies.core.worker_manifest import (
     CurrentDirectory,
     CurrentDirectoryRead,
     CurrentDirectoryUnreadable,
+    HandlerFacts,
     MainModuleLocator,
     TaskFacts,
     child_argv,
@@ -130,7 +131,9 @@ def worker_manifest_json(
     """The JSON text of the worker manifest of `app`. Reads
     `sys.executable`, the interpreter flags, `sys.path`, `sys.argv` and the
     current directory, and logs a warning for each `sys.path` entry that no
-    child gets (`child_sys_path`); no other I/O. The config of `app` passed
+    child gets (`child_sys_path`); no other I/O. The manifest names the
+    event handlers of `app` (`Horsies.get_event_handlers`), which the
+    handler child of the worker runs. The config of `app` passed
     AppConfig validation, so every value is within its manifest bound
     (`to_worker_manifest`).
 
@@ -168,10 +171,15 @@ def worker_manifest_json(
         name: TaskFacts(execution=classes[name], error_codes=task.task_error_codes)
         for name, task in app.tasks.items()
     }
+    handlers = tuple(
+        HandlerFacts(name=handler.name, event_type=handler.event_type.name)
+        for handler in app.get_event_handlers()
+    )
     manifest = to_worker_manifest(
         app.config,
         profile=launch.profile,
         tasks=tasks,
+        handlers=handlers,
         child_launch=child_launch,
         idempotency_reservation_window=_reservation_window(),
     )

@@ -130,6 +130,29 @@ pub enum ErrorCode {
     BrokerInitFailed,
     CheckReservedCodeCollision,
     ConfigInvalidRetention,
+    /// An event handler registration names a value that is not an event
+    /// type. The Rust registration takes the type as a type parameter, so
+    /// only the Python client refuses with this code.
+    EventHandlerUnknownEventType,
+    /// An event handler cannot take the events of its type: in Python, a
+    /// value that is not a function or a bound method, a generator
+    /// function, a function that does not take a call with one event, or an
+    /// event parameter annotated with another event type. The Rust
+    /// registration checks the handler at compile time.
+    EventHandlerInvalidSignature,
+    /// An earlier event handler of the app has the same name. The name is
+    /// the `handler` label of `horsies.telemetry.handler.errors` and
+    /// `horsies.telemetry.handler.dropped`, so each name is once.
+    EventHandlerDuplicateName,
+    /// The name of an event handler is not a valid handler name: empty,
+    /// longer than `MAX_HANDLER_NAME_CHARS` (255) characters, or `(unknown)`,
+    /// the label value of a name outside the declared handlers. In Python
+    /// the name is `module.qualname` of the function, so a function with no
+    /// module name is refused with this code too.
+    EventHandlerInvalidName,
+    /// The app has `MAX_EVENT_HANDLERS` (32) event handlers already, the
+    /// most that one handler child runs.
+    EventHandlerLimit,
 
     // Registry (HRS-300–HRS-399)
     TaskNotRegistered,
@@ -196,6 +219,11 @@ impl ErrorCode {
             Self::BrokerInitFailed => "HRS-211",
             Self::CheckReservedCodeCollision => "HRS-212",
             Self::ConfigInvalidRetention => "HRS-216",
+            Self::EventHandlerUnknownEventType => "HRS-222",
+            Self::EventHandlerInvalidSignature => "HRS-223",
+            Self::EventHandlerDuplicateName => "HRS-224",
+            Self::EventHandlerInvalidName => "HRS-225",
+            Self::EventHandlerLimit => "HRS-226",
             Self::TaskNotRegistered => "HRS-300",
             Self::TaskDuplicateName => "HRS-301",
             Self::WorkflowUnregisteredTask => "HRS-302",
@@ -266,7 +294,12 @@ impl ErrorCode {
             | Self::CheckLiveAsyncContext
             | Self::BrokerInitFailed
             | Self::CheckReservedCodeCollision
-            | Self::ConfigInvalidRetention => ErrorCategory::Config,
+            | Self::ConfigInvalidRetention
+            | Self::EventHandlerUnknownEventType
+            | Self::EventHandlerInvalidSignature
+            | Self::EventHandlerDuplicateName
+            | Self::EventHandlerInvalidName
+            | Self::EventHandlerLimit => ErrorCategory::Config,
 
             Self::TaskNotRegistered | Self::TaskDuplicateName | Self::WorkflowUnregisteredTask => {
                 ErrorCategory::Registry
@@ -347,6 +380,11 @@ impl ErrorCode {
                 | Self::BrokerInitFailed
                 | Self::CheckReservedCodeCollision
                 | Self::ConfigInvalidRetention
+                | Self::EventHandlerUnknownEventType
+                | Self::EventHandlerInvalidSignature
+                | Self::EventHandlerDuplicateName
+                | Self::EventHandlerInvalidName
+                | Self::EventHandlerLimit
         )
     }
 
@@ -708,6 +746,29 @@ mod tests {
             assert_eq!(code.category(), ErrorCategory::Task);
             assert!(code.is_task_error());
             assert!(!code.is_config_error());
+        }
+    }
+
+    /// Python `clients/python/horsies/core/errors.py` has the event handler
+    /// refusals with these numbers: `EVENT_HANDLER_UNKNOWN_EVENT_TYPE`
+    /// (`HRS-222`), `EVENT_HANDLER_INVALID_SIGNATURE` (`HRS-223`),
+    /// `EVENT_HANDLER_DUPLICATE_NAME` (`HRS-224`),
+    /// `EVENT_HANDLER_INVALID_NAME` (`HRS-225`) and `EVENT_HANDLER_LIMIT`
+    /// (`HRS-226`), each a `ConfigurationError`.
+    #[test]
+    fn the_event_handler_refusals_are_config_codes_with_python_numbers() {
+        for (code, text) in [
+            (ErrorCode::EventHandlerUnknownEventType, "HRS-222"),
+            (ErrorCode::EventHandlerInvalidSignature, "HRS-223"),
+            (ErrorCode::EventHandlerDuplicateName, "HRS-224"),
+            (ErrorCode::EventHandlerInvalidName, "HRS-225"),
+            (ErrorCode::EventHandlerLimit, "HRS-226"),
+        ] {
+            assert_eq!(code.as_code_str(), text);
+            assert_eq!(code.to_string(), text);
+            assert_eq!(code.category(), ErrorCategory::Config);
+            assert!(code.is_config_error());
+            assert!(!code.is_task_error());
         }
     }
 

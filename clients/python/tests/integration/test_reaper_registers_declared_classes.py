@@ -55,6 +55,7 @@ class TestReaperRegistersDeclaredClasses:
             config,
             profile=None,
             tasks={},
+            handlers=(),
             child_launch=launch,
             idempotency_reservation_window=timedelta(hours=24),
         )

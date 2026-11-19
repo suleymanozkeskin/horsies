@@ -951,6 +951,7 @@ def _document_launch(launch: wire.ChildLaunchManifest) -> dict[str, Any]:
         _app_config(worker_profiles={'batch': _full_profile()}),
         profile='batch',
         tasks={},
+        handlers=(),
         child_launch=launch,
         idempotency_reservation_window=WINDOW,
     )
@@ -1210,6 +1211,7 @@ class TestDocument:
                     error_codes=('RATE_LIMITED', 'NOT_FOUND'),
                 ),
             },
+            handlers=(),
             child_launch=_launch(),
             idempotency_reservation_window=WINDOW,
         )

@@ -299,13 +299,18 @@ deployment pattern.
 | HRS-211 | `BROKER_INIT_FAILED` | Broker failed to initialize |
 | HRS-212 | `CHECK_RESERVED_CODE_COLLISION` | User config value collides with a reserved built-in error code, or a task declares a built-in code or a reserved name as its own error code |
 | HRS-213 | `CONFIG_INVALID_BROKER_POOL` | A `PostgresConfig` pool value outside its range: `pool_size` outside 1 to 10,000, `max_overflow` outside 0 to 10,000, `pool_timeout` outside 0 to 4,294,967,295 s, or `pool_recycle` that is not -1 or 0 to 4,294,967,295 s. `pool_size=0` and `max_overflow=-1` (no limit in SQLAlchemy) are refused, and the help says to give a number. Also a `PostgresConfig` that sets a pool field removed in 0.7.0: `worker_pool_size` or `worker_max_overflow` (the help names `WorkerProfile.pool`), or `worker_child_pool_min_size`, `worker_child_pool_max_size` or `worker_child_pool_check` (the help names the `pool` field of each child kind that replaces it) |
-| HRS-214 | `CONFIG_INVALID_CHILD_HOOK` | `on_child_process_start` received a value that is not callable, or an async function |
+| HRS-214 | `CONFIG_INVALID_CHILD_HOOK` | `on_child_process_start` or `on_handler_child_start` received a value that is not callable, or an async function |
 | HRS-215 | `CONFIG_INVALID_KEEPALIVE` | A TCP value outside its range: while `tcp_keepalives` is on, `tcp_keepalives_idle` or `tcp_keepalives_interval` outside 1 to 32,767 s, or `tcp_keepalives_count` outside 1 to 127; or a `tcp_user_timeout_ms` that is not 0 or 1 to 2,147,483,647 ms. The first value out of range is refused, in field order |
 | HRS-216 | `CONFIG_INVALID_RETENTION` | Invalid retention configuration |
 | HRS-217 | `CHECK_LIVE_ASYNC_CONTEXT` | `check(live=True)` was called on a thread that runs an event loop; the live check did not run |
 | HRS-218 | `CONFIG_INVALID_WORKER_PROFILE` | A worker profile in `AppConfig.worker_profiles` is not valid: a name a `--profile` argument cannot carry, a profile with no children, a claim limit above the capacity of the worker, a child pool whose `min_size` is above its resolved `max_size`, or a `PoolSize` below 3 (`PARENT_POOL_MIN_CONNECTIONS`) for the pool of the worker process (`ParentPool.max_size`). The message names the profile and the field path |
 | HRS-219 | `CHECK_WORKER_CONNECTIONS` | `check(live=True)`: one worker of a profile opens more Postgres connections itself than the server has usable slots (the error also states what task code that sends adds: the `task_send_pool` of each child kind), or the server limit could not be read |
 | HRS-220 | `CONFIG_OTEL_API_MISSING` | `AppConfig(tracing=OtelTracing())` and the OpenTelemetry API is not installed. The help names the extra: `pip install 'horsies[otel]'` |
+| HRS-222 | `EVENT_HANDLER_UNKNOWN_EVENT_TYPE` | An event handler registration names a value that is not an event type: in Python, `app.on_event(value)` with a class of another kind, the union `AnyEvent`, a name or an event instance. The Rust registration takes the event type as a type parameter |
+| HRS-223 | `EVENT_HANDLER_INVALID_SIGNATURE` | An event handler cannot take the events of its type: in Python, a value that is not a function or a bound method, a generator function, a function that does not take a call with one event, or an event parameter annotated with another event type. The Rust compiler checks the handler |
+| HRS-224 | `EVENT_HANDLER_DUPLICATE_NAME` | An earlier event handler of the app has the same name. In Python the name is `module.qualname` of the function: the same function registered twice, or two lambdas of one scope |
+| HRS-225 | `EVENT_HANDLER_INVALID_NAME` | The name of an event handler is empty, longer than 255 characters, or `(unknown)`; in Python, also a function with no module name |
+| HRS-226 | `EVENT_HANDLER_LIMIT` | The app has 32 event handlers already, the most that a handler child runs |
 
 ### Registry (HRS-300-HRS-399)
 

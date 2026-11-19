@@ -116,6 +116,21 @@ class ErrorCode(str, Enum):
     # AppConfig.tracing is OtelTracing and the OpenTelemetry API
     # (horsies[otel]) is not installed.
     CONFIG_OTEL_API_MISSING = 'HRS-220'
+    # The rules of `@app.on_event(EventType)`, one code per rule. The core's
+    # `ErrorCode` (`core/src/core/error/mod.rs`) has the same codes, which the
+    # Rust client's handler registration uses.
+    # The argument is not an event type of `horsies.telemetry`.
+    EVENT_HANDLER_UNKNOWN_EVENT_TYPE = 'HRS-222'
+    # The handler is not a function or a method, is a generator function,
+    # does not take a call with one event, or annotates its event parameter
+    # with another event type.
+    EVENT_HANDLER_INVALID_SIGNATURE = 'HRS-223'
+    # An earlier handler of the app has the same name.
+    EVENT_HANDLER_DUPLICATE_NAME = 'HRS-224'
+    # The function has no module name, or its name is longer than the bound.
+    EVENT_HANDLER_INVALID_NAME = 'HRS-225'
+    # The app has the most handlers that a handler child runs.
+    EVENT_HANDLER_LIMIT = 'HRS-226'
 
     # Registry (HRS-300-HRS-399)
     TASK_NOT_REGISTERED = 'HRS-300'

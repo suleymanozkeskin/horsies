@@ -222,6 +222,7 @@ export default defineConfig({
 							items: [
 								{ label: 'Worker Profiles', slug: 'workers/worker-profiles' },
 								{ label: 'Child-Process Hooks', slug: 'workers/child-process-hooks' },
+								{ label: 'Event Handlers', slug: 'workers/event-handlers' },
 							],
 						},
 						{
