@@ -1228,7 +1228,7 @@ impl Worker {
             self.app_config.recovery.clone(),
             self.app_config.retention.clone(),
             health,
-            self.telemetry.recovery_failures(),
+            self.telemetry.clone(),
             self.cancel.clone(),
         )
     }
@@ -3895,12 +3895,14 @@ mod tests {
             claimed_at: task.claimed_at,
         };
         let is_workflow_task = task.kind.is_workflow_task();
-        match persist_ok_result(broker, task_id, &value, fence, is_workflow_task).await {
+        let log = task.log();
+        match persist_ok_result(broker, task_id, log, &value, fence, is_workflow_task).await {
             Ok(FinalizeOutcome::Terminal {
                 capacity_notified,
                 phase_two,
             }) => Phase2Work {
                 task_id,
+                log,
                 queue_name: task.queue_name,
                 is_workflow_task,
                 capacity_notified,

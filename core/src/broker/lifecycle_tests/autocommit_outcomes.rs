@@ -254,6 +254,7 @@ async fn plain_phase_two(broker: &PostgresBroker) -> Result<(), FinalizeError> {
         broker,
         &crate::test_support::child_specs::TestChildSpecs::empty(),
         Uuid::new_v4(),
+        crate::worker::executor::slots::AttemptLog::FIRST_UNTRACED,
         QUEUE,
         false,
         false,

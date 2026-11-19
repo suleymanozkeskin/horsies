@@ -44,6 +44,7 @@ use crate::worker::execution::{
     finalize_workflow_phase, persist_failed_attempt, persist_ok_result, FinalizeOutcome,
     PhaseTwoForm,
 };
+use crate::worker::executor::slots::AttemptLog;
 use crate::workflow_engine::engine::{
     on_workflow_task_complete_with, WorkflowTaskCompletion, WorkflowTaskCompletionError,
 };
@@ -1317,7 +1318,17 @@ pub(super) async fn worker_phase_one(
         claimed_at: task.claimed_at,
     };
     let written = match report {
-        NodeReport::Success => persist_ok_result(broker, task.task_id, b"1", fence, true).await,
+        NodeReport::Success => {
+            persist_ok_result(
+                broker,
+                task.task_id,
+                AttemptLog::FIRST_UNTRACED,
+                b"1",
+                fence,
+                true,
+            )
+            .await
+        }
         NodeReport::Failure => {
             let failure = FinishFailedAttempt {
                 task_id: task.task_id,
@@ -1333,7 +1344,7 @@ pub(super) async fn worker_phase_one(
                     failed_reason: None,
                 },
             };
-            persist_failed_attempt(broker, &failure, true).await
+            persist_failed_attempt(broker, &failure, AttemptLog::FIRST_UNTRACED, true).await
         }
     };
     match written {
@@ -1368,6 +1379,7 @@ pub(super) async fn worker_phase_two(
         broker,
         child_specs,
         task.task_id,
+        AttemptLog::FIRST_UNTRACED,
         &task.queue_name,
         true,
         done.capacity_notified,

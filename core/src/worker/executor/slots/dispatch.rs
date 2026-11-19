@@ -100,6 +100,15 @@ pub struct AttemptLog {
     pub trace_id: StoredTraceId,
 }
 
+#[cfg(test)]
+impl AttemptLog {
+    /// The log fields of a first attempt whose row stores no trace id.
+    pub(crate) const FIRST_UNTRACED: Self = Self {
+        attempt: AttemptNumber::SMALLEST,
+        trace_id: StoredTraceId::NoTraceId,
+    };
+}
+
 /// A claimed row and its input.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Claimed {
