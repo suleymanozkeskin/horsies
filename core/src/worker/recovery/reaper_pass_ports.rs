@@ -43,6 +43,9 @@ fn crash_retry_options(max_retries: u32) -> String {
 fn candidate(retry_count: i32, max_retries: i32, task_options: Option<String>) -> StaleCandidate {
     StaleCandidate {
         task_id: Uuid::from_u128(1),
+        task_name: "stale.task".to_owned(),
+        queue_name: "default".to_owned(),
+        trace_id: crate::telemetry::trace_carrier::StoredTraceId::NoTraceId,
         retry_count,
         max_retries,
         task_options,
@@ -409,6 +412,7 @@ async fn the_stale_pass_judges_its_thresholds_to_the_millisecond() {
         StatementLog::Off,
         thresholds_ms(1_900, 2_750),
         whole_scan(),
+        &WorkerTelemetry::Off,
     )
     .await
     .expect("the stale pass");
@@ -447,6 +451,7 @@ async fn a_stale_pass_with_no_stale_row_recovers_none_and_writes_nothing() {
         StatementLog::Off,
         thresholds_ms(60_000, 600_000),
         whole_scan(),
+        &WorkerTelemetry::Off,
     )
     .await
     .expect("the stale pass");
@@ -475,6 +480,7 @@ async fn a_stale_pass_fails_each_stale_row_and_counts_it() {
         StatementLog::Off,
         thresholds_ms(300_000, 300_000),
         whole_scan(),
+        &WorkerTelemetry::Off,
     )
     .await
     .expect("the stale pass");
@@ -506,6 +512,7 @@ async fn a_stale_pass_fails_a_row_whose_finalizing_marker_is_past_its_threshold(
         StatementLog::Off,
         thresholds_ms(300_000, 5_000),
         whole_scan(),
+        &WorkerTelemetry::Off,
     )
     .await
     .expect("the stale pass");
@@ -538,6 +545,7 @@ async fn a_stale_pass_whose_scan_reads_its_whole_batch_warns_that_the_rest_waits
         StatementLog::Off,
         thresholds_ms(300_000, 300_000),
         RecoveryBatch::new(1).expect("1 row is a recovery batch"),
+        &WorkerTelemetry::Off,
     )
     .await
     .expect("the stale pass");
@@ -573,6 +581,7 @@ async fn a_stale_pass_whose_scan_cannot_run_is_an_error() {
         StatementLog::Off,
         thresholds_ms(300_000, 300_000),
         whole_scan(),
+        &WorkerTelemetry::Off,
     )
     .await;
 
@@ -597,6 +606,7 @@ async fn a_stale_failure_stores_the_crash_code_in_the_task_and_its_attempt() {
         StatementLog::Off,
         thresholds_ms(300_000, 300_000),
         whole_scan(),
+        &WorkerTelemetry::Off,
     )
     .await
     .expect("the stale pass");

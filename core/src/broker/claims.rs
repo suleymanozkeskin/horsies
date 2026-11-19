@@ -530,11 +530,12 @@ fn stored_trace_of(task_id: Uuid, trace_carrier: Option<String>) -> RunTrace {
     }
 }
 
-/// The trace id of a claimed row from its stored `trace_id`: none for
-/// `NULL`, else the 16 bytes. The table holds 16 bytes; another length was
-/// not written by a send, and it does not fail the claim: the row claims
-/// with no trace id, and a warning names the task and the length.
-fn stored_trace_id_of(task_id: Uuid, trace_id: Option<Vec<u8>>) -> StoredTraceId {
+/// The trace id of a row from its stored `trace_id`: none for `NULL`, else
+/// the 16 bytes. The table holds 16 bytes; another length was not written by
+/// a send, and it does not fail the read (the claim, the stale RUNNING scan):
+/// the row reads with no trace id, and a warning names the task and the
+/// length.
+pub(crate) fn stored_trace_id_of(task_id: Uuid, trace_id: Option<Vec<u8>>) -> StoredTraceId {
     let bytes = match trace_id {
         None => return StoredTraceId::NoTraceId,
         Some(bytes) => bytes,
@@ -545,7 +546,7 @@ fn stored_trace_id_of(task_id: Uuid, trace_id: Option<Vec<u8>>) -> StoredTraceId
             tracing::warn!(
                 task_id = %task_id,
                 bytes = bytes.len(),
-                "claimed task {task_id} has a stored trace id of {} bytes, not {TRACE_ID_BYTES}; \
+                "task {task_id} has a stored trace id of {} bytes, not {TRACE_ID_BYTES}; \
                  its log records carry no trace id",
                 bytes.len(),
             );

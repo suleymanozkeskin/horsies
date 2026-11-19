@@ -14,9 +14,9 @@ use crate::broker::expiry_and_orphans::{
 };
 use crate::broker::stale_recovery::{
     finish_stale_attempt, requeue_stale_claimed_pass, scan_stale_running, wake_retried_queue,
-    FinishStaleAttempt, RecoveryBatch, StaleCandidate, StaleClaimsRequeuePass, StaleEvidence,
-    StaleRetry, StaleRunningPass, StaleRunningThresholds, ThresholdMs, ThresholdOutOfRange,
-    STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS, STALE_RUNNING_SCAN_BATCH,
+    FinishStaleAttempt, RecoveredTask, RecoveryBatch, StaleCandidate, StaleClaimsRequeuePass,
+    StaleEvidence, StaleRetry, StaleRunningPass, StaleRunningThresholds, ThresholdMs,
+    ThresholdOutOfRange, STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS, STALE_RUNNING_SCAN_BATCH,
 };
 use crate::broker::CoveragePassError;
 use crate::broker::{BrokerError, PostgresBroker, WorkflowRetentionPass};
@@ -39,10 +39,12 @@ use crate::db::{
     Transaction, TypedStatement,
 };
 use crate::log_targets::STALE_RUNNING_PASS;
-use crate::telemetry::labels::RecoveryStep;
-use crate::telemetry::registry::OptionalCounter;
+use crate::telemetry::labels::{RecoveryAction, RecoveryStep};
+use crate::telemetry::worker::WorkerTelemetry;
 
 use crate::worker::class_coverage_log::{check_class_coverage, ClassCoverageLog};
+use crate::worker::executor::slots::dispatch::attempt_of;
+use crate::worker::executor::slots::AttemptLog;
 use crate::worker::liveness::OWNER_GONE_SPAN;
 use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
 use crate::workflow_engine::child_spec::ChildSpecSource;
@@ -71,6 +73,7 @@ mod p7_maintenance_tests {
     use crate::core::history::periods::RetentionDays;
     use crate::core::history::reads::publisher::StagedLoaderPublisher;
     use crate::core::lifecycle::TerminalizationOutcome;
+    use crate::telemetry::registry::OptionalCounter;
     use crate::test_support::history::{
         create_heartbeat_leaf_of, create_history_leaf_of, database_now, register_period_class,
     };
@@ -299,6 +302,7 @@ mod p7_maintenance_tests {
             &mut orphan_state,
             &mut UnheldOwners::default(),
             &mut RecoveryFailures::new(OptionalCounter::NotRecorded),
+            &WorkerTelemetry::Off,
         )
         .await;
 
@@ -344,6 +348,7 @@ mod p7_maintenance_tests {
             &mut orphan_state,
             &mut UnheldOwners::default(),
             &mut RecoveryFailures::new(OptionalCounter::NotRecorded),
+            &WorkerTelemetry::Off,
         )
         .await;
 
@@ -442,6 +447,7 @@ mod p7_maintenance_tests {
             &mut orphan_state,
             &mut UnheldOwners::default(),
             &mut RecoveryFailures::new(OptionalCounter::NotRecorded),
+            &WorkerTelemetry::Off,
         )
         .await;
 
@@ -504,6 +510,7 @@ mod p7_maintenance_tests {
             &mut orphan_state,
             &mut UnheldOwners::default(),
             &mut RecoveryFailures::new(OptionalCounter::NotRecorded),
+            &WorkerTelemetry::Off,
         )
         .await;
 
@@ -693,6 +700,7 @@ mod p7_maintenance_tests {
             &mut orphan_state,
             &mut UnheldOwners::default(),
             &mut RecoveryFailures::new(OptionalCounter::NotRecorded),
+            &WorkerTelemetry::Off,
         )
         .await;
 
@@ -932,8 +940,10 @@ pub fn new_reaper_health() -> ReaperHealth {
 /// work ([`CheckoutClass::Reserved`]), the partition maintenance on the
 /// session-work pool. The caller has checked the client family of the
 /// handle (`Worker::start_database`); the reaper's partition maintenance
-/// writes without a second check. Each failed step adds 1 to
-/// `failure_counter` (`horsies.recovery.pass.failures{step}`).
+/// writes without a second check. With telemetry on, each failed step adds
+/// 1 to `horsies.recovery.pass.failures{step}`, and each task row that a
+/// recovery step changed is told to `telemetry` (`TaskRecovered`,
+/// `horsies.recovery.tasks{action}`).
 #[allow(clippy::needless_pass_by_value)]
 pub fn spawn_reaper(
     broker: Arc<PostgresBroker>,
@@ -941,7 +951,7 @@ pub fn spawn_reaper(
     config: RecoveryConfig,
     retention: RetentionConfig,
     health: ReaperHealth,
-    failure_counter: OptionalCounter<(RecoveryStep,)>,
+    telemetry: WorkerTelemetry,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -956,7 +966,7 @@ pub fn spawn_reaper(
         let mut unheld_owners = UnheldOwners::default();
         // The failures in a row of each step, for the failure log; they live
         // as long as the loop.
-        let mut failures = RecoveryFailures::new(failure_counter);
+        let mut failures = RecoveryFailures::new(telemetry.recovery_failures());
         // The fleet check runs after each pass, from one check interval after
         // the start on.
         let mut coverage_log =
@@ -988,6 +998,7 @@ pub fn spawn_reaper(
                     &mut orphan_state,
                     &mut unheld_owners,
                     &mut failures,
+                    &telemetry,
                 )
                 .await;
                 check_class_coverage(&broker, &mut coverage_log).await;
@@ -1171,6 +1182,7 @@ async fn end_gate(gate: Transaction<'_>) {
 /// stale-CLAIMED requeue, orphan audit, stale-RUNNING recovery, PENDING
 /// expiry, workflow recovery, then periodic retention cleanup (with the
 /// liveness rows of ended workers) and partition maintenance.
+#[allow(clippy::too_many_arguments)]
 async fn run_reaper_pass(
     broker: &PostgresBroker,
     child_specs: &dyn ChildSpecSource,
@@ -1182,6 +1194,7 @@ async fn run_reaper_pass(
     orphan_state: &mut OrphanSweepState,
     unheld_owners: &mut UnheldOwners,
     failures: &mut RecoveryFailures,
+    telemetry: &WorkerTelemetry,
 ) {
     // The tasks of workers whose liveness lock stays free, on the main core
     // pool with the reserve. It runs when either recovery of task rows is on.
@@ -1194,6 +1207,7 @@ async fn run_reaper_pass(
                     config,
                     unheld_owners,
                     OWNER_GONE_SPAN,
+                    telemetry,
                 )
                 .await
             }
@@ -1228,7 +1242,13 @@ async fn run_reaper_pass(
             Ok(threshold) => {
                 let requeued = match broker.core_pools_for_write() {
                     Ok((open, _write)) => {
-                        requeue_stale_claimed(open.main(), broker.statement_log(), threshold).await
+                        requeue_stale_claimed(
+                            open.main(),
+                            broker.statement_log(),
+                            threshold,
+                            telemetry,
+                        )
+                        .await
                     }
                     Err(error) => Err(error),
                 };
@@ -1320,6 +1340,7 @@ async fn run_reaper_pass(
                             broker.statement_log(),
                             thresholds,
                             STALE_RUNNING_SCAN_BATCH,
+                            telemetry,
                         )
                         .await
                     }
@@ -1610,6 +1631,8 @@ async fn cleanup_expired_key_reservations(
 ///   that is no longer RUNNING or stale, or whose retry count moved, is
 ///   refused and nothing is written.
 /// - A scheduled retry wakes its queue (best-effort, as Python).
+/// - Each candidate whose retry or failure committed is told to `telemetry`
+///   (`RunningRetried` or `RunningFailed`).
 ///
 /// Each statement runs alone on `pool`, checked out as reserved work, and
 /// commits alone, so the candidates before a failure stay recovered. A
@@ -1624,8 +1647,9 @@ pub async fn mark_stale_running_as_failed(
     log: StatementLog,
     thresholds: StaleRunningThresholds,
     batch: RecoveryBatch,
+    telemetry: &WorkerTelemetry,
 ) -> Result<u64, crate::broker::BrokerError> {
-    let pass = stale_running_pass(pool, log, thresholds, batch).await?;
+    let pass = stale_running_pass(pool, log, thresholds, batch, telemetry).await?;
     match pass {
         StaleRunningPass::Complete { .. } => {}
         StaleRunningPass::ScanFull { scan_batch, .. } => tracing::warn!(
@@ -1640,7 +1664,8 @@ pub async fn mark_stale_running_as_failed(
 
 /// One stale RUNNING pass, as [`mark_stale_running_as_failed`] describes,
 /// with whether the scan read a full batch. Logs each candidate's outcome
-/// and failure; the caller reports the end of the pass.
+/// and failure, and tells each recovered candidate to `telemetry`; the
+/// caller reports the end of the pass.
 ///
 /// Errors: the scan's [`crate::broker::BrokerError::Statement`] or
 /// [`crate::broker::BrokerError::RowDecode`]; nothing was written.
@@ -1649,10 +1674,12 @@ pub(crate) async fn stale_running_pass(
     log: StatementLog,
     thresholds: StaleRunningThresholds,
     batch: RecoveryBatch,
+    telemetry: &WorkerTelemetry,
 ) -> Result<StaleRunningPass, crate::broker::BrokerError> {
     let candidates = scan_stale_running(pool, log, thresholds, batch).await?;
     let mut recovered: u64 = 0;
     for candidate in &candidates {
+        let attempt = candidate_log(candidate);
         let command = match stale_attempt_command(candidate, thresholds) {
             Ok(command) => command,
             Err(error) => {
@@ -1661,6 +1688,8 @@ pub(crate) async fn stale_running_pass(
                 tracing::error!(
                     target: STALE_RUNNING_PASS,
                     task_id = %candidate.task_id,
+                    attempt = attempt.attempt.get(),
+                    trace_id = attempt.trace_id.log_field(),
                     %error,
                     "Failed to serialize crash result for task {}: {error}",
                     candidate.task_id,
@@ -1669,14 +1698,24 @@ pub(crate) async fn stale_running_pass(
             }
         };
         match finish_stale_attempt(pool, log, &command).await {
-            Ok(outcome) => match after_stale_attempt(pool, log, &command, outcome).await {
-                StaleRecovery::Recovered => recovered += 1,
+            Ok(outcome) => match after_stale_attempt(pool, log, &command, attempt, outcome).await {
+                StaleRecovery::Recovered(action) => {
+                    recovered += 1;
+                    telemetry.task_recovered(
+                        candidate.task_id,
+                        &candidate.task_name,
+                        &candidate.queue_name,
+                        action,
+                    );
+                }
                 StaleRecovery::NotRecovered => {}
             },
             Err(error) => {
                 tracing::error!(
                     target: STALE_RUNNING_PASS,
                     task_id = %candidate.task_id,
+                    attempt = attempt.attempt.get(),
+                    trace_id = attempt.trace_id.log_field(),
                     %error,
                     "Reaper failed to process stale task {}: {error}",
                     candidate.task_id,
@@ -1685,6 +1724,15 @@ pub(crate) async fn stale_running_pass(
         }
     }
     Ok(stale_running_end(candidates.len(), batch, recovered))
+}
+
+/// The log fields of the attempt that a stale candidate runs: its retry
+/// count plus 1, and the trace id that the send stored on its row. Pure.
+pub(crate) fn candidate_log(candidate: &StaleCandidate) -> AttemptLog {
+    AttemptLog {
+        attempt: attempt_of(candidate.retry_count),
+        trace_id: candidate.trace_id,
+    }
 }
 
 /// The end of a stale RUNNING pass whose scan read `scanned` candidates of
@@ -1703,7 +1751,9 @@ fn stale_running_end(scanned: usize, batch: RecoveryBatch, recovered: u64) -> St
 
 /// Whether one stale candidate was retried or failed.
 enum StaleRecovery {
-    Recovered,
+    /// The retry or the failure committed: `RunningRetried` or
+    /// `RunningFailed`.
+    Recovered(RecoveryAction),
     NotRecovered,
 }
 
@@ -1775,13 +1825,14 @@ fn stale_retry(candidate: &StaleCandidate, error_code: &str) -> StaleRetry {
     }
 }
 
-/// Log what the statement reported, and wake the queue of a scheduled
-/// retry. A failed wake is logged: the retried row is PENDING, and the
-/// queue's poll finds it.
+/// Log what the statement reported, naming the attempt of `command` with
+/// `attempt`, and wake the queue of a scheduled retry. A failed wake is
+/// logged: the retried row is PENDING, and the queue's poll finds it.
 async fn after_stale_attempt(
     pool: &CorePool,
     log: StatementLog,
     command: &FinishStaleAttempt,
+    attempt: AttemptLog,
     outcome: StaleAttemptOutcome,
 ) -> StaleRecovery {
     match outcome {
@@ -1789,11 +1840,13 @@ async fn after_stale_attempt(
             tracing::info!(
                 target: STALE_RUNNING_PASS,
                 task_id = %command.task_id,
+                attempt = attempt.attempt.get(),
+                trace_id = attempt.trace_id.log_field(),
                 ?retry,
                 ?after,
                 "stale RUNNING task marked FAILED",
             );
-            StaleRecovery::Recovered
+            StaleRecovery::Recovered(RecoveryAction::RunningFailed)
         }
         StaleAttemptOutcome::RetryScheduled {
             retry_count,
@@ -1804,6 +1857,8 @@ async fn after_stale_attempt(
             tracing::info!(
                 target: STALE_RUNNING_PASS,
                 task_id = %command.task_id,
+                attempt = attempt.attempt.get(),
+                trace_id = attempt.trace_id.log_field(),
                 retry_count,
                 %next_retry_at,
                 "stale RUNNING task scheduled for retry",
@@ -1812,18 +1867,22 @@ async fn after_stale_attempt(
                 tracing::warn!(
                     target: STALE_RUNNING_PASS,
                     task_id = %command.task_id,
+                    attempt = attempt.attempt.get(),
+                    trace_id = attempt.trace_id.log_field(),
                     queue = %queue_name,
                     %error,
                     "Wake of stale retry {} failed: {error}",
                     command.task_id,
                 );
             }
-            StaleRecovery::Recovered
+            StaleRecovery::Recovered(RecoveryAction::RunningRetried)
         }
         StaleAttemptOutcome::Refused(refusal) => {
             tracing::warn!(
                 target: STALE_RUNNING_PASS,
                 task_id = %command.task_id,
+                attempt = attempt.attempt.get(),
+                trace_id = attempt.trace_id.log_field(),
                 outcome = refusal.as_str(),
                 ?refusal,
                 retry = ?command.retry,
@@ -1854,7 +1913,9 @@ fn stale_running_thresholds(
 /// form.
 #[cfg(test)]
 pub(crate) mod on_test_pool {
-    use super::{RecoveryBatch, StaleRunningThresholds, StatementLog, ThresholdMs};
+    use super::{
+        RecoveryBatch, StaleRunningThresholds, StatementLog, ThresholdMs, WorkerTelemetry,
+    };
     use crate::test_support::sql::TestDatabaseUrl;
 
     pub(crate) async fn mark_stale_running_as_failed(
@@ -1872,8 +1933,14 @@ pub(crate) mod on_test_pool {
             .and_then(RecoveryBatch::new)
             .expect("a test scan limit of 1 to 10000 rows");
         let core = crate::broker::pools::core_pool_for_test_url(&pool.test_url());
-        let recovered =
-            super::mark_stale_running_as_failed(&core, StatementLog::Off, thresholds, batch).await;
+        let recovered = super::mark_stale_running_as_failed(
+            &core,
+            StatementLog::Off,
+            thresholds,
+            batch,
+            &WorkerTelemetry::Off,
+        )
+        .await;
         core.close();
         recovered
     }
@@ -1885,9 +1952,13 @@ pub(crate) mod on_test_pool {
         threshold_secs: f64,
     ) -> Result<u64, crate::broker::BrokerError> {
         let core = crate::broker::pools::core_pool_for_test_url(&pool.test_url());
-        let requeued =
-            super::requeue_stale_claimed(&core, StatementLog::Off, threshold_of(threshold_secs))
-                .await;
+        let requeued = super::requeue_stale_claimed(
+            &core,
+            StatementLog::Off,
+            threshold_of(threshold_secs),
+            &WorkerTelemetry::Off,
+        )
+        .await;
         core.close();
         requeued
     }
@@ -1929,6 +2000,7 @@ impl OrphanSweepState {
 #[cfg(test)]
 mod orphan_audit_schedule_tests {
     use super::*;
+    use crate::telemetry::registry::OptionalCounter;
 
     #[test]
     fn orphan_task_audit_uses_its_own_interval() {
@@ -2043,17 +2115,22 @@ fn elapsed_millis(started: std::time::Instant) -> u64 {
 
 /// Requeue stale CLAIMED tasks back to PENDING (Python
 /// `requeue_stale_claimed`, `core/brokers/postgres.py:3505-3530`): one
-/// [`requeue_stale_claimed_pass`] on `pool`. Logs a warning when the pass
-/// reached its bound. Returns the number of requeued rows.
+/// [`requeue_stale_claimed_pass`] on `pool`. Each row of each committed
+/// batch is told to `telemetry` as `ClaimRequeued`. Logs a warning when the
+/// pass reached its bound. Returns the number of requeued rows.
 ///
 /// Errors: the failed batch's [`crate::broker::BrokerError`]; the batches
-/// before it stay committed.
+/// before it stay committed, and their rows were told.
 pub async fn requeue_stale_claimed(
     pool: &CorePool,
     log: StatementLog,
     stale_after: ThresholdMs,
+    telemetry: &WorkerTelemetry,
 ) -> Result<u64, crate::broker::BrokerError> {
-    match requeue_stale_claimed_pass(pool, log, stale_after).await {
+    let told = |requeued: &[RecoveredTask]| {
+        telemetry.tasks_recovered(requeued, RecoveryAction::ClaimRequeued);
+    };
+    match requeue_stale_claimed_pass(pool, log, stale_after, told).await {
         Ok(StaleClaimsRequeuePass::Drained { requeued }) => Ok(requeued),
         Ok(StaleClaimsRequeuePass::BoundReached { requeued }) => {
             tracing::warn!(
@@ -2263,6 +2340,7 @@ mod tests {
     use crate::core::history::maintenance::coverage::{
         ensure_startup_coverage_in_pool, StartupCoverageOutcome,
     };
+    use crate::telemetry::registry::OptionalCounter;
     use crate::test_support::sql::{self, TestPool, TestPoolOptions};
     use serial_test::serial;
     use uuid::Uuid;
@@ -2414,6 +2492,7 @@ mod tests {
                     &mut orphan_state,
                     &mut UnheldOwners::default(),
                     &mut RecoveryFailures::new(OptionalCounter::NotRecorded),
+                    &WorkerTelemetry::Off,
                 ),
             ),
         )
