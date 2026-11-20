@@ -1143,6 +1143,7 @@ fn a_list_of_handler_counts_names_each_handler_once() {
 fn the_frames_of_a_handler_child_have_their_own_kinds() {
     let stats = encode_child_frame(&ChildFrame::HandlerStats(HandlerStatsFrame {
         handlers: HandlerCountsList::new(Vec::new()).unwrap(),
+        span_reads: SpanReadCounts::default(),
         rss: RssReading::Unreadable,
     }))
     .unwrap()
