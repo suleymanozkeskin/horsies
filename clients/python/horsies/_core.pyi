@@ -322,6 +322,8 @@ class CoreHandle:
         """The info of one task. Installs the schema once per handle first; then reads only."""
     def task_info_async(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> asyncio.Future[TaskInfoRecord | TaskInfoNotFound | BrokerOperationFailed | BrokerInvalidJsonPayload]:
         """The awaitable form of the method above."""
+    def task_workflow_node(self, task_id: uuid.UUID) -> TaskWorkflowNodeLinked | TaskWorkflowNodeNotLinked | BrokerOperationFailed:
+        """The workflow node that links one task. One bounded statement; no schema step."""
     def raw_result_record(self, task_id: uuid.UUID, *, timeout_ms: int | None) -> RawResultRecordRecord | RawResultAbsent | BrokerOperationFailed | BrokerInvalidJsonPayload | BrokerInvalidInput:
         """The result of one task, waiting up to timeout_ms (no limit for None) while it has not
         finished. Installs the schema once per handle first; then reads only. Bounded by the limit
@@ -792,6 +794,24 @@ class RawResultAbsent:
 @final
 class TaskInfoNotFound:
     """Neither the live table nor the task history holds the task."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+
+
+@final
+class TaskWorkflowNodeLinked:
+    """The node at node_index of the workflow workflow_id links the task; root_workflow_id is the top-level workflow of its tree."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def node_index(self) -> int: ...
+    @property
+    def root_workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class TaskWorkflowNodeNotLinked:
+    """No workflow node links the task now."""
     @property
     def task_id(self) -> uuid.UUID: ...
 

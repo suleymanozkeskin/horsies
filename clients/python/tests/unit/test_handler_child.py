@@ -24,44 +24,64 @@ import logging
 import socket
 import threading
 import time
+import uuid
 import warnings
 from collections.abc import Callable, Coroutine, Iterator
 from pathlib import Path
 from typing import Any, Final, NoReturn, cast
 
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import Tracer
 from pydantic import SecretStr
 
 from horsies import _core as core
 from horsies._catalog import events
+from horsies._catalog.broker import BrokerErrorCode
+from horsies._catalog.broker_errors import BrokerOperationFailed
 from horsies.core.app import Horsies
 from horsies.core.event_handlers import EventHandler
 from horsies.core.models.app import AppConfig
 from horsies.core.models.boot_failure import AppLoadFailed, ThreadStartRefused
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.tracing import OtelTracing
+from horsies.core.telemetry import ended_attempt_otel
+from horsies.core.telemetry.attempt_span import StopFlush
+from horsies.core.telemetry.ended_attempt_span import (
+    NO_ENDED_ATTEMPT_SPANS,
+    EndedAttemptSpans,
+    NodeRead,
+    NodeReadFailed,
+    OtelEndedAttemptSpans,
+)
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import child_main, handler_child
 from horsies.core.worker.child_frames import (
     BootFailedFrame,
     ChildFrame,
+    NO_SPAN_READS,
     HandlerCounts,
     HandlerStatsFrame,
     ReadyFrame,
+    SpanReadCounts,
 )
 from horsies.core.worker.child_main import ParentFrameReader, read_python_init_frame
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.worker.handler_child import (
+    AppNodeReader,
     EventDispatch,
     HandlerInbox,
     InboxClosed,
     InboxFull,
-    NoWorkerEndedSpans,
     NotJsonText,
     OnLoop,
     Queued,
     RunningHandler,
     decode_event_text,
     run_handler_child_start_hooks,
+    start_ended_span_reader,
     start_handlers,
     stats_frame,
 )
@@ -262,7 +282,7 @@ class TestTypedDispatch:
         for event_class in events.EVENT_TYPES:
             app.on_event(event_class)(_recorder(received, event_class))
         running = _started(app)
-        dispatch = EventDispatch(running, NoWorkerEndedSpans())
+        dispatch = EventDispatch(running, NO_ENDED_ATTEMPT_SPANS)
 
         dispatch.dispatch([text for _name, text in WIRE_TEXTS])
         _stop(running)
@@ -284,7 +304,7 @@ class TestTypedDispatch:
         app.on_event(AttemptEnded)(_recorder(received, AttemptEnded))
         running = _started(app)
 
-        EventDispatch(running, NoWorkerEndedSpans()).dispatch(_texts_of('TaskClaimed'))
+        EventDispatch(running, NO_ENDED_ATTEMPT_SPANS).dispatch(_texts_of('TaskClaimed'))
         _stop(running)
 
         assert received == {'AttemptEnded': []}
@@ -304,7 +324,7 @@ class TestTypedDispatch:
         running = _started(app)
 
         with caplog.at_level(logging.ERROR):
-            EventDispatch(running, NoWorkerEndedSpans()).dispatch(
+            EventDispatch(running, NO_ENDED_ATTEMPT_SPANS).dispatch(
                 ['["AttemptEnded",1]', _attempt_ended_text(4)],
             )
         _stop(running)
@@ -328,7 +348,7 @@ class TestHandlerKinds:
         app.on_event(AttemptEnded)(on_end)
         running = _started(app)
 
-        EventDispatch(running, NoWorkerEndedSpans()).dispatch([_attempt_ended_text(1)])
+        EventDispatch(running, NO_ENDED_ATTEMPT_SPANS).dispatch([_attempt_ended_text(1)])
         _stop(running)
 
         assert len(threads) == 1
@@ -353,7 +373,7 @@ class TestHandlerKinds:
         app.on_event(AttemptEnded)(second)
         running = _started(app)
 
-        EventDispatch(running, NoWorkerEndedSpans()).dispatch([_attempt_ended_text(1)])
+        EventDispatch(running, NO_ENDED_ATTEMPT_SPANS).dispatch([_attempt_ended_text(1)])
         _stop(running)
 
         loops = dict(seen)
@@ -384,7 +404,7 @@ class TestFailingHandlers:
         running = _started(app)
 
         with caplog.at_level(logging.ERROR):
-            EventDispatch(running, NoWorkerEndedSpans()).dispatch(
+            EventDispatch(running, NO_ENDED_ATTEMPT_SPANS).dispatch(
                 [_attempt_ended_text(attempt) for attempt in (1, 2, 3)],
             )
             _stop(running)
@@ -410,7 +430,7 @@ class TestFailingHandlers:
         running = _started(app)
 
         with caplog.at_level(logging.ERROR):
-            EventDispatch(running, NoWorkerEndedSpans()).dispatch(
+            EventDispatch(running, NO_ENDED_ATTEMPT_SPANS).dispatch(
                 [_attempt_ended_text(attempt) for attempt in range(1, 8)],
             )
             _stop(running)
@@ -444,7 +464,7 @@ class TestFailingHandlers:
         app.on_event(AttemptEnded)(on_end)
         running = _started(app)
 
-        EventDispatch(running, NoWorkerEndedSpans()).dispatch(
+        EventDispatch(running, NO_ENDED_ATTEMPT_SPANS).dispatch(
             [_attempt_ended_text(1), _attempt_ended_text(2)],
         )
         _stop(running)
@@ -473,7 +493,7 @@ class TestFailingHandlers:
             caplog.at_level(logging.ERROR),
         ):
             warnings.simplefilter('always')
-            EventDispatch(running, NoWorkerEndedSpans()).dispatch(
+            EventDispatch(running, NO_ENDED_ATTEMPT_SPANS).dispatch(
                 [_attempt_ended_text(1)]
             )
             _stop(running)
@@ -510,7 +530,7 @@ class TestBlockingHandler:
         app.on_event(AttemptEnded)(blocking)
         app.on_event(AttemptEnded)(recording)
         running = _started(app)
-        dispatch = EventDispatch(running, NoWorkerEndedSpans())
+        dispatch = EventDispatch(running, NO_ENDED_ATTEMPT_SPANS)
 
         dispatch.dispatch([_attempt_ended_text(1)])
         assert entered.wait(_WAIT_S)
@@ -683,6 +703,127 @@ class TestServedChild:
                 handler=app.get_event_handlers()[0].name, errors=1, dropped=0
             ),
         )
+
+    def test_a_child_of_an_otel_app_makes_the_span_of_a_worker_ended_attempt_first(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        exporter = InMemorySpanExporter()
+        provider = TracerProvider(shutdown_on_exit=False)
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+        def provider_tracer(*_args: object, **_kwargs: object) -> Tracer:
+            return provider.get_tracer('horsies')
+
+        monkeypatch.setattr(ended_attempt_otel.trace, 'get_tracer', provider_tracer)
+        flushed: list[EndedAttemptSpans] = []
+        flush_at_stop = handler_child.flush_ended_attempt_spans_at_stop
+
+        def recording_flush(spans: EndedAttemptSpans) -> StopFlush:
+            flushed.append(spans)
+            return flush_at_stop(spans)
+
+        monkeypatch.setattr(handler_child, 'flush_ended_attempt_spans_at_stop', recording_flush)
+        app = Horsies(
+            config=AppConfig(
+                broker=PostgresConfig(
+                    database_url=SecretStr('postgresql://user:pass@localhost/db')
+                ),
+                tracing=OtelTracing(),
+            ),
+        )
+        spans_at_handler: list[int] = []
+
+        def on_end(event: AttemptEnded) -> None:
+            del event
+            spans_at_handler.append(len(exporter.get_finished_spans()))
+
+        app.on_event(AttemptEnded)(on_end)
+        child = _ServedChild(monkeypatch, app)
+        child.start()
+        _wait_until(lambda: bool(child.snapshot()), 'the ready frame')
+
+        child.send(_events_bytes([dict(WIRE_TEXTS)['attempt_ended_by_worker']]))
+        _wait_until(lambda: bool(spans_at_handler), 'the handler call')
+        child.send(_stop_bytes())
+        child.join()
+        child.close()
+        provider.shutdown()
+
+        assert [span.name for span in exporter.get_finished_spans()] == ['run send_email']
+        assert spans_at_handler == [1]
+        assert [type(spans) for spans in flushed] == [OtelEndedAttemptSpans]
+        assert child.exit_codes == [0]
+
+    def test_a_held_node_read_never_holds_an_event_and_the_stop_counts_it(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        exporter = InMemorySpanExporter()
+        provider = TracerProvider(shutdown_on_exit=False)
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+        def provider_tracer(*_args: object, **_kwargs: object) -> Tracer:
+            return provider.get_tracer('horsies')
+
+        monkeypatch.setattr(ended_attempt_otel.trace, 'get_tracer', provider_tracer)
+        monkeypatch.setattr(handler_child, 'HANDLER_DRAIN_S', 0.1)
+        entered = threading.Event()
+        release = threading.Event()
+
+        class _HeldReader:
+            def read(self, task_id: uuid.UUID) -> NodeRead:
+                del task_id
+                entered.set()
+                _ = release.wait(_WAIT_S)
+                return NodeReadFailed(detail='released after the stop')
+
+        def held_reader(_app: Horsies) -> _HeldReader:
+            return _HeldReader()
+
+        monkeypatch.setattr(handler_child, 'AppNodeReader', held_reader)
+        app = Horsies(
+            config=AppConfig(
+                broker=PostgresConfig(
+                    database_url=SecretStr('postgresql://user:pass@localhost/db')
+                ),
+                tracing=OtelTracing(),
+            ),
+        )
+        handled: list[str] = []
+
+        def on_end(event: AttemptEnded) -> None:
+            handled.append(type(event.end).__name__)
+
+        app.on_event(AttemptEnded)(on_end)
+        child = _ServedChild(monkeypatch, app)
+        child.start()
+        _wait_until(lambda: bool(child.snapshot()), 'the ready frame')
+
+        child.send(
+            _events_bytes(
+                [
+                    dict(WIRE_TEXTS)['attempt_ended_by_worker_in_workflow'],
+                    dict(WIRE_TEXTS)['attempt_ended_by_worker'],
+                ],
+            ),
+        )
+        _wait_until(lambda: len(handled) == 2, 'both events at the handler')
+        assert entered.is_set()
+        assert len(exporter.get_finished_spans()) == 1
+        child.send(_stop_bytes())
+        child.join()
+        release.set()
+        child.close()
+        provider.shutdown()
+
+        made = exporter.get_finished_spans()
+        assert len(made) == 2
+        assert all('horsies.workflow.id' not in (span.attributes or {}) for span in made)
+        last = child.snapshot()[-1]
+        assert isinstance(last, HandlerStatsFrame)
+        assert last.span_reads == SpanReadCounts(read_failed=0, not_read=1)
+        assert child.exit_codes == [0]
 
     def test_stats_frames_come_at_the_interval_with_the_totals(
         self,
@@ -929,7 +1070,7 @@ class TestControlThread:
         with pytest.raises(_Exited) as exited:
             handler_child._read_handler_frames(
                 reader,
-                EventDispatch((), NoWorkerEndedSpans()),
+                EventDispatch((), NO_ENDED_ATTEMPT_SPANS),
                 threading.Event(),
             )
         return exited.value.code
@@ -963,7 +1104,7 @@ class TestControlThread:
         )
 
         handler_child._read_handler_frames(
-            reader, EventDispatch((), NoWorkerEndedSpans()), stopped
+            reader, EventDispatch((), NO_ENDED_ATTEMPT_SPANS), stopped
         )
 
         assert stopped.is_set()
@@ -1046,10 +1187,106 @@ def test_a_stats_frame_holds_each_handler_once_in_order() -> None:
     app.on_event(TaskClaimed)(_ignoring('second'))
     running = _started(app)
 
-    frame = stats_frame(running)
+    frame = stats_frame(running, NO_ENDED_ATTEMPT_SPANS)
     _stop(running)
 
     handlers: tuple[EventHandler, ...] = app.get_event_handlers()
     assert [counts.handler for counts in frame.handlers] == [
         handler.name for handler in handlers
     ]
+    assert frame.span_reads == NO_SPAN_READS
+
+
+def test_a_refused_reader_thread_fails_the_boot(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = Horsies(
+        config=AppConfig(
+            broker=PostgresConfig(database_url=SecretStr('postgresql://user:pass@localhost/db')),
+            tracing=OtelTracing(),
+        ),
+    )
+    spans = handler_child.ended_attempt_spans_of(app.config.tracing, AppNodeReader(app))
+
+    def refuse(_thread: threading.Thread) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, 'start', refuse)
+
+    match start_ended_span_reader(spans):
+        case Err(BootFailedFrame(cause=ThreadStartRefused())):
+            pass
+        case other:
+            pytest.fail(f'a refused reader thread is a refused thread, got {other}')
+    assert start_ended_span_reader(NO_ENDED_ATTEMPT_SPANS) == Ok(None)
+
+
+class _NodeHandle:
+    """The core handle of a broker: its node read answers ``outcome``, or
+    raises it when it is an exception."""
+
+    def __init__(self, outcome: object) -> None:
+        self.outcome = outcome
+        self.task_ids: list[uuid.UUID] = []
+
+    def task_workflow_node(self, task_id: uuid.UUID) -> object:
+        self.task_ids.append(task_id)
+        match self.outcome:
+            case BaseException() as raised:
+                raise raised
+            case answer:
+                return answer
+
+
+class _NodeBroker:
+    def __init__(self, handle: _NodeHandle) -> None:
+        self._core_handle = handle
+
+
+class _NodeApp:
+    """An app whose ``get_broker`` gives ``broker``, or raises it."""
+
+    def __init__(self, broker: _NodeBroker | Exception) -> None:
+        self.broker = broker
+
+    def get_broker(self) -> _NodeBroker:
+        match self.broker:
+            case Exception() as raised:
+                raise raised
+            case broker:
+                return broker
+
+
+def _reader_of(app: _NodeApp) -> AppNodeReader:
+    return AppNodeReader(cast('Horsies', app))
+
+
+class TestTheNodeReaderOfTheApp:
+    """``AppNodeReader``: the node read through the core handle of the app's
+    broker. A linked node and no node are the bridge's own classes, which
+    the build round's end-to-end test reads through a real worker."""
+
+    TASK_ID: Final = uuid.UUID('0190f2d8-7c1e-7a3b-9f00-000000000a17')
+
+    def test_a_failed_read_names_its_code_and_its_message(self) -> None:
+        failed = BrokerOperationFailed(
+            code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
+            message='task_workflow_node failed: the pool is closed',
+            retryable=True,
+            exception=RuntimeError('the pool is closed'),
+        )
+        handle = _NodeHandle(failed)
+
+        read = _reader_of(_NodeApp(_NodeBroker(handle))).read(self.TASK_ID)
+
+        assert read == NodeReadFailed(
+            detail='TASK_INFO_QUERY_FAILED: task_workflow_node failed: the pool is closed',
+        )
+        assert handle.task_ids == [self.TASK_ID]
+
+    def test_a_call_that_raises_or_a_broker_that_is_not_built_is_a_failed_read(self) -> None:
+        raising = _reader_of(_NodeApp(_NodeBroker(_NodeHandle(TimeoutError('call bound')))))
+        no_broker = _reader_of(_NodeApp(RuntimeError('broker init failed')))
+
+        assert raising.read(self.TASK_ID) == NodeReadFailed(detail='TimeoutError: call bound')
+        assert no_broker.read(self.TASK_ID) == NodeReadFailed(
+            detail='RuntimeError: broker init failed',
+        )

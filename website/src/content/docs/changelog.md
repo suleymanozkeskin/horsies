@@ -125,6 +125,31 @@ before you upgrade a 0.7 deployment.
   hook that raises or runs longer leaves the handler child down, and the
   worker runs its tasks on (`HRS-214` for an async hook).
 
+- **Spans of the attempts that the worker ended.** With `OtelTracing()`,
+  the handler child of a worker makes the span of each attempt that the
+  worker ended itself: an isolated task killed at its timeout
+  (`TASK_TIMEOUT`), a shared async child killed for a blocked loop
+  (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`), and a child lost with its
+  exit seen (`WORKER_CRASHED`). The child of such an attempt is gone, so its
+  own span never ends. The span is `run <task_name>` of kind CONSUMER under
+  the span that sent the task, from the time the task reached its child to
+  the time the end reached the worker, with status ERROR, `error.type` = the
+  code, the attributes of the span of a child and
+  `horsies.span.source = "worker"`. For a workflow task the handler child
+  reads the node by the task id, with one read of the core bounded at 1 s
+  for a connection and 1 s for the statement, only for such an attempt, and
+  the span gets `horsies.workflow.id`, `horsies.workflow.node` and
+  `horsies.workflow.root_id`. The read runs on one reader thread with a
+  queue of at most 1,000 spans, so it never holds an event. A read that
+  fails, a full queue, and a span still queued at the stop leave the
+  workflow attributes out; the new worker metric
+  `horsies.spans.worker_ended.read_failures{reason="read_failed"|"not_read"}`
+  counts them, and the handler child logs them.
+  `OtelTracing(worker_ended_spans=...)` takes the new `WorkerEndedSpans`:
+  `MAKE_SPANS` (the default), with which the worker starts its handler child
+  also when the app has no handler, or `NO_SPANS`. Set the tracer provider
+  in `@app.on_handler_child_start`.
+
 - **The trace id on the monitoring reads.** `LeafTaskInfo.trace_id` (the
   task detail and the workflow node detail) is the trace id of the span that
   sent the task, live and in history, and `WorkflowRunDetail.trace_id` the

@@ -42,7 +42,7 @@ string validates at runtime, but strict type checkers reject it — wrap with
 | `exception_mapper` | `ExceptionMapper` | `{}` | Global exception-to-error-code mapping |
 | `default_unhandled_error_code` | `str` | `"UNHANDLED_EXCEPTION"` | Must be `UPPER_SNAKE_CASE` |
 | `resend_on_transient_err` | `bool` | `False` | Auto-retry transient ENQUEUE_FAILED |
-| `tracing` | `OtelTracing \| NoTracing` | `NoTracing()` | `OtelTracing()`: spans of the sends and of each attempt, and producer metrics, through the OpenTelemetry API; `parentage=ChildOfSend()` (default) or `LinkedToSend()`; needs `horsies[otel]`, else HRS-220. `NoTracing()` imports no `opentelemetry` |
+| `tracing` | `OtelTracing \| NoTracing` | `NoTracing()` | `OtelTracing()`: spans of the sends and of each attempt, and producer metrics, through the OpenTelemetry API; `parentage=ChildOfSend()` (default) or `LinkedToSend()`; `worker_ended_spans=WorkerEndedSpans.MAKE_SPANS` (default: the handler child makes the span of each attempt that the worker ended) or `NO_SPANS`; needs `horsies[otel]`, else HRS-220. `NoTracing()` imports no `opentelemetry` |
 | `log_format` | `TextLogs \| JsonLogs` | `TextLogs()` | Format of the horsies log records; `JsonLogs()`: one JSON object per line |
 | `worker_profiles` | `dict[str, WorkerProfile]` | `{}` | Named worker settings; `horsies worker <app> --profile <name>` runs one. See [Worker profiles](#worker-profiles) |
 
@@ -290,6 +290,21 @@ value that is not callable); deduped by identity; each hook at most 10 s. A
 hook that raises or hangs ends the handler child, which stays down until the
 worker restarts; the worker runs its tasks on. The `on_child_process_start`
 hooks do not run in the handler child. See website docs `workers/event-handlers`.
+
+Worker-ended spans: with `OtelTracing()` (`worker_ended_spans=MAKE_SPANS`, the
+default) the handler child makes the span of each attempt that the worker
+ended (a timeout kill `TASK_TIMEOUT`, a blocked-loop kill, a lost child
+`WORKER_CRASHED`), whose child span never ended: `run <task_name>`, CONSUMER,
+parent from the stored carrier, start at the placement, status ERROR with
+`error.type`, `horsies.span.source = "worker"`. For a workflow task the
+handler child reads the node by the task id (one bounded core read, only for
+these attempts, on one reader thread with a queue of at most 1,000 spans:
+never on the event path) and sets `horsies.workflow.*`. A failed read, a
+full queue and a span still queued at the stop leave them out; the worker
+metric `horsies.spans.worker_ended.read_failures{reason}` (`read_failed`,
+`not_read`) counts them. The worker then starts the handler child also
+with no handler;
+set the tracer provider in `on_handler_child_start`. `NO_SPANS` turns it off.
 
 `on_shared_async_child_start` rules: the call must return a coroutine, read
 without a call: an `async def` function, an object with an `async def`

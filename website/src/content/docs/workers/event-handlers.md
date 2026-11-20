@@ -116,7 +116,7 @@ An event holds ids, names, codes, numbers and times. It never holds task input, 
 
 ## How the Worker Runs Handlers
 
-- The worker starts its handler child when the app has a handler, after the task children and before its first claim. It waits at most 30 seconds for the child to be ready, then claims in every case.
+- The worker starts its handler child when the app has a handler, or when the spans of the attempts that the worker ended are on, after the task children and before its first claim. It waits at most 30 seconds for the child to be ready, then claims in every case.
 - The child imports the app, runs the `on_handler_child_start` hooks, and starts one thread and one queue of 10,000 events for each handler. An `async def` handler runs on an event loop that its thread owns.
 - Each handler gets the events of its type in the order that the worker emitted them. A handler takes its next event when its call returns.
 - A handler whose queue is full misses the events that do not fit. The other handlers go on.
@@ -125,6 +125,56 @@ An event holds ids, names, codes, numbers and times. It never holds task input, 
 - At the stop of the worker, the handlers get 2 seconds together for the events left in their queues. A handler that does not return in that time does not delay the exit; the events left are logged.
 
 The name of a handler is `module.qualname` of its function, for example `myapp.events.log_attempt_end`.
+
+## Spans of the Attempts That the Worker Ended
+
+The task child opens the span of an attempt around the body, and OpenTelemetry exports a span only when it ends. When the worker ends an attempt itself, the child is gone and its span never ends:
+
+- an isolated task killed at its `timeout_ms` (`TASK_TIMEOUT`);
+- a shared async child killed for a blocked event loop (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`);
+- a child lost before it reported the end, with its exit seen (`WORKER_CRASHED`).
+
+With `OtelTracing()`, the handler child makes the span of each such attempt from the `AttemptEnded` event, with the global tracer provider of the handler child. `OtelTracing(worker_ended_spans=WorkerEndedSpans.MAKE_SPANS)` is the default: the worker starts its handler child also when the app has no handler. Set the tracer provider in `@app.on_handler_child_start`:
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+
+
+@app.on_handler_child_start
+def set_tracer_provider() -> None:
+    provider = TracerProvider()
+    provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+    trace.set_tracer_provider(provider)
+```
+
+Use the exporter of your backend in place of `ConsoleSpanExporter`, for example the OTLP exporter of `opentelemetry-exporter-otlp`.
+
+The span stands in for the span of the child:
+
+| Item | Value |
+|------|-------|
+| Name and kind | `run <task_name>`, CONSUMER |
+| Parent | The span that sent the task, from the carrier that the send stored. `LinkedToSend()` starts a trace of its own with a link to that span. A task sent with no span gets a span with no parent. |
+| Start | The start that the child reported (the `start` of the event: a shared run that its child ended at its deadline), as for the span of a child. Else when the task reached its child (wall clock of the worker): earlier than the start of the span of a child by the transit of the run frame and the `RUNNING` write. |
+| End | When the end reached the worker. |
+| Status | ERROR, with `error.type` = the error code of the attempt |
+| Attributes | The attributes of the span of a child: `horsies.task.id`, `horsies.task.name`, `horsies.task.attempt`, `horsies.task.execution` (the kind of the child), `horsies.queue`, `horsies.worker.id`, `messaging.system`, `messaging.operation.type`, `messaging.operation.name`, `messaging.destination.name`, `messaging.message.id`, and for a workflow task `horsies.workflow.id`, `horsies.workflow.node` and `horsies.workflow.root_id`; and `horsies.span.source` = `worker` |
+
+The worker does not know the workflow node of a workflow task: the start of the child reads it. For an attempt of a workflow task that the worker ended, the handler child reads the node by the task id with one read of the core, at most 1 second for a connection and 1 second for the statement. Only these attempts pay for the read.
+
+The read never holds an event: the span waits in a queue of at most 1,000 spans, and one reader thread reads the node of each span in turn, then makes it. The events go to the handlers at once.
+
+Limits:
+
+- A span that the task code made inside the killed attempt, and that its child exported before the kill, keeps the id of the lost span as its parent. A trace shows it next to the span of the worker, not under it.
+- When the node read fails, or finds no node (the workflow was deleted), the span of a workflow task has no `horsies.workflow.*` attribute. The span is still in the trace of the workflow start, through the stored carrier.
+- When the queue of the reader is full, the span is made at once with no `horsies.workflow.*` attribute. At the stop of the worker, the reader gets the 2 seconds of the handlers; each span still in its queue is then made with no `horsies.workflow.*` attribute.
+- The worker metric `horsies.spans.worker_ended.read_failures` counts the spans made with no workflow node, by `reason`: `read_failed` (the read ran and failed) and `not_read` (the queue was full, or the child stopped first). The handler child also logs them with the task id: the first of each reason, then one line per 1,000.
+- At the stop of the worker, the handler child flushes the tracer provider for at most 1 second after the 2 seconds of the handlers.
+
+`OtelTracing(worker_ended_spans=WorkerEndedSpans.NO_SPANS)` makes no such span; the trace of such an attempt then has the send span and no span of the attempt. With `NoTracing()` the handler child imports no `opentelemetry` module.
 
 ## Failure Semantics
 
