@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::core::task::DeclaredErrorCodes;
 use crate::telemetry::declared::{
-    DeclaredNames, ErrorCodeValues, FoldedNames, QueueName, TaskName,
+    DeclaredNames, ErrorCodeValues, FoldedNames, HandlerName, QueueName, TaskName,
 };
 use crate::telemetry::registry::{ProcessFacts, Registry, RegistryLabels, WorkerFacts};
 use crate::telemetry::worker::DeclaredCodesByTask;
@@ -28,8 +28,9 @@ pub struct WorkerRegistry {
 }
 
 /// The registry of a worker whose manifest registers `tasks` (each with its
-/// declared error codes) and serves `queues`, with the facts `facts`. No
-/// handler and no schedule is declared: a worker has neither label. Pure.
+/// declared error codes) and serves `queues`, with the facts `facts`, and
+/// no event handler. No schedule is declared: a worker has no schedule
+/// label. Pure.
 ///
 /// Never refuses: a task or queue name that is empty, is the fallback text
 /// of its label, or comes after `MAX_DECLARED_NAMES` names, and an error
@@ -40,17 +41,34 @@ pub fn worker_registry(
     queues: &[String],
     facts: WorkerFacts,
 ) -> WorkerRegistry {
+    worker_registry_with_handlers(tasks, queues, &[], facts)
+}
+
+/// The registry of [`worker_registry`] that also declares `handlers`: the
+/// names of the event handlers of the app, the values of the `handler`
+/// label of the metrics of the handler child. Pure.
+///
+/// Never refuses: a handler name that cannot be a label value of its own is
+/// not declared, as a task or queue name, and `folded` names it.
+pub fn worker_registry_with_handlers(
+    tasks: &BTreeMap<String, DeclaredErrorCodes>,
+    queues: &[String],
+    handlers: &[String],
+    facts: WorkerFacts,
+) -> WorkerRegistry {
     let task_names = DeclaredNames::<TaskName>::new(tasks.keys());
     let queue_names = DeclaredNames::<QueueName>::new(queues);
+    let handler_names = DeclaredNames::<HandlerName>::new(handlers);
     let error_codes = ErrorCodeValues::new(tasks.values());
     let folded = task_names
         .folded
         .and(queue_names.folded)
+        .and(handler_names.folded)
         .and(error_codes.folded);
     let labels = RegistryLabels {
         tasks: task_names.declared,
         queues: queue_names.declared,
-        handlers: DeclaredNames::none(),
+        handlers: handler_names.declared,
         schedules: DeclaredNames::none(),
         error_codes: error_codes.declared,
         process: ProcessFacts::Worker(facts),

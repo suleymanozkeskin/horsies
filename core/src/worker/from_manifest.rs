@@ -8,8 +8,10 @@
 //! - [`Worker::from_plan`]: builds the broker of the worker process (its
 //!   pools are lazy, so nothing connects) for the client family of the
 //!   caller, and the worker, whose workflow steps build sub-workflow children
-//!   with the client's child spec source. With `--metrics-listen`, it builds
-//!   the metric registry of the worker and its metrics endpoint.
+//!   with the client's child spec source. With a handler child
+//!   ([`HandlerChildPlan`]) or `--metrics-listen`, it also builds the
+//!   telemetry of the worker: one metric registry, the event queue of its
+//!   points and the child that reads it, and the metrics endpoint.
 //!
 //! The manifest holds values only, each inside its bounds, so every mapping
 //! here is total except the profile choice and the broker config check.
@@ -18,6 +20,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use crate::events::EventTypeName;
+use crate::telemetry::declared::warn_folded_names;
+use crate::telemetry::worker::{SentEventTypes, TelemetryOn, EVENT_QUEUE_CAPACITY};
+use crate::telemetry::worker_registry::{worker_registry_with_handlers, WorkerRegistry};
+use crate::worker::executor::handler_child::HandlerChildMetrics;
 
 use crate::broker::client_family::ClientFamily;
 use crate::broker::{BrokerError, PostgresBroker};
@@ -39,8 +47,8 @@ use crate::worker::executor::supervisor::ChildCommand;
 use crate::worker::worker::Worker;
 use crate::worker_manifest::{
     ChildCommandManifest, ChildProgram as ManifestChildProgram, ClaimLease, ClusterWideCap,
-    MetricsEndpoint, PreloadLaunch, QueueConcurrency, Queues, TaskManifest, WorkerLogLevel,
-    WorkerManifest,
+    EventHandlers, MetricsEndpoint, PreloadLaunch, QueueConcurrency, Queues, TaskManifest,
+    WorkerEndedSpans, WorkerLogLevel, WorkerManifest,
 };
 use crate::workflow_engine::child_spec::ChildSpecSource;
 
@@ -59,6 +67,9 @@ pub struct WorkerPlan {
     /// The broker config of the worker process: the resolved parent pool of
     /// the profile with no overflow, and the worker pre-ping.
     pub broker_config: PostgresConfig,
+    /// The telemetry of the worker: its handler child and the names of its
+    /// metric labels.
+    pub telemetry: TelemetryPlan,
     /// The metrics endpoint that the start asks for.
     pub metrics_endpoint: MetricsEndpointPlan,
 }
@@ -75,6 +86,84 @@ pub enum MetricsEndpointPlan {
         address: ListenAddress,
         task_codes: BTreeMap<String, DeclaredErrorCodes>,
     },
+}
+
+/// The handler child that a worker manifest asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandlerChildPlan {
+    /// The app has no event handler and worker-ended spans are off: no
+    /// handler child and no event queue.
+    NoHandlerChild,
+    /// One handler child. The worker sends it the events of the types
+    /// `sent`; `handlers` are the values of the `handler` label of its
+    /// metrics, in the order of the manifest.
+    HandlerChild {
+        sent: SentEventTypes,
+        handlers: Vec<String>,
+    },
+}
+
+impl HandlerChildPlan {
+    /// The handler child of `handlers` and `spans`: one child when the app
+    /// has a handler or when the child makes the worker-ended spans. The
+    /// child gets the event types of the handlers, and `AttemptEnded` for
+    /// the spans. Pure.
+    pub fn of(handlers: &EventHandlers, spans: WorkerEndedSpans) -> Self {
+        let span_types: &[EventTypeName] = match spans {
+            WorkerEndedSpans::MakeSpans => &[EventTypeName::AttemptEnded],
+            WorkerEndedSpans::NoSpans => &[],
+        };
+        match (handlers, spans) {
+            (EventHandlers::NoHandlers, WorkerEndedSpans::NoSpans) => Self::NoHandlerChild,
+            (EventHandlers::NoHandlers, WorkerEndedSpans::MakeSpans) => Self::HandlerChild {
+                sent: SentEventTypes::of(span_types.iter().copied()),
+                handlers: Vec::new(),
+            },
+            (EventHandlers::Handlers { handlers }, _) => Self::HandlerChild {
+                sent: SentEventTypes::of(
+                    handlers
+                        .handlers()
+                        .iter()
+                        .map(|handler| handler.event_type)
+                        .chain(span_types.iter().copied()),
+                ),
+                handlers: handlers
+                    .handlers()
+                    .iter()
+                    .map(|handler| handler.name.as_str().to_owned())
+                    .collect(),
+            },
+        }
+    }
+}
+
+/// The telemetry of a worker from its manifest.
+#[derive(Debug, Clone)]
+pub struct TelemetryPlan {
+    pub handler_child: HandlerChildPlan,
+    /// The values of the `task` label: every registered task.
+    pub task_names: Vec<String>,
+    /// The values of the `queue` label: every queue of the app.
+    pub queue_names: Vec<String>,
+    /// The user error codes that each task declares, for the `error_code`
+    /// label.
+    pub declared_codes: BTreeMap<String, DeclaredErrorCodes>,
+}
+
+impl TelemetryPlan {
+    /// The telemetry of `manifest`, whose queues are `queue_names`. Pure.
+    fn of_manifest(manifest: &WorkerManifest, queue_names: Vec<String>) -> Self {
+        Self {
+            handler_child: HandlerChildPlan::of(&manifest.handlers, manifest.worker_ended_spans),
+            task_names: manifest.tasks.keys().cloned().collect(),
+            queue_names,
+            declared_codes: manifest
+                .tasks
+                .iter()
+                .map(|(name, task)| (name.clone(), task.error_codes.clone()))
+                .collect(),
+        }
+    }
 }
 
 /// Why a manifest gives no worker plan.
@@ -107,6 +196,7 @@ impl WorkerPlan {
         })?;
         let app_config = app_config_of(manifest, app_broker);
         let worker_config = worker_config_of(manifest, &app_config);
+        let telemetry = TelemetryPlan::of_manifest(manifest, worker_config.queues.clone());
         Ok(Self {
             launch: launch_of(manifest, connection),
             registered: registered_of(&manifest.tasks),
@@ -115,6 +205,7 @@ impl WorkerPlan {
             app_config,
             worker_config,
             profile,
+            telemetry,
         })
     }
 }
@@ -131,10 +222,13 @@ impl Worker {
     /// language (the `build_with` of the Python client, the registry of the Rust
     /// client).
     ///
-    /// With [`MetricsEndpointPlan::ListenAddress`], the worker gets the
-    /// registry of its tasks and queues, and the metrics endpoint of the
-    /// address (`Worker::with_metrics_endpoint`). The endpoint binds when
-    /// the run starts. A task or queue name that cannot be a label value of
+    /// With [`MetricsEndpointPlan::ListenAddress`] or
+    /// [`HandlerChildPlan::HandlerChild`], the worker gets its telemetry
+    /// ([`with_planned_telemetry`]): one registry of its tasks, queues and
+    /// handlers, the metrics endpoint of the address
+    /// (`Worker::with_metrics_endpoint`) and the handler child
+    /// (`Worker::with_handler_child`). The endpoint binds when the run
+    /// starts. A task, queue or handler name that cannot be a label value of
     /// its own (empty, the fallback text of its label, or past the bound of
     /// names) is not declared: its samples count in the fallback series, and
     /// one WARNING line names it.
@@ -149,7 +243,6 @@ impl Worker {
         family: ClientFamily,
     ) -> Result<Self, WorkerError> {
         let broker = worker_broker(&plan.broker_config, family).await?;
-        let queues = plan.worker_config.queues.clone();
         let worker = Worker::of_child_specs(
             Arc::new(broker),
             child_specs,
@@ -159,13 +252,7 @@ impl Worker {
             plan.launch,
             plan.registered,
         )?;
-        match plan.metrics_endpoint {
-            MetricsEndpointPlan::NoMetricsEndpoint => Ok(worker),
-            MetricsEndpointPlan::ListenAddress {
-                address,
-                task_codes,
-            } => serve_metrics(worker, address, &task_codes, &queues),
-        }
+        with_planned_telemetry(worker, &plan.telemetry, plan.metrics_endpoint)
     }
 }
 
@@ -183,9 +270,7 @@ fn serve_metrics(
     task_codes: &BTreeMap<String, DeclaredErrorCodes>,
     queues: &[String],
 ) -> Result<Worker, WorkerError> {
-    use crate::telemetry::declared::warn_folded_names;
-    use crate::telemetry::worker::TelemetryOn;
-    use crate::telemetry::worker_registry::{worker_registry, WorkerRegistry};
+    use crate::telemetry::worker_registry::worker_registry;
 
     let WorkerRegistry {
         registry,
@@ -212,10 +297,7 @@ fn serve_metrics(
     _queues: &[String],
 ) -> Result<Worker, WorkerError> {
     drop(worker);
-    Err(WorkerError::Config(format!(
-        "--metrics-listen {address}: this build has no metrics endpoint; build horsies-core with \
-         its feature metrics-endpoint (the horsies feature cli turns it on)"
-    )))
+    Err(no_endpoint_in_this_build(&address))
 }
 
 /// The metrics endpoint of `manifest`, with the declared codes of each task
@@ -232,6 +314,121 @@ fn metrics_endpoint_of(manifest: &WorkerManifest) -> MetricsEndpointPlan {
                 .collect(),
         },
     }
+}
+
+/// `worker` with the telemetry of `telemetry` and `endpoint`:
+///
+/// - no handler child and no endpoint: `worker` as it is, with no registry,
+///   no event queue and no child;
+/// - an endpoint only: the registry of the tasks and queues, and the
+///   endpoint ([`serve_metrics`]);
+/// - a handler child: one registry of the tasks, the queues and the
+///   handlers, the telemetry value of the points with an event queue of the
+///   sent types, and the child that reads the queue. With an endpoint too,
+///   the endpoint serves that registry (one telemetry value for both).
+///
+/// A name that cannot be a label value of its own (empty, the fallback text
+/// of its label, or past the bound of names) is not declared: its samples
+/// count in the fallback series, and one WARNING line names it. No label
+/// value stops a worker.
+///
+/// Errors: [`WorkerError::Config`] for an endpoint when the core is built
+/// without the feature `metrics-endpoint`.
+fn with_planned_telemetry(
+    worker: Worker,
+    telemetry: &TelemetryPlan,
+    endpoint: MetricsEndpointPlan,
+) -> Result<Worker, WorkerError> {
+    let (sent, handlers) = match &telemetry.handler_child {
+        HandlerChildPlan::NoHandlerChild => {
+            return match endpoint {
+                MetricsEndpointPlan::NoMetricsEndpoint => Ok(worker),
+                MetricsEndpointPlan::ListenAddress {
+                    address,
+                    task_codes,
+                } => serve_metrics(worker, address, &task_codes, &telemetry.queue_names),
+            };
+        }
+        HandlerChildPlan::HandlerChild { sent, handlers } => (*sent, handlers),
+    };
+    let WorkerRegistry {
+        registry,
+        codes,
+        folded,
+    } = worker_registry_with_handlers(
+        &telemetry.declared_codes,
+        &telemetry.queue_names,
+        handlers,
+        worker.worker_facts(),
+    );
+    warn_folded_names(&folded_names_subject(&endpoint), &folded);
+    let (on, queue) = match TelemetryOn::with_event_queue(
+        Arc::clone(&registry),
+        codes,
+        EVENT_QUEUE_CAPACITY,
+        sent,
+    ) {
+        Ok(built) => built,
+        Err(refused) => panic!("a worker registry holds the metrics of the points: {refused}"),
+    };
+    let metrics = match HandlerChildMetrics::of(&registry) {
+        Ok(metrics) => metrics,
+        Err(refused) => {
+            panic!("a worker registry holds the metrics of the handler child: {refused}")
+        }
+    };
+    let on = Arc::new(on);
+    let worker = worker.with_handler_child(Arc::clone(&on), queue, metrics);
+    match endpoint {
+        MetricsEndpointPlan::NoMetricsEndpoint => Ok(worker),
+        MetricsEndpointPlan::ListenAddress { address, .. } => serve_registry(worker, address, on),
+    }
+}
+
+/// The subject of the WARNING line that names the label names that the
+/// registry of a worker with a handler child does not declare. Pure.
+fn folded_names_subject(endpoint: &MetricsEndpointPlan) -> String {
+    match endpoint {
+        MetricsEndpointPlan::NoMetricsEndpoint => "the handler child".to_owned(),
+        MetricsEndpointPlan::ListenAddress { address, .. } => format!("--metrics-listen {address}"),
+    }
+}
+
+/// `worker` with the metrics endpoint of `address`, which serves the
+/// registry of `telemetry`, the telemetry value of its handler child.
+///
+/// Errors: none in this build; the signature is the one of a build without
+/// the feature `metrics-endpoint`.
+#[cfg(feature = "metrics-endpoint")]
+fn serve_registry(
+    worker: Worker,
+    address: ListenAddress,
+    telemetry: Arc<TelemetryOn>,
+) -> Result<Worker, WorkerError> {
+    Ok(worker.with_metrics_endpoint(address, telemetry))
+}
+
+/// A core built without the feature `metrics-endpoint` has no endpoint.
+///
+/// Errors: [`WorkerError::Config`], always.
+#[cfg(not(feature = "metrics-endpoint"))]
+fn serve_registry(
+    worker: Worker,
+    address: ListenAddress,
+    _telemetry: Arc<TelemetryOn>,
+) -> Result<Worker, WorkerError> {
+    drop(worker);
+    Err(no_endpoint_in_this_build(&address))
+}
+
+/// The refusal of an endpoint by a core built without the feature
+/// `metrics-endpoint`. Pure.
+#[cfg(not(feature = "metrics-endpoint"))]
+fn no_endpoint_in_this_build(address: &ListenAddress) -> WorkerError {
+    WorkerError::Config(format!(
+        "--metrics-listen {address}: this build has no metrics endpoint; build horsies-core with \
+         its feature metrics-endpoint (the horsies feature cli turns it on)"
+    ))
 }
 
 /// The broker of the worker process for a client of `family`, with lazy
