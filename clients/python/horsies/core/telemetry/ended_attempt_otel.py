@@ -39,7 +39,6 @@ provider that the user sets in an `on_handler_child_start` hook is used.
 
 from __future__ import annotations
 
-import json
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -61,6 +60,7 @@ from horsies._catalog.events import (
     RunTraceNoCarrier,
 )
 from horsies._catalog.events import RunTrace as EventTrace
+from horsies.core.codec.json_io import loads_json
 from horsies.core.logging import get_logger
 from horsies.core.models.tracing import ChildOfSend, LinkedToSend
 from horsies.core.telemetry.attempt_otel import (
@@ -75,6 +75,7 @@ from horsies.core.telemetry.attempt_otel import (
 )
 from horsies.core.telemetry.attempt_span import ProviderFlush
 from horsies.core.telemetry.ended_attempt_span import EndedWorkflow, WorkflowNotKnown
+from horsies.core.types.result import Err, Ok
 from horsies.core.worker.child_frames import NoTraceCarrier, RunTrace, StoredTraceCarrier
 from horsies.core.worker.run_return import InWorkflow, NotInWorkflow
 
@@ -214,11 +215,14 @@ def run_trace_of_event(task_id: uuid.UUID, trace_of_event: EventTrace) -> RunTra
 
 
 def _carrier_map(text: str) -> Mapping[str, str] | _CarrierNotAnObjectOfTexts:
-    """The map of the JSON object of texts `text`. Pure."""
-    try:
-        loaded: object = json.loads(text)
-    except (ValueError, RecursionError) as exc:
-        return _CarrierNotAnObjectOfTexts(detail=f'not JSON text: {exc}')
+    """The map of the JSON object of texts `text`, parsed by the strict
+    codec parser (`loads_json`: no repeated key, no non-finite number).
+    Pure."""
+    match loads_json(text):
+        case Ok(parsed):
+            loaded: object = parsed
+        case Err(refused):
+            return _CarrierNotAnObjectOfTexts(detail=f'not JSON text: {refused}')
     match loaded:
         case dict():
             items = cast('dict[object, object]', loaded)
