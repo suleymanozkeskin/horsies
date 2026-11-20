@@ -246,6 +246,16 @@ where
     }
 }
 
+/// The trace carrier of a rerun: the map that the global propagator
+/// injects for the caller's current context, with the trace id of its
+/// span. A rerun opens no span, so the attempt spans of the new task are
+/// children of the caller's span. [`SendTrace::NoCarrier`] when the current
+/// context holds no valid span or the propagator writes no key.
+pub(crate) fn rerun_trace() -> SendTrace {
+    let current = Context::current();
+    global::get_text_map_propagator(|propagator| send_trace_of(&current, propagator))
+}
+
 /// Set the status ERROR and `error.type` on `span`.
 fn mark_error(span: &SpanRef<'_>, error_type: String) {
     span.set_attribute(KeyValue::new(ERROR_TYPE_KEY, error_type));

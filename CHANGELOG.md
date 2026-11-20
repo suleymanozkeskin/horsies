@@ -1679,7 +1679,10 @@ unless it starts with "Added".
   is one span of kind PRODUCER, `send <task_name>`, around every database
   call of the send, and a workflow start is one span
   `start <workflow_name>`; the send hands the core the carrier that the
-  propagator injects for that span, with its trace id. A send records
+  propagator injects for that span, with its trace id. A rerun
+  (`Horsies::rerun_task`, `rerun::rerun_task_in`) opens no span and hands
+  the core the carrier of the caller's current context, so the attempt
+  spans of the new task are children of the caller's span. A send records
   `horsies.task.sent` (task, queue, result `ok` or the send error code)
   and `horsies.task.send.duration` (queue). In a worker child each task
   body runs inside a `tracing` span `run <task_name>` of kind CONSUMER

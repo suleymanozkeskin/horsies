@@ -349,6 +349,9 @@ horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
   runs in each worker child before `horsies::cli::run`. Without a provider
   no span is recorded; without a propagator that writes keys a send stores
   no carrier.
+- A rerun (`app.rerun_task`, `rerun::rerun_task_in`) opens no span: the new
+  task stores the carrier of the caller's current context, so its attempt
+  spans are children of the caller's span. Without `otel`: no carrier.
 - `horsies::cli::run` adds `horsies::otel::layer()` to its subscriber. A
   binary with its own subscriber adds the layer and lets its filter pass
   `horsies::attempt` at `INFO`.

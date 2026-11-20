@@ -9,6 +9,10 @@
 //! - the producer metrics of the core's catalog: `horsies.task.sent` (task,
 //!   queue, result) and `horsies.task.send.duration` (queue), one point of
 //!   each per send that reached the database calls.
+//! - a rerun ([`Horsies::rerun_task`], [`rerun_task_in`]) hands the core the
+//!   carrier that the global propagator injects for the caller's current
+//!   context, with its trace id; it opens no span. The new task stores it,
+//!   so the attempt spans of the rerun are children of the caller's span.
 //! - in a worker child, one span of kind CONSUMER around each task body,
 //!   `run <task_name>`. It is a `tracing` span (target
 //!   [`ATTEMPT_SPAN_TARGET`]) whose OpenTelemetry parent is the context
@@ -75,6 +79,8 @@
 //! when the app has no event handler.
 //!
 //! [`Horsies::set_worker_ended_spans`]: crate::Horsies::set_worker_ended_spans
+//! [`Horsies::rerun_task`]: crate::Horsies::rerun_task
+//! [`rerun_task_in`]: crate::rerun::rerun_task_in
 
 mod attempt;
 mod carrier;
@@ -86,7 +92,7 @@ pub use crate::telemetry::ATTEMPT_SPAN_TARGET;
 pub(crate) use attempt::body_scope;
 pub(crate) use ended::ended_span_scope;
 pub use horsies_core::worker_manifest::WorkerEndedSpans;
-pub(crate) use send::{TaskSendSpan, WorkflowStartSpan};
+pub(crate) use send::{rerun_trace, TaskSendSpan, WorkflowStartSpan};
 pub use tracer::layer;
 
 /// The name of the instrumentation scope of every span and metric of the

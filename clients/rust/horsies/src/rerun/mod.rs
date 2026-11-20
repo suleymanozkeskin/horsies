@@ -14,6 +14,14 @@
 //!   builds each statement and decides the outcome; the caller's driver runs
 //!   the statements. Nothing commits inside. Adapters: `TokioPostgresCaller`
 //!   (feature `tokio-postgres`) and `SqlxCaller` (feature `sqlx`).
+//!
+//! With the feature `otel`, both hand the core the trace carrier that the
+//! global propagator injects for the caller's current OpenTelemetry context
+//! (`horsies::otel`), as a send does, and the new task stores it: the
+//! attempt spans of the rerun are children of the caller's span. A rerun
+//! opens no span of its own. Without the feature, or with no valid span in
+//! the current context, the new task stores no carrier. The carrier of the
+//! source task is never copied.
 
 #[cfg(feature = "sqlx")]
 mod sqlx_adapter;
@@ -27,6 +35,7 @@ use horsies_core::{
 };
 
 use crate::process_state::refuse_in_a_fork;
+use crate::telemetry::rerun_trace;
 use crate::Horsies;
 
 pub use horsies_core::{
@@ -93,9 +102,36 @@ pub enum CallerRerunError<E> {
 /// Outcomes: Python's catalog ([`RerunOutcome`]); every outcome but
 /// `Enqueued` writes nothing.
 ///
+/// The new task stores the trace carrier of the caller's current context
+/// (feature `otel`; see the module doc), in place of a carrier that
+/// `command` holds.
+///
 /// Errors: [`CallerRerunError`]. After an error the transaction may hold
 /// the key claim or the new row; the caller does not commit it.
 pub async fn rerun_task_in<T>(
+    transaction: &mut T,
+    command: &RerunTask,
+    policy: &RerunEnqueuePolicy,
+    sent_at: DateTime<Utc>,
+) -> Result<RerunOutcome, CallerRerunError<T::Error>>
+where
+    T: CallerTransaction,
+{
+    let command = traced(command.clone());
+    rerun_command_in(transaction, &command, policy, sent_at).await
+}
+
+/// `command` with the trace carrier of the caller's current context
+/// ([`rerun_trace`]): none without the feature `otel`.
+fn traced(command: RerunTask) -> RerunTask {
+    command.with_trace(rerun_trace())
+}
+
+/// The statements of [`rerun_task_in`] for `command` as it is: its trace
+/// is the one that the new task stores.
+///
+/// Errors: [`CallerRerunError`], as [`rerun_task_in`].
+async fn rerun_command_in<T>(
     transaction: &mut T,
     command: &RerunTask,
     policy: &RerunEnqueuePolicy,
@@ -155,7 +191,9 @@ impl Horsies {
     /// Rerun `command` in a transaction of the app's handle, and commit it
     /// (in a worker child, the child's producer handle). The handle checks
     /// the client family of the database before the transaction, and
-    /// installs the schema once per handle, as a send does.
+    /// installs the schema once per handle, as a send does. The new task
+    /// stores the trace carrier of the caller's current context (feature
+    /// `otel`), as with [`rerun_task_in`].
     ///
     /// Outcomes: as [`rerun_task_in`].
     ///
@@ -171,6 +209,7 @@ impl Horsies {
         policy: RerunEnqueuePolicy,
     ) -> Result<RerunOutcome, AppRerunError> {
         refuse_in_a_fork(format_args!("Horsies::rerun_task"));
+        let command = traced(command);
         let broker = self
             .reads_handle()
             .initialized_broker()

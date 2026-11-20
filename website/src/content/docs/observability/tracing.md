@@ -84,7 +84,8 @@ So every attempt of every task of a workflow, at every depth, is a child of the 
 ## Scheduled Tasks and Reruns
 
 - The scheduler inserts the task row of a schedule run in SQL, with no send span and no carrier. Each attempt of a scheduled task is the root of a new trace.
-- A rerun stores no carrier. Each attempt of the new task is the root of a new trace.
+- A rerun of the Rust client (feature `otel`) opens no span and stores the carrier of the caller's current context: the attempts of the new task are children of the caller's span. With no valid span in that context it stores no carrier.
+- A rerun of the Python client stores no carrier. Each attempt of the new task is the root of a new trace.
 
 ## Attributes
 
@@ -141,4 +142,4 @@ The log records of the worker for an attempt carry the same trace id. See [Logs]
 
 **Don't set a different propagator in the worker children.** The child extracts the carrier with its own global propagator. A propagator that does not read the keys that the sender wrote gives the attempt span no parent.
 
-**Don't expect a trace for a scheduled task or a rerun to start at the scheduler or at the rerun call.** Neither stores a carrier: each attempt is the root of its own trace.
+**Don't expect a trace for a scheduled task, or for a rerun of the Python client, to start at the scheduler or at the rerun call.** Neither stores a carrier: each attempt is the root of its own trace.
