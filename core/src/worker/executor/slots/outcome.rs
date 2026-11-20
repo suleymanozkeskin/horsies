@@ -32,7 +32,7 @@ use uuid::Uuid;
 
 use super::dispatch::{
     AttemptEnd, ClaimedTask, LoopKillCode, NotRunCause, Settlement, TerminalState, TimeoutCancel,
-    WrittenEnd,
+    TimeoutSeen, WrittenEnd,
 };
 use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryPlacement, RetryRequest,
@@ -187,7 +187,7 @@ pub enum ReadEnd {
         timeout: TaskTimeoutMs,
         retry: RetryPlacement,
         cancel: TimeoutCancel,
-        start: AttemptStart,
+        seen: TimeoutSeen,
     },
     KilledForLoop {
         code: LoopKillCode,
@@ -218,8 +218,9 @@ pub enum EndView<'a> {
     /// The worker code of the child failed; the child reported the start
     /// `start`.
     WorkerFailure { start: AttemptStart },
-    /// The deadline decided; the child reported the start `start`.
-    TimedOut { start: AttemptStart },
+    /// The deadline decided: the child reported it with its start, or the
+    /// worker killed the child (`seen`).
+    TimedOut { seen: TimeoutSeen },
     /// A blocked event loop ended the run.
     KilledForLoop(LoopKillCode),
     /// The child was lost with its exit seen.
@@ -239,7 +240,7 @@ impl ReadEnd {
             },
             Self::StoppedBeforeRunning(reason) => EndView::StoppedBeforeRunning(*reason),
             Self::WorkerFailure { start, .. } => EndView::WorkerFailure { start: *start },
-            Self::TimedOut { start, .. } => EndView::TimedOut { start: *start },
+            Self::TimedOut { seen, .. } => EndView::TimedOut { seen: *seen },
             Self::KilledForLoop { code, .. } => EndView::KilledForLoop(*code),
             Self::Crashed { .. } => EndView::Crashed,
             Self::EndUnknown { pid } => EndView::EndUnknown { pid: *pid },
@@ -613,12 +614,12 @@ pub fn read_attempt_end(
             timeout,
             retry,
             cancel,
-            start,
+            seen,
         } => ReadEnd::TimedOut {
             timeout,
             retry,
             cancel,
-            start,
+            seen,
         },
         AttemptEnd::KilledForLoop {
             code,

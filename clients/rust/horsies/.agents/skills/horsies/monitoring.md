@@ -415,9 +415,7 @@ fn add_handlers(app: &mut Horsies) -> Result<(), HorsiesError> {
   attempt that the worker ended (a timeout kill `TASK_TIMEOUT`, a
   blocked-runtime kill, a lost child `WORKER_CRASHED`), whose span in the
   task child never ended: `run <task_name>`, CONSUMER, parent from the stored
-  carrier, start at the start that the child reported (a shared run that
-  its child ended at its deadline), else at the placement, status ERROR
-  with `error.type`,
+  carrier, start at the placement, status ERROR with `error.type`,
   `horsies.span.source = "worker"`. For a workflow task the handler child
   reads the node by the task id (one bounded core read, only for these
   attempts, on one reader task with a queue of at most 1,000 spans: never

@@ -110,6 +110,8 @@ With the feature `otel`, a task body runs inside its attempt span in the task ch
 - a shared async child killed for a blocked runtime (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`);
 - a child lost before it reported the end, with its exit seen (`WORKER_CRASHED`).
 
+The `AttemptEnded` event of such an attempt is `AttemptEnd::DecidedByWorker`. A shared run that its child ended at its deadline is not one of them: its child reports the timeout (`AttemptEnd::ReportedByChild` with `ChildResult::TimedOut`), and the span of the child has `TASK_TIMEOUT`. One attempt has one span.
+
 The handler child makes a span for each such attempt from its `AttemptEnded` event, with the global tracer provider and propagator of that process. It is the default with the feature: the worker starts its handler child also when the app has no handler. Set the provider in `main` before `horsies::cli::run`, or in an `on_handler_child_start` hook, and shut it down after `run` returns, so that a batch processor exports the last spans of the child. `Horsies::set_worker_ended_spans(WorkerEndedSpans::NoSpans)` turns the spans off:
 
 <!-- rust-check: skip partial -- set_worker_ended_spans is built with the feature otel, which the docs check does not enable -->

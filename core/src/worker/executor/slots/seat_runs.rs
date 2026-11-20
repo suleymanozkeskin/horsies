@@ -23,7 +23,9 @@ use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::dispatch::{AttemptEnd, BodyReturn, CancelEnd, LoopKillCode, TimeoutCancel};
+use super::dispatch::{
+    AttemptEnd, BodyReturn, CancelEnd, LoopKillCode, TimeoutCancel, TimeoutSeen,
+};
 use super::pool::{MemoryLimit, TaskLimit};
 use super::shared_stop::{
     culprit_retry, verdict_at_kill, ChildKill, DeadlineState, KillVerdict, KilledRunVerdict,
@@ -31,7 +33,6 @@ use super::shared_stop::{
 };
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::child_writes::LONGEST_REFUSAL_WRITES_BOUND;
-use crate::events::AttemptStart;
 use crate::worker::executor::protocol::{
     CancelGraceMs, DispatchNumber, FailureDetail, LeftoverCancelFrame, LeftoverStuckFrame,
     LoopBlockedFrame, LoopCulprit, RssReading, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame,
@@ -365,14 +366,18 @@ impl<P> SeatRuns<P> {
                     timeout,
                     retry: retry_after_timeout(report),
                     cancel: TimeoutCancel::Ended(cancel_end_of(report)),
-                    start: frame.started_at,
+                    seen: TimeoutSeen::ReportedByChild {
+                        start: frame.started_at,
+                    },
                 }
             }
             (SeatEnd::TimedOut, report, RunWork::ThreadTask { timeout }) => AttemptEnd::TimedOut {
                 timeout,
                 retry: retry_after_timeout(report),
                 cancel: TimeoutCancel::NoSignal,
-                start: frame.started_at,
+                seen: TimeoutSeen::ReportedByChild {
+                    start: frame.started_at,
+                },
             },
         };
         let seat = self
@@ -689,22 +694,22 @@ fn cancel_end_of(report: &RunStopReport) -> CancelEnd {
 }
 
 /// The `TASK_TIMEOUT` end of a run with a deadline whose child the worker
-/// killed: an async run records `KilledWithChild`. The child reported no
-/// start for it. A refusal has none, and the report rules never give it
-/// one: a defect, which crashes loud.
+/// killed (`TimeoutSeen::AtKill`): an async run records `KilledWithChild`.
+/// The child reported no end for it. A refusal has none, and the report
+/// rules never give it one: a defect, which crashes loud.
 fn timed_out(work: RunWork, run: RunRef, retry: RetryPlacement) -> AttemptEnd {
     match work {
         RunWork::AsyncTask { timeout, .. } => AttemptEnd::TimedOut {
             timeout,
             retry,
             cancel: TimeoutCancel::Ended(CancelEnd::KilledWithChild),
-            start: AttemptStart::NotReported,
+            seen: TimeoutSeen::AtKill,
         },
         RunWork::ThreadTask { timeout } => AttemptEnd::TimedOut {
             timeout,
             retry,
             cancel: TimeoutCancel::NoSignal,
-            start: AttemptStart::NotReported,
+            seen: TimeoutSeen::AtKill,
         },
         RunWork::Refusal => unreachable!(
             "the refused task {} ended at a deadline it does not have",

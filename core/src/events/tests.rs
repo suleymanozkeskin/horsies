@@ -871,15 +871,27 @@ fn vector_events() -> Vec<(&'static str, Event)> {
             .into(),
         ),
         (
+            "attempt_ended_timed_out_in_child",
+            ended(
+                Execution::SharedAsync,
+                3,
+                AttemptEnd::ReportedByChild {
+                    result: ChildResult::TimedOut,
+                    start: AttemptStart::Reported {
+                        started_at: time(1_700_000_000_100_000_000),
+                    },
+                },
+                30_000_000_000,
+            )
+            .into(),
+        ),
+        (
             "attempt_ended_by_worker",
             ended(
                 Execution::SharedAsync,
                 3,
                 AttemptEnd::DecidedByWorker {
                     reason: WorkerDecision::TimedOut,
-                    start: AttemptStart::Reported {
-                        started_at: time(1_700_000_000_100_000_000),
-                    },
                     error_code: OutcomeCode::TaskTimeout.into(),
                     trace: RunTrace::Carrier {
                         text: text(VECTOR_CARRIER),
@@ -900,7 +912,6 @@ fn vector_events() -> Vec<(&'static str, Event)> {
                 1,
                 AttemptEnd::DecidedByWorker {
                     reason: WorkerDecision::NeighbourBlockedLoop,
-                    start: AttemptStart::NotReported,
                     error_code: OperationalErrorCode::NeighbourBlockedLoop.into(),
                     trace: RunTrace::NoCarrier,
                     placed_at: time(1_700_000_000_000_000_000),
@@ -919,7 +930,6 @@ fn vector_events() -> Vec<(&'static str, Event)> {
                 2,
                 AttemptEnd::DecidedByWorker {
                     reason: WorkerDecision::ChildLost,
-                    start: AttemptStart::NotReported,
                     error_code: OperationalErrorCode::WorkerCrashed.into(),
                     trace: RunTrace::Carrier {
                         text: text(VECTOR_CARRIER),

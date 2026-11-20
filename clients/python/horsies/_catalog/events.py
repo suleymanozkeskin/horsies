@@ -32,6 +32,7 @@ __all__ = [
     'ChildResultCompleted',
     'ChildResultFailed',
     'ChildResultWorkerFailure',
+    'ChildResultTimedOut',
     'ChildResult',
     'AttemptStartReported',
     'AttemptStartNotReported',
@@ -80,7 +81,7 @@ __all__ = [
     'decode_event',
 ]
 
-EVENT_CONTRACT_VERSION: Final = 5
+EVENT_CONTRACT_VERSION: Final = 6
 """The version of the event contract that this module reads."""
 
 
@@ -204,10 +205,19 @@ class ChildResultWorkerFailure:
     """
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ChildResultTimedOut:
+    """The deadline of a shared run fired in its child before the task
+    ended, and the child ended the run at the deadline. The attempt
+    outcome is `FAILED`, with the code `TASK_TIMEOUT`.
+    """
+
+
 type ChildResult = (
     ChildResultCompleted
     | ChildResultFailed
     | ChildResultWorkerFailure
+    | ChildResultTimedOut
 )
 """How the task ended a run that its child reported."""
 
@@ -238,7 +248,7 @@ RUNNING.
 type WorkerDecision = Literal['TIMED_OUT', 'TASK_BLOCKED_LOOP', 'NEIGHBOUR_BLOCKED_LOOP', 'CHILD_LOST']
 """Why the worker ended an attempt itself. The attempt outcome is `FAILED`.
 
-`TIMED_OUT`: The task reached its timeout. The code is `TASK_TIMEOUT`.
+`TIMED_OUT`: The task reached its timeout, and the worker killed its child. The code is `TASK_TIMEOUT`.
 
 `TASK_BLOCKED_LOOP`: The task held the event loop of its shared async child past the block limit; the worker killed the child. The code is `TASK_BLOCKED_LOOP`.
 
@@ -279,7 +289,9 @@ ends an attempt of the task itself.
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AttemptEndReportedByChild:
-    """The child reported how the run ended."""
+    """The child reported how the run ended, in a result frame. The span
+    that the child opened for the attempt is its span.
+    """
 
     result: ChildResult
 
@@ -288,18 +300,14 @@ class AttemptEndReportedByChild:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AttemptEndDecidedByWorker:
-    """The worker ended the attempt: the outcome is `FAILED`, with the code
-    of `reason`. The internal fields are the facts of the span of this
-    attempt that the handler child makes.
+    """The worker ended the attempt with no result frame of the child: it
+    killed the child, or the child was lost. The outcome is `FAILED`,
+    with the code of `reason`. The span of the child never ended; the
+    internal fields are the facts of the span of this attempt that the
+    handler child makes.
     """
 
     reason: WorkerDecision
-
-    start: AttemptStart
-    """The start that the child reported before the end: a shared run
-    that its child ended at the deadline reports it. Every other end
-    of the worker is `NotReported`.
-    """
 
     error_code: BuiltInTaskCode = field(repr=False)
     """Internal: the code that the attempt row records for `reason`:
@@ -311,7 +319,7 @@ class AttemptEndDecidedByWorker:
 
     placed_at: datetime = field(repr=False)
     """Internal: when the task reached its child (wall clock of the
-    worker). The span starts here when `start` is `NotReported`.
+    worker): the start of the span.
     """
 
     child_kind: Execution = field(repr=False)
@@ -1119,6 +1127,8 @@ def _read_child_result(value: object, at: _At) -> Result[ChildResult, MalformedE
             return _read_child_result_failed(fields, at.inside('Failed'))
         case 'WorkerFailure':
             return _read_child_result_worker_failure(fields, at.inside('WorkerFailure'))
+        case 'TimedOut':
+            return _read_child_result_timed_out(fields, at.inside('TimedOut'))
         case _:
             return at.refuse(f'ChildResult has no value {tag[:_MAX_REFUSED_NAME_CHARS]!r}')
 
@@ -1162,6 +1172,16 @@ def _read_child_result_worker_failure(fields: list[object], here: _At) -> Result
         case _:
             return here.refuse(f'expected 0 items, found {len(fields)}')
     return Ok(ChildResultWorkerFailure())
+
+
+def _read_child_result_timed_out(fields: list[object], here: _At) -> Result[ChildResultTimedOut, MalformedEvent]:
+    """A variant `ChildResultTimedOut` from the items of its fields."""
+    match fields:
+        case []:
+            pass
+        case _:
+            return here.refuse(f'expected 0 items, found {len(fields)}')
+    return Ok(ChildResultTimedOut())
 
 
 def _read_attempt_start(value: object, at: _At) -> Result[AttemptStart, MalformedEvent]:
@@ -1339,7 +1359,6 @@ def _read_attempt_end_decided_by_worker(fields: list[object], here: _At) -> Resu
     match fields:
         case [
             wire_reason,
-            wire_start,
             wire_error_code,
             wire_trace,
             wire_placed_at,
@@ -1349,14 +1368,9 @@ def _read_attempt_end_decided_by_worker(fields: list[object], here: _At) -> Resu
         ]:
             pass
         case _:
-            return here.refuse(f'expected 8 items, found {len(fields)}')
+            return here.refuse(f'expected 7 items, found {len(fields)}')
     match _read_worker_decision(wire_reason, here.inside('reason')):
         case Ok(value_reason):
-            pass
-        case Err() as refused:
-            return refused
-    match _read_attempt_start(wire_start, here.inside('start')):
-        case Ok(value_start):
             pass
         case Err() as refused:
             return refused
@@ -1393,7 +1407,6 @@ def _read_attempt_end_decided_by_worker(fields: list[object], here: _At) -> Resu
     return Ok(
         AttemptEndDecidedByWorker(
             reason=value_reason,
-            start=value_start,
             error_code=value_error_code,
             trace=value_trace,
             placed_at=value_placed_at,
