@@ -56,6 +56,7 @@ from horsies._core import (
 from horsies.core.brokers.enqueue_task import (
     SendKind,
 )
+from horsies.core.telemetry.send_telemetry import NO_TRACE_CARRIER, TraceArgument
 from horsies.core.brokers.worker_state_records import (
     class_coverage_of,
     class_report_of,
@@ -751,6 +752,7 @@ def _enqueue_request(
     retain_rerun_input: bool | None,
     idempotency_key: str | None,
     send_kind: SendKind,
+    trace: TraceArgument,
 ) -> Result[EnqueueRequest, BrokerInvalidInput]:
     """The core's request of one send, after the client rules: the start
     (``_enqueue_start_of``), the input shape of a Python send
@@ -764,6 +766,8 @@ def _enqueue_request(
     and the options, the retry limit and the class of the options, the
     command fingerprint, the scope of the idempotency key, the retention
     class key, and a ``sent_at`` in the future of a send that starts now.
+    ``trace`` goes to the core as it is: the core checks the bounds of a
+    carrier and stores none for a carrier that breaks one, with no refusal.
     """
     match _enqueue_start_of(
         task_name=task_name,
@@ -802,6 +806,7 @@ def _enqueue_request(
         retention_class_key=retention_class_key,
         rerun_input=_rerun_input_policy(retain_rerun_input),
         send_kind=send_kind.value,
+        trace=trace,
     ))
 
 
@@ -1105,6 +1110,7 @@ class PostgresBroker:
         retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
         retain_rerun_input: Optional[bool] = None,
         idempotency_key: Optional[str] = None,
+        trace: TraceArgument = NO_TRACE_CARRIER,
     ) -> Result[UUID, BrokerEnqueueError]:
         """Write one PENDING task row, or answer the send that wrote it,
         through ``CoreHandle.enqueue_async``.
@@ -1120,7 +1126,10 @@ class PostgresBroker:
         for a send retry: a task that finished then answers with its id and
         does not run again. ``retention_class_key`` absent is the 30-day
         class, an explicit ``None`` is ``forever``; ``retain_rerun_input``
-        ``None`` takes the config's default.
+        ``None`` takes the config's default. ``trace`` is the carrier of the
+        send's span (``TraceCarrier``) or ``NO_TRACE_CARRIER``; the row
+        stores a carrier that passes the core's bounds, and a carrier that
+        breaks one never fails the send.
 
         Failures (``_enqueue_request``, ``_enqueue_result``):
         - ``INVALID_INPUT`` / ``INVALID_TASK_OPTIONS``: refused before any
@@ -1158,6 +1167,7 @@ class PostgresBroker:
             retain_rerun_input=retain_rerun_input,
             idempotency_key=idempotency_key,
             send_kind=send_kind,
+            trace=trace,
         ):
             case Err() as refused:
                 return refused
@@ -2137,6 +2147,7 @@ class PostgresBroker:
         idempotency_key: Optional[str] = None,
         retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
         retain_rerun_input: Optional[bool] = None,
+        trace: TraceArgument = NO_TRACE_CARRIER,
     ) -> Result[UUID, BrokerEnqueueError | BrokerSyncCallError]:
         """The blocking form of ``enqueue_async``: ``CoreHandle.enqueue`` on
         the calling thread, with the GIL released, and the outcomes of
@@ -2168,6 +2179,7 @@ class PostgresBroker:
             retain_rerun_input=retain_rerun_input,
             idempotency_key=idempotency_key,
             send_kind=send_kind,
+            trace=trace,
         ):
             case Err() as refused:
                 return refused

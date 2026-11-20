@@ -24,6 +24,8 @@ from horsies.core import cli
 from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.web import NoTraceLink, TraceLinkTemplate
 from horsies.web.auth import AllowAll, TrustedHeader, ViewOnly
 
 pytestmark = [pytest.mark.unit]
@@ -43,6 +45,7 @@ def web_args(**overrides: Any) -> argparse.Namespace:
         'auth': 'none',
         'trusted_header': 'X-Forwarded-User',
         'enable_actions': False,
+        'trace_link': None,
         'loglevel': 'INFO',
     }
     values.update(overrides)
@@ -256,6 +259,57 @@ class TestAppPathBootLoadsTheRegistry:
         assert served[0].list_tasks() == []
 
 
+GRAFANA_TEMPLATE = 'https://grafana.example.com/explore?traceId={trace_id}'
+
+
+class TestTraceLink:
+    """``--trace-link`` gives the page's trace link; the core checks it."""
+
+    def test_no_flag_gives_the_trace_id_as_text(self) -> None:
+        config = cli.resolve_web_ui_config(web_args())
+
+        assert config.trace_link == NoTraceLink()
+
+    def test_a_template_reaches_the_page_settings(self) -> None:
+        config = cli.resolve_web_ui_config(web_args(trace_link=GRAFANA_TEMPLATE))
+
+        assert config.trace_link == TraceLinkTemplate(template=GRAFANA_TEMPLATE)
+
+    def test_a_refused_template_is_a_usage_error_that_names_the_rule(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        with pytest.raises(SystemExit) as raised:
+            cli.resolve_web_ui_config(
+                web_args(trace_link='ftp://example.com/{trace_id}'),
+            )
+
+        assert raised.value.code == 2
+        err = capsys.readouterr().err
+        assert 'invalid --trace-link' in err
+        assert 'https:// or http://' in err
+
+    @pytest.mark.parametrize(
+        ('template', 'rule'),
+        [
+            ('https://example.com/trace', '{trace_id} 0 times'),
+            ('https://example.com/{trace_id}/{trace_id}', '{trace_id} 2 times'),
+            ('https://example.com/{span_id}/{trace_id}', 'outside {trace_id}'),
+            ('https:///{trace_id}', 'no host'),
+            ('https://example.com/a b/{trace_id}', '0x20'),
+            ('', '0 bytes'),
+        ],
+    )
+    def test_a_refused_template_is_hrs_221(self, template: str, rule: str) -> None:
+        with pytest.raises(ConfigurationError) as raised:
+            TraceLinkTemplate(template=template)
+
+        assert raised.value.code is ErrorCode.CONFIG_INVALID_TRACE_LINK
+        assert raised.value.code.value == 'HRS-221'
+        assert len(raised.value.notes) == 1
+        assert rule in raised.value.notes[0]
+
+
 class TestParserDefaults:
     """The documented defaults come from the parser, not from a caller."""
 
@@ -275,6 +329,7 @@ class TestParserDefaults:
         assert captured['auth'] == 'none'
         assert captured['enable_actions'] is False
         assert captured['trusted_header'] == 'X-Forwarded-User'
+        assert captured['trace_link'] is None
         assert captured['app_path'] == 'myapp.tasks:app'
 
     def test_flags_are_parsed(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -302,6 +357,8 @@ class TestParserDefaults:
                 'X-User',
                 '--enable-actions',
                 '--pgbouncer-transaction-mode',
+                '--trace-link',
+                GRAFANA_TEMPLATE,
             ],
         )
 
@@ -314,3 +371,4 @@ class TestParserDefaults:
         assert captured['trusted_header'] == 'X-User'
         assert captured['enable_actions'] is True
         assert captured['pgbouncer_transaction_mode'] is True
+        assert captured['trace_link'] == GRAFANA_TEMPLATE

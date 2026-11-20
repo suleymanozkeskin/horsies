@@ -6,6 +6,7 @@ from uuid import UUID
 from typing import (
     TYPE_CHECKING,
     Any,
+    ClassVar,
     Generic,
     TypedDict,
     TypeVar,
@@ -536,7 +537,7 @@ class RetryPolicy(BaseModel):
         auto_retry_for: error codes that trigger automatic retries
     """
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     max_retries: Annotated[
         int,

@@ -16,6 +16,7 @@ from datetime import timedelta
 import pytest
 from pydantic import SecretStr
 
+from horsies._catalog import worker_manifest as wire
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.retention import RetentionConfig
@@ -54,7 +55,9 @@ class TestReaperRegistersDeclaredClasses:
         manifest = to_worker_manifest(
             config,
             profile=None,
+            metrics_endpoint=wire.MetricsEndpointNoMetricsEndpoint(),
             tasks={},
+            handlers=(),
             child_launch=launch,
             idempotency_reservation_window=timedelta(hours=24),
         )

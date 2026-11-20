@@ -39,6 +39,7 @@ use axum::{Json, Router};
 use futures_util::StreamExt;
 use horsies_core::handle::CoreHandle;
 use horsies_core::monitoring::fleet::FleetLabels;
+use horsies_core::telemetry::declared::{warn_folded_names, Folded};
 use horsies_core::web::{
     route_access, AccessGrant, AccessNeed, EventFrames, EventStreamItem, MonitoringHandler,
     MonitoringHandlerConfig, RequestParts, ResponseForm, ResponseParts, Verdict, HEARTBEAT,
@@ -52,7 +53,9 @@ use crate::workflow::WorkflowRegistry;
 use crate::Horsies;
 
 pub use auth::{AllowAll, MonitoringAuthPolicy, MonitoringRequest, TrustedHeader, ViewOnly};
-pub use horsies_core::web::{MonitoringUiConfig, INTENT_HEADER, INTENT_VALUE};
+pub use horsies_core::web::{
+    MonitoringUiConfig, TraceLink, TraceLinkRefusal, TraceLinkTemplate, INTENT_HEADER, INTENT_VALUE,
+};
 
 /// Whether the action routes (task cancel, workflow pause, resume and
 /// cancel) run. Disabled actions answer 403 without asking the policy's
@@ -116,21 +119,16 @@ where
 }
 
 /// The label names of `/metrics`: the queues and the schedules of the app's
-/// config. A config whose names cannot be label values (a name that is
-/// `(unknown)`) gives no declared name, with one WARNING line: every queue
-/// and schedule of `/metrics` is then `(unknown)`, and the rest of the mount
-/// serves as before.
+/// config. A config name that cannot be a label value of its own (empty,
+/// the text `(unknown)`, or past the bound of names) is not declared: its
+/// samples count in the `(unknown)` series, and one WARNING line names it.
 fn fleet_labels_of(app: &Horsies) -> FleetLabels {
-    match FleetLabels::of_config(app.config()) {
-        Ok(labels) => labels,
-        Err(refused) => {
-            tracing::warn!(
-                "the fleet metrics of /metrics label every queue and schedule (unknown): \
-                 {refused}"
-            );
-            FleetLabels::none()
-        }
-    }
+    let Folded {
+        declared: labels,
+        folded,
+    } = FleetLabels::of_config(app.config());
+    warn_folded_names(&"the fleet metrics of /metrics", &folded);
+    labels
 }
 
 /// What every request of one mount reads.

@@ -1,7 +1,7 @@
 # clients/python/horsies/core/models/recovery.py
 from __future__ import annotations
 from dataclasses import asdict, dataclass
-from typing import Annotated, Final, Self, cast
+from typing import Annotated, ClassVar, Final, Self, cast
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from horsies.core.defaults import WORKER_STATE_LIVE_WINDOW_S
 from horsies.core.errors import (
@@ -145,7 +145,7 @@ class RecoveryConfig(BaseModel):
     Retention fields live on `AppConfig.retention` (`RetentionConfig`).
     """
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     auto_requeue_stale_claimed: bool = Field(
         default=True,

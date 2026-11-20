@@ -321,7 +321,7 @@ A Rust app has two command-line programs:
 
 | Program | Commands |
 |---|---|
-| The app's own binary, through `horsies::cli::run(app)` | `worker`, `scheduler`, `check`, and child mode |
+| The app's own binary, through `horsies::cli::run(app)` | `worker`, `scheduler`, `check`, `metrics`, and child mode |
 | The shipped `horsies` binary | `web`, `get-docs`, `skills install` |
 
 ### `horsies::cli::run(app)`
@@ -360,9 +360,10 @@ fn main() -> ExitCode {
 
 | Command | Does |
 |---|---|
-| `<binary> worker --profile <name> [--loglevel LEVEL]` | Starts a worker of one profile. A missing or unknown `--profile` exits 1 and lists the profile names. The check without the schedules runs first |
+| `<binary> worker --profile <name> [--loglevel LEVEL] [--metrics-listen HOST:PORT]` | Starts a worker of one profile. A missing or unknown `--profile` exits 1 and lists the profile names. The check without the schedules runs first. `--metrics-listen` serves `GET /metrics`, `GET /livez` and `GET /readyz` (no default; `WorkerStart::with_metrics_endpoint(ListenAddress)` in a binary that owns its `main`) |
 | `<binary> scheduler [--loglevel LEVEL]` | Starts the scheduler of `AppConfig.schedule`. Exits 1 when there is no schedule section or `schedule.enabled` is `false` |
 | `<binary> check [--live] [--loglevel LEVEL]` | Checks the app. `--loglevel` default `WARNING` |
+| `<binary> metrics --listen HOST:PORT [--loglevel LEVEL]` | Serves the fleet metrics of the app's database at `GET /metrics` (Prometheus text format 0.0.4). `--listen` is required: `HOST:PORT` or `[IPV6]:PORT`. Reads at start, then at most once per 15 s; a scrape never reads. Exits 1 when the config does not build a handle or the address does not bind |
 
 - `SIGTERM` or `SIGINT` stops the worker and the scheduler. The worker
   drains within the profile's `drain_timeout`.
@@ -374,6 +375,15 @@ fn main() -> ExitCode {
   `-c`/`--concurrency`, `--max-claim-batch`, `--max-claim-per-worker`,
   `--coalesce-notifies`, `--check-interval`, `--dry-run`) exit 2 with
   what replaces each.
+- `horsies::cli::run_with_log_format(app, LogFormat::Json)` writes one JSON
+  object per record (`timestamp`, `level`, `target`, the event's fields at
+  the top level, `span`, `spans`) in the runner and in each child.
+  `run(app)` is `run_with_log_format(app, LogFormat::Text)`.
+- Each task body runs inside the `tracing` span `run` (target
+  `horsies::attempt`, `horsies::ATTEMPT_SPAN_TARGET`) with the fields
+  `horsies.task.id`, `horsies.task.name` and `horsies.task.attempt`; the
+  filter of `run` passes it at every level. The core's records of an
+  attempt carry `task_id`, `attempt` and `trace_id`.
 
 | Exit code of `run` | Meaning |
 |---|---|
