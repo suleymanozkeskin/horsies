@@ -107,6 +107,7 @@ Each state snapshot of the worker writes the state of its handler child in the `
 With the feature `otel`, a task body runs inside its attempt span in the task child (`horsies::otel`). When the worker ends the attempt itself, that child is gone and the span never ends:
 
 - an isolated task killed at its timeout (`TASK_TIMEOUT`);
+- a run past its deadline in a shared child that the worker killed (`TASK_TIMEOUT`);
 - a shared async child killed for a blocked runtime (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`);
 - a child lost before it reported the end, with its exit seen (`WORKER_CRASHED`).
 

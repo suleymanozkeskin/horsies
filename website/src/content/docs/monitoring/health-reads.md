@@ -10,7 +10,7 @@ tags: [monitoring, health, liveness, worker, api]
 
 The health methods are on the `Horsies` app. Each method returns `BrokerResult[T]`: `Ok(value)` on success, or `Err(BrokerOperationError)` with a `retryable` flag on failure. What each read means, and what to do with its result, is on [Worker & Database Health](/horsies/monitoring/worker-health/).
 
-Each method has a sync variant with the same name without the `_async` suffix. The sync variant runs the async method in a background loop.
+Each method has a sync variant with the same name without the `_async` suffix. The sync variant runs the read of the core on the calling thread, with the GIL released. On a thread that runs an event loop it returns `Err(BrokerAsyncContext)` (`ASYNC_CONTEXT`) and does no I/O.
 
 ```python
 from pydantic import SecretStr

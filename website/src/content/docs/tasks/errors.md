@@ -113,7 +113,7 @@ A task can declare its own error codes. The declared codes close the set of valu
 - each code that the task declares (`CARD_DECLINED`);
 - `undeclared`, for every other user code of the task.
 
-A declared set has no size limit. Only the label folds a code into `undeclared`: the task's error, its attempt record, its events, traces and logs keep the exact code. `horsies check` lists the declared codes of each task that declares some.
+A declared set has no size limit. The label holds the first 100,000 declared codes of the app, in text order; a code after them counts as `undeclared` there ([Label Rules](/horsies/observability/metrics/#a-name-that-cannot-be-a-label-value)). Only the label folds a code into `undeclared`: the task's error, its attempt record, its events, traces and logs keep the exact code. `horsies check` lists the declared codes of each task that declares some.
 
 Each client refuses a bad set when the task is defined:
 
@@ -185,11 +185,11 @@ separate pooled and direct connection strings; verify the current ports and URLs
 in your provider dashboard or docs.
 
 ```text
-Postgres LISTEN failed. If database_url points to PgBouncer transaction pooling
+session URL check failed: LISTEN on <session URL> received no NOTIFY within 2000 ms
 ```
 
-The worker listener could not establish a persistent PostgreSQL session. Workers
-do not support PgBouncer-only transaction-pool deployment.
+The session check of the worker start found that the session URL does not keep
+session state. Workers do not support PgBouncer-only transaction-pool deployment.
 
 ```text
 LISTEN unavailable; falling back to polling

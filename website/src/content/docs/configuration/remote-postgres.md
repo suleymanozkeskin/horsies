@@ -52,23 +52,22 @@ connections for the same rate: set
 `WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N)))`. See
 [The Pool of the Worker Process](/horsies/workers/worker-profiles/#the-pool-of-the-worker-process).
 
-Producers hold their own pools of `pool_size + max_overflow` connections
-each (default 5 + 10): the core pool of the broker, which serves sends and
-reads from every thread and event loop, and one engine pool in the resource
-set of each event loop that starts or resumes a workflow. A producer that
-only sends and reads results can open 15 at the defaults, and 1 listener
-connection when it waits for a result. Each pool has a twin of
-`pool_size + max_overflow` on `session_database_url` when that URL differs
+A producer holds one core pool of `pool_size + max_overflow` connections
+(default 5 + 10). It serves the sends, the reads, the workflow starts and the
+workflow actions of every thread and event loop of the process. A producer
+can open 15 at the defaults, and 1 listener connection when it waits for a
+result. The pool has a twin of `pool_size + max_overflow` on
+`session_database_url` when that URL differs
 (see
 [Connection Ceiling](/horsies/configuration/broker-connections/#connection-ceiling)).
 
 Size against the server's effective capacity, not its nominal
 `max_connections`: subtract superuser-reserved slots and any connections
 held by the provider's infrastructure. A managed instance with
-`max_connections=50` and 3 reserved slots fits three workers of 8 isolated
-children on direct connections (`3 × 15 = 45`), not four (`60`). When
-their task code sends, each worker can open 16 more (`31`), and one worker
-fits.
+`max_connections=50` and 3 reserved slots has 47 usable slots. It fits two
+workers of 8 isolated children on direct connections (`2 × 16 = 32`), not
+three (`48`). When their task code sends, each worker can open 16 more
+(`32`), and one worker fits.
 
 When workers exhaust the server's slots, connection attempts fail with:
 
@@ -185,12 +184,12 @@ An idle pooled connection reaped server-side between checkouts surfaces as a
 mid-query `OperationalError` on the next claim or heartbeat — absorbed by the
 worker's retry loop, but logged as noise.
 
-`tcp_keepalives` (default on) closes this gap at the socket layer. libpq
-enables keepalives by default but leaves the idle interval at the OS default
-(often 7200s), longer than a pooler's idle-reap window. Horsies sets
-`keepalives_idle=30`, so a dropped socket is detected within ~30s and recycled
-before the next query lands on it. The keepalives apply to the broker engine
-pool and each child-process pool; the LISTEN/NOTIFY listener keeps its own.
+`tcp_keepalives` (default on) closes this gap at the socket layer. The OS
+default idle interval (often 7200s) is longer than a pooler's idle-reap
+window. Horsies sets `tcp_keepalives_idle=30`, so a dropped socket is detected
+within ~30s and recycled before the next query lands on it. The keepalives
+apply to every connection of the core: the broker pools, each child-process
+pool, and the LISTEN/NOTIFY listener.
 
 PlanetScale's PgBouncer pooler (`:6432`) reaps idle connections within ~1–2h;
 the defaults keep those sockets warm with no configuration. Lower the idle
@@ -209,10 +208,10 @@ decides: about 15 minutes on Linux with the default `tcp_retries2=15`. The
 worker process is blocked for that time, and the pool's 30-second checkout
 timeout applies only after the write fails.
 
-`tcp_user_timeout_ms` (default `30000`) sets libpq `tcp_user_timeout`. Data
-that stays unacknowledged for that time closes the connection, so the write
-fails within 30 seconds and the pool opens a new connection. The setting
-applies to the broker engines, each child-process pool, and the
+`tcp_user_timeout_ms` (default `30000`) sets `TCP_USER_TIMEOUT` on each
+socket. Data that stays unacknowledged for that time closes the connection, so
+the write fails within 30 seconds and the pool opens a new connection. The
+setting applies to the broker pools, each child-process pool, and the
 LISTEN/NOTIFY listener. It has an effect only on systems that support
 `TCP_USER_TIMEOUT` (Linux).
 
