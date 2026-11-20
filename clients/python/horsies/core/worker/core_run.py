@@ -109,6 +109,8 @@ class WorkerLaunch:
     sys_path_roots: tuple[str, ...]
     profile: str
     loglevel: str
+    metrics_endpoint: wire.MetricsEndpoint
+    """The `--metrics-listen` value: an address, or no endpoint."""
 
 
 def read_current_directory() -> CurrentDirectoryRead:
@@ -178,6 +180,7 @@ def worker_manifest_json(
     manifest = to_worker_manifest(
         app.config,
         profile=launch.profile,
+        metrics_endpoint=launch.metrics_endpoint,
         tasks=tasks,
         handlers=handlers,
         child_launch=child_launch,

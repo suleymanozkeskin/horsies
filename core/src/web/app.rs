@@ -46,6 +46,9 @@ pub(crate) struct MetaResponse {
     /// version numbers (Python `clients/python/horsies/web/app.py:64-99`).
     pub schema_state: SchemaState,
     pub actions_disabled_reason: Option<String>,
+    /// The template of the trace link of a task detail, with one
+    /// `{trace_id}`; `None` when the page shows the trace id as text.
+    pub trace_link_template: Option<String>,
 }
 
 #[derive(Clone)]
@@ -243,6 +246,11 @@ async fn read_meta(State(state): State<WebState>, request: Request) -> Response 
         schema_compatible: schema.compatible(),
         schema_state: schema.state,
         actions_disabled_reason: disabled_reason,
+        trace_link_template: state
+            .ui_config
+            .trace_link
+            .template_text()
+            .map(str::to_owned),
     })
     .into_response()
 }

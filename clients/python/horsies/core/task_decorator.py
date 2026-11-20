@@ -147,6 +147,16 @@ from horsies.core.models.tasks import (
     OutcomeCode,
 )
 from horsies.core.models.workflow import WorkflowContextMissingIdError
+from horsies.core.telemetry.send_telemetry import (
+    NO_TRACE_CARRIER,
+    NoSendTelemetry,
+    OtelSendTelemetry,
+    TaskSendSubject,
+    TraceArgument,
+    task_send_end,
+    traced,
+    traced_async,
+)
 from horsies.core.exception_mapper import (
     ExceptionMapper,
     resolve_exception_error_code,
@@ -2092,12 +2102,15 @@ def create_task_wrapper(
 
     # ---- Core send/schedule helpers ----
 
-    def _do_send(
+    def _attempt_send(
         task_id: UUID,
         payload: TaskSendPayload,
         first_kind: SendKind,
+        trace: TraceArgument,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Core sync send logic. Used by send() and retry_send().
+        """The broker calls of one sync send: the first, and the resends of a
+        transient failure when ``resend_on_transient_err`` is on. Each call
+        passes ``trace``.
 
         ``first_kind`` is the send kind of the first broker call
         (``_send_kind_of_attempt``).
@@ -2138,6 +2151,7 @@ def create_task_wrapper(
                 task_options=payload.task_options,
                 idempotency_key=payload.idempotency_key,
                 retention_class_key=payload.retention_class_key,
+                trace=trace,
             )
 
             if is_err(result):
@@ -2159,12 +2173,13 @@ def create_task_wrapper(
         )
         return Err(last_err)
 
-    async def _do_send_async(
+    async def _attempt_send_async(
         task_id: UUID,
         payload: TaskSendPayload,
         first_kind: SendKind,
+        trace: TraceArgument,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Core async send logic. Used by send_async() and retry_send_async().
+        """The broker calls of one async send, as ``_attempt_send``.
 
         ``first_kind`` is the send kind of the first broker call
         (``_send_kind_of_attempt``).
@@ -2194,6 +2209,7 @@ def create_task_wrapper(
                 task_options=payload.task_options,
                 idempotency_key=payload.idempotency_key,
                 retention_class_key=payload.retention_class_key,
+                trace=trace,
             )
 
             if is_err(result):
@@ -2215,12 +2231,13 @@ def create_task_wrapper(
         )
         return Err(last_err)
 
-    def _do_schedule(
+    def _attempt_schedule(
         task_id: UUID,
         payload: TaskSendPayload,
         first_kind: SendKind,
+        trace: TraceArgument,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Core sync schedule logic. Used by schedule() and retry_schedule().
+        """The broker calls of one sync schedule, as ``_attempt_send``.
 
         ``first_kind`` is the send kind of the first broker call
         (``_send_kind_of_attempt``).
@@ -2262,6 +2279,7 @@ def create_task_wrapper(
                 task_options=payload.task_options,
                 idempotency_key=payload.idempotency_key,
                 retention_class_key=payload.retention_class_key,
+                trace=trace,
             )
 
             if is_err(result):
@@ -2283,13 +2301,13 @@ def create_task_wrapper(
         )
         return Err(last_err)
 
-    async def _do_schedule_async(
+    async def _attempt_schedule_async(
         task_id: UUID,
         payload: TaskSendPayload,
         first_kind: SendKind,
+        trace: TraceArgument,
     ) -> TaskSendResult[TaskHandle[T]]:
-        """Core async schedule logic. Used by schedule_async() and
-        retry_schedule_async().
+        """The broker calls of one async schedule, as ``_attempt_send``.
 
         ``first_kind`` is the send kind of the first broker call
         (``_send_kind_of_attempt``).
@@ -2320,6 +2338,7 @@ def create_task_wrapper(
                 task_options=payload.task_options,
                 idempotency_key=payload.idempotency_key,
                 retention_class_key=payload.retention_class_key,
+                trace=trace,
             )
 
             if is_err(result):
@@ -2340,6 +2359,93 @@ def create_task_wrapper(
             'enqueue attempt loop ended without a failed attempt'
         )
         return Err(last_err)
+
+    def _send_subject(task_id: UUID, payload: TaskSendPayload) -> TaskSendSubject:
+        return TaskSendSubject(
+            task_name=task_name,
+            queue_name=payload.queue_name,
+            task_id=task_id,
+        )
+
+    def _do_send(
+        task_id: UUID,
+        payload: TaskSendPayload,
+        first_kind: SendKind,
+    ) -> TaskSendResult[TaskHandle[T]]:
+        """One sync send, in the span of the app's send telemetry. Used by
+        send() and retry_send()."""
+        match app.send_telemetry():
+            case NoSendTelemetry():
+                return _attempt_send(task_id, payload, first_kind, NO_TRACE_CARRIER)
+            case OtelSendTelemetry(recorder=recorder):
+                return traced(
+                    lambda: recorder.start_task_send(_send_subject(task_id, payload)),
+                    lambda trace: _attempt_send(task_id, payload, first_kind, trace),
+                    task_send_end,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _do_send_async(
+        task_id: UUID,
+        payload: TaskSendPayload,
+        first_kind: SendKind,
+    ) -> TaskSendResult[TaskHandle[T]]:
+        """One async send, in the span of the app's send telemetry. Used by
+        send_async() and retry_send_async()."""
+        match app.send_telemetry():
+            case NoSendTelemetry():
+                return await _attempt_send_async(
+                    task_id, payload, first_kind, NO_TRACE_CARRIER,
+                )
+            case OtelSendTelemetry(recorder=recorder):
+                return await traced_async(
+                    lambda: recorder.start_task_send(_send_subject(task_id, payload)),
+                    lambda trace: _attempt_send_async(task_id, payload, first_kind, trace),
+                    task_send_end,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _do_schedule(
+        task_id: UUID,
+        payload: TaskSendPayload,
+        first_kind: SendKind,
+    ) -> TaskSendResult[TaskHandle[T]]:
+        """One sync schedule, in the span of the app's send telemetry. Used
+        by schedule() and retry_schedule()."""
+        match app.send_telemetry():
+            case NoSendTelemetry():
+                return _attempt_schedule(task_id, payload, first_kind, NO_TRACE_CARRIER)
+            case OtelSendTelemetry(recorder=recorder):
+                return traced(
+                    lambda: recorder.start_task_send(_send_subject(task_id, payload)),
+                    lambda trace: _attempt_schedule(task_id, payload, first_kind, trace),
+                    task_send_end,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _do_schedule_async(
+        task_id: UUID,
+        payload: TaskSendPayload,
+        first_kind: SendKind,
+    ) -> TaskSendResult[TaskHandle[T]]:
+        """One async schedule, in the span of the app's send telemetry.
+        Used by schedule_async() and retry_schedule_async()."""
+        match app.send_telemetry():
+            case NoSendTelemetry():
+                return await _attempt_schedule_async(
+                    task_id, payload, first_kind, NO_TRACE_CARRIER,
+                )
+            case OtelSendTelemetry(recorder=recorder):
+                return await traced_async(
+                    lambda: recorder.start_task_send(_send_subject(task_id, payload)),
+                    lambda trace: _attempt_schedule_async(task_id, payload, first_kind, trace),
+                    task_send_end,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
 
     # ---- Pre-send preparation ----
 

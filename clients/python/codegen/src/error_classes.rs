@@ -477,6 +477,7 @@ mod tests {
         python_base: PythonEnumBase::StrEnum,
         doc: "",
         members: &[CatalogMember {
+            name: "PAYLOAD_MISMATCH",
             value: "PAYLOAD_MISMATCH",
             doc: "",
         }],

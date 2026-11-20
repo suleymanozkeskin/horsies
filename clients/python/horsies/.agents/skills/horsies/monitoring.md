@@ -42,6 +42,7 @@ horsies web --database-url "postgresql://..."   # registry-less
 | `--auth` | `none` | `none` (loopback only) or `trusted-header` |
 | `--trusted-header` | `X-Forwarded-User` | The reverse proxy MUST strip/set this header itself, or the mode is spoofable |
 | `--enable-actions` | off | Off → view-only policy; on → actions allowed |
+| `--trace-link` | — | `http`/`https` URL with one `{trace_id}`: the task detail links the trace id; a bad template exits 2 (`MonitoringUIConfig(trace_link=TraceLinkTemplate(template=...))` when mounting; `HRS-221`) |
 | `--session-database-url` | — | Direct URL for LISTEN when `--database-url` is transaction-pooled |
 | `--pgbouncer-transaction-mode` | off | Pair with `--session-database-url` |
 
@@ -55,6 +56,62 @@ to serve). The `--database-url` form is registry-less by design:
 | Task cancel | yes | yes |
 | Workflow pause / cancel | yes | yes |
 | Workflow **resume** when a pending node uses `args_from` | yes | **no** — encoding an upstream result into a fresh task row needs the source task's registered return type |
+
+## Worker Metrics Endpoint — `--metrics-listen`
+
+- `horsies worker <app> --profile <name> --metrics-listen HOST:PORT`
+  (`[IPV6]:PORT`; host 1 to 253 bytes, port 1 to 65535; no default, no
+  config field) serves, on a thread of its own:
+  - `GET /metrics`: the worker metrics, Prometheus text format 0.0.4 (no
+    OpenMetrics);
+  - `GET /livez`: 503 only when the claim loop is past the deadline of its
+    next turn (its wait bound plus 30 s); 200 during the start and the
+    drain;
+  - `GET /readyz`: 200 when the pools have no failure, a child serves and
+    the liveness lock is held; 503 during the start and the stop.
+- A bad value exits 2 before the start. A bind failure never stops the
+  worker: the endpoint binds again with a 1 s to 60 s backoff; the probes
+  answer once it binds; `horsies_worker_states.telemetry` shows `down`.
+- Bounds: 16 connections, 5 s to read a request head, 8 KiB of request
+  (431 above).
+- Labels: `task` = the registered tasks (`(unregistered)` else), `queue` =
+  the app's queues (`(unknown)` else), `error_code` = `""`, the built-in
+  codes and the task's declared codes (`undeclared` else). A name that
+  cannot be a label value (empty, the fallback text, past 100,000 names) is
+  folded into the fallback, with one WARNING line at the start.
+- At most 10,000 series per metric; past it, the sample is dropped and
+  counted in `horsies_telemetry_series_dropped_total{metric}`.
+- See website docs `observability/metrics` and
+  `observability/metric-reference`.
+
+## Fleet Metrics — `horsies metrics` and `GET /metrics`
+
+```bash
+horsies metrics myapp.tasks:app --listen 0.0.0.0:9465   # --listen is required, no default
+```
+
+- Serves the fleet gauges of the app's database at `GET /metrics`
+  (Prometheus text format 0.0.4 only; no OpenMetrics): live tasks by queue,
+  class and status; `horsies_queue_pending_more_than` past 1,000 `PENDING`
+  rows of a queue and class; the age of the oldest due `PENDING` task; live
+  workers, seats, seats in use, unserved classes, workers with telemetry
+  down; workflows; time since the last run of each schedule; the schema
+  version; and the time, errors and `failed` state of each query.
+- Reads at start, then at most once per 15 s; a scrape never reads. Each
+  statement has a 2 s limit. A failed query leaves its gauges with no
+  series and sets `horsies_exporter_collect_failed{query} 1`.
+- Label values: the queues and schedules of `app.config`; another name is
+  `(unknown)`. Run one collector per database, or aggregate with `max`.
+- Exit codes: 2 for an address that does not parse; 0 at `SIGTERM` or
+  `SIGINT`; 1 when the app does not load, the broker does not build, or the
+  address does not bind.
+- A mounted `create_monitoring_app` and `horsies web` also serve
+  `GET /metrics`, behind `can_view`; the request reads when the last read
+  is 15 s old or more.
+- `deploy/grafana/horsies-dashboard.json` and
+  `deploy/prometheus/horsies-alerts.yaml` in the repository read these
+  series. See website docs `observability/fleet-collector` and
+  `observability/dashboards-and-alerts`.
 
 ## Authorization
 

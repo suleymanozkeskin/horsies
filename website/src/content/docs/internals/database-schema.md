@@ -92,6 +92,7 @@ Live task storage.
 | `updated_at` | `timestamptz` | Last write |
 | `retain_rerun_input` | `boolean` | Whether history keeps the input for a rerun |
 | `rerun_of_task_id`, `rerun_root_task_id` | `uuid` | Rerun lineage, both set or both empty |
+| `trace_carrier`, `trace_id` | `text`, `bytea` | The trace carrier of the send span, as one JSON text, and its 16-byte trace id; both set or both empty. Empty for a send with no trace, a carrier over a bound, and a schedule run. A workflow task copies the pair of its workflow. See [The Trace Carrier](/horsies/observability/tracing/#the-trace-carrier) |
 
 The claim reads `horsies_tasks_claim_pending` and `horsies_tasks_claim_expired_order`, keyed `(queue_name,
 execution, priority, enqueued_at, id)` over `PENDING` and `CLAIMED` rows, and `horsies_tasks_claim_expired_at`,
@@ -108,7 +109,8 @@ A record holds the task's terminal projection (status, `terminalization_kind`, `
 code and failed reason, the last worker), the result envelope (`result_envelope_version`, `result_payload`,
 `result_digest`), the attempt archive (`attempt_snapshot` and its digest), and the rerun input envelope
 (`rerun_input_disposition`: `INLINE`, `OVER_BOUND`, `DECLINED_BY_POLICY` or `NEVER_ELIGIBLE`). The move builds the
-rerun envelope from the live row's `input` and `task_options`. The format version of each envelope implies its
+rerun envelope from the live row's `input` and `task_options`. It copies `trace_id` of the live row; the carrier is not
+kept. The format version of each envelope implies its
 codec (JSON, UTF-8).
 
 Every leaf carries two indexes: `(task_id)` for point lookups and `(enqueued_at)` for the monitoring list's
@@ -124,7 +126,8 @@ probe), `horsies_key_reservations` (the scoped idempotency-key registry) and
 
 `horsies_workflows` holds one row per run: status (`PENDING`, `RUNNING`, `PAUSED`, `COMPLETED`, `FAILED`,
 `CANCELLED`, `EXPIRED`), `on_error` (`fail` or `pause`), the result or error, and the parent link of a
-sub-workflow (depth 0-32; a root has depth 0 and no parent).
+sub-workflow (depth 0-32; a root has depth 0 and no parent). `trace_carrier` and `trace_id` hold the pair of the start
+span: every workflow row of a started tree holds it, and a sub-workflow that starts later copies the pair of its parent.
 
 `horsies_workflow_tasks` holds one row per node: `input`, the dependencies and join (`all`, `any`, or `quorum`
 with `min_success`), status, the linked task id, the sub-workflow fields of a sub-workflow node, and the typed
@@ -209,6 +212,7 @@ Worker monitoring snapshots (timeseries). Each worker inserts one row per `worke
 | `worker_started_at` | `timestamptz` | Worker start time |
 | `slots_down` | `jsonb` | Each slot that is down for a cause that can clear: `{slot, cause, detail, down_since, failed_boots}`; an empty array when none is |
 | `class_capacity` | `jsonb` | Each claim budget class to `{"capacity": N, "serves": [classes]}` |
+| `telemetry` | `jsonb` | The state of the telemetry parts of the worker: `{"endpoint": {"state": ...}, "handler_child": {"state": ...}}`. The endpoint state is `off`, `binding`, `serving` (with the bound address) or `down` (with the cause and `down_since`); the handler child state is `off`, `starting`, `up` (with its pid) or `down` (with the cause, `down_since` and what follows). The fleet collector counts the live workers whose latest snapshot has a part `down` |
 
 ## horsies_worker_liveness
 

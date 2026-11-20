@@ -324,3 +324,127 @@ async fn a_handler_gives_the_worker_a_queue_a_child_and_its_label() {
         crate::worker::worker::HandlerChildSetup::HandlerChild(_)
     ));
 }
+
+/// The manifest of the batch profile with the metrics endpoint `endpoint`.
+fn manifest_with_endpoint(endpoint: serde_json::Value) -> serde_json::Value {
+    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    document["metrics_endpoint"] = endpoint;
+    document
+}
+
+#[test]
+fn no_metrics_endpoint_plans_none() {
+    assert_eq!(
+        batch_plan().metrics_endpoint,
+        MetricsEndpointPlan::NoMetricsEndpoint
+    );
+}
+
+#[test]
+fn a_listen_address_plans_the_endpoint_with_the_codes_of_each_task() {
+    let document = manifest_with_endpoint(json!({
+        "kind": "LISTEN_ADDRESS", "host": "::1", "port": 9100
+    }));
+    let manifest = parsed(&document);
+    let plan = WorkerPlan::of_manifest(&manifest).expect("a plan");
+    let MetricsEndpointPlan::ListenAddress {
+        address,
+        task_codes,
+    } = plan.metrics_endpoint
+    else {
+        panic!("an address plans an endpoint");
+    };
+    assert_eq!(address.to_string(), "[::1]:9100");
+    assert_eq!(
+        task_codes,
+        manifest
+            .tasks
+            .iter()
+            .map(|(name, task)| (name.clone(), task.error_codes.clone()))
+            .collect::<BTreeMap<String, DeclaredErrorCodes>>()
+    );
+    assert_eq!(task_codes["app.tasks.fetch"].iter().count(), 2);
+}
+
+/// With an endpoint, the worker of the plan builds the registry of its
+/// tasks and queues. A queue named as the fallback of the `queue` label is
+/// not refused: the worker builds, and one WARNING line that names the flag
+/// names the queue and its reason. Nothing connects.
+#[cfg(feature = "metrics-endpoint")]
+#[tokio::test]
+async fn the_worker_of_an_endpoint_plan_builds_and_a_fallback_queue_name_is_one_warning() {
+    let capture = crate::test_support::LogCapture::new();
+    let _default = capture.set_default();
+    let endpoint = json!({"kind": "LISTEN_ADDRESS", "host": "127.0.0.1", "port": 9100});
+    let start = "--metrics-listen 127.0.0.1:9100: ";
+
+    let plan = WorkerPlan::of_manifest(&parsed(&manifest_with_endpoint(endpoint.clone())))
+        .expect("a plan");
+    let built = Worker::from_plan(
+        plan,
+        crate::test_support::child_specs::no_child_specs(),
+        ClientFamily::Rust,
+    )
+    .await;
+    assert!(built.is_ok(), "{:?}", built.err());
+    assert_eq!(
+        capture.lines_starting(tracing::Level::WARN, start),
+        Vec::new()
+    );
+
+    let mut document = manifest_with_endpoint(endpoint);
+    document["claim"]["queues"]["queues"][0]["name"] = json!("(unknown)");
+    let plan = WorkerPlan::of_manifest(&parsed(&document)).expect("a plan");
+    let built = Worker::from_plan(
+        plan,
+        crate::test_support::child_specs::no_child_specs(),
+        ClientFamily::Rust,
+    )
+    .await;
+    assert!(built.is_ok(), "{:?}", built.err());
+    let warnings = capture.lines_starting(tracing::Level::WARN, start);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0]
+            .message
+            .ends_with("\"(unknown)\" in the queue names (the fallback text of the label)"),
+        "{}",
+        warnings[0].message
+    );
+}
+
+/// A handler and an endpoint: one telemetry value for both. The endpoint
+/// sets the telemetry of the worker last, and its registry is the one of
+/// the handler child: it declares the handler.
+#[cfg(feature = "metrics-endpoint")]
+#[tokio::test]
+async fn a_handler_and_an_endpoint_share_one_telemetry_value() {
+    let mut document = manifest_with_endpoint(json!({
+        "kind": "LISTEN_ADDRESS", "host": "127.0.0.1", "port": 9100
+    }));
+    document["handlers"] = json!({"kind": "HANDLERS", "handlers": [
+        {"name": "app.hooks.on_end", "event_type": "AttemptEnded"}
+    ]});
+    let plan = WorkerPlan::of_manifest(&parsed(&document)).expect("a plan");
+    let worker = Worker::from_plan(
+        plan,
+        crate::test_support::child_specs::no_child_specs(),
+        ClientFamily::Rust,
+    )
+    .await
+    .expect("the plan gives a worker");
+
+    let (telemetry, handler_child) = worker.telemetry_setup();
+
+    let crate::telemetry::worker::WorkerTelemetry::On(on) = telemetry else {
+        panic!("a worker with a handler and an endpoint records its telemetry");
+    };
+    assert_eq!(
+        on.registry().labels().handlers.names(),
+        ["app.hooks.on_end".to_owned()]
+    );
+    assert!(matches!(
+        handler_child,
+        crate::worker::worker::HandlerChildSetup::HandlerChild(_)
+    ));
+}

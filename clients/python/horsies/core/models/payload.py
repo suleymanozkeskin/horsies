@@ -1,6 +1,6 @@
 # clients/python/horsies/core/models/payload.py
 from __future__ import annotations
-from typing import Annotated, Optional
+from typing import Annotated, ClassVar, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from horsies._catalog.worker_manifest import PAYLOAD_BYTES_MAX
@@ -27,7 +27,7 @@ class PayloadPolicy(BaseModel):
     the worker manifest.
     """
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     warn_bytes: Annotated[Optional[int], Field(ge=1, le=PAYLOAD_BYTES_MAX)] = Field(
         default=1_048_576,  # 1 MiB

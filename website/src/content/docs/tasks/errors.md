@@ -306,6 +306,7 @@ deployment pattern.
 | HRS-218 | `CONFIG_INVALID_WORKER_PROFILE` | A worker profile in `AppConfig.worker_profiles` is not valid: a name a `--profile` argument cannot carry, a profile with no children, a claim limit above the capacity of the worker, a child pool whose `min_size` is above its resolved `max_size`, or a `PoolSize` below 3 (`PARENT_POOL_MIN_CONNECTIONS`) for the pool of the worker process (`ParentPool.max_size`). The message names the profile and the field path |
 | HRS-219 | `CHECK_WORKER_CONNECTIONS` | `check(live=True)`: one worker of a profile opens more Postgres connections itself than the server has usable slots (the error also states what task code that sends adds: the `task_send_pool` of each child kind), or the server limit could not be read |
 | HRS-220 | `CONFIG_OTEL_API_MISSING` | `AppConfig(tracing=OtelTracing())` and the OpenTelemetry API is not installed. The help names the extra: `pip install 'horsies[otel]'` |
+| HRS-221 | `CONFIG_INVALID_TRACE_LINK` | A `TraceLinkTemplate` of `MonitoringUIConfig` that the core refuses: not an `http` or `https` URL with a host, not exactly one `{trace_id}`, a brace outside it, a byte outside printable ASCII, or more than 2,048 bytes. The note names the rule |
 | HRS-222 | `EVENT_HANDLER_UNKNOWN_EVENT_TYPE` | An event handler registration names a value that is not an event type: in Python, `app.on_event(value)` with a class of another kind, the union `AnyEvent`, a name or an event instance. The Rust registration takes the event type as a type parameter |
 | HRS-223 | `EVENT_HANDLER_INVALID_SIGNATURE` | An event handler cannot take the events of its type: in Python, a value that is not a function or a bound method, a generator function, a function that does not take a call with one event, or an event parameter annotated with another event type. The Rust compiler checks the handler |
 | HRS-224 | `EVENT_HANDLER_DUPLICATE_NAME` | An earlier event handler of the app has the same name. In Python the name is `module.qualname` of the function: the same function registered twice, or two lambdas of one scope |
@@ -319,3 +320,4 @@ deployment pattern.
 | ---- | ---- | ----------- |
 | HRS-300 | `TASK_NOT_REGISTERED` | Task not found in registry |
 | HRS-301 | `TASK_DUPLICATE_NAME` | Duplicate task name |
+| HRS-302 | `WORKFLOW_UNREGISTERED_TASK` | A workflow node names a task that is not registered in this process. Only the Rust client raises it: `<task>::node()` before `<task>::register(&mut app)` |
