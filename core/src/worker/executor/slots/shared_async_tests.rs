@@ -464,9 +464,7 @@ async fn a_shared_child_that_ends_itself_gets_no_next_run() {
 
     assert_eq!(
         answer_of(first_answer).await,
-        AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(
-            StopReason::OwnershipUnconfirmed
-        ))
+        AttemptEnd::StoppedBeforeRunning(StopReason::OwnershipUnconfirmed)
     );
     assert_eq!(answer_of(second_answer).await, reported(2));
     assert_eq!(dir.lines("first-child"), vec!["ended".to_owned()]);

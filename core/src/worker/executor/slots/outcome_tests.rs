@@ -16,10 +16,11 @@ use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::task::error::{OperationalErrorCode, TaskErrorCode};
 use crate::core::task::result::{read_task_result_text, TaskResultText};
+use crate::events::AttemptStart;
 use crate::test_support::migrated_pool;
 use crate::test_support::sql::{self, TestPool};
 use crate::test_support::{CapturedEvent, LogCapture};
-use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd, StopReason};
+use crate::worker::executor::protocol::{ResultEnvelopeText, StopReason};
 use crate::worker::retry::read_stored_options;
 
 const WORKER: &str = "outcome-stop-worker";
@@ -99,7 +100,18 @@ fn writer_with_payload(pool: &TestPool, payload: PayloadPolicy) -> OutcomeWriter
 }
 
 fn stopped(reason: StopReason) -> AttemptEnd {
-    AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(reason))
+    AttemptEnd::StoppedBeforeRunning(reason)
+}
+
+/// The end of a run that reported `envelope`. The writer does not read its
+/// start.
+fn reported_result(envelope: ResultEnvelopeText) -> AttemptEnd {
+    AttemptEnd::Result {
+        envelope,
+        start: AttemptStart::Reported {
+            started_at: DateTime::<Utc>::UNIX_EPOCH,
+        },
+    }
 }
 
 async fn snapshot(pool: &TestPool, task_id: Uuid) -> serde_json::Value {
@@ -295,7 +307,7 @@ async fn a_result_that_is_json_but_not_an_envelope_fails_the_task_as_a_serializa
     let settled = writer(&pool)
         .settle(
             &dispatched(task_id, generation),
-            AttemptEnd::Reported(RunEnd::Result(not_an_envelope)),
+            reported_result(not_an_envelope),
         )
         .await;
 
@@ -352,10 +364,7 @@ async fn an_oversized_result_is_logged_once_and_written() {
             reject_bytes: None,
         },
     )
-    .settle(
-        &task,
-        AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(envelope))),
-    )
+    .settle(&task, reported_result(ResultEnvelopeText::new(envelope)))
     .await;
 
     assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);

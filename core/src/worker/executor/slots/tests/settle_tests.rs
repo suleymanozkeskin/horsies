@@ -24,6 +24,19 @@ use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 use crate::worker::execution::{phase_retry_delay, run_phase2, Phase2Work, PhaseTwoForm};
 use crate::worker::executor::protocol::FailureDetail;
 
+/// The end of a run that reported the value 3. The writer does not read its
+/// start.
+fn reported_value() -> AttemptEnd {
+    AttemptEnd::Result {
+        envelope: ResultEnvelopeText::new(
+            r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned(),
+        ),
+        start: crate::events::AttemptStart::Reported {
+            started_at: DateTime::<Utc>::UNIX_EPOCH,
+        },
+    }
+}
+
 const WORKER: &str = "worker-1";
 const OTHER_WORKER: &str = "worker-2";
 
@@ -372,12 +385,7 @@ async fn a_reported_value_completes_the_task() {
         pool.url(),
         crate::ClientFamily::Rust,
     )))
-    .settle(
-        &claimed,
-        AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
-            r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned(),
-        ))),
-    )
+    .settle(&claimed, reported_value())
     .await;
 
     assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
@@ -491,12 +499,7 @@ async fn a_crash_write_on_a_row_this_claim_does_not_hold_writes_nothing() {
 /// of 0.5 s, 1 s and 2 s; then the end is left to recovery.
 #[tokio::test]
 async fn a_write_that_cannot_reach_the_database_is_sent_three_more_times() {
-    let ends = [
-        crashed(),
-        AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
-            r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned(),
-        ))),
-    ];
+    let ends = [crashed(), reported_value()];
     let three_waits: f64 = (1..=3).map(phase_retry_delay).sum();
     let four_waits = three_waits + phase_retry_delay(4);
     for end in ends {

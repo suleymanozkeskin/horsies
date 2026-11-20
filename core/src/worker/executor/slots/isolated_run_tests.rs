@@ -9,7 +9,7 @@ use tokio::sync::oneshot::error::TryRecvError;
 use super::isolated::ISOLATED_LEFTOVER_BACKSTOP;
 use super::scripted::{
     answer_of, answer_runs, boot, ended, idle_child, isolated_config, isolated_init, ok_envelope,
-    queued, read_frame, reported, result_frame, send, serving, shell, start_isolated,
+    queued, read_frame, reported, result_frame, send, serving, shell, start_isolated, started_at,
     submit_isolated, take, task, ticket, tickets, timeout_ms, until, TestDir, ANSWER_WAIT,
     SPAWNER_STOP_WAIT, STATE_WAIT,
 };
@@ -49,7 +49,7 @@ fn body_returned(task: &ClaimedTask, value: u32) -> ChildFrame {
         task_id: task.task_id,
         returned: BodyEnd::Result(ok_envelope(value)),
         left: left_tasks(),
-        started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        started_at: started_at(),
     })
 }
 
@@ -158,7 +158,7 @@ fn write_result_file(path: &std::path::Path, task: &ClaimedTask, envelope: &Resu
         task_id: task.task_id,
         end: RunEnd::Result(envelope.clone()),
         started_at: crate::events::AttemptStart::Reported {
-            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            started_at: started_at(),
         },
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
@@ -195,10 +195,13 @@ async fn a_large_input_and_a_large_result_cross_whole() {
     ));
 
     let answer = answer_of(receiver).await;
-    assert!(
-        answer == AttemptEnd::Reported(RunEnd::Result(envelope)),
-        "the large result changed on its way"
-    );
+    let expected = AttemptEnd::Result {
+        envelope,
+        start: crate::events::AttemptStart::Reported {
+            started_at: started_at(),
+        },
+    };
+    assert!(answer == expected, "the large result changed on its way");
     stop_pool(pool, spawner).await;
 }
 
@@ -241,7 +244,13 @@ async fn the_runtime_stays_free_during_a_large_result() {
         last = now;
     };
 
-    assert!(answer == AttemptEnd::Reported(RunEnd::Result(envelope)));
+    let expected = AttemptEnd::Result {
+        envelope,
+        start: crate::events::AttemptStart::Reported {
+            started_at: started_at(),
+        },
+    };
+    assert!(answer == expected);
     assert!(
         worst < Duration::from_secs(2),
         "the runtime was held {worst:?}"
@@ -260,7 +269,7 @@ async fn a_result_with_no_left_work_keeps_the_child() {
         task_id: second.task_id,
         end: RunEnd::Result(ok_envelope(2)),
         started_at: crate::events::AttemptStart::Reported {
-            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            started_at: started_at(),
         },
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::LoopHoldsNoTask,
@@ -313,7 +322,7 @@ async fn a_run_stopped_before_running_is_answered_as_such() {
 
     assert_eq!(
         answer,
-        AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(StopReason::ClaimLost))
+        AttemptEnd::StoppedBeforeRunning(StopReason::ClaimLost)
     );
     stop_pool(pool, spawner).await;
 }
@@ -357,9 +366,7 @@ async fn a_child_that_ends_itself_gets_no_next_task() {
 
     assert_eq!(
         answer_of(first_answer).await,
-        AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(
-            StopReason::OwnershipUnconfirmed
-        ))
+        AttemptEnd::StoppedBeforeRunning(StopReason::OwnershipUnconfirmed)
     );
     assert_eq!(answer_of(second_answer).await, reported(2));
     assert_eq!(dir.lines("first-child"), vec!["ended".to_owned()]);

@@ -8,13 +8,14 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot::error::TryRecvError;
 
+use super::dispatch::BodyReturn;
 use super::scripted::{
     act_on_runs, answer_of, answer_runs, boot, boot_failed, ended, fail_boot, idle_child, input,
     isolated_config, isolated_init, layout, leftover_cancel, leftover_stuck, ok_envelope,
     process_ended, read_frame, reported, result_frame, run_ref, run_stuck, send, serving,
     shared_async_init, shared_config, shared_result, shell, short_of_descriptors, start_shared,
-    submit_isolated, submit_shared, take_init, task, ticket, tickets, timeout_ms, until, TestDir,
-    SPAWNER_STOP_WAIT, STATE_WAIT,
+    started_at, submit_isolated, submit_shared, take_init, task, ticket, tickets, timeout_ms,
+    until, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::seat_runs::{
     due_step_reported, end_at_loss, stuck_step_reported, CloseCulprit, LossSight, OutOfTurn,
@@ -24,7 +25,7 @@ use super::shared_stop::{ChildKill, LoopHolder};
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::worker::executor::protocol::{
-    BlockedWhere, BodyEnd, CancelGraceMs, ChildFrame, ProcessId, ReportedBootCause, RunEnd, RunRef,
+    BlockedWhere, BodyEnd, CancelGraceMs, ChildFrame, ProcessId, ReportedBootCause, RunRef,
     SharedWork,
 };
 use crate::worker::executor::supervisor::{
@@ -122,8 +123,11 @@ fn seat(dispatch: u64, work: RunWork, report: RunStopReport) -> SeatRun<()> {
     }
 }
 
-fn returned() -> BodyEnd {
-    BodyEnd::Result(ok_envelope(1))
+fn returned() -> BodyReturn {
+    BodyReturn {
+        end: BodyEnd::Result(ok_envelope(1)),
+        started_at: started_at(),
+    }
 }
 
 fn seen(cause: LossCause) -> SeenLoss {
@@ -242,7 +246,7 @@ fn a_run_that_returned_keeps_what_it_returned_at_any_end_whose_exit_was_seen() {
                         seen(cause),
                         now
                     ),
-                    AttemptEnd::Reported(RunEnd::from(returned())),
+                    AttemptEnd::returned(returned()),
                     "{report:?}, {kill:?}, {cause}"
                 );
             }
