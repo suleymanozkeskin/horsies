@@ -74,8 +74,10 @@ pub(crate) enum ChildLaunchRefused {
 /// - `handlers`: the app's event handlers (`EventHandlerSet::manifest`):
 ///   `NO_HANDLERS`, or the name and the event type of each handler. With a
 ///   handler the worker starts its handler child.
-/// - `worker_ended_spans`: the Rust client makes no worker-ended span
-///   (`NO_SPANS`).
+/// - `worker_ended_spans`: the app's switch (`Horsies::worker_ended_spans`):
+///   `MAKE_SPANS` by default with the feature `otel`, with which the worker
+///   starts its handler child also when the app has no handler; `NO_SPANS`
+///   without the feature.
 ///
 /// Errors: [`ManifestBoundRefused`] for the first value outside its
 /// manifest bound, in this order: the claim values (`prefetch_buffer`,
@@ -86,6 +88,7 @@ pub(crate) fn worker_manifest(
     config: &AppConfig,
     tasks: &TaskRegistry,
     handlers: wire::EventHandlers,
+    worker_ended_spans: wire::WorkerEndedSpans,
     profile: ProfileRequest,
     metrics_endpoint: wire::MetricsEndpoint,
     child_launch: wire::ChildLaunchManifest,
@@ -113,7 +116,7 @@ pub(crate) fn worker_manifest(
         payload,
         tasks: task_records(tasks),
         handlers,
-        worker_ended_spans: wire::WorkerEndedSpans::NoSpans,
+        worker_ended_spans,
         child_launch,
     })
 }
@@ -739,6 +742,7 @@ mod tests {
             config,
             &registry(),
             wire::EventHandlers::NoHandlers,
+            wire::WorkerEndedSpans::NoSpans,
             named("web"),
             wire::MetricsEndpoint::NoMetricsEndpoint,
             launch(),
@@ -754,6 +758,7 @@ mod tests {
             &config(),
             &registry(),
             wire::EventHandlers::NoHandlers,
+            wire::WorkerEndedSpans::NoSpans,
             named("web"),
             endpoint.clone(),
             launch(),

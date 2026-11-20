@@ -1760,6 +1760,32 @@ unless it starts with "Added".
   per hook; a failure ends the handler child with exit code 173, and the
   worker keeps it down and runs on. The hooks of `on_child_start` run in
   task children only.
+- **Added: the span of an attempt that the worker ended** (feature
+  `otel`). The handler child of a worker makes the span of each attempt
+  that the worker ended itself: an isolated task killed at its timeout
+  (`TASK_TIMEOUT`), a shared async child killed for a blocked runtime
+  (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`), and a child lost with its
+  exit seen (`WORKER_CRASHED`). The task child of such an attempt is gone,
+  so its own span never ends. The span is `run <task_name>` of kind
+  CONSUMER under the span that sent the task, with the global tracer
+  provider and propagator of the handler child, from the start that the
+  child reported (`AttemptEnded.end.start`: a shared run that its child
+  ended at its deadline), else from the time the task reached its child,
+  to the time the end reached the worker, with status ERROR, `error.type` = the code, the attributes of the span of a child and
+  `horsies.span.source = "worker"`. For a workflow task the handler child
+  reads the node by the task id through its producer pool, with one read of
+  the core bounded at 1 s for a connection and 1 s for the statement, only
+  for such an attempt, and the span gets the `horsies.workflow.*`
+  attributes. The read runs on one reader task with a queue of at most
+  1,000 spans (`NODE_READ_QUEUE_SPANS`), so it never holds an event. A
+  read that fails, a full queue, and a span still queued at the stop leave
+  the workflow attributes out; the new worker metric
+  `horsies.spans.worker_ended.read_failures{reason="read_failed"|"not_read"}`
+  counts them, and the handler child logs them. It is the default with
+  the feature: the worker then starts its handler child also when the app
+  has no handler.
+  `Horsies::set_worker_ended_spans(horsies::otel::WorkerEndedSpans::NoSpans)`
+  turns it off.
 
 ## [0.7.0] - 2026-11-15
 

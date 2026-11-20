@@ -49,16 +49,43 @@
 //! the `tracing` span, so each log record of the body carries them. Its
 //! status is OK when the body returned a value, and ERROR with `error.type`
 //! (the error code) when it returned an error, panicked
-//! (`UNHANDLED_EXCEPTION`) or ran past its deadline (`TASK_TIMEOUT`). An
-//! isolated task that the worker kills at its timeout has no ended span.
+//! (`UNHANDLED_EXCEPTION`) or ran past its deadline (`TASK_TIMEOUT`).
+//!
+//! The span of an attempt that the worker ended itself (an isolated task
+//! killed at its timeout, a shared async child killed for a blocked loop, a
+//! child lost with its exit seen) never ends in its child, which is gone.
+//! The handler child of the worker makes a span for it from the
+//! `AttemptEnded` event, with the global tracer provider of that process:
+//! `run <task_name>` of kind CONSUMER under the send span, from the start
+//! that the child reported (a shared run that its child ended at the
+//! deadline), else from the time the task reached its child, to the time
+//! the end reached the worker,
+//! status ERROR with `error.type`, the attributes of the span of a child
+//! with the kind of the child as `horsies.task.execution`, and
+//! `horsies.span.source` = `worker`. For a workflow task the handler child
+//! reads the node by the task id (one bounded read of the core, only for
+//! such an attempt, on its reader task: never on the dispatch of the
+//! events) and the span gets the workflow attributes. A read that fails, a
+//! full reader queue and the stop leave them out; the worker metric
+//! `horsies.spans.worker_ended.read_failures` counts them. A span
+//! that the body exported before the kill keeps the lost span as its
+//! parent. [`Horsies::set_worker_ended_spans`] turns it off
+//! ([`WorkerEndedSpans::NoSpans`]); with the default
+//! ([`WorkerEndedSpans::MakeSpans`]) the worker starts its handler child also
+//! when the app has no event handler.
+//!
+//! [`Horsies::set_worker_ended_spans`]: crate::Horsies::set_worker_ended_spans
 
 mod attempt;
 mod carrier;
+mod ended;
 mod send;
 mod tracer;
 
 pub use crate::telemetry::ATTEMPT_SPAN_TARGET;
 pub(crate) use attempt::body_scope;
+pub(crate) use ended::ended_span_scope;
+pub use horsies_core::worker_manifest::WorkerEndedSpans;
 pub(crate) use send::{TaskSendSpan, WorkflowStartSpan};
 pub use tracer::layer;
 
