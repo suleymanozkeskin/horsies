@@ -1280,12 +1280,14 @@ mod tests {
         );
         // No limit is stored resolved: the seats of the worker (#804).
         assert_eq!(max_claim_per_worker, 2);
-        // No `--metrics-listen` and no handler child: both are off.
+        // No `--metrics-listen` and no handler child: both are off. No child
+        // sent an unreadable RSS reading: `children_rss` names none.
         assert_eq!(
             telemetry,
             serde_json::json!({
                 "endpoint": { "state": "off" },
                 "handler_child": { "state": "off" },
+                "children_rss": { "unreadable": [] },
             })
         );
     }
