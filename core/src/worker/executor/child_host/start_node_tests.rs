@@ -45,6 +45,7 @@ fn context(pool: TestPool) -> (HostContext, UnixStream) {
             log_setup: ChildLogSetup::NoSetup,
             family: crate::ClientFamily::Rust,
             body_scope: super::BodyScope::NoScope,
+            handler_child: super::HandlerChildApp::without_handlers(),
         }),
         pid: 1,
         writer,

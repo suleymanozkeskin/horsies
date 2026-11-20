@@ -308,6 +308,29 @@ pub enum ErrorCode {
     /// A trace link template of the monitoring page that the core refuses.
     #[code_catalog(value = "HRS-221")]
     ConfigInvalidTraceLink,
+    /// An event handler registration names a value that is not an event
+    /// type. Only the Python client refuses with it: the Rust registration
+    /// takes the event type as a type parameter.
+    #[code_catalog(value = "HRS-222")]
+    EventHandlerUnknownEventType,
+    /// An event handler cannot take the events of its type: a value that is
+    /// not a function or a bound method, a generator function, a function
+    /// that does not take a call with one event, or an event parameter
+    /// annotated with another event type. Only the Python client refuses
+    /// with it: the Rust compiler checks the handler.
+    #[code_catalog(value = "HRS-223")]
+    EventHandlerInvalidSignature,
+    /// An earlier event handler of the app has the same name.
+    #[code_catalog(value = "HRS-224")]
+    EventHandlerDuplicateName,
+    /// The name of an event handler is empty, longer than 255 characters, or
+    /// `(unknown)`; in Python, also a function with no module name.
+    #[code_catalog(value = "HRS-225")]
+    EventHandlerInvalidName,
+    /// The app has 32 event handlers already, the most that one handler
+    /// child runs.
+    #[code_catalog(value = "HRS-226")]
+    EventHandlerLimit,
 
     // Registry (HRS-300-HRS-399)
     /// The task is not registered.
@@ -410,7 +433,12 @@ impl ErrorCode {
             | Self::ConfigInvalidWorkerProfile
             | Self::CheckWorkerConnections
             | Self::ConfigOtelApiMissing
-            | Self::ConfigInvalidTraceLink => ErrorCategory::Config,
+            | Self::ConfigInvalidTraceLink
+            | Self::EventHandlerUnknownEventType
+            | Self::EventHandlerInvalidSignature
+            | Self::EventHandlerDuplicateName
+            | Self::EventHandlerInvalidName
+            | Self::EventHandlerLimit => ErrorCategory::Config,
 
             Self::TaskNotRegistered | Self::TaskDuplicateName | Self::WorkflowUnregisteredTask => {
                 ErrorCategory::Registry

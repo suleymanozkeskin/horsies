@@ -612,7 +612,7 @@ struct RunningChildren {
 }
 
 /// The handler child of a worker, chosen when the worker is built.
-enum HandlerChildSetup {
+pub(crate) enum HandlerChildSetup {
     /// No event handler and no worker-ended span: no child and no event
     /// queue.
     NoHandlerChild,
@@ -622,7 +622,7 @@ enum HandlerChildSetup {
 }
 
 /// The parts of the handler child before and after its start.
-enum HandlerChildStart {
+pub(crate) enum HandlerChildStart {
     /// The child has not started: the reader's end of the event queue and
     /// the metric handles of the child.
     NotStarted {
@@ -1119,6 +1119,13 @@ impl Worker {
             handler_child: HandlerChildSetup::HandlerChild(std::sync::Mutex::new(start)),
             ..self
         }
+    }
+
+    /// The telemetry value and the handler child of this worker, for the
+    /// tests of the plan that built it.
+    #[cfg(test)]
+    pub(crate) fn telemetry_setup(&self) -> (&WorkerTelemetry, &HandlerChildSetup) {
+        (&self.telemetry, &self.handler_child)
     }
 
     /// Start the handler child of this worker on `spawner`, on the CPUs of

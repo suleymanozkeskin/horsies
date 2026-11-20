@@ -130,10 +130,15 @@ pub struct EventEncodeError {
 
 /// An event type of the union [`Event`], with its name. A point of the
 /// worker builds one of these; the worker builds it only when its handler
-/// child takes events of its type.
+/// child takes events of its type. A handler of a Rust handler child takes
+/// the events of one of these types.
 pub trait UnionEvent: EventRecord + Into<Event> {
     /// The name of the type: its wire tag.
     const NAME: EventTypeName;
+
+    /// The record of `event` when it is an event of this type; `None` for
+    /// an event of any other type. Pure.
+    fn of_event(event: &Event) -> Option<&Self>;
 }
 
 /// Defines the union [`Event`], the names [`EventTypeName`], the list
@@ -206,6 +211,14 @@ macro_rules! event_union {
         $(
             impl UnionEvent for $event {
                 const NAME: EventTypeName = EventTypeName::$event;
+
+                fn of_event(event: &Event) -> Option<&Self> {
+                    match event {
+                        Event::$event(record) => Some(record),
+                        // Every other event type of the union.
+                        _ => None,
+                    }
+                }
             }
         )+
 
