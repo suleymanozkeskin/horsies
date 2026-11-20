@@ -77,6 +77,53 @@ async fn stop_pool(pool: IsolatedPool, spawner: Spawner) {
 // Runs
 // ---------------------------------------------------------------------------
 
+/// The ready frame gives the first RSS reading of the slot; the RSS of a
+/// result frame of the same child, which serves on, replaces it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_rss_of_a_result_frame_is_the_last_reading_of_the_slot() {
+    let first = task(1, ExecutionClass::Isolated);
+    let rss = RssReading::Mb(crate::worker::executor::protocol::RssMb::new(42.5).unwrap());
+    let result = ChildFrame::Result(ResultFrame {
+        task_id: first.task_id,
+        end: RunEnd::Result(ok_envelope(1)),
+        started_at: crate::events::AttemptStart::Reported {
+            started_at: started_at(),
+        },
+        rss,
+        task_loop: NoLeftWork::NoTaskLoop,
+        child: ChildAfterFrame::ServesOn,
+    });
+    let script = format!(
+        "{}{}",
+        boot(&isolated_init()),
+        ordered_runs(&[(&first, vec![result])])
+    );
+    let spawner = Spawner::start().unwrap();
+    let (pool, board) = start_isolated(&spawner, 1, isolated_config(shell(&script)));
+    let child = serving(&board, 0).await;
+    let slot_reading = |rss: RssReading| {
+        vec![ChildRss {
+            slot: 0,
+            class: ExecutionClass::Isolated,
+            pid: child,
+            rss,
+        }]
+    };
+    assert_eq!(board.child_rss(), slot_reading(RssReading::Unreadable));
+
+    assert_eq!(
+        answer_of(submit_isolated(&pool, &first, IsolatedDeadline::NoDeadline)).await,
+        reported(1)
+    );
+    until(
+        "the slot holds the RSS of the result frame",
+        STATE_WAIT,
+        || board.child_rss() == slot_reading(rss),
+    )
+    .await;
+    stop_pool(pool, spawner).await;
+}
+
 /// Python `TestTaskRuns::test_queued_task_is_not_assigned_while_the_slot_is_busy`:
 /// the first child dies with the first task; the second task was not sent
 /// to it while it was busy, so it runs on the next child.

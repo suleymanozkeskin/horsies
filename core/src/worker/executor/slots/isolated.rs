@@ -364,6 +364,7 @@ async fn serve_generation(
         match after {
             AfterRun::Serve { rss } => {
                 defects.task_finished();
+                shared.board.note_rss(index, channel.pid(), rss);
                 match after_task(shared, tasks_done, rss) {
                     AfterTask::ServeOn => {}
                     AfterTask::Recycle(reason) => {
