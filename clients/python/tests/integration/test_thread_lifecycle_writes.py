@@ -49,6 +49,7 @@ from horsies.core.worker.child_frames import (
     ThreadSeatWork,
 )
 from horsies.core.models.worker_profile import ResolvedPool
+from horsies.core.telemetry.attempt_span import BodyFirst
 from horsies.core.worker.child_runner import StartAllowed
 from horsies.core.worker.current import set_current_app
 from horsies.core.worker.run_return import ResultEnvelope
@@ -372,6 +373,8 @@ async def test_the_running_update_of_a_refusal_ends_at_the_bound_of_the_core(
                 frame,
                 _seat_work(frame),
                 lambda: StartAllowed(),
+                # The RUNNING update ends first: the steps never return.
+                lambda: BodyFirst(),
             ),
             ATTEMPT_END_S,
         )
