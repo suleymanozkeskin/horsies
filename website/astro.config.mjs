@@ -155,9 +155,15 @@ export default defineConfig({
 						{
 							label: 'Observability',
 							items: [
+								{ label: 'Overview', slug: 'observability/overview' },
+								{ label: 'Metrics', slug: 'observability/metrics' },
 								{ label: 'Metric Reference', slug: 'observability/metric-reference' },
+								{ label: 'Fleet Collector', slug: 'observability/fleet-collector' },
+								{ label: 'OpenTelemetry Collector', slug: 'observability/opentelemetry-collector' },
 								{ label: 'Tracing', slug: 'observability/tracing' },
 								{ label: 'Logs', slug: 'observability/logs' },
+								{ label: 'Dashboards and Alerts', slug: 'observability/dashboards-and-alerts' },
+								{ label: 'Deployment', slug: 'observability/deployment' },
 							],
 						},
 						{

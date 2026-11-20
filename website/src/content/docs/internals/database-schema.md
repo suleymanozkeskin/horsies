@@ -212,6 +212,7 @@ Worker monitoring snapshots (timeseries). Each worker inserts one row per `worke
 | `worker_started_at` | `timestamptz` | Worker start time |
 | `slots_down` | `jsonb` | Each slot that is down for a cause that can clear: `{slot, cause, detail, down_since, failed_boots}`; an empty array when none is |
 | `class_capacity` | `jsonb` | Each claim budget class to `{"capacity": N, "serves": [classes]}` |
+| `telemetry` | `jsonb` | The state of the telemetry parts of the worker: `{"endpoint": {"state": ...}, "handler_child": {"state": ...}}`. The endpoint state is `off`, `binding`, `serving` (with the bound address) or `down` (with the cause and `down_since`); the handler child state is `off`, `starting`, `up` (with its pid) or `down` (with the cause, `down_since` and what follows). The fleet collector counts the live workers whose latest snapshot has a part `down` |
 
 ## horsies_worker_liveness
 

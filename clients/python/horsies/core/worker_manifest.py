@@ -100,6 +100,7 @@ def to_worker_manifest(
     config: AppConfig,
     *,
     profile: str | None,
+    metrics_endpoint: wire.MetricsEndpoint,
     tasks: Mapping[str, TaskFacts],
     child_launch: wire.ChildLaunchManifest,
     idempotency_reservation_window: timedelta,
@@ -107,12 +108,16 @@ def to_worker_manifest(
     """The worker manifest of `config`.
 
     Pure: no I/O. `profile` is the `--profile` value (`None` when the option
-    was not passed); `tasks` holds the facts of each registered task by
+    was not passed); `metrics_endpoint` is the `--metrics-listen` value
+    (`MetricsEndpointNoMetricsEndpoint` when the option was not passed);
+    `tasks` holds the facts of each registered task by
     name; `child_launch` comes from `python_child_launch`; the window is
     one that `validate_reservation_window` accepted. `config` passed
     AppConfig validation, which keeps every value within its manifest bound;
     a value above it fails an assertion (`worker_claim_manifest`,
-    `payload_manifest`).
+    `payload_manifest`). The app registers no event handler and the
+    tracing setting makes no worker-ended span, so the worker starts no
+    handler child (`NO_HANDLERS`, `NO_SPANS`).
     """
     return wire.WorkerManifest(
         manifest_version=wire.MANIFEST_VERSION,
@@ -128,12 +133,15 @@ def to_worker_manifest(
             for name, worker_profile in config.worker_profiles.items()
         },
         profile=profile_request(profile),
+        metrics_endpoint=metrics_endpoint,
         claim=worker_claim_manifest(config),
         recovery=recovery_manifest(config.recovery),
         retention=retention_manifest(config.retention),
         resilience=resilience_manifest(config.resilience),
         payload=payload_manifest(config.payload),
         tasks={name: task_manifest(facts) for name, facts in tasks.items()},
+        handlers=wire.EventHandlersNoHandlers(),
+        worker_ended_spans='NO_SPANS',
         child_launch=child_launch,
     )
 

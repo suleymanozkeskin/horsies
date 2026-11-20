@@ -111,6 +111,23 @@ before you upgrade a 0.7 deployment.
   space. The core checks it; a refused template is `HRS-221` (new
   `CONFIG_INVALID_TRACE_LINK`) in Python and an argument error of
   `horsies web`. `/api/meta` reports it as `trace_link_template`.
+- **`horsies worker <app> --profile <name> --metrics-listen HOST:PORT`.**
+  The worker serves its metrics at `GET /metrics` (Prometheus text format)
+  and its health probes at `GET /livez` and `GET /readyz` on `HOST:PORT`
+  or `[IPV6]:PORT`. There is no default address and no config field:
+  without the flag the worker serves no endpoint. The host is required and
+  the port is 1 to 65535; a value that does not parse is a usage error
+  (exit 2) before the worker starts. `/livez` answers 503 when the claim
+  loop of the worker is past the deadline of its next turn, and 200 during
+  the start and the stop. `/readyz` answers 200 when the pools of the
+  worker have no failure, a child serves, and its liveness lock is held,
+  and 503 during the start and the stop. A port in use does not stop the
+  worker: it starts and claims, the endpoint binds again with a backoff of
+  1 s to 60 s, and the probes answer once it binds. The endpoint serves at
+  most 16 connections at once, closes a connection whose request head is
+  not read within 5 s, and answers 431 for a head over 8 KiB. The worker
+  snapshot (`horsies_worker_states.telemetry`) shows the endpoint `off`,
+  `binding`, `serving`, or `down` with its address and cause.
 - **The worker's log records of an attempt carry `attempt` and
   `trace_id`.** Each log record of the worker that names a claimed task
   has the field `attempt` (the retry count of the row plus 1) and, when
@@ -122,6 +139,46 @@ before you upgrade a 0.7 deployment.
   `advance_retry` (bound `advance_retries`). In Python each field is an
   attribute of the `LogRecord`, so `JsonLogs` writes `attempt` and
   `trace_id` for them.
+- **`horsies metrics` serves the fleet metrics of a database.**
+  `horsies metrics <app> --listen HOST:PORT` serves `GET /metrics` in the
+  Prometheus text format 0.0.4 (no OpenMetrics): the live tasks by queue,
+  execution class and status, the age of the oldest due `PENDING` task,
+  the live workers, their seats and seats in use, the classes that no live
+  worker serves, the workers whose metrics endpoint or handler child is
+  down, the workflows that are not terminal, the time since the last run
+  of each schedule, and the schema version. `--listen` is required and has
+  no default. The command reads the database at start, then at most once
+  per 15 seconds, one statement at a time, each within 2 seconds; a scrape
+  never starts a read. The `PENDING` count of a queue and class stops at
+  1,000: past it, `horsies_queue_pending_more_than` holds the lower bound.
+  A query that fails leaves its gauges with no series and sets
+  `horsies_exporter_collect_failed{query}` to 1; it never ends the
+  command. The `queue` and `schedule` label values are the names of the
+  app config, and every other name is `(unknown)`; a config name that
+  cannot be a label value of its own counts in `(unknown)` too, with one
+  WARNING line. Exit codes: 2 for an address that does not parse, 0 at
+  `SIGTERM` or `SIGINT`, 1 when the app does not load, the broker does not
+  build, or the address does not bind.
+- **`GET /metrics` of the web UI.** `horsies web` and
+  `create_monitoring_app` serve the same fleet metrics at `GET /metrics`,
+  behind `can_view` of the access policy. A request reads the database
+  when no read has run or the last read started 15 seconds or more before
+  it; any other request answers the last read. Another method answers 405.
+- **A Grafana dashboard, Prometheus alert rules and an OpenTelemetry
+  Collector config in `deploy/`.** `deploy/grafana/horsies-dashboard.json`
+  (uid `horsies-overview`, Grafana 12.2 or later),
+  `deploy/prometheus/horsies-alerts.yaml` with its `promtool` tests
+  (`HorsiesOldestPendingTaskTooOld`, `HorsiesTaskFailureRatioHigh`,
+  `HorsiesNoLiveWorker`, `HorsiesUnservedClass`, `HorsiesEventsDropped`,
+  `HorsiesTelemetryDown`, `HorsiesFleetQueryFailed`), and
+  `deploy/otel-collector/collector.yaml`, which scrapes the metrics
+  endpoints and exports OTLP. A test checks each metric, label and label
+  value that they name against the metric catalog of the core.
+- **`horsies_worker_states.telemetry`.** Each worker snapshot records the
+  state of the metrics endpoint (`off`, `binding`, `serving`, `down`) and
+  of the handler child (`off`, `starting`, `up`, `down`) of the worker.
+  The fleet metric `horsies.fleet.workers.telemetry_down{part}` counts the
+  live workers whose latest snapshot has a part `down`.
 
 ### Changed
 
@@ -925,6 +982,13 @@ The crate `horsies` is rebuilt on `horsies-core`, the engine that the
 Python client runs on. Each entry is a breaking change of the crate's API,
 unless it starts with "Added".
 
+- **Added: `<binary> worker --metrics-listen HOST:PORT` and
+  `WorkerStart::with_metrics_endpoint(ListenAddress)`.** The worker metrics
+  endpoint of the Python flag above, with the same rules. The `cli` feature
+  turns on the server (`horsies-core/metrics-endpoint`); a core without it
+  ends a start that asks for an endpoint with `BootFailed`. `ListenAddress`
+  and `ListenAddressRefused` are exported from `horsies`.
+
 - **The client runs on `horsies-core`.** The crate has no engine of its
   own: no sqlx broker, no worker, no workflow engine, no monitoring queries
   and no migrations. A database that `0.1.0-alpha` installed (migrations 1
@@ -1615,6 +1679,13 @@ unless it starts with "Added".
 - **`task_name::node()` before `task_name::register` refuses with
   `HRS-302`** (`ErrorCode::WorkflowUnregisteredTask`). Before, its
   `HorsiesError` had no code.
+- **Added: `<binary> metrics --listen HOST:PORT`** in `horsies::cli::run`:
+  the fleet metrics of the app's database at `GET /metrics`, as Python
+  `horsies metrics` serves them. The connection runs no schema step. Exit
+  codes: 2 for an address that does not parse, 0 at `SIGTERM` or `SIGINT`,
+  1 when the config does not build a handle or the address does not bind.
+  `horsies::web::router` serves `GET /metrics` too, behind the view
+  verdict.
 
 ## [0.7.0] - 2026-11-15
 

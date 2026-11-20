@@ -950,6 +950,7 @@ def _document_launch(launch: wire.ChildLaunchManifest) -> dict[str, Any]:
     manifest = to_worker_manifest(
         _app_config(worker_profiles={'batch': _full_profile()}),
         profile='batch',
+        metrics_endpoint=wire.MetricsEndpointNoMetricsEndpoint(),
         tasks={},
         child_launch=launch,
         idempotency_reservation_window=WINDOW,
@@ -1198,11 +1199,15 @@ class TestPayload:
 
 
 class TestDocument:
-    def _document(self) -> dict[str, Any]:
+    def _document(
+        self,
+        metrics_endpoint: wire.MetricsEndpoint = wire.MetricsEndpointNoMetricsEndpoint(),
+    ) -> dict[str, Any]:
         config = _app_config(worker_profiles={'batch': _full_profile()})
         manifest = to_worker_manifest(
             config,
             profile='batch',
+            metrics_endpoint=metrics_endpoint,
             tasks={
                 'app.tasks.add': TaskFacts(execution=Execution.ISOLATED, error_codes=()),
                 'app.tasks.fetch': TaskFacts(
@@ -1222,6 +1227,7 @@ class TestDocument:
         }
         assert document['manifest_version'] == wire.MANIFEST_VERSION
         assert document['profile'] == {'kind': 'NAMED', 'name': 'batch'}
+        assert document['metrics_endpoint'] == {'kind': 'NO_METRICS_ENDPOINT'}
         assert document['tasks'] == {
             'app.tasks.add': {'execution': 'ISOLATED', 'error_codes': []},
             'app.tasks.fetch': {
@@ -1232,6 +1238,15 @@ class TestDocument:
         assert document['send'] == {
             'retain_rerun_input_default': False,
             'idempotency_reservation_window': WINDOW // timedelta(microseconds=1),
+        }
+
+    def test_a_metrics_endpoint_is_written_with_its_host_and_port(self) -> None:
+        endpoint = wire.MetricsEndpointListenAddress(host='::1', port=9100)
+        document = self._document(metrics_endpoint=endpoint)
+        assert document['metrics_endpoint'] == {
+            'kind': 'LISTEN_ADDRESS',
+            'host': '::1',
+            'port': 9100,
         }
 
     def test_the_tcp_settings_are_written_in_the_form_the_core_parses(self) -> None:

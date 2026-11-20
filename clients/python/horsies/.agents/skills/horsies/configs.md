@@ -1138,6 +1138,7 @@ horsies worker <module> --profile NAME [--loglevel LEVEL]
 |---|---|---|
 | `--profile` | required | Name of a profile in `AppConfig.worker_profiles`. See [Worker profiles](#worker-profiles) |
 | `--loglevel` | `INFO` | Log level |
+| `--metrics-listen` | none | `HOST:PORT` or `[IPV6]:PORT`: serve `GET /metrics`, `GET /livez`, `GET /readyz`. No default; a bad value exits 2; a bind failure does not stop the worker (the endpoint binds again, 1 s to 60 s backoff) |
 
 Startup: logging → import app (builds `AppConfig`, validates every profile) → select `--profile` → `app.check()` → memory warning → schema init with retry → connection warning → start children.
 SIGTERM/SIGINT: graceful shutdown: stops claims, returns tasks that wait for a child to PENDING, waits up to the profile's `drain_timeout` for running tasks, then kills their children. On systemd set `KillMode=mixed`; in Docker use the exec form of `CMD`.
@@ -1169,6 +1170,16 @@ Serves the monitoring dashboard (requires the `web` extra). Fail-closed:
 non-loopback hosts require `--auth trusted-header`; actions are off unless
 `--enable-actions`. Never executes DDL. See `monitoring.md` for the full
 reference including the registry-less capability boundary.
+
+### `horsies metrics`
+
+```bash
+horsies metrics <module> --listen HOST:PORT [--loglevel INFO]
+```
+
+Serves the fleet metrics of the app's database at `GET /metrics`.
+`--listen` is required: `HOST:PORT` or `[IPV6]:PORT`, port 1 to 65535. See
+`monitoring.md`, Fleet Metrics.
 
 ### `horsies get-docs`
 

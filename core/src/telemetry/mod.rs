@@ -13,6 +13,8 @@
 //!   its bounds, and the text that a row stores.
 //! - [`worker`]: the telemetry value of a worker parent: the metric handles
 //!   of its lifecycle points, and the bounded queue of its events.
+//! - [`worker_registry`]: the registry of a worker parent from the facts of
+//!   its manifest.
 
 pub mod catalog;
 pub mod declared;
@@ -26,3 +28,4 @@ pub mod registry;
 mod registry_tests;
 pub mod trace_carrier;
 pub mod worker;
+pub mod worker_registry;

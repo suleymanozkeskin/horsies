@@ -22,6 +22,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, NoReturn, assert_never
 
+from horsies._catalog import worker_manifest as wire
+from horsies._core import (
+    ListenAddress,
+    ListenAddressRefused,
+    parse_listen_address,
+)
 from horsies.core.app import Horsies
 from horsies.core.banner import print_banner
 from horsies.core.brokers.postgres import PostgresBroker
@@ -535,12 +541,14 @@ def worker_command(args: argparse.Namespace) -> None:
     app.import_task_modules()
     print_banner(app, role='worker', show_tasks=True)
 
+    metrics_endpoint: wire.MetricsEndpoint = args.metrics_listen
     launch = WorkerLaunch(
         app_locator=app_locator,
         imports=tuple(discovered_modules),
         sys_path_roots=(sys_path_root,) if sys_path_root else (),
         profile=selected.name,
         loglevel=loglevel,
+        metrics_endpoint=metrics_endpoint,
     )
     exit_code = run_core_worker(app, launch, logger, _print_worker_startup_report)
     if exit_code != EXIT_STOPPED:
@@ -1046,6 +1054,26 @@ def web_command(args: argparse.Namespace) -> None:
     )
 
 
+def metrics_listen_endpoint(text: str) -> wire.MetricsEndpointListenAddress:
+    """The metrics endpoint of a ``--metrics-listen`` value, by the core's
+    rules: ``HOST:PORT`` or ``[IPV6]:PORT``, a host of 1 to 253 bytes, a port
+    of 1 to 65535. The host is resolved when the endpoint binds.
+
+    The ``type`` of the argparse option: a text that breaks a rule raises
+    ``argparse.ArgumentTypeError`` with the rule, and argparse prints it and
+    exits 2 before the worker starts.
+    """
+    match parse_listen_address(text):
+        case ListenAddress() as address:
+            return wire.MetricsEndpointListenAddress(
+                host=address.host, port=address.port
+            )
+        case ListenAddressRefused(message=message):
+            raise argparse.ArgumentTypeError(message)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 REMOVED_WORKER_FLAGS: Final[Mapping[str, str]] = {
     '--processes': 'isolated=IsolatedChildren(count=N)',
     '--max-claim-batch': 'claim=ClaimLimits(per_queue_per_pass=TaskLimit(tasks=N))',
@@ -1155,6 +1183,18 @@ Examples:
                 'Name of the worker profile in AppConfig.worker_profiles. '
                 'Required: the profile holds the settings of the worker '
                 '(children, recycling, claim limits, drain timeout, preload).'
+            ),
+        )
+        worker_parser.add_argument(
+            '--metrics-listen',
+            dest='metrics_listen',
+            type=metrics_listen_endpoint,
+            default=wire.MetricsEndpointNoMetricsEndpoint(),
+            metavar='HOST:PORT',
+            help=(
+                'Serve the worker metrics (GET /metrics) and the health probes '
+                '(GET /livez, GET /readyz) on HOST:PORT, or [IPV6]:PORT. No '
+                'default: without it the worker serves no endpoint.'
             ),
         )
         for removed_flag in REMOVED_WORKER_FLAGS:
