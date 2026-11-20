@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
 use crate::core::config::worker_profile::{ParentCpu, ProfileRequest};
 use crate::core::task::Execution;
+use crate::events::EventTypeName;
 use crate::manifest::{
     DatabaseManifest, PoolRecycle, ProducerManifest, SchemaMode, SendManifest, SessionDatabase,
     PRODUCER_MANIFEST_VERSION,
@@ -32,13 +33,14 @@ use crate::scheduler_manifest::{
 };
 use crate::worker_manifest::{
     ChildCommandManifest, ChildLaunchManifest, ChildProgram, ClaimLease, ClaimLimitsManifest,
-    ClusterWideCap, CustomQueueManifest, DefaultExecutor, Isolated, IsolatedPoolManifest,
-    IsolatedRecycleManifest, MemoryLimit, ParentPoolManifest, PausedWorkflowExpiry, PayloadLimit,
-    PayloadManifest, PoolMaxSize, Preload, PreloadLaunch, QueueConcurrency, QueueRetention, Queues,
-    RecoveryManifest, ResilienceManifest, RetentionManifest, RetryAttemptLimit, SharedAsync,
-    SharedPoolManifest, SharedRecycleManifest, SharedThread, TaskLimit, TaskManifest,
-    TerminalRecordRetention, WorkerClaimManifest, WorkerDatabaseManifest, WorkerLogLevel,
-    WorkerManifest, WorkerProfileManifest, WorkerStateRetention, WORKER_MANIFEST_VERSION,
+    ClusterWideCap, CustomQueueManifest, DefaultExecutor, EventHandlers, HandlerManifest, Isolated,
+    IsolatedPoolManifest, IsolatedRecycleManifest, MemoryLimit, MetricsEndpoint,
+    ParentPoolManifest, PausedWorkflowExpiry, PayloadLimit, PayloadManifest, PoolMaxSize, Preload,
+    PreloadLaunch, QueueConcurrency, QueueRetention, Queues, RecoveryManifest, ResilienceManifest,
+    RetentionManifest, RetryAttemptLimit, SharedAsync, SharedPoolManifest, SharedRecycleManifest,
+    SharedThread, TaskLimit, TaskManifest, TerminalRecordRetention, WorkerClaimManifest,
+    WorkerDatabaseManifest, WorkerEndedSpans, WorkerLogLevel, WorkerManifest,
+    WorkerProfileManifest, WorkerStateRetention, WORKER_MANIFEST_VERSION,
 };
 use crate::workflow_engine::spec_data::{
     SpecDefinitionKey, SpecJoin, SpecNode, SpecNodeBody, SpecOnError, SpecOutput,
@@ -248,6 +250,7 @@ pub const WORKER_MANIFEST: ManifestModule = ManifestModule {
         <ParentCpu as ManifestItem>::ITEM,
         <WorkerProfileManifest as ManifestItem>::ITEM,
         <ProfileRequest as ManifestItem>::ITEM,
+        <MetricsEndpoint as ManifestItem>::ITEM,
         <QueueConcurrency as ManifestItem>::ITEM,
         <CustomQueueManifest as ManifestItem>::ITEM,
         <Queues as ManifestItem>::ITEM,
@@ -266,6 +269,10 @@ pub const WORKER_MANIFEST: ManifestModule = ManifestModule {
         <PayloadManifest as ManifestItem>::ITEM,
         <Execution as ManifestItem>::ITEM,
         <TaskManifest as ManifestItem>::ITEM,
+        <EventTypeName as ManifestItem>::ITEM,
+        <HandlerManifest as ManifestItem>::ITEM,
+        <EventHandlers as ManifestItem>::ITEM,
+        <WorkerEndedSpans as ManifestItem>::ITEM,
         <ChildCommandManifest as ManifestItem>::ITEM,
         <PreloadLaunch as ManifestItem>::ITEM,
         <ChildProgram as ManifestItem>::ITEM,
@@ -687,6 +694,7 @@ mod tests {
                 "SHARED_THREAD_CHILDREN",
                 "SHARED_THREAD_SEATS",
                 "DRAIN_TIMEOUT_MS",
+                "LISTEN_PORT",
                 "QUEUE_CONCURRENCY",
                 "QUEUE_PRIORITY",
                 "MILLISECONDS",

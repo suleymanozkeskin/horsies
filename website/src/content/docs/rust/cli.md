@@ -1,8 +1,8 @@
 ---
 title: CLI Reference
-summary: horsies::cli::run(app) runs the worker, the scheduler or the check of a Rust app from the app's own binary and serves its worker children; the shipped horsies binary has web, get-docs and skills install.
+summary: horsies::cli::run(app) runs the worker, the scheduler, the check or the fleet metrics server of a Rust app from the app's own binary and serves its worker children; the shipped horsies binary has web, get-docs and skills install.
 related: [configuration/app-config, ../workers/worker-architecture, ../scheduling/scheduler-overview, ../workers/heartbeats-recovery, ../monitoring/web-ui-deployment]
-tags: [rust, cli, worker, scheduler, check, web, get-docs, skills]
+tags: [rust, cli, worker, scheduler, check, metrics, web, get-docs, skills]
 ---
 
 # CLI Reference
@@ -11,7 +11,7 @@ A Rust app has two command-line programs:
 
 | Program | Commands | Why |
 |---------|----------|-----|
-| The app's own binary, through `horsies::cli::run(app)` | `worker`, `scheduler`, `check`, and child mode | The tasks are compiled into this binary, and the worker starts it again for each child |
+| The app's own binary, through `horsies::cli::run(app)` | `worker`, `scheduler`, `check`, `metrics`, and child mode | The tasks are compiled into this binary, and the worker starts it again for each child |
 | The shipped `horsies` binary | `web`, `get-docs`, `skills install` | These commands need no task of the app |
 
 Both are in the `cli` feature of the crate, which is on by default.
@@ -48,7 +48,7 @@ The contract of `run(app: Horsies) -> ExitCode`:
 1. Child mode first. The worker starts this binary again for each child, with the arguments `--horsies-child <fd> <pid>`. `run` reads them before any other argument, serves the child until the worker stops it, and returns the child's exit code (see [Exit Codes](#exit-codes)). A child start with arguments that cannot be used exits with code 73.
 2. Every line of `main` before `run` runs in each child too. Build the app there (config, registrations, state, start hooks), and start nothing else: each child would start it again.
 3. `run` blocks the calling thread until the command ends. Call it from a plain `fn main`. Inside a tokio runtime it prints why and returns exit code 1.
-4. Any other process runs the command of its arguments: `worker`, `scheduler` or `check`. `run` installs the logs of the command (see [Logs](#logs)) and returns its exit code.
+4. Any other process runs the command of its arguments: `worker`, `scheduler`, `check` or `metrics`. `run` installs the logs of the command (see [Logs](#logs)) and returns its exit code.
 
 ## A Binary That Owns Its `main`
 
@@ -120,6 +120,7 @@ fn run_worker(app: Horsies) -> ExitCode {
 | `<binary> worker --profile <name> [--loglevel LEVEL]` | Starts a worker of one profile of `AppConfig.worker_profiles` | [`horsies worker`](/horsies/cli/#horsies-worker) |
 | `<binary> scheduler [--loglevel LEVEL]` | Starts the scheduler of `AppConfig.schedule` | [`horsies scheduler`](/horsies/cli/#horsies-scheduler) |
 | `<binary> check [--live] [--loglevel LEVEL]` | Checks the app without starting a service | [`horsies check`](/horsies/cli/#horsies-check) |
+| `<binary> metrics --listen HOST:PORT [--loglevel LEVEL]` | Serves the fleet metrics of the app's database at `GET /metrics` | [`horsies metrics`](/horsies/cli/#horsies-metrics) |
 
 An unknown command, or no command, is an argument error: exit code 2.
 
@@ -128,12 +129,16 @@ An unknown command, or no command, is an argument error: exit code 2.
 ```bash
 ./myapp worker --profile default
 ./myapp worker --profile batch --loglevel debug
+./myapp worker --profile default --metrics-listen 0.0.0.0:9464
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--profile NAME` | required | The profile of `AppConfig.worker_profiles` that holds the settings of the worker: children, recycling, claim limits, drain timeout |
 | `--loglevel LEVEL` | `INFO` | See [Logs](#logs) |
+| `--metrics-listen HOST:PORT` | none | Serve the worker metrics (`GET /metrics`) and the health probes (`GET /livez`, `GET /readyz`) on `HOST:PORT`, or `[IPV6]:PORT`. There is no default: without it the worker serves no endpoint. See [Metrics](/horsies/observability/metrics/) |
+
+- A `--metrics-listen` value that does not parse is an argument error: exit code 2. An address that does not bind does not stop the worker: the endpoint binds again with a backoff. `WorkerStart::with_metrics_endpoint(ListenAddress)` gives the address to `Horsies::run_worker` in a binary that owns its `main`.
 
 - A missing or unknown `--profile` exits with code 1, and nothing starts. The refusal lists the defined profile names.
 - The app check runs before the worker starts, without the schedules. A refused check prints its report on stderr and exits with code 1.
@@ -167,6 +172,21 @@ An unknown command, or no command, is an argument error: exit code 2.
 
 A check that passes prints its text on stdout and exits with code 0. A refused check prints its report on stderr and exits with code 1. `--live` installs no schema.
 
+### `metrics`
+
+```bash
+./myapp metrics --listen 0.0.0.0:9465
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--listen HOST:PORT` | required | The address to serve on: `HOST:PORT`, or `[IPV6]:PORT`. The port is 1 to 65535. There is no default |
+| `--loglevel LEVEL` | `INFO` | See [Logs](#logs) |
+
+- The command serves the fleet metrics of the app's database at `GET /metrics`, in the Prometheus text format. What the metrics hold and when the command reads them: [Fleet Collector](/horsies/observability/fleet-collector/).
+- The connection runs no schema step and opens no listener.
+- An address that does not parse is an argument error: exit code 2. The command exits with code 0 at `SIGTERM` or `SIGINT`, and with code 1 when the config does not build a handle or the address does not bind. A database that does not answer does not end it.
+
 ## Logs
 
 `--loglevel` takes `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, in any case.
@@ -176,6 +196,44 @@ A check that passes prints its text on stdout and exits with code 0. A refused c
 - A subscriber that the binary installed before `run` is kept.
 - Each worker child installs the same subscriber, at the `--loglevel` of the worker.
 - The logs have ANSI color on a terminal. `FORCE_COLOR` (set, not empty, not `0`) turns color on, and wins over `NO_COLOR`. `NO_COLOR` (set, any value) turns color off.
+- Each task body runs inside the `tracing` span `run` (target `horsies::attempt`) with the fields `horsies.task.id`, `horsies.task.name` and `horsies.task.attempt`, so each record of the body carries them. The filter of `run` passes this span at every `--loglevel`. The fields of the core's own records are on [Logs](/horsies/observability/logs/).
+
+### JSON Lines
+
+`run_with_log_format(app, LogFormat::Json)` runs the app as `run` does, with one JSON object per log record, in the runner and in each worker child:
+
+```rust
+use std::process::ExitCode;
+
+use horsies::cli::LogFormat;
+use horsies::{AppConfig, Horsies, HorsiesError};
+
+fn build_app() -> Result<Horsies, HorsiesError> {
+    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+    Horsies::new(config)
+}
+
+fn main() -> ExitCode {
+    match build_app() {
+        Ok(app) => horsies::cli::run_with_log_format(app, LogFormat::Json),
+        Err(refused) => {
+            eprintln!("{refused}");
+            ExitCode::FAILURE
+        }
+    }
+}
+```
+
+| Key | Value |
+|-----|-------|
+| `timestamp` | The time of the record |
+| `level` | The level |
+| `target` | The target of the event |
+| The fields of the event | At the top level, `message` among them |
+| `span` | The innermost span of the record, with its name and fields |
+| `spans` | Every span of the record, outermost first |
+
+`run(app)` is `run_with_log_format(app, LogFormat::Text)`. With the feature `otel`, the subscriber of both also has the layer of `horsies::otel`: see [Tracing Setup](/horsies/rust/observability/tracing-setup/).
 
 ## Removed Flags
 

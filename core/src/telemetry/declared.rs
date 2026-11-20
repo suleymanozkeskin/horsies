@@ -5,8 +5,16 @@
 //! the set is the position of one name, or of the fallback of the set. Only
 //! the set builds a value, so a value is never a name outside the set: a
 //! name outside it is the fallback ([`DeclaredNames::value_of`]).
+//!
+//! A set never refuses its names. A name that cannot be a value of its own
+//! is not declared ([`FoldReason`]): the empty text, the fallback text of
+//! the set, and a name after [`MAX_DECLARED_NAMES`] names. Its samples count
+//! in the fallback series. The build names each such name
+//! ([`FoldedNames`]), and the start logs them in one WARNING line
+//! ([`warn_folded_names`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::marker::PhantomData;
 
 use crate::telemetry::labels::{
@@ -16,6 +24,10 @@ use crate::{DeclaredErrorCodes, ErrorCodeLabel};
 
 /// The most names that one declared set holds.
 pub const MAX_DECLARED_NAMES: usize = 100_000;
+
+/// The most folded names that the WARNING line of a start names; the line
+/// counts the others.
+pub const MAX_FOLDED_NAMES_SHOWN: usize = 32;
 
 /// A label whose values are names declared at start.
 pub trait DeclaredLabel: 'static {
@@ -55,28 +67,110 @@ impl DeclaredLabel for ScheduleName {
     const SOURCE: DeclaredSource = DeclaredSource::ScheduleNames;
 }
 
-/// Why a declared set is refused.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum DeclaredNamesRefused {
-    /// A name is the empty text, which Prometheus reads as no label.
-    #[error("an empty name in the declared {}", .set.description())]
-    EmptyName { set: DeclaredSource },
-    /// A name is the fallback text of its set.
-    #[error(
-        "the declared {} hold {name:?}, the value that stands for a name outside them",
-        .set.description()
-    )]
-    FallbackName { set: DeclaredSource, name: String },
-    /// The set holds more than [`MAX_DECLARED_NAMES`] names.
-    #[error(
-        "the declared {} hold {count} names; the most is {bound}",
-        .set.description()
-    )]
-    TooMany {
-        set: DeclaredSource,
-        count: usize,
-        bound: usize,
-    },
+/// Why a set does not declare a name. The samples of the name count in the
+/// fallback series of its label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldReason {
+    /// The empty text, which Prometheus reads as no label.
+    EmptyName,
+    /// The fallback text of the set. As a name of its own it would give a
+    /// second series with the label set of the fallback series.
+    FallbackText,
+    /// The set holds [`MAX_DECLARED_NAMES`] names before it.
+    PastBound,
+}
+
+impl fmt::Display for FoldReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyName => formatter.write_str("an empty name"),
+            Self::FallbackText => formatter.write_str("the fallback text of the label"),
+            Self::PastBound => write!(formatter, "past the bound of {MAX_DECLARED_NAMES} names"),
+        }
+    }
+}
+
+/// A name that a declared set does not declare.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoldedName {
+    /// The set that the name was given to.
+    pub set: DeclaredSource,
+    /// The name, as given.
+    pub name: String,
+    /// Why the set does not declare it.
+    pub reason: FoldReason,
+}
+
+/// The names that the declared sets of one start do not declare: each name
+/// once per set, in the order given.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FoldedNames {
+    names: Vec<FoldedName>,
+}
+
+impl FoldedNames {
+    /// No folded name.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// The folded names, in the order given.
+    pub fn names(&self) -> &[FoldedName] {
+        &self.names
+    }
+
+    /// These names, then the names of `other`.
+    pub fn and(mut self, other: FoldedNames) -> Self {
+        self.names.extend(other.names);
+        self
+    }
+}
+
+/// One line: each folded name with its set and its reason, at most
+/// [`MAX_FOLDED_NAMES_SHOWN`] of them, then the count of the others.
+impl fmt::Display for FoldedNames {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "these names are not declared, and their samples count in the fallback series of \
+             their label: ",
+        )?;
+        for (index, folded) in self.names.iter().take(MAX_FOLDED_NAMES_SHOWN).enumerate() {
+            let separator = match index {
+                0 => "",
+                _ => "; ",
+            };
+            write!(
+                formatter,
+                "{separator}{:?} in the {} ({})",
+                folded.name,
+                folded.set.description(),
+                folded.reason
+            )?;
+        }
+        match self.names.len().saturating_sub(MAX_FOLDED_NAMES_SHOWN) {
+            0 => Ok(()),
+            others => write!(formatter, "; and {others} more"),
+        }
+    }
+}
+
+/// A declared set, or the sets of one start, and the names that it does not
+/// declare.
+#[derive(Debug, Clone)]
+pub struct Folded<T> {
+    /// The set.
+    pub declared: T,
+    /// The names that the set does not declare.
+    pub folded: FoldedNames,
+}
+
+/// Log one WARNING line that names each name of `folded`, after `subject`,
+/// the start that built the sets. No line when `folded` holds no name.
+pub fn warn_folded_names(subject: &dyn fmt::Display, folded: &FoldedNames) {
+    match folded.names() {
+        [] => {}
+        [_, ..] => tracing::warn!("{subject}: {folded}"),
+    }
 }
 
 /// What one name adds to a set that is being built.
@@ -85,8 +179,8 @@ enum NameCheck {
     New,
     /// The name is in the set already.
     Repeated,
-    /// The name is refused.
-    Refused(DeclaredNamesRefused),
+    /// The name is not declared; its samples count in the fallback series.
+    Folded(FoldReason),
 }
 
 /// The names of one declared label, fixed at start, each once.
@@ -153,17 +247,17 @@ impl<L: DeclaredLabel> DeclaredNames<L> {
     }
 
     /// The set of `names`, in their order; a repeated name counts once.
-    ///
-    /// Errors: [`DeclaredNamesRefused::EmptyName`] for an empty name,
-    /// [`DeclaredNamesRefused::FallbackName`] for the fallback text of the
-    /// set, [`DeclaredNamesRefused::TooMany`] for more than
-    /// [`MAX_DECLARED_NAMES`] names.
-    pub fn new<I, S>(names: I) -> Result<Self, DeclaredNamesRefused>
+    /// Never refuses: the empty text, the fallback text of the set, and a
+    /// name after [`MAX_DECLARED_NAMES`] names are not declared, and
+    /// `folded` names each of them once. Pure.
+    pub fn new<I, S>(names: I) -> Folded<Self>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
         let mut set = Self::none();
+        let mut folded: Vec<FoldedName> = Vec::new();
+        let mut folded_texts: HashSet<String> = HashSet::new();
         for name in names {
             let name: String = name.into();
             match set.check(&name) {
@@ -173,33 +267,35 @@ impl<L: DeclaredLabel> DeclaredNames<L> {
                     set.names.push(name);
                 }
                 NameCheck::Repeated => {}
-                NameCheck::Refused(refused) => return Err(refused),
+                NameCheck::Folded(reason) => match folded_texts.insert(name.clone()) {
+                    true => folded.push(FoldedName {
+                        set: L::SOURCE,
+                        name,
+                        reason,
+                    }),
+                    false => {}
+                },
             }
         }
-        Ok(set)
+        Folded {
+            declared: set,
+            folded: FoldedNames { names: folded },
+        }
     }
 
     /// What `name` adds to this set.
     fn check(&self, name: &str) -> NameCheck {
-        let set = L::SOURCE;
         match (
             name.is_empty(),
-            name == set.fallback(),
+            name == L::SOURCE.fallback(),
             self.positions.contains_key(name),
             self.names.len() < MAX_DECLARED_NAMES,
         ) {
-            (true, _, _, _) => NameCheck::Refused(DeclaredNamesRefused::EmptyName { set }),
-            (false, true, _, _) => NameCheck::Refused(DeclaredNamesRefused::FallbackName {
-                set,
-                name: name.to_owned(),
-            }),
+            (true, _, _, _) => NameCheck::Folded(FoldReason::EmptyName),
+            (false, true, _, _) => NameCheck::Folded(FoldReason::FallbackText),
             (false, false, true, _) => NameCheck::Repeated,
             (false, false, false, true) => NameCheck::New,
-            (false, false, false, false) => NameCheck::Refused(DeclaredNamesRefused::TooMany {
-                set,
-                count: self.names.len() + 1,
-                bound: MAX_DECLARED_NAMES,
-            }),
+            (false, false, false, false) => NameCheck::Folded(FoldReason::PastBound),
         }
     }
 
@@ -279,11 +375,11 @@ impl LabelValue for ErrorCodeValue {
 }
 
 impl ErrorCodeValues {
-    /// The values with the declared codes of every task in `sets`.
-    ///
-    /// Errors: [`DeclaredNamesRefused::TooMany`] when the tasks declare more
-    /// than [`MAX_DECLARED_NAMES`] codes together.
-    pub fn new<'a, I>(sets: I) -> Result<Self, DeclaredNamesRefused>
+    /// The values with the declared codes of every task in `sets`, each
+    /// code once, sorted by text. Never refuses: the codes after the first
+    /// [`MAX_DECLARED_NAMES`] are not declared, so they are `undeclared`,
+    /// and `folded` names each of them. Pure.
+    pub fn new<'a, I>(sets: I) -> Folded<Self>
     where
         I: IntoIterator<Item = &'a DeclaredErrorCodes>,
     {
@@ -293,13 +389,18 @@ impl ErrorCodeValues {
             .collect();
         declared.sort();
         declared.dedup();
-        match declared.len() <= MAX_DECLARED_NAMES {
-            true => Ok(Self::of_sorted(declared)),
-            false => Err(DeclaredNamesRefused::TooMany {
+        let past_bound = declared.split_off(declared.len().min(MAX_DECLARED_NAMES));
+        let folded = past_bound
+            .into_iter()
+            .map(|code| FoldedName {
                 set: DeclaredSource::UserErrorCodes,
-                count: declared.len(),
-                bound: MAX_DECLARED_NAMES,
-            }),
+                name: code,
+                reason: FoldReason::PastBound,
+            })
+            .collect();
+        Folded {
+            declared: Self::of_sorted(declared),
+            folded: FoldedNames { names: folded },
         }
     }
 

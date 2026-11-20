@@ -1868,9 +1868,11 @@ class EventStream:
 class MonitoringHandler:
     """The monitoring web app of the broker of a CoreHandle, for the FastAPI mount of
     create_monitoring_app. Starts nothing: the first call builds it. queue_names and
-    schedule_names are the label values of /metrics; other names are (unknown). A handle
-    without a child spec source raises RuntimeError; heartbeat_ms outside 1 to 3,600,000, or a
-    name that is empty or (unknown), raises ValueError.
+    schedule_names are the label values of /metrics; other names are (unknown). A name that
+    cannot be a label value of its own (empty, (unknown), or past the bound of names) counts
+    in the (unknown) series; the first call logs one WARNING line that names it. A handle
+    without a child spec source raises RuntimeError; heartbeat_ms outside 1 to 3,600,000
+    raises ValueError.
     """
     def __init__(self, handle: CoreHandle, *, actions_enabled: bool, custom_css_url: str | None, trace_link_template: str | None, client_version: str, heartbeat_ms: int, queue_names: list[str], schedule_names: list[str]) -> None: ...
     @property
@@ -3204,21 +3206,13 @@ class ListenAddressRefused:
 
 
 @final
-class FleetLabelsRefused:
-    """A queue or schedule name that cannot be a label value: it is empty or (unknown), or a
-    kind holds too many names. message names it.
-    """
-    @property
-    def message(self) -> str: ...
-
-
-@final
 class FleetMetricsServer:
     """The fleet metrics server of one CoreHandle, not run yet. It reads the fleet state at
     most once per collect interval and serves the last read at GET /metrics.
     """
     def run(self) -> FleetMetricsStopped | FleetMetricsFailed:
-        """Bind the address and serve the fleet metrics until a stop request. Main thread only: the
+        """Log one WARNING line that names each queue or schedule name that is not declared, bind
+        the address, and serve the fleet metrics until a stop request. Main thread only: the
         signal handlers run between wait slices, and there is no total bound. A failed read is a
         failure gauge in the text. Raises NotMainThread off the main thread, RuntimeError for a
         second run, and, after the run ended, the exception of a signal handler.
@@ -3280,9 +3274,11 @@ def parse_listen_address(text: str) -> ListenAddress | ListenAddressRefused:
     """
 
 
-def prepare_fleet_metrics(handle: CoreHandle, *, listen: ListenAddress, queue_names: list[str], schedule_names: list[str]) -> FleetMetricsServer | FleetLabelsRefused:
+def prepare_fleet_metrics(handle: CoreHandle, *, listen: ListenAddress, queue_names: list[str], schedule_names: list[str]) -> FleetMetricsServer:
     """The fleet metrics server of the database of handle on listen, with the queue and
-    schedule names of the app config as label values. Pure: starts no runtime.
+    schedule names of the app config as label values. A name that cannot be a label value of
+    its own (empty, (unknown), or past the bound of names) is not declared: its samples count
+    in the (unknown) series. Pure: starts no runtime.
     """
 
 

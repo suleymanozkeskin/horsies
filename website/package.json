@@ -5,12 +5,13 @@
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
-    "build": "astro build && bun scripts/check-links.mjs",
+    "build": "bun scripts/metric-reference.mjs --check && astro build && bun scripts/check-links.mjs",
     "preview": "astro preview",
     "astro": "astro",
     "glass:check": "bun scripts/check-glass-contrast.mjs",
     "glass:report": "bun scripts/check-glass-contrast.mjs --report",
     "links:check": "bun scripts/check-links.mjs",
+    "metrics:reference": "bun scripts/metric-reference.mjs",
     "test": "bun test ./scripts"
   },
   "dependencies": {

@@ -1,7 +1,7 @@
 ---
 title: CLI Reference
 section: python
-summary: Command-line interface for running workers, the scheduler, and the monitoring web UI.
+summary: Command-line interface for running workers, the scheduler, the fleet metrics server and the monitoring web UI.
 related: [../workers/worker-architecture, ../scheduling/scheduler-overview]
 tags: [cli, worker, scheduler, commands]
 ---
@@ -28,8 +28,11 @@ horsies worker <module> --profile NAME [OPTIONS]
 | ------ | ------- | ----------- |
 | `--profile NAME` | (required) | Name of the worker profile in `AppConfig.worker_profiles`. The profile holds the settings of the worker: children, recycling, claim limits, drain timeout and preload. See [Worker Profiles](/horsies/workers/worker-profiles/) |
 | `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
+| `--metrics-listen HOST:PORT` | none | Serve the worker metrics (`GET /metrics`) and the health probes (`GET /livez`, `GET /readyz`) on `HOST:PORT`, or `[IPV6]:PORT`. There is no default: without it the worker serves no endpoint. See [Metrics](/horsies/observability/metrics/) |
 
 There is no default profile. A missing or unknown `--profile` exits with code 1 before the app check and before any child starts. The message lists the defined profile names.
+
+A `--metrics-listen` value that does not parse exits with code 2 before the worker starts. An address that does not bind does not stop the worker: the endpoint binds again with a backoff.
 
 The flags `--processes`, `--max-claim-batch`, `--max-claim-per-worker`, `--max-tasks-per-child`, `--max-memory-per-child-mb`, `--drain-timeout` and `--child-preload` were removed in 0.7.0. Each one exits with code 2 and names the profile field that replaces it. See [Migrating to 0.7.0](/horsies/migrations/migration-to-0-7-0/).
 
@@ -47,6 +50,9 @@ horsies worker myapp.instance:app --profile default --loglevel=DEBUG
 
 # Using file path (also supported)
 horsies worker app/configs/instance.py:app --profile default
+
+# Serve the worker metrics and the health probes on port 9464
+horsies worker myapp.instance:app --profile default --metrics-listen 0.0.0.0:9464
 ```
 
 At boot, before any child starts, the worker logs the settings of the profile, and warns when the per-child memory limits add up to more than the memory that the worker can use (the container limit, or the host RAM), or when one worker opens more Postgres connections itself than the server has usable slots. See [Validation](/horsies/workers/worker-profiles/#validation).
@@ -168,6 +174,39 @@ horsies web \
 ```
 
 The bind rules, the trusted-header contract and the PgBouncer rule are in [Web UI Deployment & Authentication](/horsies/monitoring/web-ui-deployment/#standalone-cli).
+
+### horsies metrics
+
+Serve the fleet metrics of the app's database at `GET /metrics`, in the Prometheus text format. What the metrics hold and when the command reads them: [Fleet Collector](/horsies/observability/fleet-collector/).
+
+```bash
+horsies metrics <module> --listen HOST:PORT [OPTIONS]
+```
+
+**Arguments:**
+
+| Argument | Description |
+| -------- | ----------- |
+| `module` | Dotted module path or file path containing Horsies instance |
+
+**Options:**
+
+| Option | Default | Description |
+| ------ | ------- | ----------- |
+| `--listen HOST:PORT` | required | The address to serve on: `HOST:PORT`, or `[IPV6]:PORT`. The port is 1 to 65535. There is no default |
+| `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
+
+**Examples:**
+
+```bash
+# Serve on all interfaces, port 9465
+horsies metrics myapp.instance:app --listen 0.0.0.0:9465
+
+# Serve on the IPv6 loopback address
+horsies metrics myapp.instance:app --listen '[::1]:9465'
+```
+
+An address that does not parse exits with code 2. The command exits with code 0 at `SIGTERM` or `SIGINT`, and with code 1 when the app cannot be loaded, the broker does not build, or the address does not bind. A database that does not answer does not end it.
 
 ### horsies get-docs
 
@@ -303,7 +342,7 @@ Requirements:
 
 ## Process Signals
 
-Both commands handle graceful shutdown:
+`horsies worker`, `horsies scheduler` and `horsies metrics` handle graceful shutdown:
 
 | Signal | Behavior |
 | ------ | -------- |

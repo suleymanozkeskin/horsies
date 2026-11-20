@@ -35,7 +35,7 @@ fn monitoring_routes(app: &Horsies) -> Result<Router, Box<dyn std::error::Error>
 }
 ```
 
-`router(&app, config, policy) -> axum::Router` serves every path of the mount: the page and its assets, `/api/...`, and the event stream `GET /api/events`.
+`router(&app, config, policy) -> axum::Router` serves every path of the mount: the page and its assets, `/api/...`, the event stream `GET /api/events`, and `GET /metrics`, the fleet metrics of the app's database behind the view verdict. The `queue` and `schedule` label values of `/metrics` are the queues and the schedules of the app's config. See [Fleet Collector](/horsies/observability/fleet-collector/).
 
 - Building the router does no I/O. The core handler is built at the first request, on the app's handle. A request whose broker cannot be built is answered 503 with the cause; the next request tries again.
 - The mount runs no schema step. For a process that only monitors, build the app with `Horsies::with_schema_mode(config, SchemaMode::ObserveOnly)`. See [App Config](/horsies/rust/configuration/app-config/#schema-modes).

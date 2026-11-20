@@ -375,7 +375,6 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<worker::StopRequested>()?;
     module.add_class::<fleet_metrics::ListenAddress>()?;
     module.add_class::<fleet_metrics::ListenAddressRefused>()?;
-    module.add_class::<fleet_metrics::FleetLabelsRefused>()?;
     module.add_class::<fleet_metrics::FleetMetricsServer>()?;
     module.add_class::<fleet_metrics::FleetMetricsStopped>()?;
     module.add_class::<fleet_metrics::FleetMetricsFailed>()?;
