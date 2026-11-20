@@ -37,6 +37,7 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
+from horsies.core.telemetry.attempt_span import BodyEndOrder, BodyFirst
 from horsies.core.worker import child_main, child_runner, shared_child, shared_runner
 from horsies.core.worker.child_inbox import ParentFrameInbox
 from horsies.core.worker.child_frames import (
@@ -283,9 +284,14 @@ def steps() -> Iterator[_Steps]:
         yield replaced
 
 
+def _body_first() -> BodyEndOrder:
+    """The order of a run whose steps end before its deadline."""
+    return BodyFirst()
+
+
 def _run(frame: core.SharedRunFrame) -> SeatReturn:
     with patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)):
-        return asyncio.run(shared_runner.run_seat_task(frame))
+        return asyncio.run(shared_runner.run_seat_task(frame, _body_first))
 
 
 def _set_running(seat_return: SeatReturn) -> ResultEnvelope:
@@ -422,7 +428,7 @@ def test_a_cancel_of_the_body_ends_the_run(steps: _Steps) -> None:
 
     async def cancel_after_start() -> SeatReturn:
         run = asyncio.ensure_future(
-            shared_runner.run_seat_task(_frame('seat_waits')),
+            shared_runner.run_seat_task(_frame('seat_waits'), _body_first),
         )
         await asyncio.wait_for(STARTED.wait(), SCENARIO_TIMEOUT_S)
         run.cancel()
@@ -508,8 +514,12 @@ class _RealSeatRunner:
     """``StartedSeats`` that runs the real ``run_seat_task`` and the real
     ``mark_seat_finalizing``, over the patched steps."""
 
-    async def run(self, frame: core.SharedRunFrame) -> SeatReturn:
-        return await shared_runner.run_seat_task(frame)
+    async def run(
+        self,
+        frame: core.SharedRunFrame,
+        body_end: Callable[[], BodyEndOrder],
+    ) -> SeatReturn:
+        return await shared_runner.run_seat_task(frame, body_end)
 
     async def mark_finalizing(self, frame: core.SharedRunFrame) -> MarkerEnd:
         return await shared_runner.mark_seat_finalizing(frame)

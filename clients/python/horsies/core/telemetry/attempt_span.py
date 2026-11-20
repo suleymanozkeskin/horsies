@@ -19,8 +19,12 @@ both. With `NoAttemptSpans` they set the log context only.
 Telemetry never changes the outcome of a run: a recorder (the user's SDK)
 that raises when the span opens leaves the run with no span, and one that
 raises later is logged once per process. A span covers what the body of the
-run returned. A run that the worker ends (a timeout, a kill, a lost child)
-is not ended here.
+run returned, or the timeout of a run whose deadline came first in its
+child: each body place gives the order of the two (`BodyEndOrder`), read
+when the steps return, and a `DeadlineFirst` ends the span with
+`RunTimedOut` (`TASK_TIMEOUT`), the end that the child reports. A run that
+the worker ends (an isolated timeout, a kill, a lost child) is not ended
+here: the handler child of the worker makes its span.
 
 `flush_attempt_spans_at_stop` flushes the spans of the child at its stop,
 within `ATTEMPT_SPAN_FLUSH_BOUND_S`.
@@ -96,8 +100,42 @@ class ScopeRaised:
     exception: BaseException
 
 
-type AttemptEnd = ResultOutcome | BodyInterrupted | ScopeRaised
+@dataclass(frozen=True, slots=True)
+class RunTimedOut:
+    """The deadline of the run came before the end of its body: the run
+    ends `TASK_TIMEOUT`, and what the body returned is dropped."""
+
+
+RUN_TIMED_OUT: Final = RunTimedOut()
+"""The end of the span of a run whose deadline came first."""
+
+type AttemptEnd = ResultOutcome | BodyInterrupted | RunTimedOut | ScopeRaised
 """How the steps of a run ended, for its span."""
+
+
+@dataclass(frozen=True, slots=True)
+class DeadlineFirst:
+    """The deadline of the run fired in its child before the steps of the
+    run returned: the run ends with the timeout."""
+
+
+@dataclass(frozen=True, slots=True)
+class BodyFirst:
+    """The steps of the run returned before its deadline fired in its
+    child, or the child holds no deadline of the run: the run ends with
+    what the steps returned."""
+
+
+type BodyEndOrder = DeadlineFirst | BodyFirst
+"""Which came first in the child: the deadline of the run, or the end of its
+steps."""
+
+
+def isolated_body_end() -> BodyEndOrder:
+    """The order of an isolated run: always `BodyFirst`. The deadline of an
+    isolated run is the worker's: it kills the child, and the span never
+    ends. Pure."""
+    return BodyFirst()
 
 
 class OpenAttemptSpan(Protocol):
@@ -212,12 +250,16 @@ def current_attempt_spans() -> AttemptSpans:
 def run_in_attempt_span(
     subject: AttemptSubject,
     steps: Callable[[], EncodedResult | BodyInterrupted],
+    body_end: Callable[[], BodyEndOrder],
 ) -> ResultEnvelope | BodyInterrupted:
     """Run `steps` as the attempt `subject`: in its log context and, with
-    `OtelAttemptSpans`, inside its span, current on the calling thread. The
-    span ends with the outcome of the steps. Returns what the steps
-    returned, with the envelope only. An exception of `steps` ends the span
-    with `ScopeRaised` and propagates."""
+    `OtelAttemptSpans`, inside its span, current on the calling thread.
+    When the steps return, `body_end` gives which came first, the deadline
+    of the run or the end of its steps; it is called once, with tracing on
+    or off. The span ends with `RunTimedOut` after `DeadlineFirst`, else
+    with the outcome of the steps. Returns what the steps returned, with
+    the envelope only. An exception of `steps` ends the span with
+    `ScopeRaised` and propagates; `body_end` is not called then."""
     span = _open(subject)
     task = enter_running_task(_running_task(subject, span))
     current = _make_current(span)
@@ -226,18 +268,21 @@ def run_in_attempt_span(
     except BaseException as raised:
         _leave(span, current, task, ScopeRaised(raised))
         raise
-    _leave(span, current, task, _end_of(ran))
+    _leave(span, current, task, _span_end(ran, body_end()))
     return _envelope_of(ran)
 
 
 async def run_in_attempt_span_async(
     subject: AttemptSubject,
     steps: Callable[[], Awaitable[EncodedResult | BodyInterrupted]],
+    body_end: Callable[[], BodyEndOrder],
 ) -> ResultEnvelope | BodyInterrupted:
     """`run_in_attempt_span` for steps that are awaited. Call it inside the
     task that runs the body: the log context and the span are set in the
     context of that task, so each task that the body starts copies them, and
-    no other task sees them."""
+    no other task sees them. Nothing is awaited after the steps, so the
+    order that `body_end` gives is read in the same step of the loop as
+    the end of the steps."""
     span = _open(subject)
     task = enter_running_task(_running_task(subject, span))
     current = _make_current(span)
@@ -246,7 +291,7 @@ async def run_in_attempt_span_async(
     except BaseException as raised:
         _leave(span, current, task, ScopeRaised(raised))
         raise
-    _leave(span, current, task, _end_of(ran))
+    _leave(span, current, task, _span_end(ran, body_end()))
     return _envelope_of(ran)
 
 
@@ -348,6 +393,19 @@ def _close(span: OpenAttemptSpan | _NoSpan, current: _SpanContext, end: AttemptE
                 _RECORDER_FAILURES.report('detach', failure)
         case _NoSpan():
             pass
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _span_end(ran: EncodedResult | BodyInterrupted, order: BodyEndOrder) -> AttemptEnd:
+    """The end of a span whose steps returned `ran`, in the order `order`:
+    the timeout when the deadline came first, else the outcome of the
+    steps. Pure."""
+    match order:
+        case DeadlineFirst():
+            return RUN_TIMED_OUT
+        case BodyFirst():
+            return _end_of(ran)
         case _ as unreachable:
             assert_never(unreachable)
 

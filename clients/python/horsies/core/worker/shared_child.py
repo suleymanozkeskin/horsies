@@ -81,6 +81,7 @@ from typing import Any, Final, NoReturn, Protocol, assert_never
 from horsies import _core as core
 from horsies.core.logging import get_logger
 from horsies.core.models.boot_failure import ThreadStartRefused
+from horsies.core.telemetry.attempt_span import BodyEndOrder, BodyFirst, DeadlineFirst
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_inbox import NoFrameYet, ParentFrameInbox
 from horsies.core.worker.child_main import (
@@ -183,9 +184,15 @@ class NoMarker:
 class StartedSeats(Protocol):
     """The seats of a shared async child after its start steps."""
 
-    async def run(self, frame: core.SharedRunFrame) -> SeatReturn:
+    async def run(
+        self,
+        frame: core.SharedRunFrame,
+        body_end: Callable[[], BodyEndOrder],
+    ) -> SeatReturn:
         """Run the task of ``frame`` on a seat, up to its result. Writes no
-        finalizing marker.
+        finalizing marker. ``body_end`` gives, when the steps of the run
+        return inside its attempt span, whether its deadline came first
+        (``SeatLoop._body_end``).
 
         A cancel of the calling task ends the run: the cancel propagates, or
         the run returns, whichever the task body does. Any other exception
@@ -601,7 +608,7 @@ class SeatLoop:
         context = contextvars.copy_context()
         _ = context.run(RUN_MARK.set, mark)
         task = self._loop.create_task(
-            started.run(frame),
+            started.run(frame, functools.partial(self._body_end, frame.dispatch)),
             name=f'horsies-seat-{frame.dispatch}',
             context=context,
         )
@@ -647,6 +654,29 @@ class SeatLoop:
                 ScanWhen.RECORD_EMPTY,
             ).is_empty()
         )
+
+    def _body_end(self, dispatch: int) -> BodyEndOrder:
+        """Whether the deadline of run ``dispatch`` came before the end of
+        its steps, read when the steps return in the seat task
+        (``run_in_attempt_span_async``): ``DeadlineFirst`` once ``_fire``
+        cancelled the task, the run whose end is ``SeatTimedOut``
+        (``_end_of``). The seat task ends in the same step of the loop as
+        its steps, so ``_fire`` cannot come between the two: a deadline
+        that fires later finds the task done and keeps what it returned."""
+        match self._seats[dispatch].stop:
+            case _Stop.CANCELLED | _Stop.SECOND_CANCEL | _Stop.STUCK:
+                return DeadlineFirst()
+            case (
+                _Stop.NO_DEADLINE
+                | _Stop.BEFORE_DEADLINE
+                | _LeftoverGrace()
+                | _LeftoverCancel()
+                | _LeftoverStuck()
+                | _Finalizing()
+            ):
+                return BodyFirst()
+            case _ as unreachable:
+                assert_never(unreachable)
 
     def _fire(self, dispatch: int) -> None:
         """The deadline of run ``dispatch`` (T): cancel its task, report the

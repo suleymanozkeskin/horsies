@@ -111,6 +111,7 @@ from horsies.core.worker.run_return import (
 from horsies.core.telemetry.attempt_span import (
     AttemptSubject,
     attempt_spans_of,
+    isolated_body_end,
     run_in_attempt_span,
     use_attempt_spans,
 )
@@ -1743,7 +1744,8 @@ def _run_isolated_after_running(
     span and the log context of ``attempt`` (``run_in_attempt_span``). The
     span is current on this thread, so a ``def`` body and the coroutine of
     an ``async def`` body, which the task loop runs in a copy of this
-    context, see it."""
+    context, see it. The deadline of an isolated run is the worker's
+    (``isolated_body_end``): the span ends with what the steps returned."""
     return run_in_attempt_span(
         attempt,
         lambda: _isolated_steps(
@@ -1753,6 +1755,7 @@ def _run_isolated_after_running(
             work,
             task_loop,
         ),
+        isolated_body_end,
     )
 
 

@@ -361,7 +361,9 @@ def set_up_child_tracing() -> None:
   `horsies.task.attempt` (from 1), `horsies.task.execution`,
   `horsies.queue`, `horsies.worker.id`, `messaging.*`; for a workflow task
   `horsies.workflow.id`, `horsies.workflow.node`, `horsies.workflow.root_id`.
-  Status: unset for a value; ERROR with `error.type` = the error code.
+  Status: unset for a value; ERROR with `error.type` = the error code;
+  ERROR with `TASK_TIMEOUT` when the deadline of a shared run fired in its
+  child before the body ended (the end that the child reports).
 - An isolated task that the worker kills at `timeout_ms`, a blocked-loop
   kill and a lost child have no attempt span. A child flushes the tracer
   provider for at most 1 s at its stop.
