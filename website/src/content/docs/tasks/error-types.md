@@ -127,8 +127,8 @@ When the core ran the call and the call failed, `exception` is the core's class 
 
 | Variant | `code` | Fields besides `message` | `retryable` | After the failure |
 | ------- | ------ | ------------------------ | ----------- | ----------------- |
-| `BrokerOperationFailed` | one of the nine operation codes | `exception` | driver classification | A read changed nothing. A cleanup may have finished part of its rows |
-| `BrokerEnqueueFailed` | `ENQUEUE_FAILED` | `exception` | driver classification | The row may or may not exist. An enqueue again with the same task id and payload returns the existing task |
+| `BrokerOperationFailed` | one of the nine operation codes | `exception` | the core's classification | A read changed nothing. A cleanup may have finished part of its rows |
+| `BrokerEnqueueFailed` | `ENQUEUE_FAILED` | `exception` | the core's classification | The row may or may not exist. An enqueue again with the same task id and payload returns the existing task |
 | `BrokerPayloadMismatch` | `PAYLOAD_MISMATCH` | – | `False` | Nothing was written |
 | `BrokerIdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `owner_task_id` | `False` | Nothing was written |
 | `BrokerNotAttached` | `NO_BROKER` | – | `False` | Nothing ran |
