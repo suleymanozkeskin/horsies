@@ -35,7 +35,7 @@ use super::defects::{
     count_defect, AfterDefect, CatchPanic, GenerationEnd, Served, SlotDefect, SlotDefects,
     TasksFinished,
 };
-use super::dispatch::{AttemptEnd, AttemptLog, NotRunCause, TimeoutCancel};
+use super::dispatch::{AttemptEnd, AttemptLog, BodyReturn, NotRunCause, TimeoutCancel};
 use super::pool::{Answer, ExitNotSeen, MemoryLimit, PoolShared, QueuedRun, TaskLimit};
 use super::replacement::{reason_of_loss, tell_replaced, ChildLeave, GenerationChild};
 use super::route::IsolatedDeadline;
@@ -45,8 +45,8 @@ use crate::broker::child_writes::{longer, FINALIZING_MARKER_END};
 use crate::db::CANCEL_REQUEST_BOUND;
 use crate::telemetry::labels::ReplaceReason;
 use crate::worker::executor::protocol::{
-    BodyEnd, ChildAfterFrame, ChildFrame, ParentFrame, ProcessId, RssReading, RunEnd, RunFrame,
-    TaskTimeoutMs, ISOLATED_LEFTOVER_GRACE, STUCK_REPORT_DELAY,
+    ChildAfterFrame, ChildFrame, ParentFrame, ProcessId, RssReading, RunFrame, TaskTimeoutMs,
+    ISOLATED_LEFTOVER_GRACE, STUCK_REPORT_DELAY,
 };
 use crate::worker::executor::supervisor::{
     log_core_stopped_child, ChildChannel, ChildExit, ChildLost, EndWithoutTask, ExitState,
@@ -627,7 +627,7 @@ async fn run_one(
             if result.task_id == task_id =>
         {
             drop(held);
-            answer.send(AttemptEnd::Reported(result.end));
+            answer.send(AttemptEnd::reported(result.end, result.started_at));
             match result.child {
                 ChildAfterFrame::ServesOn => AfterRun::Serve { rss: result.rss },
                 ChildAfterFrame::EndsItself => AfterRun::EndsItself,
@@ -641,16 +641,11 @@ async fn run_one(
                 left = returned.left.count().get(),
                 "the body returned with work left on its loop; the deadline no longer applies",
             );
-            end_after_return(
-                shared,
-                channel,
-                task_id,
-                log,
-                returned.returned,
-                held,
-                answer,
-            )
-            .await
+            let body_return = BodyReturn {
+                end: returned.returned,
+                started_at: returned.started_at,
+            };
+            end_after_return(shared, channel, task_id, log, body_return, held, answer).await
         }
         FirstAnswer::Wait(FrameWait::Frame(other)) => {
             tracing::error!(task_id = %task_id, attempt = log.attempt.get(), trace_id = log.trace_id.log_field(), frame = ?other, "an isolated child sent a frame out of turn");
@@ -791,19 +786,19 @@ async fn exit_not_seen(
 }
 
 /// After a return with work left: wait for the report of that work, bounded
-/// by [`ISOLATED_LEFTOVER_BACKSTOP`]. What the body returned is the end at
-/// every end of the child whose exit is seen. The task finished: its body
-/// returned.
+/// by [`ISOLATED_LEFTOVER_BACKSTOP`]. What the body returned, with the start
+/// of its attempt, is the end at every end of the child whose exit is seen.
+/// The task finished: its body returned.
 async fn end_after_return(
     shared: &PoolShared,
     channel: &mut ChildChannel,
     task_id: uuid::Uuid,
     log: AttemptLog,
-    returned: BodyEnd,
+    returned: BodyReturn,
     held: HeldDispatch,
     answer: &mut TaskAnswer,
 ) -> AfterRun {
-    let returned_end = AttemptEnd::Reported(RunEnd::from(returned));
+    let returned_end = AttemptEnd::returned(returned);
     answer.body_returned(returned_end.clone());
     let until = Some(Instant::now() + ISOLATED_LEFTOVER_BACKSTOP);
     match first_answer(shared, channel, until).await {

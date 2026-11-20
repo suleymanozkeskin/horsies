@@ -4183,9 +4183,9 @@ mod tests {
             crate::core::config::payload::PayloadPolicy::default(),
             crate::worker::executor::slots::test_successes(broker, "worker-1"),
         );
-        let settled = writer
-            .settle(&claimed.task, AttemptEnd::Reported(end.clone()))
-            .await;
+        // The in-process run reports no start; the writer does not read it.
+        let reported = AttemptEnd::reported(end.clone(), crate::events::AttemptStart::NotReported);
+        let settled = writer.settle(&claimed.task, reported).await;
         (end, settled)
     }
 

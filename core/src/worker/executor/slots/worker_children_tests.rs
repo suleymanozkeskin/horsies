@@ -4,7 +4,7 @@
 //! `clients/python/tests/unit/test_claim_plan.py::TestClaimPassWithClasses::test_the_pass_sends_the_budgets_and_the_routes`).
 
 use super::scripted::{
-    act_on_runs, boot_any_kind, idle_child_of_any_kind, ok_envelope, result_frame, run_ref, send,
+    act_on_runs, boot_any_kind, idle_child_of_any_kind, reported, result_frame, run_ref, send,
     shared_result, shell, task, ANSWER_WAIT, SPAWNER_STOP_WAIT, STATE_WAIT, WORKER_ID,
 };
 use super::*;
@@ -12,7 +12,7 @@ use crate::core::config::worker_profile::WorkerProfile;
 use crate::worker::children::{ChildLaunch, PoolFacts, WorkerChildren};
 use crate::worker::executor::placement::CpuPlacement;
 use crate::worker::executor::protocol::{
-    ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl, RunEnd, TaskInputText,
+    ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl, TaskInputText,
 };
 use crate::worker::executor::supervisor::{ChildCommand, Spawner};
 use crate::worker::retry::read_stored_options;
@@ -128,12 +128,7 @@ async fn each_route_goes_to_the_pool_of_its_kind() {
             tokio::time::timeout(ANSWER_WAIT, crate::worker::children::attempt_end(submitted))
                 .await
                 .expect("the end of the task comes within the bound");
-        assert_eq!(
-            end,
-            AttemptEnd::Reported(RunEnd::Result(ok_envelope(value))),
-            "{}",
-            task.execution
-        );
+        assert_eq!(end, reported(value), "{}", task.execution);
     }
 
     let _ = children.stop(STATE_WAIT).await;

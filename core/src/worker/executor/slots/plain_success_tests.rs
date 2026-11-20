@@ -12,8 +12,9 @@ use crate::broker::lifecycle_tests::support::{single_session_pool, WireProxy};
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::db::{PoolSizing, Reserve, WORKER_RESERVED_CONNECTIONS};
+use crate::events::AttemptStart;
 use crate::test_support::sql::{self, TestPool};
-use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd, StopReason};
+use crate::worker::executor::protocol::{ResultEnvelopeText, StopReason};
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
 use crate::worker::finalize_batch::{FinalizeBatcher, FlusherBound};
 use crate::worker::retry::read_stored_options;
@@ -105,9 +106,14 @@ async fn live_status(pool: &TestPool, task_id: Uuid) -> Option<String> {
 }
 
 fn reported_value() -> AttemptEnd {
-    AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
-        r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned(),
-    )))
+    AttemptEnd::Result {
+        envelope: ResultEnvelopeText::new(
+            r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned(),
+        ),
+        start: AttemptStart::Reported {
+            started_at: DateTime::<Utc>::UNIX_EPOCH,
+        },
+    }
 }
 
 /// Two plain successes settled at once both end through the batcher: each
@@ -414,7 +420,7 @@ async fn a_stop_for_a_node_not_linked_sends_no_statement() {
     let settled = writer
         .settle(
             &task,
-            AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(StopReason::NodeNotLinked)),
+            AttemptEnd::StoppedBeforeRunning(StopReason::NodeNotLinked),
         )
         .await;
     let round_trips = proxy.round_trips();

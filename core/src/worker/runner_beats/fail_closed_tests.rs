@@ -1192,10 +1192,7 @@ async fn the_pool_holds_a_task_from_the_send_to_the_answer() {
         (vec![claimed.task_id], vec![claimed.claimed_at])
     );
     let end = answer(receiver).await;
-    assert!(
-        matches!(end, AttemptEnd::Reported(RunEnd::Result(_))),
-        "{end:?}"
-    );
+    assert!(matches!(end, AttemptEnd::Result { .. }), "{end:?}");
     assert_eq!(live.snapshot(), nothing_held());
     let _report = pool.stop(Duration::from_secs(5)).await;
     let _spawner = spawner.stop(WAIT);
