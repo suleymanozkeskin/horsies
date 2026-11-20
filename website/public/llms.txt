@@ -37,6 +37,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - app.list_tasks() -> list[str]
 - app.check(live=False) -> list[HorsiesError] (phased validation)
 - app.get_broker() -> PostgresBroker
+- @app.on_event(AttemptEnded) -> registers a def or an async def handler of one event type of horsies.telemetry; the worker runs it in its handler child (refusals HRS-222 to HRS-226)
+- @app.on_handler_child_start -> sync hook, once at the boot of the handler child (HRS-214 for an async hook)
 
 ### AppConfig
 - queue_mode: QueueMode (DEFAULT or CUSTOM)
@@ -659,6 +661,11 @@ Config/broker (HRS-200-HRS-299):
 - HRS-219 CHECK_WORKER_CONNECTIONS (check(live=True): one worker of a profile opens more Postgres connections itself than the server allows, or the limit could not be read; not compared, but stated in the error: task code that sends opens the task_send_pool of its child kind in its child per event loop it sends from)
 - HRS-220 CONFIG_OTEL_API_MISSING (AppConfig(tracing=OtelTracing()) and the OpenTelemetry API is not installed; install horsies[otel])
 - HRS-221 CONFIG_INVALID_TRACE_LINK (a TraceLinkTemplate of MonitoringUIConfig that the core refuses: not an http or https URL with a host, not exactly one {trace_id}, another brace, a byte outside printable ASCII, or more than 2,048 bytes)
+- HRS-222 EVENT_HANDLER_UNKNOWN_EVENT_TYPE (app.on_event(value): value is not an event type of horsies.telemetry)
+- HRS-223 EVENT_HANDLER_INVALID_SIGNATURE (the handler is not a function or a bound method, is a generator function, does not take one event, or annotates its event parameter with another event type)
+- HRS-224 EVENT_HANDLER_DUPLICATE_NAME (an earlier handler has the same name, module.qualname of its function)
+- HRS-225 EVENT_HANDLER_INVALID_NAME (the function has no module name, or its name is longer than 255 characters)
+- HRS-226 EVENT_HANDLER_LIMIT (the app has 32 event handlers already)
 Registry (HRS-300-HRS-399):
 <!-- members: ErrorCode part -->
 - HRS-300 TASK_NOT_REGISTERED
@@ -807,6 +814,7 @@ Each entry: Title -- summary -> URL
 - Concurrency -- worker/queue/cluster limits -> /horsies/workers/concurrency/
 - Heartbeats & Recovery -- crash detection -> /horsies/workers/heartbeats-recovery/
 - Child-Process Hooks -- per-child-process setup with @app.on_child_process_start -> /horsies/workers/child-process-hooks/
+- Event Handlers -- @app.on_event(EventType) runs a def or an async def function for each lifecycle event of one type in the handler child of the worker; @app.on_handler_child_start; delivery, counts and failures -> /horsies/workers/event-handlers/
 
 ### Monitoring
 - Worker & Database Health -- what the database ping, the worker ping, worker states, class coverage and the class report answer; snapshot fields; embedded health payloads -> /horsies/monitoring/worker-health/
@@ -938,6 +946,7 @@ remote PostgreSQL, managed PostgreSQL, connection budget, PgBouncer pooling, hea
 retention class, retention_class_key, queue_retention, retention_periods, partitions -> /horsies/configuration/retention-config/
 RetentionConfig -> /horsies/configuration/app-config/#retention-configuration
 on_child_process_start, child-process hook, per-child setup -> /horsies/workers/child-process-hooks/
+on_event, on_handler_child_start, event handler, handler child, horsies.telemetry, AttemptEnded -> /horsies/workers/event-handlers/
 liveness, worker ping, class coverage, slot health, snapshot fields -> /horsies/monitoring/worker-health/
 ping_database, ping_workers, WorkerPong, WorkerStateSnapshot, ClassCoverage, ClassReport -> /horsies/monitoring/health-reads/
 web UI, dashboard -> /horsies/monitoring/web-ui-overview/

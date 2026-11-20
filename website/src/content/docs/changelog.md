@@ -101,6 +101,30 @@ before you upgrade a 0.7 deployment.
   a handler of your own takes it, with `JsonLogsFormatter` for the JSON
   lines.
 
+- **Event handlers: `@app.on_event(EventType)`.** It registers a `def` or an
+  `async def` function for one event type of the new module
+  `horsies.telemetry` (`TaskClaimed`, `ClaimReleased`, `AttemptPlaced`,
+  `AttemptNotStarted`, `AttemptEnded`, `AttemptRecorded`, `TaskRecovered`,
+  `ChildStarted`, `ChildReplaced`, `SlotDown`, `SlotRecovered`). A worker
+  runs the handlers in its handler child, a process apart from the task
+  children: one thread and one queue of 10,000 events per handler, an
+  `async def` handler on the event loop of its thread. A full queue drops
+  the event for that handler only; a handler that raises is logged with its
+  name and counted, and gets the next event. The worker counts
+  `horsies.telemetry.handler.errors{handler}` and
+  `horsies.telemetry.handler.dropped{handler}`; the handler name is
+  `module.qualname` of the function. The decorator refuses a value that is
+  not an event type (`HRS-222`, new `EVENT_HANDLER_UNKNOWN_EVENT_TYPE`), a
+  handler that cannot take one event (`HRS-223`, new
+  `EVENT_HANDLER_INVALID_SIGNATURE`), a name that an earlier handler has
+  (`HRS-224`, new `EVENT_HANDLER_DUPLICATE_NAME`), a function with no module
+  name or a name over 255 characters (`HRS-225`, new
+  `EVENT_HANDLER_INVALID_NAME`), and a 33rd handler (`HRS-226`, new
+  `EVENT_HANDLER_LIMIT`). `@app.on_handler_child_start` registers a sync
+  hook that runs once at the boot of the handler child, for at most 10 s; a
+  hook that raises or runs longer leaves the handler child down, and the
+  worker runs its tasks on (`HRS-214` for an async hook).
+
 - **The trace id on the monitoring reads.** `LeafTaskInfo.trace_id` (the
   task detail and the workflow node detail) is the trace id of the span that
   sent the task, live and in history, and `WorkflowRunDetail.trace_id` the
