@@ -40,6 +40,7 @@ __all__ = [
     'RunTraceCarrier',
     'RunTraceNoCarrier',
     'RunTrace',
+    'WorkflowPlace',
     'AttemptEndReportedByChild',
     'AttemptEndDecidedByWorker',
     'AttemptEndNotKnown',
@@ -79,7 +80,7 @@ __all__ = [
     'decode_event',
 ]
 
-EVENT_CONTRACT_VERSION: Final = 4
+EVENT_CONTRACT_VERSION: Final = 5
 """The version of the event contract that this module reads."""
 
 
@@ -266,6 +267,16 @@ type RunTrace = (
 """The stored trace carrier of a task."""
 
 
+type WorkflowPlace = Literal['NOT_IN_WORKFLOW', 'WORKFLOW_NOT_KNOWN']
+"""What the worker knows of the workflow node that links a task, when it
+ends an attempt of the task itself.
+
+`NOT_IN_WORKFLOW`: No workflow node links the task: the claim read a plain task.
+
+`WORKFLOW_NOT_KNOWN`: A workflow node links the task. The worker does not know the workflow id, the node index or the root workflow: the start write of the child read them, and the child reported no end.
+"""
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AttemptEndReportedByChild:
     """The child reported how the run ended."""
@@ -278,7 +289,8 @@ class AttemptEndReportedByChild:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AttemptEndDecidedByWorker:
     """The worker ended the attempt: the outcome is `FAILED`, with the code
-    of `reason`.
+    of `reason`. The internal fields are the facts of the span of this
+    attempt that the handler child makes.
     """
 
     reason: WorkerDecision
@@ -289,16 +301,29 @@ class AttemptEndDecidedByWorker:
     of the worker is `NotReported`.
     """
 
-    trace: RunTrace = field(repr=False)
-    """Internal: the trace carrier of the task, for the span of this
-    attempt that the handler child makes.
+    error_code: BuiltInTaskCode = field(repr=False)
+    """Internal: the code that the attempt row records for `reason`:
+    the `error.type` of the span.
     """
+
+    trace: RunTrace = field(repr=False)
+    """Internal: the trace carrier of the task, the parent of the span."""
 
     placed_at: datetime = field(repr=False)
     """Internal: when the task reached its child (wall clock of the
-    worker). The span that the handler child makes starts here when
-    `start` is `NotReported`.
+    worker). The span starts here when `start` is `NotReported`.
     """
+
+    child_kind: Execution = field(repr=False)
+    """Internal: the kind of the child that ran the attempt, the
+    `horsies.task.execution` of the span.
+    """
+
+    worker_id: str = field(repr=False)
+    """Internal: the worker that claimed the task and ended the attempt."""
+
+    workflow: WorkflowPlace = field(repr=False)
+    """Internal: what the worker knows of the workflow node of the task."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1250,6 +1275,19 @@ def _read_run_trace_no_carrier(fields: list[object], here: _At) -> Result[RunTra
     return Ok(RunTraceNoCarrier())
 
 
+def _read_workflow_place(value: object, at: _At) -> Result[WorkflowPlace, MalformedEvent]:
+    """A value of `WorkflowPlace`."""
+    match value:
+        case 'NOT_IN_WORKFLOW':
+            return Ok('NOT_IN_WORKFLOW')
+        case 'WORKFLOW_NOT_KNOWN':
+            return Ok('WORKFLOW_NOT_KNOWN')
+        case str():
+            return at.refuse(f'WorkflowPlace has no value {value[:_MAX_REFUSED_NAME_CHARS]!r}')
+        case _:
+            return at.refuse('expected a JSON string')
+
+
 def _read_attempt_end(value: object, at: _At) -> Result[AttemptEnd, MalformedEvent]:
     """A value of `AttemptEnd`: `[variant tag, field, ...]`."""
     match _read_variant(value, at, 'AttemptEnd'):
@@ -1302,12 +1340,16 @@ def _read_attempt_end_decided_by_worker(fields: list[object], here: _At) -> Resu
         case [
             wire_reason,
             wire_start,
+            wire_error_code,
             wire_trace,
             wire_placed_at,
+            wire_child_kind,
+            wire_worker_id,
+            wire_workflow,
         ]:
             pass
         case _:
-            return here.refuse(f'expected 4 items, found {len(fields)}')
+            return here.refuse(f'expected 8 items, found {len(fields)}')
     match _read_worker_decision(wire_reason, here.inside('reason')):
         case Ok(value_reason):
             pass
@@ -1315,6 +1357,11 @@ def _read_attempt_end_decided_by_worker(fields: list[object], here: _At) -> Resu
             return refused
     match _read_attempt_start(wire_start, here.inside('start')):
         case Ok(value_start):
+            pass
+        case Err() as refused:
+            return refused
+    match _read_built_in_task_code(wire_error_code, here.inside('error_code')):
+        case Ok(value_error_code):
             pass
         case Err() as refused:
             return refused
@@ -1328,12 +1375,31 @@ def _read_attempt_end_decided_by_worker(fields: list[object], here: _At) -> Resu
             pass
         case Err() as refused:
             return refused
+    match _read_execution(wire_child_kind, here.inside('child_kind')):
+        case Ok(value_child_kind):
+            pass
+        case Err() as refused:
+            return refused
+    match _read_text(wire_worker_id, here.inside('worker_id'), 255):
+        case Ok(value_worker_id):
+            pass
+        case Err() as refused:
+            return refused
+    match _read_workflow_place(wire_workflow, here.inside('workflow')):
+        case Ok(value_workflow):
+            pass
+        case Err() as refused:
+            return refused
     return Ok(
         AttemptEndDecidedByWorker(
             reason=value_reason,
             start=value_start,
+            error_code=value_error_code,
             trace=value_trace,
             placed_at=value_placed_at,
+            child_kind=value_child_kind,
+            worker_id=value_worker_id,
+            workflow=value_workflow,
         )
     )
 

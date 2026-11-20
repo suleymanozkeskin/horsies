@@ -50,9 +50,10 @@ pub use schema::{
 pub use values::{
     AttemptEnd, AttemptErrorCode, AttemptNumber, AttemptRecord, AttemptStart, ChildResult,
     Priority, QueueName, RetryCount, RunTrace, SlotDownCause, SlotIndex, TaskName,
-    TraceCarrierText, UserCodeText, WorkerDecision, BUILT_IN_TASK_CODES, MAX_ATTEMPT,
-    MAX_EVENT_QUEUE_NAME_CHARS, MAX_EVENT_TASK_NAME_CHARS, MAX_EVENT_TRACE_CARRIER_CHARS,
-    MAX_EVENT_USER_CODE_CHARS, MAX_RETRY_COUNT, MAX_SLOT_INDEX,
+    TraceCarrierText, UserCodeText, WorkerDecision, WorkerIdText, WorkflowPlace,
+    BUILT_IN_TASK_CODES, MAX_ATTEMPT, MAX_EVENT_QUEUE_NAME_CHARS, MAX_EVENT_TASK_NAME_CHARS,
+    MAX_EVENT_TRACE_CARRIER_CHARS, MAX_EVENT_USER_CODE_CHARS, MAX_EVENT_WORKER_ID_CHARS,
+    MAX_RETRY_COUNT, MAX_SLOT_INDEX,
 };
 
 // The closed types of other modules that event fields hold: the core's own
@@ -64,7 +65,7 @@ pub use crate::worker::executor::protocol::StopReason;
 
 /// The version of the event contract: its event types, their fields and the
 /// closed types that the fields hold.
-pub const EVENT_CONTRACT_VERSION: u32 = 4;
+pub const EVENT_CONTRACT_VERSION: u32 = 5;
 
 /// The event contract, as `horsies-codegen` renders it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +96,7 @@ pub const EVENT_VALUE_TYPES: &[NamedType] = &[
     <AttemptStart as EventNamedValue>::NAMED,
     <WorkerDecision as EventNamedValue>::NAMED,
     <RunTrace as EventNamedValue>::NAMED,
+    <WorkflowPlace as EventNamedValue>::NAMED,
     <AttemptEnd as EventNamedValue>::NAMED,
     <AttemptRecord as EventNamedValue>::NAMED,
     <RecoveryAction as EventNamedValue>::NAMED,

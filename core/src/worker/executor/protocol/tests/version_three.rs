@@ -867,7 +867,8 @@ fn a_batch_holds_one_to_the_most_events() {
 }
 
 /// The wire form of an `AttemptEnded` of an attempt that the worker ended,
-/// with the largest numbers, a task name of 255 and a queue name of 52
+/// with the largest numbers, a reported start, the longest names of each
+/// closed set, a task name of 255, a queue name of 52 and a worker id of 255
 /// characters that JSON writes as 6 bytes each, and the internal carrier
 /// `text`.
 fn largest_attempt_ended(text: &str) -> crate::events::Event {
@@ -877,14 +878,18 @@ fn largest_attempt_ended(text: &str) -> crate::events::Event {
         "0192f6a1-7b3c-7d4e-8f00-0123456789ab",
         "\u{1}".repeat(crate::events::MAX_EVENT_TASK_NAME_CHARS),
         "\u{1}".repeat(crate::events::MAX_EVENT_QUEUE_NAME_CHARS),
-        "SHARED_ASYNC",
+        "SHARED_THREAD",
         crate::events::MAX_ATTEMPT,
         [
             "DecidedByWorker",
             "NEIGHBOUR_BLOCKED_LOOP",
             ["Reported", i64::MAX],
+            "WORKFLOW_RECOVERY_LIMIT_REACHED",
             ["Carrier", text],
-            i64::MAX
+            i64::MAX,
+            "SHARED_THREAD",
+            "\u{1}".repeat(crate::events::MAX_EVENT_WORKER_ID_CHARS),
+            "WORKFLOW_NOT_KNOWN"
         ],
         u64::MAX,
     ]);
@@ -936,6 +941,10 @@ fn the_handler_stats_frame_carries_the_counts_of_each_handler() {
                 counts("app.handlers.on_end", 2, 0),
             ])
             .unwrap(),
+            span_reads: SpanReadCounts {
+                read_failed: 4,
+                not_read: 1,
+            },
             rss: rss(40.5),
         }),
         &framed(
@@ -943,6 +952,7 @@ fn the_handler_stats_frame_carries_the_counts_of_each_handler() {
                 r#"{"kind":"handler_stats","handlers":["#,
                 r#"{"handler":"app.handlers.on_claim","errors":0,"dropped":3},"#,
                 r#"{"handler":"app.handlers.on_end","errors":2,"dropped":0}],"#,
+                r#""span_read_failed":4,"span_not_read":1,"#,
                 r#""rss_mb":40.5}"#,
             ),
             b"",
@@ -951,10 +961,11 @@ fn the_handler_stats_frame_carries_the_counts_of_each_handler() {
     assert_child_bytes(
         &ChildFrame::HandlerStats(HandlerStatsFrame {
             handlers: HandlerCountsList::new(Vec::new()).unwrap(),
+            span_reads: SpanReadCounts::default(),
             rss: RssReading::Unreadable,
         }),
         &framed(
-            r#"{"kind":"handler_stats","handlers":[],"rss_mb":null}"#,
+            r#"{"kind":"handler_stats","handlers":[],"span_read_failed":0,"span_not_read":0,"rss_mb":null}"#,
             b"",
         ),
     );
@@ -966,6 +977,8 @@ fn each_malformed_handler_stats_frame_is_refused_with_its_field() {
     let meta = json!({
         "kind": "handler_stats",
         "handlers": [entry("a")],
+        "span_read_failed": 0,
+        "span_not_read": 0,
         "rss_mb": 1.0,
     });
     let too_many: Vec<Value> = (0..=MAX_EVENT_HANDLERS)
@@ -1062,6 +1075,20 @@ fn each_malformed_handler_stats_frame_is_refused_with_its_field() {
                 expected: ExpectedType::Number,
             },
         ),
+        (
+            "span_read_failed",
+            None,
+            MalformedFrame::MissingField {
+                field: "span_read_failed".to_owned(),
+            },
+        ),
+        (
+            "span_not_read",
+            Some(json!(-1)),
+            MalformedFrame::OutOfBounds {
+                field: "span_not_read".to_owned(),
+            },
+        ),
     ];
     for (key, value, expected) in cases {
         let changed = with_field(&meta, key, value.clone());
@@ -1116,6 +1143,7 @@ fn a_list_of_handler_counts_names_each_handler_once() {
 fn the_frames_of_a_handler_child_have_their_own_kinds() {
     let stats = encode_child_frame(&ChildFrame::HandlerStats(HandlerStatsFrame {
         handlers: HandlerCountsList::new(Vec::new()).unwrap(),
+        span_reads: SpanReadCounts::default(),
         rss: RssReading::Unreadable,
     }))
     .unwrap()

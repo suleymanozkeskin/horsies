@@ -708,6 +708,9 @@ const VECTOR_AT: i64 = 1_700_000_000_123_456_789;
 const VECTOR_CARRIER: &str =
     "{\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\"}";
 
+/// The worker id of the vectors.
+const VECTOR_WORKER_ID: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+
 fn time(nanos: i64) -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp_nanos(nanos)
 }
@@ -877,10 +880,14 @@ fn vector_events() -> Vec<(&'static str, Event)> {
                     start: AttemptStart::Reported {
                         started_at: time(1_700_000_000_100_000_000),
                     },
+                    error_code: OutcomeCode::TaskTimeout.into(),
                     trace: RunTrace::Carrier {
                         text: text(VECTOR_CARRIER),
                     },
                     placed_at: time(1_700_000_000_000_000_000),
+                    child_kind: Execution::SharedAsync,
+                    worker_id: text(VECTOR_WORKER_ID),
+                    workflow: WorkflowPlace::NotInWorkflow,
                 },
                 30_000_000_000,
             )
@@ -894,8 +901,33 @@ fn vector_events() -> Vec<(&'static str, Event)> {
                 AttemptEnd::DecidedByWorker {
                     reason: WorkerDecision::NeighbourBlockedLoop,
                     start: AttemptStart::NotReported,
+                    error_code: OperationalErrorCode::NeighbourBlockedLoop.into(),
                     trace: RunTrace::NoCarrier,
                     placed_at: time(1_700_000_000_000_000_000),
+                    child_kind: Execution::SharedAsync,
+                    worker_id: text(VECTOR_WORKER_ID),
+                    workflow: WorkflowPlace::NotInWorkflow,
+                },
+                30_000_000_000,
+            )
+            .into(),
+        ),
+        (
+            "attempt_ended_by_worker_in_workflow",
+            ended(
+                Execution::SharedThread,
+                2,
+                AttemptEnd::DecidedByWorker {
+                    reason: WorkerDecision::ChildLost,
+                    start: AttemptStart::NotReported,
+                    error_code: OperationalErrorCode::WorkerCrashed.into(),
+                    trace: RunTrace::Carrier {
+                        text: text(VECTOR_CARRIER),
+                    },
+                    placed_at: time(1_700_000_000_000_000_000),
+                    child_kind: Execution::Isolated,
+                    worker_id: text(VECTOR_WORKER_ID),
+                    workflow: WorkflowPlace::WorkflowNotKnown,
                 },
                 30_000_000_000,
             )

@@ -12,9 +12,10 @@ use super::*;
 use crate::broker::claims::ClaimRead;
 use crate::core::task::error::OperationalErrorCode;
 use crate::core::task::{Execution, TaskErrorCode, UserCode};
+use crate::core::{BuiltInTaskCode, OutcomeCode};
 use crate::events::{
     self, AttemptErrorCode, AttemptRecord, AttemptStart, ChildResult, RetryCount, RunTrace,
-    SlotIndex, SlotRecovered, WorkerDecision,
+    SlotIndex, SlotRecovered, TraceCarrierText, WorkerDecision, WorkerIdText, WorkflowPlace,
 };
 use crate::telemetry::labels::ReleaseReason;
 use crate::telemetry::registry::SampleValue;
@@ -22,7 +23,7 @@ use crate::test_support::telemetry::{series_of, worker_registry, WatchedTelemetr
 use crate::worker::executor::protocol::StopReason;
 use crate::worker::executor::slots::outcome::{EndView, ResultRead};
 use crate::worker::executor::slots::{
-    ChildPlacement, LoopKillCode, NotRunCause, Settlement, TerminalState, WrittenEnd,
+    ChildPlacement, ClaimedTask, LoopKillCode, NotRunCause, Settlement, TerminalState, WrittenEnd,
 };
 
 /// An event of slot `slot`.
@@ -446,8 +447,12 @@ fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
             ExpectedEnd::Decided(reason) => events::AttemptEnd::DecidedByWorker {
                 reason,
                 start: AttemptStart::NotReported,
+                error_code: BuiltInTaskCode::parse(code).expect("the code of a worker decision"),
                 trace: RunTrace::NoCarrier,
                 placed_at: placed.wall,
+                child_kind: Execution::Isolated,
+                worker_id: WorkerIdText::cut("worker-1"),
+                workflow: WorkflowPlace::NotInWorkflow,
             },
         };
         match events.as_slice() {
@@ -473,6 +478,71 @@ fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
             )],
             "{view:?}"
         );
+    }
+}
+
+/// The carrier that the send of the task of [`traced_task`] stored.
+const STORED_CARRIER: &str =
+    r#"{"traceparent":"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}"#;
+
+/// A task of the class `SHARED_THREAD` of `kind`, whose send stored
+/// [`STORED_CARRIER`].
+fn traced_task(kind: crate::worker::executor::slots::TaskKind) -> ClaimedTask {
+    ClaimedTask {
+        kind,
+        trace: RunTrace::Carrier {
+            text: TraceCarrierText::new(STORED_CARRIER.to_owned()).unwrap(),
+        },
+        ..claimed_task(Execution::SharedThread)
+    }
+}
+
+/// An end that the worker decided carries the facts of the span that the
+/// handler child makes: the code of its reason, the stored carrier, the
+/// placement time, the kind of the child that ran the attempt (an isolated
+/// child here, not the class of the task), the worker id of the registry,
+/// and what the claim read of the workflow node: a plain task is not in a
+/// workflow; the node of a workflow task is not known to the worker.
+#[test]
+fn an_end_that_the_worker_decided_carries_the_facts_of_its_span() {
+    use crate::worker::executor::slots::TaskKind;
+    let cases = [
+        (TaskKind::Plain, WorkflowPlace::NotInWorkflow),
+        (TaskKind::WorkflowTask, WorkflowPlace::WorkflowNotKnown),
+    ];
+    for (kind, workflow) in cases {
+        let mut watched = declaring_telemetry();
+        let task = traced_task(kind);
+        let placed = placed_after(ClaimRead::now());
+
+        let _noted = watched.telemetry.attempt_ended(
+            &task,
+            &ChildPlacement::Placed(placed),
+            EndView::TimedOut {
+                start: AttemptStart::NotReported,
+            },
+        );
+
+        match watched.events().as_slice() {
+            [Event::AttemptEnded(ended)] => {
+                assert_eq!(ended.execution, Execution::SharedThread, "{kind:?}");
+                assert_eq!(
+                    ended.end,
+                    events::AttemptEnd::DecidedByWorker {
+                        reason: WorkerDecision::TimedOut,
+                        start: AttemptStart::NotReported,
+                        error_code: OutcomeCode::TaskTimeout.into(),
+                        trace: task.trace.clone(),
+                        placed_at: placed.wall,
+                        child_kind: Execution::Isolated,
+                        worker_id: WorkerIdText::cut("worker-1"),
+                        workflow,
+                    },
+                    "{kind:?}"
+                );
+            }
+            other => panic!("{kind:?} gives one AttemptEnded, not {other:?}"),
+        }
     }
 }
 
@@ -526,6 +596,48 @@ fn a_reported_end_carries_the_start_that_its_child_reported() {
             other => panic!("{view:?} gives one AttemptEnded, not {other:?}"),
         }
     }
+}
+
+/// The telemetry of the points takes the worker id from the worker facts of
+/// its registry: a registry of the same metrics with no worker facts is
+/// refused by both builders.
+#[test]
+fn a_registry_with_no_worker_facts_gives_no_telemetry_of_the_points() {
+    use crate::telemetry::catalog::Recorder;
+    use crate::telemetry::declared::{DeclaredNames, ErrorCodeValues};
+    use crate::telemetry::registry::{HandleRefused, ProcessFacts, RegistryLabels};
+    let metrics: Vec<MetricId> = MetricId::ALL
+        .into_iter()
+        .filter(|metric| {
+            metric.spec().recorder == Recorder::Worker && *metric != MetricId::WorkerInfo
+        })
+        .collect();
+    let registry = Arc::new(
+        Registry::new(
+            &metrics,
+            RegistryLabels {
+                tasks: DeclaredNames::none(),
+                queues: DeclaredNames::none(),
+                handlers: DeclaredNames::none(),
+                schedules: DeclaredNames::none(),
+                error_codes: ErrorCodeValues::none(),
+                process: ProcessFacts::NotAWorker,
+            },
+        )
+        .expect("no metric of the points has a label of a worker fact"),
+    );
+
+    let metrics_only =
+        TelemetryOn::metrics_only(Arc::clone(&registry), DeclaredCodesByTask::none());
+    let with_queue = TelemetryOn::with_event_queue(
+        registry,
+        DeclaredCodesByTask::none(),
+        capacity(1),
+        SentEventTypes::all(),
+    );
+
+    assert!(matches!(metrics_only, Err(HandleRefused::NoWorkerFacts)));
+    assert!(matches!(with_queue, Err(HandleRefused::NoWorkerFacts)));
 }
 
 /// An end that the worker decided carries the start that the child

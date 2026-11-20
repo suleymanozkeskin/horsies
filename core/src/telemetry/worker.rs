@@ -26,7 +26,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 
 use crate::core::task::{DeclaredErrorCodes, Execution};
-use crate::events::{Event, EventTypeName, UnionEvent};
+use crate::events::{Event, EventTypeName, UnionEvent, WorkerIdText};
 use crate::telemetry::catalog::MetricId;
 use crate::telemetry::declared::{self, DeclaredValue, ErrorCodeValue};
 use crate::telemetry::labels::{
@@ -34,7 +34,7 @@ use crate::telemetry::labels::{
     ReplaceReason,
 };
 use crate::telemetry::registry::{
-    Counter, Gauge, HandleRefused, Histogram, OptionalCounter, Registry,
+    Counter, Gauge, HandleRefused, Histogram, OptionalCounter, ProcessFacts, Registry,
 };
 use crate::worker::executor::protocol::StopReason;
 use crate::worker::executor::slots::outcome::WriteStage;
@@ -169,6 +169,22 @@ pub struct TelemetryOn {
     codes: DeclaredCodesByTask,
     metrics: PointMetrics,
     events: EventRoute,
+    /// The id of the worker, from the worker facts of `registry`: the
+    /// `AttemptEnded` of an attempt that the worker ended carries it.
+    worker_id: WorkerIdText,
+}
+
+/// The worker id of the worker facts of `registry`. A worker id fits the
+/// `claimed_by_worker_id` column, so the cut keeps every id of a worker
+/// that claims whole.
+///
+/// Errors: [`HandleRefused::NoWorkerFacts`] for a registry of a process
+/// that is not a worker. Pure.
+fn worker_id_of(registry: &Registry) -> Result<WorkerIdText, HandleRefused> {
+    match &registry.labels().process {
+        ProcessFacts::Worker(facts) => Ok(WorkerIdText::cut(&facts.worker_id)),
+        ProcessFacts::NotAWorker => Err(HandleRefused::NoWorkerFacts),
+    }
 }
 
 /// The value of the `task` label.
@@ -255,7 +271,8 @@ impl TelemetryOn {
     /// label; give the registry the same sets (`ErrorCodeValues::new`).
     ///
     /// Errors: [`HandleRefused`] when `registry` does not hold a metric of
-    /// the points with the labels of the catalog: a registry that
+    /// the points with the labels of the catalog, or has no worker facts
+    /// ([`HandleRefused::NoWorkerFacts`]): a registry that
     /// [`Registry::for_worker`] did not build. Nothing is changed.
     pub fn metrics_only(
         registry: Arc<Registry>,
@@ -263,6 +280,7 @@ impl TelemetryOn {
     ) -> Result<Self, HandleRefused> {
         Ok(Self {
             metrics: PointMetrics::of(&registry)?,
+            worker_id: worker_id_of(&registry)?,
             registry,
             codes,
             events: EventRoute::NoHandlerChild,
@@ -283,12 +301,14 @@ impl TelemetryOn {
     ) -> Result<(Self, EventQueue), HandleRefused> {
         let dropped = registry.counter(MetricId::EventsDropped)?;
         let metrics = PointMetrics::of(&registry)?;
+        let worker_id = worker_id_of(&registry)?;
         let (link, queue) = event_link(capacity, dropped, sent);
         let on = Self {
             registry,
             codes,
             metrics,
             events: EventRoute::HandlerChildLink(link),
+            worker_id,
         };
         Ok((on, queue))
     }
