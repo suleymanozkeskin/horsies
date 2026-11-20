@@ -367,6 +367,7 @@ A worker child ends itself at its next core call (exit code 80; its last log lin
 
 ```bash
 horsies worker myapp.config:app --profile default  # start worker (--profile is required)
+horsies worker myapp.config:app --profile default --metrics-listen 0.0.0.0:9464  # + /metrics, /livez, /readyz
 horsies scheduler myapp.config:app       # start scheduler
 horsies check myapp.config:app [--live]  # validate before deploy
 horsies web myapp.config:app             # serve the monitoring web UI (needs horsies[web])

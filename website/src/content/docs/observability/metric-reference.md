@@ -2,7 +2,7 @@
 title: Metric Reference
 section: shared
 summary: Every metric of horsies, generated from the metric catalog of the core - its OpenTelemetry and Prometheus names, kind, unit, help text, labels and label values.
-related: [../tasks/errors, ../monitoring/worker-health]
+related: [overview, metrics, fleet-collector, ../tasks/errors]
 tags: [observability, metrics, prometheus, opentelemetry, reference]
 ---
 
@@ -21,7 +21,7 @@ This page lists the 41 metrics of the metric catalog of the core, in catalog ord
 
 | Recorder | Process | Metrics |
 | -------- | ------- | ------- |
-| worker | The core worker of each worker process records them. | 25 |
+| worker | The core worker of each worker process records them. Its metrics endpoint (`--metrics-listen HOST:PORT`) serves them. | 25 |
 | producer | The client, in each process that sends tasks, with the OpenTelemetry meter of the process and the task name and queue name of each send. No endpoint of horsies serves them. | 2 |
 | fleet collector | The fleet collector: `horsies metrics`, and `GET /metrics` of the web UI. It reads them from PostgreSQL. | 14 |
 
@@ -43,7 +43,7 @@ A series exists from its first sample. The 18 worker metrics whose labels are al
 
 ## Worker Metrics
 
-The core worker of each worker process records them.
+The core worker of each worker process records them. Its metrics endpoint (`--metrics-listen HOST:PORT`) serves them.
 
 | Metric | Prometheus name | Kind | Labels |
 | ------ | --------------- | ---- | ------ |

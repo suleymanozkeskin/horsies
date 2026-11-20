@@ -2,11 +2,11 @@
 title: Dashboards and Alerts
 section: shared
 summary: The Grafana dashboard and the Prometheus alert rules in deploy/ of the repository - where they are, how to install them, and what each alert means.
-related: [fleet-collector, metric-reference]
+related: [metrics, fleet-collector, metric-reference, deployment]
 tags: [observability, grafana, prometheus, alerts, dashboard]
 ---
 
-The repository holds a Grafana dashboard and a set of Prometheus alert rules for the metric catalog of the core. Both read the series of a Prometheus that scrapes the fleet collector and the workers.
+The repository holds a Grafana dashboard and a set of Prometheus alert rules for the metric catalog of the core. Both read the series of a Prometheus that scrapes the fleet collector and the metrics endpoint of each worker (`--metrics-listen`).
 
 | File | Holds |
 |------|-------|
@@ -25,9 +25,9 @@ A test of the repository checks that each query, legend and variable of the dash
 | Row | Source | Panels |
 |-----|--------|--------|
 | Fleet | The [fleet collector](/horsies/observability/fleet-collector/) | Live workers, unserved classes, oldest pending task, failing fleet queries, workers with telemetry down, schema version; oldest pending task age; live tasks by status; fleet seats; workers by state; workflows; time since the last run of each schedule; fleet query time and failures |
-| Tasks | The worker metrics | Attempts by outcome; not completed ratio by task; not completed attempts by error code; retries by error code; run time; queue wait; slot wait and outcome write; attempts with an unknown end |
-| Workers | The worker metrics | Worker seats; child slots down; children replaced by reason; child boot time; claim passes by result; claims released and starts refused; resident memory; recovery and outcome write retries; a table of the workers |
-| Telemetry | The worker metrics | Events dropped; samples dropped at the series bound; event handler errors and drops |
+| Tasks | The [worker endpoints](/horsies/observability/metrics/) | Attempts by outcome; not completed ratio by task; not completed attempts by error code; retries by error code; run time; queue wait; slot wait and outcome write; attempts with an unknown end |
+| Workers | The worker endpoints | Worker seats; child slots down; children replaced by reason; child boot time; claim passes by result; claims released and starts refused; resident memory; recovery and outcome write retries; a table of the workers |
+| Telemetry | The worker endpoints | Events dropped; samples dropped at the series bound; event handler errors and drops |
 
 - The fleet panels take `max` over the fleet collectors, so a second collector does not double a value. The worker panels add the workers up.
 - "Live tasks by status" shows "PENDING more than" with the lower bound for a queue and class past 1,000 pending tasks. Read the backlog from the age of the oldest pending task.
