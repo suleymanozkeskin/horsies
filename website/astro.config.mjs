@@ -162,6 +162,7 @@ export default defineConfig({
 								{ label: 'OpenTelemetry Collector', slug: 'observability/opentelemetry-collector' },
 								{ label: 'Tracing', slug: 'observability/tracing' },
 								{ label: 'Logs', slug: 'observability/logs' },
+								{ label: 'Lifecycle Events', slug: 'observability/events' },
 								{ label: 'Dashboards and Alerts', slug: 'observability/dashboards-and-alerts' },
 								{ label: 'Deployment', slug: 'observability/deployment' },
 							],

@@ -2,7 +2,7 @@
 title: Observability Overview
 section: shared
 summary: What horsies gives for metrics, traces, logs, dashboards and alerts; what it costs when it is off; the three rules that every part keeps; and how the parts fit.
-related: [metrics, fleet-collector, tracing, logs, dashboards-and-alerts, opentelemetry-collector, deployment, metric-reference]
+related: [metrics, fleet-collector, tracing, logs, events, dashboards-and-alerts, opentelemetry-collector, deployment, metric-reference]
 tags: [observability, overview, metrics, tracing, logs, prometheus, opentelemetry]
 ---
 
@@ -18,6 +18,7 @@ horsies gives a worker fleet Prometheus metrics, OpenTelemetry traces, log recor
 | Traces | One trace from the send of a task to each of its attempts, workflows included. See [Tracing](/horsies/observability/tracing/) | Python: `AppConfig(tracing=OtelTracing())` and the extra `horsies[otel]`. Rust: the feature `otel` |
 | Producer metrics | `horsies.task.sent` and `horsies.task.send.duration`, through your OpenTelemetry meter | With the traces |
 | Logs | `task_id`, `attempt` and `trace_id` on the records of the worker; the task on the records of a task body; JSON lines. See [Logs](/horsies/observability/logs/) | Python: `AppConfig(log_format=JsonLogs())`. Rust: `horsies::cli::run_with_log_format(app, LogFormat::Json)` |
+| Hooks for other systems | Typed lifecycle events, run in the handler child of the worker. See [Lifecycle Events](/horsies/observability/events/) | Python: `@app.on_event(EventType)`. Rust: `app.on_event::<E>(name, handler)` |
 | A trace link in the web UI | The trace id of a task in the task detail, as a link | `horsies web --trace-link TEMPLATE` |
 | Dashboards and alerts | A Grafana dashboard and Prometheus alert rules in `deploy/`. See [Dashboards and Alerts](/horsies/observability/dashboards-and-alerts/) | Import the files |
 
@@ -25,7 +26,7 @@ Every metric, with its labels and their values, is on the [Metric Reference](/ho
 
 ## What It Costs When It Is Off
 
-- A worker with no `--metrics-listen` has no telemetry: each lifecycle point of the worker is one branch. It records no metric, starts no thread for an endpoint and builds no event.
+- A worker with no `--metrics-listen`, no event handler and no worker-ended spans has no telemetry: each lifecycle point of the worker is one branch. It records no metric, starts no thread for an endpoint, starts no handler child and builds no event.
 - A client with tracing off (Python `NoTracing()`, the default; Rust without the feature `otel`) imports or compiles no OpenTelemetry code, opens no span and stores no carrier.
 - Telemetry adds no SQL statement per task. The trace carrier and its trace id ride on the statements that insert, claim and start a task.
 - The fleet collector is a process of its own. The web UI reads the fleet state only when a request comes.
@@ -34,9 +35,9 @@ Every metric, with its labels and their values, is on the [Metric Reference](/ho
 
 Every part keeps three rules:
 
-1. **Telemetry never changes a task outcome and never stops a running worker.** A port that does not bind leaves the worker running with its endpoint down. A carrier that breaks a bound leaves the send with no carrier. A failure of your OpenTelemetry SDK leaves the call with no span. A fleet query that fails leaves its gauges with no series.
-2. **The worker process never waits for telemetry.** It records a metric with atomic adds; a new series takes a short lock once. A scrape runs on the thread of the endpoint, not on the claim path.
-3. **No user code runs in the worker process.** Your OpenTelemetry SDK and your start hooks run in the worker children and in the processes that send.
+1. **Telemetry never changes a task outcome and never stops a running worker.** A port that does not bind leaves the worker running with its endpoint down. A handler child that fails stays down or boots again; the worker runs its tasks. A carrier that breaks a bound leaves the send with no carrier. A failure of your OpenTelemetry SDK leaves the call with no span. A fleet query that fails leaves its gauges with no series.
+2. **The worker process never waits for telemetry.** It records a metric with atomic adds; a new series takes a short lock once. A scrape runs on the thread of the endpoint, not on the claim path. An event that does not fit the event queue is dropped and counted.
+3. **No user code runs in the worker process.** Your event handlers, your OpenTelemetry SDK and your start hooks run in the worker children, in the handler child and in the processes that send.
 
 ## How the Parts Fit
 
@@ -55,10 +56,16 @@ worker process (the core worker)
   worker snapshot (30 s default) -> seat, slot and memory gauges;
                                 horsies_worker_states.telemetry
   run frame with the stored carrier ------> worker child
+  event queue (drop and count) -> events frames ------> handler child
+                                <-- handler stats ----
 
 worker child (Python or Rust)
   attempt span around the task body        -> your OpenTelemetry SDK
   task context on the log records of the body
+
+handler child (with an event handler, or with worker-ended spans)
+  one queue and one thread per event handler
+  spans of the attempts that the worker ended -> your OpenTelemetry SDK
 
 fleet collector: horsies metrics, or GET /metrics of the web UI
   PostgreSQL -> queue, worker, workflow and schedule gauges
