@@ -35,6 +35,7 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 from pydantic import SecretStr
 
 from horsies._catalog import events
+from horsies._catalog import worker_manifest as wire
 from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
@@ -770,6 +771,7 @@ class TestNoSpans:
             sys_path_roots=(),
             profile='default',
             loglevel='INFO',
+            metrics_endpoint=wire.MetricsEndpointNoMetricsEndpoint(),
         )
 
         match worker_manifest_json(app, launch, logging.getLogger('test')):
@@ -911,7 +913,10 @@ class TestTheFactsOfTheSpan:
             TASK_ID, events.RunTraceNoCarrier()
         ) == NoTraceCarrier()
 
-    @pytest.mark.parametrize('text', ['not json', '[1]', '{"traceparent": 1}'])
+    @pytest.mark.parametrize(
+        'text',
+        ['not json', '[1]', '{"traceparent": 1}', '{"traceparent": "a", "traceparent": "b"}'],
+    )
     def test_a_carrier_that_is_not_an_object_of_texts_gives_no_parent_and_is_logged(
         self,
         text: str,
