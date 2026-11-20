@@ -7483,6 +7483,628 @@
     "returns": "horsies.monitoring.MonitoringResult[list[horsies.monitoring.StatusCount]]"
    }
   },
+  "horsies.telemetry:AnyEvent": {
+   "defined_as": "horsies._catalog.events.AnyEvent",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies._catalog.events.AttemptNotStarted | horsies._catalog.events.AttemptPlaced | horsies._catalog.events.ChildReplaced | horsies._catalog.events.ChildStarted | horsies._catalog.events.ClaimReleased | horsies._catalog.events.SlotDown | horsies._catalog.events.SlotRecovered | horsies._catalog.events.TaskRecovered | horsies.telemetry.AttemptEnded | horsies.telemetry.AttemptRecorded | horsies.telemetry.TaskClaimed"
+  },
+  "horsies.telemetry:AttemptEndDecidedByWorker": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "horsies._catalog.events.WorkerDecision",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "reason"
+     },
+     {
+      "annotation": "horsies._catalog.events.BuiltInTaskCode",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "error_code"
+     },
+     {
+      "annotation": "horsies._catalog.events.RunTrace",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "trace"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "placed_at"
+     },
+     {
+      "annotation": "horsies._catalog.events.Execution",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "child_kind"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "worker_id"
+     },
+     {
+      "annotation": "horsies._catalog.events.WorkflowPlace",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "workflow"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptEndDecidedByWorker",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "reason",
+      "type": "horsies._catalog.events.WorkerDecision"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "error_code",
+      "type": "horsies._catalog.events.BuiltInTaskCode"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "trace",
+      "type": "horsies._catalog.events.RunTrace"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "placed_at",
+      "type": "datetime.datetime"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "child_kind",
+      "type": "horsies._catalog.events.Execution"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "worker_id",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "workflow",
+      "type": "horsies._catalog.events.WorkflowPlace"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.telemetry:AttemptEndNotKnown": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "child_pid"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptEndNotKnown",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "child_pid",
+      "type": "int"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.telemetry:AttemptEndReportedByChild": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "horsies._catalog.events.ChildResult",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "result"
+     },
+     {
+      "annotation": "horsies._catalog.events.AttemptStart",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "start"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptEndReportedByChild",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "result",
+      "type": "horsies._catalog.events.ChildResult"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "start",
+      "type": "horsies._catalog.events.AttemptStart"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.telemetry:AttemptEnded": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "at"
+     },
+     {
+      "annotation": "uuid.UUID",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "task_id"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "task_name"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "queue"
+     },
+     {
+      "annotation": "horsies._catalog.events.Execution",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "execution"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "attempt"
+     },
+     {
+      "annotation": "horsies._catalog.events.AttemptEnd",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "end"
+     },
+     {
+      "annotation": "datetime.timedelta",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "run_duration"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptEnded",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "at",
+      "type": "datetime.datetime"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "task_id",
+      "type": "uuid.UUID"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "task_name",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "queue",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "execution",
+      "type": "horsies._catalog.events.Execution"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "attempt",
+      "type": "int"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "end",
+      "type": "horsies._catalog.events.AttemptEnd"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "run_duration",
+      "type": "datetime.timedelta"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.telemetry:AttemptRecorded": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "at"
+     },
+     {
+      "annotation": "uuid.UUID",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "task_id"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "task_name"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "queue"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "attempt"
+     },
+     {
+      "annotation": "horsies._catalog.events.AttemptRecord",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "record"
+     },
+     {
+      "annotation": "datetime.timedelta",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "record_duration"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptRecorded",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "at",
+      "type": "datetime.datetime"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "task_id",
+      "type": "uuid.UUID"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "task_name",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "queue",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "attempt",
+      "type": "int"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "record",
+      "type": "horsies._catalog.events.AttemptRecord"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "record_duration",
+      "type": "datetime.timedelta"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.telemetry:ChildResultCompleted": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.ChildResultCompleted",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.telemetry:TaskClaimed": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "at"
+     },
+     {
+      "annotation": "uuid.UUID",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "task_id"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "task_name"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "queue"
+     },
+     {
+      "annotation": "horsies._catalog.events.Execution",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "execution"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "attempt"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "priority"
+     },
+     {
+      "annotation": "datetime.timedelta",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "queue_wait"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.TaskClaimed",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "at",
+      "type": "datetime.datetime"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "task_id",
+      "type": "uuid.UUID"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "task_name",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "queue",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "execution",
+      "type": "horsies._catalog.events.Execution"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "attempt",
+      "type": "int"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "priority",
+      "type": "int"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "queue_wait",
+      "type": "datetime.timedelta"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
   "horsies.web:AllowAll": {
    "abstract": false,
    "bases": [
@@ -7622,6 +8244,12 @@
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "actions_disabled_reason"
+     },
+     {
+      "annotation": "None | str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "trace_link_template"
      }
     ],
     "returns": "None"
@@ -7702,6 +8330,13 @@
       "default": "required",
       "metadata": [],
       "name": "actions_disabled_reason",
+      "type": "None | str"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "trace_link_template",
       "type": "None | str"
      }
     ],
@@ -7805,6 +8440,12 @@
       "default": "None",
       "kind": "KEYWORD_ONLY",
       "name": "custom_css_url"
+     },
+     {
+      "annotation": "Annotated[horsies.web.NoTraceLink | horsies.web.TraceLinkTemplate, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "<factory>",
+      "kind": "KEYWORD_ONLY",
+      "name": "trace_link"
      }
     ],
     "returns": "None"
@@ -7830,6 +8471,57 @@
       "metadata": [],
       "name": "custom_css_url",
       "type": "None | str"
+     },
+     {
+      "alias": null,
+      "default": "factory NoTraceLink",
+      "metadata": [],
+      "name": "trace_link",
+      "type": "horsies.web.NoTraceLink | horsies.web.TraceLinkTemplate"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.web:NoTraceLink": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['no_trace_link']",
+      "default": "'no_trace_link'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.web.app.NoTraceLink",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "'forbid'",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'no_trace_link'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['no_trace_link']"
      }
     ],
     "kind": "pydantic"
@@ -8045,6 +8737,80 @@
     "frozen": true,
     "kind": "dataclass",
     "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.web:TraceLinkTemplate": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['trace_link_template']",
+      "default": "'trace_link_template'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "template"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.web.app.TraceLinkTemplate",
+   "kind": "class",
+   "members": {
+    "check_template": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       }
+      ],
+      "returns": "typing.Self"
+     }
+    }
+   },
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "'forbid'",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'trace_link_template'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['trace_link_template']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "template",
+      "type": "str"
+     }
+    ],
+    "kind": "pydantic"
    },
    "type_params": []
   },
@@ -11912,7 +12678,7 @@
     ],
     "returns": "unannotated"
    },
-   "defined_as": "horsies.core.errors.ErrorCode",
+   "defined_as": "horsies._catalog.error_codes.ErrorCode",
    "kind": "class",
    "members": {},
    "mro": [
@@ -11941,8 +12707,14 @@
      "CONFIG_INVALID_RESILIENCE": "'HRS-208'",
      "CONFIG_INVALID_RETENTION": "'HRS-216'",
      "CONFIG_INVALID_SCHEDULE": "'HRS-205'",
+     "CONFIG_INVALID_TRACE_LINK": "'HRS-221'",
      "CONFIG_INVALID_WORKER_PROFILE": "'HRS-218'",
      "CONFIG_OTEL_API_MISSING": "'HRS-220'",
+     "EVENT_HANDLER_DUPLICATE_NAME": "'HRS-224'",
+     "EVENT_HANDLER_INVALID_NAME": "'HRS-225'",
+     "EVENT_HANDLER_INVALID_SIGNATURE": "'HRS-223'",
+     "EVENT_HANDLER_LIMIT": "'HRS-226'",
+     "EVENT_HANDLER_UNKNOWN_EVENT_TYPE": "'HRS-222'",
      "MODULE_EXEC_ERROR": "'HRS-210'",
      "TASK_CANCEL_GRACE_OUT_OF_RANGE": "'HRS-111'",
      "TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC": "'HRS-110'",
@@ -11995,6 +12767,7 @@
      "WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH": "'HRS-022'",
      "WORKFLOW_SUBWORKFLOW_SELF_NESTING": "'HRS-037'",
      "WORKFLOW_TOO_MANY_NODES": "'HRS-038'",
+     "WORKFLOW_UNREGISTERED_TASK": "'HRS-302'",
      "WORKFLOW_UNRESOLVED_PRIORITY": "'HRS-015'",
      "WORKFLOW_UNRESOLVED_QUEUE": "'HRS-014'"
     }
@@ -12708,6 +13481,12 @@
    },
    "type_params": []
   },
+  "horsies:HandlerChildStartHook": {
+   "defined_as": "horsies.core.event_handlers.HandlerChildStartHook",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "collections.abc.Callable[[], None]"
+  },
   "horsies:Horsies": {
    "abstract": false,
    "bases": [
@@ -12948,6 +13727,38 @@
        }
       ],
       "returns": "list[str]"
+     }
+    },
+    "get_event_handlers": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       }
+      ],
+      "returns": "tuple[horsies.core.event_handlers.EventHandler, ...]"
+     }
+    },
+    "get_handler_child_start_hooks": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       }
+      ],
+      "returns": "list[horsies.HandlerChildStartHook]"
      }
     },
     "get_raw_result": {
@@ -13382,6 +14193,50 @@
       "returns": "collections.abc.Callable[[], None]"
      }
     },
+    "on_event": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "type[~E]",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "event_type"
+       }
+      ],
+      "returns": "horsies.core.event_handlers.EventHandlerDecorator[~E]"
+     }
+    },
+    "on_handler_child_start": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "horsies.HandlerChildStartHook",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "fn"
+       }
+      ],
+      "returns": "horsies.HandlerChildStartHook"
+     }
+    },
     "on_shared_async_child_start": {
      "kind": "method",
      "overloads": [],
@@ -13502,6 +14357,90 @@
        }
       ],
       "returns": "horsies.BrokerResult[list[horsies.WorkerPong]]"
+     }
+    },
+    "rerun_task": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "sqlalchemy.engine.base.Connection",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "connection"
+       },
+       {
+        "annotation": "horsies.RerunTask",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "command"
+       },
+       {
+        "annotation": "horsies.RerunEnqueuePolicy",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "policy"
+       }
+      ],
+      "returns": "horsies.RerunOutcome"
+     }
+    },
+    "rerun_task_async": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "coroutine",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "sqlalchemy.ext.asyncio.engine.AsyncConnection",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "connection"
+       },
+       {
+        "annotation": "horsies.RerunTask",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "command"
+       },
+       {
+        "annotation": "horsies.RerunEnqueuePolicy",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "policy"
+       }
+      ],
+      "returns": "horsies.RerunOutcome"
+     }
+    },
+    "send_telemetry": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       }
+      ],
+      "returns": "horsies.core.telemetry.send_telemetry.SendTelemetry"
      }
     },
     "set_role": {
@@ -16673,6 +17612,12 @@
       "default": "<factory>",
       "kind": "KEYWORD_ONLY",
       "name": "parentage"
+     },
+     {
+      "annotation": "horsies.WorkerEndedSpans",
+      "default": "horsies.WorkerEndedSpans.MAKE_SPANS",
+      "kind": "KEYWORD_ONLY",
+      "name": "worker_ended_spans"
      }
     ],
     "returns": "None"
@@ -16705,6 +17650,13 @@
       "metadata": [],
       "name": "parentage",
       "type": "horsies.ChildOfSend | horsies.LinkedToSend"
+     },
+     {
+      "alias": null,
+      "default": "horsies.WorkerEndedSpans.MAKE_SPANS",
+      "metadata": [],
+      "name": "worker_ended_spans",
+      "type": "horsies.WorkerEndedSpans"
      }
     ],
     "kind": "pydantic"
@@ -23526,6 +24478,42 @@
    },
    "type_params": []
   },
+  "horsies:WorkerEndedSpans": {
+   "abstract": false,
+   "bases": [
+    "str",
+    "enum.Enum"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "VAR_POSITIONAL",
+      "name": "values"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies.core.models.tracing.WorkerEndedSpans",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "str",
+    "enum.Enum",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "kind": "enum",
+    "members": {
+     "MAKE_SPANS": "'MAKE_SPANS'",
+     "NO_SPANS": "'NO_SPANS'"
+    }
+   },
+   "type_params": []
+  },
   "horsies:WorkerPong": {
    "abstract": false,
    "bases": [
@@ -26804,6 +27792,1507 @@
    "type_params": [],
    "value": "horsies.BrokerAsyncContext | horsies.BrokerEnqueueFailed | horsies.BrokerIdempotencyKeyConflict | horsies.BrokerInvalidInput | horsies.BrokerInvalidJsonPayload | horsies.BrokerInvalidTaskOptions | horsies.BrokerListenerDisabled | horsies.BrokerOperationFailed | horsies.BrokerPayloadMismatch | horsies.BrokerWaitInsideTask"
   },
+  "horsies._catalog.events.AttemptEnd": {
+   "defined_as": "horsies._catalog.events.AttemptEnd",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies.telemetry.AttemptEndDecidedByWorker | horsies.telemetry.AttemptEndNotKnown | horsies.telemetry.AttemptEndReportedByChild"
+  },
+  "horsies._catalog.events.AttemptErrorCode": {
+   "defined_as": "horsies._catalog.events.AttemptErrorCode",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies._catalog.events.AttemptErrorCodeBuiltIn | horsies._catalog.events.AttemptErrorCodeUser | horsies._catalog.events.AttemptErrorCodeUserOverBound"
+  },
+  "horsies._catalog.events.AttemptErrorCodeBuiltIn": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "horsies._catalog.events.BuiltInTaskCode",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "code"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptErrorCodeBuiltIn",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "code",
+      "type": "horsies._catalog.events.BuiltInTaskCode"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.AttemptErrorCodeUser": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "code"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptErrorCodeUser",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "code",
+      "type": "str"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.AttemptErrorCodeUserOverBound": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptErrorCodeUserOverBound",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.AttemptNotStarted": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "at"
+     },
+     {
+      "annotation": "uuid.UUID",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "task_id"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "task_name"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "queue"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "attempt"
+     },
+     {
+      "annotation": "horsies._catalog.events.StopReason",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "reason"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptNotStarted",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "at",
+      "type": "datetime.datetime"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "task_id",
+      "type": "uuid.UUID"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "task_name",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "queue",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "attempt",
+      "type": "int"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "reason",
+      "type": "horsies._catalog.events.StopReason"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.AttemptPlaced": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "at"
+     },
+     {
+      "annotation": "uuid.UUID",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "task_id"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "task_name"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "queue"
+     },
+     {
+      "annotation": "horsies._catalog.events.Execution",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "execution"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "attempt"
+     },
+     {
+      "annotation": "horsies._catalog.events.Execution",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "child_kind"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "child_pid"
+     },
+     {
+      "annotation": "datetime.timedelta",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "slot_wait"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptPlaced",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "at",
+      "type": "datetime.datetime"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "task_id",
+      "type": "uuid.UUID"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "task_name",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "queue",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "execution",
+      "type": "horsies._catalog.events.Execution"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "attempt",
+      "type": "int"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "child_kind",
+      "type": "horsies._catalog.events.Execution"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "child_pid",
+      "type": "int"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "slot_wait",
+      "type": "datetime.timedelta"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.AttemptRecord": {
+   "defined_as": "horsies._catalog.events.AttemptRecord",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies._catalog.events.AttemptRecordClaimReleased | horsies._catalog.events.AttemptRecordCompleted | horsies._catalog.events.AttemptRecordFailed | horsies._catalog.events.AttemptRecordLeftToRecovery | horsies._catalog.events.AttemptRecordNotHeld | horsies._catalog.events.AttemptRecordNothingOwed | horsies._catalog.events.AttemptRecordRetriesExhausted | horsies._catalog.events.AttemptRecordRetryScheduled | horsies._catalog.events.AttemptRecordWriteFailed"
+  },
+  "horsies._catalog.events.AttemptRecordClaimReleased": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptRecordClaimReleased",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.AttemptRecordCompleted": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptRecordCompleted",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.AttemptRecordFailed": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptRecordFailed",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.AttemptRecordLeftToRecovery": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptRecordLeftToRecovery",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.AttemptRecordNotHeld": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptRecordNotHeld",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.AttemptRecordNothingOwed": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptRecordNothingOwed",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.AttemptRecordRetriesExhausted": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptRecordRetriesExhausted",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.AttemptRecordRetryScheduled": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "retry_count"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "next_retry_at"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptRecordRetryScheduled",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "retry_count",
+      "type": "int"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "next_retry_at",
+      "type": "datetime.datetime"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.AttemptRecordWriteFailed": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptRecordWriteFailed",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.AttemptStart": {
+   "defined_as": "horsies._catalog.events.AttemptStart",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies._catalog.events.AttemptStartNotReported | horsies._catalog.events.AttemptStartReported"
+  },
+  "horsies._catalog.events.AttemptStartNotReported": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptStartNotReported",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.AttemptStartReported": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "started_at"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptStartReported",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "started_at",
+      "type": "datetime.datetime"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.BuiltInTaskCode": {
+   "defined_as": "horsies._catalog.events.BuiltInTaskCode",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies.ContractCode | horsies.OperationalErrorCode | horsies.OutcomeCode | horsies.RetrievalCode"
+  },
+  "horsies._catalog.events.ChildReplaced": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "at"
+     },
+     {
+      "annotation": "horsies._catalog.events.Execution",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "child_kind"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "slot"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "child_pid"
+     },
+     {
+      "annotation": "horsies._catalog.events.ReplaceReason",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "reason"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.ChildReplaced",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "at",
+      "type": "datetime.datetime"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "child_kind",
+      "type": "horsies._catalog.events.Execution"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "slot",
+      "type": "int"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "child_pid",
+      "type": "int"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "reason",
+      "type": "horsies._catalog.events.ReplaceReason"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.ChildResult": {
+   "defined_as": "horsies._catalog.events.ChildResult",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies._catalog.events.ChildResultFailed | horsies._catalog.events.ChildResultTimedOut | horsies._catalog.events.ChildResultWorkerFailure | horsies.telemetry.ChildResultCompleted"
+  },
+  "horsies._catalog.events.ChildResultFailed": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "horsies._catalog.events.AttemptErrorCode",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "error_code"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.ChildResultFailed",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "error_code",
+      "type": "horsies._catalog.events.AttemptErrorCode"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.ChildResultTimedOut": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.ChildResultTimedOut",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.ChildResultWorkerFailure": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.ChildResultWorkerFailure",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.ChildStarted": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "at"
+     },
+     {
+      "annotation": "horsies._catalog.events.Execution",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "child_kind"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "slot"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "child_pid"
+     },
+     {
+      "annotation": "datetime.timedelta",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "boot_duration"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.ChildStarted",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "at",
+      "type": "datetime.datetime"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "child_kind",
+      "type": "horsies._catalog.events.Execution"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "slot",
+      "type": "int"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "child_pid",
+      "type": "int"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "boot_duration",
+      "type": "datetime.timedelta"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.ClaimReleased": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "at"
+     },
+     {
+      "annotation": "uuid.UUID",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "task_id"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "task_name"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "queue"
+     },
+     {
+      "annotation": "horsies._catalog.events.ReleaseReason",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "reason"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.ClaimReleased",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "at",
+      "type": "datetime.datetime"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "task_id",
+      "type": "uuid.UUID"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "task_name",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "queue",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "reason",
+      "type": "horsies._catalog.events.ReleaseReason"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.Execution": {
+   "defined_as": "horsies._catalog.events.Execution",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']"
+  },
+  "horsies._catalog.events.RecoveryAction": {
+   "defined_as": "horsies._catalog.events.RecoveryAction",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "Literal['CLAIM_REQUEUED', 'ORPHAN_CANCELLED', 'PENDING_EXPIRED', 'RUNNING_FAILED', 'RUNNING_RETRIED']"
+  },
+  "horsies._catalog.events.ReleaseReason": {
+   "defined_as": "horsies._catalog.events.ReleaseReason",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "Literal['HELD_FOR_QUEUE_CAP', 'NO_CHILD_OF_ITS_KIND', 'POOL_FAILED', 'POOL_STOPPING', 'QUEUE_FULL', 'RETURNED_AS_ISOLATED', 'RUNNER_BEATS_FAILED_CLOSED', 'WORKFLOW_NOT_RUNNABLE']"
+  },
+  "horsies._catalog.events.ReplaceReason": {
+   "defined_as": "horsies._catalog.events.ReplaceReason",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "Literal['AT_DEADLINE', 'CHANNEL_LOST', 'CHILD_DIED', 'CORE_STOPPED', 'KILLED_BY_PARENT', 'LEFTOVER_WORK', 'LOOP_BLOCKED', 'MEMORY_LIMIT', 'PROTOCOL_MISMATCH', 'PROTOCOL_VIOLATION', 'SECOND_CANCEL', 'SLOT_DEFECT', 'SPAWNER_STOPPED', 'TASK_COUNT']"
+  },
+  "horsies._catalog.events.RunTrace": {
+   "defined_as": "horsies._catalog.events.RunTrace",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies._catalog.events.RunTraceCarrier | horsies._catalog.events.RunTraceNoCarrier"
+  },
+  "horsies._catalog.events.RunTraceCarrier": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "text"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.RunTraceCarrier",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "text",
+      "type": "str"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.RunTraceNoCarrier": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.RunTraceNoCarrier",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.ShortageErrno": {
+   "defined_as": "horsies._catalog.events.ShortageErrno",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "Literal['EAGAIN', 'EMFILE', 'ENFILE', 'ENOMEM']"
+  },
+  "horsies._catalog.events.SlotDown": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "at"
+     },
+     {
+      "annotation": "horsies._catalog.events.Execution",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "child_kind"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "slot"
+     },
+     {
+      "annotation": "horsies._catalog.events.SlotDownCause",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "cause"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.SlotDown",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "at",
+      "type": "datetime.datetime"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "child_kind",
+      "type": "horsies._catalog.events.Execution"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "slot",
+      "type": "int"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "cause",
+      "type": "horsies._catalog.events.SlotDownCause"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.SlotDownCause": {
+   "defined_as": "horsies._catalog.events.SlotDownCause",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies._catalog.events.SlotDownCauseResourceShortage | horsies._catalog.events.SlotDownCauseThreadStartRefused"
+  },
+  "horsies._catalog.events.SlotDownCauseResourceShortage": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "horsies._catalog.events.ShortageErrno",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "errno"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.SlotDownCauseResourceShortage",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "errno",
+      "type": "horsies._catalog.events.ShortageErrno"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.SlotDownCauseThreadStartRefused": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.SlotDownCauseThreadStartRefused",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.SlotRecovered": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "at"
+     },
+     {
+      "annotation": "horsies._catalog.events.Execution",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "child_kind"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "slot"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.SlotRecovered",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "at",
+      "type": "datetime.datetime"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "child_kind",
+      "type": "horsies._catalog.events.Execution"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "slot",
+      "type": "int"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.StopReason": {
+   "defined_as": "horsies._catalog.events.StopReason",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "Literal['CLAIM_LOST', 'NODE_NOT_LINKED', 'ORPHAN_CANCELLED', 'OWNERSHIP_UNCONFIRMED', 'TASK_EXPIRED', 'WORKFLOW_STOPPED']"
+  },
+  "horsies._catalog.events.TaskRecovered": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "at"
+     },
+     {
+      "annotation": "uuid.UUID",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "task_id"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "task_name"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "queue"
+     },
+     {
+      "annotation": "horsies._catalog.events.RecoveryAction",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "action"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.TaskRecovered",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "at",
+      "type": "datetime.datetime"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "task_id",
+      "type": "uuid.UUID"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "task_name",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "queue",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "action",
+      "type": "horsies._catalog.events.RecoveryAction"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.WorkerDecision": {
+   "defined_as": "horsies._catalog.events.WorkerDecision",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "Literal['CHILD_LOST', 'NEIGHBOUR_BLOCKED_LOOP', 'TASK_BLOCKED_LOOP', 'TIMED_OUT']"
+  },
+  "horsies._catalog.events.WorkflowPlace": {
+   "defined_as": "horsies._catalog.events.WorkflowPlace",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "Literal['NOT_IN_WORKFLOW', 'WORKFLOW_NOT_KNOWN']"
+  },
   "horsies._catalog.history_errors.HistoryContractError": {
    "abstract": false,
    "bases": [
@@ -26844,6 +29333,12 @@
    "kind": "type alias",
    "type_params": [],
    "value": "horsies.TaskSendAsyncContext | horsies.TaskSendEnqueueFailed | horsies.TaskSendIdempotencyKeyConflict | horsies.TaskSendPayloadMismatch | horsies.TaskSendPayloadTooLarge | horsies.TaskSendSuppressed | horsies.TaskSendValidationFailed"
+  },
+  "horsies._catalog.worker_manifest.EventTypeName": {
+   "defined_as": "horsies._catalog.worker_manifest.EventTypeName",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "Literal['AttemptEnded', 'AttemptNotStarted', 'AttemptPlaced', 'AttemptRecorded', 'ChildReplaced', 'ChildStarted', 'ClaimReleased', 'SlotDown', 'SlotRecovered', 'TaskClaimed', 'TaskRecovered']"
   },
   "horsies._catalog.workflow_handle_errors.HandleCoreError": {
    "defined_as": "horsies._catalog.workflow_handle_errors.HandleCoreError",
@@ -26945,6 +29440,76 @@
    "mro": [
     "Exception",
     "BaseException",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": []
+  },
+  "horsies._core.NoTraceCarrier": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies._core.NoTraceCarrier",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": []
+  },
+  "horsies._core.TraceCarrier": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "carrier"
+     },
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "trace_id"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies._core.TraceCarrier",
+   "kind": "class",
+   "members": {
+    "carrier": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'carrier' of 'horsies._core.TraceCarrier' objects>"
+    },
+    "trace_id": {
+     "kind": "attribute",
+     "type": "getset_descriptor",
+     "value": "<attribute 'trace_id' of 'horsies._core.TraceCarrier' objects>"
+    }
+   },
+   "mro": [
     "object"
    ],
    "protocol": false,
@@ -27212,6 +29777,12 @@
         "default": "None",
         "kind": "KEYWORD_ONLY",
         "name": "retain_rerun_input"
+       },
+       {
+        "annotation": "horsies.core.telemetry.send_telemetry.TraceArgument",
+        "default": "<horsies._core.NoTraceCarrier object at 0x…>",
+        "kind": "KEYWORD_ONLY",
+        "name": "trace"
        }
       ],
       "returns": "horsies.Err[horsies.BrokerEnqueueError | horsies.BrokerSyncCallError] | horsies.Ok[uuid.UUID]"
@@ -27312,6 +29883,12 @@
         "default": "None",
         "kind": "KEYWORD_ONLY",
         "name": "idempotency_key"
+       },
+       {
+        "annotation": "horsies.core.telemetry.send_telemetry.TraceArgument",
+        "default": "<horsies._core.NoTraceCarrier object at 0x…>",
+        "kind": "KEYWORD_ONLY",
+        "name": "trace"
        }
       ],
       "returns": "horsies.Err[horsies.BrokerEnqueueError] | horsies.Ok[uuid.UUID]"
@@ -27974,6 +30551,293 @@
     "slots": false
    },
    "type_params": []
+  },
+  "horsies.core.event_handlers.AsyncEventHandler": {
+   "defined_as": "horsies.core.event_handlers.AsyncEventHandler",
+   "kind": "type alias",
+   "type_params": [
+    "~E"
+   ],
+   "value": "collections.abc.Callable[[~E], collections.abc.Coroutine[object, object, None]]"
+  },
+  "horsies.core.event_handlers.EventHandler": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "name"
+     },
+     {
+      "annotation": "horsies.core.event_handlers.KnownEventType",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "event_type"
+     },
+     {
+      "annotation": "horsies.core.event_handlers.HandlerKind",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "kind"
+     },
+     {
+      "annotation": "horsies.core.event_handlers.HandlerFunction",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "function"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.event_handlers.EventHandler",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "name",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "event_type",
+      "type": "horsies.core.event_handlers.KnownEventType"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "kind",
+      "type": "horsies.core.event_handlers.HandlerKind"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "function",
+      "type": "horsies.core.event_handlers.HandlerFunction"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.core.event_handlers.EventHandlerDecorator": {
+   "abstract": false,
+   "bases": [
+    "typing.Generic"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "horsies.core.event_handlers.KnownEventType",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "event_type"
+     },
+     {
+      "annotation": "collections.abc.Callable[[horsies.core.event_handlers.KnownEventType, object], None]",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "register"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.event_handlers.EventHandlerDecorator",
+   "kind": "class",
+   "members": {
+    "__call__": {
+     "kind": "method",
+     "overloads": [
+      {
+       "async": "sync",
+       "parameters": [
+        {
+         "annotation": "unannotated",
+         "default": "required",
+         "kind": "POSITIONAL_OR_KEYWORD",
+         "name": "self"
+        },
+        {
+         "annotation": "horsies.core.event_handlers.AsyncEventHandler[~E]",
+         "default": "required",
+         "kind": "POSITIONAL_OR_KEYWORD",
+         "name": "handler"
+        }
+       ],
+       "returns": "horsies.core.event_handlers.AsyncEventHandler[~E]"
+      },
+      {
+       "async": "sync",
+       "parameters": [
+        {
+         "annotation": "unannotated",
+         "default": "required",
+         "kind": "POSITIONAL_OR_KEYWORD",
+         "name": "self"
+        },
+        {
+         "annotation": "horsies.core.event_handlers.SyncEventHandler[~E]",
+         "default": "required",
+         "kind": "POSITIONAL_OR_KEYWORD",
+         "name": "handler"
+        }
+       ],
+       "returns": "horsies.core.event_handlers.SyncEventHandler[~E]"
+      }
+     ],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "horsies.core.event_handlers.AsyncEventHandler[~E] | horsies.core.event_handlers.SyncEventHandler[~E]",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "handler"
+       }
+      ],
+      "returns": "horsies.core.event_handlers.AsyncEventHandler[~E] | horsies.core.event_handlers.SyncEventHandler[~E]"
+     }
+    }
+   },
+   "mro": [
+    "typing.Generic",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": [
+    "~E"
+   ]
+  },
+  "horsies.core.event_handlers.HandlerFunction": {
+   "defined_as": "horsies.core.event_handlers.HandlerFunction",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "function | method"
+  },
+  "horsies.core.event_handlers.HandlerKind": {
+   "abstract": false,
+   "bases": [
+    "enum.Enum"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "VAR_POSITIONAL",
+      "name": "values"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies.core.event_handlers.HandlerKind",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "enum.Enum",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "kind": "enum",
+    "members": {
+     "ASYNC_DEF": "'async def'",
+     "DEF": "'def'"
+    }
+   },
+   "type_params": []
+  },
+  "horsies.core.event_handlers.KnownEventType": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "type[horsies.telemetry.AnyEvent]",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "event_class"
+     },
+     {
+      "annotation": "horsies._catalog.worker_manifest.EventTypeName",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "name"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.event_handlers.KnownEventType",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "event_class",
+      "type": "type[horsies.telemetry.AnyEvent]"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "name",
+      "type": "horsies._catalog.worker_manifest.EventTypeName"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.core.event_handlers.SyncEventHandler": {
+   "defined_as": "horsies.core.event_handlers.SyncEventHandler",
+   "kind": "type alias",
+   "type_params": [
+    "~E"
+   ],
+   "value": "collections.abc.Callable[[~E], None]"
   },
   "horsies.core.history.reads.pages.HistoryWindow": {
    "abstract": false,
@@ -30235,6 +33099,478 @@
     "kind": "plain"
    },
    "type_params": []
+  },
+  "horsies.core.telemetry.send_telemetry.CallEnd": {
+   "defined_as": "horsies.core.telemetry.send_telemetry.CallEnd",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies.core.telemetry.send_telemetry.CallFailed | horsies.core.telemetry.send_telemetry.CallRaised | horsies.core.telemetry.send_telemetry.CallSucceeded"
+  },
+  "horsies.core.telemetry.send_telemetry.CallFailed": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "error_code"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.telemetry.send_telemetry.CallFailed",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "error_code",
+      "type": "str"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.core.telemetry.send_telemetry.CallRaised": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "exception_type"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.telemetry.send_telemetry.CallRaised",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "exception_type",
+      "type": "str"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.core.telemetry.send_telemetry.CallSucceeded": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.telemetry.send_telemetry.CallSucceeded",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.core.telemetry.send_telemetry.NoSendTelemetry": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.telemetry.send_telemetry.NoSendTelemetry",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.core.telemetry.send_telemetry.OpenSpan": {
+   "abstract": false,
+   "bases": [
+    "typing.Protocol"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "VAR_POSITIONAL",
+      "name": "args"
+     },
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "VAR_KEYWORD",
+      "name": "kwargs"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies.core.telemetry.send_telemetry.OpenSpan",
+   "kind": "class",
+   "members": {
+    "end": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "horsies.core.telemetry.send_telemetry.CallEnd",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "call_end"
+       }
+      ],
+      "returns": "None"
+     }
+    },
+    "trace": {
+     "kind": "property",
+     "settable": false,
+     "type": "horsies.core.telemetry.send_telemetry.TraceArgument"
+    }
+   },
+   "mro": [
+    "typing.Protocol",
+    "typing.Generic",
+    "object"
+   ],
+   "protocol": true,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": []
+  },
+  "horsies.core.telemetry.send_telemetry.OtelSendTelemetry": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "horsies.core.telemetry.send_telemetry.SendRecorder",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "recorder"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.telemetry.send_telemetry.OtelSendTelemetry",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "recorder",
+      "type": "horsies.core.telemetry.send_telemetry.SendRecorder"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.core.telemetry.send_telemetry.SendRecorder": {
+   "abstract": false,
+   "bases": [
+    "typing.Protocol"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "VAR_POSITIONAL",
+      "name": "args"
+     },
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "VAR_KEYWORD",
+      "name": "kwargs"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies.core.telemetry.send_telemetry.SendRecorder",
+   "kind": "class",
+   "members": {
+    "current_trace": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       }
+      ],
+      "returns": "horsies.core.telemetry.send_telemetry.TraceArgument"
+     }
+    },
+    "start_task_send": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "horsies.core.telemetry.send_telemetry.TaskSendSubject",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "subject"
+       }
+      ],
+      "returns": "horsies.core.telemetry.send_telemetry.OpenSpan"
+     }
+    },
+    "start_workflow_start": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "horsies.core.telemetry.send_telemetry.WorkflowStartSubject",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "subject"
+       }
+      ],
+      "returns": "horsies.core.telemetry.send_telemetry.OpenSpan"
+     }
+    }
+   },
+   "mro": [
+    "typing.Protocol",
+    "typing.Generic",
+    "object"
+   ],
+   "protocol": true,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": []
+  },
+  "horsies.core.telemetry.send_telemetry.SendTelemetry": {
+   "defined_as": "horsies.core.telemetry.send_telemetry.SendTelemetry",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies.core.telemetry.send_telemetry.NoSendTelemetry | horsies.core.telemetry.send_telemetry.OtelSendTelemetry"
+  },
+  "horsies.core.telemetry.send_telemetry.TaskSendSubject": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "task_name"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "queue_name"
+     },
+     {
+      "annotation": "uuid.UUID",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "task_id"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.telemetry.send_telemetry.TaskSendSubject",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "task_name",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "queue_name",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "task_id",
+      "type": "uuid.UUID"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.core.telemetry.send_telemetry.TraceArgument": {
+   "defined_as": "horsies.core.telemetry.send_telemetry.TraceArgument",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies._core.NoTraceCarrier | horsies._core.TraceCarrier"
+  },
+  "horsies.core.telemetry.send_telemetry.WorkflowStartSubject": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "workflow_name"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "workflow_id"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.telemetry.send_telemetry.WorkflowStartSubject",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "workflow_name",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "workflow_id",
+      "type": "str"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
   }
  },
  "scope": {
@@ -30344,6 +33680,14 @@
    "horsies.monitoring:task_breakdown",
    "horsies.monitoring:task_facets",
    "horsies.monitoring:task_stats",
+   "horsies.telemetry:AnyEvent",
+   "horsies.telemetry:AttemptEndDecidedByWorker",
+   "horsies.telemetry:AttemptEndNotKnown",
+   "horsies.telemetry:AttemptEndReportedByChild",
+   "horsies.telemetry:AttemptEnded",
+   "horsies.telemetry:AttemptRecorded",
+   "horsies.telemetry:ChildResultCompleted",
+   "horsies.telemetry:TaskClaimed",
    "horsies.web:AllowAll",
    "horsies.web:MonitoringUIConfig",
    "horsies.web:TrustedHeader",
@@ -30362,6 +33706,7 @@
    "horsies:BuiltInTaskCode",
    "horsies:ByMonthDay",
    "horsies:ByWeekday",
+   "horsies:ChildOfSend",
    "horsies:ChildPreload",
    "horsies:ClaimLimits",
    "horsies:ClassBudgets",
@@ -30401,7 +33746,10 @@
    "horsies:IsolatedChildren",
    "horsies:IsolatedPool",
    "horsies:IsolatedRecycle",
+   "horsies:JsonLogs",
+   "horsies:JsonLogsFormatter",
    "horsies:JsonValue",
+   "horsies:LinkedToSend",
    "horsies:MemoryLimit",
    "horsies:Month",
    "horsies:MonthlySchedule",
@@ -30409,6 +33757,7 @@
    "horsies:NoIsolatedChildren",
    "horsies:NoMemoryLimit",
    "horsies:NoTaskLimit",
+   "horsies:NoTracing",
    "horsies:NodeKey",
    "horsies:NoneDue",
    "horsies:NotEligibleReason",
@@ -30416,6 +33765,7 @@
    "horsies:OldestWaiting",
    "horsies:OnError",
    "horsies:OperationalErrorCode",
+   "horsies:OtelTracing",
    "horsies:OutcomeCode",
    "horsies:ParentCpu",
    "horsies:ParentPool",
@@ -30459,6 +33809,7 @@
    "horsies:TASK_TERMINAL_STATES",
    "horsies:TaskAttemptInfo",
    "horsies:TaskAttemptOutcome",
+   "horsies:TaskContextFilter",
    "horsies:TaskError",
    "horsies:TaskHandle",
    "horsies:TaskInfo",
@@ -30482,6 +33833,7 @@
    "horsies:TaskSendSuppressed",
    "horsies:TaskSendValidationFailed",
    "horsies:TaskStatus",
+   "horsies:TextLogs",
    "horsies:WORKFLOW_TASK_TERMINAL_STATES",
    "horsies:WORKFLOW_TERMINAL_STATES",
    "horsies:Weekday",
