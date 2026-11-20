@@ -115,7 +115,11 @@ def _drain(
 ) -> DrainReading:
     return DrainReading(
         tasks=10_000,
-        worker=WorkerCpu(parent_s=worker_s / 2, children_s=worker_s / 2, children=5),
+        worker=WorkerCpu(
+            parent_s=worker_s / 2,
+            children_s=worker_s / 2,
+            children_pids=(101, 102, 103, 104, 105),
+        ),
         postgres=postgres,
         stop_s=1.0,
         endpoint=endpoint,

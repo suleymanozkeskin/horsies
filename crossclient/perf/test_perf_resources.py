@@ -6,6 +6,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -98,30 +99,72 @@ class TestPostgresCpuMeter:
             meter.begin()
 
 
+BURN_CPU_S: Final = 0.1
+"""The CPU seconds that the parent and the child each burn before the read:
+ten clock ticks at the ``USER_HZ`` of 100 of Linux. Linux counts the user and
+the system time of a process apart, each in whole ticks, so a process can
+run for up to two ticks and still read 0 seconds."""
+
+CHILD_SCRIPT: Final = (
+    'import sys, time\n'
+    'burn_s = float(sys.argv[1])\n'
+    'started = time.process_time()\n'
+    'while time.process_time() - started < burn_s:\n'
+    '    pass\n'
+    'print("burned", flush=True)\n'
+    'sys.stdin.read()\n'
+)
+"""Burns ``argv[1]`` CPU seconds, prints ``burned``, and waits for stdin to
+close."""
+
+PARENT_SCRIPT: Final = (
+    'import subprocess, sys, time\n'
+    'burn_s = float(sys.argv[1])\n'
+    'child = subprocess.Popen(\n'
+    '    [sys.executable, "-c", sys.argv[2], sys.argv[1]],\n'
+    '    stdin=subprocess.PIPE,\n'
+    '    stdout=subprocess.PIPE,\n'
+    '    text=True,\n'
+    ')\n'
+    'if child.stdout.readline().strip() != "burned":\n'
+    '    sys.exit("the child did not burn its CPU seconds")\n'
+    'started = time.process_time()\n'
+    'while time.process_time() - started < burn_s:\n'
+    '    pass\n'
+    'print(child.pid, flush=True)\n'
+    'sys.stdin.read()\n'
+    'child.stdin.close()\n'
+    'child.wait()\n'
+)
+"""Starts ``CHILD_SCRIPT`` (``argv[2]``) with ``argv[1]``, waits for its
+``burned``, burns ``argv[1]`` CPU seconds, prints the pid of the child, and
+waits for stdin to close."""
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessTree:
+    """A parent process and the pid of its one child, each past its burn."""
+
+    parent: subprocess.Popen[str]
+    child_pid: int
+
+
 @pytest.fixture
-def parent_with_one_child() -> Iterator[subprocess.Popen[str]]:
-    """A Python process that starts one child, prints a line once the child
-    runs, and both wait for stdin to close."""
+def parent_with_one_child() -> Iterator[ProcessTree]:
+    """A Python process with one child. Each burns ``BURN_CPU_S`` CPU seconds
+    before the parent prints the pid of the child; both then wait for stdin
+    to close."""
     process = subprocess.Popen(
-        [
-            sys.executable,
-            '-c',
-            'import subprocess, sys\n'
-            'child = subprocess.Popen([sys.executable, "-c", '
-            '"import sys; sys.stdin.read()"], stdin=subprocess.PIPE)\n'
-            'print("ready", flush=True)\n'
-            'sys.stdin.read()\n'
-            'child.stdin.close()\n'
-            'child.wait()\n',
-        ],
+        [sys.executable, '-c', PARENT_SCRIPT, str(BURN_CPU_S), CHILD_SCRIPT],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,
     )
-    assert process.stdout is not None
-    assert process.stdout.readline().strip() == 'ready'
     try:
-        yield process
+        assert process.stdout is not None
+        line = process.stdout.readline().strip()
+        assert line.isdigit(), f'the parent printed no child pid: {line!r}'
+        yield ProcessTree(parent=process, child_pid=int(line))
     finally:
         assert process.stdin is not None
         process.stdin.close()
@@ -131,11 +174,15 @@ def parent_with_one_child() -> Iterator[subprocess.Popen[str]]:
 class TestWorkerCpu:
     def test_the_parent_and_each_process_below_it_are_read(
         self,
-        parent_with_one_child: subprocess.Popen[str],
+        parent_with_one_child: ProcessTree,
     ) -> None:
-        match read_worker_cpu(parent_with_one_child.pid):
-            case WorkerCpu(parent_s=parent_s, children_s=children_s, children=children):
-                assert children == 1
+        match read_worker_cpu(parent_with_one_child.parent.pid):
+            case WorkerCpu(
+                parent_s=parent_s,
+                children_s=children_s,
+                children_pids=children_pids,
+            ):
+                assert children_pids == (parent_with_one_child.child_pid,)
                 assert parent_s > 0
                 assert children_s > 0
             case other:

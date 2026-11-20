@@ -3,6 +3,9 @@
 - A worker: the CPU time of the worker parent and of each process below it
   that runs, read with ``psutil`` at the end of a drain. A process below it
   that ended before the read is not counted; the drain replaces no child.
+  Linux counts the CPU time of a process in whole clock ticks (10 ms at a
+  ``USER_HZ`` of 100), the user and the system time apart: a process that
+  ran under one tick in each reads 0 seconds, and the read counts it.
 - A producer: the CPU time of the harness process, which makes the calls of
   a public call scenario (``time.process_time``), across one block.
 - PostgreSQL: the ``usage_usec`` of the ``cpu.stat`` file of the cgroup v2
@@ -41,11 +44,13 @@ MICROSECONDS_PER_SECOND: Final = 1_000_000
 @dataclass(frozen=True, slots=True)
 class WorkerCpu:
     """The CPU seconds (user and system) of a worker at one read: its parent
-    process, and the sum of the processes below it."""
+    process, and the sum of the processes below it. ``children_pids`` holds
+    the pid of each process below it that the read counted, in ascending
+    order; a tuple, so that the raw JSON of a run can hold it."""
 
     parent_s: float
     children_s: float
-    children: int
+    children_pids: tuple[int, ...]
 
     @property
     def total_s(self) -> float:
@@ -77,7 +82,7 @@ def read_worker_cpu(pid: int) -> WorkerCpu | WorkerCpuUnreadable:
     except psutil.Error as error:
         return WorkerCpuUnreadable(pid=pid, cause=f'{type(error).__name__}: {error}')
     children_s = 0.0
-    counted = 0
+    counted: list[int] = []
     for process in below:
         try:
             times = process.cpu_times()
@@ -89,11 +94,11 @@ def read_worker_cpu(pid: int) -> WorkerCpu | WorkerCpuUnreadable:
                 cause=f'process {process.pid}: {type(error).__name__}: {error}',
             )
         children_s += times.user + times.system
-        counted += 1
+        counted.append(process.pid)
     return WorkerCpu(
         parent_s=parent_times.user + parent_times.system,
         children_s=children_s,
-        children=counted,
+        children_pids=tuple(sorted(counted)),
     )
 
 
