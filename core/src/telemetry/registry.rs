@@ -783,10 +783,13 @@ impl Registry {
                 let _recorded = info.set((VersionValue, ProfileValue, WorkerIdValue), 1.0);
             }
             Err(HandleRefused::NotInRegistry { .. }) => {}
+            // A handle lookup never reads the worker facts: only the
+            // telemetry of the points refuses with `NoWorkerFacts`.
             Err(
                 refused @ (HandleRefused::KindDiffers { .. }
                 | HandleRefused::LabelsDiffer { .. }
-                | HandleRefused::CountedByTheRegistry { .. }),
+                | HandleRefused::CountedByTheRegistry { .. }
+                | HandleRefused::NoWorkerFacts),
             ) => unreachable!("the info labels are the labels of its catalog entry: {refused}"),
         }
     }
