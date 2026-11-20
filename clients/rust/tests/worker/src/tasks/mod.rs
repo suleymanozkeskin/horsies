@@ -27,9 +27,11 @@ pub fn register(app: &mut Horsies, instance: Instance) -> Result<(), HorsiesErro
             register_default(app)?;
             register_scheduled(app)
         }
-        Instance::Default | Instance::ClusterCap | Instance::Recovery | Instance::SoftCap => {
-            register_default(app)
-        }
+        Instance::Default
+        | Instance::ClusterCap
+        | Instance::Recovery
+        | Instance::SoftCap
+        | Instance::Handlers => register_default(app),
     }
 }
 

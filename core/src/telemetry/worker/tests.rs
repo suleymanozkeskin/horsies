@@ -353,25 +353,37 @@ fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
     };
     let cases: Vec<(EndView<'_>, ExpectedEnd, &str, &str)> = vec![
         (
-            EndView::Result(&value),
+            EndView::Result {
+                read: &value,
+                start: AttemptStart::NotReported,
+            },
             ExpectedEnd::Reported(ChildResult::Completed),
             "COMPLETED",
             "",
         ),
         (
-            EndView::Result(&declared),
+            EndView::Result {
+                read: &declared,
+                start: AttemptStart::NotReported,
+            },
             failed_with("RATE_LIMITED"),
             "FAILED",
             "RATE_LIMITED",
         ),
         (
-            EndView::Result(&other),
+            EndView::Result {
+                read: &other,
+                start: AttemptStart::NotReported,
+            },
             failed_with("OTHER_CODE"),
             "FAILED",
             "undeclared",
         ),
         (
-            EndView::Result(&unreadable),
+            EndView::Result {
+                read: &unreadable,
+                start: AttemptStart::NotReported,
+            },
             ExpectedEnd::Reported(ChildResult::Failed {
                 error_code: AttemptErrorCode::BuiltIn {
                     code: OperationalErrorCode::WorkerSerializationError.into(),
@@ -381,7 +393,9 @@ fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
             "WORKER_SERIALIZATION_ERROR",
         ),
         (
-            EndView::WorkerFailure,
+            EndView::WorkerFailure {
+                start: AttemptStart::NotReported,
+            },
             ExpectedEnd::Reported(ChildResult::WorkerFailure),
             "WORKER_FAILURE",
             "BROKER_ERROR",
@@ -456,6 +470,58 @@ fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
             )],
             "{view:?}"
         );
+    }
+}
+
+/// The start that the child reported reaches the `AttemptEnded` of a
+/// reported end with its time: a result and a worker failure that report a
+/// start carry it, and a worker failure that came before the start write
+/// returned carries `NotReported`.
+#[test]
+fn a_reported_end_carries_the_start_that_its_child_reported() {
+    let started_at =
+        chrono::DateTime::<Utc>::from_timestamp(1_767_225_600, 0).expect("a time in range");
+    let reported = AttemptStart::Reported { started_at };
+    let value = ResultRead::Value;
+    let cases = [
+        (
+            EndView::Result {
+                read: &value,
+                start: reported,
+            },
+            ChildResult::Completed,
+            reported,
+        ),
+        (
+            EndView::WorkerFailure { start: reported },
+            ChildResult::WorkerFailure,
+            reported,
+        ),
+        (
+            EndView::WorkerFailure {
+                start: AttemptStart::NotReported,
+            },
+            ChildResult::WorkerFailure,
+            AttemptStart::NotReported,
+        ),
+    ];
+    for (view, result, start) in cases {
+        let mut watched = declaring_telemetry();
+        let task = claimed_task(Execution::Isolated);
+        let placed = placed_after(ClaimRead::now());
+
+        let _noted = watched
+            .telemetry
+            .attempt_ended(&task, &ChildPlacement::Placed(placed), view);
+
+        match watched.events().as_slice() {
+            [Event::AttemptEnded(ended)] => assert_eq!(
+                ended.end,
+                events::AttemptEnd::ReportedByChild { result, start },
+                "{view:?}"
+            ),
+            other => panic!("{view:?} gives one AttemptEnded, not {other:?}"),
+        }
     }
 }
 

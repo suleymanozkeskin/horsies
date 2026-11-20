@@ -3,9 +3,11 @@
 
 use tokio::sync::oneshot;
 
-use super::{Answer, AttemptEnd, ChildExit, ChildLost, LossCause, ProcessId, TaskAnswer};
-use crate::worker::executor::protocol::RunEnd;
-use crate::worker::executor::slots::scripted::ok_envelope;
+use super::{
+    Answer, AttemptEnd, BodyReturn, ChildExit, ChildLost, LossCause, ProcessId, TaskAnswer,
+};
+use crate::worker::executor::protocol::BodyEnd;
+use crate::worker::executor::slots::scripted::{ok_envelope, started_at};
 use crate::worker::executor::supervisor::{PartialFrame, ReapedExit};
 
 fn lost(cause: LossCause, exit: ChildExit) -> ChildLost {
@@ -46,7 +48,10 @@ fn a_loss_before_the_return_takes_the_crash_path_of_the_loss() {
 /// crash path or a timeout.
 #[test]
 fn a_loss_after_the_return_keeps_what_the_body_returned() {
-    let returned = AttemptEnd::Reported(RunEnd::Result(ok_envelope(7)));
+    let returned = AttemptEnd::returned(BodyReturn {
+        end: BodyEnd::Result(ok_envelope(7)),
+        started_at: started_at(),
+    });
     for loss in [
         lost(
             LossCause::SlotDefect,

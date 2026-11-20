@@ -57,6 +57,7 @@ pub(crate) async fn run_isolated_in_process_scoped(
             log_setup: ChildLogSetup::NoSetup,
             family: crate::ClientFamily::Rust,
             body_scope,
+            handler_child: super::HandlerChildApp::without_handlers(),
         }),
         pid: IN_PROCESS_PID,
         writer,

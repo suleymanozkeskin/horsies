@@ -11,7 +11,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::thread;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::worker::executor::protocol::{
     decode_parent_frame, encode_child_frame, ChildFrame, FrameOverBound, FrameReader, ParentFrame,
@@ -111,23 +111,50 @@ pub(super) fn start_control_thread(
     Ok(receiver)
 }
 
+/// What the writer thread takes, in order.
+enum Outgoing {
+    /// A frame to write.
+    Frame(ChildFrame),
+    /// Answered when every frame queued before it is written.
+    Flush(oneshot::Sender<()>),
+}
+
+/// How a flush of the frame writer ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Flushed {
+    /// Every frame queued before the flush is written.
+    Written,
+    /// The writer thread is gone: it ended without the answer. The thread
+    /// exits the process when a write fails, so this is the end of the
+    /// process.
+    WriterGone,
+}
+
 /// The sender of child frames. One writer thread writes them in order; a
 /// failed write means the parent is gone, and the process exits with the
 /// parent-gone code.
 #[derive(Clone)]
 pub(super) struct FrameWriter {
-    frames: mpsc::Sender<ChildFrame>,
+    frames: mpsc::Sender<Outgoing>,
 }
 
 impl FrameWriter {
     pub(super) fn start(socket: UnixStream, bound: usize) -> io::Result<Self> {
-        let (frames, mut receiver) = mpsc::channel::<ChildFrame>(bound);
+        let (frames, mut receiver) = mpsc::channel::<Outgoing>(bound);
         thread::Builder::new()
             .name(WRITER_THREAD_NAME.to_owned())
             .spawn(move || {
-                while let Some(frame) = receiver.blocking_recv() {
-                    if write_frame(&socket, &frame).is_err() {
-                        std::process::exit(PARENT_GONE_EXIT_CODE);
+                while let Some(outgoing) = receiver.blocking_recv() {
+                    match outgoing {
+                        Outgoing::Frame(frame) => {
+                            if write_frame(&socket, &frame).is_err() {
+                                std::process::exit(PARENT_GONE_EXIT_CODE);
+                            }
+                        }
+                        Outgoing::Flush(written) => {
+                            // The flush caller may have stopped waiting.
+                            let _answered = written.send(());
+                        }
                     }
                 }
             })?;
@@ -138,11 +165,25 @@ impl FrameWriter {
     pub(super) async fn send(&self, frame: ChildFrame) {
         // The receiver ends only with the writer thread, which exits the
         // process when it fails; at a stop the frame is no longer needed.
-        let _ = self.frames.send(frame).await;
+        let _ = self.frames.send(Outgoing::Frame(frame)).await;
     }
 
     /// Queue a frame from a thread that is not a runtime thread.
     pub(super) fn send_blocking(&self, frame: ChildFrame) {
-        let _ = self.frames.blocking_send(frame);
+        let _ = self.frames.blocking_send(Outgoing::Frame(frame));
+    }
+
+    /// Wait until every frame queued before this call is written. Not
+    /// bounded: the caller bounds the wait.
+    pub(super) async fn flush(&self) -> Flushed {
+        let (written, answer) = oneshot::channel();
+        match self.frames.send(Outgoing::Flush(written)).await {
+            Ok(()) => {}
+            Err(_writer_gone) => return Flushed::WriterGone,
+        }
+        match answer.await {
+            Ok(()) => Flushed::Written,
+            Err(_writer_gone) => Flushed::WriterGone,
+        }
     }
 }

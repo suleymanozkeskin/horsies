@@ -138,10 +138,13 @@ impl Horsies {
     /// mode to [`Horsies::serve_child`] (or call `horsies::cli::run`).
     ///
     /// In order: the role becomes `Worker`; the static check without the
-    /// schedules; the worker manifest of the app; the profile and the
-    /// connection settings; then the core's worker parent on the process
-    /// runtime, which connects with the resilience retry, starts the
-    /// children and claims.
+    /// schedules; the worker manifest of the app, with its event handlers;
+    /// the profile and the connection settings; then the core's worker
+    /// parent on the process runtime, which connects with the resilience
+    /// retry, starts the children and claims. An app with an event handler
+    /// ([`Horsies::on_event`]) also gets a handler child: the worker waits
+    /// at most 30 s for it before the first claim, and a handler child that
+    /// fails never stops the worker.
     ///
     /// Errors: [`WorkerRunError`]. The run returns `Ok` only at a stop
     /// request.
@@ -194,6 +197,7 @@ impl Horsies {
         worker_manifest(
             self.config(),
             self.tasks(),
+            self.event_handlers().manifest(),
             start.profile,
             start.metrics_endpoint,
             launch,

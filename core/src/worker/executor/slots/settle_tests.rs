@@ -19,13 +19,25 @@ use crate::core::history::archive::attempts::decode_attempt_snapshot;
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
 use crate::core::task::error::TaskError;
 use crate::core::task::result::TaskResult;
+use crate::events::AttemptStart;
 use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 use crate::test_support::{CapturedEvent, LogCapture};
 use crate::worker::executor::protocol::{
-    CancelGraceMs, FailureDetail, IsolatedWork, ResultEnvelopeText, RunEnd, SharedWork, StopReason,
+    CancelGraceMs, FailureDetail, IsolatedWork, ResultEnvelopeText, SharedWork, StopReason,
     StoredOptionsRefusal,
 };
 use crate::worker::retry::read_stored_options;
+
+/// The end of a run that reported `envelope`. The writer does not read its
+/// start.
+fn reported_result(envelope: ResultEnvelopeText) -> AttemptEnd {
+    AttemptEnd::Result {
+        envelope,
+        start: AttemptStart::Reported {
+            started_at: DateTime::<Utc>::UNIX_EPOCH,
+        },
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -354,10 +366,7 @@ async fn a_reported_result_of_a_shared_run_completes_the_row() {
     );
 
     let settled = writer(pool.clone())
-        .settle(
-            &claimed,
-            AttemptEnd::Reported(RunEnd::Result(ok_envelope(7))),
-        )
+        .settle(&claimed, reported_result(ok_envelope(7)))
         .await;
 
     assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
@@ -731,10 +740,10 @@ async fn a_run_that_returned_before_the_kill_writes_what_it_returned() {
     let pool = crate::test_support::migrated_pool().await;
     let error = TaskError::new("UPSTREAM_DOWN", "upstream down").expect("a code of the task's own");
     let returned = || {
-        AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
+        reported_result(ResultEnvelopeText::new(
             serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error.clone()))
                 .expect("the error envelope encodes"),
-        )))
+        ))
     };
     for (retried_code, left) in [
         (
@@ -997,7 +1006,7 @@ async fn a_task_whose_node_is_not_linked_stays_claimed() {
     let settled = writer(pool.clone())
         .settle(
             &claimed,
-            AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(StopReason::NodeNotLinked)),
+            AttemptEnd::StoppedBeforeRunning(StopReason::NodeNotLinked),
         )
         .await;
 
@@ -1108,10 +1117,7 @@ async fn a_failed_success_write_logs_the_task_and_not_the_result() {
     let envelope = format!(r#"{{"__h_task_result__":true,"ok":"{RESULT_MARKER}","err":null}}"#);
 
     let settled = writer
-        .settle(
-            &claimed,
-            AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(envelope))),
-        )
+        .settle(&claimed, reported_result(ResultEnvelopeText::new(envelope)))
         .await;
 
     assert_eq!(settled, Settlement::RetriesExhausted);

@@ -5,6 +5,7 @@ from importlib.metadata import version as _pkg_version
 __version__: str = _pkg_version("horsies")
 
 from .core.app import Horsies, ChildProcessStartHook, SharedAsyncChildStartHook
+from .core.event_handlers import HandlerChildStartHook
 from .core.models.app import AppConfig
 from .core.models.broker import PostgresConfig
 from .core.models.tasks import (
@@ -253,6 +254,7 @@ __all__ = [
     'Horsies',
     'ChildProcessStartHook',
     'SharedAsyncChildStartHook',
+    'HandlerChildStartHook',
     'AppConfig',
     'PostgresConfig',
     'TaskResult',
