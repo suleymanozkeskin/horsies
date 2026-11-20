@@ -271,6 +271,7 @@ async fn a_deadline_kill_gives_no_end_before_the_exit_is_seen() {
             timeout: timeout_ms(SHORT_DEADLINE_MS),
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::NoSignal,
+            start: crate::events::AttemptStart::NotReported,
         }
     );
     held.stop().await;
@@ -328,6 +329,7 @@ async fn a_result_that_reaches_the_socket_after_the_deadline_is_not_read() {
             timeout: timeout_ms(SHORT_DEADLINE_MS),
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::NoSignal,
+            start: crate::events::AttemptStart::NotReported,
         }
     );
     held.stop().await;
@@ -397,6 +399,7 @@ async fn a_deadline_kill_waits_for_the_late_exit_with_recovery_off() {
             timeout: timeout_ms(SHORT_DEADLINE_MS),
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::NoSignal,
+            start: crate::events::AttemptStart::NotReported,
         }
     );
     held.stop().await;
@@ -648,6 +651,7 @@ async fn a_late_exit_after_the_backstop_kill_gives_the_timeout_with_recovery_off
             timeout: timeout_ms(SHORT_DEADLINE_MS),
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::NoSignal,
+            start: crate::events::AttemptStart::NotReported,
         }
     );
     held.stop().await;

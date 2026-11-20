@@ -23,7 +23,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::dispatch::{AttemptEnd, CancelEnd, LoopKillCode, TimeoutCancel};
+use super::dispatch::{AttemptEnd, BodyReturn, CancelEnd, LoopKillCode, TimeoutCancel};
 use super::pool::{MemoryLimit, TaskLimit};
 use super::shared_stop::{
     culprit_retry, verdict_at_kill, ChildKill, DeadlineState, KillVerdict, KilledRunVerdict,
@@ -31,10 +31,11 @@ use super::shared_stop::{
 };
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::child_writes::LONGEST_REFUSAL_WRITES_BOUND;
+use crate::events::AttemptStart;
 use crate::worker::executor::protocol::{
-    BodyEnd, CancelGraceMs, DispatchNumber, FailureDetail, LeftoverCancelFrame, LeftoverStuckFrame,
-    LoopBlockedFrame, LoopCulprit, RssReading, RunEnd, RunRef, RunStuckFrame, SeatEnd,
-    SharedResultFrame, SharedWork, TaskTimeoutMs, LOOP_BLOCK_LIMIT, STUCK_REPORT_DELAY,
+    CancelGraceMs, DispatchNumber, FailureDetail, LeftoverCancelFrame, LeftoverStuckFrame,
+    LoopBlockedFrame, LoopCulprit, RssReading, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame,
+    SharedWork, TaskTimeoutMs, LOOP_BLOCK_LIMIT, STUCK_REPORT_DELAY,
 };
 use crate::worker::executor::supervisor::{ChildExit, ChildLost, LossCause};
 
@@ -111,13 +112,14 @@ pub enum RunStopReport {
     /// The run did not stop after its second cancel and its cancel rounds.
     StuckReported,
     /// The body returned before its deadline; work it left was alive after
-    /// one cancel grace, and the child cancels it in rounds.
+    /// one cancel grace, and the child cancels it in rounds. `returned` is
+    /// what the body returned, with the start of the attempt.
     LeftoverCancelReported {
-        returned: BodyEnd,
+        returned: BodyReturn,
     },
     /// That work did not stop after its cancel rounds.
     LeftoverStuckReported {
-        returned: BodyEnd,
+        returned: BodyReturn,
     },
 }
 
@@ -348,7 +350,7 @@ impl<P> SeatRuns<P> {
     ) -> Result<(SeatRun<P>, AttemptEnd), FrameOutOfTurn> {
         let seat = self.checked(frame.run)?;
         let end = match (frame.end, &seat.report, seat.work) {
-            (SeatEnd::Finished(end), _, _) => AttemptEnd::Reported(end),
+            (SeatEnd::Finished(end), _, _) => AttemptEnd::reported(end, frame.started_at),
             (
                 SeatEnd::TimedOut,
                 RunStopReport::LeftoverCancelReported { .. }
@@ -363,12 +365,14 @@ impl<P> SeatRuns<P> {
                     timeout,
                     retry: retry_after_timeout(report),
                     cancel: TimeoutCancel::Ended(cancel_end_of(report)),
+                    start: frame.started_at,
                 }
             }
             (SeatEnd::TimedOut, report, RunWork::ThreadTask { timeout }) => AttemptEnd::TimedOut {
                 timeout,
                 retry: retry_after_timeout(report),
                 cancel: TimeoutCancel::NoSignal,
+                start: frame.started_at,
             },
         };
         let seat = self
@@ -421,7 +425,10 @@ impl<P> SeatRuns<P> {
             ),
             (StopReportFrame::LeftoverCancel(cancel), RunStopReport::NotReported) => (
                 RunStopReport::LeftoverCancelReported {
-                    returned: cancel.returned.clone(),
+                    returned: BodyReturn {
+                        end: cancel.returned.clone(),
+                        started_at: cancel.started_at,
+                    },
                 },
                 StopStep::Close(CloseReason::LeftoverWork),
             ),
@@ -430,7 +437,10 @@ impl<P> SeatRuns<P> {
                 RunStopReport::LeftoverCancelReported { .. },
             ) => (
                 RunStopReport::LeftoverStuckReported {
-                    returned: stuck.returned.clone(),
+                    returned: BodyReturn {
+                        end: stuck.returned.clone(),
+                        started_at: stuck.started_at,
+                    },
                 },
                 StopStep::Recorded,
             ),
@@ -679,19 +689,22 @@ fn cancel_end_of(report: &RunStopReport) -> CancelEnd {
 }
 
 /// The `TASK_TIMEOUT` end of a run with a deadline whose child the worker
-/// killed: an async run records `KilledWithChild`. A refusal has none, and
-/// the report rules never give it one: a defect, which crashes loud.
+/// killed: an async run records `KilledWithChild`. The child reported no
+/// start for it. A refusal has none, and the report rules never give it
+/// one: a defect, which crashes loud.
 fn timed_out(work: RunWork, run: RunRef, retry: RetryPlacement) -> AttemptEnd {
     match work {
         RunWork::AsyncTask { timeout, .. } => AttemptEnd::TimedOut {
             timeout,
             retry,
             cancel: TimeoutCancel::Ended(CancelEnd::KilledWithChild),
+            start: AttemptStart::NotReported,
         },
         RunWork::ThreadTask { timeout } => AttemptEnd::TimedOut {
             timeout,
             retry,
             cancel: TimeoutCancel::NoSignal,
+            start: AttemptStart::NotReported,
         },
         RunWork::Refusal => unreachable!(
             "the refused task {} ended at a deadline it does not have",
@@ -734,9 +747,6 @@ fn verdict_end(
                 loss.killed_by()
             )),
         },
-        KilledRunVerdict::ReturnedBeforeKill { returned } => {
-            AttemptEnd::Reported(RunEnd::from(returned))
-        }
     }
 }
 
@@ -757,7 +767,7 @@ pub fn end_at_loss<P>(
             RunStopReport::LeftoverCancelReported { returned }
             | RunStopReport::LeftoverStuckReported { returned },
             _,
-        ) => return AttemptEnd::Reported(RunEnd::from(returned.clone())),
+        ) => return AttemptEnd::returned(returned.clone()),
         (_, LossCause::KilledByParent) => {}
         (
             _,
@@ -789,7 +799,7 @@ pub fn end_past_deadlines<P>(
 ) -> AttemptEnd {
     match (kind, &seat.report, reason) {
         (SharedChildKind::Async, RunStopReport::LeftoverStuckReported { returned }, _) => {
-            AttemptEnd::Reported(RunEnd::from(returned.clone()))
+            AttemptEnd::returned(returned.clone())
         }
         (SharedChildKind::Async, RunStopReport::StuckReported, _) => {
             timed_out(seat.work, seat.run, RetryPlacement::Isolated)

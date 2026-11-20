@@ -448,6 +448,7 @@ class TestWorkerManifest:
             sys_path_roots=(),
             profile='default',
             loglevel='INFO',
+            metrics_endpoint=wire.MetricsEndpointNoMetricsEndpoint(),
         )
 
         match worker_manifest_json(app, launch, logging.getLogger('test')):
@@ -472,6 +473,7 @@ class TestWorkerManifest:
             sys_path_roots=(),
             profile='default',
             loglevel='INFO',
+            metrics_endpoint=wire.MetricsEndpointNoMetricsEndpoint(),
         )
 
         match worker_manifest_json(_make_app(), launch, logging.getLogger('test')):

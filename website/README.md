@@ -25,6 +25,7 @@ Documentation pages live in `src/content/docs/` as `.md` or `.mdx` files. Each f
 | `workers/` | Worker architecture, concurrency, heartbeats and recovery, child process hooks |
 | `scheduling/` | Scheduler overview, patterns, configuration |
 | `monitoring/` | Web UI, broker methods, action semantics, worker health |
+| `observability/` | Metrics, tracing, logs, the fleet collector, dashboards and alerts; `metric-reference.md` is generated |
 | `operations/` | Deploying code changes, testing, atomic enqueue and topology, autovacuum tuning |
 | `guides/` | Async frameworks, starting a workflow once |
 | `migrations/` | Upgrade guide for each release that needs one |
@@ -44,4 +45,4 @@ Create a new `.md` file in the appropriate `src/content/docs/` subdirectory. Sta
 bun run build
 ```
 
-Output goes to `./dist/`. The build then runs `scripts/check-links.mjs`, which fails the build on an internal link or `#anchor` that no page of `./dist/` serves. Run the check again on an existing build with `bun run links:check`, and its tests with `bun run test`.
+The build first checks that `src/content/docs/observability/metric-reference.md` is the page of the metric catalog of the core (`core/src/telemetry/catalog_snapshot.txt`); after a change of the catalog, run `bun run metrics:reference` and commit the page. Output goes to `./dist/`. The build then runs `scripts/check-links.mjs`, which fails the build on an internal link or `#anchor` that no page of `./dist/` serves. Run the check again on an existing build with `bun run links:check`, and its tests with `bun run test`.

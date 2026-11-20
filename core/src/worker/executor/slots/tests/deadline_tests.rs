@@ -55,10 +55,16 @@ fn answer_ok(claimed: &ClaimedTask) -> String {
     )
 }
 
+/// The end of [`answer_ok`]: its result, with the start of its frame.
 fn ok_end() -> AttemptEnd {
-    AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
-        r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned(),
-    )))
+    AttemptEnd::Result {
+        envelope: ResultEnvelopeText::new(
+            r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned(),
+        ),
+        start: crate::events::AttemptStart::Reported {
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        },
+    }
 }
 
 /// Submit `claimed` to one isolated slot whose child runs `command`, and

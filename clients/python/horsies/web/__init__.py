@@ -36,6 +36,8 @@ del _fastapi
 from horsies.web.app import (  # noqa: E402 - must follow the extra guard
     MetaResponse,
     MonitoringUIConfig,
+    NoTraceLink,
+    TraceLinkTemplate,
     create_monitoring_app,
 )
 from horsies.web.schema import (  # noqa: E402 - must follow the extra guard
@@ -68,6 +70,8 @@ __all__ = [
     'MetaResponse',
     'MonitoringAuthPolicy',
     'MonitoringUIConfig',
+    'NoTraceLink',
+    'TraceLinkTemplate',
     'TrustedHeader',
     'ViewOnly',
     'create_monitoring_app',

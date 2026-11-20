@@ -24,11 +24,13 @@ The Python client and the Rust client run on one core (horsies-core). Behaviour 
 - Schedule Config -- AppConfig.schedule: ScheduleConfig (enabled, schedules, check_interval_seconds), TaskSchedule (input, queue, timezone, catch_up_missed, max_catch_up_runs), SchedulePattern (Interval, Hourly, Daily, Weekly, Monthly, Cron), CronSchedule, CronNumericTerm, CronEnumTerm, DaySelector, schedule checks (HRS-205, HRS-300), scheduler(), PreparedScheduler, run_scheduler, SchedulerRunError -> /horsies/rust/scheduling/schedule-config/
 - Health Reads -- ping_database, ping_workers(PingTarget, timeout, min_responses), list_worker_states, get_worker_state, get_worker_state_history(WorkerHistoryLimit), get_stale_tasks(StaleMinutes), get_expired_tasks, BoundedTaskList (Complete, Truncated; TASK_LIST_BOUND 10,000), get_class_coverage, get_class_report -> /horsies/rust/monitoring/health-reads/
 - Monitoring Queries -- horsies::monitoring: task_stats, task_facets, task_breakdown, list_tasks, get_task_detail, list_workflow_names, list_workflow_runs, get_workflow_run, get_workflow_node, list_schedules; TaskStatsQuery, TaskFacetsQuery, TaskBreakdownQuery, TaskListQuery, WorkflowRunsQuery, TaskFilters, PaginationRefused, resolve_monitoring_window (24 h default, 30 days max), MonitoringQueryError; cancel_task, TaskActionError; cancel_task_action, pause_workflow_action, resume_workflow_action, cancel_workflow_action, ActionOutcome -> /horsies/rust/monitoring/monitoring-queries/
+- Tracing Setup -- feature otel; the global providers and propagator of opentelemetry 0.33 set first in main; horsies::otel::layer(); ATTEMPT_SPAN_TARGET; shut the provider down after run; producer metrics -> /horsies/rust/observability/tracing-setup/
 - Web UI Mount -- feature web; horsies::web::router(&app, MonitoringConfig, policy) -> axum::Router; MonitoringConfig (ui: MonitoringUiConfig, actions: Actions); MonitoringAuthPolicy (can_view, can_act), MonitoringRequest; AllowAll, ViewOnly, TrustedHeader; X-Horsies-Intent: action -> /horsies/rust/monitoring/web-ui-mount/
+- Event Handlers -- horsies::events: the event types (TaskClaimed, ClaimReleased, AttemptPlaced, AttemptNotStarted, AttemptEnded, AttemptRecorded, TaskRecovered, ChildStarted, ChildReplaced, SlotDown, SlotRecovered), app.on_event::<E>(name, async handler), app.on_event_blocking::<E>(name, handler), HandlerError, on_handler_child_start; the handler child, a thread and a queue of HANDLER_QUEUE_EVENTS per handler, drops and failures counted (horsies.telemetry.handler.dropped, horsies.telemetry.handler.errors), HANDLER_STATS_INTERVAL, HANDLER_DRAIN -> /horsies/rust/monitoring/event-handlers/
 - Rerun in Your Transaction -- horsies::rerun: app.rerun_task (AppRerunError), rerun_task_in on the caller's transaction (CallerRerunError), SqlxCaller (feature sqlx), TokioPostgresCaller (feature tokio-postgres), CallerTransaction, RerunTask, RerunEnqueuePolicy (new, standard), RerunOutcome -> /horsies/rust/operations/rerun-in-your-transaction/
 - Async Frameworks -- a tokio web service (axum): build the app once, the async forms in handlers, task_name::send without state, TaskFunction in router state, the service apart from the worker's child mode, ASYNC_CONTEXT -> /horsies/rust/guides/async-frameworks/
 - Testing -- direct calls of task functions, app.task_runtime(), TaskOutcome parameters, a WorkflowContext from its stored form, the generated Input, app.check() with no database, suppress_sends and HORSIES_SUPPRESS_SENDS -> /horsies/rust/operations/testing/
-- CLI Reference -- horsies::cli::run(app) in the app's fn main; <binary> worker --profile <name>, scheduler, check [--live]; --loglevel, RUST_LOG; child mode (--horsies-child); removed 0.1.0-alpha flags exit 2; exit codes 0, 1, 2, 77 and the ChildHostExit codes -> /horsies/rust/cli/
+- CLI Reference -- horsies::cli::run(app) in the app's fn main; <binary> worker --profile <name> [--metrics-listen HOST:PORT], scheduler, check [--live], metrics --listen HOST:PORT (the fleet metrics at GET /metrics); --loglevel, RUST_LOG; run_with_log_format(app, LogFormat::Json); child mode (--horsies-child); removed 0.1.0-alpha flags exit 2; exit codes 0, 1, 2, 77 and the ChildHostExit codes -> /horsies/rust/cli/
 - Switching to 0.8.0 -- for horsies-rust 0.1.0-alpha apps: the core refuses an alpha database (ForeignMigrations), drain it and start 0.8.0 on a new database; the API changes: app, binary and CLI, tasks and errors, sends and reads, workflows, monitoring, rerun, stored forms -> /horsies/rust/migrations/switching-to-0-8-0/
 
 ## Shared pages (behaviour, both clients)
@@ -52,6 +54,15 @@ The Python client and the Rust client run on one core (horsies-core). Behaviour 
 - Worker & Database Health -> /horsies/monitoring/worker-health/
 - Web UI Overview -> /horsies/monitoring/web-ui-overview/
 - Action Semantics -> /horsies/monitoring/action-semantics/
+- Observability Overview -> /horsies/observability/overview/
+- Metrics -> /horsies/observability/metrics/
+- Metric Reference -> /horsies/observability/metric-reference/
+- OpenTelemetry Collector -> /horsies/observability/opentelemetry-collector/
+- Observability Deployment -> /horsies/observability/deployment/
+- Fleet Collector -> /horsies/observability/fleet-collector/
+- Tracing -> /horsies/observability/tracing/
+- Logs -> /horsies/observability/logs/
+- Dashboards and Alerts -> /horsies/observability/dashboards-and-alerts/
 - Database Schema -> /horsies/internals/database-schema/
 - Operational Indexes -> /horsies/internals/operational-indexes/
 - Performance -> /horsies/internals/performance/

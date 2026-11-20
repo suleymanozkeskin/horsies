@@ -26,7 +26,13 @@ import psycopg
 from pydantic import SecretStr
 
 from horsies._catalog.manifest import SchemaMode, dump_producer_manifest
-from horsies._core import EnqueueRequest, IdMintRefused, StartNow, mint_task_id
+from horsies._core import (
+    EnqueueRequest,
+    IdMintRefused,
+    NoTraceCarrier,
+    StartNow,
+    mint_task_id,
+)
 from horsies.core.history.identity.keys import IDEMPOTENCY_WINDOW_DEFAULT
 from horsies.core.manifest import to_producer_manifest
 from horsies.core.models.broker import PostgresConfig
@@ -160,6 +166,7 @@ def send_request(task_id: uuid.UUID) -> EnqueueRequest:
         retention_class_key='forever',
         rerun_input='APP_DEFAULT',
         send_kind='FIRST',
+        trace=NoTraceCarrier(),
     )
 
 

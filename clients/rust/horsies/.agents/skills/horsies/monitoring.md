@@ -3,7 +3,7 @@
 Reference for the health reads on the app, the typed monitoring queries of
 `horsies::monitoring`, the task and workflow actions, and the web UI: the
 axum mount `horsies::web::router` (feature `web`) and the shipped
-`horsies web` command. The core serves every route, guard and event of the
+`horsies web` command; and the event handlers of `horsies::events`. The core serves every route, guard and event of the
 web UI, so the Python app and the Rust app answer alike.
 
 ## Health Reads on the App
@@ -215,8 +215,10 @@ fn monitoring_routes(app: &Horsies) -> Result<Router, Box<dyn std::error::Error>
 ```
 
 `router(&app, config, policy) -> axum::Router` serves every path of the
-mount: the page and its assets, `/api/...` and the event stream
-(`GET /api/events`).
+mount: the page and its assets, `/api/...`, the event stream
+(`GET /api/events`), and `GET /metrics`: the fleet metrics of the app's
+database behind the view verdict (the same gauges as `<binary> metrics`,
+read when the last read is 15 s old or more).
 
 - Building the router does no I/O. The core handler is built at the first
   request on the app's handle. A request whose broker cannot be built is
@@ -227,7 +229,11 @@ mount: the page and its assets, `/api/...` and the event stream
   definitions registered on `app` at the first request. Mount the router
   from the app's own binary, after the registrations, when the UI must
   resume such workflows.
-- `MonitoringConfig { ui: MonitoringUiConfig { custom_css_url }, actions }`.
+- `MonitoringConfig { ui: MonitoringUiConfig { custom_css_url, trace_link }, actions }`.
+  `trace_link` is `TraceLink::NoTraceLink` (the task detail shows the trace
+  id as text) or `TraceLink::Template(TraceLinkTemplate::parse(text)?)`: an
+  `http` or `https` URL with one `{trace_id}`, at most 2,048 bytes of
+  printable ASCII. `horsies web --trace-link TEMPLATE` sets it.
   `MonitoringConfig::default()` has `Actions::Enabled`. With
   `Actions::Disabled` every action route is 403 without a policy call.
 
@@ -304,7 +310,108 @@ horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
 - The bind and access rules are on the shared docs page
   `monitoring/web-ui-deployment`.
 
+## Worker Metrics Endpoint — `--metrics-listen`
+
+- `<binary> worker --profile <name> --metrics-listen HOST:PORT`
+  (`[IPV6]:PORT`; host 1 to 253 bytes, port 1 to 65535; no default, no
+  config field) serves, on a thread of its own:
+  - `GET /metrics`: the worker metrics, Prometheus text format 0.0.4 (no
+    OpenMetrics);
+  - `GET /livez`: 503 only when the claim loop is past the deadline of its
+    next turn (its wait bound plus 30 s); 200 during the start and the
+    drain;
+  - `GET /readyz`: 200 when the pools have no failure, a child serves and
+    the liveness lock is held; 503 during the start and the stop.
+- A bad value exits 2 before the start. A bind failure never stops the
+  worker: the endpoint binds again with a 1 s to 60 s backoff; the probes
+  answer once it binds; `horsies_worker_states.telemetry` shows `down`.
+- Bounds: 16 connections, 5 s to read a request head, 8 KiB of request
+  (431 above).
+- Labels: `task` = the registered tasks (`(unregistered)` else), `queue` =
+  the app's queues (`(unknown)` else), `error_code` = `""`, the built-in
+  codes and the task's declared codes (`undeclared` else). A name that
+  cannot be a label value (empty, the fallback text, past 100,000 names) is
+  folded into the fallback, with one WARNING line at the start.
+- At most 10,000 series per metric; past it, the sample is dropped and
+  counted in `horsies_telemetry_series_dropped_total{metric}`.
+- See website docs `observability/metrics` and
+  `observability/metric-reference`.
+
+## OpenTelemetry (feature `otel`)
+
+- Spans: `send <task_name>` (PRODUCER) around every database call of a
+  send; `start <workflow_name>` (PRODUCER) per workflow start; in a worker
+  child, the `tracing` span `run <task_name>` (CONSUMER, target
+  `horsies::attempt`) around each task body, whose OpenTelemetry parent is
+  the send span, extracted from the carrier that the task row stores.
+- The client uses the global tracer provider, meter provider and
+  propagator of `opentelemetry` 0.33. Set them first in `main`: `main`
+  runs in each worker child before `horsies::cli::run`. Without a provider
+  no span is recorded; without a propagator that writes keys a send stores
+  no carrier.
+- `horsies::cli::run` adds `horsies::otel::layer()` to its subscriber. A
+  binary with its own subscriber adds the layer and lets its filter pass
+  `horsies::attempt` at `INFO`.
+- A child exits after `run` returns: shut the tracer provider down after
+  `run` so a batch processor exports the last spans.
+- Attempt status: OK for a value; ERROR with `error.type` for an error, a
+  panic (`UNHANDLED_EXCEPTION`) or a deadline that came first
+  (`TASK_TIMEOUT`). An isolated task that the worker kills at its timeout
+  has no ended span.
+- Producer metrics: `horsies.task.sent` (task, queue, result `ok` or the
+  send error code), `horsies.task.send.duration` (queue).
+
+See the website docs `observability/tracing` and
+`rust/observability/tracing-setup`.
+## Event Handlers — `horsies::events`
+
+```rust
+use horsies::events::{AttemptEnded, HandlerError, TaskClaimed};
+use horsies::{Horsies, HorsiesError};
+
+async fn record_attempt_end(event: AttemptEnded) -> Result<(), HandlerError> {
+    println!("task {} attempt {} ended", event.task_id, event.attempt.get());
+    Ok(())
+}
+
+fn record_claim(event: TaskClaimed) -> Result<(), HandlerError> {
+    println!("task {} claimed", event.task_id);
+    Ok(())
+}
+
+fn add_handlers(app: &mut Horsies) -> Result<(), HorsiesError> {
+    app.on_event::<AttemptEnded>("audit.attempt_ended", record_attempt_end)?;
+    app.on_event_blocking::<TaskClaimed>("audit.task_claimed", record_claim)?;
+    app.on_handler_child_start(|| async { Ok::<(), String>(()) });
+    Ok(())
+}
+```
+
+- A handler takes the events of one type: `TaskClaimed`, `ClaimReleased`,
+  `AttemptPlaced`, `AttemptNotStarted`, `AttemptEnded`, `AttemptRecorded`,
+  `TaskRecovered`, `ChildStarted`, `ChildReplaced`, `SlotDown`,
+  `SlotRecovered`.
+- Register handlers in `main` before `horsies::cli::run(app)`. With a
+  handler, the worker starts one handler child (this binary in child
+  mode); handlers never run in the worker process.
+- Each handler runs on a thread of its own with a queue of
+  `HANDLER_QUEUE_EVENTS` (10,000). A full queue drops the event for that
+  handler and counts `horsies.telemetry.handler.dropped{handler}`.
+- A returned `HandlerError` or a panic counts
+  `horsies.telemetry.handler.errors{handler}`, is logged with the name, and
+  the handler takes its next event.
+- `name`: 1 to 255 characters, not `(unknown)`, once per app; at most 32
+  handlers. A refusal is a `HorsiesError`.
+- `on_handler_child_start(hook)`: once per handler child, before the
+  handlers start, 10 s per hook. A failure keeps the handler child down; the
+  worker runs on.
+- Delivery is at most once. The history tables are the record of a task.
+
 ## Things to Avoid
+
+**Do not block in an async event handler.** It takes no event while it
+blocks, so its queue fills and drops. Use `on_event_blocking` for a
+blocking call.
 
 **Do not treat an unfiltered `TaskListPage.total` as an exact count.** It
 is an estimate.
@@ -341,6 +448,12 @@ use horsies::monitoring::{
     cancel_task, cancel_task_action, pause_workflow_action, resume_workflow_action,
     cancel_workflow_action, TaskCancelled, TaskActionError, TaskActionErrorCode,
     TaskActionResult, ActionOutcome, ActionBody, ActionResponse,
+};
+use horsies::events::{
+    // Event handlers
+    TaskClaimed, ClaimReleased, AttemptPlaced, AttemptNotStarted, AttemptEnded,
+    AttemptRecorded, TaskRecovered, ChildStarted, ChildReplaced, SlotDown, SlotRecovered,
+    AttemptEnd, AttemptRecord, HandlerError, HANDLER_QUEUE_EVENTS, HANDLER_STATS_INTERVAL,
 };
 use horsies::web::{  // feature `web`
     router, Actions, MonitoringConfig, MonitoringUiConfig, MonitoringAuthPolicy,

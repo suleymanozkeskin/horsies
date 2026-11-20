@@ -62,7 +62,6 @@ from __future__ import annotations
 import asyncio
 import collections
 import inspect
-import json
 import os
 import socket
 import threading
@@ -76,6 +75,7 @@ from horsies import _core as core
 from horsies._catalog import events
 from horsies._catalog.broker_errors import BrokerOperationFailed
 from horsies._catalog.events import AnyEvent
+from horsies.core.codec.json_io import loads_json
 from horsies.core.event_handlers import EventHandler, HandlerChildStartHook, HandlerKind
 from horsies.core.logging import get_logger
 from horsies.core.models.boot_failure import (
@@ -492,11 +492,14 @@ type EventTextRefusal = (
 
 def decode_event_text(text: str) -> Result[AnyEvent, EventTextRefusal]:
     """The event of the wire text of one event of an ``events`` frame
-    (``events.decode_event``). Pure; never raises."""
-    try:
-        wire_value: object = json.loads(text)
-    except (ValueError, RecursionError) as exc:
-        return Err(NotJsonText(detail=str(exc)))
+    (``events.decode_event``). The text is parsed by the strict codec
+    parser (``loads_json``): an empty text, a non-finite number, a repeated
+    key or a text nested too deep is ``NotJsonText``. Pure; never raises."""
+    match loads_json(text):
+        case Ok(wire_value):
+            pass
+        case Err(refused):
+            return Err(NotJsonText(detail=str(refused)))
     match events.decode_event(wire_value):
         case Ok() as decoded:
             return decoded

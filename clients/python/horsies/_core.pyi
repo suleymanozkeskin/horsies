@@ -518,13 +518,33 @@ class StartAt:
 
 
 @final
+class NoTraceCarrier:
+    """The send carries no trace carrier: tracing is off, or the propagator wrote no key."""
+    def __init__(self) -> None: ...
+
+
+@final
+class TraceCarrier:
+    """The carrier that the client's propagator injected for the span of a send or a
+    workflow start, and the 16-byte trace id of that span. The core checks its bounds at
+    the send; a carrier that breaks a bound is not stored and never fails the send.
+    """
+    def __init__(self, carrier: dict[str, str], trace_id: bytes) -> None: ...
+    @property
+    def carrier(self) -> dict[str, str]: ...
+    @property
+    def trace_id(self) -> bytes: ...
+
+
+@final
 class EnqueueRequest:
     """One frozen send. None for good_until, task_options_json or idempotency_key
     means no deadline, no options, no key. retention_class_key is 'forever' or
     'standard_<days>d'; the core checks it at the send. send_kind is FIRST for the first send
     of the task id and REPEAT for a send retry: a task that finished then answers from history.
+    trace is NoTraceCarrier or the TraceCarrier of the send's span.
     """
-    def __init__(self, *, task_id: uuid.UUID, task_name: str, queue_name: str, priority: int, input_json: str, sent_at: datetime.datetime, start: StartNow | StartAfterDelay | StartAt, good_until: datetime.datetime | None, task_options_json: str | None, idempotency_key: str | None, retention_class_key: str, rerun_input: Literal['APP_DEFAULT', 'KEEP', 'DROP'], send_kind: Literal['FIRST', 'REPEAT']) -> None: ...
+    def __init__(self, *, task_id: uuid.UUID, task_name: str, queue_name: str, priority: int, input_json: str, sent_at: datetime.datetime, start: StartNow | StartAfterDelay | StartAt, good_until: datetime.datetime | None, task_options_json: str | None, idempotency_key: str | None, retention_class_key: str, rerun_input: Literal['APP_DEFAULT', 'KEEP', 'DROP'], send_kind: Literal['FIRST', 'REPEAT'], trace: NoTraceCarrier | TraceCarrier) -> None: ...
     @property
     def task_id(self) -> uuid.UUID: ...
 
@@ -1867,10 +1887,14 @@ class EventStream:
 @final
 class MonitoringHandler:
     """The monitoring web app of the broker of a CoreHandle, for the FastAPI mount of
-    create_monitoring_app. Starts nothing: the first call builds it. A handle without a child
-    spec source raises RuntimeError; heartbeat_ms outside 1 to 3,600,000 raises ValueError.
+    create_monitoring_app. Starts nothing: the first call builds it. queue_names and
+    schedule_names are the label values of /metrics; other names are (unknown). A name that
+    cannot be a label value of its own (empty, (unknown), or past the bound of names) counts
+    in the (unknown) series; the first call logs one WARNING line that names it. A handle
+    without a child spec source raises RuntimeError; heartbeat_ms outside 1 to 3,600,000
+    raises ValueError.
     """
-    def __init__(self, handle: CoreHandle, *, actions_enabled: bool, custom_css_url: str | None, client_version: str, heartbeat_ms: int) -> None: ...
+    def __init__(self, handle: CoreHandle, *, actions_enabled: bool, custom_css_url: str | None, trace_link_template: str | None, client_version: str, heartbeat_ms: int, queue_names: list[str], schedule_names: list[str]) -> None: ...
     @property
     def max_request_body_bytes(self) -> int: ...
     def route_access(self, method: str, path: str) -> RouteAccess:
@@ -2153,9 +2177,10 @@ class ChildSpecRefused:
 class WorkflowStartRequest:
     """One frozen workflow start. spec_json is the workflow spec data of the spec; spec data
     that the core refuses raises ValueError with the field path. A naive sent_at raises
-    TypeError.
+    TypeError. trace is NoTraceCarrier or the TraceCarrier of the start's span; every row of
+    the tree stores it.
     """
-    def __init__(self, *, spec_json: str, workflow_id: uuid.UUID, sent_at: datetime.datetime, resend_on_transient_err: bool) -> None: ...
+    def __init__(self, *, spec_json: str, workflow_id: uuid.UUID, sent_at: datetime.datetime, resend_on_transient_err: bool, trace: NoTraceCarrier | TraceCarrier) -> None: ...
 
 
 @final
@@ -2764,7 +2789,7 @@ class StoredOptionsRefused:
 
 
 @final
-class TraceCarrier:
+class StoredTraceCarrier:
     """The trace carrier that the send stored on the task row: the keys and the values that
     the propagator of the sender wrote. The child extracts it with the app's propagator.
     """
@@ -2792,7 +2817,7 @@ class RunFrame:
     @property
     def work(self) -> Literal['RUN'] | StoredOptionsRefused: ...
     @property
-    def trace(self) -> TraceCarrier | Literal['NO_CARRIER']: ...
+    def trace(self) -> StoredTraceCarrier | Literal['NO_CARRIER']: ...
     @property
     def input(self) -> str: ...
 
@@ -2835,7 +2860,7 @@ class SharedRunFrame:
     @property
     def work(self) -> AsyncTaskWork | ThreadTaskWork | StoredOptionsRefused: ...
     @property
-    def trace(self) -> TraceCarrier | Literal['NO_CARRIER']: ...
+    def trace(self) -> StoredTraceCarrier | Literal['NO_CARRIER']: ...
     @property
     def input(self) -> str: ...
 
@@ -3184,6 +3209,52 @@ class StopRequested:
     """The stop request is recorded."""
 
 
+@final
+class ListenAddress:
+    """A HOST:PORT address of a metrics endpoint; an IPv6 host without its brackets."""
+    @property
+    def host(self) -> str: ...
+    @property
+    def port(self) -> int: ...
+
+
+@final
+class ListenAddressRefused:
+    """A text that is not a HOST:PORT address. message names the text and the rule."""
+    @property
+    def message(self) -> str: ...
+
+
+@final
+class FleetMetricsServer:
+    """The fleet metrics server of one CoreHandle, not run yet. It reads the fleet state at
+    most once per collect interval and serves the last read at GET /metrics.
+    """
+    def run(self) -> FleetMetricsStopped | FleetMetricsFailed:
+        """Log one WARNING line that names each queue or schedule name that is not declared, bind
+        the address, and serve the fleet metrics until a stop request. Main thread only: the
+        signal handlers run between wait slices, and there is no total bound. A failed read is a
+        failure gauge in the text. Raises NotMainThread off the main thread, RuntimeError for a
+        second run, and, after the run ended, the exception of a signal handler.
+        """
+    def request_stop(self) -> StopRequested:
+        """Ask the run to stop: the requests in flight end, then the run answers
+        FleetMetricsStopped. Idempotent; any thread; returns at once.
+        """
+
+
+@final
+class FleetMetricsStopped:
+    """The run ended at a stop request."""
+
+
+@final
+class FleetMetricsFailed:
+    """The address did not bind. message names the address and the cause."""
+    @property
+    def message(self) -> str: ...
+
+
 def baseline_sql_files() -> list[tuple[str, str]]:
     """The baseline SQL files as (file name, text) pairs, in run order. Starts nothing."""
 
@@ -3215,6 +3286,20 @@ def encode_preload_frame(frame: PreloadReadyFrame | ChildForkedFrame | ForkFaile
 
 def mint_task_id() -> uuid.UUID | IdMintRefused:
     """Mint a new task id (UUIDv7). Starts no runtime."""
+
+
+def parse_listen_address(text: str) -> ListenAddress | ListenAddressRefused:
+    """The address of text: HOST:PORT or [IPV6]:PORT, the port 1 to 65535. Pure: starts no
+    runtime. The host is resolved at the bind.
+    """
+
+
+def prepare_fleet_metrics(handle: CoreHandle, *, listen: ListenAddress, queue_names: list[str], schedule_names: list[str]) -> FleetMetricsServer:
+    """The fleet metrics server of the database of handle on listen, with the queue and
+    schedule names of the app config as label values. A name that cannot be a label value of
+    its own (empty, (unknown), or past the bound of names) is not declared: its samples count
+    in the (unknown) series. Pure: starts no runtime.
+    """
 
 
 def prepare_rerun_write(read: PreparedStatement, row: tuple[object, ...], command: RerunCommandRecord, policy: RerunPolicyRecord, *, sent_at: datetime.datetime) -> RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunCallerKeyRefused | IdMintRefused:
@@ -3253,4 +3338,10 @@ def resolve_monitoring_window(*, since: datetime.datetime | None, until: datetim
 def set_panic_rule(rule: Literal['STOP_CORE', 'ABORT_PROCESS']) -> None:
     """Set what a panic in a core background task does in this process, before the first
     core call. Another rule than the one in force raises PanicRuleFixed.
+    """
+
+
+def trace_link_refusal(template: str) -> str | None:
+    """Why the core refuses template as the trace link template of the monitoring page, or
+    None when it accepts it. Pure.
     """

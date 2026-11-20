@@ -80,7 +80,7 @@ __all__ = [
     'decode_event',
 ]
 
-EVENT_CONTRACT_VERSION: Final = 4
+EVENT_CONTRACT_VERSION: Final = 5
 """The version of the event contract that this module reads."""
 
 
@@ -295,6 +295,12 @@ class AttemptEndDecidedByWorker:
 
     reason: WorkerDecision
 
+    start: AttemptStart
+    """The start that the child reported before the end: a shared run
+    that its child ended at the deadline reports it. Every other end
+    of the worker is `NotReported`.
+    """
+
     error_code: BuiltInTaskCode = field(repr=False)
     """Internal: the code that the attempt row records for `reason`:
     the `error.type` of the span.
@@ -305,7 +311,7 @@ class AttemptEndDecidedByWorker:
 
     placed_at: datetime = field(repr=False)
     """Internal: when the task reached its child (wall clock of the
-    worker), the start of the span.
+    worker). The span starts here when `start` is `NotReported`.
     """
 
     child_kind: Execution = field(repr=False)
@@ -1333,6 +1339,7 @@ def _read_attempt_end_decided_by_worker(fields: list[object], here: _At) -> Resu
     match fields:
         case [
             wire_reason,
+            wire_start,
             wire_error_code,
             wire_trace,
             wire_placed_at,
@@ -1342,9 +1349,14 @@ def _read_attempt_end_decided_by_worker(fields: list[object], here: _At) -> Resu
         ]:
             pass
         case _:
-            return here.refuse(f'expected 7 items, found {len(fields)}')
+            return here.refuse(f'expected 8 items, found {len(fields)}')
     match _read_worker_decision(wire_reason, here.inside('reason')):
         case Ok(value_reason):
+            pass
+        case Err() as refused:
+            return refused
+    match _read_attempt_start(wire_start, here.inside('start')):
+        case Ok(value_start):
             pass
         case Err() as refused:
             return refused
@@ -1381,6 +1393,7 @@ def _read_attempt_end_decided_by_worker(fields: list[object], here: _At) -> Resu
     return Ok(
         AttemptEndDecidedByWorker(
             reason=value_reason,
+            start=value_start,
             error_code=value_error_code,
             trace=value_trace,
             placed_at=value_placed_at,

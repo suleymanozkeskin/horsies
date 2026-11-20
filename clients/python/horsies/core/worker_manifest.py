@@ -118,6 +118,7 @@ def to_worker_manifest(
     config: AppConfig,
     *,
     profile: str | None,
+    metrics_endpoint: wire.MetricsEndpoint,
     tasks: Mapping[str, TaskFacts],
     handlers: Sequence[HandlerFacts],
     child_launch: wire.ChildLaunchManifest,
@@ -126,16 +127,18 @@ def to_worker_manifest(
     """The worker manifest of `config`.
 
     Pure: no I/O. `profile` is the `--profile` value (`None` when the option
-    was not passed); `tasks` holds the facts of each registered task by
-    name; `handlers` holds the facts of each event handler, in registration
-    order (`handlers_manifest`); `child_launch` comes from
-    `python_child_launch`; the window is one that
-    `validate_reservation_window` accepted. `config` passed AppConfig
-    validation, which keeps every value within its manifest bound; a value
-    above it fails an assertion (`worker_claim_manifest`,
-    `payload_manifest`). `worker_ended_spans` comes from the tracing
-    setting (`worker_ended_spans_manifest`): with `MAKE_SPANS` the worker
-    starts its handler child also when the app has no handler.
+    was not passed); `metrics_endpoint` is the `--metrics-listen` value
+    (`MetricsEndpointNoMetricsEndpoint` when the option was not passed);
+    `tasks` holds the facts of each registered task by name; `handlers`
+    holds the facts of each event handler, in registration order
+    (`handlers_manifest`); `child_launch` comes from `python_child_launch`;
+    the window is one that `validate_reservation_window` accepted. `config`
+    passed AppConfig validation, which keeps every value within its
+    manifest bound; a value above it fails an assertion
+    (`worker_claim_manifest`, `payload_manifest`). `worker_ended_spans`
+    comes from the tracing setting (`worker_ended_spans_manifest`): with
+    `MAKE_SPANS` the worker starts its handler child also when the app has
+    no handler.
     """
     return wire.WorkerManifest(
         manifest_version=wire.MANIFEST_VERSION,
@@ -151,6 +154,7 @@ def to_worker_manifest(
             for name, worker_profile in config.worker_profiles.items()
         },
         profile=profile_request(profile),
+        metrics_endpoint=metrics_endpoint,
         claim=worker_claim_manifest(config),
         recovery=recovery_manifest(config.recovery),
         retention=retention_manifest(config.retention),

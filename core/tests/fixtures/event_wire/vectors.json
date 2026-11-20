@@ -1,5 +1,5 @@
 {
-  "contract_version": 4,
+  "contract_version": 5,
   "vectors": [
     {
       "name": "task_claimed",
@@ -35,15 +35,15 @@
     },
     {
       "name": "attempt_ended_by_worker",
-      "wire": ["AttemptEnded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "ISOLATED", 3, ["DecidedByWorker", "TIMED_OUT", "TASK_TIMEOUT", ["Carrier", "{\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\"}"], 1700000000000000000, "ISOLATED", "7c9e6679-7425-40de-944b-e07fc1f90ae7", "NOT_IN_WORKFLOW"], 30000000000]
+      "wire": ["AttemptEnded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "SHARED_ASYNC", 3, ["DecidedByWorker", "TIMED_OUT", ["Reported", 1700000000100000000], "TASK_TIMEOUT", ["Carrier", "{\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\"}"], 1700000000000000000, "SHARED_ASYNC", "7c9e6679-7425-40de-944b-e07fc1f90ae7", "NOT_IN_WORKFLOW"], 30000000000]
     },
     {
       "name": "attempt_ended_by_worker_without_carrier",
-      "wire": ["AttemptEnded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "SHARED_ASYNC", 1, ["DecidedByWorker", "NEIGHBOUR_BLOCKED_LOOP", "NEIGHBOUR_BLOCKED_LOOP", ["NoCarrier"], 1700000000000000000, "SHARED_ASYNC", "7c9e6679-7425-40de-944b-e07fc1f90ae7", "NOT_IN_WORKFLOW"], 30000000000]
+      "wire": ["AttemptEnded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "SHARED_ASYNC", 1, ["DecidedByWorker", "NEIGHBOUR_BLOCKED_LOOP", ["NotReported"], "NEIGHBOUR_BLOCKED_LOOP", ["NoCarrier"], 1700000000000000000, "SHARED_ASYNC", "7c9e6679-7425-40de-944b-e07fc1f90ae7", "NOT_IN_WORKFLOW"], 30000000000]
     },
     {
       "name": "attempt_ended_by_worker_in_workflow",
-      "wire": ["AttemptEnded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "SHARED_THREAD", 2, ["DecidedByWorker", "CHILD_LOST", "WORKER_CRASHED", ["Carrier", "{\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\"}"], 1700000000000000000, "ISOLATED", "7c9e6679-7425-40de-944b-e07fc1f90ae7", "WORKFLOW_NOT_KNOWN"], 30000000000]
+      "wire": ["AttemptEnded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "SHARED_THREAD", 2, ["DecidedByWorker", "CHILD_LOST", ["NotReported"], "WORKER_CRASHED", ["Carrier", "{\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\"}"], 1700000000000000000, "ISOLATED", "7c9e6679-7425-40de-944b-e07fc1f90ae7", "WORKFLOW_NOT_KNOWN"], 30000000000]
     },
     {
       "name": "attempt_ended_not_known",

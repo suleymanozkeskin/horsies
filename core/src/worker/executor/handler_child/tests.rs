@@ -65,7 +65,7 @@ fn handler_registry() -> Arc<Registry> {
     let registry = Registry::for_worker(RegistryLabels {
         tasks: DeclaredNames::none(),
         queues: DeclaredNames::none(),
-        handlers: DeclaredNames::new([ON_END]).unwrap(),
+        handlers: DeclaredNames::new([ON_END]).declared,
         schedules: DeclaredNames::none(),
         error_codes: ErrorCodeValues::none(),
         process: ProcessFacts::Worker(WorkerFacts {

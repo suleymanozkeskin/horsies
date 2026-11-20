@@ -157,7 +157,7 @@ The span stands in for the span of the child:
 |------|-------|
 | Name and kind | `run <task_name>`, CONSUMER |
 | Parent | The span that sent the task, from the carrier that the send stored. `LinkedToSend()` starts a trace of its own with a link to that span. A task sent with no span gets a span with no parent. |
-| Start | When the task reached its child (wall clock of the worker). This is earlier than the start of the span of a child by the transit of the run frame and the `RUNNING` write. |
+| Start | The start that the child reported (the `start` of the event: a shared run that its child ended at its deadline), as for the span of a child. Else when the task reached its child (wall clock of the worker): earlier than the start of the span of a child by the transit of the run frame and the `RUNNING` write. |
 | End | When the end reached the worker. |
 | Status | ERROR, with `error.type` = the error code of the attempt |
 | Attributes | The attributes of the span of a child: `horsies.task.id`, `horsies.task.name`, `horsies.task.attempt`, `horsies.task.execution` (the kind of the child), `horsies.queue`, `horsies.worker.id`, `messaging.system`, `messaging.operation.type`, `messaging.operation.name`, `messaging.destination.name`, `messaging.message.id`, and for a workflow task `horsies.workflow.id`, `horsies.workflow.node` and `horsies.workflow.root_id`; and `horsies.span.source` = `worker` |

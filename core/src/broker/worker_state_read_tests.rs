@@ -18,7 +18,7 @@ use crate::core::task::Execution;
 use crate::test_support::sql::{self, TestPool};
 use crate::worker::children::{child_layout, ChildrenView, SeatsPerChild};
 use crate::worker::executor::slots::board::PoolBoard;
-use crate::worker::worker_state::class_capacity_of;
+use crate::worker::worker_state::{budget_columns, class_capacity_json};
 
 /// One snapshot of a worker with 2 processes on queue `default`, written now.
 async fn insert_snapshot(
@@ -381,7 +381,7 @@ async fn a_worker_with_no_budget_reads_as_no_budgets() {
 fn first_class_capacity_of(profile: &WorkerProfile) -> Value {
     let board = Arc::new(PoolBoard::new(child_layout(profile)));
     let children = ChildrenView::new(board, SeatsPerChild::of_profile(profile));
-    class_capacity_of(&children.service())
+    class_capacity_json(&budget_columns(&children.service()))
 }
 
 /// Python `test_claim_plan.py::TestClassCapacityOfAProfile::test_the_snapshot_value_reads_back`:

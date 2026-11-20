@@ -83,6 +83,9 @@ fn a_timed_out_run_that_was_not_stuck_retries_in_its_class() {
                 timeout,
                 retry: RetryPlacement::SameClass,
                 cancel: TimeoutCancel::Ended(cancel_end),
+                start: crate::events::AttemptStart::Reported {
+                    started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+                },
             },
             "{report:?}"
         );

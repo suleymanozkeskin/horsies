@@ -307,11 +307,11 @@ fn declaring_telemetry() -> WatchedTelemetry {
     use crate::telemetry::registry::{ProcessFacts, RegistryLabels, WorkerFacts};
     let declared = DeclaredErrorCodes::parse(["RATE_LIMITED"]).unwrap();
     let registry = Registry::for_worker(RegistryLabels {
-        tasks: DeclaredNames::new(["app.tasks.send_email"]).unwrap(),
-        queues: DeclaredNames::new(["default"]).unwrap(),
+        tasks: DeclaredNames::new(["app.tasks.send_email"]).declared,
+        queues: DeclaredNames::new(["default"]).declared,
         handlers: DeclaredNames::none(),
         schedules: DeclaredNames::none(),
-        error_codes: ErrorCodeValues::new([&declared]).unwrap(),
+        error_codes: ErrorCodeValues::new([&declared]).declared,
         process: ProcessFacts::Worker(WorkerFacts {
             version: "0.8.0".to_owned(),
             profile: "default".to_owned(),
@@ -354,25 +354,37 @@ fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
     };
     let cases: Vec<(EndView<'_>, ExpectedEnd, &str, &str)> = vec![
         (
-            EndView::Result(&value),
+            EndView::Result {
+                read: &value,
+                start: AttemptStart::NotReported,
+            },
             ExpectedEnd::Reported(ChildResult::Completed),
             "COMPLETED",
             "",
         ),
         (
-            EndView::Result(&declared),
+            EndView::Result {
+                read: &declared,
+                start: AttemptStart::NotReported,
+            },
             failed_with("RATE_LIMITED"),
             "FAILED",
             "RATE_LIMITED",
         ),
         (
-            EndView::Result(&other),
+            EndView::Result {
+                read: &other,
+                start: AttemptStart::NotReported,
+            },
             failed_with("OTHER_CODE"),
             "FAILED",
             "undeclared",
         ),
         (
-            EndView::Result(&unreadable),
+            EndView::Result {
+                read: &unreadable,
+                start: AttemptStart::NotReported,
+            },
             ExpectedEnd::Reported(ChildResult::Failed {
                 error_code: AttemptErrorCode::BuiltIn {
                     code: OperationalErrorCode::WorkerSerializationError.into(),
@@ -382,13 +394,17 @@ fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
             "WORKER_SERIALIZATION_ERROR",
         ),
         (
-            EndView::WorkerFailure,
+            EndView::WorkerFailure {
+                start: AttemptStart::NotReported,
+            },
             ExpectedEnd::Reported(ChildResult::WorkerFailure),
             "WORKER_FAILURE",
             "BROKER_ERROR",
         ),
         (
-            EndView::TimedOut,
+            EndView::TimedOut {
+                start: AttemptStart::NotReported,
+            },
             ExpectedEnd::Decided(WorkerDecision::TimedOut),
             "FAILED",
             "TASK_TIMEOUT",
@@ -430,6 +446,7 @@ fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
             },
             ExpectedEnd::Decided(reason) => events::AttemptEnd::DecidedByWorker {
                 reason,
+                start: AttemptStart::NotReported,
                 error_code: BuiltInTaskCode::parse(code).expect("the code of a worker decision"),
                 trace: RunTrace::NoCarrier,
                 placed_at: placed.wall,
@@ -501,7 +518,9 @@ fn an_end_that_the_worker_decided_carries_the_facts_of_its_span() {
         let _noted = watched.telemetry.attempt_ended(
             &task,
             &ChildPlacement::Placed(placed),
-            EndView::TimedOut,
+            EndView::TimedOut {
+                start: AttemptStart::NotReported,
+            },
         );
 
         match watched.events().as_slice() {
@@ -511,6 +530,7 @@ fn an_end_that_the_worker_decided_carries_the_facts_of_its_span() {
                     ended.end,
                     events::AttemptEnd::DecidedByWorker {
                         reason: WorkerDecision::TimedOut,
+                        start: AttemptStart::NotReported,
                         error_code: OutcomeCode::TaskTimeout.into(),
                         trace: task.trace.clone(),
                         placed_at: placed.wall,
@@ -522,6 +542,58 @@ fn an_end_that_the_worker_decided_carries_the_facts_of_its_span() {
                 );
             }
             other => panic!("{kind:?} gives one AttemptEnded, not {other:?}"),
+        }
+    }
+}
+
+/// The start that the child reported reaches the `AttemptEnded` of a
+/// reported end with its time: a result and a worker failure that report a
+/// start carry it, and a worker failure that came before the start write
+/// returned carries `NotReported`.
+#[test]
+fn a_reported_end_carries_the_start_that_its_child_reported() {
+    let started_at =
+        chrono::DateTime::<Utc>::from_timestamp(1_767_225_600, 0).expect("a time in range");
+    let reported = AttemptStart::Reported { started_at };
+    let value = ResultRead::Value;
+    let cases = [
+        (
+            EndView::Result {
+                read: &value,
+                start: reported,
+            },
+            ChildResult::Completed,
+            reported,
+        ),
+        (
+            EndView::WorkerFailure { start: reported },
+            ChildResult::WorkerFailure,
+            reported,
+        ),
+        (
+            EndView::WorkerFailure {
+                start: AttemptStart::NotReported,
+            },
+            ChildResult::WorkerFailure,
+            AttemptStart::NotReported,
+        ),
+    ];
+    for (view, result, start) in cases {
+        let mut watched = declaring_telemetry();
+        let task = claimed_task(Execution::Isolated);
+        let placed = placed_after(ClaimRead::now());
+
+        let _noted = watched
+            .telemetry
+            .attempt_ended(&task, &ChildPlacement::Placed(placed), view);
+
+        match watched.events().as_slice() {
+            [Event::AttemptEnded(ended)] => assert_eq!(
+                ended.end,
+                events::AttemptEnd::ReportedByChild { result, start },
+                "{view:?}"
+            ),
+            other => panic!("{view:?} gives one AttemptEnded, not {other:?}"),
         }
     }
 }
@@ -566,6 +638,61 @@ fn a_registry_with_no_worker_facts_gives_no_telemetry_of_the_points() {
 
     assert!(matches!(metrics_only, Err(HandleRefused::NoWorkerFacts)));
     assert!(matches!(with_queue, Err(HandleRefused::NoWorkerFacts)));
+}
+
+/// An end that the worker decided carries the start that the child
+/// reported: a timeout that a shared child ended at the deadline carries
+/// the start of its frame; a timeout at a kill, a blocked loop and a lost
+/// child carry `NotReported`.
+#[test]
+fn an_end_that_the_worker_decided_carries_the_start_that_its_child_reported() {
+    let started_at =
+        chrono::DateTime::<Utc>::from_timestamp(1_767_225_600, 0).expect("a time in range");
+    let reported = AttemptStart::Reported { started_at };
+    let cases = [
+        (
+            EndView::TimedOut { start: reported },
+            WorkerDecision::TimedOut,
+            reported,
+        ),
+        (
+            EndView::TimedOut {
+                start: AttemptStart::NotReported,
+            },
+            WorkerDecision::TimedOut,
+            AttemptStart::NotReported,
+        ),
+        (
+            EndView::KilledForLoop(LoopKillCode::TaskBlockedLoop),
+            WorkerDecision::TaskBlockedLoop,
+            AttemptStart::NotReported,
+        ),
+        (
+            EndView::Crashed,
+            WorkerDecision::ChildLost,
+            AttemptStart::NotReported,
+        ),
+    ];
+    for (view, decision, expected_start) in cases {
+        let mut watched = declaring_telemetry();
+        let task = claimed_task(Execution::Isolated);
+        let placed = placed_after(ClaimRead::now());
+
+        let _noted = watched
+            .telemetry
+            .attempt_ended(&task, &ChildPlacement::Placed(placed), view);
+
+        match watched.events().as_slice() {
+            [Event::AttemptEnded(ended)] => match &ended.end {
+                events::AttemptEnd::DecidedByWorker { reason, start, .. } => {
+                    assert_eq!(*reason, decision, "{view:?}");
+                    assert_eq!(*start, expected_start, "{view:?}");
+                }
+                other => panic!("{view:?} is decided by the worker, not {other:?}"),
+            },
+            other => panic!("{view:?} gives one AttemptEnded, not {other:?}"),
+        }
+    }
 }
 
 /// A child killed with its exit not seen: `NotKnown`, counted in

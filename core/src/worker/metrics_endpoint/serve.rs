@@ -16,7 +16,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use super::RunningEndpoint;
+use super::{RunningEndpoint, TELEMETRY_PART_DOWN};
 use crate::telemetry::endpoint::{
     bind_endpoint, metrics_response, serve_endpoint, ENDPOINT_REQUEST_TIMEOUT,
 };
@@ -84,7 +84,7 @@ impl ListenEndpoint {
                 "local_address": local.to_string(),
             }),
             EndpointState::Down(down) => serde_json::json!({
-                "state": "down",
+                "state": TELEMETRY_PART_DOWN,
                 "host": host,
                 "port": port,
                 "cause": down.cause.json(),

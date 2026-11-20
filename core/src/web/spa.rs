@@ -10,15 +10,19 @@ use include_dir::{include_dir, Dir};
 use percent_encoding::percent_decode_str;
 
 use super::events::python_json_text;
+use super::trace_link::TraceLink;
 
 static EMBEDDED_UI: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/webui-dist");
 
 pub const ASSETS_MISSING_DETAIL: &str = "horsies web UI assets are not built. \
      Run: cd webui && bun install && bun run build, then rebuild horsies-core";
 
+/// The settings of the page. `trace_link` is the link of a task's trace id
+/// in the task detail, which `/api/meta` reports.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MonitoringUiConfig {
     pub custom_css_url: Option<String>,
+    pub trace_link: TraceLink,
 }
 
 #[derive(Debug, Clone)]

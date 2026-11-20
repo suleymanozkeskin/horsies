@@ -18,11 +18,12 @@ use crate::broker::attempt_writes::{AttemptFailureKind, RetryPlacement, RetryReq
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
-    encode_child_frame, encode_parent_frame, CancelGraceMs, ChildAfterFrame, ChildConnection,
-    ChildFrame, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, InitFrame,
-    IsolatedChild, IsolatedWork, NoLeftWork, ParentFrame, PoolMaxSize, PoolMinSize, ProcessId,
-    ReadyFrame, ResultEnvelopeText, ResultFrame, RssReading, RunEnd, RunFrame, SharedWork,
-    StoredOptionsRefusal, TaskInputText, TaskSendPool, TaskTimeoutMs,
+    encode_child_frame, encode_parent_frame, BodyEnd, CancelGraceMs, ChildAfterFrame,
+    ChildConnection, ChildFrame, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl,
+    FailureDetail, InitFrame, IsolatedChild, IsolatedWork, NoLeftWork, ParentFrame, PoolMaxSize,
+    PoolMinSize, ProcessId, ReadyFrame, ResultEnvelopeText, ResultFrame, RssReading, RunEnd,
+    RunFrame, SharedWork, StopReason, StoredOptionsRefusal, TaskInputText, TaskSendPool,
+    TaskTimeoutMs,
 };
 use crate::worker::executor::supervisor::{ChildCommand, Spawner, CHILD_KILL_WAIT};
 use crate::worker::retry::{read_stored_options, StoredOptions};
@@ -940,10 +941,74 @@ async fn an_isolated_slot_reports_the_result_of_its_child() {
     );
     assert_eq!(
         run_through_pool(&after_run, IsolatedDeadline::NoDeadline).await,
-        AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
-            r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned()
-        )))
+        AttemptEnd::Result {
+            envelope: ResultEnvelopeText::new(
+                r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned()
+            ),
+            start: crate::events::AttemptStart::Reported {
+                started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            },
+        }
     );
+}
+
+/// The end of a result frame keeps the start of the frame: a result and a
+/// worker failure carry it, and a stop before running has none.
+#[test]
+fn a_reported_end_keeps_the_start_of_its_frame() {
+    let started_at = Utc.with_ymd_and_hms(2026, 11, 16, 9, 30, 1).unwrap();
+    let start = crate::events::AttemptStart::Reported { started_at };
+    let envelope =
+        ResultEnvelopeText::new(r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned());
+    let detail = FailureDetail::cut("the OS refused a seat thread");
+    let cases = [
+        (
+            RunEnd::Result(envelope.clone()),
+            start,
+            AttemptEnd::Result { envelope, start },
+        ),
+        (
+            RunEnd::WorkerFailure(detail.clone()),
+            crate::events::AttemptStart::NotReported,
+            AttemptEnd::WorkerFailure {
+                detail,
+                start: crate::events::AttemptStart::NotReported,
+            },
+        ),
+        (
+            RunEnd::StoppedBeforeRunning(StopReason::ClaimLost),
+            crate::events::AttemptStart::NotReported,
+            AttemptEnd::StoppedBeforeRunning(StopReason::ClaimLost),
+        ),
+    ];
+    for (end, frame_start, expected) in cases {
+        assert_eq!(AttemptEnd::reported(end, frame_start), expected);
+    }
+}
+
+/// What a body returned ends the attempt with the start of its frame, for
+/// a result and for a worker failure.
+#[test]
+fn a_returned_body_ends_with_the_start_of_its_frame() {
+    let started_at = Utc.with_ymd_and_hms(2026, 11, 16, 9, 30, 1).unwrap();
+    let start = crate::events::AttemptStart::Reported { started_at };
+    let envelope =
+        ResultEnvelopeText::new(r#"{"__h_task_result__":true,"ok":3,"err":null}"#.to_owned());
+    let detail = FailureDetail::cut("the task loop failed");
+    let cases = [
+        (
+            BodyEnd::Result(envelope.clone()),
+            AttemptEnd::Result { envelope, start },
+        ),
+        (
+            BodyEnd::WorkerFailure(detail.clone()),
+            AttemptEnd::WorkerFailure { detail, start },
+        ),
+    ];
+    for (end, expected) in cases {
+        let returned = super::dispatch::BodyReturn { end, started_at };
+        assert_eq!(AttemptEnd::returned(returned), expected);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -955,6 +1020,7 @@ async fn the_deadline_kills_the_child_and_ends_the_task_as_timed_out() {
             timeout,
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::NoSignal,
+            start: crate::events::AttemptStart::NotReported,
         }
     );
 }

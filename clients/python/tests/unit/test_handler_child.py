@@ -245,6 +245,16 @@ class TestDecodeEventText:
             case other:
                 pytest.fail(f'a cut text is not JSON text, got {other}')
 
+    def test_a_text_that_the_strict_parser_refuses_is_not_json_text(self) -> None:
+        """The codec parser refuses what `json.loads` takes: a non-finite
+        number and a repeated key."""
+        for text in ('["TaskClaimed", NaN]', '["TaskClaimed", {"a": 1, "a": 2}]'):
+            match decode_event_text(text):
+                case Err(NotJsonText()):
+                    pass
+                case other:
+                    pytest.fail(f'{text} is not JSON text of the codec, got {other}')
+
     def test_an_unknown_event_type_is_refused_by_its_tag(self) -> None:
         match decode_event_text('["TaskTeleported",1]'):
             case Err(events.UnknownEventType(tag=tag)):

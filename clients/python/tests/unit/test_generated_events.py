@@ -153,14 +153,15 @@ EXPECTED: Final[dict[str, events.AnyEvent]] = {
         timedelta(microseconds=5000),
     ),
     'attempt_ended_by_worker': _ended(
-        'ISOLATED',
+        'SHARED_ASYNC',
         3,
         events.AttemptEndDecidedByWorker(
             reason='TIMED_OUT',
+            start=events.AttemptStartReported(started_at=STARTED_AT),
             error_code=OutcomeCode.TASK_TIMEOUT,
             trace=events.RunTraceCarrier(text=CARRIER),
             placed_at=PLACED_AT,
-            child_kind='ISOLATED',
+            child_kind='SHARED_ASYNC',
             worker_id=WORKER_ID,
             workflow='NOT_IN_WORKFLOW',
         ),
@@ -171,6 +172,7 @@ EXPECTED: Final[dict[str, events.AnyEvent]] = {
         1,
         events.AttemptEndDecidedByWorker(
             reason='NEIGHBOUR_BLOCKED_LOOP',
+            start=events.AttemptStartNotReported(),
             error_code=OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP,
             trace=events.RunTraceNoCarrier(),
             placed_at=PLACED_AT,
@@ -185,6 +187,7 @@ EXPECTED: Final[dict[str, events.AnyEvent]] = {
         2,
         events.AttemptEndDecidedByWorker(
             reason='CHILD_LOST',
+            start=events.AttemptStartNotReported(),
             error_code=OperationalErrorCode.WORKER_CRASHED,
             trace=events.RunTraceCarrier(text=CARRIER),
             placed_at=PLACED_AT,
@@ -465,7 +468,7 @@ def test_a_worker_ended_attempt_names_its_workflow_place_or_is_refused() -> None
     wire = _sample('attempt_ended_by_worker_in_workflow')
     end = wire[7]
     assert isinstance(end, list)
-    cast('list[object]', end)[7] = 'IN_WORKFLOW'
+    cast('list[object]', end)[8] = 'IN_WORKFLOW'
     refusal = _refusal(wire)
     assert (refusal.path, refusal.reason) == (
         'end.DecidedByWorker.workflow',
