@@ -322,7 +322,7 @@ function unitText(unit) {
 function recorderText(recorder) {
 	switch (recorder) {
 		case 'worker':
-			return 'The core worker of each worker process records them.';
+			return 'The core worker of each worker process records them. Its metrics endpoint (`--metrics-listen HOST:PORT`) serves them.';
 		case 'producer':
 			return 'The client, in each process that sends tasks, with the OpenTelemetry meter of the process and the task name and queue name of each send. No endpoint of horsies serves them.';
 		case 'fleet collector':
@@ -415,7 +415,7 @@ export function renderPage(metrics, sourcePath) {
 		'title: Metric Reference',
 		'section: shared',
 		'summary: Every metric of horsies, generated from the metric catalog of the core - its OpenTelemetry and Prometheus names, kind, unit, help text, labels and label values.',
-		'related: [../tasks/errors, ../monitoring/worker-health]',
+		'related: [overview, metrics, fleet-collector, ../tasks/errors]',
 		'tags: [observability, metrics, prometheus, opentelemetry, reference]',
 		'---',
 		'',

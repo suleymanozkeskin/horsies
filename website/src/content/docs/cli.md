@@ -28,8 +28,11 @@ horsies worker <module> --profile NAME [OPTIONS]
 | ------ | ------- | ----------- |
 | `--profile NAME` | (required) | Name of the worker profile in `AppConfig.worker_profiles`. The profile holds the settings of the worker: children, recycling, claim limits, drain timeout and preload. See [Worker Profiles](/horsies/workers/worker-profiles/) |
 | `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
+| `--metrics-listen HOST:PORT` | none | Serve the worker metrics (`GET /metrics`) and the health probes (`GET /livez`, `GET /readyz`) on `HOST:PORT`, or `[IPV6]:PORT`. There is no default: without it the worker serves no endpoint. See [Metrics](/horsies/observability/metrics/) |
 
 There is no default profile. A missing or unknown `--profile` exits with code 1 before the app check and before any child starts. The message lists the defined profile names.
+
+A `--metrics-listen` value that does not parse exits with code 2 before the worker starts. An address that does not bind does not stop the worker: the endpoint binds again with a backoff.
 
 The flags `--processes`, `--max-claim-batch`, `--max-claim-per-worker`, `--max-tasks-per-child`, `--max-memory-per-child-mb`, `--drain-timeout` and `--child-preload` were removed in 0.7.0. Each one exits with code 2 and names the profile field that replaces it. See [Migrating to 0.7.0](/horsies/migrations/migration-to-0-7-0/).
 
@@ -47,6 +50,9 @@ horsies worker myapp.instance:app --profile default --loglevel=DEBUG
 
 # Using file path (also supported)
 horsies worker app/configs/instance.py:app --profile default
+
+# Serve the worker metrics and the health probes on port 9464
+horsies worker myapp.instance:app --profile default --metrics-listen 0.0.0.0:9464
 ```
 
 At boot, before any child starts, the worker logs the settings of the profile, and warns when the per-child memory limits add up to more than the memory that the worker can use (the container limit, or the host RAM), or when one worker opens more Postgres connections itself than the server has usable slots. See [Validation](/horsies/workers/worker-profiles/#validation).

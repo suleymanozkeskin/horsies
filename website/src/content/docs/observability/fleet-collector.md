@@ -2,7 +2,7 @@
 title: Fleet Collector
 section: shared
 summary: The fleet metrics of one database - horsies metrics and GET /metrics of the web UI - with the read cadence, the bounded queue depth, the oldest pending age, the failed queries, and the label values.
-related: [metric-reference, dashboards-and-alerts, ../monitoring/worker-health, ../cli, ../rust/cli]
+related: [metrics, metric-reference, dashboards-and-alerts, opentelemetry-collector, ../monitoring/worker-health, ../cli, ../rust/cli]
 tags: [observability, metrics, prometheus, fleet, queue depth]
 ---
 
@@ -33,7 +33,7 @@ scrape_configs:
       - targets: ['metrics.internal:9465']
 ```
 
-- `--listen` is required and has no default: `HOST:PORT`, or `[IPV6]:PORT` for an IPv6 address. The port is 1 to 65535. The host is resolved when the server binds. A text that is not such an address is an argument error: exit code 2.
+- `--listen` is required and has no default: `HOST:PORT`, or `[IPV6]:PORT` for an IPv6 address. The host has 1 to 253 bytes; the port is 1 to 65535. The host is resolved when the server binds. A text that is not such an address is an argument error: exit code 2.
 - The command serves `GET /metrics` (and `HEAD`). Another path answers 404, another method 405.
 - `SIGTERM` or `SIGINT` stops it with exit code 0. The app does not load, the connection settings do not build, or the address does not bind: exit code 1.
 - A database that does not answer never ends the command: the gauges of each failed query have no series until a read answers.
