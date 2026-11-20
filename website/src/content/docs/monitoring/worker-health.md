@@ -124,7 +124,7 @@ Both reads use the claim index. The coverage read takes one index probe per pend
 | `memory_usage_mb` | Parent worker process resident memory (psutil) |
 | `memory_percent` | Memory percent (psutil) |
 | `cpu_percent` | CPU percent (psutil) |
-| `children_memory_mb` | Summed resident memory of the worker's child processes |
+| `children_memory_mb` | Summed resident memory of the worker's task children: the last reading of each child, from its ready frame and its result frames. `None` when no child read its size |
 | `worker_started_at` | Worker process start time |
 | `slot_health` | See [Which slots are down?](#which-slots-are-down) |
 | `class_capacity` | See [Which classes does a worker serve?](#which-classes-does-a-worker-serve) |
@@ -168,5 +168,7 @@ whole process tree. `children_memory_mb` sums RSS, so with a
 [preload parent](/horsies/workers/worker-architecture/#preload-parent) it counts each
 shared page once per child, and it reads above real use. Use it to see one child
 grow, and read the container or cgroup total for the footprint that the quota
-enforces. To bound it, see
+enforces. A child whose reading is unreadable is not in the sum; the
+`children_rss` member of the stored `telemetry` column names its slot, its kind
+and its pid. To bound it, see
 [process recycling](/horsies/workers/concurrency/#process-recycling).

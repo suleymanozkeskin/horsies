@@ -21,7 +21,7 @@ Use a handler to send what a worker does to another system: your own metrics, an
 
 The core defines each event type once. The Python client generates its classes from the core, and the Rust client re-exports the core types, so both clients read the same events.
 
-- The contract has a version. This release has version 4: `core/tests/fixtures/event_contract/v4.txt` in the repository holds its text. A change of an event type, a field or a closed type of a field is a new version.
+- The contract has a version. This release has version 6: `core/tests/fixtures/event_contract/v6.txt` in the repository holds its text. A change of an event type, a field or a closed type of a field is a new version.
 - An event holds ids, names, codes, numbers and times. It never holds task input, a task result, a failed reason or an exception text.
 - Each field has a closed type or a bound. A duration is a duration type, a time is a UTC time, and a state that can be missing or not known is a named variant.
 - A handler takes the events of one type, never the union of the types. A later version can add an event type, and that changes no handler of another type.
@@ -56,8 +56,8 @@ Each event also has `at`: the wall-clock time of the worker at the step.
 
 | Variant | The attempt | Fields |
 |---------|-------------|--------|
-| `ReportedByChild` | The child reported the end | `result`: `Completed`, `Failed` with its error code, or `WorkerFailure`; `start` |
-| `DecidedByWorker` | The worker ended it | `reason`: `TIMED_OUT`, `TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP` or `CHILD_LOST` |
+| `ReportedByChild` | The child reported the end in its result frame | `result`: `Completed`, `Failed` with its error code, `WorkerFailure`, or `TimedOut` (the child ended a shared run at its deadline); `start` |
+| `DecidedByWorker` | The worker ended it, with no result frame of the child | `reason`: `TIMED_OUT` (the worker killed the child at the deadline), `TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP` or `CHILD_LOST` |
 | `NotKnown` | The worker killed the child and did not see its exit; recovery decides the row | `child_pid` |
 
 An error code is a built-in code, a user code of at most 128 characters, or `UserOverBound` for a longer user code. `start` is `Reported` with the time of the `RUNNING` write, or `NotReported`. `DecidedByWorker` also has internal fields for the span of the attempt; they are not part of the stable contract.

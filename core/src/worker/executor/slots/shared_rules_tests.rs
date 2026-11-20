@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::dispatch::{AttemptEnd, CancelEnd, LoopKillCode, TimeoutCancel};
+use super::dispatch::{AttemptEnd, BodyReturn, CancelEnd, LoopKillCode, TimeoutCancel};
 use super::pool::{MemoryLimit, TaskLimit};
 use super::seat_runs::*;
 use super::shared_stop::*;
@@ -66,6 +66,19 @@ fn returned() -> BodyEnd {
     BodyEnd::Result(ResultEnvelopeText::new(
         r#"{"__h_task_result__":true,"ok":1,"err":null}"#.to_owned(),
     ))
+}
+
+/// The start that the frames of a run that returned report.
+fn run_start() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(1_767_225_600, 0).expect("a time in range")
+}
+
+/// What [`returned`] is, with the start of its attempt.
+fn body_return() -> BodyReturn {
+    BodyReturn {
+        end: returned(),
+        started_at: run_start(),
+    }
 }
 
 fn stuck_work() -> StuckWork {
@@ -213,6 +226,11 @@ fn an_async_run_reports_its_stop_in_order() {
             timeout: timeout(),
             retry: RetryPlacement::Isolated,
             cancel: TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace),
+            seen: crate::worker::executor::slots::TimeoutSeen::ReportedByChild {
+                start: crate::events::AttemptStart::Reported {
+                    started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+                }
+            },
         }
     );
     assert_eq!(runs.count(), 0);
@@ -271,7 +289,7 @@ fn a_return_with_left_work_keeps_what_it_returned() {
         runs.note_stop_report(&StopReportFrame::LeftoverCancel(LeftoverCancelFrame {
             run,
             returned: returned(),
-            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            started_at: run_start(),
         })),
         Ok(StopStep::Close(CloseReason::LeftoverWork))
     );
@@ -280,7 +298,7 @@ fn a_return_with_left_work_keeps_what_it_returned() {
             run,
             work: stuck_work(),
             returned: returned(),
-            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            started_at: run_start(),
         })),
         Ok(StopStep::Recorded)
     );
@@ -305,13 +323,13 @@ fn a_return_with_left_work_keeps_what_it_returned() {
             run,
             end: SeatEnd::Finished(RunEnd::from(returned())),
             started_at: crate::events::AttemptStart::Reported {
-                started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+                started_at: run_start(),
             },
             rss: RssReading::Unreadable,
             child: ChildAfterFrame::ServesOn,
         })
         .unwrap();
-    assert_eq!(end, AttemptEnd::Reported(RunEnd::from(returned())));
+    assert_eq!(end, AttemptEnd::returned(body_return()));
 }
 
 #[test]
@@ -450,7 +468,7 @@ fn the_deadline_state_comes_from_the_report_the_clock_and_the_closer() {
         DeadlineState::Culprit
     );
     run.report = RunStopReport::LeftoverStuckReported {
-        returned: returned(),
+        returned: body_return(),
     };
     assert_eq!(
         deadline_state(&run, CloseCulprit::NotNamed, after),
@@ -499,6 +517,7 @@ fn a_run_of_a_lost_child_gets_the_verdict_of_its_kill() {
             timeout: timeout(),
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::Ended(CancelEnd::KilledWithChild),
+            seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
         }
     );
     assert!(matches!(
@@ -531,7 +550,7 @@ fn a_death_the_worker_did_not_cause_takes_the_crash_path() {
     ));
     let mut leftover = seat(2, async_work(), sent_at);
     leftover.report = RunStopReport::LeftoverCancelReported {
-        returned: returned(),
+        returned: body_return(),
     };
     for cause in [LossCause::ChildDied, LossCause::KilledByParent] {
         assert_eq!(
@@ -542,7 +561,7 @@ fn a_death_the_worker_did_not_cause_takes_the_crash_path() {
                 seen(cause),
                 sent_at
             ),
-            AttemptEnd::Reported(RunEnd::from(returned()))
+            AttemptEnd::returned(body_return())
         );
     }
     assert!(matches!(
@@ -567,6 +586,7 @@ fn a_kill_past_deadlines_isolates_only_the_culprit() {
             timeout: timeout(),
             retry: RetryPlacement::Isolated,
             cancel: TimeoutCancel::NoSignal,
+            seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
         }
     );
     assert_eq!(
@@ -575,6 +595,7 @@ fn a_kill_past_deadlines_isolates_only_the_culprit() {
             timeout: timeout(),
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::NoSignal,
+            seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
         }
     );
     let mut stuck = seat(3, async_work(), sent_at);
@@ -585,15 +606,16 @@ fn a_kill_past_deadlines_isolates_only_the_culprit() {
             timeout: timeout(),
             retry: RetryPlacement::Isolated,
             cancel: TimeoutCancel::Ended(CancelEnd::KilledWithChild),
+            seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
         }
     );
     let mut leftover = seat(4, async_work(), sent_at);
     leftover.report = RunStopReport::LeftoverStuckReported {
-        returned: returned(),
+        returned: body_return(),
     };
     assert_eq!(
         end_past_deadlines(&leftover, SharedChildKind::Async, CloseReason::LeftoverWork),
-        AttemptEnd::Reported(RunEnd::from(returned()))
+        AttemptEnd::returned(body_return())
     );
 }
 
@@ -613,6 +635,7 @@ fn a_late_exit_after_the_first_backstop_is_a_timeout_or_a_crash() {
             timeout: timeout(),
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::NoSignal,
+            seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
         }
     );
     assert!(matches!(
@@ -680,7 +703,7 @@ fn a_backstop_kills_only_a_child_that_did_not_report_the_due_step() {
             first,
             async_work(),
             &RunStopReport::LeftoverCancelReported {
-                returned: returned()
+                returned: body_return()
             }
         ),
         BackstopStep::CheckStuckLater

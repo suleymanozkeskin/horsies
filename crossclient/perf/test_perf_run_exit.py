@@ -48,7 +48,9 @@ from crossclient.perf.runner import (
     _comparison_label,
     _contract_violations,
 )
+from crossclient.perf.readings import StatementReadings
 from crossclient.perf.statistics import Budget, Verdict
+from crossclient.perf.telemetry_levels import TelemetryLevel
 
 
 def _never_run(*_args: object) -> NoReturn:
@@ -117,6 +119,9 @@ def _conditions(comparison: str, observations: int = 200) -> Conditions:
         comparison=comparison,
         demo_quiesced=False,
         measured_at='2026-08-04T00:00:00+00:00',
+        telemetry_level=TelemetryLevel.OFF.value,
+        telemetry_description='no telemetry',
+        postgres_cpu_source='not measured (no --postgres-cpu-stat)',
     )
 
 
@@ -165,11 +170,16 @@ def _control_result(
     return RunResult(
         scenario=_SCENARIO,
         conditions=_conditions('existing statement against itself (harness control)'),
-        baseline=Measurement(samples_ms=[1.0], counts=baseline),
-        candidate=Measurement(samples_ms=[1.0], counts=candidate),
+        baseline=Measurement(
+            readings=StatementReadings(), samples_ms=[1.0], counts=baseline
+        ),
+        candidate=Measurement(
+            readings=StatementReadings(), samples_ms=[1.0], counts=candidate
+        ),
         plans=None,
         comparisons=[],
         throughput=None,
+        costs=(),
         contract_violations=(),
         verdict=verdict,
     )
@@ -256,14 +266,18 @@ class TestControlCountChecks:
         result = RunResult(
             scenario=_SCENARIO,
             conditions=_conditions('existing statement against function'),
-            baseline=Measurement(samples_ms=[1.0], counts=_counts()),
+            baseline=Measurement(
+                readings=StatementReadings(), samples_ms=[1.0], counts=_counts()
+            ),
             candidate=Measurement(
+                readings=StatementReadings(),
                 samples_ms=[1.0],
                 counts=_counts(client_statements=100),
             ),
             plans=None,
             comparisons=[],
             throughput=None,
+            costs=(),
             contract_violations=(),
             verdict=Verdict.PASS,
         )
@@ -279,8 +293,12 @@ class TestCandidateContractChecks:
         return _contract_violations(
             scenario=_with_candidate(),
             conditions=_conditions('existing statement against function'),
-            baseline=Measurement(samples_ms=[1.0], counts=baseline),
-            candidate=Measurement(samples_ms=[1.0], counts=candidate),
+            baseline=Measurement(
+                readings=StatementReadings(), samples_ms=[1.0], counts=baseline
+            ),
+            candidate=Measurement(
+                readings=StatementReadings(), samples_ms=[1.0], counts=candidate
+            ),
             plans=PlanEvidence(baseline={}, candidate={}),
             control=False,
         )
@@ -329,8 +347,12 @@ class TestCandidateContractChecks:
         report = _contract_violations(
             scenario=_with_candidate(),
             conditions=_conditions('existing statement against function'),
-            baseline=Measurement(samples_ms=[1.0], counts=_counts()),
-            candidate=Measurement(samples_ms=[1.0], counts=_counts()),
+            baseline=Measurement(
+                readings=StatementReadings(), samples_ms=[1.0], counts=_counts()
+            ),
+            candidate=Measurement(
+                readings=StatementReadings(), samples_ms=[1.0], counts=_counts()
+            ),
             plans=None,
             control=False,
         )
@@ -340,8 +362,11 @@ class TestCandidateContractChecks:
         report = _contract_violations(
             scenario=_SCENARIO,
             conditions=_conditions('existing statement against function'),
-            baseline=Measurement(samples_ms=[1.0], counts=_counts()),
+            baseline=Measurement(
+                readings=StatementReadings(), samples_ms=[1.0], counts=_counts()
+            ),
             candidate=Measurement(
+                readings=StatementReadings(),
                 samples_ms=[1.0],
                 counts=_counts(client_statements=400),
             ),
@@ -412,6 +437,7 @@ class TestScenarioSelection:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A run that measures nothing must not exit as if it passed."""
+
         def select_nothing(selector: str) -> tuple[Scenario, ...]:
             del selector
             return ()
@@ -464,14 +490,22 @@ class TestPublicCallScenario:
 
     def test_the_comparison_is_labelled_a_control(self) -> None:
         """The control count checks apply to it, with or without --control."""
-        assert 'control' in _comparison_label(_PUBLIC_CALL, control=False)
-        assert 'control' in _comparison_label(_PUBLIC_CALL, control=True)
+        assert 'control' in _comparison_label(
+            _PUBLIC_CALL, control=False, telemetry=TelemetryLevel.OFF
+        )
+        assert 'control' in _comparison_label(
+            _PUBLIC_CALL, control=True, telemetry=TelemetryLevel.OFF
+        )
 
     def test_a_count_disagreement_between_its_sides_is_reported(self) -> None:
         result = dataclasses.replace(
             _control_result(_counts(), _counts(client_statements=201)),
             scenario=_PUBLIC_CALL,
-            conditions=_conditions(_comparison_label(_PUBLIC_CALL, control=False)),
+            conditions=_conditions(
+                _comparison_label(
+                    _PUBLIC_CALL, control=False, telemetry=TelemetryLevel.OFF
+                )
+            ),
         )
         report = _control_disagreements(result)
         assert len(report) == 1
@@ -481,8 +515,11 @@ class TestPublicCallScenario:
         report = _contract_violations(
             scenario=_PUBLIC_CALL,
             conditions=_conditions('public call against itself (harness control)'),
-            baseline=Measurement(samples_ms=[1.0], counts=_counts()),
+            baseline=Measurement(
+                readings=StatementReadings(), samples_ms=[1.0], counts=_counts()
+            ),
             candidate=Measurement(
+                readings=StatementReadings(),
                 samples_ms=[1.0],
                 counts=_counts(client_statements=400),
             ),
@@ -542,8 +579,12 @@ class TestWorkerDrainScenario:
 
     def test_the_comparison_is_labelled_a_control(self) -> None:
         """A smoke run does not judge its throughput verdict; a gate does."""
-        assert 'control' in _comparison_label(_DRAIN, control=False)
-        assert 'control' in _comparison_label(_DRAIN, control=True)
+        assert 'control' in _comparison_label(
+            _DRAIN, control=False, telemetry=TelemetryLevel.OFF
+        )
+        assert 'control' in _comparison_label(
+            _DRAIN, control=True, telemetry=TelemetryLevel.OFF
+        )
 
     def test_a_count_disagreement_between_its_sides_is_not_reported(self) -> None:
         """The statements of a worker depend on its timing, so two drains of
@@ -554,16 +595,23 @@ class TestWorkerDrainScenario:
                 _counts(client_statements=401, write_transactions=900),
             ),
             scenario=_DRAIN,
-            conditions=_conditions(_comparison_label(_DRAIN, control=True)),
+            conditions=_conditions(
+                _comparison_label(_DRAIN, control=True, telemetry=TelemetryLevel.OFF)
+            ),
         )
         assert _control_disagreements(result) == []
 
     def test_it_has_no_contract_of_a_real_comparison(self) -> None:
         report = _contract_violations(
             scenario=_DRAIN,
-            conditions=_conditions(_comparison_label(_DRAIN, control=True)),
-            baseline=Measurement(samples_ms=[1.0], counts=_counts()),
+            conditions=_conditions(
+                _comparison_label(_DRAIN, control=True, telemetry=TelemetryLevel.OFF)
+            ),
+            baseline=Measurement(
+                readings=StatementReadings(), samples_ms=[1.0], counts=_counts()
+            ),
             candidate=Measurement(
+                readings=StatementReadings(),
                 samples_ms=[1.0],
                 counts=_counts(client_statements=400),
             ),

@@ -3,7 +3,7 @@
 Reference for the health reads on the app, the typed monitoring queries of
 `horsies::monitoring`, the task and workflow actions, and the web UI: the
 axum mount `horsies::web::router` (feature `web`) and the shipped
-`horsies web` command. The core serves every route, guard and event of the
+`horsies web` command; and the event handlers of `horsies::events`. The core serves every route, guard and event of the
 web UI, so the Python app and the Rust app answer alike.
 
 ## Health Reads on the App
@@ -349,6 +349,9 @@ horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
   runs in each worker child before `horsies::cli::run`. Without a provider
   no span is recorded; without a propagator that writes keys a send stores
   no carrier.
+- A rerun (`app.rerun_task`, `rerun::rerun_task_in`) opens no span: the new
+  task stores the carrier of the caller's current context, so its attempt
+  spans are children of the caller's span. Without `otel`: no carrier.
 - `horsies::cli::run` adds `horsies::otel::layer()` to its subscriber. A
   binary with its own subscriber adds the layer and lets its filter pass
   `horsies::attempt` at `INFO`.
@@ -363,8 +366,73 @@ horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
 
 See the website docs `observability/tracing` and
 `rust/observability/tracing-setup`.
+## Event Handlers — `horsies::events`
+
+```rust
+use horsies::events::{AttemptEnded, HandlerError, TaskClaimed};
+use horsies::{Horsies, HorsiesError};
+
+async fn record_attempt_end(event: AttemptEnded) -> Result<(), HandlerError> {
+    println!("task {} attempt {} ended", event.task_id, event.attempt.get());
+    Ok(())
+}
+
+fn record_claim(event: TaskClaimed) -> Result<(), HandlerError> {
+    println!("task {} claimed", event.task_id);
+    Ok(())
+}
+
+fn add_handlers(app: &mut Horsies) -> Result<(), HorsiesError> {
+    app.on_event::<AttemptEnded>("audit.attempt_ended", record_attempt_end)?;
+    app.on_event_blocking::<TaskClaimed>("audit.task_claimed", record_claim)?;
+    app.on_handler_child_start(|| async { Ok::<(), String>(()) });
+    Ok(())
+}
+```
+
+- A handler takes the events of one type: `TaskClaimed`, `ClaimReleased`,
+  `AttemptPlaced`, `AttemptNotStarted`, `AttemptEnded`, `AttemptRecorded`,
+  `TaskRecovered`, `ChildStarted`, `ChildReplaced`, `SlotDown`,
+  `SlotRecovered`.
+- Register handlers in `main` before `horsies::cli::run(app)`. With a
+  handler, the worker starts one handler child (this binary in child
+  mode); handlers never run in the worker process.
+- Each handler runs on a thread of its own with a queue of
+  `HANDLER_QUEUE_EVENTS` (10,000). A full queue drops the event for that
+  handler and counts `horsies.telemetry.handler.dropped{handler}`.
+- A returned `HandlerError` or a panic counts
+  `horsies.telemetry.handler.errors{handler}`, is logged with the name, and
+  the handler takes its next event.
+- `name`: 1 to 255 characters, not `(unknown)`, once per app; at most 32
+  handlers. A refusal is a `HorsiesError` with the code of the same Python
+  refusal: `HRS-225` (name), `HRS-224` (repeated name), `HRS-226` (a 33rd
+  handler).
+- `on_handler_child_start(hook)`: once per handler child, before the
+  handlers start, 10 s per hook. A failure keeps the handler child down; the
+  worker runs on.
+- Delivery is at most once. The history tables are the record of a task.
+- With the feature `otel`, the handler child also makes the span of each
+  attempt that the worker ended (a timeout kill `TASK_TIMEOUT`, a
+  blocked-runtime kill, a lost child `WORKER_CRASHED`), whose span in the
+  task child never ended: `run <task_name>`, CONSUMER, parent from the stored
+  carrier, start at the placement, status ERROR with `error.type`,
+  `horsies.span.source = "worker"`. For a workflow task the handler child
+  reads the node by the task id (one bounded core read, only for these
+  attempts, on one reader task with a queue of at most 1,000 spans: never
+  on the event path) and sets `horsies.workflow.*`. A failed read, a full
+  queue and a span still queued at the stop leave them out; the worker
+  metric `horsies.spans.worker_ended.read_failures{reason}` (`read_failed`,
+  `not_read`) counts them. It is the default (the worker then starts the
+  handler child with no handler);
+  `app.set_worker_ended_spans(horsies::otel::WorkerEndedSpans::NoSpans)`
+  turns it off. Set the global tracer provider in `main` or in
+  `on_handler_child_start`.
 
 ## Things to Avoid
+
+**Do not block in an async event handler.** It takes no event while it
+blocks, so its queue fills and drops. Use `on_event_blocking` for a
+blocking call.
 
 **Do not treat an unfiltered `TaskListPage.total` as an exact count.** It
 is an estimate.
@@ -401,6 +469,12 @@ use horsies::monitoring::{
     cancel_task, cancel_task_action, pause_workflow_action, resume_workflow_action,
     cancel_workflow_action, TaskCancelled, TaskActionError, TaskActionErrorCode,
     TaskActionResult, ActionOutcome, ActionBody, ActionResponse,
+};
+use horsies::events::{
+    // Event handlers
+    TaskClaimed, ClaimReleased, AttemptPlaced, AttemptNotStarted, AttemptEnded,
+    AttemptRecorded, TaskRecovered, ChildStarted, ChildReplaced, SlotDown, SlotRecovered,
+    AttemptEnd, AttemptRecord, HandlerError, HANDLER_QUEUE_EVENTS, HANDLER_STATS_INTERVAL,
 };
 use horsies::web::{  // feature `web`
     router, Actions, MonitoringConfig, MonitoringUiConfig, MonitoringAuthPolicy,

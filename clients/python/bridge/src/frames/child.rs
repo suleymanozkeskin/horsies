@@ -20,7 +20,7 @@ use horsies_core::frame_protocol::{
     LeftoverCancelFrame, LeftoverName, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit,
     LoopHoldsTasks, NoLeftWork, ProcessId, ReadyFrame, ReportedBootCause, ResultEnvelopeText,
     ResultFrame, RssMb, RssReading, RunEnd, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame,
-    ShortageErrno, StopReason, StuckWork,
+    ShortageErrno, SpanReadCounts, StopReason, StuckWork,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -759,11 +759,18 @@ impl LeftoverStuckFrameRecord {
 #[pymethods]
 impl HandlerStatsFrameRecord {
     /// `handlers`: the counts of each handler, each name once, at most
-    /// `max_event_handlers`. `rss_mb`: the RSS of the child in MiB, or
-    /// `'UNREADABLE'`.
+    /// `max_event_handlers`. `span_read_failed`, `span_not_read`: the spans
+    /// of attempts of workflow tasks that the worker ended, made with no
+    /// workflow node because the node read failed, or did not run. `rss_mb`:
+    /// the RSS of the child in MiB, or `'UNREADABLE'`.
     #[new]
-    #[pyo3(signature = (*, handlers, rss_mb))]
-    fn new(handlers: Vec<Bound<'_, HandlerCountsRecord>>, rss_mb: RssArgument) -> PyResult<Self> {
+    #[pyo3(signature = (*, handlers, span_read_failed, span_not_read, rss_mb))]
+    fn new(
+        handlers: Vec<Bound<'_, HandlerCountsRecord>>,
+        span_read_failed: u64,
+        span_not_read: u64,
+        rss_mb: RssArgument,
+    ) -> PyResult<Self> {
         let counts = handlers
             .iter()
             .map(|record| record.get().counts.clone())
@@ -773,6 +780,10 @@ impl HandlerStatsFrameRecord {
         Ok(Self {
             frame: ChildFrame::HandlerStats(HandlerStatsFrame {
                 handlers,
+                span_reads: SpanReadCounts {
+                    read_failed: span_read_failed,
+                    not_read: span_not_read,
+                },
                 rss: rss_mb.reading()?,
             }),
         })

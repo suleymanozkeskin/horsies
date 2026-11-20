@@ -303,6 +303,8 @@ const TASK_INFO_PARAMETERS: &[StubParameter] = &[
     keyword("include_attempts", "bool"),
 ];
 
+const TASK_WORKFLOW_NODE_PARAMETERS: &[StubParameter] = &[positional("task_id", "uuid.UUID")];
+
 const CORE_CHILD_HANDLE_PARAMETERS: &[StubParameter] = &[
     positional("manifest_json", "str"),
     keyword("kept_open", "int"),
@@ -429,6 +431,8 @@ const INSTALL_OUTCOME: &str = "SchemaInstalled | SchemaInstallNotRun | BrokerOpe
 const SEND_OUTCOME: &str = "Enqueued | BrokerCoreEnqueueError";
 const TASK_INFO_OUTCOME: &str =
     "TaskInfoRecord | TaskInfoNotFound | BrokerOperationFailed | BrokerInvalidJsonPayload";
+const TASK_WORKFLOW_NODE_OUTCOME: &str =
+    "TaskWorkflowNodeLinked | TaskWorkflowNodeNotLinked | BrokerOperationFailed";
 const RAW_RESULT_OUTCOME: &str = "RawResultRecordRecord | RawResultAbsent | BrokerOperationFailed | BrokerInvalidJsonPayload | BrokerInvalidInput";
 const REQUEUE_STALE_CLAIMED_OUTCOME: &str =
     "StaleClaimsDrained | StaleClaimsBoundReached | StaleClaimsRequeueFailed";
@@ -944,6 +948,12 @@ const CORE_HANDLE_METHODS: &[StubFunction] = &[
         doc: "The awaitable form of the method above.",
     },
     StubFunction {
+        name: "task_workflow_node",
+        parameters: TASK_WORKFLOW_NODE_PARAMETERS,
+        returns: TypeText::Plain(TASK_WORKFLOW_NODE_OUTCOME),
+        doc: "The workflow node that links one task. One bounded statement; no schema step.",
+    },
+    StubFunction {
         name: "raw_result_record",
         parameters: RAW_RESULT_RECORD_PARAMETERS,
         returns: TypeText::Plain(RAW_RESULT_OUTCOME),
@@ -1318,7 +1328,7 @@ const ARGUMENT_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "TraceCarrier",
-        doc: "The carrier that the client's propagator injected for the span of a send or a\nworkflow start, and the 16-byte trace id of that span. The core checks its bounds at\nthe send; a carrier that breaks a bound is not stored and never fails the send.",
+        doc: "The carrier that the client's propagator injected for the span of a send or a\nworkflow start, or for the current span of the caller of a rerun, and the 16-byte trace\nid of that span. The core checks its bounds at the send; a carrier that breaks a bound\nis not stored and never fails the send.",
         constructor: Constructor::Parameters(TRACE_CARRIER_PARAMETERS),
         properties: &[
             property("carrier", "dict[str, str]"),
@@ -1558,6 +1568,24 @@ const RECORD_CLASSES: &[StubClass] = &[
     StubClass {
         name: "TaskInfoNotFound",
         doc: "Neither the live table nor the task history holds the task.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskWorkflowNodeLinked",
+        doc: "The node at node_index of the workflow workflow_id links the task; root_workflow_id is the top-level workflow of its tree.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("workflow_id", "uuid.UUID"),
+            property("node_index", "int"),
+            property("root_workflow_id", "uuid.UUID"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "TaskWorkflowNodeNotLinked",
+        doc: "No workflow node links the task now.",
         constructor: Constructor::NoConstructor,
         properties: &[property("task_id", "uuid.UUID")],
         methods: &[],
@@ -3123,8 +3151,8 @@ const HISTORY_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "RerunCommandRecord",
-        doc: "One rerun request: the source task id, the deadline of the new task (aware, or None\nfor no deadline) and the caller key. A naive deadline raises TypeError.",
-        constructor: Constructor::Parameters(&[keyword("source_task_id", "uuid.UUID"), keyword("deadline", "datetime.datetime | None"), keyword("caller_key", "str | None")]),
+        doc: "One rerun request: the source task id, the deadline of the new task (aware, or None\nfor no deadline), the caller key, and the trace that the new task stores (NoTraceCarrier,\nor the TraceCarrier of the caller's current context). A naive deadline raises TypeError.",
+        constructor: Constructor::Parameters(&[keyword("source_task_id", "uuid.UUID"), keyword("deadline", "datetime.datetime | None"), keyword("caller_key", "str | None"), keyword("trace", "NoTraceCarrier | TraceCarrier")]),
         properties: &[],
         methods: &[],
     },
@@ -3549,7 +3577,7 @@ const FRAME_CLASSES: &[StubClass] = &[
     StubClass {
         name: "HandlerStatsFrame",
         doc: "The counts of each event handler of a handler child since it started, each name once,\nand its RSS.",
-        constructor: Constructor::Parameters(&[keyword("handlers", "list[HandlerCounts]"), keyword("rss_mb", "float | Literal['UNREADABLE']")]),
+        constructor: Constructor::Parameters(&[keyword("handlers", "list[HandlerCounts]"), keyword("span_read_failed", "int"), keyword("span_not_read", "int"), keyword("rss_mb", "float | Literal['UNREADABLE']")]),
         properties: &[],
         methods: &[],
     },

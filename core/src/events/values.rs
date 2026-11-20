@@ -19,6 +19,7 @@ use crate::core::config::queue::MAX_QUEUE_NAME_BYTES;
 use crate::core::config::worker_profile::{
     MAX_ISOLATED_CHILDREN, MAX_SHARED_ASYNC_CHILDREN, MAX_SHARED_THREAD_CHILDREN,
 };
+use crate::core::task::Execution;
 use crate::core::{
     BuiltInTaskCode, ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode, TaskErrorCode,
 };
@@ -44,6 +45,11 @@ pub const MAX_EVENT_USER_CODE_CHARS: usize = 128;
 /// byte bound of the stored text. A character has at least one byte, so every
 /// stored carrier fits in an event.
 pub const MAX_EVENT_TRACE_CARRIER_CHARS: usize = MAX_TRACE_CARRIER_BYTES;
+
+/// The most characters of a worker id that an event carries: the
+/// `claimed_by_worker_id` column is `varchar(255)`, and a claim writes the
+/// id there, so every worker id that claims fits in an event.
+pub const MAX_EVENT_WORKER_ID_CHARS: usize = 255;
 
 /// The largest attempt number. The retry count of a row is a Postgres
 /// `integer` from 0, and the attempt is the retry count plus 1.
@@ -71,6 +77,9 @@ pub type UserCodeText = BoundedText<MAX_EVENT_USER_CODE_CHARS>;
 /// The text of a stored trace carrier, at most
 /// [`MAX_EVENT_TRACE_CARRIER_CHARS`] characters.
 pub type TraceCarrierText = BoundedText<MAX_EVENT_TRACE_CARRIER_CHARS>;
+
+/// The id of a worker, at most [`MAX_EVENT_WORKER_ID_CHARS`] characters.
+pub type WorkerIdText = BoundedText<MAX_EVENT_WORKER_ID_CHARS>;
 
 /// The number of an attempt of a task, from 1: its retry count plus 1.
 pub type AttemptNumber = BoundedU32<1, MAX_ATTEMPT>;
@@ -162,6 +171,10 @@ pub enum ChildResult {
     /// The worker code of the child failed, not the task. The attempt
     /// outcome is `WORKER_FAILURE`, with the code `BROKER_ERROR`.
     WorkerFailure,
+    /// The deadline of a shared run fired in its child before the task
+    /// ended, and the child ended the run at the deadline. The attempt
+    /// outcome is `FAILED`, with the code `TASK_TIMEOUT`.
+    TimedOut,
 }
 
 /// When the attempt started: the time of the start write that set the task
@@ -178,7 +191,8 @@ pub enum AttemptStart {
 /// Why the worker ended an attempt itself. The attempt outcome is `FAILED`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::EventSchema)]
 pub enum WorkerDecision {
-    /// The task reached its timeout. The code is `TASK_TIMEOUT`.
+    /// The task reached its timeout, and the worker killed its child. The
+    /// code is `TASK_TIMEOUT`.
     TimedOut,
     /// The task held the event loop of its shared async child past the block
     /// limit; the worker killed the child. The code is `TASK_BLOCKED_LOOP`.
@@ -213,26 +227,55 @@ pub enum RunTrace {
     NoCarrier,
 }
 
+/// What the worker knows of the workflow node that links a task, when it
+/// ends an attempt of the task itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::EventSchema)]
+pub enum WorkflowPlace {
+    /// No workflow node links the task: the claim read a plain task.
+    NotInWorkflow,
+    /// A workflow node links the task. The worker does not know the workflow
+    /// id, the node index or the root workflow: the start write of the child
+    /// read them, and the child reported no end.
+    WorkflowNotKnown,
+}
+
 /// How an attempt ended.
 #[derive(Debug, Clone, PartialEq, Eq, horsies_core_derive::EventSchema)]
 pub enum AttemptEnd {
-    /// The child reported how the run ended.
+    /// The child reported how the run ended, in a result frame. The span
+    /// that the child opened for the attempt is its span.
     ReportedByChild {
         result: ChildResult,
         start: AttemptStart,
     },
-    /// The worker ended the attempt: the outcome is `FAILED`, with the code
-    /// of `reason`.
+    /// The worker ended the attempt with no result frame of the child: it
+    /// killed the child, or the child was lost. The outcome is `FAILED`,
+    /// with the code of `reason`. The span of the child never ended; the
+    /// internal fields are the facts of the span of this attempt that the
+    /// handler child makes.
     DecidedByWorker {
         reason: WorkerDecision,
-        /// Internal: the trace carrier of the task, for the span of this
-        /// attempt that the handler child makes.
+        /// Internal: the code that the attempt row records for `reason`:
+        /// the `error.type` of the span.
+        #[event_schema(internal)]
+        error_code: BuiltInTaskCode,
+        /// Internal: the trace carrier of the task, the parent of the span.
         #[event_schema(internal)]
         trace: RunTrace,
         /// Internal: when the task reached its child (wall clock of the
-        /// worker), the start of the span that the handler child makes.
+        /// worker): the start of the span.
         #[event_schema(internal)]
         placed_at: DateTime<Utc>,
+        /// Internal: the kind of the child that ran the attempt, the
+        /// `horsies.task.execution` of the span.
+        #[event_schema(internal)]
+        child_kind: Execution,
+        /// Internal: the worker that claimed the task and ended the attempt.
+        #[event_schema(internal)]
+        worker_id: WorkerIdText,
+        /// Internal: what the worker knows of the workflow node of the task.
+        #[event_schema(internal)]
+        workflow: WorkflowPlace,
     },
     /// The worker killed the child and did not see its exit. Nothing was
     /// written: stale recovery or the claim lease decides the task.

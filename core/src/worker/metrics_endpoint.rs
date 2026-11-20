@@ -113,7 +113,9 @@ pub(crate) const TELEMETRY_PART_DOWN: &str = "down";
 
 /// The `telemetry` column of a worker snapshot: the state of the metrics
 /// endpoint (`endpoint`) and of the handler child (`handler_child`,
-/// [`handler_child_json`]) of the worker. Pure.
+/// [`handler_child_json`]) of the worker. The snapshot writer adds the
+/// task children whose RSS was unreadable (`children_rss`,
+/// `worker_state::children_rss_json`) to [`telemetry_members`]. Pure.
 ///
 /// The `endpoint` member:
 ///
@@ -130,13 +132,24 @@ pub(crate) fn telemetry_json(
     endpoint: &WorkerEndpoint,
     handler_child: &HandlerChildState,
 ) -> serde_json::Value {
+    serde_json::Value::Object(telemetry_members(endpoint, handler_child))
+}
+
+/// The members `endpoint` and `handler_child` of [`telemetry_json`]. Pure.
+pub(crate) fn telemetry_members(
+    endpoint: &WorkerEndpoint,
+    handler_child: &HandlerChildState,
+) -> serde_json::Map<String, serde_json::Value> {
     let endpoint = match endpoint {
         WorkerEndpoint::NoMetricsEndpoint => serde_json::json!({ "state": "off" }),
         #[cfg(feature = "metrics-endpoint")]
         WorkerEndpoint::Listen(endpoint) => endpoint.state_json(),
     };
-    serde_json::json!({
-        "endpoint": endpoint,
-        "handler_child": handler_child_json(handler_child),
-    })
+    let mut members = serde_json::Map::new();
+    let _absent = members.insert("endpoint".to_owned(), endpoint);
+    let _absent = members.insert(
+        "handler_child".to_owned(),
+        handler_child_json(handler_child),
+    );
+    members
 }

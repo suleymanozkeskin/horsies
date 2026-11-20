@@ -738,6 +738,34 @@ impl LabelValue for EventDropCause {
     }
 }
 
+/// Why the handler child has no workflow node for the span of an attempt
+/// of a workflow task that the worker ended (the `reason` label of
+/// `horsies.spans.worker_ended.read_failures`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SpanReadFailure {
+    /// The node read ran and failed.
+    ReadFailed,
+    /// The node read did not run: the queue of the reader was full, or the
+    /// handler child stopped first.
+    NotRead,
+}
+
+impl SpanReadFailure {
+    pub const ALL: [Self; 2] = [Self::ReadFailed, Self::NotRead];
+}
+
+impl LabelValue for SpanReadFailure {
+    const VALUES: LabelValues =
+        LabelValues::Fixed(&[ValueGroup::Listed(&["read_failed", "not_read"])]);
+
+    fn position(self) -> u32 {
+        match self {
+            Self::ReadFailed => 0,
+            Self::NotRead => 1,
+        }
+    }
+}
+
 /// The status of a live task row (the `status` label of
 /// `horsies.queue.tasks`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -940,6 +968,7 @@ mod tests {
         assert_positions(&ClaimPassResult::ALL);
         assert_positions(&MemoryProcess::ALL);
         assert_positions(&EventDropCause::ALL);
+        assert_positions(&SpanReadFailure::ALL);
         assert_positions(&LiveTaskStatus::ALL);
         assert_positions(&LiveWorkflowStatus::ALL);
         assert_positions(&FleetWorkerState::ALL);

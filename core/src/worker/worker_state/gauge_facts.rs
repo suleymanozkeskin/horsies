@@ -7,10 +7,12 @@
 //! | `horsies.worker.seats.in_use{execution}` | [`seats_in_use_of`] | `class_capacity`, and the statement that counts `tasks_running` and `tasks_claimed` |
 //! | `horsies.worker.slots.down{kind}` | [`down_by_kind`] | `slots_down` |
 //! | `horsies.worker.memory.rss{process="parent"}` | [`ParentRss`] | `memory_usage_mb` |
+//! | `horsies.worker.memory.rss{process="children"}` | [`children_rss_of`] | `children_memory_mb`; the unreadable children in `telemetry` |
 
 use super::BudgetColumn;
 use crate::core::task::execution::Execution;
-use crate::worker::executor::slots::DownState;
+use crate::worker::executor::protocol::{ProcessId, RssReading};
+use crate::worker::executor::slots::{ChildRss, DownState};
 
 /// A count for each execution class.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -57,6 +59,73 @@ pub enum ParentRss {
     Bytes(u64),
     /// The process table gave no entry for the worker process.
     Unreadable,
+}
+
+/// A task child whose last RSS reading was unreadable, for the snapshot
+/// that names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnreadableChild {
+    /// The board index of the slot of the child.
+    pub slot: usize,
+    /// The kind of the child.
+    pub kind: Execution,
+    pub pid: ProcessId,
+}
+
+/// The resident memory of the task children at one snapshot: the last
+/// reading of each child that sent one.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChildrenRss {
+    /// One or more children read their size: `mib` is the sum of those
+    /// last readings, in MiB. `unreadable` names each child whose last
+    /// reading was unreadable; it is not in the sum.
+    Summed {
+        mib: f64,
+        unreadable: Vec<UnreadableChild>,
+    },
+    /// No child read its size: no slot has a child that sent a reading,
+    /// or each one that did sent an unreadable one (`unreadable`).
+    NoReadableChild { unreadable: Vec<UnreadableChild> },
+}
+
+impl ChildrenRss {
+    /// The children whose last reading was unreadable, in slot order.
+    pub fn unreadable(&self) -> &[UnreadableChild] {
+        match self {
+            Self::Summed { unreadable, .. } | Self::NoReadableChild { unreadable } => unreadable,
+        }
+    }
+}
+
+/// The RSS of the task children from the last reading of each child
+/// (`readings`, in slot order). A child of any kind counts; an unreadable
+/// reading is named, never counted as 0. Pure.
+pub fn children_rss_of(readings: &[ChildRss]) -> ChildrenRss {
+    let unreadable: Vec<UnreadableChild> = readings
+        .iter()
+        .filter_map(|reading| match reading.rss {
+            RssReading::Unreadable => Some(UnreadableChild {
+                slot: reading.slot,
+                kind: reading.class,
+                pid: reading.pid,
+            }),
+            RssReading::Mb(_) => None,
+        })
+        .collect();
+    let read: Vec<f64> = readings
+        .iter()
+        .filter_map(|reading| match reading.rss {
+            RssReading::Mb(mib) => Some(mib.get()),
+            RssReading::Unreadable => None,
+        })
+        .collect();
+    match read.is_empty() {
+        true => ChildrenRss::NoReadableChild { unreadable },
+        false => ChildrenRss::Summed {
+            mib: read.iter().sum(),
+            unreadable,
+        },
+    }
 }
 
 /// The seats in use of each budget class at one snapshot.
@@ -193,5 +262,95 @@ mod tests {
 
         assert_eq!(down_by_kind(&down, kind_of), counts(1, 0, 2));
         assert_eq!(down_by_kind(&[], kind_of), ClassCounts::default());
+    }
+
+    fn child(slot: usize, class: Execution, pid: u32, rss: RssReading) -> ChildRss {
+        ChildRss {
+            slot,
+            class,
+            pid: ProcessId::new(pid).unwrap(),
+            rss,
+        }
+    }
+
+    fn mib(value: f64) -> RssReading {
+        RssReading::Mb(crate::worker::executor::protocol::RssMb::new(value).unwrap())
+    }
+
+    /// The sum takes the last reading of a child of each kind.
+    #[test]
+    fn the_children_rss_sums_the_readings_of_each_kind() {
+        let readings = [
+            child(0, ISOLATED, 101, mib(100.25)),
+            child(1, ASYNC, 102, mib(60.5)),
+            child(2, THREAD, 103, mib(10.0)),
+        ];
+
+        assert_eq!(
+            children_rss_of(&readings),
+            ChildrenRss::Summed {
+                mib: 170.75,
+                unreadable: Vec::new(),
+            }
+        );
+    }
+
+    /// An unreadable reading is named with its slot, kind and pid, and is
+    /// not in the sum: never counted as 0.
+    #[test]
+    fn an_unreadable_reading_is_named_and_not_summed() {
+        let readings = [
+            child(0, ISOLATED, 101, mib(100.25)),
+            child(1, ASYNC, 102, RssReading::Unreadable),
+            child(2, THREAD, 103, mib(10.0)),
+        ];
+
+        let children = children_rss_of(&readings);
+        assert_eq!(
+            children,
+            ChildrenRss::Summed {
+                mib: 110.25,
+                unreadable: vec![UnreadableChild {
+                    slot: 1,
+                    kind: ASYNC,
+                    pid: ProcessId::new(102).unwrap(),
+                }],
+            }
+        );
+        assert_eq!(children.unreadable().len(), 1);
+    }
+
+    /// With no readable reading there is no sum: each unreadable child is
+    /// named, and no child at all names none.
+    #[test]
+    fn no_readable_reading_gives_no_sum() {
+        let readings = [
+            child(0, ISOLATED, 101, RssReading::Unreadable),
+            child(3, THREAD, 104, RssReading::Unreadable),
+        ];
+
+        assert_eq!(
+            children_rss_of(&readings),
+            ChildrenRss::NoReadableChild {
+                unreadable: vec![
+                    UnreadableChild {
+                        slot: 0,
+                        kind: ISOLATED,
+                        pid: ProcessId::new(101).unwrap(),
+                    },
+                    UnreadableChild {
+                        slot: 3,
+                        kind: THREAD,
+                        pid: ProcessId::new(104).unwrap(),
+                    },
+                ],
+            }
+        );
+        assert_eq!(
+            children_rss_of(&[]),
+            ChildrenRss::NoReadableChild {
+                unreadable: Vec::new()
+            }
+        );
     }
 }

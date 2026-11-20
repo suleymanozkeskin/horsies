@@ -13,6 +13,12 @@ paid once and would otherwise land entirely on whichever side ran first.
 
 Wall-clock is measured with no EXPLAIN in the loop, because the instrumentation
 that reports a plan also changes the time it takes to execute.
+
+A public call scenario and a worker drain also read the CPU time of their
+client and of PostgreSQL per block or drain (``resources.py``), and a drain
+reads the telemetry columns of its worker endpoint (``metrics_scrape.py``).
+With a telemetry level (``telemetry_levels.py``) the baseline side runs with
+no telemetry and the candidate side with the level.
 """
 
 from __future__ import annotations
@@ -30,6 +36,39 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
 from crossclient.perf.counters import Counts, CounterProbe, install_extension
+from crossclient.perf.metrics_scrape import (
+    EndpointCounts,
+    EndpointCountsUnread,
+    EndpointReader,
+    ReaderDidNotStop,
+    ReadTally,
+    read_endpoint_counts,
+)
+from crossclient.perf.readings import (
+    BlockReading,
+    BlockReadings,
+    Cost,
+    CostMeasure,
+    DrainReading,
+    DrainReadings,
+    MeasuredCost,
+    Readings,
+    StatementReadings,
+    UnmeasuredCost,
+)
+from crossclient.perf.resources import (
+    CgroupCpuStat,
+    CpuReading,
+    CpuSeconds,
+    NoPostgresCpuSource,
+    NotMeasured,
+    PostgresCpuMeter,
+    PostgresCpuSource,
+    WorkerCpu,
+    WorkerCpuUnreadable,
+    producer_cpu_now,
+    read_worker_cpu,
+)
 from crossclient.perf.scenarios import (
     BatchScenario,
     Invocation,
@@ -45,6 +84,20 @@ from crossclient.perf.scenarios import (
     delete_seeded,
     seed_rows,
     seed_terminal_ballast,
+)
+from crossclient.perf.telemetry_levels import (
+    AppTelemetry,
+    ListenOn,
+    NoEndpoint,
+    NotRead,
+    ProducerLevel,
+    ReadEvery,
+    TelemetryLevel,
+    WorkerOnlyLevel,
+    WorkerTelemetry,
+    level_description,
+    producer_telemetry,
+    worker_telemetry,
 )
 from crossclient.perf.worker_drain import DrainSender
 from crossclient.perf.worker_process import (
@@ -65,8 +118,10 @@ from crossclient.perf.worker_process import (
 from crossclient.perf.statistics import (
     Comparison,
     ThroughputComparison,
+    UnitCost,
     Verdict,
     compare,
+    compare_cost,
     compare_throughput,
     worst,
 )
@@ -108,14 +163,19 @@ class Conditions:
     comparison: str
     demo_quiesced: bool
     measured_at: str
+    telemetry_level: str
+    telemetry_description: str
+    postgres_cpu_source: str
 
 
 @dataclass(frozen=True, slots=True)
 class Measurement:
-    """One side's timings and what the server counted while they ran."""
+    """One side's timings, what the server counted while they ran, and the
+    CPU and telemetry readings of each unit."""
 
     samples_ms: list[float]
     counts: Counts
+    readings: Readings
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +195,7 @@ class RunResult:
     plans: PlanEvidence | None
     comparisons: list[Comparison]
     throughput: ThroughputComparison | None
+    costs: tuple[Cost, ...]
     contract_violations: tuple[str, ...]
     verdict: Verdict
 
@@ -149,12 +210,20 @@ def run_scenario(
     resamples: int,
     seed: int,
     demo_quiesced: bool,
+    telemetry: TelemetryLevel,
+    postgres_cpu: PostgresCpuSource,
     control: bool = False,
 ) -> RunResult:
     """Measure both sides of one scenario and judge the difference.
 
     ``dsn`` is the database of ``engine``, in the form the library accepts:
-    the client of a public call scenario connects with it.
+    the client of a public call scenario connects with it. ``telemetry`` is
+    the level of the candidate side of a public call or a drain.
+
+    Raises:
+        AssertionError: a statement scenario with a telemetry level, or a
+            public call scenario with a level that changes only the worker:
+            the entry point refuses both.
     """
     baseline_rows = seed_rows(scenario.name, Role.BASELINE)
     candidate_rows = seed_rows(scenario.name, Role.CANDIDATE)
@@ -180,6 +249,9 @@ def run_scenario(
         try:
             match scenario:
                 case SingleRowScenario() | BatchScenario():
+                    assert (
+                        telemetry is TelemetryLevel.OFF
+                    ), f'{scenario.name}: a statement scenario takes no telemetry level'
                     baseline, candidate, plans = _measure_interleaved(
                         connection,
                         scenario=scenario,
@@ -196,6 +268,8 @@ def run_scenario(
                         scenario=scenario,
                         observations=observations,
                         block_size=block_size,
+                        producer_app=_producer_app(telemetry),
+                        postgres_cpu=postgres_cpu,
                     )
                 case WorkerDrainScenario():
                     baseline, candidate, plans = _measure_drains_interleaved(
@@ -203,6 +277,8 @@ def run_scenario(
                         dsn=dsn,
                         scenario=scenario,
                         drains=observations,
+                        telemetry=telemetry,
+                        postgres_cpu=postgres_cpu,
                     )
                 case _ as unreachable:
                     assert_never(unreachable)
@@ -279,9 +355,12 @@ def run_scenario(
         batch_size=_batch_size(scenario),
         resamples=resamples,
         seed=seed,
-        comparison=_comparison_label(scenario, control=control),
+        comparison=_comparison_label(scenario, control=control, telemetry=telemetry),
         demo_quiesced=demo_quiesced,
         measured_at=datetime.now(timezone.utc).isoformat(timespec='seconds'),
+        telemetry_level=telemetry.value,
+        telemetry_description=level_description(telemetry),
+        postgres_cpu_source=_postgres_cpu_label(postgres_cpu),
     )
     contract_violations = _contract_violations(
         scenario=scenario,
@@ -306,6 +385,12 @@ def run_scenario(
         plans=plans,
         comparisons=comparisons,
         throughput=throughput,
+        costs=compare_costs(
+            baseline.readings,
+            candidate.readings,
+            resamples=resamples,
+            seed=seed,
+        ),
         contract_violations=contract_violations,
         verdict=Verdict.FAIL if contract_violations else performance_verdict,
     )
@@ -408,10 +493,12 @@ def _measure_interleaved(
         Measurement(
             samples_ms=samples[Side.BASELINE],
             counts=_total(counts[Side.BASELINE]),
+            readings=StatementReadings(),
         ),
         Measurement(
             samples_ms=samples[Side.CANDIDATE],
             counts=_total(counts[Side.CANDIDATE]),
+            readings=StatementReadings(),
         ),
         plans,
     )
@@ -424,24 +511,33 @@ def _measure_public_interleaved(
     scenario: PublicCallScenario,
     observations: int,
     block_size: int,
+    producer_app: AppTelemetry,
+    postgres_cpu: PostgresCpuSource,
 ) -> tuple[Measurement, Measurement, None]:
     """Alternate blocks of the public call between the two sides until both
     are complete; the first block of each side is a warmup.
 
-    Both sides share one client, as both sides of a statement scenario share
-    one connection: the library's pool and its first connection are paid in
-    the warmup blocks. The rows the calls write stay until the cleanup of the
-    run. No plan is captured: the statements are the library's.
+    Each side has its own client: the baseline with no telemetry, the
+    candidate with ``producer_app``. The pool and the first connection of
+    each client are paid in its warmup block. The rows the calls write stay
+    until the cleanup of the run. No plan is captured: the statements are
+    the library's. Each block reads the CPU time of the harness process and
+    of PostgreSQL across it.
     """
     blocks = -(-observations // block_size)
     samples: dict[Side, list[float]] = {Side.BASELINE: [], Side.CANDIDATE: []}
     counts: dict[Side, list[Counts]] = {Side.BASELINE: [], Side.CANDIDATE: []}
+    readings: dict[Side, list[BlockReading]] = {Side.BASELINE: [], Side.CANDIDATE: []}
     analyze(connection)
     probe = CounterProbe(connection)
-    client = scenario.open_call(dsn)
+    postgres = PostgresCpuMeter(postgres_cpu)
+    clients = {
+        Side.BASELINE: scenario.open_call(dsn, AppTelemetry.NONE),
+        Side.CANDIDATE: scenario.open_call(dsn, producer_app),
+    }
     try:
-        for _warmup_side in (Side.BASELINE, Side.CANDIDATE):
-            _ = _run_public_block(client, block_size)
+        for warmup_side in (Side.BASELINE, Side.CANDIDATE):
+            _ = _run_public_block(clients[warmup_side], block_size)
         for _ in range(blocks):
             for side in (Side.BASELINE, Side.CANDIDATE):
                 probe.begin()
@@ -449,19 +545,33 @@ def _measure_public_interleaved(
                 # transaction leaves the harness session idle while the
                 # library writes on its own connections.
                 connection.commit()
-                samples[side] += _run_public_block(client, block_size)
+                postgres.begin()
+                producer_started = producer_cpu_now()
+                samples[side] += _run_public_block(clients[side], block_size)
+                producer_s = producer_cpu_now() - producer_started
+                postgres_used = postgres.finish()
                 counts[side].append(probe.finish(terminal_rows=0))
                 connection.commit()
+                readings[side].append(
+                    BlockReading(
+                        calls=block_size,
+                        producer_s=producer_s,
+                        postgres=postgres_used,
+                    )
+                )
     finally:
-        client.close()
+        for client in clients.values():
+            client.close()
     return (
         Measurement(
             samples_ms=samples[Side.BASELINE],
             counts=_total(counts[Side.BASELINE]),
+            readings=BlockReadings(blocks=tuple(readings[Side.BASELINE])),
         ),
         Measurement(
             samples_ms=samples[Side.CANDIDATE],
             counts=_total(counts[Side.CANDIDATE]),
+            readings=BlockReadings(blocks=tuple(readings[Side.CANDIDATE])),
         ),
         None,
     )
@@ -478,55 +588,83 @@ def _run_public_block(client: PublicCall, block_size: int) -> list[float]:
     return samples
 
 
+@dataclass(frozen=True, slots=True)
+class _DrainSide:
+    """The sender and the worker of one side of a drain run."""
+
+    sender: DrainSender
+    telemetry: WorkerTelemetry
+
+
 def _measure_drains_interleaved(
     connection: Connection,
     *,
     dsn: str,
     scenario: WorkerDrainScenario,
     drains: int,
+    telemetry: TelemetryLevel,
+    postgres_cpu: PostgresCpuSource,
 ) -> tuple[Measurement, Measurement, None]:
     """Alternate drains between the two sides until each side has ``drains``;
     the first drain of each side is a warmup.
 
-    Both sides share one sender. Each drain starts a new worker, so each
-    sample pays the start of a worker process. No plan is captured: the
-    statements are the worker's.
+    The baseline side sends and drains with no telemetry; the candidate side
+    with ``telemetry``. Each drain starts a new worker, so each sample pays
+    the start of a worker process. No plan is captured: the statements are
+    the worker's.
     """
     samples: dict[Side, list[float]] = {Side.BASELINE: [], Side.CANDIDATE: []}
     counts: dict[Side, list[Counts]] = {Side.BASELINE: [], Side.CANDIDATE: []}
+    readings: dict[Side, list[DrainReading]] = {Side.BASELINE: [], Side.CANDIDATE: []}
     analyze(connection)
     probe = CounterProbe(connection)
-    sender = scenario.open_sender(dsn)
+    postgres = PostgresCpuMeter(postgres_cpu)
+    workers = {
+        Side.BASELINE: worker_telemetry(TelemetryLevel.OFF),
+        Side.CANDIDATE: worker_telemetry(telemetry),
+    }
+    sides: dict[Side, _DrainSide] = {}
     try:
-        for _warmup_side in (Side.BASELINE, Side.CANDIDATE):
+        for side, worker in workers.items():
+            sides[side] = _DrainSide(
+                sender=scenario.open_sender(dsn, worker.app),
+                telemetry=worker,
+            )
+        for warmup_side in (Side.BASELINE, Side.CANDIDATE):
             _ = _drain_once(
                 connection,
                 dsn=dsn,
                 scenario=scenario,
-                sender=sender,
+                side=sides[warmup_side],
                 probe=probe,
+                postgres=postgres,
             )
         for _ in range(drains):
             for side in (Side.BASELINE, Side.CANDIDATE):
-                elapsed_ms, drain_counts = _drain_once(
+                elapsed_ms, drain_counts, reading = _drain_once(
                     connection,
                     dsn=dsn,
                     scenario=scenario,
-                    sender=sender,
+                    side=sides[side],
                     probe=probe,
+                    postgres=postgres,
                 )
                 samples[side].append(elapsed_ms)
                 counts[side].append(drain_counts)
+                readings[side].append(reading)
     finally:
-        sender.close()
+        for drain_side in sides.values():
+            drain_side.sender.close()
     return (
         Measurement(
             samples_ms=samples[Side.BASELINE],
             counts=_total(counts[Side.BASELINE]),
+            readings=DrainReadings(drains=tuple(readings[Side.BASELINE])),
         ),
         Measurement(
             samples_ms=samples[Side.CANDIDATE],
             counts=_total(counts[Side.CANDIDATE]),
+            readings=DrainReadings(drains=tuple(readings[Side.CANDIDATE])),
         ),
         None,
     )
@@ -537,53 +675,182 @@ def _drain_once(
     *,
     dsn: str,
     scenario: WorkerDrainScenario,
-    sender: DrainSender,
+    side: _DrainSide,
     probe: CounterProbe,
-) -> tuple[float, Counts]:
+    postgres: PostgresCpuMeter,
+) -> tuple[float, Counts, DrainReading]:
     """One drain: delete the tasks of the last drain, send the tasks, start a
-    worker, time it until every task is terminal, then stop it.
+    worker, time it until every task is terminal, read its CPU time and its
+    endpoint, then stop it.
 
-    The probe brackets the worker from its start until the drain. Gives the
-    time in milliseconds and the server counts.
+    The probe and the PostgreSQL CPU reading bracket the worker from its
+    start until the drain. Gives the time in milliseconds, the server counts
+    and the readings.
 
     Raises:
         RuntimeError: the worker did not start, did not drain the tasks in
-            ``scenario.timeout``, exited before it drained them, or did not
-            exit 0 after SIGTERM. The message names the log of the worker,
-            which stays in the temporary directory.
+            ``scenario.timeout``, exited before it drained them, did not exit
+            0 after SIGTERM, or a reading failed (its CPU time, the
+            PostgreSQL CPU time, the endpoint). The message names the log of
+            the worker, which stays in the temporary directory.
     """
     scenario.cleanup(connection)
-    sender.send(scenario.task_count)
+    side.sender.send(scenario.task_count)
     probe.begin()
     # The probe's reads assign no transaction id. Ending their transaction
     # leaves the harness session idle while the worker writes.
     connection.commit()
-    match scenario.start_worker(dsn):
+    postgres.begin()
+    match scenario.start_worker(dsn, side.telemetry):
         case WorkerStartFailed(command=command, cause=cause):
             raise RuntimeError(f'the worker did not start: {cause}; command: {command}')
         case StartedWorker() as worker:
             pass
+    reader = _start_reader(side.telemetry, scenario)
     try:
         match _wait_for_drain(connection, scenario=scenario, worker=worker):
             case Drained(elapsed_ns=elapsed_ns):
+                worker_cpu = _required_worker_cpu(worker, scenario)
+                postgres_used = postgres.finish()
                 drain_counts = probe.finish(terminal_rows=scenario.task_count)
                 connection.commit()
+                endpoint = _required_endpoint_counts(side.telemetry, worker, scenario)
+                reads = _required_tally(_stop_reader(reader), worker, scenario)
             case DrainTimedOut() | WorkerExitedEarly() as failed:
                 raise RuntimeError(
                     f'{scenario.name}: {failed!r}; worker log: {worker.log_path}'
                 )
     except BaseException:
-        # Explicit discard: the error that stopped the drain is the report;
-        # the stop only frees the database and the host.
+        # Explicit discards: the error that stopped the drain is the report;
+        # the stops only free the database, the port and the host.
+        _ = _stop_reader(reader)
         _ = stop_worker(worker.process, scenario.stop_timeout)
         raise
-    _require_clean_stop(
-        stop_worker(worker.process, scenario.stop_timeout),
-        scenario=scenario,
-        worker=worker,
-    )
+    stop_started_ns = time.perf_counter_ns()
+    stop = stop_worker(worker.process, scenario.stop_timeout)
+    stop_s = (time.perf_counter_ns() - stop_started_ns) / 1_000_000_000
+    _require_clean_stop(stop, scenario=scenario, worker=worker)
     remove_log(worker)
-    return elapsed_ns / 1_000_000, drain_counts
+    return (
+        elapsed_ns / 1_000_000,
+        drain_counts,
+        DrainReading(
+            tasks=scenario.task_count,
+            worker=worker_cpu,
+            postgres=postgres_used,
+            stop_s=stop_s,
+            endpoint=endpoint,
+            reads=reads,
+        ),
+    )
+
+
+def _start_reader(
+    telemetry: WorkerTelemetry,
+    scenario: WorkerDrainScenario,
+) -> EndpointReader | NotRead:
+    """Start the reads of the endpoint during the drain, at a level that has
+    them. At most one read per interval until the drain timeout."""
+    match telemetry.endpoint, telemetry.scrape:
+        case ListenOn() as listen, ReadEvery(interval=interval):
+            reader = EndpointReader(
+                listen,
+                interval,
+                max_rounds=scenario.timeout // interval + 1,
+            )
+            reader.start()
+            return reader
+        case ((ListenOn() | NoEndpoint()), NotRead()):
+            return NotRead()
+        case NoEndpoint(), ReadEvery():
+            raise AssertionError(
+                f'the level {telemetry.level.value} reads an endpoint it does not serve'
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _stop_reader(
+    reader: EndpointReader | NotRead,
+) -> ReadTally | ReaderDidNotStop | NotRead:
+    match reader:
+        case EndpointReader():
+            return reader.stop()
+        case NotRead():
+            return reader
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _required_tally(
+    stopped: ReadTally | ReaderDidNotStop | NotRead,
+    worker: StartedWorker,
+    scenario: WorkerDrainScenario,
+) -> ReadTally | NotRead:
+    """The tally of the reads, or the run stops.
+
+    Raises:
+        RuntimeError: the reader thread did not stop.
+    """
+    match stopped:
+        case ReadTally() | NotRead():
+            return stopped
+        case ReaderDidNotStop(listen=listen):
+            raise RuntimeError(
+                f'{scenario.name}: the reader of {listen.argument()} did not stop; '
+                f'worker log: {worker.log_path}'
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _required_worker_cpu(
+    worker: StartedWorker, scenario: WorkerDrainScenario
+) -> WorkerCpu:
+    """The CPU time of the drained worker, or the run stops.
+
+    Raises:
+        RuntimeError: the CPU time could not be read.
+    """
+    match read_worker_cpu(worker.process.pid):
+        case WorkerCpu() as cpu:
+            return cpu
+        case WorkerCpuUnreadable(pid=pid, cause=cause):
+            raise RuntimeError(
+                f'{scenario.name}: the CPU time of worker {pid} is not readable: '
+                f'{cause}; worker log: {worker.log_path}'
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _required_endpoint_counts(
+    telemetry: WorkerTelemetry,
+    worker: StartedWorker,
+    scenario: WorkerDrainScenario,
+) -> EndpointCounts | NoEndpoint:
+    """The telemetry columns of the worker endpoint at the end of the drain,
+    at a level with an endpoint, or the run stops.
+
+    Raises:
+        RuntimeError: the read failed.
+    """
+    match telemetry.endpoint:
+        case NoEndpoint():
+            return NoEndpoint()
+        case ListenOn() as listen:
+            match read_endpoint_counts(listen):
+                case EndpointCounts() as endpoint_counts:
+                    return endpoint_counts
+                case EndpointCountsUnread(cause=cause):
+                    raise RuntimeError(
+                        f'{scenario.name}: the endpoint {listen.argument()} of the '
+                        f'drained worker: {cause}; worker log: {worker.log_path}'
+                    )
+                case _ as unreachable:
+                    assert_never(unreachable)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _wait_for_drain(
@@ -892,9 +1159,18 @@ def _batch_size(scenario: Scenario) -> int | None:
             assert_never(unreachable)
 
 
-def _comparison_label(scenario: Scenario, *, control: bool) -> str:
+def _comparison_label(
+    scenario: Scenario,
+    *,
+    control: bool,
+    telemetry: TelemetryLevel,
+) -> str:
     """What the run actually compared, stated where a reader will see it."""
     match scenario:
+        case PublicCallScenario() if telemetry is not TelemetryLevel.OFF:
+            return f'public call, telemetry off against telemetry {telemetry.value}'
+        case WorkerDrainScenario() if telemetry is not TelemetryLevel.OFF:
+            return f'worker drain, telemetry off against telemetry {telemetry.value}'
         case PublicCallScenario():
             return 'public call against itself (harness control)'
         case WorkerDrainScenario():
@@ -1010,6 +1286,206 @@ def _contract_violations(
         )
 
     return tuple(violations)
+
+
+def _producer_app(telemetry: TelemetryLevel) -> AppTelemetry:
+    """The app of the candidate client of a public call scenario.
+
+    Raises:
+        AssertionError: a level that changes only the worker; the entry point
+            refuses it for a public call scenario.
+    """
+    match producer_telemetry(telemetry):
+        case ProducerLevel(app=app):
+            return app
+        case WorkerOnlyLevel(level=level):
+            raise AssertionError(
+                f'a public call scenario takes no level that changes only the '
+                f'worker: {level.value}'
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _postgres_cpu_label(source: PostgresCpuSource) -> str:
+    """Where the PostgreSQL CPU time comes from, for the conditions."""
+    match source:
+        case CgroupCpuStat(path=path):
+            return f'`usage_usec` of {path}'
+        case NoPostgresCpuSource():
+            return 'not measured (no --postgres-cpu-stat)'
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def compare_costs(
+    baseline: Readings,
+    candidate: Readings,
+    *,
+    resamples: int,
+    seed: int,
+) -> tuple[Cost, ...]:
+    """The cost comparisons of the readings of the two sides. A statement
+    scenario has none.
+
+    Raises:
+        AssertionError: the two sides hold readings of different kinds: a
+            defect of the runner.
+    """
+    match baseline, candidate:
+        case StatementReadings(), StatementReadings():
+            return ()
+        case BlockReadings(blocks=baseline_blocks), BlockReadings(
+            blocks=candidate_blocks
+        ):
+            return (
+                _measured(
+                    CostMeasure.PRODUCER_CPU,
+                    [
+                        UnitCost(block.calls, block.producer_s)
+                        for block in baseline_blocks
+                    ],
+                    [
+                        UnitCost(block.calls, block.producer_s)
+                        for block in candidate_blocks
+                    ],
+                    resamples=resamples,
+                    seed=seed,
+                ),
+                _postgres_cost(
+                    CostMeasure.POSTGRES_CPU_PER_CALL,
+                    [(block.calls, block.postgres) for block in baseline_blocks],
+                    [(block.calls, block.postgres) for block in candidate_blocks],
+                    resamples=resamples,
+                    seed=seed,
+                ),
+            )
+        case DrainReadings(drains=baseline_drains), DrainReadings(
+            drains=candidate_drains
+        ):
+            return (
+                _measured(
+                    CostMeasure.WORKER_CPU,
+                    [
+                        UnitCost(drain.tasks, drain.worker.total_s)
+                        for drain in baseline_drains
+                    ],
+                    [
+                        UnitCost(drain.tasks, drain.worker.total_s)
+                        for drain in candidate_drains
+                    ],
+                    resamples=resamples,
+                    seed=seed,
+                ),
+                _measured(
+                    CostMeasure.WORKER_PARENT_CPU,
+                    [
+                        UnitCost(drain.tasks, drain.worker.parent_s)
+                        for drain in baseline_drains
+                    ],
+                    [
+                        UnitCost(drain.tasks, drain.worker.parent_s)
+                        for drain in candidate_drains
+                    ],
+                    resamples=resamples,
+                    seed=seed,
+                ),
+                _measured(
+                    CostMeasure.WORKER_CHILDREN_CPU,
+                    [
+                        UnitCost(drain.tasks, drain.worker.children_s)
+                        for drain in baseline_drains
+                    ],
+                    [
+                        UnitCost(drain.tasks, drain.worker.children_s)
+                        for drain in candidate_drains
+                    ],
+                    resamples=resamples,
+                    seed=seed,
+                ),
+                _postgres_cost(
+                    CostMeasure.POSTGRES_CPU_PER_TASK,
+                    [(drain.tasks, drain.postgres) for drain in baseline_drains],
+                    [(drain.tasks, drain.postgres) for drain in candidate_drains],
+                    resamples=resamples,
+                    seed=seed,
+                ),
+                _measured(
+                    CostMeasure.WORKER_STOP,
+                    [UnitCost(1, drain.stop_s) for drain in baseline_drains],
+                    [UnitCost(1, drain.stop_s) for drain in candidate_drains],
+                    resamples=resamples,
+                    seed=seed,
+                ),
+            )
+        case _:
+            raise AssertionError(
+                f'the sides hold readings of different kinds: '
+                f'{type(baseline).__name__} and {type(candidate).__name__}'
+            )
+
+
+def _measured(
+    measure: CostMeasure,
+    baseline: list[UnitCost],
+    candidate: list[UnitCost],
+    *,
+    resamples: int,
+    seed: int,
+) -> MeasuredCost:
+    return MeasuredCost(
+        measure=measure,
+        comparison=compare_cost(
+            baseline=baseline,
+            candidate=candidate,
+            resamples=resamples,
+            seed=seed,
+        ),
+    )
+
+
+def _postgres_cost(
+    measure: CostMeasure,
+    baseline: list[tuple[int, CpuReading]],
+    candidate: list[tuple[int, CpuReading]],
+    *,
+    resamples: int,
+    seed: int,
+) -> Cost:
+    """The PostgreSQL cost, when every unit of both sides measured it."""
+    baseline_units = _measured_units(baseline)
+    candidate_units = _measured_units(candidate)
+    match baseline_units, candidate_units:
+        case list(), list():
+            return _measured(
+                measure,
+                baseline_units,
+                candidate_units,
+                resamples=resamples,
+                seed=seed,
+            )
+        case NotMeasured(reason=reason), _:
+            return UnmeasuredCost(measure=measure, reason=reason)
+        case _, NotMeasured(reason=reason):
+            return UnmeasuredCost(measure=measure, reason=reason)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _measured_units(
+    units: list[tuple[int, CpuReading]],
+) -> list[UnitCost] | NotMeasured:
+    """The costs of ``units``, or the first reason that one was not measured."""
+    measured: list[UnitCost] = []
+    for operations, reading in units:
+        match reading:
+            case CpuSeconds(seconds=seconds):
+                measured.append(UnitCost(operations, seconds))
+            case NotMeasured():
+                return reading
+            case _ as unreachable:
+                assert_never(unreachable)
+    return measured
 
 
 def server_setting(connection: Connection, name: str) -> str:

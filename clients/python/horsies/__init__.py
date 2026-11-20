@@ -5,6 +5,7 @@ from importlib.metadata import version as _pkg_version
 __version__: str = _pkg_version("horsies")
 
 from .core.app import Horsies, ChildProcessStartHook, SharedAsyncChildStartHook
+from .core.event_handlers import HandlerChildStartHook
 from .core.models.app import AppConfig
 from .core.models.broker import PostgresConfig
 from .core.models.tasks import (
@@ -104,7 +105,13 @@ from .core.models.payload import PayloadPolicy
 from .core.models.recovery import RecoveryConfig
 from .core.models.retention import RetentionConfig
 from .core.models.resilience import WorkerResilienceConfig
-from .core.models.tracing import ChildOfSend, LinkedToSend, NoTracing, OtelTracing
+from .core.models.tracing import (
+    ChildOfSend,
+    LinkedToSend,
+    NoTracing,
+    OtelTracing,
+    WorkerEndedSpans,
+)
 from .core.models.log_format import JsonLogs, TextLogs
 from .core.logging import JsonLogsFormatter, TaskContextFilter
 from .core.models.worker_profile import (
@@ -253,6 +260,7 @@ __all__ = [
     'Horsies',
     'ChildProcessStartHook',
     'SharedAsyncChildStartHook',
+    'HandlerChildStartHook',
     'AppConfig',
     'PostgresConfig',
     'TaskResult',
@@ -359,6 +367,7 @@ __all__ = [
     'NoTracing',
     'ChildOfSend',
     'LinkedToSend',
+    'WorkerEndedSpans',
     # Log format and task context of log records
     'TextLogs',
     'JsonLogs',

@@ -84,7 +84,9 @@ So every attempt of every task of a workflow, at every depth, is a child of the 
 ## Scheduled Tasks and Reruns
 
 - The scheduler inserts the task row of a schedule run in SQL, with no send span and no carrier. Each attempt of a scheduled task is the root of a new trace.
-- A rerun stores no carrier. Each attempt of the new task is the root of a new trace.
+- A rerun of the Rust client (feature `otel`) opens no span and stores the carrier of the caller's current context: the attempts of the new task are children of the caller's span. With no valid span in that context it stores no carrier.
+- A rerun of the Python client through the app (`app.rerun_task`, `app.rerun_task_async`) with `OtelTracing()` does the same. With `NoTracing()` it stores no carrier.
+- The free function `rerun_task` of the Python client has no app, so it stores no carrier. Each attempt of its new task is the root of a new trace.
 
 ## Attributes
 
@@ -119,18 +121,21 @@ The `horsies.*` attributes are the names of horsies. The `messaging.*` attribute
 | Attempt | The body returned a value | Not set (Python); OK (Rust) |
 | Attempt | The body returned a task error | ERROR, `error.type` = the error code. Python records the live exception that the task error keeps |
 | Attempt | A panic of the body (Rust) | ERROR, `error.type` = `UNHANDLED_EXCEPTION` |
-| Attempt | The deadline of the run came before the end of the body, and the child saw it (Rust) | ERROR, `error.type` = `TASK_TIMEOUT` |
+| Attempt | The deadline of a shared run fired in its child before the end of the body: the end that the child reports | ERROR, `error.type` = `TASK_TIMEOUT`. What the body returned is not on the span |
 | Attempt | An exception left the steps of the run, or a refusal of the core ended the body (Python) | ERROR, `error.type` = the class name of the exception, which is recorded |
 
 In the Python client, a failure of your OpenTelemetry SDK never changes the outcome of a send or of an attempt: an SDK that raises when a span opens leaves the call with no span, and one that raises later is logged once per process.
 
 ## Spans of the Attempts That the Worker Ended
 
-The attempt span ends when the body returns. The worker ends some attempts itself, and then the child is gone and its span never ends:
+The attempt span ends when the body returns. The worker ends some attempts itself, with no result frame of the child, and then the child is gone and its span never ends:
 
 - an isolated task killed at its `timeout_ms` (`TASK_TIMEOUT`);
+- a run past its deadline in a shared child that the worker killed because no run in it had time left (`TASK_TIMEOUT`);
 - a shared async child killed for a blocked event loop (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`);
 - a child lost before it reported the end, with its exit seen (`WORKER_CRASHED`).
+
+A shared run that its child ended at its deadline is not one of them: the child reports the timeout in its result frame, and the span of the child ends with `TASK_TIMEOUT`. One attempt has one span.
 
 For each such attempt, the [handler child](/horsies/observability/events/#the-handler-child) of the worker makes a span in its place, from the `AttemptEnded` event, with the global tracer provider and propagator of the handler child. It is on by default with tracing on, and the worker then starts its handler child also when the app has no event handler.
 
@@ -173,4 +178,4 @@ The log records of the worker for an attempt carry the same trace id. See [Logs]
 
 **Don't set a different propagator in the worker children.** The child extracts the carrier with its own global propagator. A propagator that does not read the keys that the sender wrote gives the attempt span no parent.
 
-**Don't expect a trace for a scheduled task or a rerun to start at the scheduler or at the rerun call.** Neither stores a carrier: each attempt is the root of its own trace.
+**Don't expect a trace for a scheduled task, or for a rerun through the free function `rerun_task` of the Python client, to start at the scheduler or at the rerun call.** Neither stores a carrier: each attempt is the root of its own trace. Use `app.rerun_task` or `app.rerun_task_async` for a rerun that continues the trace of the caller.

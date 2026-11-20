@@ -20,7 +20,7 @@ from typing import Any, assert_never
 from horsies import _core as core
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import Execution, TaskError, TaskResult
-from horsies.core.telemetry.attempt_span import run_in_attempt_span
+from horsies.core.telemetry.attempt_span import BodyEndOrder, run_in_attempt_span
 from horsies.core.worker.child_frames import ThreadSeatWork, stored_refusal_of
 from horsies.core.worker.run_return import (
     BodyInterrupted,
@@ -60,10 +60,11 @@ class PostgresThreadSeats:
         frame: core.SharedRunFrame,
         work: ThreadSeatWork,
         start_check: Callable[[], StartCheck],
+        body_end: Callable[[], BodyEndOrder],
     ) -> ThreadSeatReturn:
         """Run the task of ``frame`` on the calling seat thread; see
         ``run_thread_seat_task``."""
-        return run_thread_seat_task(frame, work, start_check)
+        return run_thread_seat_task(frame, work, start_check, body_end)
 
     def mark_finalizing(self, frame: core.SharedRunFrame) -> MarkerEnd:
         """Write the finalizing marker of the run of ``frame``; see
@@ -100,6 +101,7 @@ def run_thread_seat_task(
     frame: core.SharedRunFrame,
     work: ThreadSeatWork,
     start_check: Callable[[], StartCheck],
+    body_end: Callable[[], BodyEndOrder],
 ) -> ThreadSeatReturn:
     """Run one task on the calling seat thread, up to its result.
 
@@ -116,9 +118,10 @@ def run_thread_seat_task(
     (``core.StoredOptionsRefused``) return ``WORKER_SERIALIZATION_ERROR``
     after the RUNNING transition, before the task is resolved. An ``async def`` task cannot run on a thread seat:
     ``WORKER_RESOLUTION_ERROR``. An exception of the body becomes
-    ``TASK_EXCEPTION``. A deadline does not stop the body: the run table
-    fixes the end at the return. The seat writes the marker after the
-    return (``mark_thread_seat_finalizing``). A body that a refusal of the
+    ``TASK_EXCEPTION``. A deadline does not stop the body: ``body_end``
+    fixes the order of the deadline and the end of the steps in the run
+    table when the steps return, and the attempt span ends with it. The
+    seat writes the marker after the return (``mark_thread_seat_finalizing``). A body that a refusal of the
     core of the child ended does not return: the child ends at once
     (``set_running_or_end_child``).
     """
@@ -135,7 +138,7 @@ def run_thread_seat_task(
             return set_running_or_end_child(
                 str(frame.task_id),
                 started,
-                _run_after_running(frame, work, started.workflow),
+                _run_after_running(frame, work, started.workflow, body_end),
             )
         case StoppedBeforeRunning() | CoreStoppedBeforeStart():
             return ownership_result
@@ -155,14 +158,18 @@ def _run_after_running(
     frame: core.SharedRunFrame,
     work: ThreadSeatWork,
     workflow: RunWorkflow,
+    body_end: Callable[[], BodyEndOrder],
 ) -> ResultEnvelope | BodyInterrupted:
     """The steps of a run after its RUNNING update (``_thread_steps``),
     inside the span and the log context of its attempt, whose start gave the
     workflow node ``workflow`` (``run_in_attempt_span``). The span is current
-    on the calling seat thread only, so the other seats do not see it."""
+    on the calling seat thread only, so the other seats do not see it. A
+    deadline that came first (``body_end``) ends the span with the timeout,
+    the end that the run table reports."""
     return run_in_attempt_span(
         shared_attempt_subject(frame, Execution.SHARED_THREAD, workflow),
         lambda: _thread_steps(frame, work),
+        body_end,
     )
 
 

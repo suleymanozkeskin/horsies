@@ -28,7 +28,7 @@ from horsies.core.models.boot_failure import (
 )
 from horsies.core.models.tasks import Execution, TaskError, TaskResult
 from horsies.core.task_decorator import await_task_call_in_worker
-from horsies.core.telemetry.attempt_span import run_in_attempt_span_async
+from horsies.core.telemetry.attempt_span import BodyEndOrder, run_in_attempt_span_async
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_main import (
     boot_failure_from_exception,
@@ -73,11 +73,16 @@ logger = get_logger('worker')
 class PostgresSeats:
     """The seats of a started shared async child."""
 
-    async def run(self, frame: core.SharedRunFrame) -> SeatReturn:
+    async def run(
+        self,
+        frame: core.SharedRunFrame,
+        body_end: Callable[[], BodyEndOrder],
+    ) -> SeatReturn:
         """Run the task of ``frame``. The same steps and outcomes as
         ``child_runner._run_task_entry`` but the marker, through the core
-        handle of the child."""
-        return await run_seat_task(frame)
+        handle of the child. ``body_end`` orders the deadline and the end
+        of the steps for the attempt span."""
+        return await run_seat_task(frame, body_end)
 
     async def mark_finalizing(self, frame: core.SharedRunFrame) -> MarkerEnd:
         """Write the finalizing marker of the run of ``frame``
@@ -206,7 +211,10 @@ def _without_left_cancel(
     return map_exception(asyncio.CancelledError())
 
 
-async def run_seat_task(frame: core.SharedRunFrame) -> SeatReturn:
+async def run_seat_task(
+    frame: core.SharedRunFrame,
+    body_end: Callable[[], BodyEndOrder],
+) -> SeatReturn:
     """Run one task on a seat, up to its result.
 
     The steps of ``_run_task_entry`` but the finalizing marker: the RUNNING
@@ -231,7 +239,7 @@ async def run_seat_task(frame: core.SharedRunFrame) -> SeatReturn:
             return set_running_or_end_child(
                 str(frame.task_id),
                 started,
-                await _run_after_running(frame, started.workflow),
+                await _run_after_running(frame, started.workflow, body_end),
             )
         case StoppedBeforeRunning() | CoreStoppedBeforeStart():
             return ownership_result
@@ -242,16 +250,19 @@ async def run_seat_task(frame: core.SharedRunFrame) -> SeatReturn:
 async def _run_after_running(
     frame: core.SharedRunFrame,
     workflow: RunWorkflow,
+    body_end: Callable[[], BodyEndOrder],
 ) -> ResultEnvelope | BodyInterrupted:
     """The steps of a run after its RUNNING update (``_seat_steps``), inside
     the span and the log context of its attempt, whose start gave the
     workflow node ``workflow`` (``run_in_attempt_span_async``). They start
     inside the seat coroutine, so the span is current in the context of this
     seat task only: the body, and each task that the body starts, sees it;
-    the other seats do not."""
+    the other seats do not. A deadline that came first (``body_end``) ends
+    the span with the timeout, the end that the seat loop reports."""
     return await run_in_attempt_span_async(
         shared_attempt_subject(frame, Execution.SHARED_ASYNC, workflow),
         lambda: _seat_steps(frame),
+        body_end,
     )
 
 

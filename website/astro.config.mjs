@@ -237,6 +237,7 @@ export default defineConfig({
 							items: [
 								{ label: 'Worker Profiles', slug: 'workers/worker-profiles' },
 								{ label: 'Child-Process Hooks', slug: 'workers/child-process-hooks' },
+								{ label: 'Event Handlers', slug: 'workers/event-handlers' },
 							],
 						},
 						{
@@ -326,6 +327,7 @@ export default defineConfig({
 								{ label: 'Health Reads', slug: 'rust/monitoring/health-reads' },
 								{ label: 'Monitoring Queries', slug: 'rust/monitoring/monitoring-queries' },
 								{ label: 'Web UI Mount', slug: 'rust/monitoring/web-ui-mount' },
+								{ label: 'Event Handlers', slug: 'rust/monitoring/event-handlers' },
 							],
 						},
 						{

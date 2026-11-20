@@ -45,6 +45,7 @@ pub mod stale_recovery;
 #[cfg(test)]
 mod start_deadline_tests;
 pub mod task_lists;
+pub mod task_workflow_node;
 pub mod terminalization;
 #[cfg(test)]
 pub(crate) mod terminalization_matrix;
@@ -94,6 +95,10 @@ pub use row::workflow::{WorkflowRow, WorkflowTaskRow};
 pub use slot_health::{
     ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
     MAX_BOOT_FAILURE_DETAIL_CHARS,
+};
+pub use task_workflow_node::{
+    TaskWorkflowNode, TASK_WORKFLOW_NODE_CHECKOUT_WAIT, TASK_WORKFLOW_NODE_READ_END,
+    TASK_WORKFLOW_NODE_STATEMENT_BOUND,
 };
 pub use workflow_operations::{WorkflowRetentionFailed, WorkflowRetentionPass};
 pub use workflow_stop_before_start::{OrphanSelfHeal, StopBeforeStart, StopMove};

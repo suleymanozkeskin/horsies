@@ -15,8 +15,8 @@ use std::time::Duration;
 use crate::telemetry::labels::{
     ClaimPassResult, DeclaredSource, EventDropCause, FleetQuery, FleetWorkerState, LabelName,
     LabelValue, LabelValues, LiveTaskStatus, LiveWorkflowStatus, MemoryProcess, ProcessFact,
-    RecoveryAction, RecoveryStep, ReleaseReason, ReplaceReason, TelemetryPart, ERROR_CODE_VALUES,
-    SEND_RESULT_VALUES,
+    RecoveryAction, RecoveryStep, ReleaseReason, ReplaceReason, SpanReadFailure, TelemetryPart,
+    ERROR_CODE_VALUES, SEND_RESULT_VALUES,
 };
 use crate::worker::executor::protocol::StopReason;
 use crate::worker::executor::slots::outcome::WriteStage;
@@ -216,6 +216,7 @@ pub enum MetricId {
     SeriesDropped,
     HandlerErrors,
     HandlerDropped,
+    SpanReadFailures,
     WorkerInfo,
     TaskSent,
     TaskSendDuration,
@@ -237,7 +238,7 @@ pub enum MetricId {
 
 impl MetricId {
     /// Every metric, in declaration order.
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 42] = [
         Self::TaskAttempts,
         Self::TaskAttemptsEndNotKnown,
         Self::TaskRunDuration,
@@ -262,6 +263,7 @@ impl MetricId {
         Self::SeriesDropped,
         Self::HandlerErrors,
         Self::HandlerDropped,
+        Self::SpanReadFailures,
         Self::WorkerInfo,
         Self::TaskSent,
         Self::TaskSendDuration,
@@ -308,6 +310,7 @@ impl MetricId {
             Self::SeriesDropped => &SERIES_DROPPED,
             Self::HandlerErrors => &HANDLER_ERRORS,
             Self::HandlerDropped => &HANDLER_DROPPED,
+            Self::SpanReadFailures => &SPAN_READ_FAILURES,
             Self::WorkerInfo => &WORKER_INFO,
             Self::TaskSent => &TASK_SENT,
             Self::TaskSendDuration => &TASK_SEND_DURATION,
@@ -617,6 +620,18 @@ static HANDLER_DROPPED: MetricSpec = MetricSpec {
     recorder: Recorder::Worker,
     help: "Events that the full queue of an event handler dropped, by handler.",
     labels: &[HANDLER],
+};
+
+static SPAN_READ_FAILURES: MetricSpec = MetricSpec {
+    name: "horsies.spans.worker_ended.read_failures",
+    kind: MetricKind::Counter,
+    unit: MetricUnit::Count,
+    recorder: Recorder::Worker,
+    help: "Spans of attempts of workflow tasks that the worker ended, made with no workflow node, by reason.",
+    labels: &[LabelSpec {
+        name: LabelName::Reason,
+        values: <SpanReadFailure as LabelValue>::VALUES,
+    }],
 };
 
 static WORKER_INFO: MetricSpec = MetricSpec {

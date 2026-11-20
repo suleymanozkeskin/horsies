@@ -16,6 +16,10 @@ task loop, which runs from the ready frame to the stop frame; see
 ``shared_child``. A shared thread child runs up to its seats ``def`` tasks at
 once, each on a seat thread; see ``thread_child``.
 
+The init frame of a handler child makes this program the handler child of
+the worker: it runs the event handlers of the app and no task; see
+``handler_child``.
+
 When the parent is gone the child exits at once. Nothing can save its result,
 and a run that continues could overlap a retry of the same task.
 """
@@ -110,6 +114,7 @@ from horsies.core.worker.task_loop import (
 )
 
 if TYPE_CHECKING:
+    from horsies.core.app import Horsies
     from horsies.core.worker.shared_child import SeatProgram
     from horsies.core.worker.thread_child import ThreadSeatProgram
 
@@ -149,6 +154,12 @@ RunTaskFn = Callable[[core.RunFrame, core.InitFrame, TaskLoop], RunReturn]
 # and has ended. Logs a failed write; nothing escapes. Returns
 # ``MarkerMetStoppedCore`` when the core of the child stopped.
 MarkFinalizingFn = Callable[[core.RunFrame], MarkerEnd]
+# The boot step of a handler child: the app with its event handlers, or the
+# frame that reports why it failed.
+type HandlerBootFn = Callable[
+    [core.InitFrame, core.HandlerChildKind],
+    Result[Horsies, BootFailedFrame],
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,12 +357,14 @@ def ignore_stop_signals() -> None:
     signal.signal(signal.SIGTERM, lambda _signum, _frame: None)
 
 
-def read_init_frame(sock: socket.socket, reader: ParentFrameReader) -> core.InitFrame:
-    """Read the first frame with ``reader``, bounded. Exits when the parent
-    never sends it, when it is another frame, when it names a program other
-    than the Python child (``python_program_of``), and when it names the kind
-    of a handler child: this program serves task children only
-    (``task_child_kind_of``)."""
+def read_python_init_frame(
+    sock: socket.socket,
+    reader: ParentFrameReader,
+) -> core.InitFrame:
+    """Read the first frame with ``reader``, bounded, for a child of any
+    kind. Exits when the parent never sends it, when it is another frame,
+    and when it names a program other than the Python child
+    (``python_program_of``)."""
     sock.settimeout(INIT_FRAME_TIMEOUT_S)
     try:
         frame = reader.next_frame()
@@ -359,16 +372,29 @@ def read_init_frame(sock: socket.socket, reader: ParentFrameReader) -> core.Init
         os._exit(PARENT_GONE_EXIT_CODE)
     sock.settimeout(None)
     match frame:
-        case core.InitFrame(child_kind=core.HandlerChildKind()):
-            _exit_bad_parent_frame(
-                'Parent sent the init frame of a handler child to a task child',
-            )
         case core.InitFrame(program=core.PythonProgram()):
             return frame
         case core.InitFrame():
             _exit_bad_parent_frame('Parent sent the init frame of a Rust child')
         case core.RunFrame() | core.SharedRunFrame() | core.EventsFrame() | core.StopFrame():
             _exit_bad_parent_frame('First parent frame was not an init frame')
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def read_init_frame(sock: socket.socket, reader: ParentFrameReader) -> core.InitFrame:
+    """Read the init frame of a task child (``read_python_init_frame``).
+    Exits also when it names the kind of a handler child: a forked child and
+    the preload process serve task children only (``task_child_kind_of``);
+    the worker starts its handler child by ``exec`` (``serve_program``)."""
+    init = read_python_init_frame(sock, reader)
+    match init.child_kind:
+        case core.HandlerChildKind():
+            _exit_bad_parent_frame(
+                'Parent sent the init frame of a handler child to a task child',
+            )
+        case core.IsolatedChildKind() | core.SharedAsyncChildKind() | core.SharedThreadChildKind():
+            return init
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -1004,6 +1030,44 @@ def serve(
     bind_to_parent(parent_pid)
     reader = ParentFrameReader(sock)
     init = read_init_frame(sock, reader)
+    _serve_task_child(sock, reader, init, boot, runners)
+
+
+def serve_program(
+    sock: socket.socket,
+    parent_pid: int,
+    boot: BootFn,
+    runners: TaskRunners,
+    handler_boot: HandlerBootFn,
+) -> NoReturn:
+    """Run the child program that the worker starts by ``exec``: a task
+    child as ``serve`` runs it, or the handler child of the worker when the
+    init frame names the handler kind (``handler_child.serve_handler_child``,
+    which boots the app with ``handler_boot``). Ends the process."""
+    ignore_stop_signals()
+    bind_to_parent(parent_pid)
+    reader = ParentFrameReader(sock)
+    init = read_python_init_frame(sock, reader)
+    match init.child_kind:
+        case core.HandlerChildKind() as kind:
+            from horsies.core.worker.handler_child import serve_handler_child
+
+            serve_handler_child(sock, reader, init, kind, handler_boot)
+        case core.IsolatedChildKind() | core.SharedAsyncChildKind() | core.SharedThreadChildKind():
+            _serve_task_child(sock, reader, init, boot, runners)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _serve_task_child(
+    sock: socket.socket,
+    reader: ParentFrameReader,
+    init: core.InitFrame,
+    boot: BootFn,
+    runners: TaskRunners,
+) -> NoReturn:
+    """Boot the task child of ``init`` and serve its runs until the stop
+    frame (``serve``)."""
     work = ParentFrameInbox()
     task_loop = _boot_or_exit(sock, reader, init, boot, work)
     match task_child_kind_of(init):
@@ -1167,14 +1231,32 @@ def parse_arguments(argv: Sequence[str]) -> tuple[int, int] | None:
     return int(argv[0]), int(argv[1])
 
 
+def boot_handler_child_app(
+    init: core.InitFrame,
+    kind: core.HandlerChildKind,
+) -> Result[Horsies, BootFailedFrame]:
+    """The boot step of a handler child
+    (``handler_child.boot_handler_app``)."""
+    from horsies.core.worker.handler_child import boot_handler_app
+
+    return boot_handler_app(init, kind)
+
+
 def main(argv: Sequence[str]) -> NoReturn:
-    """Program entry. After a stop frame, ``serve`` ends the process."""
+    """Program entry. After a stop frame, ``serve_program`` ends the
+    process."""
     parsed = parse_arguments(argv)
     if parsed is None:
         sys.stderr.write(f'child_main: bad arguments: {list(argv)!r}\n')
         sys.exit(BAD_ARGUMENTS_EXIT_CODE)
     fd, parent_pid = parsed
-    serve(socket.socket(fileno=fd), parent_pid, boot_app, production_runners())
+    serve_program(
+        socket.socket(fileno=fd),
+        parent_pid,
+        boot_app,
+        production_runners(),
+        boot_handler_child_app,
+    )
 
 
 if __name__ == '__main__':

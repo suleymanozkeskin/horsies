@@ -18,6 +18,15 @@ operations of the library (``public_calls.py``), or drain sent tasks with a
 worker that ``horsies worker`` starts (``worker_drain.py``), and connect with
 ``--dsn``. The drain runs the ``horsies`` script of the environment that runs
 the harness.
+
+``--telemetry LEVEL`` measures the overhead of telemetry: the baseline side
+runs with no telemetry and the candidate side with ``LEVEL``
+(``telemetry_levels.py``). ``--postgres-cpu-stat PATH`` names the ``cpu.stat``
+file of the cgroup of the PostgreSQL server, for its CPU time per operation:
+
+    uv run python -m crossclient.perf --scenario claim-finish \\
+        --dsn ... --scale gate --demo-quiesced --telemetry handler \\
+        --postgres-cpu-stat /sys/fs/cgroup/system.slice/docker-<id>.scope/cpu.stat
 """
 
 from __future__ import annotations
@@ -42,7 +51,21 @@ from crossclient.perf.scenarios import (
     WorkerDrainScenario,
     scenario_by_name,
 )
+from crossclient.perf.resources import (
+    CgroupCpuStat,
+    CpuStatUnreadable,
+    CpuUsage,
+    NoPostgresCpuSource,
+    PostgresCpuSource,
+    read_cgroup_cpu,
+)
 from crossclient.perf.statistics import Verdict
+from crossclient.perf.telemetry_levels import (
+    ProducerLevel,
+    TelemetryLevel,
+    WorkerOnlyLevel,
+    producer_telemetry,
+)
 from horsies.core.types.result import Err, Ok
 from tests.sqlalchemy_url import sqlalchemy_url
 
@@ -118,7 +141,32 @@ def main(argv: list[str] | None = None) -> int:
         action='store_true',
         help='run every candidate side with its baseline implementation',
     )
+    parser.add_argument(
+        '--telemetry',
+        choices=[level.value for level in TelemetryLevel],
+        default=TelemetryLevel.OFF.value,
+        help=(
+            'the telemetry of the candidate side of a public call or a drain; '
+            'the baseline side runs with none. "off" (the default) is a '
+            'control run'
+        ),
+    )
+    parser.add_argument(
+        '--postgres-cpu-stat',
+        type=Path,
+        help=(
+            'the cpu.stat file of the cgroup v2 group of the PostgreSQL '
+            'server: its usage_usec gives the PostgreSQL CPU time of each '
+            'block or drain. Without it, that column is not measured'
+        ),
+    )
     arguments = parser.parse_args(argv)
+    telemetry = TelemetryLevel(arguments.telemetry)
+    postgres_cpu: PostgresCpuSource = (
+        CgroupCpuStat(path=arguments.postgres_cpu_stat)
+        if arguments.postgres_cpu_stat is not None
+        else NoPostgresCpuSource()
+    )
 
     if arguments.apply_schema:
         target = arguments.dsn.rsplit('@', 1)[-1]
@@ -161,7 +209,32 @@ def main(argv: list[str] | None = None) -> int:
                 '--observations cannot lower the gate minimum for: '
                 + ', '.join(undersized)
             )
-    if arguments.scale == 'gate' and not arguments.control:
+    if telemetry is not TelemetryLevel.OFF and arguments.control:
+        parser.error(
+            f'--telemetry {telemetry.value} runs telemetry on the candidate side; '
+            '--control runs the baseline on both sides'
+        )
+    refused = _telemetry_refusals(scenarios, telemetry)
+    if refused:
+        parser.error('; '.join(refused))
+    match postgres_cpu:
+        case CgroupCpuStat(path=path):
+            match read_cgroup_cpu(path):
+                case CpuStatUnreadable(cause=cause):
+                    parser.error(f'--postgres-cpu-stat {path}: {cause}')
+                case CpuUsage():
+                    pass
+                case _ as unreachable:
+                    assert_never(unreachable)
+        case NoPostgresCpuSource():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    if (
+        arguments.scale == 'gate'
+        and not arguments.control
+        and telemetry is TelemetryLevel.OFF
+    ):
         missing = [
             scenario.name for scenario in scenarios if not _has_candidate(scenario)
         ]
@@ -198,6 +271,8 @@ def main(argv: list[str] | None = None) -> int:
                 resamples=resamples,
                 seed=arguments.seed,
                 demo_quiesced=arguments.demo_quiesced,
+                telemetry=telemetry,
+                postgres_cpu=postgres_cpu,
                 control=arguments.control,
             )
             summary = render_summary(result)
@@ -242,6 +317,43 @@ def _gate_environment_violations(observed: dict[str, str]) -> list[str]:
         for name, required in GATE_ENVIRONMENT.items()
         if observed.get(name) != required
     ]
+
+
+def _telemetry_refusals(
+    scenarios: Sequence[Scenario],
+    telemetry: TelemetryLevel,
+) -> list[str]:
+    """The scenarios that cannot run at ``telemetry``, each with the reason.
+
+    A statement scenario runs no client of the library. A public call
+    scenario runs no worker, so it takes only the levels that change its
+    producer (``off`` and ``tracing``).
+    """
+    refusals: list[str] = []
+    for scenario in scenarios:
+        match scenario:
+            case SingleRowScenario() | BatchScenario():
+                if telemetry is not TelemetryLevel.OFF:
+                    refusals.append(
+                        f'{scenario.name} sends one statement and takes no '
+                        f'--telemetry level'
+                    )
+            case PublicCallScenario():
+                match producer_telemetry(telemetry):
+                    case ProducerLevel():
+                        pass
+                    case WorkerOnlyLevel(level=level):
+                        refusals.append(
+                            f'--telemetry {level.value} changes only the worker, and '
+                            f'{scenario.name} runs no worker: use off or tracing'
+                        )
+                    case _ as unreachable:
+                        assert_never(unreachable)
+            case WorkerDrainScenario():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+    return refusals
 
 
 def _select_scenarios(selector: str) -> tuple[Scenario, ...]:
@@ -349,6 +461,10 @@ def _control_disagreements(result: RunResult) -> list[str]:
     commit count, which the per-side lower bound below and the declared
     budgets enforce.
 
+    A public call with tracing on its candidate side is held to the same
+    equality: tracing stores the trace carrier in the row that the call
+    writes anyway, so it adds no statement, no row and no write transaction.
+
     A worker drain has no such counts: the claim passes, heartbeats and
     pauses of a worker run on its clocks, so two drains of one release send
     different numbers of statements. Each drain checks its own tasks: it
@@ -357,12 +473,13 @@ def _control_disagreements(result: RunResult) -> list[str]:
     match result.scenario:
         case WorkerDrainScenario():
             return []
-        case SingleRowScenario() | BatchScenario() | PublicCallScenario():
+        case PublicCallScenario():
             pass
+        case SingleRowScenario() | BatchScenario():
+            if 'control' not in result.conditions.comparison:
+                return []
         case _ as unreachable:
             assert_never(unreachable)
-    if 'control' not in result.conditions.comparison:
-        return []
     baseline, candidate = result.baseline.counts, result.candidate.counts
     operations = result.conditions.observations_per_side
     blocks = -(-operations // result.conditions.block_size)

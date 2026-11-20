@@ -30,6 +30,7 @@ mod task_history_terminalization_prototypes;
 mod task_history_terminalization_workflow_nodes;
 mod task_lock_order;
 mod task_row_plans;
+mod task_workflow_node_read;
 mod terminal_writer_characterization;
 mod terminalization_claim_fence;
 mod terminalization_functions;

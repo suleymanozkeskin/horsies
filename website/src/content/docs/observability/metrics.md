@@ -104,12 +104,12 @@ At the stop, the endpoint serves until the drain of the worker ends, so the last
 | `horsies.recovery.tasks`, `horsies.recovery.pass.failures` | At each pass of the reaper |
 | `horsies.worker.children.started`, `horsies.worker.children.replaced`, `horsies.worker.child.boot.duration` | When a child sends its ready frame, or a slot replaces its child |
 | `horsies.worker.claim.passes` | At each pass of the claim loop |
-| `horsies.worker.seats`, `horsies.worker.seats.in_use`, `horsies.worker.slots.down`, `horsies.worker.memory.rss{process="parent"}` | At each worker snapshot, from the values that the snapshot writes: once per `recovery.worker_state_snapshot_interval_ms` (30 seconds by default), not at a scrape |
+| `horsies.worker.seats`, `horsies.worker.seats.in_use`, `horsies.worker.slots.down`, `horsies.worker.memory.rss{process="parent"}`, `horsies.worker.memory.rss{process="children"}` | At each worker snapshot, from the values that the snapshot writes: once per `recovery.worker_state_snapshot_interval_ms` (30 seconds by default), not at a scrape |
 
 - `horsies.task.run.duration` runs from the placement of the attempt on a child to the end that the worker saw. It includes the transit of the run frame and the `RUNNING` write of the child.
 - A duration above one day counts only in the `+Inf` bucket of its histogram. The longest task timeout is about 49.7 days.
 - `horsies.worker.seats.in_use` counts, for the worker, the `RUNNING` rows and the `CLAIMED` rows with a live lease, at most the seats of the budget. It has no series after a count of the held rows that failed.
-- `horsies.worker.memory.rss{process="children"}` has no series: the snapshot does not read the memory of the task children.
+- `horsies.worker.memory.rss{process="children"}` is the sum of the last RSS reading of each task child (its ready frame, then each result frame), the value of the `children_memory_mb` column of the same snapshot. A child whose last reading is unreadable is not in the sum: the `children_rss` member of the `telemetry` column names it. A snapshot in which no child read its size leaves the last value. A replaced child's reading leaves the sum.
 - `horsies.worker.info` is always 1. Its labels hold the version, the profile and the worker id.
 
 ## Label Rules

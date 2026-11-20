@@ -22,7 +22,7 @@ import textwrap
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Final, Protocol
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -56,6 +56,9 @@ from horsies.core.telemetry.attempt_span import (
     NO_ATTEMPT_SPANS,
     AttemptEnd,
     AttemptSubject,
+    BodyEndOrder,
+    BodyFirst,
+    DeadlineFirst,
     FlushNotConfirmed,
     FlushRaised,
     FlushTimedOut,
@@ -63,6 +66,7 @@ from horsies.core.telemetry.attempt_span import (
     OtelAttemptSpans,
     ProviderFlush,
     ProviderHasNoFlush,
+    RunTimedOut,
     ScopeRaised,
     SpansFlushed,
     bounded_flush,
@@ -293,11 +297,31 @@ def _run_isolated(
         )
 
 
+def _body_first() -> BodyEndOrder:
+    """The order of a run whose steps end before its deadline."""
+    return BodyFirst()
+
+
+def _deadline_first() -> BodyEndOrder:
+    """The order of a run whose deadline fired in its child first."""
+    return DeadlineFirst()
+
+
 def _run_seat(
     task_name: str,
     trace_meta: dict[str, object],
     task_loop: TaskLoop,
     started: StartedRunning = STARTED,
+) -> RunReturn:
+    return _run_seat_in_order(task_name, trace_meta, task_loop, started, _body_first)
+
+
+def _run_seat_in_order(
+    task_name: str,
+    trace_meta: dict[str, object],
+    task_loop: TaskLoop,
+    started: StartedRunning,
+    body_end: Callable[[], BodyEndOrder],
 ) -> RunReturn:
     _ = task_loop
     frame = shared_run_frame(
@@ -312,7 +336,7 @@ def _run_seat(
         patch.object(shared_runner, 'confirm_until_not_resumed', AsyncMock(return_value=started)),
         patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)),
     ):
-        return asyncio.run(shared_runner.run_seat_task(frame))
+        return asyncio.run(shared_runner.run_seat_task(frame, body_end))
 
 
 def _thread_seat_work(frame: core.SharedRunFrame) -> ThreadSeatWork:
@@ -330,6 +354,18 @@ def _run_thread_seat(
     started: StartedRunning = STARTED,
 ) -> RunReturn:
     """Run on a thread of its own, as a seat thread does."""
+    return _run_thread_seat_in_order(task_name, trace_meta, task_loop, started, _body_first)
+
+
+def _run_thread_seat_in_order(
+    task_name: str,
+    trace_meta: dict[str, object],
+    task_loop: TaskLoop,
+    started: StartedRunning,
+    body_end: Callable[[], BodyEndOrder],
+) -> RunReturn:
+    """Run on a thread of its own, as a seat thread does, with the order
+    that `body_end` gives."""
     _ = task_loop
     frame = shared_run_frame(
         dispatch=1,
@@ -342,7 +378,9 @@ def _run_thread_seat(
     returned: list[RunReturn] = []
 
     def seat() -> None:
-        match thread_runner.run_thread_seat_task(frame, _thread_seat_work(frame), StartAllowed):
+        match thread_runner.run_thread_seat_task(
+            frame, _thread_seat_work(frame), StartAllowed, body_end,
+        ):
             case SetRunning() as ran:
                 returned.append(ran)
             case other:
@@ -581,6 +619,40 @@ class TestTheStatusOfTheSpan:
         assert attempt.status.status_code == StatusCode.ERROR
         assert (attempt.attributes or {})['error.type'] == 'WORKER_RESOLUTION_ERROR'
 
+    @pytest.mark.parametrize(
+        ('task_name', 'run_in_order'),
+        [
+            pytest.param('seat_work', _run_seat_in_order, id='shared-async'),
+            pytest.param('thread_work', _run_thread_seat_in_order, id='shared-thread'),
+        ],
+    )
+    def test_a_deadline_that_came_first_sets_the_timeout(
+        self,
+        task_name: str,
+        run_in_order: Callable[
+            [str, dict[str, object], TaskLoop, StartedRunning, Callable[[], BodyEndOrder]],
+            RunReturn,
+        ],
+        traced: _Traced,
+        task_loop: TaskLoop,
+    ) -> None:
+        """The deadline of a shared run fired in its child before its steps
+        returned: the one span of the attempt has the end that the child
+        reports, ERROR with `TASK_TIMEOUT`; what the body returned is not
+        on it."""
+        trace_meta, send = _send_carrier(traced)
+
+        returned = run_in_order(task_name, trace_meta, task_loop, STARTED, _deadline_first)
+
+        assert isinstance(returned, SetRunning), returned
+        [attempt] = [span for span in traced.spans() if span.name == f'run {task_name}']
+        assert attempt.status.status_code == StatusCode.ERROR
+        assert (attempt.attributes or {})['error.type'] == 'TASK_TIMEOUT'
+        assert 'horsies.span.source' not in (attempt.attributes or {})
+        assert attempt.events == ()
+        assert attempt.parent is not None and send.context is not None
+        assert attempt.parent.span_id == send.context.span_id
+
 
 def _subject(
     trace_value: RunTrace = NoTraceCarrier(),
@@ -684,6 +756,10 @@ def _ok_steps() -> EncodedResult:
     return EncodedResult(ResultEnvelope('{"ok": 1}'), ResultSucceeded())
 
 
+async def _ok_steps_async() -> EncodedResult:
+    return _ok_steps()
+
+
 class TestTracingOff:
     def test_a_run_with_no_attempt_spans_makes_no_span_and_keeps_the_log_context(
         self,
@@ -720,7 +796,7 @@ class TestTracingOff:
             from horsies.core.models.tracing import NoTracing
             from horsies.core.telemetry.attempt_span import (
                 AttemptSubject, attempt_spans_of, flush_attempt_spans_at_stop,
-                run_in_attempt_span, use_attempt_spans,
+                isolated_body_end, run_in_attempt_span, use_attempt_spans,
             )
             from horsies.core.worker import child_main, shared_runner, thread_runner
             from horsies.core.worker.child_frames import NoTraceCarrier
@@ -735,6 +811,7 @@ class TestTracingOff:
                     execution=Execution.ISOLATED, workflow=NotInWorkflow(), trace=NoTraceCarrier(),
                 ),
                 lambda: EncodedResult(ResultEnvelope('{}'), ResultSucceeded()),
+                isolated_body_end,
             )
             assert returned == ResultEnvelope('{}'), returned
             print(flush_attempt_spans_at_stop())
@@ -782,8 +859,8 @@ class TestSharedAsyncSeats:
         async def two_seats() -> None:
             async with asyncio.timeout(SCENARIO_TIMEOUT_S):
                 _ = await asyncio.gather(
-                    run_in_attempt_span_async(subject('a'), lambda: steps('a')),
-                    run_in_attempt_span_async(subject('b'), lambda: steps('b')),
+                    run_in_attempt_span_async(subject('a'), lambda: steps('a'), _body_first),
+                    run_in_attempt_span_async(subject('b'), lambda: steps('b'), _body_first),
                 )
 
         asyncio.run(two_seats())
@@ -820,8 +897,8 @@ class TestARecorderThatFails:
         use_attempt_spans(OtelAttemptSpans(recorder=_RaisingRecorder()))
         try:
             with caplog.at_level(logging.WARNING, logger='horsies.telemetry'):
-                first = run_in_attempt_span(_subject(), _ok_steps)
-                second = run_in_attempt_span(_subject(), _ok_steps)
+                first = run_in_attempt_span(_subject(), _ok_steps, _body_first)
+                second = run_in_attempt_span(_subject(), _ok_steps, _body_first)
         finally:
             use_attempt_spans(NO_ATTEMPT_SPANS)
 
@@ -835,12 +912,102 @@ class TestARecorderThatFails:
             raise RuntimeError('a defect of the steps')
 
         with pytest.raises(RuntimeError, match='a defect of the steps'):
-            _ = run_in_attempt_span(_subject(), defect)
+            _ = run_in_attempt_span(_subject(), defect, _body_first)
 
         span = traced.one('run task')
         assert (span.attributes or {})['error.type'] == 'RuntimeError'
         assert running_task() == NoRunningTask()
         assert not trace.get_current_span().get_span_context().is_valid
+
+
+class _RecordedSpan:
+    """A span that keeps the end that it gets."""
+
+    def __init__(self, ends: list[AttemptEnd]) -> None:
+        self._ends = ends
+
+    @property
+    def ids(self) -> SpanIds | NoSpanIds:
+        return NoSpanIds()
+
+    def make_current(self) -> Callable[[], None]:
+        return lambda: None
+
+    def end(self, end: AttemptEnd) -> None:
+        self._ends.append(end)
+
+
+class _EndRecorder:
+    """A recorder whose spans keep their ends in `ends`."""
+
+    def __init__(self) -> None:
+        self.ends: list[AttemptEnd] = []
+
+    def open(self, subject: AttemptSubject) -> _RecordedSpan:
+        _ = subject
+        return _RecordedSpan(self.ends)
+
+    def flush(self, timeout_millis: int) -> ProviderFlush:
+        _ = timeout_millis
+        return SpansFlushed()
+
+
+class TestTheOrderAtTheEndOfTheSteps:
+    """The order that a body place gives, read once when the steps return,
+    decides the end of the span; the run returns what the steps returned in
+    both orders: the end that the child reports is the seat's."""
+
+    def test_a_deadline_that_came_first_ends_the_span_with_the_timeout(self) -> None:
+        recorder = _EndRecorder()
+        use_attempt_spans(OtelAttemptSpans(recorder=recorder))
+        try:
+            returned = run_in_attempt_span(_subject(), _ok_steps, _deadline_first)
+        finally:
+            use_attempt_spans(NO_ATTEMPT_SPANS)
+
+        assert recorder.ends == [RunTimedOut()]
+        assert returned == ResultEnvelope('{"ok": 1}')
+
+    def test_steps_that_came_first_end_the_span_with_their_outcome(self) -> None:
+        recorder = _EndRecorder()
+        use_attempt_spans(OtelAttemptSpans(recorder=recorder))
+        try:
+            returned = asyncio.run(
+                run_in_attempt_span_async(_subject(), _ok_steps_async, _body_first),
+            )
+        finally:
+            use_attempt_spans(NO_ATTEMPT_SPANS)
+
+        assert recorder.ends == [ResultSucceeded()]
+        assert returned == ResultEnvelope('{"ok": 1}')
+
+    def test_with_tracing_off_the_order_is_still_read_once(self) -> None:
+        asked: list[BodyEndOrder] = []
+
+        def body_end() -> BodyEndOrder:
+            asked.append(BodyFirst())
+            return BodyFirst()
+
+        use_attempt_spans(NO_ATTEMPT_SPANS)
+        returned = run_in_attempt_span(_subject(), _ok_steps, body_end)
+
+        assert asked == [BodyFirst()]
+        assert returned == ResultEnvelope('{"ok": 1}')
+
+    def test_steps_that_raise_do_not_read_the_order(self) -> None:
+        asked: list[BodyEndOrder] = []
+
+        def body_end() -> BodyEndOrder:
+            asked.append(DeadlineFirst())
+            return DeadlineFirst()
+
+        def defect() -> EncodedResult:
+            raise RuntimeError('a defect of the steps')
+
+        with pytest.raises(RuntimeError, match='a defect of the steps'):
+            _ = run_in_attempt_span(_subject(), defect, body_end)
+
+        assert asked == []
 
 
 class TestTheFlushAtStop:
@@ -951,7 +1118,7 @@ class TestTheProviderFlush:
     ) -> None:
         monkeypatch.setattr(attempt_otel.trace, 'get_tracer_provider', lambda: provider)
 
-        assert attempt_otel._global_provider_flush(250) == expected
+        assert attempt_otel.global_provider_flush(250) == expected
 
 
 class TestTheOutcomeOfAResult:

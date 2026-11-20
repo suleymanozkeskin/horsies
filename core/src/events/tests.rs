@@ -708,6 +708,9 @@ const VECTOR_AT: i64 = 1_700_000_000_123_456_789;
 const VECTOR_CARRIER: &str =
     "{\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\"}";
 
+/// The worker id of the vectors.
+const VECTOR_WORKER_ID: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+
 fn time(nanos: i64) -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp_nanos(nanos)
 }
@@ -868,16 +871,35 @@ fn vector_events() -> Vec<(&'static str, Event)> {
             .into(),
         ),
         (
+            "attempt_ended_timed_out_in_child",
+            ended(
+                Execution::SharedAsync,
+                3,
+                AttemptEnd::ReportedByChild {
+                    result: ChildResult::TimedOut,
+                    start: AttemptStart::Reported {
+                        started_at: time(1_700_000_000_100_000_000),
+                    },
+                },
+                30_000_000_000,
+            )
+            .into(),
+        ),
+        (
             "attempt_ended_by_worker",
             ended(
-                Execution::Isolated,
+                Execution::SharedAsync,
                 3,
                 AttemptEnd::DecidedByWorker {
                     reason: WorkerDecision::TimedOut,
+                    error_code: OutcomeCode::TaskTimeout.into(),
                     trace: RunTrace::Carrier {
                         text: text(VECTOR_CARRIER),
                     },
                     placed_at: time(1_700_000_000_000_000_000),
+                    child_kind: Execution::SharedAsync,
+                    worker_id: text(VECTOR_WORKER_ID),
+                    workflow: WorkflowPlace::NotInWorkflow,
                 },
                 30_000_000_000,
             )
@@ -890,8 +912,32 @@ fn vector_events() -> Vec<(&'static str, Event)> {
                 1,
                 AttemptEnd::DecidedByWorker {
                     reason: WorkerDecision::NeighbourBlockedLoop,
+                    error_code: OperationalErrorCode::NeighbourBlockedLoop.into(),
                     trace: RunTrace::NoCarrier,
                     placed_at: time(1_700_000_000_000_000_000),
+                    child_kind: Execution::SharedAsync,
+                    worker_id: text(VECTOR_WORKER_ID),
+                    workflow: WorkflowPlace::NotInWorkflow,
+                },
+                30_000_000_000,
+            )
+            .into(),
+        ),
+        (
+            "attempt_ended_by_worker_in_workflow",
+            ended(
+                Execution::SharedThread,
+                2,
+                AttemptEnd::DecidedByWorker {
+                    reason: WorkerDecision::ChildLost,
+                    error_code: OperationalErrorCode::WorkerCrashed.into(),
+                    trace: RunTrace::Carrier {
+                        text: text(VECTOR_CARRIER),
+                    },
+                    placed_at: time(1_700_000_000_000_000_000),
+                    child_kind: Execution::Isolated,
+                    worker_id: text(VECTOR_WORKER_ID),
+                    workflow: WorkflowPlace::WorkflowNotKnown,
                 },
                 30_000_000_000,
             )
@@ -1102,4 +1148,50 @@ fn the_contract_is_the_snapshot_of_its_version() {
     assert_eq!(EVENT_CONTRACT.version, EVENT_CONTRACT_VERSION);
     assert_eq!(EVENT_CONTRACT.events, EVENT_TYPES);
     assert_eq!(EVENT_CONTRACT.value_types, EVENT_VALUE_TYPES);
+}
+
+/// Whether `event` is an event of type `E`, by [`UnionEvent::of_event`].
+fn is_of<E: UnionEvent>(event: &Event) -> bool {
+    E::of_event(event).is_some()
+}
+
+/// `of_event` of each type gives the record of an event of that type, and
+/// `None` for an event of every other type. The list has one entry per
+/// type of the union, so a new type fails here until it is added.
+#[test]
+fn of_event_gives_the_record_of_its_own_type_only() {
+    let checks: [(EventTypeName, fn(&Event) -> bool); 11] = [
+        (EventTypeName::TaskClaimed, is_of::<TaskClaimed>),
+        (EventTypeName::ClaimReleased, is_of::<ClaimReleased>),
+        (EventTypeName::AttemptPlaced, is_of::<AttemptPlaced>),
+        (EventTypeName::AttemptNotStarted, is_of::<AttemptNotStarted>),
+        (EventTypeName::AttemptEnded, is_of::<AttemptEnded>),
+        (EventTypeName::AttemptRecorded, is_of::<AttemptRecorded>),
+        (EventTypeName::TaskRecovered, is_of::<TaskRecovered>),
+        (EventTypeName::ChildStarted, is_of::<ChildStarted>),
+        (EventTypeName::ChildReplaced, is_of::<ChildReplaced>),
+        (EventTypeName::SlotDown, is_of::<SlotDown>),
+        (EventTypeName::SlotRecovered, is_of::<SlotRecovered>),
+    ];
+    assert_eq!(checks.len(), EventTypeName::ALL.len());
+    let events = vector_events();
+    for name in EventTypeName::ALL {
+        assert!(
+            events.iter().any(|(_, event)| event.type_name() == *name),
+            "the vectors have no event of {name:?}"
+        );
+    }
+    for (_, event) in &events {
+        for (name, is_of_type) in &checks {
+            assert_eq!(
+                is_of_type(event),
+                event.type_name() == *name,
+                "{name:?} of a {:?} event",
+                event.type_name()
+            );
+        }
+    }
+    let claimed = vector_event("task_claimed");
+    let record = TaskClaimed::of_event(&claimed).expect("a TaskClaimed event");
+    assert_eq!(Event::from(record.clone()), claimed);
 }

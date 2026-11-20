@@ -387,12 +387,24 @@ fn check_handler_names(handlers: &[HandlerCounts]) -> Result<(), HandlerCountsIn
     Ok(())
 }
 
+/// The spans of attempts of workflow tasks that the worker ended, which a
+/// handler child made with no workflow node, since it started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SpanReadCounts {
+    /// The node read ran and failed.
+    pub read_failed: u64,
+    /// The node read did not run: the queue of the reader was full, or the
+    /// child stopped first.
+    pub not_read: u64,
+}
+
 /// The counts of each event handler of a handler child since it started,
-/// and its RSS. The child sends one at a fixed interval. Each holds the
-/// totals, so a lost frame loses no count.
+/// the counts of its span reads, and its RSS. The child sends one at a fixed
+/// interval. Each holds the totals, so a lost frame loses no count.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HandlerStatsFrame {
     pub handlers: HandlerCountsList,
+    pub span_reads: SpanReadCounts,
     pub rss: RssReading,
 }
 
@@ -521,6 +533,8 @@ enum ChildWire<'a> {
     },
     HandlerStats {
         handlers: Vec<HandlerCountsWire<'a>>,
+        span_read_failed: u64,
+        span_not_read: u64,
         rss_mb: Option<f64>,
     },
 }
@@ -814,6 +828,8 @@ pub fn encode_child_frame(frame: &ChildFrame) -> Result<EncodedFrame<'_>, FrameE
         ChildFrame::HandlerStats(stats) => pack(
             &ChildWire::HandlerStats {
                 handlers: handler_counts_wire(&stats.handlers),
+                span_read_failed: stats.span_reads.read_failed,
+                span_not_read: stats.span_reads.not_read,
                 rss_mb: stats.rss.wire(),
             },
             NO_BODY,
@@ -1233,7 +1249,13 @@ fn decode_handler_stats(
     fields: &Fields<'_>,
     body: &[u8],
 ) -> Result<HandlerStatsFrame, MalformedFrame> {
-    fields.only(&["kind", "handlers", "rss_mb"])?;
+    fields.only(&[
+        "kind",
+        "handlers",
+        "span_read_failed",
+        "span_not_read",
+        "rss_mb",
+    ])?;
     no_body("handler_stats", body)?;
     match fields.list_len("handlers")? <= MAX_EVENT_HANDLERS {
         true => {}
@@ -1255,6 +1277,10 @@ fn decode_handler_stats(
     })?;
     Ok(HandlerStatsFrame {
         handlers,
+        span_reads: SpanReadCounts {
+            read_failed: fields.whole("span_read_failed")?,
+            not_read: fields.whole("span_not_read")?,
+        },
         rss: fields.rss("rss_mb")?,
     })
 }

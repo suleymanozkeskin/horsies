@@ -12,6 +12,7 @@
 //! |---|---|---|
 //! | [`WorkerTelemetry::slots_read`] | `horsies.worker.seats{execution}`, `horsies.worker.slots.down{kind}` | `class_capacity`, `slots_down` |
 //! | [`WorkerTelemetry::parent_rss_read`] | `horsies.worker.memory.rss{process="parent"}` | `memory_usage_mb` |
+//! | [`WorkerTelemetry::children_rss_read`] | `horsies.worker.memory.rss{process="children"}` | `children_memory_mb`; the unreadable children in `telemetry` (`children_rss`) |
 //! | [`WorkerTelemetry::held_rows_read`] | `horsies.worker.seats.in_use{execution}` | `class_capacity`; one statement with `tasks_running`, `tasks_claimed` |
 //!
 //! - The seats, the down slots and the seats in use have one series per
@@ -22,13 +23,20 @@
 //! - An RSS that the process table does not give leaves the last `parent`
 //!   value: the metric also holds the `handler_child` series, which the
 //!   handler child's stats frames set, so its series are set one by one.
-//! - `process="children"` has no series: the snapshot does not read the RSS
-//!   of the task children (its `children_memory_mb` column is NULL).
+//! - `process="children"` is the sum of the last RSS reading of each task
+//!   child (its ready frame, then each result frame), the value of
+//!   `children_memory_mb`. A child whose last reading is unreadable is not
+//!   in the sum: the snapshot names it. A snapshot in which no child read
+//!   its size leaves the last `children` value, as for the parent.
 
 use super::{TelemetryOn, WorkerTelemetry};
 use crate::core::task::Execution;
 use crate::telemetry::labels::MemoryProcess;
-use crate::worker::worker_state::{ClassCounts, ParentRss, SeatsInUse};
+use crate::worker::worker_state::{ChildrenRss, ClassCounts, ParentRss, SeatsInUse};
+
+/// The bytes of one MiB: the children report their RSS in MiB, the gauge
+/// holds bytes.
+const BYTES_PER_MIB: f64 = 1_048_576.0;
 
 impl WorkerTelemetry {
     /// A snapshot read the slots: `seats` are the seats in service of each
@@ -45,6 +53,14 @@ impl WorkerTelemetry {
         match self {
             Self::Off => {}
             Self::On(on) => on.parent_rss_read(rss),
+        }
+    }
+
+    /// A snapshot read the last RSS reading of each task child.
+    pub(crate) fn children_rss_read(&self, children: &ChildrenRss) {
+        match self {
+            Self::Off => {}
+            Self::On(on) => on.children_rss_read(children),
         }
     }
 
@@ -80,6 +96,18 @@ impl TelemetryOn {
                     .set((MemoryProcess::Parent,), bytes as f64);
             }
             ParentRss::Unreadable => {}
+        }
+    }
+
+    fn children_rss_read(&self, children: &ChildrenRss) {
+        match children {
+            ChildrenRss::Summed { mib, .. } => {
+                let _recorded = self
+                    .metrics
+                    .memory_rss
+                    .set((MemoryProcess::Children,), mib * BYTES_PER_MIB);
+            }
+            ChildrenRss::NoReadableChild { .. } => {}
         }
     }
 
@@ -210,5 +238,33 @@ mod tests {
                 (vec!["parent".to_owned()], 2_097_152.0),
             ]
         );
+    }
+
+    /// The sum of the children's readings, in MiB, is the `children`
+    /// series in bytes; the parent's series stays. A snapshot in which no
+    /// child read its size leaves the last value.
+    #[test]
+    fn a_children_sum_sets_the_children_series_and_no_readable_child_keeps_it() {
+        let watched = WatchedTelemetry::new();
+        watched
+            .telemetry
+            .parent_rss_read(ParentRss::Bytes(2_097_152));
+
+        watched.telemetry.children_rss_read(&ChildrenRss::Summed {
+            mib: 170.75,
+            unreadable: Vec::new(),
+        });
+        let expected = vec![
+            (vec!["children".to_owned()], 170.75 * 1_048_576.0),
+            (vec!["parent".to_owned()], 2_097_152.0),
+        ];
+        assert_eq!(gauges(&watched, MetricId::MemoryRss), expected);
+
+        watched
+            .telemetry
+            .children_rss_read(&ChildrenRss::NoReadableChild {
+                unreadable: Vec::new(),
+            });
+        assert_eq!(gauges(&watched, MetricId::MemoryRss), expected);
     }
 }

@@ -952,6 +952,7 @@ def _document_launch(launch: wire.ChildLaunchManifest) -> dict[str, Any]:
         profile='batch',
         metrics_endpoint=wire.MetricsEndpointNoMetricsEndpoint(),
         tasks={},
+        handlers=(),
         child_launch=launch,
         idempotency_reservation_window=WINDOW,
     )
@@ -1215,6 +1216,7 @@ class TestDocument:
                     error_codes=('RATE_LIMITED', 'NOT_FOUND'),
                 ),
             },
+            handlers=(),
             child_launch=_launch(),
             idempotency_reservation_window=WINDOW,
         )

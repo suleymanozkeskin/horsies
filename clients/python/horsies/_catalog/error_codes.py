@@ -283,6 +283,33 @@ class ErrorCode(str, Enum):
     CONFIG_INVALID_TRACE_LINK = 'HRS-221'
     """A trace link template of the monitoring page that the core refuses."""
 
+    EVENT_HANDLER_UNKNOWN_EVENT_TYPE = 'HRS-222'
+    """An event handler registration names a value that is not an event
+    type. Only the Python client refuses with it: the Rust registration
+    takes the event type as a type parameter.
+    """
+
+    EVENT_HANDLER_INVALID_SIGNATURE = 'HRS-223'
+    """An event handler cannot take the events of its type: a value that is
+    not a function or a bound method, a generator function, a function
+    that does not take a call with one event, or an event parameter
+    annotated with another event type. Only the Python client refuses
+    with it: the Rust compiler checks the handler.
+    """
+
+    EVENT_HANDLER_DUPLICATE_NAME = 'HRS-224'
+    """An earlier event handler of the app has the same name."""
+
+    EVENT_HANDLER_INVALID_NAME = 'HRS-225'
+    """The name of an event handler is empty, longer than 255 characters, or
+    `(unknown)`; in Python, also a function with no module name.
+    """
+
+    EVENT_HANDLER_LIMIT = 'HRS-226'
+    """The app has 32 event handlers already, the most that one handler
+    child runs.
+    """
+
     TASK_NOT_REGISTERED = 'HRS-300'
     """The task is not registered."""
 

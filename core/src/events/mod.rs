@@ -50,9 +50,10 @@ pub use schema::{
 pub use values::{
     AttemptEnd, AttemptErrorCode, AttemptNumber, AttemptRecord, AttemptStart, ChildResult,
     Priority, QueueName, RetryCount, RunTrace, SlotDownCause, SlotIndex, TaskName,
-    TraceCarrierText, UserCodeText, WorkerDecision, BUILT_IN_TASK_CODES, MAX_ATTEMPT,
-    MAX_EVENT_QUEUE_NAME_CHARS, MAX_EVENT_TASK_NAME_CHARS, MAX_EVENT_TRACE_CARRIER_CHARS,
-    MAX_EVENT_USER_CODE_CHARS, MAX_RETRY_COUNT, MAX_SLOT_INDEX,
+    TraceCarrierText, UserCodeText, WorkerDecision, WorkerIdText, WorkflowPlace,
+    BUILT_IN_TASK_CODES, MAX_ATTEMPT, MAX_EVENT_QUEUE_NAME_CHARS, MAX_EVENT_TASK_NAME_CHARS,
+    MAX_EVENT_TRACE_CARRIER_CHARS, MAX_EVENT_USER_CODE_CHARS, MAX_EVENT_WORKER_ID_CHARS,
+    MAX_RETRY_COUNT, MAX_SLOT_INDEX,
 };
 
 // The closed types of other modules that event fields hold: the core's own
@@ -64,7 +65,7 @@ pub use crate::worker::executor::protocol::StopReason;
 
 /// The version of the event contract: its event types, their fields and the
 /// closed types that the fields hold.
-pub const EVENT_CONTRACT_VERSION: u32 = 3;
+pub const EVENT_CONTRACT_VERSION: u32 = 6;
 
 /// The event contract, as `horsies-codegen` renders it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +96,7 @@ pub const EVENT_VALUE_TYPES: &[NamedType] = &[
     <AttemptStart as EventNamedValue>::NAMED,
     <WorkerDecision as EventNamedValue>::NAMED,
     <RunTrace as EventNamedValue>::NAMED,
+    <WorkflowPlace as EventNamedValue>::NAMED,
     <AttemptEnd as EventNamedValue>::NAMED,
     <AttemptRecord as EventNamedValue>::NAMED,
     <RecoveryAction as EventNamedValue>::NAMED,
@@ -130,10 +132,15 @@ pub struct EventEncodeError {
 
 /// An event type of the union [`Event`], with its name. A point of the
 /// worker builds one of these; the worker builds it only when its handler
-/// child takes events of its type.
+/// child takes events of its type. A handler of a Rust handler child takes
+/// the events of one of these types.
 pub trait UnionEvent: EventRecord + Into<Event> {
     /// The name of the type: its wire tag.
     const NAME: EventTypeName;
+
+    /// The record of `event` when it is an event of this type; `None` for
+    /// an event of any other type. Pure.
+    fn of_event(event: &Event) -> Option<&Self>;
 }
 
 /// Defines the union [`Event`], the names [`EventTypeName`], the list
@@ -206,6 +213,14 @@ macro_rules! event_union {
         $(
             impl UnionEvent for $event {
                 const NAME: EventTypeName = EventTypeName::$event;
+
+                fn of_event(event: &Event) -> Option<&Self> {
+                    match event {
+                        Event::$event(record) => Some(record),
+                        // Every other event type of the union.
+                        _ => None,
+                    }
+                }
             }
         )+
 

@@ -65,6 +65,7 @@ Call `run_with_tracing` from `main` with the span exporter of your backend, for 
 - The client looks up the tracer at each span, so a provider that an `on_child_start` hook sets applies too.
 - Without a provider the spans are not recorded, and a send stores no carrier.
 - Without a propagator that writes keys, a send stores no carrier: each attempt span is the root of a new trace.
+- A rerun (`app.rerun_task`, `horsies::rerun::rerun_task_in`) opens no span: it hands the core the carrier that the propagator injects for the caller's current context, so the attempt spans of the new task are children of the caller's span. See [Rerun in Your Transaction](/horsies/rust/operations/rerun-in-your-transaction/#trace-carrier).
 
 ## The `tracing` Layer
 
@@ -108,7 +109,7 @@ The names, units, help texts, attribute keys and bucket bounds are those of the 
 
 ## Without the Feature
 
-Each task body still runs inside the `tracing` span `run` (target `horsies::attempt`) with the fields `horsies.task.id`, `horsies.task.name` and `horsies.task.attempt`, so each log record of the body carries them. A send carries no trace carrier. See [Logs](/horsies/observability/logs/).
+Each task body still runs inside the `tracing` span `run` (target `horsies::attempt`) with the fields `horsies.task.id`, `horsies.task.name` and `horsies.task.attempt`, so each log record of the body carries them. A send and a rerun carry no trace carrier. See [Logs](/horsies/observability/logs/).
 
 ## Things to Avoid
 

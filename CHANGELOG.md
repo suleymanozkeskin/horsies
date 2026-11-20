@@ -64,6 +64,19 @@ before you upgrade a 0.7 deployment.
   the user's OpenTelemetry SDK never changes the outcome of a send.
   `PostgresBroker.enqueue` and `enqueue_async` take `trace=`
   (`TraceCarrier` or the default `NO_TRACE_CARRIER`).
+- **`app.rerun_task` and `app.rerun_task_async`: a rerun with the trace of
+  the caller.** `app.rerun_task_async(connection, command, policy)` runs
+  `rerun_task` on the caller's `AsyncConnection` with the tracing setting
+  of the app; `app.rerun_task` takes a blocking SQLAlchemy `Connection`.
+  Both return a `RerunOutcome` and raise as `rerun_task`. With
+  `OtelTracing()`, the new task stores the carrier that the configured
+  propagator injects for the caller's current context, with its trace id,
+  so the attempt spans of the new task are children of the caller's span.
+  The rerun opens no span and records no metric. Outside a valid span, or
+  with `NoTracing()`, the new task stores no carrier; `NoTracing()` imports
+  no `opentelemetry` module. The free `rerun_task` stores no carrier.
+  `horsies._core.RerunCommandRecord` takes a required `trace=`
+  (`NoTraceCarrier` or `TraceCarrier`).
 - **The span and the log context of each attempt.** With `OtelTracing()`,
   a worker child runs the steps of each attempt after its RUNNING update
   inside one span of kind CONSUMER, `run <task_name>`. The span is the
@@ -83,8 +96,13 @@ before you upgrade a 0.7 deployment.
   error sets the status ERROR and `error.type` to its code, and the live
   exception that it keeps is recorded on the span. Set the SDK of a child in
   `on_child_process_start`. At its stop a child flushes the tracer provider
-  for at most 1 s. The span holds what the body returned; the end that the
-  worker decides for a timeout, a kill or a lost child is not on it.
+  for at most 1 s. The span holds what the body returned, but when the
+  deadline of a shared run fired in its child before the steps of the body
+  returned: then it has the end that the child reports, status ERROR and
+  `error.type` = `TASK_TIMEOUT`, and what the body returned is not on it. A
+  shared thread run fixes that order when its steps return, so its span
+  and its end agree. The end that the worker decides for an isolated
+  timeout, a kill or a lost child is not on the span of the child.
 - **`AppConfig.log_format` and `TaskContextFilter`.** `log_format` takes
   `TextLogs()` (the default) or `JsonLogs()`: one JSON object per line with
   the keys `ts`, `level`, `logger`, `message`, `process`, `task_id`,
@@ -95,6 +113,60 @@ before you upgrade a 0.7 deployment.
   each record (`None` outside a task body); the horsies handler has it, and
   a handler of your own takes it, with `JsonLogsFormatter` for the JSON
   lines.
+
+- **Event handlers: `@app.on_event(EventType)`.** It registers a `def` or an
+  `async def` function for one event type of the new module
+  `horsies.telemetry` (`TaskClaimed`, `ClaimReleased`, `AttemptPlaced`,
+  `AttemptNotStarted`, `AttemptEnded`, `AttemptRecorded`, `TaskRecovered`,
+  `ChildStarted`, `ChildReplaced`, `SlotDown`, `SlotRecovered`). A worker
+  runs the handlers in its handler child, a process apart from the task
+  children: one thread and one queue of 10,000 events per handler, an
+  `async def` handler on the event loop of its thread. A full queue drops
+  the event for that handler only; a handler that raises is logged with its
+  name and counted, and gets the next event. The worker counts
+  `horsies.telemetry.handler.errors{handler}` and
+  `horsies.telemetry.handler.dropped{handler}`; the handler name is
+  `module.qualname` of the function. The decorator refuses a value that is
+  not an event type (`HRS-222`, new `EVENT_HANDLER_UNKNOWN_EVENT_TYPE`), a
+  handler that cannot take one event (`HRS-223`, new
+  `EVENT_HANDLER_INVALID_SIGNATURE`), a name that an earlier handler has
+  (`HRS-224`, new `EVENT_HANDLER_DUPLICATE_NAME`), a function with no module
+  name or a name over 255 characters (`HRS-225`, new
+  `EVENT_HANDLER_INVALID_NAME`), and a 33rd handler (`HRS-226`, new
+  `EVENT_HANDLER_LIMIT`). `@app.on_handler_child_start` registers a sync
+  hook that runs once at the boot of the handler child, for at most 10 s; a
+  hook that raises or runs longer leaves the handler child down, and the
+  worker runs its tasks on (`HRS-214` for an async hook).
+
+- **Spans of the attempts that the worker ended.** With `OtelTracing()`,
+  the handler child of a worker makes the span of each attempt that the
+  worker ended itself: an isolated task killed at its timeout
+  (`TASK_TIMEOUT`), a shared async child killed for a blocked loop
+  (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`), and a child lost with its
+  exit seen (`WORKER_CRASHED`). The child of such an attempt is gone, so its
+  own span never ends. A shared run that its child ended at its deadline
+  is an end that the child reported (`AttemptEndReportedByChild` with the
+  new `ChildResultTimedOut`): the span of the child is the span of the
+  attempt, with the timeout, and the handler child makes none, so one
+  attempt has one span. `AttemptEndDecidedByWorker` has no `start`: the
+  worker decides only ends with no result frame of the child. The span is `run <task_name>` of kind CONSUMER under
+  the span that sent the task, from the time the task reached its child to
+  the time the end reached the worker, with status ERROR, `error.type` = the
+  code, the attributes of the span of a child and
+  `horsies.span.source = "worker"`. For a workflow task the handler child
+  reads the node by the task id, with one read of the core bounded at 1 s
+  for a connection and 1 s for the statement, only for such an attempt, and
+  the span gets `horsies.workflow.id`, `horsies.workflow.node` and
+  `horsies.workflow.root_id`. The read runs on one reader thread with a
+  queue of at most 1,000 spans, so it never holds an event. A read that
+  fails, a full queue, and a span still queued at the stop leave the
+  workflow attributes out; the new worker metric
+  `horsies.spans.worker_ended.read_failures{reason="read_failed"|"not_read"}`
+  counts them, and the handler child logs them.
+  `OtelTracing(worker_ended_spans=...)` takes the new `WorkerEndedSpans`:
+  `MAKE_SPANS` (the default), with which the worker starts its handler child
+  also when the app has no handler, or `NO_SPANS`. Set the tracer provider
+  in `@app.on_handler_child_start`.
 
 - **The trace id on the monitoring reads.** `LeafTaskInfo.trace_id` (the
   task detail and the workflow node detail) is the trace id of the span that
@@ -179,6 +251,16 @@ before you upgrade a 0.7 deployment.
   of the handler child (`off`, `starting`, `up`, `down`) of the worker.
   The fleet metric `horsies.fleet.workers.telemetry_down{part}` counts the
   live workers whose latest snapshot has a part `down`.
+- **The memory of the task children in each worker snapshot.** The worker
+  keeps the last RSS reading of each task child: its ready frame, then each
+  result frame. Each snapshot writes their sum to `children_memory_mb`
+  (MiB, two decimals) and sets
+  `horsies.worker.memory.rss{process="children"}` to the same sum in bytes.
+  A child whose last reading is unreadable is not in the sum: the
+  `children_rss` member of `telemetry` names it
+  (`{"unreadable": [{"slot", "kind", "pid"}]}`). With no readable reading
+  the column is `NULL` and the gauge keeps its last value. A replaced
+  child's reading leaves the sum with it.
 
 ### Changed
 
@@ -1630,7 +1712,10 @@ unless it starts with "Added".
   is one span of kind PRODUCER, `send <task_name>`, around every database
   call of the send, and a workflow start is one span
   `start <workflow_name>`; the send hands the core the carrier that the
-  propagator injects for that span, with its trace id. A send records
+  propagator injects for that span, with its trace id. A rerun
+  (`Horsies::rerun_task`, `rerun::rerun_task_in`) opens no span and hands
+  the core the carrier of the caller's current context, so the attempt
+  spans of the new task are children of the caller's span. A send records
   `horsies.task.sent` (task, queue, result `ok` or the send error code)
   and `horsies.task.send.duration` (queue). In a worker child each task
   body runs inside a `tracing` span `run <task_name>` of kind CONSUMER
@@ -1686,6 +1771,63 @@ unless it starts with "Added".
   1 when the config does not build a handle or the address does not bind.
   `horsies::web::router` serves `GET /metrics` too, behind the view
   verdict.
+- **Added: event handlers, `horsies::events`.** The module re-exports the
+  core's event types (`TaskClaimed`, `ClaimReleased`, `AttemptPlaced`,
+  `AttemptNotStarted`, `AttemptEnded`, `AttemptRecorded`, `TaskRecovered`,
+  `ChildStarted`, `ChildReplaced`, `SlotDown`, `SlotRecovered`) and their
+  value types. `Horsies::on_event::<E>(name, handler)` registers an async
+  handler of the events of type `E` (`AsyncFn(E) -> Result<(),
+  HandlerError>`), `on_event_blocking::<E>(name, handler)` a blocking one
+  (`Fn(E) -> Result<(), HandlerError>`). The worker manifest names each
+  handler and its type, so a worker of an app with a handler starts its
+  handler child: the binary in child mode, which runs each handler on a
+  thread of its own (an async handler on a current-thread runtime of that
+  thread) with a queue of `HANDLER_QUEUE_EVENTS` (10,000) events. A full
+  queue drops the event for that handler and counts it; a returned
+  `HandlerError` or a panic is counted and logged with the handler's name
+  (the first, then one line per `HANDLER_ERROR_LOG_EVERY`, 1,000), and the
+  handler takes its next event. The child reports the counts every
+  `HANDLER_STATS_INTERVAL` (5 s) in `horsies.telemetry.handler.errors` and
+  `horsies.telemetry.handler.dropped`, and at the stop gives the handlers
+  `HANDLER_DRAIN` (2 s) for their queues. A name is 1 to 255 characters,
+  not `(unknown)` and once per app; an app takes at most 32 handlers; a
+  refusal is a `HorsiesError` with the code of the same refusal of the
+  Python registration: `HRS-225` (`ErrorCode::EventHandlerInvalidName`)
+  for a name, `HRS-224` (`EventHandlerDuplicateName`) for a repeated name,
+  `HRS-226` (`EventHandlerLimit`) for a 33rd handler.
+  `Horsies::on_handler_child_start(hook)`
+  runs a hook once in each handler child before its handlers start, 10 s
+  per hook; a failure ends the handler child with exit code 173, and the
+  worker keeps it down and runs on. The hooks of `on_child_start` run in
+  task children only.
+- **Added: the span of an attempt that the worker ended** (feature
+  `otel`). The handler child of a worker makes the span of each attempt
+  that the worker ended itself: an isolated task killed at its timeout
+  (`TASK_TIMEOUT`), a shared async child killed for a blocked runtime
+  (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`), and a child lost with its
+  exit seen (`WORKER_CRASHED`). The task child of such an attempt is gone,
+  so its own span never ends. A shared run that its child ended at its
+  deadline is `AttemptEnd::ReportedByChild` with the new
+  `ChildResult::TimedOut`: the span of the child is the span of the
+  attempt, with `TASK_TIMEOUT`, and the handler child makes none.
+  `AttemptEnd::DecidedByWorker` has no `start`. The span is `run <task_name>` of kind
+  CONSUMER under the span that sent the task, with the global tracer
+  provider and propagator of the handler child, from the time the task
+  reached its child to the time the end reached the worker, with status ERROR, `error.type` = the code, the attributes of the span of a child and
+  `horsies.span.source = "worker"`. For a workflow task the handler child
+  reads the node by the task id through its producer pool, with one read of
+  the core bounded at 1 s for a connection and 1 s for the statement, only
+  for such an attempt, and the span gets the `horsies.workflow.*`
+  attributes. The read runs on one reader task with a queue of at most
+  1,000 spans (`NODE_READ_QUEUE_SPANS`), so it never holds an event. A
+  read that fails, a full queue, and a span still queued at the stop leave
+  the workflow attributes out; the new worker metric
+  `horsies.spans.worker_ended.read_failures{reason="read_failed"|"not_read"}`
+  counts them, and the handler child logs them. It is the default with
+  the feature: the worker then starts its handler child also when the app
+  has no handler.
+  `Horsies::set_worker_ended_spans(horsies::otel::WorkerEndedSpans::NoSpans)`
+  turns it off.
 
 ## [0.7.0] - 2026-11-15
 

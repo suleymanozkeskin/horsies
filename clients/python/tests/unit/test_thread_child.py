@@ -19,6 +19,7 @@ import pytest
 
 from horsies import _core as core
 from horsies.core.models.tasks import MIN_TASK_TIMEOUT_MS
+from horsies.core.telemetry.attempt_span import BodyEndOrder, BodyFirst, DeadlineFirst
 from horsies.core.worker import thread_child
 from horsies.core.worker.child_frames import (
     AttemptStart,
@@ -287,6 +288,77 @@ class TestRunTable:
                 rss=RssMb(5.0),
             ),
         ]
+
+    def test_a_body_that_ends_before_its_deadline_fixes_the_result(self) -> None:
+        """The steps return before the deadline: ``body_ended`` gives
+        ``BodyFirst`` (the order of the attempt span), and the deadline no
+        longer fires, also when the task returns past it."""
+        table, writer, clock = self._table()
+        frame = _frame(1)
+        table.add(frame, _thread_work(frame))
+        clock.now += 0.999
+
+        assert table.body_ended(1) == BodyFirst()
+        clock.now += 1.0
+        table._fire_due()
+        _ = table.returned(1, set_running(OK_END))
+        table.finish(1, RssMb(5.0))
+
+        assert writer.frames == [
+            SharedResultFrame(
+                dispatch=1,
+                task_id=_task_id(1),
+                end=OK_END,
+                started=StartReported(STARTED_AT),
+                rss=RssMb(5.0),
+            ),
+        ]
+
+    def test_a_body_that_ends_after_its_deadline_fired_is_the_timeout(self) -> None:
+        """The deadline fired first: ``body_ended`` gives ``DeadlineFirst``,
+        and the run ends with the timeout, the end of the attempt span."""
+        table, writer, clock = self._table()
+        frame = _frame(1)
+        table.add(frame, _thread_work(frame))
+        clock.now += 1.0
+        table._fire_due()
+
+        assert table.body_ended(1) == DeadlineFirst()
+        _ = table.returned(1, set_running(OK_END))
+        table.finish(1, RssMb(5.0))
+
+        assert [item.end for item in writer.frames if isinstance(item, SharedResultFrame)] == [
+            SeatTimedOut(),
+        ]
+
+    def test_a_body_past_its_deadline_that_the_thread_did_not_fire_keeps_its_result(
+        self,
+    ) -> None:
+        """The steps return at or past the deadline before the deadline
+        thread fired it: ``body_ended`` fires nothing, and the run keeps
+        what it returned."""
+        table, writer, clock = self._table()
+        frame = _frame(1)
+        table.add(frame, _thread_work(frame))
+        clock.now += 5.0
+
+        assert table.body_ended(1) == BodyFirst()
+        _ = table.returned(1, set_running(OK_END))
+        table.finish(1, RssMb(5.0))
+
+        assert [type(item) for item in writer.frames] == [SharedResultFrame]
+        assert [item.end for item in writer.frames if isinstance(item, SharedResultFrame)] == [
+            OK_END,
+        ]
+
+    def test_a_body_that_ends_twice_is_a_defect(self) -> None:
+        table, _writer, _clock = self._table()
+        frame = _frame(1)
+        table.add(frame, _thread_work(frame))
+        _ = table.body_ended(1)
+
+        with pytest.raises(AssertionError, match='ended its body twice'):
+            _ = table.body_ended(1)
 
     def test_an_ended_run_has_no_deadline_left(self) -> None:
         table, writer, clock = self._table()
@@ -564,13 +636,16 @@ class _Program:
     """Each run calls the behavior registered for its task name, and sets
     its row RUNNING, but a task named in ``not_running``. A task named in
     ``checks_start`` asks ``start_check`` first, as the RUNNING update does.
-    Each marker is recorded with its run, then calls ``marker``."""
+    A run that sets its row RUNNING records the order that ``body_end``
+    gives when its behavior returned, as the attempt span reads it. Each
+    marker is recorded with its run, then calls ``marker``."""
 
     def __init__(self, behaviors: dict[str, Callable[[], str]]) -> None:
         self._behaviors = behaviors
         self.threads: list[str] = []
         self.not_running: set[str] = set()
         self.checks_start: set[str] = set()
+        self.orders: dict[int, BodyEndOrder] = {}
         self.markers: list[int] = []
         self.marker: Callable[[], None] = lambda: None
         self._lock = threading.Lock()
@@ -580,6 +655,7 @@ class _Program:
         frame: core.SharedRunFrame,
         work: ThreadSeatWork,
         start_check: Callable[[], StartCheck],
+        body_end: Callable[[], BodyEndOrder],
     ) -> ThreadSeatReturn:
         _ = work
         if frame.task_name in self.checks_start:
@@ -593,6 +669,9 @@ class _Program:
         end = ResultEnvelope(self._behaviors[frame.task_name]())
         if frame.task_name in self.not_running:
             return StoppedBeforeRunning('CLAIM_LOST')
+        order = body_end()
+        with self._lock:
+            self.orders[frame.dispatch] = order
         return set_running(end)
 
     def mark_finalizing(self, frame: core.SharedRunFrame) -> MarkerDone:
@@ -751,6 +830,7 @@ class TestTheMarkerOfASeatThread:
         assert not any(isinstance(item, DeadlineFiredFrame) for item in writer.frames)
         assert writer.results()[0].end == ResultEnvelope('done')
         assert program.markers == [1]
+        assert program.orders == {1: BodyFirst()}
 
     def test_a_run_that_timed_out_writes_no_marker(
         self,
@@ -782,6 +862,7 @@ class TestTheMarkerOfASeatThread:
             'SharedResultFrame',
         ]
         assert writer.results()[0].end == SeatTimedOut()
+        assert program.orders == {1: DeadlineFirst()}
 
     def test_the_end_report_follows_the_marker(
         self,

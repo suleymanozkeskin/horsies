@@ -32,10 +32,11 @@ use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC
 use crate::core::lifecycle::OwnedClaim;
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
+use crate::events::AttemptStart;
 use crate::test_support::migrated_pool;
 use crate::test_support::sql::{self, TestListener, TestPool};
 use crate::worker::executor::protocol::{
-    FailureDetail, ProcessId, ResultEnvelopeText, RunEnd, StopReason, TaskTimeoutMs,
+    FailureDetail, ProcessId, ResultEnvelopeText, StopReason, TaskTimeoutMs,
 };
 use crate::worker::executor::supervisor::{
     ChildExit, ChildLost, LossCause, PartialFrame, ReapedExit,
@@ -532,7 +533,31 @@ fn writer(pool: &TestPool) -> OutcomeWriter {
 }
 
 fn stopped(reason: StopReason) -> AttemptEnd {
-    AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(reason))
+    AttemptEnd::StoppedBeforeRunning(reason)
+}
+
+/// The start that the reported ends of these tests carry. The writer does
+/// not read it.
+fn run_start() -> AttemptStart {
+    AttemptStart::Reported {
+        started_at: DateTime::<Utc>::UNIX_EPOCH,
+    }
+}
+
+/// The end of a run that reported `envelope`.
+fn reported_result(envelope: ResultEnvelopeText) -> AttemptEnd {
+    AttemptEnd::Result {
+        envelope,
+        start: run_start(),
+    }
+}
+
+/// The end of a run whose worker code failed with `detail`.
+fn worker_failure(detail: &str) -> AttemptEnd {
+    AttemptEnd::WorkerFailure {
+        detail: FailureDetail::cut(detail),
+        start: run_start(),
+    }
 }
 
 /// A queue of this test: `task_queue_<name>` stays within the 63-byte
@@ -672,7 +697,7 @@ async fn an_undecodable_result_fails_the_task_as_a_serialization_error_with_no_r
     let settled = writer(&pool)
         .settle(
             &claimed(task_id, &queue, generation, TaskKind::Plain),
-            AttemptEnd::Reported(RunEnd::Result(envelope)),
+            reported_result(envelope),
         )
         .await;
 
@@ -832,7 +857,7 @@ async fn a_plain_success_completes_in_the_fused_write_and_wakes_its_queue() {
     let settled = writer(&pool)
         .settle(
             &claimed(task_id, &queue, generation, TaskKind::Plain),
-            AttemptEnd::Reported(RunEnd::Result(ok_envelope(42))),
+            reported_result(ok_envelope(42)),
         )
         .await;
 
@@ -866,7 +891,7 @@ async fn a_workflow_success_completes_in_the_locked_write_and_finishes_its_node(
     let settled = writer(&pool)
         .settle(
             &claimed(task_id, &queue, generation, TaskKind::WorkflowTask),
-            AttemptEnd::Reported(RunEnd::Result(ok_envelope(7))),
+            reported_result(ok_envelope(7)),
         )
         .await;
 
@@ -914,34 +939,32 @@ fn row_ending_reports() -> Vec<(&'static str, Seed, AttemptEnd)> {
         (
             "plain-success",
             RUNNING_PLAIN,
-            AttemptEnd::Reported(RunEnd::Result(ok_envelope(42))),
+            reported_result(ok_envelope(42)),
         ),
         (
             "workflow-success",
             RUNNING_WORKFLOW_TASK,
-            AttemptEnd::Reported(RunEnd::Result(ok_envelope(42))),
+            reported_result(ok_envelope(42)),
         ),
         (
             "plain-worker-failure",
             RUNNING_PLAIN,
-            AttemptEnd::Reported(RunEnd::WorkerFailure(FailureDetail::cut("pool died"))),
+            worker_failure("pool died"),
         ),
         (
             "workflow-worker-failure",
             RUNNING_WORKFLOW_TASK,
-            AttemptEnd::Reported(RunEnd::WorkerFailure(FailureDetail::cut("pool died"))),
+            worker_failure("pool died"),
         ),
         (
             "undecodable",
             RUNNING_PLAIN,
-            AttemptEnd::Reported(RunEnd::Result(ResultEnvelopeText::new(
-                "{not an envelope".to_owned(),
-            ))),
+            reported_result(ResultEnvelopeText::new("{not an envelope".to_owned())),
         ),
         (
             "refused-retry",
             RUNNING_PLAIN,
-            AttemptEnd::Reported(RunEnd::Result(error_envelope(&error))),
+            reported_result(error_envelope(&error)),
         ),
     ]
 }
@@ -1232,6 +1255,7 @@ async fn a_timed_out_attempt_stores_its_reason() {
         timeout: TaskTimeoutMs::new(1_000).expect("1 s is a valid task timeout"),
         retry: RetryPlacement::SameClass,
         cancel: TimeoutCancel::NoSignal,
+        seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
     };
 
     let (facts, attempts) = settle_on_a_running_row(end).await;

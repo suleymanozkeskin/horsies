@@ -1,0 +1,145 @@
+version 6
+
+event TaskClaimed
+  at: Time
+  task_id: Uuid
+  task_name: Text(255)
+  queue: Text(52)
+  execution: Execution
+  attempt: WholeNumber(1..=2147483648)
+  priority: WholeNumber(1..=100)
+  queue_wait: Duration
+
+event ClaimReleased
+  at: Time
+  task_id: Uuid
+  task_name: Text(255)
+  queue: Text(52)
+  reason: ReleaseReason
+
+event AttemptPlaced
+  at: Time
+  task_id: Uuid
+  task_name: Text(255)
+  queue: Text(52)
+  execution: Execution
+  attempt: WholeNumber(1..=2147483648)
+  child_kind: Execution
+  child_pid: WholeNumber(1..=2147483647)
+  slot_wait: Duration
+
+event AttemptNotStarted
+  at: Time
+  task_id: Uuid
+  task_name: Text(255)
+  queue: Text(52)
+  attempt: WholeNumber(1..=2147483648)
+  reason: StopReason
+
+event AttemptEnded
+  at: Time
+  task_id: Uuid
+  task_name: Text(255)
+  queue: Text(52)
+  execution: Execution
+  attempt: WholeNumber(1..=2147483648)
+  end: AttemptEnd
+  run_duration: Duration
+
+event AttemptRecorded
+  at: Time
+  task_id: Uuid
+  task_name: Text(255)
+  queue: Text(52)
+  attempt: WholeNumber(1..=2147483648)
+  record: AttemptRecord
+  record_duration: Duration
+
+event TaskRecovered
+  at: Time
+  task_id: Uuid
+  task_name: Text(255)
+  queue: Text(52)
+  action: RecoveryAction
+
+event ChildStarted
+  at: Time
+  child_kind: Execution
+  slot: WholeNumber(0..=3071)
+  child_pid: WholeNumber(1..=2147483647)
+  boot_duration: Duration
+
+event ChildReplaced
+  at: Time
+  child_kind: Execution
+  slot: WholeNumber(0..=3071)
+  child_pid: WholeNumber(1..=2147483647)
+  reason: ReplaceReason
+
+event SlotDown
+  at: Time
+  child_kind: Execution
+  slot: WholeNumber(0..=3071)
+  cause: SlotDownCause
+
+event SlotRecovered
+  at: Time
+  child_kind: Execution
+  slot: WholeNumber(0..=3071)
+
+choice Execution: ISOLATED | SHARED_ASYNC | SHARED_THREAD
+
+choice StopReason: CLAIM_LOST | OWNERSHIP_UNCONFIRMED | WORKFLOW_STOPPED | TASK_EXPIRED | NODE_NOT_LINKED | ORPHAN_CANCELLED
+
+choice ShortageErrno: EMFILE | ENFILE | ENOMEM | EAGAIN
+
+choice ReleaseReason: POOL_STOPPING | POOL_FAILED | QUEUE_FULL | NO_CHILD_OF_ITS_KIND | RUNNER_BEATS_FAILED_CLOSED | HELD_FOR_QUEUE_CAP | WORKFLOW_NOT_RUNNABLE | RETURNED_AS_ISOLATED
+
+variants AttemptErrorCode
+  BuiltIn(code: Codes(BuiltInTaskCode))
+  User(code: Text(128))
+  UserOverBound
+
+variants ChildResult
+  Completed
+  Failed(error_code: AttemptErrorCode)
+  WorkerFailure
+  TimedOut
+
+variants AttemptStart
+  Reported(started_at: Time)
+  NotReported
+
+choice WorkerDecision: TIMED_OUT | TASK_BLOCKED_LOOP | NEIGHBOUR_BLOCKED_LOOP | CHILD_LOST
+
+variants RunTrace
+  Carrier(text: Text(2048))
+  NoCarrier
+
+choice WorkflowPlace: NOT_IN_WORKFLOW | WORKFLOW_NOT_KNOWN
+
+variants AttemptEnd
+  ReportedByChild(result: ChildResult, start: AttemptStart)
+  DecidedByWorker(reason: WorkerDecision, internal error_code: Codes(BuiltInTaskCode), internal trace: RunTrace, internal placed_at: Time, internal child_kind: Execution, internal worker_id: Text(255), internal workflow: WorkflowPlace)
+  NotKnown(child_pid: WholeNumber(1..=2147483647))
+
+variants AttemptRecord
+  Completed
+  Failed
+  RetryScheduled(retry_count: WholeNumber(1..=2147483647), next_retry_at: Time)
+  ClaimReleased
+  NothingOwed
+  NotHeld
+  LeftToRecovery
+  RetriesExhausted
+  WriteFailed
+
+choice RecoveryAction: RUNNING_FAILED | RUNNING_RETRIED | CLAIM_REQUEUED | ORPHAN_CANCELLED | PENDING_EXPIRED
+
+choice ReplaceReason: CHILD_DIED | CHANNEL_LOST | PROTOCOL_VIOLATION | PROTOCOL_MISMATCH | KILLED_BY_PARENT | SLOT_DEFECT | SPAWNER_STOPPED | TASK_COUNT | MEMORY_LIMIT | SECOND_CANCEL | LOOP_BLOCKED | LEFTOVER_WORK | AT_DEADLINE | CORE_STOPPED
+
+variants SlotDownCause
+  ResourceShortage(errno: ShortageErrno)
+  ThreadStartRefused
+
+codes BuiltInTaskCode: OperationalErrorCode | ContractCode | RetrievalCode | OutcomeCode

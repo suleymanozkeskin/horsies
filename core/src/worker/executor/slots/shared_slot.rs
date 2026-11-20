@@ -327,7 +327,7 @@ async fn serve_step(pool: &SharedPoolShared, local: usize, generation: &mut Gene
         ended => return ended,
     }
     match next_event(pool, local, generation).await {
-        SlotEvent::Frame(wait) => on_wait(pool, generation, wait).await,
+        SlotEvent::Frame(wait) => on_wait(pool, local, generation, wait).await,
         SlotEvent::Wake => Flow::Continue,
         SlotEvent::PoolStopping => {
             generation.service.close_for_pool_stop();
@@ -613,10 +613,15 @@ fn finish(seat: SeatRun<RunHold>, end: AttemptEnd) {
 // Frames
 // ---------------------------------------------------------------------------
 
-/// Act on what the wait for a frame gave.
-async fn on_wait(pool: &SharedPoolShared, generation: &mut Generation, wait: FrameWait) -> Flow {
+/// Act on what the wait for a frame gave, for the slot `local` of `pool`.
+async fn on_wait(
+    pool: &SharedPoolShared,
+    local: usize,
+    generation: &mut Generation,
+    wait: FrameWait,
+) -> Flow {
     match wait {
-        FrameWait::Frame(frame) => match on_frame(pool, generation, frame).await {
+        FrameWait::Frame(frame) => match on_frame(pool, local, generation, frame).await {
             Ok(()) => Flow::Continue,
             Err(bad) => {
                 tracing::error!(
@@ -648,12 +653,13 @@ enum BadFrame {
 /// Apply one frame of the child to its runs.
 async fn on_frame(
     pool: &SharedPoolShared,
+    local: usize,
     generation: &mut Generation,
     frame: ChildFrame,
 ) -> Result<(), BadFrame> {
     let pid = generation.channel.pid().get();
     match frame {
-        ChildFrame::SharedResult(result) => on_result(pool, generation, result),
+        ChildFrame::SharedResult(result) => on_result(pool, local, generation, result),
         ChildFrame::DeadlineFired(run) => {
             let timeout = generation
                 .runs
@@ -727,15 +733,19 @@ async fn on_frame(
     }
 }
 
-/// A run ended: answer it, count it, note a child that ends itself, and
-/// close the child at a recycle limit.
+/// A run of the slot `local` ended: note the RSS of its frame on the board,
+/// answer it, count it, note a child that ends itself, and close the child
+/// at a recycle limit.
 fn on_result(
     pool: &SharedPoolShared,
+    local: usize,
     generation: &mut Generation,
     result: SharedResultFrame,
 ) -> Result<(), BadFrame> {
     let rss = result.rss;
     let child = result.child;
+    pool.board
+        .note_rss(pool.first + local, generation.channel.pid(), rss);
     let (seat, end) = generation
         .runs
         .end_run(result)

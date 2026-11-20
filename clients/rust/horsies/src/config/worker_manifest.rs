@@ -71,9 +71,13 @@ pub(crate) enum ChildLaunchRefused {
 /// - `profile`: the `--profile` value of the start.
 /// - `metrics_endpoint`: the `--metrics-listen` value of the start.
 /// - `child_launch`: from [`rust_child_launch`].
-/// - `handlers` and `worker_ended_spans`: the Rust client registers no
-///   event handler and makes no worker-ended span, so the worker starts no
-///   handler child (`NO_HANDLERS`, `NO_SPANS`).
+/// - `handlers`: the app's event handlers (`EventHandlerSet::manifest`):
+///   `NO_HANDLERS`, or the name and the event type of each handler. With a
+///   handler the worker starts its handler child.
+/// - `worker_ended_spans`: the app's switch (`Horsies::worker_ended_spans`):
+///   `MAKE_SPANS` by default with the feature `otel`, with which the worker
+///   starts its handler child also when the app has no handler; `NO_SPANS`
+///   without the feature.
 ///
 /// Errors: [`ManifestBoundRefused`] for the first value outside its
 /// manifest bound, in this order: the claim values (`prefetch_buffer`,
@@ -83,6 +87,8 @@ pub(crate) enum ChildLaunchRefused {
 pub(crate) fn worker_manifest(
     config: &AppConfig,
     tasks: &TaskRegistry,
+    handlers: wire::EventHandlers,
+    worker_ended_spans: wire::WorkerEndedSpans,
     profile: ProfileRequest,
     metrics_endpoint: wire::MetricsEndpoint,
     child_launch: wire::ChildLaunchManifest,
@@ -109,8 +115,8 @@ pub(crate) fn worker_manifest(
         resilience,
         payload,
         tasks: task_records(tasks),
-        handlers: wire::EventHandlers::NoHandlers,
-        worker_ended_spans: wire::WorkerEndedSpans::NoSpans,
+        handlers,
+        worker_ended_spans,
         child_launch,
     })
 }
@@ -735,6 +741,8 @@ mod tests {
         worker_manifest(
             config,
             &registry(),
+            wire::EventHandlers::NoHandlers,
+            wire::WorkerEndedSpans::NoSpans,
             named("web"),
             wire::MetricsEndpoint::NoMetricsEndpoint,
             launch(),
@@ -749,6 +757,8 @@ mod tests {
         let manifest = worker_manifest(
             &config(),
             &registry(),
+            wire::EventHandlers::NoHandlers,
+            wire::WorkerEndedSpans::NoSpans,
             named("web"),
             endpoint.clone(),
             launch(),

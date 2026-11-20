@@ -57,6 +57,7 @@ class TestReaperRegistersDeclaredClasses:
             profile=None,
             metrics_endpoint=wire.MetricsEndpointNoMetricsEndpoint(),
             tasks={},
+            handlers=(),
             child_launch=launch,
             idempotency_reservation_window=timedelta(hours=24),
         )

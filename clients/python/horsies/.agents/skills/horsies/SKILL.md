@@ -15,7 +15,7 @@ reference files in this skill folder (open one only when the task needs it):
 |---|---|
 | `tasks.md` | `@app.task`, `TaskResult`, `send()`, `with_options()`, `RetryPolicy`, `ExceptionMapper`, serialization |
 | `workflows.md` | `WorkflowSpec`, `TaskNode`, `WorkflowHandle`, DAG construction, failure semantics |
-| `configs.md` | `AppConfig`, `PostgresConfig`, queues, recovery, recurring scheduling including `CronSchedule`, CLI commands |
+| `configs.md` | `AppConfig`, `PostgresConfig`, queues, recovery, recurring scheduling including `CronSchedule`, child hooks, event handlers (`@app.on_event`), CLI commands |
 | `monitoring.md` | `horsies.monitoring` query API, `cancel_task`, the `horsies[web]` dashboard, `create_monitoring_app`, `horsies web`, auth policies, schema states |
 
 All public symbols: `from horsies import <name>`
@@ -325,6 +325,12 @@ checking one variant. Eligibility is decided **at enqueue** by
 was not retained cannot be rerun. A `COMPLETED` source is not eligible.
 `RerunSourceAbsent.reason` is a `TaskAbsenceReason`: it says whether
 retention can explain that no record has the id (see `monitoring.md`).
+
+`app.rerun_task_async(connection, command, policy)` is the same rerun with
+the tracing setting of the app (blocking: `app.rerun_task` on a SQLAlchemy
+`Connection`). With `OtelTracing()` the new task stores the trace carrier of
+the caller's current context, so its attempts continue the caller's trace.
+The free `rerun_task` stores no carrier.
 
 ## Result Types
 

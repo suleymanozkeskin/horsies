@@ -322,6 +322,8 @@ class CoreHandle:
         """The info of one task. Installs the schema once per handle first; then reads only."""
     def task_info_async(self, task_id: uuid.UUID, *, include_result: bool, include_failed_reason: bool, include_attempts: bool) -> asyncio.Future[TaskInfoRecord | TaskInfoNotFound | BrokerOperationFailed | BrokerInvalidJsonPayload]:
         """The awaitable form of the method above."""
+    def task_workflow_node(self, task_id: uuid.UUID) -> TaskWorkflowNodeLinked | TaskWorkflowNodeNotLinked | BrokerOperationFailed:
+        """The workflow node that links one task. One bounded statement; no schema step."""
     def raw_result_record(self, task_id: uuid.UUID, *, timeout_ms: int | None) -> RawResultRecordRecord | RawResultAbsent | BrokerOperationFailed | BrokerInvalidJsonPayload | BrokerInvalidInput:
         """The result of one task, waiting up to timeout_ms (no limit for None) while it has not
         finished. Installs the schema once per handle first; then reads only. Bounded by the limit
@@ -524,8 +526,9 @@ class NoTraceCarrier:
 @final
 class TraceCarrier:
     """The carrier that the client's propagator injected for the span of a send or a
-    workflow start, and the 16-byte trace id of that span. The core checks its bounds at
-    the send; a carrier that breaks a bound is not stored and never fails the send.
+    workflow start, or for the current span of the caller of a rerun, and the 16-byte trace
+    id of that span. The core checks its bounds at the send; a carrier that breaks a bound
+    is not stored and never fails the send.
     """
     def __init__(self, carrier: dict[str, str], trace_id: bytes) -> None: ...
     @property
@@ -792,6 +795,24 @@ class RawResultAbsent:
 @final
 class TaskInfoNotFound:
     """Neither the live table nor the task history holds the task."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+
+
+@final
+class TaskWorkflowNodeLinked:
+    """The node at node_index of the workflow workflow_id links the task; root_workflow_id is the top-level workflow of its tree."""
+    @property
+    def workflow_id(self) -> uuid.UUID: ...
+    @property
+    def node_index(self) -> int: ...
+    @property
+    def root_workflow_id(self) -> uuid.UUID: ...
+
+
+@final
+class TaskWorkflowNodeNotLinked:
+    """No workflow node links the task now."""
     @property
     def task_id(self) -> uuid.UUID: ...
 
@@ -2509,9 +2530,10 @@ class PruneFailed:
 @final
 class RerunCommandRecord:
     """One rerun request: the source task id, the deadline of the new task (aware, or None
-    for no deadline) and the caller key. A naive deadline raises TypeError.
+    for no deadline), the caller key, and the trace that the new task stores (NoTraceCarrier,
+    or the TraceCarrier of the caller's current context). A naive deadline raises TypeError.
     """
-    def __init__(self, *, source_task_id: uuid.UUID, deadline: datetime.datetime | None, caller_key: str | None) -> None: ...
+    def __init__(self, *, source_task_id: uuid.UUID, deadline: datetime.datetime | None, caller_key: str | None, trace: NoTraceCarrier | TraceCarrier) -> None: ...
 
 
 @final
@@ -3100,7 +3122,7 @@ class HandlerStatsFrame:
     """The counts of each event handler of a handler child since it started, each name once,
     and its RSS.
     """
-    def __init__(self, *, handlers: list[HandlerCounts], rss_mb: float | Literal['UNREADABLE']) -> None: ...
+    def __init__(self, *, handlers: list[HandlerCounts], span_read_failed: int, span_not_read: int, rss_mb: float | Literal['UNREADABLE']) -> None: ...
 
 
 @final

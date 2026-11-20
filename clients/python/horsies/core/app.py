@@ -44,7 +44,20 @@ from horsies.core.exception_mapper import (
     validate_exception_mapper,
     validate_error_code_string,
 )
-from horsies.core.telemetry.send_telemetry import SendTelemetry, send_telemetry_of
+from horsies.core.telemetry.send_telemetry import (
+    SendTelemetry,
+    current_context_trace,
+    send_telemetry_of,
+)
+from horsies.core.history.rerun.operations import (
+    RerunEnqueuePolicy,
+    RerunOutcome,
+    RerunTask,
+    rerun_with_trace,
+    rerun_with_trace_async,
+)
+from sqlalchemy import Connection
+from sqlalchemy.ext.asyncio import AsyncConnection
 from horsies.core.declared_error_codes import (
     NO_ERROR_CODES,
     CodeRefusal,
@@ -121,6 +134,17 @@ from horsies._core import (
 from horsies.core.history.identity.keys import IDEMPOTENCY_WINDOW_DEFAULT
 from horsies.core.manifest import to_producer_manifest
 from horsies.core.worker_manifest import dump_worker_profiles
+from horsies._catalog.events import AnyEvent
+from horsies.core.event_handlers import (
+    EventHandler,
+    EventHandlerDecorator,
+    HandlerChildStartHook,
+    KnownEventType,
+    check_event_handler,
+    event_type_refusal_error,
+    handler_refusal_error,
+    known_event_type,
+)
 
 if TYPE_CHECKING:
     from horsies.core.task_decorator import (
@@ -451,6 +475,11 @@ class Horsies:
         # Hooks run once per shared async child, on its event loop, before it
         # takes its first task.
         self._shared_async_child_start_hooks: list[SharedAsyncChildStartHook] = []
+        # The event handlers, in registration order: the worker runs them in
+        # its handler child.
+        self._event_handlers: list[EventHandler] = []
+        # Hooks run once in the handler child, before its first event.
+        self._handler_child_start_hooks: list[HandlerChildStartHook] = []
 
         if os.getenv('HORSIES_CHILD_PROCESS') == '1':
             # Child processes re-run this on every recycle
@@ -595,6 +624,97 @@ class Horsies:
     def get_shared_async_child_start_hooks(self) -> list[SharedAsyncChildStartHook]:
         """Snapshot of registered shared async child start hooks, in order."""
         return list(self._shared_async_child_start_hooks)
+
+    def on_event[E: AnyEvent](self, event_type: type[E]) -> EventHandlerDecorator[E]:
+        """Register a handler of the events of `event_type`, one event type
+        of `horsies.telemetry`.
+
+        The decorated function is a `def` or an `async def` function that
+        takes one event of `event_type`. A worker of the app runs it in its
+        handler child, a process apart from the worker and from the task
+        children, on a thread and a bounded queue of its own; an `async def`
+        handler runs on the event loop of that thread. A handler that raises
+        is logged and counted, and a handler whose queue is full misses the
+        events that do not fit; neither touches the tasks of the worker.
+        The name of the handler is `module.qualname` of its function.
+
+        Raises:
+            ConfigurationError: `HRS-222` here, when `event_type` is not an
+                event type. When the decorator is applied: `HRS-223` for a
+                handler that cannot take the events, `HRS-224` for a name
+                that an earlier handler has, `HRS-225` for a name with no
+                module or over its bound, `HRS-226` past the most handlers
+                (`horsies.core.event_handlers`). Nothing is registered then.
+        """
+        match known_event_type(event_type):
+            case Ok(known):
+                return EventHandlerDecorator[E](known, self._register_event_handler)
+            case Err(refused):
+                raise event_type_refusal_error(refused)
+
+    def _register_event_handler(self, event_type: KnownEventType, handler: object) -> None:
+        """Register `handler` for `event_type` after the checks of
+        `check_event_handler`.
+
+        Raises:
+            ConfigurationError: the refusal (`handler_refusal_error`).
+        """
+        match check_event_handler(event_type, handler, self._event_handlers):
+            case Ok(registered):
+                self._event_handlers.append(registered)
+            case Err(refused):
+                raise handler_refusal_error(refused, handler=handler, event_type=event_type)
+
+    def get_event_handlers(self) -> tuple[EventHandler, ...]:
+        """The registered event handlers, in registration order."""
+        return tuple(self._event_handlers)
+
+    def on_handler_child_start(
+        self,
+        fn: HandlerChildStartHook,
+    ) -> HandlerChildStartHook:
+        """Register a hook that runs once in the handler child of a worker,
+        after the app imports and before the child takes its first event.
+
+        The hook is a sync function with no arguments. Hooks run in
+        registration order, each for at most 10 seconds, and again in each
+        new handler child, so bodies must be idempotent. Set the
+        OpenTelemetry SDK of the handler child here, or build a client that
+        the handlers share.
+
+        A hook that raises or runs longer ends the handler child: it stays
+        down until the worker restarts, and the worker runs its tasks on. The
+        `on_child_process_start` hooks do not run in the handler child.
+
+        Raises:
+            ConfigurationError: `HRS-214` for a value that is not callable
+                or for an `async def` function.
+        """
+        if not callable(fn):
+            raise ConfigurationError(
+                message='on_handler_child_start requires a callable',
+                code=ErrorCode.CONFIG_INVALID_CHILD_HOOK,
+                notes=[f'got {type(fn).__name__!r}'],
+                help_text='register a zero-argument sync function',
+            )
+        if inspect.iscoroutinefunction(fn):
+            raise ConfigurationError(
+                message='on_handler_child_start hooks must be sync',
+                code=ErrorCode.CONFIG_INVALID_CHILD_HOOK,
+                notes=[
+                    f"hook '{getattr(fn, '__name__', repr(fn))}' is an async function",
+                    'the hook runs at the boot of the handler child, before any '
+                    'event loop exists',
+                ],
+                help_text='use a sync function',
+            )
+        if all(existing is not fn for existing in self._handler_child_start_hooks):
+            self._handler_child_start_hooks.append(fn)
+        return fn
+
+    def get_handler_child_start_hooks(self) -> list[HandlerChildStartHook]:
+        """Snapshot of registered handler child start hooks, in order."""
+        return list(self._handler_child_start_hooks)
 
     def get_valid_queue_names(self) -> list[str]:
         """Get list of valid queue names based on configuration"""
@@ -1632,6 +1752,48 @@ class Horsies:
         `NoSendTelemetry`, or `OtelSendTelemetry` with its recorder
         (`horsies.core.telemetry.send_telemetry`). Pure."""
         return self._send_telemetry
+
+    async def rerun_task_async(
+        self,
+        connection: AsyncConnection,
+        command: RerunTask,
+        policy: RerunEnqueuePolicy,
+    ) -> RerunOutcome:
+        """``horsies.rerun_task`` with the tracing setting of this app: the
+        same statements on ``connection``, in its transaction, with the same
+        outcomes and errors. It does not commit.
+
+        With ``OtelTracing`` the new task stores the carrier that the
+        configured propagator injects for the caller's current context, with
+        the trace id of its span, so the attempts of the new task are
+        children of the caller's span. The rerun opens no span and records no
+        metric. With no valid span in the current context, or with
+        ``NoTracing``, the new task stores no carrier; ``NoTracing`` imports
+        no ``opentelemetry`` module. A failure of the user's OpenTelemetry
+        SDK never changes the outcome of the rerun.
+        """
+        return await rerun_with_trace_async(
+            connection,
+            command,
+            policy,
+            current_context_trace(self._send_telemetry),
+        )
+
+    def rerun_task(
+        self,
+        connection: Connection,
+        command: RerunTask,
+        policy: RerunEnqueuePolicy,
+    ) -> RerunOutcome:
+        """``rerun_task_async`` on a blocking SQLAlchemy ``Connection`` of the
+        caller: the same statements in its transaction, the same trace
+        carrier, outcomes and errors. It does not commit."""
+        return rerun_with_trace(
+            connection,
+            command,
+            policy,
+            current_context_trace(self._send_telemetry),
+        )
 
     def get_broker(self) -> 'PostgresBroker':
         """Get the configured PostgreSQL broker for this app.

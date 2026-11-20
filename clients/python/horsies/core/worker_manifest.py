@@ -6,9 +6,10 @@ horsies-core, `clients/python/horsies/_catalog/worker_manifest.py`). It maps eve
 profile, the database settings, the queue and claim settings, the recovery,
 retention, resilience and payload settings, the facts of each registered
 task (its execution class and its declared error codes) and the child
-launch. It does not pick the profile: the core checks the profile
-set and picks the requested profile, so each client sends the set and the
-`--profile` value as they are.
+launch, the event handlers of the app, and the worker-ended span switch of
+its tracing setting. It does not pick the profile: the core checks the
+profile set and picks the requested profile, so each client sends the set
+and the `--profile` value as they are.
 
 AppConfig validation refuses every user error first, the values above a
 bound of the worker manifest included (`prefetch_buffer`, the claim lease,
@@ -52,6 +53,12 @@ from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.models.tasks import Execution
+from horsies.core.models.tracing import (
+    NoTracing,
+    OtelTracing,
+    WorkerEndedSpans,
+    worker_ended_spans_of,
+)
 from horsies.core.models.worker_profile import (
     ExecutorThreads,
     ExecutorThreadsFromSeats,
@@ -72,6 +79,7 @@ from horsies.core.models.worker_profile import (
     WorkerProfile,
 )
 from horsies.core.types.result import Err, Ok, Result
+from horsies.core.worker.child_frames import MAX_EVENT_HANDLERS, MAX_HANDLER_NAME_CHARS
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.cpu_placement import ParentCpu
 
@@ -96,12 +104,23 @@ class TaskFacts:
     error_codes: tuple[str, ...]
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class HandlerFacts:
+    """The facts of one registered event handler that the worker manifest
+    carries: its name (`module.qualname`) and the event type that it takes.
+    `Horsies.on_event` checked both (`check_event_handler`)."""
+
+    name: str
+    event_type: wire.EventTypeName
+
+
 def to_worker_manifest(
     config: AppConfig,
     *,
     profile: str | None,
     metrics_endpoint: wire.MetricsEndpoint,
     tasks: Mapping[str, TaskFacts],
+    handlers: Sequence[HandlerFacts],
     child_launch: wire.ChildLaunchManifest,
     idempotency_reservation_window: timedelta,
 ) -> wire.WorkerManifest:
@@ -110,14 +129,16 @@ def to_worker_manifest(
     Pure: no I/O. `profile` is the `--profile` value (`None` when the option
     was not passed); `metrics_endpoint` is the `--metrics-listen` value
     (`MetricsEndpointNoMetricsEndpoint` when the option was not passed);
-    `tasks` holds the facts of each registered task by
-    name; `child_launch` comes from `python_child_launch`; the window is
-    one that `validate_reservation_window` accepted. `config` passed
-    AppConfig validation, which keeps every value within its manifest bound;
-    a value above it fails an assertion (`worker_claim_manifest`,
-    `payload_manifest`). The app registers no event handler and the
-    tracing setting makes no worker-ended span, so the worker starts no
-    handler child (`NO_HANDLERS`, `NO_SPANS`).
+    `tasks` holds the facts of each registered task by name; `handlers`
+    holds the facts of each event handler, in registration order
+    (`handlers_manifest`); `child_launch` comes from `python_child_launch`;
+    the window is one that `validate_reservation_window` accepted. `config`
+    passed AppConfig validation, which keeps every value within its
+    manifest bound; a value above it fails an assertion
+    (`worker_claim_manifest`, `payload_manifest`). `worker_ended_spans`
+    comes from the tracing setting (`worker_ended_spans_manifest`): with
+    `MAKE_SPANS` the worker starts its handler child also when the app has
+    no handler.
     """
     return wire.WorkerManifest(
         manifest_version=wire.MANIFEST_VERSION,
@@ -140,8 +161,8 @@ def to_worker_manifest(
         resilience=resilience_manifest(config.resilience),
         payload=payload_manifest(config.payload),
         tasks={name: task_manifest(facts) for name, facts in tasks.items()},
-        handlers=wire.EventHandlersNoHandlers(),
-        worker_ended_spans='NO_SPANS',
+        handlers=handlers_manifest(handlers),
+        worker_ended_spans=worker_ended_spans_manifest(config.tracing),
         child_launch=child_launch,
     )
 
@@ -153,6 +174,46 @@ def task_manifest(facts: TaskFacts) -> wire.TaskManifest:
         execution=execution_of(facts.execution),
         error_codes=facts.error_codes,
     )
+
+
+def worker_ended_spans_manifest(tracing: OtelTracing | NoTracing) -> wire.WorkerEndedSpans:
+    """The `worker_ended_spans` field of the manifest: `MAKE_SPANS` for
+    `OtelTracing(worker_ended_spans=WorkerEndedSpans.MAKE_SPANS)`, the
+    default of `OtelTracing`; `NO_SPANS` for `NoTracing` and for
+    `WorkerEndedSpans.NO_SPANS`. Pure."""
+    match worker_ended_spans_of(tracing):
+        case WorkerEndedSpans.MAKE_SPANS:
+            return 'MAKE_SPANS'
+        case WorkerEndedSpans.NO_SPANS:
+            return 'NO_SPANS'
+
+
+def handlers_manifest(handlers: Sequence[HandlerFacts]) -> wire.EventHandlers:
+    """The event handlers of the manifest: `NO_HANDLERS` for none, else
+    `HANDLERS` with each handler in the order of `handlers`. Pure.
+
+    `Horsies.on_event` keeps at most `MAX_EVENT_HANDLERS` handlers, each name
+    once and within `MAX_HANDLER_NAME_CHARS`; a list that breaks a bound is a
+    defect and fails an assertion.
+    """
+    names = [facts.name for facts in handlers]
+    assert len(names) <= MAX_EVENT_HANDLERS, (
+        f'handlers: {len(names)} handlers, above the bound {MAX_EVENT_HANDLERS}'
+    )
+    assert len(set(names)) == len(names), f'handlers: a name is repeated in {names}'
+    assert all(1 <= len(name) <= MAX_HANDLER_NAME_CHARS for name in names), (
+        f'handlers: a name is empty or above {MAX_HANDLER_NAME_CHARS} characters'
+    )
+    match handlers:
+        case []:
+            return wire.EventHandlersNoHandlers()
+        case _:
+            return wire.EventHandlersHandlers(
+                handlers=tuple(
+                    wire.HandlerManifest(name=facts.name, event_type=facts.event_type)
+                    for facts in handlers
+                ),
+            )
 
 
 def profile_request(profile: str | None) -> wire.ProfileRequest:

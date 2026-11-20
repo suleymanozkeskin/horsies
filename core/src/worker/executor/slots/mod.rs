@@ -38,6 +38,8 @@ mod attempt_points_tests;
 #[cfg(test)]
 mod boot_tests;
 #[cfg(test)]
+mod child_rss_tests;
+#[cfg(test)]
 mod claim_plan_tests;
 #[cfg(test)]
 mod exit_not_seen_tests;
@@ -95,8 +97,8 @@ mod timeout_order_tests;
 mod worker_children_tests;
 
 pub use board::{
-    ChildBaseline, ChildLayout, DownState, PoolBoard, PoolFailure, PoolHealth, ReadyChild,
-    SlotPhase, StartEnd,
+    ChildBaseline, ChildLayout, ChildRss, DownState, PoolBoard, PoolFailure, PoolHealth,
+    ReadyChild, SlotPhase, StartEnd,
 };
 pub use budgets::{
     isolated_capacity, shared_capacity, BudgetCapacity, FreeCapacity, PoolService,
@@ -109,7 +111,8 @@ pub use crate::broker::OrphanSelfHeal;
 pub use defects::{SlotDefect, SLOT_DEFECT_LIMIT};
 pub use dispatch::{
     AttemptEnd, AttemptLog, CancelEnd, Claimed, ClaimedTask, ExecutionClass, LoopKillCode,
-    NotRunCause, RetryFacts, Settlement, TaskKind, TerminalState, TimeoutCancel, WrittenEnd,
+    NotRunCause, RetryFacts, Settlement, TaskKind, TerminalState, TimeoutCancel, TimeoutSeen,
+    WrittenEnd,
 };
 #[cfg(test)]
 pub(crate) use outcome::test_successes;

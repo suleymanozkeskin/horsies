@@ -42,6 +42,8 @@ mod workflow;
 pub mod blocking;
 #[cfg(feature = "cli")]
 pub mod cli;
+// The lifecycle events of the worker, and the app's handlers of them.
+pub mod events;
 pub mod monitoring;
 #[cfg(feature = "otel")]
 pub mod otel;

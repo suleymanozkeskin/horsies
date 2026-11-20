@@ -20,30 +20,34 @@ use crate::core::task::execution::Execution;
 use crate::telemetry::worker::WorkerTelemetry;
 use crate::worker::children::ChildrenView;
 use crate::worker::config::WorkerConfig;
-use crate::worker::executor::handler_child::HandlerChildView;
+use crate::worker::executor::handler_child::{HandlerChildState, HandlerChildView};
 use crate::worker::executor::slots::{DownState, PoolService};
 use crate::worker::executor::supervisor::BootFailureCause;
-use crate::worker::metrics_endpoint::{telemetry_json, WorkerEndpoint};
+use crate::worker::metrics_endpoint::{telemetry_members, WorkerEndpoint};
 use crate::worker::recovery::ReaperHealth;
 
 mod gauge_facts;
 
 pub use gauge_facts::{
-    down_by_kind, seats_in_use_of, seats_of, ClassCounts, ParentRss, SeatsInUse,
+    children_rss_of, down_by_kind, seats_in_use_of, seats_of, ChildrenRss, ClassCounts, ParentRss,
+    SeatsInUse, UnreadableChild,
 };
 
 /// One worker snapshot. Every NOT NULL column of the baseline table is named
-/// (the baseline has no column defaults); `children_memory_mb` is left NULL:
-/// the core does not read the RSS of the children yet.
+/// (the baseline has no column defaults). `children_memory_mb` is the sum
+/// of the last RSS readings of the task children, NULL when no child read
+/// its size ([`ChildrenRss`]).
 const INSERT_WORKER_STATE_SQL: &str = "\
 INSERT INTO horsies_worker_states (
     worker_id, snapshot_at, hostname, pid, processes, max_claim_batch, max_claim_per_worker,
     cluster_wide_cap, queues, queue_priorities, queue_max_concurrency,
     recovery_config, tasks_running, tasks_claimed, memory_usage_mb,
-    memory_percent, cpu_percent, worker_started_at, slots_down, class_capacity, telemetry
+    memory_percent, cpu_percent, worker_started_at, slots_down, class_capacity, telemetry,
+    children_memory_mb
 ) VALUES (
     $1, NOW(), $2, $3, $4, $5, $6, $7, $8::text[], $9::jsonb, $10::jsonb,
-    $11::jsonb, $12, $13, $14, $15, $16, $17, $18::jsonb, $19::jsonb, $20::jsonb
+    $11::jsonb, $12, $13, $14, $15, $16, $17, $18::jsonb, $19::jsonb, $20::jsonb,
+    $21
 )";
 
 /// The JSON of the cause of a down slot (Python `boot_cause_json`). A slot
@@ -67,6 +71,54 @@ fn down_cause_json(slot: usize, cause: &BootFailureCause) -> serde_json::Value {
             panic!("slot {slot} is down for a cause that repeats: {cause}")
         }
     }
+}
+
+/// A size in MiB with two decimals, as the memory columns of a snapshot
+/// store it. Pure.
+fn two_decimals(mib: f64) -> f64 {
+    (mib * 100.0).round() / 100.0
+}
+
+/// The `children_memory_mb` column: the sum of the last RSS readings of the
+/// task children in MiB, with two decimals; NULL when no child read its
+/// size. Pure.
+pub fn children_memory_mb(children: &ChildrenRss) -> Option<f64> {
+    match children {
+        ChildrenRss::Summed { mib, .. } => Some(two_decimals(*mib)),
+        ChildrenRss::NoReadableChild { .. } => None,
+    }
+}
+
+/// The `children_rss` member of the `telemetry` column: each task child
+/// whose last RSS reading was unreadable, in slot order, with its slot, its
+/// kind and its pid. An empty list: each child that sent a reading read its
+/// size. Pure.
+pub fn children_rss_json(children: &ChildrenRss) -> serde_json::Value {
+    let unreadable: Vec<serde_json::Value> = children
+        .unreadable()
+        .iter()
+        .map(|child| {
+            serde_json::json!({
+                "slot": child.slot,
+                "kind": child.kind.as_str(),
+                "pid": child.pid.get(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "unreadable": unreadable })
+}
+
+/// The `telemetry` column of one snapshot: the members of the endpoint and
+/// of the handler child (`metrics_endpoint::telemetry_json`), and
+/// `children_rss` ([`children_rss_json`]). Pure.
+fn snapshot_telemetry_json(
+    endpoint: &WorkerEndpoint,
+    handler_child: &HandlerChildState,
+    children: &ChildrenRss,
+) -> serde_json::Value {
+    let mut members = telemetry_members(endpoint, handler_child);
+    let _absent = members.insert("children_rss".to_owned(), children_rss_json(children));
+    serde_json::Value::Object(members)
 }
 
 /// The `slots_down` column: each slot that is down, in slot order (Python
@@ -209,7 +261,7 @@ fn collect_resource_metrics(sys: &mut System, pid: Pid) -> ResourceMetrics {
 
         ResourceMetrics {
             parent_rss: ParentRss::Bytes(rss_bytes),
-            memory_usage_mb: Some((memory_mb * 100.0).round() / 100.0),
+            memory_usage_mb: Some(two_decimals(memory_mb)),
             memory_percent: Some((memory_percent * 100.0).round() / 100.0),
             cpu_percent: Some((cpu_percent * 100.0).round() / 100.0),
         }
@@ -281,6 +333,7 @@ static INSERT_WORKER_STATE: TypedStatement = TypedStatement::new(
         ParameterType::Jsonb,
         ParameterType::Jsonb,
         ParameterType::Jsonb,
+        ParameterType::Float8,
     ],
 );
 
@@ -355,6 +408,9 @@ struct ProcessRead {
     budgets: Vec<BudgetColumn>,
     /// The memory and CPU of the worker parent.
     resources: ResourceMetrics,
+    /// The last RSS reading of each task child: `children_memory_mb`, and
+    /// the `children_rss` member of `telemetry`.
+    children_rss: ChildrenRss,
 }
 
 impl SnapshotSource {
@@ -410,14 +466,17 @@ impl SnapshotSource {
             down_by_kind,
             budgets: budget_columns(&self.children.service()),
             resources: collect_resource_metrics(&mut self.sys, self.sys_pid),
+            children_rss: children_rss_of(&self.children.child_rss()),
         }
     }
 
-    /// Set the gauges of the slots and of the parent's memory from `read`.
+    /// Set the gauges of the slots and of the memory of the parent and of
+    /// the task children from `read`.
     fn record_process(&self, read: &ProcessRead) {
         self.telemetry
             .slots_read(seats_of(&read.budgets), read.down_by_kind);
         self.telemetry.parent_rss_read(read.resources.parent_rss);
+        self.telemetry.children_rss_read(&read.children_rss);
     }
 
     /// The `recovery_config` column: the recovery config, the two retention
@@ -505,9 +564,10 @@ async fn count_held_rows(
 /// session, under one `try`).
 ///
 /// The worker gauges get the values of this snapshot: the seats, the down
-/// slots and the parent's RSS from the read, before the count; the seats in
-/// use after the count, or no series when the count fails. The gauges are
-/// set before the insert: an insert that fails leaves them set.
+/// slots, the parent's RSS and the children's RSS from the read, before the
+/// count; the seats in use after the count, or no series when the count
+/// fails. The gauges are set before the insert: an insert that fails leaves
+/// them set.
 ///
 /// Errors: [`SnapshotFailure`].
 pub(crate) async fn write_snapshot(
@@ -529,7 +589,12 @@ pub(crate) async fn write_snapshot(
 
     let slots_down = slots_down_json(&read.down);
     let class_capacity = class_capacity_json(&read.budgets);
-    let telemetry = telemetry_json(&source.endpoint, &source.handler_child.state());
+    let telemetry = snapshot_telemetry_json(
+        &source.endpoint,
+        &source.handler_child.state(),
+        &read.children_rss,
+    );
+    let children_memory_mb = children_memory_mb(&read.children_rss);
     let metrics = read.resources;
     let recovery_value = source.recovery_value().await;
     let processes = source.claim_columns.processes as i32;
@@ -562,6 +627,7 @@ pub(crate) async fn write_snapshot(
         .value(&slots_down)
         .value(&class_capacity)
         .value(&telemetry)
+        .value(&children_memory_mb)
         .finish();
     log.log(&INSERT_WORKER_STATE);
     let _inserted = connection
@@ -787,6 +853,54 @@ mod tests {
         assert_eq!(
             slots_down_json(&isolated_children(2).down_slots()),
             serde_json::json!([])
+        );
+    }
+
+    /// `children_memory_mb` is the sum with two decimals, NULL with no
+    /// readable child; `children_rss` names each unreadable child, an empty
+    /// list otherwise.
+    #[test]
+    fn the_children_rss_columns_hold_the_sum_and_name_each_unreadable_child() {
+        use crate::worker::executor::protocol::ProcessId;
+
+        let unreadable = vec![UnreadableChild {
+            slot: 1,
+            kind: Execution::SharedAsync,
+            pid: ProcessId::new(102).unwrap(),
+        }];
+        let summed = ChildrenRss::Summed {
+            mib: 160.754,
+            unreadable: unreadable.clone(),
+        };
+        let none_read = ChildrenRss::NoReadableChild {
+            unreadable: Vec::new(),
+        };
+
+        assert_eq!(children_memory_mb(&summed), Some(160.75));
+        assert_eq!(children_memory_mb(&none_read), None);
+        assert_eq!(
+            children_rss_json(&summed),
+            serde_json::json!({
+                "unreadable": [{"slot": 1, "kind": "SHARED_ASYNC", "pid": 102}],
+            })
+        );
+        assert_eq!(
+            children_rss_json(&none_read),
+            serde_json::json!({ "unreadable": [] })
+        );
+        assert_eq!(
+            snapshot_telemetry_json(
+                &WorkerEndpoint::NoMetricsEndpoint,
+                &HandlerChildState::Off,
+                &ChildrenRss::NoReadableChild { unreadable },
+            ),
+            serde_json::json!({
+                "endpoint": { "state": "off" },
+                "handler_child": { "state": "off" },
+                "children_rss": {
+                    "unreadable": [{"slot": 1, "kind": "SHARED_ASYNC", "pid": 102}],
+                },
+            })
         );
     }
 
@@ -1166,12 +1280,14 @@ mod tests {
         );
         // No limit is stored resolved: the seats of the worker (#804).
         assert_eq!(max_claim_per_worker, 2);
-        // No `--metrics-listen` and no handler child: both are off.
+        // No `--metrics-listen` and no handler child: both are off. No child
+        // sent an unreadable RSS reading: `children_rss` names none.
         assert_eq!(
             telemetry,
             serde_json::json!({
                 "endpoint": { "state": "off" },
                 "handler_child": { "state": "off" },
+                "children_rss": { "unreadable": [] },
             })
         );
     }
@@ -1353,6 +1469,90 @@ mod tests {
         assert_eq!(
             (bytes / 1024.0 / 1024.0 * 100.0).round() / 100.0,
             memory_usage_mb
+        );
+    }
+
+    /// The last RSS reading of each task child reaches the snapshot: the sum
+    /// of the readable ones is `children_memory_mb` and the `children`
+    /// series of the memory gauge; an unreadable one is named in the
+    /// `children_rss` member of `telemetry`, not counted. A result frame
+    /// replaces the ready frame's reading; a slot that boots has none.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_snapshot_writes_the_children_rss_from_the_last_reading_of_each_child() {
+        use crate::telemetry::catalog::MetricId;
+        use crate::worker::executor::protocol::{ProcessId, RssMb, RssReading};
+        use crate::worker::executor::slots::ReadyChild;
+
+        let pool = crate::test_support::migrated_pool().await;
+        let worker_id = uuid::Uuid::new_v4().to_string();
+        let board = Arc::new(PoolBoard::new(ChildLayout {
+            isolated: 4,
+            shared_async: 0,
+            shared_thread: 0,
+        }));
+        let mib = |value: f64| RssReading::Mb(RssMb::new(value).unwrap());
+        let ready = |slot: usize, pid: u32, rss: RssReading| {
+            board.ready(
+                slot,
+                ReadyChild {
+                    pid: ProcessId::new(pid).unwrap(),
+                    rss,
+                },
+            );
+        };
+        ready(0, 101, mib(100.25));
+        ready(1, 102, RssReading::Unreadable);
+        ready(2, 103, mib(50.5));
+        board.note_rss(2, ProcessId::new(103).unwrap(), mib(60.5));
+        let children = ChildrenView::new(
+            Arc::clone(&board),
+            SeatsPerChild {
+                shared_async: 0,
+                shared_thread: 0,
+            },
+        );
+        let watched = crate::test_support::telemetry::WatchedTelemetry::new();
+        let control = crate::broker::pools::core_pool_for_test_url(pool.url());
+
+        let written = write_snapshot(
+            &control,
+            StatementLog::Off,
+            &mut isolated_source(&worker_id, children, 4, watched.telemetry.clone()),
+        )
+        .await;
+        let columns: (Option<f64>, serde_json::Value) = sql::query_as(
+            "SELECT children_memory_mb, telemetry
+             FROM horsies_worker_states WHERE worker_id = $1",
+        )
+        .bind(&worker_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the snapshot");
+        sql::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&pool)
+            .await
+            .expect("delete the snapshot");
+        control.close();
+
+        assert!(written.is_ok(), "{written:?}");
+        let (children_memory_mb, telemetry) = columns;
+        assert_eq!(children_memory_mb, Some(160.75));
+        assert_eq!(
+            telemetry["children_rss"],
+            serde_json::json!({
+                "unreadable": [{"slot": 1, "kind": "ISOLATED", "pid": 102}],
+            })
+        );
+        let rss = gauge_values(&watched.registry, MetricId::MemoryRss);
+        let children_series: Vec<&(Vec<String>, f64)> = rss
+            .iter()
+            .filter(|(labels, _)| *labels == vec!["children".to_owned()])
+            .collect();
+        assert_eq!(
+            children_series,
+            vec![&(vec!["children".to_owned()], 160.75 * 1_048_576.0)]
         );
     }
 

@@ -13,17 +13,20 @@ use chrono::Utc;
 use tokio::time::Instant;
 
 use super::{TelemetryOn, WorkerTelemetry};
-use crate::core::task::error::{error_code_label, OperationalErrorCode, TaskErrorCode};
+use crate::core::task::error::{
+    error_code_label, OperationalErrorCode, OutcomeCode, TaskErrorCode,
+};
 use crate::events::{
     self, AttemptEnded, AttemptErrorCode, AttemptNotStarted, AttemptRecord, AttemptRecorded,
-    AttemptStart, ChildResult, RetryCount, RunTrace, WorkerDecision,
+    AttemptStart, ChildResult, RetryCount, WorkerDecision, WorkerIdText, WorkflowPlace,
 };
 use crate::telemetry::declared::ErrorCodeValue;
 use crate::telemetry::labels::ReleaseReason;
 use crate::worker::executor::protocol::{ProcessId, StopReason};
 use crate::worker::executor::slots::outcome::{EndView, ResultRead, WriteStage};
 use crate::worker::executor::slots::{
-    ChildPlacement, ClaimedTask, LoopKillCode, Placed, Settlement, TerminalState, WrittenEnd,
+    ChildPlacement, ClaimedTask, LoopKillCode, Placed, Settlement, TaskKind, TerminalState,
+    TimeoutSeen, WrittenEnd,
 };
 use crate::TaskAttemptOutcome;
 
@@ -42,23 +45,24 @@ pub(crate) enum EndNoted {
     },
 }
 
-/// The start of a run that its child reported. The result frames of
-/// protocol version 2 carry no start time, so every reported run reads as
-/// `NotReported`. When the result frames carry `started_at`, this is the one
-/// place that takes it.
-fn reported_start() -> AttemptStart {
-    AttemptStart::NotReported
-}
-
 /// How a run that reached a child ended.
 #[derive(Debug, Clone, Copy)]
 enum RanEnd<'a> {
-    /// The child reported a result envelope.
-    Result(&'a ResultRead),
-    /// The worker code of the child failed.
-    WorkerFailure,
-    /// The worker ended the attempt.
-    Decided(WorkerDecision),
+    /// The child reported a result envelope, and the start `start` of the
+    /// attempt.
+    Result {
+        read: &'a ResultRead,
+        start: AttemptStart,
+    },
+    /// The worker code of the child failed; the child reported the start
+    /// `start`.
+    WorkerFailure { start: AttemptStart },
+    /// A shared child ended the run at its deadline and reported it, with
+    /// the start `start`: the span of the child covers the attempt.
+    TimedOutInChild { start: AttemptStart },
+    /// The worker ended the attempt for `reason` with no result frame of
+    /// the child: a kill or a lost child. The handler child makes its span.
+    Decided { reason: WorkerDecision },
     /// The child was killed and its exit was not seen.
     NotKnown(ProcessId),
 }
@@ -85,11 +89,22 @@ fn kind_of(end: EndView<'_>) -> EndKind<'_> {
     match end {
         EndView::NotDispatched(cause) => EndKind::NotDispatched(cause),
         EndView::StoppedBeforeRunning(reason) => EndKind::NotStarted(reason),
-        EndView::Result(read) => EndKind::Ran(RanEnd::Result(read)),
-        EndView::WorkerFailure => EndKind::Ran(RanEnd::WorkerFailure),
-        EndView::TimedOut => EndKind::Ran(RanEnd::Decided(WorkerDecision::TimedOut)),
-        EndView::KilledForLoop(code) => EndKind::Ran(RanEnd::Decided(loop_decision(code))),
-        EndView::Crashed => EndKind::Ran(RanEnd::Decided(WorkerDecision::ChildLost)),
+        EndView::Result { read, start } => EndKind::Ran(RanEnd::Result { read, start }),
+        EndView::WorkerFailure { start } => EndKind::Ran(RanEnd::WorkerFailure { start }),
+        EndView::TimedOut {
+            seen: TimeoutSeen::ReportedByChild { start },
+        } => EndKind::Ran(RanEnd::TimedOutInChild { start }),
+        EndView::TimedOut {
+            seen: TimeoutSeen::AtKill,
+        } => EndKind::Ran(RanEnd::Decided {
+            reason: WorkerDecision::TimedOut,
+        }),
+        EndView::KilledForLoop(code) => EndKind::Ran(RanEnd::Decided {
+            reason: loop_decision(code),
+        }),
+        EndView::Crashed => EndKind::Ran(RanEnd::Decided {
+            reason: WorkerDecision::ChildLost,
+        }),
         EndView::EndUnknown { pid } => EndKind::Ran(RanEnd::NotKnown(pid)),
     }
 }
@@ -99,21 +114,52 @@ fn built_in(code: OperationalErrorCode) -> TaskErrorCode {
     TaskErrorCode::BuiltIn(code.into())
 }
 
-/// How a run ended, as the event holds it.
-fn event_end(ran: RanEnd<'_>, trace: &RunTrace, placed: &Placed) -> events::AttemptEnd {
+/// What the worker knows of the workflow node of a task of `kind`. The
+/// claim reads whether a node links the task; the start write of the child
+/// reads the node, and only a reported end could carry it. Pure.
+fn workflow_place(kind: TaskKind) -> WorkflowPlace {
+    match kind {
+        TaskKind::Plain => WorkflowPlace::NotInWorkflow,
+        TaskKind::WorkflowTask => WorkflowPlace::WorkflowNotKnown,
+    }
+}
+
+/// How the run of `task` on the child of `placed` ended, as the event
+/// holds it. This decides which `AttemptEnded` asks the handler child for
+/// a worker-made span: only an end with no result frame of the child (a
+/// kill or a lost child), whose child exported no attempt span, is
+/// `DecidedByWorker`, with the facts of that span: the code, the stored
+/// carrier, the placement time, the child kind, the worker id `worker_id`
+/// and the workflow place. A timeout that a shared child reported is
+/// `ReportedByChild` with `ChildResult::TimedOut`: the span of the child
+/// is the span of the attempt, with the timeout. Pure.
+fn event_end(
+    ran: RanEnd<'_>,
+    task: &ClaimedTask,
+    placed: &Placed,
+    worker_id: &WorkerIdText,
+) -> events::AttemptEnd {
     match ran {
-        RanEnd::Result(read) => events::AttemptEnd::ReportedByChild {
+        RanEnd::Result { read, start } => events::AttemptEnd::ReportedByChild {
             result: child_result(read),
-            start: reported_start(),
+            start,
         },
-        RanEnd::WorkerFailure => events::AttemptEnd::ReportedByChild {
+        RanEnd::WorkerFailure { start } => events::AttemptEnd::ReportedByChild {
             result: ChildResult::WorkerFailure,
-            start: reported_start(),
+            start,
         },
-        RanEnd::Decided(reason) => events::AttemptEnd::DecidedByWorker {
+        RanEnd::TimedOutInChild { start } => events::AttemptEnd::ReportedByChild {
+            result: ChildResult::TimedOut,
+            start,
+        },
+        RanEnd::Decided { reason } => events::AttemptEnd::DecidedByWorker {
             reason,
-            trace: trace.clone(),
+            error_code: reason.error_code(),
+            trace: task.trace.clone(),
             placed_at: placed.wall,
+            child_kind: placed.child_kind,
+            worker_id: worker_id.clone(),
+            workflow: workflow_place(task.kind),
         },
         RanEnd::NotKnown(child_pid) => events::AttemptEnd::NotKnown { child_pid },
     }
@@ -279,18 +325,26 @@ impl TelemetryOn {
             RanOutcome::Known(TaskAttemptOutcome::Failed, self.code_label(task_name, code))
         };
         match ran {
-            RanEnd::Result(ResultRead::Value) => {
-                RanOutcome::Known(TaskAttemptOutcome::Completed, ErrorCodeValue::NO_ERROR_CODE)
-            }
-            RanEnd::Result(ResultRead::TaskError(code)) => failed(code),
-            RanEnd::Result(ResultRead::Unreadable) => {
-                failed(&built_in(OperationalErrorCode::WorkerSerializationError))
-            }
-            RanEnd::WorkerFailure => RanOutcome::Known(
+            RanEnd::Result {
+                read: ResultRead::Value,
+                ..
+            } => RanOutcome::Known(TaskAttemptOutcome::Completed, ErrorCodeValue::NO_ERROR_CODE),
+            RanEnd::Result {
+                read: ResultRead::TaskError(code),
+                ..
+            } => failed(code),
+            RanEnd::Result {
+                read: ResultRead::Unreadable,
+                ..
+            } => failed(&built_in(OperationalErrorCode::WorkerSerializationError)),
+            RanEnd::WorkerFailure { .. } => RanOutcome::Known(
                 TaskAttemptOutcome::WorkerFailure,
                 self.code_label(task_name, &built_in(OperationalErrorCode::BrokerError)),
             ),
-            RanEnd::Decided(reason) => failed(&TaskErrorCode::BuiltIn(reason.error_code())),
+            RanEnd::TimedOutInChild { .. } => {
+                failed(&TaskErrorCode::BuiltIn(OutcomeCode::TaskTimeout.into()))
+            }
+            RanEnd::Decided { reason } => failed(&TaskErrorCode::BuiltIn(reason.error_code())),
             RanEnd::NotKnown(_) => RanOutcome::NotKnown,
         }
     }
@@ -326,7 +380,7 @@ impl TelemetryOn {
             queue: events::QueueName::cut(&task.queue_name),
             execution: task.execution,
             attempt: task.retry.attempt(),
-            end: event_end(ran, &task.trace, placed),
+            end: event_end(ran, task, placed, &self.worker_id),
             run_duration,
         });
         EndNoted::Seen { seen, error_code }

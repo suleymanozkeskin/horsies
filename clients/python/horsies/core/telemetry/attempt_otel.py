@@ -22,10 +22,12 @@ This module imports `opentelemetry`. `attempt_spans_of` imports it only for
   workflow of its tree), as the start read them.
 - Status: unset when the envelope holds the task's value; ERROR with
   `error.type` = the error code when it holds a task error. The live
-  exception that the task error keeps is recorded on the span first. A body
-  that a refusal of the core ended, and an exception that left the steps,
-  set ERROR with `error.type` = the class name of the exception, which is
-  recorded.
+  exception that the task error keeps is recorded on the span first. A run
+  whose deadline came first in its child (a shared run, `RunTimedOut`) sets
+  ERROR with `error.type` = `TASK_TIMEOUT`, the code that the worker
+  records; what the body returned is not recorded. A body that a refusal
+  of the core ended, and an exception that left the steps, set ERROR with
+  `error.type` = the class name of the exception, which is recorded.
 
 The tracer and the propagator come from the global API at each use: a
 provider that the user sets in a start hook of the child is used. A flush
@@ -45,6 +47,7 @@ from opentelemetry.trace import Link, Span, SpanKind, Status, StatusCode, Tracer
 from opentelemetry.util.types import AttributeValue
 
 from horsies import __version__
+from horsies._catalog.task_codes import OutcomeCode
 from horsies.core.logging import NoSpanIds, SpanIds
 from horsies.core.models.tracing import ChildOfSend, LinkedToSend
 from horsies.core.telemetry.attempt_span import (
@@ -53,10 +56,11 @@ from horsies.core.telemetry.attempt_span import (
     FlushNotConfirmed,
     ProviderFlush,
     ProviderHasNoFlush,
+    RunTimedOut,
     ScopeRaised,
     SpansFlushed,
 )
-from horsies.core.worker.child_frames import NoTraceCarrier, StoredTraceCarrier
+from horsies.core.worker.child_frames import NoTraceCarrier, RunTrace, StoredTraceCarrier
 from horsies.core.worker.run_return import (
     BodyInterrupted,
     InWorkflow,
@@ -106,7 +110,7 @@ def otel_attempt_recorder(parentage: ChildOfSend | LinkedToSend) -> OtelAttemptR
     return OtelAttemptRecorder(
         tracer=trace.get_tracer(INSTRUMENTATION_SCOPE, __version__),
         parentage=parentage,
-        provider_flush=_global_provider_flush,
+        provider_flush=global_provider_flush,
     )
 
 
@@ -127,7 +131,7 @@ class OtelAttemptRecorder:
 
     def open(self, subject: AttemptSubject) -> OtelAttemptSpan:
         """Open the span of `subject` (see the module doc)."""
-        placed = place_attempt(_extracted(subject), self._parentage)
+        placed = place_attempt(context_of_trace(subject.trace), self._parentage)
         span = self._tracer.start_span(
             f'{RUN_OPERATION_NAME} {subject.task_name}',
             context=placed.parent,
@@ -142,7 +146,7 @@ class OtelAttemptRecorder:
         )
 
     def flush(self, timeout_millis: int) -> ProviderFlush:
-        """Flush the global tracer provider (`_global_provider_flush`)."""
+        """Flush the global tracer provider (`global_provider_flush`)."""
         return self._provider_flush(timeout_millis)
 
 
@@ -172,6 +176,8 @@ class OtelAttemptSpan:
             case ResultFailed(error_code=code, raised=raised):
                 record_raised(self.span, raised)
                 mark_error(self.span, code)
+            case RunTimedOut():
+                mark_error(self.span, OutcomeCode.TASK_TIMEOUT.value)
             case BodyInterrupted(refusal=exception) | ScopeRaised(exception=exception):
                 self.span.record_exception(exception)
                 mark_error(self.span, type(exception).__qualname__)
@@ -189,10 +195,11 @@ class PlacedAttempt:
     links: tuple[Link, ...]
 
 
-def _extracted(subject: AttemptSubject) -> Context:
-    """The context that the global propagator extracts from the carrier of
-    `subject`, into an empty context; an empty context with no carrier."""
-    match subject.trace:
+def context_of_trace(trace: RunTrace) -> Context:
+    """The context that the global propagator extracts from the stored
+    carrier `trace`, into an empty context; an empty context with no
+    carrier."""
+    match trace:
         case StoredTraceCarrier(carrier=carrier):
             return propagate.extract(dict(carrier), context=Context())
         case NoTraceCarrier():
@@ -223,18 +230,43 @@ def place_attempt(extracted: Context, parentage: ChildOfSend | LinkedToSend) -> 
 def attempt_attributes(subject: AttemptSubject) -> dict[str, AttributeValue]:
     """The attributes of the span of `subject`. Pure."""
     return {
+        **run_attributes(
+            task_id=subject.task_id,
+            task_name=subject.task_name,
+            queue_name=subject.queue_name,
+            attempt=subject.attempt,
+            execution=subject.execution.value,
+            worker_id=subject.worker_id,
+        ),
+        **workflow_attributes(subject.workflow),
+    }
+
+
+def run_attributes(
+    *,
+    task_id: str,
+    task_name: str,
+    queue_name: str,
+    attempt: int,
+    execution: str,
+    worker_id: str,
+) -> dict[str, AttributeValue]:
+    """The attributes of an attempt span besides its workflow attributes:
+    attempt `attempt` (from 1) of task `task_id`, of the queue `queue_name`,
+    in a child of the class `execution`, for the claim of `worker_id`. The
+    span of an attempt that the worker ended has the same set. Pure."""
+    return {
         MESSAGING_SYSTEM_KEY: MESSAGING_SYSTEM,
         MESSAGING_OPERATION_TYPE_KEY: PROCESS_OPERATION_TYPE,
         MESSAGING_OPERATION_NAME_KEY: RUN_OPERATION_NAME,
-        MESSAGING_MESSAGE_ID_KEY: subject.task_id,
-        MESSAGING_DESTINATION_NAME_KEY: subject.queue_name,
-        TASK_ID_KEY: subject.task_id,
-        TASK_NAME_KEY: subject.task_name,
-        TASK_ATTEMPT_KEY: subject.attempt,
-        TASK_EXECUTION_KEY: subject.execution.value,
-        QUEUE_KEY: subject.queue_name,
-        WORKER_ID_KEY: subject.worker_id,
-        **workflow_attributes(subject.workflow),
+        MESSAGING_MESSAGE_ID_KEY: task_id,
+        MESSAGING_DESTINATION_NAME_KEY: queue_name,
+        TASK_ID_KEY: task_id,
+        TASK_NAME_KEY: task_name,
+        TASK_ATTEMPT_KEY: attempt,
+        TASK_EXECUTION_KEY: execution,
+        QUEUE_KEY: queue_name,
+        WORKER_ID_KEY: worker_id,
     }
 
 
@@ -290,7 +322,7 @@ def mark_error(span: Span, error_type: str) -> None:
     span.set_status(Status(StatusCode.ERROR))
 
 
-def _global_provider_flush(timeout_millis: int) -> ProviderFlush:
+def global_provider_flush(timeout_millis: int) -> ProviderFlush:
     """`force_flush(timeout_millis)` of the global tracer provider. The API's
     own providers have none (`ProviderHasNoFlush`); the SDK's returns
     whether every span was exported. May raise or block: the caller bounds

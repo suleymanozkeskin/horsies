@@ -305,7 +305,12 @@ async fn a_shared_seat_reports_the_result_of_its_run() {
             Duration::from_secs(30)
         )
         .await,
-        AttemptEnd::Reported(RunEnd::Result(ok_envelope()))
+        AttemptEnd::Result {
+            envelope: ok_envelope(),
+            start: crate::events::AttemptStart::Reported {
+                started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            },
+        }
     );
 }
 
@@ -342,6 +347,11 @@ async fn a_stuck_async_run_ends_at_its_timeout_and_retries_isolated() {
             timeout: timeout(),
             retry: RetryPlacement::Isolated,
             cancel: TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace),
+            seen: crate::worker::executor::slots::TimeoutSeen::ReportedByChild {
+                start: crate::events::AttemptStart::Reported {
+                    started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+                }
+            },
         }
     );
 }
@@ -407,6 +417,7 @@ async fn a_thread_child_is_killed_once_no_run_has_time_left() {
             timeout: timeout(),
             retry: RetryPlacement::Isolated,
             cancel: TimeoutCancel::NoSignal,
+            seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
         }
     );
 }
@@ -427,6 +438,7 @@ async fn the_backstop_kills_a_frozen_child() {
             timeout: timeout(),
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::NoSignal,
+            seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
         }
     );
 }

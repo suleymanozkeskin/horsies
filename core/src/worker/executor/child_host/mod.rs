@@ -17,10 +17,21 @@
 //! A client that traces its task bodies gives the host a [`BodySpans`]: the
 //! host runs each body inside the `tracing` span that it opens for the run
 //! ([`BodyScope`]).
+//!
+//! The same binary serves the handler child of a worker: an init frame of
+//! the `handler` kind boots a child that runs the app's event handlers
+//! ([`EventHandlerSet`]) and no task. Each handler runs on a thread of its
+//! own with a bounded queue; a full queue drops and counts, and a handler
+//! that fails or panics is counted and logged with its name while the
+//! child lives. The child sends `handler_stats` frames every
+//! [`HANDLER_STATS_INTERVAL`].
 
 mod args;
 mod body_scope;
+mod ended_spans;
 mod handle_setup;
+mod handler_host;
+mod handlers;
 mod host;
 mod link;
 mod panic;
@@ -31,6 +42,10 @@ mod run;
 mod run_work;
 mod seats;
 
+#[cfg(test)]
+mod ended_spans_tests;
+#[cfg(test)]
+mod handler_tests;
 #[cfg(test)]
 pub(crate) mod in_process;
 #[cfg(test)]
@@ -44,7 +59,16 @@ mod tests;
 
 pub use args::{child_mode, ChildArgs, ChildArgsError, ChildMode, CHILD_MODE_ARGUMENT};
 pub use body_scope::{BodyCarrier, BodyOutcome, BodyRun, BodyScope, BodySpans};
+pub use ended_spans::{
+    EndedAttempt, EndedSpanMaker, EndedSpanScope, EndedWorkflow, NODE_READER_STOP_BOUND,
+    NODE_READ_QUEUE_SPANS,
+};
 pub use handle_setup::{child_handle_setup, ChildHandleSetup, HandlerChildHasNoHandle};
+pub use handlers::{
+    EventHandlerRefused, EventHandlerSet, HandlerChildApp, HandlerError, HANDLER_DRAIN,
+    HANDLER_ERROR_LOG_EVERY, HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS,
+    HANDLER_STATS_INTERVAL,
+};
 pub use host::{
     child_command, run_child_host, ChildApp, ChildHookFailure, ChildHostExit, ChildLogSetup,
     ChildStartFuture, ChildStartHook, NamedChildStartHook, CHILD_START_HOOK_BOUND,

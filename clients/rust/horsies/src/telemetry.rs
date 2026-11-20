@@ -10,20 +10,39 @@
 //!   producer metrics go to the user's global OpenTelemetry providers
 //!   (`horsies::otel`).
 //! - Without it, the client records no OpenTelemetry span and no metric: a
-//!   send and a start carry no trace carrier, and no OpenTelemetry crate is
-//!   compiled.
+//!   send, a start and a rerun carry no trace carrier, and no OpenTelemetry
+//!   crate is compiled.
 //!
-//! The send paths call the same three items in both builds: `TaskSendSpan`,
-//! `WorkflowStartSpan` and `body_scope`.
+//! The send paths call the same four items in both builds: `TaskSendSpan`,
+//! `WorkflowStartSpan`, `rerun_trace` and `body_scope`. The handler child calls
+//! `ended_span_scope` with the worker-ended span switch of the app, whose
+//! default is `DEFAULT_WORKER_ENDED_SPANS`.
 
+use horsies_core::worker_manifest::WorkerEndedSpans;
 use horsies_core::BodyRun;
 use uuid::Uuid;
 
 #[cfg(feature = "otel")]
-pub(crate) use crate::otel::{body_scope, TaskSendSpan, WorkflowStartSpan};
+pub(crate) use crate::otel::{
+    body_scope, ended_span_scope, rerun_trace, TaskSendSpan, WorkflowStartSpan,
+};
 
 #[cfg(not(feature = "otel"))]
-pub(crate) use untraced::{body_scope, TaskSendSpan, WorkflowStartSpan};
+pub(crate) use untraced::{
+    body_scope, ended_span_scope, rerun_trace, TaskSendSpan, WorkflowStartSpan,
+};
+
+/// The worker-ended span switch of a new app with the feature `otel`: the
+/// handler child makes the span of each attempt that the worker ended
+/// (`Horsies::set_worker_ended_spans` changes it).
+#[cfg(feature = "otel")]
+pub(crate) const DEFAULT_WORKER_ENDED_SPANS: WorkerEndedSpans = WorkerEndedSpans::MakeSpans;
+
+/// The worker-ended span switch of an app without the feature `otel`: no
+/// span, and no handler child for spans. No setter changes it in this
+/// build.
+#[cfg(not(feature = "otel"))]
+pub(crate) const DEFAULT_WORKER_ENDED_SPANS: WorkerEndedSpans = WorkerEndedSpans::NoSpans;
 
 /// The `tracing` target of the span of each task body. A filter of the
 /// binary's subscriber passes it at `INFO` so that every body has its span
@@ -98,8 +117,10 @@ mod untraced {
     use std::sync::Arc;
 
     use horsies_core::telemetry::trace_carrier::SendTrace;
+    use horsies_core::worker_manifest::WorkerEndedSpans;
     use horsies_core::{
-        BodyOutcome, BodyRun, BodyScope, BodySpans, TaskSendErrorCode, WorkflowStartErrorCode,
+        BodyOutcome, BodyRun, BodyScope, BodySpans, EndedSpanScope, TaskSendErrorCode,
+        WorkflowStartErrorCode,
     };
 
     use super::{body_span, CallEnd, TaskSendSubject, WorkflowStartSubject};
@@ -142,9 +163,23 @@ mod untraced {
         pub(crate) fn end(self, _end: CallEnd<WorkflowStartErrorCode>) {}
     }
 
+    /// A rerun carries no trace carrier.
+    pub(crate) fn rerun_trace() -> SendTrace {
+        SendTrace::NoCarrier
+    }
+
     /// A worker child runs each task body inside its [`body_span`].
     pub(crate) fn body_scope() -> BodyScope {
         BodyScope::Spans(Arc::new(BodyLogSpans))
+    }
+
+    /// The handler child of a client built without `otel` makes no span of
+    /// an attempt that the worker ended, for either value: there is no
+    /// tracer, and the switch of the app is `NoSpans` in this build.
+    pub(crate) fn ended_span_scope(spans: WorkerEndedSpans) -> EndedSpanScope {
+        match spans {
+            WorkerEndedSpans::NoSpans | WorkerEndedSpans::MakeSpans => EndedSpanScope::NoSpans,
+        }
     }
 
     /// The spans of the task bodies of a child built without `otel`: the
@@ -170,8 +205,21 @@ mod tests {
 
     use super::*;
 
+    /// Without the feature `otel` an app makes no worker-ended span: its
+    /// switch is `NoSpans`, so the worker starts no handler child for it, and
+    /// the handler child calls no client for either value.
     #[test]
-    fn without_the_otel_feature_a_send_and_a_start_carry_no_trace() {
+    fn without_the_otel_feature_no_worker_ended_span_is_made() {
+        use horsies_core::EndedSpanScope;
+
+        assert_eq!(DEFAULT_WORKER_ENDED_SPANS, WorkerEndedSpans::NoSpans);
+        for spans in [WorkerEndedSpans::NoSpans, WorkerEndedSpans::MakeSpans] {
+            assert!(matches!(ended_span_scope(spans), EndedSpanScope::NoSpans));
+        }
+    }
+
+    #[test]
+    fn without_the_otel_feature_a_send_a_start_and_a_rerun_carry_no_trace() {
         let send = TaskSendSpan::open(&TaskSendSubject {
             task_id: Uuid::new_v4(),
             task_name: "send_invoice",
@@ -185,6 +233,7 @@ mod tests {
         });
         assert_eq!(start.trace(), SendTrace::NoCarrier);
         start.end(CallEnd::Failed(WorkflowStartErrorCode::EnqueueFailed));
+        assert_eq!(rerun_trace(), SendTrace::NoCarrier);
     }
 
     /// A writer whose bytes go to one shared buffer.

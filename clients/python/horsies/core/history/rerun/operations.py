@@ -26,6 +26,11 @@ its rerun.
 and decides the outcome (``horsies._core.rerun_read``,
 ``prepare_rerun_write``, ``decode_rerun_write``), and the caller's
 connection runs both statements.
+
+The new task stores the trace that the request carries. ``rerun_task``
+passes none. ``Horsies.rerun_task`` and ``Horsies.rerun_task_async`` pass
+the carrier of the caller's current context when the app traces
+(``rerun_with_trace``, ``rerun_with_trace_async``).
 """
 
 from __future__ import annotations
@@ -37,7 +42,7 @@ from uuid import UUID
 
 from typing import assert_never
 
-from sqlalchemy import text
+from sqlalchemy import Connection, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from horsies._core import (
@@ -63,6 +68,7 @@ from horsies._core import (
     prepare_rerun_write,
 )
 from horsies._core import rerun_read as core_rerun_read
+from horsies.core.telemetry.send_telemetry import NO_TRACE_CARRIER, TraceArgument
 
 from ..ddl.tables import FOREVER_CLASS_KEY
 from ..errors import HistoryContractError
@@ -222,6 +228,14 @@ async def _run_prepared(
     return tuple(_cell(value) for value in row)
 
 
+def _run_prepared_blocking(
+    connection: Connection, statement: PreparedStatement
+) -> tuple[object, ...]:
+    """``_run_prepared`` on a blocking connection of the caller."""
+    row = connection.execute(text(statement.sql), statement.parameters).one()
+    return tuple(_cell(value) for value in row)
+
+
 def _cell(value: object) -> object:
     """``value`` as the core reads it: a ``memoryview`` as ``bytes``. Pure."""
     match value:
@@ -267,59 +281,57 @@ def _class_not_registered(class_key: str) -> ValueError:
     )
 
 
-async def rerun_task(
-    connection: AsyncConnection,
+@dataclass(frozen=True, slots=True)
+class _CoreRequest:
+    """The request and the policy of one rerun, as the core takes them."""
+
+    command: RerunCommandRecord
+    policy: RerunPolicyRecord
+
+
+def _core_request(
     command: RerunTask,
     policy: RerunEnqueuePolicy,
-) -> RerunOutcome:
-    """Execute one rerun inside the caller-owned transaction.
+    trace: TraceArgument,
+) -> _CoreRequest:
+    """The core's records of ``command``, ``policy`` and ``trace``. Pure."""
+    return _CoreRequest(
+        command=RerunCommandRecord(
+            source_task_id=command.source_task_id,
+            deadline=command.deadline,
+            caller_key=command.caller_key,
+            trace=trace,
+        ),
+        policy=RerunPolicyRecord(
+            retention_class_key=policy.retention_class_key,
+            retain_rerun_input=policy.retain_rerun_input,
+            reservation_window_us=policy.reservation_window // timedelta(microseconds=1),
+        ),
+    )
 
-    The core builds each statement and decides the outcome
-    (``horsies._core.rerun_read``, ``prepare_rerun_write``,
-    ``decode_rerun_write``); ``connection`` runs the two statements (the
-    source read ``horsies_rerun_source_read``, then for an eligible source
-    one ``horsies_enqueue_task`` with the lineage ``RERUN``), so the rerun
-    commits or rolls back with the caller's own writes. Every outcome but
-    ``RerunEnqueued`` writes nothing.
+
+def _write_or_outcome(
+    request: _CoreRequest,
+    read: PreparedStatement,
+    read_row: tuple[object, ...],
+) -> RerunWriteRecord | RerunOutcome:
+    """The core's decision on the read row: the write to run, or the outcome
+    of a rerun that writes nothing. Does no I/O.
 
     Raises:
-        ValueError: the new request's retention class is not registered, the
-            caller key is not a valid idempotency key, or the task id source
-            refused to mint. Nothing is written.
-        CorePreconditionFailed: the database was installed by the other
-            client family, or records none (subject ``rerun_task``, not
-            retryable). Nothing is written.
-        CoreContractViolation: the family row of the database holds a value
-            that is not a client family: corrupt stored data (subject
-            ``rerun_task``; the message names the stored value). Nothing is
-            written.
-        CoreError: the core of this process cannot run (forked after the
-            core started, or stopped).
-        A database error of a statement raises from the caller's driver.
+        ValueError, CorePreconditionFailed, CoreContractViolation: as
+            ``rerun_task`` lists them. Nothing is written.
     """
-    core_command = RerunCommandRecord(
-        source_task_id=command.source_task_id,
-        deadline=command.deadline,
-        caller_key=command.caller_key,
-    )
-    core_policy = RerunPolicyRecord(
-        retention_class_key=policy.retention_class_key,
-        retain_rerun_input=policy.retain_rerun_input,
-        reservation_window_us=policy.reservation_window // timedelta(microseconds=1),
-    )
-    read = core_rerun_read(core_command, core_policy)
-    read_row = await _run_prepared(connection, read)
     prepared = prepare_rerun_write(
         read,
         read_row,
-        core_command,
-        core_policy,
+        request.command,
+        request.policy,
         sent_at=datetime.now(timezone.utc),
     )
     match prepared:
         case RerunWriteRecord():
-            written = await _run_prepared(connection, prepared.statement)
-            return _write_outcome(decode_rerun_write(prepared, written))
+            return prepared
         case RerunSourceLiveRecord(task_id=task_id):
             return RerunSourceLive(task_id=task_id)
         case RerunSourceAbsentRecord(task_id=task_id, reason=reason):
@@ -344,3 +356,82 @@ async def rerun_task(
             raise ValueError(cause)
         case _ as unreachable:
             assert_never(unreachable)
+
+
+async def rerun_task(
+    connection: AsyncConnection,
+    command: RerunTask,
+    policy: RerunEnqueuePolicy,
+) -> RerunOutcome:
+    """Execute one rerun inside the caller-owned transaction.
+
+    The core builds each statement and decides the outcome
+    (``horsies._core.rerun_read``, ``prepare_rerun_write``,
+    ``decode_rerun_write``); ``connection`` runs the two statements (the
+    source read ``horsies_rerun_source_read``, then for an eligible source
+    one ``horsies_enqueue_task`` with the lineage ``RERUN``), so the rerun
+    commits or rolls back with the caller's own writes. Every outcome but
+    ``RerunEnqueued`` writes nothing.
+
+    The new task stores no trace carrier, so each of its attempts is the
+    root of a new trace. ``Horsies.rerun_task_async`` (and the blocking
+    ``Horsies.rerun_task``) is the same rerun with the tracing setting of
+    the app: with ``OtelTracing`` the new task stores the carrier of the
+    caller's current context.
+
+    Raises:
+        ValueError: the new request's retention class is not registered, the
+            caller key is not a valid idempotency key, or the task id source
+            refused to mint. Nothing is written.
+        CorePreconditionFailed: the database was installed by the other
+            client family, or records none (subject ``rerun_task``, not
+            retryable). Nothing is written.
+        CoreContractViolation: the family row of the database holds a value
+            that is not a client family: corrupt stored data (subject
+            ``rerun_task``; the message names the stored value). Nothing is
+            written.
+        CoreError: the core of this process cannot run (forked after the
+            core started, or stopped).
+        A database error of a statement raises from the caller's driver.
+    """
+    return await rerun_with_trace_async(connection, command, policy, NO_TRACE_CARRIER)
+
+
+async def rerun_with_trace_async(
+    connection: AsyncConnection,
+    command: RerunTask,
+    policy: RerunEnqueuePolicy,
+    trace: TraceArgument,
+) -> RerunOutcome:
+    """``rerun_task`` whose new task stores ``trace``: ``NO_TRACE_CARRIER``,
+    or the ``TraceCarrier`` of the caller's current context. The core checks
+    the bounds of the carrier: a carrier that breaks one is not stored and
+    never refuses the rerun. Raises as ``rerun_task``."""
+    request = _core_request(command, policy, trace)
+    read = core_rerun_read(request.command, request.policy)
+    read_row = await _run_prepared(connection, read)
+    match _write_or_outcome(request, read, read_row):
+        case RerunWriteRecord() as write:
+            written = await _run_prepared(connection, write.statement)
+            return _write_outcome(decode_rerun_write(write, written))
+        case outcome:
+            return outcome
+
+
+def rerun_with_trace(
+    connection: Connection,
+    command: RerunTask,
+    policy: RerunEnqueuePolicy,
+    trace: TraceArgument,
+) -> RerunOutcome:
+    """``rerun_with_trace_async`` on a blocking connection of the caller:
+    the same statements, outcomes and errors."""
+    request = _core_request(command, policy, trace)
+    read = core_rerun_read(request.command, request.policy)
+    read_row = _run_prepared_blocking(connection, read)
+    match _write_or_outcome(request, read, read_row):
+        case RerunWriteRecord() as write:
+            written = _run_prepared_blocking(connection, write.statement)
+            return _write_outcome(decode_rerun_write(write, written))
+        case outcome:
+            return outcome

@@ -41,9 +41,9 @@ use crate::worker::executor::protocol::{
     SharedAsyncChild, SharedThreadChild, TaskSendPool, ThreadSeats,
 };
 use crate::worker::executor::slots::{
-    dispatch_route, AttemptEnd, BaselineLimits, ChildLayout, Claimed, DispatchRoute, DownState,
-    ExecutionClass, ExitNotSeen, FreeCapacity, IsolatedPool, IsolatedPoolConfig, MemoryLimit,
-    NotRunCause, PlacementWatch, PoolBoard, PoolService, PoolStopReport, SharedPool,
+    dispatch_route, AttemptEnd, BaselineLimits, ChildLayout, ChildRss, Claimed, DispatchRoute,
+    DownState, ExecutionClass, ExitNotSeen, FreeCapacity, IsolatedPool, IsolatedPoolConfig,
+    MemoryLimit, NotRunCause, PlacementWatch, PoolBoard, PoolService, PoolStopReport, SharedPool,
     SharedPoolConfig, SharedSlotService, SlotPhase, Submitted, TaskLimit,
 };
 use crate::worker::executor::supervisor::{
@@ -487,6 +487,12 @@ impl ChildrenView {
     /// Every slot that is down, with its board index (Python `_down_slots`).
     pub fn down_slots(&self) -> Vec<(usize, DownState)> {
         self.board.down_slots()
+    }
+
+    /// The last RSS reading of the child of each slot that has one, in slot
+    /// order: the ready frame of the child, then each result frame.
+    pub fn child_rss(&self) -> Vec<ChildRss> {
+        self.board.child_rss()
     }
 
     /// The kind of the children of the slot at board index `slot`, an index

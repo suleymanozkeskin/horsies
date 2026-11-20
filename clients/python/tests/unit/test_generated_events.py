@@ -20,7 +20,7 @@ from typing import Final, cast
 import pytest
 
 from horsies._catalog import events
-from horsies._catalog.task_codes import OperationalErrorCode
+from horsies._catalog.task_codes import OperationalErrorCode, OutcomeCode
 from horsies.core.types.result import Err, Ok
 
 pytestmark = [pytest.mark.unit]
@@ -36,6 +36,7 @@ PLACED_AT: Final = datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
 NEXT_RETRY_AT: Final = datetime(2023, 11, 14, 22, 14, 20, tzinfo=timezone.utc)
 TASK_ID: Final = uuid.UUID('0192f6a1-7b3c-7d4e-8f00-0123456789ab')
 CARRIER: Final = '{"traceparent":"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}'
+WORKER_ID: Final = '7c9e6679-7425-40de-944b-e07fc1f90ae7'
 
 
 def _ended(
@@ -151,13 +152,26 @@ EXPECTED: Final[dict[str, events.AnyEvent]] = {
         ),
         timedelta(microseconds=5000),
     ),
+    'attempt_ended_timed_out_in_child': _ended(
+        'SHARED_ASYNC',
+        3,
+        events.AttemptEndReportedByChild(
+            result=events.ChildResultTimedOut(),
+            start=events.AttemptStartReported(started_at=STARTED_AT),
+        ),
+        timedelta(seconds=30),
+    ),
     'attempt_ended_by_worker': _ended(
-        'ISOLATED',
+        'SHARED_ASYNC',
         3,
         events.AttemptEndDecidedByWorker(
             reason='TIMED_OUT',
+            error_code=OutcomeCode.TASK_TIMEOUT,
             trace=events.RunTraceCarrier(text=CARRIER),
             placed_at=PLACED_AT,
+            child_kind='SHARED_ASYNC',
+            worker_id=WORKER_ID,
+            workflow='NOT_IN_WORKFLOW',
         ),
         timedelta(seconds=30),
     ),
@@ -166,8 +180,26 @@ EXPECTED: Final[dict[str, events.AnyEvent]] = {
         1,
         events.AttemptEndDecidedByWorker(
             reason='NEIGHBOUR_BLOCKED_LOOP',
+            error_code=OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP,
             trace=events.RunTraceNoCarrier(),
             placed_at=PLACED_AT,
+            child_kind='SHARED_ASYNC',
+            worker_id=WORKER_ID,
+            workflow='NOT_IN_WORKFLOW',
+        ),
+        timedelta(seconds=30),
+    ),
+    'attempt_ended_by_worker_in_workflow': _ended(
+        'SHARED_THREAD',
+        2,
+        events.AttemptEndDecidedByWorker(
+            reason='CHILD_LOST',
+            error_code=OperationalErrorCode.WORKER_CRASHED,
+            trace=events.RunTraceCarrier(text=CARRIER),
+            placed_at=PLACED_AT,
+            child_kind='ISOLATED',
+            worker_id=WORKER_ID,
+            workflow='WORKFLOW_NOT_KNOWN',
         ),
         timedelta(seconds=30),
     ),
@@ -269,8 +301,8 @@ def test_an_internal_field_is_left_out_of_repr() -> None:
     assert isinstance(ended.end, events.AttemptEndDecidedByWorker)
     text = repr(ended.end)
     assert 'reason=' in text
-    assert 'trace=' not in text
-    assert 'placed_at=' not in text
+    for internal in ('error_code', 'trace', 'placed_at', 'child_kind', 'worker_id', 'workflow'):
+        assert f'{internal}=' not in text
 
 
 def test_an_event_is_frozen() -> None:
@@ -432,3 +464,41 @@ def test_a_variant_value_without_its_tag_or_items_is_refused() -> None:
         )
     refusal = _refusal(_ended_with_end(['NotKnown']))
     assert (refusal.path, refusal.reason) == ('end.NotKnown', 'expected 1 items, found 0')
+
+
+def test_a_timeout_that_the_child_reported_decodes_as_a_child_result() -> None:
+    ended = EXPECTED['attempt_ended_timed_out_in_child']
+    assert isinstance(ended, events.AttemptEnded)
+    match ended.end:
+        case events.AttemptEndReportedByChild(
+            result=events.ChildResultTimedOut(),
+            start=events.AttemptStartReported(started_at=started_at),
+        ):
+            assert started_at == STARTED_AT
+        case other:
+            raise AssertionError(f'a timeout that the child reported, not {other!r}')
+    wire = _sample('attempt_ended_timed_out_in_child')
+    end = wire[7]
+    assert isinstance(end, list)
+    cast('list[object]', end)[1] = ['TimedOut', 'extra']
+    refusal = _refusal(wire)
+    assert (refusal.path, refusal.reason) == (
+        'end.ReportedByChild.result.TimedOut',
+        'expected 0 items, found 1',
+    )
+
+
+def test_a_worker_ended_attempt_names_its_workflow_place_or_is_refused() -> None:
+    ended = EXPECTED['attempt_ended_by_worker_in_workflow']
+    assert isinstance(ended, events.AttemptEnded)
+    assert isinstance(ended.end, events.AttemptEndDecidedByWorker)
+    assert ended.end.workflow == 'WORKFLOW_NOT_KNOWN'
+    wire = _sample('attempt_ended_by_worker_in_workflow')
+    end = wire[7]
+    assert isinstance(end, list)
+    cast('list[object]', end)[7] = 'IN_WORKFLOW'
+    refusal = _refusal(wire)
+    assert (refusal.path, refusal.reason) == (
+        'end.DecidedByWorker.workflow',
+        "WorkflowPlace has no value 'IN_WORKFLOW'",
+    )
