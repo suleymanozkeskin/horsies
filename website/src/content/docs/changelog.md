@@ -233,6 +233,16 @@ before you upgrade a 0.7 deployment.
   of the handler child (`off`, `starting`, `up`, `down`) of the worker.
   The fleet metric `horsies.fleet.workers.telemetry_down{part}` counts the
   live workers whose latest snapshot has a part `down`.
+- **The memory of the task children in each worker snapshot.** The worker
+  keeps the last RSS reading of each task child: its ready frame, then each
+  result frame. Each snapshot writes their sum to `children_memory_mb`
+  (MiB, two decimals) and sets
+  `horsies.worker.memory.rss{process="children"}` to the same sum in bytes.
+  A child whose last reading is unreadable is not in the sum: the
+  `children_rss` member of `telemetry` names it
+  (`{"unreadable": [{"slot", "kind", "pid"}]}`). With no readable reading
+  the column is `NULL` and the gauge keeps its last value. A replaced
+  child's reading leaves the sum with it.
 
 ### Changed
 

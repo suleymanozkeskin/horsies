@@ -161,6 +161,48 @@ struct BoardSlot {
     class: ExecutionClass,
     phase: SlotPhase,
     booted: BootedOnce,
+    rss: LastRss,
+}
+
+/// The last RSS reading of the child of a slot, for the worker snapshot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LastRss {
+    /// The slot has no child that sent a reading: it boots, retires or is
+    /// down, or its child changed.
+    NoChild,
+    /// The last reading of the child `pid`: the RSS of its ready frame, then
+    /// of each result frame.
+    Read { pid: ProcessId, rss: RssReading },
+}
+
+/// The process id of the child that a slot in `phase` serves: `Serving` and
+/// `Closing` hold one. Pure.
+fn child_of(phase: &SlotPhase) -> Option<ProcessId> {
+    match phase {
+        SlotPhase::Serving { pid } | SlotPhase::Closing { pid, .. } => Some(*pid),
+        SlotPhase::Booting | SlotPhase::Retiring | SlotPhase::Down(_) => None,
+    }
+}
+
+/// The reading that a slot keeps when it enters `phase`: the reading of its
+/// child while the phase holds the same child, else none. A replaced
+/// child's reading leaves with it. Pure.
+fn kept_rss(rss: LastRss, phase: &SlotPhase) -> LastRss {
+    match (rss, child_of(phase)) {
+        (LastRss::Read { pid, rss }, Some(child)) if pid == child => LastRss::Read { pid, rss },
+        (LastRss::Read { .. } | LastRss::NoChild, _) => LastRss::NoChild,
+    }
+}
+
+/// The last RSS reading of the child of one slot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChildRss {
+    /// The board index of the slot.
+    pub slot: usize,
+    /// The kind of the child.
+    pub class: ExecutionClass,
+    pub pid: ProcessId,
+    pub rss: RssReading,
 }
 
 struct Slots {
@@ -248,6 +290,7 @@ impl PoolBoard {
                 class,
                 phase: SlotPhase::Booting,
                 booted: BootedOnce::No,
+                rss: LastRss::NoChild,
             })
             .collect();
         Self {
@@ -308,7 +351,8 @@ impl PoolBoard {
     }
 
     /// Set the phase of slot `index`. A serving child marks the slot as
-    /// booted once.
+    /// booted once. The slot keeps the RSS reading of its child only while
+    /// `phase` holds the same child.
     pub fn set(&self, index: usize, phase: SlotPhase) {
         let first_generation_now = {
             let mut slots = self.lock();
@@ -316,6 +360,7 @@ impl PoolBoard {
             if let SlotPhase::Serving { .. } = phase {
                 slot.booted = BootedOnce::Yes;
             }
+            slot.rss = kept_rss(slot.rss, &phase);
             slot.phase = phase;
             slots.check_first_generation()
         };
@@ -325,11 +370,12 @@ impl PoolBoard {
     }
 
     /// The child of slot `index` sent its ready frame: the slot serves it,
-    /// and its baseline is noted for the memory guard (Python
-    /// `_note_ready`). In the first generation the baseline goes to
-    /// [`Self::first_generation`]; after it, the first ready child of a kind
-    /// with no baseline yet goes to [`Self::wait_new_kind_baseline`], once
-    /// per kind. Any other child adds nothing.
+    /// its RSS is the last reading of the slot, and its baseline is noted
+    /// for the memory guard (Python `_note_ready`). In the first generation
+    /// the baseline goes to [`Self::first_generation`]; after it, the first
+    /// ready child of a kind with no baseline yet goes to
+    /// [`Self::wait_new_kind_baseline`], once per kind. Any other child adds
+    /// nothing.
     pub fn ready(&self, index: usize, child: ReadyChild) {
         let (first_generation_now, new_kind) = {
             let mut slots = self.lock();
@@ -337,6 +383,10 @@ impl PoolBoard {
             let slot = &mut slots.slots[index];
             slot.booted = BootedOnce::Yes;
             slot.phase = SlotPhase::Serving { pid: child.pid };
+            slot.rss = LastRss::Read {
+                pid: child.pid,
+                rss: child.rss,
+            };
             let baseline = ChildBaseline {
                 slot: index,
                 class,
@@ -438,6 +488,38 @@ impl PoolBoard {
 
     pub fn phase(&self, index: usize) -> SlotPhase {
         self.lock().slots[index].phase.clone()
+    }
+
+    /// The child `pid` of slot `index` reported `rss` in a result frame: it
+    /// is the last reading of the slot while the slot serves that child. A
+    /// reading of a child that the slot no longer serves is dropped.
+    pub fn note_rss(&self, index: usize, pid: ProcessId, rss: RssReading) {
+        let mut slots = self.lock();
+        let slot = &mut slots.slots[index];
+        match child_of(&slot.phase) {
+            Some(child) if child == pid => slot.rss = LastRss::Read { pid, rss },
+            Some(_) | None => {}
+        }
+    }
+
+    /// The last RSS reading of the child of each slot that has one, in slot
+    /// order, for the worker snapshot. A slot that boots, retires or is
+    /// down has none.
+    pub fn child_rss(&self) -> Vec<ChildRss> {
+        self.lock()
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, entry)| match entry.rss {
+                LastRss::Read { pid, rss } => Some(ChildRss {
+                    slot,
+                    class: entry.class,
+                    pid,
+                    rss,
+                }),
+                LastRss::NoChild => None,
+            })
+            .collect()
     }
 
     /// The number of slots of every kind.

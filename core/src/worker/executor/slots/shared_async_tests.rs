@@ -525,6 +525,58 @@ async fn a_shared_child_above_its_memory_limit_is_replaced() {
     stop_shared(pool, spawner).await;
 }
 
+/// The ready frame gives the first RSS reading of the slot; the RSS of
+/// each result frame of the same child replaces it, an unreadable one too,
+/// before the run is answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_rss_of_each_result_frame_is_the_last_reading_of_its_slot() {
+    let dir = TestDir::new();
+    let tasks: Vec<ClaimedTask> = (1..=2).map(shared_task).collect();
+    let readings = [
+        RssReading::Mb(RssMb::new(30.0).unwrap()),
+        RssReading::Unreadable,
+    ];
+    let actions: Vec<(&ClaimedTask, String)> = tasks
+        .iter()
+        .zip(1_u32..)
+        .zip(readings)
+        .map(|((task, value), rss)| {
+            let answer = send(&[shared_result_with_rss(
+                run_ref(task, u64::from(value)),
+                value,
+                rss,
+            )]);
+            (task, answer)
+        })
+        .collect();
+    let script = children(&dir, 2, &actions, 2);
+    let spawner = Spawner::start().unwrap();
+    let (pool, board) = async_pool(
+        &spawner,
+        1,
+        shared_config(shell(&script), shared_async_init(2)),
+    );
+    let child = serving(&board, 0).await;
+    let slot_reading = |rss: RssReading| {
+        vec![ChildRss {
+            slot: 0,
+            class: ExecutionClass::SharedAsync,
+            pid: child,
+            rss,
+        }]
+    };
+    assert_eq!(board.child_rss(), slot_reading(RssReading::Unreadable));
+
+    for ((task, value), rss) in tasks.iter().zip(1_u32..).zip(readings) {
+        assert_eq!(
+            answer_of(submit_shared(&pool, task, long_work())).await,
+            reported(value)
+        );
+        assert_eq!(board.child_rss(), slot_reading(rss));
+    }
+    stop_shared(pool, spawner).await;
+}
+
 // ---------------------------------------------------------------------------
 // Deadlines and backstops
 // ---------------------------------------------------------------------------
