@@ -18,6 +18,7 @@ from horsies._core import (
     ChildSpecBuilt,
     ChildSpecRefused,
     ChildSpecRequest,
+    NoTraceCarrier,
     PanicException,
     WorkflowStartRequest,
 )
@@ -87,6 +88,7 @@ def subworkflow_start_request(workflow_id: uuid.UUID) -> WorkflowStartRequest:
         workflow_id=workflow_id,
         sent_at=datetime.now(UTC),
         resend_on_transient_err=False,
+        trace=NoTraceCarrier(),
     )
 
 

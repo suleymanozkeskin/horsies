@@ -218,6 +218,25 @@ mod tests {
         }
     }
 
+    /// Two pyclasses of one name in `horsies._core`: the one that the module
+    /// registers last replaces the other, and the stub then names one class
+    /// twice.
+    #[test]
+    fn each_exception_class_and_function_of_the_stub_has_its_own_name() {
+        let mut seen = std::collections::BTreeSet::new();
+        let names = CORE_MODULE
+            .exceptions
+            .iter()
+            .map(|exception| exception.name)
+            .chain(CORE_MODULE.classes.iter().map(|class| class.name))
+            .chain(CORE_MODULE.functions.iter().map(|function| function.name));
+        let repeated: Vec<&str> = names.filter(|name| !seen.insert(*name)).collect();
+        assert!(
+            repeated.is_empty(),
+            "names given twice in horsies._core: {repeated:?}"
+        );
+    }
+
     #[test]
     fn an_exception_with_attributes_has_its_constructor_and_its_properties() {
         let exception = StubException {

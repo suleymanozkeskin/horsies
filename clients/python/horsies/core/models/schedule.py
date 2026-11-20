@@ -1,7 +1,7 @@
 # clients/python/horsies/core/models/schedule.py
 from __future__ import annotations
 from datetime import time as datetime_time
-from typing import Annotated, Generic, Literal, TypeVar, Union, Optional, Any
+from typing import Annotated, ClassVar, Generic, Literal, TypeVar, Union, Optional, Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 from enum import Enum
@@ -40,7 +40,7 @@ class IntervalSchedule(BaseModel):
         - Every 1.5 hours: IntervalSchedule(hours=1, minutes=30)
     """
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     type: Literal['interval'] = 'interval'
     seconds: Optional[int] = Field(
@@ -95,7 +95,7 @@ class HourlySchedule(BaseModel):
         - Every hour at XX:15:30 -> HourlySchedule(minute=15, second=30)
     """
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     type: Literal['hourly'] = 'hourly'
     minute: int = Field(ge=0, le=59, description='Minute of the hour (0-59)')
@@ -153,7 +153,7 @@ class DailySchedule(BaseModel):
         - Daily at 15:30:00 -> DailySchedule(time=time(15, 30, 0))
     """
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     type: Literal['daily'] = 'daily'
     time: datetime_time = Field(description='Time of day to run (HH:MM:SS)')
@@ -182,7 +182,7 @@ class WeeklySchedule(BaseModel):
           WeeklySchedule(days=[...weekdays...], time=time(17, 0, 0))
     """
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     type: Literal['weekly'] = 'weekly'
     days: list[Weekday] = Field(min_length=1, description='Days of week to run')
@@ -231,7 +231,7 @@ class MonthlySchedule(BaseModel):
           MonthlySchedule(day=15, time=time(15, 0, 0))
     """
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     type: Literal['monthly'] = 'monthly'
     day: int = Field(ge=1, le=31, description='Day of month (1-31)')
@@ -315,7 +315,7 @@ EnumT = TypeVar('EnumT', Month, Weekday)
 class CronEvery(BaseModel):
     """`*` — every value in the field's domain. Shared by all field families."""
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     kind: Literal['every'] = 'every'
 
@@ -329,7 +329,7 @@ class CronStep(BaseModel):
     value. This is intentionally stricter than some cron implementations.
     """
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     kind: Literal['step'] = 'step'
     step: int = Field(ge=1, description='Step size (>= 1, <= field span)')
@@ -338,7 +338,7 @@ class CronStep(BaseModel):
 class CronValues(BaseModel):
     """`a,b,c` — an explicit set of integer values (single value = one entry)."""
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     kind: Literal['values'] = 'values'
     values: list[int] = Field(min_length=1, description='Explicit integer values')
@@ -347,7 +347,7 @@ class CronValues(BaseModel):
 class CronRange(BaseModel):
     """`a-b` or `a-b/n` — an inclusive integer range with an optional step."""
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     kind: Literal['range'] = 'range'
     start: int = Field(description='Range start (inclusive)')
@@ -358,7 +358,7 @@ class CronRange(BaseModel):
 class CronEnumValues(BaseModel, Generic[EnumT]):
     """`a,b,c` over an enum field (Month or Weekday)."""
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     kind: Literal['enum_values'] = 'enum_values'
     values: list[EnumT] = Field(min_length=1, description='Explicit enum values')
@@ -367,7 +367,7 @@ class CronEnumValues(BaseModel, Generic[EnumT]):
 class CronEnumRange(BaseModel, Generic[EnumT]):
     """`a-b` or `a-b/n` over an enum field, ordered by the canonical ordinal."""
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     kind: Literal['enum_range'] = 'enum_range'
     start: EnumT = Field(description='Range start (inclusive, by canonical order)')
@@ -383,7 +383,7 @@ class CronEnumStep(BaseModel, Generic[EnumT]):
     Intentionally stricter than some cron implementations — use `CronEnumValues`.
     """
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     kind: Literal['enum_step'] = 'enum_step'
     step: int = Field(ge=1, description='Step size (>= 1, <= field span)')
@@ -422,7 +422,7 @@ CronWeekdayTerm = Annotated[
 class EveryDay(BaseModel):
     """Both day-of-month and day-of-week unrestricted."""
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     kind: Literal['every_day'] = 'every_day'
 
@@ -430,7 +430,7 @@ class EveryDay(BaseModel):
 class ByMonthDay(BaseModel):
     """Restrict by day-of-month only."""
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     kind: Literal['by_month_day'] = 'by_month_day'
     day_of_month: list[CronNumericTerm] = Field(min_length=1)
@@ -439,7 +439,7 @@ class ByMonthDay(BaseModel):
 class ByWeekday(BaseModel):
     """Restrict by day-of-week only."""
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     kind: Literal['by_weekday'] = 'by_weekday'
     day_of_week: list[CronWeekdayTerm] = Field(min_length=1)
@@ -448,7 +448,7 @@ class ByWeekday(BaseModel):
 class EitherDay(BaseModel):
     """Fire when day-of-month OR day-of-week matches (cron's '13th or Friday')."""
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     kind: Literal['either_day'] = 'either_day'
     day_of_month: list[CronNumericTerm] = Field(min_length=1)
@@ -458,7 +458,7 @@ class EitherDay(BaseModel):
 class BothDays(BaseModel):
     """Fire only when day-of-month AND day-of-week both match (intersection)."""
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     kind: Literal['both_days'] = 'both_days'
     day_of_month: list[CronNumericTerm] = Field(min_length=1)
@@ -751,7 +751,7 @@ class CronSchedule(BaseModel):
     expressed by accident.
     """
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     type: Literal['cron'] = 'cron'
     minute: list[CronNumericTerm] = Field(
@@ -814,7 +814,7 @@ class TaskSchedule(BaseModel):
         - catch_up_missed: If scheduler was down, should missed runs be executed?
     """
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     name: str = Field(description='Unique schedule identifier')
     task_name: str = Field(description='Task to execute (must be registered)')
@@ -846,7 +846,7 @@ class ScheduleConfig(BaseModel):
         - check_interval_seconds: How often to check for due schedules (1-60 seconds)
     """
 
-    model_config = ConfigDict(extra='forbid')
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra='forbid')
 
     enabled: bool = Field(default=True, description='Master scheduler enable switch')
     schedules: list[TaskSchedule] = Field(

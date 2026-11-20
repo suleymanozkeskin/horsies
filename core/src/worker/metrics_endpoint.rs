@@ -106,6 +106,11 @@ impl RunningEndpoint {
     }
 }
 
+/// The `state` of a telemetry part that is down, in the `telemetry` column:
+/// the endpoint member and the handler child member write it, and the fleet
+/// read counts it (`horsies.fleet.workers.telemetry_down`).
+pub(crate) const TELEMETRY_PART_DOWN: &str = "down";
+
 /// The `telemetry` column of a worker snapshot: the state of the metrics
 /// endpoint (`endpoint`) and of the handler child (`handler_child`,
 /// [`handler_child_json`]) of the worker. Pure.

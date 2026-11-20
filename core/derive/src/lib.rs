@@ -15,8 +15,8 @@ mod event_schema;
 mod manifest_schema;
 
 /// Derive the static catalog data of a closed code enum of horsies-core:
-/// its members, their wire values and their docs. `horsies-codegen` renders
-/// the Python enum classes from it.
+/// its members, their Python names, their wire values and their docs.
+/// `horsies-codegen` renders the Python enum classes from it.
 ///
 /// ```ignore
 /// /// Categorized broker operation failure codes.
@@ -29,6 +29,10 @@ mod manifest_schema;
 /// ```
 ///
 /// Emits `impl horsies_core::catalog::CodeEnum for BrokerErrorCode`.
+///
+/// The Python name of a member is the variant name in SCREAMING_SNAKE_CASE.
+/// Its wire value is the same text, unless the variant sets
+/// `#[code_catalog(value = "...")]` (`HRS-001` for `WorkflowNoName`).
 ///
 /// A lifecycle status marks its terminal variants with
 /// `#[code_catalog(terminal)]` and names their Python constant with

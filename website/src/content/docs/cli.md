@@ -1,7 +1,7 @@
 ---
 title: CLI Reference
 section: python
-summary: Command-line interface for running workers, the scheduler, and the monitoring web UI.
+summary: Command-line interface for running workers, the scheduler, the fleet metrics server and the monitoring web UI.
 related: [../workers/worker-architecture, ../scheduling/scheduler-overview]
 tags: [cli, worker, scheduler, commands]
 ---
@@ -144,6 +144,7 @@ Pass either `app_path` or `--database-url`, not both. With `--database-url` the 
 | `--auth MODE` | none | `none` (loopback hosts only) or `trusted-header` |
 | `--trusted-header NAME` | X-Forwarded-User | Identity header that the proxy sets |
 | `--enable-actions` | false | Allow task cancel, and workflow pause, resume and cancel (default is view-only) |
+| `--trace-link TEMPLATE` | none | The link of a task's trace id in the task detail: an `http` or `https` URL with one `{trace_id}`. A template that breaks a rule exits 2 and names the rule. Without it the id shows as text |
 | `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
 
 **Examples:**
@@ -167,6 +168,39 @@ horsies web \
 ```
 
 The bind rules, the trusted-header contract and the PgBouncer rule are in [Web UI Deployment & Authentication](/horsies/monitoring/web-ui-deployment/#standalone-cli).
+
+### horsies metrics
+
+Serve the fleet metrics of the app's database at `GET /metrics`, in the Prometheus text format. What the metrics hold and when the command reads them: [Fleet Collector](/horsies/observability/fleet-collector/).
+
+```bash
+horsies metrics <module> --listen HOST:PORT [OPTIONS]
+```
+
+**Arguments:**
+
+| Argument | Description |
+| -------- | ----------- |
+| `module` | Dotted module path or file path containing Horsies instance |
+
+**Options:**
+
+| Option | Default | Description |
+| ------ | ------- | ----------- |
+| `--listen HOST:PORT` | required | The address to serve on: `HOST:PORT`, or `[IPV6]:PORT`. The port is 1 to 65535. There is no default |
+| `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
+
+**Examples:**
+
+```bash
+# Serve on all interfaces, port 9465
+horsies metrics myapp.instance:app --listen 0.0.0.0:9465
+
+# Serve on the IPv6 loopback address
+horsies metrics myapp.instance:app --listen '[::1]:9465'
+```
+
+An address that does not parse exits with code 2. The command exits with code 0 at `SIGTERM` or `SIGINT`, and with code 1 when the app cannot be loaded, the broker does not build, or the address does not bind. A database that does not answer does not end it.
 
 ### horsies get-docs
 
@@ -302,7 +336,7 @@ Requirements:
 
 ## Process Signals
 
-Both commands handle graceful shutdown:
+`horsies worker`, `horsies scheduler` and `horsies metrics` handle graceful shutdown:
 
 | Signal | Behavior |
 | ------ | -------- |

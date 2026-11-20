@@ -67,6 +67,11 @@ pub(super) struct WebArgs {
     /// A stylesheet URL that the page loads after its own stylesheet.
     #[arg(long, value_name = "URL")]
     custom_css_url: Option<String>,
+    /// The link of a task's trace id in the task detail: an http or https
+    /// URL with one {trace_id}, for example
+    /// https://grafana.example.com/explore?traceId={trace_id}.
+    #[arg(long, value_name = "TEMPLATE")]
+    trace_link: Option<String>,
     #[arg(long, value_enum, ignore_case = true, default_value = "INFO")]
     loglevel: LogLevel,
 }
@@ -113,6 +118,8 @@ enum WebError {
     BlankTrustedHeader,
     #[error("invalid trusted header name: {cause}")]
     InvalidTrustedHeader { cause: String },
+    #[error("invalid --trace-link: {cause}")]
+    InvalidTraceLink { cause: String },
     #[error("could not read configuration file {path}: {cause}")]
     ConfigRead {
         path: PathBuf,
@@ -146,7 +153,8 @@ impl WebError {
         match self {
             Self::ExposedWithoutAuthentication { .. }
             | Self::BlankTrustedHeader
-            | Self::InvalidTrustedHeader { .. } => 2,
+            | Self::InvalidTrustedHeader { .. }
+            | Self::InvalidTraceLink { .. } => 2,
             Self::MissingFeature
             | Self::ConfigRead { .. }
             | Self::ConfigTooLarge { .. }
@@ -189,6 +197,7 @@ fn serve(args: &WebArgs) -> Result<(), WebError> {
     use crate::web::{Actions, MonitoringConfig, MonitoringUiConfig};
     use crate::{Horsies, SchemaMode};
 
+    let trace_link = trace_link_of(args.trace_link.as_deref())?;
     let policy = web_policy(
         args.auth,
         &args.host,
@@ -209,6 +218,7 @@ fn serve(args: &WebArgs) -> Result<(), WebError> {
     let monitoring = MonitoringConfig {
         ui: MonitoringUiConfig {
             custom_css_url: args.custom_css_url.clone(),
+            trace_link,
         },
         actions: match args.enable_actions {
             true => Actions::Enabled,
@@ -225,6 +235,23 @@ fn serve(args: &WebArgs) -> Result<(), WebError> {
     runtime
         .runtime()
         .block_on(serve_router(router, &args.host, args.port))
+}
+
+/// The trace link of `--trace-link`: `NoTraceLink` without the flag, else
+/// the checked template. Errors: `InvalidTraceLink` with the rule that the
+/// text breaks (an argument error). Pure.
+#[cfg(feature = "web")]
+fn trace_link_of(text: Option<&str>) -> Result<crate::web::TraceLink, WebError> {
+    use crate::web::{TraceLink, TraceLinkTemplate};
+
+    match text {
+        None => Ok(TraceLink::NoTraceLink),
+        Some(text) => TraceLinkTemplate::parse(text)
+            .map(TraceLink::Template)
+            .map_err(|refused| WebError::InvalidTraceLink {
+                cause: refused.to_string(),
+            }),
+    }
 }
 
 /// The policy of the axum mount.
@@ -501,5 +528,25 @@ mod tests {
         assert!(matches!(refused, WebError::ConfigTooLarge { .. }));
         let missing = read_config_file(Path::new("/nonexistent/horsies.toml")).unwrap_err();
         assert!(matches!(missing, WebError::ConfigRead { .. }));
+    }
+
+    #[cfg(feature = "web")]
+    #[test]
+    fn a_trace_link_is_absent_without_the_flag_and_a_bad_template_is_an_argument_error() {
+        use crate::web::TraceLink;
+
+        assert!(matches!(trace_link_of(None), Ok(TraceLink::NoTraceLink)));
+        let template = "https://grafana.example.com/explore?traceId={trace_id}";
+        match trace_link_of(Some(template)) {
+            Ok(TraceLink::Template(checked)) => assert_eq!(checked.as_str(), template),
+            other => panic!("the template is valid: {other:?}"),
+        }
+        let refused = trace_link_of(Some("ftp://example.com/{trace_id}"))
+            .expect_err("another scheme is refused");
+        assert!(
+            matches!(refused, WebError::InvalidTraceLink { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(refused.exit_code(), 2);
     }
 }

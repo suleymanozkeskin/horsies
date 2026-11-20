@@ -1,6 +1,6 @@
 # app/core/cli.py
 """
-CLI for horsies worker, scheduler, and check commands.
+CLI for horsies worker, scheduler, check and metrics commands.
 
 Module path resolution follows Celery's approach:
 1. User provides dotted module path: `horsies worker app.configs.horsies:app`
@@ -22,6 +22,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, NoReturn, assert_never
 
+from horsies._catalog import worker_manifest as wire
+from horsies._core import (
+    ListenAddress,
+    ListenAddressRefused,
+    parse_listen_address,
+)
 from horsies.core.app import Horsies
 from horsies.core.banner import print_banner
 from horsies.core.brokers.postgres import PostgresBroker
@@ -33,6 +39,7 @@ from horsies.core.errors import (
     HorsiesError,
     ValidationReport,
 )
+from horsies.core.fleet_metrics import listen_address, run_fleet_metrics
 from horsies.core.logging import TEXT_LOGS, get_logger
 from horsies.core.models.log_format import JsonLogs, TextLogs
 from horsies.core.models.resilience import WorkerResilienceConfig
@@ -534,12 +541,14 @@ def worker_command(args: argparse.Namespace) -> None:
     app.import_task_modules()
     print_banner(app, role='worker', show_tasks=True)
 
+    metrics_endpoint: wire.MetricsEndpoint = args.metrics_listen
     launch = WorkerLaunch(
         app_locator=app_locator,
         imports=tuple(discovered_modules),
         sys_path_roots=(sys_path_root,) if sys_path_root else (),
         profile=selected.name,
         loglevel=loglevel,
+        metrics_endpoint=metrics_endpoint,
     )
     exit_code = run_core_worker(app, launch, logger, _print_worker_startup_report)
     if exit_code != EXIT_STOPPED:
@@ -735,6 +744,31 @@ def check_command(args: argparse.Namespace) -> None:
             ),
         )
         sys.exit(0)
+
+
+def metrics_command(args: argparse.Namespace) -> None:
+    """Handle the metrics command: serve the fleet metrics of the app's
+    database at `GET /metrics` on `--listen`.
+
+    Exit contract: 2 for arguments that do not parse (argparse); 0 at
+    `SIGTERM` or `SIGINT`; 1 when the app cannot be discovered, the broker
+    does not build, or the address does not bind.
+    """
+    logger = get_logger('cli')
+    setup_logging(args.loglevel)
+    try:
+        module_locator: str = _resolve_module_argument(args)
+        app, _var_name, _module_name, _sys_path_root = discover_app(module_locator)
+    except HorsiesError as e:
+        logger.error(str(e))
+        sys.exit(1)
+    except ValueError as e:
+        logger.error(str(e))
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f'Failed to discover app: {e}')
+        sys.exit(1)
+    sys.exit(run_fleet_metrics(app, args.listen, logger))
 
 
 def check_passed_text(
@@ -933,6 +967,25 @@ def resolve_web_auth_policy(args: argparse.Namespace) -> Any:
             _web_arg_error(f'unknown --auth value {args.auth!r}')
 
 
+def resolve_web_ui_config(args: argparse.Namespace) -> Any:
+    """The page settings of a ``horsies web`` invocation: the trace link
+    of ``--trace-link``, or none. A template that the core refuses is a bad
+    invocation (exit 2) that names the rule."""
+    from horsies.web import MonitoringUIConfig, NoTraceLink, TraceLinkTemplate
+
+    template: str | None = args.trace_link
+    match template:
+        case None:
+            return MonitoringUIConfig(trace_link=NoTraceLink())
+        case str():
+            try:
+                return MonitoringUIConfig(
+                    trace_link=TraceLinkTemplate(template=template),
+                )
+            except ConfigurationError as refused:
+                _web_arg_error(f'invalid --trace-link: {"; ".join(refused.notes)}')
+
+
 def web_command(args: argparse.Namespace) -> None:
     """Handle the web command — serve the monitoring UI.
 
@@ -947,6 +1000,9 @@ def web_command(args: argparse.Namespace) -> None:
     except ImportError as e:
         print(f'error: {e}', file=sys.stderr)
         sys.exit(1)
+
+    # An argument error, so it is found before the app is resolved.
+    ui_config = resolve_web_ui_config(args)
 
     try:
         app = resolve_web_app(args)
@@ -976,6 +1032,7 @@ def web_command(args: argparse.Namespace) -> None:
     monitoring_app = create_monitoring_app(
         app,
         auth_policy=policy,
+        config=ui_config,
         actions_enabled=args.enable_actions,
     )
 
@@ -995,6 +1052,26 @@ def web_command(args: argparse.Namespace) -> None:
     uvicorn.run(  # pyright: ignore[reportUnknownMemberType]
         monitoring_app, host=host, port=port
     )
+
+
+def metrics_listen_endpoint(text: str) -> wire.MetricsEndpointListenAddress:
+    """The metrics endpoint of a ``--metrics-listen`` value, by the core's
+    rules: ``HOST:PORT`` or ``[IPV6]:PORT``, a host of 1 to 253 bytes, a port
+    of 1 to 65535. The host is resolved when the endpoint binds.
+
+    The ``type`` of the argparse option: a text that breaks a rule raises
+    ``argparse.ArgumentTypeError`` with the rule, and argparse prints it and
+    exits 2 before the worker starts.
+    """
+    match parse_listen_address(text):
+        case ListenAddress() as address:
+            return wire.MetricsEndpointListenAddress(
+                host=address.host, port=address.port
+            )
+        case ListenAddressRefused(message=message):
+            raise argparse.ArgumentTypeError(message)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 REMOVED_WORKER_FLAGS: Final[Mapping[str, str]] = {
@@ -1068,6 +1145,9 @@ Examples:
   # Validate configuration without starting services
   horsies check app.configs.horsies:app
   horsies check app.configs.horsies:app --live
+
+  # Serve the fleet metrics of the app's database at GET /metrics
+  horsies metrics app.configs.horsies:app --listen 127.0.0.1:9100
 """,
         )
         subparsers = parser.add_subparsers(dest='command', help='Available commands')
@@ -1103,6 +1183,18 @@ Examples:
                 'Name of the worker profile in AppConfig.worker_profiles. '
                 'Required: the profile holds the settings of the worker '
                 '(children, recycling, claim limits, drain timeout, preload).'
+            ),
+        )
+        worker_parser.add_argument(
+            '--metrics-listen',
+            dest='metrics_listen',
+            type=metrics_listen_endpoint,
+            default=wire.MetricsEndpointNoMetricsEndpoint(),
+            metavar='HOST:PORT',
+            help=(
+                'Serve the worker metrics (GET /metrics) and the health probes '
+                '(GET /livez, GET /readyz) on HOST:PORT, or [IPV6]:PORT. No '
+                'default: without it the worker serves no endpoint.'
             ),
         )
         for removed_flag in REMOVED_WORKER_FLAGS:
@@ -1168,6 +1260,37 @@ Examples:
             help='Also check broker connectivity (SELECT 1)',
         )
 
+        # Metrics command
+        metrics_parser = subparsers.add_parser(
+            'metrics',
+            help="Serve the fleet metrics of the app's database at GET /metrics",
+        )
+        metrics_parser.add_argument(
+            '-m',
+            '--module',
+            dest='module',
+            help='Module path (e.g., app.configs.horsies:app)',
+        )
+        metrics_parser.add_argument(
+            'module_pos',
+            nargs='?',
+            help='Module path (e.g., app.configs.horsies:app)',
+        )
+        metrics_parser.add_argument(
+            '--listen',
+            required=True,
+            type=listen_address,
+            metavar='HOST:PORT',
+            help='Address to serve on: HOST:PORT or [IPV6]:PORT. Required; there is no default.',
+        )
+        metrics_parser.add_argument(
+            '--loglevel',
+            choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+            default='INFO',
+            type=str.upper,
+            help='Logging level (default: INFO)',
+        )
+
         # Web command
         web_parser = subparsers.add_parser(
             'web',
@@ -1227,6 +1350,15 @@ Examples:
             action='store_true',
             default=False,
             help='Allow cancel/pause/resume (default: view-only)',
+        )
+        web_parser.add_argument(
+            '--trace-link',
+            default=None,
+            metavar='TEMPLATE',
+            help=(
+                "Link of a task's trace id in the task detail: an http or https "
+                'URL with one {trace_id} (default: the id as text)'
+            ),
         )
         web_parser.add_argument(
             '--loglevel',
@@ -1292,6 +1424,8 @@ Examples:
                 scheduler_command(args)
             case 'check':
                 check_command(args)
+            case 'metrics':
+                metrics_command(args)
             case 'web':
                 web_command(args)
             case 'get-docs':

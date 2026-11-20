@@ -9,10 +9,12 @@
 //! it to [`CODE_CATALOGS`], and add a test below that pins its wire values
 //! to the enum's own text form. A lifecycle status also marks its terminal
 //! variants, and a test pins them to the enum's own terminal rule.
+//! [`ErrorCode`] has no other text form: its `HRS-nnn` text is its catalog
+//! value.
 
 use crate::monitoring::{MonitoringQueryErrorCode, TaskActionErrorCode};
 use crate::{
-    BrokerErrorCode, ContractCode, HandleErrorCode, OperationalErrorCode, OutcomeCode,
+    BrokerErrorCode, ContractCode, ErrorCode, HandleErrorCode, OperationalErrorCode, OutcomeCode,
     RetrievalCode, TaskAbsenceReason, TaskAttemptOutcome, TaskSendErrorCode, TaskStatus,
     WorkflowStartErrorCode, WorkflowStatus, WorkflowTaskStatus,
 };
@@ -29,7 +31,10 @@ pub enum PythonEnumBase {
 /// One member of a catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CatalogMember {
-    /// The wire value; the Python member name is the same text.
+    /// The Python member name: the variant name in SCREAMING_SNAKE_CASE.
+    pub name: &'static str,
+    /// The wire value: the Python member name, unless the variant sets
+    /// `#[code_catalog(value = "...")]`.
     pub value: &'static str,
     /// The member doc, from the variant's `///` lines.
     pub doc: &'static str,
@@ -47,7 +52,8 @@ pub enum TerminalStates {
     Lifecycle {
         /// The Python name of the `frozenset` constant.
         constant: &'static str,
-        /// The wire values of the terminal members, in declaration order.
+        /// The Python member names of the terminal members, in declaration
+        /// order.
         members: &'static [&'static str],
     },
 }
@@ -93,6 +99,7 @@ pub const CODE_CATALOGS: &[CodeCatalog] = &[
     <MonitoringQueryErrorCode as CodeEnum>::CATALOG,
     <TaskActionErrorCode as CodeEnum>::CATALOG,
     <TaskAbsenceReason as CodeEnum>::CATALOG,
+    <ErrorCode as CodeEnum>::CATALOG,
 ];
 
 #[cfg(test)]
@@ -370,13 +377,14 @@ mod tests {
         }
     }
 
-    /// The terminal members that the derive recorded are the variants for
-    /// which `is_terminal` holds, in declaration order.
+    /// The terminal members that the derive recorded are the names of the
+    /// variants for which `is_terminal` holds, in declaration order.
     fn assert_terminal_members_follow<E: CodeEnum>(is_terminal: impl Fn(&E) -> bool) {
         let rule: Vec<&str> = E::VARIANTS
             .iter()
-            .filter(|variant| is_terminal(variant))
-            .map(|variant| variant.wire_value())
+            .zip(E::CATALOG.members)
+            .filter(|(variant, _member)| is_terminal(variant))
+            .map(|(_variant, member)| member.name)
             .collect();
         let (_constant, members) = lifecycle(E::CATALOG);
         assert_eq!(members, rule.as_slice(), "{}", E::CATALOG.python_class);
@@ -421,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn class_names_are_unique_and_values_are_unique_per_class() {
+    fn class_names_are_unique_and_names_and_values_are_unique_per_class() {
         let mut classes = HashSet::new();
         for catalog in CODE_CATALOGS {
             assert!(
@@ -429,12 +437,20 @@ mod tests {
                 "{}",
                 catalog.python_class
             );
+            let mut names = HashSet::new();
             let mut values = HashSet::new();
             for member in catalog.members {
                 assert!(
-                    values.insert(member.value),
+                    names.insert(member.name),
                     "{}.{}",
                     catalog.python_class,
+                    member.name
+                );
+                assert!(
+                    values.insert(member.value),
+                    "{}.{} = {}",
+                    catalog.python_class,
+                    member.name,
                     member.value
                 );
             }
@@ -459,7 +475,7 @@ mod tests {
             );
             assert!(identifier(catalog.python_class), "{}", catalog.python_class);
             for member in catalog.members {
-                assert!(identifier(member.value), "{}", member.value);
+                assert!(identifier(member.name), "{}", member.name);
             }
             match catalog.terminal_states {
                 TerminalStates::Lifecycle { constant, .. } => {

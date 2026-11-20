@@ -21,6 +21,7 @@ const meta = (overrides: Partial<MonitoringMeta> = {}): MonitoringMeta => ({
   schema_compatible: true,
   schema_state: 'MATCH',
   actions_disabled_reason: null,
+  trace_link_template: null,
   ...overrides,
 });
 

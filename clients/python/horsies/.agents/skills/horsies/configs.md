@@ -272,6 +272,63 @@ the hook named — it does not restart-loop. Engine rebind requires indirection
 (task code reads via a `get_engine()` accessor; `Engine.poolclass` is fixed at
 construction). See website docs `workers/child-process-hooks`.
 
+### Tracing and Logs
+
+`AppConfig(tracing=OtelTracing())` needs `pip install 'horsies[otel]'`
+(`opentelemetry-api` 1.30 or later). The client uses the global tracer,
+meter and propagator of the OpenTelemetry API. Set your SDK in each process
+that sends, and in each worker child with `@app.on_child_process_start`:
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+
+
+def set_up_tracing() -> None:
+    provider = TracerProvider()
+    provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+    trace.set_tracer_provider(provider)
+
+
+@app.on_child_process_start
+def set_up_child_tracing() -> None:
+    set_up_tracing()
+```
+
+- Spans: `send <task_name>` (PRODUCER) around every database call of a
+  send; `start <workflow_name>` (PRODUCER) per workflow start;
+  `run <task_name>` (CONSUMER) per attempt in the worker child, after the
+  RUNNING update. `ChildOfSend()` (default): the attempt span is a child of
+  the send span; `LinkedToSend()`: a new trace with a link.
+- The core stores the carrier of the global propagator with the trace id
+  on the task row: at most 8 keys, a key 1 to 128 bytes of HTTP token
+  characters, a value at most 1,024 bytes of printable ASCII, the JSON text
+  at most 2,048 bytes. Over a bound: no carrier, the send goes on, one
+  WARNING per process. A schedule run and a rerun store no carrier: each
+  attempt is a new trace.
+- Attempt attributes: `horsies.task.id`, `horsies.task.name`,
+  `horsies.task.attempt` (from 1), `horsies.task.execution`,
+  `horsies.queue`, `horsies.worker.id`, `messaging.*`; for a workflow task
+  `horsies.workflow.id`, `horsies.workflow.node`, `horsies.workflow.root_id`.
+  Status: unset for a value; ERROR with `error.type` = the error code.
+- An isolated task that the worker kills at `timeout_ms`, a blocked-loop
+  kill and a lost child have no attempt span. A child flushes the tracer
+  provider for at most 1 s at its stop.
+- Producer metrics (global meter): `horsies.task.sent` (task, queue,
+  result `ok` or the `TaskSendErrorCode` value), `horsies.task.send.duration`
+  (queue).
+- `AppConfig(log_format=JsonLogs())`: one JSON line per record with `ts`,
+  `level`, `logger`, `message`, `process`, `task_id`, `task_name`,
+  `attempt`, `trace_id`, `span_id`, `exc`. `TaskContextFilter` puts
+  `task_id`, `task_name`, `attempt`, `trace_id`, `span_id` of the running
+  task on each record (`None` outside a body); add it, with
+  `JsonLogsFormatter`, to a handler of your own. The core's records of an
+  attempt carry `task_id`, `attempt` and `trace_id` themselves.
+
+See website docs `observability/tracing`, `observability/tracing-setup`,
+`observability/logs`, `observability/log-setup`.
+
 ### Direct Broker Methods
 
 `app.get_broker()` returns a `PostgresBroker` with methods for result retrieval and monitoring. All methods have sync and async variants.
@@ -1104,7 +1161,7 @@ horsies check <module> [--live] [--loglevel LEVEL]
 ### `horsies web`
 
 ```bash
-horsies web <module> [--host 127.0.0.1] [--port 8600] [--auth none|trusted-header] [--trusted-header X-Forwarded-User] [--enable-actions] [--loglevel INFO]
+horsies web <module> [--host 127.0.0.1] [--port 8600] [--auth none|trusted-header] [--trusted-header X-Forwarded-User] [--enable-actions] [--trace-link TEMPLATE] [--loglevel INFO]
 horsies web --database-url "postgresql://..." [--session-database-url URL] [--pgbouncer-transaction-mode] [...]
 ```
 
@@ -1112,6 +1169,16 @@ Serves the monitoring dashboard (requires the `web` extra). Fail-closed:
 non-loopback hosts require `--auth trusted-header`; actions are off unless
 `--enable-actions`. Never executes DDL. See `monitoring.md` for the full
 reference including the registry-less capability boundary.
+
+### `horsies metrics`
+
+```bash
+horsies metrics <module> --listen HOST:PORT [--loglevel INFO]
+```
+
+Serves the fleet metrics of the app's database at `GET /metrics`.
+`--listen` is required: `HOST:PORT` or `[IPV6]:PORT`, port 1 to 65535. See
+`monitoring.md`, Fleet Metrics.
 
 ### `horsies get-docs`
 
@@ -1175,5 +1242,8 @@ from horsies import (
     ExceptionMapper,
     # Retry
     RetryPolicy,
+    # Tracing and logs
+    OtelTracing, NoTracing, ChildOfSend, LinkedToSend,
+    JsonLogs, TextLogs, TaskContextFilter, JsonLogsFormatter,
 )
 ```

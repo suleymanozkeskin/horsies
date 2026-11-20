@@ -61,6 +61,9 @@ __all__ = [
     'ProfileRequestNamed',
     'ProfileRequestNotGiven',
     'ProfileRequest',
+    'MetricsEndpointListenAddress',
+    'MetricsEndpointNoMetricsEndpoint',
+    'MetricsEndpoint',
     'QueueConcurrencyTasks',
     'QueueConcurrencyNoLimit',
     'QueueConcurrency',
@@ -99,6 +102,12 @@ __all__ = [
     'PayloadManifest',
     'Execution',
     'TaskManifest',
+    'EventTypeName',
+    'HandlerManifest',
+    'EventHandlersHandlers',
+    'EventHandlersNoHandlers',
+    'EventHandlers',
+    'WorkerEndedSpans',
     'ChildCommandManifest',
     'PreloadLaunchCommand',
     'PreloadLaunchNoPreloadProgram',
@@ -143,6 +152,8 @@ __all__ = [
     'SHARED_THREAD_SEATS_MAX',
     'DRAIN_TIMEOUT_MS_MIN',
     'DRAIN_TIMEOUT_MS_MAX',
+    'LISTEN_PORT_MIN',
+    'LISTEN_PORT_MAX',
     'QUEUE_CONCURRENCY_MIN',
     'QUEUE_CONCURRENCY_MAX',
     'QUEUE_PRIORITY_MIN',
@@ -249,6 +260,9 @@ SHARED_THREAD_SEATS_MAX: Final = 256
 
 DRAIN_TIMEOUT_MS_MIN: Final = 1
 DRAIN_TIMEOUT_MS_MAX: Final = 86400000
+
+LISTEN_PORT_MIN: Final = 1
+LISTEN_PORT_MAX: Final = 65535
 
 QUEUE_CONCURRENCY_MIN: Final = 0
 QUEUE_CONCURRENCY_MAX: Final = 2147483647
@@ -785,6 +799,31 @@ type ProfileRequest = ProfileRequestNamed | ProfileRequestNotGiven
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class MetricsEndpointListenAddress:
+    """Serve the worker metrics and the health probes on `host`:`port`."""
+
+    kind: Literal['LISTEN_ADDRESS'] = 'LISTEN_ADDRESS'
+
+    host: str
+    """A host name or an IP address; an IPv6 address without brackets."""
+
+    port: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MetricsEndpointNoMetricsEndpoint:
+    """No metrics endpoint."""
+
+    kind: Literal['NO_METRICS_ENDPOINT'] = 'NO_METRICS_ENDPOINT'
+
+
+type MetricsEndpoint = MetricsEndpointListenAddress | MetricsEndpointNoMetricsEndpoint
+"""The metrics endpoint of a worker process. There is no default address:
+`--metrics-listen HOST:PORT` turns it on and names its address.
+"""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class QueueConcurrencyTasks:
     """At most `tasks` RUNNING tasks; 0 pauses the claims of the queue."""
 
@@ -1142,6 +1181,84 @@ class TaskManifest:
     """
 
 
+type EventTypeName = Literal['TaskClaimed', 'ClaimReleased', 'AttemptPlaced', 'AttemptNotStarted', 'AttemptEnded', 'AttemptRecorded', 'TaskRecovered', 'ChildStarted', 'ChildReplaced', 'SlotDown', 'SlotRecovered']
+"""The name of one event type: the tag of its wire form. A handler takes the events of one type.
+
+`TaskClaimed`: The worker claimed a task.
+
+`ClaimReleased`: A claimed task went back to the queue before it reached a child.
+
+`AttemptPlaced`: A task reached a child.
+
+`AttemptNotStarted`: The child stopped before it set the task RUNNING. No task code ran.
+
+`AttemptEnded`: An attempt ended: the child reported its end, the worker ended it, or the worker killed the child and did not see its exit.
+
+`AttemptRecorded`: The worker recorded the end of an attempt.
+
+`TaskRecovered`: A recovery pass of the worker changed a task.
+
+`ChildStarted`: A child of a slot sent its ready frame.
+
+`ChildReplaced`: A slot replaced its child.
+
+`SlotDown`: A slot is down after a boot failure that can clear.
+
+`SlotRecovered`: A slot that was down serves again.
+"""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HandlerManifest:
+    """One event handler of the app."""
+
+    name: str
+    """The name of the handler: the value of the `handler` label of
+    `horsies.telemetry.handler.errors` and
+    `horsies.telemetry.handler.dropped`. Each name is once in the
+    manifest.
+    """
+
+    event_type: EventTypeName
+    """The one event type that the handler takes."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class EventHandlersHandlers:
+    """The handlers of the app, each with its name and the event type that
+    it takes. The worker sends its handler child the events of these
+    types only.
+    """
+
+    kind: Literal['HANDLERS'] = 'HANDLERS'
+
+    handlers: tuple[HandlerManifest, ...]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class EventHandlersNoHandlers:
+    """The app registered no event handler. A member after the tag is
+    refused.
+    """
+
+    kind: Literal['NO_HANDLERS'] = 'NO_HANDLERS'
+
+
+type EventHandlers = EventHandlersHandlers | EventHandlersNoHandlers
+"""The event handlers that the app registered."""
+
+
+type WorkerEndedSpans = Literal['MAKE_SPANS', 'NO_SPANS']
+"""Whether the handler child makes a span for each attempt that the worker
+ended (a timeout kill, a crash, a blocked loop, a lost child). The child
+of such an attempt is gone, so the span that it opened never ends.
+
+`MAKE_SPANS`: The handler child makes these spans: the worker starts it also when the app has no handler, and sends it the `AttemptEnded` events.
+
+`NO_SPANS`: No span of an attempt that the worker ended.
+"""
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ChildCommandManifest:
     """The program that starts each child and its first arguments, the
@@ -1252,6 +1369,12 @@ class WorkerManifest:
     profile: ProfileRequest
     """The profile that the start asks for (`horsies worker --profile`)."""
 
+    metrics_endpoint: MetricsEndpoint
+    """The metrics endpoint that the start asks for (`horsies worker
+    --metrics-listen HOST:PORT`): a field of the process, not of the
+    app's config.
+    """
+
     claim: WorkerClaimManifest
 
     recovery: RecoveryManifest
@@ -1264,6 +1387,16 @@ class WorkerManifest:
 
     tasks: dict[str, TaskManifest]
     """The facts of each task that the worker registered, by task name."""
+
+    handlers: EventHandlers
+    """The event handlers of the app. The worker starts its handler child
+    when the app has one, or when `worker_ended_spans` is `MAKE_SPANS`.
+    """
+
+    worker_ended_spans: WorkerEndedSpans
+    """Whether the handler child makes the span of each attempt that the
+    worker ended.
+    """
 
     child_launch: ChildLaunchManifest
 

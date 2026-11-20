@@ -166,7 +166,7 @@ pub use crate::worker::runner_beats::RUNNER_HEARTBEAT_LOST_EXIT_CODE;
 pub use crate::worker::connection_fit::{
     check_handle_worker_connections, check_worker_connections,
 };
-pub use crate::worker::from_manifest::{WorkerPlan, WorkerPlanRefused};
+pub use crate::worker::from_manifest::{MetricsEndpointPlan, WorkerPlan, WorkerPlanRefused};
 pub use crate::worker::run_end::{
     run_end_of, RunPhase, WorkerBootCause, WorkerFailCause, WorkerRunEnd,
 };

@@ -22,11 +22,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use horsies_core::monitoring::fleet::FleetLabels;
+use horsies_core::telemetry::declared::{warn_folded_names, Folded, FoldedNames};
 use horsies_core::web::{
     route_access, AccessGrant as CoreGrant, AccessNeed, Bytes, EventFrames, EventStreamItem,
     Method, MonitoringHandler as CoreHandler, MonitoringHandlerConfig, MonitoringUiConfig,
-    RequestParts, ResponseForm, ResponseParts, Verdict, DEGRADED_FRAME, MAX_REQUEST_BODY_BYTES,
+    RequestParts, ResponseForm, ResponseParts, TraceLink, TraceLinkTemplate, Verdict,
+    DEGRADED_FRAME, MAX_REQUEST_BODY_BYTES,
 };
 use horsies_core::{BrokerError, ChildSpecSource};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -38,6 +39,7 @@ use tokio::sync::{watch, Mutex, OnceCell};
 use crate::bridge::completion_queue::call_async;
 use crate::bridge::CallKind;
 use crate::child_spec::{PythonChildSpecSource, RaisedExceptions, RegisteredSource};
+use crate::fleet_metrics::fleet_labels;
 use crate::handle::{checked_core, BrokerConnection, CoreHandle};
 use crate::process_core::Core;
 
@@ -351,6 +353,9 @@ struct HandlerPlan {
     connection: BrokerConnection,
     child_source: RegisteredSource,
     config: MonitoringHandlerConfig,
+    /// The queue and schedule names that the labels of `/metrics` do not
+    /// declare; the build logs them.
+    folded: FoldedNames,
 }
 
 /// A built handler and the child spec source that its resume route uses.
@@ -368,11 +373,13 @@ struct HandlerState {
 impl HandlerState {
     /// The built handler. The first call connects the handle's broker (no
     /// connection opens) and builds the handler; a failure is returned and
-    /// not kept.
+    /// not kept. The build logs one WARNING line that names each queue or
+    /// schedule name that `/metrics` does not declare.
     async fn built(&self, core: &'static Core) -> Result<Arc<BuiltHandler>, BrokerError> {
         self.built
             .get_or_try_init(|| async {
                 let broker = self.plan.connection.broker().await?;
+                warn_folded_names(&"the fleet metrics of /metrics", &self.plan.folded);
                 let child_source = Arc::new(PythonChildSpecSource::new(
                     core,
                     Arc::clone(&self.plan.child_source),
@@ -481,6 +488,14 @@ fn heartbeat_of(heartbeat_ms: u64) -> Result<Duration, String> {
     }
 }
 
+/// The trace link of a template text: `NoTraceLink` for `None`. Pure.
+fn trace_link_of(template: Option<&str>) -> Result<TraceLink, horsies_core::web::TraceLinkRefusal> {
+    match template {
+        None => Ok(TraceLink::NoTraceLink),
+        Some(text) => TraceLinkTemplate::parse(text).map(TraceLink::Template),
+    }
+}
+
 /// The monitoring handler of one `CoreHandle`.
 #[pyclass(module = "horsies._core", name = "MonitoringHandler", frozen)]
 pub struct MonitoringHandler {
@@ -492,20 +507,45 @@ pub struct MonitoringHandler {
 impl MonitoringHandler {
     /// The handler of `handle`'s broker. `client_version` is the version
     /// that `/api/meta` reports; `heartbeat_ms` the wait of an event stream
-    /// without an event before its heartbeat frame (1 to 3,600,000).
-    /// Starts nothing: the first call builds the handler. A handle without
-    /// a child spec source raises `RuntimeError`; a heartbeat out of bounds
-    /// raises `ValueError`.
+    /// without an event before its heartbeat frame (1 to 3,600,000);
+    /// `trace_link_template` the template of the trace link of a task
+    /// detail, or `None` for the trace id as text; `queue_names` and
+    /// `schedule_names` the label values of `/metrics` (every other name is
+    /// `(unknown)`). A name that cannot be a label value of its own (empty,
+    /// `(unknown)`, or past the bound of names) counts in the `(unknown)`
+    /// series, and the build logs one WARNING line that names it. Starts
+    /// nothing: the first call builds the handler. A handle without a child
+    /// spec source raises `RuntimeError`; a heartbeat out of bounds or a
+    /// template that `trace_link_refusal` refuses raises `ValueError`.
     #[new]
-    #[pyo3(signature = (handle, *, actions_enabled, custom_css_url, client_version, heartbeat_ms))]
+    #[pyo3(signature = (
+        handle,
+        *,
+        actions_enabled,
+        custom_css_url,
+        trace_link_template,
+        client_version,
+        heartbeat_ms,
+        queue_names,
+        schedule_names
+    ))]
     fn new(
         handle: &Bound<'_, CoreHandle>,
         actions_enabled: bool,
         custom_css_url: Option<String>,
+        trace_link_template: Option<String>,
         client_version: String,
         heartbeat_ms: u64,
+        queue_names: Vec<String>,
+        schedule_names: Vec<String>,
     ) -> PyResult<Self> {
         let heartbeat = heartbeat_of(heartbeat_ms).map_err(PyValueError::new_err)?;
+        let trace_link = trace_link_of(trace_link_template.as_deref())
+            .map_err(|refused| PyValueError::new_err(refused.to_string()))?;
+        let Folded {
+            declared: fleet_labels,
+            folded,
+        } = fleet_labels(queue_names, schedule_names);
         let handle = handle.get();
         let child_source = handle.registered_child_spec_source().ok_or_else(|| {
             PyRuntimeError::new_err(
@@ -520,14 +560,15 @@ impl MonitoringHandler {
                     child_source,
                     config: MonitoringHandlerConfig {
                         actions_enabled,
-                        ui: MonitoringUiConfig { custom_css_url },
+                        ui: MonitoringUiConfig {
+                            custom_css_url,
+                            trace_link,
+                        },
                         client_version,
                         heartbeat,
-                        // The constructor takes no queue or schedule names:
-                        // every queue and schedule of `/metrics` is
-                        // `(unknown)`.
-                        fleet_labels: FleetLabels::none(),
+                        fleet_labels,
                     },
+                    folded,
                 },
                 built: OnceCell::new(),
             }),
