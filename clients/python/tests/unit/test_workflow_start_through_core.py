@@ -163,6 +163,7 @@ class TestSpecData:
             workflow_id=uuid.UUID(WORKFLOW_ID),
             sent_at=SENT_AT,
             resend_on_transient_err=False,
+            trace=core.NoTraceCarrier(),
         )
         assert isinstance(request, core.WorkflowStartRequest)
 
@@ -176,6 +177,7 @@ class TestSpecData:
                 workflow_id=uuid.UUID(WORKFLOW_ID),
                 sent_at=SENT_AT,
                 resend_on_transient_err=False,
+                trace=core.NoTraceCarrier(),
             )
 
         assert str(refused.value) == (
@@ -190,6 +192,7 @@ class TestSpecData:
                 workflow_id=uuid.UUID(WORKFLOW_ID),
                 sent_at=SENT_AT,
                 resend_on_transient_err=False,
+                trace=core.NoTraceCarrier(),
             )
 
         assert str(refused.value) == (

@@ -1,4 +1,8 @@
-"""Rust-style error display for horsies startup/validation errors."""
+"""Rust-style error display for horsies startup/validation errors.
+
+`ErrorCode`, the `HRS-nnn` codes, is the catalog that `horsies-codegen`
+renders from horsies-core into `horsies._catalog.error_codes`.
+"""
 
 from __future__ import annotations
 
@@ -7,119 +11,15 @@ import linecache
 import os
 import sys
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, Callable
+
+from horsies._catalog.error_codes import ErrorCode as ErrorCode
 
 # Absolute path to the horsies package directory.
 # Used by _find_user_frame to distinguish library frames from user code.
 # This avoids false positives when the project checkout path itself contains
 # "horsies" (e.g. /home/runner/work/horsies/horsies/ on GitHub Actions).
 _HORSIES_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-class ErrorCode(str, Enum):
-    """Error codes for startup/validation errors.
-
-    Organized by category:
-    - HRS-001-HRS-099: Workflow validation errors
-    - HRS-100-HRS-199: Task definition errors
-    - HRS-200-HRS-299: Config/broker errors
-    - HRS-300-HRS-399: Registry errors
-    """
-
-    # Workflow validation (HRS-001-HRS-099)
-    WORKFLOW_NO_NAME = 'HRS-001'
-    WORKFLOW_NO_NODES = 'HRS-002'
-    WORKFLOW_INVALID_NODE_ID = 'HRS-003'
-    WORKFLOW_DUPLICATE_NODE_ID = 'HRS-004'
-    WORKFLOW_NO_ROOT_TASKS = 'HRS-005'
-    WORKFLOW_INVALID_DEPENDENCY = 'HRS-006'
-    WORKFLOW_CYCLE_DETECTED = 'HRS-007'
-    WORKFLOW_INVALID_ARGS_FROM = 'HRS-008'
-    WORKFLOW_INVALID_CTX_FROM = 'HRS-009'
-    WORKFLOW_CTX_PARAM_MISSING = 'HRS-010'
-    WORKFLOW_INVALID_OUTPUT = 'HRS-011'
-    WORKFLOW_INVALID_SUCCESS_POLICY = 'HRS-012'
-    WORKFLOW_INVALID_JOIN = 'HRS-013'
-    WORKFLOW_UNRESOLVED_QUEUE = 'HRS-014'
-    WORKFLOW_UNRESOLVED_PRIORITY = 'HRS-015'
-    WORKFLOW_NO_DEFINITION_KEY = 'HRS-016'
-    WORKFLOW_DUPLICATE_DEFINITION_KEY = 'HRS-017'
-    WORKFLOW_INVALID_KWARG_KEY = 'HRS-019'
-    WORKFLOW_MISSING_REQUIRED_PARAMS = 'HRS-020'
-    WORKFLOW_KWARGS_ARGS_FROM_OVERLAP = 'HRS-021'
-    WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH = 'HRS-022'
-    # HRS-023 is retired and is not used again.
-    WORKFLOW_ARGS_FROM_TYPE_MISMATCH = 'HRS-024'
-    WORKFLOW_OUTPUT_TYPE_MISMATCH = 'HRS-025'
-    WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED = 'HRS-026'
-    WORKFLOW_CHECK_CASES_REQUIRED = 'HRS-027'
-    WORKFLOW_CHECK_CASE_INVALID = 'HRS-028'
-    WORKFLOW_CHECK_BUILDER_EXCEPTION = 'HRS-029'
-    WORKFLOW_CHECK_UNDECORATED_BUILDER = 'HRS-030'
-    WORKFLOW_KWARGS_NOT_SERIALIZABLE = 'HRS-031'
-    WORKFLOW_INVALID_ID = 'HRS-032'
-    WORKFLOW_INVALID_DEFINITION_CONFIG = 'HRS-033'
-    WORKFLOW_INVALID_PRIORITY = 'HRS-034'
-    WORKFLOW_NAIVE_GOOD_UNTIL = 'HRS-035'
-    WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT = 'HRS-036'
-    WORKFLOW_SUBWORKFLOW_SELF_NESTING = 'HRS-037'
-    WORKFLOW_TOO_MANY_NODES = 'HRS-038'
-    WORKFLOW_SUBWORKFLOW_APP_MISSING = 'HRS-018'
-
-    # Task definition (HRS-100-HRS-199)
-    TASK_NO_RETURN_TYPE = 'HRS-100'
-    TASK_INVALID_RETURN_TYPE = 'HRS-101'
-    TASK_INVALID_OPTIONS = 'HRS-102'
-    TASK_INVALID_QUEUE = 'HRS-103'
-    TASK_PREDECORATED_NOT_SUPPORTED = 'HRS-104'
-    TASK_STRICT_SIGNATURE_VIOLATION = 'HRS-105'
-    # HRS-106 is retired and is not used again.
-    # The execution rules of `@app.task(execution=...)`, one code per rule.
-    TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF = 'HRS-107'
-    TASK_SHARED_THREAD_REQUIRES_DEF = 'HRS-108'
-    TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT = 'HRS-109'
-    TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC = 'HRS-110'
-    TASK_CANCEL_GRACE_OUT_OF_RANGE = 'HRS-111'
-    # The codes of `@app.task(error_codes=...)`: a code that fails the
-    # code-text rule, and a code given twice. A built-in or reserved name is
-    # CHECK_RESERVED_CODE_COLLISION.
-    TASK_INVALID_ERROR_CODE = 'HRS-112'
-    TASK_DUPLICATE_ERROR_CODE = 'HRS-113'
-
-    # Config/broker (HRS-200-HRS-299)
-    CONFIG_INVALID_QUEUE_MODE = 'HRS-200'
-    CONFIG_INVALID_CLUSTER_CAP = 'HRS-201'
-    CONFIG_INVALID_PREFETCH = 'HRS-202'
-    BROKER_INVALID_URL = 'HRS-203'
-    CONFIG_INVALID_RECOVERY = 'HRS-204'
-    CONFIG_INVALID_SCHEDULE = 'HRS-205'
-    CLI_INVALID_ARGS = 'HRS-206'
-    WORKER_INVALID_LOCATOR = 'HRS-207'
-    CONFIG_INVALID_RESILIENCE = 'HRS-208'
-    CONFIG_INVALID_EXCEPTION_MAPPER = 'HRS-209'
-    MODULE_EXEC_ERROR = 'HRS-210'
-    BROKER_INIT_FAILED = 'HRS-211'
-    CONFIG_INVALID_BROKER_POOL = 'HRS-213'
-    CHECK_RESERVED_CODE_COLLISION = 'HRS-212'
-    CONFIG_INVALID_CHILD_HOOK = 'HRS-214'
-    CONFIG_INVALID_KEEPALIVE = 'HRS-215'
-    CONFIG_INVALID_RETENTION = 'HRS-216'
-    # check(live=True) was called on a thread that runs an event loop; the
-    # live connectivity check did not run.
-    CHECK_LIVE_ASYNC_CONTEXT = 'HRS-217'
-    # A worker profile in AppConfig.worker_profiles is not valid.
-    CONFIG_INVALID_WORKER_PROFILE = 'HRS-218'
-    # check(live=True): a worker profile needs more Postgres connections than
-    # the server allows, or the server limit could not be read.
-    CHECK_WORKER_CONNECTIONS = 'HRS-219'
-    # AppConfig.tracing is OtelTracing and the OpenTelemetry API
-    # (horsies[otel]) is not installed.
-    CONFIG_OTEL_API_MISSING = 'HRS-220'
-
-    # Registry (HRS-300-HRS-399)
-    TASK_NOT_REGISTERED = 'HRS-300'
-    TASK_DUPLICATE_NAME = 'HRS-301'
 
 
 # ANSI color codes

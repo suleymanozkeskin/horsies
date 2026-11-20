@@ -35,7 +35,7 @@ fn monitoring_routes(app: &Horsies) -> Result<Router, Box<dyn std::error::Error>
 }
 ```
 
-`router(&app, config, policy) -> axum::Router` serves every path of the mount: the page and its assets, `/api/...`, and the event stream `GET /api/events`.
+`router(&app, config, policy) -> axum::Router` serves every path of the mount: the page and its assets, `/api/...`, the event stream `GET /api/events`, and `GET /metrics`, the fleet metrics of the app's database behind the view verdict. The `queue` and `schedule` label values of `/metrics` are the queues and the schedules of the app's config. See [Fleet Collector](/horsies/observability/fleet-collector/).
 
 - Building the router does no I/O. The core handler is built at the first request, on the app's handle. A request whose broker cannot be built is answered 503 with the cause; the next request tries again.
 - The mount runs no schema step. For a process that only monitors, build the app with `Horsies::with_schema_mode(config, SchemaMode::ObserveOnly)`. See [App Config](/horsies/rust/configuration/app-config/#schema-modes).
@@ -45,7 +45,7 @@ fn monitoring_routes(app: &Horsies) -> Result<Router, Box<dyn std::error::Error>
 
 | Field | Type | Default |
 |-------|------|---------|
-| `ui` | `MonitoringUiConfig { custom_css_url: Option<String> }` | No stylesheet |
+| `ui` | `MonitoringUiConfig { custom_css_url: Option<String>, trace_link: TraceLink }` | No stylesheet; `TraceLink::NoTraceLink` (the task detail shows the trace id as text). `TraceLink::Template(TraceLinkTemplate::parse(text)?)` links it: an `http` or `https` URL with one `{trace_id}`, at most 2,048 bytes of printable ASCII |
 | `actions` | `Actions::Enabled` or `Actions::Disabled` | `Enabled` |
 
 - With `Actions::Disabled`, every action route answers 403 and the policy's `can_act` is not called.

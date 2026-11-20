@@ -42,6 +42,8 @@ mod workflow;
 pub mod blocking;
 #[cfg(feature = "cli")]
 pub mod cli;
+// The lifecycle events of the worker, and the app's handlers of them.
+pub mod events;
 pub mod monitoring;
 #[cfg(feature = "otel")]
 pub mod otel;
@@ -169,11 +171,13 @@ pub mod __private {
         }
     }
 
-    /// The refusal of `name::node()` before `name::register(&mut app)`.
+    /// The refusal of `name::node()` before `name::register(&mut app)`:
+    /// `HRS-302`, the task of the node is not registered in this process.
     pub fn node_before_register(task_name: &str) -> crate::HorsiesError {
         crate::HorsiesError::new(format!(
             "task '{task_name}' is not registered in this process; call \
              {task_name}::register(&mut app) when main builds the app"
         ))
+        .with_code(crate::ErrorCode::WorkflowUnregisteredTask)
     }
 }

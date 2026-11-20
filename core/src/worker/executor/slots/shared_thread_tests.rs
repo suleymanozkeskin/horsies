@@ -89,11 +89,26 @@ fn crash_reason(end: AttemptEnd) -> String {
     }
 }
 
+/// The timeout of a run at a kill of its child: no start reached the worker.
 fn timed_out(milliseconds: u64, retry: RetryPlacement) -> AttemptEnd {
     AttemptEnd::TimedOut {
         timeout: timeout_ms(milliseconds),
         retry,
         cancel: TimeoutCancel::NoSignal,
+        start: crate::events::AttemptStart::NotReported,
+    }
+}
+
+/// The timeout of a run that its child ended at the deadline, with the
+/// start of the scripted `shared_result` frame.
+fn timed_out_in_child(milliseconds: u64, retry: RetryPlacement) -> AttemptEnd {
+    AttemptEnd::TimedOut {
+        timeout: timeout_ms(milliseconds),
+        retry,
+        cancel: TimeoutCancel::NoSignal,
+        start: crate::events::AttemptStart::Reported {
+            started_at: super::scripted::started_at(),
+        },
     }
 }
 
@@ -516,7 +531,7 @@ async fn a_thread_run_that_ends_after_its_deadline_times_out_and_the_child_retir
 
     assert_eq!(
         answer_of(late_answer).await,
-        timed_out(SHORT_MS, RetryPlacement::SameClass)
+        timed_out_in_child(SHORT_MS, RetryPlacement::SameClass)
     );
     assert_eq!(answer_of(neighbour_answer).await, reported(2));
     assert_eq!(

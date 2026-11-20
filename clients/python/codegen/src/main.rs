@@ -24,6 +24,9 @@
 //! - `_catalog/events.py`: the event classes of
 //!   `horsies_core::events::EVENT_CONTRACT` and `decode_event`, their
 //!   decoder.
+//! - `_catalog/producer_metrics.py`: the producer metrics of
+//!   `horsies_core::telemetry::catalog`: names, units, help texts, label
+//!   attribute keys and the bucket bounds of the send duration.
 //! - `_core.pyi`: the type stubs of the extension module `horsies._core`.
 //!
 //! Usage:
@@ -43,6 +46,7 @@ mod error_classes;
 mod events;
 mod manifest;
 mod output;
+mod producer_metrics;
 mod python_text;
 mod surface;
 

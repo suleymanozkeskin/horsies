@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from horsies.core.telemetry.send_telemetry import NO_SEND_TELEMETRY
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.retention import RetentionConfig
@@ -53,6 +54,7 @@ def _make_app(retention: RetentionConfig) -> MagicMock:
     app.config.payload = PayloadPolicy()
     app.config.retention = retention
     app.are_sends_suppressed.return_value = False
+    app.send_telemetry.return_value = NO_SEND_TELEMETRY
     app.validate_queue_name.return_value = MAPPED_QUEUE
     return app
 

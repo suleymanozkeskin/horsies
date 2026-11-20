@@ -15,6 +15,7 @@ import { StatusChip } from '@/components/ui/status-chip';
 import { Button } from '@/components/ui/button';
 import { Toggle } from '@/components/ui/toggle';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { useMeta } from '@/hooks/use-meta';
 import { useBreakdown, useFacets, useTasks } from '@/hooks/use-tasks';
 import { formatDuration, formatRelative, formatTime } from '@/lib/format-duration';
 import { cn } from '@/lib/utils';
@@ -31,7 +32,7 @@ import {
 } from '@/routes/search';
 import type { TaskSummary } from '@/types/tasks';
 
-import { AttemptHistory, DetailRow } from './detail';
+import { AttemptHistory, DetailRow, TraceRow } from './detail';
 import { ErrorChip } from './error-chip';
 import { errorCategoryColorVar } from './error-taxonomy';
 import { FacetCombobox, type FacetOption } from './facet-combobox';
@@ -63,6 +64,7 @@ function TaskDetailPanel({
   onClose: () => void;
 }) {
   const view = useTaskActions(taskId, onClose);
+  const { meta } = useMeta();
   const { detail, isLoading, isError } = view;
   const leaf = detail?.leaf;
   return (
@@ -139,6 +141,10 @@ function TaskDetailPanel({
             {leaf.good_until && (
               <DetailRow label="Good until" value={formatTime(leaf.good_until)} />
             )}
+            <TraceRow
+              traceId={leaf.trace_id}
+              template={meta?.trace_link_template ?? null}
+            />
             {leaf.failed_reason && (
               <div>
                 <span className="text-xs uppercase tracking-wide text-muted-foreground">

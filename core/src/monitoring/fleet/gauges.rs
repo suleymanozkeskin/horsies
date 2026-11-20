@@ -18,8 +18,9 @@
 //!   oldest due row, in seconds. A (queue, class) whose rows are all due
 //!   later has no series: no row waits.
 //! - `horsies.fleet.workers{state}`, `horsies.fleet.seats{execution}`,
-//!   `horsies.fleet.seats.in_use{execution}`: one series per state and
-//!   class, 0 included.
+//!   `horsies.fleet.seats.in_use{execution}`,
+//!   `horsies.fleet.workers.telemetry_down{part}`: one series per state,
+//!   class and part, 0 included.
 //! - `horsies.fleet.unserved_classes{queue, execution}`: one series per
 //!   pending (queue, class); 1 when no live worker serves it, else 0. A
 //!   (queue, class) whose serving workers have every seat of the class down
@@ -34,7 +35,9 @@ use std::collections::HashMap;
 
 use crate::core::task::Execution;
 use crate::telemetry::declared::{DeclaredNames, DeclaredValue, QueueName, ScheduleName};
-use crate::telemetry::labels::{FleetWorkerState, LiveTaskStatus, LiveWorkflowStatus};
+use crate::telemetry::labels::{
+    FleetWorkerState, LiveTaskStatus, LiveWorkflowStatus, TelemetryPart,
+};
 use crate::telemetry::registry::{LabelSet, SeriesKey};
 use crate::{ClassCoverage, StreamCoverageState, StreamWait};
 
@@ -73,6 +76,8 @@ pub(crate) struct WorkerSeries {
     pub(crate) seats: Vec<((Execution,), f64)>,
     /// `horsies.fleet.seats.in_use`.
     pub(crate) seats_in_use: Vec<((Execution,), f64)>,
+    /// `horsies.fleet.workers.telemetry_down`.
+    pub(crate) telemetry_down: Vec<((TelemetryPart,), f64)>,
 }
 
 /// The `PENDING` rows of the (queue, class) streams that one series stands
@@ -222,6 +227,10 @@ pub(crate) fn worker_series(workers: &FleetWorkers) -> WorkerSeries {
                     count_value(workers.seats.of(execution).in_use),
                 )
             })
+            .collect(),
+        telemetry_down: TelemetryPart::ALL
+            .into_iter()
+            .map(|part| ((part,), count_value(workers.telemetry_down.of(part))))
             .collect(),
     }
 }

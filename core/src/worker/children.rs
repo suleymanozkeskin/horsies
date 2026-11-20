@@ -488,6 +488,12 @@ impl ChildrenView {
     pub fn down_slots(&self) -> Vec<(usize, DownState)> {
         self.board.down_slots()
     }
+
+    /// The kind of the children of the slot at board index `slot`, an index
+    /// of [`ChildrenView::down_slots`].
+    pub fn kind_of(&self, slot: usize) -> ExecutionClass {
+        self.board.class_of(slot)
+    }
 }
 
 /// What the stop of the pools did: the worst report of any pool, with the

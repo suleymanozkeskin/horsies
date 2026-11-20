@@ -659,6 +659,7 @@ async fn every_task_gets_its_predicted_end_in_a_mixed_run() {
                     timeout: timeout_ms(1_000),
                     retry: RetryPlacement::SameClass,
                     cancel: TimeoutCancel::NoSignal,
+                    start: crate::events::AttemptStart::NotReported,
                 }
             ),
             Fate::Garbage => assert!(crash_reason(end).contains("bad frame")),

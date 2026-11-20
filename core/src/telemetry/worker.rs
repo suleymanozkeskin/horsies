@@ -30,10 +30,11 @@ use crate::events::{Event, EventTypeName, UnionEvent, WorkerIdText};
 use crate::telemetry::catalog::MetricId;
 use crate::telemetry::declared::{self, DeclaredValue, ErrorCodeValue};
 use crate::telemetry::labels::{
-    ClaimPassResult, EventDropCause, RecoveryAction, RecoveryStep, ReleaseReason, ReplaceReason,
+    ClaimPassResult, EventDropCause, MemoryProcess, RecoveryAction, RecoveryStep, ReleaseReason,
+    ReplaceReason,
 };
 use crate::telemetry::registry::{
-    Counter, HandleRefused, Histogram, OptionalCounter, ProcessFacts, Registry,
+    Counter, Gauge, HandleRefused, Histogram, OptionalCounter, ProcessFacts, Registry,
 };
 use crate::worker::executor::protocol::StopReason;
 use crate::worker::executor::slots::outcome::WriteStage;
@@ -43,6 +44,7 @@ mod end_points;
 mod points;
 mod recovery_points;
 mod slot_points;
+mod snapshot_points;
 #[cfg(test)]
 mod tests;
 
@@ -214,6 +216,10 @@ struct PointMetrics {
     children_started: Counter<(Execution,)>,
     children_replaced: Counter<(Execution, ReplaceReason)>,
     child_boot: Histogram<(Execution,)>,
+    seats: Gauge<(Execution,)>,
+    seats_in_use: Gauge<(Execution,)>,
+    slots_down: Gauge<(Execution,)>,
+    memory_rss: Gauge<(MemoryProcess,)>,
 }
 
 impl PointMetrics {
@@ -239,6 +245,10 @@ impl PointMetrics {
             children_started: registry.counter(MetricId::ChildrenStarted)?,
             children_replaced: registry.counter(MetricId::ChildrenReplaced)?,
             child_boot: registry.histogram(MetricId::ChildBootDuration)?,
+            seats: registry.gauge(MetricId::Seats)?,
+            seats_in_use: registry.gauge(MetricId::SeatsInUse)?,
+            slots_down: registry.gauge(MetricId::SlotsDown)?,
+            memory_rss: registry.gauge(MetricId::MemoryRss)?,
         })
     }
 }
