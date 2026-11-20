@@ -358,11 +358,15 @@ fn next_values<T>(receiver: &Receiver<T>, count: usize) -> Vec<T> {
 struct Serving {
     parent: tokio::sync::mpsc::Sender<ParentFrame>,
     service: tokio::task::JoinHandle<ServeEnd>,
+    /// The parent's end of the socket. It lives until the service ended:
+    /// a write to a closed peer exits the process with the parent-gone
+    /// code, which ends the whole test binary.
+    _peer: UnixStream,
 }
 
 impl Serving {
     fn start(spans: EndedSpans, seen_tx: Sender<Seen>) -> Serving {
-        let (ours, _theirs) = UnixStream::pair().unwrap();
+        let (ours, peer) = UnixStream::pair().unwrap();
         let writer = FrameWriter::start(ours, 8).unwrap();
         let handler_seen = Mutex::new(seen_tx);
         let mut set = EventHandlerSet::new();
@@ -384,7 +388,11 @@ impl Serving {
         let service = tokio::spawn(async move {
             serve_handlers(running, &spans, writer, &mut frames, times).await
         });
-        Serving { parent, service }
+        Serving {
+            parent,
+            service,
+            _peer: peer,
+        }
     }
 
     async fn send(&self, events: &[Event]) {
