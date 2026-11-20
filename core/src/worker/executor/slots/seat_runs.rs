@@ -741,7 +741,6 @@ fn verdict_end(
                 loss.killed_by()
             )),
         },
-        KilledRunVerdict::ReturnedBeforeKill { returned } => AttemptEnd::returned(returned),
     }
 }
 
