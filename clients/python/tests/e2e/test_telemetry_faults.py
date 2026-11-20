@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Final, cast
 
 import pytest
+import pytest_asyncio
 from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.propagate import get_global_textmap, set_global_textmap
@@ -113,9 +114,11 @@ of that connection under ``ENDPOINT_MAX_CONNECTIONS``."""
 HTTP_TIMEOUT: Final = timedelta(seconds=2)
 HTTP_BODY_MAX_BYTES: Final = 16 * 1024 * 1024
 POLL_INTERVAL: Final = timedelta(milliseconds=200)
-MAX_WAVES: Final = 10
+MAX_WAVES: Final = 60
 """The most waves that a test sends while it waits for a state of the
-fault."""
+fault. A wave of trivial tasks takes well under a second, while the worker
+writes its snapshot once a second: the wait is bounded by ``STATE_BOUND``,
+and this count only bounds the waves inside it."""
 LOG_TAIL_BYTES: Final = 8_192
 
 
@@ -368,7 +371,7 @@ def _free_port() -> int:
         return int(probe.getsockname()[1])
 
 
-@pytest.fixture
+@pytest_asyncio.fixture(loop_scope='session')
 async def clean_snapshots(session: AsyncSession) -> AsyncIterator[datetime]:
     """Delete the snapshots of earlier workers; give the database time of
     the start of the test."""
@@ -398,7 +401,10 @@ async def test_a_handler_child_that_crashes_at_each_event_changes_no_task(
         await _wait_ready(worker)
         down: dict[str, object] | None = None
         dropped = 0.0
+        deadline = time.monotonic() + STATE_BOUND.total_seconds()
         for wave in range(MAX_WAVES):
+            if time.monotonic() >= deadline:
+                break
             await _assert_wave_completes(wave)
             states = await _telemetry_states(session, clean_snapshots, 'handler_child')
             down = next((s for s in states if s.get('state') == 'down'), down)
@@ -439,9 +445,9 @@ async def test_a_handler_that_never_returns_changes_no_task(
                 pass
             case other:
                 pytest.fail(f'/livez while the handler blocks: {other}')
-        states = await _telemetry_states(session, clean_snapshots, 'handler_child')
-        assert states, 'the worker wrote no snapshot'
-        assert states[-1]['state'] == 'up', states[-1]
+        # The snapshot of the start shows the child starting; a later one,
+        # written while the handler blocks, shows it up.
+        _ = await _wait_for_state(session, clean_snapshots, 'handler_child', 'up')
         _assert_stops_clean(worker)
 
 
