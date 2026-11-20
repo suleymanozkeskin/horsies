@@ -129,12 +129,16 @@ An unknown command, or no command, is an argument error: exit code 2.
 ```bash
 ./myapp worker --profile default
 ./myapp worker --profile batch --loglevel debug
+./myapp worker --profile default --metrics-listen 0.0.0.0:9464
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--profile NAME` | required | The profile of `AppConfig.worker_profiles` that holds the settings of the worker: children, recycling, claim limits, drain timeout |
 | `--loglevel LEVEL` | `INFO` | See [Logs](#logs) |
+| `--metrics-listen HOST:PORT` | none | Serve the worker metrics (`GET /metrics`) and the health probes (`GET /livez`, `GET /readyz`) on `HOST:PORT`, or `[IPV6]:PORT`. There is no default: without it the worker serves no endpoint. See [Metrics](/horsies/observability/metrics/) |
+
+- A `--metrics-listen` value that does not parse is an argument error: exit code 2. An address that does not bind does not stop the worker: the endpoint binds again with a backoff. `WorkerStart::with_metrics_endpoint(ListenAddress)` gives the address to `Horsies::run_worker` in a binary that owns its `main`.
 
 - A missing or unknown `--profile` exits with code 1, and nothing starts. The refusal lists the defined profile names.
 - The app check runs before the worker starts, without the schedules. A refused check prints its report on stderr and exits with code 1.
