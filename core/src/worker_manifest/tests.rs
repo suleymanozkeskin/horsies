@@ -119,6 +119,8 @@ pub(crate) fn manifest(profiles: Value, request: Value) -> Value {
             },
             "app.tasks.resize": {"execution": "SHARED_THREAD", "error_codes": []}
         },
+        "handlers": {"kind": "NO_HANDLERS"},
+        "worker_ended_spans": "NO_SPANS",
         "child_launch": {
             "command": {
                 "program": "/usr/bin/python3",
@@ -429,6 +431,109 @@ fn a_task_record_without_its_codes_or_with_another_field_is_refused() {
     let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
     document["tasks"]["app.tasks.add"]["queue"] = json!("default");
     assert!(refused_path(&document).starts_with("tasks."));
+}
+
+/// The handlers of the app parse with their names and types, in order;
+/// both span switches parse from their wire names.
+#[test]
+fn the_handlers_and_the_span_switch_parse() {
+    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    document["handlers"] = json!({
+        "kind": "HANDLERS",
+        "handlers": [
+            {"name": "app.hooks.on_end", "event_type": "AttemptEnded"},
+            {"name": "app.hooks.on_claim", "event_type": "TaskClaimed"}
+        ]
+    });
+    document["worker_ended_spans"] = json!("MAKE_SPANS");
+
+    let manifest = parsed(&document);
+
+    let EventHandlers::Handlers { handlers } = &manifest.handlers else {
+        panic!("the manifest has handlers: {:?}", manifest.handlers);
+    };
+    let parsed_handlers: Vec<(&str, EventTypeName)> = handlers
+        .handlers()
+        .iter()
+        .map(|handler| (handler.name.as_str(), handler.event_type))
+        .collect();
+    assert_eq!(
+        parsed_handlers,
+        [
+            ("app.hooks.on_end", EventTypeName::AttemptEnded),
+            ("app.hooks.on_claim", EventTypeName::TaskClaimed),
+        ]
+    );
+    assert_eq!(manifest.worker_ended_spans, WorkerEndedSpans::MakeSpans);
+    let complete = parsed(&manifest_with_no_handler());
+    assert_eq!(complete.handlers, EventHandlers::NoHandlers);
+    assert_eq!(complete.worker_ended_spans, WorkerEndedSpans::NoSpans);
+}
+
+fn manifest_with_no_handler() -> Value {
+    manifest(json!({"batch": full_profile()}), named("batch"))
+}
+
+/// A handler list is refused at its field when it is empty, holds more than
+/// `MAX_EVENT_HANDLERS` handlers or a name twice, has a name that is empty,
+/// too long or `(unknown)`, or names no event type of the contract.
+#[test]
+fn a_bad_handler_list_is_refused_at_the_handlers_field() {
+    let handler = |name: &str, event_type: &str| json!({"name": name, "event_type": event_type});
+    let too_many: Vec<Value> = (0..=MAX_EVENT_HANDLERS)
+        .map(|index| handler(&format!("app.hooks.h{index}"), "TaskClaimed"))
+        .collect();
+    let longest = "h".repeat(MAX_HANDLER_NAME_CHARS);
+    let too_long = "h".repeat(MAX_HANDLER_NAME_CHARS + 1);
+    for handlers in [
+        json!([]),
+        Value::Array(too_many),
+        json!([
+            handler("app.hooks.a", "TaskClaimed"),
+            handler("app.hooks.a", "AttemptEnded")
+        ]),
+        json!([handler("", "TaskClaimed")]),
+        json!([handler("(unknown)", "TaskClaimed")]),
+        json!([handler(&too_long, "TaskClaimed")]),
+        json!([handler("app.hooks.a", "TaskStarted")]),
+        json!([handler("app.hooks.a", "task_claimed")]),
+        json!([{"name": "app.hooks.a"}]),
+        json!([{"name": "app.hooks.a", "event_type": "TaskClaimed", "queue": "default"}]),
+    ] {
+        let mut document = manifest_with_no_handler();
+        document["handlers"] = json!({"kind": "HANDLERS", "handlers": handlers.clone()});
+        let path = refused_path(&document);
+        assert!(path.starts_with("handlers"), "{handlers}: {path}");
+    }
+    let mut document = manifest_with_no_handler();
+    document["handlers"] = json!({"kind": "HANDLERS", "handlers": [handler(&longest, "SlotDown")]});
+    assert!(matches!(
+        parsed(&document).handlers,
+        EventHandlers::Handlers { .. }
+    ));
+}
+
+/// The span switch has two wire names, and both fields are required.
+#[test]
+fn the_handler_fields_are_required_and_closed() {
+    let mut document = manifest_with_no_handler();
+    document["worker_ended_spans"] = json!("SPANS");
+    assert!(refused_path(&document).starts_with("worker_ended_spans"));
+    let mut document = manifest_with_no_handler();
+    document["handlers"] = json!({"kind": "NO_HANDLERS", "handlers": []});
+    assert!(refused_path(&document).starts_with("handlers"));
+    for field in ["handlers", "worker_ended_spans"] {
+        let mut document = manifest_with_no_handler();
+        let removed = document
+            .as_object_mut()
+            .expect("a manifest is an object")
+            .remove(field);
+        assert!(removed.is_some(), "{field}");
+        assert!(
+            parse_worker_manifest(&document.to_string()).is_err(),
+            "a manifest without {field} is refused"
+        );
+    }
 }
 
 /// The declared codes of a parsed task give the label of each error code.

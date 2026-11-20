@@ -151,9 +151,44 @@ macro_rules! event_union {
 
         /// The name of one event type: the tag of its wire form. A handler
         /// takes the events of one type, which it names with this value.
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        /// The worker manifest names the type of each handler with it: its
+        /// JSON form is the name.
+        #[derive(
+            Debug,
+            Clone,
+            Copy,
+            PartialEq,
+            Eq,
+            Hash,
+            PartialOrd,
+            Ord,
+            serde::Serialize,
+            serde::Deserialize,
+        )]
         pub enum EventTypeName {
             $($event,)+
+        }
+
+        /// A Python `Literal` of the names, with the doc of each type.
+        impl crate::manifest_schema::ManifestValue for EventTypeName {
+            const PYTHON: crate::manifest_schema::PythonValue =
+                crate::manifest_schema::PythonValue::Named("EventTypeName");
+        }
+
+        impl crate::manifest_schema::ManifestItem for EventTypeName {
+            const ITEM: crate::manifest_schema::ManifestType = crate::manifest_schema::ManifestType {
+                python_name: "EventTypeName",
+                doc: "The name of one event type: the tag of its wire form. A handler takes the \
+                      events of one type.",
+                shape: crate::manifest_schema::ManifestShape::Choice {
+                    values: &[$(
+                        crate::manifest_schema::ChoiceValue {
+                            value: stringify!($event),
+                            doc: <$event as EventRecord>::TYPE.doc,
+                        },
+                    )+],
+                },
+            };
         }
 
         impl EventTypeName {

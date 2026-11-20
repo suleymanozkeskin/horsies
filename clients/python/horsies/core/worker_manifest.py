@@ -115,7 +115,9 @@ def to_worker_manifest(
     one that `validate_reservation_window` accepted. `config` passed
     AppConfig validation, which keeps every value within its manifest bound;
     a value above it fails an assertion (`worker_claim_manifest`,
-    `payload_manifest`).
+    `payload_manifest`). The app registers no event handler and the
+    tracing setting makes no worker-ended span, so the worker starts no
+    handler child (`NO_HANDLERS`, `NO_SPANS`).
     """
     return wire.WorkerManifest(
         manifest_version=wire.MANIFEST_VERSION,
@@ -138,6 +140,8 @@ def to_worker_manifest(
         resilience=resilience_manifest(config.resilience),
         payload=payload_manifest(config.payload),
         tasks={name: task_manifest(facts) for name, facts in tasks.items()},
+        handlers=wire.EventHandlersNoHandlers(),
+        worker_ended_spans='NO_SPANS',
         child_launch=child_launch,
     )
 
