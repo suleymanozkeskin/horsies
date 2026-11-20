@@ -61,6 +61,7 @@ The Python client and the Rust client run on one core (horsies-core). Behaviour 
 - Fleet Collector -> /horsies/observability/fleet-collector/
 - Tracing -> /horsies/observability/tracing/
 - Logs -> /horsies/observability/logs/
+- Lifecycle Events -> /horsies/observability/events/
 - Dashboards and Alerts -> /horsies/observability/dashboards-and-alerts/
 - Database Schema -> /horsies/internals/database-schema/
 - Operational Indexes -> /horsies/internals/operational-indexes/

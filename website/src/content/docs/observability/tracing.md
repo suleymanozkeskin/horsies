@@ -2,7 +2,7 @@
 title: Tracing
 section: shared
 summary: The OpenTelemetry spans of horsies - the send, workflow start and attempt spans, the trace carrier that a task row stores, propagators, attributes, status, workflows, and the limits.
-related: [logs, tracing-setup, ../rust/observability/tracing-setup, ../monitoring/web-ui-mount]
+related: [logs, events, tracing-setup, ../rust/observability/tracing-setup, ../workers/event-handlers, ../rust/monitoring/event-handlers, ../monitoring/web-ui-mount]
 tags: [observability, tracing, opentelemetry, spans, propagation]
 ---
 
@@ -124,6 +124,37 @@ The `horsies.*` attributes are the names of horsies. The `messaging.*` attribute
 
 In the Python client, a failure of your OpenTelemetry SDK never changes the outcome of a send or of an attempt: an SDK that raises when a span opens leaves the call with no span, and one that raises later is logged once per process.
 
+## Spans of the Attempts That the Worker Ended
+
+The attempt span ends when the body returns. The worker ends some attempts itself, and then the child is gone and its span never ends:
+
+- an isolated task killed at its `timeout_ms` (`TASK_TIMEOUT`);
+- a shared async child killed for a blocked event loop (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`);
+- a child lost before it reported the end, with its exit seen (`WORKER_CRASHED`).
+
+For each such attempt, the [handler child](/horsies/observability/events/#the-handler-child) of the worker makes a span in its place, from the `AttemptEnded` event, with the global tracer provider and propagator of the handler child. It is on by default with tracing on, and the worker then starts its handler child also when the app has no event handler.
+
+| Client | On (default with tracing) | Off |
+|--------|---------------------------|-----|
+| Python | `OtelTracing(worker_ended_spans=WorkerEndedSpans.MAKE_SPANS)` | `OtelTracing(worker_ended_spans=WorkerEndedSpans.NO_SPANS)` |
+| Rust | The feature `otel` | `app.set_worker_ended_spans(WorkerEndedSpans::NoSpans)` |
+
+Set the tracer provider of the handler child in its start hook (Python `@app.on_handler_child_start`), or in `main` before `horsies::cli::run` (Rust).
+
+| Item | Value |
+|------|-------|
+| Name and kind | `run <task_name>`, CONSUMER, as the span of a child |
+| Parent | The span that sent the task, from the stored carrier, placed as the attempt span of a child is |
+| Start | When the task reached its child, on the wall clock of the worker. This is earlier than the start of the span of a child by the transit of the run frame and the `RUNNING` write |
+| End | When the end reached the worker |
+| Status | ERROR, with `error.type` = the error code of the attempt |
+| Attributes | The attributes of the attempt span of the client, with `horsies.task.execution` = the class of the child, and `horsies.span.source` = `worker` |
+
+The worker does not know the workflow node of a workflow task: the start write of the child reads it. For an attempt of a workflow task that the worker ended, the handler child reads the node by the task id, with at most 1 second for a connection and 1 second for the statement. The read never holds an event: the span waits in a queue of at most 1,000 spans, and one reader reads the node of each span in turn, then makes it.
+
+- When the read fails or finds no node, or the queue is full, or the worker stops first, the span has no `horsies.workflow.*` attribute. The stored carrier still places it in the trace of the workflow start. `horsies.spans.worker_ended.read_failures{reason}` counts these spans: `read_failed` and `not_read`.
+- The span is made on the thread or task of the handler child that hands out the events. A span processor that exports in `on_end` delays the events by its export: use a batch span processor.
+
 ## The Trace Id of a Task
 
 The task detail, the workflow node detail and the workflow run detail of the monitoring reads return the trace id of the send span (or of the start span): 32 lowercase hex digits, live and in history. A task with no trace has none. The web UI shows it in the task detail, as a link when the UI has a trace link template: `horsies web --trace-link TEMPLATE`, or the `trace_link` field of the config of a mount ([Python](/horsies/monitoring/web-ui-mount/#monitoringuiconfig), [Rust](/horsies/rust/monitoring/web-ui-mount/#monitoringconfig)).
@@ -132,9 +163,10 @@ The log records of the worker for an attempt carry the same trace id. See [Logs]
 
 ## Limits
 
-- **The attempts that the worker ends have no attempt span.** An attempt span ends when the body returns. The worker ends some attempts itself: it kills an isolated child at the task's `timeout_ms`, kills a shared async child whose event loop is blocked, or sees that a child was lost. The child is gone, so its span never ends and is not exported. The trace shows the send span and no span of that attempt. The attempt record, the metrics and the history row of the task still record it.
-- **Spans of a killed attempt can lose their parent.** A span that the body made inside a killed attempt, and that its child exported before the kill, keeps the id of the lost attempt span as its parent. A trace shows it with no parent span.
-- **The last spans of a child.** At its stop, a Python worker child flushes the global tracer provider for at most 1 second. The Rust client has no flush of its own: a batch span processor exports the last spans of a child only when `main` shuts the provider down after `horsies::cli::run` returns.
+- **The span of an attempt that the worker ended starts at the placement.** It stands in for the span of the child, which was never exported. With the worker-ended spans off, the trace of such an attempt has the send span and no span of the attempt. The attempt record, the metrics and the history row of the task still record it.
+- **An attempt with an end that is not known has no span.** When the worker killed the child and did not see its exit, recovery decides the row, and no span is made.
+- **Spans of a killed attempt keep the lost parent.** A span that the body made inside a killed attempt, and that its child exported before the kill, keeps the id of the lost attempt span as its parent. A trace shows it next to the span of the worker, not under it.
+- **The last spans of a child.** At its stop, a Python worker child, and a Python handler child after the 2 seconds of its handlers, flush the global tracer provider for at most 1 second. The Rust client has no flush of its own: a batch span processor exports the last spans of a child only when `main` shuts the provider down after `horsies::cli::run` returns.
 - **No span for the time in the queue.** The wait from the due time to the claim is the metric `horsies.task.queue.duration`. See the [Metric Reference](/horsies/observability/metric-reference/).
 
 ## Things to Avoid
