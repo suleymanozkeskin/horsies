@@ -101,6 +101,8 @@ monitoring = create_monitoring_app(
 
 **Returns:** `FastAPI`, the sub-app to mount.
 
+The sub-app also serves `GET /metrics`: the fleet metrics of the app's database, for a request that `can_view` allows. The `queue` and `schedule` label values are the queues and the schedules of `app.config`. See [Fleet Collector](/horsies/observability/fleet-collector/).
+
 ### Policies
 
 | Constructor | Policy |
