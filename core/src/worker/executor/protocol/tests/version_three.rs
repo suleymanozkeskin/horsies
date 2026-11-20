@@ -882,6 +882,7 @@ fn largest_attempt_ended(text: &str) -> crate::events::Event {
         [
             "DecidedByWorker",
             "NEIGHBOUR_BLOCKED_LOOP",
+            ["Reported", i64::MAX],
             ["Carrier", text],
             i64::MAX
         ],

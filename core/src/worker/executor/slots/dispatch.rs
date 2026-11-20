@@ -241,11 +241,15 @@ pub enum AttemptEnd {
         detail: FailureDetail,
         start: AttemptStart,
     },
-    /// The deadline decided. A result that came later was dropped.
+    /// The deadline decided. A result that came later was dropped. `start`
+    /// is the start that a shared child reported when it ended the run at
+    /// its deadline; a timeout at a kill of the child has none
+    /// (`NotReported`).
     TimedOut {
         timeout: TaskTimeoutMs,
         retry: RetryPlacement,
         cancel: TimeoutCancel,
+        start: AttemptStart,
     },
     /// A blocked event loop ended the run (a shared async child).
     KilledForLoop {

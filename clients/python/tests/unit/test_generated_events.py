@@ -152,10 +152,11 @@ EXPECTED: Final[dict[str, events.AnyEvent]] = {
         timedelta(microseconds=5000),
     ),
     'attempt_ended_by_worker': _ended(
-        'ISOLATED',
+        'SHARED_ASYNC',
         3,
         events.AttemptEndDecidedByWorker(
             reason='TIMED_OUT',
+            start=events.AttemptStartReported(started_at=STARTED_AT),
             trace=events.RunTraceCarrier(text=CARRIER),
             placed_at=PLACED_AT,
         ),
@@ -166,6 +167,7 @@ EXPECTED: Final[dict[str, events.AnyEvent]] = {
         1,
         events.AttemptEndDecidedByWorker(
             reason='NEIGHBOUR_BLOCKED_LOOP',
+            start=events.AttemptStartNotReported(),
             trace=events.RunTraceNoCarrier(),
             placed_at=PLACED_AT,
         ),
