@@ -50,6 +50,7 @@ read `https://suleymanozkeskin.github.io/horsies/rust/llms.txt`.
 | `web` | off | `horsies::web::router` (axum mount) and `horsies web` |
 | `tokio-postgres` | off | `horsies::rerun::TokioPostgresCaller` |
 | `sqlx` | off | `horsies::rerun::SqlxCaller` |
+| `otel` | off | `horsies::otel`: OpenTelemetry spans of the sends, the workflow starts and the task bodies, and the producer metrics, with the global providers of `opentelemetry` 0.33 |
 
 Minimum Rust version: 1.91.
 
@@ -321,9 +322,10 @@ owns. See `tasks.md`, Rerun a Terminal Task.
 ## CLI
 
 ```bash
-./myapp worker --profile <name> [--loglevel LEVEL]   # the app's own binary
+./myapp worker --profile <name> [--loglevel LEVEL] [--metrics-listen HOST:PORT]   # the app's own binary
 ./myapp scheduler [--loglevel LEVEL]
 ./myapp check [--live] [--loglevel LEVEL]
+./myapp metrics --listen HOST:PORT [--loglevel LEVEL]   # the fleet metrics at GET /metrics
 horsies web --database-url URL                       # the shipped binary (feature web)
 horsies get-docs [--output DIR] [--ref main]
 horsies skills install --target DIR [--force]        # copy this skill folder to DIR/horsies/

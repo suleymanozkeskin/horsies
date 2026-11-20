@@ -148,6 +148,11 @@ const START_AFTER_DELAY_PARAMETERS: &[StubParameter] = &[positional("seconds", "
 
 const START_AT_PARAMETERS: &[StubParameter] = &[positional("at", "datetime.datetime")];
 
+const TRACE_CARRIER_PARAMETERS: &[StubParameter] = &[
+    positional("carrier", "dict[str, str]"),
+    positional("trace_id", "bytes"),
+];
+
 const CORE_HANDLE_PARAMETERS: &[StubParameter] = &[
     positional("manifest_json", "str"),
     keyword("pool_profile", "Literal['PRODUCER', 'WORKER']"),
@@ -155,6 +160,8 @@ const CORE_HANDLE_PARAMETERS: &[StubParameter] = &[
 
 const SET_PANIC_RULE_PARAMETERS: &[StubParameter] =
     &[positional("rule", "Literal['STOP_CORE', 'ABORT_PROCESS']")];
+
+const TRACE_LINK_REFUSAL_PARAMETERS: &[StubParameter] = &[positional("template", "str")];
 
 const ENQUEUE_REQUEST_PARAMETERS: &[StubParameter] = &[
     keyword("task_id", "uuid.UUID"),
@@ -170,6 +177,7 @@ const ENQUEUE_REQUEST_PARAMETERS: &[StubParameter] = &[
     keyword("retention_class_key", "str"),
     keyword("rerun_input", "Literal['APP_DEFAULT', 'KEEP', 'DROP']"),
     keyword("send_kind", "Literal['FIRST', 'REPEAT']"),
+    keyword("trace", "NoTraceCarrier | TraceCarrier"),
 ];
 
 const ENQUEUE_PARAMETERS: &[StubParameter] = &[positional("request", "EnqueueRequest")];
@@ -468,6 +476,7 @@ const WORKFLOW_START_REQUEST_PARAMETERS: &[StubParameter] = &[
     keyword("workflow_id", "uuid.UUID"),
     keyword("sent_at", "datetime.datetime"),
     keyword("resend_on_transient_err", "bool"),
+    keyword("trace", "NoTraceCarrier | TraceCarrier"),
 ];
 const CHILD_SPEC_BUILT_PARAMETERS: &[StubParameter] = &[keyword("spec_json", "str")];
 const CHILD_SPEC_REFUSED_PARAMETERS: &[StubParameter] =
@@ -1301,8 +1310,25 @@ const ARGUMENT_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
+        name: "NoTraceCarrier",
+        doc: "The send carries no trace carrier: tracing is off, or the propagator wrote no key.",
+        constructor: Constructor::Parameters(&[]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "TraceCarrier",
+        doc: "The carrier that the client's propagator injected for the span of a send or a\nworkflow start, and the 16-byte trace id of that span. The core checks its bounds at\nthe send; a carrier that breaks a bound is not stored and never fails the send.",
+        constructor: Constructor::Parameters(TRACE_CARRIER_PARAMETERS),
+        properties: &[
+            property("carrier", "dict[str, str]"),
+            property("trace_id", "bytes"),
+        ],
+        methods: &[],
+    },
+    StubClass {
         name: "EnqueueRequest",
-        doc: "One frozen send. None for good_until, task_options_json or idempotency_key\nmeans no deadline, no options, no key. retention_class_key is 'forever' or\n'standard_<days>d'; the core checks it at the send. send_kind is FIRST for the first send\nof the task id and REPEAT for a send retry: a task that finished then answers from history.",
+        doc: "One frozen send. None for good_until, task_options_json or idempotency_key\nmeans no deadline, no options, no key. retention_class_key is 'forever' or\n'standard_<days>d'; the core checks it at the send. send_kind is FIRST for the first send\nof the task id and REPEAT for a send retry: a task that finished then answers from history.\ntrace is NoTraceCarrier or the TraceCarrier of the send's span.",
         constructor: Constructor::Parameters(ENQUEUE_REQUEST_PARAMETERS),
         properties: &[property("task_id", "uuid.UUID")],
         methods: &[],
@@ -2143,8 +2169,11 @@ const MONITORING_HANDLER_PARAMETERS: &[StubParameter] = &[
     positional("handle", "CoreHandle"),
     keyword("actions_enabled", "bool"),
     keyword("custom_css_url", "str | None"),
+    keyword("trace_link_template", "str | None"),
     keyword("client_version", "str"),
     keyword("heartbeat_ms", "int"),
+    keyword("queue_names", "list[str]"),
+    keyword("schedule_names", "list[str]"),
 ];
 
 /// The classes of the monitoring reads and the web handler.
@@ -2555,7 +2584,7 @@ const MONITORING_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "MonitoringHandler",
-        doc: "The monitoring web app of the broker of a CoreHandle, for the FastAPI mount of\ncreate_monitoring_app. Starts nothing: the first call builds it. A handle without a child\nspec source raises RuntimeError; heartbeat_ms outside 1 to 3,600,000 raises ValueError.",
+        doc: "The monitoring web app of the broker of a CoreHandle, for the FastAPI mount of\ncreate_monitoring_app. Starts nothing: the first call builds it. queue_names and\nschedule_names are the label values of /metrics; other names are (unknown). A name that\ncannot be a label value of its own (empty, (unknown), or past the bound of names) counts\nin the (unknown) series; the first call logs one WARNING line that names it. A handle\nwithout a child spec source raises RuntimeError; heartbeat_ms outside 1 to 3,600,000\nraises ValueError.",
         constructor: Constructor::Parameters(MONITORING_HANDLER_PARAMETERS),
         properties: &[
             property("max_request_body_bytes", "int"),
@@ -2818,7 +2847,7 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "WorkflowStartRequest",
-        doc: "One frozen workflow start. spec_json is the workflow spec data of the spec; spec data\nthat the core refuses raises ValueError with the field path. A naive sent_at raises\nTypeError.",
+        doc: "One frozen workflow start. spec_json is the workflow spec data of the spec; spec data\nthat the core refuses raises ValueError with the field path. A naive sent_at raises\nTypeError. trace is NoTraceCarrier or the TraceCarrier of the start's span; every row of\nthe tree stores it.",
         constructor: Constructor::Parameters(WORKFLOW_START_REQUEST_PARAMETERS),
         properties: &[],
         methods: &[],
@@ -3273,7 +3302,7 @@ const FRAME_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "TraceCarrier",
+        name: "StoredTraceCarrier",
         doc: "The trace carrier that the send stored on the task row: the keys and the values that\nthe propagator of the sender wrote. The child extracts it with the app's propagator.",
         constructor: Constructor::NoConstructor,
         properties: &[property("carrier", "dict[str, str]")],
@@ -3283,7 +3312,7 @@ const FRAME_CLASSES: &[StubClass] = &[
         name: "RunFrame",
         doc: "Run one task in an isolated child. The parent holds the deadline.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("task_id", "uuid.UUID"), property("task_name", "str"), property("queue_name", "str"), property("attempt", "int"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("orphan_self_heal", "bool"), property("work", "Literal['RUN'] | StoredOptionsRefused"), property("trace", "TraceCarrier | Literal['NO_CARRIER']"), property("input", "str")],
+        properties: &[property("task_id", "uuid.UUID"), property("task_name", "str"), property("queue_name", "str"), property("attempt", "int"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("orphan_self_heal", "bool"), property("work", "Literal['RUN'] | StoredOptionsRefused"), property("trace", "StoredTraceCarrier | Literal['NO_CARRIER']"), property("input", "str")],
         methods: &[],
     },
     StubClass {
@@ -3304,7 +3333,7 @@ const FRAME_CLASSES: &[StubClass] = &[
         name: "SharedRunFrame",
         doc: "Run one task on a free seat of a shared child.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("dispatch", "int"), property("task_id", "uuid.UUID"), property("task_name", "str"), property("queue_name", "str"), property("attempt", "int"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("orphan_self_heal", "bool"), property("work", "AsyncTaskWork | ThreadTaskWork | StoredOptionsRefused"), property("trace", "TraceCarrier | Literal['NO_CARRIER']"), property("input", "str")],
+        properties: &[property("dispatch", "int"), property("task_id", "uuid.UUID"), property("task_name", "str"), property("queue_name", "str"), property("attempt", "int"), property("worker_id", "str"), property("claimed_at", "datetime.datetime"), property("orphan_self_heal", "bool"), property("work", "AsyncTaskWork | ThreadTaskWork | StoredOptionsRefused"), property("trace", "StoredTraceCarrier | Literal['NO_CARRIER']"), property("input", "str")],
         methods: &[],
     },
     StubClass {
@@ -3630,6 +3659,60 @@ const WORKER_CLASSES: &[StubClass] = &[
     },
 ];
 
+const FLEET_METRICS_SERVER_METHODS: &[StubFunction] = &[
+    StubFunction {
+        name: "run",
+        parameters: &[],
+        returns: TypeText::Plain("FleetMetricsStopped | FleetMetricsFailed"),
+        doc: "Log one WARNING line that names each queue or schedule name that is not declared, bind\nthe address, and serve the fleet metrics until a stop request. Main thread only: the\nsignal handlers run between wait slices, and there is no total bound. A failed read is a\nfailure gauge in the text. Raises NotMainThread off the main thread, RuntimeError for a\nsecond run, and, after the run ended, the exception of a signal handler.",
+    },
+    StubFunction {
+        name: "request_stop",
+        parameters: &[],
+        returns: TypeText::Plain("StopRequested"),
+        doc: "Ask the run to stop: the requests in flight end, then the run answers\nFleetMetricsStopped. Idempotent; any thread; returns at once.",
+    },
+];
+
+/// The classes of the fleet metrics server (`horsies metrics`).
+const FLEET_METRICS_CLASSES: &[StubClass] = &[
+    StubClass {
+        name: "ListenAddress",
+        doc: "A HOST:PORT address of a metrics endpoint; an IPv6 host without its brackets.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("host", "str"), property("port", "int")],
+        methods: &[],
+    },
+    StubClass {
+        name: "ListenAddressRefused",
+        doc: "A text that is not a HOST:PORT address. message names the text and the rule.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str")],
+        methods: &[],
+    },
+    StubClass {
+        name: "FleetMetricsServer",
+        doc: "The fleet metrics server of one CoreHandle, not run yet. It reads the fleet state at\nmost once per collect interval and serves the last read at GET /metrics.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: FLEET_METRICS_SERVER_METHODS,
+    },
+    StubClass {
+        name: "FleetMetricsStopped",
+        doc: "The run ended at a stop request.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "FleetMetricsFailed",
+        doc: "The address did not bind. message names the address and the cause.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("message", "str")],
+        methods: &[],
+    },
+];
+
 const CLASS_COUNT: usize = HANDLE_CLASSES.len()
     + ARGUMENT_CLASSES.len()
     + RECORD_CLASSES.len()
@@ -3637,7 +3720,8 @@ const CLASS_COUNT: usize = HANDLE_CLASSES.len()
     + WORKFLOW_CLASSES.len()
     + HISTORY_CLASSES.len()
     + FRAME_CLASSES.len()
-    + WORKER_CLASSES.len();
+    + WORKER_CLASSES.len()
+    + FLEET_METRICS_CLASSES.len();
 
 const CLASSES: [StubClass; CLASS_COUNT] = {
     let mut classes = [HANDLE_CLASSES[0]; CLASS_COUNT];
@@ -3687,6 +3771,13 @@ const CLASSES: [StubClass; CLASS_COUNT] = {
         classes[worker_start + worker_position] = WORKER_CLASSES[worker_position];
         worker_position += 1;
     }
+    let fleet_metrics_start = worker_start + WORKER_CLASSES.len();
+    let mut fleet_metrics_position = 0;
+    while fleet_metrics_position < FLEET_METRICS_CLASSES.len() {
+        classes[fleet_metrics_start + fleet_metrics_position] =
+            FLEET_METRICS_CLASSES[fleet_metrics_position];
+        fleet_metrics_position += 1;
+    }
     classes
 };
 
@@ -3734,6 +3825,18 @@ const FUNCTIONS: &[StubFunction] = &[
         doc: "Mint a new task id (UUIDv7). Starts no runtime.",
     },
     StubFunction {
+        name: "parse_listen_address",
+        parameters: &[positional("text", "str")],
+        returns: TypeText::Plain("ListenAddress | ListenAddressRefused"),
+        doc: "The address of text: HOST:PORT or [IPV6]:PORT, the port 1 to 65535. Pure: starts no\nruntime. The host is resolved at the bind.",
+    },
+    StubFunction {
+        name: "prepare_fleet_metrics",
+        parameters: &[positional("handle", "CoreHandle"), keyword("listen", "ListenAddress"), keyword("queue_names", "list[str]"), keyword("schedule_names", "list[str]")],
+        returns: TypeText::Plain("FleetMetricsServer"),
+        doc: "The fleet metrics server of the database of handle on listen, with the queue and\nschedule names of the app config as label values. A name that cannot be a label value of\nits own (empty, (unknown), or past the bound of names) is not declared: its samples count\nin the (unknown) series. Pure: starts no runtime.",
+    },
+    StubFunction {
         name: "prepare_rerun_write",
         parameters: &[positional("read", "PreparedStatement"), positional("row", "tuple[object, ...]"), positional("command", "RerunCommandRecord"), positional("policy", "RerunPolicyRecord"), keyword("sent_at", "datetime.datetime")],
         returns: TypeText::Plain("RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunCallerKeyRefused | IdMintRefused"),
@@ -3774,6 +3877,12 @@ const FUNCTIONS: &[StubFunction] = &[
         parameters: SET_PANIC_RULE_PARAMETERS,
         returns: TypeText::Plain("None"),
         doc: "Set what a panic in a core background task does in this process, before the first\ncore call. Another rule than the one in force raises PanicRuleFixed.",
+    },
+    StubFunction {
+        name: "trace_link_refusal",
+        parameters: TRACE_LINK_REFUSAL_PARAMETERS,
+        returns: TypeText::Plain("str | None"),
+        doc: "Why the core refuses template as the trace link template of the monitoring page, or\nNone when it accepts it. Pure.",
     },
 ];
 

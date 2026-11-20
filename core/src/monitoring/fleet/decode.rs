@@ -22,7 +22,8 @@ use super::statements::{OLDEST_PENDING, WORKERS};
 use super::{
     ClassSeats, FleetWorkers, HeldStatus, HeldTasks, LastRun, LiveWorkerCounts, OldestPending,
     PendingCount, PendingTasks, QueueTasks, ScheduleLastRun, ScheduleRuns, SchemaVersion,
-    SeatCount, StreamOldest, WorkflowCounts, HELD_GROUP_LIMIT, PENDING_COUNT_LIMIT, SCHEDULE_LIMIT,
+    SeatCount, StreamOldest, TelemetryDownCounts, WorkflowCounts, HELD_GROUP_LIMIT,
+    PENDING_COUNT_LIMIT, SCHEDULE_LIMIT,
 };
 
 /// One entry of the `pending` part: queue, class, rows counted (1 to
@@ -65,6 +66,10 @@ pub(super) struct WorkersRow {
     pub(super) recent_rows: i64,
     pub(super) live: Value,
     pub(super) in_flight: Value,
+    /// The live workers whose metrics endpoint is down: a `count(*)`.
+    pub(super) endpoint_down: i64,
+    /// The live workers whose handler child is down: a `count(*)`.
+    pub(super) handler_child_down: i64,
 }
 
 /// The slot health fields of one entry of the workers statement's `live`
@@ -178,6 +183,8 @@ pub(super) fn workers_row(rows: Vec<Row>) -> Result<WorkersRow, RowDecodeError> 
         recent_rows: column(&row, statement, "recent_rows")?,
         live: column(&row, statement, "live")?,
         in_flight: column(&row, statement, "in_flight")?,
+        endpoint_down: column(&row, statement, "endpoint_down")?,
+        handler_child_down: column(&row, statement, "handler_child_down")?,
     })
 }
 
@@ -209,8 +216,8 @@ pub(super) fn oldest_pending(row: OldestPendingRow) -> Result<OldestPending, Rea
     })
 }
 
-/// The workers part: the live workers by slot health, and the seats of
-/// their budgets per class.
+/// The workers part: the live workers by slot health, the seats of their
+/// budgets per class, and the live workers whose telemetry parts are down.
 ///
 /// Errors: [`ReadRefused`] past
 /// [`LIVE_SNAPSHOT_ROW_LIMIT`](crate::LIVE_SNAPSHOT_ROW_LIMIT) snapshots,
@@ -226,6 +233,13 @@ pub(super) fn fleet_workers(row: WorkersRow) -> Result<FleetWorkers, ReadRefused
         checked_at: row.checked_at,
         workers: counts,
         seats,
+        telemetry_down: TelemetryDownCounts {
+            endpoint: stored_count(row.endpoint_down, "live workers whose endpoint is down"),
+            handler_child: stored_count(
+                row.handler_child_down,
+                "live workers whose handler child is down",
+            ),
+        },
     })
 }
 

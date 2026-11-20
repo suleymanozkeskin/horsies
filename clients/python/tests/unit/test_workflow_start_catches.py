@@ -53,6 +53,7 @@ class TestPrevalidationCatch:
         spec.tasks = []
         spec.workflow_def_cls = object()
         broker = MagicMock()
+        broker.app = None
 
         with patch(
             'horsies.core.workflows.lifecycle.validate_workflow_generic_output_match',

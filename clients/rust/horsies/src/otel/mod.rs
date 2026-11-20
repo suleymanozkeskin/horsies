@@ -56,8 +56,10 @@
 //! child lost with its exit seen) never ends in its child, which is gone.
 //! The handler child of the worker makes a span for it from the
 //! `AttemptEnded` event, with the global tracer provider of that process:
-//! `run <task_name>` of kind CONSUMER under the send span, from the time
-//! the task reached its child to the time the end reached the worker,
+//! `run <task_name>` of kind CONSUMER under the send span, from the start
+//! that the child reported (a shared run that its child ended at the
+//! deadline), else from the time the task reached its child, to the time
+//! the end reached the worker,
 //! status ERROR with `error.type`, the attributes of the span of a child
 //! with the kind of the child as `horsies.task.execution`, and
 //! `horsies.span.source` = `worker`. For a workflow task the handler child

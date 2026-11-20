@@ -53,6 +53,12 @@ fn placed_at() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp_nanos(1_700_000_000_000_123_456)
 }
 
+/// The start that a shared child reported for an attempt whose run it
+/// ended at the deadline.
+fn reported_start() -> DateTime<Utc> {
+    DateTime::<Utc>::from_timestamp_nanos(1_700_000_000_250_456_000)
+}
+
 fn ended_at() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp_nanos(1_700_000_030_500_654_321)
 }
@@ -162,10 +168,20 @@ fn next_value<T>(receiver: &Receiver<T>) -> T {
 }
 
 /// The end of an attempt that the worker ended for `reason`, of a task whose
-/// send stored a carrier, on an isolated child.
+/// send stored a carrier, on an isolated child; the child reported no start.
 fn decided(reason: WorkerDecision, workflow: WorkflowPlace) -> AttemptEnd {
+    decided_with_start(reason, workflow, AttemptStart::NotReported)
+}
+
+/// As [`decided`], with the start `start` that the child reported.
+fn decided_with_start(
+    reason: WorkerDecision,
+    workflow: WorkflowPlace,
+    start: AttemptStart,
+) -> AttemptEnd {
     AttemptEnd::DecidedByWorker {
         reason,
+        start,
         error_code: reason.error_code(),
         trace: RunTrace::Carrier {
             text: BoundedText::new(format!(r#"{{"traceparent":"{TRACEPARENT}"}}"#)).unwrap(),
@@ -225,7 +241,7 @@ struct MadeSpan {
     carrier: BodyCarrier,
     reason: WorkerDecision,
     error_code: BuiltInTaskCode,
-    placed_at: DateTime<Utc>,
+    started_at: DateTime<Utc>,
     ended_at: DateTime<Utc>,
 }
 
@@ -242,7 +258,7 @@ impl MadeSpan {
             carrier: attempt.carrier.clone(),
             reason: attempt.reason,
             error_code: attempt.error_code.clone(),
-            placed_at: attempt.placed_at,
+            started_at: attempt.started_at,
             ended_at: attempt.ended_at,
         }
     }
@@ -267,7 +283,7 @@ fn expected_span(reason: WorkerDecision, workflow: EndedWorkflow) -> MadeSpan {
         )])),
         reason,
         error_code: reason.error_code(),
-        placed_at: placed_at(),
+        started_at: placed_at(),
         ended_at: ended_at(),
     }
 }
@@ -436,6 +452,33 @@ async fn the_span_of_an_attempt_that_the_worker_ended_comes_once_before_its_hand
     );
     assert!(seen.try_recv().is_err(), "no other span");
     assert!(reads.reads().is_empty(), "a plain task reads no node");
+}
+
+/// The span of an attempt whose child reported its start starts there; an
+/// attempt with no reported start starts when the task reached its child.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_span_starts_at_the_start_that_the_child_reported() {
+    let (seen_tx, seen) = channel::<Seen>();
+    let reads = StubReads::answering(NodeRead::Failed("a plain task reads no node".to_owned()));
+    let spans = recording_spans(seen_tx.clone(), &reads);
+    let events = [attempt_ended(decided_with_start(
+        WorkerDecision::TimedOut,
+        WorkflowPlace::NotInWorkflow,
+        AttemptStart::Reported {
+            started_at: reported_start(),
+        },
+    ))];
+
+    let order = serve_and_see(spans, seen_tx, &seen, &events, 2).await;
+
+    let expected = MadeSpan {
+        started_at: reported_start(),
+        ..expected_span(
+            WorkerDecision::TimedOut,
+            EndedWorkflow::Known(RunWorkflow::NotInWorkflow),
+        )
+    };
+    assert_eq!(order, vec![Seen::Span(expected), Seen::Handled("decided")]);
 }
 
 /// Each reason of the worker gives one span with the code of its attempt

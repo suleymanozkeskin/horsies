@@ -9,6 +9,7 @@ use tokio::sync::watch;
 
 use crate::worker::executor::protocol::ProcessId;
 use crate::worker::executor::supervisor::{BootFailureCause, LossCause};
+use crate::worker::metrics_endpoint::TELEMETRY_PART_DOWN;
 
 /// The state of the handler child of a worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,10 +94,16 @@ impl HandlerChildView {
     /// last state.
     pub async fn settled(&self, bound: Duration) -> HandlerChildState {
         let mut state = self.0.clone();
-        let wait = state.wait_for(|now| !matches!(now, HandlerChildState::Starting));
-        match tokio::time::timeout(bound, wait).await {
+        // A local, so the borrow of `state` that it holds ends before
+        // `state` is dropped.
+        let waited = tokio::time::timeout(
+            bound,
+            state.wait_for(|now| !matches!(now, HandlerChildState::Starting)),
+        )
+        .await;
+        match waited {
             Ok(Ok(settled)) => settled.clone(),
-            Ok(Err(_gone)) | Err(_) => self.state(),
+            Ok(Err(_)) | Err(_) => self.state(),
         }
     }
 }
@@ -112,7 +119,7 @@ pub fn handler_child_json(state: &HandlerChildState) -> Value {
         HandlerChildState::Starting => json!({ "state": "starting" }),
         HandlerChildState::Up { pid } => json!({ "state": "up", "pid": pid.get() }),
         HandlerChildState::Down(down) => json!({
-            "state": "down",
+            "state": TELEMETRY_PART_DOWN,
             "cause": cause_json(down.cause),
             "detail": down.detail,
             "down_since": down.since.to_rfc3339_opts(SecondsFormat::Micros, false),

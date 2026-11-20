@@ -68,8 +68,8 @@ use crate::broker::TaskWorkflowNode;
 use crate::core::task::Execution;
 use crate::core::BuiltInTaskCode;
 use crate::events::{
-    AttemptEnd, AttemptEnded, AttemptNumber, Event, RunTrace, WorkerDecision, WorkerIdText,
-    WorkflowPlace,
+    AttemptEnd, AttemptEnded, AttemptNumber, AttemptStart, Event, RunTrace, WorkerDecision,
+    WorkerIdText, WorkflowPlace,
 };
 use crate::handle::CoreHandle;
 use crate::worker::executor::protocol::SpanReadCounts;
@@ -130,9 +130,10 @@ pub struct EndedAttempt<'a> {
     pub reason: WorkerDecision,
     /// The code that the attempt row records for `reason`.
     pub error_code: &'a BuiltInTaskCode,
-    /// When the task reached its child (wall clock of the worker): the
-    /// start of the span.
-    pub placed_at: DateTime<Utc>,
+    /// When the span starts: the start that the child reported (a shared
+    /// run that its child ended at the deadline), else when the task
+    /// reached its child (wall clock of the worker).
+    pub started_at: DateTime<Utc>,
     /// When the end reached the worker (wall clock of the worker): the end
     /// of the span.
     pub ended_at: DateTime<Utc>,
@@ -595,6 +596,7 @@ fn make_span(
 /// The fields of a `DecidedByWorker` end that the span takes.
 struct DecidedFacts<'a> {
     reason: WorkerDecision,
+    start: AttemptStart,
     error_code: &'a BuiltInTaskCode,
     trace: &'a RunTrace,
     placed_at: DateTime<Utc>,
@@ -610,6 +612,7 @@ impl<'a> DecidedFacts<'a> {
         match end {
             AttemptEnd::DecidedByWorker {
                 reason,
+                start,
                 error_code,
                 trace,
                 placed_at,
@@ -618,6 +621,7 @@ impl<'a> DecidedFacts<'a> {
                 workflow,
             } => Some(DecidedFacts {
                 reason: *reason,
+                start: *start,
                 error_code,
                 trace,
                 placed_at: *placed_at,
@@ -652,8 +656,18 @@ fn attempt_of<'a>(
         carrier,
         reason: facts.reason,
         error_code: facts.error_code,
-        placed_at: facts.placed_at,
+        started_at: span_start(facts.start, facts.placed_at),
         ended_at: ended.at,
+    }
+}
+
+/// The start of the span of an attempt that the worker ended: the start
+/// `start` that the child reported, else `placed_at`, when the task reached
+/// its child. Pure.
+fn span_start(start: AttemptStart, placed_at: DateTime<Utc>) -> DateTime<Utc> {
+    match start {
+        AttemptStart::Reported { started_at } => started_at,
+        AttemptStart::NotReported => placed_at,
     }
 }
 

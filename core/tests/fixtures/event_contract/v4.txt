@@ -115,11 +115,9 @@ variants RunTrace
   Carrier(text: Text(2048))
   NoCarrier
 
-choice WorkflowPlace: NOT_IN_WORKFLOW | WORKFLOW_NOT_KNOWN
-
 variants AttemptEnd
   ReportedByChild(result: ChildResult, start: AttemptStart)
-  DecidedByWorker(reason: WorkerDecision, internal error_code: Codes(BuiltInTaskCode), internal trace: RunTrace, internal placed_at: Time, internal child_kind: Execution, internal worker_id: Text(255), internal workflow: WorkflowPlace)
+  DecidedByWorker(reason: WorkerDecision, start: AttemptStart, internal trace: RunTrace, internal placed_at: Time)
   NotKnown(child_pid: WholeNumber(1..=2147483647))
 
 variants AttemptRecord

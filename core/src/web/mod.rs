@@ -14,6 +14,7 @@ mod schema;
 mod spa;
 mod stdlib_uuid_text;
 mod task_stats_cache;
+mod trace_link;
 mod uuid_text;
 
 pub use auth::{INTENT_HEADER, INTENT_VALUE};
@@ -36,6 +37,10 @@ pub use schema::{
     SchemaIncompatible, SchemaProbe, SchemaState, SchemaStatus, SCHEMA_INCOMPATIBLE, SCHEMA_UNKNOWN,
 };
 pub use spa::{MonitoringUiConfig, ASSETS_MISSING_DETAIL};
+pub use trace_link::{
+    TraceLink, TraceLinkRefusal, TraceLinkTemplate, MAX_TRACE_LINK_TEMPLATE_BYTES,
+    TRACE_ID_PLACEHOLDER,
+};
 
 #[cfg(test)]
 mod tests;

@@ -29,7 +29,7 @@
 use uuid::Uuid;
 
 use crate::broker::attempt_writes::RetryPlacement;
-use crate::worker::executor::protocol::{BlockedWhere, BodyEnd, DispatchNumber, RunRef};
+use crate::worker::executor::protocol::{BlockedWhere, DispatchNumber, RunRef};
 
 /// What held a blocked event loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,9 +85,6 @@ pub enum KilledRunVerdict {
         holder_task_id: Uuid,
         blocked_ms: u64,
     },
-    /// The body of this run returned `returned` before its deadline, and the
-    /// work it left was stuck: the end is what it returned.
-    ReturnedBeforeKill { returned: BodyEnd },
 }
 
 /// The verdict at a kill, or the crash path for a run the kill names no

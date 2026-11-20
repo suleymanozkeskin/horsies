@@ -247,6 +247,10 @@ pub enum AttemptEnd {
     /// attempt that the handler child makes.
     DecidedByWorker {
         reason: WorkerDecision,
+        /// The start that the child reported before the end: a shared run
+        /// that its child ended at the deadline reports it. Every other end
+        /// of the worker is `NotReported`.
+        start: AttemptStart,
         /// Internal: the code that the attempt row records for `reason`:
         /// the `error.type` of the span.
         #[event_schema(internal)]
@@ -255,7 +259,7 @@ pub enum AttemptEnd {
         #[event_schema(internal)]
         trace: RunTrace,
         /// Internal: when the task reached its child (wall clock of the
-        /// worker), the start of the span.
+        /// worker). The span starts here when `start` is `NotReported`.
         #[event_schema(internal)]
         placed_at: DateTime<Utc>,
         /// Internal: the kind of the child that ran the attempt, the

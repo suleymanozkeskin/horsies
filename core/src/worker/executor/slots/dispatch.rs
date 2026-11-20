@@ -8,10 +8,11 @@ use uuid::Uuid;
 
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::core::task::error::OperationalErrorCode;
-use crate::events::{AttemptNumber, RunTrace};
+use crate::events::{AttemptNumber, AttemptStart, RunTrace};
 use crate::telemetry::trace_carrier::StoredTraceId;
 use crate::worker::executor::protocol::{
-    FailureDetail, ProcessId, RunEnd, TaskInputText, TaskTimeoutMs,
+    BodyEnd, FailureDetail, ProcessId, ResultEnvelopeText, RunEnd, StopReason, TaskInputText,
+    TaskTimeoutMs,
 };
 use crate::worker::executor::supervisor::ChildLost;
 use crate::worker::retry::StoredOptions;
@@ -204,21 +205,51 @@ pub enum TimeoutCancel {
     Ended(CancelEnd),
 }
 
+/// What the body of a run returned, and the start of its attempt: the time
+/// that the start write returned to the child. A body that ran had its
+/// start written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BodyReturn {
+    pub end: BodyEnd,
+    pub started_at: DateTime<Utc>,
+}
+
 /// How one attempt ended in the executor. Each submitted task gets exactly
 /// one. The outcome writer maps it to one statement.
+///
+/// The three ends that a child reports (`StoppedBeforeRunning`, `Result`,
+/// `WorkerFailure`) come from its result frame
+/// ([`AttemptEnd::reported`]). A body that returned before its child was
+/// lost also ends as `Result` or `WorkerFailure`, with what it returned
+/// ([`AttemptEnd::returned`]). `start` is the start that the child reported
+/// for the attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttemptEnd {
     /// The task never reached a child; the row goes back to the queue.
     NotDispatched(NotRunCause),
-    /// The child reported how the run ended: a result envelope, a stop
-    /// before RUNNING, or a failure of its worker code. A body that returned
-    /// before its child was lost also ends here, with what it returned.
-    Reported(RunEnd),
-    /// The deadline decided. A result that came later was dropped.
+    /// The child stopped before it set the row RUNNING: the attempt did not
+    /// start.
+    StoppedBeforeRunning(StopReason),
+    /// The task produced a result envelope: a value or a task error.
+    Result {
+        envelope: ResultEnvelopeText,
+        start: AttemptStart,
+    },
+    /// The worker code of the child failed, not the task. `start` is
+    /// `NotReported` when the failure came before the start write returned.
+    WorkerFailure {
+        detail: FailureDetail,
+        start: AttemptStart,
+    },
+    /// The deadline decided. A result that came later was dropped. `start`
+    /// is the start that a shared child reported when it ended the run at
+    /// its deadline; a timeout at a kill of the child has none
+    /// (`NotReported`).
     TimedOut {
         timeout: TaskTimeoutMs,
         retry: RetryPlacement,
         cancel: TimeoutCancel,
+        start: AttemptStart,
     },
     /// A blocked event loop ended the run (a shared async child).
     KilledForLoop {
@@ -239,6 +270,29 @@ pub enum AttemptEnd {
 pub const LOST_CHILD_REASON_PREFIX: &str = "Worker child lost: ";
 
 impl AttemptEnd {
+    /// The end that a result frame reports: `end`, with the start `start`
+    /// of the frame. The frame rules give a stop before running no start
+    /// (`NotReported`), so its end holds none. Pure.
+    pub fn reported(end: RunEnd, start: AttemptStart) -> Self {
+        match end {
+            RunEnd::StoppedBeforeRunning(reason) => Self::StoppedBeforeRunning(reason),
+            RunEnd::Result(envelope) => Self::Result { envelope, start },
+            RunEnd::WorkerFailure(detail) => Self::WorkerFailure { detail, start },
+        }
+    }
+
+    /// The end of a run whose body returned `returned` before its child
+    /// ended, with the start of the attempt that the child reported. Pure.
+    pub fn returned(returned: BodyReturn) -> Self {
+        let start = AttemptStart::Reported {
+            started_at: returned.started_at,
+        };
+        match returned.end {
+            BodyEnd::Result(envelope) => Self::Result { envelope, start },
+            BodyEnd::WorkerFailure(detail) => Self::WorkerFailure { detail, start },
+        }
+    }
+
     /// The crash end of a run whose child `lost` ended with no result, once
     /// its exit was seen. The reason is Python's
     /// `f'Worker child lost: {lost.describe()}'`; the outcome writer stores

@@ -12,8 +12,10 @@
 //! - its parent is the context that the global propagator extracts from the
 //!   stored carrier, as for the span of a child; a task with no carrier gets
 //!   a root span;
-//! - it starts when the task reached its child and ends when the end
-//!   reached the worker (wall clock of the worker);
+//! - it starts at the start that the child reported (a shared run that its
+//!   child ended at the deadline), else when the task reached its child, and
+//!   ends when the end reached the worker (`EndedAttempt::started_at`,
+//!   `ended_at`);
 //! - status ERROR with `error.type` = the code of the attempt row;
 //! - the attributes of the span of a child ([`super::attempt::run_attributes`],
 //!   [`super::attempt::workflow_attributes`], and the task id, name and
@@ -105,7 +107,7 @@ pub(super) fn make_ended_span<T: Tracer>(
     };
     let builder = SpanBuilder::from_name(format!("run {}", attempt.task_name))
         .with_kind(SpanKind::Consumer)
-        .with_start_time(SystemTime::from(attempt.placed_at))
+        .with_start_time(SystemTime::from(attempt.started_at))
         .with_attributes(ended_span_attributes(attempt));
     let mut span = tracer.build_with_context(builder, &parent);
     span.set_attribute(KeyValue::new(

@@ -74,7 +74,9 @@ def _manifest_json(profile: str | None) -> str:
     manifest = to_worker_manifest(
         config,
         profile=profile,
+        metrics_endpoint=wire.MetricsEndpointNoMetricsEndpoint(),
         tasks={'app.tasks.add': TaskFacts(execution=Execution.ISOLATED, error_codes=())},
+        handlers=(),
         child_launch=launch,
         idempotency_reservation_window=timedelta(minutes=1),
     )

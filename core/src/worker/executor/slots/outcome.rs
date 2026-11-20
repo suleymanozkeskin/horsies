@@ -5,11 +5,11 @@
 //! | End | Statement |
 //! |---|---|
 //! | `NotDispatched` | `horsies_release_claims` with placement `SAME_CLASS`; the row goes back to the queue |
-//! | `Reported(result)`, a value | a plain task: its row in the next batch of the finalize batcher; a workflow task: the workflow success |
-//! | `Reported(result)`, a task error | the failed attempt, with the retry the policy admits for its code |
-//! | `Reported(result)` that does not read as the envelope | the failed attempt, `WORKER_SERIALIZATION_ERROR`, no retry |
-//! | `Reported(stopped before running)` | none; an expired workflow task replays phase 2; an unconfirmed start releases the claim (`horsies_release_claims` with placement `SAME_CLASS`); the child's stop before start already wrote every other stop, the orphan cancel included |
-//! | `Reported(worker failure)` | the failed attempt, `BROKER_ERROR`, no retry |
+//! | `Result`, a value | a plain task: its row in the next batch of the finalize batcher; a workflow task: the workflow success |
+//! | `Result`, a task error | the failed attempt, with the retry the policy admits for its code |
+//! | `Result` that does not read as the envelope | the failed attempt, `WORKER_SERIALIZATION_ERROR`, no retry |
+//! | `StoppedBeforeRunning` | none; an expired workflow task replays phase 2; an unconfirmed start releases the claim (`horsies_release_claims` with placement `SAME_CLASS`); the child's stop before start already wrote every other stop, the orphan cancel included |
+//! | `WorkerFailure` | the failed attempt, `BROKER_ERROR`, no retry |
 //! | `TimedOut`, `KilledForLoop`, `Crashed` | the failed attempt with `TASK_TIMEOUT`, the loop code or `WORKER_CRASHED`, the retry the policy admits, at the placement of the end, under the claimed-row rule `RELEASE`: a row that is still CLAIMED goes back to the queue in the same statement |
 //! | `EndUnknown` | none: stale recovery or the lease decides the row |
 //!
@@ -48,6 +48,7 @@ use crate::core::task::error::{
 };
 use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
 use crate::db::Transience;
+use crate::events::AttemptStart;
 use crate::telemetry::worker::WorkerTelemetry;
 use crate::worker::execution::{
     persist_failed_attempt, persist_ok_result, persist_undecodable_result,
@@ -55,7 +56,7 @@ use crate::worker::execution::{
     FinalizeStage, Phase2Work, PhaseTwoForm, UnreportedAttemptWrite, PHASE1_MAX_RETRIES,
 };
 use crate::worker::executor::protocol::{
-    FailureDetail, ProcessId, ResultEnvelopeText, RunEnd, StopReason, TaskTimeoutMs,
+    FailureDetail, ProcessId, ResultEnvelopeText, StopReason, TaskTimeoutMs,
 };
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
 use crate::worker::finalize_batch::{FinalizeBatcher, PlainSuccess, RowNotWritten};
@@ -169,17 +170,24 @@ impl ReadResult {
 
 /// One attempt end whose result envelope, when the child reported one, is
 /// read once ([`OutcomeWriter::read_end`]). Each variant is the end of
-/// [`AttemptEnd`] of the same name; a reported run is split into its three
-/// forms.
+/// [`AttemptEnd`] of the same name; `start` is the start that the child
+/// reported, for the lifecycle points (the writer does not read it).
 pub enum ReadEnd {
     NotDispatched(NotRunCause),
-    Result(ReadResult),
+    Result {
+        result: ReadResult,
+        start: AttemptStart,
+    },
     StoppedBeforeRunning(StopReason),
-    WorkerFailure(FailureDetail),
+    WorkerFailure {
+        detail: FailureDetail,
+        start: AttemptStart,
+    },
     TimedOut {
         timeout: TaskTimeoutMs,
         retry: RetryPlacement,
         cancel: TimeoutCancel,
+        start: AttemptStart,
     },
     KilledForLoop {
         code: LoopKillCode,
@@ -200,14 +208,18 @@ pub enum ReadEnd {
 pub enum EndView<'a> {
     /// The task never reached a child.
     NotDispatched(NotRunCause),
-    /// The child reported a result envelope.
-    Result(&'a ResultRead),
+    /// The child reported a result envelope, and the start `start`.
+    Result {
+        read: &'a ResultRead,
+        start: AttemptStart,
+    },
     /// The child stopped before it set the row RUNNING.
     StoppedBeforeRunning(StopReason),
-    /// The worker code of the child failed.
-    WorkerFailure,
-    /// The deadline decided.
-    TimedOut,
+    /// The worker code of the child failed; the child reported the start
+    /// `start`.
+    WorkerFailure { start: AttemptStart },
+    /// The deadline decided; the child reported the start `start`.
+    TimedOut { start: AttemptStart },
     /// A blocked event loop ended the run.
     KilledForLoop(LoopKillCode),
     /// The child was lost with its exit seen.
@@ -221,10 +233,13 @@ impl ReadEnd {
     pub fn view(&self) -> EndView<'_> {
         match self {
             Self::NotDispatched(cause) => EndView::NotDispatched(*cause),
-            Self::Result(result) => EndView::Result(&result.read),
+            Self::Result { result, start } => EndView::Result {
+                read: &result.read,
+                start: *start,
+            },
             Self::StoppedBeforeRunning(reason) => EndView::StoppedBeforeRunning(*reason),
-            Self::WorkerFailure(_) => EndView::WorkerFailure,
-            Self::TimedOut { .. } => EndView::TimedOut,
+            Self::WorkerFailure { start, .. } => EndView::WorkerFailure { start: *start },
+            Self::TimedOut { start, .. } => EndView::TimedOut { start: *start },
             Self::KilledForLoop { code, .. } => EndView::KilledForLoop(*code),
             Self::Crashed { .. } => EndView::Crashed,
             Self::EndUnknown { pid } => EndView::EndUnknown { pid: *pid },
@@ -588,21 +603,22 @@ pub fn read_attempt_end(
 ) -> ReadEnd {
     match end {
         AttemptEnd::NotDispatched(cause) => ReadEnd::NotDispatched(cause),
-        AttemptEnd::Reported(RunEnd::Result(envelope)) => {
-            ReadEnd::Result(read_result(task, &envelope, worker_id, payload_policy))
-        }
-        AttemptEnd::Reported(RunEnd::StoppedBeforeRunning(reason)) => {
-            ReadEnd::StoppedBeforeRunning(reason)
-        }
-        AttemptEnd::Reported(RunEnd::WorkerFailure(detail)) => ReadEnd::WorkerFailure(detail),
+        AttemptEnd::StoppedBeforeRunning(reason) => ReadEnd::StoppedBeforeRunning(reason),
+        AttemptEnd::Result { envelope, start } => ReadEnd::Result {
+            result: read_result(task, &envelope, worker_id, payload_policy),
+            start,
+        },
+        AttemptEnd::WorkerFailure { detail, start } => ReadEnd::WorkerFailure { detail, start },
         AttemptEnd::TimedOut {
             timeout,
             retry,
             cancel,
+            start,
         } => ReadEnd::TimedOut {
             timeout,
             retry,
             cancel,
+            start,
         },
         AttemptEnd::KilledForLoop {
             code,
@@ -720,7 +736,7 @@ impl OutcomeWriter {
                 Settlement::LeftToRecovery
             }
             ReadEnd::StoppedBeforeRunning(reason) => self.after_stop(task, reason).await,
-            ReadEnd::Result(result) => {
+            ReadEnd::Result { result, .. } => {
                 self.phase_one(
                     task,
                     result.write,
@@ -729,7 +745,7 @@ impl OutcomeWriter {
                 )
                 .await
             }
-            ReadEnd::WorkerFailure(detail) => {
+            ReadEnd::WorkerFailure { detail, .. } => {
                 let write = worker_failure_write(task, &self.worker_id, detail.as_str());
                 self.phase_one(
                     task,
@@ -743,6 +759,7 @@ impl OutcomeWriter {
                 timeout,
                 retry,
                 cancel,
+                ..
             } => self.timed_out(task, timeout, retry, cancel).await,
             ReadEnd::KilledForLoop {
                 code,

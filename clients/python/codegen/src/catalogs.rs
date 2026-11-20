@@ -1,8 +1,9 @@
 //! Render the code catalogs of horsies-core as Python modules under
 //! `_catalog/`: one module per `python_module`, one enum class per catalog,
-//! in the order of `CODE_CATALOGS`. A lifecycle status class also gets the
-//! `is_terminal` property, and the module gets the `frozenset` constant of
-//! its terminal members right after the class.
+//! in the order of `CODE_CATALOGS`. Each member is `NAME = 'value'` with its
+//! doc. A lifecycle status class also gets the `is_terminal` property, and
+//! the module gets the `frozenset` constant of its terminal members right
+//! after the class.
 
 use std::collections::BTreeMap;
 
@@ -96,7 +97,7 @@ fn render_class(catalog: &CodeCatalog) -> String {
         }
         text.push_str(&format!(
             "    {} = {}\n",
-            member.value,
+            member.name,
             string_literal(member.value)
         ));
         if let Some(doc) = docstring(member.doc, "    ") {
@@ -137,16 +138,19 @@ fn render_terminal_constant(class: &str, constant: &str, members: &[&str]) -> St
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::catalog::CatalogMember;
+    use horsies_core::catalog::{CatalogMember, CodeEnum, CODE_CATALOGS};
+    use horsies_core::ErrorCode;
 
     use super::*;
 
     const MEMBERS: &[CatalogMember] = &[
         CatalogMember {
+            name: "PENDING",
             value: "PENDING",
             doc: "Waits for a worker.",
         },
         CatalogMember {
+            name: "RUNNING",
             value: "RUNNING",
             doc: "",
         },
@@ -199,6 +203,63 @@ mod tests {
         ];
         let rendered = render_module("status", &catalogs);
         assert!(rendered.contains("__all__ = ['Status', 'STATUS_TERMINAL_STATES', 'Outcome']\n"));
+    }
+
+    #[test]
+    fn a_member_whose_value_is_not_its_name_renders_name_equals_value() {
+        let codes = CodeCatalog {
+            members: &[CatalogMember {
+                name: "WORKFLOW_NO_NAME",
+                value: "HRS-001",
+                doc: "The workflow has no name.",
+            }],
+            ..catalog("error_codes", "ErrorCode", PythonEnumBase::StrEnum)
+        };
+        assert_eq!(
+            render_class(&codes),
+            "class ErrorCode(str, Enum):\n    \"\"\"Task status.\"\"\"\n\n    WORKFLOW_NO_NAME = 'HRS-001'\n    \"\"\"The workflow has no name.\"\"\"\n"
+        );
+    }
+
+    /// The `error_codes` module holds one member per core `ErrorCode`: the
+    /// variant name in SCREAMING_SNAKE_CASE, its `HRS-nnn` code and its
+    /// short text, in declaration order, and no other member.
+    #[test]
+    fn the_error_code_module_renders_every_hrs_code_with_its_name_and_text() {
+        let catalog = <ErrorCode as CodeEnum>::CATALOG;
+        let modules = group_by_module(CODE_CATALOGS);
+        let rendered = render_module("error_codes", &modules["error_codes"]);
+        assert!(rendered.contains("\n\n\nclass ErrorCode(str, Enum):\n"));
+        let mut expected_lines = Vec::new();
+        for (code, member) in <ErrorCode as CodeEnum>::VARIANTS
+            .iter()
+            .zip(catalog.members)
+        {
+            let name = screaming_snake_case(&format!("{code:?}"));
+            let line = format!("    {name} = '{}'\n", code.as_code_str());
+            let doc = docstring(member.doc, "    ").expect("each code has its short text");
+            assert!(rendered.contains(&format!("{line}{doc}")), "{line}");
+            expected_lines.push(line);
+        }
+        let member_lines: Vec<String> = rendered
+            .lines()
+            .filter(|line| line.contains(" = 'HRS-"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert_eq!(member_lines, expected_lines);
+    }
+
+    /// The Python name rule of the derive: an underscore before each
+    /// uppercase letter but the first, then all uppercase.
+    fn screaming_snake_case(variant: &str) -> String {
+        let mut name = String::with_capacity(variant.len() + 8);
+        for (position, character) in variant.char_indices() {
+            if position > 0 && character.is_uppercase() {
+                name.push('_');
+            }
+            name.push(character.to_ascii_uppercase());
+        }
+        name
     }
 
     #[test]

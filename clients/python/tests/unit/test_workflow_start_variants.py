@@ -136,6 +136,7 @@ class TestValidationCause:
         task.name = 'unbound-queue'
         spec.tasks = [task]
         broker = MagicMock()
+        broker.app = None
 
         result = await start_workflow_async(spec, broker, WORKFLOW_ID)
 

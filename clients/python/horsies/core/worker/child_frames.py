@@ -118,13 +118,13 @@ type RunTrace = StoredTraceCarrier | NoTraceCarrier
 """The trace carrier of a run."""
 
 
-def run_trace_of(trace: core.TraceCarrier | Literal['NO_CARRIER']) -> RunTrace:
+def run_trace_of(trace: core.StoredTraceCarrier | Literal['NO_CARRIER']) -> RunTrace:
     """The trace carrier of a run frame (``core.RunFrame.trace``,
     ``core.SharedRunFrame.trace``), frozen. Pure."""
     match trace:
         case 'NO_CARRIER':
             return NoTraceCarrier()
-        case core.TraceCarrier(carrier=carrier):
+        case core.StoredTraceCarrier(carrier=carrier):
             return StoredTraceCarrier(carrier=MappingProxyType(dict(carrier)))
         case _ as unreachable:
             assert_never(unreachable)

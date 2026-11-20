@@ -11,12 +11,13 @@
 use std::sync::Arc;
 
 use horsies_core::core::config::worker_profile::ProfileRequest;
-use horsies_core::worker_manifest::WorkerManifest;
+use horsies_core::worker_manifest::{MetricsEndpoint, WorkerManifest};
 use horsies_core::{
     child_command, run_end_of, ClientFamily, RunPhase, Worker, WorkerPlan, WorkerPlanRefused,
     WorkerRunEnd, WorkerStop,
 };
 
+pub use horsies_core::telemetry::listen::{ListenAddress, ListenAddressRefused};
 pub use horsies_core::worker_manifest::WorkerLogLevel;
 pub use horsies_core::{WorkerBootCause, WorkerFailCause};
 
@@ -28,11 +29,12 @@ use crate::workflow::WorkflowRegistry;
 use crate::{AppRole, Horsies, HorsiesError};
 
 /// How a worker starts: the profile of `AppConfig.worker_profiles` that it
-/// runs, and the log level of its children.
+/// runs, the log level of its children, and its metrics endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerStart {
     profile: ProfileRequest,
     log_level: WorkerLogLevel,
+    metrics_endpoint: MetricsEndpoint,
 }
 
 impl WorkerStart {
@@ -41,6 +43,7 @@ impl WorkerStart {
         Self {
             profile: ProfileRequest::Named { name: name.into() },
             log_level: WorkerLogLevel::Info,
+            metrics_endpoint: MetricsEndpoint::NoMetricsEndpoint,
         }
     }
 
@@ -53,12 +56,27 @@ impl WorkerStart {
         }
     }
 
+    /// This start with a metrics endpoint on `address` (`--metrics-listen
+    /// HOST:PORT`): the worker serves its metrics at `GET /metrics` and its
+    /// health probes at `GET /livez` and `GET /readyz`. There is no default
+    /// address. A bind that fails does not stop the worker: the endpoint
+    /// binds again with a backoff. The core serves it with its feature
+    /// `metrics-endpoint`, which the `cli` feature turns on; a core without
+    /// it ends the start with `BootFailed`.
+    pub fn with_metrics_endpoint(self, address: ListenAddress) -> Self {
+        Self {
+            metrics_endpoint: MetricsEndpoint::of_address(address),
+            ..self
+        }
+    }
+
     /// A start that names no profile: the CLI with no `--profile`, which
     /// the core refuses with Python's report.
     pub(crate) fn without_profile(log_level: WorkerLogLevel) -> Self {
         Self {
             profile: ProfileRequest::NotGiven,
             log_level,
+            metrics_endpoint: MetricsEndpoint::NoMetricsEndpoint,
         }
     }
 }
@@ -183,6 +201,7 @@ impl Horsies {
             self.event_handlers().manifest(),
             self.worker_ended_spans(),
             start.profile,
+            start.metrics_endpoint,
             launch,
         )
         .map_err(|refused| WorkerRunError::ManifestBound {
@@ -330,6 +349,31 @@ mod tests {
         }
         #[cfg(not(feature = "otel"))]
         assert_eq!(manifest.worker_ended_spans, WorkerEndedSpans::NoSpans);
+    }
+
+    #[test]
+    fn a_start_with_a_metrics_endpoint_puts_its_address_in_the_manifest() {
+        let address = ListenAddress::parse("0.0.0.0:9100").expect("a valid address");
+        let manifest = app()
+            .worker_manifest_of(WorkerStart::profile("web").with_metrics_endpoint(address.clone()))
+            .unwrap();
+        assert_eq!(
+            manifest.metrics_endpoint,
+            MetricsEndpoint::of_address(address)
+        );
+        let plan = WorkerPlan::of_manifest(&manifest).unwrap();
+        assert!(matches!(
+            plan.metrics_endpoint,
+            horsies_core::MetricsEndpointPlan::ListenAddress { ref address, .. }
+                if address.to_string() == "0.0.0.0:9100"
+        ));
+        let manifest = app()
+            .worker_manifest_of(WorkerStart::profile("web"))
+            .unwrap();
+        assert_eq!(
+            manifest.metrics_endpoint,
+            MetricsEndpoint::NoMetricsEndpoint
+        );
     }
 
     /// The worker of `config` with the profile `web`: the app accepts the

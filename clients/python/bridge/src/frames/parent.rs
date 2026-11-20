@@ -114,7 +114,7 @@ pub struct StoredOptionsRefused {
 /// values that the propagator of the sender wrote. The child extracts it
 /// with the app's propagator.
 #[pyclass(module = "horsies._core", frozen, get_all)]
-pub struct TraceCarrier {
+pub struct StoredTraceCarrier {
     carrier: BTreeMap<String, String>,
 }
 
@@ -136,7 +136,7 @@ pub struct RunFrameRecord {
     orphan_self_heal: bool,
     /// `'RUN'`, or `StoredOptionsRefused`.
     work: Py<PyAny>,
-    /// `TraceCarrier`, or `'NO_CARRIER'`.
+    /// `StoredTraceCarrier`, or `'NO_CARRIER'`.
     trace: Py<PyAny>,
     /// The JSON text of the task input.
     input: Py<PyString>,
@@ -173,7 +173,7 @@ pub struct SharedRunFrameRecord {
     orphan_self_heal: bool,
     /// `AsyncTaskWork`, `ThreadTaskWork` or `StoredOptionsRefused`.
     work: Py<PyAny>,
-    /// `TraceCarrier`, or `'NO_CARRIER'`.
+    /// `StoredTraceCarrier`, or `'NO_CARRIER'`.
     trace: Py<PyAny>,
     input: Py<PyString>,
 }
@@ -371,7 +371,7 @@ fn trace_object(py: Python<'_>, trace: RunTrace) -> PyResult<Py<PyAny>> {
                          of texts: {error}"
                     )
                 });
-            TraceCarrier { carrier }.into_py_any(py)
+            StoredTraceCarrier { carrier }.into_py_any(py)
         }
         RunTrace::NoCarrier => "NO_CARRIER".into_py_any(py),
     }
@@ -442,7 +442,7 @@ pub fn add_parent_frame_classes(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<AsyncTaskWork>()?;
     module.add_class::<ThreadTaskWork>()?;
     module.add_class::<SharedRunFrameRecord>()?;
-    module.add_class::<TraceCarrier>()?;
+    module.add_class::<StoredTraceCarrier>()?;
     module.add_class::<EventsFrameRecord>()?;
     module.add_class::<StopFrameRecord>()?;
     module.add_class::<FrameRefused>()?;

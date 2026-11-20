@@ -153,6 +153,20 @@ export default defineConfig({
 							],
 						},
 						{
+							label: 'Observability',
+							items: [
+								{ label: 'Overview', slug: 'observability/overview' },
+								{ label: 'Metrics', slug: 'observability/metrics' },
+								{ label: 'Metric Reference', slug: 'observability/metric-reference' },
+								{ label: 'Fleet Collector', slug: 'observability/fleet-collector' },
+								{ label: 'OpenTelemetry Collector', slug: 'observability/opentelemetry-collector' },
+								{ label: 'Tracing', slug: 'observability/tracing' },
+								{ label: 'Logs', slug: 'observability/logs' },
+								{ label: 'Dashboards and Alerts', slug: 'observability/dashboards-and-alerts' },
+								{ label: 'Deployment', slug: 'observability/deployment' },
+							],
+						},
+						{
 							label: 'Operations',
 							items: [
 								{ label: 'Atomic Enqueue & Topology', slug: 'operations/atomic-enqueue-and-topology' },
@@ -222,6 +236,7 @@ export default defineConfig({
 							items: [
 								{ label: 'Worker Profiles', slug: 'workers/worker-profiles' },
 								{ label: 'Child-Process Hooks', slug: 'workers/child-process-hooks' },
+								{ label: 'Event Handlers', slug: 'workers/event-handlers' },
 							],
 						},
 						{
@@ -237,6 +252,13 @@ export default defineConfig({
 								{ label: 'Health Reads', slug: 'monitoring/health-reads' },
 								{ label: 'Broker Methods', slug: 'monitoring/broker-methods' },
 								{ label: 'Web UI Mount', slug: 'monitoring/web-ui-mount' },
+							],
+						},
+						{
+							label: 'Observability',
+							items: [
+								{ label: 'Tracing Setup', slug: 'observability/tracing-setup' },
+								{ label: 'Log Setup', slug: 'observability/log-setup' },
 							],
 						},
 						{
@@ -305,6 +327,12 @@ export default defineConfig({
 								{ label: 'Monitoring Queries', slug: 'rust/monitoring/monitoring-queries' },
 								{ label: 'Web UI Mount', slug: 'rust/monitoring/web-ui-mount' },
 								{ label: 'Event Handlers', slug: 'rust/monitoring/event-handlers' },
+							],
+						},
+						{
+							label: 'Observability',
+							items: [
+								{ label: 'Tracing Setup', slug: 'rust/observability/tracing-setup' },
 							],
 						},
 						{

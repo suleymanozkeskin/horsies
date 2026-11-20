@@ -49,6 +49,7 @@ use crate::manifest::{
 };
 use crate::manifest_schema::{IntBound, ManifestValue, PythonItem, PythonValue};
 use crate::telemetry::labels::DeclaredSource;
+use crate::telemetry::listen::{ListenAddress, ListenHost, ListenPort};
 use crate::worker::executor::protocol::{MAX_EVENT_HANDLERS, MAX_HANDLER_NAME_CHARS};
 
 /// The one worker manifest version this core reads.
@@ -263,6 +264,10 @@ pub struct WorkerManifest {
     pub profiles: BTreeMap<String, WorkerProfileManifest>,
     /// The profile that the start asks for (`horsies worker --profile`).
     pub profile: ProfileRequest,
+    /// The metrics endpoint that the start asks for (`horsies worker
+    /// --metrics-listen HOST:PORT`): a field of the process, not of the
+    /// app's config.
+    pub metrics_endpoint: MetricsEndpoint,
     pub claim: WorkerClaimManifest,
     pub recovery: RecoveryManifest,
     pub retention: RetentionManifest,
@@ -425,6 +430,32 @@ pub enum WorkerEndedSpans {
     MakeSpans,
     /// No span of an attempt that the worker ended.
     NoSpans,
+}
+
+/// The metrics endpoint of a worker process. There is no default address:
+/// `--metrics-listen HOST:PORT` turns it on and names its address.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
+#[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
+pub enum MetricsEndpoint {
+    /// Serve the worker metrics and the health probes on `host`:`port`.
+    ListenAddress {
+        /// A host name or an IP address; an IPv6 address without brackets.
+        host: ListenHost,
+        port: ListenPort,
+    },
+    /// No metrics endpoint.
+    #[serde(deserialize_with = "no_member_after_the_tag")]
+    NoMetricsEndpoint,
+}
+
+impl MetricsEndpoint {
+    /// The endpoint on `address`. Pure.
+    pub fn of_address(address: ListenAddress) -> Self {
+        let (host, port) = address.into_parts();
+        Self::ListenAddress { host, port }
+    }
 }
 
 /// The facts of one registered task.

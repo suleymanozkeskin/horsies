@@ -56,6 +56,12 @@ pub(super) fn claimed_at() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 11, 16, 9, 30, 0).unwrap()
 }
 
+/// The start that every scripted frame that ends a run reports: the time
+/// that the start write returned to the child.
+pub(super) fn started_at() -> DateTime<Utc> {
+    DateTime::<Utc>::UNIX_EPOCH
+}
+
 /// A claimed task with id `number`. Every id has the same length, so the
 /// run frames of two scripted tasks have the same length.
 pub(super) fn task(number: u128, execution: ExecutionClass) -> ClaimedTask {
@@ -204,7 +210,7 @@ pub(super) fn result_frame(task: &ClaimedTask, value: u32) -> ChildFrame {
         task_id: task.task_id,
         end: RunEnd::Result(ok_envelope(value)),
         started_at: crate::events::AttemptStart::Reported {
-            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            started_at: started_at(),
         },
         rss: RssReading::Unreadable,
         task_loop: NoLeftWork::NoTaskLoop,
@@ -212,9 +218,15 @@ pub(super) fn result_frame(task: &ClaimedTask, value: u32) -> ChildFrame {
     })
 }
 
-/// The end that the pool answers for [`result_frame`].
+/// The end that the pool answers for [`result_frame`] and
+/// [`shared_result`]: the result, with the start that the frame reports.
 pub(super) fn reported(value: u32) -> AttemptEnd {
-    AttemptEnd::Reported(RunEnd::Result(ok_envelope(value)))
+    AttemptEnd::Result {
+        envelope: ok_envelope(value),
+        start: crate::events::AttemptStart::Reported {
+            started_at: started_at(),
+        },
+    }
 }
 
 /// The result frame of a shared run that finished.
@@ -227,7 +239,7 @@ pub(super) fn shared_result_with_rss(run: RunRef, value: u32, rss: RssReading) -
         run,
         end: SeatEnd::Finished(RunEnd::Result(ok_envelope(value))),
         started_at: crate::events::AttemptStart::Reported {
-            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            started_at: started_at(),
         },
         rss,
         child: ChildAfterFrame::ServesOn,
@@ -240,7 +252,7 @@ pub(super) fn shared_timed_out(run: RunRef) -> ChildFrame {
         run,
         end: SeatEnd::TimedOut,
         started_at: crate::events::AttemptStart::Reported {
-            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            started_at: started_at(),
         },
         rss: RssReading::Unreadable,
         child: ChildAfterFrame::ServesOn,
@@ -264,7 +276,7 @@ pub(super) fn leftover_cancel(run: RunRef, value: u32) -> ChildFrame {
     ChildFrame::LeftoverCancel(LeftoverCancelFrame {
         run,
         returned: BodyEnd::Result(ok_envelope(value)),
-        started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        started_at: started_at(),
     })
 }
 
@@ -273,7 +285,7 @@ pub(super) fn leftover_stuck(run: RunRef, value: u32) -> ChildFrame {
         run,
         work: stuck_work(),
         returned: BodyEnd::Result(ok_envelope(value)),
-        started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        started_at: started_at(),
     })
 }
 

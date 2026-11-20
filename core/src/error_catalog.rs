@@ -723,7 +723,7 @@ mod tests {
                 .code_catalog
                 .members
                 .iter()
-                .map(|member| member.value)
+                .map(|member| member.name)
                 .collect();
             for class in catalog.classes {
                 match class.slots.first() {

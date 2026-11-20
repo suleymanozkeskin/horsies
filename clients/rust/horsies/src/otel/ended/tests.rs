@@ -36,7 +36,8 @@ fn send_carrier() -> BodyCarrier {
     )]))
 }
 
-fn placed_at() -> DateTime<Utc> {
+/// The start of the span that the core gives (`EndedAttempt::started_at`).
+fn started_at() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp_nanos(1_700_000_000_000_123_456)
 }
 
@@ -90,7 +91,7 @@ fn ended_attempt<'a>(
         carrier,
         reason: end.reason,
         error_code,
-        placed_at: placed_at(),
+        started_at: started_at(),
         ended_at: ended_at(),
     }
 }
@@ -136,7 +137,7 @@ fn each_end_makes_one_span_under_the_send_with_its_times_status_and_attributes()
         );
         assert_eq!(span.parent_span_id, SpanId::from(SEND_SPAN_ID), "{end:?}");
         assert!(span.parent_span_is_remote, "{end:?}");
-        assert_eq!(span.start_time, SystemTime::from(placed_at()), "{end:?}");
+        assert_eq!(span.start_time, SystemTime::from(started_at()), "{end:?}");
         assert_eq!(span.end_time, SystemTime::from(ended_at()), "{end:?}");
         assert_eq!(span.status, Status::error(""), "{end:?}");
         let task_id_text = task_id.to_string();

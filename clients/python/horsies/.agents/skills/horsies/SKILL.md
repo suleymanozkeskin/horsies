@@ -15,7 +15,7 @@ reference files in this skill folder (open one only when the task needs it):
 |---|---|
 | `tasks.md` | `@app.task`, `TaskResult`, `send()`, `with_options()`, `RetryPolicy`, `ExceptionMapper`, serialization |
 | `workflows.md` | `WorkflowSpec`, `TaskNode`, `WorkflowHandle`, DAG construction, failure semantics |
-| `configs.md` | `AppConfig`, `PostgresConfig`, queues, recovery, recurring scheduling including `CronSchedule`, CLI commands |
+| `configs.md` | `AppConfig`, `PostgresConfig`, queues, recovery, recurring scheduling including `CronSchedule`, child hooks, event handlers (`@app.on_event`), CLI commands |
 | `monitoring.md` | `horsies.monitoring` query API, `cancel_task`, the `horsies[web]` dashboard, `create_monitoring_app`, `horsies web`, auth policies, schema states |
 
 All public symbols: `from horsies import <name>`
@@ -367,10 +367,12 @@ A worker child ends itself at its next core call (exit code 80; its last log lin
 
 ```bash
 horsies worker myapp.config:app --profile default  # start worker (--profile is required)
+horsies worker myapp.config:app --profile default --metrics-listen 0.0.0.0:9464  # + /metrics, /livez, /readyz
 horsies scheduler myapp.config:app       # start scheduler
 horsies check myapp.config:app [--live]  # validate before deploy
 horsies web myapp.config:app             # serve the monitoring web UI (needs horsies[web])
 horsies web --database-url URL           # monitor a database without an app module
+horsies metrics myapp.config:app --listen 0.0.0.0:9465  # serve the fleet metrics at GET /metrics
 horsies get-docs                         # download the docs of the installed version
 horsies get-docs --ref main              # download the main branch docs (needed for a development version)
 horsies skills install --target DIR      # copy this skill folder to DIR/horsies/ (--force replaces a changed copy)

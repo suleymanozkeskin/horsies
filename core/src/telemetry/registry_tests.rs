@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use crate::telemetry::catalog::{MetricId, Recorder};
 use crate::telemetry::declared::{
-    DeclaredLookup, DeclaredNames, DeclaredNamesRefused, DeclaredValue, ErrorCodeValue,
-    ErrorCodeValues, QueueName, TaskName, MAX_DECLARED_NAMES,
+    warn_folded_names, DeclaredLookup, DeclaredNames, DeclaredValue, ErrorCodeValue,
+    ErrorCodeValues, FoldReason, Folded, FoldedName, FoldedNames, QueueName, TaskName,
+    MAX_DECLARED_NAMES, MAX_FOLDED_NAMES_SHOWN,
 };
 use crate::telemetry::exposition::{escape_help, escape_label_value, gauge_text, render};
 use crate::telemetry::labels::{
@@ -16,6 +17,7 @@ use crate::telemetry::registry::{
     RegistryRefused, Replaced, SampleValue, WorkerFacts, MAX_LABELS_PER_METRIC,
     MAX_SERIES_PER_METRIC,
 };
+use crate::test_support::LogCapture;
 use crate::{
     error_code_label, BuiltInTaskCode, ContractCode, DeclaredErrorCodes, ErrorCodeLabel, Execution,
     OperationalErrorCode, OutcomeCode, RetrievalCode, TaskErrorCode, UserCode, UNDECLARED_LABEL,
@@ -35,12 +37,11 @@ type EndNotKnownLabels = (DeclaredValue<TaskName>, DeclaredValue<QueueName>, Exe
 /// and the codes that `codes` declares.
 fn labels_of<S: AsRef<str>>(tasks: &[S], codes: &DeclaredErrorCodes) -> RegistryLabels {
     RegistryLabels {
-        tasks: DeclaredNames::new(tasks.iter().map(|task| task.as_ref().to_owned()))
-            .expect("the test task names are a valid set"),
-        queues: DeclaredNames::new(["default"]).expect("the test queue is a valid set"),
+        tasks: DeclaredNames::new(tasks.iter().map(|task| task.as_ref().to_owned())).declared,
+        queues: DeclaredNames::new(["default"]).declared,
         handlers: DeclaredNames::none(),
         schedules: DeclaredNames::none(),
-        error_codes: ErrorCodeValues::new([codes]).expect("the test codes are within the bound"),
+        error_codes: ErrorCodeValues::new([codes]).declared,
         process: ProcessFacts::Worker(WorkerFacts {
             version: "0.8.0".to_owned(),
             profile: "default".to_owned(),
@@ -74,8 +75,8 @@ fn every_built_in_code() -> Vec<BuiltInTaskCode> {
 
 #[test]
 fn a_name_outside_the_declared_names_is_the_fallback() {
-    let tasks = DeclaredNames::<TaskName>::new(["send_email", "resize_image", "send_email"])
-        .expect("a valid set");
+    let tasks =
+        DeclaredNames::<TaskName>::new(["send_email", "resize_image", "send_email"]).declared;
     assert_eq!(
         tasks.names().to_vec(),
         vec!["send_email".to_owned(), "resize_image".to_owned()]
@@ -98,42 +99,171 @@ fn a_name_outside_the_declared_names_is_the_fallback() {
     );
 }
 
+fn folded_name(set: DeclaredSource, name: &str, reason: FoldReason) -> FoldedName {
+    FoldedName {
+        set,
+        name: name.to_owned(),
+        reason,
+    }
+}
+
+/// The empty text and the fallback text of a set are not declared: no
+/// refusal, each is named once with its reason, and its value is the
+/// fallback. A declared name keeps its own value.
 #[test]
-fn declared_names_refuse_an_empty_name_the_fallback_and_too_many() {
-    let count = |names: Result<DeclaredNames<QueueName>, DeclaredNamesRefused>| {
-        names.map(|names| names.names().len())
-    };
+fn the_empty_text_and_the_fallback_text_are_folded_into_the_fallback() {
+    let Folded {
+        declared: queues,
+        folded,
+    } = DeclaredNames::<QueueName>::new(["default", "", "(unknown)", "", "(unknown)", "default"]);
+    assert_eq!(queues.names().to_vec(), vec!["default".to_owned()]);
     assert_eq!(
-        count(DeclaredNames::new([""])),
-        Err(DeclaredNamesRefused::EmptyName {
-            set: DeclaredSource::QueueNames
-        })
+        folded.names().to_vec(),
+        vec![
+            folded_name(DeclaredSource::QueueNames, "", FoldReason::EmptyName),
+            folded_name(
+                DeclaredSource::QueueNames,
+                "(unknown)",
+                FoldReason::FallbackText
+            ),
+        ]
     );
+    assert_eq!(queues.value_of(""), queues.fallback());
+    assert_eq!(queues.value_of("(unknown)"), queues.fallback());
     assert_eq!(
-        count(DeclaredNames::new(["(unknown)"])),
-        Err(DeclaredNamesRefused::FallbackName {
-            set: DeclaredSource::QueueNames,
-            name: "(unknown)".to_owned(),
-        })
+        queues.lookup("default"),
+        DeclaredLookup::Member(queues.value_of("default"))
     );
+    assert_ne!(queues.value_of("default"), queues.fallback());
+
+    // Each label has its own fallback text: `(unknown)` is a valid task name.
+    let Folded {
+        declared: tasks,
+        folded,
+    } = DeclaredNames::<TaskName>::new(["(unregistered)", "(unknown)"]);
+    assert_eq!(tasks.names().to_vec(), vec!["(unknown)".to_owned()]);
+    assert_eq!(
+        folded.names().to_vec(),
+        vec![folded_name(
+            DeclaredSource::TaskNames,
+            "(unregistered)",
+            FoldReason::FallbackText
+        )]
+    );
+    assert_eq!(tasks.value_of("(unregistered)"), tasks.fallback());
+}
+
+/// A name after [`MAX_DECLARED_NAMES`] names is not declared: no refusal,
+/// it is named once, and its value is the fallback. A repeat of a declared
+/// name is not folded.
+#[test]
+fn a_name_past_the_bound_is_folded_into_the_fallback() {
     let at_bound = (0..MAX_DECLARED_NAMES).map(|index| format!("queue_{index}"));
-    assert_eq!(count(DeclaredNames::new(at_bound)), Ok(MAX_DECLARED_NAMES));
-    let past_bound = (0..=MAX_DECLARED_NAMES).map(|index| format!("queue_{index}"));
+    let Folded { declared, folded } = DeclaredNames::<QueueName>::new(at_bound);
+    assert_eq!(declared.names().len(), MAX_DECLARED_NAMES);
+    assert_eq!(folded, FoldedNames::none());
+
+    let past_bound = (0..MAX_DECLARED_NAMES)
+        .map(|index| format!("queue_{index}"))
+        .chain(["late".to_owned(), "queue_0".to_owned(), "late".to_owned()]);
+    let Folded {
+        declared: queues,
+        folded,
+    } = DeclaredNames::<QueueName>::new(past_bound);
+    assert_eq!(queues.names().len(), MAX_DECLARED_NAMES);
     assert_eq!(
-        count(DeclaredNames::new(past_bound)),
-        Err(DeclaredNamesRefused::TooMany {
-            set: DeclaredSource::QueueNames,
-            count: MAX_DECLARED_NAMES + 1,
-            bound: MAX_DECLARED_NAMES,
-        })
+        folded.names().to_vec(),
+        vec![folded_name(
+            DeclaredSource::QueueNames,
+            "late",
+            FoldReason::PastBound
+        )]
     );
+    assert_eq!(queues.value_of("late"), queues.fallback());
+    assert_eq!(queues.value_of("queue_0").position(), 0);
+}
+
+/// The user codes after the first [`MAX_DECLARED_NAMES`] (by text) are not
+/// declared: no refusal, each is named, and its value is `undeclared`.
+#[test]
+fn error_codes_past_the_bound_are_undeclared() {
+    let codes =
+        DeclaredErrorCodes::parse((0..=MAX_DECLARED_NAMES).map(|index| format!("CODE_{index:06}")))
+            .expect("valid codes");
+    let Folded {
+        declared: values,
+        folded,
+    } = ErrorCodeValues::new([&codes]);
+    assert_eq!(values.declared().len(), MAX_DECLARED_NAMES);
+    let last = format!("CODE_{MAX_DECLARED_NAMES:06}");
+    assert_eq!(
+        folded.names().to_vec(),
+        vec![folded_name(
+            DeclaredSource::UserErrorCodes,
+            &last,
+            FoldReason::PastBound
+        )]
+    );
+    let undeclared = values.value_of(ErrorCodeLabel::Undeclared);
+    let past = TaskErrorCode::User(UserCode::parse(last).expect("a user code"));
+    assert_eq!(values.value_of(error_code_label(&codes, &past)), undeclared);
+    let first = TaskErrorCode::User(UserCode::parse("CODE_000000").expect("a user code"));
+    assert_ne!(
+        values.value_of(error_code_label(&codes, &first)),
+        undeclared
+    );
+}
+
+/// The start logs one WARNING line that names each folded name with its
+/// set and its reason, and no line when no name is folded.
+#[test]
+fn one_warning_line_names_each_folded_name_and_no_folded_name_logs_nothing() {
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
+    let folded = DeclaredNames::<TaskName>::new(["(unregistered)", "app.fetch"])
+        .folded
+        .and(DeclaredNames::<QueueName>::new(["", "default"]).folded);
+
+    warn_folded_names(&"the worker metrics", &folded);
+    warn_folded_names(&"the worker metrics", &FoldedNames::none());
+
+    let warnings = capture.lines_starting(tracing::Level::WARN, "");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(
+        warnings[0].message,
+        "the worker metrics: these names are not declared, and their samples count in the \
+         fallback series of their label: \"(unregistered)\" in the task names (the fallback \
+         text of the label); \"\" in the queue names (an empty name)"
+    );
+}
+
+/// The WARNING line names at most [`MAX_FOLDED_NAMES_SHOWN`] names and
+/// counts the others.
+#[test]
+fn the_warning_line_names_at_most_the_shown_bound_and_counts_the_others() {
+    let names =
+        (0..MAX_DECLARED_NAMES + MAX_FOLDED_NAMES_SHOWN + 3).map(|index| format!("q{index}"));
+    let folded = DeclaredNames::<QueueName>::new(names).folded;
+    assert_eq!(folded.names().len(), MAX_FOLDED_NAMES_SHOWN + 3);
+
+    let line = folded.to_string();
+    assert_eq!(
+        line.matches(" in the queue names (past the bound").count(),
+        MAX_FOLDED_NAMES_SHOWN
+    );
+    assert!(
+        line.contains(&format!("\"q{MAX_DECLARED_NAMES}\" in the queue names")),
+        "{line}"
+    );
+    assert!(line.ends_with("; and 3 more"), "{line}");
+    assert!(!line.contains('\n'));
 }
 
 #[test]
 fn error_code_values_hold_no_code_the_built_in_the_declared_and_undeclared() {
     let first = DeclaredErrorCodes::parse(["RATE_LIMITED", "CARD_DECLINED"]).expect("a valid set");
     let second = DeclaredErrorCodes::parse(["CARD_DECLINED", "HTTP2_FAILED"]).expect("a valid set");
-    let values = ErrorCodeValues::new([&first, &second]).expect("within the bound");
+    let values = ErrorCodeValues::new([&first, &second]).declared;
     assert_eq!(
         values.declared().to_vec(),
         vec![
@@ -265,7 +395,7 @@ fn a_new_series_past_the_series_bound_is_dropped_and_counted() {
 
 #[test]
 fn a_value_of_another_registry_s_names_is_outside_the_label_set() {
-    let other = DeclaredNames::<TaskName>::new(["a", "b", "c"]).expect("a valid set");
+    let other = DeclaredNames::<TaskName>::new(["a", "b", "c"]).declared;
     let registry = Registry::new(
         &[MetricId::TaskAttemptsEndNotKnown],
         labels_of(&["a"], &DeclaredErrorCodes::NONE),
@@ -702,7 +832,7 @@ fn gauge_values_print_in_the_prometheus_form() {
 fn collector_labels(queues: &[String]) -> RegistryLabels {
     let mut labels = labels_of(&["a"], &DeclaredErrorCodes::NONE);
     labels.process = ProcessFacts::NotAWorker;
-    labels.queues = DeclaredNames::new(queues.iter().cloned()).expect("valid test queue names");
+    labels.queues = DeclaredNames::new(queues.iter().cloned()).declared;
     labels
 }
 
@@ -770,7 +900,7 @@ fn a_gauge_replacement_drops_a_value_of_the_declared_names_of_another_registry()
     let three = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
     let registry = Registry::new(&[MetricId::FleetUnservedClasses], collector_labels(&one))
         .expect("the registry builds");
-    let other = DeclaredNames::<QueueName>::new(three).expect("valid test queue names");
+    let other = DeclaredNames::<QueueName>::new(three).declared;
     let unserved = registry
         .gauge::<(DeclaredValue<QueueName>, Execution)>(MetricId::FleetUnservedClasses)
         .expect("the handle of the metric");

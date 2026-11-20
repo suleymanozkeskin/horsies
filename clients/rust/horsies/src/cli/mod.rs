@@ -8,8 +8,11 @@
 //! }
 //! ```
 //!
-//! - `<binary> worker --profile <name> [--loglevel LEVEL]`: Python
-//!   `horsies worker`.
+//! - `<binary> worker --profile <name> [--loglevel LEVEL]
+//!   [--metrics-listen HOST:PORT]`: Python `horsies worker`. With
+//!   `--metrics-listen`, the worker serves its metrics at `GET /metrics` and
+//!   its health probes at `GET /livez` and `GET /readyz`; there is no default
+//!   address.
 //! - `<binary> scheduler [--loglevel LEVEL]`: Python `horsies scheduler`.
 //! - `<binary> check [--live] [--loglevel LEVEL]`: Python `horsies check`.
 //! - `<binary> metrics --listen HOST:PORT [--loglevel LEVEL]`: Python
@@ -134,6 +137,11 @@ enum Command {
         profile: Option<String>,
         #[arg(long, value_enum, ignore_case = true, default_value = "INFO")]
         loglevel: LogLevel,
+        /// Serve the worker metrics (GET /metrics) and the health probes
+        /// (GET /livez, GET /readyz) on HOST:PORT, or [IPV6]:PORT. No
+        /// default: without it the worker serves no endpoint.
+        #[arg(long = "metrics-listen", value_name = "HOST:PORT", value_parser = ListenAddress::parse)]
+        metrics_listen: Option<ListenAddress>,
     },
     /// Start the scheduler of AppConfig.schedule.
     Scheduler {
@@ -189,11 +197,19 @@ impl LogLevel {
 /// status.
 fn run_command(mut app: Horsies, command: Command, format: LogFormat) -> ExitCode {
     match command {
-        Command::Worker { profile, loglevel } => {
+        Command::Worker {
+            profile,
+            loglevel,
+            metrics_listen,
+        } => {
             logging::install_logs(loglevel.child_level(), format);
             let start = match profile {
                 Some(name) => WorkerStart::profile(name).with_log_level(loglevel.child_level()),
                 None => WorkerStart::without_profile(loglevel.child_level()),
+            };
+            let start = match metrics_listen {
+                Some(address) => start.with_metrics_endpoint(address),
+                None => start,
             };
             block_on_process_runtime(app.run_worker(start)).map_or(ExitCode::FAILURE, worker_exit)
         }
@@ -330,21 +346,86 @@ mod tests {
     fn worker_takes_a_profile_and_a_level_in_any_case() {
         let cli = parse(&["app", "worker", "--profile", "web", "--loglevel", "debug"]).unwrap();
         match cli.command {
-            Command::Worker { profile, loglevel } => {
+            Command::Worker {
+                profile,
+                loglevel,
+                metrics_listen,
+            } => {
                 assert_eq!(profile.as_deref(), Some("web"));
                 assert_eq!(loglevel, LogLevel::Debug);
+                assert_eq!(metrics_listen, None);
             }
             other => panic!("expected worker, got {other:?}"),
         }
     }
 
     #[test]
+    fn worker_takes_a_metrics_listen_address() {
+        for (text, host, port) in [
+            ("0.0.0.0:9100", "0.0.0.0", 9100),
+            ("[::1]:9100", "::1", 9100),
+            ("metrics.internal:65535", "metrics.internal", 65_535),
+        ] {
+            let cli = parse(&[
+                "app",
+                "worker",
+                "--profile",
+                "web",
+                "--metrics-listen",
+                text,
+            ])
+            .unwrap();
+            match cli.command {
+                Command::Worker {
+                    metrics_listen: Some(address),
+                    ..
+                } => {
+                    assert_eq!((address.host(), address.port()), (host, port));
+                }
+                other => panic!("expected worker with an address, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn worker_with_a_metrics_listen_address_that_does_not_parse_is_a_usage_error() {
+        let too_long = format!("{}:9100", "a".repeat(254));
+        for (address, refusal) in [
+            ("9100", "is not HOST:PORT"),
+            (":9100", "has no host before the port"),
+            ("localhost:0", "is not a number from 1 to 65535"),
+            ("localhost:65536", "is not a number from 1 to 65535"),
+            ("::1:9100", "write an IPv6 address in brackets"),
+            (too_long.as_str(), "has more than 253 bytes"),
+        ] {
+            let error = parse(&[
+                "app",
+                "worker",
+                "--profile",
+                "web",
+                "--metrics-listen",
+                address,
+            ])
+            .unwrap_err();
+            assert_eq!(error.exit_code(), 2, "{address}");
+            assert!(error.to_string().contains(refusal), "{address}: {error}");
+        }
+        let error = parse(&["app", "worker", "--profile", "web", "--metrics-listen"]).unwrap_err();
+        assert_eq!(error.exit_code(), 2);
+    }
+
+    #[test]
     fn each_command_has_python_s_default_level() {
-        let Command::Worker { profile, loglevel } = parse(&["app", "worker"]).unwrap().command
+        let Command::Worker {
+            profile,
+            loglevel,
+            metrics_listen,
+        } = parse(&["app", "worker"]).unwrap().command
         else {
             panic!("expected worker");
         };
         assert_eq!((profile, loglevel), (None, LogLevel::Info));
+        assert_eq!(metrics_listen, None);
         let Command::Check { live, loglevel } = parse(&["app", "check"]).unwrap().command else {
             panic!("expected check");
         };
