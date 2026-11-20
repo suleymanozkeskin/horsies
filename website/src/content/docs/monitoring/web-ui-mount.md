@@ -116,6 +116,7 @@ What each policy answers is in [Authorization policies](/horsies/monitoring/web-
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `custom_css_url` | `str \| None` | `None` | The URL of one stylesheet. Its link goes last in the served `index.html` |
+| `trace_link` | `TraceLinkTemplate \| NoTraceLink` | `NoTraceLink()` | The link of a task's trace id in the task detail. `TraceLinkTemplate(template=...)` takes an `http` or `https` URL with one `{trace_id}`, at most 2,048 bytes of printable ASCII with no space, for example `https://grafana.example.com/explore?traceId={trace_id}`; another template raises `ConfigurationError` (`HRS-221`) that names the rule. With `NoTraceLink()` the task detail shows the trace id as text. A task sent with no trace shows no trace row |
 
 ### Static Assets
 

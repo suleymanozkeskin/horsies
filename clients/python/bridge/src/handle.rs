@@ -155,6 +155,12 @@ impl BrokerConnection {
         &self.handle
     }
 
+    /// The core's lazy handle, shared, for a service run that outlives the
+    /// call (the fleet metrics server).
+    pub fn shared_handle(&self) -> Arc<LazyHandle> {
+        Arc::clone(&self.handle)
+    }
+
     /// Whether a connect succeeded on this handle. Starts nothing and waits
     /// for nothing: a connect still in flight is `NeverConnected`, and the
     /// core of the process may not have started then.

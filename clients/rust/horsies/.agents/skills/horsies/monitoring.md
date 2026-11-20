@@ -227,7 +227,11 @@ mount: the page and its assets, `/api/...` and the event stream
   definitions registered on `app` at the first request. Mount the router
   from the app's own binary, after the registrations, when the UI must
   resume such workflows.
-- `MonitoringConfig { ui: MonitoringUiConfig { custom_css_url }, actions }`.
+- `MonitoringConfig { ui: MonitoringUiConfig { custom_css_url, trace_link }, actions }`.
+  `trace_link` is `TraceLink::NoTraceLink` (the task detail shows the trace
+  id as text) or `TraceLink::Template(TraceLinkTemplate::parse(text)?)`: an
+  `http` or `https` URL with one `{trace_id}`, at most 2,048 bytes of
+  printable ASCII. `horsies web --trace-link TEMPLATE` sets it.
   `MonitoringConfig::default()` has `Actions::Enabled`. With
   `Actions::Disabled` every action route is 403 without a policy call.
 
@@ -303,6 +307,33 @@ horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
 - Without the `web` feature, `horsies web` exits with code 1.
 - The bind and access rules are on the shared docs page
   `monitoring/web-ui-deployment`.
+
+## OpenTelemetry (feature `otel`)
+
+- Spans: `send <task_name>` (PRODUCER) around every database call of a
+  send; `start <workflow_name>` (PRODUCER) per workflow start; in a worker
+  child, the `tracing` span `run <task_name>` (CONSUMER, target
+  `horsies::attempt`) around each task body, whose OpenTelemetry parent is
+  the send span, extracted from the carrier that the task row stores.
+- The client uses the global tracer provider, meter provider and
+  propagator of `opentelemetry` 0.33. Set them first in `main`: `main`
+  runs in each worker child before `horsies::cli::run`. Without a provider
+  no span is recorded; without a propagator that writes keys a send stores
+  no carrier.
+- `horsies::cli::run` adds `horsies::otel::layer()` to its subscriber. A
+  binary with its own subscriber adds the layer and lets its filter pass
+  `horsies::attempt` at `INFO`.
+- A child exits after `run` returns: shut the tracer provider down after
+  `run` so a batch processor exports the last spans.
+- Attempt status: OK for a value; ERROR with `error.type` for an error, a
+  panic (`UNHANDLED_EXCEPTION`) or a deadline that came first
+  (`TASK_TIMEOUT`). An isolated task that the worker kills at its timeout
+  has no ended span.
+- Producer metrics: `horsies.task.sent` (task, queue, result `ok` or the
+  send error code), `horsies.task.send.duration` (queue).
+
+See the website docs `observability/tracing` and
+`rust/observability/tracing-setup`.
 
 ## Things to Avoid
 

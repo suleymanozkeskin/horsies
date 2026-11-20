@@ -61,6 +61,9 @@ __all__ = [
     'ProfileRequestNamed',
     'ProfileRequestNotGiven',
     'ProfileRequest',
+    'MetricsEndpointListenAddress',
+    'MetricsEndpointNoMetricsEndpoint',
+    'MetricsEndpoint',
     'QueueConcurrencyTasks',
     'QueueConcurrencyNoLimit',
     'QueueConcurrency',
@@ -143,6 +146,8 @@ __all__ = [
     'SHARED_THREAD_SEATS_MAX',
     'DRAIN_TIMEOUT_MS_MIN',
     'DRAIN_TIMEOUT_MS_MAX',
+    'LISTEN_PORT_MIN',
+    'LISTEN_PORT_MAX',
     'QUEUE_CONCURRENCY_MIN',
     'QUEUE_CONCURRENCY_MAX',
     'QUEUE_PRIORITY_MIN',
@@ -249,6 +254,9 @@ SHARED_THREAD_SEATS_MAX: Final = 256
 
 DRAIN_TIMEOUT_MS_MIN: Final = 1
 DRAIN_TIMEOUT_MS_MAX: Final = 86400000
+
+LISTEN_PORT_MIN: Final = 1
+LISTEN_PORT_MAX: Final = 65535
 
 QUEUE_CONCURRENCY_MIN: Final = 0
 QUEUE_CONCURRENCY_MAX: Final = 2147483647
@@ -785,6 +793,31 @@ type ProfileRequest = ProfileRequestNamed | ProfileRequestNotGiven
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class MetricsEndpointListenAddress:
+    """Serve the worker metrics and the health probes on `host`:`port`."""
+
+    kind: Literal['LISTEN_ADDRESS'] = 'LISTEN_ADDRESS'
+
+    host: str
+    """A host name or an IP address; an IPv6 address without brackets."""
+
+    port: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MetricsEndpointNoMetricsEndpoint:
+    """No metrics endpoint."""
+
+    kind: Literal['NO_METRICS_ENDPOINT'] = 'NO_METRICS_ENDPOINT'
+
+
+type MetricsEndpoint = MetricsEndpointListenAddress | MetricsEndpointNoMetricsEndpoint
+"""The metrics endpoint of a worker process. There is no default address:
+`--metrics-listen HOST:PORT` turns it on and names its address.
+"""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class QueueConcurrencyTasks:
     """At most `tasks` RUNNING tasks; 0 pauses the claims of the queue."""
 
@@ -1251,6 +1284,12 @@ class WorkerManifest:
 
     profile: ProfileRequest
     """The profile that the start asks for (`horsies worker --profile`)."""
+
+    metrics_endpoint: MetricsEndpoint
+    """The metrics endpoint that the start asks for (`horsies worker
+    --metrics-listen HOST:PORT`): a field of the process, not of the
+    app's config.
+    """
 
     claim: WorkerClaimManifest
 

@@ -176,6 +176,44 @@ A check that passes prints its text on stdout and exits with code 0. A refused c
 - A subscriber that the binary installed before `run` is kept.
 - Each worker child installs the same subscriber, at the `--loglevel` of the worker.
 - The logs have ANSI color on a terminal. `FORCE_COLOR` (set, not empty, not `0`) turns color on, and wins over `NO_COLOR`. `NO_COLOR` (set, any value) turns color off.
+- Each task body runs inside the `tracing` span `run` (target `horsies::attempt`) with the fields `horsies.task.id`, `horsies.task.name` and `horsies.task.attempt`, so each record of the body carries them. The filter of `run` passes this span at every `--loglevel`. The fields of the core's own records are on [Logs](/horsies/observability/logs/).
+
+### JSON Lines
+
+`run_with_log_format(app, LogFormat::Json)` runs the app as `run` does, with one JSON object per log record, in the runner and in each worker child:
+
+```rust
+use std::process::ExitCode;
+
+use horsies::cli::LogFormat;
+use horsies::{AppConfig, Horsies, HorsiesError};
+
+fn build_app() -> Result<Horsies, HorsiesError> {
+    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+    Horsies::new(config)
+}
+
+fn main() -> ExitCode {
+    match build_app() {
+        Ok(app) => horsies::cli::run_with_log_format(app, LogFormat::Json),
+        Err(refused) => {
+            eprintln!("{refused}");
+            ExitCode::FAILURE
+        }
+    }
+}
+```
+
+| Key | Value |
+|-----|-------|
+| `timestamp` | The time of the record |
+| `level` | The level |
+| `target` | The target of the event |
+| The fields of the event | At the top level, `message` among them |
+| `span` | The innermost span of the record, with its name and fields |
+| `spans` | Every span of the record, outermost first |
+
+`run(app)` is `run_with_log_format(app, LogFormat::Text)`. With the feature `otel`, the subscriber of both also has the layer of `horsies::otel`: see [Tracing Setup](/horsies/rust/observability/tracing-setup/).
 
 ## Removed Flags
 
@@ -254,6 +292,7 @@ horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
 | `--trusted-header NAME` | `X-Forwarded-User` | The identity header that the proxy sets, in `trusted-header` mode |
 | `--enable-actions` | off | Allow task cancel and workflow pause, resume and cancel. Without it the UI is view only |
 | `--custom-css-url URL` | none | A stylesheet URL that the page loads after its own stylesheet |
+| `--trace-link TEMPLATE` | none | The link of a task's trace id in the task detail: an `http` or `https` URL with one `{trace_id}`. A template that breaks a rule exits 2 and names the rule |
 | `--loglevel LEVEL` | `INFO` | See [Logs](#logs) |
 
 A config file:

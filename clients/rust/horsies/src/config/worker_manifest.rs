@@ -69,6 +69,7 @@ pub(crate) enum ChildLaunchRefused {
 ///   its declared error codes are the codes of its code type
 ///   ([`task_records`]).
 /// - `profile`: the `--profile` value of the start.
+/// - `metrics_endpoint`: the `--metrics-listen` value of the start.
 /// - `child_launch`: from [`rust_child_launch`].
 /// - `handlers` and `worker_ended_spans`: the Rust client registers no
 ///   event handler and makes no worker-ended span, so the worker starts no
@@ -83,6 +84,7 @@ pub(crate) fn worker_manifest(
     config: &AppConfig,
     tasks: &TaskRegistry,
     profile: ProfileRequest,
+    metrics_endpoint: wire::MetricsEndpoint,
     child_launch: wire::ChildLaunchManifest,
 ) -> Result<wire::WorkerManifest, ManifestBoundRefused> {
     let claim = claim_manifest(config)?;
@@ -100,6 +102,7 @@ pub(crate) fn worker_manifest(
             .map(|(name, worker_profile)| (name.clone(), profile_manifest(worker_profile)))
             .collect(),
         profile,
+        metrics_endpoint,
         claim,
         recovery,
         retention,
@@ -729,7 +732,41 @@ mod tests {
     }
 
     fn build(config: &AppConfig) -> Result<wire::WorkerManifest, ManifestBoundRefused> {
-        worker_manifest(config, &registry(), named("web"), launch())
+        worker_manifest(
+            config,
+            &registry(),
+            named("web"),
+            wire::MetricsEndpoint::NoMetricsEndpoint,
+            launch(),
+        )
+    }
+
+    #[test]
+    fn the_metrics_endpoint_of_the_start_reads_back() {
+        let address = horsies_core::telemetry::listen::ListenAddress::parse("0.0.0.0:9100")
+            .expect("a valid address");
+        let endpoint = wire::MetricsEndpoint::of_address(address);
+        let manifest = worker_manifest(
+            &config(),
+            &registry(),
+            named("web"),
+            endpoint.clone(),
+            launch(),
+        )
+        .unwrap();
+        assert_eq!(manifest.metrics_endpoint, endpoint);
+        let text = serde_json::to_string(&manifest).unwrap();
+        assert!(
+            text.contains(
+                r#""metrics_endpoint":{"kind":"LISTEN_ADDRESS","host":"0.0.0.0","port":9100}"#
+            ),
+            "{text}"
+        );
+        assert_eq!(parse_worker_manifest(&text).unwrap(), manifest);
+        assert_eq!(
+            build(&config()).unwrap().metrics_endpoint,
+            wire::MetricsEndpoint::NoMetricsEndpoint
+        );
     }
 
     #[test]

@@ -163,8 +163,8 @@ mod tests {
     use super::*;
     use crate::monitoring::fleet::{
         ClassSeats, FleetPart, FleetQueryError, FleetQueryFailure, FleetWorkers, LiveWorkerCounts,
-        OldestPending, QueueTasks, ScheduleRuns, SchemaVersion, SeatCount, WorkflowCounts,
-        FLEET_QUERY_TIMEOUT,
+        OldestPending, QueueTasks, ScheduleRuns, SchemaVersion, SeatCount, TelemetryDownCounts,
+        WorkflowCounts, FLEET_QUERY_TIMEOUT,
     };
     use crate::telemetry::labels::FleetQuery;
     use crate::{ClassCoverage, ClientFamily};
@@ -247,6 +247,10 @@ mod tests {
                     isolated: no_seats,
                     shared_async: no_seats,
                     shared_thread: no_seats,
+                },
+                telemetry_down: TelemetryDownCounts {
+                    endpoint: 0,
+                    handler_child: 0,
                 },
             }),
             class_coverage: answered(ClassCoverage {

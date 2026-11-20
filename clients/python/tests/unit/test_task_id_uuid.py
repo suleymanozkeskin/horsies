@@ -8,6 +8,7 @@ from uuid import UUID
 
 import pytest
 
+from horsies.core.telemetry.send_telemetry import NO_SEND_TELEMETRY
 from horsies.core.brokers.result_types import BrokerEnqueueFailed
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendEnqueueFailed
@@ -25,6 +26,7 @@ def _app_with_broker(broker: MagicMock) -> MagicMock:
     app.config.resend_on_transient_err = False
     app.config.payload = PayloadPolicy()
     app.are_sends_suppressed.return_value = False
+    app.send_telemetry.return_value = NO_SEND_TELEMETRY
     app.validate_queue_name.return_value = 'default'
     app.get_broker.return_value = broker
     return app

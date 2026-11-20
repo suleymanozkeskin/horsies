@@ -8,7 +8,8 @@
 //! - [`Worker::from_plan`]: builds the broker of the worker process (its
 //!   pools are lazy, so nothing connects) for the client family of the
 //!   caller, and the worker, whose workflow steps build sub-workflow children
-//!   with the client's child spec source.
+//!   with the client's child spec source. With `--metrics-listen`, it builds
+//!   the metric registry of the worker and its metrics endpoint.
 //!
 //! The manifest holds values only, each inside its bounds, so every mapping
 //! here is total except the profile choice and the broker config check.
@@ -23,7 +24,9 @@ use crate::broker::{BrokerError, PostgresBroker};
 use crate::core::config::app::AppConfig;
 use crate::core::config::queue::{CustomQueueConfig, QueueMode};
 use crate::core::config::worker_profile::{ProfileSelectionRefused, SelectedProfile};
+use crate::core::task::DeclaredErrorCodes;
 use crate::core::PostgresConfig;
+use crate::telemetry::listen::ListenAddress;
 use crate::worker::children::{ChildLaunch, PreloadProgram};
 use crate::worker::claim_pass::RegisteredClasses;
 use crate::worker::cli::LogLevel;
@@ -36,7 +39,8 @@ use crate::worker::executor::supervisor::ChildCommand;
 use crate::worker::worker::Worker;
 use crate::worker_manifest::{
     ChildCommandManifest, ChildProgram as ManifestChildProgram, ClaimLease, ClusterWideCap,
-    PreloadLaunch, QueueConcurrency, Queues, TaskManifest, WorkerLogLevel, WorkerManifest,
+    MetricsEndpoint, PreloadLaunch, QueueConcurrency, Queues, TaskManifest, WorkerLogLevel,
+    WorkerManifest,
 };
 use crate::workflow_engine::child_spec::ChildSpecSource;
 
@@ -55,6 +59,22 @@ pub struct WorkerPlan {
     /// The broker config of the worker process: the resolved parent pool of
     /// the profile with no overflow, and the worker pre-ping.
     pub broker_config: PostgresConfig,
+    /// The metrics endpoint that the start asks for.
+    pub metrics_endpoint: MetricsEndpointPlan,
+}
+
+/// The metrics endpoint of a plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetricsEndpointPlan {
+    /// No `--metrics-listen`: no registry, no endpoint.
+    NoMetricsEndpoint,
+    /// `--metrics-listen`: the address, and the declared error codes of each
+    /// registered task, which give the `task` and `error_code` labels of the
+    /// registry.
+    ListenAddress {
+        address: ListenAddress,
+        task_codes: BTreeMap<String, DeclaredErrorCodes>,
+    },
 }
 
 /// Why a manifest gives no worker plan.
@@ -90,6 +110,7 @@ impl WorkerPlan {
         Ok(Self {
             launch: launch_of(manifest, connection),
             registered: registered_of(&manifest.tasks),
+            metrics_endpoint: metrics_endpoint_of(manifest),
             broker_config: manifest.worker_process_config(&profile),
             app_config,
             worker_config,
@@ -110,15 +131,26 @@ impl Worker {
     /// language (the `build_with` of the Python client, the registry of the Rust
     /// client).
     ///
+    /// With [`MetricsEndpointPlan::ListenAddress`], the worker gets the
+    /// registry of its tasks and queues, and the metrics endpoint of the
+    /// address (`Worker::with_metrics_endpoint`). The endpoint binds when
+    /// the run starts. A task or queue name that cannot be a label value of
+    /// its own (empty, the fallback text of its label, or past the bound of
+    /// names) is not declared: its samples count in the fallback series, and
+    /// one WARNING line names it.
+    ///
     /// Errors: [`WorkerError::Broker`] when the broker config or the core
-    /// handle is refused; [`WorkerError::Config`] as [`Worker::of_child_specs`].
+    /// handle is refused; [`WorkerError::Config`] as [`Worker::of_child_specs`],
+    /// and with an endpoint when the core is built without the feature
+    /// `metrics-endpoint`.
     pub async fn from_plan(
         plan: WorkerPlan,
         child_specs: Arc<dyn ChildSpecSource>,
         family: ClientFamily,
     ) -> Result<Self, WorkerError> {
         let broker = worker_broker(&plan.broker_config, family).await?;
-        Worker::of_child_specs(
+        let queues = plan.worker_config.queues.clone();
+        let worker = Worker::of_child_specs(
             Arc::new(broker),
             child_specs,
             plan.app_config,
@@ -126,7 +158,79 @@ impl Worker {
             plan.profile,
             plan.launch,
             plan.registered,
-        )
+        )?;
+        match plan.metrics_endpoint {
+            MetricsEndpointPlan::NoMetricsEndpoint => Ok(worker),
+            MetricsEndpointPlan::ListenAddress {
+                address,
+                task_codes,
+            } => serve_metrics(worker, address, &task_codes, &queues),
+        }
+    }
+}
+
+/// `worker` with the registry of `task_codes` and `queues`, and the metrics
+/// endpoint of `address`. The endpoint thread starts with the run. Logs one
+/// WARNING line that names each task or queue name that the registry does
+/// not declare.
+///
+/// Errors: none in this build; the signature is the one of a build without
+/// the feature `metrics-endpoint`.
+#[cfg(feature = "metrics-endpoint")]
+fn serve_metrics(
+    worker: Worker,
+    address: ListenAddress,
+    task_codes: &BTreeMap<String, DeclaredErrorCodes>,
+    queues: &[String],
+) -> Result<Worker, WorkerError> {
+    use crate::telemetry::declared::warn_folded_names;
+    use crate::telemetry::worker::TelemetryOn;
+    use crate::telemetry::worker_registry::{worker_registry, WorkerRegistry};
+
+    let WorkerRegistry {
+        registry,
+        codes,
+        folded,
+    } = worker_registry(task_codes, queues, worker.worker_facts());
+    warn_folded_names(&format!("--metrics-listen {address}"), &folded);
+    let telemetry = match TelemetryOn::metrics_only(registry, codes) {
+        Ok(telemetry) => telemetry,
+        // `worker_registry` builds the registry of every worker metric.
+        Err(refused) => panic!("the telemetry of a worker registry was refused: {refused}"),
+    };
+    Ok(worker.with_metrics_endpoint(address, Arc::new(telemetry)))
+}
+
+/// A core built without the feature `metrics-endpoint` has no endpoint.
+///
+/// Errors: [`WorkerError::Config`], always.
+#[cfg(not(feature = "metrics-endpoint"))]
+fn serve_metrics(
+    worker: Worker,
+    address: ListenAddress,
+    _task_codes: &BTreeMap<String, DeclaredErrorCodes>,
+    _queues: &[String],
+) -> Result<Worker, WorkerError> {
+    drop(worker);
+    Err(WorkerError::Config(format!(
+        "--metrics-listen {address}: this build has no metrics endpoint; build horsies-core with \
+         its feature metrics-endpoint (the horsies feature cli turns it on)"
+    )))
+}
+
+/// The metrics endpoint of `manifest`, with the declared codes of each task
+/// for an address. Pure.
+fn metrics_endpoint_of(manifest: &WorkerManifest) -> MetricsEndpointPlan {
+    match &manifest.metrics_endpoint {
+        MetricsEndpoint::NoMetricsEndpoint => MetricsEndpointPlan::NoMetricsEndpoint,
+        MetricsEndpoint::ListenAddress { host, port } => MetricsEndpointPlan::ListenAddress {
+            address: ListenAddress::new(host.clone(), *port),
+            task_codes: manifest
+                .tasks
+                .iter()
+                .map(|(name, task)| (name.clone(), task.error_codes.clone()))
+                .collect(),
+        },
     }
 }
 

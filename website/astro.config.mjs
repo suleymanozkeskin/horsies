@@ -153,6 +153,14 @@ export default defineConfig({
 							],
 						},
 						{
+							label: 'Observability',
+							items: [
+								{ label: 'Metric Reference', slug: 'observability/metric-reference' },
+								{ label: 'Tracing', slug: 'observability/tracing' },
+								{ label: 'Logs', slug: 'observability/logs' },
+							],
+						},
+						{
 							label: 'Operations',
 							items: [
 								{ label: 'Atomic Enqueue & Topology', slug: 'operations/atomic-enqueue-and-topology' },
@@ -240,6 +248,13 @@ export default defineConfig({
 							],
 						},
 						{
+							label: 'Observability',
+							items: [
+								{ label: 'Tracing Setup', slug: 'observability/tracing-setup' },
+								{ label: 'Log Setup', slug: 'observability/log-setup' },
+							],
+						},
+						{
 							label: 'Operations',
 							items: [
 								{ label: 'Rerun in Your Transaction', slug: 'operations/rerun-in-your-transaction' },
@@ -304,6 +319,12 @@ export default defineConfig({
 								{ label: 'Health Reads', slug: 'rust/monitoring/health-reads' },
 								{ label: 'Monitoring Queries', slug: 'rust/monitoring/monitoring-queries' },
 								{ label: 'Web UI Mount', slug: 'rust/monitoring/web-ui-mount' },
+							],
+						},
+						{
+							label: 'Observability',
+							items: [
+								{ label: 'Tracing Setup', slug: 'rust/observability/tracing-setup' },
 							],
 						},
 						{

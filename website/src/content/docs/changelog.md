@@ -55,6 +55,20 @@ before you upgrade a 0.7 deployment.
   With `NoTracing()` horsies does not import `opentelemetry`. The success
   text of `horsies check` ends with `tracing: OpenTelemetry` or
   `tracing: off`.
+- **Spans of the sends and workflow starts, and the producer metrics.**
+  With `AppConfig(tracing=OtelTracing())`, each `send`, `send_async`,
+  `schedule`, `schedule_async` and retry is one span of kind PRODUCER,
+  `send <task_name>`, a child of the caller's current span, around every
+  broker call of the send. Each workflow start is one span
+  `start <workflow_name>`. The carrier that the configured propagator
+  injects goes to the core with the trace id of the span, and the task row
+  (or every row of the workflow tree) stores it. A send that returns an
+  error sets the status ERROR and `error.type` to its code. Each send
+  records `horsies.task.sent` (task, queue, result) and
+  `horsies.task.send.duration` (queue) with the user's meter. A failure of
+  the user's OpenTelemetry SDK never changes the outcome of a send.
+  `PostgresBroker.enqueue` and `enqueue_async` take `trace=`
+  (`TraceCarrier` or the default `NO_TRACE_CARRIER`).
 - **The span and the log context of each attempt.** With `OtelTracing()`,
   a worker child runs the steps of each attempt after its RUNNING update
   inside one span of kind CONSUMER, `run <task_name>`. The span is the
@@ -93,6 +107,43 @@ before you upgrade a 0.7 deployment.
   trace id of the span that started the run: 32 lowercase hex digits, or
   `None` for a send or start with no trace. Code that builds one of these
   models, for example a test fake, must pass the field.
+- **The trace link of the web UI.** The task detail shows the trace id of
+  the task: as a link when the page has a template, else as text.
+  `MonitoringUIConfig(trace_link=TraceLinkTemplate(template=...))`,
+  `horsies web --trace-link TEMPLATE` (both clients) and the Rust
+  `MonitoringUiConfig.trace_link` set the template: an `http` or `https`
+  URL with one `{trace_id}`, at most 2,048 bytes of printable ASCII with no
+  space. The core checks it; a refused template is `HRS-221` (new
+  `CONFIG_INVALID_TRACE_LINK`) in Python and an argument error of
+  `horsies web`. `/api/meta` reports it as `trace_link_template`.
+- **`horsies worker <app> --profile <name> --metrics-listen HOST:PORT`.**
+  The worker serves its metrics at `GET /metrics` (Prometheus text format)
+  and its health probes at `GET /livez` and `GET /readyz` on `HOST:PORT`
+  or `[IPV6]:PORT`. There is no default address and no config field:
+  without the flag the worker serves no endpoint. The host is required and
+  the port is 1 to 65535; a value that does not parse is a usage error
+  (exit 2) before the worker starts. `/livez` answers 503 when the claim
+  loop of the worker is past the deadline of its next turn, and 200 during
+  the start and the stop. `/readyz` answers 200 when the pools of the
+  worker have no failure, a child serves, and its liveness lock is held,
+  and 503 during the start and the stop. A port in use does not stop the
+  worker: it starts and claims, the endpoint binds again with a backoff of
+  1 s to 60 s, and the probes answer once it binds. The endpoint serves at
+  most 16 connections at once, closes a connection whose request head is
+  not read within 5 s, and answers 431 for a head over 8 KiB. The worker
+  snapshot (`horsies_worker_states.telemetry`) shows the endpoint `off`,
+  `binding`, `serving`, or `down` with its address and cause.
+- **The worker's log records of an attempt carry `attempt` and
+  `trace_id`.** Each log record of the worker that names a claimed task
+  has the field `attempt` (the retry count of the row plus 1) and, when
+  the send stored a trace id, `trace_id` (32 lowercase hex digits). This
+  covers the claim, the placement, the run in a slot, the outcome write,
+  the retry wake and the workflow step after a task outcome. The records
+  of that workflow step name a retry of its write `phase2_retry` (bound
+  `phase2_retries`), and a retry of the advance of a parent workflow
+  `advance_retry` (bound `advance_retries`). In Python each field is an
+  attribute of the `LogRecord`, so `JsonLogs` writes `attempt` and
+  `trace_id` for them.
 
 ### Changed
 
@@ -706,6 +757,15 @@ before you upgrade a 0.7 deployment.
   stops (its health state `failed`) now counts as a failure of
   `partition_coverage` and logs by the same rule; before, it wrote no line.
 
+- **`ErrorCode` is generated from the core.** The core `ErrorCode` is the
+  one list of the `HRS-nnn` codes: each code with its member name and its
+  short text, the member docstring. `horsies-codegen` renders it as
+  `horsies._catalog.error_codes.ErrorCode`, which `horsies.ErrorCode` and
+  `horsies.core.errors.ErrorCode` re-export. Every code keeps its number
+  and its member name; the members are in code order. New member:
+  `WORKFLOW_UNREGISTERED_TASK` (`HRS-302`), which the core had and Python
+  did not. Only the Rust client raises it.
+
 ### Fixed
 
 - **The schema install creates the history leaves of the current day, so a
@@ -886,6 +946,13 @@ before you upgrade a 0.7 deployment.
 The crate `horsies` is rebuilt on `horsies-core`, the engine that the
 Python client runs on. Each entry is a breaking change of the crate's API,
 unless it starts with "Added".
+
+- **Added: `<binary> worker --metrics-listen HOST:PORT` and
+  `WorkerStart::with_metrics_endpoint(ListenAddress)`.** The worker metrics
+  endpoint of the Python flag above, with the same rules. The `cli` feature
+  turns on the server (`horsies-core/metrics-endpoint`); a core without it
+  ends a start that asks for an endpoint with `BootFailed`. `ListenAddress`
+  and `ListenAddressRefused` are exported from `horsies`.
 
 - **The client runs on `horsies-core`.** The crate has no engine of its
   own: no sqlx broker, no worker, no workflow engine, no monitoring queries
@@ -1556,6 +1623,27 @@ unless it starts with "Added".
   and each worker child write one JSON object per log record, with the
   event's fields at the top level and the record's spans with their
   fields. `cli::run(app)` keeps the text format.
+- **`ErrorCode` holds every `HRS-nnn` code of both clients.** New
+  variants, with the numbers that the Python client already used:
+  `WorkflowArgsFromTypeMismatch` (`HRS-024`), `WorkflowInvalidId`
+  (`HRS-032`), `WorkflowInvalidDefinitionConfig` (`HRS-033`),
+  `WorkflowNaiveGoodUntil` (`HRS-035`), `TaskPredecoratedNotSupported`
+  (`HRS-104`), `TaskStrictSignatureViolation` (`HRS-105`),
+  `TaskSharedAsyncRequiresAsyncDef` (`HRS-107`),
+  `TaskSharedThreadRequiresDef` (`HRS-108`),
+  `TaskSharedExecutionRequiresTimeout` (`HRS-109`),
+  `TaskCancelGraceRequiresSharedAsync` (`HRS-110`),
+  `TaskCancelGraceOutOfRange` (`HRS-111`), `ConfigInvalidExceptionMapper`
+  (`HRS-209`), `ModuleExecError` (`HRS-210`), `ConfigInvalidChildHook`
+  (`HRS-214`), `ConfigInvalidKeepalive` (`HRS-215`), `ConfigOtelApiMissing`
+  (`HRS-220`) and `ConfigInvalidTraceLink` (`HRS-221`). The Rust client
+  raises none of them. An exhaustive `match` on `ErrorCode` needs the new
+  arms. `is_workflow_error`, `is_task_error`, `is_config_error` and
+  `is_registry_error` follow `category()`: `is_registry_error()` of
+  `WorkflowUnregisteredTask` (`HRS-302`) is now `true`.
+- **`task_name::node()` before `task_name::register` refuses with
+  `HRS-302`** (`ErrorCode::WorkflowUnregisteredTask`). Before, its
+  `HorsiesError` had no code.
 
 ## 0.7.0 — 2026-11-15
 
