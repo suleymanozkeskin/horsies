@@ -203,6 +203,87 @@ def compare_throughput(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class UnitCost:
+    """The cost of one measured unit (a drain, or a block of calls): its
+    ``operations`` (tasks or calls) and the ``seconds`` they took of one
+    resource."""
+
+    operations: int
+    seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class CostComparison:
+    """The cost per operation of each side, and the candidate/baseline ratio
+    with its bootstrap 95% interval. No budget: a reader judges it against
+    the spread of the control runs."""
+
+    baseline_per_operation_s: float
+    candidate_per_operation_s: float
+    ratio: float
+    ci_low_ratio: float
+    ci_high_ratio: float
+
+
+def compare_cost(
+    *,
+    baseline: list[UnitCost],
+    candidate: list[UnitCost],
+    resamples: int,
+    seed: int,
+) -> CostComparison:
+    """Bootstrap the ratio of the cost per operation of two sides.
+
+    The cost per operation of a side is its total seconds over its total
+    operations. The units are resampled, as the drains are for throughput:
+    a unit is the block of operations that one reading covers.
+
+    Raises:
+        ValueError: no resample, no unit on a side, a unit with no operation,
+            a negative cost, or a baseline unit that cost nothing: a defect
+            of the caller.
+    """
+    if resamples < 1:
+        raise ValueError('bootstrap needs at least one resample')
+    _require_costs(baseline)
+    _require_costs(candidate)
+    if any(unit.seconds <= 0 for unit in baseline):
+        raise ValueError('a cost ratio needs baseline units that cost something')
+    baseline_per_operation_s = _per_operation(baseline)
+    candidate_per_operation_s = _per_operation(candidate)
+
+    rng = random.Random(seed)
+    ratios: list[float] = []
+    for _ in range(resamples):
+        drawn_baseline = _per_operation(rng.choices(baseline, k=len(baseline)))
+        drawn_candidate = _per_operation(rng.choices(candidate, k=len(candidate)))
+        ratios.append(drawn_candidate / drawn_baseline)
+    ratios.sort()
+    ci_low_ratio = ratios[max(0, round(0.025 * len(ratios)) - 1)]
+    ci_high_ratio = ratios[min(len(ratios) - 1, round(0.975 * len(ratios)) - 1)]
+    return CostComparison(
+        baseline_per_operation_s=baseline_per_operation_s,
+        candidate_per_operation_s=candidate_per_operation_s,
+        ratio=candidate_per_operation_s / baseline_per_operation_s,
+        ci_low_ratio=ci_low_ratio,
+        ci_high_ratio=ci_high_ratio,
+    )
+
+
+def _per_operation(units: list[UnitCost]) -> float:
+    return sum(unit.seconds for unit in units) / sum(unit.operations for unit in units)
+
+
+def _require_costs(units: list[UnitCost]) -> None:
+    if not units:
+        raise ValueError('a cost of no units')
+    if any(unit.operations < 1 for unit in units):
+        raise ValueError('a unit of cost needs at least one operation')
+    if any(unit.seconds < 0 for unit in units):
+        raise ValueError('a cost cannot be negative')
+
+
 def _throughput(samples_ms: list[float], *, rows_per_operation: int) -> float:
     return rows_per_operation * len(samples_ms) * 1_000 / sum(samples_ms)
 

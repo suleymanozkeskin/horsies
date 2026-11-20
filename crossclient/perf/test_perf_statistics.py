@@ -15,8 +15,10 @@ import pytest
 
 from crossclient.perf.statistics import (
     Budget,
+    UnitCost,
     Verdict,
     compare,
+    compare_cost,
     compare_throughput,
     percentile_ms,
     worst,
@@ -209,4 +211,77 @@ class TestThroughputVerdicts:
                 minimum_ratio=0.90,
                 resamples=200,
                 seed=7,
+            )
+
+
+class TestCostComparison:
+    """The cost per operation of each side and their ratio, with no verdict."""
+
+    @staticmethod
+    def _units(seconds: float, count: int = 10) -> list[UnitCost]:
+        return [
+            UnitCost(operations=1_000, seconds=seconds + index * 0.001)
+            for index in range(count)
+        ]
+
+    def test_equal_costs_have_a_ratio_of_one_inside_the_interval(self) -> None:
+        compared = compare_cost(
+            baseline=self._units(1.0),
+            candidate=self._units(1.0),
+            resamples=500,
+            seed=7,
+        )
+        assert compared.ratio == pytest.approx(1.0)
+        assert compared.ci_low_ratio <= 1.0 <= compared.ci_high_ratio
+
+    def test_the_cost_per_operation_is_the_total_over_the_operations(self) -> None:
+        compared = compare_cost(
+            baseline=[UnitCost(operations=100, seconds=1.0)],
+            candidate=[
+                UnitCost(operations=100, seconds=1.0),
+                UnitCost(operations=300, seconds=5.0),
+            ],
+            resamples=10,
+            seed=7,
+        )
+        assert compared.baseline_per_operation_s == pytest.approx(0.01)
+        assert compared.candidate_per_operation_s == pytest.approx(0.015)
+        assert compared.ratio == pytest.approx(1.5)
+
+    def test_a_doubled_cost_has_an_interval_above_one(self) -> None:
+        compared = compare_cost(
+            baseline=self._units(1.0),
+            candidate=self._units(2.0),
+            resamples=500,
+            seed=7,
+        )
+        assert compared.ci_low_ratio > 1.0
+
+    @pytest.mark.parametrize(
+        ('baseline', 'candidate'),
+        [
+            ([], [UnitCost(operations=1, seconds=1.0)]),
+            (
+                [UnitCost(operations=0, seconds=1.0)],
+                [UnitCost(operations=1, seconds=1.0)],
+            ),
+            (
+                [UnitCost(operations=1, seconds=1.0)],
+                [UnitCost(operations=1, seconds=-1.0)],
+            ),
+            (
+                [UnitCost(operations=1, seconds=0.0)],
+                [UnitCost(operations=1, seconds=1.0)],
+            ),
+        ],
+        ids=['no-unit', 'no-operation', 'negative-cost', 'free-baseline'],
+    )
+    def test_a_cost_that_cannot_be_compared_is_refused(
+        self,
+        baseline: list[UnitCost],
+        candidate: list[UnitCost],
+    ) -> None:
+        with pytest.raises(ValueError):
+            _ = compare_cost(
+                baseline=baseline, candidate=candidate, resamples=10, seed=7
             )

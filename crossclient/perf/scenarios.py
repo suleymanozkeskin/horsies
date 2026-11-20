@@ -56,6 +56,7 @@ from crossclient.perf.public_calls import (
     delete_started_workflows,
 )
 from crossclient.perf.statistics import Budget
+from crossclient.perf.telemetry_levels import AppTelemetry, WorkerTelemetry
 from crossclient.perf.worker_drain import (
     DRAIN_COUNT_INTERVAL,
     DRAIN_ISOLATED_CHILDREN,
@@ -66,6 +67,7 @@ from crossclient.perf.worker_drain import (
     DrainSender,
     count_terminal_tasks,
     delete_drained_tasks,
+    open_drain_sender,
     start_drain_worker,
 )
 from crossclient.perf.worker_process import StartedWorker, WorkerStartFailed
@@ -329,8 +331,9 @@ class PublicCall(Protocol):
         ...
 
 
-type OpenPublicCall = Callable[[str], PublicCall]
-"""Builds the client of a scenario for a database URL. No I/O."""
+type OpenPublicCall = Callable[[str, AppTelemetry], PublicCall]
+"""Builds the client of a scenario for a database URL, with the telemetry of
+its app. No I/O."""
 
 type PublicCleanup = Callable[[Connection], None]
 """Deletes every row that the calls of a scenario wrote, and commits."""
@@ -341,9 +344,10 @@ class PublicCallScenario:
     """One call of a public operation of the library per measured operation.
 
     The library opens its own connections and sends its own statements, so no
-    plan is captured. Both sides of a run share one client and run the same
-    call: every run is a control run. ``payload_bytes`` is the length of the
-    text argument that one call sends.
+    plan is captured. Both sides of a run make the same call: with the
+    telemetry level ``off`` the run is a control run, and with ``tracing`` the
+    candidate side calls through an app with tracing. ``payload_bytes`` is the
+    length of the text argument that one call sends.
     """
 
     name: str
@@ -355,11 +359,15 @@ class PublicCallScenario:
     cleanup: PublicCleanup
 
 
-type OpenDrainSender = Callable[[str], DrainSender]
-"""Builds the sender of a drain for a database URL. No I/O."""
+type OpenDrainSender = Callable[[str, AppTelemetry], DrainSender]
+"""Builds the sender of a drain for a database URL, with the telemetry of its
+app. No I/O."""
 
-type StartDrainWorker = Callable[[str], StartedWorker | WorkerStartFailed]
-"""Starts the worker of a drain on a database URL. Starts a process."""
+type StartDrainWorker = Callable[
+    [str, WorkerTelemetry], StartedWorker | WorkerStartFailed
+]
+"""Starts the worker of a drain on a database URL, with its telemetry. Starts
+a process."""
 
 type CountTerminal = Callable[[Connection], int]
 """Reads the number of tasks of the drain that are terminal, and ends its
@@ -375,9 +383,10 @@ class WorkerDrainScenario:
     worker until ``count_terminal`` reads every task terminal, once every
     ``count_interval``; a drain that takes longer than ``timeout`` stops the
     run. Then the worker gets SIGTERM and ``stop_timeout`` to exit 0. Both
-    sides run the same drain: every run is a control run. The statement and
-    transaction counts of a worker depend on its timing, so the sides are not
-    held to equal counts.
+    sides run the same drain: with the telemetry level ``off`` the run is a
+    control run, and with another level the candidate side runs the worker
+    of that level. The statement and transaction counts of a worker depend on
+    its timing, so the sides are not held to equal counts.
     """
 
     name: str
@@ -549,7 +558,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         timeout=DRAIN_TIMEOUT,
         count_interval=DRAIN_COUNT_INTERVAL,
         stop_timeout=WORKER_STOP_TIMEOUT,
-        open_sender=DrainSender,
+        open_sender=open_drain_sender,
         start_worker=start_drain_worker,
         count_terminal=count_terminal_tasks,
         cleanup=delete_drained_tasks,
