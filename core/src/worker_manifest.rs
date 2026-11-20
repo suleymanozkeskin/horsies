@@ -5,7 +5,9 @@
 //! the queues and claim settings of the app, the recovery, retention,
 //! resilience and payload settings of the worker's loops (`sections`), the
 //! execution class and the declared error codes of each registered task,
-//! and how a child and the preload process start. The client resolves its
+//! the event handlers of the app and the worker-ended span switch (which
+//! decide the handler child), and how a child and the preload process
+//! start. The client resolves its
 //! user config (Pydantic in Python) into it; the core picks and checks the
 //! profile ([`select_worker_profile`]), so one resolver serves every client.
 //!
@@ -40,12 +42,15 @@ use crate::core::config::worker_profile::{
 };
 use crate::core::task::{DeclaredErrorCodes, Execution};
 use crate::core::PostgresConfig;
+use crate::events::EventTypeName;
 use crate::manifest::{
     parse_manifest, DatabaseUrl, ManifestRefused, PoolRecycle, SendManifest, SessionDatabase,
     WholeSeconds,
 };
 use crate::manifest_schema::{IntBound, ManifestValue, PythonItem, PythonValue};
+use crate::telemetry::labels::DeclaredSource;
 use crate::telemetry::listen::{ListenAddress, ListenHost, ListenPort};
+use crate::worker::executor::protocol::{MAX_EVENT_HANDLERS, MAX_HANDLER_NAME_CHARS};
 
 /// The one worker manifest version this core reads.
 pub const WORKER_MANIFEST_VERSION: u32 = 1;
@@ -270,7 +275,161 @@ pub struct WorkerManifest {
     pub payload: PayloadManifest,
     /// The facts of each task that the worker registered, by task name.
     pub tasks: BTreeMap<String, TaskManifest>,
+    /// The event handlers of the app. The worker starts its handler child
+    /// when the app has one, or when `worker_ended_spans` is `MAKE_SPANS`.
+    pub handlers: EventHandlers,
+    /// Whether the handler child makes the span of each attempt that the
+    /// worker ended.
+    pub worker_ended_spans: WorkerEndedSpans,
     pub child_launch: ChildLaunchManifest,
+}
+
+/// The name of one event handler: 1 to [`MAX_HANDLER_NAME_CHARS`]
+/// characters, and not `(unknown)`, the `handler` label value of a name
+/// outside the declared handlers. It is the value of the `handler` label of
+/// the handler's metrics. Only the parser constructs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct HandlerNameText(String);
+
+impl HandlerNameText {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for HandlerNameText {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let fallback = DeclaredSource::HandlerNames.fallback();
+        match (value.chars().count(), value == fallback) {
+            (0, _) => Err("a handler name is empty".to_owned()),
+            (_, true) => Err(format!(
+                "a handler name is {fallback}, the label value of a name outside the declared \
+                 handlers"
+            )),
+            (count, false) if count > MAX_HANDLER_NAME_CHARS => Err(format!(
+                "a handler name has {count} characters; the most is {MAX_HANDLER_NAME_CHARS}"
+            )),
+            (_, false) => Ok(Self(value)),
+        }
+    }
+}
+
+impl From<HandlerNameText> for String {
+    fn from(name: HandlerNameText) -> Self {
+        name.0
+    }
+}
+
+impl ManifestValue for HandlerNameText {
+    const PYTHON: PythonValue = PythonValue::Str;
+}
+
+/// One event handler of the app.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct HandlerManifest {
+    /// The name of the handler: the value of the `handler` label of
+    /// `horsies.telemetry.handler.errors` and
+    /// `horsies.telemetry.handler.dropped`. Each name is once in the
+    /// manifest.
+    pub name: HandlerNameText,
+    /// The one event type that the handler takes.
+    pub event_type: EventTypeName,
+}
+
+/// The event handlers of an app: 1 to [`MAX_EVENT_HANDLERS`] handlers,
+/// each name once. Only the parser constructs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<HandlerManifest>", into = "Vec<HandlerManifest>")]
+pub struct HandlerList(Vec<HandlerManifest>);
+
+impl HandlerList {
+    /// The handlers, in the order of the manifest.
+    pub fn handlers(&self) -> &[HandlerManifest] {
+        &self.0
+    }
+}
+
+impl TryFrom<Vec<HandlerManifest>> for HandlerList {
+    type Error = String;
+
+    fn try_from(handlers: Vec<HandlerManifest>) -> Result<Self, Self::Error> {
+        match handlers.len() {
+            0 => {
+                return Err(
+                    "the list of handlers is empty; an app with no handler is NO_HANDLERS"
+                        .to_owned(),
+                )
+            }
+            count if count > MAX_EVENT_HANDLERS => {
+                return Err(format!(
+                    "the app has {count} handlers; the most is {MAX_EVENT_HANDLERS}"
+                ))
+            }
+            _ => {}
+        }
+        match first_repeated_name(&handlers) {
+            Some(index) => Err(format!(
+                "handler {index} has the name of an earlier handler; each name is once"
+            )),
+            None => Ok(Self(handlers)),
+        }
+    }
+}
+
+/// The position of the first handler whose name an earlier handler has.
+/// Pure.
+fn first_repeated_name(handlers: &[HandlerManifest]) -> Option<usize> {
+    let mut names = std::collections::HashSet::with_capacity(handlers.len());
+    handlers
+        .iter()
+        .position(|handler| !names.insert(handler.name.as_str()))
+}
+
+impl From<HandlerList> for Vec<HandlerManifest> {
+    fn from(list: HandlerList) -> Self {
+        list.0
+    }
+}
+
+impl ManifestValue for HandlerList {
+    const PYTHON: PythonValue = PythonValue::List(PythonItem::Named("HandlerManifest"));
+}
+
+/// The event handlers that the app registered.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
+#[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
+pub enum EventHandlers {
+    /// The handlers of the app, each with its name and the event type that
+    /// it takes. The worker sends its handler child the events of these
+    /// types only.
+    Handlers { handlers: HandlerList },
+    /// The app registered no event handler. A member after the tag is
+    /// refused.
+    #[serde(deserialize_with = "no_member_after_the_tag")]
+    NoHandlers,
+}
+
+/// Whether the handler child makes a span for each attempt that the worker
+/// ended (a timeout kill, a crash, a blocked loop, a lost child). The child
+/// of such an attempt is gone, so the span that it opened never ends.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum WorkerEndedSpans {
+    /// The handler child makes these spans: the worker starts it also when
+    /// the app has no handler, and sends it the `AttemptEnded` events.
+    MakeSpans,
+    /// No span of an attempt that the worker ended.
+    NoSpans,
 }
 
 /// The metrics endpoint of a worker process. There is no default address:
