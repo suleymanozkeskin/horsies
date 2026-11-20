@@ -10,7 +10,7 @@ set -euo pipefail
 #   DIV_WAIT_COUNT=200 DIV_WAIT_PARALLEL=50 \
 #   FETCH_COUNT=50 FETCH_PARALLEL=25 \
 #   BASE_URL=http://localhost:8000 \
-#   ./scripts/repro_mixed_burst.sh
+#   ./clients/rust/scripts/repro_mixed_burst.sh
 
 BASE_URL="${BASE_URL:-http://localhost:8000}"
 OUT_DIR="${OUT_DIR:-/tmp/horse_mixed_$(date +%Y%m%d_%H%M%S)}"

@@ -14,7 +14,7 @@ The library uses two distinct error systems:
    frozen variant per state. Every variant has ``code`` (a
    ``BrokerErrorCode`` member), ``message`` and ``retryable``. Callers
    match on the variant. A method with fewer failures returns a subset:
-   ``enqueue_async`` returns ``Result[str, BrokerEnqueueError]``,
+   ``enqueue_async`` returns ``Result[UUID, BrokerEnqueueError]``,
    ``enqueue`` adds ``BrokerSyncCallError``, and
    ``ensure_schema_initialized`` returns
    ``Result[None, BrokerOperationFailed]``.
@@ -22,8 +22,10 @@ The library uses two distinct error systems:
 Where Result stops and exceptions take over (the "stop line"):
 
 * **Broker layer** -- returns ``BrokerResult``.  Never raises for
-  operational failures.  ``asyncio.CancelledError`` and programmer
-  defects propagate, from the sync facades as from the async methods.
+  operational failures.  ``ForkedAfterCoreStart`` and ``CoreStopped``
+  (states of the process, ``call_refusal_or_raise``),
+  ``asyncio.CancelledError`` and programmer defects propagate, from the
+  sync facades as from the async methods.
 
 * **Internal call sites** -- handle ``BrokerResult`` with real decisions:
   retry on transient errors, save partial progress, track consecutive

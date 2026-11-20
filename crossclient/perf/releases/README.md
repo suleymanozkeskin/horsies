@@ -218,7 +218,7 @@ release: the two schemas have the same table names.
    ```sh
    (cd ../horsies-v0.7.0 && uv run python -m tests.perf --apply-schema \
        --dsn postgresql+psycopg://USER:PASSWORD@HOST:PORT/horsies_v070)
-   uv run python -m crossclient.perf --apply-schema \
+   uv run --project clients/python python -m crossclient.perf --apply-schema \
        --dsn postgresql://USER:PASSWORD@HOST:PORT/horsies_v080
    ```
 
@@ -231,7 +231,7 @@ release: the two schemas have the same table names.
        --scenario send --scale gate \
        --demo-quiesced --control --write-summary \
        --dsn postgresql+psycopg://USER:PASSWORD@HOST:PORT/horsies_v070)
-   uv run python -m crossclient.perf \
+   uv run --project clients/python python -m crossclient.perf \
        --scenario send --scale gate \
        --demo-quiesced --control --write-summary \
        --dsn postgresql://USER:PASSWORD@HOST:PORT/horsies_v080
@@ -315,7 +315,7 @@ telemetry. Each level holds every part of the level before it:
    ```sh
    git worktree add ../horsies-before-telemetry 2c8aea1072023a056f5e239251d6dc00a27c212a
    git -C ../horsies-before-telemetry checkout "$(git rev-parse HEAD)" -- crossclient/perf
-   (cd ../horsies-before-telemetry && uv sync --frozen --dev)
+   (cd ../horsies-before-telemetry && uv sync --project clients/python --frozen --dev)
    ```
 
    Build `horsies._core` in each checkout, as for the release session.
@@ -323,9 +323,9 @@ telemetry. Each level holds every part of the level before it:
    telemetry migration) and install each schema with its own checkout:
 
    ```sh
-   (cd ../horsies-before-telemetry && uv run python -m crossclient.perf \
+   (cd ../horsies-before-telemetry && uv run --project clients/python python -m crossclient.perf \
        --apply-schema --dsn postgresql://USER:PASSWORD@HOST:PORT/horsies_before_telemetry)
-   uv run python -m crossclient.perf --apply-schema \
+   uv run --project clients/python python -m crossclient.perf --apply-schema \
        --dsn postgresql://USER:PASSWORD@HOST:PORT/horsies_overhead
    ```
 
@@ -343,10 +343,10 @@ The control runs of both checkouts (they give the noise and the rule for
 DSN_NOW=postgresql://USER:PASSWORD@HOST:PORT/horsies_overhead
 DSN_BEFORE=postgresql://USER:PASSWORD@HOST:PORT/horsies_before_telemetry
 for scenario in claim-finish send workflow-start; do
-  uv run python -m crossclient.perf --scenario "$scenario" --scale gate \
+  uv run --project clients/python python -m crossclient.perf --scenario "$scenario" --scale gate \
       --demo-quiesced --control --telemetry off \
       --postgres-cpu-stat "$CPU_STAT" --write-summary --dsn "$DSN_NOW"
-  (cd ../horsies-before-telemetry && uv run python -m crossclient.perf \
+  (cd ../horsies-before-telemetry && uv run --project clients/python python -m crossclient.perf \
       --scenario "$scenario" --scale gate --demo-quiesced --control \
       --telemetry off --postgres-cpu-stat "$CPU_STAT" --write-summary \
       --dsn "$DSN_BEFORE")
@@ -357,12 +357,12 @@ The level cells, in this checkout only:
 
 ```sh
 for level in metrics scraped tracing handler worker-ended-spans; do
-  uv run python -m crossclient.perf --scenario claim-finish --scale gate \
+  uv run --project clients/python python -m crossclient.perf --scenario claim-finish --scale gate \
       --demo-quiesced --telemetry "$level" \
       --postgres-cpu-stat "$CPU_STAT" --write-summary --dsn "$DSN_NOW"
 done
 for scenario in send workflow-start; do
-  uv run python -m crossclient.perf --scenario "$scenario" --scale gate \
+  uv run --project clients/python python -m crossclient.perf --scenario "$scenario" --scale gate \
       --demo-quiesced --telemetry tracing \
       --postgres-cpu-stat "$CPU_STAT" --write-summary --dsn "$DSN_NOW"
 done

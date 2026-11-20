@@ -183,11 +183,11 @@ class PostgresConfig(BaseModel):
     )
     # TCP keepalives keep idle pooled sockets warm so a server-side or
     # middlebox idle-reap is detected and recycled at the socket layer
-    # instead of surfacing as a mid-query OperationalError. pool_pre_ping
-    # and pool_recycle are checkout-time guards and cannot catch a
-    # connection that dies in-flight. These apply to the broker engine pool
-    # and the per-child connection pool; the LISTEN/NOTIFY listener sets its
-    # own keepalives independently.
+    # instead of surfacing as a CoreConnectionError of a statement.
+    # pool_pre_ping and pool_recycle are checkout-time guards and cannot
+    # catch a connection that dies in-flight. The core sets these on every
+    # connection that it opens: the broker pools, the pool of each worker
+    # child and the LISTEN/NOTIFY listener.
     # Each TCP value has the core's bounds (horsies._catalog.manifest), which
     # are Linux's limits (tcp(7)). macOS's limits are higher (TCP_KEEPALIVE
     # and TCP_KEEPINTVL 4,294,967 s, TCP_KEEPCNT 2^31 - 1), and macOS has no

@@ -27,8 +27,10 @@ in ``.md`` and ``{/* check: skip KIND -- reason */}`` in ``.mdx``.
 A chained or ``alone`` block that does not parse is an error, so a new
 fragment cannot enter the docs unmarked.
 
-Run: ``uv run python tests/docs_examples/extract.py OUTPUT_DIR``. Exit code 1
-when an error is found, with one line per error.
+Run from the repository root, which holds the roots of ``DOC_ROOTS`` and
+``MODULE_ROOTS``:
+``uv run --project clients/python python clients/python/tests/docs_examples/extract.py OUTPUT_DIR``.
+Exit code 1 when an error is found, with one line per error.
 """
 
 from __future__ import annotations

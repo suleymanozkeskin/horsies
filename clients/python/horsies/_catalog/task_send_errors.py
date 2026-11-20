@@ -89,7 +89,7 @@ class TaskSendValidationFailed:
 class TaskSendEnqueueFailed:
     """The broker or the database failed during enqueue. The row may or may not exist.
 
-    ``retryable`` is the driver classification of the cause. ``retry_send(err)``
+    ``retryable`` is the core's classification of the cause. ``retry_send(err)``
     sends the same task id and payload again; the broker returns the existing
     task for a duplicate. ``exception`` is ``NoCause()`` when the broker found
     the failure by a data check.

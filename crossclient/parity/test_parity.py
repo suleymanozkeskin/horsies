@@ -7,9 +7,11 @@ Snapshots that differ while the run spans of the two sides do not lie in one
 UTC hour (`ClockBoundaryStraddle`) run again on new databases, at most
 `STRADDLE_REPEATS` times; the last run must have no difference.
 
-Run: `pytest crossclient/parity -m e2e` with a test server
-(`HORSIES_TEST_DATABASE_URL`), a built `horsies._core`, and the Rust scenario
-binary (`cargo build -p horsies-parity-tests`, or `HORSIES_PARITY_RUST_BIN`).
+Run, from the repository root:
+`uv run --project clients/python pytest -c clients/python/pyproject.toml --rootdir . crossclient/parity -m e2e`
+with a test server (`HORSIES_TEST_DATABASE_URL`), a built `horsies._core`,
+and the Rust scenario binary (`cargo build -p horsies-parity-tests`, or
+`HORSIES_PARITY_RUST_BIN`).
 """
 
 from __future__ import annotations

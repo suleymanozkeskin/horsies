@@ -3,13 +3,14 @@
 Two scales, and the difference is not just sample count. A smoke run proves the
 harness still works and is expected on any change to it; a gate run produces
 evidence that a phase is allowed to proceed, and refuses to start unless the
-conditions that make its numbers meaningful have been stated.
+conditions that make its numbers meaningful have been stated. Run it from the
+repository root, in the environment of the Python client:
 
-    uv run python -m crossclient.perf --scenario send \\
+    uv run --project clients/python python -m crossclient.perf --scenario send \\
         --dsn postgresql://postgres:testpassword@localhost:15446/horsies \\
         --scale smoke --control
 
-    uv run python -m crossclient.perf --scenario send \\
+    uv run --project clients/python python -m crossclient.perf --scenario send \\
         --dsn ... --scale gate --demo-quiesced --control
 
 On the baseline schema every scenario has one implementation, so a gate run
@@ -24,7 +25,7 @@ runs with no telemetry and the candidate side with ``LEVEL``
 (``telemetry_levels.py``). ``--postgres-cpu-stat PATH`` names the ``cpu.stat``
 file of the cgroup of the PostgreSQL server, for its CPU time per operation:
 
-    uv run python -m crossclient.perf --scenario claim-finish \\
+    uv run --project clients/python python -m crossclient.perf --scenario claim-finish \\
         --dsn ... --scale gate --demo-quiesced --telemetry handler \\
         --postgres-cpu-stat /sys/fs/cgroup/system.slice/docker-<id>.scope/cpu.stat
 """

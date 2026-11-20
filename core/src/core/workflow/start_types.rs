@@ -105,7 +105,7 @@ pub enum WorkflowStartError {
     },
     /// Schema initialization or the start transaction failed with a database or driver error.
     ///
-    /// ``retryable`` is the driver classification of the cause: ``True`` when
+    /// ``retryable`` is the core's classification of the cause: ``True`` when
     /// the condition may clear, for example a lost connection. The transaction
     /// rolled back, or its commit outcome is unknown. ``retry_start(err)``
     /// starts again with the same id; a workflow that the failed attempt
