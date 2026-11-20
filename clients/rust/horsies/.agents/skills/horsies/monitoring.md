@@ -401,7 +401,9 @@ fn add_handlers(app: &mut Horsies) -> Result<(), HorsiesError> {
   `horsies.telemetry.handler.errors{handler}`, is logged with the name, and
   the handler takes its next event.
 - `name`: 1 to 255 characters, not `(unknown)`, once per app; at most 32
-  handlers. A refusal is a `HorsiesError`.
+  handlers. A refusal is a `HorsiesError` with the code of the same Python
+  refusal: `HRS-225` (name), `HRS-224` (repeated name), `HRS-226` (a 33rd
+  handler).
 - `on_handler_child_start(hook)`: once per handler child, before the
   handlers start, 10 s per hook. A failure keeps the handler child down; the
   worker runs on.

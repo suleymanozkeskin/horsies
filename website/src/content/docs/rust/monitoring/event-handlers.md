@@ -41,7 +41,7 @@ Register every handler in `main`, before `horsies::cli::run(app)`: the worker re
 
 - `on_event::<E>` takes an async handler: an `async fn`, an async closure, or a closure that returns a future. `on_event_blocking::<E>` takes a function that blocks.
 - `E` is one event type of `horsies::events`. The handler takes the events of that type only, so a later event type changes no handler.
-- `name` names the handler in the logs, and is the `handler` label of its metrics: 1 to 255 characters, not `(unknown)`, once per app. An app takes at most 32 handlers.
+- `name` names the handler in the logs, and is the `handler` label of its metrics: 1 to 255 characters, not `(unknown)`, once per app. An app takes at most 32 handlers. A refusal has the code of the same Python refusal: `HRS-225`, `HRS-224`, `HRS-226`.
 - A handler returns `Result<(), HandlerError>`. `?` converts any `std::error::Error`; `HandlerError::new(cause)` takes any other text.
 
 ## Event Types
@@ -173,7 +173,7 @@ app.on_event_blocking::<AttemptEnded>("audit.write", write_audit_row)?;
 | `name` | `impl Into<String>` | The handler's name and metric label |
 | `handler` | `impl AsyncFn(E) -> Result<(), HandlerError> + Send + Sync + 'static` | The async handler |
 
-**Errors:** `HorsiesError` for a name that is empty, longer than 255 characters or `(unknown)`, a name that another handler has, or a 33rd handler. Nothing is registered then.
+**Errors:** `HorsiesError` with the code of the same refusal of the Python registration: `HRS-225` (`ErrorCode::EventHandlerInvalidName`) for a name that is empty, longer than 255 characters or `(unknown)`, `HRS-224` (`ErrorCode::EventHandlerDuplicateName`) for a name that another handler has, `HRS-226` (`ErrorCode::EventHandlerLimit`) for a 33rd handler. Nothing is registered then.
 
 ### `Horsies::on_event_blocking::<E>(name, handler) -> Result<(), HorsiesError>`
 

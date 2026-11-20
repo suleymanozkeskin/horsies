@@ -29,6 +29,7 @@ use super::link::{read_frame, FrameWriter};
 use super::panic::install_panic_hook;
 use super::seats::ServeEnd;
 use crate::core::config::bounded::BoundedU32;
+use crate::core::error::ErrorCode;
 use crate::core::task::Execution;
 use crate::events::{Event, EventDecodeError, EventTypeName, SlotRecovered, TaskClaimed};
 use crate::worker::executor::protocol::{
@@ -150,6 +151,41 @@ fn a_handler_set_refuses_a_bad_name_a_repeated_name_and_one_handler_too_many() {
         })
     );
     assert_eq!(set.len(), MAX_EVENT_HANDLERS);
+}
+
+/// Each refusal kind has the code of the same refusal of the Python
+/// registration: `HRS-225` for a name, `HRS-224` for a repeated name,
+/// `HRS-226` for a 33rd handler. Each is a config code.
+#[test]
+fn each_handler_refusal_has_the_code_of_the_python_refusal() {
+    let cases = [
+        (
+            EventHandlerRefused::InvalidName {
+                cause: "empty".to_owned(),
+            },
+            ErrorCode::EventHandlerInvalidName,
+            "HRS-225",
+        ),
+        (
+            EventHandlerRefused::RepeatedName {
+                name: "audit".to_owned(),
+            },
+            ErrorCode::EventHandlerDuplicateName,
+            "HRS-224",
+        ),
+        (
+            EventHandlerRefused::TooMany {
+                name: "one.more".to_owned(),
+            },
+            ErrorCode::EventHandlerLimit,
+            "HRS-226",
+        ),
+    ];
+    for (refused, code, text) in cases {
+        assert_eq!(refused.code(), code, "{refused:?}");
+        assert_eq!(refused.code().as_code_str(), text, "{refused:?}");
+        assert!(refused.code().is_config_error(), "{refused:?}");
+    }
 }
 
 #[test]
