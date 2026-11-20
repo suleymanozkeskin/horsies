@@ -296,7 +296,10 @@ default) the handler child makes the span of each attempt that the worker
 ended (a timeout kill `TASK_TIMEOUT`, a blocked-loop kill, a lost child
 `WORKER_CRASHED`), whose child span never ended: `run <task_name>`, CONSUMER,
 parent from the stored carrier, start at the placement, status ERROR with
-`error.type`, `horsies.span.source = "worker"`. For a workflow task the
+`error.type`, `horsies.span.source = "worker"`. A shared run that its child
+ended at the deadline is `AttemptEndReportedByChild` with
+`ChildResultTimedOut`: its child span has `TASK_TIMEOUT`, and the handler
+child makes none (one attempt, one span). For a workflow task the
 handler child reads the node by the task id (one bounded core read, only for
 these attempts, on one reader thread with a queue of at most 1,000 spans:
 never on the event path) and sets `horsies.workflow.*`. A failed read, a

@@ -35,7 +35,9 @@ use super::defects::{
     count_defect, AfterDefect, CatchPanic, GenerationEnd, Served, SlotDefect, SlotDefects,
     TasksFinished,
 };
-use super::dispatch::{AttemptEnd, AttemptLog, BodyReturn, NotRunCause, TimeoutCancel};
+use super::dispatch::{
+    AttemptEnd, AttemptLog, BodyReturn, NotRunCause, TimeoutCancel, TimeoutSeen,
+};
 use super::pool::{Answer, ExitNotSeen, MemoryLimit, PoolShared, QueuedRun, TaskLimit};
 use super::replacement::{reason_of_loss, tell_replaced, ChildLeave, GenerationChild};
 use super::route::IsolatedDeadline;
@@ -43,7 +45,6 @@ use super::seat_runs::SHARED_BACKSTOP_MARGIN;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::child_writes::{longer, FINALIZING_MARKER_END};
 use crate::db::CANCEL_REQUEST_BOUND;
-use crate::events::AttemptStart;
 use crate::telemetry::labels::ReplaceReason;
 use crate::worker::executor::protocol::{
     ChildAfterFrame, ChildFrame, ParentFrame, ProcessId, RssReading, RunFrame, TaskTimeoutMs,
@@ -700,7 +701,7 @@ fn timeout_end(timeout: Option<TaskTimeoutMs>) -> AttemptEnd {
             timeout,
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::NoSignal,
-            start: AttemptStart::NotReported,
+            seen: TimeoutSeen::AtKill,
         },
         None => unreachable!("a wait with no deadline cannot pass its deadline"),
     }

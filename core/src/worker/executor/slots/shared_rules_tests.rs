@@ -226,8 +226,10 @@ fn an_async_run_reports_its_stop_in_order() {
             timeout: timeout(),
             retry: RetryPlacement::Isolated,
             cancel: TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace),
-            start: crate::events::AttemptStart::Reported {
-                started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            seen: crate::worker::executor::slots::TimeoutSeen::ReportedByChild {
+                start: crate::events::AttemptStart::Reported {
+                    started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+                }
             },
         }
     );
@@ -515,7 +517,7 @@ fn a_run_of_a_lost_child_gets_the_verdict_of_its_kill() {
             timeout: timeout(),
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::Ended(CancelEnd::KilledWithChild),
-            start: crate::events::AttemptStart::NotReported,
+            seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
         }
     );
     assert!(matches!(
@@ -584,7 +586,7 @@ fn a_kill_past_deadlines_isolates_only_the_culprit() {
             timeout: timeout(),
             retry: RetryPlacement::Isolated,
             cancel: TimeoutCancel::NoSignal,
-            start: crate::events::AttemptStart::NotReported,
+            seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
         }
     );
     assert_eq!(
@@ -593,7 +595,7 @@ fn a_kill_past_deadlines_isolates_only_the_culprit() {
             timeout: timeout(),
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::NoSignal,
-            start: crate::events::AttemptStart::NotReported,
+            seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
         }
     );
     let mut stuck = seat(3, async_work(), sent_at);
@@ -604,7 +606,7 @@ fn a_kill_past_deadlines_isolates_only_the_culprit() {
             timeout: timeout(),
             retry: RetryPlacement::Isolated,
             cancel: TimeoutCancel::Ended(CancelEnd::KilledWithChild),
-            start: crate::events::AttemptStart::NotReported,
+            seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
         }
     );
     let mut leftover = seat(4, async_work(), sent_at);
@@ -633,7 +635,7 @@ fn a_late_exit_after_the_first_backstop_is_a_timeout_or_a_crash() {
             timeout: timeout(),
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::NoSignal,
-            start: crate::events::AttemptStart::NotReported,
+            seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
         }
     );
     assert!(matches!(

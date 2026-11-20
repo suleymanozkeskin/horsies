@@ -4,7 +4,8 @@ An isolated task outruns its timeout; the worker kills its child, records
 `TASK_TIMEOUT`, and sends the `AttemptEnded` event to its handler child,
 which makes the span with the tracer provider of its start hook. The task is
 sent inside a span of the test process, so the stored carrier puts the
-worker-made span in that trace.
+worker-made span in that trace. A shared async task that its child ends at
+the deadline has one span, the span of its child, with the timeout.
 """
 
 from __future__ import annotations
@@ -33,6 +34,10 @@ RESULT_TIMEOUT_MS: Final = 30_000
 SPAN_LINE_TIMEOUT_S: Final = 30.0
 """The longest wait for the span line: the worker writes an events frame
 within its flush interval, and the handler child makes the span at once."""
+SECOND_SPAN_WAIT_S: Final = 3.0
+"""How long a test waits after the first span line of an attempt for a
+second one: past the flush interval of the events (25 ms) and the dispatch
+of the handler child, which makes a span at once."""
 POLL_INTERVAL_S: Final = 0.1
 
 
@@ -163,3 +168,52 @@ async def test_a_workflow_task_killed_at_its_timeout_gets_a_span_with_its_node(
     assert attributes['horsies.span.source'] == 'worker'
     assert attributes['horsies.workflow.node'] == 0
     assert attributes['horsies.workflow.root_id'] == workflow_id
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_shared_task_that_its_child_ended_at_its_deadline_has_one_span(
+    broker: PostgresBroker,  # noqa: ARG001 - binds the e2e database first
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The child of the shared run reports the timeout in its result frame
+    and lives: the span of the child is the span of the attempt, with the
+    timeout, and the handler child makes none."""
+    out = tmp_path / 'span_lines.txt'
+    monkeypatch.setenv(SPAN_OUT_ENV, str(out))
+    test_provider = TracerProvider()
+    parent = test_provider.get_tracer('e2e').start_span('e2e parent')
+    parent_trace_id = format(parent.get_span_context().trace_id, '032x')
+
+    with run_worker(
+        INSTANCE,
+        profile='split-isolated-1-shared-1x4',
+        timeout=60.0,
+        ready_check=_ready_check(instance.healthcheck),
+    ):
+        token = otel_context.attach(trace.set_span_in_context(parent))
+        try:
+            handle = unwrap_send(await instance.shared_sleeper.send_async())
+        finally:
+            otel_context.detach(token)
+        assert_err(await handle.get_async(timeout_ms=RESULT_TIMEOUT_MS), 'TASK_TIMEOUT')
+        _ = await _wait_for_span(out, 'horsies.task.id', str(handle.task_id))
+        await asyncio.sleep(SECOND_SPAN_WAIT_S)
+        spans = [
+            line
+            for line in _span_lines(out)
+            if line['attributes'].get('horsies.task.id') == str(handle.task_id)
+        ]
+    parent.end()
+    test_provider.shutdown()
+
+    assert len(spans) == 1, spans
+    span = spans[0]
+    assert span['name'] == 'run e2e_worker_ended_spans_shared_sleeper'
+    assert span['status'] == 'ERROR'
+    assert span['trace_id'] == parent_trace_id
+    attributes = cast('dict[str, Any]', span['attributes'])
+    assert attributes['error.type'] == 'TASK_TIMEOUT'
+    assert 'horsies.span.source' not in attributes
+    assert attributes['horsies.task.execution'] == 'SHARED_ASYNC'

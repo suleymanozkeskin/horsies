@@ -23,7 +23,8 @@ use crate::test_support::telemetry::{series_of, worker_registry, WatchedTelemetr
 use crate::worker::executor::protocol::StopReason;
 use crate::worker::executor::slots::outcome::{EndView, ResultRead};
 use crate::worker::executor::slots::{
-    ChildPlacement, ClaimedTask, LoopKillCode, NotRunCause, Settlement, TerminalState, WrittenEnd,
+    ChildPlacement, ClaimedTask, LoopKillCode, NotRunCause, Settlement, TerminalState, TimeoutSeen,
+    WrittenEnd,
 };
 
 /// An event of slot `slot`.
@@ -403,9 +404,19 @@ fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
         ),
         (
             EndView::TimedOut {
-                start: AttemptStart::NotReported,
+                seen: TimeoutSeen::AtKill,
             },
             ExpectedEnd::Decided(WorkerDecision::TimedOut),
+            "FAILED",
+            "TASK_TIMEOUT",
+        ),
+        (
+            EndView::TimedOut {
+                seen: TimeoutSeen::ReportedByChild {
+                    start: AttemptStart::NotReported,
+                },
+            },
+            ExpectedEnd::Reported(ChildResult::TimedOut),
             "FAILED",
             "TASK_TIMEOUT",
         ),
@@ -446,7 +457,6 @@ fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
             },
             ExpectedEnd::Decided(reason) => events::AttemptEnd::DecidedByWorker {
                 reason,
-                start: AttemptStart::NotReported,
                 error_code: BuiltInTaskCode::parse(code).expect("the code of a worker decision"),
                 trace: RunTrace::NoCarrier,
                 placed_at: placed.wall,
@@ -519,7 +529,7 @@ fn an_end_that_the_worker_decided_carries_the_facts_of_its_span() {
             &task,
             &ChildPlacement::Placed(placed),
             EndView::TimedOut {
-                start: AttemptStart::NotReported,
+                seen: TimeoutSeen::AtKill,
             },
         );
 
@@ -530,7 +540,6 @@ fn an_end_that_the_worker_decided_carries_the_facts_of_its_span() {
                     ended.end,
                     events::AttemptEnd::DecidedByWorker {
                         reason: WorkerDecision::TimedOut,
-                        start: AttemptStart::NotReported,
                         error_code: OutcomeCode::TaskTimeout.into(),
                         trace: task.trace.clone(),
                         placed_at: placed.wall,
@@ -640,40 +649,46 @@ fn a_registry_with_no_worker_facts_gives_no_telemetry_of_the_points() {
     assert!(matches!(with_queue, Err(HandleRefused::NoWorkerFacts)));
 }
 
-/// An end that the worker decided carries the start that the child
-/// reported: a timeout that a shared child ended at the deadline carries
-/// the start of its frame; a timeout at a kill, a blocked loop and a lost
-/// child carry `NotReported`.
+/// Which `AttemptEnded` asks the handler child for a worker-made span: a
+/// timeout that a shared child reported in its result frame is
+/// `ReportedByChild` with `ChildResult::TimedOut` and the start of its frame
+/// (the span of the child is the span of the attempt), also with no start;
+/// a timeout at a kill, a blocked loop and a lost child, with no result
+/// frame, are `DecidedByWorker`. The outcome and the code label of a
+/// timeout are the same either way.
 #[test]
-fn an_end_that_the_worker_decided_carries_the_start_that_its_child_reported() {
+fn only_an_end_with_no_result_frame_asks_for_a_worker_made_span() {
     let started_at =
         chrono::DateTime::<Utc>::from_timestamp(1_767_225_600, 0).expect("a time in range");
     let reported = AttemptStart::Reported { started_at };
     let cases = [
         (
-            EndView::TimedOut { start: reported },
-            WorkerDecision::TimedOut,
-            reported,
+            EndView::TimedOut {
+                seen: TimeoutSeen::ReportedByChild { start: reported },
+            },
+            Ok((ChildResult::TimedOut, reported)),
         ),
         (
             EndView::TimedOut {
-                start: AttemptStart::NotReported,
+                seen: TimeoutSeen::ReportedByChild {
+                    start: AttemptStart::NotReported,
+                },
             },
-            WorkerDecision::TimedOut,
-            AttemptStart::NotReported,
+            Ok((ChildResult::TimedOut, AttemptStart::NotReported)),
+        ),
+        (
+            EndView::TimedOut {
+                seen: TimeoutSeen::AtKill,
+            },
+            Err(WorkerDecision::TimedOut),
         ),
         (
             EndView::KilledForLoop(LoopKillCode::TaskBlockedLoop),
-            WorkerDecision::TaskBlockedLoop,
-            AttemptStart::NotReported,
+            Err(WorkerDecision::TaskBlockedLoop),
         ),
-        (
-            EndView::Crashed,
-            WorkerDecision::ChildLost,
-            AttemptStart::NotReported,
-        ),
+        (EndView::Crashed, Err(WorkerDecision::ChildLost)),
     ];
-    for (view, decision, expected_start) in cases {
+    for (view, expected) in cases {
         let mut watched = declaring_telemetry();
         let task = claimed_task(Execution::Isolated);
         let placed = placed_after(ClaimRead::now());
@@ -682,15 +697,19 @@ fn an_end_that_the_worker_decided_carries_the_start_that_its_child_reported() {
             .telemetry
             .attempt_ended(&task, &ChildPlacement::Placed(placed), view);
 
-        match watched.events().as_slice() {
-            [Event::AttemptEnded(ended)] => match &ended.end {
-                events::AttemptEnd::DecidedByWorker { reason, start, .. } => {
+        match (watched.events().as_slice(), expected) {
+            ([Event::AttemptEnded(ended)], Ok((result, start))) => assert_eq!(
+                ended.end,
+                events::AttemptEnd::ReportedByChild { result, start },
+                "{view:?}"
+            ),
+            ([Event::AttemptEnded(ended)], Err(decision)) => match &ended.end {
+                events::AttemptEnd::DecidedByWorker { reason, .. } => {
                     assert_eq!(*reason, decision, "{view:?}");
-                    assert_eq!(*start, expected_start, "{view:?}");
                 }
                 other => panic!("{view:?} is decided by the worker, not {other:?}"),
             },
-            other => panic!("{view:?} gives one AttemptEnded, not {other:?}"),
+            (other, _) => panic!("{view:?} gives one AttemptEnded, not {other:?}"),
         }
     }
 }

@@ -1020,7 +1020,7 @@ async fn the_deadline_kills_the_child_and_ends_the_task_as_timed_out() {
             timeout,
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::NoSignal,
-            start: crate::events::AttemptStart::NotReported,
+            seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
         }
     );
 }

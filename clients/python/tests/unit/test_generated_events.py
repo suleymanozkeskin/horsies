@@ -152,12 +152,20 @@ EXPECTED: Final[dict[str, events.AnyEvent]] = {
         ),
         timedelta(microseconds=5000),
     ),
+    'attempt_ended_timed_out_in_child': _ended(
+        'SHARED_ASYNC',
+        3,
+        events.AttemptEndReportedByChild(
+            result=events.ChildResultTimedOut(),
+            start=events.AttemptStartReported(started_at=STARTED_AT),
+        ),
+        timedelta(seconds=30),
+    ),
     'attempt_ended_by_worker': _ended(
         'SHARED_ASYNC',
         3,
         events.AttemptEndDecidedByWorker(
             reason='TIMED_OUT',
-            start=events.AttemptStartReported(started_at=STARTED_AT),
             error_code=OutcomeCode.TASK_TIMEOUT,
             trace=events.RunTraceCarrier(text=CARRIER),
             placed_at=PLACED_AT,
@@ -172,7 +180,6 @@ EXPECTED: Final[dict[str, events.AnyEvent]] = {
         1,
         events.AttemptEndDecidedByWorker(
             reason='NEIGHBOUR_BLOCKED_LOOP',
-            start=events.AttemptStartNotReported(),
             error_code=OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP,
             trace=events.RunTraceNoCarrier(),
             placed_at=PLACED_AT,
@@ -187,7 +194,6 @@ EXPECTED: Final[dict[str, events.AnyEvent]] = {
         2,
         events.AttemptEndDecidedByWorker(
             reason='CHILD_LOST',
-            start=events.AttemptStartNotReported(),
             error_code=OperationalErrorCode.WORKER_CRASHED,
             trace=events.RunTraceCarrier(text=CARRIER),
             placed_at=PLACED_AT,
@@ -460,6 +466,28 @@ def test_a_variant_value_without_its_tag_or_items_is_refused() -> None:
     assert (refusal.path, refusal.reason) == ('end.NotKnown', 'expected 1 items, found 0')
 
 
+def test_a_timeout_that_the_child_reported_decodes_as_a_child_result() -> None:
+    ended = EXPECTED['attempt_ended_timed_out_in_child']
+    assert isinstance(ended, events.AttemptEnded)
+    match ended.end:
+        case events.AttemptEndReportedByChild(
+            result=events.ChildResultTimedOut(),
+            start=events.AttemptStartReported(started_at=started_at),
+        ):
+            assert started_at == STARTED_AT
+        case other:
+            raise AssertionError(f'a timeout that the child reported, not {other!r}')
+    wire = _sample('attempt_ended_timed_out_in_child')
+    end = wire[7]
+    assert isinstance(end, list)
+    cast('list[object]', end)[1] = ['TimedOut', 'extra']
+    refusal = _refusal(wire)
+    assert (refusal.path, refusal.reason) == (
+        'end.ReportedByChild.result.TimedOut',
+        'expected 0 items, found 1',
+    )
+
+
 def test_a_worker_ended_attempt_names_its_workflow_place_or_is_refused() -> None:
     ended = EXPECTED['attempt_ended_by_worker_in_workflow']
     assert isinstance(ended, events.AttemptEnded)
@@ -468,7 +496,7 @@ def test_a_worker_ended_attempt_names_its_workflow_place_or_is_refused() -> None
     wire = _sample('attempt_ended_by_worker_in_workflow')
     end = wire[7]
     assert isinstance(end, list)
-    cast('list[object]', end)[8] = 'IN_WORKFLOW'
+    cast('list[object]', end)[7] = 'IN_WORKFLOW'
     refusal = _refusal(wire)
     assert (refusal.path, refusal.reason) == (
         'end.DecidedByWorker.workflow',

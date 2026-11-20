@@ -427,7 +427,7 @@ async fn a_timeout_retries_the_row_at_the_placement_of_its_end() {
                     timeout: timeout_ms(1_000),
                     retry: placement,
                     cancel,
-                    start: crate::events::AttemptStart::NotReported,
+                    seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
                 },
             )
             .await;
@@ -489,7 +489,7 @@ async fn a_timeout_with_no_retry_fails_the_row_with_task_timeout() {
                 timeout: timeout_ms(1_000),
                 retry: RetryPlacement::SameClass,
                 cancel: TimeoutCancel::NoSignal,
-                start: crate::events::AttemptStart::NotReported,
+                seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
             },
         )
         .await;
@@ -875,7 +875,7 @@ async fn an_unreported_end_of_a_row_still_claimed_puts_it_back_with_no_attempt_r
             timeout: timeout_ms(1_000),
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::Ended(CancelEnd::KilledWithChild),
-            start: crate::events::AttemptStart::NotReported,
+            seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
         },
     ];
     for end in ends {
@@ -1069,7 +1069,7 @@ async fn a_failing_timeout_write_runs_crash_recovery_after_its_own_retries() {
                 timeout: timeout_ms(1_000),
                 retry: RetryPlacement::Isolated,
                 cancel: TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace),
-                start: crate::events::AttemptStart::NotReported,
+                seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
             },
         )
         .await;

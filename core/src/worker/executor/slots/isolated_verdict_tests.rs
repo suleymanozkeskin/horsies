@@ -302,7 +302,7 @@ async fn the_deadline_kills_a_child_that_spins() {
             timeout: timeout_ms(1_000),
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::NoSignal,
-            start: crate::events::AttemptStart::NotReported,
+            seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
         }
     );
     stop_pool(pool, spawner).await;
@@ -432,7 +432,7 @@ async fn the_deadline_kills_a_stopped_child() {
             timeout: timeout_ms(1_000),
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::NoSignal,
-            start: crate::events::AttemptStart::NotReported,
+            seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
         }
     );
     stop_pool(pool, spawner).await;

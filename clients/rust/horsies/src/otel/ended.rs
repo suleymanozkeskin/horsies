@@ -2,20 +2,21 @@
 //! child with the global tracer and propagator.
 //!
 //! The span of an attempt is a `tracing` span of the task child around the
-//! body ([`super::attempt`]). When the worker ends the attempt itself (an
-//! isolated task killed at its timeout, a shared async child killed for a
-//! blocked loop, a child lost with its exit seen), that child is gone and
-//! its span never ends. The handler child makes a span for the attempt from
-//! the facts of its `AttemptEnded` event (`horsies_core::EndedAttempt`):
+//! body ([`super::attempt`]). When the worker ends the attempt itself with
+//! no result frame of the child (an isolated task killed at its timeout, a
+//! shared child killed for a blocked loop or past its deadlines, a child
+//! lost with its exit seen), its span never ends. The handler child makes a
+//! span for the attempt from the facts of its `AttemptEnded` event
+//! (`horsies_core::EndedAttempt`). A shared run that its child ended at the
+//! deadline is an end that the child reported: the span of the child has
+//! the timeout, and the handler child makes none.
 //!
 //! - kind CONSUMER, name `run <task_name>`, as the span of a child;
 //! - its parent is the context that the global propagator extracts from the
 //!   stored carrier, as for the span of a child; a task with no carrier gets
 //!   a root span;
-//! - it starts at the start that the child reported (a shared run that its
-//!   child ended at the deadline), else when the task reached its child, and
-//!   ends when the end reached the worker (`EndedAttempt::started_at`,
-//!   `ended_at`);
+//! - it starts when the task reached its child and ends when the end
+//!   reached the worker (`EndedAttempt::started_at`, `ended_at`);
 //! - status ERROR with `error.type` = the code of the attempt row;
 //! - the attributes of the span of a child ([`super::attempt::run_attributes`],
 //!   [`super::attempt::workflow_attributes`], and the task id, name and

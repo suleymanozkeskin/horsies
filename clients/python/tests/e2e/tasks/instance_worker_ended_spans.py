@@ -2,13 +2,16 @@
 attempt that it ended, in its handler child.
 
 The app registers no event handler: the switch `MAKE_SPANS` (the default of
-`OtelTracing`) starts the handler child alone. Its start hook sets a tracer
-provider whose exporter writes one JSON line per ended span to the file that
-the environment variable `SPAN_OUT_ENV` names.
+`OtelTracing`) starts the handler child alone. Its start hook, and the start
+hook of each task child, set a tracer provider whose exporter writes one
+JSON line per ended span to the file that the environment variable
+`SPAN_OUT_ENV` names: the spans of the children and the spans that the
+handler child makes go to one file.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -25,7 +28,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import Execution, TaskError, TaskResult
 from horsies.core.models.tracing import OtelTracing
 from horsies.core.models.workflow import TaskNode
 
@@ -86,6 +89,12 @@ def set_tracer_provider() -> None:
     trace.set_tracer_provider(provider)
 
 
+@app.on_child_process_start
+def set_child_tracer_provider() -> None:
+    """The task children export their attempt spans to the same file."""
+    set_tracer_provider()
+
+
 @app.task(task_name='e2e_worker_ended_spans_healthcheck')
 def healthcheck() -> TaskResult[str, TaskError]:
     return TaskResult(ok='ready')
@@ -94,6 +103,18 @@ def healthcheck() -> TaskResult[str, TaskError]:
 @app.task(task_name='e2e_worker_ended_spans_sleeper', timeout_ms=SLEEPER_TIMEOUT_MS)
 def sleeper() -> TaskResult[str, TaskError]:
     time.sleep(60)
+    return TaskResult(ok='woke')
+
+
+@app.task(
+    task_name='e2e_worker_ended_spans_shared_sleeper',
+    execution=Execution.SHARED_ASYNC,
+    timeout_ms=SLEEPER_TIMEOUT_MS,
+)
+async def shared_sleeper() -> TaskResult[str, TaskError]:
+    """The shared async child cancels it at its deadline and reports the
+    timeout: the child lives, and its span is the span of the attempt."""
+    await asyncio.sleep(60)
     return TaskResult(ok='woke')
 
 

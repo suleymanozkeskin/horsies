@@ -1,12 +1,15 @@
 """The span of each attempt that the worker ended, made in the handler child.
 
 The task child opens the span of an attempt around its body, and a span is
-exported only when it ends. When the worker ends the attempt itself (an
-isolated task killed at its timeout, a shared async child killed for a
-blocked loop, a child lost with its exit seen), the child is gone and that
-span never ends. The `AttemptEnded` event of such an attempt
-(`AttemptEndDecidedByWorker`) carries the facts of its span, and the handler
-child makes the span from them.
+exported only when it ends. When the worker ends the attempt itself with no
+result frame of the child (an isolated task killed at its timeout, a shared
+child killed for a blocked loop or past its deadlines, a child lost with its
+exit seen), that span never ends. The `AttemptEnded` event of such an
+attempt (`AttemptEndDecidedByWorker`) carries the facts of its span, and the
+handler child makes the span from them. An end that the child reported, a
+shared run that its child ended at the deadline included
+(`ChildResultTimedOut`), has the span of the child, with the timeout: the
+handler child makes none, so one attempt has one span.
 
 The handler child chooses once, at boot, after its
 `on_handler_child_start` hooks (where the user sets the tracer provider),

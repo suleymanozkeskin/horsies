@@ -171,6 +171,10 @@ pub enum ChildResult {
     /// The worker code of the child failed, not the task. The attempt
     /// outcome is `WORKER_FAILURE`, with the code `BROKER_ERROR`.
     WorkerFailure,
+    /// The deadline of a shared run fired in its child before the task
+    /// ended, and the child ended the run at the deadline. The attempt
+    /// outcome is `FAILED`, with the code `TASK_TIMEOUT`.
+    TimedOut,
 }
 
 /// When the attempt started: the time of the start write that set the task
@@ -187,7 +191,8 @@ pub enum AttemptStart {
 /// Why the worker ended an attempt itself. The attempt outcome is `FAILED`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::EventSchema)]
 pub enum WorkerDecision {
-    /// The task reached its timeout. The code is `TASK_TIMEOUT`.
+    /// The task reached its timeout, and the worker killed its child. The
+    /// code is `TASK_TIMEOUT`.
     TimedOut,
     /// The task held the event loop of its shared async child past the block
     /// limit; the worker killed the child. The code is `TASK_BLOCKED_LOOP`.
@@ -237,20 +242,19 @@ pub enum WorkflowPlace {
 /// How an attempt ended.
 #[derive(Debug, Clone, PartialEq, Eq, horsies_core_derive::EventSchema)]
 pub enum AttemptEnd {
-    /// The child reported how the run ended.
+    /// The child reported how the run ended, in a result frame. The span
+    /// that the child opened for the attempt is its span.
     ReportedByChild {
         result: ChildResult,
         start: AttemptStart,
     },
-    /// The worker ended the attempt: the outcome is `FAILED`, with the code
-    /// of `reason`. The internal fields are the facts of the span of this
-    /// attempt that the handler child makes.
+    /// The worker ended the attempt with no result frame of the child: it
+    /// killed the child, or the child was lost. The outcome is `FAILED`,
+    /// with the code of `reason`. The span of the child never ended; the
+    /// internal fields are the facts of the span of this attempt that the
+    /// handler child makes.
     DecidedByWorker {
         reason: WorkerDecision,
-        /// The start that the child reported before the end: a shared run
-        /// that its child ended at the deadline reports it. Every other end
-        /// of the worker is `NotReported`.
-        start: AttemptStart,
         /// Internal: the code that the attempt row records for `reason`:
         /// the `error.type` of the span.
         #[event_schema(internal)]
@@ -259,7 +263,7 @@ pub enum AttemptEnd {
         #[event_schema(internal)]
         trace: RunTrace,
         /// Internal: when the task reached its child (wall clock of the
-        /// worker). The span starts here when `start` is `NotReported`.
+        /// worker): the start of the span.
         #[event_schema(internal)]
         placed_at: DateTime<Utc>,
         /// Internal: the kind of the child that ran the attempt, the

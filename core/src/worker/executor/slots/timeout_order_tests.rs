@@ -275,7 +275,7 @@ fn timed_out() -> AttemptEnd {
         timeout: timeout_ms(1_000),
         retry: RetryPlacement::SameClass,
         cancel: TimeoutCancel::NoSignal,
-        start: crate::events::AttemptStart::NotReported,
+        seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
     }
 }
 

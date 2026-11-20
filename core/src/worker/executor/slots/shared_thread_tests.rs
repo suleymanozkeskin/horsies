@@ -95,7 +95,7 @@ fn timed_out(milliseconds: u64, retry: RetryPlacement) -> AttemptEnd {
         timeout: timeout_ms(milliseconds),
         retry,
         cancel: TimeoutCancel::NoSignal,
-        start: crate::events::AttemptStart::NotReported,
+        seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
     }
 }
 
@@ -106,8 +106,10 @@ fn timed_out_in_child(milliseconds: u64, retry: RetryPlacement) -> AttemptEnd {
         timeout: timeout_ms(milliseconds),
         retry,
         cancel: TimeoutCancel::NoSignal,
-        start: crate::events::AttemptStart::Reported {
-            started_at: super::scripted::started_at(),
+        seen: crate::worker::executor::slots::TimeoutSeen::ReportedByChild {
+            start: crate::events::AttemptStart::Reported {
+                started_at: super::scripted::started_at(),
+            },
         },
     }
 }
