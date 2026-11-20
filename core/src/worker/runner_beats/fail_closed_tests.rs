@@ -1222,6 +1222,7 @@ async fn a_task_killed_at_its_deadline_is_no_longer_held() {
             timeout,
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::NoSignal,
+            start: crate::events::AttemptStart::NotReported,
         }
     );
     assert_eq!(live.snapshot(), nothing_held());

@@ -870,10 +870,13 @@ fn vector_events() -> Vec<(&'static str, Event)> {
         (
             "attempt_ended_by_worker",
             ended(
-                Execution::Isolated,
+                Execution::SharedAsync,
                 3,
                 AttemptEnd::DecidedByWorker {
                     reason: WorkerDecision::TimedOut,
+                    start: AttemptStart::Reported {
+                        started_at: time(1_700_000_000_100_000_000),
+                    },
                     trace: RunTrace::Carrier {
                         text: text(VECTOR_CARRIER),
                     },
@@ -890,6 +893,7 @@ fn vector_events() -> Vec<(&'static str, Event)> {
                 1,
                 AttemptEnd::DecidedByWorker {
                     reason: WorkerDecision::NeighbourBlockedLoop,
+                    start: AttemptStart::NotReported,
                     trace: RunTrace::NoCarrier,
                     placed_at: time(1_700_000_000_000_000_000),
                 },

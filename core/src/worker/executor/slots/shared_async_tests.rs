@@ -108,11 +108,26 @@ fn crash_reason(end: AttemptEnd) -> String {
     }
 }
 
+/// The timeout of a run at a kill of its child: no start reached the worker.
 fn timed_out(retry: RetryPlacement, cancel: TimeoutCancel) -> AttemptEnd {
     AttemptEnd::TimedOut {
         timeout: super::scripted::timeout_ms(SHORT_MS),
         retry,
         cancel,
+        start: crate::events::AttemptStart::NotReported,
+    }
+}
+
+/// The timeout of a run that its child ended at the deadline, with the
+/// start of the scripted `shared_result` frame.
+fn timed_out_in_child(retry: RetryPlacement, cancel: TimeoutCancel) -> AttemptEnd {
+    AttemptEnd::TimedOut {
+        timeout: super::scripted::timeout_ms(SHORT_MS),
+        retry,
+        cancel,
+        start: crate::events::AttemptStart::Reported {
+            started_at: super::scripted::started_at(),
+        },
     }
 }
 
@@ -550,7 +565,7 @@ async fn a_run_that_timed_out_in_its_child_ends_at_its_timeout_beside_a_neighbou
 
     assert_eq!(
         answer_of(late_answer).await,
-        timed_out(
+        timed_out_in_child(
             RetryPlacement::SameClass,
             TimeoutCancel::Ended(CancelEnd::ReturnedAfterSignal)
         )
@@ -847,7 +862,7 @@ async fn a_run_that_needed_the_second_cancel_closes_its_child() {
 
     assert_eq!(
         answer,
-        timed_out(
+        timed_out_in_child(
             RetryPlacement::SameClass,
             TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace)
         )

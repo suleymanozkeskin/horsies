@@ -497,8 +497,8 @@ async fn a_worker_failure_before_the_start_reaches_attempt_ended_with_no_start()
 }
 
 /// An attempt that the worker ended (its child exited before a result
-/// frame) is decided by the worker: its `AttemptEnded` holds no reported
-/// start.
+/// frame) is decided by the worker: its `AttemptEnded` carries
+/// `NotReported`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_attempt_that_the_worker_ended_holds_no_reported_start() {
     let mut watched = WatchedTelemetry::new();
@@ -520,10 +520,75 @@ async fn an_attempt_that_the_worker_ended_holds_no_reported_start() {
             ended.end,
             crate::events::AttemptEnd::DecidedByWorker {
                 reason: WorkerDecision::ChildLost,
+                start: AttemptStart::NotReported,
                 ..
             }
         ),
         "{:?}",
         ended.end
     );
+}
+
+/// A shared run that its child ended at the deadline is a timeout decided
+/// by the worker; the start of its `shared_result` frame reaches the
+/// `AttemptEnded` with its time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_timeout_that_a_shared_child_ended_carries_the_start_of_its_frame() {
+    let mut watched = WatchedTelemetry::new();
+    let late = task(9, ExecutionClass::SharedAsync);
+    let run = run_ref(&late, 1);
+    let start = AttemptStart::Reported {
+        started_at: distinct_start(),
+    };
+    let timed_out = ChildFrame::SharedResult(SharedResultFrame {
+        run,
+        end: SeatEnd::TimedOut,
+        started_at: start,
+        rss: RssReading::Unreadable,
+        child: ChildAfterFrame::ServesOn,
+    });
+    let init = shared_async_init(1);
+    let script = format!(
+        "{}{}",
+        boot(&init),
+        answer_runs(
+            &[(&late, vec![ChildFrame::DeadlineFired(run), timed_out])],
+            1
+        )
+    );
+    let spawner = Spawner::start().unwrap();
+    let board = Arc::new(PoolBoard::new(layout(0, 1, 0)));
+    let pool = start_shared(&spawner, &board, shared_config(shell(&script), init));
+    let (watch, receipt) = watched.telemetry.placement_watch();
+    let submitted = pool.submit_watched(&late, input(), async_work(1_000, 100), watch);
+    let writer = ScriptedWrites {
+        settlement: Settlement::Written(WrittenEnd::Terminal(TerminalState::Failed)),
+    };
+
+    let _settled = tokio::time::timeout(
+        ATTEMPT_WAIT,
+        follow_attempt(
+            &writer,
+            &watched.telemetry,
+            &late,
+            ClaimRead::now(),
+            receipt,
+            submitted,
+        ),
+    )
+    .await
+    .expect("the attempt ends within the test wait");
+    let _report = pool.stop(Duration::from_secs(5)).await;
+    let _stopped = spawner.stop(SPAWNER_STOP_WAIT);
+
+    let events = watched.events();
+    let ended = the_attempt_ended(&events);
+    match &ended.end {
+        crate::events::AttemptEnd::DecidedByWorker {
+            reason: WorkerDecision::TimedOut,
+            start: reported,
+            ..
+        } => assert_eq!(*reported, start),
+        other => panic!("a timeout decided by the worker, not {other:?}"),
+    }
 }

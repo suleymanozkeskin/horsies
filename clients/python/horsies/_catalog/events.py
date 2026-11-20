@@ -79,7 +79,7 @@ __all__ = [
     'decode_event',
 ]
 
-EVENT_CONTRACT_VERSION: Final = 3
+EVENT_CONTRACT_VERSION: Final = 4
 """The version of the event contract that this module reads."""
 
 
@@ -283,6 +283,12 @@ class AttemptEndDecidedByWorker:
 
     reason: WorkerDecision
 
+    start: AttemptStart
+    """The start that the child reported before the end: a shared run
+    that its child ended at the deadline reports it. Every other end
+    of the worker is `NotReported`.
+    """
+
     trace: RunTrace = field(repr=False)
     """Internal: the trace carrier of the task, for the span of this
     attempt that the handler child makes.
@@ -290,7 +296,8 @@ class AttemptEndDecidedByWorker:
 
     placed_at: datetime = field(repr=False)
     """Internal: when the task reached its child (wall clock of the
-    worker), the start of the span that the handler child makes.
+    worker). The span that the handler child makes starts here when
+    `start` is `NotReported`.
     """
 
 
@@ -1294,14 +1301,20 @@ def _read_attempt_end_decided_by_worker(fields: list[object], here: _At) -> Resu
     match fields:
         case [
             wire_reason,
+            wire_start,
             wire_trace,
             wire_placed_at,
         ]:
             pass
         case _:
-            return here.refuse(f'expected 3 items, found {len(fields)}')
+            return here.refuse(f'expected 4 items, found {len(fields)}')
     match _read_worker_decision(wire_reason, here.inside('reason')):
         case Ok(value_reason):
+            pass
+        case Err() as refused:
+            return refused
+    match _read_attempt_start(wire_start, here.inside('start')):
+        case Ok(value_start):
             pass
         case Err() as refused:
             return refused
@@ -1318,6 +1331,7 @@ def _read_attempt_end_decided_by_worker(fields: list[object], here: _At) -> Resu
     return Ok(
         AttemptEndDecidedByWorker(
             reason=value_reason,
+            start=value_start,
             trace=value_trace,
             placed_at=value_placed_at,
         )

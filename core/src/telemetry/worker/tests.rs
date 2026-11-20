@@ -401,7 +401,9 @@ fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
             "BROKER_ERROR",
         ),
         (
-            EndView::TimedOut,
+            EndView::TimedOut {
+                start: AttemptStart::NotReported,
+            },
             ExpectedEnd::Decided(WorkerDecision::TimedOut),
             "FAILED",
             "TASK_TIMEOUT",
@@ -443,6 +445,7 @@ fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
             },
             ExpectedEnd::Decided(reason) => events::AttemptEnd::DecidedByWorker {
                 reason,
+                start: AttemptStart::NotReported,
                 trace: RunTrace::NoCarrier,
                 placed_at: placed.wall,
             },
@@ -520,6 +523,61 @@ fn a_reported_end_carries_the_start_that_its_child_reported() {
                 events::AttemptEnd::ReportedByChild { result, start },
                 "{view:?}"
             ),
+            other => panic!("{view:?} gives one AttemptEnded, not {other:?}"),
+        }
+    }
+}
+
+/// An end that the worker decided carries the start that the child
+/// reported: a timeout that a shared child ended at the deadline carries
+/// the start of its frame; a timeout at a kill, a blocked loop and a lost
+/// child carry `NotReported`.
+#[test]
+fn an_end_that_the_worker_decided_carries_the_start_that_its_child_reported() {
+    let started_at =
+        chrono::DateTime::<Utc>::from_timestamp(1_767_225_600, 0).expect("a time in range");
+    let reported = AttemptStart::Reported { started_at };
+    let cases = [
+        (
+            EndView::TimedOut { start: reported },
+            WorkerDecision::TimedOut,
+            reported,
+        ),
+        (
+            EndView::TimedOut {
+                start: AttemptStart::NotReported,
+            },
+            WorkerDecision::TimedOut,
+            AttemptStart::NotReported,
+        ),
+        (
+            EndView::KilledForLoop(LoopKillCode::TaskBlockedLoop),
+            WorkerDecision::TaskBlockedLoop,
+            AttemptStart::NotReported,
+        ),
+        (
+            EndView::Crashed,
+            WorkerDecision::ChildLost,
+            AttemptStart::NotReported,
+        ),
+    ];
+    for (view, decision, expected_start) in cases {
+        let mut watched = declaring_telemetry();
+        let task = claimed_task(Execution::Isolated);
+        let placed = placed_after(ClaimRead::now());
+
+        let _noted = watched
+            .telemetry
+            .attempt_ended(&task, &ChildPlacement::Placed(placed), view);
+
+        match watched.events().as_slice() {
+            [Event::AttemptEnded(ended)] => match &ended.end {
+                events::AttemptEnd::DecidedByWorker { reason, start, .. } => {
+                    assert_eq!(*reason, decision, "{view:?}");
+                    assert_eq!(*start, expected_start, "{view:?}");
+                }
+                other => panic!("{view:?} is decided by the worker, not {other:?}"),
+            },
             other => panic!("{view:?} gives one AttemptEnded, not {other:?}"),
         }
     }

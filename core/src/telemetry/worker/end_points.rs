@@ -54,8 +54,13 @@ enum RanEnd<'a> {
     /// The worker code of the child failed; the child reported the start
     /// `start`.
     WorkerFailure { start: AttemptStart },
-    /// The worker ended the attempt.
-    Decided(WorkerDecision),
+    /// The worker ended the attempt for `reason`; the child reported the
+    /// start `start` (only a shared run that its child ended at the
+    /// deadline reports one).
+    Decided {
+        reason: WorkerDecision,
+        start: AttemptStart,
+    },
     /// The child was killed and its exit was not seen.
     NotKnown(ProcessId),
 }
@@ -84,9 +89,18 @@ fn kind_of(end: EndView<'_>) -> EndKind<'_> {
         EndView::StoppedBeforeRunning(reason) => EndKind::NotStarted(reason),
         EndView::Result { read, start } => EndKind::Ran(RanEnd::Result { read, start }),
         EndView::WorkerFailure { start } => EndKind::Ran(RanEnd::WorkerFailure { start }),
-        EndView::TimedOut => EndKind::Ran(RanEnd::Decided(WorkerDecision::TimedOut)),
-        EndView::KilledForLoop(code) => EndKind::Ran(RanEnd::Decided(loop_decision(code))),
-        EndView::Crashed => EndKind::Ran(RanEnd::Decided(WorkerDecision::ChildLost)),
+        EndView::TimedOut { start } => EndKind::Ran(RanEnd::Decided {
+            reason: WorkerDecision::TimedOut,
+            start,
+        }),
+        EndView::KilledForLoop(code) => EndKind::Ran(RanEnd::Decided {
+            reason: loop_decision(code),
+            start: AttemptStart::NotReported,
+        }),
+        EndView::Crashed => EndKind::Ran(RanEnd::Decided {
+            reason: WorkerDecision::ChildLost,
+            start: AttemptStart::NotReported,
+        }),
         EndView::EndUnknown { pid } => EndKind::Ran(RanEnd::NotKnown(pid)),
     }
 }
@@ -107,8 +121,9 @@ fn event_end(ran: RanEnd<'_>, trace: &RunTrace, placed: &Placed) -> events::Atte
             result: ChildResult::WorkerFailure,
             start,
         },
-        RanEnd::Decided(reason) => events::AttemptEnd::DecidedByWorker {
+        RanEnd::Decided { reason, start } => events::AttemptEnd::DecidedByWorker {
             reason,
+            start,
             trace: trace.clone(),
             placed_at: placed.wall,
         },
@@ -292,7 +307,7 @@ impl TelemetryOn {
                 TaskAttemptOutcome::WorkerFailure,
                 self.code_label(task_name, &built_in(OperationalErrorCode::BrokerError)),
             ),
-            RanEnd::Decided(reason) => failed(&TaskErrorCode::BuiltIn(reason.error_code())),
+            RanEnd::Decided { reason, .. } => failed(&TaskErrorCode::BuiltIn(reason.error_code())),
             RanEnd::NotKnown(_) => RanOutcome::NotKnown,
         }
     }
