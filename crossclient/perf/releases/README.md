@@ -247,3 +247,244 @@ release: the two schemas have the same table names.
 
 Each run seeds 100,000 ballast rows through the terminal write of its own
 release, and deletes its own rows when it ends.
+
+## A session: the overhead of telemetry
+
+The session measures what each telemetry level costs against no telemetry,
+and checks that a build with telemetry off costs the same as the build
+before the telemetry work. Run it on the benchmark server; numbers from a
+laptop are not evidence.
+
+### The levels and the cells
+
+A run with `--telemetry LEVEL` runs the baseline side with no telemetry and
+the candidate side with `LEVEL` (`crossclient/perf/telemetry_levels.py`).
+`--telemetry off` (the default) is the control run: both sides with no
+telemetry. Each level holds every part of the level before it:
+
+| Level | The candidate side adds |
+|---|---|
+| `off` | nothing |
+| `metrics` | `--metrics-listen 127.0.0.1:19464`: the worker records its metrics; nothing reads the endpoint during the drain |
+| `scraped` | a read of `/metrics` and of `/livez` every 1 s during the drain: 15 times the common 15 s interval, so a drain of a few seconds sees several reads |
+| `tracing` | `OtelTracing(worker_ended_spans=NO_SPANS)`: send spans and producer metrics in the harness, attempt spans in the task children. Each process has the SDK `TracerProvider` with a `BatchSpanProcessor` and an exporter that discards, and the SDK `MeterProvider` with a reader that nothing collects (`crossclient/perf/telemetry_apps.py`) |
+| `handler` | one `def` handler of `AttemptEnded` that returns at once: the worker runs its handler child |
+| `worker-ended-spans` | `worker_ended_spans=MAKE_SPANS`, with the same providers in the handler child |
+
+| Scenario | Levels | One cell reports |
+|---|---|---|
+| `claim-finish` | all six | tasks per second; worker CPU per task (the worker parent, the processes below it, both); PostgreSQL CPU per task; worker stop time; and from one read of `/metrics` at the end of each drain: the series count, events dropped (queue full, handler child down), series dropped, handler events dropped, handler errors; the `/livez` answers of the reads during the drains |
+| `send`, `workflow-start` | `off`, `tracing` | calls per second, p50 and p99 latency; producer CPU per call (the harness process); PostgreSQL CPU per call |
+
+- A public call scenario runs no worker, so it takes `off` and `tracing`
+  only; the entry point refuses the other levels for it.
+- In the no-op drain the worker ends no attempt itself, so the
+  `worker-ended-spans` cell measures the switch on the event path, not the
+  cost of one span that the handler child makes.
+- The worker CPU is read at the end of each drain, from the start of the
+  worker: the start of the worker is in the throughput time too. A process
+  below the worker that ended before the read is not counted; the drain
+  replaces no child.
+- With tracing, the candidate side also sends its tasks through an app with
+  tracing, so each task row holds a trace carrier, as in a traced
+  application. The sends are not timed.
+
+### Before the session
+
+1. Use the server and the PostgreSQL settings of "A session: both releases
+   on one server" (step 1). Stop every other workload on the host. Port
+   19464 must be free.
+2. Find the `cpu.stat` file of the cgroup v2 group of the PostgreSQL server,
+   for `--postgres-cpu-stat`. For the compose service on a host with the
+   systemd cgroup driver:
+
+   ```sh
+   CONTAINER=$(docker compose -f crossclient/fixtures/perf/compose.yaml ps -q pg16)
+   CPU_STAT=/sys/fs/cgroup/system.slice/docker-${CONTAINER}.scope/cpu.stat
+   grep usage_usec "$CPU_STAT"
+   ```
+
+   For PostgreSQL as a systemd service, the file is
+   `/sys/fs/cgroup/system.slice/<unit>/cpu.stat`. Without the option the
+   PostgreSQL columns are "not measured".
+3. Make the checkout of the build before telemetry: the merge of #2128
+   (`2c8aea1072023a056f5e239251d6dc00a27c212a`), the last commit of
+   `program/0.8.0` before the first telemetry change. It runs the harness of
+   this checkout, which imports no telemetry API at the level `off`:
+
+   ```sh
+   git worktree add ../horsies-before-telemetry 2c8aea1072023a056f5e239251d6dc00a27c212a
+   git -C ../horsies-before-telemetry checkout "$(git rev-parse HEAD)" -- crossclient/perf
+   (cd ../horsies-before-telemetry && uv sync --frozen --dev)
+   ```
+
+   Build `horsies._core` in each checkout, as for the release session.
+4. Make one database for each checkout (the two schemas differ by the
+   telemetry migration) and install each schema with its own checkout:
+
+   ```sh
+   (cd ../horsies-before-telemetry && uv run python -m crossclient.perf \
+       --apply-schema --dsn postgresql://USER:PASSWORD@HOST:PORT/horsies_before_telemetry)
+   uv run python -m crossclient.perf --apply-schema \
+       --dsn postgresql://USER:PASSWORD@HOST:PORT/horsies_overhead
+   ```
+
+### The runs
+
+Run three rounds. A round runs every command below once, one after the
+other, never two at the same time. Change the checkout that runs first in
+each round. Each run interleaves its drains or blocks between its two sides,
+and the first drain or block of each side is a warm-up.
+
+The control runs of both checkouts (they give the noise and the rule for
+`off`):
+
+```sh
+DSN_NOW=postgresql://USER:PASSWORD@HOST:PORT/horsies_overhead
+DSN_BEFORE=postgresql://USER:PASSWORD@HOST:PORT/horsies_before_telemetry
+for scenario in claim-finish send workflow-start; do
+  uv run python -m crossclient.perf --scenario "$scenario" --scale gate \
+      --demo-quiesced --control --telemetry off \
+      --postgres-cpu-stat "$CPU_STAT" --write-summary --dsn "$DSN_NOW"
+  (cd ../horsies-before-telemetry && uv run python -m crossclient.perf \
+      --scenario "$scenario" --scale gate --demo-quiesced --control \
+      --telemetry off --postgres-cpu-stat "$CPU_STAT" --write-summary \
+      --dsn "$DSN_BEFORE")
+done
+```
+
+The level cells, in this checkout only:
+
+```sh
+for level in metrics scraped tracing handler worker-ended-spans; do
+  uv run python -m crossclient.perf --scenario claim-finish --scale gate \
+      --demo-quiesced --telemetry "$level" \
+      --postgres-cpu-stat "$CPU_STAT" --write-summary --dsn "$DSN_NOW"
+done
+for scenario in send workflow-start; do
+  uv run python -m crossclient.perf --scenario "$scenario" --scale gate \
+      --demo-quiesced --telemetry tracing \
+      --postgres-cpu-stat "$CPU_STAT" --write-summary --dsn "$DSN_NOW"
+done
+```
+
+Each run writes its summary to `crossclient/perf/results/` of its checkout,
+one file per run (`<day>-<time>-<scenario>-telemetry-<level>-pg<major>.md`),
+and its samples and readings to `results/raw/`. A gate run exits 1 when a
+verdict of its scenario is not a pass (for a drain: a throughput ratio under
+0.90); it writes its summary first. Keep the summaries out of the commit:
+the results go into the template below.
+
+### Noise and the rule
+
+The noise is measured as the speed gate measures it: from interleaved
+rounds after a warm-up, over three runs.
+
+- The value of a run, for one measure: the mean of its two sides (in a
+  control run both sides run the same build). The measures are tasks or
+  calls per second, worker or producer CPU per task or call, and PostgreSQL
+  CPU per task or call.
+- The noise band of a measure in one checkout: (largest − smallest) / mean
+  of the values of its three control runs. The band of a measure is the
+  larger of the bands of the two checkouts.
+- Write the bands, and the tolerance of a level cell, in the template
+  before you read any comparison. The tolerance lies between the band and
+  the cost of a wrong design (for example a write that waits on the handler
+  child).
+
+**The rule for `off`:** for each scenario and each measure, the mean of the
+three values of this checkout over the mean of the three values of the build
+before telemetry is within 1 ± the band. Telemetry off passes when every
+measure of every scenario holds.
+
+**A level cell:** the cost of a level is the candidate/baseline ratio of each
+measure in its own run, with its 95% interval in the summary. Read it
+against the band and the tolerance. In every `claim-finish` cell the
+events dropped (queue full), the series dropped, the handler events dropped
+and the `/livez` late answers are 0.
+
+### Results template
+
+Copy it to `crossclient/perf/results/telemetry-overhead/<day>.md` and fill
+it from the summaries.
+
+```markdown
+# Telemetry overhead, <day>
+
+Server: <CPU model, vCPUs, the CPUs of PostgreSQL, of the worker and of the
+harness>. PostgreSQL <version>, the settings of
+`crossclient/fixtures/perf/compose.yaml`. This checkout: <commit>. The build
+before telemetry: 2c8aea1072023a056f5e239251d6dc00a27c212a with the harness
+of <commit>.
+
+## Recorded before any comparison is read
+
+| Scenario | Measure | Band, this checkout | Band, before telemetry | Band used |
+|---|---|---|---|---|
+| claim-finish | tasks per second | | | |
+| claim-finish | worker CPU per task | | | |
+| claim-finish | PostgreSQL CPU per task | | | |
+| send | calls per second | | | |
+| send | producer CPU per call | | | |
+| send | PostgreSQL CPU per call | | | |
+| workflow-start | calls per second | | | |
+| workflow-start | producer CPU per call | | | |
+| workflow-start | PostgreSQL CPU per call | | | |
+
+Tolerance of a level cell: <ratio>, because <reason>.
+
+## Telemetry off against the build before telemetry
+
+| Scenario | Measure | This checkout (3 runs) | Before telemetry (3 runs) | Ratio | Within the band |
+|---|---|---|---|---|---|
+| claim-finish | tasks per second | | | | |
+| ... | | | | | |
+
+Telemetry off: PASS | FAIL.
+
+## Level cells: claim-finish
+
+| Level | Round | Tasks/s ratio | Worker CPU/task ratio | Parent | Children | PostgreSQL CPU/task ratio | Stop time ratio | Series | Dropped: queue full | Dropped: child down | Series dropped | Handler dropped | Handler errors | /livez late |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| metrics | 1 | | | | | | | | | | | | | |
+| ... | | | | | | | | | | | | | | |
+
+## Level cells: send and workflow-start
+
+| Scenario | Round | Calls/s ratio | Producer CPU/call ratio | PostgreSQL CPU/call ratio |
+|---|---|---|---|---|
+| send | 1 | | | |
+| ... | | | | |
+
+## Constants
+
+| Constant | Value before | Value after | The cell and the number that set it |
+|---|---|---|---|
+| ... | | | |
+```
+
+### The constants that the session sets
+
+These constants of the telemetry code hold a provisional value. Each row
+names the cell whose numbers set it. The session changes no value; a change
+follows from the filled template. `test_perf_overhead_constants.py` checks
+that each constant is defined in the file of its row.
+
+| Constant | File | Value | What it bounds | The cell that sets it |
+|---|---|---|---|---|
+| `MAX_SERIES_PER_METRIC` | `core/src/telemetry/registry.rs` | 10,000 series | The series of one metric in the registry of a worker. A sample past it is dropped and counts `horsies.telemetry.series.dropped`. | `claim-finish` `metrics`: the worker parent CPU per task (the series lookup of each sample), the series count, and series dropped = 0. |
+| `ENDPOINT_MAX_CONNECTIONS` | `core/src/telemetry/endpoint.rs` | 16 connections | The open connections of a metrics endpoint (the worker and `horsies metrics`). A connection over it is closed with no answer. | `claim-finish` `scraped` against `metrics`: the worker parent CPU per task over the reads per drain is the cost of one read; the bound times that cost is the most that reads can take at once. |
+| `ENDPOINT_REQUEST_TIMEOUT` | `core/src/telemetry/endpoint.rs` | 5 s | The time to read one request head; also the time of the open connections at the stop. | `claim-finish` `scraped`: every read answered within `READ_TIMEOUT` (2 s). The slow scrape fault test checks the bound. |
+| `ENDPOINT_MAX_REQUEST_BYTES` | `core/src/telemetry/endpoint.rs` | 8 KiB | The request buffer of one connection; 8 KiB is the least that HTTP/1 serving takes. | `claim-finish` `scraped`: no read refused. It stays at its floor unless a cell shows a refused head. |
+| `LIVEZ_TURN_ALLOWANCE` | `core/src/worker/probes.rs` | 30 s | How late a turn of the claim loop may be before `/livez` answers 503. | Every `claim-finish` cell from `scraped` on: `/livez` late answers = 0 at full drain speed. |
+| `HANDLER_READY_TIMEOUT` | `core/src/worker/executor/handler_child/mod.rs` | 30 s | The wait for the ready frame of one boot of the handler child, before the first claim. | No cell: the cells do not time the boot of the handler child. The tasks per second of `handler` against `tracing` include it, with the cost of the events. |
+| `EVENT_QUEUE_CAPACITY` | `core/src/telemetry/worker.rs` | 8,192 events | The events that wait for the writer to the handler child. An offer to a full queue drops the event and counts `queue_full`. | `claim-finish` `handler`: events dropped (queue full) = 0 at full drain speed. |
+| `EVENT_BATCH_MAX` | `core/src/worker/executor/handler_child/mod.rs` | 256 events (`MAX_EVENTS_PER_FRAME`) | The events of one `events` frame. | `claim-finish` `handler` against `tracing`: the worker parent CPU per task (the frame cost of each event). |
+| `MAX_EVENTS_PER_FRAME` | `core/src/worker/executor/protocol/bounds.rs` | 256 events | The protocol bound of an `events` frame; `EVENT_BATCH_MAX` takes it. | As `EVENT_BATCH_MAX`. |
+| `EVENT_FLUSH_INTERVAL` | `core/src/worker/executor/handler_child/mod.rs` | 25 ms | The wait for more events after the first event of a batch. | `claim-finish` `handler` against `tracing`: the worker parent CPU per task and the handler child CPU (the children CPU per task). |
+| `HANDLER_STOP_FLUSH` | `core/src/worker/executor/handler_child/mod.rs` | 2 s | At the stop: the write of the queue and of the stop frame to the handler child. | `claim-finish` `handler` against `tracing`: the worker stop time. |
+| `MAX_EVENT_HANDLERS` | `core/src/worker/executor/protocol/bounds.rs` | 32 handlers | The handlers of one app, and the entries of one `handler_stats` frame. | `claim-finish` `handler`: the handler child CPU per task of one handler; 32 times it is the most. |
+| `MAX_EVENT_WIRE_BYTES` | `core/src/worker/executor/protocol/bounds.rs` | 8 KiB | The wire form of one event. | No cell: the bounds of the fields of the largest event set it (its comment). |
+| `MAX_TRACE_CARRIER_KEYS` | `core/src/telemetry/trace_carrier.rs` | 8 keys | The keys of a stored trace carrier. Over it, the send stores NULL. | `claim-finish` `tracing`: the PostgreSQL CPU per task with a W3C carrier. The carrier fault test checks the bound. |
+| `MAX_TRACE_CARRIER_BYTES` | `core/src/telemetry/trace_carrier.rs` | 2,048 bytes | The text of a stored trace carrier. Over it, the send stores NULL. | As `MAX_TRACE_CARRIER_KEYS`. |
+| `ATTEMPT_SPAN_FLUSH_BOUND_S` | `clients/python/horsies/core/telemetry/attempt_span.py` | 1.0 s | The flush of the attempt spans at the stop of a task child. | `claim-finish` `tracing` against `scraped`: the worker stop time. The hung exporter fault test checks the bound. |

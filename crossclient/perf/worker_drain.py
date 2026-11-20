@@ -5,13 +5,14 @@ starts one worker with ``horsies worker`` (``worker_process.py``) and counts the
 tasks that are COMPLETED or FAILED until all are. The worker claims, runs and
 finishes them, so a drain measures the three together as throughput.
 
-Every call here is public API of horsies 0.7.0 and of the current release,
-with the same signature in both: ``Horsies``, ``AppConfig``,
-``PostgresConfig``, ``WorkerProfile``, ``IsolatedChildren``,
-``IsolatedRecycle``, ``NoTaskLimit``, ``app.task``, ``send``,
-``PostgresBroker.close``. The count is one SQL statement on columns that both
-schemas have. The harness of each release runs this file unchanged
-(``crossclient/perf/releases/README.md``).
+With no telemetry (``AppTelemetry.NONE``), every call here is public API of
+horsies 0.7.0 and of the current release, with the same signature in both:
+``Horsies``, ``AppConfig``, ``PostgresConfig``, ``WorkerProfile``,
+``IsolatedChildren``, ``IsolatedRecycle``, ``NoTaskLimit``, ``app.task``,
+``send``, ``PostgresBroker.close``. The count is one SQL statement on columns
+that both schemas have. The v0.7.0 patch holds this file as it was before the
+telemetry levels (``crossclient/perf/releases/README.md``). The apps with
+tracing are built by ``telemetry_apps.py``, which only those levels import.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Final
+from typing import Final, assert_never
 
 from pydantic import SecretStr
 from sqlalchemy import text
@@ -43,6 +44,7 @@ from horsies import (
     TaskSendResult,
     WorkerProfile,
 )
+from crossclient.perf.telemetry_levels import AppTelemetry, WorkerTelemetry
 from crossclient.perf.worker_process import (
     StartedWorker,
     WorkerStartFailed,
@@ -72,6 +74,9 @@ task, and the defaults of the other settings. A child is not replaced after a
 count of tasks (the default replaces it after 100), so a drain does not
 measure child starts."""
 
+DRAIN_WORKER_PROFILES: Final = {DRAIN_PROFILE_NAME: DRAIN_WORKER_PROFILE}
+"""The worker profiles of the app of a drain."""
+
 DRAIN_TIMEOUT: Final = timedelta(minutes=10)
 """The longest time from the start of the worker until every task of a drain
 is terminal. A drain that takes longer stops the run."""
@@ -85,13 +90,10 @@ WORKER_STOP_TIMEOUT: Final = timedelta(seconds=60)
 WORKER_LOGLEVEL: Final = 'WARNING'
 """The ``--loglevel`` of the worker."""
 
-WORKER_APP_LOCATOR: Final = 'crossclient.perf.worker_drain_app:app'
-"""The app that ``horsies worker`` loads: ``worker_drain_app.py``."""
-
 CHECKOUT_ROOT: Final = Path(__file__).resolve().parents[2]
 """The repository root: the working directory of the worker and its
-``PYTHONPATH``. ``WORKER_APP_LOCATOR`` names a module of the top-level
-package ``crossclient``. The ``horsies`` CLI adds its working directory to
+``PYTHONPATH``. The app locators of ``telemetry_levels.py`` name modules of
+the top-level package ``crossclient``. The ``horsies`` CLI adds its working directory to
 ``sys.path`` only when that folder holds a ``pyproject.toml``, and the
 repository root holds none (the Python project is ``clients/python/``)."""
 
@@ -133,25 +135,36 @@ class DrainApp:
     send: Callable[[], TaskSendResult[TaskHandle[None]]]
 
 
-def drain_app(dsn: str) -> DrainApp:
-    """The app of ``dsn`` with the no-op task and ``DRAIN_WORKER_PROFILE``.
-    No I/O: the broker connects at the first send.
+def drain_broker(dsn: str) -> PostgresConfig:
+    """The broker config of the app of a drain. Pure."""
+    return PostgresConfig(database_url=SecretStr(dsn))
 
-    The harness builds it to send the tasks; ``worker_drain_app.py`` builds it
-    in the worker and in each child to run them.
-    """
-    app = Horsies(
-        AppConfig(
-            broker=PostgresConfig(database_url=SecretStr(dsn)),
-            worker_profiles={DRAIN_PROFILE_NAME: DRAIN_WORKER_PROFILE},
-        ),
-    )
+
+def with_drain_task(app: Horsies) -> DrainApp:
+    """Define the no-op task of the drain on ``app``. No I/O."""
 
     @app.task(DRAIN_TASK_NAME)
     def perf_drain_noop() -> TaskResult[None, TaskError]:
         return TaskResult(ok=None)
 
     return DrainApp(app=app, send=perf_drain_noop.send)
+
+
+def drain_app(dsn: str) -> DrainApp:
+    """The app of ``dsn`` with the no-op task and ``DRAIN_WORKER_PROFILE``,
+    with no telemetry. No I/O: the broker connects at the first send.
+
+    The harness builds it to send the tasks; ``worker_drain_app.py`` builds it
+    in the worker and in each child to run them.
+    """
+    return with_drain_task(
+        Horsies(
+            AppConfig(
+                broker=drain_broker(dsn),
+                worker_profiles=DRAIN_WORKER_PROFILES,
+            ),
+        ),
+    )
 
 
 def drain_dsn_from_environment() -> str:
@@ -175,10 +188,9 @@ class DrainSender:
     """Sends the tasks of a drain with ``send``, as a producer sends them. No
     worker runs in the harness process."""
 
-    def __init__(self, dsn: str) -> None:
-        """Build the app of ``dsn``. No I/O: the broker connects at the first
-        send."""
-        drain = drain_app(dsn)
+    def __init__(self, drain: DrainApp) -> None:
+        """Send with the app of ``drain``. No I/O: the broker connects at the
+        first send."""
         self._broker = drain.app.get_broker()
         self._send = drain.send
 
@@ -205,18 +217,44 @@ class DrainSender:
         _ = self._broker.close()
 
 
-def start_drain_worker(dsn: str) -> StartedWorker | WorkerStartFailed:
+def open_drain_sender(dsn: str, app_telemetry: AppTelemetry) -> DrainSender:
+    """The sender of the drains of ``dsn`` with the app of ``app_telemetry``.
+    No I/O."""
+    match app_telemetry:
+        case AppTelemetry.NONE:
+            return DrainSender(drain_app(dsn))
+        case (
+            AppTelemetry.TRACING
+            | AppTelemetry.TRACING_AND_HANDLER
+            | AppTelemetry.TRACING_HANDLER_AND_WORKER_ENDED_SPANS
+        ):
+            # Imported here, not at the top: a build of the library without
+            # telemetry has no tracing setting, and runs the level `off` only.
+            from crossclient.perf.telemetry_apps import open_telemetry_drain_sender
+
+            return open_telemetry_drain_sender(dsn, app_telemetry)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def start_drain_worker(
+    dsn: str,
+    telemetry: WorkerTelemetry,
+) -> StartedWorker | WorkerStartFailed:
     """Start ``horsies worker`` with ``DRAIN_PROFILE_NAME`` on the app of
-    ``dsn``, from the ``horsies`` script of the environment of the harness.
-    Starts a process; it does not wait for the worker to be ready."""
+    ``dsn`` and ``telemetry``, from the ``horsies`` script of the environment
+    of the harness. Starts a process; it does not wait for the worker to be
+    ready."""
     return start_worker(
         script=cli_script(),
-        app_locator=WORKER_APP_LOCATOR,
+        app_locator=telemetry.app_locator(),
         profile=DRAIN_PROFILE_NAME,
         loglevel=WORKER_LOGLEVEL,
+        extra_arguments=telemetry.worker_arguments(),
         environment={
             DRAIN_DSN_VARIABLE: dsn,
             IMPORT_PATH_VARIABLE: str(CHECKOUT_ROOT),
+            **telemetry.environment(),
         },
         working_directory=CHECKOUT_ROOT,
         clock_ns=time.perf_counter_ns,

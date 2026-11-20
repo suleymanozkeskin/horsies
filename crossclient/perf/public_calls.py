@@ -3,9 +3,11 @@
 Each call here is public API of horsies 0.7.0 and of the current release, with
 the same signature in both: ``Horsies``, ``AppConfig``, ``PostgresConfig``,
 ``app.task``, ``send``, ``TaskNode``, ``app.workflow``, ``WorkflowSpec.start``,
-``PostgresBroker.close``. The harness of each release runs this file
-unchanged (``crossclient/perf/releases/README.md``), so a comparison of two releases
-measures the same call through the product of each release.
+``PostgresBroker.close``. The harness of each release makes the same calls
+(``crossclient/perf/releases/README.md``), so a comparison of two releases
+measures the same call through the product of each release. With a telemetry
+level, the app of the call is built by ``telemetry_apps.py`` with its tracing
+setting; only such a level imports that module.
 
 A call writes new rows with ids that the library mints. The rows of a scenario
 carry a task name or a workflow name that only that scenario uses; its cleanup
@@ -14,7 +16,7 @@ deletes them by that name.
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, assert_never
 
 from pydantic import SecretStr
 from sqlalchemy import text
@@ -30,6 +32,7 @@ from horsies import (
     TaskNode,
     TaskResult,
 )
+from crossclient.perf.telemetry_levels import AppTelemetry
 
 INPUT_TEXT_BYTES: Final = 200
 """The length of the one text argument that each call sends."""
@@ -55,19 +58,39 @@ _DELETE_WORKFLOWS_BY_NAME_SQL = text("""
 """)
 
 
-def _app(dsn: str) -> Horsies:
-    """An app whose broker connects to ``dsn``. No I/O."""
-    return Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(dsn))))
+def public_call_broker(dsn: str) -> PostgresConfig:
+    """The broker config of the app of a public call. Pure."""
+    return PostgresConfig(database_url=SecretStr(dsn))
+
+
+def public_call_app(dsn: str, app_telemetry: AppTelemetry) -> Horsies:
+    """An app whose broker connects to ``dsn``, with the telemetry of
+    ``app_telemetry``. No I/O."""
+    match app_telemetry:
+        case AppTelemetry.NONE:
+            return Horsies(AppConfig(broker=public_call_broker(dsn)))
+        case (
+            AppTelemetry.TRACING
+            | AppTelemetry.TRACING_AND_HANDLER
+            | AppTelemetry.TRACING_HANDLER_AND_WORKER_ENDED_SPANS
+        ):
+            # Imported here, not at the top: a build of the library without
+            # telemetry has no tracing setting, and runs the level `off` only.
+            from crossclient.perf.telemetry_apps import telemetry_public_app
+
+            return telemetry_public_app(dsn, app_telemetry)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 class SendCall:
     """One call is ``send`` of one task with one text argument, as a producer
     sends it. Each call writes one PENDING task row; no worker runs it."""
 
-    def __init__(self, dsn: str) -> None:
-        """Define the task on a new app of ``dsn``. No I/O: the broker
-        connects at the first call."""
-        app = _app(dsn)
+    def __init__(self, dsn: str, app_telemetry: AppTelemetry) -> None:
+        """Define the task on a new app of ``dsn`` with ``app_telemetry``.
+        No I/O: the broker connects at the first call."""
+        app = public_call_app(dsn, app_telemetry)
 
         @app.task(SEND_TASK_NAME)
         def perf_public_send(*, text: str) -> TaskResult[str, TaskError]:
@@ -101,10 +124,10 @@ class WorkflowStartCall:
     it. Each call writes the workflow row, its node row and the task row of
     the node; no worker runs it."""
 
-    def __init__(self, dsn: str) -> None:
-        """Define the task and the workflow on a new app of ``dsn``. No I/O:
-        the broker connects at the first call."""
-        app = _app(dsn)
+    def __init__(self, dsn: str, app_telemetry: AppTelemetry) -> None:
+        """Define the task and the workflow on a new app of ``dsn`` with
+        ``app_telemetry``. No I/O: the broker connects at the first call."""
+        app = public_call_app(dsn, app_telemetry)
 
         @app.task(WORKFLOW_TASK_NAME)
         def perf_public_workflow_node(*, text: str) -> TaskResult[str, TaskError]:

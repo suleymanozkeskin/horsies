@@ -14,14 +14,28 @@ storage, which is where the caller sends them.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import asdict
-from typing import assert_never, cast
+from enum import Enum
+from typing import Final, assert_never, cast
 
+from crossclient.perf.metrics_scrape import EndpointCounts, ReadTally
+from crossclient.perf.readings import (
+    BlockReadings,
+    Cost,
+    DrainReading,
+    DrainReadings,
+    MeasuredCost,
+    Readings,
+    StatementReadings,
+    UnmeasuredCost,
+)
 from crossclient.perf.runner import (
     WAL_RECORD_DELTA_PER_TERMINAL_ROW,
     Measurement,
     RunResult,
 )
+from crossclient.perf.telemetry_levels import NoEndpoint, NotRead
 from crossclient.perf.scenarios import (
     BatchScenario,
     PublicCallScenario,
@@ -63,16 +77,20 @@ def render_summary(result: RunResult) -> str:
         f'| bootstrap resamples | {conditions.resamples} |',
         f'| bootstrap seed | {conditions.seed} |',
         f'| demo units quiesced | {_yes_no(conditions.demo_quiesced)} |',
+        f'| telemetry of the candidate side | `{conditions.telemetry_level}`: '
+        f'{conditions.telemetry_description} |',
+        f'| PostgreSQL CPU time | {conditions.postgres_cpu_source} |',
     ]
     match result.scenario:
-        case SingleRowScenario() | PublicCallScenario():
+        case SingleRowScenario():
+            lines += _latency_section(result.comparisons)
+        case PublicCallScenario():
+            lines += _latency_section(result.comparisons)
             lines += [
                 '',
-                '## Latency',
-                '',
-                '| percentile | baseline | candidate | delta | 95% interval | budget | verdict |',
-                '|---|---|---|---|---|---|---|',
-                *[_latency_row(c) for c in result.comparisons],
+                'Calls per second (one client, one call at a time): baseline '
+                f'{_calls_per_second(result.baseline.samples_ms):.0f}, candidate '
+                f'{_calls_per_second(result.candidate.samples_ms):.0f}.',
             ]
         case BatchScenario():
             lines += _batch_performance(
@@ -83,6 +101,8 @@ def render_summary(result: RunResult) -> str:
             lines += _drain_performance(_required_throughput(result))
         case _ as unreachable:
             assert_never(unreachable)
+    lines += _cost_section(result.costs)
+    lines += _telemetry_section(result.baseline.readings, result.candidate.readings)
     if result.plans is not None:
         lines += [
             '',
@@ -137,11 +157,14 @@ def render_raw(result: RunResult) -> str:
             'baseline': {
                 'samples_ms': result.baseline.samples_ms,
                 'counts': asdict(result.baseline.counts),
+                'readings': _raw_readings(result.baseline.readings),
             },
             'candidate': {
                 'samples_ms': result.candidate.samples_ms,
                 'counts': asdict(result.candidate.counts),
+                'readings': _raw_readings(result.candidate.readings),
             },
+            'costs': [_raw_cost(cost) for cost in result.costs],
             'comparisons': [
                 {**asdict(c), 'verdict': c.verdict.value} for c in result.comparisons
             ],
@@ -162,11 +185,32 @@ def render_raw(result: RunResult) -> str:
 
 
 def summary_filename(result: RunResult) -> str:
-    """Name the authoritative run for one day, scenario, and server major."""
+    """Name the run by its start second, scenario, telemetry level and server
+    major, so repeated runs of one cell on one day keep a file each."""
     conditions = result.conditions
     day = conditions.measured_at[:10]
+    clock = conditions.measured_at[11:19].replace(':', '')
     major = conditions.server_version.split('.')[0]
-    return f'{day}-{conditions.scenario}-pg{major}.md'
+    return (
+        f'{day}-{clock}-{conditions.scenario}-telemetry-'
+        f'{conditions.telemetry_level}-pg{major}.md'
+    )
+
+
+def _latency_section(comparisons: list[Comparison]) -> list[str]:
+    return [
+        '',
+        '## Latency',
+        '',
+        '| percentile | baseline | candidate | delta | 95% interval | budget | verdict |',
+        '|---|---|---|---|---|---|---|',
+        *[_latency_row(c) for c in comparisons],
+    ]
+
+
+def _calls_per_second(samples_ms: list[float]) -> float:
+    """The calls of a side over the sum of their times."""
+    return len(samples_ms) * 1_000 / sum(samples_ms)
 
 
 def _latency_row(comparison: Comparison) -> str:
@@ -329,6 +373,180 @@ def _integer(plan: dict[str, object], key: str) -> int:
     if not isinstance(value, int):
         raise RuntimeError(f'EXPLAIN field {key!r} is not an integer')
     return value
+
+
+def _cost_section(costs: tuple[Cost, ...]) -> list[str]:
+    """The CPU and stop costs of a public call or a drain run. No verdict: a
+    reader judges each ratio against the spread of the control runs."""
+    if not costs:
+        return []
+    return [
+        '',
+        '## Resources',
+        '',
+        '| measure | baseline | candidate | ratio | 95% interval |',
+        '|---|---|---|---|---|',
+        *[_cost_row(cost) for cost in costs],
+        '',
+        'A cost per operation is the sum of its readings over the sum of the '
+        'operations of a side; the interval resamples the drains or the '
+        'blocks. Worker CPU is the CPU time of the worker parent and of each '
+        'process below it, from the start of the worker to the end of the '
+        'drain; the stop time runs from SIGTERM to the exit. Producer CPU is '
+        'the CPU time of the harness process across a block of calls.',
+    ]
+
+
+def _cost_row(cost: Cost) -> str:
+    match cost:
+        case MeasuredCost(measure=measure, comparison=comparison):
+            return (
+                f'| {measure.value} '
+                f'| {comparison.baseline_per_operation_s * 1_000:.4f} ms '
+                f'| {comparison.candidate_per_operation_s * 1_000:.4f} ms '
+                f'| {comparison.ratio:.3f}x '
+                f'| {comparison.ci_low_ratio:.3f}x to {comparison.ci_high_ratio:.3f}x |'
+            )
+        case UnmeasuredCost(measure=measure, reason=reason):
+            return f'| {measure.value} | not measured: {reason} | | | |'
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _telemetry_section(baseline: Readings, candidate: Readings) -> list[str]:
+    """The telemetry columns of a drain run: the endpoint counts of each side
+    and the answers to the reads during the drains."""
+    match baseline, candidate:
+        case DrainReadings(drains=baseline_drains), DrainReadings(
+            drains=candidate_drains
+        ):
+            pass
+        case _:
+            return []
+    return [
+        '',
+        '## Telemetry',
+        '',
+        '| | baseline | candidate |',
+        '|---|---|---|',
+        *[
+            f'| {label} | {_endpoint_value(baseline_drains, over_drains, read)} '
+            f'| {_endpoint_value(candidate_drains, over_drains, read)} |'
+            for label, over_drains, read in _ENDPOINT_COLUMNS
+        ],
+        *[
+            f'| {label} | {_tally_value(baseline_drains, read)} '
+            f'| {_tally_value(candidate_drains, read)} |'
+            for label, read in _TALLY_COLUMNS
+        ],
+        '',
+        'The endpoint columns come from one read of `/metrics` at the end of '
+        'each drain: the series count is the largest over the drains, each '
+        'drop count is the sum over the drains. A read during a drain that '
+        'was not answered includes the reads before the worker bound its '
+        'endpoint.',
+    ]
+
+
+class _OverDrains(Enum):
+    """How a column of the endpoint reads combines its drains."""
+
+    LARGEST = 'largest'
+    SUM = 'sum'
+
+
+_ENDPOINT_COLUMNS: Final[
+    tuple[tuple[str, _OverDrains, Callable[[EndpointCounts], int]], ...]
+] = (
+    ('series (largest)', _OverDrains.LARGEST, lambda counts: counts.series),
+    (
+        'events dropped, queue full',
+        _OverDrains.SUM,
+        lambda counts: counts.events_dropped_queue_full,
+    ),
+    (
+        'events dropped, handler child down',
+        _OverDrains.SUM,
+        lambda counts: counts.events_dropped_child_down,
+    ),
+    ('series dropped', _OverDrains.SUM, lambda counts: counts.series_dropped),
+    ('handler events dropped', _OverDrains.SUM, lambda counts: counts.handler_dropped),
+    ('handler errors', _OverDrains.SUM, lambda counts: counts.handler_errors),
+)
+
+_TALLY_COLUMNS: Final[tuple[tuple[str, Callable[[ReadTally], int]], ...]] = (
+    ('`/metrics` reads answered', lambda tally: tally.metrics_answered),
+    ('`/metrics` reads not answered', lambda tally: tally.metrics_not_answered),
+    ('`/livez` live', lambda tally: tally.livez_live),
+    ('`/livez` late (503)', lambda tally: tally.livez_late),
+    ('`/livez` not answered', lambda tally: tally.livez_not_answered),
+)
+
+
+def _endpoint_value(
+    drains: tuple[DrainReading, ...],
+    over_drains: _OverDrains,
+    read: Callable[[EndpointCounts], int],
+) -> str:
+    """The column over the drains; 'no endpoint' at a level without one."""
+    values: list[int] = []
+    for drain in drains:
+        match drain.endpoint:
+            case EndpointCounts() as counts:
+                values.append(read(counts))
+            case NoEndpoint():
+                return 'no endpoint'
+            case _ as unreachable:
+                assert_never(unreachable)
+    if not values:
+        return 'no drain'
+    match over_drains:
+        case _OverDrains.LARGEST:
+            return str(max(values))
+        case _OverDrains.SUM:
+            return str(sum(values))
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _tally_value(
+    drains: tuple[DrainReading, ...],
+    read: Callable[[ReadTally], int],
+) -> str:
+    """The sum of a read count over the drains; 'not read' at a level that
+    does not read the endpoint during a drain."""
+    total = 0
+    for drain in drains:
+        match drain.reads:
+            case ReadTally() as tally:
+                total += read(tally)
+            case NotRead():
+                return 'not read'
+            case _ as unreachable:
+                assert_never(unreachable)
+    return str(total)
+
+
+def _raw_readings(readings: Readings) -> dict[str, object]:
+    match readings:
+        case StatementReadings():
+            return {'kind': 'statement'}
+        case BlockReadings(blocks=blocks):
+            return {'kind': 'blocks', 'blocks': [asdict(block) for block in blocks]}
+        case DrainReadings(drains=drains):
+            return {'kind': 'drains', 'drains': [asdict(drain) for drain in drains]}
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _raw_cost(cost: Cost) -> dict[str, object]:
+    match cost:
+        case MeasuredCost(measure=measure, comparison=comparison):
+            return {'measure': measure.value, **asdict(comparison)}
+        case UnmeasuredCost(measure=measure, reason=reason):
+            return {'measure': measure.value, 'not_measured': reason}
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _yes_no(value: bool) -> str:
