@@ -153,8 +153,8 @@ before you upgrade a 0.7 deployment.
   is an end that the child reported (`AttemptEndReportedByChild` with the
   new `ChildResultTimedOut`): the span of the child is the span of the
   attempt, with the timeout, and the handler child makes none, so one
-  attempt has one span. `AttemptEndDecidedByWorker` has no `start`: the
-  worker decides only ends with no result frame of the child. The span is `run <task_name>` of kind CONSUMER under
+  attempt has one span. `AttemptEndDecidedByWorker` is only an end with no
+  result frame of the child. The span is `run <task_name>` of kind CONSUMER under
   the span that sent the task, from the time the task reached its child to
   the time the end reached the worker, with status ERROR, `error.type` = the
   code, the attributes of the span of a child and
@@ -605,7 +605,7 @@ before you upgrade a 0.7 deployment.
   `monitoring_app.state.events.close()` ends the open event streams.
 
 - **The web UI is compiled into `horsies._core`.** The core embeds the
-  committed build of `webui/` (`crates/horsies-core/webui-dist`); the wheel
+  committed build of `webui/` (`core/webui-dist`); the wheel
   no longer carries `horsies/web/static/`, and a build from a clone serves
   the page with no frontend step. `bun run build` in `webui/` writes the
   committed build.
@@ -1678,7 +1678,7 @@ unless it starts with "Added".
   { stored }`, `UnknownStoredFamily` (a family row that holds no client
   family), `CallerKeyRefused`, `IdMintRefused`, `Row`.
 - **The client writes each stored form as Python writes it**, as the shared
-  vectors of `crates/horsies-core/tests/fixtures/stored_forms/` pin it:
+  vectors of `core/tests/fixtures/stored_forms/` pin it:
   - Task input: a send of a task with no parameters, and a schedule
     without input, store `{}` (no keyword arguments), not `null`.
   - Task options of a workflow node: the deadline `good_until` is written
@@ -1761,8 +1761,10 @@ unless it starts with "Added".
   `TaskCancelGraceOutOfRange` (`HRS-111`), `ConfigInvalidExceptionMapper`
   (`HRS-209`), `ModuleExecError` (`HRS-210`), `ConfigInvalidChildHook`
   (`HRS-214`), `ConfigInvalidKeepalive` (`HRS-215`), `ConfigOtelApiMissing`
-  (`HRS-220`) and `ConfigInvalidTraceLink` (`HRS-221`). The Rust client
-  raises none of them. An exhaustive `match` on `ErrorCode` needs the new
+  (`HRS-220`), `ConfigInvalidTraceLink` (`HRS-221`),
+  `EventHandlerUnknownEventType` (`HRS-222`) and
+  `EventHandlerInvalidSignature` (`HRS-223`). The Rust client raises none
+  of them. An exhaustive `match` on `ErrorCode` needs the new
   arms. `is_workflow_error`, `is_task_error`, `is_config_error` and
   `is_registry_error` follow `category()`: `is_registry_error()` of
   `WorkflowUnregisteredTask` (`HRS-302`) is now `true`.
@@ -1815,7 +1817,8 @@ unless it starts with "Added".
   deadline is `AttemptEnd::ReportedByChild` with the new
   `ChildResult::TimedOut`: the span of the child is the span of the
   attempt, with `TASK_TIMEOUT`, and the handler child makes none.
-  `AttemptEnd::DecidedByWorker` has no `start`. The span is `run <task_name>` of kind
+  `AttemptEnd::DecidedByWorker` is only an end with no result frame of the
+  child. The span is `run <task_name>` of kind
   CONSUMER under the span that sent the task, with the global tracer
   provider and propagator of the handler child, from the time the task
   reached its child to the time the end reached the worker, with status ERROR, `error.type` = the code, the attributes of the span of a child and

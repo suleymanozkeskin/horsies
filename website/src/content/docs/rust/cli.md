@@ -117,7 +117,7 @@ fn run_worker(app: Horsies) -> ExitCode {
 
 | Command | Does | Python command |
 |---------|------|----------------|
-| `<binary> worker --profile <name> [--loglevel LEVEL]` | Starts a worker of one profile of `AppConfig.worker_profiles` | [`horsies worker`](/horsies/cli/#horsies-worker) |
+| `<binary> worker --profile <name> [--loglevel LEVEL] [--metrics-listen HOST:PORT]` | Starts a worker of one profile of `AppConfig.worker_profiles` | [`horsies worker`](/horsies/cli/#horsies-worker) |
 | `<binary> scheduler [--loglevel LEVEL]` | Starts the scheduler of `AppConfig.schedule` | [`horsies scheduler`](/horsies/cli/#horsies-scheduler) |
 | `<binary> check [--live] [--loglevel LEVEL]` | Checks the app without starting a service | [`horsies check`](/horsies/cli/#horsies-check) |
 | `<binary> metrics --listen HOST:PORT [--loglevel LEVEL]` | Serves the fleet metrics of the app's database at `GET /metrics` | [`horsies metrics`](/horsies/cli/#horsies-metrics) |

@@ -138,16 +138,18 @@ session_database_url must not use the transaction-pool URL
 Use two different URLs. Put the transaction-pool URL in `database_url`. Put a
 direct or session-pooled URL in `session_database_url`.
 
-## Error: Postgres LISTEN failed
+## Error: Session URL Check Failed
 
 ```text
-Postgres LISTEN failed. If database_url points to PgBouncer transaction pooling,
-set PostgresConfig.session_database_url to a direct/session-capable Postgres URL.
+session URL check failed: LISTEN on <session URL> received no NOTIFY within 2000 ms:
+the session URL does not keep session state (for example PgBouncer transaction pooling);
+set session_database_url to a direct or session-pooled URL
 ```
 
-The worker could not subscribe to PostgreSQL notifications. Check that
-`session_database_url` does not point to transaction-pooled PgBouncer. Horsies
-workers intentionally fail startup here; poll-only workers are not supported.
+At each start, the worker sends a `NOTIFY` and waits at most 2 seconds for it
+on a `LISTEN` of the session URL. Check that `session_database_url` does not
+point to transaction-pooled PgBouncer. Horsies workers intentionally fail
+startup here; poll-only workers are not supported.
 
 ## Warning: LISTEN unavailable
 
@@ -176,7 +178,7 @@ If the pooled URL is used without `pgbouncer_transaction_mode` set to true, oper
 may see prepared-statement or statement-cache errors from the pooler. Enable the
 flag, with the split URLs above.
 
-This disables psycopg prepared statements for Horsies runtime SQL. For the
+In this mode the core prepares no named statement: it sends each statement as the unnamed statement. For the
 standalone web UI, pass `--pgbouncer-transaction-mode` with both URLs:
 
 ```bash

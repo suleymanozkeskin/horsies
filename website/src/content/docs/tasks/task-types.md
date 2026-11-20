@@ -194,10 +194,10 @@ node_process: TaskNode[str] = TaskNode(
 |--------|---------|
 | `horsies.core.types.json_value` | `JsonValue` PEP 695 alias; `JsonInput`, `JsonList`, `JsonDict` |
 | `horsies.core.codec.json_value` | `StrictJsonError`; strict JSON-native validators; re-exports `JsonValue` |
-| `horsies.core.codec.json_io` | `dumps_json` / `loads_json` — the strict JSON-native stringification boundary (no class tags). `loads_json` takes a `str`, never `None`; an empty text is not JSON and is `Err(EmptyJsonTextError)`, a `SerializationError`. `loads_json_bytes` is the same parse for stored UTF-8 payloads. `dumps_canonical_json` is the one canonical form for stored or hashed text. A unit test keeps every other JSON parse out of the library |
+| `horsies.core.codec.json_io` | `dumps_json` / `loads_json` — the strict JSON-native stringification boundary (no class tags). `loads_json` takes a `str`, never `None`; an empty text is not JSON and is `Err(EmptyJsonTextError)`, a `SerializationError`. A unit test keeps every other JSON parse out of the library |
 | `horsies.core.codec.error_payload` | `flatten_exception`; `serialize_error_payload` for library-emitted error payloads |
 | `horsies.core.codec.task_options` | `serialize_task_options` — `TaskOptions` → persisted JSON |
-| `horsies.core.codec.signature_check` | `validate_task_signature` — rejects banned types at decorator time |
+| `horsies.core.codec.signature_check` | `check_task_signature` — rejects banned types at decorator time |
 | `horsies.core.codec.kwargs` | `encode_kwargs_read_back(task_fn, kwargs)` / `decode_kwargs(...)` for producer/consumer kwarg binding |
 | `horsies.core.codec.typed` | `encode_value` / `decode_value` / `encode_task_result` / `decode_task_result` / `decode_task_error` / `validate_task_result_envelope` |
 

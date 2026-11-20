@@ -22,11 +22,11 @@ The API is on the client pages: [Broker Connections](/horsies/configuration/brok
 | `pool_timeout` | 30 | 0 to 4,294,967,295; `0`: a checkout does not wait | Seconds to wait for connection |
 | `pool_pre_ping` | on | – | Ping a pooled connection at checkout when it waited in the pool for more than 1 s, in every pool but the one of the worker process; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
 | `worker_pool_pre_ping` | off | – | Ping a pooled connection of the worker process at checkout when it waited in the pool for more than 1 s. Off: the worker sends a one-statement write in one round trip, and a dead pooled connection fails its first statement with a connection error that the worker retries; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt) |
-| `tcp_keepalives` | on | – | Enable libpq TCP keepalives on broker and child-process connections; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
-| `tcp_keepalives_idle` | 30 | 1 to 32,767 | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
-| `tcp_keepalives_interval` | 10 | 1 to 32,767 | Seconds between keepalive probes (libpq `keepalives_interval`) |
-| `tcp_keepalives_count` | 3 | 1 to 127 | Unacknowledged probes before the connection is dropped (libpq `keepalives_count`) |
-| `tcp_user_timeout_ms` | 30000 | `0` or 1 to 2,147,483,647 | Milliseconds that sent data may stay unacknowledged before the connection is closed (libpq `tcp_user_timeout`); `0` uses the operating system default; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
+| `tcp_keepalives` | on | – | Enable TCP keepalives on every connection of the core: the broker pools, the child-process pools and the listener; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
+| `tcp_keepalives_idle` | 30 | 1 to 32,767 | Idle seconds before the first keepalive probe (as libpq `keepalives_idle`) |
+| `tcp_keepalives_interval` | 10 | 1 to 32,767 | Seconds between keepalive probes (as libpq `keepalives_interval`) |
+| `tcp_keepalives_count` | 3 | 1 to 127 | Unacknowledged probes before the connection is dropped (as libpq `keepalives_count`) |
+| `tcp_user_timeout_ms` | 30000 | `0` or 1 to 2,147,483,647 | Milliseconds that sent data may stay unacknowledged before the connection is closed (as libpq `tcp_user_timeout`); `0` uses the operating system default; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
 | `retain_rerun_input_default` | off | – | App-level default for rerun-input retention at enqueue; a per-task value overrides it |
 | `echo` | off | – | Log each SQL statement at INFO on the logger `horsies.sql` (Rust: the `tracing` target `horsies.sql`): the SQL text as the message, the statement name as the field `statement`. Bound values are not shown. Python: a broker built with `echo=True` sets `horsies.sql` to INFO and, when that logger has no handler, adds one stdout handler per process |
 | `pool_recycle` | 1800 | `-1` (never) or 0 to 4,294,967,295 | Recycle connections after N seconds |

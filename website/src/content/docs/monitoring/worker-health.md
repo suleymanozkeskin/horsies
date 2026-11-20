@@ -83,7 +83,7 @@ Each reaper pass runs the same check, one check interval after the worker starts
 PENDING ISOLATED tasks on queue 'default' wait: no live worker serves this class. Start a worker with isolated children on this queue. A shared task that went back to the queue as ISOLATED also waits here.
 ```
 
-Each worker logs one stream at most once per 5 minutes (`CLASS_COVERAGE_LOG_INTERVAL_S`). A check that fails logs one warning per 5 minutes and changes nothing.
+Each worker logs one stream at most once per 5 minutes. A check that fails logs one warning per 5 minutes and changes nothing.
 
 ### What to do
 
@@ -121,9 +121,9 @@ Both reads use the claim index. The coverage read takes one index probe per pend
 | `recovery_config` | Recovery configuration snapshot, plus the embedded health payloads below; empty when none is set |
 | `tasks_running` | RUNNING tasks at snapshot time |
 | `tasks_claimed` | CLAIMED tasks at snapshot time |
-| `memory_usage_mb` | Parent worker process resident memory (psutil) |
-| `memory_percent` | Memory percent (psutil) |
-| `cpu_percent` | CPU percent (psutil) |
+| `memory_usage_mb` | Resident memory of the worker process, in MiB |
+| `memory_percent` | Resident memory of the worker process, as a percent of the memory of the host |
+| `cpu_percent` | CPU use of the worker process, in percent |
 | `children_memory_mb` | Summed resident memory of the worker's task children: the last reading of each child, from its ready frame and its result frames. `None` when no child read its size |
 | `worker_started_at` | Worker process start time |
 | `slot_health` | See [Which slots are down?](#which-slots-are-down) |

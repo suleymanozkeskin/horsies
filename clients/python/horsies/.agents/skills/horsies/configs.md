@@ -431,7 +431,7 @@ config = PostgresConfig(
 
 | Field | Type | Default | Range | Description |
 |---|---|---|---|---|
-| `database_url` | `SecretStr` | required | – | Must start with `"postgresql://"` (HRS-203 otherwise) |
+| `database_url` | `SecretStr` | required | – | Scheme `postgresql://` or `postgres://` (HRS-203 otherwise) |
 | `session_database_url` | `SecretStr \| None` | `None` | – | Direct/session-capable URL for LISTEN and schema setup; required when `database_url` is transaction-pooled |
 | `pgbouncer_transaction_mode` | `bool` | `False` | – | Disable prepared statements for transaction-pooled `database_url`; requires `session_database_url` |
 | `pool_size` | `int` | `5` | 1 to 10,000 | Connection pool size (raise for high-throughput producers) |
@@ -439,18 +439,18 @@ config = PostgresConfig(
 | `retain_rerun_input_default` | `bool` | `False` | – | App-level default for enqueue-time rerun-input retention; a per-task value overrides it and the resolved value is snapshotted at enqueue. A task enqueued without a retained input cannot be rerun later |
 | `pool_timeout` | `int` | `30` | 0 to 4,294,967,295; `0`: a checkout does not wait | Seconds to wait for a connection |
 | `pool_recycle` | `int` | `1800` | `-1` (never) or 0 to 4,294,967,295 | Seconds before connections are recycled |
-| `pool_pre_ping` | `bool` | `True` | – | Ping a pooled connection at checkout when it waited in the pool for more than 1 s, in every engine but the worker process's |
+| `pool_pre_ping` | `bool` | `True` | – | Ping a pooled connection at checkout when it waited in the pool for more than 1 s, in every pool but the worker process's |
 | `worker_pool_pre_ping` | `bool` | `False` | – | Ping a pooled connection of the worker process at checkout when it waited in the pool for more than 1 s. Off: a one-statement write is one round trip, and a dead connection fails its first statement as a retryable connection error |
-| `tcp_keepalives` | `bool` | `True` | – | Enable libpq TCP keepalives on broker and child-process connections |
-| `tcp_keepalives_idle` | `int` | `30` | 1 to 32,767 | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
-| `tcp_keepalives_interval` | `int` | `10` | 1 to 32,767 | Seconds between keepalive probes (libpq `keepalives_interval`) |
-| `tcp_keepalives_count` | `int` | `3` | 1 to 127 | Unacknowledged probes before the connection is dropped (libpq `keepalives_count`) |
-| `tcp_user_timeout_ms` | `int` | `30000` | `0` or 1 to 2,147,483,647 | Milliseconds that sent data may stay unacknowledged before the connection is closed (libpq `tcp_user_timeout`); `0` uses the OS default |
+| `tcp_keepalives` | `bool` | `True` | – | Enable TCP keepalives on every connection of the core: broker, child-process and listener connections |
+| `tcp_keepalives_idle` | `int` | `30` | 1 to 32,767 | Idle seconds before the first keepalive probe (as libpq `keepalives_idle`) |
+| `tcp_keepalives_interval` | `int` | `10` | 1 to 32,767 | Seconds between keepalive probes (as libpq `keepalives_interval`) |
+| `tcp_keepalives_count` | `int` | `3` | 1 to 127 | Unacknowledged probes before the connection is dropped (as libpq `keepalives_count`) |
+| `tcp_user_timeout_ms` | `int` | `30000` | `0` or 1 to 2,147,483,647 | Milliseconds that sent data may stay unacknowledged before the connection is closed (as libpq `tcp_user_timeout`); `0` uses the OS default |
 | `echo` | `bool` | `False` | – | Echo SQL (debug only); bound values are not shown |
 
 A pool value outside its range fails with HRS-213 (`CONFIG_INVALID_BROKER_POOL`); `pool_size=0` and `max_overflow=-1` (no limit in SQLAlchemy) are refused, and the help says to give a number. A TCP value outside its range fails with HRS-215 (`CONFIG_INVALID_KEEPALIVE`); the three keepalive values are checked only when `tcp_keepalives` is `True`.
 
-`database_url` and `session_database_url` take the scheme `postgresql://` or `postgres://` and name no driver; horsies opens the database with psycopg 3. A URL that names a driver (`postgresql+psycopg://`, `postgresql+psycopg2://`) is refused with HRS-203, and the error says to use `postgresql://`.
+`database_url` and `session_database_url` take the scheme `postgresql://` or `postgres://` and name no driver; the core of horsies opens the database with its own driver, not libpq. A URL that names a driver (`postgresql+psycopg://`, `postgresql+psycopg2://`) is refused with HRS-203, and the error says to use `postgresql://`.
 
 `worker_child_pool_min_size`, `worker_child_pool_max_size` and
 `worker_child_pool_check` were removed in 0.7.0: each child kind has its own
@@ -486,8 +486,8 @@ surfacing as a mid-query `OperationalError`. `pool_pre_ping`,
 `worker_pool_pre_ping` and `pool_recycle` are checkout-time guards and cannot
 catch a connection that dies in-flight. The pre-ping settings check only a
 connection that waited in the pool for more than 1 s. The
-keepalives apply to the broker engine pool and each child-process pool; the
-LISTEN/NOTIFY listener sets its own keepalives independently. Without them, the
+keepalives apply to the broker pools, each child-process pool and the
+LISTEN/NOTIFY listener. Without them, the
 OS idle default (often 7200s) outlives a pooler's idle-reap window — e.g.
 PlanetScale's PgBouncer reaps idle connections within ~1–2h. Disabling is rarely
 needed; lower `tcp_keepalives_idle` only for poolers that reap faster than 30s.
@@ -496,13 +496,13 @@ needed; lower `tcp_keepalives_idle` only for poolers that reap faster than 30s.
 Keepalives do not probe while sent data is unacknowledged, so without it a
 pool health check on a connection that died without a reset blocks for the
 kernel retransmission limit (about 15 minutes on Linux). It applies to the
-broker engines, each child-process pool, and the LISTEN/NOTIFY listener. A
+broker pools, each child-process pool, and the LISTEN/NOTIFY listener. A
 long query is not affected: the sent query is acknowledged while the client
 waits for the result.
 
 Workers do not use `pool_size` and `max_overflow`. The worker process opens
 the resolved `WorkerProfile.pool` with no overflow; each child process creates
-its own psycopg pool bounded by the `pool` of its kind (`min_size..max_size`).
+its own core pool bounded by the `pool` of its kind (`min_size..max_size`).
 Direct Postgres budget for one worker is approximately:
 
 ```text

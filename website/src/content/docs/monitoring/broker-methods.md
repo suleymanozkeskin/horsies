@@ -8,7 +8,7 @@ tags: [monitoring, broker, api]
 
 `PostgresBroker` exposes async methods for querying task and worker health directly from the database. These are useful for building custom monitoring, alerting, or cleanup scripts.
 
-All broker methods return `BrokerResult[T]` — either `Ok(value)` on success or `Err(BrokerOperationError)` on failure. `BrokerOperationError` is a union of frozen variants; match on the variant ([Broker Errors](/horsies/tasks/error-types/#broker-errors-brokerresult)). Every variant carries a `retryable` flag: `True` when the driver classifies the cause as transient (connection blip), `False` when it does not clear by itself (a refused argument, schema drift, code bug).
+All broker methods return `BrokerResult[T]` — either `Ok(value)` on success or `Err(BrokerOperationError)` on failure. `BrokerOperationError` is a union of frozen variants; match on the variant ([Broker Errors](/horsies/tasks/error-types/#broker-errors-brokerresult)). Every variant carries a `retryable` flag: `True` when the core classifies the cause as transient (connection blip), `False` when it does not clear by itself (a refused argument, schema drift, code bug).
 
 ```python
 from uuid import UUID
@@ -36,7 +36,7 @@ Every task id parameter and field of these methods is a `uuid.UUID`.
 
 Fetch the raw stored result envelope for a task by ID, waiting if necessary. This is the broker's infrastructure-level result-fetch surface: it does no typed decoding and imports no user code. Callers that want a typed `TaskResult[T, TaskError]` should use [`app.get_result_async`](#app-level-typed-result-apis) instead — it composes a typed decode on top of this call.
 
-Uses PostgreSQL `LISTEN/NOTIFY` with a 1-second polling fallback.
+Waits on PostgreSQL `LISTEN/NOTIFY`, and reads the row again at least every 5 seconds. With no listener, it reads the row every 0.2 seconds.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -47,7 +47,7 @@ In a worker child, where task bodies run, it returns `Err(BrokerWaitInsideTask)`
 
 **Returns:** `BrokerResult[RawResultRecord | None]` — `Ok(None)` if no task row exists for that ID; `Err(BrokerOperationError)` on infrastructure failure. The `RawResultRecord` carries `task_id`, `task_name`, `status`, and `raw_result` (the decoded JSON envelope, or `None` for cancelled tasks, non-terminal timeout snapshots, or terminal rows with no payload).
 
-Sync variant: `get_raw_result_record(task_id, timeout_ms)` (runs the async version in a background loop).
+Sync variant: `get_raw_result_record(task_id, timeout_ms)`. It runs on the calling thread, with the GIL released. On a thread that runs an event loop it returns `Err(BrokerAsyncContext)` (`ASYNC_CONTEXT`) and does no I/O.
 
 ```python
 # Async — broker-level raw fetch (no typed decode)

@@ -121,11 +121,12 @@ The histogram takes the bucket bounds of the [Metric Reference](/horsies/observa
 
 ## API Reference
 
-### `OtelTracing(parentage=ChildOfSend())`
+### `OtelTracing(parentage=ChildOfSend(), worker_ended_spans=WorkerEndedSpans.MAKE_SPANS)`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `parentage` | `ChildOfSend \| LinkedToSend` | No | How each attempt span relates to the span that sent the task. Default `ChildOfSend()` |
+| `worker_ended_spans` | `WorkerEndedSpans` | No | `MAKE_SPANS` (the default): the handler child of the worker makes the span of each attempt that the worker ended. `NO_SPANS`: no such span. See [Spans of the Attempts That the Worker Ended](/horsies/observability/tracing/#spans-of-the-attempts-that-the-worker-ended) |
 
 A frozen model. `AppConfig.tracing` takes `OtelTracing` or `NoTracing`.
 

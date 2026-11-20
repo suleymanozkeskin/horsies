@@ -131,6 +131,7 @@ The name of a handler is `module.qualname` of its function, for example `myapp.e
 The task child opens the span of an attempt around the body, and OpenTelemetry exports a span only when it ends. When the worker ends an attempt itself, the child is gone and its span never ends:
 
 - an isolated task killed at its `timeout_ms` (`TASK_TIMEOUT`);
+- a run past its deadline in a shared child that the worker killed (`TASK_TIMEOUT`);
 - a shared async child killed for a blocked event loop (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`);
 - a child lost before it reported the end, with its exit seen (`WORKER_CRASHED`).
 

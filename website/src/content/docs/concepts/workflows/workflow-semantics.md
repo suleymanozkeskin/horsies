@@ -453,7 +453,7 @@ A success policy holds success cases. Each case lists the nodes that it requires
 3. **SKIPPED counts as not satisfied**: A SKIPPED task does not satisfy a required condition.
 4. **`optional` is declarative**: It records which nodes may fail, and it has no runtime effect. A node that no case requires does not change the result, with or without `optional`. Spec validation checks that each node in `optional` is in the workflow.
 5. **Default behavior**: If `success_policy` is None, any task failure → FAILED (unchanged).
-6. **Stored policy that does not parse**: The start stores the policy as node indices. If the stored value is not that form (for example a row written by hand), the completion step raises `StoredSuccessPolicyError` and does not fall back to the default rule. The [recovery limit](#recovery-limit) then fails the workflow closed with `WORKFLOW_RECOVERY_LIMIT_REACHED`.
+6. **Stored policy that does not parse**: The start stores the policy as node indices. If the stored value is not that form (for example a row written by hand), the completion step fails with SQLSTATE `XX001` (`data_corrupted`), writes nothing, and does not fall back to the default rule. The [recovery limit](#recovery-limit) then fails the workflow closed with `WORKFLOW_RECOVERY_LIMIT_REACHED`.
 
 ### Error Handling with Success Policy
 

@@ -347,44 +347,33 @@ Both preload modes:
 
 ## Worker Configuration
 
-`horsies worker` builds the internal `WorkerConfig` from the app config and the chosen [worker profile](/horsies/workers/worker-profiles/):
+The worker command of each client builds the worker manifest of the core from the app config, the registered tasks and the command line. The core checks the manifest, picks the profile, and runs the worker:
 
-| Field | Source |
-| ----- | ------ |
-| `dsn` | `PostgresConfig.database_url` |
-| `session_dsn` | `PostgresConfig.session_database_url`, or `database_url` |
-| `pgbouncer_transaction_mode` | `PostgresConfig.pgbouncer_transaction_mode`. Disables child-process prepared statements for PgBouncer transaction pooling |
-| `queues` | The queues of the app |
-| `processes` | `IsolatedChildren.count`: the number of isolated children, 0 with `NoIsolatedChildren()` |
-| `max_tasks_per_child` | `IsolatedRecycle.after` |
-| `max_memory_per_child_mb` | `IsolatedRecycle.above` |
-| `shared_async` | `WorkerProfile.shared_async` |
-| `shared_thread` | `WorkerProfile.shared_thread` |
-| `max_claim_batch` | `ClaimLimits.per_queue_per_pass` |
-| `max_claim_per_worker` | `ClaimLimits.claimed_per_worker` |
-| `drain_timeout_s` | `WorkerProfile.drain_timeout` |
-| `child_preload` | `WorkerProfile.preload` |
-| `parent_pool_size` | `WorkerProfile.pool`, resolved. The pool of the worker process has no overflow |
-| `isolated_pool` | `IsolatedChildren.pool`, resolved; the default `IsolatedPool()` with `NoIsolatedChildren()`. The pool of a shared child comes from `shared_async.pool` or `shared_thread.pool` |
-| `isolated_task_send_pool` | `IsolatedChildren.task_send_pool`; the default with `NoIsolatedChildren()`. The task-send pool of a shared child comes from `shared_async.task_send_pool` or `shared_thread.task_send_pool` |
-| `app_locator` | The app locator of the command |
-| `imports` | Task module paths |
+| Part | Source |
+| ---- | ------ |
+| Database | The URLs, `pgbouncer_transaction_mode` and the connection settings of the broker config |
+| Profiles | Every profile of `AppConfig.worker_profiles` ([Worker Profiles](/horsies/workers/worker-profiles/)), and the `--profile` value. The core refuses a missing or unknown name |
+| Metrics endpoint | `--metrics-listen`, or no endpoint |
+| Claim | The queues of the app, `prefetch_buffer`, the claim lease, `max_claim_renew_age_ms` and `cluster_wide_cap` |
+| Recovery, retention, resilience, payload | `AppConfig.recovery`, `retention`, `resilience` and `payload` |
+| Tasks | The execution class and the declared error codes of each registered task |
+| Event handlers | The event handlers of the app, and the switch of the spans of the attempts that the worker ended |
+| Child launch | The program that each child runs, and the preload of the profile |
 
 Workers require PostgreSQL `LISTEN` for dispatch. When using transaction-pooled
 PgBouncer, configure `PostgresConfig.session_database_url` with a direct or
 session-capable URL. Workers fail startup instead of silently switching to
 poll-only dispatch if `LISTEN` is unavailable.
 
-Child database pools are initialized inside the child process. Psycopg
-connections are not process-safe. A child starts with `exec`, so it inherits no
-parent database socket. Child DB connections remain lazy by default: the `min_size` of each child
-pool is 0. Each connection of a child pool is in autocommit: the RUNNING update
+Each child builds its own connection pool in its core, inside the child
+process, so it inherits no database socket of the worker. Child DB connections
+remain lazy by default: the `min_size` of each child pool is 0. Each connection of a child pool is in autocommit: the RUNNING update
 of a plain task and the finalizing mark are one statement each, and one round
 trip each with the checkout `check` off (the default). The RUNNING update of a
 workflow task and the start of its node run in one transaction. An isolated
 child uses one connection at a time: for the RUNNING
 update, and for the finalizing mark. Its pool is `IsolatedChildren.pool`, 0 to
-2 connections by default; see
+1 connection by default; see
 [Connection Pools and the Default Executor](/horsies/workers/worker-profiles/#connection-pools-and-the-default-executor). The seats of a
 shared child share the pool of the child for the same writes. See
 [Connections](/horsies/workers/shared-thread-tasks/#connections). The worker process holds one more
