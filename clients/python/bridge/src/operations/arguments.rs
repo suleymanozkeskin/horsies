@@ -97,9 +97,10 @@ impl NoTraceCarrier {
 }
 
 /// The carrier that the client's propagator injected for the span of a
-/// send or a workflow start, and the 16-byte trace id of that span. The core
-/// checks its bounds at the send; a carrier that breaks a bound is not
-/// stored and never fails the send (`horsies_core::telemetry::trace_carrier`).
+/// send or a workflow start, or for the current span of the caller of a
+/// rerun, and the 16-byte trace id of that span. The core checks its bounds
+/// at the send; a carrier that breaks a bound is not stored and never fails
+/// the send (`horsies_core::telemetry::trace_carrier`).
 #[pyclass(module = "horsies._core", frozen)]
 pub struct TraceCarrier {
     carrier: BTreeMap<String, String>,
@@ -129,7 +130,8 @@ impl TraceCarrier {
     }
 }
 
-/// The trace argument of a send or a start: one of the two trace classes.
+/// The trace argument of a send, a start or a rerun: one of the two trace
+/// classes.
 #[derive(FromPyObject)]
 pub enum TraceArgument<'py> {
     NoCarrier(Bound<'py, NoTraceCarrier>),

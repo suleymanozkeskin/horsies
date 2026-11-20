@@ -1,5 +1,6 @@
-"""The spans of the sends and the workflow starts, and the producer metrics,
-through the OpenTelemetry API: the recorder of `AppConfig(tracing=OtelTracing())`.
+"""The spans of the sends and the workflow starts, the carrier of a rerun, and
+the producer metrics, through the OpenTelemetry API: the recorder of
+`AppConfig(tracing=OtelTracing())`.
 
 This module imports `opentelemetry`. `send_telemetry_of` imports it only for
 `OtelTracing`, whose config check found the API installed.
@@ -12,6 +13,10 @@ This module imports `opentelemetry`. `send_telemetry_of` imports it only for
   the core gets it with the 16-byte trace id of the span. A span that is not
   valid (no SDK, or a sampler that gives a non-recording span with no
   parent), or a propagator that writes no key, gives `NO_TRACE_CARRIER`.
+- A rerun opens no span. Its carrier is the one that the configured
+  propagator injects for the caller's current context, with the trace id of
+  the current span; a current span that is not valid, or a propagator that
+  writes no key, gives `NO_TRACE_CARRIER`.
 - A call that returns `Err` sets the status ERROR and `error.type` to the
   error code; one that raises sets ERROR and `error.type` to the exception
   class. A success leaves the status unset.
@@ -161,6 +166,11 @@ class OtelSendRecorder:
             attributes=attributes,
         )
         return OtelWorkflowStart(span=span, trace=trace_of_span(span))
+
+    def current_trace(self) -> TraceArgument:
+        """The carrier of the caller's current context, for a rerun: the
+        carrier of its current span (`trace_of_span`). Opens no span."""
+        return trace_of_span(trace.get_current_span())
 
 
 @dataclass(frozen=True, slots=True)

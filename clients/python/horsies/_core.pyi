@@ -526,8 +526,9 @@ class NoTraceCarrier:
 @final
 class TraceCarrier:
     """The carrier that the client's propagator injected for the span of a send or a
-    workflow start, and the 16-byte trace id of that span. The core checks its bounds at
-    the send; a carrier that breaks a bound is not stored and never fails the send.
+    workflow start, or for the current span of the caller of a rerun, and the 16-byte trace
+    id of that span. The core checks its bounds at the send; a carrier that breaks a bound
+    is not stored and never fails the send.
     """
     def __init__(self, carrier: dict[str, str], trace_id: bytes) -> None: ...
     @property
@@ -2529,9 +2530,10 @@ class PruneFailed:
 @final
 class RerunCommandRecord:
     """One rerun request: the source task id, the deadline of the new task (aware, or None
-    for no deadline) and the caller key. A naive deadline raises TypeError.
+    for no deadline), the caller key, and the trace that the new task stores (NoTraceCarrier,
+    or the TraceCarrier of the caller's current context). A naive deadline raises TypeError.
     """
-    def __init__(self, *, source_task_id: uuid.UUID, deadline: datetime.datetime | None, caller_key: str | None) -> None: ...
+    def __init__(self, *, source_task_id: uuid.UUID, deadline: datetime.datetime | None, caller_key: str | None, trace: NoTraceCarrier | TraceCarrier) -> None: ...
 
 
 @final

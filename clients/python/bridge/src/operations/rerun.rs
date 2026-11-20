@@ -31,14 +31,16 @@ use uuid::Uuid;
 
 use crate::core_failures::FailureException;
 use crate::errors::{self, CoreDefect};
-use crate::operations::arguments::utc_instant;
+use crate::operations::arguments::{utc_instant, TraceArgument};
 use crate::process_core;
 use crate::IdMintRefused;
 
 /// The family of every rerun that this module prepares.
 const OWN_FAMILY: ClientFamily = ClientFamily::Python;
 
-/// One rerun request. A naive `deadline` raises `TypeError`.
+/// One rerun request. A naive `deadline` raises `TypeError`. `trace` is
+/// `NoTraceCarrier` or the `TraceCarrier` of the caller's current context;
+/// the new task stores it (`RerunTask::with_trace`).
 #[pyclass(module = "horsies._core", name = "RerunCommandRecord", frozen)]
 pub struct RerunCommandArgument {
     command: RerunTask,
@@ -47,18 +49,20 @@ pub struct RerunCommandArgument {
 #[pymethods]
 impl RerunCommandArgument {
     #[new]
-    #[pyo3(signature = (*, source_task_id, deadline, caller_key))]
+    #[pyo3(signature = (*, source_task_id, deadline, caller_key, trace))]
     fn new(
         source_task_id: Uuid,
         deadline: Option<&Bound<'_, PyAny>>,
         caller_key: Option<String>,
+        trace: TraceArgument<'_>,
     ) -> PyResult<Self> {
         let deadline = match deadline {
             Some(value) => Some(utc_instant(value)?),
             None => None,
         };
         Ok(Self {
-            command: RerunTask::new(source_task_id, deadline, caller_key),
+            command: RerunTask::new(source_task_id, deadline, caller_key)
+                .with_trace(trace.send_trace()),
         })
     }
 }

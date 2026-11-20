@@ -1,21 +1,23 @@
-"""The telemetry of the sends and the workflow starts of an app.
+"""The telemetry of the sends, the workflow starts and the reruns of an app.
 
 An app chooses its send telemetry once, from `AppConfig.tracing`
 (`send_telemetry_of`):
 
-- `NoTracing`: `NoSendTelemetry`. A send passes `NO_TRACE_CARRIER` to the
-  core; nothing imports `opentelemetry`.
+- `NoTracing`: `NoSendTelemetry`. A send and a rerun pass `NO_TRACE_CARRIER`
+  to the core; nothing imports `opentelemetry`.
 - `OtelTracing`: `OtelSendTelemetry`, whose recorder opens one span per task
   send (`send <task_name>`) and per workflow start (`start <workflow_name>`)
   with the OpenTelemetry API, injects the carrier with the configured
   propagator, and records the producer metrics of a task send
-  (`horsies.core.telemetry.producer`).
+  (`horsies.core.telemetry.producer`). A rerun opens no span: it passes the
+  carrier of the caller's current context (`current_context_trace`).
 
 `traced` and `traced_async` run one send or start inside its span. Telemetry
-never changes the outcome of a send: a recorder that raises when the span
-opens gives `NO_TRACE_CARRIER` and no span, and a recorder that raises when
-the span ends is logged once per process. The exceptions of the send itself
-pass through unchanged.
+never changes the outcome of a send or a rerun: a recorder that raises when
+the span opens, or when it injects the carrier of a rerun, gives
+`NO_TRACE_CARRIER` and no span, and a recorder that raises when the span
+ends is logged once per process. The exceptions of the send itself pass
+through unchanged.
 
 This module imports no `opentelemetry` module.
 """
@@ -105,7 +107,8 @@ class OpenSpan(Protocol):
 
 
 class SendRecorder(Protocol):
-    """Opens the spans of the sends and the starts of one app."""
+    """Opens the spans of the sends and the starts of one app, and gives the
+    carrier of a rerun."""
 
     def start_task_send(self, subject: TaskSendSubject) -> OpenSpan:
         """Open the span of the task send `subject`."""
@@ -113,6 +116,11 @@ class SendRecorder(Protocol):
 
     def start_workflow_start(self, subject: WorkflowStartSubject) -> OpenSpan:
         """Open the span of the workflow start `subject`."""
+        ...
+
+    def current_trace(self) -> TraceArgument:
+        """The carrier of the caller's current context, for a rerun, which
+        opens no span."""
         ...
 
 
@@ -146,6 +154,26 @@ def send_telemetry_of(tracing: OtelTracing | NoTracing) -> SendTelemetry:
             from horsies.core.telemetry.producer import otel_send_recorder
 
             return OtelSendTelemetry(recorder=otel_send_recorder())
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def current_context_trace(telemetry: SendTelemetry) -> TraceArgument:
+    """The trace of a call that opens no span (a rerun): `NO_TRACE_CARRIER`
+    for `NoSendTelemetry`; for `OtelSendTelemetry`, the carrier that the
+    configured propagator injects for the caller's current context, with
+    the trace id of its span (`NO_TRACE_CARRIER` with no valid span or no
+    key). A recorder that raises `Exception` gives `NO_TRACE_CARRIER`; that
+    failure is logged once per process. Imports no `opentelemetry` module."""
+    match telemetry:
+        case NoSendTelemetry():
+            return NO_TRACE_CARRIER
+        case OtelSendTelemetry(recorder=recorder):
+            try:
+                return recorder.current_trace()
+            except Exception as failure:
+                _RECORDER_FAILURES.report_rerun_carrier(failure)
+                return NO_TRACE_CARRIER
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -249,17 +277,34 @@ class _RecorderFailureLog:
         self._lock = threading.Lock()
         self._logged = False
 
-    def report(self, stage: str, failure: Exception) -> None:
+    def _first(self) -> bool:
+        """Whether no failure was logged before; marks one as logged."""
         with self._lock:
             first = not self._logged
             self._logged = True
-        match first:
+        return first
+
+    def report(self, stage: str, failure: Exception) -> None:
+        match self._first():
             case True:
                 _logger.warning(
                     'the OpenTelemetry recorder raised when a send span was '
                     'at the %s stage: %s: %s. The send goes on; this span is '
                     'not complete. Later failures are not logged.',
                     stage,
+                    type(failure).__qualname__,
+                    failure,
+                )
+            case False:
+                pass
+
+    def report_rerun_carrier(self, failure: Exception) -> None:
+        match self._first():
+            case True:
+                _logger.warning(
+                    'the OpenTelemetry recorder raised when it injected the '
+                    'carrier of a rerun: %s: %s. The rerun goes on; the new '
+                    'task stores no carrier. Later failures are not logged.',
                     type(failure).__qualname__,
                     failure,
                 )
