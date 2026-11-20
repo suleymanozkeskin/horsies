@@ -254,7 +254,42 @@ hooks = app.get_child_process_start_hooks()  # list[ChildProcessStartHook]
 async def open_clients() -> None: ...
 
 async_hooks = app.get_shared_async_child_start_hooks()  # list[SharedAsyncChildStartHook]
+
+# Event handler: a def or an async def function that takes one event type of
+# horsies.telemetry. The worker runs it in its handler child, never with tasks.
+from horsies.telemetry import AttemptEnded
+
+@app.on_event(AttemptEnded)
+def log_attempt_end(event: AttemptEnded) -> None: ...
+
+handlers = app.get_event_handlers()  # tuple[EventHandler, ...], registration order
+
+# Handler child hook: sync zero-arg fn, runs once at the boot of the handler
+# child, before its first event (set the OpenTelemetry SDK of the child here).
+@app.on_handler_child_start
+def configure_event_log() -> None: ...
+
+handler_hooks = app.get_handler_child_start_hooks()  # list[HandlerChildStartHook]
 ```
+
+`on_event` rules: one event type per handler; the union `AnyEvent`, a name or
+any other value is `HRS-222`. The handler is a function or a bound method that
+takes a call with one event, not a generator, and its event parameter names no
+other event type (`HRS-223`). Its name is `module.qualname`: once per app
+(`HRS-224`), at most 255 characters (`HRS-225`); at most 32 handlers
+(`HRS-226`). Delivery is best effort and never touches a task: one thread and
+one queue of 10,000 events per handler (an `async def` handler on the event
+loop of its thread); a full queue drops for that handler only; a handler that
+raises is counted and logged with its name, and gets the next event. The
+worker counts `horsies.telemetry.handler.errors{handler}` and
+`horsies.telemetry.handler.dropped{handler}`. At the stop the handlers get 2 s
+for the events left.
+
+`on_handler_child_start` rules: sync (`HRS-214` for an async function or a
+value that is not callable); deduped by identity; each hook at most 10 s. A
+hook that raises or hangs ends the handler child, which stays down until the
+worker restarts; the worker runs its tasks on. The `on_child_process_start`
+hooks do not run in the handler child. See website docs `workers/event-handlers`.
 
 `on_shared_async_child_start` rules: the call must return a coroutine, read
 without a call: an `async def` function, an object with an `async def`

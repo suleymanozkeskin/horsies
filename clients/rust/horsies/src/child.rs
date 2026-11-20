@@ -2,7 +2,9 @@
 //! and the start hooks of each child (`Horsies::on_child_start`).
 //!
 //! The worker starts this binary again with `--horsies-child <fd> <pid>` for
-//! every child, whatever the execution class of its tasks. Every line of
+//! every child, whatever the execution class of its tasks, and for its
+//! handler child, which runs the app's event handlers (`horsies::events`).
+//! Every line of
 //! `main` before the hand-over runs in each child too, as a Python child
 //! imports the app again: build the app, then hand over to horsies
 //! (`horsies::cli::run(app)`, or `child_mode` and `serve_child`).
@@ -13,7 +15,7 @@ use std::sync::Arc;
 
 use horsies_core::{
     run_child_host, ChildApp, ChildHookFailure, ChildLogSetup, ChildStartFuture, ChildStartHook,
-    ClientFamily, NamedChildStartHook,
+    ClientFamily, HandlerChildApp, NamedChildStartHook,
 };
 
 pub use horsies_core::{
@@ -48,7 +50,8 @@ impl Horsies {
     ///   the function that defines it), and gives the error's text.
     /// - Work that a hook starts and leaves running belongs to no task.
     ///
-    /// Only children run the hooks: the worker process, the scheduler and a
+    /// Only task children run the hooks: the worker process, the handler
+    /// child ([`Self::on_handler_child_start`]), the scheduler and a
     /// producer never call them.
     pub fn on_child_start<F, Fut, E>(&mut self, hook: F)
     where
@@ -56,16 +59,7 @@ impl Horsies {
         Fut: Future<Output = Result<(), E>> + Send + 'static,
         E: std::fmt::Display,
     {
-        self.add_child_start_hook(NamedChildStartHook {
-            name: std::any::type_name::<F>().to_owned(),
-            start: Box::new(move || -> ChildStartFuture {
-                Box::pin(async move {
-                    hook().await.map_err(|error| ChildHookFailure {
-                        cause: error.to_string(),
-                    })
-                })
-            }),
-        });
+        self.add_child_start_hook(named_start_hook(hook));
     }
 
     /// Serve as a worker child until the worker's stop frame or the end of
@@ -98,14 +92,39 @@ impl Horsies {
             log_setup,
             family: ClientFamily::Rust,
             body_scope: crate::telemetry::body_scope(),
+            handler_child: HandlerChildApp {
+                handlers: parts.event_handlers,
+                start_hook: start_hook_of(parts.handler_child_start_hooks),
+            },
         };
         ExitCode::from(exit_byte(run_child_host(app, args).code()))
     }
 }
 
+/// The start hook of `hook`, named by its type name (for a closure, the path
+/// of the function that defines it), whose error's text is the cause of a
+/// failure. Pure.
+pub(crate) fn named_start_hook<F, Fut, E>(hook: F) -> NamedChildStartHook
+where
+    F: FnOnce() -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<(), E>> + Send + 'static,
+    E: std::fmt::Display,
+{
+    NamedChildStartHook {
+        name: std::any::type_name::<F>().to_owned(),
+        start: Box::new(move || -> ChildStartFuture {
+            Box::pin(async move {
+                hook().await.map_err(|error| ChildHookFailure {
+                    cause: error.to_string(),
+                })
+            })
+        }),
+    }
+}
+
 /// The core's start hooks: `hooks` in registration order, each bounded by
 /// the core alone. No hook is `NoHook`. Pure.
-fn start_hook_of(hooks: Vec<ChildStartFn>) -> ChildStartHook {
+pub(crate) fn start_hook_of(hooks: Vec<ChildStartFn>) -> ChildStartHook {
     match hooks.is_empty() {
         true => ChildStartHook::NoHook,
         false => ChildStartHook::Run(hooks),
@@ -207,6 +226,8 @@ mod tests {
         assert!(parts.tasks.is_empty());
         assert!(parts.start_hooks.is_empty());
         assert_eq!(parts.producer_manifest, manifest);
+        assert!(parts.event_handlers.is_empty());
+        assert!(parts.handler_child_start_hooks.is_empty());
     }
 
     #[test]

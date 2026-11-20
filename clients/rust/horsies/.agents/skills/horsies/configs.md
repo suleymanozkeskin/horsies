@@ -174,7 +174,9 @@ fn with_profiles(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Err
 | `register_workflow_definition::<D>()`, `workflow_template::<D>()` | Registers a workflow definition (see `workflows.md`) |
 | `provide(value)` | Gives a value of type `T` to task bodies, which read it with `TaskRuntime::state::<T>()` |
 | `discover(registrars)` | Runs each `fn(&mut Horsies) -> Result<(), HorsiesError>` on the app in order; stops at the first refusal |
-| `on_child_start(hook)` | Runs an async hook once in every worker child |
+| `on_child_start(hook)` | Runs an async hook once in every task child |
+| `on_event::<E>(name, handler)`, `on_event_blocking::<E>(name, handler)` | Registers a handler of the events of type `E`; it runs in the worker's handler child (monitoring.md, Event Handlers) |
+| `on_handler_child_start(hook)` | Runs an async hook once in every handler child |
 | `task_runtime()` | The `TaskRuntime` that task bodies take |
 
 ```rust
@@ -199,8 +201,9 @@ fn register_hooks(app: &mut Horsies) -> Result<(), HorsiesError> {
 - A hook that returns an error, panics or runs past its bound ends the
   child with exit code 173. The worker stops with `CHILD_HOOK_FAILED`. The
   logged cause names the hook by its position and its type name.
-- Only worker children run the hooks: the worker process, the scheduler
-  and a producer never call them.
+- Only task children run the hooks: the worker process, the handler child,
+  the scheduler and a producer never call them. The handler child runs the
+  hooks of `on_handler_child_start` (see monitoring.md, Event Handlers).
 - Work that a hook starts and leaves running belongs to no task.
 
 ## Send Suppression and Role

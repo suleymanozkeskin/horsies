@@ -42,21 +42,18 @@ pub(crate) enum EndNoted {
     },
 }
 
-/// The start of a run that its child reported. The result frames of
-/// protocol version 2 carry no start time, so every reported run reads as
-/// `NotReported`. When the result frames carry `started_at`, this is the one
-/// place that takes it.
-fn reported_start() -> AttemptStart {
-    AttemptStart::NotReported
-}
-
 /// How a run that reached a child ended.
 #[derive(Debug, Clone, Copy)]
 enum RanEnd<'a> {
-    /// The child reported a result envelope.
-    Result(&'a ResultRead),
-    /// The worker code of the child failed.
-    WorkerFailure,
+    /// The child reported a result envelope, and the start `start` of the
+    /// attempt.
+    Result {
+        read: &'a ResultRead,
+        start: AttemptStart,
+    },
+    /// The worker code of the child failed; the child reported the start
+    /// `start`.
+    WorkerFailure { start: AttemptStart },
     /// The worker ended the attempt.
     Decided(WorkerDecision),
     /// The child was killed and its exit was not seen.
@@ -85,8 +82,8 @@ fn kind_of(end: EndView<'_>) -> EndKind<'_> {
     match end {
         EndView::NotDispatched(cause) => EndKind::NotDispatched(cause),
         EndView::StoppedBeforeRunning(reason) => EndKind::NotStarted(reason),
-        EndView::Result(read) => EndKind::Ran(RanEnd::Result(read)),
-        EndView::WorkerFailure => EndKind::Ran(RanEnd::WorkerFailure),
+        EndView::Result { read, start } => EndKind::Ran(RanEnd::Result { read, start }),
+        EndView::WorkerFailure { start } => EndKind::Ran(RanEnd::WorkerFailure { start }),
         EndView::TimedOut => EndKind::Ran(RanEnd::Decided(WorkerDecision::TimedOut)),
         EndView::KilledForLoop(code) => EndKind::Ran(RanEnd::Decided(loop_decision(code))),
         EndView::Crashed => EndKind::Ran(RanEnd::Decided(WorkerDecision::ChildLost)),
@@ -102,13 +99,13 @@ fn built_in(code: OperationalErrorCode) -> TaskErrorCode {
 /// How a run ended, as the event holds it.
 fn event_end(ran: RanEnd<'_>, trace: &RunTrace, placed: &Placed) -> events::AttemptEnd {
     match ran {
-        RanEnd::Result(read) => events::AttemptEnd::ReportedByChild {
+        RanEnd::Result { read, start } => events::AttemptEnd::ReportedByChild {
             result: child_result(read),
-            start: reported_start(),
+            start,
         },
-        RanEnd::WorkerFailure => events::AttemptEnd::ReportedByChild {
+        RanEnd::WorkerFailure { start } => events::AttemptEnd::ReportedByChild {
             result: ChildResult::WorkerFailure,
-            start: reported_start(),
+            start,
         },
         RanEnd::Decided(reason) => events::AttemptEnd::DecidedByWorker {
             reason,
@@ -279,14 +276,19 @@ impl TelemetryOn {
             RanOutcome::Known(TaskAttemptOutcome::Failed, self.code_label(task_name, code))
         };
         match ran {
-            RanEnd::Result(ResultRead::Value) => {
-                RanOutcome::Known(TaskAttemptOutcome::Completed, ErrorCodeValue::NO_ERROR_CODE)
-            }
-            RanEnd::Result(ResultRead::TaskError(code)) => failed(code),
-            RanEnd::Result(ResultRead::Unreadable) => {
-                failed(&built_in(OperationalErrorCode::WorkerSerializationError))
-            }
-            RanEnd::WorkerFailure => RanOutcome::Known(
+            RanEnd::Result {
+                read: ResultRead::Value,
+                ..
+            } => RanOutcome::Known(TaskAttemptOutcome::Completed, ErrorCodeValue::NO_ERROR_CODE),
+            RanEnd::Result {
+                read: ResultRead::TaskError(code),
+                ..
+            } => failed(code),
+            RanEnd::Result {
+                read: ResultRead::Unreadable,
+                ..
+            } => failed(&built_in(OperationalErrorCode::WorkerSerializationError)),
+            RanEnd::WorkerFailure { .. } => RanOutcome::Known(
                 TaskAttemptOutcome::WorkerFailure,
                 self.code_label(task_name, &built_in(OperationalErrorCode::BrokerError)),
             ),

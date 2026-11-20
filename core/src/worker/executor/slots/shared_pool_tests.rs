@@ -305,7 +305,12 @@ async fn a_shared_seat_reports_the_result_of_its_run() {
             Duration::from_secs(30)
         )
         .await,
-        AttemptEnd::Reported(RunEnd::Result(ok_envelope()))
+        AttemptEnd::Result {
+            envelope: ok_envelope(),
+            start: crate::events::AttemptStart::Reported {
+                started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            },
+        }
     );
 }
 
