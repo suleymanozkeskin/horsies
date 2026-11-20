@@ -121,7 +121,7 @@ mod tests {
             task_id,
             TaskWorkflowNode::Linked {
                 workflow_id,
-                node_index: WorkflowNodeIndex::try_from(3).unwrap(),
+                node_index: WorkflowNodeIndex::try_from(3).expect("3 is a node index"),
                 root_workflow_id,
             },
         );
