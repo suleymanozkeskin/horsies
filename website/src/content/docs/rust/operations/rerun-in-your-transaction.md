@@ -124,6 +124,10 @@ pub trait CallerTransaction: Send {
 
 `query_one` runs `statement.sql()` with `statement.parameters()` (each a `StatementValue`) in the transaction, and returns its one row as `CallerRow::new(values)`: one `StatementValue` per `statement.columns()` entry, decoded as the declared `CallerType`, SQL `NULL` as `StatementValue::Null`. It does not commit.
 
+## Trace Carrier
+
+With the feature `otel`, both calls hand the core the trace carrier that the global propagator injects for the caller's current OpenTelemetry context, with its trace id, as a send does. The new task stores it, so the attempt spans of the rerun are children of the caller's span. A rerun opens no span of its own. Without the feature, or with no valid span in the current context, the new task stores no carrier. The carrier of the source task is never copied. See [Tracing Setup](/horsies/rust/observability/tracing-setup/).
+
 ## RerunTask
 
 `RerunTask::new(source_task_id, deadline, caller_key)`:

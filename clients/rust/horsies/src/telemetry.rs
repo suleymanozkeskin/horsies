@@ -10,11 +10,11 @@
 //!   producer metrics go to the user's global OpenTelemetry providers
 //!   (`horsies::otel`).
 //! - Without it, the client records no OpenTelemetry span and no metric: a
-//!   send and a start carry no trace carrier, and no OpenTelemetry crate is
-//!   compiled.
+//!   send, a start and a rerun carry no trace carrier, and no OpenTelemetry
+//!   crate is compiled.
 //!
-//! The send paths call the same three items in both builds: `TaskSendSpan`,
-//! `WorkflowStartSpan` and `body_scope`. The handler child calls
+//! The send paths call the same four items in both builds: `TaskSendSpan`,
+//! `WorkflowStartSpan`, `rerun_trace` and `body_scope`. The handler child calls
 //! `ended_span_scope` with the worker-ended span switch of the app, whose
 //! default is `DEFAULT_WORKER_ENDED_SPANS`.
 
@@ -23,10 +23,14 @@ use horsies_core::BodyRun;
 use uuid::Uuid;
 
 #[cfg(feature = "otel")]
-pub(crate) use crate::otel::{body_scope, ended_span_scope, TaskSendSpan, WorkflowStartSpan};
+pub(crate) use crate::otel::{
+    body_scope, ended_span_scope, rerun_trace, TaskSendSpan, WorkflowStartSpan,
+};
 
 #[cfg(not(feature = "otel"))]
-pub(crate) use untraced::{body_scope, ended_span_scope, TaskSendSpan, WorkflowStartSpan};
+pub(crate) use untraced::{
+    body_scope, ended_span_scope, rerun_trace, TaskSendSpan, WorkflowStartSpan,
+};
 
 /// The worker-ended span switch of a new app with the feature `otel`: the
 /// handler child makes the span of each attempt that the worker ended
@@ -159,6 +163,11 @@ mod untraced {
         pub(crate) fn end(self, _end: CallEnd<WorkflowStartErrorCode>) {}
     }
 
+    /// A rerun carries no trace carrier.
+    pub(crate) fn rerun_trace() -> SendTrace {
+        SendTrace::NoCarrier
+    }
+
     /// A worker child runs each task body inside its [`body_span`].
     pub(crate) fn body_scope() -> BodyScope {
         BodyScope::Spans(Arc::new(BodyLogSpans))
@@ -210,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn without_the_otel_feature_a_send_and_a_start_carry_no_trace() {
+    fn without_the_otel_feature_a_send_a_start_and_a_rerun_carry_no_trace() {
         let send = TaskSendSpan::open(&TaskSendSubject {
             task_id: Uuid::new_v4(),
             task_name: "send_invoice",
@@ -224,6 +233,7 @@ mod tests {
         });
         assert_eq!(start.trace(), SendTrace::NoCarrier);
         start.end(CallEnd::Failed(WorkflowStartErrorCode::EnqueueFailed));
+        assert_eq!(rerun_trace(), SendTrace::NoCarrier);
     }
 
     /// A writer whose bytes go to one shared buffer.
