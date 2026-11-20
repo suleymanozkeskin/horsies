@@ -159,7 +159,7 @@ fn add_hooks(app: &mut Horsies) {
 - Hooks run in registration order. The first failure ends the rest.
 - Each hook runs for at most `CHILD_START_HOOK_BOUND` (10 s).
 - A hook that returns an error, panics or runs past its bound ends the child with exit code 173 (`ChildHostExit::ChildHookFailed`). The worker stops with `CHILD_HOOK_FAILED`. The logged cause names the hook by its position and its type name.
-- Only worker children run the hooks: the worker process, the scheduler and a producer never call them.
+- Only task children run the hooks: the worker process, the handler child, the scheduler and a producer never call them. The handler child runs the hooks of `on_handler_child_start` ([Event Handlers](/horsies/rust/monitoring/event-handlers/#handler-child-start-hooks)).
 - Work that a hook starts and leaves running belongs to no task.
 
 To give task bodies a value that each child builds, use `provide` in `main`: every child runs `main` again. See [App Config](/horsies/rust/configuration/app-config/#registration-and-state).

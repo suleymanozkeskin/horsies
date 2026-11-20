@@ -86,11 +86,14 @@ pub enum Instance {
     /// The schedules of the scheduler tests (Python
     /// `instance_scheduler.py`).
     Scheduler,
+    /// The tasks of [`Instance::Default`] and the event handlers of
+    /// [`crate::handlers`]: a worker of it starts a handler child.
+    Handlers,
 }
 
 impl Instance {
     /// Every instance.
-    pub const ALL: [Instance; 7] = [
+    pub const ALL: [Instance; 8] = [
         Instance::Default,
         Instance::CustomQueues,
         Instance::ClusterCap,
@@ -98,6 +101,7 @@ impl Instance {
         Instance::SoftCap,
         Instance::RecoveryQueues,
         Instance::Scheduler,
+        Instance::Handlers,
     ];
 
     /// The value of [`INSTANCE_ENV`].
@@ -110,6 +114,7 @@ impl Instance {
             Self::SoftCap => "soft_cap",
             Self::RecoveryQueues => "recovery_queues",
             Self::Scheduler => "scheduler",
+            Self::Handlers => "handlers",
         }
     }
 
@@ -140,7 +145,8 @@ impl Instance {
             | Self::Recovery
             | Self::SoftCap
             | Self::RecoveryQueues
-            | Self::Scheduler => "default",
+            | Self::Scheduler
+            | Self::Handlers => "default",
         }
     }
 
@@ -179,6 +185,7 @@ impl Instance {
                 config.recovery = fast_recovery();
             }
             Self::Scheduler => config.schedule = Some(schedules()),
+            Self::Handlers => {}
         }
         config
     }

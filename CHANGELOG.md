@@ -1710,6 +1710,31 @@ unless it starts with "Added".
   1 when the config does not build a handle or the address does not bind.
   `horsies::web::router` serves `GET /metrics` too, behind the view
   verdict.
+- **Added: event handlers, `horsies::events`.** The module re-exports the
+  core's event types (`TaskClaimed`, `ClaimReleased`, `AttemptPlaced`,
+  `AttemptNotStarted`, `AttemptEnded`, `AttemptRecorded`, `TaskRecovered`,
+  `ChildStarted`, `ChildReplaced`, `SlotDown`, `SlotRecovered`) and their
+  value types. `Horsies::on_event::<E>(name, handler)` registers an async
+  handler of the events of type `E` (`AsyncFn(E) -> Result<(),
+  HandlerError>`), `on_event_blocking::<E>(name, handler)` a blocking one
+  (`Fn(E) -> Result<(), HandlerError>`). The worker manifest names each
+  handler and its type, so a worker of an app with a handler starts its
+  handler child: the binary in child mode, which runs each handler on a
+  thread of its own (an async handler on a current-thread runtime of that
+  thread) with a queue of `HANDLER_QUEUE_EVENTS` (10,000) events. A full
+  queue drops the event for that handler and counts it; a returned
+  `HandlerError` or a panic is counted and logged with the handler's name
+  (the first, then one line per `HANDLER_ERROR_LOG_EVERY`, 1,000), and the
+  handler takes its next event. The child reports the counts every
+  `HANDLER_STATS_INTERVAL` (5 s) in `horsies.telemetry.handler.errors` and
+  `horsies.telemetry.handler.dropped`, and at the stop gives the handlers
+  `HANDLER_DRAIN` (2 s) for their queues. A name is 1 to 255 characters,
+  not `(unknown)` and once per app; an app takes at most 32 handlers; a
+  refusal is a `HorsiesError`. `Horsies::on_handler_child_start(hook)`
+  runs a hook once in each handler child before its handlers start, 10 s
+  per hook; a failure ends the handler child with exit code 173, and the
+  worker keeps it down and runs on. The hooks of `on_child_start` run in
+  task children only.
 
 ## [0.7.0] - 2026-11-15
 
