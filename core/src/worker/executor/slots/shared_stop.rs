@@ -28,7 +28,6 @@
 
 use uuid::Uuid;
 
-use super::dispatch::BodyReturn;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::worker::executor::protocol::{BlockedWhere, DispatchNumber, RunRef};
 
@@ -86,10 +85,6 @@ pub enum KilledRunVerdict {
         holder_task_id: Uuid,
         blocked_ms: u64,
     },
-    /// The body of this run returned `returned` before its deadline, and the
-    /// work it left was stuck: the end is what it returned, with the start
-    /// of the attempt.
-    ReturnedBeforeKill { returned: BodyReturn },
 }
 
 /// The verdict at a kill, or the crash path for a run the kill names no
