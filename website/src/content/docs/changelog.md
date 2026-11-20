@@ -69,6 +69,19 @@ before you upgrade a 0.7 deployment.
   the user's OpenTelemetry SDK never changes the outcome of a send.
   `PostgresBroker.enqueue` and `enqueue_async` take `trace=`
   (`TraceCarrier` or the default `NO_TRACE_CARRIER`).
+- **`app.rerun_task` and `app.rerun_task_async`: a rerun with the trace of
+  the caller.** `app.rerun_task_async(connection, command, policy)` runs
+  `rerun_task` on the caller's `AsyncConnection` with the tracing setting
+  of the app; `app.rerun_task` takes a blocking SQLAlchemy `Connection`.
+  Both return a `RerunOutcome` and raise as `rerun_task`. With
+  `OtelTracing()`, the new task stores the carrier that the configured
+  propagator injects for the caller's current context, with its trace id,
+  so the attempt spans of the new task are children of the caller's span.
+  The rerun opens no span and records no metric. Outside a valid span, or
+  with `NoTracing()`, the new task stores no carrier; `NoTracing()` imports
+  no `opentelemetry` module. The free `rerun_task` stores no carrier.
+  `horsies._core.RerunCommandRecord` takes a required `trace=`
+  (`NoTraceCarrier` or `TraceCarrier`).
 - **The span and the log context of each attempt.** With `OtelTracing()`,
   a worker child runs the steps of each attempt after its RUNNING update
   inside one span of kind CONSUMER, `run <task_name>`. The span is the

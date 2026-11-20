@@ -44,7 +44,20 @@ from horsies.core.exception_mapper import (
     validate_exception_mapper,
     validate_error_code_string,
 )
-from horsies.core.telemetry.send_telemetry import SendTelemetry, send_telemetry_of
+from horsies.core.telemetry.send_telemetry import (
+    SendTelemetry,
+    current_context_trace,
+    send_telemetry_of,
+)
+from horsies.core.history.rerun.operations import (
+    RerunEnqueuePolicy,
+    RerunOutcome,
+    RerunTask,
+    rerun_with_trace,
+    rerun_with_trace_async,
+)
+from sqlalchemy import Connection
+from sqlalchemy.ext.asyncio import AsyncConnection
 from horsies.core.declared_error_codes import (
     NO_ERROR_CODES,
     CodeRefusal,
@@ -1739,6 +1752,48 @@ class Horsies:
         `NoSendTelemetry`, or `OtelSendTelemetry` with its recorder
         (`horsies.core.telemetry.send_telemetry`). Pure."""
         return self._send_telemetry
+
+    async def rerun_task_async(
+        self,
+        connection: AsyncConnection,
+        command: RerunTask,
+        policy: RerunEnqueuePolicy,
+    ) -> RerunOutcome:
+        """``horsies.rerun_task`` with the tracing setting of this app: the
+        same statements on ``connection``, in its transaction, with the same
+        outcomes and errors. It does not commit.
+
+        With ``OtelTracing`` the new task stores the carrier that the
+        configured propagator injects for the caller's current context, with
+        the trace id of its span, so the attempts of the new task are
+        children of the caller's span. The rerun opens no span and records no
+        metric. With no valid span in the current context, or with
+        ``NoTracing``, the new task stores no carrier; ``NoTracing`` imports
+        no ``opentelemetry`` module. A failure of the user's OpenTelemetry
+        SDK never changes the outcome of the rerun.
+        """
+        return await rerun_with_trace_async(
+            connection,
+            command,
+            policy,
+            current_context_trace(self._send_telemetry),
+        )
+
+    def rerun_task(
+        self,
+        connection: Connection,
+        command: RerunTask,
+        policy: RerunEnqueuePolicy,
+    ) -> RerunOutcome:
+        """``rerun_task_async`` on a blocking SQLAlchemy ``Connection`` of the
+        caller: the same statements in its transaction, the same trace
+        carrier, outcomes and errors. It does not commit."""
+        return rerun_with_trace(
+            connection,
+            command,
+            policy,
+            current_context_trace(self._send_telemetry),
+        )
 
     def get_broker(self) -> 'PostgresBroker':
         """Get the configured PostgreSQL broker for this app.

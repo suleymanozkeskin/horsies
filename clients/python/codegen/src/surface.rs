@@ -1328,7 +1328,7 @@ const ARGUMENT_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "TraceCarrier",
-        doc: "The carrier that the client's propagator injected for the span of a send or a\nworkflow start, and the 16-byte trace id of that span. The core checks its bounds at\nthe send; a carrier that breaks a bound is not stored and never fails the send.",
+        doc: "The carrier that the client's propagator injected for the span of a send or a\nworkflow start, or for the current span of the caller of a rerun, and the 16-byte trace\nid of that span. The core checks its bounds at the send; a carrier that breaks a bound\nis not stored and never fails the send.",
         constructor: Constructor::Parameters(TRACE_CARRIER_PARAMETERS),
         properties: &[
             property("carrier", "dict[str, str]"),
@@ -3151,8 +3151,8 @@ const HISTORY_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "RerunCommandRecord",
-        doc: "One rerun request: the source task id, the deadline of the new task (aware, or None\nfor no deadline) and the caller key. A naive deadline raises TypeError.",
-        constructor: Constructor::Parameters(&[keyword("source_task_id", "uuid.UUID"), keyword("deadline", "datetime.datetime | None"), keyword("caller_key", "str | None")]),
+        doc: "One rerun request: the source task id, the deadline of the new task (aware, or None\nfor no deadline), the caller key, and the trace that the new task stores (NoTraceCarrier,\nor the TraceCarrier of the caller's current context). A naive deadline raises TypeError.",
+        constructor: Constructor::Parameters(&[keyword("source_task_id", "uuid.UUID"), keyword("deadline", "datetime.datetime | None"), keyword("caller_key", "str | None"), keyword("trace", "NoTraceCarrier | TraceCarrier")]),
         properties: &[],
         methods: &[],
     },

@@ -1,5 +1,6 @@
 """The spans of the task sends and the workflow starts, the carrier that the
-core gets, and the producer metrics (`AppConfig(tracing=OtelTracing())`).
+core gets (of a rerun too), and the producer metrics
+(`AppConfig(tracing=OtelTracing())`).
 
 The recorder is built on an SDK tracer provider with an in-memory span
 exporter and an SDK meter provider with an in-memory reader, so no global
@@ -62,6 +63,7 @@ from horsies.core.telemetry.send_telemetry import (
     TaskSendSubject,
     TraceArgument,
     WorkflowStartSubject,
+    current_context_trace,
 )
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.workflows.lifecycle import start_workflow, start_workflow_async
@@ -466,6 +468,55 @@ class TestWorkflowStartSpan:
             assert isinstance(_trace_of(request_class.call_args.kwargs), core.NoTraceCarrier)
 
 
+class TestRerunCarrier:
+    def test_a_rerun_gets_the_carrier_of_the_current_span_and_opens_no_span(
+        self,
+        otel: Otel,
+    ) -> None:
+        caller = otel.tracer_provider.get_tracer('caller')
+        with caller.start_as_current_span('request') as parent:
+            trace = current_context_trace(otel.telemetry)
+            parent_context = parent.get_span_context()
+
+        assert isinstance(trace, core.TraceCarrier)
+        request = otel.one_span()
+        assert request.name == 'request'
+        assert trace.carrier == {'traceparent': _traceparent(request)}
+        assert trace.trace_id == parent_context.trace_id.to_bytes(16, 'big')
+
+    def test_the_configured_propagator_writes_the_rerun_carrier(self, otel: Otel) -> None:
+        caller = otel.tracer_provider.get_tracer('caller')
+        previous = propagate.get_global_textmap()
+        propagate.set_global_textmap(_SpanIdPropagator())
+        try:
+            with caller.start_as_current_span('request') as parent:
+                trace = current_context_trace(otel.telemetry)
+                parent_context = parent.get_span_context()
+        finally:
+            propagate.set_global_textmap(previous)
+
+        assert isinstance(trace, core.TraceCarrier)
+        assert trace.carrier == {_SpanIdPropagator.KEY: f'{parent_context.span_id:016x}'}
+
+    def test_a_rerun_outside_a_span_gets_no_carrier(self, otel: Otel) -> None:
+        assert isinstance(current_context_trace(otel.telemetry), core.NoTraceCarrier)
+
+    def test_with_tracing_off_a_rerun_gets_no_carrier(self, otel: Otel) -> None:
+        caller = otel.tracer_provider.get_tracer('caller')
+        with caller.start_as_current_span('request'):
+            trace = current_context_trace(NO_SEND_TELEMETRY)
+
+        assert isinstance(trace, core.NoTraceCarrier)
+
+    def test_a_recorder_that_raises_gives_a_rerun_no_carrier(self, otel: Otel) -> None:
+        telemetry = OtelSendTelemetry(recorder=_RaisingRecorder(at_open=True))
+        caller = otel.tracer_provider.get_tracer('caller')
+        with caller.start_as_current_span('request'):
+            trace = current_context_trace(telemetry)
+
+        assert isinstance(trace, core.NoTraceCarrier)
+
+
 class _BrokerDefect(Exception):
     """A defect that the fake broker raises."""
 
@@ -511,7 +562,7 @@ class _RaisingSpan:
 @dataclass(frozen=True)
 class _RaisingRecorder:
     """A recorder that raises when it opens a span (`at_open`), or whose
-    spans raise when they end."""
+    spans raise when they end. Its rerun carrier raises."""
 
     at_open: bool
 
@@ -527,3 +578,6 @@ class _RaisingRecorder:
 
     def start_workflow_start(self, subject: WorkflowStartSubject) -> OpenSpan:
         return self._open()
+
+    def current_trace(self) -> TraceArgument:
+        raise RuntimeError('propagator failed')
