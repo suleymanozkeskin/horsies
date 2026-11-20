@@ -31,6 +31,7 @@ use super::shared_stop::{
 };
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::child_writes::LONGEST_REFUSAL_WRITES_BOUND;
+use crate::events::AttemptStart;
 use crate::worker::executor::protocol::{
     CancelGraceMs, DispatchNumber, FailureDetail, LeftoverCancelFrame, LeftoverStuckFrame,
     LoopBlockedFrame, LoopCulprit, RssReading, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame,
@@ -364,12 +365,14 @@ impl<P> SeatRuns<P> {
                     timeout,
                     retry: retry_after_timeout(report),
                     cancel: TimeoutCancel::Ended(cancel_end_of(report)),
+                    start: frame.started_at,
                 }
             }
             (SeatEnd::TimedOut, report, RunWork::ThreadTask { timeout }) => AttemptEnd::TimedOut {
                 timeout,
                 retry: retry_after_timeout(report),
                 cancel: TimeoutCancel::NoSignal,
+                start: frame.started_at,
             },
         };
         let seat = self
@@ -686,19 +689,22 @@ fn cancel_end_of(report: &RunStopReport) -> CancelEnd {
 }
 
 /// The `TASK_TIMEOUT` end of a run with a deadline whose child the worker
-/// killed: an async run records `KilledWithChild`. A refusal has none, and
-/// the report rules never give it one: a defect, which crashes loud.
+/// killed: an async run records `KilledWithChild`. The child reported no
+/// start for it. A refusal has none, and the report rules never give it
+/// one: a defect, which crashes loud.
 fn timed_out(work: RunWork, run: RunRef, retry: RetryPlacement) -> AttemptEnd {
     match work {
         RunWork::AsyncTask { timeout, .. } => AttemptEnd::TimedOut {
             timeout,
             retry,
             cancel: TimeoutCancel::Ended(CancelEnd::KilledWithChild),
+            start: AttemptStart::NotReported,
         },
         RunWork::ThreadTask { timeout } => AttemptEnd::TimedOut {
             timeout,
             retry,
             cancel: TimeoutCancel::NoSignal,
+            start: AttemptStart::NotReported,
         },
         RunWork::Refusal => unreachable!(
             "the refused task {} ended at a deadline it does not have",
@@ -741,7 +747,6 @@ fn verdict_end(
                 loss.killed_by()
             )),
         },
-        KilledRunVerdict::ReturnedBeforeKill { returned } => AttemptEnd::returned(returned),
     }
 }
 

@@ -93,7 +93,7 @@ pub use child_frames::{
     HandlerCountsList, HandlerStatsFrame, LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame,
     LeftoverCancelFrame, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit, NoLeftWork, ReadyFrame,
     ReportedBootCause, ResultFrame, RunEnd, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame,
-    ShortageErrno, StopReason,
+    ShortageErrno, SpanReadCounts, StopReason,
 };
 pub use event_batch::{EventBatch, EventCountOutOfBounds, WireEvent, WireEventRefusal};
 pub use exit_codes::{

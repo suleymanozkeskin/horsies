@@ -82,6 +82,12 @@ pub use crate::broker::{
     WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
+// The node read of a task by its id: the workflow facts of the span of an
+// attempt that the worker ended, read in the handler child.
+pub use crate::broker::{
+    TaskWorkflowNode, TASK_WORKFLOW_NODE_CHECKOUT_WAIT, TASK_WORKFLOW_NODE_READ_END,
+    TASK_WORKFLOW_NODE_STATEMENT_BOUND,
+};
 // The bounded limit of a result wait; a client checks it before the read.
 pub use crate::broker::wait_limit::{BoundedWait, WaitLimit, WaitLimitRefused, MAX_WAIT_LIMIT_MS};
 
@@ -141,17 +147,19 @@ pub use crate::worker::finalize_batch::{
 // cancel signal of their run with `run_cancel_signal`. A result wait reads
 // `process_role` first: a process that runs task bodies refuses it. The
 // event handlers of the app (`EventHandlerSet`) run in the handler child of
-// the same binary (`HandlerChildApp`).
+// the same binary (`HandlerChildApp`), which also makes the span of each
+// attempt that the worker ended through the client's `EndedSpanMaker`.
 pub use crate::worker::executor::child_host::{
     child_command, child_handle_setup, child_mode, child_producer, process_role, run_cancel_signal,
     run_child_host, spawn_in_run, thread_role, wait_inside_task_message, BodyCarrier, BodyOutcome,
     BodyRun, BodyScope, BodySpans, ChildApp, ChildArgs, ChildArgsError, ChildHandleSetup,
     ChildHookFailure, ChildHostExit, ChildLogSetup, ChildMode, ChildProducer, ChildStartFuture,
-    ChildStartHook, EventHandlerRefused, EventHandlerSet, HandlerChildApp, HandlerChildHasNoHandle,
-    HandlerError, NamedChildStartHook, ProcessRole, RunCancelSignal, RunSignalRefused,
-    RunSpawnRefused, ThreadRole, CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND, HANDLER_DRAIN,
+    ChildStartHook, EndedAttempt, EndedSpanMaker, EndedSpanScope, EndedWorkflow,
+    EventHandlerRefused, EventHandlerSet, HandlerChildApp, HandlerChildHasNoHandle, HandlerError,
+    NamedChildStartHook, ProcessRole, RunCancelSignal, RunSignalRefused, RunSpawnRefused,
+    ThreadRole, CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND, HANDLER_DRAIN,
     HANDLER_ERROR_LOG_EVERY, HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS,
-    HANDLER_STATS_INTERVAL, MAX_RUN_WORK,
+    HANDLER_STATS_INTERVAL, MAX_RUN_WORK, NODE_READER_STOP_BOUND, NODE_READ_QUEUE_SPANS,
 };
 
 // The parent-child frame codec, for the Python child program and the

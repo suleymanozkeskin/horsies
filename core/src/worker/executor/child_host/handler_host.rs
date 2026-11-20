@@ -12,23 +12,33 @@
 //! 4. the writer and the control thread of the socket;
 //! 5. the ready frame.
 //!
-//! Service: each event of an `events` frame is decoded on its own, and goes
-//! to the queue of each handler of its type with no wait. An event that
+//! Service: each event of an `events` frame is decoded on its own. The span
+//! step of an attempt that the worker ended comes first
+//! ([`StartedSpans::step`]: the span of a plain task is made; the span of a
+//! workflow task goes to the queue of the reader task, which reads its
+//! node), then the event goes to the queue of each handler of its type. The
+//! dispatch never waits for a handler or for the database. An event that
 //! does not decode is logged and reaches no handler. A `handler_stats`
 //! frame goes out every [`HANDLER_STATS_INTERVAL`]. A run frame or a second
 //! init frame ends the child with the bad-frame code.
 //!
-//! Stop frame: the queues close; the handlers get [`HANDLER_DRAIN`] to take
-//! the events of their queues; the last `handler_stats` frame is written
+//! Stop frame: the queues close; the handlers and the reader task get
+//! [`HANDLER_DRAIN`] together for the events and the spans left; each span
+//! still waiting for its node is made with no node within
+//! [`NODE_READER_STOP_BOUND`]; the last `handler_stats` frame is written
 //! within [`HANDLER_LAST_STATS_BOUND`]; the child exits 0.
+//!
+//! [`NODE_READER_STOP_BOUND`]: super::ended_spans::NODE_READER_STOP_BOUND
 
 use std::io;
 use std::num::NonZeroUsize;
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 
+use super::ended_spans::{EndedSpans, SpanReadFailures, StartedSpans, NODE_READ_QUEUE_SPANS};
 use super::handlers::{
     HandlerChildApp, HandlerTallies, RunningHandlers, HANDLER_DRAIN, HANDLER_ERROR_LOG_EVERY,
     HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS, HANDLER_STATS_INTERVAL,
@@ -47,8 +57,9 @@ use crate::worker::executor::protocol::{
 };
 
 /// The runtime threads of a handler child: the dispatch of the events, the
-/// `handler_stats` frames, and the connections of the producer handle. The
-/// handlers run on threads of their own.
+/// `handler_stats` frames, the reader task of the workflow nodes of spans,
+/// and the connections of the producer handle. The handlers run on threads
+/// of their own.
 const HANDLER_RUNTIME_THREADS: NonZeroUsize = match NonZeroUsize::new(2) {
     Some(threads) => threads,
     None => panic!("2 is not zero"),
@@ -68,7 +79,8 @@ pub(super) struct HandlerChildTimes {
     /// The interval of the `handler_stats` frames.
     pub(super) stats_every: Duration,
     /// After the stop frame: the longest wait for the handlers to take the
-    /// events of their queues.
+    /// events of their queues, and for the reader task to make the spans
+    /// of its queue.
     pub(super) drain: Duration,
     /// After the drain: the longest wait for the write of the last
     /// `handler_stats` frame.
@@ -110,6 +122,7 @@ pub(super) fn boot_and_serve_handlers_on(
     let HandlerChildApp {
         handlers,
         start_hook,
+        ended_spans,
     } = app;
     if let Err(exit) = run_start_hook(
         runtime,
@@ -139,8 +152,10 @@ pub(super) fn boot_and_serve_handlers_on(
         pid,
         rss: read_rss(),
     }));
+    let ended_spans = EndedSpans::of_this_process(ended_spans);
     let end = runtime.block_on(serve_handlers(
         running,
+        &ended_spans,
         writer,
         &mut frames,
         HandlerChildTimes::CHILD,
@@ -165,24 +180,31 @@ fn start_links(
 }
 
 /// Serve a ready handler child: the events of the parent frames go to the
-/// handlers of `running`, and a `handler_stats` frame goes out each
+/// handlers of `running`, after the span step of `ended_spans` for an
+/// attempt that the worker ended, and a `handler_stats` frame goes out each
 /// `times.stats_every`, until the stop frame, the end of the control thread
 /// or a frame that a handler child does not take. After the stop frame the
-/// handlers get `times.drain`, and the last `handler_stats` frame is
-/// written within `times.last_stats`.
+/// handlers and the reader task of the spans get `times.drain` together,
+/// and the last `handler_stats` frame is written within `times.last_stats`.
 pub(super) async fn serve_handlers(
     running: RunningHandlers,
+    ended_spans: &EndedSpans,
     writer: FrameWriter,
     frames: &mut mpsc::Receiver<ParentFrame>,
     times: HandlerChildTimes,
 ) -> ServeEnd {
     let tallies = running.tallies();
+    let read_failures = ended_spans.read_failures();
     let stats = tokio::spawn(send_stats_every(
         writer.clone(),
-        tallies.clone(),
+        Counts {
+            tallies: tallies.clone(),
+            read_failures: Arc::clone(&read_failures),
+        },
         times.stats_every,
     ));
-    let end = dispatch_frames(&running, frames).await;
+    let spans = ended_spans.start(NODE_READ_QUEUE_SPANS);
+    let end = dispatch_frames(&running, &spans, frames).await;
     stats.abort();
     // The task ends at an await, so no stats frame of it follows the last
     // one.
@@ -193,8 +215,12 @@ pub(super) async fn serve_handlers(
     }
     match end {
         ServeEnd::Stopped => {
-            let _drained = running.stop(times.drain).await;
-            send_last_stats(&writer, &tallies, times.last_stats).await;
+            let ((), _drained) = tokio::join!(spans.stop(times.drain), running.stop(times.drain));
+            let counts = Counts {
+                tallies,
+                read_failures,
+            };
+            send_last_stats(&writer, &counts, times.last_stats).await;
             ServeEnd::Stopped
         }
         ServeEnd::BadParentFrame | ServeEnd::ParentGone => end,
@@ -202,9 +228,11 @@ pub(super) async fn serve_handlers(
 }
 
 /// Take the parent frames until the stop frame, the end of the control
-/// thread, or a frame that a handler child does not take.
+/// thread, or a frame that a handler child does not take. Each decoded
+/// event gets its span step first, then goes to the handlers.
 async fn dispatch_frames(
     running: &RunningHandlers,
+    spans: &StartedSpans,
     frames: &mut mpsc::Receiver<ParentFrame>,
 ) -> ServeEnd {
     let mut undecoded: u64 = 0;
@@ -215,7 +243,10 @@ async fn dispatch_frames(
             Some(ParentFrame::Events(frame)) => {
                 for text in frame.events.events() {
                     match decode_wire_event(text) {
-                        Ok(event) => running.offer(&event),
+                        Ok(event) => {
+                            let _step = spans.step(&event);
+                            running.offer(&event);
+                        }
                         Err(refusal) => {
                             undecoded = undecoded.saturating_add(1);
                             log_undecoded(undecoded, &refusal);
@@ -267,29 +298,37 @@ fn log_undecoded(count: u64, refusal: &UndecodedEvent) {
     }
 }
 
-/// The `handler_stats` frame of `tallies` now.
-fn stats_frame(tallies: &HandlerTallies) -> ChildFrame {
+/// The totals that a `handler_stats` frame carries: those of each handler,
+/// and the spans made with no workflow node.
+struct Counts {
+    tallies: HandlerTallies,
+    read_failures: Arc<SpanReadFailures>,
+}
+
+/// The `handler_stats` frame of `counts` now.
+fn stats_frame(counts: &Counts) -> ChildFrame {
     ChildFrame::HandlerStats(HandlerStatsFrame {
-        handlers: tallies.counts(),
+        handlers: counts.tallies.counts(),
+        span_reads: counts.read_failures.counts(),
         rss: read_rss(),
     })
 }
 
-/// Send a `handler_stats` frame of `tallies` each `every`, the first one
+/// Send a `handler_stats` frame of `counts` each `every`, the first one
 /// `every` after the start. Runs until it is aborted.
-async fn send_stats_every(writer: FrameWriter, tallies: HandlerTallies, every: Duration) {
+async fn send_stats_every(writer: FrameWriter, counts: Counts, every: Duration) {
     let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let _tick = ticks.tick().await;
-        writer.send(stats_frame(&tallies)).await;
+        writer.send(stats_frame(&counts)).await;
     }
 }
 
-/// Write the last `handler_stats` frame of `tallies`, at most `bound`.
-async fn send_last_stats(writer: &FrameWriter, tallies: &HandlerTallies, bound: Duration) {
+/// Write the last `handler_stats` frame of `counts`, at most `bound`.
+async fn send_last_stats(writer: &FrameWriter, counts: &Counts, bound: Duration) {
     let written = tokio::time::timeout(bound, async {
-        writer.send(stats_frame(tallies)).await;
+        writer.send(stats_frame(counts)).await;
         writer.flush().await
     })
     .await;

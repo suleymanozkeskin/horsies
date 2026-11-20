@@ -187,6 +187,7 @@ pub enum ReadEnd {
         timeout: TaskTimeoutMs,
         retry: RetryPlacement,
         cancel: TimeoutCancel,
+        start: AttemptStart,
     },
     KilledForLoop {
         code: LoopKillCode,
@@ -217,8 +218,8 @@ pub enum EndView<'a> {
     /// The worker code of the child failed; the child reported the start
     /// `start`.
     WorkerFailure { start: AttemptStart },
-    /// The deadline decided.
-    TimedOut,
+    /// The deadline decided; the child reported the start `start`.
+    TimedOut { start: AttemptStart },
     /// A blocked event loop ended the run.
     KilledForLoop(LoopKillCode),
     /// The child was lost with its exit seen.
@@ -238,7 +239,7 @@ impl ReadEnd {
             },
             Self::StoppedBeforeRunning(reason) => EndView::StoppedBeforeRunning(*reason),
             Self::WorkerFailure { start, .. } => EndView::WorkerFailure { start: *start },
-            Self::TimedOut { .. } => EndView::TimedOut,
+            Self::TimedOut { start, .. } => EndView::TimedOut { start: *start },
             Self::KilledForLoop { code, .. } => EndView::KilledForLoop(*code),
             Self::Crashed { .. } => EndView::Crashed,
             Self::EndUnknown { pid } => EndView::EndUnknown { pid: *pid },
@@ -612,10 +613,12 @@ pub fn read_attempt_end(
             timeout,
             retry,
             cancel,
+            start,
         } => ReadEnd::TimedOut {
             timeout,
             retry,
             cancel,
+            start,
         },
         AttemptEnd::KilledForLoop {
             code,
@@ -756,6 +759,7 @@ impl OutcomeWriter {
                 timeout,
                 retry,
                 cancel,
+                ..
             } => self.timed_out(task, timeout, retry, cancel).await,
             ReadEnd::KilledForLoop {
                 code,

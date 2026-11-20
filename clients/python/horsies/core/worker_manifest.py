@@ -6,9 +6,10 @@ horsies-core, `clients/python/horsies/_catalog/worker_manifest.py`). It maps eve
 profile, the database settings, the queue and claim settings, the recovery,
 retention, resilience and payload settings, the facts of each registered
 task (its execution class and its declared error codes) and the child
-launch, and the event handlers of the app. It does not pick the profile: the core checks the profile
-set and picks the requested profile, so each client sends the set and the
-`--profile` value as they are.
+launch, the event handlers of the app, and the worker-ended span switch of
+its tracing setting. It does not pick the profile: the core checks the
+profile set and picks the requested profile, so each client sends the set
+and the `--profile` value as they are.
 
 AppConfig validation refuses every user error first, the values above a
 bound of the worker manifest included (`prefetch_buffer`, the claim lease,
@@ -52,6 +53,12 @@ from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.models.tasks import Execution
+from horsies.core.models.tracing import (
+    NoTracing,
+    OtelTracing,
+    WorkerEndedSpans,
+    worker_ended_spans_of,
+)
 from horsies.core.models.worker_profile import (
     ExecutorThreads,
     ExecutorThreadsFromSeats,
@@ -128,9 +135,10 @@ def to_worker_manifest(
     the window is one that `validate_reservation_window` accepted. `config`
     passed AppConfig validation, which keeps every value within its
     manifest bound; a value above it fails an assertion
-    (`worker_claim_manifest`, `payload_manifest`). The tracing setting makes
-    no worker-ended span (`NO_SPANS`), so the worker starts a handler child
-    only for the handlers.
+    (`worker_claim_manifest`, `payload_manifest`). `worker_ended_spans`
+    comes from the tracing setting (`worker_ended_spans_manifest`): with
+    `MAKE_SPANS` the worker starts its handler child also when the app has
+    no handler.
     """
     return wire.WorkerManifest(
         manifest_version=wire.MANIFEST_VERSION,
@@ -154,7 +162,7 @@ def to_worker_manifest(
         payload=payload_manifest(config.payload),
         tasks={name: task_manifest(facts) for name, facts in tasks.items()},
         handlers=handlers_manifest(handlers),
-        worker_ended_spans='NO_SPANS',
+        worker_ended_spans=worker_ended_spans_manifest(config.tracing),
         child_launch=child_launch,
     )
 
@@ -166,6 +174,18 @@ def task_manifest(facts: TaskFacts) -> wire.TaskManifest:
         execution=execution_of(facts.execution),
         error_codes=facts.error_codes,
     )
+
+
+def worker_ended_spans_manifest(tracing: OtelTracing | NoTracing) -> wire.WorkerEndedSpans:
+    """The `worker_ended_spans` field of the manifest: `MAKE_SPANS` for
+    `OtelTracing(worker_ended_spans=WorkerEndedSpans.MAKE_SPANS)`, the
+    default of `OtelTracing`; `NO_SPANS` for `NoTracing` and for
+    `WorkerEndedSpans.NO_SPANS`. Pure."""
+    match worker_ended_spans_of(tracing):
+        case WorkerEndedSpans.MAKE_SPANS:
+            return 'MAKE_SPANS'
+        case WorkerEndedSpans.NO_SPANS:
+            return 'NO_SPANS'
 
 
 def handlers_manifest(handlers: Sequence[HandlerFacts]) -> wire.EventHandlers:

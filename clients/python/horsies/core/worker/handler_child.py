@@ -14,20 +14,28 @@ Boot, before the ready frame:
    register the handlers.
 2. Run the ``on_handler_child_start`` hooks, each for at most
    ``HANDLER_HOOK_TIMEOUT_S``. A hook that raises or runs longer ends the
-   child with ``CHILD_HOOK_FAILURE_EXIT_CODE``.
+   child with ``CHILD_HOOK_FAILURE_EXIT_CODE``. The user sets the tracer
+   provider here.
 3. Start one ``HandlerInbox`` of ``HANDLER_QUEUE_EVENTS`` events and one
    thread per handler. An ``async def`` handler gets an event loop of its
    own, which its thread runs.
-4. Start the control thread, which reads the frames of the worker.
+4. Choose the spans of the attempts that the worker ended from
+   ``AppConfig.tracing`` (``ended_attempt_spans_of``), with the node reader
+   of the app (``AppNodeReader``), and start the reader thread of the
+   workflow nodes (``start_node_reader``): the workflow node of a workflow
+   task whose attempt the worker ended is read through the core on that
+   thread, never on the control thread.
+5. Start the control thread, which reads the frames of the worker.
 
 After the ready frame:
 
 - The control thread decodes each event of an ``events`` frame with the
-  generated decoder (``decode_event``). The step for an attempt that the
-  worker ended comes first (``WorkerEndedSpans``), then the event goes to
-  the inbox of each handler of its type. A full inbox drops the event for
-  that handler only and counts it. The control thread never waits for a
-  handler.
+  generated decoder (``decode_event``). The span of an attempt that the
+  worker ended comes first (``make_ended_attempt_span``: made at once, or
+  queued for the read of its workflow node), then the event goes to the
+  inbox of each handler of its type. A full inbox drops the event for that
+  handler only and counts it. The control thread never waits for a
+  handler or for the database.
 - Each handler thread takes the events of its inbox in order and calls its
   handler. A handler that fails is counted and logged with its name: the
   first failure with its traceback, then one line per
@@ -35,13 +43,16 @@ After the ready frame:
   event.
 - The main thread sends a ``handler_stats`` frame every
   ``HANDLER_STATS_INTERVAL_S``: the totals of each handler since the child
-  started, and the RSS of the child.
+  started, the spans made with no workflow node, and the RSS of the child.
 
-At the stop frame each inbox closes, the handler threads get
-``HANDLER_DRAIN_S`` together for the events left, the child sends a last
-``handler_stats`` frame and exits 0. The handler threads are daemon threads:
-the exit does not wait for a handler that blocks, and the events left in its
-inbox are logged.
+At the stop frame each inbox closes, the handler threads and the reader
+thread get ``HANDLER_DRAIN_S`` together for the events and the spans left,
+each span still waiting for its node is made with no node
+(``end_node_reads_at_stop``), the spans of the attempts that the worker
+ended are flushed within ``ENDED_ATTEMPT_SPAN_FLUSH_BOUND_S``, the child
+sends a last ``handler_stats`` frame and exits 0. The handler threads and
+the reader thread are daemon threads: the exit does not wait for a handler
+that blocks, and the events left in its inbox are logged.
 """
 
 # pyright: reportPrivateUsage=false
@@ -55,12 +66,14 @@ import os
 import socket
 import threading
 import time
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, NoReturn, assert_never
 
 from horsies import _core as core
 from horsies._catalog import events
+from horsies._catalog.broker_errors import BrokerOperationFailed
 from horsies._catalog.events import AnyEvent
 from horsies.core.codec.json_io import loads_json
 from horsies.core.event_handlers import EventHandler, HandlerChildStartHook, HandlerKind
@@ -70,6 +83,18 @@ from horsies.core.models.boot_failure import (
     TaskLoopCreateFailed,
     ThreadStartRefused,
     shortage_or,
+)
+from horsies.core.telemetry.ended_attempt_span import (
+    EndedAttemptSpans,
+    NodeNotLinked,
+    NodeRead,
+    NodeReadFailed,
+    ended_attempt_spans_of,
+    end_node_reads_at_stop,
+    flush_ended_attempt_spans_at_stop,
+    make_ended_attempt_span,
+    span_read_counts_of,
+    start_node_reader,
 )
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_frames import (
@@ -100,6 +125,7 @@ from horsies.core.worker.child_runner import (
     import_app_for_child,
     log_level_of,
 )
+from horsies.core.worker.run_return import InWorkflow
 
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
@@ -402,15 +428,53 @@ class RunningHandler:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class NoWorkerEndedSpans:
-    """The child makes no span for an attempt that the worker ended
-    (``AttemptEndDecidedByWorker``): its event goes to the handlers only."""
+def node_read_of(
+    outcome: core.TaskWorkflowNodeLinked
+    | core.TaskWorkflowNodeNotLinked
+    | BrokerOperationFailed,
+) -> NodeRead:
+    """The node read of the outcome of ``CoreHandle.task_workflow_node``.
+    Pure."""
+    match outcome:
+        case BrokerOperationFailed(code=code, message=message):
+            return NodeReadFailed(detail=f'{code.value}: {message}')
+        case core.TaskWorkflowNodeLinked(
+            workflow_id=workflow_id,
+            node_index=node_index,
+            root_workflow_id=root_workflow_id,
+        ):
+            return InWorkflow(
+                workflow_id=workflow_id,
+                node_index=node_index,
+                root_workflow_id=root_workflow_id,
+            )
+        case core.TaskWorkflowNodeNotLinked():
+            return NodeNotLinked()
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
-type WorkerEndedSpans = NoWorkerEndedSpans
-"""What the child does for an attempt that the worker ended, before the
-handlers get its event."""
+class AppNodeReader:
+    """Reads the workflow node of a task through the core handle of the
+    app's broker (``CoreHandle.task_workflow_node``: one bounded statement,
+    no schema step). The broker is built at the first read, so a child
+    whose worker ends no attempt of a workflow task builds none."""
+
+    def __init__(self, app: Horsies) -> None:
+        self._app: Final = app
+
+    def read(self, task_id: uuid.UUID) -> NodeRead:
+        """The node that links ``task_id``. A broker that cannot be built
+        and a call that the bridge refuses or ends at its bound
+        (``CoreCallTimedOut``, ``CoreStopped``) are ``NodeReadFailed``."""
+        try:
+            handle = self._app.get_broker()._core_handle
+            outcome = handle.task_workflow_node(task_id)
+        except Exception as exc:
+            # The broker construction raises HorsiesError; the bridge call
+            # raises its call errors. Each is a failed read of this span.
+            return NodeReadFailed(detail=f'{type(exc).__name__}: {exc}')
+        return node_read_of(outcome)
 
 
 @dataclass(frozen=True, slots=True)
@@ -461,9 +525,9 @@ class EventDispatch:
     """Gives each event of an ``events`` frame to the handlers of its type.
     The control thread only.
 
-    For each event: the step for an attempt that the worker ended
-    (``worker_ended_spans``), then an offer to the inbox of each handler of
-    the event type. An event of a type that no handler takes goes to none.
+    For each event: the span of an attempt that the worker ended
+    (``make_ended_attempt_span`` with ``ended_spans``), then an offer to the
+    inbox of each handler of the event type. An event of a type that no handler takes goes to none.
     A wire text that does not decode is logged (the first, then one line
     per ``HANDLER_ERROR_LOG_EVERY``) and skipped; the other events of its
     frame still go out.
@@ -472,7 +536,7 @@ class EventDispatch:
     def __init__(
         self,
         running: Sequence[RunningHandler],
-        worker_ended_spans: WorkerEndedSpans,
+        ended_spans: EndedAttemptSpans,
     ) -> None:
         routes: dict[type[AnyEvent], list[RunningHandler]] = {}
         for one in running:
@@ -480,7 +544,7 @@ class EventDispatch:
         self._routes: Final[Mapping[type[AnyEvent], tuple[RunningHandler, ...]]] = {
             event_class: tuple(handlers) for event_class, handlers in routes.items()
         }
-        self._worker_ended_spans: Final = worker_ended_spans
+        self._ended_spans: Final = ended_spans
         self._refused = 0
 
     def dispatch(self, texts: Sequence[str]) -> None:
@@ -494,9 +558,7 @@ class EventDispatch:
                     self._skip(refused)
 
     def _route(self, event: AnyEvent) -> None:
-        match self._worker_ended_spans:
-            case NoWorkerEndedSpans():
-                pass
+        _ = make_ended_attempt_span(self._ended_spans, event)
         for one in self._routes.get(type(event), ()):
             one.offer(event)
 
@@ -510,12 +572,37 @@ class EventDispatch:
             )
 
 
-def stats_frame(running: Sequence[RunningHandler]) -> HandlerStatsFrame:
-    """The ``handler_stats`` frame of now: the totals of each handler, and
-    the RSS of the child."""
+def stats_frame(
+    running: Sequence[RunningHandler],
+    ended_spans: EndedAttemptSpans,
+) -> HandlerStatsFrame:
+    """The ``handler_stats`` frame of now: the totals of each handler, the
+    spans made with no workflow node (``span_read_counts_of``), and the RSS
+    of the child."""
     return HandlerStatsFrame(
-        handlers=tuple(one.counts() for one in running), rss=_read_rss()
+        handlers=tuple(one.counts() for one in running),
+        span_reads=span_read_counts_of(ended_spans),
+        rss=_read_rss(),
     )
+
+
+def start_ended_span_reader(
+    ended_spans: EndedAttemptSpans,
+) -> Result[None, BootFailedFrame]:
+    """Start the reader thread of the workflow nodes of the spans
+    (``start_node_reader``). ``Err``: the OS refused the thread
+    (``ThreadStartRefused``)."""
+    match start_node_reader(ended_spans):
+        case Ok():
+            return Ok(None)
+        case Err(refused):
+            return Err(
+                boot_failed_frame(
+                    ThreadStartRefused(),
+                    refused.exception_name,
+                    f'the reader thread of the workflow nodes of spans: {refused.detail}',
+                ),
+            )
 
 
 def boot_handler_app(
@@ -722,18 +809,24 @@ def start_handler_control_thread(
 
 
 def exit_after_handler_stop(
-    sock: socket.socket, running: Sequence[RunningHandler]
+    sock: socket.socket,
+    running: Sequence[RunningHandler],
+    ended_spans: EndedAttemptSpans,
 ) -> NoReturn:
-    """After the stop frame: close each inbox, give the handler threads
-    ``HANDLER_DRAIN_S`` together for the events left, log the events that
-    are still left, send the last ``handler_stats`` frame, then exit 0
-    (``end_without_teardown``). The worker kills a child that has not
-    exited within its stop bound."""
+    """After the stop frame: close each inbox, give the handler threads and
+    the reader thread ``HANDLER_DRAIN_S`` together for the events and the
+    spans left, make each span still waiting for its node with no node
+    (``end_node_reads_at_stop``), log the events that are still left, flush
+    the spans of the attempts that the worker ended
+    (``flush_ended_attempt_spans_at_stop``), send the last ``handler_stats``
+    frame, then exit 0 (``end_without_teardown``). The worker kills a child
+    that has not exited within its stop bound."""
     for one in running:
         one.inbox.close()
     drain_end = time.monotonic() + HANDLER_DRAIN_S
     for one in running:
         one.join(max(0.0, drain_end - time.monotonic()))
+    _ = end_node_reads_at_stop(ended_spans, max(0.0, drain_end - time.monotonic()))
     for one in running:
         left = one.inbox.waiting()
         if left > 0:
@@ -743,7 +836,8 @@ def exit_after_handler_stop(
                 left,
                 HANDLER_DRAIN_S,
             )
-    _send_child_frame(sock, stats_frame(running))
+    _ = flush_ended_attempt_spans_at_stop(ended_spans)
+    _send_child_frame(sock, stats_frame(running, ended_spans))
     end_without_teardown(0)
 
 
@@ -780,7 +874,13 @@ def serve_handler_child(
         case Err(failed):
             fail_boot(sock, failed)
     stopped = threading.Event()
-    dispatch = EventDispatch(running, NoWorkerEndedSpans())
+    ended_spans = ended_attempt_spans_of(app.config.tracing, AppNodeReader(app))
+    match start_ended_span_reader(ended_spans):
+        case Ok():
+            pass
+        case Err(failed):
+            fail_boot(sock, failed)
+    dispatch = EventDispatch(running, ended_spans)
     match start_handler_control_thread(reader, dispatch, stopped):
         case Ok():
             pass
@@ -791,5 +891,5 @@ def serve_handler_child(
         'The handler child %s is ready with %d handlers', os.getpid(), len(running)
     )
     while not stopped.wait(HANDLER_STATS_INTERVAL_S):
-        _send_child_frame(sock, stats_frame(running))
-    exit_after_handler_stop(sock, running)
+        _send_child_frame(sock, stats_frame(running, ended_spans))
+    exit_after_handler_stop(sock, running, ended_spans)

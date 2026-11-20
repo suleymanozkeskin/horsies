@@ -13,6 +13,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use super::ended_spans::{EndedSpanScope, EndedSpans};
 use super::handler_host::{
     boot_and_serve_handlers_on, decode_wire_event, serve_handlers, HandlerChildTimes,
     UndecodedEvent,
@@ -407,8 +408,9 @@ async fn the_service_hands_out_the_events_and_reports_the_totals_of_each_handler
         drain: WAIT,
         last_stats: WAIT,
     };
-    let service =
-        tokio::spawn(async move { serve_handlers(running, writer, &mut frames, times).await });
+    let service = tokio::spawn(async move {
+        serve_handlers(running, &EndedSpans::none(), writer, &mut frames, times).await
+    });
     let batch = events_frame(&[
         Event::from(slot_recovered(1)),
         Event::from(task_claimed(1)),
@@ -469,7 +471,7 @@ async fn an_init_frame_after_the_boot_ends_the_service_as_a_bad_frame() {
         stats_every: Duration::from_secs(60),
         ..HandlerChildTimes::CHILD
     };
-    let end = serve_handlers(running, writer, &mut frames, times).await;
+    let end = serve_handlers(running, &EndedSpans::none(), writer, &mut frames, times).await;
     assert_eq!(end, ServeEnd::BadParentFrame);
 }
 
@@ -513,6 +515,7 @@ fn the_start_hooks_of_the_handler_child_run_in_order_and_a_failure_exits_173() {
     let app = HandlerChildApp {
         handlers,
         start_hook: ChildStartHook::Run(vec![recording("first"), failing, recording("third")]),
+        ended_spans: EndedSpanScope::NoSpans,
     };
     let (ours, _theirs) = UnixStream::pair().unwrap();
     let exit = boot_and_serve_handlers_on(&runtime, app, ours, FrameReader::new());

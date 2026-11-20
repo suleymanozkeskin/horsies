@@ -93,7 +93,7 @@ async fn connect_audit_sink() -> Result<(), String> {
 
 | Fact | Behaviour |
 |------|-----------|
-| Start | When the app has a handler: after the task children, before the first claim |
+| Start | When the app has a handler, or makes the spans of the attempts that the worker ended (the default with the feature `otel`): after the task children, before the first claim |
 | Ready wait | The worker waits at most 30 s for its ready frame, then claims in every case |
 | Boot failure that repeats | A failed start hook, no ready frame in time: the child stays down until the worker restarts |
 | Boot failure that can clear | A resource shortage, a refused thread: the child boots again after the slot backoff |
@@ -101,6 +101,46 @@ async fn connect_audit_sink() -> Result<(), String> {
 | Full event queue of the worker | Each event drops and counts in `horsies.telemetry.events.dropped{cause="queue_full"}`. The worker never waits for the child |
 
 Each state snapshot of the worker writes the state of its handler child in the `telemetry` column of `horsies_worker_states`: `off`, `starting`, `up` with its pid, or `down` with its cause.
+
+## Spans of the Attempts That the Worker Ended
+
+With the feature `otel`, a task body runs inside its attempt span in the task child (`horsies::otel`). When the worker ends the attempt itself, that child is gone and the span never ends:
+
+- an isolated task killed at its timeout (`TASK_TIMEOUT`);
+- a shared async child killed for a blocked runtime (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`);
+- a child lost before it reported the end, with its exit seen (`WORKER_CRASHED`).
+
+The handler child makes a span for each such attempt from its `AttemptEnded` event, with the global tracer provider and propagator of that process. It is the default with the feature: the worker starts its handler child also when the app has no handler. Set the provider in `main` before `horsies::cli::run`, or in an `on_handler_child_start` hook, and shut it down after `run` returns, so that a batch processor exports the last spans of the child. `Horsies::set_worker_ended_spans(WorkerEndedSpans::NoSpans)` turns the spans off:
+
+<!-- rust-check: skip partial -- set_worker_ended_spans is built with the feature otel, which the docs check does not enable -->
+```rust
+use horsies::otel::WorkerEndedSpans;
+
+fn no_worker_ended_spans(app: &mut Horsies) {
+    app.set_worker_ended_spans(WorkerEndedSpans::NoSpans);
+}
+```
+
+| Item | Value |
+|------|-------|
+| Name and kind | `run <task_name>`, CONSUMER |
+| Parent | The span that sent the task, from the carrier that the send stored; a task with no carrier gets a root span |
+| Start | When the task reached its child (wall clock of the worker), earlier than the start of the body |
+| End | When the end reached the worker |
+| Status | ERROR, with `error.type` = the error code of the attempt |
+| Attributes | `horsies.task.id`, `horsies.task.name`, `horsies.task.attempt`, `horsies.task.execution` (the kind of the child), `horsies.queue`, `horsies.worker.id`, `messaging.system`, `messaging.operation.type`, `messaging.destination.name`, `messaging.message.id`, for a workflow task `horsies.workflow.id`, `horsies.workflow.node` and `horsies.workflow.root_id`, and `horsies.span.source` = `worker` |
+
+The worker does not know the workflow node of a workflow task: the start of the child reads it. For an attempt of a workflow task that the worker ended, the handler child reads the node by the task id through its producer pool, with one read of the core: at most 1 second for a connection and 1 second for the statement. Only these attempts pay for the read.
+
+The read never holds an event: the span waits in a queue of at most 1,000 spans (`NODE_READ_QUEUE_SPANS`), and one reader task reads the node of each span in turn, then makes it. The events go to the handlers at once.
+
+Limits:
+
+- A span that the body made and exported before the kill keeps the id of the lost span as its parent. A trace shows it next to the span of the worker, not under it.
+- When the node read fails, or finds no node (the workflow was deleted), the span of a workflow task has no `horsies.workflow.*` attribute. The span stays in the trace of the workflow start through the stored carrier.
+- When the queue of the reader is full, the span is made at once with no `horsies.workflow.*` attribute. At the stop of the worker, the reader gets the 2 seconds of the handlers; the span whose read still runs and each span still in the queue are then made with no `horsies.workflow.*` attribute, within 1 second (`NODE_READER_STOP_BOUND`).
+- The worker metric `horsies.spans.worker_ended.read_failures` counts the spans made with no workflow node, by `reason`: `read_failed` (the read ran and failed) and `not_read` (the queue was full, or the child stopped first). The handler child also logs them with the task id: the first of each reason, then one line per 1,000.
+- Without the feature `otel` the app makes no such span, and the worker starts no handler child for it.
 
 ## Things to Avoid
 
@@ -144,6 +184,12 @@ app.on_event_blocking::<AttemptEnded>("audit.write", write_audit_row)?;
 | `handler` | `impl Fn(E) -> Result<(), HandlerError> + Send + Sync + 'static` | The blocking handler |
 
 **Errors:** as `on_event`.
+
+### `Horsies::set_worker_ended_spans(spans: WorkerEndedSpans)` (feature `otel`)
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `spans` | `horsies::otel::WorkerEndedSpans` | `MakeSpans` (the default with the feature): the handler child makes the span of each attempt that the worker ended. `NoSpans`: no such span |
 
 ### `Horsies::on_handler_child_start(hook)`
 

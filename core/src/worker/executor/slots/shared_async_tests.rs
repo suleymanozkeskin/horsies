@@ -108,11 +108,26 @@ fn crash_reason(end: AttemptEnd) -> String {
     }
 }
 
+/// The timeout of a run at a kill of its child: no start reached the worker.
 fn timed_out(retry: RetryPlacement, cancel: TimeoutCancel) -> AttemptEnd {
     AttemptEnd::TimedOut {
         timeout: super::scripted::timeout_ms(SHORT_MS),
         retry,
         cancel,
+        start: crate::events::AttemptStart::NotReported,
+    }
+}
+
+/// The timeout of a run that its child ended at the deadline, with the
+/// start of the scripted `shared_result` frame.
+fn timed_out_in_child(retry: RetryPlacement, cancel: TimeoutCancel) -> AttemptEnd {
+    AttemptEnd::TimedOut {
+        timeout: super::scripted::timeout_ms(SHORT_MS),
+        retry,
+        cancel,
+        start: crate::events::AttemptStart::Reported {
+            started_at: super::scripted::started_at(),
+        },
     }
 }
 
@@ -550,7 +565,7 @@ async fn a_run_that_timed_out_in_its_child_ends_at_its_timeout_beside_a_neighbou
 
     assert_eq!(
         answer_of(late_answer).await,
-        timed_out(
+        timed_out_in_child(
             RetryPlacement::SameClass,
             TimeoutCancel::Ended(CancelEnd::ReturnedAfterSignal)
         )
@@ -847,7 +862,7 @@ async fn a_run_that_needed_the_second_cancel_closes_its_child() {
 
     assert_eq!(
         answer,
-        timed_out(
+        timed_out_in_child(
             RetryPlacement::SameClass,
             TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace)
         )
@@ -1137,6 +1152,48 @@ async fn a_blocked_loop_names_the_culprit_and_its_neighbour() {
             assert_eq!(retry, RetryPlacement::SameClass);
         }
         other => panic!("expected the neighbour verdict, got {other:?}"),
+    }
+    stop_shared(pool, spawner).await;
+}
+
+/// A result that the child wrote before the worker killed it ends its run
+/// with that result, not with a verdict of the kill. The child writes the
+/// blocked-loop report of the culprit and the result of its neighbour in
+/// one write: the worker reads the report, sends the kill, and reads the
+/// result after the kill, before the loss of the child.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_result_written_before_the_kill_ends_its_run_with_the_result() {
+    let dir = TestDir::new();
+    let neighbour = shared_task(1);
+    let culprit = shared_task(2);
+    let actions = vec![
+        (&neighbour, ":".to_owned()),
+        (
+            &culprit,
+            send(&[
+                loop_blocked(LoopCulprit::Run(run_ref(&culprit, 2))),
+                shared_result(run_ref(&neighbour, 1), 1),
+            ]),
+        ),
+    ];
+    let script = children(&dir, 2, &actions, 2);
+    let spawner = Spawner::start().unwrap();
+    let (pool, _board) = async_pool(
+        &spawner,
+        1,
+        shared_config(shell(&script), shared_async_init(2)),
+    );
+
+    let neighbour_answer = submit_shared(&pool, &neighbour, long_work());
+    let culprit_answer = submit_shared(&pool, &culprit, long_work());
+
+    assert_eq!(answer_of(neighbour_answer).await, reported(1));
+    match answer_of(culprit_answer).await {
+        AttemptEnd::KilledForLoop { code, retry, .. } => {
+            assert_eq!(code, LoopKillCode::TaskBlockedLoop);
+            assert_eq!(retry, RetryPlacement::Isolated);
+        }
+        other => panic!("expected the blocked-loop verdict, got {other:?}"),
     }
     stop_shared(pool, spawner).await;
 }

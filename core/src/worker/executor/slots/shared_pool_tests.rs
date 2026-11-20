@@ -347,6 +347,9 @@ async fn a_stuck_async_run_ends_at_its_timeout_and_retries_isolated() {
             timeout: timeout(),
             retry: RetryPlacement::Isolated,
             cancel: TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace),
+            start: crate::events::AttemptStart::Reported {
+                started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            },
         }
     );
 }
@@ -412,6 +415,7 @@ async fn a_thread_child_is_killed_once_no_run_has_time_left() {
             timeout: timeout(),
             retry: RetryPlacement::Isolated,
             cancel: TimeoutCancel::NoSignal,
+            start: crate::events::AttemptStart::NotReported,
         }
     );
 }
@@ -432,6 +436,7 @@ async fn the_backstop_kills_a_frozen_child() {
             timeout: timeout(),
             retry: RetryPlacement::SameClass,
             cancel: TimeoutCancel::NoSignal,
+            start: crate::events::AttemptStart::NotReported,
         }
     );
 }

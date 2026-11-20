@@ -95,6 +95,7 @@ impl Horsies {
             handler_child: HandlerChildApp {
                 handlers: parts.event_handlers,
                 start_hook: start_hook_of(parts.handler_child_start_hooks),
+                ended_spans: crate::telemetry::ended_span_scope(parts.worker_ended_spans),
             },
         };
         ExitCode::from(exit_byte(run_child_host(app, args).code()))

@@ -84,6 +84,7 @@ fn timed_out(retry: RetryPlacement, cancel: TimeoutCancel) -> AttemptEnd {
         timeout: timeout_ms(SHORT_MS),
         retry,
         cancel,
+        start: crate::events::AttemptStart::NotReported,
     }
 }
 

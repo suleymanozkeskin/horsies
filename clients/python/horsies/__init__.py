@@ -105,7 +105,13 @@ from .core.models.payload import PayloadPolicy
 from .core.models.recovery import RecoveryConfig
 from .core.models.retention import RetentionConfig
 from .core.models.resilience import WorkerResilienceConfig
-from .core.models.tracing import ChildOfSend, LinkedToSend, NoTracing, OtelTracing
+from .core.models.tracing import (
+    ChildOfSend,
+    LinkedToSend,
+    NoTracing,
+    OtelTracing,
+    WorkerEndedSpans,
+)
 from .core.models.log_format import JsonLogs, TextLogs
 from .core.logging import JsonLogsFormatter, TaskContextFilter
 from .core.models.worker_profile import (
@@ -361,6 +367,7 @@ __all__ = [
     'NoTracing',
     'ChildOfSend',
     'LinkedToSend',
+    'WorkerEndedSpans',
     # Log format and task context of log records
     'TextLogs',
     'JsonLogs',

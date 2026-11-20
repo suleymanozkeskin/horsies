@@ -406,6 +406,24 @@ fn add_handlers(app: &mut Horsies) -> Result<(), HorsiesError> {
   handlers start, 10 s per hook. A failure keeps the handler child down; the
   worker runs on.
 - Delivery is at most once. The history tables are the record of a task.
+- With the feature `otel`, the handler child also makes the span of each
+  attempt that the worker ended (a timeout kill `TASK_TIMEOUT`, a
+  blocked-runtime kill, a lost child `WORKER_CRASHED`), whose span in the
+  task child never ended: `run <task_name>`, CONSUMER, parent from the stored
+  carrier, start at the start that the child reported (a shared run that
+  its child ended at its deadline), else at the placement, status ERROR
+  with `error.type`,
+  `horsies.span.source = "worker"`. For a workflow task the handler child
+  reads the node by the task id (one bounded core read, only for these
+  attempts, on one reader task with a queue of at most 1,000 spans: never
+  on the event path) and sets `horsies.workflow.*`. A failed read, a full
+  queue and a span still queued at the stop leave them out; the worker
+  metric `horsies.spans.worker_ended.read_failures{reason}` (`read_failed`,
+  `not_read`) counts them. It is the default (the worker then starts the
+  handler child with no handler);
+  `app.set_worker_ended_spans(horsies::otel::WorkerEndedSpans::NoSpans)`
+  turns it off. Set the global tracer provider in `main` or in
+  `on_handler_child_start`.
 
 ## Things to Avoid
 
