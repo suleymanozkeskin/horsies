@@ -13,13 +13,14 @@ to avoid colliding with developer machines that already run Postgres or
 PgBouncer. The `16435` transaction-pool service has `default_pool_size = 1` and
 exists only for the prepared-statement collision control test.
 
+Run the commands from `clients/python/`:
+
 ```bash
 docker compose -f tests/fixtures/pgbouncer/compose.yaml up -d --wait
 
 HORSIES_PGBOUNCER_TEST=1 \
 DB_PASSWORD=testpassword \
 uv run pytest tests/integration/test_pgbouncer_contract.py \
-  tests/integration/test_pgbouncer_rolling_upgrade.py \
   tests/integration/test_pgbouncer_prepared_statements.py -q
 
 HORSIES_PGBOUNCER_TEST=1 \

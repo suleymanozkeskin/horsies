@@ -14,8 +14,9 @@ use crate::core::history::errors::HistoryError;
 #[code_catalog(module = "monitoring", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MonitoringQueryErrorCode {
-    /// The read failed with a database or driver error. `retryable` is the
-    /// driver classification of the cause.
+    /// The read failed with a database or driver error, or the core of this
+    /// process could not run it. `retryable` is the core's classification of
+    /// the cause.
     DbOperationFailed,
     /// Stored history data does not decode: a status that is not a task
     /// status, an attempt snapshot or archive envelope that does not decode.
@@ -66,11 +67,14 @@ pub struct HistoryContractSource(pub MonitoringQueryErrorSource);
     union_doc = "Every failure of a monitoring query that the core gives: one class per state."
 )]
 pub enum MonitoringQueryError {
-    /// The query failed with a database or driver error. Nothing changed.
+    /// The query failed with a database or driver error, or the core of this
+    /// process could not run it. Nothing changed.
     ///
-    /// ``retryable`` is the driver classification of the cause: ``True`` when
+    /// ``retryable`` is the core's classification of the cause: ``True`` when
     /// the condition may clear, for example a lost connection. ``exception``
-    /// is the ``SQLAlchemyError``.
+    /// is the core's class of the cause (a ``CoreFailure`` leaf class, with
+    /// the read as its subject), or the ``CoreCallRefusal`` of the core
+    /// boundary.
     #[error("{message}")]
     #[error_class(
         class = "MonitoringQueryDbOperationFailed",

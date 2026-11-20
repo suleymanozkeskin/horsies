@@ -15,11 +15,14 @@ __all__ = ['MonitoringQueryDbOperationFailed', 'MonitoringQueryHistoryContractVi
 
 @dataclass(slots=True, frozen=True)
 class MonitoringQueryDbOperationFailed:
-    """The query failed with a database or driver error. Nothing changed.
+    """The query failed with a database or driver error, or the core of this
+    process could not run it. Nothing changed.
 
-    ``retryable`` is the driver classification of the cause: ``True`` when
+    ``retryable`` is the core's classification of the cause: ``True`` when
     the condition may clear, for example a lost connection. ``exception``
-    is the ``SQLAlchemyError``.
+    is the core's class of the cause (a ``CoreFailure`` leaf class, with
+    the read as its subject), or the ``CoreCallRefusal`` of the core
+    boundary.
     """
 
     code: ClassVar[MonitoringQueryErrorCode] = MonitoringQueryErrorCode.DB_OPERATION_FAILED

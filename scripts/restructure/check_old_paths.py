@@ -135,6 +135,11 @@ ROOTED_PATH: Final = re.compile(
 """A path after ``$WORKSPACE/`` (trybuild) or ``./``, which the citation
 pattern does not start at: ``./rust/scripts/coverage.sh``."""
 
+PLACEHOLDER_OPENERS: Final = ('<', '{')
+"""Characters that open a placeholder in a file name: ``v<version>.txt``,
+``v{EVENT_CONTRACT_VERSION}.txt``. The citation pattern stops at them, so the
+cited text is the stem of a name that the text builds, not a path."""
+
 GITHUB_PATH: Final = re.compile(
     r'github\.com/suleymanozkeskin/horsies/(?:blob|tree|edit|raw)/[A-Za-z0-9_.-]+/(?P<path>[A-Za-z0-9_.@/-]+)',
 )
@@ -189,12 +194,24 @@ def old_path_cited(cited: str, citing_file: str, tree: rules.Tree) -> bool:
     return False
 
 
+def judged_path(citation: re.Match[str], line: str) -> str:
+    """The path that the check judges for one citation of ``line``: the cited
+    path, or its folder when a placeholder follows it (the cited text is then
+    the stem of a built name). Pure."""
+    path = citation.group('path')
+    match line[citation.end() : citation.end() + 1]:
+        case opener if opener in PLACEHOLDER_OPENERS:
+            return rules.dirname(path)
+        case _:
+            return path
+
+
 def findings_in_line(line: str, citing_file: str, tree: rules.Tree) -> list[str]:
     """The old paths that one line cites."""
     found = [
         match.group('path')
         for match in rules.CITATION.finditer(line)
-        if old_path_cited(match.group('path'), citing_file, tree)
+        if old_path_cited(judged_path(match, line), citing_file, tree)
     ]
     found += [
         match.group('path')
@@ -307,6 +324,7 @@ PLANTED_TREE: Final = rules.Tree.of(
         'clients/python/tests/__init__.py',
         'clients/python/tests/sqlalchemy_url.py',
         'clients/python/tests/unit/test_a.py',
+        'clients/python/tests/fixtures/pgbouncer/compose.yaml',
         'clients/python/horsies/__init__.py',
         'clients/rust/tests/parity/Cargo.toml',
         'clients/rust/tests/parity/src/lib.rs',
@@ -378,6 +396,10 @@ PLANTED: Final = (
     ('README.md', 'horsies = { features = ["horsies/web"] }', False),
     ('README.md', 'https://example.com/python/horsies/core', False),
     ('core/src/lib.rs', 'tests/fixtures/stored_forms/README.md', False),
+    ('core/src/lib.rs', '(`tests/fixtures/stored_forms/v<version>.txt`)', False),
+    ('core/src/lib.rs', '"tests/fixtures/stored_forms/v{VERSION}.txt"', False),
+    ('README.md', '`crates/horsies-core/tests/fixtures/v<version>.txt`', True),
+    ('README.md', 'tests/fixtures/pgbouncer/{name}', True),
     (
         'clients/python/tests/unit/test_a.py',
         "case_name='tests/integration/test_x.py::test_y'",

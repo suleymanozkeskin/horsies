@@ -148,7 +148,7 @@ pub enum HandleOperationError {
     },
     /// The operation failed with a database or driver error.
     ///
-    /// ``retryable`` is the driver classification of the cause: ``True`` when
+    /// ``retryable`` is the core's classification of the cause: ``True`` when
     /// the condition may clear, for example a lost connection. A read changed
     /// nothing. A write (``cancel``, ``pause``, or ``resume`` before its commit)
     /// rolled back, or its commit outcome is unknown.
@@ -172,8 +172,9 @@ pub enum HandleOperationError {
     /// A stored value of the workflow does not parse. Nothing changed.
     ///
     /// The value is a workflow status that is not a ``WorkflowStatus``
-    /// (``status``), or a subworkflow summary that is not valid (``tasks``). ``exception`` is the parse error. The same call returns this
-    /// error until the stored value changes.
+    /// (``status``), or a subworkflow summary that is not valid (``tasks``).
+    /// ``exception`` is a ``CoreContractViolation`` with the core's message.
+    /// The same call returns this error until the stored value changes.
     #[error_class(
         class = "HandleStoredDataInvalid",
         code = "StoredDataInvalid",
@@ -196,9 +197,9 @@ pub enum HandleOperationError {
     /// completes the propagation for a task that finished while the resume
     /// transaction ran, when the completion callback saw the workflow as
     /// ``PAUSED``. That pass rolled back, or its commit outcome is unknown.
-    /// ``exception`` is the database or driver error. The worker reaper runs
-    /// the same pass over all workflows. A repeated ``resume`` returns
-    /// ``Ok(False)``.
+    /// ``exception`` is the core's class of the cause (a ``CoreFailure`` leaf
+    /// class). The worker reaper runs the same pass over all workflows. A
+    /// repeated ``resume`` returns ``Ok(False)``.
     #[error_class(
         class = "HandleResumeRecoveryFailed",
         code = "ResumeRecoveryFailed",

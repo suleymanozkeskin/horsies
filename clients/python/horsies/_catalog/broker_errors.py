@@ -31,7 +31,7 @@ type BrokerOperationFailedCode = Literal[
 class BrokerOperationFailed:
     """A broker operation failed with a database, driver or connection error.
 
-    ``code`` names the operation. ``retryable`` is the driver classification
+    ``code`` names the operation. ``retryable`` is the core's classification
     of the cause: ``True`` when the condition may clear, for example a lost
     connection. A read changed nothing. A cleanup may have finished part of
     its rows; no write of the library's own data is left half done.
@@ -47,7 +47,7 @@ class BrokerOperationFailed:
 class BrokerEnqueueFailed:
     """The enqueue write failed or could not be confirmed. The row may or may not exist.
 
-    ``retryable`` is the driver classification of the cause. An enqueue
+    ``retryable`` is the core's classification of the cause. An enqueue
     again with the same task id and payload is safe: the broker returns the
     existing task for a duplicate. ``exception`` is ``NoCause()`` when the
     broker found the failure by a data check (the conflicting row was gone).

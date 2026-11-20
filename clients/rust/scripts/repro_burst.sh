@@ -4,7 +4,7 @@ set -euo pipefail
 # Burst-submit doc_scraper workflows to reproduce contention issues.
 #
 # Usage:
-#   COUNT=50 PARALLEL=20 BASE_URL=http://localhost:8000 ./scripts/repro_burst.sh
+#   COUNT=50 PARALLEL=20 BASE_URL=http://localhost:8000 ./clients/rust/scripts/repro_burst.sh
 #
 # Outputs JSON responses to a timestamped directory (default under /tmp).
 

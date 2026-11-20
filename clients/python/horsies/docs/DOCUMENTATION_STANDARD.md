@@ -214,7 +214,7 @@ docs/
 CI type-checks every `python` block of the docs and the skill files.
 
 - The blocks of one page share names: a block can use the names that the blocks above it define.
-- `from prelude import *` is added to each page. It gives `app`, `my_task`, `broker`, `handle`, `spec`, `ctx` and common standard-library names. The stand-ins are in `tests/docs_examples/stubs/`.
+- `from prelude import *` is added to each page. It gives `app`, `my_task`, `broker`, `handle`, `spec`, `ctx` and common standard-library names. The stand-ins are in `clients/python/tests/docs_examples/stubs/`.
 - A block that must not be checked has a marker on the line directly above the fence, with a reason:
   - `.md`: `<!-- check: skip KIND -- reason -->`
   - `.mdx`: `{/* check: skip KIND -- reason */}`
@@ -225,7 +225,7 @@ CI type-checks every `python` block of the docs and the skill files.
 - `check: alone` (same form, no reason) checks a block on its own, with no names from other blocks.
 - A block that does not parse needs `skip`. Never use `elided` or `partial` for a block that is wrong for the current API.
 - Pass `SecretStr(...)` to `PostgresConfig(database_url=...)`.
-- Run the check: `uv run python tests/docs_examples/extract.py build/doc_examples && uv run pyright -p pyrightconfig.docs.json`
+- Run the check from the repository root: `uv run --project clients/python python clients/python/tests/docs_examples/extract.py clients/python/build/doc_examples && uv run --project clients/python pyright -p clients/python/pyrightconfig.docs.json`
 
 ---
 

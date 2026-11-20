@@ -2,9 +2,10 @@
 
 Each file here is one run's evidence: the conditions it ran under, what it
 measured, and the verdict those numbers support. They are written by
-`uv run python -m crossclient.perf ... --write-summary` and committed, because a
-number cited in a pull request is only as good as the conditions a reader can
-still resolve a year later.
+`uv run --project clients/python python -m crossclient.perf ... --write-summary`
+from the repository root, and committed, because a number cited in a pull
+request is only as good as the conditions a reader can still resolve a year
+later.
 
 These are public repository artifacts. What that requires of their contents:
 

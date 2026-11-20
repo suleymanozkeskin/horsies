@@ -15,8 +15,9 @@ class MonitoringQueryErrorCode(str, Enum):
     """
 
     DB_OPERATION_FAILED = 'DB_OPERATION_FAILED'
-    """The read failed with a database or driver error. `retryable` is the
-    driver classification of the cause.
+    """The read failed with a database or driver error, or the core of this
+    process could not run it. `retryable` is the core's classification of
+    the cause.
     """
 
     HISTORY_CONTRACT_VIOLATION = 'HISTORY_CONTRACT_VIOLATION'
