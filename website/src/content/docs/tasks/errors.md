@@ -159,7 +159,7 @@ The codes of the client calls. The error types that carry them are on the client
 | Code | Variant | Other fields | Retryable | When |
 |---|---|---|---|---|
 | `WORKFLOW_NOT_FOUND` | `HandleWorkflowNotFound` | – | No | No workflow has this id; nothing changed |
-| `DB_OPERATION_FAILED` | `HandleDbOperationFailed` | `exception: BaseException` | Driver classification of the cause | A database or driver error. A read changed nothing; `cancel()`, `pause()` and `resume()` before its commit rolled back, or the commit outcome is unknown |
+| `DB_OPERATION_FAILED` | `HandleDbOperationFailed` | `exception: BaseException` | The core's classification of the cause | A database or driver error. A read changed nothing; `cancel()`, `pause()` and `resume()` before its commit rolled back, or the commit outcome is unknown |
 | `STORED_DATA_INVALID` | `HandleStoredDataInvalid` | `exception: BaseException` | No | A stored workflow status that is not a `WorkflowStatus` (`status()`, `cancel()`), or a subworkflow summary that is not valid (`tasks()`); nothing changed, and a repeat returns the same error |
 | `RESUME_RECOVERY_FAILED` | `HandleResumeRecoveryFailed` | `exception: BaseException` | No | `resume()` committed, and the recovery pass for the workflow tree, which runs after the commit, failed with a database error. The workflow is `RUNNING`; the worker reaper runs the same pass over all workflows. A repeated `resume()` returns `Ok(False)` |
 | `ASYNC_CONTEXT` | `HandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran. Call the `*_async` form (sync `get()` / `result_for()` return `RetrievalCode.ASYNC_CONTEXT` instead) |

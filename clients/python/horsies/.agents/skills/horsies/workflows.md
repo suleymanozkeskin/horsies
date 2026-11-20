@@ -250,7 +250,7 @@ match spec.start():
 | `WorkflowStartBrokerNotConfigured` | `BROKER_NOT_CONFIGURED` | – | `False` |
 | `WorkflowStartValidationFailed` | `VALIDATION_FAILED` | `exception: BaseException \| NoCause` | `False` |
 | `WorkflowStartIdConflict` | `WORKFLOW_ID_CONFLICT` | `existing_workflow_name: str` | `False` |
-| `WorkflowStartEnqueueFailed` | `ENQUEUE_FAILED` | `exception: BaseException` | driver classification |
+| `WorkflowStartEnqueueFailed` | `ENQUEUE_FAILED` | `exception: BaseException` | the core's classification |
 | `WorkflowStartAsyncContext` | `ASYNC_CONTEXT` | – | `False` |
 
 ### WorkflowStartErrorCode
@@ -376,7 +376,7 @@ Non-blocking single DB query. Returns `RESULT_NOT_READY` if the task hasn't comp
 | Code | Variant | Other fields | Retryable | After the failure |
 |---|---|---|---|---|
 | `WORKFLOW_NOT_FOUND` | `HandleWorkflowNotFound` | – | No | No workflow has this id; nothing changed |
-| `DB_OPERATION_FAILED` | `HandleDbOperationFailed` | `exception: BaseException` | driver classification | A read changed nothing; `cancel`, `pause` and `resume` before its commit rolled back, or the commit outcome is unknown |
+| `DB_OPERATION_FAILED` | `HandleDbOperationFailed` | `exception: BaseException` | the core's classification | A read changed nothing; `cancel`, `pause` and `resume` before its commit rolled back, or the commit outcome is unknown |
 | `STORED_DATA_INVALID` | `HandleStoredDataInvalid` | `exception: BaseException` | No | A stored workflow status or subworkflow summary does not parse; nothing changed, a repeat returns the same error |
 | `RESUME_RECOVERY_FAILED` | `HandleResumeRecoveryFailed` | `exception: BaseException` | No | `resume` committed and the recovery pass after the commit failed; the workflow is `RUNNING`, the worker reaper runs the same pass, a repeated `resume` returns `Ok(False)` |
 | `ASYNC_CONTEXT` | `HandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran — call the `*_async` form (sync `get()` / `result_for()` return `RetrievalCode.ASYNC_CONTEXT` instead) |

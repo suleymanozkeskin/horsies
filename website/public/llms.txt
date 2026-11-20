@@ -248,7 +248,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - TaskSendSuppressed: message
 - TaskSendAsyncContext: task_id, payload, message
 - TaskSendValidationFailed: message, exception
-- TaskSendEnqueueFailed: task_id, payload, message, retryable (bool, driver classification), exception
+- TaskSendEnqueueFailed: task_id, payload, message, retryable (bool, the core's classification), exception
 - TaskSendPayloadMismatch: task_id, payload, message
 - TaskSendPayloadTooLarge: message, size_bytes (int), limit_bytes (int)
 - TaskSendIdempotencyKeyConflict: task_id, payload, message, owner_task_id (str)
@@ -347,7 +347,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .cancel() / .cancel_async() -> HandleResult[None]
 - .pause() / .pause_async() -> HandleResult[bool]
 - .resume() / .resume_async() -> HandleResult[bool]
-- `HandleResult[T]` = Result[T, HandleOperationError]; HandleOperationError is a union of frozen variants, one per HandleErrorCode member; every variant has code, message, retryable, workflow_id. HandleWorkflowNotFound, HandleDbOperationFailed (exception: BaseException; retryable is the driver classification; a write rolled back or its commit outcome is unknown), HandleStoredDataInvalid (exception; a stored status or subworkflow summary does not parse; nothing changed), HandleResumeRecoveryFailed (exception; resume committed, the recovery pass after the commit failed, the workflow is RUNNING), HandleAsyncContext. Match on the variant. A defect in pause or resume propagates
+- `HandleResult[T]` = Result[T, HandleOperationError]; HandleOperationError is a union of frozen variants, one per HandleErrorCode member; every variant has code, message, retryable, workflow_id. HandleWorkflowNotFound, HandleDbOperationFailed (exception: BaseException; retryable is the core's classification; a write rolled back or its commit outcome is unknown), HandleStoredDataInvalid (exception; a stored status or subworkflow summary does not parse; nothing changed), HandleResumeRecoveryFailed (exception; resume committed, the recovery pass after the commit failed, the workflow is RUNNING), HandleAsyncContext. Match on the variant. A defect in pause or resume propagates
 - HandleErrorCode: WORKFLOW_NOT_FOUND, DB_OPERATION_FAILED, STORED_DATA_INVALID, RESUME_RECOVERY_FAILED, ASYNC_CONTEXT
 
 ### WorkflowStatus (enum)
@@ -439,7 +439,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Ok(WorkflowHandle): workflow created and root tasks enqueued
 - Err(WorkflowStartError): start failed; match on the variant
 - WorkflowStartError is a union of frozen variants; every variant has code (WorkflowStartErrorCode), message (str), retryable (bool), workflow_name (str), workflow_id (str, the id this start used)
-- Variants: WorkflowStartBrokerNotConfigured; WorkflowStartValidationFailed (exception: BaseException | NoCause); WorkflowStartIdConflict (existing_workflow_name: str); WorkflowStartEnqueueFailed (retryable = driver classification, exception: BaseException); WorkflowStartAsyncContext
+- Variants: WorkflowStartBrokerNotConfigured; WorkflowStartValidationFailed (exception: BaseException | NoCause); WorkflowStartIdConflict (existing_workflow_name: str); WorkflowStartEnqueueFailed (retryable = the core's classification, exception: BaseException); WorkflowStartAsyncContext
 - WorkflowStartErrorCode: BROKER_NOT_CONFIGURED, VALIDATION_FAILED, WORKFLOW_ID_CONFLICT, ENQUEUE_FAILED, ASYNC_CONTEXT
 - WORKFLOW_ID_CONFLICT: the workflow id exists for another workflow name; nothing was written; use another id
 - ENQUEUE_FAILED: schema init or the start transaction failed with a database or driver error; any other exception in the start transaction propagates

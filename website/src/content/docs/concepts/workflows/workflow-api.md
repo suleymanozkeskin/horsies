@@ -70,7 +70,7 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 | `WorkflowStartBrokerNotConfigured` | `BROKER_NOT_CONFIGURED` | – | `False` | Nothing ran |
 | `WorkflowStartValidationFailed` | `VALIDATION_FAILED` | `exception: BaseException \| NoCause` | `False` | Nothing written |
 | `WorkflowStartIdConflict` | `WORKFLOW_ID_CONFLICT` | `existing_workflow_name: str` | `False` | Nothing written |
-| `WorkflowStartEnqueueFailed` | `ENQUEUE_FAILED` | `exception: BaseException` | Driver classification of the cause | Rolled back, or the commit outcome is unknown |
+| `WorkflowStartEnqueueFailed` | `ENQUEUE_FAILED` | `exception: BaseException` | The core's classification of the cause | Rolled back, or the commit outcome is unknown |
 | `WorkflowStartAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing written |
 
 `NoCause()` means that a check refused the input without a Python exception. Match on `exception` before `raise ... from`.
@@ -150,7 +150,7 @@ Returned by the `WorkflowHandle` methods `.status()`, `.results()`, `.tasks()`, 
 | Variant | `code` | Other fields | `retryable` | After the failure |
 |---|---|---|---|---|
 | `HandleWorkflowNotFound` | `WORKFLOW_NOT_FOUND` | – | `False` | Nothing changed |
-| `HandleDbOperationFailed` | `DB_OPERATION_FAILED` | `exception: BaseException` | Driver classification of the cause | A read changed nothing; a write rolled back, or the commit outcome is unknown |
+| `HandleDbOperationFailed` | `DB_OPERATION_FAILED` | `exception: BaseException` | The core's classification of the cause | A read changed nothing; a write rolled back, or the commit outcome is unknown |
 | `HandleStoredDataInvalid` | `STORED_DATA_INVALID` | `exception: BaseException` | `False` | Nothing changed; a stored workflow status or subworkflow summary does not parse |
 | `HandleResumeRecoveryFailed` | `RESUME_RECOVERY_FAILED` | `exception: BaseException` | `False` | The resume committed and the workflow is `RUNNING`; the recovery pass after the commit failed |
 | `HandleAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing ran |
