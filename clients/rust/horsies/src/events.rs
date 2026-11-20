@@ -39,7 +39,7 @@ pub use horsies_core::{
 };
 
 use crate::child::named_start_hook;
-use crate::{Horsies, HorsiesError};
+use crate::{ErrorCode, Horsies, HorsiesError};
 
 impl Horsies {
     /// Run `handler` on each event of type `E` in the worker's handler
@@ -74,9 +74,12 @@ impl Horsies {
     /// the worker reads the handlers from the app, and its handler child
     /// builds the same app.
     ///
-    /// Errors: a [`HorsiesError`] for a name that is empty, longer than 255
-    /// characters or `(unknown)`, a name that another handler has, and a
-    /// 33rd handler. Nothing is registered then.
+    /// Errors: a [`HorsiesError`] with the code of the same refusal of the
+    /// Python registration: `HRS-225` ([`ErrorCode::EventHandlerInvalidName`])
+    /// for a name that is empty, longer than 255 characters or `(unknown)`,
+    /// `HRS-224` ([`ErrorCode::EventHandlerDuplicateName`]) for a name that
+    /// another handler has, and `HRS-226` ([`ErrorCode::EventHandlerLimit`])
+    /// for a 33rd handler. Nothing is registered then.
     pub fn on_event<E>(
         &mut self,
         name: impl Into<String>,
@@ -133,16 +136,22 @@ impl Horsies {
     }
 }
 
-/// The error of a refused handler registration. Pure.
+/// The error of a refused handler registration, with the code of the same
+/// refusal of the Python registration ([`EventHandlerRefused::code`]).
+/// Pure.
 fn handler_refusal(refused: EventHandlerRefused) -> HorsiesError {
-    match refused {
-        EventHandlerRefused::InvalidName { .. } => HorsiesError::new(refused.to_string())
-            .with_help("name the handler with 1 to 255 characters, other than (unknown)"),
-        EventHandlerRefused::RepeatedName { .. } => HorsiesError::new(refused.to_string())
-            .with_help("give each event handler a name of its own"),
-        EventHandlerRefused::TooMany { .. } => HorsiesError::new(refused.to_string())
-            .with_help("handle several event types in one handler of each type"),
-    }
+    let help = match refused {
+        EventHandlerRefused::InvalidName { .. } => {
+            "name the handler with 1 to 255 characters, other than (unknown)"
+        }
+        EventHandlerRefused::RepeatedName { .. } => "give each event handler a name of its own",
+        EventHandlerRefused::TooMany { .. } => {
+            "handle several event types in one handler of each type"
+        }
+    };
+    HorsiesError::new(refused.to_string())
+        .with_code(refused.code())
+        .with_help(help)
 }
 
 #[cfg(test)]
@@ -190,6 +199,9 @@ mod tests {
         );
     }
 
+    /// A repeated name is `HRS-224` and an invalid name `HRS-225`, the codes
+    /// of the same refusals of the Python registration; nothing is
+    /// registered.
     #[test]
     fn a_repeated_or_invalid_name_is_refused_and_nothing_is_registered() {
         let mut app = app();
@@ -201,12 +213,46 @@ mod tests {
             repeated.message.contains("'audit' is registered already"),
             "{repeated}"
         );
+        assert_eq!(repeated.code, Some(ErrorCode::EventHandlerDuplicateName));
+        assert!(
+            repeated.to_string().starts_with("error[HRS-224]: "),
+            "{repeated}"
+        );
         assert!(repeated.help_text.is_some());
         for name in ["", "(unknown)"] {
             let refused = app.on_event::<AttemptEnded>(name, record_end).unwrap_err();
             assert!(refused.message.contains("name is refused"), "{refused}");
+            assert_eq!(refused.code, Some(ErrorCode::EventHandlerInvalidName));
+            assert!(
+                refused.to_string().starts_with("error[HRS-225]: "),
+                "{refused}"
+            );
         }
         assert_eq!(app.event_handlers().len(), 1);
+    }
+
+    /// A 33rd handler is `HRS-226`, the code of the Python refusal of one
+    /// handler too many; nothing is registered.
+    #[test]
+    fn a_handler_past_the_most_is_refused_with_the_limit_code() {
+        let mut app = app();
+        for index in 0..horsies_core::frame_protocol::MAX_EVENT_HANDLERS {
+            app.on_event_blocking::<TaskClaimed>(format!("audit.{index}"), record_claim)
+                .unwrap();
+        }
+        let refused = app
+            .on_event::<AttemptEnded>("one.more", record_end)
+            .unwrap_err();
+        assert_eq!(refused.code, Some(ErrorCode::EventHandlerLimit));
+        assert!(
+            refused.to_string().starts_with("error[HRS-226]: "),
+            "{refused}"
+        );
+        assert!(refused.is_config_error());
+        assert_eq!(
+            app.event_handlers().len(),
+            horsies_core::frame_protocol::MAX_EVENT_HANDLERS
+        );
     }
 
     #[test]

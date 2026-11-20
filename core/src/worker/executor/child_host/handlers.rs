@@ -32,6 +32,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::ended_spans::{EndedSpanScope, NODE_READER_STOP_BOUND};
 use super::host::ChildStartHook;
 use super::panic::{catch_body_panic, CatchPanic, PanicRecord};
+use crate::core::error::ErrorCode;
 use crate::events::{Event, EventTypeName, UnionEvent};
 use crate::worker::executor::protocol::{
     HandlerCounts, HandlerCountsList, HandlerName, MAX_EVENT_HANDLERS,
@@ -132,6 +133,18 @@ pub enum EventHandlerRefused {
          registered"
     )]
     TooMany { name: String },
+}
+
+impl EventHandlerRefused {
+    /// The code of this refusal: the code of the same refusal of the Python
+    /// registration (`@app.on_event`), one code per refusal kind. Pure.
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            Self::InvalidName { .. } => ErrorCode::EventHandlerInvalidName,
+            Self::RepeatedName { .. } => ErrorCode::EventHandlerDuplicateName,
+            Self::TooMany { .. } => ErrorCode::EventHandlerLimit,
+        }
+    }
 }
 
 /// The start of the thread of one handler, with a queue of its event type.

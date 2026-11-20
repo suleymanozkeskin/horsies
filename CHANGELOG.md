@@ -1755,7 +1755,11 @@ unless it starts with "Added".
   `horsies.telemetry.handler.dropped`, and at the stop gives the handlers
   `HANDLER_DRAIN` (2 s) for their queues. A name is 1 to 255 characters,
   not `(unknown)` and once per app; an app takes at most 32 handlers; a
-  refusal is a `HorsiesError`. `Horsies::on_handler_child_start(hook)`
+  refusal is a `HorsiesError` with the code of the same refusal of the
+  Python registration: `HRS-225` (`ErrorCode::EventHandlerInvalidName`)
+  for a name, `HRS-224` (`EventHandlerDuplicateName`) for a repeated name,
+  `HRS-226` (`EventHandlerLimit`) for a 33rd handler.
+  `Horsies::on_handler_child_start(hook)`
   runs a hook once in each handler child before its handlers start, 10 s
   per hook; a failure ends the handler child with exit code 173, and the
   worker keeps it down and runs on. The hooks of `on_child_start` run in
