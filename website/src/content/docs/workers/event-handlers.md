@@ -134,6 +134,8 @@ The task child opens the span of an attempt around the body, and OpenTelemetry e
 - a shared async child killed for a blocked event loop (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`);
 - a child lost before it reported the end, with its exit seen (`WORKER_CRASHED`).
 
+The `AttemptEnded` event of such an attempt is `AttemptEndDecidedByWorker`. A shared run that its child ended at its deadline is not one of them: its child reports the timeout in its result frame (`AttemptEndReportedByChild` with `ChildResultTimedOut`), and the span of the child has the timeout. One attempt has one span.
+
 With `OtelTracing()`, the handler child makes the span of each such attempt from the `AttemptEnded` event, with the global tracer provider of the handler child. `OtelTracing(worker_ended_spans=WorkerEndedSpans.MAKE_SPANS)` is the default: the worker starts its handler child also when the app has no handler. Set the tracer provider in `@app.on_handler_child_start`:
 
 ```python
@@ -157,7 +159,7 @@ The span stands in for the span of the child:
 |------|-------|
 | Name and kind | `run <task_name>`, CONSUMER |
 | Parent | The span that sent the task, from the carrier that the send stored. `LinkedToSend()` starts a trace of its own with a link to that span. A task sent with no span gets a span with no parent. |
-| Start | The start that the child reported (the `start` of the event: a shared run that its child ended at its deadline), as for the span of a child. Else when the task reached its child (wall clock of the worker): earlier than the start of the span of a child by the transit of the run frame and the `RUNNING` write. |
+| Start | When the task reached its child (wall clock of the worker): earlier than the start of the span of a child by the transit of the run frame and the `RUNNING` write. |
 | End | When the end reached the worker. |
 | Status | ERROR, with `error.type` = the error code of the attempt |
 | Attributes | The attributes of the span of a child: `horsies.task.id`, `horsies.task.name`, `horsies.task.attempt`, `horsies.task.execution` (the kind of the child), `horsies.queue`, `horsies.worker.id`, `messaging.system`, `messaging.operation.type`, `messaging.operation.name`, `messaging.destination.name`, `messaging.message.id`, and for a workflow task `horsies.workflow.id`, `horsies.workflow.node` and `horsies.workflow.root_id`; and `horsies.span.source` = `worker` |

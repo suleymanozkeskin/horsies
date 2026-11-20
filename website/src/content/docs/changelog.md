@@ -149,7 +149,12 @@ before you upgrade a 0.7 deployment.
   (`TASK_TIMEOUT`), a shared async child killed for a blocked loop
   (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`), and a child lost with its
   exit seen (`WORKER_CRASHED`). The child of such an attempt is gone, so its
-  own span never ends. The span is `run <task_name>` of kind CONSUMER under
+  own span never ends. A shared run that its child ended at its deadline
+  is an end that the child reported (`AttemptEndReportedByChild` with the
+  new `ChildResultTimedOut`): the span of the child is the span of the
+  attempt, with the timeout, and the handler child makes none, so one
+  attempt has one span. `AttemptEndDecidedByWorker` has no `start`: the
+  worker decides only ends with no result frame of the child. The span is `run <task_name>` of kind CONSUMER under
   the span that sent the task, from the time the task reached its child to
   the time the end reached the worker, with status ERROR, `error.type` = the
   code, the attributes of the span of a child and
@@ -1806,12 +1811,14 @@ unless it starts with "Added".
   (`TASK_TIMEOUT`), a shared async child killed for a blocked runtime
   (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`), and a child lost with its
   exit seen (`WORKER_CRASHED`). The task child of such an attempt is gone,
-  so its own span never ends. The span is `run <task_name>` of kind
+  so its own span never ends. A shared run that its child ended at its
+  deadline is `AttemptEnd::ReportedByChild` with the new
+  `ChildResult::TimedOut`: the span of the child is the span of the
+  attempt, with `TASK_TIMEOUT`, and the handler child makes none.
+  `AttemptEnd::DecidedByWorker` has no `start`. The span is `run <task_name>` of kind
   CONSUMER under the span that sent the task, with the global tracer
-  provider and propagator of the handler child, from the start that the
-  child reported (`AttemptEnded.end.start`: a shared run that its child
-  ended at its deadline), else from the time the task reached its child,
-  to the time the end reached the worker, with status ERROR, `error.type` = the code, the attributes of the span of a child and
+  provider and propagator of the handler child, from the time the task
+  reached its child to the time the end reached the worker, with status ERROR, `error.type` = the code, the attributes of the span of a child and
   `horsies.span.source = "worker"`. For a workflow task the handler child
   reads the node by the task id through its producer pool, with one read of
   the core bounded at 1 s for a connection and 1 s for the statement, only

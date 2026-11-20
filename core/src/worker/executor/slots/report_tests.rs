@@ -1255,7 +1255,7 @@ async fn a_timed_out_attempt_stores_its_reason() {
         timeout: TaskTimeoutMs::new(1_000).expect("1 s is a valid task timeout"),
         retry: RetryPlacement::SameClass,
         cancel: TimeoutCancel::NoSignal,
-        start: crate::events::AttemptStart::NotReported,
+        seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
     };
 
     let (facts, attempts) = settle_on_a_running_row(end).await;

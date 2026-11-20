@@ -497,10 +497,10 @@ async fn a_worker_failure_before_the_start_reaches_attempt_ended_with_no_start()
 }
 
 /// An attempt that the worker ended (its child exited before a result
-/// frame) is decided by the worker: its `AttemptEnded` carries
-/// `NotReported`.
+/// frame) is decided by the worker: its `AttemptEnded` asks the handler
+/// child for the span of the attempt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_attempt_that_the_worker_ended_holds_no_reported_start() {
+async fn an_attempt_whose_child_was_lost_is_decided_by_the_worker() {
     let mut watched = WatchedTelemetry::new();
     let lost = task(8, ExecutionClass::Isolated);
     let script = format!("{}{}exit 9", boot(&isolated_init()), read_frame());
@@ -520,7 +520,6 @@ async fn an_attempt_that_the_worker_ended_holds_no_reported_start() {
             ended.end,
             crate::events::AttemptEnd::DecidedByWorker {
                 reason: WorkerDecision::ChildLost,
-                start: AttemptStart::NotReported,
                 ..
             }
         ),
@@ -529,11 +528,12 @@ async fn an_attempt_that_the_worker_ended_holds_no_reported_start() {
     );
 }
 
-/// A shared run that its child ended at the deadline is a timeout decided
-/// by the worker; the start of its `shared_result` frame reaches the
-/// `AttemptEnded` with its time.
+/// A shared run that its child ended at the deadline is a timeout that the
+/// child reported: its `AttemptEnded` is `ReportedByChild` with
+/// `ChildResult::TimedOut` and the start of its `shared_result` frame, so
+/// the handler child makes no second span of the attempt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_timeout_that_a_shared_child_ended_carries_the_start_of_its_frame() {
+async fn a_timeout_that_a_shared_child_ended_is_reported_by_the_child() {
     let mut watched = WatchedTelemetry::new();
     let late = task(9, ExecutionClass::SharedAsync);
     let run = run_ref(&late, 1);
@@ -583,12 +583,11 @@ async fn a_timeout_that_a_shared_child_ended_carries_the_start_of_its_frame() {
 
     let events = watched.events();
     let ended = the_attempt_ended(&events);
-    match &ended.end {
-        crate::events::AttemptEnd::DecidedByWorker {
-            reason: WorkerDecision::TimedOut,
-            start: reported,
-            ..
-        } => assert_eq!(*reported, start),
-        other => panic!("a timeout decided by the worker, not {other:?}"),
-    }
+    assert_eq!(
+        ended.end,
+        crate::events::AttemptEnd::ReportedByChild {
+            result: ChildResult::TimedOut,
+            start,
+        }
+    );
 }

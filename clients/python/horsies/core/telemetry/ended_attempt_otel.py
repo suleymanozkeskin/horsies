@@ -12,12 +12,10 @@ never ended:
 - Its parent: the configured propagator extracts the carrier that the send
   stored on the row, and the parentage of `OtelTracing` places the span
   (`attempt_otel.place_attempt`), as for the span of a child.
-- Start: the start that the child reported (`start` of the event: a shared
-  run that its child ended at the deadline), as for the span of a child;
-  else when the task reached its child (`placed_at`, wall clock of the
-  worker), and then the span is longer than the span of a child by the
-  transit of the run frame and the start write (`span_start`). End: when
-  the end reached the worker (`AttemptEnded.at`).
+- Start: when the task reached its child (`placed_at`, wall clock of the
+  worker): the span is longer than the span of a child by the transit of
+  the run frame and the start write (`span_start`). End: when the end
+  reached the worker (`AttemptEnded.at`).
 - Status ERROR with `error.type` = the error code of the attempt row
   (`TASK_TIMEOUT`, `TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`,
   `WORKER_CRASHED`).
@@ -54,8 +52,6 @@ from horsies import __version__
 from horsies._catalog.events import (
     AttemptEndDecidedByWorker,
     AttemptEnded,
-    AttemptStartNotReported,
-    AttemptStartReported,
     RunTraceCarrier,
     RunTraceNoCarrier,
 )
@@ -239,16 +235,10 @@ def _carrier_map(text: str) -> Mapping[str, str] | _CarrierNotAnObjectOfTexts:
 
 
 def span_start(decided: AttemptEndDecidedByWorker) -> datetime:
-    """The start of the span of the attempt that `decided` ended: the start
-    that the child reported, else the time that the task reached its child
-    (`placed_at`). Pure."""
-    match decided.start:
-        case AttemptStartReported(started_at=started_at):
-            return started_at
-        case AttemptStartNotReported():
-            return decided.placed_at
-        case _ as unreachable:
-            assert_never(unreachable)
+    """The start of the span of the attempt that `decided` ended: the time
+    that the task reached its child (`placed_at`). The worker ended the
+    attempt with no result frame, so the child reported no start. Pure."""
+    return decided.placed_at
 
 
 def unix_nanos(moment: datetime) -> int:

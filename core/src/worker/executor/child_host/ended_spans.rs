@@ -3,10 +3,14 @@
 //!
 //! The task child opens the span of an attempt around its body, and a span
 //! is exported only when it ends. When the worker ends the attempt itself
-//! (an isolated task killed at its timeout, a shared async child killed for
-//! a blocked loop, a child lost with its exit seen), the child is gone and
-//! that span never ends. The `AttemptEnded` event of such an attempt
-//! (`AttemptEnd::DecidedByWorker`) carries the facts of its span.
+//! with no result frame of the child (an isolated task killed at its
+//! timeout, a shared child killed for a blocked loop or past its deadlines,
+//! a child lost with its exit seen), that span never ends. The
+//! `AttemptEnded` event of such an attempt (`AttemptEnd::DecidedByWorker`)
+//! carries the facts of its span. An end that the child reported, a shared
+//! run that its child ended at the deadline included
+//! (`ChildResult::TimedOut`), has the span of the child: the handler child
+//! makes none, so one attempt has one span.
 //!
 //! The core has no OpenTelemetry dependency. A client that traces gives the
 //! handler child an [`EndedSpanMaker`] in [`EndedSpanScope::MakeSpans`].
@@ -68,8 +72,8 @@ use crate::broker::TaskWorkflowNode;
 use crate::core::task::Execution;
 use crate::core::BuiltInTaskCode;
 use crate::events::{
-    AttemptEnd, AttemptEnded, AttemptNumber, AttemptStart, Event, RunTrace, WorkerDecision,
-    WorkerIdText, WorkflowPlace,
+    AttemptEnd, AttemptEnded, AttemptNumber, Event, RunTrace, WorkerDecision, WorkerIdText,
+    WorkflowPlace,
 };
 use crate::handle::CoreHandle;
 use crate::worker::executor::protocol::SpanReadCounts;
@@ -130,9 +134,8 @@ pub struct EndedAttempt<'a> {
     pub reason: WorkerDecision,
     /// The code that the attempt row records for `reason`.
     pub error_code: &'a BuiltInTaskCode,
-    /// When the span starts: the start that the child reported (a shared
-    /// run that its child ended at the deadline), else when the task
-    /// reached its child (wall clock of the worker).
+    /// When the span starts: when the task reached its child (wall clock
+    /// of the worker).
     pub started_at: DateTime<Utc>,
     /// When the end reached the worker (wall clock of the worker): the end
     /// of the span.
@@ -596,7 +599,6 @@ fn make_span(
 /// The fields of a `DecidedByWorker` end that the span takes.
 struct DecidedFacts<'a> {
     reason: WorkerDecision,
-    start: AttemptStart,
     error_code: &'a BuiltInTaskCode,
     trace: &'a RunTrace,
     placed_at: DateTime<Utc>,
@@ -607,12 +609,12 @@ struct DecidedFacts<'a> {
 
 impl<'a> DecidedFacts<'a> {
     /// The facts of `end` when the worker ended the attempt; `None` for an
-    /// end that the child reported or that is not known. Pure.
+    /// end that the child reported (its own span covers the attempt, a
+    /// timeout included) or that is not known. Pure.
     fn of(end: &'a AttemptEnd) -> Option<DecidedFacts<'a>> {
         match end {
             AttemptEnd::DecidedByWorker {
                 reason,
-                start,
                 error_code,
                 trace,
                 placed_at,
@@ -621,7 +623,6 @@ impl<'a> DecidedFacts<'a> {
                 workflow,
             } => Some(DecidedFacts {
                 reason: *reason,
-                start: *start,
                 error_code,
                 trace,
                 placed_at: *placed_at,
@@ -656,18 +657,8 @@ fn attempt_of<'a>(
         carrier,
         reason: facts.reason,
         error_code: facts.error_code,
-        started_at: span_start(facts.start, facts.placed_at),
+        started_at: facts.placed_at,
         ended_at: ended.at,
-    }
-}
-
-/// The start of the span of an attempt that the worker ended: the start
-/// `start` that the child reported, else `placed_at`, when the task reached
-/// its child. Pure.
-fn span_start(start: AttemptStart, placed_at: DateTime<Utc>) -> DateTime<Utc> {
-    match start {
-        AttemptStart::Reported { started_at } => started_at,
-        AttemptStart::NotReported => placed_at,
     }
 }
 

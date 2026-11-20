@@ -59,6 +59,17 @@ fn reported_start() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp_nanos(1_700_000_000_250_456_000)
 }
 
+/// The end of a shared run that its child ended at the deadline, with its
+/// start: the child reported it.
+fn timed_out_in_child() -> AttemptEnd {
+    AttemptEnd::ReportedByChild {
+        result: ChildResult::TimedOut,
+        start: AttemptStart::Reported {
+            started_at: reported_start(),
+        },
+    }
+}
+
 fn ended_at() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp_nanos(1_700_000_030_500_654_321)
 }
@@ -168,20 +179,10 @@ fn next_value<T>(receiver: &Receiver<T>) -> T {
 }
 
 /// The end of an attempt that the worker ended for `reason`, of a task whose
-/// send stored a carrier, on an isolated child; the child reported no start.
+/// send stored a carrier, on an isolated child.
 fn decided(reason: WorkerDecision, workflow: WorkflowPlace) -> AttemptEnd {
-    decided_with_start(reason, workflow, AttemptStart::NotReported)
-}
-
-/// As [`decided`], with the start `start` that the child reported.
-fn decided_with_start(
-    reason: WorkerDecision,
-    workflow: WorkflowPlace,
-    start: AttemptStart,
-) -> AttemptEnd {
     AttemptEnd::DecidedByWorker {
         reason,
-        start,
         error_code: reason.error_code(),
         trace: RunTrace::Carrier {
             text: BoundedText::new(format!(r#"{{"traceparent":"{TRACEPARENT}"}}"#)).unwrap(),
@@ -462,31 +463,42 @@ async fn the_span_of_an_attempt_that_the_worker_ended_comes_once_before_its_hand
     assert!(reads.reads().is_empty(), "a plain task reads no node");
 }
 
-/// The span of an attempt whose child reported its start starts there; an
-/// attempt with no reported start starts when the task reached its child.
+/// A shared run that its child ended at the deadline is an end that the
+/// child reported: the span of the child is the span of the attempt, with
+/// the timeout, so the handler child makes none and the handler gets the
+/// event. A timeout at a kill gets the worker-made span, from the time the
+/// task reached its child. One attempt, one span.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_span_starts_at_the_start_that_the_child_reported() {
+async fn a_timeout_that_the_child_reported_gets_no_worker_made_span() {
     let (seen_tx, seen) = channel::<Seen>();
     let reads = StubReads::answering(NodeRead::Failed("a plain task reads no node".to_owned()));
     let spans = recording_spans(seen_tx.clone(), &reads);
-    let events = [attempt_ended(decided_with_start(
-        WorkerDecision::TimedOut,
-        WorkflowPlace::NotInWorkflow,
-        AttemptStart::Reported {
-            started_at: reported_start(),
-        },
-    ))];
+    let events = [
+        attempt_ended(decided(
+            WorkerDecision::TimedOut,
+            WorkflowPlace::NotInWorkflow,
+        )),
+        attempt_ended(timed_out_in_child()),
+    ];
 
-    let order = serve_and_see(spans, seen_tx, &seen, &events, 2).await;
+    let order = serve_and_see(spans, seen_tx, &seen, &events, 3).await;
 
-    let expected = MadeSpan {
-        started_at: reported_start(),
+    let killed = MadeSpan {
+        started_at: placed_at(),
         ..expected_span(
             WorkerDecision::TimedOut,
             EndedWorkflow::Known(RunWorkflow::NotInWorkflow),
         )
     };
-    assert_eq!(order, vec![Seen::Span(expected), Seen::Handled("decided")]);
+    assert_eq!(
+        order,
+        vec![
+            Seen::Span(killed),
+            Seen::Handled("decided"),
+            Seen::Handled("reported"),
+        ]
+    );
+    assert!(seen.try_recv().is_err(), "no other span");
 }
 
 /// Each reason of the worker gives one span with the code of its attempt

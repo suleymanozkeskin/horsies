@@ -241,15 +241,14 @@ pub enum AttemptEnd {
         detail: FailureDetail,
         start: AttemptStart,
     },
-    /// The deadline decided. A result that came later was dropped. `start`
-    /// is the start that a shared child reported when it ended the run at
-    /// its deadline; a timeout at a kill of the child has none
-    /// (`NotReported`).
+    /// The deadline decided. A result that came later was dropped. `seen`
+    /// says whether the child reported the timeout in a result frame, with
+    /// its start, or the worker killed the child at the deadline.
     TimedOut {
         timeout: TaskTimeoutMs,
         retry: RetryPlacement,
         cancel: TimeoutCancel,
-        start: AttemptStart,
+        seen: TimeoutSeen,
     },
     /// A blocked event loop ended the run (a shared async child).
     KilledForLoop {
@@ -264,6 +263,20 @@ pub enum AttemptEnd {
     /// The child was killed and its exit was not seen. Nothing is written:
     /// stale recovery or the claim lease decides the row.
     EndUnknown { pid: ProcessId },
+}
+
+/// How the worker learned that the deadline of a run ended it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutSeen {
+    /// A shared child ended the run at its deadline and reported it in a
+    /// result frame (`end: TimedOut`), with the start of the attempt:
+    /// `NotReported` when the deadline came before its start write
+    /// returned. The attempt span of the child, when the child opened one,
+    /// ends with the timeout.
+    ReportedByChild { start: AttemptStart },
+    /// The worker killed the child at the deadline: the child sent no
+    /// result frame for the run, and its attempt span never ended.
+    AtKill,
 }
 
 /// The start of the crash reason of a child lost with no result.

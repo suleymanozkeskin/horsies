@@ -249,11 +249,9 @@ def _ended_text(
     child_kind: str,
     trace_wire: list[object],
     workflow: str = 'NOT_IN_WORKFLOW',
-    start: list[object] | None = None,
 ) -> str:
     """The wire text of the `AttemptEnded` of an attempt that the worker
-    ended, as the core writes it in an `events` frame. `start` is the wire
-    start of the event; `None` writes `['NotReported']`."""
+    ended, as the core writes it in an `events` frame."""
     wire: list[object] = [
         'AttemptEnded',
         ENDED_NANOS,
@@ -265,7 +263,6 @@ def _ended_text(
         [
             'DecidedByWorker',
             reason,
-            ['NotReported'] if start is None else start,
             code,
             trace_wire,
             PLACED_NANOS,
@@ -273,6 +270,24 @@ def _ended_text(
             WORKER_ID,
             workflow,
         ],
+        RUN_NANOS,
+    ]
+    return json.dumps(wire, separators=(',', ':'))
+
+
+def _timed_out_in_child_text() -> str:
+    """The wire text of the `AttemptEnded` of a shared run that its child
+    ended at the deadline: an end that the child reported, with its
+    start."""
+    wire: list[object] = [
+        'AttemptEnded',
+        ENDED_NANOS,
+        str(TASK_ID),
+        TASK_NAME,
+        QUEUE_NAME,
+        'SHARED_ASYNC',
+        ATTEMPT,
+        ['ReportedByChild', ['TimedOut'], ['Reported', STARTED_NANOS]],
         RUN_NANOS,
     ]
     return json.dumps(wire, separators=(',', ':'))
@@ -307,9 +322,6 @@ NEIGHBOUR_BLOCKED_LOOP: Final = _WorkerEnd(
 )
 ROUTED_TIMEOUT_KILL: Final = _WorkerEnd('TIMED_OUT', 'TASK_TIMEOUT', 'SHARED_THREAD', 'ISOLATED')
 """A task of a shared class that ran on an isolated child (the route rule)."""
-TIMEOUT_IN_CHILD: Final = _WorkerEnd('TIMED_OUT', 'TASK_TIMEOUT', 'SHARED_ASYNC', 'SHARED_ASYNC')
-"""A shared run that its child ended at the deadline: its frame reports the
-start."""
 
 
 def _expected_attributes(end: _WorkerEnd) -> dict[str, object]:
@@ -366,27 +378,20 @@ class TestTheSpanOfAnAttemptThatTheWorkerEnded:
         assert dict(span.attributes or {}) == _expected_attributes(end)
         assert list(span.links) == []
 
-    def test_the_span_starts_at_the_start_that_the_child_reported(
+    def test_a_timeout_that_the_child_reported_gets_no_worker_made_span(
         self,
         traced: _Traced,
     ) -> None:
-        carrier, _send = traced.send_carrier()
-        text = _ended_text(
-            reason=TIMEOUT_IN_CHILD.reason,
-            code=TIMEOUT_IN_CHILD.code,
-            execution=TIMEOUT_IN_CHILD.execution,
-            child_kind=TIMEOUT_IN_CHILD.child_kind,
-            trace_wire=['Carrier', carrier],
-            start=['Reported', STARTED_NANOS],
+        """A shared run that its child ended at the deadline is an end that
+        the child reported: the span of the child has the timeout, so the
+        handler child makes none. One attempt, one span."""
+        _carrier, _send = traced.send_carrier()
+
+        EventDispatch((), traced.recorder(ChildOfSend())).dispatch(
+            [_timed_out_in_child_text()],
         )
 
-        EventDispatch((), traced.recorder(ChildOfSend())).dispatch([text])
-
-        made = traced.named(SPAN_NAME)
-        assert len(made) == 1, [span.name for span in traced.spans()]
-        assert made[0].start_time == _to_microsecond(STARTED_NANOS)
-        assert made[0].end_time == _to_microsecond(ENDED_NANOS)
-        assert dict(made[0].attributes or {}) == _expected_attributes(TIMEOUT_IN_CHILD)
+        assert traced.named(SPAN_NAME) == []
 
     def test_the_span_has_the_attributes_of_the_span_of_a_child(self, traced: _Traced) -> None:
         carrier, _send = traced.send_carrier()
