@@ -120,7 +120,7 @@ The `horsies.*` attributes are the names of horsies. The `messaging.*` attribute
 | Attempt | The body returned a value | Not set (Python); OK (Rust) |
 | Attempt | The body returned a task error | ERROR, `error.type` = the error code. Python records the live exception that the task error keeps |
 | Attempt | A panic of the body (Rust) | ERROR, `error.type` = `UNHANDLED_EXCEPTION` |
-| Attempt | The deadline of the run came before the end of the body, and the child saw it (Rust) | ERROR, `error.type` = `TASK_TIMEOUT` |
+| Attempt | The deadline of a shared run fired in its child before the end of the body: the end that the child reports | ERROR, `error.type` = `TASK_TIMEOUT`. What the body returned is not on the span |
 | Attempt | An exception left the steps of the run, or a refusal of the core ended the body (Python) | ERROR, `error.type` = the class name of the exception, which is recorded |
 
 In the Python client, a failure of your OpenTelemetry SDK never changes the outcome of a send or of an attempt: an SDK that raises when a span opens leaves the call with no span, and one that raises later is logged once per process.

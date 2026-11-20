@@ -10,10 +10,13 @@ The child holds the deadline of each run, on one deadline thread. A thread
 cannot be cancelled: at ``timeout_ms`` the child reports the deadline with
 ``DeadlineFiredFrame``, and the run goes on. The parent then places no new
 run on the child, and kills it when no run in it has time left. The end of a
-run is fixed when its task returns: ``SeatTimedOut`` after a deadline that
-fired, whatever the task returned, else ``SeatFinished``: a task that
-returns at or past its deadline before the deadline thread fired it keeps
-what it returned. A run whose task returned has no deadline left. A
+run is fixed when the steps of its body return, in its attempt span
+(``ThreadRunTable.body_ended``), or when its task returns for a run whose
+body did not start: ``SeatTimedOut`` after a deadline that fired, whatever
+the task returned, else ``SeatFinished``: a task that returns at or past its
+deadline before the deadline thread fired it keeps what it returned. The
+attempt span ends with the same order, so a span of a run that timed out
+has the timeout. A run whose body ended has no deadline left. A
 ``SeatRefusal`` runs no task code and has no deadline.
 
 A seat thread does not start the task of a run whose deadline passed:
@@ -54,6 +57,7 @@ from enum import Enum
 from typing import Final, NoReturn, Protocol, assert_never
 
 from horsies.core.models.boot_failure import ThreadStartRefused
+from horsies.core.telemetry.attempt_span import BodyEndOrder, BodyFirst, DeadlineFirst
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_inbox import ParentFrameInbox
 from horsies.core.worker.child_main import (
@@ -140,11 +144,14 @@ class ThreadSeatProgram(Protocol):
         frame: core.SharedRunFrame,
         work: ThreadSeatWork,
         start_check: Callable[[], StartCheck],
+        body_end: Callable[[], BodyEndOrder],
     ) -> ThreadSeatReturn:
         """Run the task of ``frame``, whose work is ``work``, up to its
         result; write no finalizing marker. ``start_check`` tells, right
-        before the RUNNING update, whether the deadline of the run fired. An
-        exception that escapes is a defect: the child ends at once with
+        before the RUNNING update, whether the deadline of the run fired.
+        ``body_end`` fixes, when the steps of the body return in the attempt
+        span, whether the deadline came first (``ThreadRunTable.body_ended``).
+        An exception that escapes is a defect: the child ends at once with
         ``CHILD_DEFECT_EXIT_CODE``."""
         ...
 
@@ -177,6 +184,12 @@ class _DeadlineAt:
 
 
 @dataclass(frozen=True, slots=True)
+class _BodyEnded:
+    """The steps of the body of the run returned before its deadline fired:
+    the run has no deadline left, and its end is what the task returns."""
+
+
+@dataclass(frozen=True, slots=True)
 class _Returned:
     """The task of the run returned, and ``end`` is the end of the run;
     ``started`` is the start of its attempt. The run has no deadline left; it
@@ -202,11 +215,12 @@ def _start_at_return(returned: ThreadSeatReturn) -> AttemptStart:
 @dataclass(slots=True)
 class _ThreadRun:
     """One run in flight. ``state`` turns ``FIRED`` once, and only for a run
-    with a deadline, then ``_Returned`` once, when its task returns."""
+    with a deadline, or ``_BodyEnded`` once, when the steps of its body
+    return first; then ``_Returned`` once, when its task returns."""
 
     frame: core.SharedRunFrame
     deadline_at: _DeadlineAt | _NoDeadline
-    state: _Deadline | _Returned
+    state: _Deadline | _BodyEnded | _Returned
 
 
 class _TableState(Enum):
@@ -255,10 +269,16 @@ def _end_at_return(run: _ThreadRun, returned: ThreadSeatReturn) -> _EndAtReturn:
                 f'run {run.frame.dispatch} did not start before a deadline '
                 'that has not fired',
             )
-        case _Deadline.PENDING, SetRunning(result=result):
+        case _Deadline.PENDING | _BodyEnded(), SetRunning(result=result):
             return result
         case _Deadline.PENDING, StoppedBeforeRunning() | CoreStoppedBeforeStart() as stopped:
             return stopped
+        case _BodyEnded(), (
+            DeadlineBeforeStart() | StoppedBeforeRunning() | CoreStoppedBeforeStart()
+        ):
+            raise AssertionError(
+                f'run {run.frame.dispatch} ended a body that did not start',
+            )
         case _Returned(), _:
             raise AssertionError(f'run {run.frame.dispatch} returned twice')
         case _ as unreachable:
@@ -384,10 +404,32 @@ class ThreadRunTable:
                     return StartAllowed()
                 case _Deadline.FIRED, _:
                     return DeadlineBeforeStart()
-                case _Returned(), _:
+                case _BodyEnded() | _Returned(), _:
                     raise AssertionError(
-                        f'run {dispatch} asked to start after its return',
+                        f'run {dispatch} asked to start after its body ended',
                     )
+                case _ as unreachable:
+                    assert_never(unreachable)
+
+    def body_ended(self, dispatch: int) -> BodyEndOrder:
+        """Fix which came first for run ``dispatch``, whose steps returned in
+        its attempt span: ``DeadlineFirst`` after a deadline that fired, else
+        ``BodyFirst``, and the deadline of the run no longer fires. The end
+        of the run at its return follows the same order
+        (``_end_at_return``). Fires no deadline that is due: a body that
+        ends at or past its deadline before the deadline thread fired it
+        keeps what it returned. Called at most once per run, by its seat
+        thread, before ``returned``."""
+        with self._lock:
+            run = self._runs[dispatch]
+            match run.state:
+                case _Deadline.FIRED:
+                    return DeadlineFirst()
+                case _Deadline.PENDING:
+                    run.state = _BodyEnded()
+                    return BodyFirst()
+                case _BodyEnded() | _Returned():
+                    raise AssertionError(f'run {dispatch} ended its body twice')
                 case _ as unreachable:
                     assert_never(unreachable)
 
@@ -433,7 +475,7 @@ class ThreadRunTable:
             match run.state:
                 case _Returned(end=ResultEnvelope() as result, started=started):
                     run.state = _Returned(end_after_marker(result, marker), started)
-                case _Returned() | _Deadline.PENDING | _Deadline.FIRED:
+                case _Returned() | _BodyEnded() | _Deadline.PENDING | _Deadline.FIRED:
                     raise AssertionError(
                         f'run {dispatch} wrote a marker with no finished body',
                     )
@@ -449,7 +491,7 @@ class ThreadRunTable:
             match run.state:
                 case _Returned(end=end, started=started):
                     pass
-                case _Deadline.PENDING | _Deadline.FIRED:
+                case _Deadline.PENDING | _Deadline.FIRED | _BodyEnded():
                     raise AssertionError(
                         f'run {dispatch} ended before its task returned',
                     )
@@ -500,7 +542,7 @@ class ThreadRunTable:
                 case _ as unreachable:
                     assert_never(unreachable)
             match run.state:
-                case _Deadline.FIRED | _Returned():
+                case _Deadline.FIRED | _BodyEnded() | _Returned():
                     continue
                 case _Deadline.PENDING if deadline_at <= now:
                     run.state = _Deadline.FIRED
@@ -630,6 +672,7 @@ class ThreadSeats:
                 frame,
                 work,
                 functools.partial(self._table.start_check, frame.dispatch),
+                functools.partial(self._table.body_ended, frame.dispatch),
             )
         except BaseException as exc:
             _exit_for_defect(

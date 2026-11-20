@@ -27,6 +27,7 @@ import pytest
 
 from horsies import _core as core
 from horsies.core.models.tasks import MIN_CANCEL_GRACE_MS, MIN_TASK_TIMEOUT_MS
+from horsies.core.telemetry.attempt_span import BodyEndOrder, BodyFirst, DeadlineFirst
 from horsies.core.types.result import Ok, Result
 from horsies.core.worker import child_main, run_mark, shared_child
 from horsies.core.worker.child_inbox import ParentFrameInbox
@@ -133,22 +134,30 @@ class _RecordingWriter:
 class _ScriptedSeats:
     """Each run awaits the behavior registered for its task name, and sets
     its row RUNNING, but a task named in ``not_running``, which stops with
-    ``CLAIM_LOST``. Each marker is recorded with its run, then awaits
-    ``marker`` when one is set, and ends with ``marker_end``."""
+    ``CLAIM_LOST``. A run whose behavior returned records the order that
+    ``body_end`` gives then, as the attempt span reads it when the steps
+    return. Each marker is recorded with its run, then awaits ``marker``
+    when one is set, and ends with ``marker_end``."""
 
     def __init__(self, behaviors: dict[str, Callable[[], Any]]) -> None:
         self._behaviors = behaviors
         self.started: list[int] = []
         self.not_running: set[str] = set()
+        self.orders: dict[int, BodyEndOrder] = {}
         self.markers: list[int] = []
         self.marker: Callable[[], Any] | None = None
         self.marker_end: MarkerEnd = MarkerDone()
 
-    async def run(self, frame: core.SharedRunFrame) -> SeatReturn:
+    async def run(
+        self,
+        frame: core.SharedRunFrame,
+        body_end: Callable[[], BodyEndOrder],
+    ) -> SeatReturn:
         self.started.append(frame.dispatch)
         value = await self._behaviors[frame.task_name]()
         if frame.task_name in self.not_running:
             return StoppedBeforeRunning('CLAIM_LOST')
+        self.orders[frame.dispatch] = body_end()
         return set_running(ResultEnvelope(str(value)))
 
     async def mark_finalizing(self, frame: core.SharedRunFrame) -> MarkerEnd:
@@ -336,6 +345,10 @@ class TestDeadline:
         ]
 
     def test_a_value_after_the_deadline_is_still_the_timeout(self) -> None:
+        """The steps return a value after the deadline fired: the run ends
+        with the timeout, and the order that the attempt span reads is
+        ``DeadlineFirst``, so the span has the timeout too."""
+
         async def swallow_cancel() -> str:
             try:
                 await asyncio.Event().wait()
@@ -343,7 +356,7 @@ class TestDeadline:
                 await asyncio.sleep(0.02)
             return 'late value'
 
-        seat_loop, writer, _started = _seat_loop(1, {'swallow': swallow_cancel})
+        seat_loop, writer, started = _seat_loop(1, {'swallow': swallow_cancel})
         inbox = ParentFrameInbox()
 
         async def scenario() -> None:
@@ -355,6 +368,30 @@ class TestDeadline:
 
         asyncio.run(scenario())
         assert _results(writer)[0].end == SeatTimedOut()
+        assert started.orders == {1: DeadlineFirst()}
+
+    def test_steps_that_return_before_the_deadline_are_body_first(self) -> None:
+        """The steps return before the deadline: the run ends with what they
+        returned, and the order that the attempt span reads is
+        ``BodyFirst``; a deadline that comes later changes neither."""
+
+        async def quick() -> int:
+            return 4
+
+        seat_loop, writer, started = _seat_loop(1, {'quick': quick})
+        inbox = ParentFrameInbox()
+
+        async def scenario() -> None:
+            serving = asyncio.ensure_future(seat_loop.serve(inbox))
+            inbox.put(_frame(1, 'quick', timeout_ms=DEADLINE_MS))
+            await _until(lambda: len(_results(writer)) == 1)
+            await asyncio.sleep(DEADLINE_MS / 1000 + 0.1)
+            inbox.put(stop_frame())
+            await asyncio.wait_for(serving, RUN_TIMEOUT_S)
+
+        asyncio.run(scenario())
+        assert _results(writer)[0].end == ResultEnvelope('4')
+        assert started.orders == {1: BodyFirst()}
 
     def test_the_deadline_of_one_task_leaves_its_neighbours_running(self) -> None:
         release = asyncio.Event()

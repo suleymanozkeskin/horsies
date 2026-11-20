@@ -83,8 +83,13 @@ before you upgrade a 0.7 deployment.
   error sets the status ERROR and `error.type` to its code, and the live
   exception that it keeps is recorded on the span. Set the SDK of a child in
   `on_child_process_start`. At its stop a child flushes the tracer provider
-  for at most 1 s. The span holds what the body returned; the end that the
-  worker decides for a timeout, a kill or a lost child is not on it.
+  for at most 1 s. The span holds what the body returned, but when the
+  deadline of a shared run fired in its child before the steps of the body
+  returned: then it has the end that the child reports, status ERROR and
+  `error.type` = `TASK_TIMEOUT`, and what the body returned is not on it. A
+  shared thread run fixes that order when its steps return, so its span
+  and its end agree. The end that the worker decides for an isolated
+  timeout, a kill or a lost child is not on the span of the child.
 - **`AppConfig.log_format` and `TaskContextFilter`.** `log_format` takes
   `TextLogs()` (the default) or `JsonLogs()`: one JSON object per line with
   the keys `ts`, `level`, `logger`, `message`, `process`, `task_id`,

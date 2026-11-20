@@ -35,6 +35,7 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
+from horsies.core.telemetry.attempt_span import BodyEndOrder, BodyFirst
 from horsies.core.worker import child_main, child_runner, thread_runner
 from horsies.core.worker.child_frames import (
     ChildFrame,
@@ -160,6 +161,11 @@ def fresh_marks() -> Iterator[None]:
     yield
 
 
+def _body_first() -> BodyEndOrder:
+    """The order of a run whose steps end before its deadline."""
+    return BodyFirst()
+
+
 def _run(frame: core.SharedRunFrame) -> SeatReturn:
     """Run on a thread named as a seat, as the child does."""
     results: list[SeatReturn] = []
@@ -170,6 +176,7 @@ def _run(frame: core.SharedRunFrame) -> SeatReturn:
                 frame,
                 _seat_work(frame),
                 StartAllowed,
+                _body_first,
             )
             match returned:
                 case SetRunning() | StoppedBeforeRunning():
@@ -294,7 +301,9 @@ def test_a_body_that_the_stopped_core_ended_ends_the_child_with_no_report(
 
     with patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)):
         with pytest.raises(_Exited):
-            thread_runner.run_thread_seat_task(frame, _seat_work(frame), StartAllowed)
+            thread_runner.run_thread_seat_task(
+                frame, _seat_work(frame), StartAllowed, _body_first,
+            )
 
     assert codes == [child_main.CORE_STOPPED_EXIT_CODE]
     assert (
