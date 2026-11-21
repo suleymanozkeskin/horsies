@@ -1,0 +1,85 @@
+{
+  "contract_version": 6,
+  "vectors": [
+    {
+      "name": "task_claimed",
+      "wire": ["TaskClaimed", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "SHARED_ASYNC", 2, 50, 1500000]
+    },
+    {
+      "name": "claim_released",
+      "wire": ["ClaimReleased", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "QUEUE_FULL"]
+    },
+    {
+      "name": "attempt_placed",
+      "wire": ["AttemptPlaced", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "SHARED_ASYNC", 1, "ISOLATED", 4242, 250000]
+    },
+    {
+      "name": "attempt_not_started",
+      "wire": ["AttemptNotStarted", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", 1, "WORKFLOW_STOPPED"]
+    },
+    {
+      "name": "attempt_ended_completed",
+      "wire": ["AttemptEnded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "SHARED_THREAD", 1, ["ReportedByChild", ["Completed"], ["Reported", 1700000000100000000]], 2000000000]
+    },
+    {
+      "name": "attempt_ended_user_code",
+      "wire": ["AttemptEnded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "SHARED_ASYNC", 2, ["ReportedByChild", ["Failed", ["User", "RATE_LIMITED"]], ["Reported", 1700000000100000000]], 2000000000]
+    },
+    {
+      "name": "attempt_ended_built_in_code",
+      "wire": ["AttemptEnded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "ISOLATED", 1, ["ReportedByChild", ["Failed", ["BuiltIn", "TASK_EXCEPTION"]], ["NotReported"]], 5000000]
+    },
+    {
+      "name": "attempt_ended_worker_failure",
+      "wire": ["AttemptEnded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "ISOLATED", 1, ["ReportedByChild", ["WorkerFailure"], ["NotReported"]], 5000000]
+    },
+    {
+      "name": "attempt_ended_timed_out_in_child",
+      "wire": ["AttemptEnded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "SHARED_ASYNC", 3, ["ReportedByChild", ["TimedOut"], ["Reported", 1700000000100000000]], 30000000000]
+    },
+    {
+      "name": "attempt_ended_by_worker",
+      "wire": ["AttemptEnded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "SHARED_ASYNC", 3, ["DecidedByWorker", "TIMED_OUT", "TASK_TIMEOUT", ["Carrier", "{\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\"}"], 1700000000000000000, "SHARED_ASYNC", "7c9e6679-7425-40de-944b-e07fc1f90ae7", "NOT_IN_WORKFLOW"], 30000000000]
+    },
+    {
+      "name": "attempt_ended_by_worker_without_carrier",
+      "wire": ["AttemptEnded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "SHARED_ASYNC", 1, ["DecidedByWorker", "NEIGHBOUR_BLOCKED_LOOP", "NEIGHBOUR_BLOCKED_LOOP", ["NoCarrier"], 1700000000000000000, "SHARED_ASYNC", "7c9e6679-7425-40de-944b-e07fc1f90ae7", "NOT_IN_WORKFLOW"], 30000000000]
+    },
+    {
+      "name": "attempt_ended_by_worker_in_workflow",
+      "wire": ["AttemptEnded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "SHARED_THREAD", 2, ["DecidedByWorker", "CHILD_LOST", "WORKER_CRASHED", ["Carrier", "{\"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\"}"], 1700000000000000000, "ISOLATED", "7c9e6679-7425-40de-944b-e07fc1f90ae7", "WORKFLOW_NOT_KNOWN"], 30000000000]
+    },
+    {
+      "name": "attempt_ended_not_known",
+      "wire": ["AttemptEnded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "ISOLATED", 1, ["NotKnown", 4242], 60000000000]
+    },
+    {
+      "name": "attempt_recorded_retry",
+      "wire": ["AttemptRecorded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", 2, ["RetryScheduled", 2, 1700000060000000000], 3000000]
+    },
+    {
+      "name": "attempt_recorded_failed",
+      "wire": ["AttemptRecorded", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", 3, ["Failed"], 1000000]
+    },
+    {
+      "name": "task_recovered",
+      "wire": ["TaskRecovered", 1700000000123456789, "0192f6a1-7b3c-7d4e-8f00-0123456789ab", "send_email", "default", "RUNNING_FAILED"]
+    },
+    {
+      "name": "child_started",
+      "wire": ["ChildStarted", 1700000000123456789, "SHARED_THREAD", 3, 4243, 850000000]
+    },
+    {
+      "name": "child_replaced",
+      "wire": ["ChildReplaced", 1700000000123456789, "ISOLATED", 0, 4242, "MEMORY_LIMIT"]
+    },
+    {
+      "name": "slot_down",
+      "wire": ["SlotDown", 1700000000123456789, "SHARED_ASYNC", 1, ["ResourceShortage", "EMFILE"]]
+    },
+    {
+      "name": "slot_recovered",
+      "wire": ["SlotRecovered", 1700000000123456789, "SHARED_ASYNC", 1]
+    }
+  ]
+}

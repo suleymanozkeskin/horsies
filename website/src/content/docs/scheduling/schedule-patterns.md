@@ -1,5 +1,6 @@
 ---
 title: Schedule Patterns
+section: python
 summary: Type-safe patterns for Interval, Hourly, Daily, Weekly, Monthly, and full cron-style schedules.
 related: [scheduler-overview, schedule-config]
 tags: [scheduling, patterns, interval, cron]
@@ -83,7 +84,7 @@ DailySchedule(time=time(18, 30, 0))
 DailySchedule(time=time(0, 0, 0))
 ```
 
-The `time` field is a Python `datetime.time` object.
+The `time` field is a Python `datetime.time` object, without `tzinfo` and in whole seconds (see [Time of Day](#time-of-day)).
 
 ## WeeklySchedule
 
@@ -152,6 +153,32 @@ MonthlySchedule(day=31, time=time(23, 59, 0))
 | ----- | ----- | ----------- |
 | `day` | 1-31 | Day of month |
 | `time` | time | Time of day |
+
+## Time of Day
+
+The `time` of `DailySchedule`, `WeeklySchedule` and `MonthlySchedule` is a time of day in the schedule's `timezone` field (see [Schedule Config](../schedule-config)). The pattern refuses two kinds of `time` at construction with `ConfigurationError` (`HRS-205`, `CONFIG_INVALID_SCHEDULE`):
+
+| Refused `time` | Why | Fix |
+| -------------- | --- | --- |
+| A `time` with `tzinfo`, for example `time(9, 0, tzinfo=timezone.utc)` | The zone of a schedule comes only from its `timezone` field | Give the time without `tzinfo`, and set the zone in `timezone` |
+| A `time` with microseconds, for example `time(9, 0, 0, 500)` | Schedules fire at whole seconds | Give the time in whole seconds |
+
+```python
+from datetime import time, timedelta, timezone
+
+from horsies.core.models.schedule import DailySchedule, TaskSchedule
+
+# Wrong: a time with tzinfo is refused
+DailySchedule(time=time(9, 0, tzinfo=timezone(timedelta(hours=2))))
+
+# Correct: the zone is the schedule's timezone
+TaskSchedule(
+    name='morning-report',
+    task_name='send_morning_report',
+    pattern=DailySchedule(time=time(9, 0)),
+    timezone='Europe/Berlin',
+)
+```
 
 ## CronSchedule
 

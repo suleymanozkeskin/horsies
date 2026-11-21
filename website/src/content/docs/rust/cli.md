@@ -1,348 +1,378 @@
 ---
 title: CLI Reference
-summary: Command-line interface for workers, the scheduler, and monitoring.
-related: [../workers/worker-architecture, ../scheduling/scheduler-overview, ./monitoring/web-ui-deployment]
-tags: [cli, worker, scheduler, monitoring, commands]
+summary: horsies::cli::run(app) runs the worker, the scheduler, the check or the fleet metrics server of a Rust app from the app's own binary and serves its worker children; the shipped horsies binary has web, get-docs and skills install.
+related: [configuration/app-config, ../workers/worker-architecture, ../scheduling/scheduler-overview, ../workers/heartbeats-recovery, ../monitoring/web-ui-deployment]
+tags: [rust, cli, worker, scheduler, check, metrics, web, get-docs, skills]
 ---
 
-Horsies provides a clap-based CLI (`horsies`) for running workers, the scheduler, and validation checks. In Rust, tasks are registered at compile time, so the CLI takes a configuration source (config file path or database URL) instead of a Python module path.
+# CLI Reference
 
-## Commands
+A Rust app has two command-line programs:
 
-### horsies worker
+| Program | Commands | Why |
+|---------|----------|-----|
+| The app's own binary, through `horsies::cli::run(app)` | `worker`, `scheduler`, `check`, `metrics`, and child mode | The tasks are compiled into this binary, and the worker starts it again for each child |
+| The shipped `horsies` binary | `web`, `get-docs`, `skills install` | These commands need no task of the app |
 
-Start a task worker.
+Both are in the `cli` feature of the crate, which is on by default.
 
-```bash
-horsies worker [CONFIG] [OPTIONS]
-```
+What a worker, a scheduler and a check do is on the shared pages: [Worker Architecture](/horsies/workers/worker-architecture/) and [Scheduler Overview](/horsies/scheduling/scheduler-overview/).
 
-**Arguments:**
-
-| Argument | Description |
-| -------- | ----------- |
-| `CONFIG` | Path to a config file (TOML/JSON) or database URL (positional, optional) |
-
-**Options:**
-
-| Option | Default | Description |
-| ------ | ------- | ----------- |
-| `-m`, `--module CONFIG` | -- | Config source (alternative to positional argument; takes precedence) |
-| `-q`, `--queues QUEUES` | `default` | Comma-separated queue names |
-| `-c`, `--concurrency N` | CPU count | Maximum concurrent tasks |
-| `--max-claim-batch N` | 2 | Max claims per queue per pass |
-| `--max-claim-per-worker N` | 0 | Max total claimed tasks (0=auto) |
-| `--coalesce-notifies N` | 100 | NOTIFY messages to drain per wake |
-| `--loglevel LEVEL` | info | debug, info, warning, error |
-
-**Examples:**
-
-```bash
-# Start worker with a config file
-horsies worker ./config/horsies.toml
-
-# Start worker with a database URL
-horsies worker -m "postgresql://user:pass@localhost/mydb"
-
-# Custom concurrency and queues
-horsies worker ./config/horsies.toml -q high,low --concurrency 8
-
-# Debug logging
-horsies worker ./config/horsies.toml --loglevel debug
-
-# Production settings
-horsies worker ./config/horsies.toml --concurrency 8 --max-claim-batch 4 --loglevel warning
-```
-
-### Programmatic Alternative
-
-In most Rust projects, you start the worker directly in your binary:
+## Run the App
 
 ```rust
-use horsies::{Horsies, AppConfig, WorkerConfig};
+use std::process::ExitCode;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut app = Horsies::new(AppConfig::for_database_url("postgresql://..."))?;
+use horsies::{AppConfig, Horsies, HorsiesError};
 
-    // Register tasks
-    my_task::register(&mut app)?;
+fn build_app() -> Result<Horsies, HorsiesError> {
+    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+    Horsies::new(config)
+}
 
-    // Start worker with defaults
-    app.run_worker().await?;
-
-    // Or with custom config
-    let worker_config = WorkerConfig {
-        concurrency: 8,
-        queues: vec!["high".into(), "low".into()],
-        ..Default::default()
-    };
-    app.run_worker_with(worker_config).await?;
-
-    Ok(())
+fn main() -> ExitCode {
+    match build_app() {
+        Ok(app) => horsies::cli::run(app),
+        Err(refused) => {
+            eprintln!("{refused}");
+            ExitCode::FAILURE
+        }
+    }
 }
 ```
 
-### horsies scheduler
+Register the tasks, provide the state and add the child start hooks in `build_app`: see [App Config](/horsies/rust/configuration/app-config/#registration-and-state).
 
-Start the scheduler service.
+The contract of `run(app: Horsies) -> ExitCode`:
 
-```bash
-horsies scheduler [CONFIG] [OPTIONS]
-```
+1. Child mode first. The worker starts this binary again for each child, with the arguments `--horsies-child <fd> <pid>`. `run` reads them before any other argument, serves the child until the worker stops it, and returns the child's exit code (see [Exit Codes](#exit-codes)). A child start with arguments that cannot be used exits with code 73.
+2. Every line of `main` before `run` runs in each child too. Build the app there (config, registrations, state, start hooks), and start nothing else: each child would start it again.
+3. `run` blocks the calling thread until the command ends. Call it from a plain `fn main`. Inside a tokio runtime it prints why and returns exit code 1.
+4. Any other process runs the command of its arguments: `worker`, `scheduler`, `check` or `metrics`. `run` installs the logs of the command (see [Logs](#logs)) and returns its exit code.
 
-**Arguments:**
+## A Binary That Owns Its `main`
 
-| Argument | Description |
-| -------- | ----------- |
-| `CONFIG` | Path to a config file or database URL |
-
-**Options:**
-
-| Option | Default | Description |
-| ------ | ------- | ----------- |
-| `-m`, `--module CONFIG` | -- | Config source (alternative to positional argument) |
-| `--loglevel LEVEL` | info | debug, info, warning, error |
-| `--check-interval N` | from config | Override check interval in seconds (1-60) |
-| `--dry-run` | false | Validate schedules without starting the loop |
-
-**Examples:**
-
-```bash
-# Start scheduler
-horsies scheduler ./config/horsies.toml
-
-# Debug logging
-horsies scheduler ./config/horsies.toml --loglevel debug
-
-# Validate schedules without running
-horsies scheduler ./config/horsies.toml --dry-run
-```
-
-**Programmatic alternative:**
+A binary with a command line of its own (for example a service that also runs other loops) calls the parts of `run` itself: `horsies::child_mode()` first, then a method of the app for its service.
 
 ```rust
-app.run_scheduler().await?;
+use std::process::ExitCode;
+
+use horsies::{AppConfig, ChildHostExit, ChildMode, Horsies, HorsiesError, WorkerStart};
+
+fn build_app() -> Result<Horsies, HorsiesError> {
+    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+    Horsies::new(config)
+}
+
+fn main() -> ExitCode {
+    let app = match build_app() {
+        Ok(app) => app,
+        Err(refused) => {
+            eprintln!("{refused}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match horsies::child_mode() {
+        ChildMode::Child(args) => app.serve_child(args),
+        ChildMode::BadArguments(error) => {
+            eprintln!("child mode cannot start: {error}");
+            ExitCode::from(u8::try_from(ChildHostExit::BadArguments.code()).unwrap_or(u8::MAX))
+        }
+        ChildMode::Worker => run_worker(app),
+    }
+}
+
+fn run_worker(app: Horsies) -> ExitCode {
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("the runtime did not start: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(app.run_worker(WorkerStart::profile("default"))) {
+        Ok(_stopped) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
 ```
 
-### horsies check
+- Call `serve_child` outside any tokio runtime: it blocks its thread on the core's process runtime.
+- `serve_child` installs no `tracing` subscriber; the child keeps the one that `main` installed before the call.
 
-Validate configuration, task registration, and optionally broker connectivity without starting services.
+| Command of `run` | Method |
+|------------------|--------|
+| child mode | `horsies::child_mode() -> ChildMode`, then `Horsies::serve_child(self, ChildArgs) -> ExitCode` |
+| `worker --profile <name>` | `Horsies::run_worker(self, WorkerStart) -> Result<WorkerStopped, WorkerRunError>` (async) |
+| `scheduler` | `Horsies::run_scheduler(&self) -> Result<SchedulerStopped, SchedulerRunError>` (async), or `Horsies::scheduler(&self)` for a `PreparedScheduler` with `run()` and `stop_handle()` |
+| `check` | `Horsies::check(&self) -> Result<CheckPassed, CheckReport>` |
+| `check --live` | `Horsies::check_live(&self) -> Result<CheckPassed, CheckReport>` (async) |
 
-For details on validation phases, see [Startup Validation](../configuration/app-config#startup-validation-appcheck).
+`run_worker` and `run_scheduler` stop at `SIGTERM` or `SIGINT`, as the commands do.
+
+## Commands
+
+| Command | Does | Python command |
+|---------|------|----------------|
+| `<binary> worker --profile <name> [--loglevel LEVEL] [--metrics-listen HOST:PORT]` | Starts a worker of one profile of `AppConfig.worker_profiles` | [`horsies worker`](/horsies/cli/#horsies-worker) |
+| `<binary> scheduler [--loglevel LEVEL]` | Starts the scheduler of `AppConfig.schedule` | [`horsies scheduler`](/horsies/cli/#horsies-scheduler) |
+| `<binary> check [--live] [--loglevel LEVEL]` | Checks the app without starting a service | [`horsies check`](/horsies/cli/#horsies-check) |
+| `<binary> metrics --listen HOST:PORT [--loglevel LEVEL]` | Serves the fleet metrics of the app's database at `GET /metrics` | [`horsies metrics`](/horsies/cli/#horsies-metrics) |
+
+An unknown command, or no command, is an argument error: exit code 2.
+
+### `worker`
 
 ```bash
-horsies check [CONFIG] [OPTIONS]
+./myapp worker --profile default
+./myapp worker --profile batch --loglevel debug
+./myapp worker --profile default --metrics-listen 0.0.0.0:9464
 ```
-
-**Arguments:**
-
-| Argument | Description |
-| -------- | ----------- |
-| `CONFIG` | Path to a config file or database URL |
-
-**Options:**
 
 | Option | Default | Description |
-| ------ | ------- | ----------- |
-| `-m`, `--module CONFIG` | -- | Config source (alternative to positional argument) |
-| `--loglevel LEVEL` | warning | debug, info, warning, error |
-| `--live` | false | Also connect to PostgreSQL, ensure the Horsies schema, and run `SELECT 1` |
+|--------|---------|-------------|
+| `--profile NAME` | required | The profile of `AppConfig.worker_profiles` that holds the settings of the worker: children, recycling, claim limits, drain timeout |
+| `--loglevel LEVEL` | `INFO` | See [Logs](#logs) |
+| `--metrics-listen HOST:PORT` | none | Serve the worker metrics (`GET /metrics`) and the health probes (`GET /livez`, `GET /readyz`) on `HOST:PORT`, or `[IPV6]:PORT`. There is no default: without it the worker serves no endpoint. See [Metrics](/horsies/observability/metrics/) |
 
-**Examples:**
+- A `--metrics-listen` value that does not parse is an argument error: exit code 2. An address that does not bind does not stop the worker: the endpoint binds again with a backoff. `WorkerStart::with_metrics_endpoint(ListenAddress)` gives the address to `Horsies::run_worker` in a binary that owns its `main`.
+
+- A missing or unknown `--profile` exits with code 1, and nothing starts. The refusal lists the defined profile names.
+- The app check runs before the worker starts, without the schedules. A refused check prints its report on stderr and exits with code 1.
+- `SIGTERM` or `SIGINT` stops the worker. It drains within the drain timeout of the profile and exits with code 0. See [Graceful Shutdown](/horsies/workers/worker-architecture/#graceful-shutdown).
+
+### `scheduler`
 
 ```bash
-# Validate config and task registration
-horsies check ./config/horsies.toml
-
-# Include broker connectivity check
-horsies check ./config/horsies.toml --live
+./myapp scheduler
 ```
 
-**Programmatic alternative:**
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--loglevel LEVEL` | `INFO` | See [Logs](#logs) |
+
+- The scheduler exits with code 1 when the app config has no `schedule` section, or when `schedule.enabled` is `false`.
+- The app check runs before the scheduler starts, with the schedules. A refused check prints its report on stderr and exits with code 1.
+- `SIGTERM` or `SIGINT` stops the scheduler, and it exits with code 0.
+
+### `check`
+
+```bash
+./myapp check
+./myapp check --live
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--live` | off | Also connect to the database, and compare each worker profile with the connection limit of the server |
+| `--loglevel LEVEL` | `WARNING` | See [Logs](#logs) |
+
+A check that passes prints its text on stdout and exits with code 0. A refused check prints its report on stderr and exits with code 1. `--live` installs no schema.
+
+### `metrics`
+
+```bash
+./myapp metrics --listen 0.0.0.0:9465
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--listen HOST:PORT` | required | The address to serve on: `HOST:PORT`, or `[IPV6]:PORT`. The port is 1 to 65535. There is no default |
+| `--loglevel LEVEL` | `INFO` | See [Logs](#logs) |
+
+- The command serves the fleet metrics of the app's database at `GET /metrics`, in the Prometheus text format. What the metrics hold and when the command reads them: [Fleet Collector](/horsies/observability/fleet-collector/).
+- The connection runs no schema step and opens no listener.
+- An address that does not parse is an argument error: exit code 2. The command exits with code 0 at `SIGTERM` or `SIGINT`, and with code 1 when the config does not build a handle or the address does not bind. A database that does not answer does not end it.
+
+## Logs
+
+`--loglevel` takes `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, in any case.
+
+- `run` installs one `tracing` subscriber that writes to stderr at the level of `--loglevel`. When `RUST_LOG` is set to a valid filter, it replaces the level.
+- `tracing` has no level above `error`, so `CRITICAL` logs errors.
+- A subscriber that the binary installed before `run` is kept.
+- Each worker child installs the same subscriber, at the `--loglevel` of the worker.
+- The logs have ANSI color on a terminal. `FORCE_COLOR` (set, not empty, not `0`) turns color on, and wins over `NO_COLOR`. `NO_COLOR` (set, any value) turns color off.
+- Each task body runs inside the `tracing` span `run` (target `horsies::attempt`) with the fields `horsies.task.id`, `horsies.task.name` and `horsies.task.attempt`, so each record of the body carries them. The filter of `run` passes this span at every `--loglevel`. The fields of the core's own records are on [Logs](/horsies/observability/logs/).
+
+### JSON Lines
+
+`run_with_log_format(app, LogFormat::Json)` runs the app as `run` does, with one JSON object per log record, in the runner and in each worker child:
 
 ```rust
-app.check()?;
-// or with live DB check:
-app.check_live().await?;
+use std::process::ExitCode;
+
+use horsies::cli::LogFormat;
+use horsies::{AppConfig, Horsies, HorsiesError};
+
+fn build_app() -> Result<Horsies, HorsiesError> {
+    let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
+    Horsies::new(config)
+}
+
+fn main() -> ExitCode {
+    match build_app() {
+        Ok(app) => horsies::cli::run_with_log_format(app, LogFormat::Json),
+        Err(refused) => {
+            eprintln!("{refused}");
+            ExitCode::FAILURE
+        }
+    }
+}
 ```
 
-### horsies web
+| Key | Value |
+|-----|-------|
+| `timestamp` | The time of the record |
+| `level` | The level |
+| `target` | The target of the event |
+| The fields of the event | At the top level, `message` among them |
+| `span` | The innermost span of the record, with its name and fields |
+| `spans` | Every span of the record, outermost first |
 
-Start the optional monitoring dashboard. Build the binary with the `web` Cargo
-feature first.
+`run(app)` is `run_with_log_format(app, LogFormat::Text)`. With the feature `otel`, the subscriber of both also has the layer of `horsies::otel`: see [Tracing Setup](/horsies/rust/observability/tracing-setup/).
 
-```bash
-horsies web CONFIG [OPTIONS]
-horsies web --database-url URL [OPTIONS]
-```
+## Removed Flags
 
-`CONFIG` is a TOML application configuration. `--database-url` selects the
-standalone database-URL form. The two forms are mutually exclusive.
+The flags of the `0.1.0-alpha` commands exit with code 2, with the message `<flag> was removed in 0.8.0: <replacement>`. A flag counts in its own form and in its `=value` form, only after its own command.
 
-The server is observe-only. It does not run migrations or the task-history
-fleet gate.
-
-**Options:**
-
-| Option | Default | Description |
-| ------ | ------- | ----------- |
-| `--database-url URL` | -- | Runtime query URL instead of `CONFIG` |
-| `--session-database-url URL` | -- | Direct or session URL for `LISTEN/NOTIFY` |
-| `--pgbouncer-transaction-mode` | false | Treat the runtime URL as a PgBouncer transaction pool |
-| `--host HOST` | `127.0.0.1` | Bind interface or host |
-| `--port PORT` | `8600` | Bind port; zero requests an assigned port |
-| `--auth MODE` | `none` | `none` or `trusted-header` |
-| `--trusted-header NAME` | `X-Forwarded-User` | Trusted proxy identity header |
-| `--enable-actions` | false | Enable task and workflow actions |
-| `--custom-css-url URL` | -- | Load a stylesheet after the bundled styles |
-| `--loglevel LEVEL` | `info` | debug, info, warning, error |
-
-`--auth none` requires a loopback host. Trusted-header mode requires a reverse
-proxy that strips or overwrites the identity header on every request.
-
-```bash
-# Local view-only dashboard
-horsies web ./config/horsies.toml
-
-# Trusted proxy with actions
-horsies web ./config/horsies.toml \
-  --host 127.0.0.1 \
-  --auth trusted-header \
-  --trusted-header X-Forwarded-User \
-  --enable-actions
-
-# PgBouncer transaction-pool deployment
-horsies web \
-  --database-url postgresql://app:secret@pool.example.com/horsies \
-  --session-database-url postgresql://app:secret@db.example.com/horsies \
-  --pgbouncer-transaction-mode
-```
-
-See [Deployment and Authentication](../monitoring/web-ui-deployment/) for the
-router factory, auth policies, custom CSS, and schema states.
-
-### horsies get-docs
-
-Fetch the full documentation locally as markdown files. Useful for AI agents (Claude Code, Cursor, Copilot, etc.) that need to read docs without web requests.
-
-```bash
-horsies get-docs [OPTIONS]
-```
-
-**Options:**
-
-| Option | Default | Description |
-| ------ | ------- | ----------- |
-| `--output DIR` | .horsies-docs | Output directory |
-
-**Examples:**
-
-```bash
-# Fetch docs to default location
-horsies get-docs
-
-# Custom output directory
-horsies get-docs --output my-docs/
-
-# Update existing docs (idempotent -- overwrites cleanly)
-horsies get-docs
-```
-
-Uses git sparse checkout when git is available, falls back to tarball download otherwise. No app instance or database connection required.
-
-## Agent Skills (Repository)
-
-If you are using an AI coding agent from a source checkout, Horsies also ships
-guidance-oriented skill files in:
-
-`crates/horsies/.agents/skills/`
-
-Available files:
-
-- `SKILL.md` -- quick orientation and routing
-- `tasks.md` -- task authoring, send/retry, serialization, error handling
-- `workflows.md` -- DAG construction, handles, failure semantics, validation
-- `configs.md` -- configuration, scheduling, CLI checks, environment variables
-
-These files are documentation-focused (no bundled scripts) and are intended for
-on-demand loading by agents that support markdown skill files.
-
-## Process Signals
-
-Both commands handle graceful shutdown:
-
-| Signal | Behavior |
-| ------ | -------- |
-| `SIGTERM` | Graceful shutdown |
-| `SIGINT` (Ctrl+C) | Graceful shutdown |
-
-Workers wait for running tasks to complete before exiting.
+| Command | Flag | Replacement |
+|---------|------|-------------|
+| `worker` | `-q`, `--queues` | A worker serves every queue of the app. Set the queues with `AppConfig.queue_mode` and `AppConfig.custom_queues` |
+| `worker` | `-c`, `--concurrency` | The children of a profile of `AppConfig.worker_profiles` (`WorkerProfile.isolated`, `shared_async`, `shared_thread`), and `--profile <name>` |
+| `worker` | `--max-claim-batch` | `WorkerProfile.claim.per_queue_per_pass`, and `--profile <name>` |
+| `worker` | `--max-claim-per-worker` | `WorkerProfile.claim.claimed_per_worker`, and `--profile <name>` |
+| `worker` | `--coalesce-notifies` | None |
+| `scheduler` | `--check-interval` | `AppConfig.schedule.check_interval_seconds` |
+| `scheduler` | `--dry-run` | The `check` command |
 
 ## Exit Codes
 
+The exit codes of `run`, the codes of the app's own binary:
+
 | Code | Meaning |
-| ---- | ------- |
-| 0 | Clean shutdown |
-| 1 | Error (check logs) |
-| 2 | Unsafe or invalid `horsies web` security arguments |
+|------|---------|
+| 0 | The worker or the scheduler stopped at `SIGTERM` or `SIGINT`, the check passed, or `--help` printed the usage |
+| 1 | Any other end: a refused check, a refused profile, a start that failed, a worker or a scheduler that failed, or `run` inside a tokio runtime |
+| 2 | Arguments that do not parse, or a removed flag |
+| 77 | `worker`: the worker could not write runner heartbeats, and it had not stopped 120 seconds after it started to stop. See [When the Worker Cannot Write Heartbeats](/horsies/workers/heartbeats-recovery/#when-the-worker-cannot-write-heartbeats) |
+| 79 | `worker`: the worker held a task, and its liveness lock was not held for 60 seconds. See [Worker Liveness Lock](/horsies/workers/heartbeats-recovery/#worker-liveness-lock) |
 
-## Environment Variables
+A worker child exits with the code of `ChildHostExit`. The worker reads it to name how the child ended.
+
+| Code | `ChildHostExit` | Meaning |
+|------|-----------------|---------|
+| 0 | `Stopped` | The worker sent its stop frame |
+| 71 | `ParentGone` | The worker is gone |
+| 72 | `BadParentFrame` | The worker sent a malformed frame, or a frame over the bounds |
+| 73 | `BadArguments` | The child mode arguments cannot be used |
+| 75 | `BootFailed` | The child start failed, after a report that names the cause |
+| 78 | `ProtocolMismatch` | The worker speaks another protocol version |
+| 173 | `ChildHookFailed` | A child start hook failed, panicked or ran past its bound |
+
+## The `horsies` Binary
+
+The crate ships one binary, `horsies`. `web` needs the `web` feature:
 
 ```bash
-export DATABASE_URL=postgresql://...
-horsies worker "$DATABASE_URL"
+cargo install horsies --features web
 ```
 
-The CLI does not inject `DATABASE_URL` into config files or load `.env` automatically. Use a config file path as the positional argument, or pass the database URL directly as the config source.
+| Command | Does | Python command |
+|---------|------|----------------|
+| `horsies web [CONFIG] [OPTIONS]` | Serves the monitoring web UI of one database | [`horsies web`](/horsies/cli/#horsies-web) |
+| `horsies get-docs [--output DIR] [--ref main]` | Fetches the docs of this release for AI agents | [`horsies get-docs`](/horsies/cli/#horsies-get-docs) |
+| `horsies skills install --target DIR [--force]` | Copies the agent skill folder of this release | [`horsies skills install`](/horsies/cli/#horsies-skills-install) |
 
-Logging can be controlled with `RUST_LOG`:
+`horsies worker`, `horsies scheduler` and `horsies check` exit with code 2: the tasks of an app are compiled into the app's own binary, so these commands run there. The message names `horsies::cli::run(app)` and the command of that binary, for example `` `<your binary> worker` ``. `horsies --help` names them the same way.
+
+### `horsies web`
 
 ```bash
-# Fine-grained log control
-RUST_LOG=horsies=debug,sqlx=warn horsies worker ./config/horsies.toml
+horsies web horsies.toml
+horsies web --database-url postgresql://app:secret@localhost:5432/horsies
+horsies web --database-url postgresql://app:secret@pooler.example.com:6432/horsies \
+  --session-database-url postgresql://app:secret@db.example.com:5432/horsies \
+  --pgbouncer-transaction-mode
+horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
 ```
 
-When `RUST_LOG` is set, it takes precedence over the `--loglevel` flag.
+| Option | Default | Description |
+|--------|---------|-------------|
+| `CONFIG` | none | A TOML file of `AppConfig`; its `broker` section names the database. Give exactly one of `CONFIG` and `--database-url` |
+| `--database-url URL` | none | Monitor this database, with the default of every other setting |
+| `--session-database-url URL` | none | A direct or session-capable URL when `--database-url` is pooled. Needs `--database-url` |
+| `--pgbouncer-transaction-mode` | off | `--database-url` is a PgBouncer transaction-pool endpoint. Needs `--database-url` and `--session-database-url` |
+| `--host HOST` | `127.0.0.1` | Bind address |
+| `--port PORT` | `8600` | Bind port; `0` asks the operating system for a free port |
+| `--auth MODE` | `none` | `none` (a loopback host only) or `trusted-header` |
+| `--trusted-header NAME` | `X-Forwarded-User` | The identity header that the proxy sets, in `trusted-header` mode |
+| `--enable-actions` | off | Allow task cancel and workflow pause, resume and cancel. Without it the UI is view only |
+| `--custom-css-url URL` | none | A stylesheet URL that the page loads after its own stylesheet |
+| `--trace-link TEMPLATE` | none | The link of a task's trace id in the task detail: an `http` or `https` URL with one `{trace_id}`. A template that breaks a rule exits 2 and names the rule |
+| `--loglevel LEVEL` | `INFO` | See [Logs](#logs) |
 
-## Deployment
+A config file:
 
-### Systemd
-
-```ini
-[Unit]
-Description=Horsies Worker
-After=postgresql.service
-
-[Service]
-Type=simple
-User=app
-WorkingDirectory=/app
-ExecStart=/usr/local/bin/myapp-worker
-Restart=always
-Environment=DATABASE_URL=postgresql://user:pass@localhost/db
-
-[Install]
-WantedBy=multi-user.target
+```toml
+[broker]
+database_url = "postgresql://app:secret@db.example.com:5432/horsies"
 ```
 
-### Docker
+- The config file is read up to 1 MiB. A key that no config section has is refused by name, with exit code 1.
+- The server never installs or migrates the schema (`SchemaMode::ObserveOnly`).
+- `--auth none` on a host that is not `localhost` or a loopback address exits with code 2. A blank `--trusted-header`, or a value that is not a header name, exits with code 2. `--auth trusted-header` prints a warning: the proxy must strip or overwrite that header on each incoming request. The access rules are on the shared page: [Bind rules](/horsies/monitoring/web-ui-deployment/#bind-rules) and [Trusted-header mode](/horsies/monitoring/web-ui-deployment/#trusted-header-mode).
+- The binary has no task or workflow of an app. A resume of a paused workflow that owes a sub-workflow child needs the app's workflow definitions: serve the UI from the app's own binary with `horsies::web::router` (feature `web`).
+- `SIGTERM` or `SIGINT` stops the server; requests in flight end first, and it exits with code 0.
+- Built without the `web` feature, `horsies web` prints ``horsies web requires the `web` cargo feature`` and exits with code 1.
 
-```dockerfile
-FROM rust:1.75 AS builder
-WORKDIR /app
-COPY . .
-RUN cargo build --release
+### `horsies get-docs`
 
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y libssl3 ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/myapp-worker /usr/local/bin/
-CMD ["myapp-worker"]
+```bash
+horsies get-docs
+horsies get-docs --output docs/horsies --ref main
 ```
 
-### Procfile
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--output DIR` | `.horsies-docs` | The output folder |
+| `--ref main` | none | Fetch the `main` branch instead of the release tag. Required for a version that is not a release version |
 
-```text
-worker: ./target/release/myapp-worker
-scheduler: ./target/release/myapp-scheduler
+- The docs are those of the tag `v<crate version>`, for example `v0.8.0`. A crate version that is not three dot-separated numbers (a pre-release) has no tag: without `--ref main` the command exits with code 1. The `main` branch can differ from the installed version.
+- Kept: every page under `rust/` and every page with `section: shared`. The Python API pages and the site pages are dropped. `llms.txt` of the Rust docs is written to the output folder.
+- The fetch is a git sparse checkout, then, when that fails, the tarball of the ref through `curl` and `tar`. Each git or curl call is stopped after 60 seconds.
+- The output folder is replaced only after the new copy is complete. On success the command prints `Done. N files written to DIR/` and exits with code 0; on a failure it prints the cause and exits with code 1.
+
+### `horsies skills install`
+
+```bash
+horsies skills install --target .claude/skills
+horsies skills install --target .claude/skills --force
 ```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--target DIR` | required | The skills folder of the agent tool. The skill is written to `DIR/horsies/` |
+| `--force` | off | Replace a copy that differs from the skill files of this release |
+
+The skill files are compiled into the binary. The command creates `DIR` when it does not exist, and writes the new copy beside the destination before it moves it into place.
+
+| Case | Result | Exit code |
+|------|--------|-----------|
+| `DIR/horsies/` is absent | Folder written | 0 |
+| `DIR/horsies/` has the same files | Nothing written | 0 |
+| `DIR/horsies/` differs (edited, missing or extra files) | Nothing written. The message lists the differing paths | 1 |
+| `DIR/horsies/` differs and `--force` is set | Folder replaced | 0 |
+| `DIR` or `DIR/horsies` is a file | Nothing written | 1 |
+| A filesystem call fails | The message names the path, the cause and what is at the destination | 1 |
+
+### Exit Codes of `horsies`
+
+| Code | Meaning |
+|------|---------|
+| 0 | The command succeeded, or `SIGTERM` or `SIGINT` stopped `web` |
+| 1 | The command failed |
+| 2 | Arguments that do not parse, `worker`, `scheduler` or `check`, or an argument that `web` refuses before it starts |

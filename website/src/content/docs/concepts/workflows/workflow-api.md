@@ -1,5 +1,6 @@
 ---
 title: Workflow API
+section: python
 summary: Signatures and return types for WorkflowSpec and WorkflowHandle.
 related: [workflow-semantics, subworkflows]
 tags: [concepts, workflows, api, reference]
@@ -69,9 +70,7 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 | `WorkflowStartBrokerNotConfigured` | `BROKER_NOT_CONFIGURED` | – | `False` | Nothing ran |
 | `WorkflowStartValidationFailed` | `VALIDATION_FAILED` | `exception: BaseException \| NoCause` | `False` | Nothing written |
 | `WorkflowStartIdConflict` | `WORKFLOW_ID_CONFLICT` | `existing_workflow_name: str` | `False` | Nothing written |
-| `WorkflowStartEnqueueFailed` | `ENQUEUE_FAILED` | `exception: BaseException` | Driver classification of the cause | Rolled back, or the commit outcome is unknown |
-| `WorkflowStartLoopRunnerFailed` | `LOOP_RUNNER_FAILED` | `exception: BaseException` (the `LoopRunnerError`) | `False` | Nothing ran |
-| `WorkflowStartEventLoopLimit` | `EVENT_LOOP_LIMIT` | `loop_limit: EventLoopLimit` | `False` | Nothing written |
+| `WorkflowStartEnqueueFailed` | `ENQUEUE_FAILED` | `exception: BaseException` | The core's classification of the cause | Rolled back, or the commit outcome is unknown |
 | `WorkflowStartAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing written |
 
 `NoCause()` means that a check refused the input without a Python exception. Match on `exception` before `raise ... from`.
@@ -85,11 +84,9 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 | `VALIDATION_FAILED` | No | A start check (`WorkflowValidationError`) refused the start, or a retry of another workflow's error. Any other exception in the start checks is a defect and propagates. In the start transaction, an exception that is not a database or driver error is a defect and propagates, also a `SerializationError` |
 | `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written. `existing_workflow_name` names it. Use another id |
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error. Any other exception in the start transaction is a defect and propagates |
-| `LOOP_RUNNER_FAILED` | No | Sync `spec.start()` could not run the call on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was written. A stopped runner does not start again: call `await spec.retry_start_async(err)` or use a new broker |
-| `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing was written |
 | `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` was called on a thread that runs an event loop; nothing was written. Call `await spec.retry_start_async(err)` to complete the start with the error's id |
 
-`WorkflowStartRetryable` is `WorkflowStartEnqueueFailed | WorkflowStartAsyncContext | WorkflowStartLoopRunnerFailed`. It is the parameter type of `.retry_start()` and `.retry_start_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. The retry methods start the workflow again with the error's `workflow_id`. An error of another workflow returns `WorkflowStartValidationFailed`.
+`WorkflowStartRetryable` is `WorkflowStartEnqueueFailed | WorkflowStartAsyncContext`. It is the parameter type of `.retry_start()` and `.retry_start_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. The retry methods start the workflow again with the error's `workflow_id`. An error of another workflow returns `WorkflowStartValidationFailed`.
 
 **Usage:**
 
@@ -127,7 +124,8 @@ match spec.start():
 
 | Attribute / Method | Type / Signature | Description |
 |---|---|---|
-| `.workflow_id` | `str` | Workflow UUID |
+| `WorkflowHandle.for_id(text, broker)` | `(str, PostgresBroker) -> Result[WorkflowHandle[Any], HandleInvalidWorkflowId]` | The handle of a workflow id text, or `HandleInvalidWorkflowId` when the text is not a UUID. Reads nothing |
+| `.workflow_id` | `uuid.UUID` | Workflow id; `str(handle.workflow_id)` is its canonical text |
 | `.status()` / `.status_async()` | `-> HandleResult[WorkflowStatus]` | Current workflow status |
 | `.get()` / `.get_async()` | `(timeout_ms: int \| None) -> TaskResult[OutT, TaskError]` | Block until completion or timeout. A COMPLETED workflow whose output node is SKIPPED returns `WORKFLOW_OUTPUT_SKIPPED`: see [Output Node Under a Success Policy](/horsies/concepts/workflows/workflow-semantics/#output-node-under-a-success-policy) |
 | `.results()` / `.results_async()` | `-> HandleResult[dict[str, TaskResult[Any, TaskError]]]` | All results keyed by node_id; `Ok({})` before any node has a result, `HandleWorkflowNotFound` when no workflow has the id |
@@ -137,11 +135,13 @@ match spec.start():
 | `.pause()` / `.pause_async()` | `-> HandleResult[bool]` | Pause running workflow |
 | `.resume()` / `.resume_async()` | `-> HandleResult[bool]` | Resume paused workflow |
 
+`WorkflowHandle(workflow_id=..., broker=...)` takes a `uuid.UUID`. `for_id` parses a text once: every spelling that `uuid.UUID` accepts (upper case, braces, `urn:uuid:`, no hyphens) gives the same UUID. Text that is not a UUID is `HandleInvalidWorkflowId` with `message`, `workflow_id_text` (the text as given) and `exception` (the `ValueError` of `uuid.UUID`); the same text gives the same error. It is not a `HandleOperationError` variant.
+
 ### HandleResult
 
 `HandleResult[T] = Result[T, HandleOperationError]`
 
-Returned by the `WorkflowHandle` methods `.status()`, `.results()`, `.tasks()`, `.cancel()`, `.pause()`, `.resume()` and their `*_async` forms, and by `pause_workflow()`, `resume_workflow()`, `pause_workflow_sync()` and `resume_workflow_sync()`.
+Returned by the `WorkflowHandle` methods `.status()`, `.results()`, `.tasks()`, `.cancel()`, `.pause()`, `.resume()` and their `*_async` forms, and by `pause_workflow()`, `resume_workflow()`, `pause_workflow_sync()` and `resume_workflow_sync()`. These four functions take the workflow id as a `uuid.UUID`.
 
 **HandleOperationError variants:**
 
@@ -150,14 +150,12 @@ Returned by the `WorkflowHandle` methods `.status()`, `.results()`, `.tasks()`, 
 | Variant | `code` | Other fields | `retryable` | After the failure |
 |---|---|---|---|---|
 | `HandleWorkflowNotFound` | `WORKFLOW_NOT_FOUND` | – | `False` | Nothing changed |
-| `HandleDbOperationFailed` | `DB_OPERATION_FAILED` | `exception: BaseException` | Driver classification of the cause | A read changed nothing; a write rolled back, or the commit outcome is unknown |
+| `HandleDbOperationFailed` | `DB_OPERATION_FAILED` | `exception: BaseException` | The core's classification of the cause | A read changed nothing; a write rolled back, or the commit outcome is unknown |
 | `HandleStoredDataInvalid` | `STORED_DATA_INVALID` | `exception: BaseException` | `False` | Nothing changed; a stored workflow status or subworkflow summary does not parse |
 | `HandleResumeRecoveryFailed` | `RESUME_RECOVERY_FAILED` | `exception: BaseException` | `False` | The resume committed and the workflow is `RUNNING`; the recovery pass after the commit failed |
-| `HandleLoopRunnerFailed` | `LOOP_RUNNER_FAILED` | `exception: BaseException` (the `LoopRunnerError`) | `False` | Nothing ran |
-| `HandleEventLoopLimit` | `EVENT_LOOP_LIMIT` | `loop_limit: EventLoopLimit` | `False` | Nothing ran |
 | `HandleAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing ran |
 
-See [Errors Reference](/horsies/tasks/errors/#workflow-handle-errors-handleresult) for when each code occurs.
+See [Errors Reference](/horsies/tasks/errors/#workflow-handle-error-codes) for when each code occurs.
 
 **Usage:**
 

@@ -1,16 +1,21 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/horsies",
-    "crates/horsies-macros",
-    "rust/examples",
-    "rust/showcase",
-    "rust/tests/support",
-    "rust/tests/worker",
-    "rust/tests/queue_mismatch",
+    "clients/rust/horsies",
+    "clients/python/codegen",
+    "core",
+    "core/derive",
+    "clients/rust/macros",
+    "clients/python/bridge",
+    "clients/rust/examples",
+    "clients/rust/examples/showcase",
+    "clients/rust/tests/arbitrary-precision",
+    "clients/rust/tests/docs-check",
+    "clients/rust/tests/parity",
+    "clients/rust/tests/support",
+    "clients/rust/tests/worker",
+    "clients/rust/tests/queue_mismatch",
 ]
-# syce has its own Cargo.lock and release line.
-exclude = ["syce"]
 
 [workspace.lints.rust]
 unused_must_use = "deny"

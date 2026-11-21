@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: user error code WORKFLOW_STOPPED of variant `WorkflowStopped` is the name of a built-in or reserved code; rename the variant
+ --> tests/compile_fail/user_error_code_reserved_name.rs:6:5
+  |
+6 |     WorkflowStopped,
+  |     ^^^^^^^^^^^^^^^ evaluation of `_` failed here

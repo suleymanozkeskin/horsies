@@ -3,8 +3,11 @@ name: Unit Tests
 on:
   push:
     branches: [main]
+  # Pull requests into program/** start no run; a run there is started by hand
+  # (workflow_dispatch) when a result is needed.
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: unit-tests-${{ github.ref }}
@@ -12,8 +15,60 @@ concurrency:
 
 permissions: {}
 
+# The Python project is clients/python/. A step that runs uv at the
+# repository root uses its pyproject.toml, uv.lock and .venv.
+env:
+  UV_PROJECT: ${{ github.workspace }}/clients/python
+
 jobs:
+  # One dev wheel of horsies, with horsies._core for Linux x86_64, per run.
+  # The Python jobs install this wheel and import horsies from it: no job
+  # builds the extension again, and no test imports the source folder.
+  python-wheel:
+    needs: scope
+    if: needs.scope.outputs.run_python == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # rustup is preinstalled on the runner. With no argument it installs the
+      # toolchain and components that rust-toolchain.toml names.
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - name: Cache Cargo builds
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      # The build backend of pyproject.toml (maturin) builds in the release
+      # profile unless MATURIN_PEP517_ARGS names another; the dev profile
+      # compiles faster and keeps debug assertions and overflow checks on.
+      - name: Build the dev wheel
+        env:
+          MATURIN_PEP517_ARGS: --profile dev
+        run: uv build clients/python --wheel --python 3.13 --out-dir dist
+
+      - name: Upload the dev wheel
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: horsies-dev-wheel
+          path: dist/horsies-*.whl
+          if-no-files-found: error
+          retention-days: 7
+
   unit:
+    needs: [scope, python-wheel]
+    if: needs.scope.outputs.run_python == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -25,26 +80,165 @@ jobs:
           version: 0.11.14
           enable-cache: true
 
-      - name: Install dependencies
-        run: uv sync --dev
+      - name: Download the dev wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: horsies-dev-wheel
+          path: dist
+
+      # The project itself comes from the wheel; every later `uv run` has
+      # --no-sync, so uv does not replace it with a build of the source.
+      - name: Install dependencies and the dev wheel
+        run: |
+          uv sync --dev --no-install-project
+          uv pip install --python clients/python/.venv --no-deps dist/horsies-*.whl
+          # pytest puts clients/python/ first on sys.path, so `import horsies`
+          # loads the source folder; give it the compiled module of the wheel.
+          unzip -o -j dist/horsies-*.whl 'horsies/_core*.so' -d clients/python/horsies
 
       # Strict pyright over the paths listed in pyrightconfig.clean.json. The
       # list holds files that are clean today, and the type pins.
       - name: Typecheck clean paths
-        run: uv run pyright -p pyrightconfig.clean.json
+        run: uv run --no-sync pyright -p clients/python/pyrightconfig.clean.json
 
       # Type-check the python blocks of the docs and the skill files. The
       # extractor writes one file per page; blocks marked "check: skip" are
-      # left out. See tests/docs_examples/extract.py.
+      # left out. See clients/python/tests/docs_examples/extract.py.
       - name: Typecheck doc examples
         run: |
-          uv run python tests/docs_examples/extract.py build/doc_examples
-          uv run pyright -p pyrightconfig.docs.json
+          uv run --no-sync python clients/python/tests/docs_examples/extract.py clients/python/build/doc_examples
+          uv run --no-sync pyright -p clients/python/pyrightconfig.docs.json
 
       - name: Run unit tests
-        run: uv run pytest tests/unit/ -v --tb=short
+        run: uv run --no-sync pytest clients/python/tests/unit/ -v --tb=short
+
+      # The unit tests of the cross-client harnesses in crossclient/:
+      # the perf harness, the stored-form vectors and the package root. They
+      # run from the repository root with the pytest settings of the Python
+      # project.
+      - name: Run the unit tests of the cross-client harnesses
+        run: uv run --no-sync pytest -c clients/python/pyproject.toml --rootdir . crossclient/perf/ crossclient/test_*.py -v --tb=short
+
+      # The pure tests of the dual-run snapshot: rules, normalize, compare.
+      - name: Run dual-run unit tests
+        run: uv run --no-sync pytest -c clients/python/pyproject.toml --rootdir . crossclient/parity/snapshot/ -m unit -v --tb=short
+
+      # The public API of the installed wheel against clients/python/tests/public_api/
+      # baseline.json and baseline-pyright.json: exports, the deep imports of
+      # the docs, the skill files and the showcase, signatures, fields, enum
+      # members, the pyright completeness score and diagnostics. An intended
+      # change updates the baseline with `python -m tests.public_api.runner`.
+      - name: Compare the public API with the baseline
+        run: uv run --no-sync pytest clients/python/tests/public_api/ -v --tb=short
+
+  dualrun:
+    needs: [scope, python-wheel]
+    if: needs.scope.outputs.run_python == 'true'
+    # The snapshot tests that need PostgreSQL. Each test creates and drops
+    # its own dualrun_<32 hex> databases on this server.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: horsies
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Download the dev wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: horsies-dev-wheel
+          path: dist
+
+      # The project itself comes from the wheel; every later `uv run` has
+      # --no-sync, so uv does not replace it with a build of the source.
+      - name: Install dependencies and the dev wheel
+        run: |
+          uv sync --dev --no-install-project
+          uv pip install --python clients/python/.venv --no-deps dist/horsies-*.whl
+          # pytest puts clients/python/ first on sys.path, so `import horsies`
+          # loads the source folder; give it the compiled module of the wheel.
+          unzip -o -j dist/horsies-*.whl 'horsies/_core*.so' -d clients/python/horsies
+
+      - name: Run dual-run integration tests
+        env:
+          DB_PASSWORD: testpassword
+        run: uv run --no-sync pytest -c clients/python/pyproject.toml --rootdir . crossclient/parity/snapshot/ -m integration -v --tb=short
+
+  extension:
+    needs: [scope, python-wheel]
+    if: needs.scope.outputs.run_python == 'true'
+    # The tests of horsies._core itself, each case in a fresh interpreter
+    # (clients/python/tests/extension/). Most cases connect: the session database of
+    # clients/python/tests/session_database.py, with the schema that
+    # CoreHandle.install_schema installs. The uvloop cases need uvloop from
+    # the dev group.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: horsies
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Download the dev wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: horsies-dev-wheel
+          path: dist
+
+      # The project itself comes from the wheel; every later `uv run` has
+      # --no-sync, so uv does not replace it with a build of the source.
+      - name: Install dependencies and the dev wheel
+        run: |
+          uv sync --dev --no-install-project
+          uv pip install --python clients/python/.venv --no-deps dist/horsies-*.whl
+          # pytest puts clients/python/ first on sys.path, so `import horsies`
+          # loads the source folder; give it the compiled module of the wheel.
+          unzip -o -j dist/horsies-*.whl 'horsies/_core*.so' -d clients/python/horsies
+
+      - name: Run the extension module tests
+        env:
+          DB_PASSWORD: testpassword
+        run: uv run --no-sync pytest clients/python/tests/extension/ -v --tb=short
 
   newest-pydantic:
+    needs: [scope, python-wheel]
+    if: needs.scope.outputs.run_python == 'true'
     # The definition check reads core schema keys that pydantic owns, and the
     # dependency has no upper bound. A user can install a newer pydantic than
     # the lock file holds.
@@ -59,13 +253,26 @@ jobs:
           version: 0.11.14
           enable-cache: true
 
-      - name: Install dependencies with the newest pydantic
-        run: uv sync --dev --upgrade-package pydantic --upgrade-package pydantic-core
+      - name: Download the dev wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: horsies-dev-wheel
+          path: dist
+
+      - name: Install dependencies with the newest pydantic, and the dev wheel
+        run: |
+          uv sync --dev --no-install-project --upgrade-package pydantic --upgrade-package pydantic-core
+          uv pip install --python clients/python/.venv --no-deps dist/horsies-*.whl
+          # pytest puts clients/python/ first on sys.path, so `import horsies`
+          # loads the source folder; give it the compiled module of the wheel.
+          unzip -o -j dist/horsies-*.whl 'horsies/_core*.so' -d clients/python/horsies
 
       - name: Run the type contract tests
-        run: uv run --no-sync pytest tests/unit/test_wire_shape.py tests/unit/test_strict_codec.py tests/unit/test_workflow_node_wire_kwargs.py tests/unit/test_signature_check.py tests/unit/test_type_contract_send_return.py -v --tb=short
+        run: uv run --no-sync pytest clients/python/tests/unit/test_wire_shape.py clients/python/tests/unit/test_strict_codec.py clients/python/tests/unit/test_workflow_node_wire_kwargs.py clients/python/tests/unit/test_signature_check.py clients/python/tests/unit/test_type_contract_send_return.py -v --tb=short
 
   showcase:
+    needs: [scope, python-wheel]
+    if: needs.scope.outputs.run_python == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -84,7 +291,7 @@ jobs:
           # Same rule as the webui job: an unknown base runs rather than skips.
           if [ -z "$base" ] || [ "$base" = '0000000000000000000000000000000000000000' ]; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$base" HEAD -- showcase/ horsies/; then
+          elif git diff --quiet "$base" HEAD -- clients/python/examples/ clients/python/horsies/ clients/python/bridge/ core/ core/derive/ Cargo.toml Cargo.lock rust-toolchain.toml; then
             echo 'run=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run=true' >> "$GITHUB_OUTPUT"
@@ -96,23 +303,40 @@ jobs:
           version: 0.11.14
           enable-cache: true
 
-      - name: Install dependencies
+      - name: Download the dev wheel
         if: steps.changed.outputs.run == 'true'
-        run: uv sync --dev
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: horsies-dev-wheel
+          path: dist
+
+      - name: Install dependencies and the dev wheel
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          uv sync --dev --no-install-project
+          uv pip install --python clients/python/.venv --no-deps dist/horsies-*.whl
+          # pytest puts clients/python/ first on sys.path, so `import horsies`
+          # loads the source folder; give it the compiled module of the wheel.
+          unzip -o -j dist/horsies-*.whl 'horsies/_core*.so' -d clients/python/horsies
 
       # No --live: this validates config, imports, every workflow DAG, and each
       # registered builder without a database. It is what keeps the showcase
       # compiling against the library as the library changes, which is why a
-      # change under horsies/ also triggers this job.
+      # change to clients/python/horsies/ or to the crates of horsies._core also
+      # triggers this job.
       - name: Validate showcase app
         if: steps.changed.outputs.run == 'true'
-        run: uv run horsies check showcase.acme.app:app
+        working-directory: clients/python
+        run: uv run --no-sync horsies check examples.acme.app:app
 
       - name: Typecheck showcase
         if: steps.changed.outputs.run == 'true'
-        run: uv run pyright showcase/
+        working-directory: clients/python
+        run: uv run --no-sync pyright examples/
 
   webui:
+    needs: scope
+    if: needs.scope.outputs.run_python == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -129,10 +353,12 @@ jobs:
             base='${{ github.event.before }}'
           fi
           # An unknown base (first push to a branch) runs the job rather than
-          # skipping it: a missed check is worse than a redundant one.
+          # skipping it: a missed check is worse than a redundant one. A change
+          # to the core's committed build alone also runs it, for the check of
+          # that build below.
           if [ -z "$base" ] || [ "$base" = '0000000000000000000000000000000000000000' ]; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$base" HEAD -- webui/; then
+          elif git diff --quiet "$base" HEAD -- webui/ core/webui-dist/; then
             echo 'run=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run=true' >> "$GITHUB_OUTPUT"
@@ -167,7 +393,90 @@ jobs:
         working-directory: webui
         run: bun run build
 
+      # Builds into core/webui-dist/, which horsies-core embeds,
+      # and fails if the committed build differs (webui/scripts/check-core-dist.sh).
+      - name: Check the core's committed build
+        if: steps.changed.outputs.run == 'true'
+        working-directory: webui
+        run: bun run check:core-dist
+
+  # A PR into program/0.8.0 runs only the jobs that its paths need. Other
+  # events run every job.
+  scope:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      run_rust: ${{ steps.decide.outputs.run_rust }}
+      run_python: ${{ steps.decide.outputs.run_python }}
+      run_generated: ${{ steps.decide.outputs.run_generated }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Decide the Rust, Python and generated-files jobs
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ] || [ "$BASE_REF" != "program/0.8.0" ]; then
+            echo 'run_rust=true' >> "$GITHUB_OUTPUT"
+            echo 'run_python=true' >> "$GITHUB_OUTPUT"
+            echo 'run_generated=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base="$(git merge-base "$BASE_SHA" HEAD)"
+          # The rust job checks and tests every crate of the workspace.
+          # The Rust pages of the docs site hold the code blocks that
+          # horsies-docs-check builds.
+          if git diff --quiet "$base" HEAD -- core/ clients/rust/ clients/python/bridge/ clients/python/codegen/ website/src/content/docs/rust/ Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml clippy.toml; then
+            echo 'run_rust=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'run_rust=true' >> "$GITHUB_OUTPUT"
+          fi
+          # The generator renders the catalogs and the stubs from horsies-core
+          # (which derives its catalogs with horsies-core-derive). A change to
+          # an input or to a committed output can make a committed file stale.
+          if git diff --quiet "$base" HEAD -- core/ core/derive/ clients/python/codegen/ clients/python/horsies/_catalog/ clients/python/horsies/_core.pyi Cargo.toml Cargo.lock rust-toolchain.toml; then
+            echo 'run_generated=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'run_generated=true' >> "$GITHUB_OUTPUT"
+          fi
+          # horsies._core is built from clients/python/bridge, core and
+          # core/derive with the root Cargo and toolchain files, so a change
+          # there can change a Python result. A PR that changes only the Rust
+          # client (clients/rust/), the generator, or the format and lint
+          # settings cannot: the Python jobs are skipped for it.
+          if git diff --quiet "$base" HEAD -- . ':(exclude)clients/rust/' ':(exclude)clients/python/codegen/' ':(exclude)rustfmt.toml' ':(exclude)clippy.toml'; then
+            echo 'run_python=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'run_python=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  rust-fmt:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+      - name: Check formatting of every crate, the core included
+        run: cargo fmt --all --check
+
+  # Every crate of the workspace. The check leaves out horsies-test-worker
+  # (clients/rust/tests/worker/): its workflow tests still use the API of the old
+  # Rust client and move to the client of the core with #1410.
   rust:
+    needs: scope
+    if: needs.scope.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -177,7 +486,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: testpassword
-          POSTGRES_DB: horsies-rust-port
+          POSTGRES_DB: horsies
         ports:
           - 5432:5432
         options: >-
@@ -187,6 +496,8 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       # rustup is preinstalled on the runner. With no argument it installs the
       # toolchain and components that rust-toolchain.toml names.
@@ -195,30 +506,159 @@ jobs:
           rustup toolchain install
           rustc --version
 
+      # horsies-python enables PyO3's `abi3-py313` feature, so its build script
+      # needs a Python 3.13 interpreter; the runner's python3 is older.
+      # `cargo test -p horsies-python` links libpython (the `extension-module`
+      # feature is on only in the wheel build). This Python ships the shared
+      # library, and the action puts its folder on LD_LIBRARY_PATH.
+      - name: Install Python 3.13 for PyO3
+        id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Point PyO3 at Python 3.13
+        env:
+          PYTHON_PATH: ${{ steps.python.outputs.python-path }}
+        run: echo "PYO3_PYTHON=$PYTHON_PATH" >> "$GITHUB_ENV"
+
       - name: Cache Cargo builds
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
-      - name: Check formatting
-        run: cargo fmt --all --check
+      # Cargo unifies the features of the checked crates: horsies-python turns
+      # on the `web` feature of horsies-core here.
+      # horsies-arbitrary-precision-tests would turn on serde_json's
+      # arbitrary_precision for every crate; tests-full.yml builds it alone.
+      - name: Check the workspace
+        run: cargo check --workspace --all-targets --exclude horsies-test-worker --exclude horsies-docs-check --exclude horsies-arbitrary-precision-tests
 
-      - name: Check default features
-        run: cargo check --workspace --all-targets
+      # Every `rust` block of website/src/content/docs/rust/ and of the Rust
+      # skill files, as a module of the crate; the error names the page.
+      # The block markers: clients/rust/tests/docs-check/src/lib.rs.
+      - name: Build the Rust code blocks of the docs and the skill files
+        run: cargo check -p horsies-docs-check --all-targets
 
-      # `web` adds the web module and the `horsies web` CLI.
-      - name: Check web feature
-        run: cargo check --workspace --all-targets --features horsies/web
+      - name: Check the core without the web feature
+        run: cargo check -p horsies-core --all-targets
 
-      # `arbitrary-precision` changes serde_json number handling for the whole
-      # build graph.
-      - name: Check arbitrary-precision feature
-        run: cargo check --workspace --all-targets --features horsies/arbitrary-precision
+      # Each feature of the client has code of its own: `cli` (the default)
+      # holds horsies::cli::run and the shipped binary, `web` the axum mount,
+      # `tokio-postgres` and `sqlx` the rerun adapters, `otel` the
+      # OpenTelemetry spans and producer metrics.
+      - name: Check the client with default features
+        run: cargo check -p horsies --all-targets
 
-      - name: Run tests
+      - name: Check the client with the web feature
+        run: cargo check -p horsies --all-targets --features web
+
+      - name: Check the client with the tokio-postgres feature
+        run: cargo check -p horsies --all-targets --features tokio-postgres
+
+      - name: Check the client with the sqlx feature
+        run: cargo check -p horsies --all-targets --features sqlx
+
+      # `otel` without `cli`: the spans and metrics need no CLI runner.
+      - name: Check the client with the otel feature and no default features
+        run: cargo check -p horsies --all-targets --no-default-features --features otel
+
+      - name: Check the client with no default features
+        run: cargo check -p horsies --all-targets --no-default-features
+
+      - name: Build the examples
+        run: cargo build -p horsies-examples --examples
+
+      # The compile-pass and compile-fail cases of the task attributes and
+      # derives of the Rust client (trybuild).
+      - name: Test the macros
+        run: cargo test -p horsies-macros
+
+      # The derives of the core's code catalogs and manifest types.
+      - name: Test the core derives
+        run: cargo test -p horsies-core-derive
+
+      # The core tests run in parallel, and one of them holds 66 sessions at
+      # once (core/src/sql_tests/baseline_key_reservation_claim.rs). The
+      # image's max_connections of 100 refuses some of them (SQLSTATE 53300).
+      # ALTER SYSTEM takes effect at the restart.
+      - name: Raise max_connections of the test server to 300
         env:
-          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies-rust-port
-        run: cargo test --workspace
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$POSTGRES_CONTAINER" psql -U postgres -c "ALTER SYSTEM SET max_connections = 300"
+          docker restart "$POSTGRES_CONTAINER"
+          for attempt in $(seq 1 30); do
+            if docker exec "$POSTGRES_CONTAINER" pg_isready -U postgres -q; then
+              docker exec "$POSTGRES_CONTAINER" psql -U postgres -Atc "SHOW max_connections"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the test server accepts no connection 30 s after its restart" >&2
+          exit 1
+
+      # The core's tests create one database per test, copied from a
+      # template that each test process installs, on the server of
+      # DATABASE_URL (core/src/test_support/database.rs).
+      - name: Create the core test database
+        run: docker exec ${{ job.services.postgres.id }} createdb -U postgres horsies-core
+
+      # The `web` feature adds the monitoring handler and its tests; no core
+      # test needs the feature off.
+      - name: Test the core
+        env:
+          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies-core
+        run: cargo test -p horsies-core --features web
+
+      - name: Test the extension module crate
+        run: cargo test -p horsies-python
+
+      - name: Test the generator
+        run: cargo test -p horsies-codegen
+
+      # Without `web`, `horsies web` refuses with its message; that test runs
+      # only in this run.
+      - name: Test the client with default features
+        env:
+          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies
+        run: cargo test -p horsies
+
+      # The rerun adapters and the carrier of a traced send run against the
+      # server of DATABASE_URL.
+      - name: Test the client with every feature
+        env:
+          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies
+        run: cargo test -p horsies --features web,tokio-postgres,sqlx,otel
+
+  # horsies-codegen renders the catalog modules under clients/python/horsies/_catalog/
+  # and the stubs clients/python/horsies/_core.pyi from horsies-core; the rendered
+  # files are committed. This job renders them again and fails when a
+  # committed file differs, is missing, or is a retired generated file. The
+  # fix is `cargo run -p horsies-codegen -- write clients/python/horsies`.
+  generated-files:
+    needs: scope
+    if: needs.scope.outputs.run_generated == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - name: Cache Cargo builds
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Check the generated Python files
+        run: cargo run -p horsies-codegen -- check clients/python/horsies
 
   rust-showcase:
+    needs: scope
+    if: needs.scope.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -237,7 +677,7 @@ jobs:
           # Same rule as the webui job: an unknown base runs rather than skips.
           if [ -z "$base" ] || [ "$base" = '0000000000000000000000000000000000000000' ]; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$base" HEAD -- rust/showcase/ crates/ Cargo.toml Cargo.lock rust-toolchain.toml; then
+          elif git diff --quiet "$base" HEAD -- clients/rust/examples/showcase/ core/ clients/python/bridge/ clients/python/codegen/ clients/rust/horsies/ clients/rust/macros/ Cargo.toml Cargo.lock rust-toolchain.toml; then
             echo 'run=false' >> "$GITHUB_OUTPUT"
           else
             echo 'run=true' >> "$GITHUB_OUTPUT"
@@ -255,7 +695,7 @@ jobs:
 
       - name: Enforce repository-only package
         if: steps.changed.outputs.run == 'true'
-        run: grep -Eq '^publish[[:space:]]*=[[:space:]]*false[[:space:]]*$' rust/showcase/Cargo.toml
+        run: grep -Eq '^publish[[:space:]]*=[[:space:]]*false[[:space:]]*$' clients/rust/examples/showcase/Cargo.toml
 
       - name: Check default features
         if: steps.changed.outputs.run == 'true'
@@ -272,62 +712,3 @@ jobs:
       - name: Test web feature
         if: steps.changed.outputs.run == 'true'
         run: cargo test -p acme-showcase --features web --all-targets
-
-  rust-webui:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0
-
-      - name: Detect Rust web UI changes
-        id: changed
-        run: |
-          base='${{ github.event.pull_request.base.sha }}'
-          if [ -z "$base" ]; then
-            base='${{ github.event.before }}'
-          fi
-          # Same rule as the webui job: an unknown base runs rather than skips.
-          if [ -z "$base" ] || [ "$base" = '0000000000000000000000000000000000000000' ]; then
-            echo 'run=true' >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$base" HEAD -- rust/webui/ crates/horsies/webui-dist/ rust/scripts/check-webui-dist.sh; then
-            echo 'run=false' >> "$GITHUB_OUTPUT"
-          else
-            echo 'run=true' >> "$GITHUB_OUTPUT"
-          fi
-
-      - if: steps.changed.outputs.run == 'true'
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          # The frozen rust/webui/ copy keeps the bun its CI used before the
-          # import.
-          bun-version: "1.2.23"
-
-      - name: Install dependencies
-        if: steps.changed.outputs.run == 'true'
-        working-directory: rust/webui
-        run: bun install --frozen-lockfile
-
-      - name: Typecheck
-        if: steps.changed.outputs.run == 'true'
-        working-directory: rust/webui
-        run: bun run typecheck
-
-      - name: Run tests
-        if: steps.changed.outputs.run == 'true'
-        working-directory: rust/webui
-        run: bun run test
-
-      - name: Check design tokens
-        if: steps.changed.outputs.run == 'true'
-        working-directory: rust/webui
-        run: bun run lint:tokens
-
-      # Builds into crates/horsies/webui-dist/ and fails if the committed
-      # build differs (rust/scripts/check-webui-dist.sh).
-      - name: Check committed build
-        if: steps.changed.outputs.run == 'true'
-        working-directory: rust/webui
-        run: bun run check:dist

@@ -1,5 +1,6 @@
 ---
 title: Shared Thread Tasks
+section: shared
 summary: SHARED_THREAD tasks run on threads, many at once, in shared thread children - when threads help (measured), what runs where, the timeout and the kill, the rules for task authors, recycling and sizing.
 related: [execution-modes, worker-profiles, worker-architecture, shared-async-tasks, ../tasks/defining-tasks]
 tags: [workers, threads, shared-thread, execution, timeouts, concurrency, free-threading]
@@ -43,54 +44,9 @@ Enqueue stores a `timeout_ms` on every `SHARED_THREAD` row. A row without a usab
 
 ## How To
 
-Declare the task. `timeout_ms` is required. A thread cannot be cancelled, so a thread task takes no `cancel_grace_ms`.
+Declare the task with the `SHARED_THREAD` class and a `timeout_ms`. A thread cannot be cancelled, so a thread task takes no `cancel_grace_ms`. Start a worker whose profile has shared thread children. A profile with 2 isolated children and 2 shared thread children of 4 seats runs `ISOLATED` tasks in the 2 isolated children and `SHARED_THREAD` tasks on 2 × 4 = 8 seats.
 
-```python
-import hashlib
-
-from pydantic import SecretStr
-
-from horsies import (
-    AppConfig,
-    Execution,
-    Horsies,
-    IsolatedChildren,
-    PostgresConfig,
-    SharedThreadChildren,
-    TaskError,
-    TaskResult,
-    WorkerProfile,
-)
-
-app = Horsies(AppConfig(
-    broker=PostgresConfig(
-        database_url=SecretStr('postgresql+psycopg://user:pass@localhost:5432/mydb'),
-    ),
-    worker_profiles={
-        'files': WorkerProfile(
-            isolated=IsolatedChildren(count=2),
-            shared_thread=SharedThreadChildren(count=2, seats=4),
-        ),
-    },
-))
-
-
-@app.task('digest_file', execution=Execution.SHARED_THREAD, timeout_ms=60_000)
-def digest_file(*, path: str) -> TaskResult[str, TaskError]:
-    digest = hashlib.sha256()
-    with open(path, 'rb') as source:
-        for block in iter(lambda: source.read(1 << 20), b''):
-            digest.update(block)
-    return TaskResult(ok=digest.hexdigest())
-```
-
-Start a worker with a profile that has shared thread children:
-
-```bash
-horsies worker myapp.instance:app --profile files
-```
-
-This worker runs `ISOLATED` tasks in 2 isolated children and `SHARED_THREAD` tasks on 2 × 4 = 8 seats. See [Worker Profiles](/horsies/workers/worker-profiles/#sharedthreadchildren) for the fields.
+The API is on the client pages: [Choose the Execution Class](/horsies/tasks/defining-tasks/#choose-the-execution-class) and [Run Shared Tasks](/horsies/workers/worker-profiles/#run-shared-tasks) (Python), and [Attributes](/horsies/rust/tasks/defining-tasks/#attributes) and [Worker Setup](/horsies/rust/workers/worker-setup/) (Rust).
 
 ## The Timeout
 
@@ -113,20 +69,7 @@ The worker keeps one more timer per task, at `timeout_ms + 10 seconds`. A child 
 
 **Do not use module state without a lock.** Module variables, caches and clients are shared by every thread of the child. Use a lock for state that a task changes, or keep the state inside the call. A client is safe to share only when its library says so.
 
-```python
-import threading
-
-_seen: set[str] = set()
-_seen_lock = threading.Lock()
-
-
-@app.task('mark_seen', execution=Execution.SHARED_THREAD, timeout_ms=10_000)
-def mark_seen(*, key: str) -> TaskResult[bool, TaskError]:
-    with _seen_lock:
-        first = key not in _seen
-        _seen.add(key)
-    return TaskResult(ok=first)
-```
+The Python example is in [Choose the Execution Class](/horsies/tasks/defining-tasks/#choose-the-execution-class).
 
 **Set `timeout_ms`, and give each blocking call its own timeout.** The decorator refuses a `SHARED_THREAD` task without one (`HRS-109`). A task that passes its deadline closes its child, and the kill ends every task that is still in it once none has time left. Set the timeout of a sync client below `timeout_ms`, so that a call that hangs returns an error to the task instead of closing the child.
 
@@ -167,7 +110,7 @@ The pool size that the seats give is a default. The connections that a child use
 
 Each child kind has its own pool setting: `IsolatedChildren.pool`, `SharedAsyncChildren.pool` and `SharedThreadChildren.pool`. Each added connection counts once per child of that kind in the connection budget of the worker.
 
-Task code that sends through the app opens the app's broker on the runner loop of the broker, with `SharedThreadChildren.task_send_pool` connections (default 2). The seat threads share it. See [The Task-Send Pool](/horsies/workers/worker-profiles/#the-task-send-pool).
+Task code that sends through the app uses the app's broker, whose core pool holds `SharedThreadChildren.task_send_pool` connections (default 2). The seat threads share it. See [The Task-Send Pool](/horsies/workers/worker-profiles/#the-task-send-pool).
 
 ## Limits
 

@@ -1,257 +1,210 @@
 ---
 title: Schedule Config
-summary: ScheduleConfig and TaskSchedule configuration models.
-related: [scheduler-overview, schedule-patterns]
-tags: [scheduling, configuration, TaskSchedule]
+summary: Define the schedules of a Rust app with ScheduleConfig, TaskSchedule and SchedulePattern, and run the scheduler.
+related: [../configuration/app-config, ../cli, ../../scheduling/scheduler-overview]
+tags: [rust, scheduling, ScheduleConfig, TaskSchedule, SchedulePattern, CronSchedule]
 ---
+
+# Schedule Config
+
+`AppConfig.schedule` is an `Option<ScheduleConfig>`: the schedules that the scheduler sends. How the scheduler fires a slot, keeps its state rows, reads the database clock and catches up is on [Scheduler Overview](/horsies/scheduling/scheduler-overview/).
+
+## Define Schedules
+
+```rust
+use std::convert::Infallible;
+
+use chrono::NaiveTime;
+use horsies::{
+    task, AppConfig, DailySchedule, Horsies, HorsiesError, IntervalSchedule, ScheduleConfig,
+    SchedulePattern, TaskError, TaskSchedule,
+};
+
+#[task("build_report")]
+async fn build_report(region: String) -> Result<String, TaskError<Infallible>> {
+    Ok(format!("report of {region}"))
+}
+
+#[task("clean_cache")]
+async fn clean_cache() -> Result<u32, TaskError<Infallible>> {
+    Ok(0)
+}
+
+fn schedules() -> Result<ScheduleConfig, Box<dyn std::error::Error>> {
+    let three_am = NaiveTime::from_hms_opt(3, 0, 0).ok_or("03:00:00 is a time of day")?;
+    let nightly_report = TaskSchedule::new(
+        "nightly-eu-report",
+        "build_report",
+        SchedulePattern::Daily(DailySchedule { time: three_am }),
+    )
+    .input(&build_report::Input { region: "eu".to_owned() })?
+    .timezone("Europe/Berlin");
+    let cache_cleanup = TaskSchedule::new(
+        "cache-cleanup",
+        "clean_cache",
+        SchedulePattern::Interval(IntervalSchedule { minutes: Some(15), ..IntervalSchedule::default() }),
+    );
+    Ok(ScheduleConfig::new(vec![nightly_report, cache_cleanup]))
+}
+
+fn build_app(database_url: &str) -> Result<Horsies, Box<dyn std::error::Error>> {
+    let config = AppConfig {
+        schedule: Some(schedules()?),
+        ..AppConfig::for_database_url(database_url)
+    };
+    let mut app = Horsies::new(config)?;
+    let _report = build_report::register(&mut app)?;
+    let _cleanup = clean_cache::register(&mut app)?;
+    Ok(app)
+}
+```
+
+```bash
+./myapp scheduler
+```
+
+The `scheduler` command, its options and its exit codes are on [CLI Reference](/horsies/rust/cli/#scheduler).
 
 ## ScheduleConfig
 
-Top-level scheduler configuration added to `AppConfig`.
+| Field | Type | Default | Rule |
+|-------|------|---------|------|
+| `enabled` | `bool` | `true` | The scheduler does not start when it is `false` |
+| `schedules` | `Vec<TaskSchedule>` | empty | Each name is unique |
+| `check_interval_seconds` | `u32` | 1 | 1 to 60: the time between two checks of the schedules |
 
-```rust
-use horsies::{AppConfig, ScheduleConfig, TaskSchedule};
-
-let config = AppConfig {
-    schedule: Some(ScheduleConfig::new(vec![/* ... */]).check_interval_seconds(1)),
-    ..AppConfig::for_database_url("postgresql://...")
-};
-```
-
-### Fields
-
-| Field | Type | Default | Description |
-| ----- | ---- | ------- | ----------- |
-| `enabled` | `bool` | `true` | Enable/disable scheduler |
-| `check_interval_seconds` | `u32` | 1 | Seconds between schedule checks (1-60) |
-| `schedules` | `Vec<TaskSchedule>` | `[]` | Schedule definitions |
+`ScheduleConfig::new(schedules)` takes the defaults. `.enabled(bool)` and `.check_interval_seconds(seconds)` set the other fields.
 
 ## TaskSchedule
 
-Defines a single scheduled task.
+`TaskSchedule::new(name, task_name, pattern)` builds a schedule with the defaults:
+
+| Field | Builder | Type | Default |
+|-------|---------|------|---------|
+| `name` | `new` | `String` | – |
+| `task_name` | `new` | `String`: a registered task | – |
+| `pattern` | `new` | `SchedulePattern` | – |
+| `input` | `.input(&value)?` | `Option<JsonText>`: the input's JSON text | `None`: the task gets the input `{}` |
+| `queue_name` | `.queue(name)` | `Option<String>` | `None`: the queue of the task |
+| `enabled` | `.enabled(bool)` | `bool` | `true` |
+| `timezone` | `.timezone(name)` | `String`: an IANA name | `UTC` |
+| `catch_up_missed` | `.catch_up_missed(bool)` | `bool` | `false` |
+| `max_catch_up_runs` | `.max_catch_up_runs(n)` | `u32`: 1 to 10,000 | 100 |
+
+- `input` is the task input in the stored form: one member per task parameter, by name. A task `fn build_report(region: String)` reads `{"region": "eu"}`, which `build_report::Input { region }` writes. See [Defining Tasks](/horsies/rust/tasks/defining-tasks/#define-a-task).
+- `.input(&value)` writes `value` with the strict writer of every stored form and returns `Result<TaskSchedule, JsonTextRefused>`. An integer keeps every digit: a `u128` field of `u128::MAX` is stored as `340282366920938463463374607431768211455`. `JsonTextRefused::NotJsonNative` is a value that does not write as JSON (a non-finite float, a map key that is not a text); `JsonTextRefused::NotStrictJson` is a text deeper than 300 levels, with an integer of more than 4,300 digits, or with a repeated key.
+- A config text of any serde format gives the `input` member as its value: TOML (`toml::from_str`, `horsies web CONFIG`) and JSON (serde_json). The read writes the value with the same strict writer, so the input text is compact and keeps no spelling of the file. `null` is no input. The read refuses what `.input` refuses: a non-finite float (TOML `nan`, `inf`), a value deeper than 300 levels, a repeated key.
+- In a config file, an integer of `input` must fit `i64` or `u64`. TOML holds no wider integer, and serde_json's untyped read gives a wider one as a float. Set an input with a wider integer in code with `.input(&value)`, which keeps every digit.
+- A time of day is in the schedule's `timezone`.
+- The meaning of `catch_up_missed` and `max_catch_up_runs` is on [Scheduler Overview](/horsies/scheduling/scheduler-overview/#catch-up-logic).
+
+## SchedulePattern
+
+| Variant | Fields | Rule |
+|---------|--------|------|
+| `Interval(IntervalSchedule)` | `seconds`, `minutes`, `hours`, `days`: `Option<u32>` | At least one unit. `seconds` 1 to 86,400; `minutes` 1 to 1,440; `hours` 1 to 168; `days` 1 to 365. The interval is the sum of the units |
+| `Hourly(HourlySchedule)` | `minute`, `second`: `u32` | Each 0 to 59 |
+| `Daily(DailySchedule)` | `time: NaiveTime` | A whole second |
+| `Weekly(WeeklySchedule)` | `days: Vec<Weekday>`, `time: NaiveTime` | At least one day, no repeat; `time` a whole second |
+| `Monthly(MonthlySchedule)` | `day: u32`, `time: NaiveTime` | `day` 1 to 31; `time` a whole second |
+| `Cron(CronSchedule)` | `minute`, `hour`, `month`, `day` | See [Typed Cron](#typed-cron) |
+
+`IntervalSchedule::default()` has no unit; set at least one with struct update syntax. `Weekday` is `Monday` to `Sunday`; `Month` is `January` to `December`. Both are enums of the crate.
+
+### Typed Cron
+
+`CronSchedule` holds what a `minute hour day-of-month month day-of-week` crontab line holds, in typed fields. It fires at second 0.
 
 ```rust
-use horsies::{TaskSchedule, SchedulePattern, DailySchedule};
-use chrono::NaiveTime;
+use horsies::{CronEnumTerm, CronNumericTerm, CronSchedule, DaySelector, SchedulePattern, Weekday};
 
-TaskSchedule::new(
-    "daily-report",
-    "generate_report",
-    SchedulePattern::Daily(DailySchedule {
-        time: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
-    }),
-)
-.kwargs(serde_json::json!({"format": "pdf"}))
-```
-
-### Fields
-
-| Field | Type | Default | Description |
-| ----- | ---- | ------- | ----------- |
-| `name` | `String` | required | Unique schedule identifier |
-| `task_name` | `String` | required | Registered task name |
-| `pattern` | `SchedulePattern` | required | When to run |
-| `args` | `serde_json::Value` | `Null` | Positional arguments (JSON array) |
-| `kwargs` | `serde_json::Value` | `Null` | Keyword arguments (JSON object) |
-| `queue_name` | `Option<String>` | `None` | Queue override (CUSTOM mode) |
-| `enabled` | `bool` | `true` | Enable/disable this schedule |
-| `timezone` | `String` | `"UTC"` | Timezone for schedule evaluation |
-| `catch_up_missed` | `bool` | `false` | Execute missed runs on restart |
-| `max_catch_up_runs` | `u32` | `100` | Maximum runs to enqueue per scheduler tick when `catch_up_missed=true` (range: 1-10000) |
-
-### Name
-
-Must be unique across all schedules. Used for state tracking:
-
-```rust
-TaskSchedule::new(
-    "hourly-sync",
-    "sync_data",
-    SchedulePattern::Interval(IntervalSchedule {
-        hours: Some(1),
-        ..Default::default()
-    }),
-);
-TaskSchedule::new(
-    "daily-cleanup",
-    "cleanup_old_data",
-    SchedulePattern::Daily(DailySchedule {
-        time: NaiveTime::from_hms_opt(3, 0, 0).unwrap(),
-    }),
-);
-```
-
-### Task Name
-
-Must match a registered `#[task]`:
-
-```rust
-#[task("send_notification")]
-async fn send_notification(input: NotifyInput) -> Result<(), TaskError> {
-    // ...
-    Ok(())
+fn weekdays_at_nine_thirty() -> SchedulePattern {
+    SchedulePattern::Cron(CronSchedule {
+        minute: vec![CronNumericTerm::Values { values: vec![30] }],
+        hour: vec![CronNumericTerm::Values { values: vec![9] }],
+        month: vec![CronEnumTerm::Every],
+        day: DaySelector::ByWeekday {
+            day_of_week: vec![CronEnumTerm::EnumRange {
+                start: Weekday::Monday,
+                end: Weekday::Friday,
+                step: 1,
+            }],
+        },
+    })
 }
-
-TaskSchedule::new(
-    "notify-users",
-    "send_notification", // Must match
-    SchedulePattern::Daily(DailySchedule {
-        time: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
-    }),
-)
 ```
 
-### Arguments
+| Field | Type | Domain |
+|-------|------|--------|
+| `minute` | `Vec<CronNumericTerm>`, at least one term | 0 to 59 |
+| `hour` | `Vec<CronNumericTerm>`, at least one term | 0 to 23 |
+| `month` | `Vec<CronEnumTerm<Month>>`, at least one term | `January` (1) to `December` (12) |
+| `day` | `DaySelector` | Day of month 1 to 31; day of week `Monday` (0) to `Sunday` (6) |
 
-Pass arguments to the scheduled task as serialized JSON:
+| `CronNumericTerm` | Crontab form |
+|-------------------|--------------|
+| `Every` | `*` |
+| `Step { step }` | `*/n`, from the start of the domain |
+| `Values { values }` | `a,b,c` |
+| `Range { start, end, step }` | `a-b` or `a-b/n` |
 
-```rust
-#[task("process_region")]
-async fn process_region(input: RegionInput) -> Result<(), TaskError> {
-    // ...
-    Ok(())
-}
+| `CronEnumTerm<T>` | Crontab form |
+|-------------------|--------------|
+| `Every` | `*` |
+| `EnumValues { values }` | `a,b,c` |
+| `EnumRange { start, end, step }` | `a-b` or `a-b/n`, by ordinal |
+| `EnumStep { step }` | `*/n`, by ordinal |
 
-TaskSchedule::new(
-    "sync-us-east",
-    "process_region",
-    SchedulePattern::Interval(IntervalSchedule {
-        hours: Some(1),
-        ..Default::default()
-    }),
-)
-.kwargs(serde_json::json!({
-    "region": "us-east",
-    "full_sync": true,
-}))
-```
+`DaySelector` makes the choice between the day of the month and the day of the week explicit:
 
-### Queue Override
+| Variant | Fires on |
+|---------|----------|
+| `EveryDay` | Every day |
+| `ByMonthDay { day_of_month }` | The days of the month |
+| `ByWeekday { day_of_week }` | The days of the week |
+| `EitherDay { day_of_month, day_of_week }` | A day that matches one of the two |
+| `BothDays { day_of_month, day_of_week }` | A day that matches both |
 
-In CUSTOM mode, override the task's default queue:
+A step is 1 or more and at most the span of its field. A range has `start` at most `end`. A month and day-of-month combination that no date has is refused.
 
-```rust
-#[task("background_job", queue = "normal")]
-async fn background_job() -> Result<(), TaskError> {
-    // ...
-    Ok(())
-}
+## Checks
 
-TaskSchedule::new(
-    "priority-job",
-    "background_job",
-    SchedulePattern::Daily(DailySchedule {
-        time: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
-    }),
-)
-    .queue("critical") // Override to higher priority queue
-```
+`Horsies::new` refuses a schedule section that breaks a rule of the tables above, with `HRS-205`. The scheduler start and `app.check()` check each enabled schedule, in config order, and report the first refusal of each:
 
-### Timezone
+| Check | Code |
+|-------|------|
+| `task_name` is a task registered in this binary | `HRS-300` |
+| `queue_name` is a queue of the app | `HRS-205` |
+| `input` reads back with the task's input type | `HRS-205` |
+| The input size is within `AppConfig.payload.reject_bytes` | `HRS-205` |
 
-Schedule evaluated in specified timezone:
+The check runs without a database. A worker skips it: a worker never sends a scheduled task.
 
-```rust
-// Runs at 9 AM New York time (EST/EDT)
-TaskSchedule::new(
-    "morning-task",
-    "my_task",
-    SchedulePattern::Daily(DailySchedule {
-        time: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
-    }),
-)
-.timezone("America/New_York")
-```
+## Run the Scheduler
 
-Uses IANA timezone names via `chrono-tz`. Common values:
+`<binary> scheduler` runs the scheduler through `horsies::cli::run(app)`. A binary that owns its `main` calls the methods:
 
-- `"UTC"` - Coordinated Universal Time
-- `"America/New_York"` - US Eastern
-- `"America/Los_Angeles"` - US Pacific
-- `"Europe/London"` - UK
-- `"Asia/Tokyo"` - Japan
+| Method | Does |
+|--------|------|
+| `app.scheduler()` | `Result<PreparedScheduler, SchedulerRunError>`: the checks and the scheduler manifest, with no I/O |
+| `prepared.stop_handle()` | The `SchedulerStop` of the scheduler. `request_stop()` ends the run; a fire in flight runs to its end |
+| `prepared.run().await` | `Result<SchedulerStopped, SchedulerRunError>`: connects, installs the schema once, starts the schedule state, then checks the schedules at once and every `check_interval_seconds` until a stop request. A failed check is logged and the next one runs |
+| `app.run_scheduler().await` | `scheduler()` and `run()`, stopped by `SIGTERM` or `SIGINT` |
 
-### Catch-Up
+| `SchedulerRunError` | When |
+|---------------------|------|
+| `NotConfigured` | The config has no schedule section. Nothing started |
+| `Disabled` | `schedule.enabled` is `false`. Nothing started |
+| `CheckRefused(CheckReport)` | The check refused a task's options or a schedule. Nothing started |
+| `ManifestRefused { cause }` | The core refused the scheduler manifest: a value outside its bound, a pattern that breaks its rules, or a repeated schedule name. Nothing started |
+| `StartRefused { schedule, reason }` | The start refused `schedule` before any state write: a time zone that the core does not know, a send that the rules refuse, or a pattern with no slot after the database time |
+| `StartFailed { message, retryable }` | The connect, the schema install or the client family check failed. No schedule state was written |
+| `RuntimeUnavailable(RuntimeStartFailed)` | The operating system refused the threads of the core's process runtime, which listens for the stop signals. Nothing started; a later run tries the start again. In a fork, `run_scheduler` panics: see [Process-State Refusals](/horsies/tasks/error-types/#process-state-refusals) |
 
-When `catch_up_missed=true`, missed runs are executed:
+Several schedulers can run against one database: each fire locks the state row of its schedule, so a second scheduler writes nothing for a slot that the first one fired.
 
-```rust
-TaskSchedule::new(
-    "hourly-sync",
-    "sync_data",
-    SchedulePattern::Interval(IntervalSchedule {
-        hours: Some(1),
-        ..Default::default()
-    }),
-)
-.catch_up_missed(true)
-```
+## Things to Avoid
 
-If scheduler was down 3 hours, 3 tasks are enqueued on restart.
+**Do not pass a struct parameter as the `input`.** A task `fn build_report(request: ReportRequest)` reads `{"request": {...}}`: pass `build_report::Input { request }`, not the `ReportRequest`.
 
-Use for:
-
-- Data synchronization (must process all intervals)
-- Compliance reporting (all periods must be covered)
-
-Avoid for:
-
-- Notifications (users do not want 24 emails at once)
-- Status updates (only latest matters)
-
-## Disabling Schedules
-
-Disable individual schedules:
-
-```rust
-TaskSchedule::new(
-    "deprecated-job",
-    "old_task",
-    SchedulePattern::Daily(DailySchedule {
-        time: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
-    }),
-)
-    .enabled(false) // Will not run
-```
-
-Disable entire scheduler:
-
-```rust
-ScheduleConfig::new(vec![])
-    .enabled(false) // No schedules run
-    .check_interval_seconds(30)
-```
-
-## Configuration Changes
-
-When schedule configuration changes:
-
-1. Scheduler detects via `config_hash`
-2. Recalculates `next_run_at` from current time
-3. Logs warning about configuration change
-
-This prevents issues when:
-
-- Pattern changes (e.g., hourly to daily)
-- Timezone changes
-- Time changes within pattern
-
-## Validation
-
-At scheduler startup, validates:
-
-1. **Task exists**: `task_name` must be registered
-2. **Queue valid**: `queue_name` must match configured queue (CUSTOM mode)
-3. **Timezone valid**: Must be a recognized IANA timezone name
-4. **Schedule names unique**: No duplicate `name` values
-
-```rust
-// Will fail at startup:
-TaskSchedule::new(
-    "bad",
-    "nonexistent_task", // Not registered
-    SchedulePattern::Daily(DailySchedule {
-        time: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
-    }),
-)
-```
+**Do not rename a task parameter that a schedule's `input` names.** The parameter name is the stored key. The check refuses the old key, and a slot that the scheduler already sent fails with `WORKER_SERIALIZATION_ERROR`.

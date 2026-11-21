@@ -1,5 +1,6 @@
 ---
 title: Questions & Answers
+section: shared
 summary: Common questions about design trade-offs, scaling, and failure behavior.
 related: [concepts/architecture, workers/concurrency, workers/heartbeats-recovery, tasks/retry-policy, internals/serialization]
 tags: [faq, design]
@@ -90,15 +91,12 @@ See [workflows](../concepts/workflows/workflow-api) and [subworkflows](../concep
 
 ## Does it have monitoring?
 
-There is a terminal-based TUI called syce, capable of displaying the status of your workers, tasks and workflows in detail.
-See [syce](../monitoring/syce-overview)
-
-A web UI ships with horsies. Install the `horsies[web]` extra and run `horsies web`.
+A web UI ships with horsies. It shows the status of your workers, tasks and workflows. Install the `horsies[web]` extra and run `horsies web`.
 See [web UI overview](../monitoring/web-ui-overview)
 
 ## Does horsies provide guidance files for coding agents?
 
-Yes. The horsies package includes one skill folder, `horsies/.agents/skills/horsies/`. A source checkout has it at the same path. Run `horsies skills install --target .claude/skills` to copy it into the skills directory of your agent tool.
+Yes. The horsies package includes one skill folder, `horsies/.agents/skills/horsies/`. A source checkout has it at `clients/python/horsies/.agents/skills/horsies/`. Run `horsies skills install --target .claude/skills` to copy it into the skills directory of your agent tool.
 
 These cover:
 

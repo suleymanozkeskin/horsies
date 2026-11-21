@@ -1,5 +1,6 @@
 ---
 title: Defining Workflows
+section: python
 summary: Compose tasks into DAG-based workflows.
 related: [02-producing-tasks, 04-scheduling]
 tags: [quickstart, workflows]

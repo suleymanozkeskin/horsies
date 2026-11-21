@@ -1,312 +1,97 @@
 ---
 title: Retry Policy
-summary: Automatic retry behavior with fixed or exponential backoff.
-related: [defining-tasks, ../../concepts/task-lifecycle]
+section: shared
+summary: When a failed task retries, how the retry delay is computed, the limits of a policy, and how a retry differs from a rerun.
+related: [defining-tasks, ../rust/tasks/defining-tasks, ../concepts/task-lifecycle, ../monitoring/action-semantics]
 tags: [tasks, retry, backoff]
 ---
 
-## Basic Usage
+A retry policy makes a failed task run again on the same task row. The policy is part of the task options: a send stores it with the task row, and the worker reads it from the row.
 
-```python
-from horsies import RetryPolicy, TaskResult, TaskError, JsonValue
+The API is on the client pages: [Configure Retries](/horsies/tasks/defining-tasks/#configure-retries) (Python) and [Retry Policy](/horsies/rust/tasks/defining-tasks/#retry-policy) (Rust).
 
-@app.task(
-    "flaky_task",
-    retry_policy=RetryPolicy.fixed([60, 300, 900], auto_retry_for=["TRANSIENT_ERROR"]),
-)
-def flaky_task() -> TaskResult[str, TaskError]:
-    # Will retry up to 3 times with delays: 1min, 5min, 15min
-    ...
-```
+## Policy Fields
 
-## Fields
+| Field | Meaning | Rule |
+|-------|---------|------|
+| `max_retries` | The number of retries. The first run is not a retry | 1 to 20 |
+| `intervals` | The delays, in seconds | Each value is 1 to 86,400 |
+| `backoff_strategy` | `fixed` or `exponential` | `fixed`: one interval for each retry. `exponential`: exactly one interval, the base |
+| `jitter` | Adds a random part to each delay | |
+| `max_delay_seconds` | A cap on each delay, or no cap | Greater than 0 when set |
+| `auto_retry_for` | The error codes that start a retry | At least one code |
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `auto_retry_for` | `list[str \| BuiltInTaskCode]` | (required) | Error codes that trigger automatic retries |
-| `max_retries` | `int` | 3 | Number of retry attempts (1-20) |
-| `intervals` | `list[int]` | [60, 300, 900] | Delay intervals in seconds |
-| `backoff_strategy` | `str` | "fixed" | "fixed" or "exponential" |
-| `jitter` | `bool` | `True` | Add random variation to delays |
-| `max_delay_seconds` | `int \| None` | `None` | Optional upper bound on the computed delay (positive int); `None` = uncapped |
+A client refuses a policy that breaks a rule when the policy is built.
 
-## Backoff Strategies
+## Retry Delay
 
-### Fixed Backoff
+The delay before retry `n` (`n` is 1 for the first retry) is computed in four steps:
 
-Uses exact intervals from the list. The list length must match `max_retries`.
+1. Backoff. `fixed` takes interval `n`. `exponential` takes `base * 2^(n-1)`.
+2. Floor. A delay under 1 second becomes 1 second.
+3. Jitter. When `jitter` is on, a random part of 0% to 25% of the delay is added. The delay only increases: a 60-second delay becomes 60 to 75 seconds. Jitter spreads out the retries of many tasks that failed at the same time.
+4. Cap. When `max_delay_seconds` is set, a longer delay becomes `max_delay_seconds`. The cap applies last, after the jitter.
 
-```python
-# Retry 3 times: wait 1min, then 5min, then 15min
-RetryPolicy.fixed([60, 300, 900], auto_retry_for=["TRANSIENT_ERROR"])
+Without a cap, exponential backoff has no upper bound: a base of 30 seconds with 10 retries waits 15,360 seconds (about 4.3 hours) before the last retry.
 
-# Equivalent to:
-RetryPolicy(
-    max_retries=3,
-    intervals=[60, 300, 900],
-    backoff_strategy='fixed',
-    auto_retry_for=["TRANSIENT_ERROR"],
-)
-```
-
-### Exponential Backoff
-
-Uses a base interval multiplied by 2^(attempt-1).
-
-```python
-# Base 30s: retry at 30s, 60s, 120s, 240s, 480s
-RetryPolicy.exponential(base_seconds=30, max_retries=5, auto_retry_for=["TRANSIENT_ERROR"])
-
-# Equivalent to:
-RetryPolicy(
-    max_retries=5,
-    intervals=[30],  # Single base interval
-    backoff_strategy='exponential',
-    auto_retry_for=["TRANSIENT_ERROR"],
-)
-```
-
-## Jitter
-
-When `jitter=True` (default), the computed delay is floored at 1 second and then
-randomized **upward** by 0–25%:
-
-- 60 second base -> 60-75 seconds actual
-- Applied after the floor, so 1.0s is the true bottom of the range (no lower-half
-  collapse at small base delays)
-- Prevents thundering herd when many tasks retry simultaneously
-
-```python
-# Disable jitter for predictable delays
-RetryPolicy.fixed([60, 300, 900], auto_retry_for=["TRANSIENT_ERROR"], jitter=False)
-```
-
-## Maximum Delay Cap
-
-Exponential backoff is otherwise unbounded (`base * 2^(attempt-1)`), so a high
-`max_retries` can produce very large delays. Set `max_delay_seconds` to cap the
-final delay. The cap is opt-in (`None` = uncapped) and applied **last** — after
-backoff, the 1s floor, and jitter:
-
-```python
-# Exponential backoff, but never wait longer than 10 minutes between retries
-RetryPolicy.exponential(
-    base_seconds=30,
-    max_retries=10,
-    auto_retry_for=["TRANSIENT_ERROR"],
-    max_delay_seconds=600,
-)
-
-# Equivalent to:
-RetryPolicy(
-    max_retries=10,
-    intervals=[30],
-    backoff_strategy='exponential',
-    max_delay_seconds=600,
-    auto_retry_for=["TRANSIENT_ERROR"],
-)
-```
+| Policy | Delays without jitter |
+|--------|-----------------------|
+| `fixed`, intervals 60, 300, 900 | 60 s, 300 s, 900 s |
+| `exponential`, base 30, 5 retries | 30 s, 60 s, 120 s, 240 s, 480 s |
+| `exponential`, base 30, 10 retries, cap 600 | 30 s, 60 s, 120 s, 240 s, 480 s, then 600 s for retries 6 to 10 |
 
 ## When a Retry Starts
 
 The computed delay is the earliest time a retry can start, not the exact time. When the delay ends, the retry joins its queue in the same order as a task sent at that moment: tasks that became ready earlier are claimed first.
 
+A retry cannot start at or after the task's `good_until` deadline. See [Task Expiry](/horsies/concepts/task-lifecycle/#task-expiry).
+
 ## Auto-Retry Triggers
 
-Retries only happen when specific conditions are met. Configure via `auto_retry_for` on `RetryPolicy`:
-
-```python
-@app.task(
-    "api_call",
-    retry_policy=RetryPolicy.fixed([30, 60, 120], auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"]),
-)
-def api_call() -> TaskResult[dict[str, JsonValue], TaskError]:
-    ...
-```
+A failure starts a retry only when its error code is in `auto_retry_for` and retries remain. A failure with another code is terminal.
 
 `auto_retry_for` accepts:
 
-- Error codes from `TaskError`: `"RATE_LIMITED"`, `"SERVICE_UNAVAILABLE"`
-- Library error codes: `"UNHANDLED_EXCEPTION"`, `"WORKER_CRASHED"`, `"TASK_TIMEOUT"`
-- Codes must use `UPPER_SNAKE_CASE` (exception class names like `"TimeoutError"` are rejected)
+- Codes of the task's own errors, for example `RATE_LIMITED` and `SERVICE_UNAVAILABLE`.
+- Library codes, for example `UNHANDLED_EXCEPTION`, `WORKER_CRASHED` and `TASK_TIMEOUT`. The library codes are on the [Errors Reference](/horsies/tasks/errors/).
 
-## Exception Mapper
-
-Map unhandled exceptions to error codes without try/except boilerplate. When a task raises an exception, the mapper matches the exact exception class (`type(exc)`).
-
-### Per-Task Mapper
-
-```python
-@app.task(
-    "call_api",
-    retry_policy=RetryPolicy.fixed([30, 60, 120], auto_retry_for=["TIMEOUT", "CONNECTION_ERROR"]),
-    exception_mapper={
-        TimeoutError: "TIMEOUT",
-        ConnectionError: "CONNECTION_ERROR",
-    },
-)
-def call_api() -> TaskResult[dict[str, JsonValue], TaskError]:
-    # No try/except needed — TimeoutError becomes "TIMEOUT" automatically
-    response = requests.get("https://api.example.com", timeout=10)
-    return TaskResult(ok=response.json())
-```
-
-### Global Mapper
-
-Set a global mapper on `AppConfig` to apply to all tasks:
-
-```python
-from pydantic import SecretStr
-
-config = AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://...")),
-    exception_mapper={
-        TimeoutError: "TIMEOUT",
-        ConnectionError: "CONNECTION_ERROR",
-        PermissionError: "PERMISSION_DENIED",
-    },
-    default_unhandled_error_code="UNHANDLED_EXCEPTION",
-)
-```
-
-### Resolution Order
-
-When an unhandled exception is caught:
-
-1. Per-task `exception_mapper` (exact class lookup)
-2. Global `AppConfig.exception_mapper` (exact class lookup)
-3. Per-task `default_unhandled_error_code`
-4. Global `AppConfig.default_unhandled_error_code` (defaults to `"UNHANDLED_EXCEPTION"`)
-
-Per-task mapper entries take priority over global. If the task function returns `TaskResult(err=...)` explicitly, the mapper is never invoked.
-
-Only exact class matches count — subclasses are not matched. If you need to handle a subclass, map it explicitly.
+A code is `UPPER_SNAKE_CASE`. `WORKFLOW_STOPPED` is reserved and is not a task code, so `auto_retry_for` refuses it.
 
 ## How Retries Work
 
-1. Task fails with matching error code
-2. Worker checks `retry_count < max_retries`
-3. If retries remaining, task status set to PENDING
-4. `next_retry_at` calculated from retry policy
-5. Task not claimable until `next_retry_at` passes
-6. Worker sends delayed notification to trigger claiming
+1. A task attempt fails with a code in `auto_retry_for`.
+2. The worker checks `retry_count < max_retries`.
+3. If retries remain, the task status goes back to `PENDING`.
+4. `next_retry_at` is set from the retry policy.
+5. The task cannot be claimed until `next_retry_at` passes.
+6. The worker sends a delayed notification to start the claim.
 
-Each step writes an immutable attempt row to `horsies_task_attempts`. A retried failure creates an attempt with `will_retry=True` and `outcome='FAILED'`. The final attempt (whether success or terminal failure) has `will_retry=False`. During retries, `horsies_tasks.error_code` remains `NULL` — it is only set when the task reaches its final terminal state.
+Each attempt writes an immutable attempt row to `horsies_task_attempts`. A failed attempt that retries has `will_retry=True` and `outcome='FAILED'`. The final attempt (success or terminal failure) has `will_retry=False`. During retries, `horsies_tasks.error_code` stays `NULL`: it is set only when the task reaches its final terminal state.
 
-Use `handle.info(include_attempts=True)` to inspect the full attempt timeline. See [Retrieving Results](/horsies/tasks/retrieving-results/#task-metadata-and-attempt-history) for details.
+A task info read returns the attempts. See [Retrieving Results](/horsies/tasks/retrieving-results/#task-metadata-and-attempt-history) (Python) and [Task Info](/horsies/rust/tasks/retrieving-results/#task-info) (Rust).
 
 ## Retry Count Tracking
 
+The task row holds the retry counters:
+
 | Field | Description |
 |-------|-------------|
-| `retry_count` | Current number of retry attempts |
-| `max_retries` | Maximum attempts allowed |
-| `next_retry_at` | When task becomes claimable again |
-
-Access via database or result:
-
-```python
-result = handle.get()
-if result.is_err():
-    error = result.err_value
-    # Check if retries exhausted
-    if "retry" in str(error.data):
-        print("All retries exhausted")
-```
+| `retry_count` | The number of retries so far |
+| `max_retries` | The number of retries the policy allows |
+| `next_retry_at` | When the task can be claimed again |
 
 ## Retry vs Rerun
 
-`RetryPolicy` governs **automatic retry of the same request**: the task row
-stays live, `retry_count` advances, and every attempt is recorded against one
-task id. That is unchanged in 0.5.0.
+A retry policy controls the **automatic retry of the same request**: the task row stays live, `retry_count` increases, and each attempt is recorded against one task id.
 
-**Rerun is a different operation.** A task that has reached a terminal status
-has left the live table for the immutable history archive — there is no row to
-reset, and manual in-place retry of a terminal task is removed. Re-executing
-that work is a **new request**: `rerun_task` mints a new task with a new id and
-records lineage back to the source.
+**A rerun is a different operation.** A task that has reached a terminal status has left the live table for the immutable history archive. There is no row to reset, and a terminal task cannot be retried in place. To run that work again is a **new request**: a rerun creates a new task with a new id and records the lineage back to the source.
 
-| | Retry (`RetryPolicy`) | Rerun (`rerun_task`) |
+| | Retry | Rerun |
 |---|---|---|
 | Applies to | A live task that failed an attempt | A terminal task record |
 | Task id | Unchanged | New, with recorded lineage |
-| Triggered by | `auto_retry_for` matching the error code | An explicit call or the dashboard action |
-| Attempt history | Appended to the same task | Belongs to the new task |
-| Requires | A retry policy with attempts remaining | The enqueue input to have been retained |
+| Started by | `auto_retry_for` matches the error code | An explicit call |
+| Attempt history | Added to the same task | Belongs to the new task |
+| Requires | A retry policy with retries remaining | A retained enqueue input |
 
-```python
-from horsies import rerun_task, RerunTask, RerunEnqueuePolicy
-```
-
-Whether a task is rerunnable is decided at enqueue by
-`retain_rerun_input_default` (with a per-task override), not at rerun time.
-See [Action Semantics](/horsies/monitoring/action-semantics/#task-rerun).
-
-## Validation
-
-The policy validates consistency:
-
-```python
-# This raises ValueError:
-RetryPolicy(
-    max_retries=3,
-    intervals=[60, 300],  # Only 2 intervals for 3 retries
-    backoff_strategy='fixed',
-    auto_retry_for=["TRANSIENT_ERROR"],
-)
-
-# This also raises ValueError:
-RetryPolicy(
-    max_retries=3,
-    intervals=[60, 300, 900],  # Multiple intervals
-    backoff_strategy='exponential',  # Exponential needs exactly 1 interval
-    auto_retry_for=["TRANSIENT_ERROR"],
-)
-```
-
-## Examples
-
-### API with Rate Limiting
-
-```python
-@app.task(
-    "call_external_api",
-    retry_policy=RetryPolicy.exponential(
-        base_seconds=60,
-        max_retries=5,
-        auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"],
-    ),
-)
-def call_external_api() -> TaskResult[dict[str, JsonValue], TaskError]:
-    try:
-        response = requests.get("https://api.example.com")
-        if response.status_code == 429:
-            return TaskResult(err=TaskError(
-                error_code="RATE_LIMITED",
-                message="the API answered 429",
-            ))
-        return TaskResult(ok=response.json())
-    except requests.Timeout:
-        return TaskResult(err=TaskError(
-            error_code="TIMEOUT",
-            message="the API did not answer in time",
-        ))
-```
-
-`auto_retry_for` reads `error_code` only. `message` is optional: `TaskError(error_code="RATE_LIMITED")` retries in the same way.
-
-### Database Transaction with Deadlock Retry
-
-<!-- check: skip partial -- uses names that the page does not define -->
-```python
-@app.task(
-    "update_inventory",
-    retry_policy=RetryPolicy.fixed([1, 2, 5], auto_retry_for=["DEADLOCK"]),  # Quick retries
-)
-def update_inventory(*, item_id: int, delta: int) -> TaskResult[None, TaskError]:
-    try:
-        db.update_stock(item_id, delta)
-        return TaskResult(ok=None)
-    except DeadlockDetected:
-        return TaskResult(err=TaskError(error_code="DEADLOCK", message="Deadlock detected"))
-```
+Whether a task can be rerun is decided at enqueue by `retain_rerun_input_default` (with a per-task override), not at rerun time. See [Action Semantics](/horsies/monitoring/action-semantics/#task-rerun).

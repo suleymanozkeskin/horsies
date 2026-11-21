@@ -1,0 +1,1362 @@
+"""Layer 1 e2e tests: task fundamentals."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import tempfile
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from uuid import UUID, uuid4
+
+import pytest
+
+from typing import Protocol
+
+from horsies.core.brokers.enqueue_task import SendKind
+from horsies.core.app import Horsies
+from horsies.core.types.status import TaskStatus
+from horsies.core.models.tasks import OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode, TaskResult, TaskError
+from horsies.core.task_decorator import TaskHandle
+from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.brokers.result_types import BrokerErrorCode
+from horsies.core.errors import ConfigurationError
+from horsies.core.types.result import is_ok, is_err
+from horsies.core.models.task_send_types import TaskSendResult, TaskSendSuppressed
+from sqlalchemy import text
+
+from tests.e2e.conftest import compute_test_command_fingerprint
+from tests.e2e.helpers.assertions import (
+    assert_ok,
+    assert_err,
+    unwrap_get_result,
+    unwrap_send,
+)
+from tests.e2e.helpers.db import poll_max_during, read_task
+from tests.integration.history_seeding import force_terminal
+from tests.e2e.helpers.worker import run_worker
+from tests.e2e.tasks import async_tasks
+from tests.e2e.tasks import basic as basic_tasks
+from tests.e2e.tasks import retry as retry_tasks
+from tests.e2e.tasks import instance as default_instance
+from tests.e2e.tasks import instance_retry_precedence
+from tests.e2e.tasks import instance_custom
+from tests.e2e.tasks import queues_custom
+from tests.e2e.tasks.profiles import (
+    CLAIM_BATCH_1,
+    CLAIM_BATCH_1_TASKS,
+    isolated_profile_name,
+)
+from tests.broker_resources_support import current_resources
+
+
+DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
+RETRY_PRECEDENCE_INSTANCE = 'tests.e2e.tasks.instance_retry_precedence:app'
+CUSTOM_INSTANCE = 'tests.e2e.tasks.instance_custom:app'
+
+
+class _HealthcheckTask(Protocol):
+    def send(self) -> TaskSendResult[TaskHandle[str]]: ...
+
+
+def _make_ready_check(task_func: _HealthcheckTask):
+    handle: TaskHandle[str] | None = None
+
+    def _check() -> bool:
+        nonlocal handle
+        if handle is None:
+            r = task_func.send()
+            if is_err(r):
+                return False
+            handle = r.ok_value
+        result = handle.get(timeout_ms=2000)
+        return result.is_ok()
+
+    return _check
+
+
+@pytest.mark.e2e
+def test_simple_task_lifecycle() -> None:
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        handle = unwrap_send(basic_tasks.simple_task.send(x=5))
+        result = handle.get(timeout_ms=5000)
+        assert_ok(result, expected_value=10)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_status_transitions(broker: PostgresBroker) -> None:
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        handle = unwrap_send(await basic_tasks.simple_task.send_async(x=5))
+        result = await asyncio.to_thread(handle.get, timeout_ms=5000)
+        assert_ok(result)
+
+        async with current_resources(broker).session_factory() as session:
+            task = await read_task(session, handle.task_id)
+            assert task is not None
+            assert task.status == TaskStatus.COMPLETED
+            assert task.started_at is not None
+            assert task.completed_at is not None
+            assert task.claimed_at is not None
+
+
+@pytest.mark.e2e
+def test_a_task_cannot_wait_for_another_task() -> None:
+    """In a worker child, every result wait is refused at once, also on a thread
+    that the task starts. send, a workflow start and info work."""
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        handle = unwrap_send(basic_tasks.wait_inside_task.send())
+        result = handle.get(timeout_ms=10000)
+        assert_ok(
+            result,
+            {
+                'get_refused': True,
+                'thread_get_refused': True,
+                'app_get_result_refused': True,
+                'raw_refused': True,
+                'workflow_started': True,
+                'workflow_get_refused': True,
+                'info_read': True,
+            },
+        )
+
+
+@pytest.mark.e2e
+def test_an_async_task_cannot_wait_for_another_task() -> None:
+    """In an `async def` task, every async result wait is refused at once.
+    send_async enqueues: the sent task completes, read from outside the worker."""
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        handle = unwrap_send(async_tasks.async_wait_inside_task.send())
+        probe = handle.get(timeout_ms=10000)
+        assert probe.is_ok(), f'Expected Ok, got Err: {probe.err}'
+        value = probe.unwrap()
+        assert value == async_tasks.AsyncWaitProbe(
+            sent_task_id=value.sent_task_id,
+            get_async_refused=True,
+            app_get_result_async_refused=True,
+            raw_async_refused=True,
+            workflow_started=True,
+            workflow_get_async_refused=True,
+        )
+        sent = unwrap_get_result(
+            default_instance.app.get_result(
+                UUID(value.sent_task_id), timeout_ms=10000,
+            ),
+        )
+        assert_ok(sent, expected_value=2)
+
+
+@pytest.mark.e2e
+def test_primitive_args() -> None:
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        result = unwrap_send(basic_tasks.primitives_task.send(i=42, f=3.14, s='hello', b=True, n=None)).get(
+            timeout_ms=5000
+        )
+        assert_ok(result, {'i': 42, 'f': 3.14, 's': 'hello', 'b': True, 'n': None})
+
+
+@pytest.mark.e2e
+def test_collection_args() -> None:
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        result = unwrap_send(basic_tasks.collections_task.send(lst=[1, 2, 3], dct={'a': 1}, tpl=(4, 5))).get(
+            timeout_ms=5000
+        )
+        assert_ok(result)
+        output = result.unwrap()
+        assert output['lst'] == [1, 2, 3]
+        assert output['dct'] == {'a': 1}
+        assert output['tpl'] == [4, 5]  # tuple serializes as list
+
+
+@pytest.mark.e2e
+def test_pydantic_model_args() -> None:
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        user = basic_tasks.UserInput(name='Alice', age=30)
+        result = unwrap_send(basic_tasks.pydantic_task.send(user=user)).get(timeout_ms=5000)
+        assert_ok(result, 'Alice is 30')
+
+
+@pytest.mark.e2e
+def test_dataclass_args() -> None:
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        result = unwrap_send(basic_tasks.dataclass_task.send(data=basic_tasks.DataInput(x=10, y=20))).get(
+            timeout_ms=5000
+        )
+        assert_ok(result, 30)
+
+
+@pytest.mark.e2e
+def test_kwargs_with_defaults() -> None:
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        r1 = unwrap_send(basic_tasks.kwargs_task.send(required=5)).get(timeout_ms=5000)
+        assert_ok(r1, '5_default')
+
+        r2 = unwrap_send(basic_tasks.kwargs_task.send(required=5, optional='custom')).get(timeout_ms=5000)
+        assert_ok(r2, '5_custom')
+
+        r3 = unwrap_send(basic_tasks.kwargs_task.send(required=5, optional='x', multiplier=10)).get(
+            timeout_ms=5000
+        )
+        assert_ok(r3, '50_x')
+
+
+@pytest.mark.e2e
+def test_explicit_error_result() -> None:
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        result = unwrap_send(basic_tasks.error_task.send()).get(timeout_ms=5000)
+        assert_err(result, expected_code='DELIBERATE_ERROR')
+        assert result.err is not None
+        assert result.err.message == 'This is intentional'
+        assert result.err.data == {'key': 'value'}
+
+
+@pytest.mark.e2e
+def test_exception_becomes_error() -> None:
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        result = unwrap_send(basic_tasks.exception_task.send()).get(timeout_ms=5000)
+        assert result.is_err()
+        assert result.err is not None
+        assert result.err.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
+        assert result.err.message is not None
+        assert 'ValueError' in result.err.message
+
+
+@pytest.mark.e2e
+def test_return_type_mismatch() -> None:
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        result = unwrap_send(basic_tasks.type_mismatch_task.send()).get(timeout_ms=5000)
+        assert result.is_err()
+        assert result.err is not None
+        assert result.err.error_code == ContractCode.RETURN_TYPE_MISMATCH
+
+
+@pytest.mark.e2e
+def test_complex_result_serialization() -> None:
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        result = unwrap_send(basic_tasks.complex_result_task.send()).get(timeout_ms=5000)
+        assert_ok(result)
+        output = result.unwrap()
+        assert output.value == 42
+        assert output.nested == {'a': [1, 2, 3], 'b': [4, 5]}
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_retry_exhausted(broker: PostgresBroker) -> None:
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        handle = unwrap_send(await retry_tasks.retry_exhausted_task.send_async())
+        result = await asyncio.to_thread(handle.get, timeout_ms=15000)
+        assert_err(result, expected_code='TRANSIENT')
+
+        async with current_resources(broker).session_factory() as session:
+            task = await read_task(session, handle.task_id)
+            assert task is not None
+            assert task.retry_count == 3
+            assert task.status == TaskStatus.FAILED
+
+
+@pytest.mark.e2e
+def test_retry_eventual_success() -> None:
+    with tempfile.NamedTemporaryFile(delete=False, mode='w') as tmp:
+        tmp.write('0')  # Initialize counter to 0
+        state_path = tmp.name
+
+    os.environ['E2E_RETRY_SUCCESS_PATH'] = state_path
+    try:
+        with run_worker(
+            DEFAULT_INSTANCE,
+            profile='isolated-1',
+            ready_check=_make_ready_check(basic_tasks.healthcheck),
+        ):
+            result = unwrap_send(retry_tasks.retry_success_task.send()).get(timeout_ms=15000)
+            assert_ok(result, 'succeeded_on_attempt_3')
+    finally:
+        try:
+            os.unlink(state_path)
+        except FileNotFoundError:
+            pass
+        os.environ.pop('E2E_RETRY_SUCCESS_PATH', None)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_exponential_backoff_state(broker: PostgresBroker) -> None:
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        handle = unwrap_send(await retry_tasks.exponential_task.send_async())
+
+        # Wait for at least one retry to be scheduled
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            async with current_resources(broker).session_factory() as session:
+                task = await read_task(session, handle.task_id)
+                if task and task.retry_count >= 1 and task.next_retry_at is not None:
+                    break
+            await asyncio.sleep(0.2)
+        else:
+            raise AssertionError('retry_count did not advance')
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_exponential_backoff_intervals(broker: PostgresBroker) -> None:
+    """Exponential backoff: second retry interval exceeds first."""
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        handle = unwrap_send(await retry_tasks.exponential_task.send_async())
+
+        # Capture original enqueued_at before worker processes the task
+        async with current_resources(broker).session_factory() as session:
+            task = await read_task(session, handle.task_id)
+            assert task is not None and task.enqueued_at is not None
+            original_sent_at = task.sent_at
+            enqueued_at_snapshots: dict[int, datetime] = {0: task.enqueued_at}
+
+        # Poll until retry_count reaches 2
+        deadline = time.time() + 15.0
+        while time.time() < deadline:
+            async with current_resources(broker).session_factory() as session:
+                task = await read_task(session, handle.task_id)
+                if task is not None and task.enqueued_at is not None:
+                    rc = task.retry_count
+                    if rc not in enqueued_at_snapshots:
+                        enqueued_at_snapshots[rc] = task.enqueued_at
+                    if rc >= 2:
+                        # sent_at must remain immutable across retries
+                        assert task.sent_at == original_sent_at, (
+                            f'sent_at changed on retry: {task.sent_at} != {original_sent_at}'
+                        )
+                        break
+            await asyncio.sleep(0.15)
+        else:
+            raise AssertionError(
+                f'retry_count did not reach 2; snapshots: {enqueued_at_snapshots}'
+            )
+
+        # enqueued_at is updated to next_retry_at on each retry
+        # base=1 exponential: delay_1 ≈ 1s (2^0), delay_2 ≈ 2s (2^1)
+        assert {0, 1, 2}.issubset(enqueued_at_snapshots), (
+            f'Missing retry counts; got: {sorted(enqueued_at_snapshots)}'
+        )
+        interval_1 = (enqueued_at_snapshots[1] - enqueued_at_snapshots[0]).total_seconds()
+        interval_2 = (enqueued_at_snapshots[2] - enqueued_at_snapshots[1]).total_seconds()
+        assert interval_2 > interval_1, (
+            f'Expected increasing intervals for exponential backoff: '
+            f'interval_1={interval_1:.2f}s, interval_2={interval_2:.2f}s'
+        )
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_auto_retry_by_error_code(broker: PostgresBroker) -> None:
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        handle = unwrap_send(await retry_tasks.retry_error_code_task.send_async())
+        result = await asyncio.to_thread(handle.get, timeout_ms=10000)
+        assert result.is_err()
+
+        async with current_resources(broker).session_factory() as session:
+            task = await read_task(session, handle.task_id)
+            assert task is not None
+            assert task.retry_count == 1
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_auto_retry_by_mapped_exception(broker: PostgresBroker) -> None:
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        handle = unwrap_send(await retry_tasks.retry_mapped_exception_task.send_async())
+        result = await asyncio.to_thread(handle.get, timeout_ms=10000)
+        assert result.is_err()
+
+        async with current_resources(broker).session_factory() as session:
+            task = await read_task(session, handle.task_id)
+            assert task is not None
+            assert task.retry_count == 1
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_no_retry_for_non_matching(broker: PostgresBroker) -> None:
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        handle = unwrap_send(await basic_tasks.no_retry_task.send_async())
+        result = await asyncio.to_thread(handle.get, timeout_ms=5000)
+        assert_err(result, expected_code='PERMANENT')
+
+        async with current_resources(broker).session_factory() as session:
+            task = await read_task(session, handle.task_id)
+            assert task is not None
+            assert task.retry_count == 0
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_retry_precedence_task_mapper_wins_over_global_no_retry(
+    broker: PostgresBroker,
+) -> None:
+    with run_worker(
+        RETRY_PRECEDENCE_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
+    ):
+        handle = unwrap_send(await instance_retry_precedence.task_mapper_wins_no_retry_task.send_async())
+        result = await asyncio.to_thread(handle.get, timeout_ms=10000)
+        assert result.is_err()
+        assert result.err is not None
+        assert result.err.error_code == 'TASK_VALUE_ERROR'
+
+        async with current_resources(broker).session_factory() as session:
+            task = await read_task(session, handle.task_id)
+            assert task is not None
+            assert task.retry_count == 0
+            assert task.status == TaskStatus.FAILED
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_retry_precedence_task_mapper_wins_and_retries(
+    broker: PostgresBroker,
+) -> None:
+    with run_worker(
+        RETRY_PRECEDENCE_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
+    ):
+        handle = unwrap_send(await instance_retry_precedence.task_mapper_wins_retry_task.send_async())
+        result = await asyncio.to_thread(handle.get, timeout_ms=10000)
+        assert result.is_err()
+        assert result.err is not None
+        assert result.err.error_code == 'TASK_VALUE_ERROR'
+
+        async with current_resources(broker).session_factory() as session:
+            task = await read_task(session, handle.task_id)
+            assert task is not None
+            assert task.retry_count == 1
+            assert task.status == TaskStatus.FAILED
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_retry_precedence_global_mapper_triggers_retry(
+    broker: PostgresBroker,
+) -> None:
+    with run_worker(
+        RETRY_PRECEDENCE_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
+    ):
+        handle = unwrap_send(await instance_retry_precedence.global_mapper_retry_task.send_async())
+        result = await asyncio.to_thread(handle.get, timeout_ms=10000)
+        assert result.is_err()
+        assert result.err is not None
+        assert result.err.error_code == 'GLOBAL_VALUE_ERROR'
+
+        async with current_resources(broker).session_factory() as session:
+            task = await read_task(session, handle.task_id)
+            assert task is not None
+            assert task.retry_count == 1
+            assert task.status == TaskStatus.FAILED
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_retry_precedence_exception_name_collision_no_retry(
+    broker: PostgresBroker,
+) -> None:
+    with run_worker(
+        RETRY_PRECEDENCE_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
+    ):
+        handle = unwrap_send(await instance_retry_precedence.exception_name_collision_task.send_async())
+        result = await asyncio.to_thread(handle.get, timeout_ms=10000)
+        assert result.is_err()
+        assert result.err is not None
+        assert result.err.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
+
+        async with current_resources(broker).session_factory() as session:
+            task = await read_task(session, handle.task_id)
+            assert task is not None
+            assert task.retry_count == 0
+            assert task.status == TaskStatus.FAILED
+
+
+@pytest.mark.e2e
+def test_default_mode_rejects_queue_name() -> None:
+    # Default instance should reject queue_name at task definition time
+    with pytest.raises(ConfigurationError, match='cannot specify queue_name'):
+
+        @default_instance.app.task(task_name='e2e_default_reject', queue_name='custom')
+        def default_reject_task(*, x: int) -> TaskResult[int, TaskError]:
+            return basic_tasks.simple_task(x)
+
+
+@pytest.mark.e2e
+def test_custom_mode_queue_routing() -> None:
+    with run_worker(
+        CUSTOM_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(queues_custom.high_task),
+    ):
+        result_high = unwrap_send(queues_custom.high_task.send()).get(timeout_ms=5000)
+        result_normal = unwrap_send(queues_custom.normal_task.send()).get(timeout_ms=5000)
+        result_low = unwrap_send(queues_custom.low_task.send()).get(timeout_ms=5000)
+
+        assert_ok(result_high, 'high')
+        assert_ok(result_normal, 'normal')
+        assert_ok(result_low, 'low')
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_custom_mode_queue_names_stored(custom_broker: PostgresBroker) -> None:
+    with run_worker(
+        CUSTOM_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(queues_custom.high_task),
+    ):
+        handle = unwrap_send(await queues_custom.high_task.send_async())
+        result = await asyncio.to_thread(handle.get, timeout_ms=5000)
+        assert_ok(result, 'high')
+
+        async with current_resources(custom_broker).session_factory() as session:
+            task = await read_task(session, handle.task_id)
+            assert task is not None
+            assert task.queue_name == 'high'
+
+
+# =============================================================================
+# L1.5 Queue Modes (continued)
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_priority_ordering(custom_broker: PostgresBroker) -> None:
+    """L1.5.4: High priority (lower number) tasks are claimed before low priority."""
+    # Submit both tasks BEFORE starting worker to ensure fair priority ordering
+    # Low priority (100) submitted first
+    # Use explicit enqueued_at ordering to avoid timing sleeps.
+    enqueue_base = datetime.now(timezone.utc)
+    task_id_low = (await asyncio.to_thread(
+        custom_broker.enqueue,
+        task_name='e2e_low',
+        queue_name='low',
+        task_id=uuid4(),
+        send_kind=SendKind.FIRST,
+        sent_at=datetime.now(timezone.utc),
+        priority=100,
+        enqueued_at=enqueue_base,
+    )).unwrap()
+    # High priority (1) submitted second
+    task_id_high = (await asyncio.to_thread(
+        custom_broker.enqueue,
+        task_name='e2e_high',
+        queue_name='high',
+        task_id=uuid4(),
+        send_kind=SendKind.FIRST,
+        sent_at=datetime.now(timezone.utc),
+        priority=1,
+        enqueued_at=enqueue_base + timedelta(milliseconds=50),
+    )).unwrap()
+
+    # Now start worker - should claim high priority first despite later submission
+    with run_worker(
+        CUSTOM_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(queues_custom.high_task),
+    ):
+        # Wait for both to complete
+        unwrap_get_result(await asyncio.to_thread(instance_custom.app.get_result, task_id_low, timeout_ms=10000))
+        unwrap_get_result(await asyncio.to_thread(instance_custom.app.get_result, task_id_high, timeout_ms=10000))
+
+        # Verify high started before low (started_at is set when task runs, more deterministic
+        # than claimed_at which can be identical if both claimed in same transaction)
+        async with current_resources(custom_broker).session_factory() as session:
+            t_high = await read_task(session, task_id_high)
+            t_low = await read_task(session, task_id_low)
+            assert t_high is not None
+            assert t_low is not None
+            assert t_high.started_at is not None
+            assert t_low.started_at is not None
+            assert t_high.started_at < t_low.started_at, (
+                f'High priority task started at {t_high.started_at} should be before '
+                f'low priority task started at {t_low.started_at}'
+            )
+
+
+@pytest.mark.e2e
+def test_custom_mode_requires_queue_name() -> None:
+    """L1.5.5: CUSTOM mode requires queue_name at definition time."""
+    with pytest.raises(ConfigurationError, match='queue_name is required'):
+
+        @instance_custom.app.task(task_name='e2e_missing_queue_name')
+        def missing_queue_task() -> TaskResult[str, TaskError]:
+            return TaskResult(ok='test')
+
+
+# =============================================================================
+# L1.6 Task Expiry (good_until)
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_task_expires_before_claim(broker: PostgresBroker) -> None:
+    """L1.6.1: Task with past good_until is never claimed or executed."""
+    # Submit task that expires in 500ms
+    expiry = datetime.now(timezone.utc) + timedelta(milliseconds=500)
+    task_id = (await asyncio.to_thread(
+        broker.enqueue,
+        task_name='e2e_simple',
+        input_json='{"x": 5}',
+        queue_name='default',
+        task_id=uuid4(),
+        send_kind=SendKind.FIRST,
+        sent_at=datetime.now(timezone.utc),
+        good_until=expiry,
+    )).unwrap()
+
+    # Wait until the task is definitely expired.
+    while datetime.now(timezone.utc) <= expiry:
+        await asyncio.sleep(0.05)
+
+    # Start worker - should not claim expired task
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        # Observe for a short window and ensure the expired task is never claimed.
+        # The reaper may transition it to EXPIRED — both PENDING and EXPIRED are valid.
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            async with current_resources(broker).session_factory() as session:
+                task = await read_task(session, task_id)
+                assert task is not None
+                assert task.status in (TaskStatus.PENDING, TaskStatus.EXPIRED)
+            await asyncio.sleep(0.1)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_task_completes_before_expiry(
+    broker: PostgresBroker, app: Horsies,
+) -> None:
+    """L1.6.2: Task with future good_until completes successfully."""
+    expiry = datetime.now(timezone.utc) + timedelta(seconds=60)
+    task_id = (await asyncio.to_thread(
+        broker.enqueue,
+        task_name='e2e_simple',
+        input_json='{"x": 5}',
+        queue_name='default',
+        task_id=uuid4(),
+        send_kind=SendKind.FIRST,
+        sent_at=datetime.now(timezone.utc),
+        good_until=expiry,
+    )).unwrap()
+
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        result = unwrap_get_result(await asyncio.to_thread(app.get_result, task_id, timeout_ms=5000))
+        assert_ok(result, expected_value=10)
+
+        async with current_resources(broker).session_factory() as session:
+            task = await read_task(session, task_id)
+            assert task is not None
+            assert task.status == TaskStatus.COMPLETED
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_good_until_already_past(broker: PostgresBroker) -> None:
+    """L1.6.3: Task with already-past good_until at enqueue time is never claimed."""
+    past = datetime.now(timezone.utc) - timedelta(seconds=10)
+    task_id = (await asyncio.to_thread(
+        broker.enqueue,
+        task_name='e2e_simple',
+        input_json='{"x": 5}',
+        queue_name='default',
+        task_id=uuid4(),
+        send_kind=SendKind.FIRST,
+        sent_at=datetime.now(timezone.utc),
+        good_until=past,
+    )).unwrap()
+
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        await asyncio.sleep(2.0)  # Give worker time to potentially claim
+
+        async with current_resources(broker).session_factory() as session:
+            task = await read_task(session, task_id)
+            assert task is not None
+            # Dead on arrival — never claimed; reaper may have transitioned to EXPIRED
+            assert task.status in (TaskStatus.PENDING, TaskStatus.EXPIRED)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_retry_blocked_by_good_until_expiry(
+    broker: PostgresBroker, app: Horsies,
+) -> None:
+    """L1.6.4: Retry is skipped and task fails when next retry would exceed good_until."""
+    good_until = datetime.now(timezone.utc) + timedelta(seconds=10)
+    task_options = json.dumps({
+        'retry_policy': {
+            'max_retries': 3,
+            'intervals': [60, 60, 60],
+            'backoff_strategy': 'fixed',
+            'jitter': False,
+            'auto_retry_for': ['TRANSIENT'],
+        },
+        'good_until': good_until.isoformat(),
+    })
+    task_id = (await asyncio.to_thread(
+        broker.enqueue,
+        task_name='e2e_retry_exhausted',
+        queue_name='default',
+        task_id=uuid4(),
+        send_kind=SendKind.FIRST,
+        sent_at=datetime.now(timezone.utc),
+        good_until=good_until,
+        task_options=task_options,
+    )).unwrap()
+
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        result = unwrap_get_result(await asyncio.to_thread(app.get_result, task_id, timeout_ms=15000))
+        assert_err(result, expected_code='TRANSIENT')
+
+        async with current_resources(broker).session_factory() as session:
+            task = await read_task(session, task_id)
+            assert task is not None
+            assert task.status == TaskStatus.FAILED
+            assert task.retry_count == 0
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_retry_succeeds_within_good_until(
+    broker: PostgresBroker, app: Horsies,
+) -> None:
+    """L1.6.5: Retry proceeds and succeeds when all retries fit within good_until."""
+    with tempfile.NamedTemporaryFile(delete=False, mode='w') as tmp:
+        tmp.write('0')
+        state_path = tmp.name
+
+    good_until = datetime.now(timezone.utc) + timedelta(seconds=30)
+    task_options = json.dumps({
+        'retry_policy': {
+            'max_retries': 3,
+            'intervals': [1, 1, 1],
+            'backoff_strategy': 'fixed',
+            'jitter': False,
+            'auto_retry_for': ['TRANSIENT'],
+        },
+        'good_until': good_until.isoformat(),
+    })
+    os.environ['E2E_RETRY_SUCCESS_PATH'] = state_path
+    try:
+        task_id = (await asyncio.to_thread(
+            broker.enqueue,
+            task_name='e2e_retry_success',
+            queue_name='default',
+            task_id=uuid4(),
+            send_kind=SendKind.FIRST,
+            sent_at=datetime.now(timezone.utc),
+            good_until=good_until,
+            task_options=task_options,
+        )).unwrap()
+
+        with run_worker(
+            DEFAULT_INSTANCE,
+            profile='isolated-1',
+            ready_check=_make_ready_check(basic_tasks.healthcheck),
+        ):
+            result = unwrap_get_result(await asyncio.to_thread(app.get_result, task_id, timeout_ms=20000))
+            assert_ok(result, expected_value='succeeded_on_attempt_3')
+
+            async with current_resources(broker).session_factory() as session:
+                task = await read_task(session, task_id)
+                assert task is not None
+                assert task.status == TaskStatus.COMPLETED
+                assert task.retry_count == 2
+    finally:
+        try:
+            os.unlink(state_path)
+        except FileNotFoundError:
+            pass
+        os.environ.pop('E2E_RETRY_SUCCESS_PATH', None)
+
+
+# =============================================================================
+# L1.7 Error Scenarios
+# =============================================================================
+
+
+@pytest.mark.e2e
+def test_worker_resolution_error(broker: PostgresBroker, app: Horsies) -> None:
+    """L1.7.1: Unknown task_name returns WORKER_RESOLUTION_ERROR."""
+    task_id = broker.enqueue(
+        task_name='nonexistent_task_xyz',
+        queue_name='default',
+        task_id=uuid4(),
+        send_kind=SendKind.FIRST,
+        sent_at=datetime.now(timezone.utc),
+    ).unwrap()
+
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        result = unwrap_get_result(app.get_result(task_id, timeout_ms=5000))
+        assert_err(result, expected_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR)
+
+
+@pytest.mark.e2e
+def test_unencodable_return_value_is_a_type_mismatch() -> None:
+    """L1.7.2: A returned value that fails its declared type and is not
+    JSON-encodable stores RETURN_TYPE_MISMATCH. The stored error names the
+    actual type, not the value, so it encodes."""
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        result = unwrap_send(basic_tasks.unserializable_result_task.send()).get(timeout_ms=5000)
+        assert_err(result, expected_code=ContractCode.RETURN_TYPE_MISMATCH)
+        err = result.err_value
+        assert 'TaskResult(ok=<function>)' in (err.message or '')
+        assert 'identity' not in (err.message or '')
+        assert 'identity' not in json.dumps(err.data)
+
+
+@pytest.mark.e2e
+def test_task_not_found(broker: PostgresBroker, app: Horsies) -> None:
+    """L1.7.3: Non-existent task_id returns TASK_NOT_FOUND."""
+    fake_id = UUID(int=0)
+    result = unwrap_get_result(app.get_result(fake_id, timeout_ms=1000))
+    assert_err(result, expected_code=RetrievalCode.TASK_NOT_FOUND)
+
+
+@pytest.mark.e2e
+def test_wait_timeout(broker: PostgresBroker, app: Horsies) -> None:
+    """L1.7.4: Short timeout returns WAIT_TIMEOUT when task doesn't complete."""
+    # Submit task but DON'T start worker
+    task_id = broker.enqueue(
+        task_name='e2e_simple',
+        input_json='{"x": 5}',
+        queue_name='default',
+        task_id=uuid4(),
+        send_kind=SendKind.FIRST,
+        sent_at=datetime.now(timezone.utc),
+    ).unwrap()
+
+    # Wait with very short timeout - task never completes
+    result = unwrap_get_result(app.get_result(task_id, timeout_ms=500))
+    assert_err(result, expected_code=RetrievalCode.WAIT_TIMEOUT)
+
+
+@pytest.mark.e2e
+def test_return_none_from_task() -> None:
+    """L1.7.5: Task returning None instead of TaskResult gives RETURN_TYPE_MISMATCH."""
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        result = unwrap_send(basic_tasks.return_none_task.send()).get(timeout_ms=5000)
+        assert_err(result, expected_code=ContractCode.RETURN_TYPE_MISMATCH)
+        assert result.err is not None
+        assert 'None' in (result.err.message or '')
+
+
+@pytest.mark.e2e
+def test_library_error_code_in_user_task() -> None:
+    """L1.7.6: Task returning OperationalErrorCode is preserved correctly."""
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        result = unwrap_send(basic_tasks.error_code_task.send()).get(timeout_ms=5000)
+        assert_err(result, expected_code=OperationalErrorCode.TASK_EXCEPTION)
+        assert result.err is not None
+        assert result.err.message == 'boom'
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_argument_deserialization_error(
+    broker: PostgresBroker, app: Horsies,
+) -> None:
+    """L1.7.7: A corrupted stored input triggers WORKER_SERIALIZATION_ERROR."""
+    task_id = uuid4()
+    # Store the input as a JSON string instead of a JSON object
+    sent_at, fingerprint = compute_test_command_fingerprint(
+        task_name='e2e_simple', input_json='"not_a_list"',
+    )
+    async with current_resources(broker).session_factory() as session:
+        await session.execute(
+            text("""
+                INSERT INTO horsies_tasks
+                    (
+                        id, task_name, queue_name, status, input, priority, sent_at,
+                        retry_count, max_retries, retention_class_key,
+                        command_fingerprint_version, command_fingerprint,
+                        retain_rerun_input, execution, enqueued_at, created_at,
+                        updated_at, is_workflow_task
+                    ) VALUES (
+                        :tid, 'e2e_simple', 'default', 'PENDING', :input, 100,
+                        :sent_at, 0, 0, 'standard_30d', 1, :command_fingerprint, FALSE,
+                        'ISOLATED', NOW(), NOW(), NOW(), FALSE
+                    )
+            """),
+            {
+                'tid': str(task_id),
+                'input': '"not_a_list"',
+                'sent_at': sent_at,
+                'command_fingerprint': fingerprint,
+            },
+        )
+        await session.commit()
+
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        result = unwrap_get_result(await asyncio.to_thread(app.get_result, task_id, timeout_ms=5000))
+        assert_err(result, expected_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_malformed_pydantic_args(
+    broker: PostgresBroker, app: Horsies,
+) -> None:
+    """L1.7.8: Invalid Pydantic model data in the input triggers WORKER_SERIALIZATION_ERROR."""
+    task_id = uuid4()
+    # Model data that fails model_validate (age is not coercible to int)
+    corrupted_input = json.dumps(
+        {'user': {'name': 'Alice', 'age': 'not_a_number'}},
+    )
+    sent_at, fingerprint = compute_test_command_fingerprint(
+        task_name='e2e_pydantic', input_json=corrupted_input,
+    )
+    async with current_resources(broker).session_factory() as session:
+        await session.execute(
+            text("""
+                INSERT INTO horsies_tasks
+                    (
+                        id, task_name, queue_name, status, input, priority, sent_at,
+                        retry_count, max_retries, retention_class_key,
+                        command_fingerprint_version, command_fingerprint,
+                        retain_rerun_input, execution, enqueued_at, created_at,
+                        updated_at, is_workflow_task
+                    ) VALUES (
+                        :tid, 'e2e_pydantic', 'default', 'PENDING', :input, 100,
+                        :sent_at, 0, 0, 'standard_30d', 1, :command_fingerprint, FALSE,
+                        'ISOLATED', NOW(), NOW(), NOW(), FALSE
+                    )
+            """),
+            {
+                'tid': str(task_id),
+                'input': corrupted_input,
+                'sent_at': sent_at,
+                'command_fingerprint': fingerprint,
+            },
+        )
+        await session.commit()
+
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        result = unwrap_get_result(await asyncio.to_thread(app.get_result, task_id, timeout_ms=5000))
+        assert_err(result, expected_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_task_cancelled(broker: PostgresBroker, app: Horsies) -> None:
+    """L1.7.9: Cancelled task returns TASK_CANCELLED from get_result."""
+    task_id = (await asyncio.to_thread(
+        broker.enqueue,
+        task_name='e2e_simple',
+        input_json='{"x": 5}',
+        queue_name='default',
+        task_id=uuid4(),
+        send_kind=SendKind.FIRST,
+        sent_at=datetime.now(timezone.utc),
+    )).unwrap()
+
+    # Cancel directly in DB (no cancel API exists)
+    async with current_resources(broker).session_factory() as session:
+        await force_terminal(session, str(task_id), status='CANCELLED')
+        await session.commit()
+
+    result = unwrap_get_result(await asyncio.to_thread(app.get_result, task_id, timeout_ms=1000))
+    assert_err(result, expected_code=OutcomeCode.TASK_CANCELLED)
+    assert result.err is not None
+    assert result.err.data is not None
+    assert result.err.data['task_id'] == str(task_id)
+
+
+# =============================================================================
+# L1.8 Concurrency & Fairness
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_multiple_tasks_concurrent(broker: PostgresBroker) -> None:
+    """L1.8.1: Multiple processes handle concurrent tasks (DB proves parallelism)."""
+    num_tasks = 4
+    task_duration_ms = 800
+    num_processes = 2
+
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile=isolated_profile_name(num_processes),
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        handles = [
+            unwrap_send(await basic_tasks.slow_task.send_async(duration_ms=task_duration_ms)) for _ in range(num_tasks)
+        ]
+
+        # Observe runtime concurrency directly from DB instead of wall-clock timing.
+        max_running = await poll_max_during(
+            current_resources(broker).session_factory,
+            "SELECT COUNT(*) FROM horsies_tasks WHERE status = 'RUNNING'",
+            duration_s=3.0,
+            poll_interval=0.05,
+        )
+
+        # All tasks should succeed
+        results = [await asyncio.to_thread(h.get, timeout_ms=15000) for h in handles]
+        assert all(r.is_ok() for r in results)
+
+        # Guard against vacuous sampling and prove at least 2 tasks overlapped.
+        assert max_running > 0, 'Polling observed 0 RUNNING tasks — test may be vacuous'
+        assert max_running >= 2, (
+            f'Expected parallel execution with >=2 RUNNING tasks, observed {max_running}'
+        )
+
+
+@pytest.mark.e2e
+def test_skip_locked_prevents_double_claim() -> None:
+    """L1.8.2: Two workers should not claim the same task (atomic file proves single execution)."""
+    with tempfile.TemporaryDirectory() as log_dir:
+        os.environ['E2E_IDEMPOTENT_LOG_DIR'] = log_dir
+        try:
+            with run_worker(
+                DEFAULT_INSTANCE,
+                profile='isolated-2',
+                ready_check=_make_ready_check(basic_tasks.healthcheck),
+            ):
+                with run_worker(
+                    DEFAULT_INSTANCE,
+                    profile='isolated-2',
+                    ready_check=_make_ready_check(basic_tasks.healthcheck),
+                ):
+                    # Use unique tokens for each task
+                    tokens = [f'task_{i}' for i in range(20)]
+                    handles = [
+                        unwrap_send(basic_tasks.idempotent_task.send(token=token)) for token in tokens
+                    ]
+                    results = [h.get(timeout_ms=15000) for h in handles]
+
+                    # All tasks should succeed (no DOUBLE_EXECUTION errors)
+                    for i, r in enumerate(results):
+                        assert r.is_ok(), f'Task {i} failed: {r.err}'
+
+                    # Verify each token file exists exactly once (atomic creation proves single execution)
+                    for token in tokens:
+                        token_file = Path(log_dir) / token
+                        assert token_file.exists(), f'Token file {token} not created'
+        finally:
+            os.environ.pop('E2E_IDEMPOTENT_LOG_DIR', None)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_max_claim_batch(broker: PostgresBroker) -> None:
+    """L1.8.3: Worker with max_claim_batch=1 never claims more than 1 task at a time."""
+    max_claim_batch = CLAIM_BATCH_1_TASKS
+    num_tasks = 6
+    task_duration_ms = 300
+
+    # One child; one claim pass takes at most max_claim_batch tasks per queue.
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile=CLAIM_BATCH_1,
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        # Submit slow tasks
+        handles = [
+            unwrap_send(await basic_tasks.slow_task.send_async(duration_ms=task_duration_ms)) for _ in range(num_tasks)
+        ]
+
+        # Poll DB while tasks are running to check CLAIMED count
+        max_claimed_seen = 0
+        deadline = time.time() + 10.0
+        all_done = False
+
+        while time.time() < deadline and not all_done:
+            async with current_resources(broker).session_factory() as session:
+                # Count CLAIMED tasks (not yet RUNNING)
+                result = await session.execute(
+                    text("SELECT COUNT(*) FROM horsies_tasks WHERE status = 'CLAIMED'")
+                )
+                claimed_count = result.scalar() or 0
+                max_claimed_seen = max(max_claimed_seen, claimed_count)
+
+                # Check if all done
+                result = await session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM horsies_tasks WHERE status IN ('PENDING', 'CLAIMED', 'RUNNING')"
+                    )
+                )
+                pending_count = result.scalar() or 0
+                all_done = pending_count == 0
+
+            await asyncio.sleep(0.05)
+
+        # Verify batch limit was respected
+        assert (
+            max_claimed_seen <= max_claim_batch
+        ), f'CLAIMED count {max_claimed_seen} exceeded max_claim_batch {max_claim_batch}'
+
+        # All tasks should complete successfully
+        results = [await asyncio.to_thread(h.get, timeout_ms=15000) for h in handles]
+        assert all(r.is_ok() for r in results)
+
+
+# =============================================================================
+# L1.9 TaskHandle API
+# =============================================================================
+
+
+@pytest.mark.e2e
+def test_task_handle_info() -> None:
+    """L1.9.1: TaskHandle.info() returns task metadata after completion."""
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        handle = unwrap_send(basic_tasks.simple_task.send(x=5))
+        result = handle.get(timeout_ms=5000)
+        assert_ok(result)
+
+        info_result = handle.info()
+        assert is_ok(info_result)
+        info = info_result.ok_value
+        assert info is not None
+        assert info.task_id == handle.task_id
+        assert info.task_name == 'e2e_simple'
+        assert info.status == TaskStatus.COMPLETED
+        assert info.queue_name == 'default'
+        assert info.started_at is not None
+        assert info.completed_at is not None
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_task_handle_info_async() -> None:
+    """L1.9.2: TaskHandle.info_async() returns task metadata after completion."""
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        handle = unwrap_send(await basic_tasks.simple_task.send_async(x=5))
+        result = await asyncio.to_thread(handle.get, timeout_ms=5000)
+        assert_ok(result)
+
+        info_result = await handle.info_async()
+        assert is_ok(info_result)
+        info = info_result.ok_value
+        assert info is not None
+        assert info.task_id == handle.task_id
+        assert info.task_name == 'e2e_simple'
+        assert info.status == TaskStatus.COMPLETED
+        assert info.started_at is not None
+        assert info.completed_at is not None
+
+
+# =============================================================================
+# L1.10 Send Suppression
+# =============================================================================
+
+
+@pytest.mark.e2e
+def test_send_suppressed() -> None:
+    """L1.10.1: Task send during suppression returns SEND_SUPPRESSED."""
+    os.environ['HORSIES_SUPPRESS_SENDS'] = '1'
+    try:
+        send_result = basic_tasks.simple_task.send(x=5)
+        assert is_err(send_result)
+        err = send_result.err_value
+        assert isinstance(err, TaskSendSuppressed)
+    finally:
+        os.environ.pop('HORSIES_SUPPRESS_SENDS', None)
+
+
+# =============================================================================
+# L1.11 Legacy Wire Rejection
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_legacy_pydantic_result_envelope_rejected(
+    broker: PostgresBroker, app: Horsies,
+) -> None:
+    """L1.11.1: Legacy polymorphic ``__task_result__`` / ``__pydantic_model__``
+    payloads are rejected at the strict-serde envelope boundary.
+
+    Pre-strict-serde wire carried class identity inside ``ok``:
+    ``{"__pydantic_model__": true, "module": ..., "qualname": ...}``.
+    Strict-serde removed that polymorphism; the envelope marker is now
+    ``__h_task_result__``, so any stored row using the legacy shape fails
+    ``validate_task_result_envelope`` and surfaces as an outer
+    ``Err(BrokerOperationError(INVALID_JSON_PAYLOAD))`` from
+    ``app.get_result``.
+
+    This is distinct from the ``TaskHandle.get()`` path, where a
+    malformed stored payload is mapped to
+    ``TaskResult(err=TaskError(RESULT_DESERIALIZATION_ERROR))``.
+    """
+    task_id = uuid4()
+    legacy_result = json.dumps({
+        '__task_result__': True,
+        'ok': {
+            '__pydantic_model__': True,
+            'module': 'nonexistent.module.that.does.not.exist',
+            'qualname': 'FakeModel',
+            'data': {'field': 'value'},
+        },
+        'err': None,
+    })
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='e2e_simple')
+    async with current_resources(broker).session_factory() as session:
+        await session.execute(
+            text("""
+                INSERT INTO horsies_tasks
+                    (
+                        id, task_name, queue_name, status, priority, input, sent_at,
+                        retry_count, max_retries, retention_class_key,
+                        command_fingerprint_version, command_fingerprint,
+                        retain_rerun_input, execution, enqueued_at, created_at,
+                        updated_at, is_workflow_task, worker_pid, worker_hostname,
+                        worker_process_name
+                    ) VALUES (
+                        :tid, 'e2e_simple', 'default', 'RUNNING', 100, '{}', :sent_at,
+                        0, 0, 'standard_30d', 1, :command_fingerprint, FALSE,
+                        'ISOLATED', NOW(), NOW(), NOW(), FALSE, 4242, 'host-1',
+                        'child-1'
+                    )
+            """),
+            {'tid': str(task_id), 'sent_at': sent_at, 'command_fingerprint': fingerprint},
+        )
+        await force_terminal(
+            session,
+            str(task_id),
+            status='COMPLETED',
+            result_json=legacy_result,
+        )
+        await session.commit()
+
+    outer = await asyncio.to_thread(app.get_result, task_id, timeout_ms=1000)
+    assert is_err(outer), f'expected outer Err for legacy envelope, got Ok: {outer}'
+    err = outer.err_value
+    assert err.code == BrokerErrorCode.INVALID_JSON_PAYLOAD
+    assert err.retryable is False

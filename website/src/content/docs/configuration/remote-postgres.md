@@ -1,5 +1,6 @@
 ---
 title: Remote PostgreSQL
+section: shared
 summary: Deploy workers against a remote or managed PostgreSQL — connection budgeting, pooled multi-worker setups, prefetch, and health-check tuning.
 related: [broker-config, ../workers/concurrency, ../troubleshooting/pgbouncer]
 tags: [configuration, deployment, postgres, pgbouncer, connections, latency]
@@ -20,8 +21,10 @@ Each worker holds, under load:
 
 ```text
 pool max_size                                           # pool of the worker process
-+ 2                                                     # LISTEN connections (tasks, ping)
++ pool max_size                                         # session pool, when session_database_url differs from database_url
++ 1                                                     # listener: every LISTEN of the worker process
 + 1                                                     # runner heartbeat connection
++ 1                                                     # liveness lock connection, on the session URL
 + isolated children × isolated.pool max_size            # isolated child pools
 + shared async children × shared_async.pool max_size    # shared async child pools
 + shared thread children × shared_thread.pool max_size  # shared thread child pools
@@ -32,15 +35,15 @@ Each `max_size` is the resolved value: a `PoolSize`, or the size that
 pool of the worker process, of the profile (see
 [Sizes Derived from the Seats](/horsies/workers/worker-profiles/#sizes-derived-from-the-seats)).
 At defaults (a pool of the worker process of 5 for 8 seats, an isolated pool
-`max_size` of 1) with a profile of 8 isolated children:
+`max_size` of 1) with a profile of 8 isolated children and no
+`session_database_url`:
 
 ```text
-5 + 2 + 1 + 8 × 1 = 16 connections per worker
+5 + 1 + 1 + 1 + 8 × 1 = 16 connections per worker
 ```
 
 Task code that sends through the app adds the `task_send_pool` of its child
-kind (default 2) in its child for each event loop that it sends from:
-`8 × 2 = 16` more with one sending loop per child, `32` in all. See
+kind (default 2) in its child: `8 × 2 = 16` more, `32` in all. See
 [Worker Profiles](/horsies/workers/worker-profiles/#connections).
 
 The pool of the worker process writes the outcome of each task. At a high RTT
@@ -49,22 +52,22 @@ connections for the same rate: set
 `WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N)))`. See
 [The Pool of the Worker Process](/horsies/workers/worker-profiles/#the-pool-of-the-worker-process).
 
-Producers hold their own engine pools of `pool_size + max_overflow`
-connections each (default 5 + 10): one in the resource set of each event loop
-that makes broker calls, one in the set of the sync runner loop for sync
-calls, and the sync send pool for sync sends without an idempotency key. A
-producer that sends only with `send()` can open `15 + 15 = 30` at the
-defaults. Each set adds 2 listener connections when it waits for a result,
-and one more pool of `pool_size + max_overflow` when `session_database_url`
-differs (see
-[Connection Ceiling](/horsies/configuration/broker-config/#connection-ceiling)).
+A producer holds one core pool of `pool_size + max_overflow` connections
+(default 5 + 10). It serves the sends, the reads, the workflow starts and the
+workflow actions of every thread and event loop of the process. A producer
+can open 15 at the defaults, and 1 listener connection when it waits for a
+result. The pool has a twin of `pool_size + max_overflow` on
+`session_database_url` when that URL differs
+(see
+[Connection Ceiling](/horsies/configuration/broker-connections/#connection-ceiling)).
 
 Size against the server's effective capacity, not its nominal
 `max_connections`: subtract superuser-reserved slots and any connections
 held by the provider's infrastructure. A managed instance with
-`max_connections=50` and 3 reserved slots fits two workers of 8 isolated
-children on direct connections (`2 × 16 = 32`), not three (`48`). When
-their task code sends, each worker can open 16 more, and one worker fits.
+`max_connections=50` and 3 reserved slots has 47 usable slots. It fits two
+workers of 8 isolated children on direct connections (`2 × 16 = 32`), not
+three (`48`). When their task code sends, each worker can open 16 more
+(`32`), and one worker fits.
 
 When workers exhaust the server's slots, connection attempts fail with:
 
@@ -83,25 +86,14 @@ Run multiple workers against a slot-capped server through a transaction-mode
 pooler (PgBouncer or the provider's built-in equivalent). Point
 `database_url` at the pooled endpoint and `session_database_url` at a direct
 endpoint — `LISTEN` requires a real session and does not survive transaction
-pooling:
+pooling — and set `pgbouncer_transaction_mode` to true. The API is on the client
+pages: [PgBouncer / Transaction Pooling](/horsies/configuration/broker-connections/#pgbouncer--transaction-pooling)
+(Python) and [PostgresConfig](/horsies/rust/configuration/app-config/#postgresconfig) (Rust).
 
-```python
-from pydantic import SecretStr
-import os
-
-from horsies import AppConfig, PostgresConfig
-
-config = AppConfig(
-    broker=PostgresConfig(
-        database_url=SecretStr(os.environ['DATABASE_URL_POOLED']),
-        session_database_url=SecretStr(os.environ['DATABASE_URL_DIRECT']),
-        pgbouncer_transaction_mode=True,
-    ),
-)
-```
-
-Direct slots consumed per worker drop to the 2 `LISTEN` connections;
-everything else multiplexes over the pooler's server pool. See
+Direct slots per worker drop to the listener connection and the session
+pool (schema work and partition maintenance) on `session_database_url`: at
+most `1 + pool max_size`. Everything else multiplexes over the pooler's
+server pool. See
 [PgBouncer pool size](/horsies/troubleshooting/pgbouncer/#pool-size) for
 `default_pool_size` and `max_client_conn`, and
 [PgBouncer Troubleshooting](/horsies/troubleshooting/pgbouncer/) for
@@ -121,17 +113,11 @@ With `prefetch_buffer=0` (the default), a worker claims new tasks only
 when a process slot is free, and each claim pass costs a round trip. At 30ms+ RTT this serializes into the task rate and caps
 throughput near the number of children in tasks per second, regardless of task duration.
 
-Set a prefetch buffer and claim lease for remote deployments:
-
-```python
-from horsies import AppConfig, PostgresConfig
-
-config = AppConfig(
-    prefetch_buffer=24,        # claim ahead: 2–3× the children
-    claim_lease_ms=120_000,    # required when prefetch_buffer > 0
-    broker=PostgresConfig(database_url=SecretStr(os.environ['DATABASE_URL'])),
-)
-```
+Set a prefetch buffer and claim lease for remote deployments: `prefetch_buffer`
+at 2–3× the children of the worker (for example 24 for 8 children), and
+`claim_lease_ms`, which a `prefetch_buffer` above 0 requires (for example
+120,000). The Python example is in
+[Prefetch Configuration](/horsies/configuration/app-config/#prefetch-configuration).
 
 At 33ms RTT this raises drain throughput roughly 2–3× over the default.
 Soft-cap semantics and fairness trade-offs are covered in
@@ -141,9 +127,9 @@ Soft-cap semantics and fairness trade-offs are covered in
 
 Three settings can check a pooled connection at checkout, at one round trip
 each. The two pre-ping settings check a connection only when it waited in the
-pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`). A connection checked in more
-recently is used with no check, so a burst of statements pays no checks. The
-`check` of a child pool runs at every checkout.
+pool for more than 1 s. A connection checked in more recently is used with no
+check, so a burst of statements pays no checks. The `check` of a child pool
+runs at every checkout.
 
 | Setting | Default | Scope |
 |---------|---------|-------|
@@ -163,7 +149,7 @@ autocommit, so a check doubles their round trips. At the defaults:
 | Phase 2 of a workflow task (node, dependents, workflow completion, capacity wake) | worker | 7 to 12, in one transaction; see [Worker Architecture](/horsies/workers/worker-architecture/#5-result-handling) |
 | Claim pass (`horsies_claim`) | worker | 1 |
 | Wake of a retry that comes due | worker | 1 |
-| RUNNING update of a plain task, with its first runner heartbeat | child | 1 |
+| RUNNING update of a plain task | child | 1 |
 | Finalizing marker | child | 1 |
 | RUNNING update of a workflow task and the start of its node | child | 4 (BEGIN, update, node, COMMIT) |
 
@@ -174,43 +160,18 @@ statement instead of a transparent reconnect:
   runs it again on a new connection, and a statement whose reply was lost
   is classified on that run, so it is not applied twice.
 - The claim loop retries a pass that failed with a connection error.
-- A RUNNING update of a child ends as `OWNERSHIP_UNCONFIRMED`: the task
-  stays `CLAIMED` until its claim lease returns it to the queue. A failed
+- A RUNNING update of a child ends as `OWNERSHIP_UNCONFIRMED`: no task
+  code runs, and the worker releases the claim at once, fenced on its claim
+  generation, so the task goes back to the queue. If that release also
+  fails, the claim lease returns the task. A failed
   finalizing marker is logged; the runner heartbeats of the worker cover
   the row until the worker reads the end of the task.
 
 Turn the checks on for workers that sit idle for long stretches behind
 NAT or load balancers that kill idle connections, where stale connections
-occur:
-
-```python
-from horsies import (
-    AppConfig,
-    IsolatedChildren,
-    IsolatedPool,
-    PostgresConfig,
-    SharedAsyncChildren,
-    SharedPool,
-    WorkerProfile,
-)
-
-config = AppConfig(
-    broker=PostgresConfig(
-        database_url=SecretStr(os.environ['DATABASE_URL']),
-        worker_pool_pre_ping=True,
-    ),
-    worker_profiles={
-        'idle_behind_nat': WorkerProfile(
-            isolated=IsolatedChildren(count=8, pool=IsolatedPool(check=True)),
-            shared_async=SharedAsyncChildren(
-                count=2,
-                seats=50,
-                pool=SharedPool(check=True),
-            ),
-        ),
-    },
-)
-```
+occur: `worker_pool_pre_ping` for the worker process, and the `check` of the
+pool of each child kind. The Python example is in
+[Check Connections at Checkout](/horsies/configuration/broker-connections/#check-connections-at-checkout).
 
 ## TCP Keepalives for Idle Pooled Connections
 
@@ -223,26 +184,19 @@ An idle pooled connection reaped server-side between checkouts surfaces as a
 mid-query `OperationalError` on the next claim or heartbeat — absorbed by the
 worker's retry loop, but logged as noise.
 
-`tcp_keepalives` (default on) closes this gap at the socket layer. libpq
-enables keepalives by default but leaves the idle interval at the OS default
-(often 7200s), longer than a pooler's idle-reap window. Horsies sets
-`keepalives_idle=30`, so a dropped socket is detected within ~30s and recycled
-before the next query lands on it. The keepalives apply to the broker engine
-pool and each child-process pool; the LISTEN/NOTIFY listener keeps its own.
+`tcp_keepalives` (default on) closes this gap at the socket layer. The OS
+default idle interval (often 7200s) is longer than a pooler's idle-reap
+window. Horsies sets `tcp_keepalives_idle=30`, so a dropped socket is detected
+within ~30s and recycled before the next query lands on it. The keepalives
+apply to every connection of the core: the broker pools, each child-process
+pool, and the LISTEN/NOTIFY listener.
 
 PlanetScale's PgBouncer pooler (`:6432`) reaps idle connections within ~1–2h;
 the defaults keep those sockets warm with no configuration. Lower the idle
-window only for poolers that reap faster than 30s:
-
-```python
-config = AppConfig(
-    broker=PostgresConfig(
-        database_url=SecretStr(os.environ['DATABASE_URL']),
-        tcp_keepalives_idle=15,
-        tcp_keepalives_interval=5,
-    ),
-)
-```
+window only for poolers that reap faster than 30s, for example
+`tcp_keepalives_idle` at 15 and `tcp_keepalives_interval` at 5. The Python
+example is in
+[Shorter Keepalive Idle](/horsies/configuration/broker-connections/#shorter-keepalive-idle).
 
 ## TCP User Timeout for Dead Connections
 
@@ -254,10 +208,10 @@ decides: about 15 minutes on Linux with the default `tcp_retries2=15`. The
 worker process is blocked for that time, and the pool's 30-second checkout
 timeout applies only after the write fails.
 
-`tcp_user_timeout_ms` (default `30000`) sets libpq `tcp_user_timeout`. Data
-that stays unacknowledged for that time closes the connection, so the write
-fails within 30 seconds and the pool opens a new connection. The setting
-applies to the broker engines, each child-process pool, and the
+`tcp_user_timeout_ms` (default `30000`) sets `TCP_USER_TIMEOUT` on each
+socket. Data that stays unacknowledged for that time closes the connection, so
+the write fails within 30 seconds and the pool opens a new connection. The
+setting applies to the broker pools, each child-process pool, and the
 LISTEN/NOTIFY listener. It has an effect only on systems that support
 `TCP_USER_TIMEOUT` (Linux).
 

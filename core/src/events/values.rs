@@ -1,0 +1,334 @@
+//! The bounded values and the closed types that event fields hold.
+//!
+//! Each closed type derives `EventSchema`. The core's own closed types that
+//! events hold as they are derive it where they are defined: `Execution`,
+//! `StopReason`, `ShortageErrno`, and the metric label sets that an event
+//! field shares (`ReleaseReason`, `ReplaceReason`, `RecoveryAction` of
+//! `telemetry::labels`). Pure: no I/O.
+
+use chrono::{DateTime, Utc};
+
+use super::schema::{
+    wire_text, CodeUnion, DecodeRefusal, EncodeRefusal, EventValue, ValueForm, WireValue,
+};
+use crate::broker::ClearableBootCause;
+use crate::catalog::CodeEnum;
+use crate::core::boot_failure::ShortageErrno;
+use crate::core::config::bounded::BoundedU32;
+use crate::core::config::queue::MAX_QUEUE_NAME_BYTES;
+use crate::core::config::worker_profile::{
+    MAX_ISOLATED_CHILDREN, MAX_SHARED_ASYNC_CHILDREN, MAX_SHARED_THREAD_CHILDREN,
+};
+use crate::core::task::Execution;
+use crate::core::{
+    BuiltInTaskCode, ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode, TaskErrorCode,
+};
+use crate::telemetry::labels::ReleaseReason;
+use crate::telemetry::trace_carrier::MAX_TRACE_CARRIER_BYTES;
+use crate::worker::executor::protocol::{BoundedText, ProcessId};
+use crate::worker::executor::slots::dispatch::NotRunCause;
+use crate::worker_manifest::MAX_QUEUE_PRIORITY;
+
+/// The most characters of a task name: the `task_name` column is
+/// `varchar(255)`.
+pub const MAX_EVENT_TASK_NAME_CHARS: usize = 255;
+
+/// The most characters of a queue name: its byte bound. A character has at
+/// least one byte, so every queue name fits in an event.
+pub const MAX_EVENT_QUEUE_NAME_CHARS: usize = MAX_QUEUE_NAME_BYTES;
+
+/// The most characters of a user error code that an event carries. A longer
+/// code is [`AttemptErrorCode::UserOverBound`].
+pub const MAX_EVENT_USER_CODE_CHARS: usize = 128;
+
+/// The most characters of a stored trace carrier that an event carries: the
+/// byte bound of the stored text. A character has at least one byte, so every
+/// stored carrier fits in an event.
+pub const MAX_EVENT_TRACE_CARRIER_CHARS: usize = MAX_TRACE_CARRIER_BYTES;
+
+/// The most characters of a worker id that an event carries: the
+/// `claimed_by_worker_id` column is `varchar(255)`, and a claim writes the
+/// id there, so every worker id that claims fits in an event.
+pub const MAX_EVENT_WORKER_ID_CHARS: usize = 255;
+
+/// The largest attempt number. The retry count of a row is a Postgres
+/// `integer` from 0, and the attempt is the retry count plus 1.
+pub const MAX_ATTEMPT: u32 = i32::MAX as u32 + 1;
+
+/// The largest retry count: the largest Postgres `integer`.
+pub const MAX_RETRY_COUNT: u32 = i32::MAX as u32;
+
+/// The largest slot index. Slots are numbered from 0 across kinds: the
+/// isolated slots, then the shared async slots, then the shared thread
+/// slots.
+pub const MAX_SLOT_INDEX: u32 =
+    MAX_ISOLATED_CHILDREN + MAX_SHARED_ASYNC_CHILDREN + MAX_SHARED_THREAD_CHILDREN - 1;
+
+/// The name of a task.
+pub type TaskName = BoundedText<MAX_EVENT_TASK_NAME_CHARS>;
+
+/// The name of a queue.
+pub type QueueName = BoundedText<MAX_EVENT_QUEUE_NAME_CHARS>;
+
+/// The text of a user error code, at most [`MAX_EVENT_USER_CODE_CHARS`]
+/// characters.
+pub type UserCodeText = BoundedText<MAX_EVENT_USER_CODE_CHARS>;
+
+/// The text of a stored trace carrier, at most
+/// [`MAX_EVENT_TRACE_CARRIER_CHARS`] characters.
+pub type TraceCarrierText = BoundedText<MAX_EVENT_TRACE_CARRIER_CHARS>;
+
+/// The id of a worker, at most [`MAX_EVENT_WORKER_ID_CHARS`] characters.
+pub type WorkerIdText = BoundedText<MAX_EVENT_WORKER_ID_CHARS>;
+
+/// The number of an attempt of a task, from 1: its retry count plus 1.
+pub type AttemptNumber = BoundedU32<1, MAX_ATTEMPT>;
+
+/// The retry count of a task after a retry was scheduled, from 1.
+pub type RetryCount = BoundedU32<1, MAX_RETRY_COUNT>;
+
+/// The priority of a queue: 1 is claimed first, 100 last.
+pub type Priority = BoundedU32<1, MAX_QUEUE_PRIORITY>;
+
+/// The index of a slot of a worker, from 0.
+pub type SlotIndex = BoundedU32<0, MAX_SLOT_INDEX>;
+
+/// The four built-in task code catalogs. Their wire values are unique
+/// across them.
+pub const BUILT_IN_TASK_CODES: CodeUnion = CodeUnion {
+    python_name: "BuiltInTaskCode",
+    doc: "A built-in task error code: a member of one of the four built-in code catalogs.",
+    catalogs: &[
+        <OperationalErrorCode as CodeEnum>::CATALOG,
+        <ContractCode as CodeEnum>::CATALOG,
+        <RetrievalCode as CodeEnum>::CATALOG,
+        <OutcomeCode as CodeEnum>::CATALOG,
+    ],
+};
+
+impl EventValue for BuiltInTaskCode {
+    const FORM: ValueForm = ValueForm::Codes(&BUILT_IN_TASK_CODES);
+
+    fn to_wire(&self) -> Result<WireValue, EncodeRefusal> {
+        Ok(WireValue::String(self.value()))
+    }
+
+    fn from_wire(wire: &WireValue) -> Result<Self, DecodeRefusal> {
+        let text = wire_text(wire)?;
+        BuiltInTaskCode::parse(text)
+            .ok_or_else(|| DecodeRefusal::unknown_name(BUILT_IN_TASK_CODES.python_name, text))
+    }
+}
+
+/// The release reason of a claim that never reached a child.
+impl From<NotRunCause> for ReleaseReason {
+    fn from(cause: NotRunCause) -> Self {
+        match cause {
+            NotRunCause::PoolStopping => Self::PoolStopping,
+            NotRunCause::PoolFailed => Self::PoolFailed,
+            NotRunCause::QueueFull => Self::QueueFull,
+            NotRunCause::NoChildOfItsKind => Self::NoChildOfItsKind,
+            NotRunCause::RunnerBeatsFailedClosed => Self::RunnerBeatsFailedClosed,
+            NotRunCause::HeldForQueueCap => Self::HeldForQueueCap,
+        }
+    }
+}
+
+/// The error code of an attempt that ended with a task error.
+#[derive(Debug, Clone, PartialEq, Eq, horsies_core_derive::EventSchema)]
+pub enum AttemptErrorCode {
+    /// A built-in code of horsies.
+    BuiltIn { code: BuiltInTaskCode },
+    /// A code that the task chose, of at most 128 characters.
+    User { code: UserCodeText },
+    /// A code that the task chose, of more than 128 characters. The event
+    /// does not carry it; the attempt row and the history row keep it.
+    UserOverBound,
+}
+
+impl From<&TaskErrorCode> for AttemptErrorCode {
+    fn from(code: &TaskErrorCode) -> Self {
+        match code {
+            TaskErrorCode::BuiltIn(built_in) => Self::BuiltIn {
+                code: built_in.clone(),
+            },
+            TaskErrorCode::User(user) => match UserCodeText::new(user.as_str().to_owned()) {
+                Ok(text) => Self::User { code: text },
+                Err(_over_bound) => Self::UserOverBound,
+            },
+        }
+    }
+}
+
+/// How the task ended a run that its child reported.
+#[derive(Debug, Clone, PartialEq, Eq, horsies_core_derive::EventSchema)]
+pub enum ChildResult {
+    /// The task returned a value. The attempt outcome is `COMPLETED`.
+    Completed,
+    /// The task returned an error, or a result that the worker could not
+    /// read. The attempt outcome is `FAILED`.
+    Failed { error_code: AttemptErrorCode },
+    /// The worker code of the child failed, not the task. The attempt
+    /// outcome is `WORKER_FAILURE`, with the code `BROKER_ERROR`.
+    WorkerFailure,
+    /// The deadline of a shared run fired in its child before the task
+    /// ended, and the child ended the run at the deadline. The attempt
+    /// outcome is `FAILED`, with the code `TASK_TIMEOUT`.
+    TimedOut,
+}
+
+/// When the attempt started: the time of the start write that set the task
+/// RUNNING.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, horsies_core_derive::EventSchema)]
+pub enum AttemptStart {
+    /// The time that the database returned to the child for its start
+    /// write.
+    Reported { started_at: DateTime<Utc> },
+    /// The child reported no start time.
+    NotReported,
+}
+
+/// Why the worker ended an attempt itself. The attempt outcome is `FAILED`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::EventSchema)]
+pub enum WorkerDecision {
+    /// The task reached its timeout, and the worker killed its child. The
+    /// code is `TASK_TIMEOUT`.
+    TimedOut,
+    /// The task held the event loop of its shared async child past the block
+    /// limit; the worker killed the child. The code is `TASK_BLOCKED_LOOP`.
+    TaskBlockedLoop,
+    /// Another task held the event loop of this task's shared async child
+    /// past the block limit; the worker killed the child. The code is
+    /// `NEIGHBOUR_BLOCKED_LOOP`.
+    NeighbourBlockedLoop,
+    /// The child was lost before it reported the end, and its exit was
+    /// seen. The code is `WORKER_CRASHED`.
+    ChildLost,
+}
+
+impl WorkerDecision {
+    /// The error code that the attempt row records for this end.
+    pub fn error_code(self) -> BuiltInTaskCode {
+        match self {
+            Self::TimedOut => OutcomeCode::TaskTimeout.into(),
+            Self::TaskBlockedLoop => OperationalErrorCode::TaskBlockedLoop.into(),
+            Self::NeighbourBlockedLoop => OperationalErrorCode::NeighbourBlockedLoop.into(),
+            Self::ChildLost => OperationalErrorCode::WorkerCrashed.into(),
+        }
+    }
+}
+
+/// The stored trace carrier of a task.
+#[derive(Debug, Clone, PartialEq, Eq, horsies_core_derive::EventSchema)]
+pub enum RunTrace {
+    /// The carrier text that the send stored on the task row.
+    Carrier { text: TraceCarrierText },
+    /// The task row has no carrier.
+    NoCarrier,
+}
+
+/// What the worker knows of the workflow node that links a task, when it
+/// ends an attempt of the task itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::EventSchema)]
+pub enum WorkflowPlace {
+    /// No workflow node links the task: the claim read a plain task.
+    NotInWorkflow,
+    /// A workflow node links the task. The worker does not know the workflow
+    /// id, the node index or the root workflow: the start write of the child
+    /// read them, and the child reported no end.
+    WorkflowNotKnown,
+}
+
+/// How an attempt ended.
+#[derive(Debug, Clone, PartialEq, Eq, horsies_core_derive::EventSchema)]
+pub enum AttemptEnd {
+    /// The child reported how the run ended, in a result frame. The span
+    /// that the child opened for the attempt is its span.
+    ReportedByChild {
+        result: ChildResult,
+        start: AttemptStart,
+    },
+    /// The worker ended the attempt with no result frame of the child: it
+    /// killed the child, or the child was lost. The outcome is `FAILED`,
+    /// with the code of `reason`. The span of the child never ended; the
+    /// internal fields are the facts of the span of this attempt that the
+    /// handler child makes.
+    DecidedByWorker {
+        reason: WorkerDecision,
+        /// Internal: the code that the attempt row records for `reason`:
+        /// the `error.type` of the span.
+        #[event_schema(internal)]
+        error_code: BuiltInTaskCode,
+        /// Internal: the trace carrier of the task, the parent of the span.
+        #[event_schema(internal)]
+        trace: RunTrace,
+        /// Internal: when the task reached its child (wall clock of the
+        /// worker): the start of the span.
+        #[event_schema(internal)]
+        placed_at: DateTime<Utc>,
+        /// Internal: the kind of the child that ran the attempt, the
+        /// `horsies.task.execution` of the span.
+        #[event_schema(internal)]
+        child_kind: Execution,
+        /// Internal: the worker that claimed the task and ended the attempt.
+        #[event_schema(internal)]
+        worker_id: WorkerIdText,
+        /// Internal: what the worker knows of the workflow node of the task.
+        #[event_schema(internal)]
+        workflow: WorkflowPlace,
+    },
+    /// The worker killed the child and did not see its exit. Nothing was
+    /// written: stale recovery or the claim lease decides the task.
+    NotKnown { child_pid: ProcessId },
+}
+
+/// What the worker recorded for the end of an attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, horsies_core_derive::EventSchema)]
+pub enum AttemptRecord {
+    /// The task is `COMPLETED`.
+    Completed,
+    /// The task is `FAILED`: no retry is left or admitted.
+    Failed,
+    /// The task is `PENDING` for its next attempt.
+    RetryScheduled {
+        /// The retry count of the task after this attempt.
+        retry_count: RetryCount,
+        /// When the next attempt is due.
+        next_retry_at: DateTime<Utc>,
+    },
+    /// The claim went back to the queue: the task is `PENDING` with the same
+    /// retry count.
+    ClaimReleased,
+    /// The child wrote what the end needs; the worker owed no write.
+    NothingOwed,
+    /// The task is no longer held by this claim; nothing was written.
+    NotHeld,
+    /// Nothing was written: stale recovery or the claim lease decides the
+    /// task.
+    LeftToRecovery,
+    /// Every retry of the write failed with an error that a retry can clear;
+    /// the task waits for recovery.
+    RetriesExhausted,
+    /// The write failed with an error that no retry can clear; the task
+    /// waits for recovery.
+    WriteFailed,
+}
+
+/// Why a slot is down: a boot failure that can clear. The worker boots the
+/// slot again later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, horsies_core_derive::EventSchema)]
+pub enum SlotDownCause {
+    /// A boot step failed with an errno of a resource limit.
+    ResourceShortage { errno: ShortageErrno },
+    /// The OS refused a thread that the child starts at boot.
+    ThreadStartRefused,
+}
+
+impl From<ClearableBootCause> for SlotDownCause {
+    fn from(cause: ClearableBootCause) -> Self {
+        match cause {
+            ClearableBootCause::ResourceShortage(errno) => Self::ResourceShortage { errno },
+            ClearableBootCause::ThreadStartRefused => Self::ThreadStartRefused,
+        }
+    }
+}

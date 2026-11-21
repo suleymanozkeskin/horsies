@@ -1,238 +1,105 @@
 ---
 title: Retrieving Results
-summary: Getting task outcomes via TaskHandle.get().
-related: [sending-tasks, ../../concepts/result-handling]
-tags: [tasks, results, TaskHandle, errors]
+summary: Read a task's outcome as Result<TaskOutcome<T, E>, ReadError>, read its info, and read by task id on the app.
+related: [sending-tasks, errors, ../../concepts/task-lifecycle]
+tags: [rust, result, TaskHandle, TaskOutcome, ReadError, WaitLimit, TaskInfo]
 ---
 
 # Retrieving Results
 
-Retrieve task outcomes through `TaskHandle::get()`. For error handling
-strategy, see [Error Handling](../error-handling) and [Result
-Handling](../../concepts/result-handling).
+A read of a task's result returns `Result<TaskOutcome<T, E>, ReadError>`. The outer error is the read failing: the wait limit passed, the task is not held, the stored data does not read, the database failed. The inner value is what the task ended with.
 
-## How To
-
-### Basic Retrieval
-
-```rust
-use std::time::Duration;
-use horsies::TaskResult;
-
-let handle = match my_task::send(input).await {
-    Ok(h) => h,
-    Err(err) => {
-        println!("Send failed: {}", err.message);
-        return;
-    }
-};
-
-// Block until complete (or timeout/error)
-let result: TaskResult<MyOutput> = handle.get(None).await;
-
-match result {
-    TaskResult::Ok(value) => println!("Success: {:?}", value),
-    TaskResult::Err(err) => {
-        if err.is_transient() {
-            println!("Transient error, task may complete later");
-        } else {
-            println!("Error: {:?} - {:?}", err.error_code, err.message);
-        }
-    }
-}
-```
-
-### Timeouts
-
-Specify maximum wait time as a `Duration`:
+## Read the Outcome
 
 ```rust
 use std::time::Duration;
 
-// Wait up to 5 seconds
-let result = handle.get(Some(Duration::from_secs(5))).await;
+use horsies::{ReadError, TaskHandle, TaskOutcome, WaitLimit};
 
-if result.is_err() {
-    let err = result.unwrap_err();
-    // Check if it was a timeout (task may still be running)
-    if err.is_transient() {
-        println!("Timed out, task may still complete later");
+async fn print_outcome(handle: &TaskHandle<String, std::convert::Infallible>) -> Result<(), ReadError> {
+    let limit = WaitLimit::parse(Some(Duration::from_secs(30))).expect("30 s is within the limit");
+    match handle.get(limit).await? {
+        TaskOutcome::Succeeded(order_id) => println!("validated {order_id}"),
+        TaskOutcome::Failed(error) => println!("failed with {}", error.code().text()),
     }
+    Ok(())
 }
 ```
 
-### Result Caching
+`TaskHandle::get(limit)` waits while the task has not finished, up to `limit`:
 
-Results are cached on the handle after the first terminal resolution:
+| `WaitLimit` | Wait |
+|-------------|------|
+| `WaitLimit::NoLimit` | Until the task ends |
+| `WaitLimit::parse(Some(duration))` | Up to `duration`. A limit above `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms) is refused with `WaitLimitRefused` before any read |
+| `WaitLimit::parse(None)` | `NoLimit` |
+
+`TaskOutcome<T, E>`:
+
+| Variant | The task |
+|---------|----------|
+| `Succeeded(T)` | Returned this value |
+| `Failed(TaskError<E>)` | Returned this error, or the library recorded it: a library code such as `TASK_CANCELLED`, `TASK_EXPIRED`, `TASK_TIMEOUT` or `WORKER_CRASHED` |
+
+## ReadError
+
+| Variant | Code | When | A later read |
+|---------|------|------|--------------|
+| `WaitTimedOut { task_id, status }` | `WAIT_TIMEOUT` | The task had not finished when the limit passed | May find it finished |
+| `TaskNotFound { task_id, reason }` | `TASK_NOT_FOUND` | Neither the live table nor the history holds the task. `reason` is a `TaskAbsenceReason`; see below. A handle built by id can race the commit of its send | May find it |
+| `ResultNotAvailable { task_id, status }` | `RESULT_NOT_AVAILABLE` | The task reached a terminal status and stored no result | Kept: returns the same |
+| `StoredResultUnreadable { task_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of this task's types; `cause` names no value | Kept: returns the same |
+| `UnknownUserCode { task_id, code, code_type }` | `RESULT_DESERIALIZATION_ERROR` | The stored error has a user code that `E` does not name | Kept: returns the same |
+| `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A result wait in a process that runs task bodies. Nothing was read. Compose the tasks with a workflow | – |
+| `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking read on a thread where a tokio runtime is current. Nothing was read. See [Blocking API](/horsies/rust/tasks/blocking-api/#on-a-runtime-thread) | – |
+| `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed; `retryable` is the classification of the cause | May succeed |
+
+`ReadError::code()` returns the library code of the failure.
+
+`TaskAbsenceReason` tells why the task is held nowhere:
+
+| Variant | Meaning |
+|---------|---------|
+| `PredatesRetainedHistory` | The task id's UUIDv7 time is before the end of a history leaf that retention removed: retention can have removed the task |
+| `WithinRetainedHistory` | No removed leaf can have held the task: it did not exist, or its leaf was removed out of band |
+| `NotClassified` | The id is not a UUIDv7, so it carries no time |
+
+The handle keeps its first final read: an outcome, `ResultNotAvailable`, `StoredResultUnreadable` and `UnknownUserCode`. A later `get` returns it with no read. Clones of a handle share one task and one kept read.
+
+## Task Info
 
 ```rust
-let handle = match my_task::send(input).await {
-    Ok(h) => h,
-    Err(err) => {
-        println!("Send failed: {}", err.message);
-        return;
-    }
-};
+use horsies::{ReadError, TaskHandle, TaskInfoParts};
 
-// First call fetches from database
-let result1 = handle.get(None).await;
-
-// Subsequent calls return cached result
-let result2 = handle.get(None).await; // No database query
-```
-
-### Checking Result State
-
-```rust
-let result = handle.get(None).await;
-
-// Check state
-if result.is_ok() {
-    let value = result.unwrap();
-} else {
-    let error = result.unwrap_err();
-}
-
-// Or use pattern matching
-match result {
-    TaskResult::Ok(value) => { /* use value */ }
-    TaskResult::Err(err) => { /* handle error */ }
+async fn print_attempts(handle: &TaskHandle<String, std::convert::Infallible>) -> Result<(), ReadError> {
+    let parts = TaskInfoParts { result: false, failed_reason: true, attempts: true };
+    let info = handle.info(parts).await?;
+    println!("{info:?}");
+    Ok(())
 }
 ```
 
-### Task Metadata and Attempt History
+`info(parts)` returns the task's `TaskInfo`: its status and times, plus the parts asked for in `TaskInfoParts`:
 
-Use `handle.info()` to fetch task metadata without waiting for completion:
+| Field | Reads |
+|-------|-------|
+| `result` | The stored result of a terminal task, as `TaskResult<JsonText>`: the value as its stored text (`decode::<T>()` reads it with the task's type), or the stored error |
+| `failed_reason` | The failed reason of a failed task |
+| `attempts` | Every attempt of the task, newest first |
 
-```rust
-let info_result = handle.info(true, true, false).await;
-if let Ok(Some(task_info)) = info_result {
-    println!("Status: {:?}, Retries: {}", task_info.status, task_info.retry_count);
-    println!("Error code: {:?}", task_info.error_code);
-}
-```
+The info is not kept: a status changes. Its errors are `TaskNotFound` and `Database`.
 
-To inspect per-attempt execution history, pass `include_attempts = true`:
+## Reads by Task Id
 
-```rust
-let info_result = handle.info(false, false, true).await;
-if let Ok(Some(task_info)) = info_result {
-    if let Some(attempts) = task_info.attempts {
-        for attempt in &attempts {
-            println!(
-                "Attempt {}: {:?} (retry={}, error={:?})",
-                attempt.attempt, attempt.outcome, attempt.will_retry, attempt.error_code
-            );
-        }
-    }
-}
-```
+The app reads a task that another process sent:
 
-`info()` reads both live and history storage. A terminal task's attempt list is
-decoded from its history snapshot. Corrupt result or attempt envelopes return
-an error. They are not guessed.
+| Method | Returns |
+|--------|---------|
+| `app.task_handle_of::<T, E>(task_id)` | A `TaskHandle<T, E>` of the task. Starts nothing |
+| `app.get_result::<T, E>(task_id, limit)` | `Result<TaskOutcome<T, E>, ReadError>`, as `TaskHandle::get`. Nothing is kept between calls |
+| `app.get_raw_result(task_id, limit)` | `Result<StoredResult, ReadError>`: the stored result, read with no types |
+| `app.get_task_info(task_id, parts)` | `Result<TaskInfo, ReadError>`: the live row or the history record, attempts newest first |
 
-## Rerun a retained terminal task
+`StoredResult` has `task_id`, `task_name`, `status` (the terminal status) and `envelope_json`: the stored result envelope as JSON text, `{"__h_task_result__": true, "ok": <value>, "err": <error>}`. It is for tools that read results without the task's types. `get_raw_result` returns `WaitInsideTask` (before any statement), `TaskNotFound`, `WaitTimedOut`, `ResultNotAvailable` and `Database`.
 
-`rerun_task` creates a new task from retained source input. It never changes
-the source record. The new task stores its direct source and its rerun root.
-
-```rust
-use horsies::{
-    rerun_task, RerunEnqueuePolicy, RerunOutcome, RerunTask,
-};
-
-let source_id = handle.task_id();
-let broker = app.get_broker().await?;
-
-let outcome = rerun_task(
-    &broker,
-    RerunTask::new(
-        source_id,
-        None,
-        Some("manual-rerun-4182".to_owned()),
-    ),
-    RerunEnqueuePolicy::standard(true),
-)
-.await?;
-
-match outcome {
-    RerunOutcome::Enqueued { new_task_id, .. } => {
-        println!("rerun task: {new_task_id}");
-    }
-    RerunOutcome::KeyReplay { existing_task_id } => {
-        println!("existing rerun: {existing_task_id}");
-    }
-    RerunOutcome::SourceLive { task_id } => {
-        println!("source is live: {task_id}");
-    }
-    RerunOutcome::SourceAbsent { task_id, .. } => {
-        println!("source is absent: {task_id}");
-    }
-    RerunOutcome::NotEligible { task_id, reason } => {
-        println!("source is not eligible: {task_id} {reason:?}");
-    }
-    RerunOutcome::InputUnavailable { task_id, .. } => {
-        println!("source input is unavailable: {task_id}");
-    }
-    RerunOutcome::InputCorrupt { task_id, detail } => {
-        println!("source input is corrupt: {task_id} {detail}");
-    }
-    RerunOutcome::KeyConflict { task_id, .. } => {
-        println!("rerun key conflicts: {task_id}");
-    }
-}
-```
-
-The source must be a retained terminal non-workflow task. A completed source is
-not eligible. A workflow backing task is not eligible.
-
-The source input must have an `INLINE` rerun envelope. Set
-`PostgresConfig.retain_rerun_input_default = true` before enqueue when later
-rerun is required. The default is `false`.
-
-The policy selects the new retention class. It also selects whether the new
-task retains its own rerun input. `RerunEnqueuePolicy::standard(true)` uses
-`standard_30d` and a 24-hour key reservation window.
-
-`RerunOutcome` is exhaustive:
-
-- `Enqueued`
-- `SourceLive`
-- `SourceAbsent`
-- `NotEligible`
-- `InputUnavailable`
-- `InputCorrupt`
-- `KeyConflict`
-- `KeyReplay`
-
-Use a caller key when an operator or API request may be submitted more than
-once. The rerun lineage is part of the command fingerprint. A source enqueue
-key cannot silently replay a rerun command.
-
-## Things to Avoid
-
-**Don't silently ignore errors by only logging them.**
-
-```rust
-// Wrong - logs error but takes no action
-let result = handle.get(None).await;
-if result.is_err() {
-    println!("{:?}", result.unwrap_err().message);
-}
-// Code continues as if nothing happened...
-
-// Correct - handle or propagate errors
-let result = handle.get(None).await;
-match result {
-    TaskResult::Err(err) => {
-        handle_error(&err);
-        return Err(err.into());
-    }
-    TaskResult::Ok(value) => {
-        println!("Success: {:?}", value);
-    }
-}
-```
-
-For detailed error handling patterns, see [Error Handling](../error-handling).
+In a worker child a read goes through the child's producer handle, as a send does.

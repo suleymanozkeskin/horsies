@@ -1,275 +1,299 @@
 ---
-title: Workflows and Subworkflows
-summary: Compose parent and child workflows with `SubWorkflowNode`.
-related: [workflow-semantics, result-handling]
-tags: [concepts, workflows, subworkflows, composition]
+title: Subworkflows
+summary: Run a child workflow as a node, with params from build_with, field tokens from #[derive(WorkflowInput)], and a child built at run time from a dependency's result.
+related: [workflow-api, typed-node-builder, ../../../concepts/workflows/workflow-semantics]
+tags: [rust, workflow, subworkflow, SubWorkflowNode, build_with, WorkflowInput]
 ---
 
-## What is a Subworkflow?
+# Subworkflows
 
-A subworkflow is a child workflow executed as one node inside a parent DAG.
+A sub-workflow node runs a child workflow. The node names the child by its `WorkflowDefinition`. When the child's definition takes params, the engine builds the child spec from the params of the node, so a child can have one node per element of a dependency's result. The status rules of a child and its node are on [Workflow Semantics](/horsies/concepts/workflows/workflow-semantics/#success-cases-partial-success-policy).
 
-In the parent workflow:
+## A Definition with Params
 
-- a task node runs one task function
-- a subworkflow node runs one registered child workflow
-
-Subworkflows are useful when:
-
-- you want to reuse child workflow logic
-- the child has its own success policy
-- the child should appear as one unit in the parent DAG
-
-## Defining a Child Workflow
-
-Static child workflow:
+A definition with params implements `build_with` in place of `define`.
 
 ```rust
+use std::convert::Infallible;
+
 use horsies::{
-    HorsiesError, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
+    task, HorsiesError, OutputlessResults, TaskError, WorkflowDefinition, WorkflowInput,
+    WorkflowSpec, WorkflowSpecBuilder,
 };
-
-struct ChildPipeline;
-
-impl WorkflowDefinition for ChildPipeline {
-    type Output = String;
-    type Params = ();
-
-    fn name() -> &'static str { "child_pipeline" }
-    fn definition_key() -> &'static str { "docs.child_pipeline.v1" }
-
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-        let fetch = builder.task(
-            fetch_data::node()?
-                .set_input(FetchDataInput {
-                    source: "https://api.example.com".into(),
-                })?
-                .node_id("fetch"),
-        );
-
-        let process = builder.task(
-            process_data::node()?
-                .node_id("process")
-                .waits_for(fetch)
-                .arg_from(process_data::params::data(), fetch),
-        );
-
-        Ok(WorkflowDefConfig::new().output(process))
-    }
-}
-```
-
-Parameterized child workflow:
-
-```rust
-use horsies::{HorsiesError, WorkflowDefinition, WorkflowSpecBuilder};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ChildParams {
-    source_url: String,
+#[task("fetch_report")]
+async fn fetch_report(region: String) -> Result<String, TaskError<Infallible>> {
+    Ok(format!("report of {region}"))
 }
 
-struct ChildPipelineWithParams;
+#[derive(Debug, Clone, Serialize, Deserialize, WorkflowInput)]
+struct RegionParams {
+    region: String,
+}
 
-impl WorkflowDefinition for ChildPipelineWithParams {
-    type Output = String;
-    type Params = ChildParams;
+struct RegionReport;
 
-    fn name() -> &'static str { "child_pipeline_with_params" }
-    fn definition_key() -> &'static str { "docs.child_pipeline_with_params.v1" }
+impl WorkflowDefinition for RegionReport {
+    type Output = OutputlessResults;
+    type Params = RegionParams;
 
-    fn build_with(params: ChildParams) -> Result<horsies::WorkflowSpec, HorsiesError> {
+    fn name() -> &'static str {
+        "region_report"
+    }
+
+    fn definition_key() -> &'static str {
+        "reports.region_report.v1"
+    }
+
+    fn build_with(params: RegionParams) -> Result<WorkflowSpec, HorsiesError> {
         let mut builder = WorkflowSpecBuilder::new(Self::name());
         builder.definition_key(Self::definition_key());
-
-        let fetch = builder.task(
-            fetch_data::node()?
-                .set_input(FetchDataInput {
-                    source: params.source_url,
-                })?
-                .node_id("fetch"),
+        let _fetched = builder.task(
+            fetch_report::node()?.set(fetch_report::params::region(), params.region)?,
         );
-
-        builder.output(fetch);
         builder.build()
     }
 }
 ```
 
-## Starting a Workflow Directly
+- The builder of `build_with` is new: set the definition key, and `on_error` when it is not FAIL, on it.
+- The engine calls `build_with` for each sub-workflow node that gives params, and can call it more than once for one node. Give it no side effects.
+- When the engine or the check builds a child, a panic of `build_with` is a refusal of the build, with the panic text.
+- Register the definition with `app.workflow_template::<D>()`, which returns a `WorkflowTemplate<D::Params, D::Output>`. A template also starts the definition as a workflow of its own: see [Workflow API](/horsies/rust/concepts/workflows/workflow-api/#register-and-start).
 
-Zero-param workflow:
-
-```rust
-let wf = app.register_workflow_definition::<ChildPipeline>()?;
-let handle = wf.start().await?;
-```
-
-Parameterized workflow:
+## Add a Sub-Workflow Node
 
 ```rust
-let template = app.workflow_template::<ChildPipelineWithParams>();
-let handle = template
-    .start(ChildParams {
-        source_url: "https://api.example.com".into(),
-    })
-    .await?;
-```
+use horsies::{
+    HorsiesError, OutputlessResults, SubWorkflowParams, WorkflowDefConfig, WorkflowDefinition,
+    WorkflowSpecBuilder,
+};
 
-`handle.get(...)` returns `TaskResult<T>`.
+struct AllRegions;
 
-## Composing a Child Workflow Into a Parent
-
-Use `SubWorkflowNode::from_definition::<D>()` when the child is a `WorkflowDefinition`.
-That carries both the workflow name and definition key.
-
-```rust
-use horsies::{SubWorkflowNode, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder};
-
-struct ParentPipeline;
-
-impl WorkflowDefinition for ParentPipeline {
-    type Output = bool;
+impl WorkflowDefinition for AllRegions {
+    type Output = OutputlessResults;
     type Params = ();
 
-    fn name() -> &'static str { "parent_pipeline" }
-    fn definition_key() -> &'static str { "docs.parent_pipeline.v1" }
+    fn name() -> &'static str {
+        "all_regions"
+    }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, horsies::HorsiesError> {
-        let child = builder.sub_workflow(
-            SubWorkflowNode::from_definition::<ChildPipeline>()
-                .node_id("child"),
+    fn definition_key() -> &'static str {
+        "reports.all_regions.v1"
+    }
+
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        let _eu = builder.sub_workflow(
+            RegionReport::node(SubWorkflowParams::Given(RegionParams { region: "eu".to_owned() }))?
+                .node_id("eu"),
         );
-
-        let store = builder.task(
-            store_result::node()?
-                .node_id("store")
-                .waits_for(child)
-                .arg_from(store_result::params::result(), child),
+        let _us = builder.sub_workflow(
+            RegionReport::node(SubWorkflowParams::NotGiven)?
+                .set(RegionParams::field_region(), "us".to_owned())?
+                .node_id("us"),
         );
-
-        Ok(WorkflowDefConfig::new().output(store))
+        Ok(WorkflowDefConfig::new())
     }
 }
 ```
 
-The parent receives the child workflow output just like any other upstream node.
+`RegionReport` and `RegionParams` are the definition and the params of [A Definition with Params](#a-definition-with-params).
 
-If you obtained a registered template from `app.workflow_template::<ChildPipelineWithParams>()`,
-the equivalent authoring path is `template.node()`.
+A node of the child definition `D` comes from:
 
-## Parameterized Child Workflow as a Node
+| Call | Returns |
+|------|---------|
+| `D::node(params)` | `Result<SubWorkflowNode<D::Params, D::Output>, HorsiesError>` |
+| `SubWorkflowNode::of::<D>(params)` | The same |
+| `template.node(params)` | The same, from a registered `WorkflowTemplate` |
 
-Child workflow params can be supplied in the same two ways as task-node input:
+`builder.sub_workflow(node)` adds it and returns its `TypedNodeRef<T>`, with `T` the child's output type.
 
-- whole child params with `.set_input(...)`
-- mixed static plus injected child params with `.set(...)` and `.arg_from(...)`
+`SubWorkflowParams<P>`:
+
+| Variant | The node |
+|---------|----------|
+| `NotGiven` | Gives no params: the child builds as defined, and the node stores the input `{}` |
+| `Given(params)` | Gives `params` to the child's `build_with` |
+
+Params given to a definition without params are refused with `HRS-022`. Params that do not encode or read back as `P` are `HRS-031`; params that do not encode as a JSON object are `HRS-026`.
+
+## Field Tokens of the Params
+
+`#[derive(WorkflowInput)]` on a struct with named fields generates one token per field that serde reads: `RegionParams::field_region()` returns `InputField<RegionParams, String>`.
+
+- The token has the key that serde reads: `rename`, `rename_all` and raw identifiers (`r#type` is `type`) apply.
+- A field with `#[serde(skip)]` or `#[serde(skip_deserializing)]` gets no token.
+- A `#[serde(flatten)]` field is a compile error.
+
+The parameters of a task have their tokens in the task's own module: `task_name::params::<name>()`. See [Typed Node Builder](/horsies/rust/concepts/workflows/typed-node-builder/).
+
+## SubWorkflowNode
+
+| Method | Does |
+|--------|------|
+| `.set(field, value)` | Gives the child one param, encoded and read back as a send does. The node then gives params. `Result<Self, HorsiesError>` |
+| `.set_params(SubWorkflowParams)` | `Given(params)` replaces every param set before; `NotGiven` also drops the `arg_from` members. `Result<Self, HorsiesError>` |
+| `.arg_from(field, source)` | Gives the child the outcome of `source` as the param `field` of type `TaskOutcome<S, E>`. The node then gives params and waits for `source` |
+| `.waits_for(node)`, `.waits_for_all(nodes)` | Waits for the nodes, with no data |
+| `.node_id(id)` | Sets the node id, as `TaskNode::node_id` |
+| `.allow_failed_deps(true)` | Starts the child when a dependency failed or was skipped |
+| `.join_all()` (default), `.join_any()`, `.join_quorum(min_success)` | When the node becomes ready |
+| `.key()` | `Option<NodeKey<T>>`: the key of the node's result when the node has a given node id |
+| `.workflow_name()`, `.definition_key()` | The child's workflow name and definition key |
+
+A sub-workflow node has no queue, priority, deadline or workflow context: the nodes of the child have their own.
+
+## Build the Child from a Dependency's Result
+
+A child whose params take a dependency's result with `arg_from` is built when the node becomes ready. Its `build_with` can add one node per element of the result.
 
 ```rust
-use horsies::{TaskResult, WorkflowInput};
+use std::convert::Infallible;
+
+use horsies::{
+    task, HorsiesError, OutputlessResults, SubWorkflowParams, TaskError, TaskOutcome,
+    WorkflowDefConfig, WorkflowDefinition, WorkflowInput, WorkflowSpec, WorkflowSpecBuilder,
+};
 use serde::{Deserialize, Serialize};
 
+#[task("list_regions")]
+async fn list_regions() -> Result<Vec<String>, TaskError<Infallible>> {
+    Ok(vec!["eu".to_owned(), "us".to_owned()])
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, WorkflowInput)]
-struct ChildSeedParams {
-    seed: TaskResult<String>,
-    limit: usize,
+struct RegionListParams {
+    regions: TaskOutcome<Vec<String>, Infallible>,
 }
 
-fn build_parent(
-    app: &horsies::Horsies,
-) -> Result<horsies::WorkflowSpec, horsies::HorsiesError> {
-    let child_template = app.workflow_template::<ChildPipelineWithParams>();
-    let mut builder = WorkflowSpecBuilder::new("aggregate_parent");
-    builder.definition_key("docs.aggregate_parent.v1");
+struct RegionFanOut;
 
-    let fetch = builder.task(
-        fetch_data::node()?
-            .set_input(FetchDataInput {
-                source: "https://api.example.com".into(),
-            })?
-            .node_id("fetch"),
-    );
+impl WorkflowDefinition for RegionFanOut {
+    type Output = OutputlessResults;
+    type Params = RegionListParams;
 
-    let child = builder.sub_workflow(
-        child_template
-            .node()
-            .node_id("child")
-            .set(ChildSeedParams::field_limit(), 100)?
-            .arg_from(ChildSeedParams::field_seed(), fetch),
-    );
+    fn name() -> &'static str {
+        "region_fan_out"
+    }
 
-    let store = builder.task(
-        store_result::node()?
-            .node_id("store")
-            .waits_for(child)
-            .arg_from(store_result::params::result(), child),
-    );
+    fn definition_key() -> &'static str {
+        "reports.region_fan_out.v1"
+    }
 
-    builder.output(store);
-    builder.build()
+    fn build_with(params: RegionListParams) -> Result<WorkflowSpec, HorsiesError> {
+        let regions = match params.regions {
+            TaskOutcome::Succeeded(regions) => regions,
+            TaskOutcome::Failed(error) => {
+                return Err(HorsiesError::new(format!("no region list: {error}")));
+            }
+        };
+        let mut builder = WorkflowSpecBuilder::new(Self::name());
+        builder.definition_key(Self::definition_key());
+        for region in regions {
+            let _fetched = builder.task(
+                fetch_report::node()?
+                    .node_id(format!("fetch_{region}"))
+                    .set(fetch_report::params::region(), region)?,
+            );
+        }
+        builder.build()
+    }
 }
-```
 
-Use `#[derive(WorkflowInput)]` on the child params type when you want field-level
-bindings like `.set(...)` and `.arg_from(...)`. For whole explicit params, prefer
-`.set_input(params)?`.
+struct DailyRegions;
 
-## Dependencies and Context
+impl WorkflowDefinition for DailyRegions {
+    type Output = OutputlessResults;
+    type Params = ();
 
-Subworkflow nodes support the same dependency primitives as task nodes:
+    fn name() -> &'static str {
+        "daily_regions"
+    }
 
-- `.waits_for(...)`
-- `.waits_for_all(...)`
-- `.arg_from(...)`
-- `.workflow_ctx_from([...])`
-- `.allow_failed_deps(true)`
-- `.join_all()`, `.join_any()`, `.join_quorum(min)`
+    fn definition_key() -> &'static str {
+        "reports.daily_regions.v1"
+    }
 
-Example:
-
-```rust
-    let child_template = app.workflow_template::<ChildPipelineWithParams>();
-
-    let child = builder.sub_workflow(
-        child_template
-            .node()
-            .node_id("child")
-            .waits_for(fetch)
-            .workflow_ctx_from([fetch])
-            .arg_from(ChildSeedParams::field_seed(), fetch),
-    );
-```
-
-As with task nodes, `workflow_ctx_from(...)` does not add dependencies automatically.
-
-## Lifecycle Mapping
-
-Parent subworkflow-node state follows child workflow state:
-
-- child `Running` -> parent node `Running`
-- child `Completed` -> parent node `Completed`
-- child `Failed` -> parent node `Failed`
-- child `Paused` -> parent node remains non-terminal until resumed
-- child `Cancelled` -> parent node `Failed` with a child cancellation error
-- child `Expired` -> parent node `Failed` with a child expiry error
-
-The child output becomes the upstream value for downstream parent nodes.
-
-## Error Handling
-
-Downstream parent tasks can opt into recovery logic the same way they do for task-task edges:
-
-```rust
-use horsies::{task, TaskError, TaskResult};
-
-#[task("recovery_handler")]
-async fn recovery_handler(primary_result: TaskResult<String>) -> Result<String, TaskError> {
-    match primary_result {
-        TaskResult::Ok(data) => Ok(data),
-        TaskResult::Err(_err) => Ok("fallback".into()),
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        let listed = builder.task(list_regions::node()?);
+        let _reports = builder.sub_workflow(
+            RegionFanOut::node(SubWorkflowParams::NotGiven)?
+                .arg_from(RegionListParams::field_regions(), listed)
+                .node_id("reports"),
+        );
+        Ok(WorkflowDefConfig::new())
     }
 }
 ```
 
-Use `.allow_failed_deps(true)` on the downstream node if it should still run after child failure.
+`fetch_report` is the task of [A Definition with Params](#a-definition-with-params).
+
+- A FAILED or SKIPPED source skips the node, unless the node has `allow_failed_deps(true)`; then `build_with` gets `TaskOutcome::Failed`.
+- A `build_with` that refuses or panics at run time fails its node with `WORKFLOW_ENQUEUE_FAILED`. A list with no element builds a spec with no node, which `build` refuses (`HRS-002`).
+- The check does not build a child whose node has an `arg_from`: its params exist only at run time.
+
+## Register the Children
+
+Register each child definition when `main` builds the app, so that every process has it, the worker children included. The engine builds a child from the definitions registered in the process that advances the workflow.
+
+```rust
+use horsies::{Horsies, HorsiesError};
+
+fn register_reports(app: &mut Horsies) -> Result<(), HorsiesError> {
+    let _fetch = fetch_report::register(app)?;
+    let _list = list_regions::register(app)?;
+    let _region_report = app.workflow_template::<RegionReport>()?;
+    let _fan_out = app.workflow_template::<RegionFanOut>()?;
+    let _all_regions = app.register_workflow_definition::<AllRegions>()?;
+    let _daily_regions = app.register_workflow_definition::<DailyRegions>()?;
+    Ok(())
+}
+```
+
+- A start refuses a spec with a sub-workflow node of a definition that is not registered: `ValidationFailed` with `HRS-020`.
+- At run time, a child whose definition is not registered fails its node with `SUBWORKFLOW_LOAD_FAILED`.
+- A resume of a PAUSED workflow builds the children it owes from the definitions registered on the app of the handle.
+
+## Read a Child's Result
+
+The result of a sub-workflow node is the result of its child: the child's output, or its error. A downstream node reads it as it reads a task node:
+
+| Read | Gives |
+|------|-------|
+| `arg_from(field, child_node)` | `TaskOutcome<T, E>` with `T` the child's output type |
+| `workflow_ctx.summary_for(&key)` | The `SubWorkflowSummary` of the ended child |
+| `workflow_ctx.output_for::<T>(&key)` | `Option<T>`: the child's output, `None` when the child stored none |
+| `handle.tasks()` | `WorkflowNodeInfo` with `sub_workflow_id` and `sub_workflow_summary` |
+
+`SubWorkflowSummary`:
+
+| Field | Type |
+|-------|------|
+| `status` | `WorkflowStatus`: `Completed`, `Failed`, `Cancelled` or `Expired` |
+| `output` | `Option<JsonText>`: the child's output as its stored text, set only when the child is COMPLETED and stored an ok value. `get()` gives the text, `decode::<T>()` the value |
+| `total_tasks`, `completed_tasks`, `failed_tasks`, `skipped_tasks` | `i32` |
+| `error_summary` | `Option<String>`: the message of the child's stored error |
+
+A failed child gives its node a `TaskError` whose `sub_workflow()` returns the `SubWorkflowFailure`: `sub_workflow_id` and `sub_workflow_summary`.
+
+## Nesting Limit
+
+A child is at most 32 levels deep. At run time the engine does not start a deeper child, and the node fails with `SUBWORKFLOW_DEPTH_LIMIT_REACHED`. `app.check()` reports a nesting with no wait on its path:
+
+| Code | Refusal |
+|------|---------|
+| `HRS-036` | The nesting starts a child deeper than 32 for certain |
+| `HRS-037` | A definition includes itself with the same params, with no node between the two that waits for other nodes |
+
+The codes are on the [Errors Reference](/horsies/tasks/errors/#workflow-validation-hrs-001-hrs-099).
+
+## Things to Avoid
+
+**Do not give `build_with` side effects.** The engine can call it more than once for one node.
+
+**Do not omit the definition key in `build_with`.** The builder is new, and a start refuses a spec without a key.
+
+**Do not register a child only in the producer.** The process that advances the workflow can be a worker child, and it builds the child from its own registrations.

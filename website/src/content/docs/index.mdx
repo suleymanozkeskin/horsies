@@ -1,9 +1,10 @@
 ---
 title: Horsies
-description: A PostgreSQL-backed background task queue and workflow engine for Python.
+section: site
+description: A PostgreSQL-backed background task queue and workflow engine for Python and Rust.
 head:
   - tag: title
-    content: Horsies | PostgreSQL Task Queue & Workflow Engine for Python
+    content: Horsies | PostgreSQL Task Queue & Workflow Engine for Python and Rust
 ---
 
 import { CardGrid, LinkCard } from '@astrojs/starlight/components';
@@ -26,13 +27,19 @@ import subworkflowLight from '../../assets/screenshots/web-ui-subworkflow-light.
   </video>
 </div>
 
-**PostgreSQL-backed background task queue and workflow engine for Python.**
+**PostgreSQL-backed background task queue and workflow engine for Python and Rust.**
 
 Most businesses need durable, observable systems with strong execution guarantees. Traditional queues do not give you that out of the box. You end up writing tedious state machines around them, and your execution state gets mixed into your business logic, because your execution layer was never durable.
 
 Horsies lets you declare your conditional business logic as tasks and workflows, without managing execution state on top of it.
 
-Using Rust? The [Rust docs](/horsies/rust/) cover the `horsies` crate. The Python and Rust libraries have almost the same API and mental model, but they are not interoperable.
+The Python client and the Rust client run on one core, written in Rust. The docs have three sections:
+
+- **Shared: Behaviour** states the behaviour and the guarantees of the core, for both clients.
+- **Python API** states the API of the Python package.
+- **[Rust API](/horsies/rust/)** states the API of the `horsies` crate.
+
+A database belongs to one client: the core refuses a database that the other client installed.
 
 <CardGrid>
   <LinkCard title="Get Started" href="/horsies/quick-start/getting-started/" description="Install Horsies and run your first task" />
@@ -94,7 +101,7 @@ from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError, O
 
 app = Horsies(AppConfig(
     broker=PostgresConfig(
-        database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb"),
+        database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb"),
     ),
 ))
 

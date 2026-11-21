@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: user error code TASK_TIMEOUT of variant `TaskTimeout` is the name of a built-in or reserved code; rename the variant
+ --> tests/compile_fail/user_error_code_built_in_name.rs:7:5
+  |
+7 |     TaskTimeout,
+  |     ^^^^^^^^^^^ evaluation of `_` failed here

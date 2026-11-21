@@ -1,5 +1,6 @@
 ---
 title: Getting Started
+section: python
 summary: Minimal working example with a task producer and worker.
 related: [../../tasks/defining-tasks, ../../tasks/sending-tasks, ../../concepts/task-lifecycle]
 tags: [quickstart, installation, tutorial]
@@ -9,7 +10,7 @@ tags: [quickstart, installation, tutorial]
 
 - PostgreSQL 14+
 - Python 3.13+
-- libpq 17+ for a time limit on the cancel request of an interrupted query. The `horsies[pg-binary]` extra bundles its own libpq. See [psycopg and libpq](/horsies/configuration/broker-config/#psycopg-and-libpq)
+- libpq 17+ for a time limit on the cancel request of an interrupted query. The `horsies[pg-binary]` extra bundles its own libpq. See [psycopg and libpq](/horsies/configuration/broker-connections/#psycopg-and-libpq)
 
 ## Installation
 
@@ -36,7 +37,7 @@ from horsies import (
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
+        database_url=SecretStr("postgresql://user:password@localhost:5432/mydb"),
     ),
     worker_profiles={
         "default": WorkerProfile(isolated=IsolatedChildren(count=8)),

@@ -1,11 +1,12 @@
 ---
 title: Showcase Application
+section: python
 summary: A runnable demonstration app in the repository that exercises every horsies capability against a real database.
 related: [quick-start/getting-started, quick-start/05-workflow-patterns, monitoring/web-ui-overview, tasks/retry-policy]
 tags: [showcase, example, demo, workflows, monitoring]
 ---
 
-The repository contains a complete application under `showcase/`: Acme Clothing,
+The repository contains a complete application under `clients/python/examples/`: Acme Clothing,
 a fictional clothing retailer with orders, payments, stock, shipments, and
 returns. Its domain state is real — products, orders, and payments are rows in
 `acme_*` tables that the tasks read and write. Only the outside world is
@@ -31,36 +32,29 @@ replayed.
 ## How To
 
 Requires Python 3.13, a PostgreSQL instance, and `uv`. Run everything from the
-repository root.
+`clients/python/` folder of the repository.
 
 Create the database, tables, and catalog:
 
 ```bash
-uv run python -m showcase.acme.scenarios seed
+uv run python -m examples.acme.scenarios seed
 ```
 
 Start the three processes, each in its own terminal:
 
 ```bash
-uv run horsies worker showcase.acme.app:app --profile default
-uv run horsies scheduler showcase.acme.app:app
-uv run horsies web showcase.acme.app:app --enable-actions
+uv run horsies worker examples.acme.app:app --profile default
+uv run horsies scheduler examples.acme.app:app
+uv run horsies web examples.acme.app:app --enable-actions
 ```
 
 Place orders continuously in a fourth:
 
 ```bash
-uv run python -m showcase.acme.scenarios steady
+uv run python -m examples.acme.scenarios steady
 ```
 
 Open `http://127.0.0.1:8600`.
-
-Working from a clone, build the dashboard assets once before starting the web
-process. A `horsies` installed from PyPI already ships them:
-
-```bash
-cd webui && bun install && bun run build
-```
 
 ### Validate without a database
 
@@ -68,7 +62,7 @@ cd webui && bun install && bun run build
 each DAG without a broker or a worker:
 
 ```bash
-uv run horsies check showcase.acme.app:app
+uv run horsies check examples.acme.app:app
 ```
 
 ### Scenarios
@@ -89,7 +83,7 @@ Each scenario prints the dashboard links for what it started.
 ### Database selection
 
 The showcase uses its own database, `acme_demo`, so a demo never shares rows
-with a development database. `showcase/acme/settings.py` resolves the URL from
+with a development database. `clients/python/examples/acme/settings.py` resolves the URL from
 `ACME_DATABASE_URL`, then from `DATABASE_URL` with the database name replaced,
 then from a built-in default. The `seed` scenario creates the database when it
 does not exist and prints which rule it used.
@@ -100,7 +94,7 @@ does not exist and prints which rule it used.
 for a demo, not for production:
 
 ```python
-# showcase/acme/app.py — demo values
+# clients/python/examples/acme/app.py — demo values
 RecoveryConfig(
     worker_state_snapshot_interval_ms=10_000,  # lively charts, more writes
     check_interval_ms=10_000,                  # frequent reaper passes
@@ -122,11 +116,11 @@ a problem.
 
 | Path | Contents |
 |---|---|
-| `showcase/acme/app.py` | Queue configuration, recovery tuning, 32 schedules, global exception mapper |
-| `showcase/acme/tuning.py` | Every rate and duration the showcase uses |
-| `showcase/acme/tasks/` | 36 tasks across eight modules |
-| `showcase/acme/workflows/` | 12 workflow definitions |
-| `showcase/acme/scenarios/` | The eight runnable scenarios |
-| `showcase/README.md` | Capability-to-code table and the full walkthrough |
-| `showcase/Procfile` | Worker, scheduler, and web together |
-| `showcase/docker-compose.yml` | PostgreSQL 16 on port 5433 |
+| `clients/python/examples/acme/app.py` | Queue configuration, recovery tuning, 32 schedules, global exception mapper |
+| `clients/python/examples/acme/tuning.py` | Every rate and duration the showcase uses |
+| `clients/python/examples/acme/tasks/` | 36 tasks across eight modules |
+| `clients/python/examples/acme/workflows/` | 12 workflow definitions |
+| `clients/python/examples/acme/scenarios/` | The eight runnable scenarios |
+| `clients/python/examples/README.md` | Capability-to-code table and the full walkthrough |
+| `clients/python/examples/Procfile` | Worker, scheduler, and web together |
+| `clients/python/examples/docker-compose.yml` | PostgreSQL 16 on port 5433 |

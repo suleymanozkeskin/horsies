@@ -1,5 +1,6 @@
 ---
 title: Workflows and Subworkflows
+section: python
 summary: Defining, composing, and running workflows with SubWorkflowNode.
 related: [workflow-semantics, ../../concepts/result-handling]
 tags: [concepts, workflows, subworkflows, composition]
@@ -30,7 +31,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, WorkflowDefinition, WorkflowDefinitionConfig, TaskNode, TaskResult, TaskError, JsonValue
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb")),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb")),
 ))
 
 @app.task(task_name="fetch_data")
@@ -263,7 +264,7 @@ class AggregationWorkflow(WorkflowDefinition[Summary]):
 
 ## `build_with` Parameters
 
-The kwargs of a `SubWorkflowNode` are stored and read back, so each `build_with` that a node targets follows the rules of a task signature: `Any` and bare `dict` parameters are refused, and so is each shape in [Shapes Refused at Definition](/horsies/internals/serialization/#shapes-refused-at-definition). The first two parameters are the class and the app, and their names are free. `*args` and `**params` are not checked by type, and `**params` holds JSON-native values only.
+The kwargs of a `SubWorkflowNode` are stored and read back, so each `build_with` that a node targets follows the rules of a task signature: `Any` and bare `dict` parameters are refused, and so is each shape in [Shapes Refused at Definition](/horsies/tasks/task-types/#shapes-refused-at-definition). The first two parameters are the class and the app, and their names are free. `*args` and `**params` are not checked by type, and `**params` holds JSON-native values only.
 
 The hints must resolve. `Horsies` and `WorkflowSpec` may stay under `TYPE_CHECKING`. A return annotation is not read. Any other name that a parameter uses must import at run time.
 
@@ -357,6 +358,10 @@ class DataProcessor(WorkflowDefinition[ProcessedData]):
 ```
 
 `build_with()` must build the `WorkflowSpec` from its arguments only. Do not call the network, a database or the file system in `build_with()`, and do not sleep in it. Put that work in an upstream `TaskNode`, and pass its result to `build_with()` through `args_from`.
+
+The `build_with()` of a `SubWorkflowNode` with no `waits_for` runs when its parent starts, before the start writes anything. It also runs when the start finds that a workflow with the given `workflow_id` exists already, and then the start writes nothing.
+
+If the parent has `on_error=OnError.PAUSE`, the start takes the `SubWorkflowNode`s with no `waits_for` in node order. When one of them cannot build its child, or its child fails at the start, the start pauses the parent and does not write the children that `build_with()` built for the later ones. Their nodes stay `READY`, and `handle.resume()` runs `build_with()` again and starts the children.
 
 :::note[Queue and priority binding]
 A `build_with()` that returns a `WorkflowSpec(...)` directly does not run the
@@ -1051,7 +1056,7 @@ from horsies import (
 )
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb")),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb")),
 ))
 
 

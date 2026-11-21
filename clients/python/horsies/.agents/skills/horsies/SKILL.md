@@ -1,0 +1,429 @@
+---
+name: horsies
+description: Guidance for the horsies Python task queue and workflow engine (PostgreSQL broker). Use when code has `import horsies`, `from horsies import ...`, `@app.task`, `TaskResult`, `TaskError`, `WorkflowSpec` or `WorkflowDefinition`, or when the user works on horsies tasks, workflows, configuration, scheduling, or monitoring.
+---
+
+# horsies — Quick Reference
+
+PostgreSQL-backed background task queue and workflow engine for Python.
+
+This is an **introductory quick reference** — it covers core concepts and
+patterns at a glance. For production-level guidance, see the dedicated
+reference files in this skill folder (open one only when the task needs it):
+
+| File | When to open |
+|---|---|
+| `tasks.md` | `@app.task`, `TaskResult`, `send()`, `with_options()`, `RetryPolicy`, `ExceptionMapper`, serialization |
+| `workflows.md` | `WorkflowSpec`, `TaskNode`, `WorkflowHandle`, DAG construction, failure semantics |
+| `configs.md` | `AppConfig`, `PostgresConfig`, queues, recovery, recurring scheduling including `CronSchedule`, child hooks, event handlers (`@app.on_event`), CLI commands |
+| `monitoring.md` | `horsies.monitoring` query API, `cancel_task`, the `horsies[web]` dashboard, `create_monitoring_app`, `horsies web`, auth policies, schema states |
+
+All public symbols: `from horsies import <name>`
+
+For the full API reference, run `horsies get-docs` to download the docs of the installed version,
+or read `llms.txt` on the docs site:
+`https://suleymanozkeskin.github.io/horsies/llms.txt`.
+
+## Deployment facts
+
+- Use a dedicated Postgres instance for the broker. Ownership, finalization, and workflow transitions are transactional state changes in that database.
+- Pre-1.0 is an API-contract statement: breaking API changes may land in minor releases (see CHANGELOG).
+- The Q&A page of the docs explains how to describe the library: `questions-and-answers`.
+- Changing a model that a task takes or returns: add a field with a default; rename with `Field(validation_alias=AliasChoices('new_name', 'old_name'))`, the new name first; never rename a field and give it a default with no alias, because old rows then read the default with no error. Stored data is read strictly. Unknown keys are ignored on read and refused at send.
+
+Honest boundary: fire-hose throughput and streaming fan-out belong to
+Redis/Kafka-class systems. Below that ceiling, throughput scales with the
+Postgres instance. Reference shape: separate machines, same region,
+entry-tier managed Postgres, ~2.5M statements/day — no top-20 statement
+exceeds p99 2 ms (claim function: p50 1 ms / p99 2 ms at 150k claims/day).
+
+Note that these are measurements at a reference shape on an entry-tier instance, not throughput limits; headroom scales with the instance tier, and per-statement latency stays flat until the instance saturates.
+
+
+## Define a Task
+
+```python
+from pydantic import SecretStr
+
+from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
+
+app = Horsies(config=AppConfig(
+    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
+))
+
+@app.task("add_numbers")
+def add_numbers(*, a: int, b: int) -> TaskResult[int, TaskError]:
+    return TaskResult(ok=a + b)
+```
+
+Every task must return `TaskResult[T, TaskError]`.
+A task function is `def` or `async def`. With `execution=Execution.ISOLATED` (the default), a worker child runs one task at a time, and an `async def` task runs on the one event loop that the child keeps. `Execution.SHARED_ASYNC` (`async def`) and `Execution.SHARED_THREAD` (`def`) run many tasks in one child, as coroutines or on threads, and need `timeout_ms`. See `tasks.md`, Shared async tasks and Shared thread tasks, and the docs page `workers/execution-modes` to choose. In an `async def` task, send with `.send_async()`: the sync `.send()` returns `Err(TaskSendAsyncContext)` in a running event loop. See `tasks.md`, Async tasks.
+Use `TaskResult(ok=value)` for success, `TaskResult(err=TaskError(...))` for failure.
+
+Register task modules for worker discovery:
+
+```python
+app.discover_tasks(["myapp.tasks", "myapp.jobs.tasks"])
+```
+
+Only records paths — actual imports happen when the worker starts.
+
+## Send a Task
+
+`send()` returns `TaskSendResult[TaskHandle[T]]` — always handle both branches:
+
+```python
+from horsies import Ok, Err
+
+match add_numbers.send(a=5, b=3):
+    case Ok(handle):
+        result = handle.get(timeout_ms=5000)
+    case Err(send_err):
+        print(f"Send failed: {send_err.code} - {send_err.message}")
+```
+
+Async: `send_async()` / `handle.get_async()`. Inside a coroutine or a Jupyter cell, use only the `*_async` forms: every sync call there returns `ASYNC_CONTEXT` and runs nothing.
+Delayed: `add_numbers.schedule(60, a=5, b=3)` dispatches after 60 seconds.
+Deadline: `add_numbers.with_options(good_until=deadline).send(a=5, b=3)` expires if not executed in time.
+
+### Retry a Failed Send
+
+`TaskSendError` is a union with one variant per code; match on the variant. Only `TaskSendEnqueueFailed` has `retryable` (`True` for a transient cause). The retry methods take a `TaskSendRetryable` (`TaskSendEnqueueFailed`, `TaskSendAsyncContext`, `TaskSendIdempotencyKeyConflict`); another variant is a type error and fails an assertion at run time. For a key conflict, `owner_task_id` names the task that holds the key; a retry is accepted after the reservation ends:
+
+<!-- check: skip partial -- uses names that the page does not define -->
+```python
+match my_task.send(**kwargs):
+    case Ok(handle):
+        ...
+    case Err(TaskSendEnqueueFailed(retryable=True) as err):
+        match my_task.retry_send(err):
+            case Ok(handle):
+                ...
+            case Err(retry_err):
+                ...  # permanent failure
+    case Err(err):
+        ...  # permanent failure
+```
+
+`retry_send` / `retry_send_async` replay the exact stored payload (SHA-verified).
+
+## Define a Workflow
+
+Workflows are DAGs of tasks. Two approaches:
+
+### Functional — `app.workflow()` with `.node()`
+
+`.node()` returns a `NodeFactory`; the second `()` call passes task kwargs.
+First call sets workflow options, second call sets task arguments:
+
+<!-- check: skip partial -- uses names that the page does not define -->
+```python
+from horsies import OnError, from_node
+
+fetch = fetch_data.node()()
+process = process_data.node()(data=from_node(fetch))
+save = save_result.node()(result=from_node(process))
+
+spec = app.workflow(
+    name="etl_pipeline",
+    tasks=[fetch, process, save],
+    definition_key="myapp.etl_pipeline.v1",
+    on_error=OnError.FAIL,
+    output=save,
+)
+```
+
+Best for dynamic workflows where node kwargs depend on runtime inputs.
+`definition_key` is required for top-level workflows built with `app.workflow()` and is used for persistence/runtime identity.
+
+### Class-based — `WorkflowDefinition`
+
+Nodes are class attributes; `node_id` is auto-assigned from the attribute name:
+
+<!-- check: skip partial -- uses names that the page does not define -->
+```python
+from horsies import TaskNode, WorkflowDefinition, WorkflowDefinitionConfig, OnError
+
+class ETLPipeline(WorkflowDefinition[SaveResult]):
+    name = "etl_pipeline"
+    definition_key = "myapp.etl_pipeline.v1"
+
+    fetch = TaskNode(fn=fetch_data)
+    process = TaskNode(fn=process_data, waits_for=[fetch], args_from={"data": fetch})
+    save = TaskNode(fn=save_result, waits_for=[process], args_from={"result": process})
+
+    config = WorkflowDefinitionConfig(
+        output=save,
+        on_error=OnError.FAIL,
+    )
+
+spec = ETLPipeline.build(app)
+```
+
+`config = WorkflowDefinitionConfig(...)` sets `output`, `on_error` and `success_policy`, and can name the nodes of the same class body. A `Meta` attribute raises HRS-033 when the class is created.
+
+Best for static, reusable DAGs. Use `build_with(app, **params)` for parameterized builds.
+
+### Node options
+
+`waits_for`, `args_from`, `workflow_ctx_from`, `queue`, `priority`,
+`allow_failed_deps`, `join` (`"all"` | `"any"` | `"quorum"`),
+`min_success`, `good_until`, `node_id`.
+
+## Start a Workflow
+
+`start()` returns `WorkflowStartResult[WorkflowHandle[T]]`:
+
+```python
+from horsies import Ok, Err
+
+match spec.start():
+    case Ok(handle):
+        status = handle.status()
+        result = handle.get(timeout_ms=30000)
+    case Err(start_err):
+        print(f"Start failed: {start_err.code}")
+```
+
+Async: `spec.start_async()`.
+
+### Retry a Failed Start
+
+`retry_start` takes `WorkflowStartRetryable`: `WorkflowStartEnqueueFailed` or `WorkflowStartAsyncContext`. It starts again with the error's `workflow_id`:
+
+```python
+match spec.start():
+    case Ok(handle):
+        ...
+    case Err(WorkflowStartEnqueueFailed(retryable=True) as err):
+        match spec.retry_start(err):
+            case Ok(handle):
+                ...
+            case Err(retry_err):
+                ...
+    case Err(err):
+        ...
+```
+
+`retry_start` is best-effort idempotent by `workflow_id` (not payload-verified).
+
+### Auto-retry ( this is not execution retry, only for sending tasks / starting workflows, for task execution retry see `RetryPolicy` )
+
+Set `resend_on_transient_err=True` on `AppConfig` to auto-retry transient
+`ENQUEUE_FAILED` errors (up to 3 times, exponential backoff) for both
+task sends and workflow starts.
+
+## WorkflowHandle
+
+<!-- check: skip partial -- uses names that the page does not define -->
+```python
+handle.status()          # HandleResult[WorkflowStatus] — unwrap before use
+handle.get(timeout_ms=N) # TaskResult (blocks for output node)
+handle.results()         # HandleResult[dict[str, TaskResult]] — unwrap before use
+handle.tasks()           # HandleResult[list[WorkflowTaskInfo]] — unwrap before use
+handle.cancel()          # cancel workflow
+handle.pause()           # pause (RUNNING -> PAUSED)
+handle.resume()          # resume (PAUSED -> RUNNING)
+```
+
+All methods have `_async()` variants.
+
+### Reconnect to an Existing Workflow
+
+`WorkflowHandle.for_id(text, broker)` parses a workflow id text once, at the
+boundary: `Ok(handle)`, or `Err(HandleInvalidWorkflowId)` for text that is not
+a UUID (no handle is built).
+
+```python
+from horsies import Err, Ok, WorkflowHandle
+
+match WorkflowHandle.for_id("3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f", app.get_broker()):
+    case Ok(ok_value=handle):
+        result = handle.get(timeout_ms=30_000)
+    case Err(err_value=invalid):
+        print(invalid.message)  # the text is not a UUID
+```
+
+### Direct Result Access by Task ID
+
+Fetch a task result by ID without a `TaskHandle` (e.g. in HTTP endpoints). Use
+the app-level typed API — `broker.get_result(_async)` was removed in 0.1.2.
+
+<!-- check: skip elided -- shows a wrong form next to the right one -->
+```python
+from horsies.core.types.result import is_err
+
+# Returns BrokerResult[TaskResult[Any, TaskError]] — unwrap the outer result.
+outer = await app.get_result_async("task-uuid", timeout_ms=5000)
+if is_err(outer):
+    ...  # infrastructure failure (INVALID_JSON_PAYLOAD / NO_TYPE_AVAILABLE)
+else:
+    task_result = outer.ok_value  # typed TaskResult[Any, TaskError]
+
+# Task metadata with typed-decoded result: the app-level wrapper decodes
+# when the task is registered locally (decoded_result / result_decoded set).
+info = await app.get_task_info_async("task-uuid", include_result=True)
+
+# Broker-level variants are RAW envelope only — decoded_result is always
+# empty there. Reach for them for cross-process monitoring/dashboards:
+# app.get_broker().get_task_info_async(...) or
+# broker.get_raw_result_record_async(...)
+```
+
+Result reads resolve across both sides of the lifecycle: a task that has
+terminalized is answered from the task-history archive, so
+`get_result`/`get_task_info` keep working after the row leaves the live
+table.
+
+See `configs.md` for all broker methods. See website docs `monitoring/broker-methods` for full reference.
+
+### Re-executing a Terminal Task
+
+A terminal record is immutable. Manual in-place retry is removed — re-execution
+is a **new request** with a new id and recorded lineage:
+
+<!-- check: skip partial -- uses names that the page does not define -->
+```python
+from datetime import timedelta
+
+from horsies import (
+    rerun_task, RerunTask, RerunEnqueuePolicy,
+    RerunEnqueued, RerunSourceLive, RerunSourceAbsent, RerunSourceCorrupt,
+    RerunNotEligible, RerunInputUnavailable, RerunInputCorrupt,
+    RerunKeyConflict, RerunKeyReplay,
+)
+
+outcome = await rerun_task(
+    connection,
+    RerunTask(source_task_id=task_id, deadline=None),
+    RerunEnqueuePolicy(
+        # A period in whole days, or None for forever. A rerun states its
+        # period outright -- there is no queue mapping to fall back on here.
+        # The rerun path checks the period's class against the registry and
+        # refuses an unregistered one.
+        retention=timedelta(days=30),
+        retain_rerun_input=True,
+        reservation_window=timedelta(hours=24),
+    ),
+)
+match outcome:
+    case RerunEnqueued(new_task_id=new_id):
+        ...
+    case RerunSourceLive() | RerunSourceAbsent() | RerunNotEligible():
+        ...
+    case RerunInputUnavailable() | RerunInputCorrupt():
+        ...
+    case RerunSourceCorrupt(exception=cause):
+        ...  # the source history row does not decode; nothing was written
+    case RerunKeyConflict() | RerunKeyReplay():
+        ...
+```
+
+`RerunOutcome` is an exhaustive union — match it exhaustively rather than
+checking one variant. Eligibility is decided **at enqueue** by
+`retain_rerun_input_default` (per-task override available): a task whose input
+was not retained cannot be rerun. A `COMPLETED` source is not eligible.
+`RerunSourceAbsent.reason` is a `TaskAbsenceReason`: it says whether
+retention can explain that no record has the id (see `monitoring.md`).
+
+`app.rerun_task_async(connection, command, policy)` is the same rerun with
+the tracing setting of the app (blocking: `app.rerun_task` on a SQLAlchemy
+`Connection`). With `OtelTracing()` the new task stores the trace carrier of
+the caller's current context, so its attempts continue the caller's trace.
+The free `rerun_task` stores no carrier.
+
+## Result Types
+
+| Operation | Result type | Ok | Err |
+|---|---|---|---|
+| Task execution | `TaskResult[T, TaskError]` | value `T` | `TaskError` |
+| `send()` / `schedule()` | `TaskSendResult[TaskHandle[T]]` | `TaskHandle` | `TaskSendError` |
+| `start()` | `WorkflowStartResult[WorkflowHandle[T]]` | `WorkflowHandle` | `WorkflowStartError` |
+| Broker infra | `BrokerResult[T]` | value `T` | `BrokerOperationError` |
+| Handle ops | `HandleResult[T]` | value `T` | `HandleOperationError` |
+
+Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`.
+
+### Error Code Enums
+
+- `TaskSendErrorCode`: `SEND_SUPPRESSED`, `ASYNC_CONTEXT`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_CONFLICT`, `PAYLOAD_TOO_LARGE`
+- `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `WORKFLOW_ID_CONFLICT`, `ENQUEUE_FAILED`, `ASYNC_CONTEXT`
+- `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `STORED_DATA_INVALID`, `RESUME_RECOVERY_FAILED`, `ASYNC_CONTEXT`
+
+`retryable=True` means transient (DB connection blip). `retryable=False` means permanent. On send errors only `TaskSendEnqueueFailed` has `retryable`.
+
+`HandleOperationError` is a union with one variant per `HandleErrorCode` member (`HandleWorkflowNotFound`, `HandleDbOperationFailed`, `HandleStoredDataInvalid`, `HandleResumeRecoveryFailed`, `HandleAsyncContext`); match on the variant. `HandleResumeRecoveryFailed` means `resume()` committed and only its recovery pass failed: the workflow is `RUNNING`.
+
+Every call runs on the core of the process: one pool for every thread and event loop, so no call has an event loop limit.
+
+`ASYNC_CONTEXT` (every catalog above, `BrokerErrorCode`, `RetrievalCode`): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell). Its wait would stall that loop, so nothing ran. Call the `*_async` form. `retryable=False` where the error has the field; `RetrievalCode.ASYNC_CONTEXT` is not cached; `await spec.retry_start_async(err)` completes a start that returned it. `app.check(live=True)` there reports `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`).
+
+### Raised, never returned: `ForkedAfterCoreStart`, `CoreStopped`
+
+These two core errors (import them from `horsies`) are states of the process, not of one call: the core refuses every later call in the process. Every call that runs on the core raises them, sync and async forms alike: the sends and their retry methods, the task, result and health reads, `check(live=True)`, the workflow start, `WorkflowHandle`, `horsies.monitoring` and the `horsies web` schema probe. No call returns them as a result, and no result type has a variant for them. Nothing ran, and a retry in the same process raises again.
+
+| Raised | Cause | Fix |
+|---|---|---|
+| `ForkedAfterCoreStart` | The process was forked without exec after the core started in its parent, for example a `multiprocessing` pool with the `fork` start method inside a task | Start child processes that call horsies with the `spawn` or `forkserver` start method, or start the core after the fork: fork before the parent's first call |
+| `CoreStopped` | A background task of the core panicked: a defect in horsies, not a failure of the database or of your code. `args` are the `(subject, cause)` of the first panic | Restart the process: the core does not start again in it. Report the panic's subject and cause as a defect |
+
+A worker child ends itself at its next core call (exit code 80; its last log line names the cause), and the worker replaces it. At the start of a task, before task code ran, the claim is released with no attempt charged. After a body that finished, the child reports the result first, and the task keeps it. A body that the refusal ended (a core call of the body raised it), and a body of a shared child that still runs at the exit, take the crashed-child path (`WORKER_CRASHED`) and the retry policy.
+
+## CLI
+
+```bash
+horsies worker myapp.config:app --profile default  # start worker (--profile is required)
+horsies worker myapp.config:app --profile default --metrics-listen 0.0.0.0:9464  # + /metrics, /livez, /readyz
+horsies scheduler myapp.config:app       # start scheduler
+horsies check myapp.config:app [--live]  # validate before deploy
+horsies web myapp.config:app             # serve the monitoring web UI (needs horsies[web])
+horsies web --database-url URL           # monitor a database without an app module
+horsies metrics myapp.config:app --listen 0.0.0.0:9465  # serve the fleet metrics at GET /metrics
+horsies get-docs                         # download the docs of the installed version
+horsies get-docs --ref main              # download the main branch docs (needed for a development version)
+horsies skills install --target DIR      # copy this skill folder to DIR/horsies/ (--force replaces a changed copy)
+```
+
+Worker settings live in named profiles in `AppConfig.worker_profiles`, not in
+flags. `--profile` is required, with no default; a missing or unknown name
+fails before anything starts and lists the defined names. The removed flags
+(`--processes`, `--max-claim-batch`, `--max-claim-per-worker`,
+`--max-tasks-per-child`, `--max-memory-per-child-mb`, `--drain-timeout`,
+`--child-preload`) exit 2 and name their profile field. See `configs.md`
+"Worker profiles".
+
+```python
+from horsies import (
+    IsolatedChildren, IsolatedRecycle, MemoryLimit, TaskLimit, WorkerProfile,
+)
+
+profiles = {
+    'default': WorkerProfile(
+        isolated=IsolatedChildren(
+            count=8,
+            recycle=IsolatedRecycle(after=TaskLimit(tasks=500), above=MemoryLimit(mb=1024)),
+        ),
+    ),
+}
+```
+
+`horsies check` runs phased validation (config and every worker profile, imports,
+DAG, builders, policies, optional live DB check and worker connection check).
+Worker and scheduler also run check at startup.
+
+A worker owns one child and one socket per slot. An isolated child holds one
+task, so a crash or a timeout affects only that task; a crash of a shared child
+ends every task in it. On Linux a preload parent forks each child: a new child takes
+milliseconds, and children share memory. Before you change `WorkerProfile.preload`,
+read the traps under "Child process model" in `configs.md`: `app` mode changes
+what runs at import, and a recycle no longer reloads your code.
+
+Two limits recycle worker children to bound memory, with **OR** semantics (a
+child exits when either limit is reached). `IsolatedRecycle.after` (default
+`TaskLimit(tasks=100)`) recycles after N tasks; `IsolatedRecycle.above` (default
+`NoMemoryLimit()`) recycles once a child's own RSS reaches N MB after a task — the
+primary guard for memory-quota deployments, since it maps to the RSS the quota
+charges. A threshold at or below the warmed child baseline fails startup.
+Recommended default: memory recycling on, count high as a
+backstop, tuned against the `children_memory_mb` field on `WorkerStateSnapshot`.
+See `configs.md` and website docs `workers/concurrency`.

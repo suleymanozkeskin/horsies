@@ -1,284 +1,71 @@
-Hi agent! If you need to work with the horsies Rust crates, consider using the docs locally.
+Hi agent! If you need to work with the horsies Rust crate, consider using the docs locally.
 
 # Horsies (Rust)
-> PostgreSQL-backed background task queue and workflow engine for Rust.
+> The Rust client of the horsies core: a PostgreSQL-backed background task queue and workflow engine.
 > Docs: https://suleymanozkeskin.github.io/horsies/rust/
-> Source: https://github.com/suleymanozkeskin/horsies/tree/main/crates/horsies
-> Crates: horsies, horsies-macros
+> Source: https://github.com/suleymanozkeskin/horsies/tree/main/clients/rust/horsies
+> Crates: horsies, horsies-macros, horsies-core, horsies-core-derive
 
-## Agent Skills (Repository Guidance)
-- In source checkouts, skills live under: `crates/horsies/.agents/skills/`
-- `SKILL.md` -> quick orientation and routing
-- `tasks.md` -> task APIs, send/retry flows, serialization, error handling
-- `workflows.md` -> DAG construction, WorkflowHandle semantics, HRS-001-HRS-031 validation
-- `configs.md` -> AppConfig, queues, recovery/resilience, scheduling, CLI/runtime settings
+The Python client and the Rust client run on one core (horsies-core). Behaviour and guarantees are on the shared pages, for both clients. The Rust pages state the API of the crate. A database belongs to one client: the core refuses a database that the Python client installed.
 
-## Quick Reference
+## Rust API pages
+- Overview -> /horsies/rust/
+- Getting Started -- cargo add horsies; one binary is the producer, the worker and each child; build_app, a worker profile with the default preload (ChildPreload::NoPreload), main hands the command line to horsies::cli::run; worker --profile default; send and read a result -> /horsies/rust/quick-start/getting-started/
+- App Config -- Horsies::new, with_schema_mode (MigrateAndValidate, ObserveOnly, AssumeInitialized), with_handle, AppConfig fields, Rust-only refusals (pool size bounds, preload), queues, register, provide, discover, AppRole, suppress_sends / HORSIES_SUPPRESS_SENDS -> /horsies/rust/configuration/app-config/
+- Defining Tasks -- #[horsies::task], #[horsies::blocking_task], execution = isolated | shared_async | shared_thread, timeout_ms, cancel_grace_ms, retry_policy + auto_retry_for, the generated module, TaskRuntime (state, cancelled, is_cancelled, spawn, task_handle), async_task_fn!, blocking_task_fn! -> /horsies/rust/tasks/defining-tasks/
+- Task Errors -- TaskError<E>, TaskErrorCode<E> (Library, User), #[derive(horsies::UserErrorCode)], with_data (never fails; data_refused), ExceptionRecord, SubWorkflowFailure, WORKER_SERIALIZATION_ERROR for input and return read-back -> /horsies/rust/tasks/errors/
+- Sending Tasks -- TaskFunction<A, T, E>: send, schedule(WholeSeconds), send_with_options, schedule_with_options, with_options; TaskSendOptions (good_until, idempotency_key, retention, retain_forever); SendRetention; TaskSendError catalog; retry_send, retry_schedule; resend_on_transient_err; PayloadPolicy -> /horsies/rust/tasks/sending-tasks/
+- Retrieving Results -- TaskHandle::get(WaitLimit) -> Result<TaskOutcome<T, E>, ReadError>; kept reads; info(TaskInfoParts); app.task_handle_of, get_result, get_raw_result (StoredResult), get_task_info -> /horsies/rust/tasks/retrieving-results/
+- Blocking API -- horsies::blocking: task_function.blocking() (TaskFunctionView, TaskFunctionSendOptionsView), handle.blocking() (TaskHandleView), app.blocking() (HorsiesView), workflow_function.blocking() (WorkflowFunctionView), workflow_template.blocking() (WorkflowTemplateView), workflow_handle.blocking() (WorkflowHandleView), blocking::start_workflow, blocking::start_workflow_with; ASYNC_CONTEXT on a runtime thread (TaskSendError::AsyncContext, ReadError::AsyncContext, BrokerErrorCode::AsyncContext, HRS-217, WorkflowStartErrorCode::AsyncContext, HandleErrorCode::AsyncContext, WorkflowReadError::AsyncContext); the order of the checks -> /horsies/rust/tasks/blocking-api/
+- Workflow API -- WorkflowDefinition (Output, Params, name, definition_key, on_error, define, build_with), WorkflowDefConfig, WorkflowSpecBuilder, WorkflowSpec, register_workflow_definition, workflow_template, WorkflowFunction, WorkflowTemplate, start_workflow, start_workflow_with, app.start, TaskRuntime::start, WorkflowStartError, WorkflowHandle (get, result_for, status, results, tasks, cancel, pause, resume), WorkflowReadError, HandleOperationError, OutputlessResults, SuccessPolicy, check_workflow_builder -> /horsies/rust/concepts/workflows/workflow-api/
+- Typed Node Builder -- task_name::node(), task_name::params::<name>(), TaskNode<T, I> (set, set_input, input_json, arg_from, waits_for, workflow_ctx_from, node_id, queue, priority, allow_failed_deps, join_all, join_any, join_quorum, good_until), TaskOutcome<S, E> parameters, WorkflowContext, WorkflowContextError, TypedNodeRef, NodeRef, NodeKey, InputField -> /horsies/rust/concepts/workflows/typed-node-builder/
+- Subworkflows -- build_with, #[derive(WorkflowInput)] field tokens, SubWorkflowParams (NotGiven, Given), SubWorkflowNode, a child built from a dependency's result, SubWorkflowSummary, SubWorkflowFailure, nesting limit 32 (HRS-036, HRS-037) -> /horsies/rust/concepts/workflows/subworkflows/
+- Worker Setup -- WorkerProfile (isolated, shared_async, shared_thread, pool, claim, drain_timeout, preload (default ChildPreload::NoPreload, the only value a Rust worker takes), parent_cpu), IsolatedChildren, SharedAsyncChildren, SharedThreadChildren, IsolatedRecycle, SharedRecycle, pools, ClaimLimits, DrainTimeout, bounded counts (try_from, from_constant, OutOfBounds), on_child_start (CHILD_START_HOOK_BOUND), WorkerStart, run_worker, WorkerRunError -> /horsies/rust/workers/worker-setup/
+- Schedule Config -- AppConfig.schedule: ScheduleConfig (enabled, schedules, check_interval_seconds), TaskSchedule (input, queue, timezone, catch_up_missed, max_catch_up_runs), SchedulePattern (Interval, Hourly, Daily, Weekly, Monthly, Cron), CronSchedule, CronNumericTerm, CronEnumTerm, DaySelector, schedule checks (HRS-205, HRS-300), scheduler(), PreparedScheduler, run_scheduler, SchedulerRunError -> /horsies/rust/scheduling/schedule-config/
+- Health Reads -- ping_database, ping_workers(PingTarget, timeout, min_responses), list_worker_states, get_worker_state, get_worker_state_history(WorkerHistoryLimit), get_stale_tasks(StaleMinutes), get_expired_tasks, BoundedTaskList (Complete, Truncated; TASK_LIST_BOUND 10,000), get_class_coverage, get_class_report -> /horsies/rust/monitoring/health-reads/
+- Monitoring Queries -- horsies::monitoring: task_stats, task_facets, task_breakdown, list_tasks, get_task_detail, list_workflow_names, list_workflow_runs, get_workflow_run, get_workflow_node, list_schedules; TaskStatsQuery, TaskFacetsQuery, TaskBreakdownQuery, TaskListQuery, WorkflowRunsQuery, TaskFilters, PaginationRefused, resolve_monitoring_window (24 h default, 30 days max), MonitoringQueryError; cancel_task, TaskActionError; cancel_task_action, pause_workflow_action, resume_workflow_action, cancel_workflow_action, ActionOutcome -> /horsies/rust/monitoring/monitoring-queries/
+- Tracing Setup -- feature otel; the global providers and propagator of opentelemetry 0.33 set first in main; horsies::otel::layer(); ATTEMPT_SPAN_TARGET; shut the provider down after run; producer metrics -> /horsies/rust/observability/tracing-setup/
+- Web UI Mount -- feature web; horsies::web::router(&app, MonitoringConfig, policy) -> axum::Router; MonitoringConfig (ui: MonitoringUiConfig, actions: Actions); MonitoringAuthPolicy (can_view, can_act), MonitoringRequest; AllowAll, ViewOnly, TrustedHeader; X-Horsies-Intent: action -> /horsies/rust/monitoring/web-ui-mount/
+- Event Handlers -- horsies::events: the event types (TaskClaimed, ClaimReleased, AttemptPlaced, AttemptNotStarted, AttemptEnded, AttemptRecorded, TaskRecovered, ChildStarted, ChildReplaced, SlotDown, SlotRecovered), app.on_event::<E>(name, async handler), app.on_event_blocking::<E>(name, handler), HandlerError, on_handler_child_start; the handler child, a thread and a queue of HANDLER_QUEUE_EVENTS per handler, drops and failures counted (horsies.telemetry.handler.dropped, horsies.telemetry.handler.errors), HANDLER_STATS_INTERVAL, HANDLER_DRAIN -> /horsies/rust/monitoring/event-handlers/
+- Rerun in Your Transaction -- horsies::rerun: app.rerun_task (AppRerunError), rerun_task_in on the caller's transaction (CallerRerunError), SqlxCaller (feature sqlx), TokioPostgresCaller (feature tokio-postgres), CallerTransaction, RerunTask, RerunEnqueuePolicy (new, standard), RerunOutcome -> /horsies/rust/operations/rerun-in-your-transaction/
+- Async Frameworks -- a tokio web service (axum): build the app once, the async forms in handlers, task_name::send without state, TaskFunction in router state, the service apart from the worker's child mode, ASYNC_CONTEXT -> /horsies/rust/guides/async-frameworks/
+- Testing -- direct calls of task functions, app.task_runtime(), TaskOutcome parameters, a WorkflowContext from its stored form, the generated Input, app.check() with no database, suppress_sends and HORSIES_SUPPRESS_SENDS -> /horsies/rust/operations/testing/
+- CLI Reference -- horsies::cli::run(app) in the app's fn main; <binary> worker --profile <name> [--metrics-listen HOST:PORT], scheduler, check [--live], metrics --listen HOST:PORT (the fleet metrics at GET /metrics); --loglevel, RUST_LOG; run_with_log_format(app, LogFormat::Json); child mode (--horsies-child); removed 0.1.0-alpha flags exit 2; exit codes 0, 1, 2, 77 and the ChildHostExit codes -> /horsies/rust/cli/
+- Switching to 0.8.0 -- for horsies-rust 0.1.0-alpha apps: the core refuses an alpha database (ForeignMigrations), drain it and start 0.8.0 on a new database; the API changes: app, binary and CLI, tasks and errors, sends and reads, workflows, monitoring, rerun, stored forms -> /horsies/rust/migrations/switching-to-0-8-0/
 
-### Horsies (app instance)
-- app = Horsies::new(AppConfig { ... })?
-- #[task("name")] async fn(args) -> Result<T, TaskError>
-- #[task("name", queue = "q")] async fn(args) -> Result<T, TaskError>
-- #[blocking_task("name")] fn(args) -> Result<T, TaskError>
-- #[task("name", auto_retry_for = ["CODE"], retry_policy = RetryPolicy::fixed(...))]
-- task_name::register(&mut app)? -> TaskFunction<A, T>
-- task_name::send(args).await -> TaskSendResult<TaskHandle<T>>
-- task_name::schedule(delay, args).await -> TaskSendResult<TaskHandle<T>>
-- task_name::with_options(TaskSendOptions::new().good_until(deadline)).send(args).await
-- app.discover(vec![|app| task::register(app).map(|_| ())])?
-- app.check()? (static validation)
-- app.check_live().await? (static validation + broker connect + schema ensure + DB ping)
-- app.run_worker().await?
-- app.run_worker_with(WorkerConfig { ... }).await?
-- app.run_scheduler().await?
-- app.get_broker().await? -> Arc<PostgresBroker>
-
-### AppConfig
-- queue_mode: QueueMode (Default or Custom)
-- custom_queues: Option<Vec<CustomQueueConfig>> (required for Custom)
-- broker: PostgresConfig
-- cluster_wide_cap: Option<u32> (max RUNNING tasks across cluster)
-- prefetch_buffer: u32 (0 = hard cap, >0 = soft cap with lease)
-- claim_lease_ms: Option<u32> (required when prefetch_buffer > 0)
-- max_claim_renew_age_ms: u32 (default 180_000)
-- recovery: RecoveryConfig
-- resilience: WorkerResilienceConfig
-- schedule: Option<ScheduleConfig>
-- resend_on_transient_err: bool (default false)
-
-### PostgresConfig
-- database_url: String (must start with postgresql:// or postgres://)
-- session_database_url: Option<String> (direct/session-capable URL for schema init and LISTEN/NOTIFY)
-- pgbouncer_transaction_mode: bool (default false; disables SQLx named prepared-statement cache for runtime pool)
-- pool_pre_ping: bool (default true)
-- pool_size: u32 (default 30)
-- max_overflow: u32 (default 30)
-- pool_timeout: u32 (default 30)
-- pool_recycle: u32 (default 1800)
-- echo: bool (default false)
-- PostgresConfig::from_url(url) convenience constructor
-- PostgresConfig::from_pgbouncer_urls(runtime_url, session_url) for transaction-pool runtime + direct/session listener URL
-
-### QueueMode & CustomQueueConfig
-- QueueMode::Default -> single "default" queue, FIFO
-- QueueMode::Custom -> named queues with priority + max_concurrency
-- CustomQueueConfig { name, priority (1-100), max_concurrency }
-
-### TaskResult<T> (wire format)
-- TaskResult::Ok(T) -> success
-- TaskResult::Err(TaskError) -> failure
-- .is_ok(), .is_err(), .unwrap(), .unwrap_err(), .ok(), .map(), .and_then()
-- .is_transient() -> true for retrieval/broker errors
-- JSON: {"__type": "ok"|"err", "value": ...}
-
-### TaskError
-- error_code: Option<TaskErrorCode>
-- message: Option<String>
-- data: Option<serde_json::Value>
-- cause: Option<serde_json::Value> (wire key: "exception")
-- TaskError::new(code, message) -> user-defined error
-- TaskError::builtin(code, message) -> library error
-
-### TaskErrorCode
-- TaskErrorCode::BuiltIn(BuiltInTaskCode) -> library codes
-- TaskErrorCode::User(String) -> user-defined codes
-
-### BuiltInTaskCode (4 families)
-- OperationalErrorCode: UnhandledError, TaskError, WorkerCrashed, BrokerError, WorkerResolutionError, WorkerSerializationError, ResultDeserializationError, WorkflowEnqueueFailed, SubworkflowLoadFailed
-- ContractCode: ArgumentTypeMismatch, ReturnTypeMismatch, WorkflowCtxMissingId
-- RetrievalCode: WaitTimeout, TaskNotFound, WorkflowNotFound, ResultNotAvailable, ResultNotReady
-- OutcomeCode: TaskCancelled, TaskExpired, WorkflowPaused, WorkflowFailed, WorkflowCancelled, UpstreamSkipped, SubworkflowFailed, WorkflowSuccessCaseNotMet, WorkflowStopped, SendSuppressed
-
-### TaskSendResult<T> = Result<T, TaskSendError>
-- TaskSendError { code, message, retryable, task_id, payload }
-- TaskSendErrorCode: SendSuppressed, ValidationFailed, EnqueueFailed, PayloadMismatch
-
-### TaskFunction<A, T>
-- .send(args).await -> TaskSendResult<TaskHandle<T>>
-- .schedule(delay, args).await -> TaskSendResult<TaskHandle<T>>
-- .with_options(TaskSendOptions::new().good_until(deadline)).send(args).await
-- .retry_send(&err).await -> TaskSendResult<TaskHandle<T>>
-- .retry_schedule(&err).await -> TaskSendResult<TaskHandle<T>>
-- .task_name(), .queue_name(), .priority()
-- .node() -> TaskNode<T, A> (for workflow building)
-
-### TaskHandle<T>
-- .task_id() -> &str
-- .get(timeout: Option<Duration>).await -> TaskResult<T>
-- .info(include_result, include_failed_reason, include_attempts).await -> BrokerResult<Option<TaskInfo>>
-
-### RetryPolicy
-- RetryPolicy::fixed(intervals: Vec<u32>, jitter: bool)? -> fixed backoff
-- RetryPolicy::exponential(base_seconds: u32, max_retries: u32, jitter: bool)? -> exponential backoff
-- max_retries: u32 (1-20), intervals: Vec<u32> (seconds, 1-86400 each)
-- BackoffStrategy::Fixed | BackoffStrategy::Exponential
-
-### TaskRuntime
-- rt.state::<T>() -> Result<Arc<T>, TaskError> (access shared state)
-- rt.start::<T>(spec).await -> WorkflowStartResult<WorkflowHandle<T>>
-
-### WorkflowDefinition trait
-- type Output; type Params;
-- fn name() -> &'static str
-- fn definition_key() -> &'static str
-- fn on_error() -> OnError { OnError::Fail }
-- fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError>
-
-### WorkflowSpecBuilder
-- WorkflowSpecBuilder::new(name)
-- .task(TaskNode<T, I>) -> TypedNodeRef<T>
-- .sub_workflow(SubWorkflowNode<P, T>) -> TypedNodeRef<T>
-- .definition_key(key), .on_error(policy), .output(node_ref), .success_policy(policy)
-- .build() -> Result<WorkflowSpec, HorsiesError>
-
-### TaskNode<T> (workflow node builder)
-- task_name::node()? -> TaskNode<T, A>
-- .node_id(id), .args_json(json), .kwargs_json(json)
-- .waits_for(dep), .waits_for_all(deps)  // accepts typed refs via Into<NodeRef>
-- .set_input(value)?, .set(task_name::params::field(), value)?
-- .arg_from(task_name::params::field(), dep)
-- .join_any(), .join_quorum(min_success)
-- .allow_failed_deps(), .queue(q), .priority(p), .good_until(dt)
-
-### SubWorkflowNode (workflow node builder)
-- SubWorkflowNode::new(sub_workflow_name) -> Self
-- SubWorkflowNode::from_definition::<D>() -> SubWorkflowNode<D::Params, D::Output>
-- .node_id(id), .waits_for(dep), .waits_for_all(deps)
-- .args_json(json), .kwargs_json(json), .set_input(value)?, .set(field, value)?, .queue(q), .priority(p)
-
-### WorkflowFunction<T> (registered workflow handle)
-- .start().await -> WorkflowStartResult<WorkflowHandle<T>>
-- .start_with_id(id).await
-- .retry_start(&err).await
-
-### WorkflowTemplate<P, T> (parameterized workflow)
-- .start(params).await -> WorkflowStartResult<WorkflowHandle<T>>
-- .start_with_id(params, id).await
-
-### WorkflowHandle<T>
-- .workflow_id() -> &str
-- .get(timeout).await -> HandleResult<TaskResult<T>>
-- .status().await -> HandleResult<WorkflowStatus>
-- .results().await -> HandleResult<HashMap<String, TaskResult<Value>>>
-
-### Global workflow dispatch
-- horsies::start_workflow::<D>().await (zero params)
-- horsies::start_workflow_with::<D>(params).await
-
-### Workflow lifecycle
-- cancel_workflow(pool, workflow_id).await
-- pause_workflow(pool, workflow_id).await
-- resume_workflow(pool, workflow_id, registry).await
-- recover_stuck_workflows(pool, registry, ...).await
-
-### WorkflowStatus
-- Pending, Running, Completed, Failed, Cancelled, Paused
-- WORKFLOW_TERMINAL_STATES: [Completed, Failed, Cancelled]
-
-### WorkflowTaskStatus
-- Pending, Ready, Enqueued, Running, Completed, Failed, Skipped, Cancelled
-
-### TaskStatus
-- Pending, Claimed, Running, Completed, Failed, Cancelled, Expired
-- TASK_TERMINAL_STATES: [Completed, Failed, Cancelled, Expired]
-
-### ScheduleConfig
-- enabled: bool (default true)
-- schedules: Vec<TaskSchedule>
-- check_interval_seconds: u32 (default 1, range 1-60)
-
-### TaskSchedule
-- name, task_name, pattern: SchedulePattern, args, kwargs: serde_json::Value
-- queue_name: Option<String>, enabled: bool, timezone: String, catch_up_missed: bool
-
-### SchedulePattern (enum)
-- Interval(IntervalSchedule) { seconds, minutes, hours, days: Option<u32> }
-- Hourly(HourlySchedule) { minute, second: u32 }
-- Daily(DailySchedule) { time: NaiveTime }
-- Weekly(WeeklySchedule) { days: Vec<Weekday>, time: NaiveTime }
-- Monthly(MonthlySchedule) { day: u32, time: NaiveTime }
-
-### RecoveryConfig (defaults)
-- auto_requeue_stale_claimed: true, claimed_stale_threshold_ms: 120_000
-- auto_fail_stale_running: true, running_stale_threshold_ms: 300_000
-- check_interval_ms: 30_000
-- runner_heartbeat_interval_ms: 30_000, claimer_heartbeat_interval_ms: 30_000
-- heartbeat_retention_hours: Some(24), worker_state_retention_hours: Some(168)
-- terminal_record_retention_hours: Some(720)
-
-### WorkerResilienceConfig (defaults)
-- db_retry_initial_ms: 500 (range 100-60_000)
-- db_retry_max_ms: 30_000 (range 500-300_000)
-- db_retry_max_attempts: 0 (infinite, range 0-10_000)
-- notify_poll_interval_ms: 5_000 (range 1_000-300_000)
-
-### WorkerConfig
-- queues: Vec<String> (default ["default"])
-- concurrency: u32 (default available_parallelism)
-- max_claim_batch: u32 (default 2), max_claim_per_worker: u32 (default 0 = auto)
-- queue_priorities, queue_max_concurrency: HashMap
-- coalesce_notifies: u32 (default 100)
-- loglevel: LogLevel (Debug, Info, Warning, Error)
-
-### PostgresBroker
-- PostgresBroker::connect_with(config).await?
-- PostgresBroker::from_pool(pool)
-- .migrate().await, .ensure_schema_initialized().await, .health_check().await
-- .enqueue(...).await -> BrokerResult<String>
-- .send_task::<T>(resolved, args_json, kwargs_json, task_options).await
-- .get_result::<T>(task_id, timeout).await -> BrokerResult<TaskResult<T>>
-- .get_task_info(task_id, include_result, include_failed_reason).await
-- .get_task_attempts(task_id).await -> BrokerResult<Vec<TaskAttemptRow>>
-- Type alias: Broker = PostgresBroker
-
-### HRS Error Codes (startup errors)
-- HRS-001-099: Workflow validation (WorkflowNoName, WorkflowNoNodes, WorkflowCycleDetected, etc.)
-- HRS-100-199: Task definition (TaskInvalidOptions)
-- HRS-200-299: Configuration (BrokerInvalidUrl)
-- HRS-300-399: Registry (TaskNotRegistered, TaskDuplicateName)
-
-### Database Tables
-- horsies_tasks (28 columns), horsies_task_attempts, horsies_heartbeats
-- horsies_worker_states, horsies_schedule_state
-- NOTIFY trigger on task INSERT
-
-### Utilities
-- mask_database_url(url) -> String (replaces password with ***)
-- init_tracing(level: LogLevel) (respects RUST_LOG env var)
-
-## Sitemap
-- /horsies/rust/ (home)
-- /horsies/rust/quick-start/getting-started/
-- /horsies/rust/quick-start/01-configuring-horsies/
-- /horsies/rust/quick-start/02-producing-tasks/
-- /horsies/rust/quick-start/03-defining-workflows/
-- /horsies/rust/quick-start/04-scheduling/
-- /horsies/rust/quick-start/05-workflow-patterns/
-- /horsies/rust/questions-and-answers/
-- /horsies/rust/concepts/architecture/
-- /horsies/rust/concepts/task-lifecycle/
-- /horsies/rust/concepts/result-handling/
-- /horsies/rust/concepts/queue-modes/
-- /horsies/rust/concepts/workflows/workflow-semantics/
-- /horsies/rust/concepts/workflows/workflow-api/
-- /horsies/rust/concepts/workflows/subworkflows/
-- /horsies/rust/tasks/defining-tasks/
-- /horsies/rust/tasks/sending-tasks/
-- /horsies/rust/tasks/error-handling/
-- /horsies/rust/tasks/errors/
-- /horsies/rust/tasks/retrieving-results/
-- /horsies/rust/tasks/retry-policy/
-- /horsies/rust/configuration/app-config/
-- /horsies/rust/configuration/broker-config/
-- /horsies/rust/configuration/recovery-config/
-- /horsies/rust/workers/worker-architecture/
-- /horsies/rust/workers/concurrency/
-- /horsies/rust/workers/heartbeats-recovery/
-- /horsies/rust/monitoring/syce-overview/
-- /horsies/rust/monitoring/broker-methods/
-- /horsies/rust/scheduling/scheduler-overview/
-- /horsies/rust/scheduling/schedule-patterns/
-- /horsies/rust/scheduling/schedule-config/
-- /horsies/rust/cli/
-- /horsies/rust/internals/database-schema/
-- /horsies/rust/internals/serialization/
+## Shared pages (behaviour, both clients)
+- Architecture -> /horsies/concepts/architecture/
+- Task Lifecycle -> /horsies/concepts/task-lifecycle/
+- Queue Modes -> /horsies/concepts/queue-modes/
+- Errors Reference (library codes, HRS config codes) -> /horsies/tasks/errors/
+- Retry Policy -> /horsies/tasks/retry-policy/
+- Workflow Semantics -> /horsies/concepts/workflows/workflow-semantics/
+- Worker Architecture -> /horsies/workers/worker-architecture/
+- Choosing an Execution Mode -> /horsies/workers/execution-modes/
+- Shared Async Tasks (timeout, cancel grace, cancel_end) -> /horsies/workers/shared-async-tasks/
+- Shared Thread Tasks -> /horsies/workers/shared-thread-tasks/
+- Concurrency -> /horsies/workers/concurrency/
+- Heartbeats & Recovery -> /horsies/workers/heartbeats-recovery/
+- Broker Config (field meanings and ranges) -> /horsies/configuration/broker-config/
+- Remote PostgreSQL -> /horsies/configuration/remote-postgres/
+- Recovery Config -> /horsies/configuration/recovery-config/
+- Retention Config -> /horsies/configuration/retention-config/
+- Scheduler Overview -> /horsies/scheduling/scheduler-overview/
+- Worker & Database Health -> /horsies/monitoring/worker-health/
+- Web UI Overview -> /horsies/monitoring/web-ui-overview/
+- Action Semantics -> /horsies/monitoring/action-semantics/
+- Observability Overview -> /horsies/observability/overview/
+- Metrics -> /horsies/observability/metrics/
+- Metric Reference -> /horsies/observability/metric-reference/
+- OpenTelemetry Collector -> /horsies/observability/opentelemetry-collector/
+- Observability Deployment -> /horsies/observability/deployment/
+- Fleet Collector -> /horsies/observability/fleet-collector/
+- Tracing -> /horsies/observability/tracing/
+- Logs -> /horsies/observability/logs/
+- Lifecycle Events -> /horsies/observability/events/
+- Dashboards and Alerts -> /horsies/observability/dashboards-and-alerts/
+- Database Schema -> /horsies/internals/database-schema/
+- Operational Indexes -> /horsies/internals/operational-indexes/
+- Performance -> /horsies/internals/performance/
+- Questions & Answers -> /horsies/questions-and-answers/
+- Changelog -> /horsies/changelog/

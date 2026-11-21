@@ -1,0 +1,1197 @@
+"""Unit tests for workflow builder check contract (Workstream A)."""
+
+from __future__ import annotations
+
+import logging
+import sys
+import types
+from typing import Annotated, Any
+from unittest import mock
+
+import pytest
+from pydantic import AfterValidator
+
+from horsies.core.app import Horsies, _BUILDER_ATTR, _NO_CHECK_ATTR
+from horsies.core.errors import (
+    ConfigurationError,
+    ErrorCode,
+    WorkflowValidationError,
+)
+from horsies.core.models.app import AppConfig
+from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.queues import CustomQueueConfig, QueueMode
+from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.workflow import (
+    SubWorkflowNode,
+    TaskNode,
+    WorkflowDefinition,
+    WorkflowSpec,
+)
+from horsies.core.models.workflow.definition import WorkflowDefinitionMeta
+
+pytestmark = pytest.mark.unit
+
+
+def _make_app() -> Horsies:
+    return Horsies(
+        config=AppConfig(
+            broker=PostgresConfig(
+                database_url='postgresql://user:pass@localhost/db',
+            ),
+        ),
+    )
+
+
+# =============================================================================
+# Registration Tests
+# =============================================================================
+
+
+class TestWorkflowBuilderRegistration:
+    """Tests for @app.workflow_builder() decorator registration."""
+
+    def test_decorator_registers_builder(self) -> None:
+        """Decorated function is stored in the builder registry."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def my_builder() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        builders = app.get_workflow_builders()
+        assert len(builders) == 1
+        assert builders[0].fn is my_builder
+
+    def test_decorator_stamps_builder_attr(self) -> None:
+        """Decorated function carries the sentinel attribute."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def my_builder() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        assert getattr(my_builder, _BUILDER_ATTR, False) is True
+
+    def test_decorator_preserves_function(self) -> None:
+        """Decorator returns the original function unchanged."""
+        app = _make_app()
+
+        def my_builder() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        decorated = app.workflow_builder()(my_builder)
+        assert decorated is my_builder
+
+    def test_decorator_stores_cases(self) -> None:
+        """Cases passed to decorator are stored in metadata."""
+        app = _make_app()
+
+        @app.workflow_builder(cases=[{'x': 1}, {'x': 2}])
+        def my_builder(x: int) -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        builders = app.get_workflow_builders()
+        assert builders[0].cases == [{'x': 1}, {'x': 2}]
+
+    def test_decorator_stores_source_location(self) -> None:
+        """Source location is captured from the decorated function."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def my_builder() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        builders = app.get_workflow_builders()
+        loc = builders[0].location
+        assert loc is not None
+        assert loc.file.endswith('test_workflow_builder_check.py')
+
+    def test_multiple_builders_registered(self) -> None:
+        """Multiple decorated builders accumulate in the registry."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def builder_a() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        @app.workflow_builder()
+        def builder_b() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        assert len(app.get_workflow_builders()) == 2
+
+
+# =============================================================================
+# _check_workflow_builders Tests
+# =============================================================================
+
+
+class TestCheckWorkflowBuilders:
+    """Tests for _check_workflow_builders phase."""
+
+    def test_zero_arg_builder_auto_invoked(self) -> None:
+        """Builder with no params is auto-invoked once."""
+        app = _make_app()
+        call_count = 0
+
+        @app.workflow_builder()
+        def my_builder() -> WorkflowSpec[Any]:
+            nonlocal call_count
+            call_count += 1
+            # Return a mock spec to avoid real validation
+            return mock.MagicMock(spec=WorkflowSpec)
+
+        errors = app._check_workflow_builders()
+        assert errors == []
+        assert call_count == 1
+
+    def test_all_defaults_builder_auto_invoked(self) -> None:
+        """Builder where all params have defaults is auto-invoked once."""
+        app = _make_app()
+        call_count = 0
+
+        @app.workflow_builder()
+        def my_builder(x: int = 5) -> WorkflowSpec[Any]:
+            nonlocal call_count
+            call_count += 1
+            return mock.MagicMock(spec=WorkflowSpec)
+
+        errors = app._check_workflow_builders()
+        assert errors == []
+        assert call_count == 1
+
+    def test_unintrospectable_builder_folds_to_e029(self) -> None:
+        """Regression: a builder whose signature inspect cannot resolve
+        folds into the report (HRS-029) instead of crashing the check
+        phase (check-phase containment contract)."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def my_builder() -> WorkflowSpec[Any]:
+            return mock.MagicMock(spec=WorkflowSpec)
+
+        with mock.patch(
+            'horsies.core.app.inspect.signature',
+            side_effect=ValueError('no signature found'),
+        ):
+            errors = app._check_workflow_builders()
+
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION
+        assert 'not introspectable' in errors[0].message
+
+    def test_zero_arg_builder_exception_wrapped_as_e029(self) -> None:
+        """Unexpected exception from builder is wrapped with HRS-029."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def bad_builder() -> WorkflowSpec[Any]:
+            raise RuntimeError('kaboom')
+
+        errors = app._check_workflow_builders()
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION
+        assert 'kaboom' in str(errors[0])
+
+    def test_builder_returning_non_workflow_spec_wrapped_as_e029(self) -> None:
+        """Builder returning non-WorkflowSpec is reported as HRS-029."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def bad_builder() -> WorkflowSpec[Any]:
+            return None  # type: ignore[return-value]
+
+        errors = app._check_workflow_builders()
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION
+        assert 'returned non-WorkflowSpec' in str(errors[0])
+
+    def test_builder_validation_error_collected(self) -> None:
+        """WorkflowValidationError from builder is collected directly."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def bad_workflow_builder() -> WorkflowSpec[Any]:
+            raise WorkflowValidationError(
+                message='bad graph',
+                code=ErrorCode.WORKFLOW_CYCLE_DETECTED,
+            )
+
+        errors = app._check_workflow_builders()
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.WORKFLOW_CYCLE_DETECTED
+
+    def test_parameterized_builder_without_cases_e027(self) -> None:
+        """Parameterized builder missing cases= fails with HRS-027."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def my_builder(urls: list[str]) -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        errors = app._check_workflow_builders()
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_CASES_REQUIRED
+        assert 'urls' in str(errors[0])
+
+    def test_parameterized_builder_with_valid_cases(self) -> None:
+        """Each case is invoked when cases are valid."""
+        app = _make_app()
+        invocations: list[dict[str, Any]] = []
+
+        @app.workflow_builder(cases=[{'x': 1}, {'x': 2}])
+        def my_builder(x: int) -> WorkflowSpec[Any]:
+            invocations.append({'x': x})
+            return mock.MagicMock(spec=WorkflowSpec)
+
+        errors = app._check_workflow_builders()
+        assert errors == []
+        assert invocations == [{'x': 1}, {'x': 2}]
+
+    def test_case_with_unknown_keys_e028(self) -> None:
+        """Case with keys not in builder signature fails with HRS-028."""
+        app = _make_app()
+
+        @app.workflow_builder(cases=[{'x': 1, 'bogus': 2}])
+        def my_builder(x: int) -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        errors = app._check_workflow_builders()
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_CASE_INVALID
+        assert 'bogus' in str(errors[0])
+
+    def test_case_missing_required_keys_e028(self) -> None:
+        """Case missing required keys fails with HRS-028."""
+        app = _make_app()
+
+        @app.workflow_builder(cases=[{'x': 1}])
+        def my_builder(x: int, y: str) -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        errors = app._check_workflow_builders()
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_CASE_INVALID
+        assert 'y' in str(errors[0])
+
+    def test_case_not_a_dict_e028(self) -> None:
+        """Non-dict case fails with HRS-028."""
+        app = _make_app()
+
+        @app.workflow_builder(cases=["not_a_dict"])  # type: ignore[list-item]
+        def my_builder(x: int) -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        errors = app._check_workflow_builders()
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_CASE_INVALID
+
+    def test_case_exception_wrapped_as_e029(self) -> None:
+        """Exception during case execution is wrapped with HRS-029."""
+        app = _make_app()
+
+        @app.workflow_builder(cases=[{'x': 1}])
+        def my_builder(x: int) -> WorkflowSpec[Any]:
+            raise ValueError(f'bad value: {x}')
+
+        errors = app._check_workflow_builders()
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION
+        assert 'bad value: 1' in str(errors[0])
+
+    def test_send_suppression_active_during_builder_execution(self) -> None:
+        """Sends are suppressed while builders execute."""
+        app = _make_app()
+        suppressed_during_call = False
+
+        @app.workflow_builder()
+        def my_builder() -> WorkflowSpec[Any]:
+            nonlocal suppressed_during_call
+            suppressed_during_call = app.are_sends_suppressed()
+            return mock.MagicMock(spec=WorkflowSpec)
+
+        # Ensure sends are NOT suppressed before
+        assert not app.are_sends_suppressed()
+        app._check_workflow_builders()
+        assert suppressed_during_call is True
+        # Ensure sends are NOT suppressed after
+        assert not app.are_sends_suppressed()
+
+    def test_multiple_builder_errors_aggregated(self) -> None:
+        """Errors from multiple builders are all collected."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def builder_a(x: int) -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        @app.workflow_builder()
+        def builder_b(y: str) -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        errors = app._check_workflow_builders()
+        assert len(errors) == 2
+        codes = {e.code for e in errors}
+        assert codes == {ErrorCode.WORKFLOW_CHECK_CASES_REQUIRED}
+
+    def test_builder_horsies_error_collected_directly(self) -> None:
+        """HorsiesError from builder is collected as-is (not wrapped)."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def my_builder() -> WorkflowSpec[Any]:
+            raise ConfigurationError(
+                message='bad config in builder',
+                code=ErrorCode.BROKER_INVALID_URL,
+            )
+
+        errors = app._check_workflow_builders()
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.BROKER_INVALID_URL
+
+
+# =============================================================================
+# _check_undecorated_builders Tests
+# =============================================================================
+
+
+class TestCheckUndecoratedBuilders:
+    """Tests for undecorated builder detection."""
+
+    def _make_module(
+        self,
+        name: str,
+        functions: dict[str, Any],
+    ) -> types.ModuleType:
+        """Create a synthetic module with given functions."""
+        module = types.ModuleType(name)
+        module.__name__ = name
+        for fn_name, fn in functions.items():
+            fn.__module__ = name
+            fn.__qualname__ = fn_name
+            setattr(module, fn_name, fn)
+        sys.modules[name] = module
+        return module
+
+    def _cleanup_module(self, name: str) -> None:
+        sys.modules.pop(name, None)
+
+    def test_undecorated_workflow_spec_function_detected(self) -> None:
+        """Top-level function returning WorkflowSpec triggers HRS-030."""
+        app = _make_app()
+
+        def build_wf() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        mod_name = '_test_undecorated_mod_1'
+        self._make_module(mod_name, {'build_wf': build_wf})
+        app.discover_tasks([mod_name])
+        # Mark as "imported" by adding to sys.modules (already done)
+        try:
+            errors = app._check_undecorated_builders()
+            assert len(errors) == 1
+            assert errors[0].code == ErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER
+            assert 'build_wf' in str(errors[0])
+        finally:
+            self._cleanup_module(mod_name)
+
+    def test_decorated_builder_not_flagged(self) -> None:
+        """Function with @app.workflow_builder is NOT flagged."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def build_wf() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        mod_name = '_test_decorated_mod_1'
+        self._make_module(mod_name, {'build_wf': build_wf})
+        app.discover_tasks([mod_name])
+        try:
+            errors = app._check_undecorated_builders()
+            assert errors == []
+        finally:
+            self._cleanup_module(mod_name)
+
+    def test_no_check_opt_out_suppresses_detection(self) -> None:
+        """__horsies_no_check__ = True suppresses HRS-030."""
+        app = _make_app()
+
+        def build_wf() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        setattr(build_wf, _NO_CHECK_ATTR, True)
+
+        mod_name = '_test_optout_mod_1'
+        self._make_module(mod_name, {'build_wf': build_wf})
+        app.discover_tasks([mod_name])
+        try:
+            errors = app._check_undecorated_builders()
+            assert errors == []
+        finally:
+            self._cleanup_module(mod_name)
+
+    def test_non_workflow_spec_return_not_flagged(self) -> None:
+        """Function returning int is not flagged."""
+        app = _make_app()
+
+        def regular_fn() -> int:
+            return 42
+
+        mod_name = '_test_non_wf_mod_1'
+        self._make_module(mod_name, {'regular_fn': regular_fn})
+        app.discover_tasks([mod_name])
+        try:
+            errors = app._check_undecorated_builders()
+            assert errors == []
+        finally:
+            self._cleanup_module(mod_name)
+
+    def test_no_return_annotation_not_flagged(self) -> None:
+        """Function without return annotation is not flagged."""
+        app = _make_app()
+
+        def no_annotation():  # type: ignore[no-untyped-def]
+            pass
+
+        mod_name = '_test_no_annot_mod_1'
+        self._make_module(mod_name, {'no_annotation': no_annotation})
+        app.discover_tasks([mod_name])
+        try:
+            errors = app._check_undecorated_builders()
+            assert errors == []
+        finally:
+            self._cleanup_module(mod_name)
+
+    def test_imported_function_not_flagged(self) -> None:
+        """Function defined in a truly foreign module (re-exported) is not flagged."""
+        app = _make_app()
+
+        def foreign_fn() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        # Set __module__ to a different module
+        foreign_fn.__module__ = 'some_other_module'
+
+        mod_name = '_test_foreign_mod_1'
+        self._make_module(mod_name, {'foreign_fn': foreign_fn})
+        # Manually fix __module__ back since _make_module overwrites it
+        foreign_fn.__module__ = 'some_other_module'
+        app.discover_tasks([mod_name])
+        try:
+            errors = app._check_undecorated_builders()
+            assert errors == []
+        finally:
+            self._cleanup_module(mod_name)
+
+    def test_reexported_submodule_function_detected_in_package(self) -> None:
+        """Function from a sub-module re-exported via __init__.py is detected."""
+        app = _make_app()
+
+        def build_wf() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        pkg_name = '_test_pkg_reexport'
+        # Create a package module (has __path__)
+        module = types.ModuleType(pkg_name)
+        module.__name__ = pkg_name
+        module.__path__ = ['/fake/path']  # marks it as a package
+        # Function defined in sub-module but re-exported in __init__
+        build_wf.__module__ = f'{pkg_name}.builders'
+        build_wf.__qualname__ = 'build_wf'
+        setattr(module, 'build_wf', build_wf)
+        sys.modules[pkg_name] = module
+
+        app.discover_tasks([pkg_name])
+        try:
+            errors = app._check_undecorated_builders()
+            assert len(errors) == 1
+            assert errors[0].code == ErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER
+            assert 'build_wf' in str(errors[0])
+        finally:
+            self._cleanup_module(pkg_name)
+
+    def test_reexported_foreign_function_not_detected_in_package(self) -> None:
+        """Function from a truly foreign module is not flagged even in a package."""
+        app = _make_app()
+
+        def foreign_fn() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        pkg_name = '_test_pkg_foreign'
+        module = types.ModuleType(pkg_name)
+        module.__name__ = pkg_name
+        module.__path__ = ['/fake/path']
+        # Function from an unrelated module
+        foreign_fn.__module__ = 'completely_unrelated'
+        foreign_fn.__qualname__ = 'foreign_fn'
+        setattr(module, 'foreign_fn', foreign_fn)
+        sys.modules[pkg_name] = module
+
+        app.discover_tasks([pkg_name])
+        try:
+            errors = app._check_undecorated_builders()
+            assert errors == []
+        finally:
+            self._cleanup_module(pkg_name)
+
+    def test_submodule_builder_detected_without_reexport(self) -> None:
+        """Builder in a sub-module is detected even if not re-exported in __init__."""
+        app = _make_app()
+
+        def build_pipeline() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        pkg_name = '_test_pkg_submod_scan'
+        sub_name = f'{pkg_name}.pipelines'
+
+        # Package __init__ — empty, no re-exports
+        pkg_module = types.ModuleType(pkg_name)
+        pkg_module.__name__ = pkg_name
+        pkg_module.__path__ = ['/fake/path']
+        sys.modules[pkg_name] = pkg_module
+
+        # Sub-module with an undecorated builder
+        sub_module = types.ModuleType(sub_name)
+        sub_module.__name__ = sub_name
+        build_pipeline.__module__ = sub_name
+        build_pipeline.__qualname__ = 'build_pipeline'
+        setattr(sub_module, 'build_pipeline', build_pipeline)
+        sys.modules[sub_name] = sub_module
+
+        app.discover_tasks([pkg_name])
+        try:
+            errors = app._check_undecorated_builders()
+            assert len(errors) == 1
+            assert errors[0].code == ErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER
+            assert 'build_pipeline' in str(errors[0])
+        finally:
+            self._cleanup_module(sub_name)
+            self._cleanup_module(pkg_name)
+
+    def test_decorated_builder_in_submodule_not_flagged(self) -> None:
+        """Decorated builder in a sub-module is NOT flagged."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def build_pipeline() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        pkg_name = '_test_pkg_submod_decorated'
+        sub_name = f'{pkg_name}.pipelines'
+
+        pkg_module = types.ModuleType(pkg_name)
+        pkg_module.__name__ = pkg_name
+        pkg_module.__path__ = ['/fake/path']
+        sys.modules[pkg_name] = pkg_module
+
+        sub_module = types.ModuleType(sub_name)
+        sub_module.__name__ = sub_name
+        build_pipeline.__module__ = sub_name
+        build_pipeline.__qualname__ = 'build_pipeline'
+        setattr(sub_module, 'build_pipeline', build_pipeline)
+        sys.modules[sub_name] = sub_module
+
+        app.discover_tasks([pkg_name])
+        try:
+            errors = app._check_undecorated_builders()
+            assert errors == []
+        finally:
+            self._cleanup_module(sub_name)
+            self._cleanup_module(pkg_name)
+
+    def test_flat_module_does_not_scan_submodules(self) -> None:
+        """Non-package module does not trigger sub-module scanning."""
+        app = _make_app()
+
+        def build_wf() -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        mod_name = '_test_flat_mod'
+        sub_name = f'{mod_name}.child'
+
+        # Regular module (no __path__)
+        module = types.ModuleType(mod_name)
+        module.__name__ = mod_name
+        sys.modules[mod_name] = module
+
+        # A sub-module that happens to share the prefix
+        sub_module = types.ModuleType(sub_name)
+        sub_module.__name__ = sub_name
+        build_wf.__module__ = sub_name
+        build_wf.__qualname__ = 'build_wf'
+        setattr(sub_module, 'build_wf', build_wf)
+        sys.modules[sub_name] = sub_module
+
+        app.discover_tasks([mod_name])
+        try:
+            errors = app._check_undecorated_builders()
+            # Should NOT detect build_wf — mod_name is not a package
+            assert errors == []
+        finally:
+            self._cleanup_module(sub_name)
+            self._cleanup_module(mod_name)
+
+
+# =============================================================================
+# Integration: check() wiring tests
+# =============================================================================
+
+
+class TestCheckIntegration:
+    """Tests that builder check phases are wired into Horsies.check()."""
+
+    def test_builder_errors_surface_in_check(self) -> None:
+        """Builder check errors appear in check() output."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def missing_cases_builder(x: int) -> WorkflowSpec[Any]:
+            raise NotImplementedError  # pragma: no cover
+
+        # No modules to import, so import phase passes
+        errors = app.check(live=False)
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.WORKFLOW_CHECK_CASES_REQUIRED
+
+    def test_check_passes_with_valid_builder(self) -> None:
+        """check() passes when builder is valid and produces no errors."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def good_builder() -> WorkflowSpec[Any]:
+            return mock.MagicMock(spec=WorkflowSpec)
+
+        errors = app.check(live=False)
+        assert errors == []
+
+    def test_import_errors_block_builder_phase(self) -> None:
+        """If imports fail, builder phase is never reached."""
+        app = _make_app()
+        call_count = 0
+
+        @app.workflow_builder()
+        def my_builder() -> WorkflowSpec[Any]:
+            nonlocal call_count
+            call_count += 1
+            return mock.MagicMock(spec=WorkflowSpec)
+
+        # Register a non-existent module
+        app.discover_tasks(['/nonexistent/module.py'])
+        errors = app.check(live=False)
+        # Import error should be returned
+        assert len(errors) >= 1
+        # Builder should NOT have been called
+        assert call_count == 0
+
+    def test_missing_definition_key_surfaces_in_check(self) -> None:
+        """Imported WorkflowDefinition without definition_key fails check()."""
+        app = _make_app()
+        mod_name = '_test_missing_definition_key_mod'
+        module = types.ModuleType(mod_name)
+        module.__name__ = mod_name
+
+        missing_def = WorkflowDefinitionMeta(
+            'MissingDefinitionKeyWorkflow',
+            (WorkflowDefinition,),
+            {
+                '__module__': mod_name,
+                'name': 'missing_definition_key',
+                'step': TaskNode(fn=mock.MagicMock(task_name='task_a')),
+            },
+        )
+        setattr(module, 'MissingDefinitionKeyWorkflow', missing_def)
+        sys.modules[mod_name] = module
+        app.discover_tasks([mod_name])
+        try:
+            errors = app.check(live=False)
+            assert len(errors) == 1
+            assert errors[0].code == ErrorCode.WORKFLOW_NO_DEFINITION_KEY
+        finally:
+            sys.modules.pop(mod_name, None)
+
+    def test_builder_returning_raw_spec_without_definition_key_fails_check(self) -> None:
+        """Builders returning a raw WorkflowSpec without definition_key fail check()."""
+        app = _make_app()
+
+        @app.workflow_builder()
+        def missing_key_builder() -> WorkflowSpec[Any]:
+            return WorkflowSpec(
+                name='missing_key_builder',
+                tasks=[TaskNode(fn=mock.MagicMock(task_name='task_a'))],
+            )
+
+        errors = app.check(live=False)
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.WORKFLOW_NO_DEFINITION_KEY
+
+
+def _make_custom_app(*queues: tuple[str, int]) -> Horsies:
+    """CUSTOM-mode app with the given (name, priority) queues."""
+    return Horsies(
+        config=AppConfig(
+            broker=PostgresConfig(
+                database_url='postgresql://user:pass@localhost/db',
+            ),
+            queue_mode=QueueMode.CUSTOM,
+            custom_queues=[
+                CustomQueueConfig(name=n, priority=p) for n, p in queues
+            ],
+        ),
+    )
+
+
+class TestNodeBindingInCheck:
+    """check() binds builder-returned spec nodes — the same resolver runtime uses.
+
+    Builders returning a direct WorkflowSpec(...) (the parameterized-subworkflow
+    pattern) bypass app.workflow()'s binding. check() must exercise that binding
+    so invalid queues surface at check time, not at enqueue time.
+    """
+
+    def test_valid_queue_binds_and_passes(self) -> None:
+        """A node on a valid CUSTOM queue binds cleanly — check reports nothing."""
+        app = _make_custom_app(('scraping', 30))
+
+        @app.workflow_builder()
+        def valid_builder() -> WorkflowSpec[Any]:
+            return WorkflowSpec(
+                name='valid_builder',
+                tasks=[
+                    TaskNode(
+                        fn=mock.MagicMock(
+                            task_name='scrape', task_queue_name='scraping',
+                        ),
+                    ),
+                ],
+                definition_key='valid_builder.v1',
+            )
+
+        assert app.check(live=False) == []
+
+    def test_invalid_queue_caught_at_check(self) -> None:
+        """A node on an unknown queue fails check with TASK_INVALID_QUEUE."""
+        app = _make_custom_app(('scraping', 30))
+
+        @app.workflow_builder()
+        def invalid_builder() -> WorkflowSpec[Any]:
+            return WorkflowSpec(
+                name='invalid_builder',
+                tasks=[
+                    TaskNode(
+                        fn=mock.MagicMock(
+                            task_name='scrape', task_queue_name='nonexistent',
+                        ),
+                    ),
+                ],
+                definition_key='invalid_builder.v1',
+            )
+
+        errors = app.check(live=False)
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.TASK_INVALID_QUEUE
+
+
+def _refuse(value: int) -> int:
+    raise ValueError(f'refused {value}')
+
+
+def _broken(value: int) -> int:
+    raise KeyError(value)
+
+
+def _mock_fn(queue: str) -> Any:
+    """A mock task fn carrying a queue name, for TaskNode binding tests."""
+    return mock.MagicMock(task_name=f'task_{queue}', task_queue_name=queue)
+
+
+class TestRecursiveSubworkflowBindingInCheck:
+    """check() expands statically-parameterized SubWorkflowNodes and validates
+    their nodes — catching invalid queues nested in unregistered children.
+
+    Only static subworkflows (no args_from, no from_node markers) are expanded;
+    runtime-parameterized ones are skipped (their build_with needs dependency
+    results absent at check). Cycles are guarded by definition_key.
+    """
+
+    def test_nested_unregistered_subworkflow_invalid_queue_caught(self) -> None:
+        """An invalid queue in a nested, unregistered child fails check."""
+        app = _make_custom_app(('scraping', 30))
+
+        class Child(WorkflowDefinition[Any]):
+            name = 'child'
+            definition_key = 'child.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
+                bad = TaskNode(fn=_mock_fn('ghost'), node_id='bad')
+                return WorkflowSpec(name=cls.name, tasks=[bad], output=bad)
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            return app.workflow(
+                'parent',
+                [SubWorkflowNode(workflow_def=Child)],
+                definition_key='parent.v1',
+            )
+
+        errors = app.check(live=False)
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.TASK_INVALID_QUEUE
+
+    def test_nested_valid_subworkflow_passes(self) -> None:
+        """A nested child whose nodes bind cleanly reports nothing."""
+        app = _make_custom_app(('scraping', 30))
+
+        class Child(WorkflowDefinition[Any]):
+            name = 'child_ok'
+            definition_key = 'child_ok.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
+                ok = TaskNode(fn=_mock_fn('scraping'), node_id='ok')
+                return WorkflowSpec(name=cls.name, tasks=[ok], output=ok)
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            return app.workflow(
+                'parent_ok',
+                [SubWorkflowNode(workflow_def=Child)],
+                definition_key='parent_ok.v1',
+            )
+
+        assert app.check(live=False) == []
+
+    def test_a_child_gets_the_declared_types_from_static_kwargs(self) -> None:
+        """check() builds the child from the engine's read of the stored row, so
+        a list stays a list, a dict stays a dict, and a default is validated."""
+        app = _make_custom_app(('scraping', 30))
+        seen: list[tuple[object, object, object]] = []
+
+        def take(*, values: list[int], shape: dict[str, int]) -> None:
+            _ = values, shape
+
+        leaf_fn = _mock_fn('scraping')
+        leaf_fn._original_fn = take
+
+        class ChildContainers(WorkflowDefinition[Any]):
+            name = 'child_containers'
+            definition_key = 'child_containers.v1'
+
+            @classmethod
+            def build_with(
+                cls,
+                app: Horsies,
+                values: list[int],
+                shape: dict[str, int],
+                label: Annotated[str, AfterValidator(str.upper)] = 'a',
+            ) -> WorkflowSpec[Any]:
+                seen.append((values, shape, label))
+                leaf = TaskNode(
+                    fn=leaf_fn,
+                    node_id='leaf',
+                    kwargs={'values': values, 'shape': shape},
+                )
+                return WorkflowSpec(name=cls.name, tasks=[leaf], output=leaf)
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            sub = SubWorkflowNode(
+                workflow_def=ChildContainers,
+                kwargs={'values': [1, 2], 'shape': {'a': 1}},
+            )
+            return app.workflow(
+                'parent_containers', [sub], definition_key='parent_containers.v1',
+            )
+
+        assert app.check(live=False) == []
+        assert seen == [([1, 2], {'a': 1}, 'A')]
+        assert type(seen[0][0]) is list
+        assert type(seen[0][1]) is dict
+
+    def test_a_default_that_its_validator_refuses_is_a_finding(self) -> None:
+        """At run time this fails the parent node, so check reports it."""
+        app = _make_custom_app(('scraping', 30))
+
+        class Child(WorkflowDefinition[Any]):
+            name = 'child_refused_default'
+            definition_key = 'child_refused_default.v1'
+
+            @classmethod
+            def build_with(
+                cls,
+                app: Horsies,
+                *,
+                x: Annotated[int, AfterValidator(_refuse)] = 1,
+            ) -> WorkflowSpec[Any]:
+                raise AssertionError('the check must stop before the build')
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            sub = SubWorkflowNode(workflow_def=Child)
+            return app.workflow(
+                'parent_refused_default', [sub], definition_key='parent_refused_default.v1',
+            )
+
+        errors = app.check(live=False)
+
+        assert [error.code for error in errors] == [
+            ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+        ]
+        assert 'do not fit build_with' in str(errors[0])
+
+    def test_a_validator_that_raises_on_a_default_does_not_stop_the_boot(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An exception is no verdict on the value: a validator can need a service
+        that is down at boot. It does not stop the process, and it is not silent."""
+        app = _make_custom_app(('scraping', 30))
+
+        class Child(WorkflowDefinition[Any]):
+            name = 'child_broken_validator'
+            definition_key = 'child_broken_validator.v1'
+
+            @classmethod
+            def build_with(
+                cls,
+                app: Horsies,
+                *,
+                x: Annotated[int, AfterValidator(_broken)] = 1,
+            ) -> WorkflowSpec[Any]:
+                raise AssertionError('the check must stop before the build')
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            sub = SubWorkflowNode(workflow_def=Child)
+            return app.workflow(
+                'parent_broken_validator',
+                [sub],
+                definition_key='parent_broken_validator.v1',
+            )
+
+        with caplog.at_level(logging.WARNING):
+            assert app.check(live=False) == []
+
+        warned = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+        ]
+        assert len(warned) == 1
+        assert 'child_broken_validator' in warned[0]
+        assert 'KeyError' in warned[0]
+
+    def test_a_build_that_raises_stays_out_of_scope(self) -> None:
+        """A failure in user code surfaces through the registered builder path, or
+        at run time. It is not a finding of this check."""
+        app = _make_custom_app(('scraping', 30))
+
+        class Child(WorkflowDefinition[Any]):
+            name = 'child_raises'
+            definition_key = 'child_raises.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, *, x: int = 1) -> WorkflowSpec[Any]:
+                raise KeyError('user code')
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            sub = SubWorkflowNode(workflow_def=Child)
+            return app.workflow(
+                'parent_raises', [sub], definition_key='parent_raises.v1',
+            )
+
+        assert app.check(live=False) == []
+
+    def test_a_child_problem_is_found_for_each_set_of_static_kwargs(self) -> None:
+        """The cycle guard keys on the stored kwargs, so a second set is checked."""
+        app = _make_custom_app(('scraping', 30))
+        seen: list[int] = []
+
+        class Child(WorkflowDefinition[Any]):
+            name = 'child_each_kwarg'
+            definition_key = 'child_each_kwarg.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, n: int) -> WorkflowSpec[Any]:
+                seen.append(n)
+                leaf = TaskNode(fn=_mock_fn('scraping'), node_id='leaf')
+                return WorkflowSpec(name=cls.name, tasks=[leaf], output=leaf)
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            first = SubWorkflowNode(workflow_def=Child, node_id='a', kwargs={'n': 1})
+            second = SubWorkflowNode(workflow_def=Child, node_id='b', kwargs={'n': 2})
+            same = SubWorkflowNode(workflow_def=Child, node_id='c', kwargs={'n': 1})
+            return app.workflow(
+                'parent_each_kwarg',
+                [first, second, same],
+                definition_key='parent_each_kwarg.v1',
+            )
+
+        assert app.check(live=False) == []
+        assert sorted(set(seen)) == [1, 2]
+
+    def test_runtime_parameterized_subworkflow_skipped(self) -> None:
+        """A runtime-parameterized (args_from) subworkflow is not expanded.
+
+        Even though its child has an invalid queue, check cannot statically
+        build it, so it reports nothing rather than a false positive.
+        """
+        app = _make_custom_app(('scraping', 30))
+
+        class ChildRuntime(WorkflowDefinition[Any]):
+            name = 'child_rt'
+            definition_key = 'child_rt.v1'
+
+            @classmethod
+            def build_with(
+                cls, app: Horsies, v: TaskResult[int, TaskError],
+            ) -> WorkflowSpec[Any]:
+                bad = TaskNode(fn=_mock_fn('ghost'), node_id='bad')
+                return WorkflowSpec(name=cls.name, tasks=[bad], output=bad)
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            source_fn = _mock_fn('scraping')
+            source_fn.task_ok_type = int
+            src = TaskNode(fn=source_fn, node_id='src')
+            sub = SubWorkflowNode(
+                workflow_def=ChildRuntime, args_from={'v': src}, waits_for=[src],
+            )
+            return app.workflow(
+                'parent_rt', [src, sub], definition_key='parent_rt.v1',
+            )
+
+        assert app.check(live=False) == []
+
+    def test_self_referential_subworkflow_terminates(self) -> None:
+        """A subworkflow that references itself with the same kwargs ends the
+        walk, and check reports it: at run time its nesting never ends."""
+        app = _make_custom_app(('scraping', 30))
+
+        class Recur(WorkflowDefinition[Any]):
+            name = 'recur'
+            definition_key = 'recur.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
+                t = TaskNode(fn=_mock_fn('scraping'), node_id='t')
+                child = SubWorkflowNode(workflow_def=Recur, node_id='self')
+                return app.workflow(
+                    cls.name, [t, child], definition_key=cls.definition_key,
+                )
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            return app.workflow(
+                'parent_recur',
+                [SubWorkflowNode(workflow_def=Recur)],
+                definition_key='parent_recur.v1',
+            )
+
+        # Cycle guard: returns without hanging or RecursionError, with HRS-037.
+        errors = app.check(live=False)
+        assert [error.code for error in errors] == [
+            ErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING
+        ]
+
+    def test_param_varying_self_reference_invalid_queue_caught(self) -> None:
+        """A definition self-referencing with DIFFERENT kwargs is not deduped away.
+
+        Regression: keying the cycle guard on definition_key alone skipped the
+        parameter-varying recursion, so an invalid queue nested at depth>0
+        escaped check. The guard is keyed on (definition_key, kwargs) so the
+        depth-1 instance is still validated.
+        """
+        app = _make_custom_app(('scraping', 30))
+
+        class Recur(WorkflowDefinition[Any]):
+            name = 'recur_pv'
+            definition_key = 'recur_pv.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, *, depth: int = 0) -> WorkflowSpec[Any]:
+                if depth == 0:
+                    # Valid at depth 0; recurse into the SAME definition with
+                    # different kwargs that bind an invalid queue at depth 1.
+                    t = TaskNode(fn=_mock_fn('scraping'), node_id='t0')
+                    deeper = SubWorkflowNode(
+                        workflow_def=Recur, kwargs={'depth': 1}, node_id='deeper',
+                    )
+                    return app.workflow(
+                        cls.name, [t, deeper], definition_key=cls.definition_key,
+                    )
+                bad = TaskNode(fn=_mock_fn('ghost'), node_id='bad')
+                return WorkflowSpec(
+                    name=f'{cls.name}_d{depth}', tasks=[bad], output=bad,
+                )
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            return app.workflow(
+                'parent_pv',
+                [SubWorkflowNode(workflow_def=Recur, kwargs={'depth': 0})],
+                definition_key='parent_pv.v1',
+            )
+
+        codes = [e.code for e in app.check(live=False)]
+        assert ErrorCode.TASK_INVALID_QUEUE in codes
+
+    def test_nested_child_single_structural_error_surfaces(self) -> None:
+        """A nested static child that fails with ONE structural error surfaces it.
+
+        Regression: catching only ConfigurationError let a single
+        WorkflowValidationError (e.g. empty tasks) from a child build_with be
+        swallowed, while multi-error failures surfaced — an inconsistent
+        contract. Static recursion now validates the whole child spec.
+        """
+        app = _make_custom_app(('scraping', 30))
+
+        class EmptyChild(WorkflowDefinition[Any]):
+            name = 'empty_child'
+            definition_key = 'empty_child.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
+                return WorkflowSpec(name=cls.name, tasks=[])  # WORKFLOW_NO_NODES
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            return app.workflow(
+                'parent_empty',
+                [SubWorkflowNode(workflow_def=EmptyChild)],
+                definition_key='parent_empty.v1',
+            )
+
+        codes = [e.code for e in app.check(live=False)]
+        assert ErrorCode.WORKFLOW_NO_NODES in codes
+
+    def test_nested_child_multi_error_surfaces_all(self) -> None:
+        """A nested static child failing with MULTIPLE errors surfaces them all."""
+        app = _make_custom_app(('scraping', 30))
+
+        class MultiBadChild(WorkflowDefinition[Any]):
+            name = 'multi_bad'
+            definition_key = 'multi_bad.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
+                # Two distinct invalid-queue nodes → collected together.
+                a = TaskNode(fn=_mock_fn('ghost1'), node_id='a')
+                b = TaskNode(fn=_mock_fn('ghost2'), node_id='b')
+                return app.workflow(
+                    cls.name, [a, b], definition_key=cls.definition_key,
+                )
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            return app.workflow(
+                'parent_multi',
+                [SubWorkflowNode(workflow_def=MultiBadChild)],
+                definition_key='parent_multi.v1',
+            )
+
+        codes = [e.code for e in app.check(live=False)]
+        # Both invalid-queue nodes reported (not just the first).
+        assert codes.count(ErrorCode.TASK_INVALID_QUEUE) == 2

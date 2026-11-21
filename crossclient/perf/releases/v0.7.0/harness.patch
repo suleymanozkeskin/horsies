@@ -1,0 +1,2969 @@
+diff --git a/tests/perf/__main__.py b/tests/perf/__main__.py
+index af7e03830..4579ae914 100644
+--- a/tests/perf/__main__.py
++++ b/tests/perf/__main__.py
+@@ -11,6 +11,9 @@ conditions that make its numbers meaningful have been stated.
+ 
+     uv run python -m tests.perf --scenario fused-completion-small-result \\
+         --dsn ... --scale gate --demo-quiesced
++
++The worker drain (``claim-finish``) starts ``horsies worker`` from the
++``horsies`` script of the environment that runs the harness.
+ """
+ 
+ from __future__ import annotations
+@@ -19,8 +22,11 @@ import argparse
+ import sys
+ from collections.abc import Sequence
+ from pathlib import Path
++from typing import Any, assert_never
+ 
+-from sqlalchemy import create_engine
++from psycopg.types.string import TextLoader
++from sqlalchemy import create_engine, event
++from sqlalchemy.engine import Engine
+ 
+ from tests.perf.prepare import apply_schema
+ from tests.perf.report import render_raw, render_summary, summary_filename
+@@ -28,7 +34,10 @@ from tests.perf.runner import RunResult, run_scenario, server_setting
+ from tests.perf.scenarios import (
+     SCENARIOS,
+     BatchScenario,
++    PublicCallScenario,
+     Scenario,
++    SingleRowScenario,
++    WorkerDrainScenario,
+     scenario_by_name,
+ )
+ from tests.perf.statistics import Verdict
+@@ -42,11 +51,14 @@ RAW_DIR = RESULTS_DIR / 'raw'
+ # runtime issues is the stated requirement, and ten thousand would seed five
+ # million rows to answer a question a hundred already answers. A smoke run is
+ # proving the machinery, so it takes the smallest count that still exercises
+-# every code path.
++# every code path. A drain is counted in drains: each one sends its tasks and
++# starts a worker, and its sample is the throughput of thousands of tasks.
+ GATE_OBSERVATIONS = 10_000
+ GATE_BATCHES = 100
++GATE_DRAINS = 10
+ SMOKE_OBSERVATIONS = 200
+ SMOKE_BATCHES = 10
++SMOKE_DRAINS = 1
+ GATE_RESAMPLES = 1_000
+ SMOKE_RESAMPLES = 200
+ 
+@@ -121,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
+ 
+     resamples = GATE_RESAMPLES if arguments.scale == 'gate' else SMOKE_RESAMPLES
+     scenarios = _select_scenarios(arguments.scenario)
++    if not scenarios:
++        parser.error(f'--scenario {arguments.scenario} selects no scenario')
+     if arguments.observations is not None and arguments.observations <= 0:
+         parser.error('--observations must be positive')
+     if arguments.scale == 'gate' and arguments.observations is not None:
+@@ -136,14 +150,14 @@ def main(argv: list[str] | None = None) -> int:
+             )
+     if arguments.scale == 'gate' and not arguments.control:
+         missing = [
+-            scenario.name for scenario in scenarios if scenario.candidate is None
++            scenario.name for scenario in scenarios if not _has_candidate(scenario)
+         ]
+         if missing:
+             parser.error(
+                 'a gate requires a real candidate; missing for: ' + ', '.join(missing)
+             )
+ 
+-    engine = create_engine(arguments.dsn)
++    engine = measurement_engine(arguments.dsn)
+     outcomes: list[tuple[Verdict, bool]] = []
+     control_failures: list[str] = []
+     try:
+@@ -160,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
+         for scenario in scenarios:
+             result = run_scenario(
+                 engine,
++                dsn=arguments.dsn,
+                 scenario=scenario,
+                 observations=_observations_for(
+                     scenario,
+@@ -200,6 +215,20 @@ def main(argv: list[str] | None = None) -> int:
+     return _exit_status(arguments.scale, outcomes)
+ 
+ 
++def measurement_engine(dsn: str) -> Engine:
++    """The engine of a run. It reads uuid columns as text, as the runtime
++    engine of the product does (``register_identity_text_reads``): the
++    workflow engine handles workflow and task ids as strings."""
++    engine = create_engine(dsn)
++    event.listen(engine, 'connect', _read_uuid_as_text)
++    return engine
++
++
++def _read_uuid_as_text(dbapi_connection: Any, connection_record: Any) -> None:
++    del connection_record
++    dbapi_connection.adapters.register_loader('uuid', TextLoader)
++
++
+ def _gate_environment_violations(observed: dict[str, str]) -> list[str]:
+     """Contract settings the server does not report as required.
+ 
+@@ -222,13 +251,26 @@ def _select_scenarios(selector: str) -> tuple[Scenario, ...]:
+         case 'all':
+             return SCENARIOS
+         case 'candidates':
+-            return tuple(
+-                scenario for scenario in SCENARIOS if scenario.candidate is not None
+-            )
++            return tuple(scenario for scenario in SCENARIOS if _has_candidate(scenario))
+         case name:
+             return (scenario_by_name(name),)
+ 
+ 
++def _has_candidate(scenario: Scenario) -> bool:
++    """The scenario has a second implementation to compare with its baseline.
++
++    A public call scenario and a worker drain have none: both sides run the
++    one call or drain of the release.
++    """
++    match scenario:
++        case SingleRowScenario() | BatchScenario():
++            return scenario.candidate is not None
++        case PublicCallScenario() | WorkerDrainScenario():
++            return False
++        case _ as unreachable:
++            assert_never(unreachable)
++
++
+ def _exit_status(
+     scale: str,
+     outcomes: Sequence[tuple[Verdict, bool]],
+@@ -260,8 +302,12 @@ def _minimum_observations(scenario: Scenario, scale: str) -> int:
+     match scenario:
+         case BatchScenario():
+             return GATE_BATCHES if scale == 'gate' else SMOKE_BATCHES
+-        case _:
++        case WorkerDrainScenario():
++            return GATE_DRAINS if scale == 'gate' else SMOKE_DRAINS
++        case SingleRowScenario() | PublicCallScenario():
+             return GATE_OBSERVATIONS if scale == 'gate' else SMOKE_OBSERVATIONS
++        case _ as unreachable:
++            assert_never(unreachable)
+ 
+ 
+ def _observations_for(
+@@ -273,12 +319,17 @@ def _observations_for(
+ 
+ 
+ def _block_size_for(scenario: Scenario, requested: int) -> int:
+-    """Batches are seeded per block, so a block is a handful, not a hundred."""
++    """Batches are seeded per block, so a block is a handful, not a hundred.
++    A drain is one block of its own: it sends its tasks before it starts."""
+     match scenario:
+         case BatchScenario():
+             return min(requested, 10)
+-        case _:
++        case WorkerDrainScenario():
++            return 1
++        case SingleRowScenario() | PublicCallScenario():
+             return requested
++        case _ as unreachable:
++            assert_never(unreachable)
+ 
+ 
+ def _control_disagreements(result: RunResult) -> list[str]:
+@@ -298,7 +349,19 @@ def _control_disagreements(result: RunResult) -> list[str]:
+     against what cannot be attributed — not tolerance on the operation's own
+     commit count, which the per-side lower bound below and the declared
+     budgets enforce.
++
++    A worker drain has no such counts: the claim passes, heartbeats and
++    pauses of a worker run on its clocks, so two drains of one release send
++    different numbers of statements. Each drain checks its own tasks: it
++    fails the run unless every task is terminal and the worker stops clean.
+     """
++    match result.scenario:
++        case WorkerDrainScenario():
++            return []
++        case SingleRowScenario() | BatchScenario() | PublicCallScenario():
++            pass
++        case _ as unreachable:
++            assert_never(unreachable)
+     if 'control' not in result.conditions.comparison:
+         return []
+     baseline, candidate = result.baseline.counts, result.candidate.counts
+diff --git a/tests/perf/counters.py b/tests/perf/counters.py
+index ebfdba568..fd2a04121 100644
+--- a/tests/perf/counters.py
++++ b/tests/perf/counters.py
+@@ -23,6 +23,8 @@ _RESET_SQL = text('SELECT pg_stat_statements_reset()')
+ 
+ # Bookkeeping the harness itself issues is excluded by name. Without this the
+ # reset call and these very reads would be counted as work under measurement.
++# A harness read that runs while the work runs, such as the count of terminal
++# tasks during a worker drain, carries the column alias `perf_harness_read`.
+ # WAL is attributed from top-level statements only: pg_stat_statements reports
+ # the WAL generated by a function call on both its top-level SELECT and the
+ # nested statements that produced it. Summing both layers makes an otherwise
+@@ -40,6 +42,7 @@ _READ_SQL = text("""
+     FROM pg_stat_statements
+     WHERE query NOT LIKE '%pg_stat%'
+       AND query NOT LIKE '%pg_snapshot%'
++      AND query NOT LIKE '%perf_harness_read%'
+ """)
+ 
+ # Committed write transactions, counted by transaction-id consumption rather
+diff --git a/tests/perf/prepare.py b/tests/perf/prepare.py
+index fdc31a2b4..2d96421b0 100644
+--- a/tests/perf/prepare.py
++++ b/tests/perf/prepare.py
+@@ -5,6 +5,10 @@ be installed before anything is timed. It lives here rather than in a shell
+ snippet inside a workflow file: a migration invocation embedded in YAML is
+ neither type-checked nor runnable locally, and this one has to work on both
+ supported server versions.
++
++A terminal write moves its row to history, which needs the history leaves
++and the published history readers. A worker creates them at startup with
++one coverage pass; ``--apply-schema`` runs the same pass after the install.
+ """
+ 
+ from __future__ import annotations
+@@ -12,13 +16,24 @@ from __future__ import annotations
+ import asyncio
+ 
+ from horsies.core.brokers.postgres import PostgresBroker
++from horsies.core.history.maintenance.coverage import (
++    CoverageEnsured,
++    CoverageEnsureFailed,
++    ensure_partition_coverage,
++)
++from horsies.core.models.retention import RetentionConfig
+ from pydantic import SecretStr
++from sqlalchemy.ext.asyncio import create_async_engine
+ 
+ from horsies.core.models.broker import PostgresConfig
+ 
+ 
+ def apply_schema(dsn: str) -> None:
+-    """Install or upgrade the schema at `dsn`, then release the connection."""
++    """Install or upgrade the schema at `dsn`, then release the connection.
++
++    Raises:
++        RuntimeError: the coverage pass refused a step; its outcome names it.
++    """
+     asyncio.run(_apply(dsn))
+ 
+ 
+@@ -28,3 +43,25 @@ async def _apply(dsn: str) -> None:
+         await broker.ensure_schema_initialized()
+     finally:
+         await broker.close_async()
++    await _ensure_partition_coverage(dsn)
++
++
++async def _ensure_partition_coverage(dsn: str) -> None:
++    """The coverage pass of a worker's startup with the default retention
++    settings: classes, history and heartbeat leaves, published readers."""
++    retention = RetentionConfig()
++    engine = create_async_engine(dsn)
++    try:
++        async with engine.begin() as connection:
++            outcome = await ensure_partition_coverage(
++                connection,
++                history_horizon_days=retention.history_leaf_horizon_days,
++                heartbeat_horizon_hours=retention.heartbeat_leaf_horizon_hours,
++            )
++    finally:
++        await engine.dispose()
++    match outcome:
++        case CoverageEnsured():
++            return
++        case CoverageEnsureFailed():
++            raise RuntimeError(f'partition coverage refused: {outcome!r}')
+diff --git a/tests/perf/public_calls.py b/tests/perf/public_calls.py
+new file mode 100644
+index 000000000..1716eaa65
+--- /dev/null
++++ b/tests/perf/public_calls.py
+@@ -0,0 +1,155 @@
++"""Public operations of the library, called as an application calls them.
++
++Each call here is public API of horsies 0.7.0 and of the current release, with
++the same signature in both: ``Horsies``, ``AppConfig``, ``PostgresConfig``,
++``app.task``, ``send``, ``TaskNode``, ``app.workflow``, ``WorkflowSpec.start``,
++``PostgresBroker.close``. The harness of each release runs this file
++unchanged (``tests/perf/releases/README.md``), so a comparison of two releases
++measures the same call through the product of each release.
++
++A call writes new rows with ids that the library mints. The rows of a scenario
++carry a task name or a workflow name that only that scenario uses; its cleanup
++deletes them by that name.
++"""
++
++from __future__ import annotations
++
++from typing import Final
++
++from pydantic import SecretStr
++from sqlalchemy import text
++from sqlalchemy.engine import Connection
++
++from horsies import (
++    AppConfig,
++    Err,
++    Horsies,
++    Ok,
++    PostgresConfig,
++    TaskError,
++    TaskNode,
++    TaskResult,
++)
++
++INPUT_TEXT_BYTES: Final = 200
++"""The length of the one text argument that each call sends."""
++
++SEND_TASK_NAME: Final = 'perf.public.send'
++"""The task of the send scenario. No other code sends it."""
++
++WORKFLOW_NAME: Final = 'perf.public.workflow'
++"""The workflow of the start scenario. No other code starts it."""
++
++WORKFLOW_DEFINITION_KEY: Final = 'perf.public.workflow.v1'
++
++WORKFLOW_TASK_NAME: Final = 'perf.public.workflow-node'
++"""The task of the one node of the started workflow."""
++
++_DELETE_TASKS_BY_NAME_SQL = text("""
++    DELETE FROM horsies_tasks WHERE task_name = :task_name
++""")
++
++# The delete of a workflow row cascades to its node rows (ON DELETE CASCADE).
++_DELETE_WORKFLOWS_BY_NAME_SQL = text("""
++    DELETE FROM horsies_workflows WHERE name = :workflow_name
++""")
++
++
++def _app(dsn: str) -> Horsies:
++    """An app whose broker connects to ``dsn``. No I/O."""
++    return Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(dsn))))
++
++
++class SendCall:
++    """One call is ``send`` of one task with one text argument, as a producer
++    sends it. Each call writes one PENDING task row; no worker runs it."""
++
++    def __init__(self, dsn: str) -> None:
++        """Define the task on a new app of ``dsn``. No I/O: the broker
++        connects at the first call."""
++        app = _app(dsn)
++
++        @app.task(SEND_TASK_NAME)
++        def perf_public_send(*, text: str) -> TaskResult[str, TaskError]:
++            return TaskResult(ok=text)
++
++        self._broker = app.get_broker()
++        self._task = perf_public_send
++        self._text = 'x' * INPUT_TEXT_BYTES
++
++    def call(self) -> None:
++        """Send the task once. Writes one task row.
++
++        Raises:
++            RuntimeError: the send returned an error; it names the error. The
++                run stops: a measured operation must apply.
++        """
++        match self._task.send(text=self._text):
++            case Ok():
++                return
++            case Err(err_value=error):
++                raise RuntimeError(f'send of {SEND_TASK_NAME} returned {error!r}')
++
++    def close(self) -> None:
++        """Close the broker. A failed close is discarded: the process of the
++        run ends after it, and the result of the run does not depend on it."""
++        _ = self._broker.close()
++
++
++class WorkflowStartCall:
++    """One call is ``start`` of a one-node workflow, as an application starts
++    it. Each call writes the workflow row, its node row and the task row of
++    the node; no worker runs it."""
++
++    def __init__(self, dsn: str) -> None:
++        """Define the task and the workflow on a new app of ``dsn``. No I/O:
++        the broker connects at the first call."""
++        app = _app(dsn)
++
++        @app.task(WORKFLOW_TASK_NAME)
++        def perf_public_workflow_node(*, text: str) -> TaskResult[str, TaskError]:
++            return TaskResult(ok=text)
++
++        node = TaskNode(
++            fn=perf_public_workflow_node,
++            kwargs={'text': 'x' * INPUT_TEXT_BYTES},
++        )
++        self._broker = app.get_broker()
++        self._spec = app.workflow(
++            name=WORKFLOW_NAME,
++            tasks=[node],
++            output=node,
++            definition_key=WORKFLOW_DEFINITION_KEY,
++        )
++
++    def call(self) -> None:
++        """Start the workflow once, with a workflow id that the library mints.
++
++        Raises:
++            RuntimeError: the start returned an error; it names the error. The
++                run stops: a measured operation must apply.
++        """
++        match self._spec.start():
++            case Ok():
++                return
++            case Err(err_value=error):
++                raise RuntimeError(f'start of {WORKFLOW_NAME} returned {error!r}')
++
++    def close(self) -> None:
++        """Close the broker. A failed close is discarded: the process of the
++        run ends after it, and the result of the run does not depend on it."""
++        _ = self._broker.close()
++
++
++def delete_sent_tasks(connection: Connection) -> None:
++    """Delete every task row of ``SEND_TASK_NAME`` and commit."""
++    connection.execute(_DELETE_TASKS_BY_NAME_SQL, {'task_name': SEND_TASK_NAME})
++    connection.commit()
++
++
++def delete_started_workflows(connection: Connection) -> None:
++    """Delete every workflow of ``WORKFLOW_NAME`` with its node rows, then the
++    task rows of its node, and commit."""
++    connection.execute(_DELETE_WORKFLOWS_BY_NAME_SQL, {'workflow_name': WORKFLOW_NAME})
++    connection.execute(_DELETE_TASKS_BY_NAME_SQL, {'task_name': WORKFLOW_TASK_NAME})
++    connection.commit()
+diff --git a/tests/perf/report.py b/tests/perf/report.py
+index 32104d479..09d3db928 100644
+--- a/tests/perf/report.py
++++ b/tests/perf/report.py
+@@ -15,13 +15,19 @@ from __future__ import annotations
+ 
+ import json
+ from dataclasses import asdict
+-from typing import cast
++from typing import assert_never, cast
+ 
+ from tests.perf.runner import (
+     WAL_RECORD_DELTA_PER_TERMINAL_ROW,
+     Measurement,
+     RunResult,
+ )
++from tests.perf.scenarios import (
++    BatchScenario,
++    PublicCallScenario,
++    SingleRowScenario,
++    WorkerDrainScenario,
++)
+ from tests.perf.statistics import Comparison, ThroughputComparison
+ 
+ 
+@@ -48,7 +54,7 @@ def render_summary(result: RunResult) -> str:
+         f'| observations per side | {conditions.observations_per_side} |',
+         f'| block size | {conditions.block_size} |',
+         f'| pre-existing terminal rows | {conditions.ballast_rows} |',
+-        f'| result payload | {conditions.payload_bytes} bytes |',
++        f'| payload per operation | {conditions.payload_bytes} bytes |',
+         f'| batch | {batch} |',
+         f'| fsync | {conditions.fsync} |',
+         f'| full_page_writes | {conditions.full_page_writes} |',
+@@ -58,17 +64,25 @@ def render_summary(result: RunResult) -> str:
+         f'| bootstrap seed | {conditions.seed} |',
+         f'| demo units quiesced | {_yes_no(conditions.demo_quiesced)} |',
+     ]
+-    if result.throughput is None:
+-        lines += [
+-            '',
+-            '## Latency',
+-            '',
+-            '| percentile | baseline | candidate | delta | 95% interval | budget | verdict |',
+-            '|---|---|---|---|---|---|---|',
+-            *[_latency_row(c) for c in result.comparisons],
+-        ]
+-    else:
+-        lines += _batch_performance(result.throughput, result.comparisons)
++    match result.scenario:
++        case SingleRowScenario() | PublicCallScenario():
++            lines += [
++                '',
++                '## Latency',
++                '',
++                '| percentile | baseline | candidate | delta | 95% interval | budget | verdict |',
++                '|---|---|---|---|---|---|---|',
++                *[_latency_row(c) for c in result.comparisons],
++            ]
++        case BatchScenario():
++            lines += _batch_performance(
++                _required_throughput(result),
++                result.comparisons,
++            )
++        case WorkerDrainScenario():
++            lines += _drain_performance(_required_throughput(result))
++        case _ as unreachable:
++            assert_never(unreachable)
+     if result.plans is not None:
+         lines += [
+             '',
+@@ -202,6 +216,41 @@ def _batch_performance(
+     ]
+ 
+ 
++def _required_throughput(result: RunResult) -> ThroughputComparison:
++    """The throughput of a batch or drain result, which the runner computes
++    for every such result."""
++    if result.throughput is None:
++        raise RuntimeError(
++            f'{result.conditions.scenario}: a batch or drain result has no '
++            'throughput comparison'
++        )
++    return result.throughput
++
++
++def _drain_performance(throughput: ThroughputComparison) -> list[str]:
++    return [
++        '',
++        '## Drain throughput',
++        '',
++        '| metric | baseline | candidate | comparison | 95% interval | budget | verdict |',
++        '|---|---|---|---|---|---|---|',
++        '| tasks per second '
++        f'| {throughput.baseline_rows_per_second:.0f} tasks/s '
++        f'| {throughput.candidate_rows_per_second:.0f} tasks/s '
++        f'| {throughput.ratio:.3f}x '
++        f'| {throughput.ci_low_ratio:.3f}x to '
++        f'{throughput.ci_high_ratio:.3f}x '
++        f'| >= {throughput.minimum_ratio:.2f}x '
++        f'| {throughput.verdict.value} |',
++        '',
++        'Throughput is the sent tasks of the drains divided by their total '
++        'time. The time of a drain includes the start of the worker process, '
++        'and ends at the start of the count that read every task terminal. '
++        'The server counts include the statements of the worker from its '
++        'start until that count, without the counts of the harness.',
++    ]
++
++
+ def _counts_rows(baseline: Measurement, candidate: Measurement) -> list[str]:
+     return [
+         f'| client statements | {baseline.counts.client_statements} '
+diff --git a/tests/perf/runner.py b/tests/perf/runner.py
+index 3a7ca1388..533b69167 100644
+--- a/tests/perf/runner.py
++++ b/tests/perf/runner.py
+@@ -33,13 +33,34 @@ from tests.perf.counters import Counts, CounterProbe, install_extension
+ from tests.perf.scenarios import (
+     BatchScenario,
+     Invocation,
++    PublicCall,
++    PublicCallScenario,
++    Role,
+     Scenario,
++    SeedRows,
+     SingleRowScenario,
++    StatementScenario,
++    WorkerDrainScenario,
+     analyze,
+     delete_seeded,
+-    id_prefix,
++    seed_rows,
+     seed_terminal_ballast,
+-    task_ids,
++)
++from tests.perf.worker_drain import DrainSender
++from tests.perf.worker_process import (
++    Drained,
++    DrainOutcome,
++    DrainTimedOut,
++    StartedWorker,
++    WorkerExitedEarly,
++    WorkerKilled,
++    WorkerStartFailed,
++    WorkerStop,
++    WorkerStopped,
++    remove_log,
++    stop_worker,
++    wait_for_drain,
++    worker_state,
+ )
+ from tests.perf.statistics import (
+     Comparison,
+@@ -107,6 +128,7 @@ class PlanEvidence:
+ 
+ @dataclass(frozen=True, slots=True)
+ class RunResult:
++    scenario: Scenario
+     conditions: Conditions
+     baseline: Measurement
+     candidate: Measurement
+@@ -120,6 +142,7 @@ class RunResult:
+ def run_scenario(
+     engine: Engine,
+     *,
++    dsn: str,
+     scenario: Scenario,
+     observations: int,
+     block_size: int,
+@@ -128,10 +151,14 @@ def run_scenario(
+     demo_quiesced: bool,
+     control: bool = False,
+ ) -> RunResult:
+-    """Measure both sides of one scenario and judge the difference."""
+-    baseline_prefix = id_prefix(scenario.name, 'base')
+-    candidate_prefix = id_prefix(scenario.name, 'cand')
+-    ballast_prefix = id_prefix(scenario.name, 'ball')
++    """Measure both sides of one scenario and judge the difference.
++
++    ``dsn`` is the database of ``engine``, in the form the library accepts:
++    the client of a public call scenario connects with it.
++    """
++    baseline_rows = seed_rows(scenario.name, Role.BASELINE)
++    candidate_rows = seed_rows(scenario.name, Role.CANDIDATE)
++    ballast_rows = seed_rows(scenario.name, Role.BALLAST)
+ 
+     with engine.connect() as connection:
+         install_extension(connection)
+@@ -141,36 +168,55 @@ def run_scenario(
+         synchronous_commit = server_setting(connection, 'synchronous_commit')
+         autovacuum = server_setting(connection, 'autovacuum')
+ 
+-        for stale in (baseline_prefix, candidate_prefix):
+-            scenario.cleanup(connection, stale)
+-        delete_seeded(connection, ballast_prefix)
++        for stale in (baseline_rows, candidate_rows):
++            _cleanup(scenario, connection, stale)
++        delete_seeded(connection, ballast_rows)
+         seed_terminal_ballast(
+             connection,
+-            prefix=ballast_prefix,
++            rows=ballast_rows,
+             count=BALLAST_ROWS,
+             payload_bytes=200,
+         )
+         try:
+-            baseline, candidate, plans = _measure_interleaved(
+-                connection,
+-                scenario=scenario,
+-                baseline_prefix=baseline_prefix,
+-                candidate_prefix=candidate_prefix,
+-                observations=observations,
+-                block_size=block_size,
+-                control=control,
+-            )
++            match scenario:
++                case SingleRowScenario() | BatchScenario():
++                    baseline, candidate, plans = _measure_interleaved(
++                        connection,
++                        scenario=scenario,
++                        baseline_rows=baseline_rows,
++                        candidate_rows=candidate_rows,
++                        observations=observations,
++                        block_size=block_size,
++                        control=control,
++                    )
++                case PublicCallScenario():
++                    baseline, candidate, plans = _measure_public_interleaved(
++                        connection,
++                        dsn=dsn,
++                        scenario=scenario,
++                        observations=observations,
++                        block_size=block_size,
++                    )
++                case WorkerDrainScenario():
++                    baseline, candidate, plans = _measure_drains_interleaved(
++                        connection,
++                        dsn=dsn,
++                        scenario=scenario,
++                        drains=observations,
++                    )
++                case _ as unreachable:
++                    assert_never(unreachable)
+         finally:
+             # A statement failure leaves PostgreSQL's transaction aborted.
+             # Roll it back before cleanup so the original error is not masked
+             # by a second "current transaction is aborted" cleanup error.
+             connection.rollback()
+-            for seeded in (baseline_prefix, candidate_prefix):
+-                scenario.cleanup(connection, seeded)
+-            delete_seeded(connection, ballast_prefix)
++            for seeded in (baseline_rows, candidate_rows):
++                _cleanup(scenario, connection, seeded)
++            delete_seeded(connection, ballast_rows)
+ 
+     match scenario:
+-        case SingleRowScenario():
++        case SingleRowScenario() | PublicCallScenario():
+             comparisons = [
+                 compare(
+                     baseline=baseline.samples_ms,
+@@ -205,6 +251,16 @@ def run_scenario(
+                 resamples=resamples,
+                 seed=seed,
+             )
++        case WorkerDrainScenario():
++            comparisons = []
++            throughput = compare_throughput(
++                baseline_ms=baseline.samples_ms,
++                candidate_ms=candidate.samples_ms,
++                rows_per_operation=scenario.task_count,
++                minimum_ratio=scenario.minimum_throughput_ratio,
++                resamples=resamples,
++                seed=seed,
++            )
+         case _ as unreachable:
+             assert_never(unreachable)
+ 
+@@ -243,6 +299,7 @@ def run_scenario(
+     )
+ 
+     return RunResult(
++        scenario=scenario,
+         conditions=conditions,
+         baseline=baseline,
+         candidate=candidate,
+@@ -257,9 +314,9 @@ def run_scenario(
+ def _measure_interleaved(
+     connection: Connection,
+     *,
+-    scenario: Scenario,
+-    baseline_prefix: str,
+-    candidate_prefix: str,
++    scenario: StatementScenario,
++    baseline_rows: SeedRows,
++    candidate_rows: SeedRows,
+     observations: int,
+     block_size: int,
+     control: bool,
+@@ -271,7 +328,7 @@ def _measure_interleaved(
+     same state.
+     """
+     blocks = -(-observations // block_size)
+-    prefixes = {Side.BASELINE: baseline_prefix, Side.CANDIDATE: candidate_prefix}
++    rows = {Side.BASELINE: baseline_rows, Side.CANDIDATE: candidate_rows}
+ 
+     # A single-row operation consumes the row named in its parameters, so both
+     # sides can be seeded once from disjoint id ranges. A batch operation
+@@ -286,27 +343,27 @@ def _measure_interleaved(
+         case SingleRowScenario():
+             # One warmup block per side beyond the measured ones.
+             per_side_rows = (blocks + 1) * block_size
+-            for side, prefix in prefixes.items():
+-                _seed_for(scenario, connection, prefix=prefix, count=per_side_rows)
+-                ids[side] = task_ids(prefix, per_side_rows)
++            for side, side_rows in rows.items():
++                _seed_for(scenario, connection, rows=side_rows, count=per_side_rows)
++                ids[side] = side_rows.tasks.ids(per_side_rows)
+             analyze(connection)
+             plans = _capture_plans(
+                 connection,
+                 scenario,
+-                baseline_warmup_id=f'{baseline_prefix}1',
+-                candidate_warmup_id=f'{candidate_prefix}1',
+-                baseline_task_id=f'{baseline_prefix}2',
+-                candidate_task_id=f'{candidate_prefix}2',
++                baseline_warmup_id=baseline_rows.tasks.id_at(1),
++                candidate_warmup_id=candidate_rows.tasks.id_at(1),
++                baseline_task_id=baseline_rows.tasks.id_at(2),
++                candidate_task_id=candidate_rows.tasks.id_at(2),
+                 control=control,
+             )
+         case BatchScenario():
+-            for side in prefixes:
++            for side in rows:
+                 ids[side] = iter(())
+             plans = _capture_batch_plans(
+                 connection,
+                 scenario,
+-                baseline_prefix=baseline_prefix,
+-                candidate_prefix=candidate_prefix,
++                baseline_rows=baseline_rows,
++                candidate_rows=candidate_rows,
+                 control=control,
+             )
+         case _ as unreachable:
+@@ -317,7 +374,7 @@ def _measure_interleaved(
+     probe = CounterProbe(connection)
+ 
+     for side in (Side.BASELINE, Side.CANDIDATE):
+-        _seed_block(scenario, connection, prefix=prefixes[side], block_size=block_size)
++        _seed_block(scenario, connection, rows=rows[side], block_size=block_size)
+         _run_block(
+             connection,
+             scenario,
+@@ -332,7 +389,7 @@ def _measure_interleaved(
+             _seed_block(
+                 scenario,
+                 connection,
+-                prefix=prefixes[side],
++                rows=rows[side],
+                 block_size=block_size,
+             )
+             probe.begin()
+@@ -360,6 +417,215 @@ def _measure_interleaved(
+     )
+ 
+ 
++def _measure_public_interleaved(
++    connection: Connection,
++    *,
++    dsn: str,
++    scenario: PublicCallScenario,
++    observations: int,
++    block_size: int,
++) -> tuple[Measurement, Measurement, None]:
++    """Alternate blocks of the public call between the two sides until both
++    are complete; the first block of each side is a warmup.
++
++    Both sides share one client, as both sides of a statement scenario share
++    one connection: the library's pool and its first connection are paid in
++    the warmup blocks. The rows the calls write stay until the cleanup of the
++    run. No plan is captured: the statements are the library's.
++    """
++    blocks = -(-observations // block_size)
++    samples: dict[Side, list[float]] = {Side.BASELINE: [], Side.CANDIDATE: []}
++    counts: dict[Side, list[Counts]] = {Side.BASELINE: [], Side.CANDIDATE: []}
++    analyze(connection)
++    probe = CounterProbe(connection)
++    client = scenario.open_call(dsn)
++    try:
++        for _warmup_side in (Side.BASELINE, Side.CANDIDATE):
++            _ = _run_public_block(client, block_size)
++        for _ in range(blocks):
++            for side in (Side.BASELINE, Side.CANDIDATE):
++                probe.begin()
++                # The probe's reads assign no transaction id. Ending their
++                # transaction leaves the harness session idle while the
++                # library writes on its own connections.
++                connection.commit()
++                samples[side] += _run_public_block(client, block_size)
++                counts[side].append(probe.finish(terminal_rows=0))
++                connection.commit()
++    finally:
++        client.close()
++    return (
++        Measurement(
++            samples_ms=samples[Side.BASELINE],
++            counts=_total(counts[Side.BASELINE]),
++        ),
++        Measurement(
++            samples_ms=samples[Side.CANDIDATE],
++            counts=_total(counts[Side.CANDIDATE]),
++        ),
++        None,
++    )
++
++
++def _run_public_block(client: PublicCall, block_size: int) -> list[float]:
++    """One block of public calls, each timed on its own. A call moves no task
++    row to history."""
++    samples: list[float] = []
++    for _ in range(block_size):
++        started = time.perf_counter_ns()
++        client.call()
++        samples.append((time.perf_counter_ns() - started) / 1_000_000)
++    return samples
++
++
++def _measure_drains_interleaved(
++    connection: Connection,
++    *,
++    dsn: str,
++    scenario: WorkerDrainScenario,
++    drains: int,
++) -> tuple[Measurement, Measurement, None]:
++    """Alternate drains between the two sides until each side has ``drains``;
++    the first drain of each side is a warmup.
++
++    Both sides share one sender. Each drain starts a new worker, so each
++    sample pays the start of a worker process. No plan is captured: the
++    statements are the worker's.
++    """
++    samples: dict[Side, list[float]] = {Side.BASELINE: [], Side.CANDIDATE: []}
++    counts: dict[Side, list[Counts]] = {Side.BASELINE: [], Side.CANDIDATE: []}
++    analyze(connection)
++    probe = CounterProbe(connection)
++    sender = scenario.open_sender(dsn)
++    try:
++        for _warmup_side in (Side.BASELINE, Side.CANDIDATE):
++            _ = _drain_once(
++                connection,
++                dsn=dsn,
++                scenario=scenario,
++                sender=sender,
++                probe=probe,
++            )
++        for _ in range(drains):
++            for side in (Side.BASELINE, Side.CANDIDATE):
++                elapsed_ms, drain_counts = _drain_once(
++                    connection,
++                    dsn=dsn,
++                    scenario=scenario,
++                    sender=sender,
++                    probe=probe,
++                )
++                samples[side].append(elapsed_ms)
++                counts[side].append(drain_counts)
++    finally:
++        sender.close()
++    return (
++        Measurement(
++            samples_ms=samples[Side.BASELINE],
++            counts=_total(counts[Side.BASELINE]),
++        ),
++        Measurement(
++            samples_ms=samples[Side.CANDIDATE],
++            counts=_total(counts[Side.CANDIDATE]),
++        ),
++        None,
++    )
++
++
++def _drain_once(
++    connection: Connection,
++    *,
++    dsn: str,
++    scenario: WorkerDrainScenario,
++    sender: DrainSender,
++    probe: CounterProbe,
++) -> tuple[float, Counts]:
++    """One drain: delete the tasks of the last drain, send the tasks, start a
++    worker, time it until every task is terminal, then stop it.
++
++    The probe brackets the worker from its start until the drain. Gives the
++    time in milliseconds and the server counts.
++
++    Raises:
++        RuntimeError: the worker did not start, did not drain the tasks in
++            ``scenario.timeout``, exited before it drained them, or did not
++            exit 0 after SIGTERM. The message names the log of the worker,
++            which stays in the temporary directory.
++    """
++    scenario.cleanup(connection)
++    sender.send(scenario.task_count)
++    probe.begin()
++    # The probe's reads assign no transaction id. Ending their transaction
++    # leaves the harness session idle while the worker writes.
++    connection.commit()
++    match scenario.start_worker(dsn):
++        case WorkerStartFailed(command=command, cause=cause):
++            raise RuntimeError(f'the worker did not start: {cause}; command: {command}')
++        case StartedWorker() as worker:
++            pass
++    try:
++        match _wait_for_drain(connection, scenario=scenario, worker=worker):
++            case Drained(elapsed_ns=elapsed_ns):
++                drain_counts = probe.finish(terminal_rows=scenario.task_count)
++                connection.commit()
++            case DrainTimedOut() | WorkerExitedEarly() as failed:
++                raise RuntimeError(
++                    f'{scenario.name}: {failed!r}; worker log: {worker.log_path}'
++                )
++    except BaseException:
++        # Explicit discard: the error that stopped the drain is the report;
++        # the stop only frees the database and the host.
++        _ = stop_worker(worker.process, scenario.stop_timeout)
++        raise
++    _require_clean_stop(
++        stop_worker(worker.process, scenario.stop_timeout),
++        scenario=scenario,
++        worker=worker,
++    )
++    remove_log(worker)
++    return elapsed_ns / 1_000_000, drain_counts
++
++
++def _wait_for_drain(
++    connection: Connection,
++    *,
++    scenario: WorkerDrainScenario,
++    worker: StartedWorker,
++) -> DrainOutcome:
++    return wait_for_drain(
++        count_terminal=lambda: scenario.count_terminal(connection),
++        state_of_worker=lambda: worker_state(worker.process),
++        expected=scenario.task_count,
++        started_ns=worker.started_ns,
++        timeout=scenario.timeout,
++        interval=scenario.count_interval,
++        clock_ns=time.perf_counter_ns,
++        sleep=time.sleep,
++    )
++
++
++def _require_clean_stop(
++    stop: WorkerStop,
++    *,
++    scenario: WorkerDrainScenario,
++    worker: StartedWorker,
++) -> None:
++    """A drained worker exits 0 after SIGTERM (the stop contract of
++    ``horsies worker``).
++
++    Raises:
++        RuntimeError: it exited with another code, or was killed.
++    """
++    match stop:
++        case WorkerStopped(exit_code=0):
++            return
++        case WorkerStopped() | WorkerKilled():
++            raise RuntimeError(
++                f'{scenario.name}: the drained worker did not stop clean: '
++                f'{stop!r}; worker log: {worker.log_path}'
++            )
++
++
+ def _capture_plans(
+     connection: Connection,
+     scenario: SingleRowScenario,
+@@ -403,8 +669,8 @@ def _capture_batch_plans(
+     connection: Connection,
+     scenario: BatchScenario,
+     *,
+-    baseline_prefix: str,
+-    candidate_prefix: str,
++    baseline_rows: SeedRows,
++    candidate_rows: SeedRows,
+     control: bool,
+ ) -> PlanEvidence | None:
+     """Capture each discovery plan against its own isolated eligible pool."""
+@@ -414,17 +680,17 @@ def _capture_batch_plans(
+     if candidate_factory is None:
+         return None
+ 
+-    scenario.cleanup(connection, baseline_prefix)
+-    scenario.cleanup(connection, candidate_prefix)
+-    scenario.seed(connection, baseline_prefix, scenario.batch_size)
++    scenario.cleanup(connection, baseline_rows)
++    scenario.cleanup(connection, candidate_rows)
++    scenario.seed(connection, baseline_rows, scenario.batch_size)
+     analyze(connection)
+     baseline = _explain(connection, scenario.baseline_invocation())
+-    scenario.cleanup(connection, baseline_prefix)
++    scenario.cleanup(connection, baseline_rows)
+ 
+-    scenario.seed(connection, candidate_prefix, scenario.batch_size)
++    scenario.seed(connection, candidate_rows, scenario.batch_size)
+     analyze(connection)
+     candidate = _explain(connection, candidate_factory())
+-    scenario.cleanup(connection, candidate_prefix)
++    scenario.cleanup(connection, candidate_rows)
+     return PlanEvidence(baseline=baseline, candidate=candidate)
+ 
+ 
+@@ -458,7 +724,7 @@ def _explain(connection: Connection, invocation: Invocation) -> dict[str, Any]:
+ 
+ def _run_block(
+     connection: Connection,
+-    scenario: Scenario,
++    scenario: StatementScenario,
+     ids: Iterator[str],
+     block_size: int,
+     *,
+@@ -552,10 +818,10 @@ def _total(blocks: list[Counts]) -> Counts:
+ 
+ 
+ def _seed_block(
+-    scenario: Scenario,
++    scenario: StatementScenario,
+     connection: Connection,
+     *,
+-    prefix: str,
++    rows: SeedRows,
+     block_size: int,
+ ) -> None:
+     """Rows a batch block will consume, seeded immediately before it runs."""
+@@ -563,43 +829,65 @@ def _seed_block(
+         case SingleRowScenario():
+             return
+         case BatchScenario(batch_size=batch_size):
+-            # Clear first: a batch operation transitions its rows rather than
+-            # removing them, so last block's ids are still present and would
+-            # collide. Every block therefore starts from a pool holding exactly
+-            # what it is meant to consume.
+-            scenario.cleanup(connection, prefix)
+-            scenario.seed(connection, prefix, block_size * batch_size)
++            # Clear first: a batch operation moves its rows to history, where
++            # last block's ids are still present, and a second move of one id
++            # is refused by the duplicate identity guard. Every block
++            # therefore starts from a pool holding exactly what it is meant
++            # to consume.
++            scenario.cleanup(connection, rows)
++            scenario.seed(connection, rows, block_size * batch_size)
+             analyze(connection)
+         case _ as unreachable:
+             assert_never(unreachable)
+ 
+ 
+ def _seed_for(
+-    scenario: Scenario,
++    scenario: StatementScenario,
+     connection: Connection,
+     *,
+-    prefix: str,
++    rows: SeedRows,
+     count: int,
+ ) -> None:
+-    scenario.seed(connection, prefix, count)
++    scenario.seed(connection, rows, count)
++
++
++def _cleanup(scenario: Scenario, connection: Connection, rows: SeedRows) -> None:
++    """Delete the rows that ``scenario`` wrote for one role, and commit."""
++    match scenario:
++        case SingleRowScenario() | BatchScenario():
++            scenario.cleanup(connection, rows)
++        case PublicCallScenario() | WorkerDrainScenario():
++            # The calls and the sends write rows with ids that the library
++            # mints; the cleanup finds them by the names the scenario owns,
++            # so it has no role.
++            scenario.cleanup(connection)
++        case _ as unreachable:
++            assert_never(unreachable)
+ 
+ 
+ def _payload_bytes(scenario: Scenario) -> int:
+     match scenario:
+         case SingleRowScenario(payload_bytes=payload_bytes):
+             return payload_bytes
++        case PublicCallScenario(payload_bytes=payload_bytes):
++            return payload_bytes
+         case BatchScenario():
+             return 200
++        case WorkerDrainScenario():
++            # The no-op task takes no argument.
++            return 0
+         case _ as unreachable:
+             assert_never(unreachable)
+ 
+ 
+ def _batch_size(scenario: Scenario) -> int | None:
+     match scenario:
+-        case SingleRowScenario():
++        case SingleRowScenario() | PublicCallScenario():
+             return None
+         case BatchScenario(batch_size=batch_size):
+             return batch_size
++        case WorkerDrainScenario(task_count=task_count):
++            return task_count
+         case _ as unreachable:
+             assert_never(unreachable)
+ 
+@@ -607,6 +895,10 @@ def _batch_size(scenario: Scenario) -> int | None:
+ def _comparison_label(scenario: Scenario, *, control: bool) -> str:
+     """What the run actually compared, stated where a reader will see it."""
+     match scenario:
++        case PublicCallScenario():
++            return 'public call against itself (harness control)'
++        case WorkerDrainScenario():
++            return 'worker drain against itself (harness control)'
+         case _ if control:
+             return 'existing statement against itself (harness control)'
+         case SingleRowScenario(candidate=None) | BatchScenario(candidate=None):
+@@ -630,8 +922,16 @@ def _contract_violations(
+ 
+     Latency is sampled and has confidence intervals. These facts are counted,
+     so they fail directly: an interval cannot make an extra commit or WAL
+-    record less real.
++    record less real. A public call scenario and a worker drain have one
++    implementation, which both sides run, so they have no contract to break.
+     """
++    match scenario:
++        case PublicCallScenario() | WorkerDrainScenario():
++            return ()
++        case SingleRowScenario() | BatchScenario():
++            pass
++        case _ as unreachable:
++            assert_never(unreachable)
+     if control or scenario.candidate is None:
+         return ()
+ 
+diff --git a/tests/perf/scenarios.py b/tests/perf/scenarios.py
+index f67e92133..a99d921f4 100644
+--- a/tests/perf/scenarios.py
++++ b/tests/perf/scenarios.py
+@@ -10,9 +10,26 @@ consumes one seeded row per call, and a batch operation selects its own rows
+ under a bound and consumes many. Reporting a batch as though it were one row
+ would flatter it by the batch size.
+ 
+-The candidate side is the database-owned implementation. ``--control`` makes
+-the candidate side execute the baseline explicitly; a gate refuses a scenario
+-whose candidate does not exist.
++Variant for a comparison of releases: each scenario runs the statement that
++the 0.7.0 product sends on both sides (a control run). The pre-consolidation
++statements of ``legacy_terminalization_sql`` write a terminal status into the
++live table, which ``horsies_tasks_live_status_only`` refuses, so they cannot
++run on the 0.7.0 schema.
++
++A third shape calls a public operation of the library (``public_calls.py``)
++in place of a statement: the library sends its own statements, so the
++harness times the call and counts what the server recorded. The call is the
++same public API in each release, so the harness of each release measures the
++same work through its own product.
++
++A fourth shape drains sent tasks with a worker that the public CLI starts
++(``worker_drain.py``): the worker claims, runs and finishes them, and the
++harness reports the drain as throughput.
++
++Seeded rows carry ids of the column type: one UUIDv7 per scenario, role,
++kind of row and index (``seed_rows``). The ids of one role and kind share
++their leading digits, so a run finds and deletes its own rows by an id range
++on the primary key, also the rows of a run that crashed.
+ """
+ 
+ from __future__ import annotations
+@@ -20,10 +37,12 @@ from __future__ import annotations
+ import asyncio
+ import atexit
+ import hashlib
+-from collections.abc import Callable, Iterator
++import uuid
++from collections.abc import Callable, Iterator, Mapping, Sequence
+ from dataclasses import dataclass
+-from datetime import datetime, timezone
+-from typing import Any, cast
++from datetime import datetime, timedelta, timezone
++from enum import Enum
++from typing import Any, Final, Protocol, cast
+ 
+ from sqlalchemy import text
+ from sqlalchemy.engine import Connection
+@@ -46,8 +65,22 @@ from horsies.core.lifecycle.commands import (
+     TerminalizationCommand,
+ )
+ from horsies.core.lifecycle.fences import OwnedClaim, PriorLockedRead, WorkerOwned
+-from horsies.core.lifecycle.outcomes import Applied, decode_outcome_row
++from horsies.core.lifecycle.outcomes import (
++    Applied,
++    CapacityWoken,
++    FailureApplied,
++    PhaseTwoOwed,
++    RetryNotRequested,
++    SuccessApplied,
++    decode_failed_attempt_row,
++    decode_outcome_row,
++    decode_workflow_success_row,
++)
+ from horsies.core.lifecycle.persistence import (
++    FUSED_BATCH_MAX_ROWS,
++    FusedCompletionBatch,
++    _fused_outcomes,
++    _fused_statement,
+     _log_outcome,
+     apply_sync,
+     batch_call_for,
+@@ -60,24 +93,69 @@ from horsies.core.models.tasks import (
+     TaskResult,
+ )
+ from horsies.core.lifecycle.persistence import LOCK_TASK_SQL
++from horsies.core.worker.failed_attempt import (
++    FINISH_FAILED_ATTEMPT_SQL,
++    AttemptFailure,
++    AttemptFailureKind,
++    NoRetry,
++    RetryRequest,
++    RunningAttempt,
++    finish_for,
++    finish_parameters,
++    retry_request_for,
++)
++from horsies.core.worker.shared_stop import RetryPlacement
+ from horsies.core.worker.sql import (
+-    NOTIFY_TASK_QUEUE_SQL,
++    READ_IN_FLIGHT_ATTEMPT_SQL,
+     UPSERT_TASK_ATTEMPT_SQL,
+ )
+-from horsies.core.workflows.engine import on_workflow_task_complete
++from horsies.core.worker.workflow_success import success_for, success_statement
++from horsies.core.workflows.engine import QueueWake, on_workflow_task_complete
+ from tests.perf.legacy_terminalization_sql import (
+     EXPIRE_CLAIMED_TASK_BEFORE_START_SQL as _EXPIRE_CLAIMED_TASK_BEFORE_START_SQL,
+     EXPIRE_PENDING_TASKS_SQL,
+     FINALIZE_TASK_COMPLETED_SQL,
+     MARK_STALE_TASK_FAILED_SQL,
+     MARK_TASK_COMPLETED_SQL,
+-    MARK_TASK_FAILED_SQL,
++)
++from tests.perf.public_calls import (
++    INPUT_TEXT_BYTES,
++    SendCall,
++    WorkflowStartCall,
++    delete_sent_tasks,
++    delete_started_workflows,
+ )
+ from tests.perf.statistics import Budget
++from tests.perf.worker_drain import (
++    DRAIN_COUNT_INTERVAL,
++    DRAIN_ISOLATED_CHILDREN,
++    DRAIN_PROFILE_NAME,
++    DRAIN_TASK_COUNT,
++    DRAIN_TIMEOUT,
++    WORKER_STOP_TIMEOUT,
++    DrainSender,
++    count_terminal_tasks,
++    delete_drained_tasks,
++    start_drain_worker,
++)
++from tests.perf.worker_process import StartedWorker, WorkerStartFailed
+ 
+ WORKER_ID = 'perf-harness'
++WORKER_HOSTNAME = 'perf-harness-host'
++WORKER_PID = 4242
++WORKER_PROCESS_NAME = 'perf-harness-child'
+ CLAIMED_AT = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
+ 
++ID_BIRTH: Final = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
++"""The UUIDv7 birth of every seeded id. It is earlier than every terminal
++time a run writes, so a move records no clock exception for a seeded id."""
++
++ID_INDEX_HEX_DIGITS: Final = 10
++"""The row index fills the last 10 hex digits (40 bits) of a seeded id."""
++
++MAX_SEEDED_INDEX: Final = 16**ID_INDEX_HEX_DIGITS - 1
++"""The largest row index a seeded id can hold."""
++
+ # Budgets as declared for each path, before anything was measured.
+ FUSED_P50 = Budget(fraction=0.05, floor_ms=0.2)
+ FUSED_P99 = Budget(fraction=0.10, floor_ms=1.0)
+@@ -86,41 +164,69 @@ SINGLE_ROW_P99 = Budget(fraction=0.15, floor_ms=1.5)
+ BATCH_LOCK_P95 = Budget(fraction=0.10, floor_ms=1.0)
+ MINIMUM_BATCH_THROUGHPUT_RATIO = 0.90
+ 
++# Every seed names the columns of schema 61 that have no default: the
++# command fingerprint (32 bytes, version 1), the retention class `forever`
++# (its leaf is created at install), and the rerun input disposition that a
++# send writes when it does not keep the input (DECLINED_BY_POLICY for a plain
++# task, NEVER_ELIGIBLE for a workflow task). The id of row g is the role's
++# prefix followed by g in ID_INDEX_HEX_DIGITS hex digits.
+ _INSERT_RUNNING_SQL = text("""
+     INSERT INTO horsies_tasks (
+         id, task_name, queue_name, status, args, kwargs, enqueue_sha,
+         is_workflow_task, claimed, claimed_by_worker_id, claimed_at,
+-        started_at, result
++        started_at, result, worker_hostname, worker_pid, worker_process_name,
++        command_fingerprint_version, command_fingerprint, retention_class_key,
++        retain_rerun_input, prepared_rerun_input_disposition
+     )
+     SELECT
+-        :prefix || g, 'perf.task', 'default', 'RUNNING', '[]', '{}',
++        s.id, 'perf.task', 'default', 'RUNNING', '[]', '{}',
+         repeat('0', 64), :is_workflow_task, TRUE, :worker_id, :claimed_at,
+-        NOW() - INTERVAL '30 seconds', NULL
+-    FROM generate_series(1, :count) AS g
++        NOW() - INTERVAL '30 seconds', NULL, :worker_hostname, :worker_pid,
++        :worker_process_name,
++        1, sha256(uuid_send(s.id)), 'forever',
++        FALSE,
++        CASE WHEN CAST(:is_workflow_task AS boolean) THEN 'NEVER_ELIGIBLE'
++             ELSE 'DECLINED_BY_POLICY' END
++    FROM generate_series(1, CAST(:count AS integer)) AS g,
++        LATERAL (
++            SELECT CAST(:id_prefix || lpad(to_hex(g), 10, '0') AS uuid) AS id
++        ) AS s
+ """)
+ 
+ _INSERT_PENDING_EXPIRED_SQL = text("""
+     INSERT INTO horsies_tasks (
+         id, task_name, queue_name, status, args, kwargs, enqueue_sha,
+-        is_workflow_task, claimed, good_until
++        is_workflow_task, claimed, good_until,
++        command_fingerprint_version, command_fingerprint, retention_class_key,
++        retain_rerun_input, prepared_rerun_input_disposition
+     )
+     SELECT
+-        :prefix || g, 'perf.task', 'default', 'PENDING', '[]', '{}',
+-        repeat('0', 64), FALSE, FALSE, NOW() - INTERVAL '1 hour'
+-    FROM generate_series(1, :count) AS g
++        s.id, 'perf.task', 'default', 'PENDING', '[]', '{}',
++        repeat('0', 64), FALSE, FALSE, NOW() - INTERVAL '1 hour',
++        1, sha256(uuid_send(s.id)), 'forever', FALSE, 'DECLINED_BY_POLICY'
++    FROM generate_series(1, CAST(:count AS integer)) AS g,
++        LATERAL (
++            SELECT CAST(:id_prefix || lpad(to_hex(g), 10, '0') AS uuid) AS id
++        ) AS s
+ """)
+ 
+ _INSERT_CLAIMED_EXPIRED_SQL = text("""
+     INSERT INTO horsies_tasks (
+         id, task_name, queue_name, status, args, kwargs, enqueue_sha,
+         is_workflow_task, claimed, claimed_by_worker_id, claimed_at,
+-        claim_expires_at, good_until
++        claim_expires_at, good_until,
++        command_fingerprint_version, command_fingerprint, retention_class_key,
++        retain_rerun_input, prepared_rerun_input_disposition
+     )
+     SELECT
+-        :prefix || g, 'perf.task', 'default', 'CLAIMED', '[]', '{}',
++        s.id, 'perf.task', 'default', 'CLAIMED', '[]', '{}',
+         repeat('0', 64), FALSE, TRUE, :worker_id, :claimed_at,
+-        NOW() + INTERVAL '5 minutes', NOW() - INTERVAL '1 hour'
+-    FROM generate_series(1, :count) AS g
++        NOW() + INTERVAL '5 minutes', NOW() - INTERVAL '1 hour',
++        1, sha256(uuid_send(s.id)), 'forever', FALSE, 'DECLINED_BY_POLICY'
++    FROM generate_series(1, CAST(:count AS integer)) AS g,
++        LATERAL (
++            SELECT CAST(:id_prefix || lpad(to_hex(g), 10, '0') AS uuid) AS id
++        ) AS s
+ """)
+ 
+ _EXPIRE_OWNED_BASELINE_PLAN_SQL = text("""
+@@ -143,25 +249,17 @@ _EXPIRE_OWNED_BASELINE_PLAN_SQL = text("""
+     RETURNING id
+ """)
+ 
+-# A heap where every row is fresh is not the heap this runs against in
+-# production, and a scan over one answers a question nobody asked. Terminal
+-# rows are seeded alongside so the measured statements meet a table with
+-# history in it.
+-_INSERT_TERMINAL_BALLAST_SQL = text("""
+-    INSERT INTO horsies_tasks (
+-        id, task_name, queue_name, status, args, kwargs, enqueue_sha,
+-        is_workflow_task, claimed, completed_at, terminal_at, result
+-    )
+-    SELECT
+-        :prefix || g, 'perf.task', 'default', 'COMPLETED', '[]', '{}',
+-        repeat('0', 64), FALSE, FALSE,
+-        NOW() - (g || ' seconds')::INTERVAL,
+-        NOW() - (g || ' seconds')::INTERVAL,
+-        :payload
+-    FROM generate_series(1, :count) AS g
++# A seeded task ends either live or, after a terminal write, in history. The
++# attempt rows of a live task go with it (ON DELETE CASCADE).
++_DELETE_LIVE_TASKS_SQL = text("""
++    DELETE FROM horsies_tasks
++    WHERE id BETWEEN CAST(:lower AS uuid) AND CAST(:upper AS uuid)
+ """)
+ 
+-_DELETE_SEEDED_SQL = text("DELETE FROM horsies_tasks WHERE id LIKE :prefix || '%'")
++_DELETE_HISTORY_TASKS_SQL = text("""
++    DELETE FROM horsies_task_history
++    WHERE task_id BETWEEN CAST(:lower AS uuid) AND CAST(:upper AS uuid)
++""")
+ 
+ _INSERT_WORKFLOWS_SQL = text("""
+     INSERT INTO horsies_workflows (
+@@ -169,9 +267,12 @@ _INSERT_WORKFLOWS_SQL = text("""
+         root_workflow_id, sent_at, created_at, started_at, updated_at
+     )
+     SELECT
+-        'wf-' || :prefix || g, 'perf.workflow', 'RUNNING', 'FAIL', 0, 0,
+-        'wf-' || :prefix || g, NOW(), NOW(), NOW(), NOW()
+-    FROM generate_series(1, :count) AS g
++        w.id, 'perf.workflow', 'RUNNING', 'FAIL', 0, 0,
++        w.id, NOW(), NOW(), NOW(), NOW()
++    FROM generate_series(1, CAST(:count AS integer)) AS g,
++        LATERAL (
++            SELECT CAST(:workflow_id_prefix || lpad(to_hex(g), 10, '0') AS uuid) AS id
++        ) AS w
+ """)
+ 
+ _INSERT_WORKFLOW_TASKS_SQL = text("""
+@@ -181,21 +282,122 @@ _INSERT_WORKFLOW_TASKS_SQL = text("""
+         join_type, is_subworkflow, status, task_id, created_at
+     )
+     SELECT
+-        'wt-' || :prefix || g, 'wf-' || :prefix || g, 0, 'node_0',
++        r.node_id, r.workflow_id, 0, 'node_0',
+         'perf.task', '[]', '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
+-        'RUNNING', :prefix || g, NOW()
+-    FROM generate_series(1, :count) AS g
++        'RUNNING', r.task_id, NOW()
++    FROM generate_series(1, CAST(:count AS integer)) AS g,
++        LATERAL (
++            SELECT
++                CAST(:node_id_prefix || lpad(to_hex(g), 10, '0') AS uuid) AS node_id,
++                CAST(:workflow_id_prefix || lpad(to_hex(g), 10, '0') AS uuid) AS workflow_id,
++                CAST(:id_prefix || lpad(to_hex(g), 10, '0') AS uuid) AS task_id
++        ) AS r
+ """)
+ 
+-_DELETE_WORKFLOW_TASKS_SQL = text(
+-    "DELETE FROM horsies_workflow_tasks WHERE task_id LIKE :prefix || '%'"
+-)
+-_DELETE_WORKFLOWS_SQL = text(
+-    "DELETE FROM horsies_workflows WHERE id LIKE 'wf-' || :prefix || '%'"
+-)
++# The delete of a workflow row cascades to its node rows (ON DELETE CASCADE).
++_DELETE_WORKFLOWS_SQL = text("""
++    DELETE FROM horsies_workflows
++    WHERE id BETWEEN CAST(:lower AS uuid) AND CAST(:upper AS uuid)
++""")
++
++
++class Role(Enum):
++    """Whose rows a seeded id names."""
++
++    BASELINE = 'base'
++    CANDIDATE = 'cand'
++    BALLAST = 'ball'
++
++
++class RowKind(Enum):
++    """The table a seeded id is the primary key of."""
++
++    TASK = 'task'
++    WORKFLOW = 'workflow'
++    WORKFLOW_NODE = 'workflow-node'
++
++
++@dataclass(frozen=True, slots=True)
++class SeedIds:
++    """The ids of one kind of row of one role in one scenario.
++
++    ``prefix`` is 22 hex digits: the 48-bit UUIDv7 birth ``ID_BIRTH``, the
++    version digit 7, and 34 bits of the SHA-256 of the scenario, role and kind
++    in the random fields (the variant bits set). The row index fills the last
++    ``ID_INDEX_HEX_DIGITS`` hex digits, so the ids of one ``SeedIds`` lie in
++    the closed range ``lower`` to ``upper``.
++    """
++
++    prefix: str
++
++    def id_at(self, index: int) -> str:
++        """The id of row ``index``, from 1 to ``MAX_SEEDED_INDEX``.
++
++        Raises:
++            ValueError: ``index`` is outside that range.
++        """
++        if not 1 <= index <= MAX_SEEDED_INDEX:
++            raise ValueError(
++                f'a seeded row index runs from 1 to {MAX_SEEDED_INDEX}, got {index}'
++            )
++        return str(uuid.UUID(hex=f'{self.prefix}{index:0{ID_INDEX_HEX_DIGITS}x}'))
++
++    def ids(self, count: int) -> Iterator[str]:
++        """The ids of rows 1 to ``count``, in order."""
++        for index in range(1, count + 1):
++            yield self.id_at(index)
++
++    @property
++    def lower(self) -> str:
++        """The lowest id of the range (index 0, never seeded)."""
++        return str(uuid.UUID(hex=f'{self.prefix}{0:0{ID_INDEX_HEX_DIGITS}x}'))
++
++    @property
++    def upper(self) -> str:
++        """The highest id of the range."""
++        return str(
++            uuid.UUID(hex=f'{self.prefix}{MAX_SEEDED_INDEX:0{ID_INDEX_HEX_DIGITS}x}')
++        )
++
++    def bounds(self) -> dict[str, str]:
++        """The parameters of a range delete."""
++        return {'lower': self.lower, 'upper': self.upper}
++
++
++@dataclass(frozen=True, slots=True)
++class SeedRows:
++    """The rows that one role of one scenario seeds. Row g of each kind
++    belongs together: workflow g holds node g, which links task g."""
++
++    tasks: SeedIds
++    workflows: SeedIds
++    nodes: SeedIds
++
++
++def seed_ids(scenario_name: str, role: Role, kind: RowKind) -> SeedIds:
++    """The id range of one kind of row of one role in one scenario. Pure."""
++    digest = hashlib.sha256(
++        f'{scenario_name}/{role.value}/{kind.value}'.encode('utf-8')
++    ).digest()
++    birth_ms = int(ID_BIRTH.timestamp() * 1000)
++    random_a = int.from_bytes(digest[0:2], 'big') & 0x0FFF
++    variant_and_random = 0x80 | (digest[2] & 0x3F)
++    prefix = f'{birth_ms:012x}7{random_a:03x}{variant_and_random:02x}{digest[3:5].hex()}'
++    assert len(prefix) == 32 - ID_INDEX_HEX_DIGITS, prefix
++    return SeedIds(prefix=prefix)
++
++
++def seed_rows(scenario_name: str, role: Role) -> SeedRows:
++    """The rows of one role in one scenario. Pure."""
++    return SeedRows(
++        tasks=seed_ids(scenario_name, role, RowKind.TASK),
++        workflows=seed_ids(scenario_name, role, RowKind.WORKFLOW),
++        nodes=seed_ids(scenario_name, role, RowKind.WORKFLOW_NODE),
++    )
++
+ 
+-type Seed = Callable[[Connection, str, int], None]
+-type Cleanup = Callable[[Connection, str], None]
++type Seed = Callable[[Connection, SeedRows, int], None]
++type Cleanup = Callable[[Connection, SeedRows], None]
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -251,19 +453,91 @@ class BatchScenario:
+     exact_write_transactions_per_operation: int = 1
+ 
+ 
+-type Scenario = SingleRowScenario | BatchScenario
++class PublicCall(Protocol):
++    """A client of the library whose ``call`` runs one public operation."""
+ 
++    def call(self) -> None:
++        """Run the operation once.
+ 
+-def id_prefix(scenario_name: str, role: str) -> str:
+-    """A short, stable id prefix.
++        Raises:
++            RuntimeError: the library returned an error. The run stops: a
++                measured operation must apply.
++        """
++        ...
+ 
+-    Task ids are 36 characters — the width of the uuid the runtime writes —
+-    and scenario names are longer than the budget that leaves. Hashing the
+-    name keeps the prefix short, keeps it stable across runs so a crashed run
+-    can be cleaned up, and keeps two scenarios from sharing rows.
++    def close(self) -> None:
++        """Release the connections of the client."""
++        ...
++
++
++type OpenPublicCall = Callable[[str], PublicCall]
++"""Builds the client of a scenario for a database URL. No I/O."""
++
++type PublicCleanup = Callable[[Connection], None]
++"""Deletes every row that the calls of a scenario wrote, and commits."""
++
++
++@dataclass(frozen=True, slots=True)
++class PublicCallScenario:
++    """One call of a public operation of the library per measured operation.
++
++    The library opens its own connections and sends its own statements, so no
++    plan is captured. Both sides of a run share one client and run the same
++    call: every run is a control run. ``payload_bytes`` is the length of the
++    text argument that one call sends.
+     """
+-    digest = hashlib.sha256(scenario_name.encode('utf-8')).hexdigest()[:6]
+-    return f'pf-{digest}-{role}-'
++
++    name: str
++    description: str
++    p50_budget: Budget
++    p99_budget: Budget
++    payload_bytes: int
++    open_call: OpenPublicCall
++    cleanup: PublicCleanup
++
++
++type OpenDrainSender = Callable[[str], DrainSender]
++"""Builds the sender of a drain for a database URL. No I/O."""
++
++type StartDrainWorker = Callable[[str], StartedWorker | WorkerStartFailed]
++"""Starts the worker of a drain on a database URL. Starts a process."""
++
++type CountTerminal = Callable[[Connection], int]
++"""Reads the number of tasks of the drain that are terminal, and ends its
++transaction."""
++
++
++@dataclass(frozen=True, slots=True)
++class WorkerDrainScenario:
++    """One drain per measured operation.
++
++    A drain sends ``task_count`` tasks (``open_sender``), then starts one
++    worker (``start_worker``). The operation runs from the start of the
++    worker until ``count_terminal`` reads every task terminal, once every
++    ``count_interval``; a drain that takes longer than ``timeout`` stops the
++    run. Then the worker gets SIGTERM and ``stop_timeout`` to exit 0. Both
++    sides run the same drain: every run is a control run. The statement and
++    transaction counts of a worker depend on its timing, so the sides are not
++    held to equal counts.
++    """
++
++    name: str
++    description: str
++    minimum_throughput_ratio: float
++    task_count: int
++    timeout: timedelta
++    count_interval: timedelta
++    stop_timeout: timedelta
++    open_sender: OpenDrainSender
++    start_worker: StartDrainWorker
++    count_terminal: CountTerminal
++    cleanup: PublicCleanup
++
++
++type StatementScenario = SingleRowScenario | BatchScenario
++"""A scenario whose operation is one statement that the harness sends."""
++
++type Scenario = StatementScenario | PublicCallScenario | WorkerDrainScenario
+ 
+ 
+ def payload_of(size_bytes: int) -> str:
+@@ -272,9 +546,13 @@ def payload_of(size_bytes: int) -> str:
+     return f'{{"ok": "{filler}"}}'
+ 
+ 
++def _seed_parameters(ids: SeedIds, count: int) -> dict[str, Any]:
++    return {'id_prefix': ids.prefix, 'count': count}
++
++
+ def seed_running_tasks(
+     connection: Connection,
+-    prefix: str,
++    rows: SeedRows,
+     count: int,
+     *,
+     is_workflow_task: bool = False,
+@@ -282,11 +560,13 @@ def seed_running_tasks(
+     connection.execute(
+         _INSERT_RUNNING_SQL,
+         {
+-            'prefix': prefix,
+-            'count': count,
++            **_seed_parameters(rows.tasks, count),
+             'worker_id': WORKER_ID,
+             'claimed_at': CLAIMED_AT,
+             'is_workflow_task': is_workflow_task,
++            'worker_hostname': WORKER_HOSTNAME,
++            'worker_pid': WORKER_PID,
++            'worker_process_name': WORKER_PROCESS_NAME,
+         },
+     )
+     connection.commit()
+@@ -294,26 +574,25 @@ def seed_running_tasks(
+ 
+ def seed_expired_pending_tasks(
+     connection: Connection,
+-    prefix: str,
++    rows: SeedRows,
+     count: int,
+ ) -> None:
+     connection.execute(
+         _INSERT_PENDING_EXPIRED_SQL,
+-        {'prefix': prefix, 'count': count},
++        _seed_parameters(rows.tasks, count),
+     )
+     connection.commit()
+ 
+ 
+ def seed_expired_claimed_tasks(
+     connection: Connection,
+-    prefix: str,
++    rows: SeedRows,
+     count: int,
+ ) -> None:
+     connection.execute(
+         _INSERT_CLAIMED_EXPIRED_SQL,
+         {
+-            'prefix': prefix,
+-            'count': count,
++            **_seed_parameters(rows.tasks, count),
+             'worker_id': WORKER_ID,
+             'claimed_at': CLAIMED_AT,
+         },
+@@ -324,60 +603,105 @@ def seed_expired_claimed_tasks(
+ def seed_terminal_ballast(
+     connection: Connection,
+     *,
+-    prefix: str,
++    rows: SeedRows,
+     count: int,
+     payload_bytes: int,
+ ) -> None:
+-    connection.execute(
+-        _INSERT_TERMINAL_BALLAST_SQL,
+-        {'prefix': prefix, 'count': count, 'payload': payload_of(payload_bytes)},
+-    )
+-    connection.commit()
++    """Terminal rows in history, written by the product's terminal write.
++
++    A heap where every row is fresh is not the heap this runs against in
++    production, and a scan over one answers a question nobody asked. The
++    live table holds live rows only (CHECK horsies_tasks_live_status_only),
++    so each ballast row is seeded RUNNING and completed by the statement of a
++    batch of plain successes, at most ``FUSED_BATCH_MAX_ROWS`` rows per
++    statement and one transaction each.
++
++    Raises:
++        RuntimeError: a completion did not apply.
++    """
++    seed_running_tasks(connection, rows, count)
++    payload = payload_of(payload_bytes)
++    ballast_ids = list(rows.tasks.ids(count))
++    for start in range(0, count, FUSED_BATCH_MAX_ROWS):
++        batch = FusedCompletionBatch(
++            commands=tuple(
++                CompleteTaskFused(
++                    task_id=task_id,
++                    fence=OwnedClaim(worker_id=WORKER_ID, claimed_at=CLAIMED_AT),
++                    result_json=payload,
++                    notify_channel='task_queue_default',
++                    notify_payload=f'capacity:{task_id}',
++                )
++                for task_id in ballast_ids[start : start + FUSED_BATCH_MAX_ROWS]
++            )
++        )
++        statement = _fused_statement(batch)
++        result = connection.execute(statement.statement, dict(statement.parameters))
++        outcomes = _fused_outcomes(batch, _mappings(result.mappings().all()))
++        refused = [
++            outcome for outcome in outcomes if not isinstance(outcome, Applied)
++        ]
++        if refused:
++            connection.rollback()
++            raise RuntimeError(
++                f'ballast completion refused {len(refused)} of '
++                f'{len(batch.commands)} rows; first: {refused[0]!r}'
++            )
++        connection.commit()
++
++
++def _mappings(rows: Sequence[Mapping[Any, Any]]) -> list[dict[str, Any]]:
++    return [{str(key): value for key, value in row.items()} for row in rows]
+ 
+ 
+ def seed_workflow_success_tasks(
+     connection: Connection,
+-    prefix: str,
++    rows: SeedRows,
+     count: int,
+ ) -> None:
+     """One-node RUNNING workflows whose only task is ready to finish."""
+     seed_running_tasks(
+         connection,
+-        prefix,
++        rows,
+         count,
+         is_workflow_task=True,
+     )
+-    connection.execute(_INSERT_WORKFLOWS_SQL, {'prefix': prefix, 'count': count})
++    connection.execute(
++        _INSERT_WORKFLOWS_SQL,
++        {'workflow_id_prefix': rows.workflows.prefix, 'count': count},
++    )
+     connection.execute(
+         _INSERT_WORKFLOW_TASKS_SQL,
+-        {'prefix': prefix, 'count': count},
++        {
++            **_seed_parameters(rows.tasks, count),
++            'workflow_id_prefix': rows.workflows.prefix,
++            'node_id_prefix': rows.nodes.prefix,
++        },
+     )
+     connection.commit()
+ 
+ 
+-def delete_seeded(connection: Connection, prefix: str) -> None:
+-    connection.execute(_DELETE_SEEDED_SQL, {'prefix': prefix})
++def delete_seeded(connection: Connection, rows: SeedRows) -> None:
++    """Delete the task rows of ``rows``, live and in history."""
++    connection.execute(_DELETE_LIVE_TASKS_SQL, rows.tasks.bounds())
++    connection.execute(_DELETE_HISTORY_TASKS_SQL, rows.tasks.bounds())
+     connection.commit()
+ 
+ 
+-def delete_workflow_seeded(connection: Connection, prefix: str) -> None:
+-    connection.execute(_DELETE_WORKFLOW_TASKS_SQL, {'prefix': prefix})
+-    connection.execute(_DELETE_WORKFLOWS_SQL, {'prefix': prefix})
+-    connection.execute(_DELETE_SEEDED_SQL, {'prefix': prefix})
++def delete_workflow_seeded(connection: Connection, rows: SeedRows) -> None:
++    """Delete the workflow rows of ``rows`` with their nodes, then its task rows."""
++    connection.execute(_DELETE_WORKFLOWS_SQL, rows.workflows.bounds())
+     connection.commit()
++    delete_seeded(connection, rows)
+ 
+ 
+ def analyze(connection: Connection) -> None:
+-    """Statistics must describe the seeded table, not the empty one."""
++    """Statistics must describe the seeded tables, not the empty ones."""
+     connection.execute(text('ANALYZE horsies_tasks'))
++    connection.execute(text('ANALYZE horsies_task_history'))
+     connection.commit()
+ 
+ 
+-def task_ids(prefix: str, count: int) -> Iterator[str]:
+-    for index in range(1, count + 1):
+-        yield f'{prefix}{index}'
+-
+-
+ def _baseline_applied(result: Any, *, operation: str) -> int:
+     if result.fetchone() is None:
+         raise RuntimeError(f'{operation} did not transition its seeded task')
+@@ -490,11 +814,13 @@ def _locked_completion_invocation(
+     return build
+ 
+ 
++_FAILURE_ERROR_CODE = 'PERF_FAILURE'
++_FAILURE_MESSAGE = 'terminal application failure measurement'
+ _FAILURE_RESULT = serialize_error_payload(
+     TaskResult(
+         err=TaskError(
+-            error_code='PERF_FAILURE',
+-            message='terminal application failure measurement',
++            error_code=_FAILURE_ERROR_CODE,
++            message=_FAILURE_MESSAGE,
+         )
+     )
+ )
+@@ -521,37 +847,108 @@ _STALE_FAILURE_RESULT = serialize_error_payload(
+ )
+ 
+ 
+-def _failure_invocation(*, candidate: bool) -> InvocationFactory:
+-    def build(task_id: str) -> Invocation:
+-        if candidate:
+-            command = FailLockedTask(
+-                task_id=task_id,
+-                fence=PriorLockedRead(worker_id=WORKER_ID),
+-                result_json=_FAILURE_RESULT,
+-                error_code='PERF_FAILURE',
+-                failed_reason=None,
+-            )
+-            statement, parameters = call_for(command)
+-            return Invocation(
+-                statement=statement,
+-                parameters=dict(parameters),
+-                candidate=True,
+-                operation='terminal application failure operation',
+-                command=command,
+-            )
+-        return Invocation(
+-            statement=MARK_TASK_FAILED_SQL,
+-            parameters={
+-                'id': task_id,
+-                'wid': WORKER_ID,
+-                'result_json': _FAILURE_RESULT,
+-                'error_code': 'PERF_FAILURE',
+-            },
+-            candidate=False,
+-            operation='terminal application failure statement',
++# What the attempt row records for a task error: ``_attempt_failure_of`` of
++# ``ErrorProduced`` (horsies/core/worker/finalize.py:273-298 at v0.7.0).
++_FAILURE_ATTEMPT = AttemptFailure(
++    kind=AttemptFailureKind.FAILED,
++    error_message=_FAILURE_MESSAGE,
++    failed_reason=None,
++)
++
++
++def _failed_attempt_parameters(task_id: str, retry: RetryRequest) -> dict[str, Any]:
++    """The parameters of ``FINISH_FAILED_ATTEMPT_SQL`` for a task error with
++    ``retry``, as the worker builds them: the terminal failure of the retry
++    refusal (``FailLockedTask``), then ``finish_for``. Pure."""
++    failure = FailLockedTask(
++        task_id=task_id,
++        fence=PriorLockedRead(worker_id=WORKER_ID),
++        result_json=_FAILURE_RESULT,
++        error_code=_FAILURE_ERROR_CODE,
++        failed_reason=None,
++    )
++    return finish_parameters(
++        finish_for(
++            failure,
++            claimed_at=CLAIMED_AT,
++            retry=retry,
++            attempt=_FAILURE_ATTEMPT,
+         )
++    )
+ 
+-    return build
++
++def _failed_attempt_invocation(task_id: str) -> Invocation:
++    """The finish statement, with the retry that the read gives a seeded task
++    (none: ``max_retries`` 0). The plan evidence explains it."""
++    return Invocation(
++        statement=FINISH_FAILED_ATTEMPT_SQL,
++        parameters=_failed_attempt_parameters(task_id, NoRetry()),
++        candidate=True,
++        operation='failed attempt operation',
++    )
++
++
++def _retry_request(connection: Connection, task_id: str) -> RetryRequest:
++    """The unlocked read of the retry facts and the retry that the policy
++    asks for: ``_finalize_retry_request`` (horsies/core/worker/finalize.py:
++    1525-1554 at v0.7.0) on the synchronous connection.
++
++    Raises:
++        RuntimeError: the read did not find the seeded task RUNNING under
++            the harness's claim generation.
++    """
++    row = connection.execute(
++        READ_IN_FLIGHT_ATTEMPT_SQL,
++        {'id': task_id, 'wid': WORKER_ID, 'claimed_at': CLAIMED_AT},
++    ).fetchone()
++    if row is None or row.status != 'RUNNING':
++        raise RuntimeError(
++            f'the retry-facts read found {row!r} for a seeded RUNNING task'
++        )
++    return retry_request_for(
++        RunningAttempt(
++            retry_count=int(row.retry_count),
++            max_retries=int(row.max_retries),
++            task_options=row.task_options,
++        ),
++        _FAILURE_ERROR_CODE,
++        RetryPlacement.SAME_CLASS,
++    )
++
++
++def _run_failed_attempt(connection: Connection, task_id: str) -> int:
++    """The failure path of the v0.7.0 worker for a task error
++    (``_persist_failed_attempt``, horsies/core/worker/finalize.py:1467-1523 at
++    v0.7.0): the retry-facts read, then ``horsies_finish_failed_attempt``.
++
++    The worker sends the two statements in autocommit; here they share the
++    one transaction of an operation, as in every scenario of the harness.
++
++    Raises:
++        RuntimeError: the read or the finish did not find the seeded task, or
++            the finish did not write its terminal failure.
++    """
++    retry = _retry_request(connection, task_id)
++    rows = (
++        connection.execute(
++            FINISH_FAILED_ATTEMPT_SQL,
++            _failed_attempt_parameters(task_id, retry),
++        )
++        .mappings()
++        .all()
++    )
++    if len(rows) != 1:
++        connection.rollback()
++        raise RuntimeError(f'failed attempt operation returned {len(rows)} rows')
++    match decode_failed_attempt_row(_mappings(rows)[0]):
++        case FailureApplied(retry=RetryNotRequested(), after=CapacityWoken()):
++            connection.commit()
++            return 1
++        case other:
++            connection.rollback()
++            raise RuntimeError(
++                f'failed attempt operation returned {other!r} for a seeded task'
++            )
+ 
+ 
+ def _owned_expiry_invocation(*, candidate: bool) -> InvocationFactory:
+@@ -720,49 +1117,6 @@ def _run_terminal_invocation(
+     return run
+ 
+ 
+-# The locking read of a RUNNING task of one claim generation, after the task
+-# advisory lock: the order of every move function.
+-_LOCK_RUNNING_CONTEXT_SQL = text("""
+-    SELECT retry_count, started_at, claimed_by_worker_id, worker_hostname,
+-           worker_pid, worker_process_name, clock_timestamp() AS db_now
+-    FROM horsies_tasks
+-    WHERE id = CAST(:id AS uuid)
+-      AND status = 'RUNNING'
+-      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
+-      AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)
+-    FOR UPDATE
+-""")
+-
+-
+-def _upsert_completed_attempt(connection: Connection, task_id: str) -> None:
+-    connection.execute(LOCK_TASK_SQL, {'task_id': task_id})
+-    context = connection.execute(
+-        _LOCK_RUNNING_CONTEXT_SQL,
+-        {'id': task_id, 'wid': WORKER_ID, 'claimed_at': CLAIMED_AT},
+-    ).fetchone()
+-    if context is None:
+-        raise RuntimeError('workflow completion could not lock its seeded task')
+-    db_now = context.db_now
+-    connection.execute(
+-        UPSERT_TASK_ATTEMPT_SQL,
+-        {
+-            'task_id': task_id,
+-            'attempt': (context.retry_count or 0) + 1,
+-            'outcome': 'COMPLETED',
+-            'will_retry': False,
+-            'started_at': context.started_at or db_now,
+-            'finished_at': db_now,
+-            'error_code': None,
+-            'error_message': None,
+-            'failed_reason': None,
+-            'worker_id': context.claimed_by_worker_id,
+-            'worker_hostname': context.worker_hostname,
+-            'worker_pid': context.worker_pid,
+-            'worker_process_name': context.worker_process_name,
+-        },
+-    )
+-
+-
+ class _SyncConnectionAsAsyncSession:
+     """The workflow engine's async execute seam over the measured connection."""
+ 
+@@ -780,32 +1134,72 @@ _WORKFLOW_RESULT: TaskResult[int, Any] = TaskResult(ok=1)
+ _WORKFLOW_RESULT_JSON = dumps_json(encode_task_result(_WORKFLOW_RESULT, int)).unwrap()
+ 
+ 
+-def _run_workflow_success(
+-    invocation_for: InvocationFactory,
+-) -> Callable[[Connection, str], int]:
+-    def run(connection: Connection, task_id: str) -> int:
+-        _upsert_completed_attempt(connection, task_id)
+-        _execute_invocation(connection, invocation_for(task_id))
+-        connection.commit()
++def _workflow_success_invocation(task_id: str) -> Invocation:
++    """Phase 1 of a workflow task's success as the v0.7.0 worker sends it
++    (``_finish_workflow_success``, horsies/core/worker/finalize.py:1322-1373
++    at v0.7.0): ``horsies_finish_workflow_success``, which writes the attempt
++    row, the move to history and the phase-2 record."""
++    completion = CompleteLockedTask(
++        task_id=task_id,
++        fence=PriorLockedRead(worker_id=WORKER_ID),
++        result_json=_WORKFLOW_RESULT_JSON,
++    )
++    statement = success_statement(success_for(completion, claimed_at=CLAIMED_AT))
++    return Invocation(
++        statement=statement.statement,
++        parameters=dict(statement.parameters),
++        candidate=True,
++        operation='workflow success operation',
++    )
++
++
++def _run_workflow_success(connection: Connection, task_id: str) -> int:
++    """Phase 1 and phase 2 of a one-node workflow's success, each its own
++    write transaction.
+ 
+-        session = _SyncConnectionAsAsyncSession(connection)
+-        _WORKFLOW_RUNNER.run(
+-            on_workflow_task_complete(
+-                cast(Any, session),
+-                task_id,
+-                _WORKFLOW_RESULT,
+-                None,
+-                task_name='perf.task',
++    Phase 2 is the worker's (``_finalize_workflow_phase``,
++    horsies/core/worker/finalize.py:1619-1674 at v0.7.0): the engine's node
++    write, which sends the capacity wake of the task's queue in its first
++    statement, and the progression, which completes the workflow.
++
++    Raises:
++        RuntimeError: phase 1 did not write the success of the seeded task.
++    """
++    invocation = _workflow_success_invocation(task_id)
++    rows = (
++        connection.execute(invocation.statement, invocation.parameters)
++        .mappings()
++        .all()
++    )
++    if len(rows) != 1:
++        connection.rollback()
++        raise RuntimeError(f'workflow success operation returned {len(rows)} rows')
++    match decode_workflow_success_row(_mappings(rows)[0]):
++        case SuccessApplied(phase_two=PhaseTwoOwed()):
++            connection.commit()
++        case other:
++            connection.rollback()
++            raise RuntimeError(
++                f'workflow success operation returned {other!r} for a seeded '
++                'workflow task'
+             )
+-        )
+-        connection.execute(
+-            NOTIFY_TASK_QUEUE_SQL,
+-            {'c2': 'task_queue_default', 'p': f'capacity:{task_id}'},
+-        )
+-        connection.commit()
+-        return 1
+ 
+-    return run
++    session = _SyncConnectionAsAsyncSession(connection)
++    _WORKFLOW_RUNNER.run(
++        on_workflow_task_complete(
++            cast(Any, session),
++            task_id,
++            _WORKFLOW_RESULT,
++            None,
++            task_name='perf.task',
++            wake=QueueWake(
++                channel='task_queue_default',
++                payload=f'capacity:{task_id}',
++            ),
++        )
++    )
++    connection.commit()
++    return 1
+ 
+ 
+ def _pending_expiry_invocation(
+@@ -905,20 +1299,14 @@ _FUSED_LARGE_CANDIDATE = _fused_invocation(
+ )
+ _LOCKED_BASELINE = _locked_completion_invocation(payload_of(200), candidate=False)
+ _LOCKED_CANDIDATE = _locked_completion_invocation(payload_of(200), candidate=True)
+-_FAILURE_BASELINE = _failure_invocation(candidate=False)
+-_FAILURE_CANDIDATE = _failure_invocation(candidate=True)
+ _OWNED_EXPIRY_BASELINE = _owned_expiry_invocation(candidate=False)
+ _OWNED_EXPIRY_CANDIDATE = _owned_expiry_invocation(candidate=True)
+ _STALE_FAILURE_BASELINE = _stale_failure_invocation(candidate=False)
+ _STALE_FAILURE_CANDIDATE = _stale_failure_invocation(candidate=True)
+-_WORKFLOW_BASELINE = _locked_completion_invocation(
+-    _WORKFLOW_RESULT_JSON,
+-    candidate=False,
+-)
+-_WORKFLOW_CANDIDATE = _locked_completion_invocation(
+-    _WORKFLOW_RESULT_JSON,
+-    candidate=True,
+-)
++
++PUBLIC_CALL_P50: Final = Budget(fraction=0.10, floor_ms=0.5)
++PUBLIC_CALL_P99: Final = Budget(fraction=0.15, floor_ms=1.5)
++MINIMUM_DRAIN_THROUGHPUT_RATIO: Final = 0.90
+ 
+ SCENARIOS: tuple[Scenario, ...] = (
+     SingleRowScenario(
+@@ -929,10 +1317,10 @@ SCENARIOS: tuple[Scenario, ...] = (
+         payload_bytes=200,
+         seed=seed_running_tasks,
+         cleanup=delete_seeded,
+-        baseline=_run_terminal_invocation(_FUSED_SMALL_BASELINE),
+-        candidate=_run_terminal_invocation(_FUSED_SMALL_CANDIDATE),
+-        baseline_invocation=_FUSED_SMALL_BASELINE,
+-        candidate_invocation=_FUSED_SMALL_CANDIDATE,
++        baseline=_run_terminal_invocation(_FUSED_SMALL_CANDIDATE),
++        candidate=None,
++        baseline_invocation=_FUSED_SMALL_CANDIDATE,
++        candidate_invocation=None,
+         exact_client_statements_per_operation=1,
+     ),
+     SingleRowScenario(
+@@ -943,10 +1331,10 @@ SCENARIOS: tuple[Scenario, ...] = (
+         payload_bytes=1024 * 1024,
+         seed=seed_running_tasks,
+         cleanup=delete_seeded,
+-        baseline=_run_terminal_invocation(_FUSED_LARGE_BASELINE),
+-        candidate=_run_terminal_invocation(_FUSED_LARGE_CANDIDATE),
+-        baseline_invocation=_FUSED_LARGE_BASELINE,
+-        candidate_invocation=_FUSED_LARGE_CANDIDATE,
++        baseline=_run_terminal_invocation(_FUSED_LARGE_CANDIDATE),
++        candidate=None,
++        baseline_invocation=_FUSED_LARGE_CANDIDATE,
++        candidate_invocation=None,
+         exact_client_statements_per_operation=1,
+     ),
+     SingleRowScenario(
+@@ -957,25 +1345,28 @@ SCENARIOS: tuple[Scenario, ...] = (
+         payload_bytes=200,
+         seed=seed_running_tasks,
+         cleanup=delete_seeded,
+-        baseline=_run_terminal_invocation(_LOCKED_BASELINE),
+-        candidate=_run_terminal_invocation(_LOCKED_CANDIDATE),
+-        baseline_invocation=_LOCKED_BASELINE,
+-        candidate_invocation=_LOCKED_CANDIDATE,
++        baseline=_run_terminal_invocation(_LOCKED_CANDIDATE),
++        candidate=None,
++        baseline_invocation=_LOCKED_CANDIDATE,
++        candidate_invocation=None,
+         exact_client_statements_per_operation=1,
+     ),
+     SingleRowScenario(
+         name='terminal-application-failure',
+-        description='terminal application failure transition, retry already denied',
++        description=(
++            'terminal failure of a task error with no retry: the retry-facts '
++            'read, then attempt row, move and capacity wake in one statement'
++        ),
+         p50_budget=SINGLE_ROW_P50,
+         p99_budget=SINGLE_ROW_P99,
+         payload_bytes=len(_FAILURE_RESULT.encode('utf-8')),
+         seed=seed_running_tasks,
+         cleanup=delete_seeded,
+-        baseline=_run_terminal_invocation(_FAILURE_BASELINE),
+-        candidate=_run_terminal_invocation(_FAILURE_CANDIDATE),
+-        baseline_invocation=_FAILURE_BASELINE,
+-        candidate_invocation=_FAILURE_CANDIDATE,
+-        exact_client_statements_per_operation=1,
++        baseline=_run_failed_attempt,
++        candidate=None,
++        baseline_invocation=_failed_attempt_invocation,
++        candidate_invocation=None,
++        exact_client_statements_per_operation=2,
+     ),
+     SingleRowScenario(
+         name='owned-claim-expiry',
+@@ -985,10 +1376,10 @@ SCENARIOS: tuple[Scenario, ...] = (
+         payload_bytes=len(_EXPIRY_RESULT.encode('utf-8')),
+         seed=seed_expired_claimed_tasks,
+         cleanup=delete_seeded,
+-        baseline=_run_owned_expiry(candidate=False),
+-        candidate=_run_owned_expiry(candidate=True),
+-        baseline_invocation=_OWNED_EXPIRY_BASELINE,
+-        candidate_invocation=_OWNED_EXPIRY_CANDIDATE,
++        baseline=_run_owned_expiry(candidate=True),
++        candidate=None,
++        baseline_invocation=_OWNED_EXPIRY_CANDIDATE,
++        candidate_invocation=None,
+         exact_client_statements_per_operation=1,
+     ),
+     SingleRowScenario(
+@@ -1001,27 +1392,28 @@ SCENARIOS: tuple[Scenario, ...] = (
+         payload_bytes=len(_STALE_FAILURE_RESULT.encode('utf-8')),
+         seed=seed_running_tasks,
+         cleanup=delete_seeded,
+-        baseline=_run_stale_failure(candidate=False),
+-        candidate=_run_stale_failure(candidate=True),
+-        baseline_invocation=_STALE_FAILURE_BASELINE,
+-        candidate_invocation=_STALE_FAILURE_CANDIDATE,
++        baseline=_run_stale_failure(candidate=True),
++        candidate=None,
++        baseline_invocation=_STALE_FAILURE_CANDIDATE,
++        candidate_invocation=None,
+         exact_client_statements_per_operation=3,
+     ),
+     SingleRowScenario(
+         name='workflow-success-phase2',
+         description=(
+-            'one-node workflow success through terminal persistence, phase 2, '
+-            'workflow completion and queue wake'
++            'one-node workflow success: phase 1 (attempt row, move, phase-2 '
++            'record), then phase 2 (node write with the capacity wake, '
++            'workflow completion)'
+         ),
+         p50_budget=SINGLE_ROW_P50,
+         p99_budget=Budget(fraction=0.15, floor_ms=2.0),
+         payload_bytes=len(_WORKFLOW_RESULT_JSON.encode('utf-8')),
+         seed=seed_workflow_success_tasks,
+         cleanup=delete_workflow_seeded,
+-        baseline=_run_workflow_success(_WORKFLOW_BASELINE),
+-        candidate=_run_workflow_success(_WORKFLOW_CANDIDATE),
+-        baseline_invocation=_WORKFLOW_BASELINE,
+-        candidate_invocation=_WORKFLOW_CANDIDATE,
++        baseline=_run_workflow_success,
++        candidate=None,
++        baseline_invocation=_workflow_success_invocation,
++        candidate_invocation=None,
+         exact_write_transactions_per_operation=2,
+     ),
+     BatchScenario(
+@@ -1033,15 +1425,58 @@ SCENARIOS: tuple[Scenario, ...] = (
+         seed=seed_expired_pending_tasks,
+         cleanup=delete_seeded,
+         baseline=_run_pending_expiry(
+-            _PENDING_EXPIRY_BASELINE,
+-            batch_size=PRODUCTION_EXPIRE_BATCH_SIZE,
+-        ),
+-        candidate=_run_pending_expiry(
+             _PENDING_EXPIRY_CANDIDATE,
+             batch_size=PRODUCTION_EXPIRE_BATCH_SIZE,
+         ),
+-        baseline_invocation=_PENDING_EXPIRY_BASELINE,
+-        candidate_invocation=_PENDING_EXPIRY_CANDIDATE,
++        candidate=None,
++        baseline_invocation=_PENDING_EXPIRY_CANDIDATE,
++        candidate_invocation=None,
++    ),
++    PublicCallScenario(
++        name='send',
++        description=(
++            'send of one task with one 200-byte text argument '
++            '(`send`), one PENDING task row per call'
++        ),
++        p50_budget=PUBLIC_CALL_P50,
++        p99_budget=PUBLIC_CALL_P99,
++        payload_bytes=INPUT_TEXT_BYTES,
++        open_call=SendCall,
++        cleanup=delete_sent_tasks,
++    ),
++    PublicCallScenario(
++        name='workflow-start',
++        description=(
++            'start of a one-node workflow whose node has one 200-byte text '
++            'argument (`WorkflowSpec.start`): the workflow row, the node row '
++            'and the task row of the node per call'
++        ),
++        p50_budget=PUBLIC_CALL_P50,
++        p99_budget=PUBLIC_CALL_P99,
++        payload_bytes=INPUT_TEXT_BYTES,
++        open_call=WorkflowStartCall,
++        cleanup=delete_started_workflows,
++    ),
++    WorkerDrainScenario(
++        name='claim-finish',
++        description=(
++            f'claim, run and finish of {DRAIN_TASK_COUNT} sent no-op tasks by '
++            f'one worker that `horsies worker --profile {DRAIN_PROFILE_NAME}` '
++            f'starts ({DRAIN_ISOLATED_CHILDREN} isolated children, not '
++            'recycled). One operation is one drain: the time from the start '
++            'of the worker process until every task is COMPLETED or FAILED, '
++            'read by a count every '
++            f'{DRAIN_COUNT_INTERVAL // timedelta(milliseconds=1)} ms'
++        ),
++        minimum_throughput_ratio=MINIMUM_DRAIN_THROUGHPUT_RATIO,
++        task_count=DRAIN_TASK_COUNT,
++        timeout=DRAIN_TIMEOUT,
++        count_interval=DRAIN_COUNT_INTERVAL,
++        stop_timeout=WORKER_STOP_TIMEOUT,
++        open_sender=DrainSender,
++        start_worker=start_drain_worker,
++        count_terminal=count_terminal_tasks,
++        cleanup=delete_drained_tasks,
+     ),
+ )
+ 
+diff --git a/tests/perf/worker_drain.py b/tests/perf/worker_drain.py
+new file mode 100644
+index 000000000..8db322c84
+--- /dev/null
++++ b/tests/perf/worker_drain.py
+@@ -0,0 +1,237 @@
++"""The app, the sends and the reads of the ``claim-finish`` scenario.
++
++One drain sends ``DRAIN_TASK_COUNT`` tasks of a no-op task with ``send``, then
++starts one worker with ``horsies worker`` (``worker_process.py``) and counts the
++tasks that are COMPLETED or FAILED until all are. The worker claims, runs and
++finishes them, so a drain measures the three together as throughput.
++
++Every call here is public API of horsies 0.7.0 and of the current release,
++with the same signature in both: ``Horsies``, ``AppConfig``,
++``PostgresConfig``, ``WorkerProfile``, ``IsolatedChildren``,
++``IsolatedRecycle``, ``NoTaskLimit``, ``app.task``, ``send``,
++``PostgresBroker.close``. The count is one SQL statement on columns that both
++schemas have. The harness of each release runs this file unchanged
++(``tests/perf/releases/README.md``).
++"""
++
++from __future__ import annotations
++
++import os
++import time
++from collections.abc import Callable
++from dataclasses import dataclass
++from datetime import timedelta
++from pathlib import Path
++from typing import Final
++
++from pydantic import SecretStr
++from sqlalchemy import text
++from sqlalchemy.engine import Connection
++
++from horsies import (
++    AppConfig,
++    Err,
++    Horsies,
++    IsolatedChildren,
++    IsolatedRecycle,
++    NoTaskLimit,
++    Ok,
++    PostgresConfig,
++    TaskError,
++    TaskHandle,
++    TaskResult,
++    TaskSendResult,
++    WorkerProfile,
++)
++from tests.perf.worker_process import (
++    StartedWorker,
++    WorkerStartFailed,
++    cli_script,
++    start_worker,
++)
++
++DRAIN_TASK_NAME: Final = 'perf.drain.noop'
++"""The task of the drain. No other code sends it."""
++
++DRAIN_TASK_COUNT: Final = 10_000
++"""The tasks that one drain sends and the worker drains."""
++
++DRAIN_PROFILE_NAME: Final = 'perf-drain'
++"""The name of ``DRAIN_WORKER_PROFILE`` in the app, given to ``--profile``."""
++
++DRAIN_ISOLATED_CHILDREN: Final = 4
++
++DRAIN_WORKER_PROFILE: Final = WorkerProfile(
++    isolated=IsolatedChildren(
++        count=DRAIN_ISOLATED_CHILDREN,
++        recycle=IsolatedRecycle(after=NoTaskLimit()),
++    ),
++)
++"""``DRAIN_ISOLATED_CHILDREN`` isolated children, the default execution of a
++task, and the defaults of the other settings. A child is not replaced after a
++count of tasks (the default replaces it after 100), so a drain does not
++measure child starts."""
++
++DRAIN_TIMEOUT: Final = timedelta(minutes=10)
++"""The longest time from the start of the worker until every task of a drain
++is terminal. A drain that takes longer stops the run."""
++
++DRAIN_COUNT_INTERVAL: Final = timedelta(milliseconds=100)
++"""The time between two counts of the terminal tasks."""
++
++WORKER_STOP_TIMEOUT: Final = timedelta(seconds=60)
++"""How long a drained worker gets to exit after SIGTERM."""
++
++WORKER_LOGLEVEL: Final = 'WARNING'
++"""The ``--loglevel`` of the worker."""
++
++WORKER_APP_LOCATOR: Final = 'tests.perf.worker_drain_app:app'
++"""The app that ``horsies worker`` loads: ``worker_drain_app.py``."""
++
++CHECKOUT_ROOT: Final = Path(__file__).resolve().parents[2]
++"""The working directory of the worker, which holds ``pyproject.toml``."""
++
++DRAIN_DSN_VARIABLE: Final = 'HORSIES_PERF_DRAIN_DSN'
++"""The environment variable that gives the worker the database URL."""
++
++# The alias marks the read as harness bookkeeping: the server counts leave
++# out each statement that holds it (tests/perf/counters.py).
++_COUNT_TERMINAL_SQL = text("""
++    SELECT count(*) AS perf_harness_read
++    FROM horsies_task_history
++    WHERE task_name = :task_name AND status IN ('COMPLETED', 'FAILED')
++""")
++
++# The attempt rows of a live task go first: the current schema refuses the
++# delete of a live task that has attempt rows; 0.7.0 cascades it.
++_DELETE_ATTEMPTS_SQL = text("""
++    DELETE FROM horsies_task_attempts
++    WHERE task_id IN (SELECT id FROM horsies_tasks WHERE task_name = :task_name)
++""")
++
++_DELETE_LIVE_TASKS_SQL = text("""
++    DELETE FROM horsies_tasks WHERE task_name = :task_name
++""")
++
++_DELETE_HISTORY_TASKS_SQL = text("""
++    DELETE FROM horsies_task_history WHERE task_name = :task_name
++""")
++
++
++@dataclass(frozen=True, slots=True)
++class DrainApp:
++    """The app of the drain, and the send of its one task."""
++
++    app: Horsies
++    send: Callable[[], TaskSendResult[TaskHandle[None]]]
++
++
++def drain_app(dsn: str) -> DrainApp:
++    """The app of ``dsn`` with the no-op task and ``DRAIN_WORKER_PROFILE``.
++    No I/O: the broker connects at the first send.
++
++    The harness builds it to send the tasks; ``worker_drain_app.py`` builds it
++    in the worker and in each child to run them.
++    """
++    app = Horsies(
++        AppConfig(
++            broker=PostgresConfig(database_url=SecretStr(dsn)),
++            worker_profiles={DRAIN_PROFILE_NAME: DRAIN_WORKER_PROFILE},
++        ),
++    )
++
++    @app.task(DRAIN_TASK_NAME)
++    def perf_drain_noop() -> TaskResult[None, TaskError]:
++        return TaskResult(ok=None)
++
++    return DrainApp(app=app, send=perf_drain_noop.send)
++
++
++def drain_dsn_from_environment() -> str:
++    """The database URL that the harness gives the worker it starts.
++
++    Raises:
++        RuntimeError: ``DRAIN_DSN_VARIABLE`` is not set: a process that the
++            harness did not start loads the app module of the worker.
++    """
++    match os.environ.get(DRAIN_DSN_VARIABLE):
++        case None:
++            raise RuntimeError(
++                f'{DRAIN_DSN_VARIABLE} is not set: the measurement harness sets '
++                f'it for the worker that it starts'
++            )
++        case dsn:
++            return dsn
++
++
++class DrainSender:
++    """Sends the tasks of a drain with ``send``, as a producer sends them. No
++    worker runs in the harness process."""
++
++    def __init__(self, dsn: str) -> None:
++        """Build the app of ``dsn``. No I/O: the broker connects at the first
++        send."""
++        drain = drain_app(dsn)
++        self._broker = drain.app.get_broker()
++        self._send = drain.send
++
++    def send(self, count: int) -> None:
++        """Send the task ``count`` times. Writes ``count`` PENDING task rows.
++
++        Raises:
++            RuntimeError: a send returned an error; it names the error and the
++                number of the send. The tasks sent before it stay.
++        """
++        for number in range(1, count + 1):
++            match self._send():
++                case Ok():
++                    continue
++                case Err(err_value=error):
++                    raise RuntimeError(
++                        f'send {number} of {count} of {DRAIN_TASK_NAME} '
++                        f'returned {error!r}'
++                    )
++
++    def close(self) -> None:
++        """Close the broker. A failed close is discarded: the process of the
++        run ends after it, and the result of the run does not depend on it."""
++        _ = self._broker.close()
++
++
++def start_drain_worker(dsn: str) -> StartedWorker | WorkerStartFailed:
++    """Start ``horsies worker`` with ``DRAIN_PROFILE_NAME`` on the app of
++    ``dsn``, from the ``horsies`` script of the environment of the harness.
++    Starts a process; it does not wait for the worker to be ready."""
++    return start_worker(
++        script=cli_script(),
++        app_locator=WORKER_APP_LOCATOR,
++        profile=DRAIN_PROFILE_NAME,
++        loglevel=WORKER_LOGLEVEL,
++        environment={DRAIN_DSN_VARIABLE: dsn},
++        working_directory=CHECKOUT_ROOT,
++        clock_ns=time.perf_counter_ns,
++    )
++
++
++def count_terminal_tasks(connection: Connection) -> int:
++    """The tasks of ``DRAIN_TASK_NAME`` that are COMPLETED or FAILED. Reads,
++    then ends its transaction, so the session holds none while the worker
++    writes."""
++    terminal = int(
++        connection.execute(
++            _COUNT_TERMINAL_SQL,
++            {'task_name': DRAIN_TASK_NAME},
++        ).scalar_one()
++    )
++    connection.commit()
++    return terminal
++
++
++def delete_drained_tasks(connection: Connection) -> None:
++    """Delete every task row of ``DRAIN_TASK_NAME``, live and in history,
++    with the attempt rows of the live ones, and commit."""
++    parameters = {'task_name': DRAIN_TASK_NAME}
++    connection.execute(_DELETE_ATTEMPTS_SQL, parameters)
++    connection.execute(_DELETE_LIVE_TASKS_SQL, parameters)
++    connection.execute(_DELETE_HISTORY_TASKS_SQL, parameters)
++    connection.commit()
+diff --git a/tests/perf/worker_drain_app.py b/tests/perf/worker_drain_app.py
+new file mode 100644
+index 000000000..3fc28604c
+--- /dev/null
++++ b/tests/perf/worker_drain_app.py
+@@ -0,0 +1,13 @@
++"""The app module that ``horsies worker`` loads in the ``claim-finish`` scenario.
++
++The worker process and each of its children import this module
++(``WORKER_APP_LOCATOR`` in ``worker_drain.py``). It builds the app of the drain
++from the database URL that the harness puts in the environment of the worker
++(``DRAIN_DSN_VARIABLE``). The harness does not import it.
++"""
++
++from __future__ import annotations
++
++from tests.perf.worker_drain import drain_app, drain_dsn_from_environment
++
++app = drain_app(drain_dsn_from_environment()).app
+diff --git a/tests/perf/worker_process.py b/tests/perf/worker_process.py
+new file mode 100644
+index 000000000..2364ce547
+--- /dev/null
++++ b/tests/perf/worker_process.py
+@@ -0,0 +1,298 @@
++"""A worker process started with the public CLI, as an operator starts it.
++
++``horsies worker <locator> --profile <name> --loglevel <level>`` is the same
++command in horsies 0.7.0 and in the current release. The harness runs the
++``horsies`` script of its own environment, with the working directory at the
++root of the checkout: the CLI adds a working directory that holds
++``pyproject.toml`` to ``sys.path``, so the worker imports the app module of
++that checkout.
++
++The worker writes its output to a file, never to a pipe: nothing reads a pipe
++while the worker runs, and a full pipe blocks the worker. The worker starts in
++a new session, so the harness can kill the worker and its children as one
++process group when the worker does not stop.
++
++This module does not import the library: it starts, watches and stops a
++process.
++"""
++
++from __future__ import annotations
++
++import os
++import signal
++import subprocess
++import sysconfig
++import tempfile
++from collections.abc import Callable, Mapping
++from dataclasses import dataclass
++from datetime import timedelta
++from pathlib import Path
++from typing import Final
++
++WORKER_SCRIPT_NAME: Final = 'horsies'
++"""The console script of the library (``[project.scripts]`` of both releases)."""
++
++WORKER_LOG_PREFIX: Final = 'horsies-perf-worker-'
++
++KILL_WAIT: Final = timedelta(seconds=10)
++"""How long the harness waits for a process group that it killed to exit."""
++
++
++@dataclass(frozen=True, slots=True)
++class StartedWorker:
++    """A worker process that runs. ``started_ns`` is the
++    ``time.perf_counter_ns`` reading taken just before the process started.
++    ``log_path`` holds the output of the worker and its children."""
++
++    process: subprocess.Popen[bytes]
++    started_ns: int
++    log_path: Path
++
++
++@dataclass(frozen=True, slots=True)
++class WorkerStartFailed:
++    """The process did not start: the script is missing or not executable,
++    or the log file could not be made. ``cause`` names the OS error."""
++
++    command: tuple[str, ...]
++    cause: str
++
++
++@dataclass(frozen=True, slots=True)
++class WorkerRunning:
++    """The worker process has not exited."""
++
++
++@dataclass(frozen=True, slots=True)
++class WorkerExited:
++    """The worker process exited with ``exit_code``. A negative code is the
++    number of the signal that ended it."""
++
++    exit_code: int
++
++
++type WorkerState = WorkerRunning | WorkerExited
++
++
++@dataclass(frozen=True, slots=True)
++class Drained:
++    """Every task is terminal. ``elapsed_ns`` runs from the start of the
++    worker to the start of the count that read every task terminal."""
++
++    elapsed_ns: int
++
++
++@dataclass(frozen=True, slots=True)
++class DrainTimedOut:
++    """``timeout`` passed after the start of the worker before every task was
++    terminal. ``terminal`` is the result of the last count."""
++
++    terminal: int
++    expected: int
++    timeout: timedelta
++
++
++@dataclass(frozen=True, slots=True)
++class WorkerExitedEarly:
++    """The worker exited before every task was terminal."""
++
++    exit_code: int
++    terminal: int
++    expected: int
++
++
++type DrainOutcome = Drained | DrainTimedOut | WorkerExitedEarly
++
++
++@dataclass(frozen=True, slots=True)
++class WorkerStopped:
++    """The worker exited with ``exit_code``, after SIGTERM or before it."""
++
++    exit_code: int
++
++
++@dataclass(frozen=True, slots=True)
++class WorkerKilled:
++    """The worker had not exited ``timeout`` after SIGTERM. The harness killed
++    its process group with SIGKILL."""
++
++    timeout: timedelta
++
++
++type WorkerStop = WorkerStopped | WorkerKilled
++
++
++def cli_script() -> Path:
++    """The ``horsies`` script of the environment that runs the harness. Pure:
++    it does not check that the file exists; ``start_worker`` reports that."""
++    return Path(sysconfig.get_path('scripts')) / WORKER_SCRIPT_NAME
++
++
++def start_worker(
++    *,
++    script: Path,
++    app_locator: str,
++    profile: str,
++    loglevel: str,
++    environment: Mapping[str, str],
++    working_directory: Path,
++    clock_ns: Callable[[], int],
++) -> StartedWorker | WorkerStartFailed:
++    """Start ``script worker <app_locator> --profile <profile> --loglevel
++    <loglevel>`` in a new session. Starts a process; writes a log file.
++
++    The process gets the environment of the harness with ``environment``
++    added. Its output goes to a new log file in the temporary directory; the
++    caller deletes the file. It does not wait for the worker to be ready.
++    """
++    command = (
++        str(script),
++        'worker',
++        app_locator,
++        '--profile',
++        profile,
++        '--loglevel',
++        loglevel,
++    )
++    try:
++        log_descriptor, log_name = tempfile.mkstemp(
++            prefix=WORKER_LOG_PREFIX,
++            suffix='.log',
++        )
++    except OSError as error:
++        return WorkerStartFailed(command=command, cause=_os_error(error))
++    started_ns = clock_ns()
++    try:
++        process = subprocess.Popen(
++            command,
++            cwd=working_directory,
++            env={**os.environ, **environment},
++            stdin=subprocess.DEVNULL,
++            stdout=log_descriptor,
++            stderr=subprocess.STDOUT,
++            start_new_session=True,
++        )
++    except OSError as error:
++        _remove_log(Path(log_name))
++        return WorkerStartFailed(command=command, cause=_os_error(error))
++    finally:
++        os.close(log_descriptor)
++    return StartedWorker(
++        process=process,
++        started_ns=started_ns,
++        log_path=Path(log_name),
++    )
++
++
++def worker_state(process: subprocess.Popen[bytes]) -> WorkerState:
++    """Whether ``process`` has exited. Reaps it when it has."""
++    match process.poll():
++        case None:
++            return WorkerRunning()
++        case int() as exit_code:
++            return WorkerExited(exit_code=exit_code)
++
++
++def wait_for_drain(
++    *,
++    count_terminal: Callable[[], int],
++    state_of_worker: Callable[[], WorkerState],
++    expected: int,
++    started_ns: int,
++    timeout: timedelta,
++    interval: timedelta,
++    clock_ns: Callable[[], int],
++    sleep: Callable[[float], None],
++) -> DrainOutcome:
++    """Count the terminal tasks every ``interval`` until all ``expected`` are
++    terminal, the worker exits, or ``timeout`` passes after ``started_ns``.
++
++    It reads the clock before each count, so ``Drained.elapsed_ns`` is late
++    by at most one interval and one count. It makes at most ``timeout //
++    interval + 1`` counts, so it ends also with a clock that does not move.
++    It does not stop the worker.
++
++    Raises:
++        AssertionError: a count read more than ``expected`` terminal tasks.
++            The cleanup before a drain deletes the rows of the task, so more
++            rows mean that another run sends the task to this database.
++    """
++    timeout_ns = timeout // timedelta(microseconds=1) * 1_000
++    terminal = 0
++    for _ in range(timeout // interval + 1):
++        read_at_ns = clock_ns()
++        if read_at_ns - started_ns > timeout_ns:
++            break
++        terminal = count_terminal()
++        if terminal > expected:
++            raise AssertionError(
++                f'the drain counted {terminal} terminal tasks for {expected} '
++                f'sent: another run sends the same task to this database'
++            )
++        if terminal == expected:
++            return Drained(elapsed_ns=read_at_ns - started_ns)
++        match state_of_worker():
++            case WorkerExited(exit_code=exit_code):
++                return WorkerExitedEarly(
++                    exit_code=exit_code,
++                    terminal=terminal,
++                    expected=expected,
++                )
++            case WorkerRunning():
++                sleep(interval.total_seconds())
++    return DrainTimedOut(terminal=terminal, expected=expected, timeout=timeout)
++
++
++def stop_worker(
++    process: subprocess.Popen[bytes],
++    timeout: timedelta,
++) -> WorkerStop:
++    """Send SIGTERM to the worker and wait ``timeout`` for it to exit; then
++    kill its process group with SIGKILL. A worker that already exited gets
++    no signal. The worker must be the leader of its process group
++    (``start_worker`` starts it so).
++
++    Raises:
++        RuntimeError: the process group had not exited ``KILL_WAIT`` after
++            SIGKILL. The harness cannot free the database or the host for the
++            next drain, so the run stops.
++    """
++    match worker_state(process):
++        case WorkerExited(exit_code=exit_code):
++            return WorkerStopped(exit_code=exit_code)
++        case WorkerRunning():
++            process.send_signal(signal.SIGTERM)
++    try:
++        return WorkerStopped(exit_code=process.wait(timeout.total_seconds()))
++    except subprocess.TimeoutExpired:
++        pass
++    try:
++        os.killpg(process.pid, signal.SIGKILL)
++    except ProcessLookupError:
++        pass
++    try:
++        _ = process.wait(KILL_WAIT.total_seconds())
++    except subprocess.TimeoutExpired as error:
++        raise RuntimeError(
++            f'worker process {process.pid} had not exited {KILL_WAIT} after '
++            f'SIGKILL of its process group'
++        ) from error
++    return WorkerKilled(timeout=timeout)
++
++
++def remove_log(started: StartedWorker) -> None:
++    """Delete the log file of a worker that stopped clean."""
++    _remove_log(started.log_path)
++
++
++def _remove_log(path: Path) -> None:
++    # Explicit discard: a log left in the temporary directory changes no
++    # measurement, and the run already has its result.
++    try:
++        path.unlink()
++    except OSError:
++        pass
++
++
++def _os_error(error: OSError) -> str:
++    return f'{type(error).__name__}: {error}'

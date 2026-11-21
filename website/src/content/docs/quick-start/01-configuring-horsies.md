@@ -1,5 +1,6 @@
 ---
 title: Configuring Horsies
+section: python
 summary: Set up the app instance and broker connection.
 related: [02-producing-tasks]
 tags: [quickstart, configuration]
@@ -9,7 +10,7 @@ tags: [quickstart, configuration]
 
 - PostgreSQL 14+
 - Python 3.13+
-- libpq 17+ for a time limit on the cancel request of an interrupted query. The `horsies[pg-binary]` extra bundles its own libpq. See [psycopg and libpq](/horsies/configuration/broker-config/#psycopg-and-libpq)
+- libpq 17+ for a time limit on the cancel request of an interrupted query. The `horsies[pg-binary]` extra bundles its own libpq. See [psycopg and libpq](/horsies/configuration/broker-connections/#psycopg-and-libpq)
 
 ## Installation
 
@@ -25,7 +26,7 @@ from horsies import Horsies, AppConfig, IsolatedChildren, PostgresConfig, Worker
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
+        database_url=SecretStr("postgresql://user:password@localhost:5432/mydb"),
     ),
     worker_profiles={
         "default": WorkerProfile(isolated=IsolatedChildren(count=8)),
@@ -78,7 +79,7 @@ config = AppConfig(
         CustomQueueConfig(name="low", priority=100, max_concurrency=5),
     ],
     broker=PostgresConfig(
-        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/db_name"),
+        database_url=SecretStr("postgresql://user:password@localhost:5432/db_name"),
     ),
 )
 

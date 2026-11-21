@@ -1,0 +1,1221 @@
+//! The worker side of shared tasks: the
+//! route of a shared row, the capacity of a worker with shared children,
+//! and the write of each end of a run (`OutcomeWriter::settle`) on the
+//! database.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use chrono::{DateTime, Utc};
+use serial_test::serial;
+use uuid::Uuid;
+
+use super::scripted::{ok_envelope, task, timeout_ms, WORKER_ID};
+use super::*;
+use crate::broker::attempt_writes::RetryPlacement;
+use crate::broker::PostgresBroker;
+use crate::core::config::payload::PayloadPolicy;
+use crate::core::history::archive::attempts::decode_attempt_snapshot;
+use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
+use crate::core::task::error::TaskError;
+use crate::core::task::result::TaskResult;
+use crate::events::AttemptStart;
+use crate::test_support::sql::{self, TestPool, TestPoolOptions};
+use crate::test_support::{CapturedEvent, LogCapture};
+use crate::worker::executor::protocol::{
+    CancelGraceMs, FailureDetail, IsolatedWork, ResultEnvelopeText, SharedWork, StopReason,
+    StoredOptionsRefusal,
+};
+use crate::worker::retry::read_stored_options;
+
+/// The end of a run that reported `envelope`. The writer does not read its
+/// start.
+fn reported_result(envelope: ResultEnvelopeText) -> AttemptEnd {
+    AttemptEnd::Result {
+        envelope,
+        start: AttemptStart::Reported {
+            started_at: DateTime::<Utc>::UNIX_EPOCH,
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Routes
+// ---------------------------------------------------------------------------
+
+/// A `SHARED_ASYNC` row that the worker cannot run, and the refusal it gets.
+struct Unusable {
+    options: &'static str,
+    refusal: fn(&StoredOptionsRefusal) -> bool,
+}
+
+fn unusable_shared_async_rows() -> Vec<Unusable> {
+    vec![
+        Unusable {
+            options: r#"{"cancel_grace_ms": 700}"#,
+            refusal: |refusal: &StoredOptionsRefusal| {
+                matches!(refusal, StoredOptionsRefusal::TimeoutValueInvalid(reason)
+                    if reason.as_str() == "stored timeout_ms is absent for execution SHARED_ASYNC")
+            },
+        },
+        Unusable {
+            options: "{not json",
+            refusal: |refusal: &StoredOptionsRefusal| {
+                matches!(refusal, StoredOptionsRefusal::OptionsUnreadable(_))
+            },
+        },
+        Unusable {
+            options: r#"{"timeout_ms": 5, "cancel_grace_ms": 700}"#,
+            refusal: |refusal: &StoredOptionsRefusal| {
+                matches!(refusal, StoredOptionsRefusal::TimeoutValueInvalid(reason)
+                    if reason.as_str() == "stored timeout_ms is below 1000 ms")
+            },
+        },
+        Unusable {
+            options: r#"{"timeout_ms": 2000, "cancel_grace_ms": 1}"#,
+            refusal: |refusal: &StoredOptionsRefusal| {
+                matches!(refusal, StoredOptionsRefusal::CancelGraceInvalid(reason)
+                    if reason.as_str() == "stored cancel_grace_ms is below 100 ms")
+            },
+        },
+        Unusable {
+            options: r#"{"timeout_ms": 2000, "cancel_grace_ms": "5"}"#,
+            refusal: |refusal: &StoredOptionsRefusal| {
+                matches!(refusal, StoredOptionsRefusal::CancelGraceInvalid(reason)
+                    if reason.as_str() == "stored cancel_grace_ms is a JSON str, not an int")
+            },
+        },
+        Unusable {
+            options: r#"{"timeout_ms": 2000}"#,
+            refusal: |refusal: &StoredOptionsRefusal| {
+                matches!(refusal, StoredOptionsRefusal::CancelGraceInvalid(reason)
+                    if reason.as_str() == "stored cancel_grace_ms is absent for execution SHARED_ASYNC")
+            },
+        },
+    ]
+}
+
+/// A shared row with no usable timeout or grace, on both plans: the refusal
+/// runs on a seat, never on an isolated
+/// child and never back to the queue.
+#[test]
+fn every_unusable_shared_async_row_is_refused_on_a_seat_on_either_plan() {
+    for plan in [
+        ClaimPlan::for_children(1, 1, 0),
+        ClaimPlan::for_children(0, 1, 0),
+    ] {
+        for row in unusable_shared_async_rows() {
+            match dispatch_route(
+                ExecutionClass::SharedAsync,
+                plan,
+                &read_stored_options(Some(row.options)),
+            ) {
+                Ok(DispatchRoute::SharedAsync(SharedWork::Refusal(refusal))) => {
+                    assert!((row.refusal)(&refusal), "{}: {refusal:?}", row.options);
+                }
+                other => panic!(
+                    "{}: expected a refusal on a seat, got {other:?}",
+                    row.options
+                ),
+            }
+        }
+    }
+}
+
+/// A worker with no shared children refuses a shared row in an isolated
+/// child.
+#[test]
+fn a_worker_with_only_isolated_children_refuses_an_unusable_shared_row_in_an_isolated_child() {
+    let plan = ClaimPlan::for_children(1, 0, 0);
+    for row in unusable_shared_async_rows() {
+        match dispatch_route(
+            ExecutionClass::SharedAsync,
+            plan,
+            &read_stored_options(Some(row.options)),
+        ) {
+            Ok(DispatchRoute::Isolated {
+                work: IsolatedWork::Refusal(refusal),
+                deadline: IsolatedDeadline::NoDeadline,
+            }) => assert!((row.refusal)(&refusal), "{}: {refusal:?}", row.options),
+            other => panic!(
+                "{}: expected a refusal in an isolated child, got {other:?}",
+                row.options
+            ),
+        }
+    }
+}
+
+/// A worker with only shared children has one budget per kind, and its
+/// seats are its capacity.
+#[test]
+fn a_worker_with_only_shared_children_has_their_seats_as_its_capacity() {
+    let shared = |service, seats| SharedSlotService { service, seats };
+    for (shared_async, shared_thread, budget) in [
+        (2, 0, ExecutionClass::SharedAsync),
+        (0, 2, ExecutionClass::SharedThread),
+    ] {
+        let slots = vec![shared(SlotService::InService, 5); 2];
+        let pool = PoolService {
+            isolated: Vec::new(),
+            shared_async: match shared_async {
+                0 => Vec::new(),
+                _ => slots.clone(),
+            },
+            shared_thread: match shared_thread {
+                0 => Vec::new(),
+                _ => slots,
+            },
+        };
+        assert_eq!(pool.plan().budgets(), vec![budget]);
+        assert_eq!(
+            pool.capacities(),
+            vec![BudgetCapacity {
+                budget,
+                in_service: 10
+            }]
+        );
+        assert_eq!(pool.total_capacity(), 10);
+        assert_eq!(
+            ClaimPlan::for_children(0, shared_async, shared_thread).route(ExecutionClass::Isolated),
+            ClaimRoute::NotServed
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The writes of each end
+// ---------------------------------------------------------------------------
+
+/// How the seeded row is held by [`WORKER_ID`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Held {
+    Claimed,
+    Running,
+}
+
+/// A plain task row of `execution` on `queue`, held by [`WORKER_ID`].
+/// Returns the id and the claim generation.
+async fn seed(
+    pool: &TestPool,
+    queue: &str,
+    execution: ExecutionClass,
+    held: Held,
+    task_options: Option<&str>,
+    max_retries: i32,
+) -> (Uuid, DateTime<Utc>) {
+    let id = Uuid::new_v4();
+    let statement = match held {
+        Held::Running => {
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+             ) VALUES (
+                $1, 'app.tasks.scripted', $2, 100, '{}', $3, $4,
+                'forever', date_trunc('milliseconds', NOW()) - interval '31 minutes',
+                NOW() - interval '31 minutes',
+                1, decode(repeat('05', 32), 'hex'), NULL,
+                'RUNNING', NOW() - interval '31 minutes',
+                date_trunc('milliseconds', NOW()) - interval '30 minutes', $5, NULL,
+                NOW() - interval '30 minutes', NULL, NULL,
+                4242, 'slots-host', 'slots-process',
+                0, $6, NULL, NULL, FALSE,
+                NOW(), FALSE, NULL, NULL
+             ) RETURNING claimed_at"
+        }
+        Held::Claimed => {
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+             ) VALUES (
+                $1, 'app.tasks.scripted', $2, 100, '{}', $3, $4,
+                'forever', NOW(), NOW(),
+                1, decode(repeat('05', 32), 'hex'), NULL,
+                'CLAIMED', NOW(), date_trunc('milliseconds', NOW()), $5,
+                NOW() + interval '1 minute',
+                NULL, NULL, NULL,
+                NULL, NULL, NULL,
+                0, $6, NULL, NULL, FALSE,
+                NOW(), FALSE, NULL, NULL
+             ) RETURNING claimed_at"
+        }
+    };
+    let generation = sql::query_scalar(statement)
+        .bind(id)
+        .bind(queue)
+        .bind(task_options)
+        .bind(execution.as_str())
+        .bind(WORKER_ID)
+        .bind(max_retries)
+        .fetch_one(pool)
+        .await
+        .expect("seed a task row");
+    (id, generation)
+}
+
+async fn live_row(pool: &TestPool, task_id: Uuid) -> Option<serde_json::Value> {
+    sql::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .expect("read the live row")
+}
+
+async fn history_row(pool: &TestPool, task_id: Uuid) -> serde_json::Value {
+    sql::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("read the history row")
+}
+
+async fn remove_task(pool: &TestPool, task_id: Uuid) {
+    for statement in [
+        "DELETE FROM horsies_task_attempts WHERE task_id = $1",
+        "DELETE FROM horsies_heartbeats WHERE task_id = $1",
+        "DELETE FROM horsies_tasks WHERE id = $1",
+        "DELETE FROM horsies_task_history WHERE task_id = $1",
+    ] {
+        sql::query(statement)
+            .bind(task_id)
+            .execute(pool)
+            .await
+            .expect("remove the test task");
+    }
+}
+
+fn test_queue() -> String {
+    format!("settle_{}", &Uuid::new_v4().simple().to_string()[..8])
+}
+
+fn writer(pool: TestPool) -> OutcomeWriter {
+    let broker = Arc::new(PostgresBroker::from_test_url(
+        pool.url(),
+        crate::ClientFamily::Rust,
+    ));
+    let successes = super::outcome::test_successes(&broker, WORKER_ID);
+    OutcomeWriter::new(
+        broker,
+        crate::test_support::child_specs::no_child_specs(),
+        WORKER_ID.to_owned(),
+        PayloadPolicy::default(),
+        successes,
+    )
+}
+
+/// The claimed task of a seeded row.
+fn claimed_row(
+    task_id: Uuid,
+    queue: &str,
+    generation: DateTime<Utc>,
+    execution: ExecutionClass,
+    options: Option<&str>,
+    max_retries: i32,
+) -> ClaimedTask {
+    ClaimedTask {
+        task_id,
+        queue_name: queue.to_owned(),
+        claimed_at: generation,
+        execution,
+        retry: RetryFacts {
+            retry_count: 0,
+            max_retries,
+        },
+        options: read_stored_options(options),
+        ..task(1, execution)
+    }
+}
+
+const RETRY_ON_TIMEOUT: &str = r#"{"timeout_ms": 1000, "cancel_grace_ms": 500, "retry_policy": {
+    "max_retries": 2, "intervals": [5, 5], "backoff_strategy": "fixed", "jitter": false,
+    "max_delay_seconds": null, "auto_retry_for": ["TASK_TIMEOUT"]}}"#;
+
+/// A reported result of a shared run completes its row.
+#[tokio::test]
+#[serial]
+async fn a_reported_result_of_a_shared_run_completes_the_row() {
+    let pool = crate::test_support::migrated_pool().await;
+    let queue = test_queue();
+    let (task_id, generation) = seed(
+        &pool,
+        &queue,
+        ExecutionClass::SharedAsync,
+        Held::Running,
+        None,
+        0,
+    )
+    .await;
+    let claimed = claimed_row(
+        task_id,
+        &queue,
+        generation,
+        ExecutionClass::SharedAsync,
+        None,
+        0,
+    );
+
+    let settled = writer(pool.clone())
+        .settle(&claimed, reported_result(ok_envelope(7)))
+        .await;
+
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
+    assert_eq!(history_row(&pool, task_id).await["status"], "COMPLETED");
+    remove_task(&pool, task_id).await;
+}
+
+/// The timeout retries by the policy at the placement of the end; an
+/// isolated placement moves the row to the `ISOLATED` class. The attempt
+/// records `TASK_TIMEOUT` and will retry.
+#[tokio::test]
+#[serial]
+async fn a_timeout_retries_the_row_at_the_placement_of_its_end() {
+    let pool = crate::test_support::migrated_pool().await;
+    for (execution, placement, cancel, class_after) in [
+        (
+            ExecutionClass::SharedAsync,
+            RetryPlacement::Isolated,
+            TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace),
+            "ISOLATED",
+        ),
+        (
+            ExecutionClass::SharedAsync,
+            RetryPlacement::SameClass,
+            TimeoutCancel::Ended(CancelEnd::ReturnedAfterSignal),
+            "SHARED_ASYNC",
+        ),
+        (
+            ExecutionClass::SharedThread,
+            RetryPlacement::Isolated,
+            TimeoutCancel::NoSignal,
+            "ISOLATED",
+        ),
+    ] {
+        let queue = test_queue();
+        let (task_id, generation) = seed(
+            &pool,
+            &queue,
+            execution,
+            Held::Running,
+            Some(RETRY_ON_TIMEOUT),
+            2,
+        )
+        .await;
+        let claimed = claimed_row(
+            task_id,
+            &queue,
+            generation,
+            execution,
+            Some(RETRY_ON_TIMEOUT),
+            2,
+        );
+
+        let settled = writer(pool.clone())
+            .settle(
+                &claimed,
+                AttemptEnd::TimedOut {
+                    timeout: timeout_ms(1_000),
+                    retry: placement,
+                    cancel,
+                    seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(settled, Settlement::Written(_)),
+            "{execution} {placement:?}"
+        );
+        let row = live_row(&pool, task_id)
+            .await
+            .expect("a retried row stays live");
+        assert_eq!(row["status"], "PENDING", "{execution} {placement:?}");
+        assert_eq!(row["execution"], class_after, "{execution} {placement:?}");
+        assert_eq!(row["retry_count"], 1, "{execution} {placement:?}");
+        let attempts: Vec<(bool, Option<String>)> = sql::query_as(
+            "SELECT will_retry, error_code FROM horsies_task_attempts WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_all(&pool)
+        .await
+        .expect("read the attempt rows");
+        assert_eq!(
+            attempts,
+            vec![(true, Some("TASK_TIMEOUT".to_owned()))],
+            "{execution} {placement:?}"
+        );
+        remove_task(&pool, task_id).await;
+    }
+}
+
+/// A timeout with no retry fails the row with `TASK_TIMEOUT`.
+#[tokio::test]
+#[serial]
+async fn a_timeout_with_no_retry_fails_the_row_with_task_timeout() {
+    let pool = crate::test_support::migrated_pool().await;
+    let queue = test_queue();
+    let (task_id, generation) = seed(
+        &pool,
+        &queue,
+        ExecutionClass::SharedThread,
+        Held::Running,
+        None,
+        0,
+    )
+    .await;
+    let claimed = claimed_row(
+        task_id,
+        &queue,
+        generation,
+        ExecutionClass::SharedThread,
+        None,
+        0,
+    );
+
+    let settled = writer(pool.clone())
+        .settle(
+            &claimed,
+            AttemptEnd::TimedOut {
+                timeout: timeout_ms(1_000),
+                retry: RetryPlacement::SameClass,
+                cancel: TimeoutCancel::NoSignal,
+                seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
+            },
+        )
+        .await;
+
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
+    let history = history_row(&pool, task_id).await;
+    assert_eq!(history["status"], "FAILED");
+    assert_eq!(history["error_code"], "TASK_TIMEOUT");
+    remove_task(&pool, task_id).await;
+}
+
+/// Each run
+/// of a child killed for a blocked loop fails with its own code.
+#[tokio::test]
+#[serial]
+async fn a_loop_kill_fails_the_row_with_its_code() {
+    let pool = crate::test_support::migrated_pool().await;
+    for (code, retry, name) in [
+        (
+            LoopKillCode::TaskBlockedLoop,
+            RetryPlacement::Isolated,
+            "TASK_BLOCKED_LOOP",
+        ),
+        (
+            LoopKillCode::NeighbourBlockedLoop,
+            RetryPlacement::SameClass,
+            "NEIGHBOUR_BLOCKED_LOOP",
+        ),
+    ] {
+        let queue = test_queue();
+        let (task_id, generation) = seed(
+            &pool,
+            &queue,
+            ExecutionClass::SharedAsync,
+            Held::Running,
+            None,
+            0,
+        )
+        .await;
+        let claimed = claimed_row(
+            task_id,
+            &queue,
+            generation,
+            ExecutionClass::SharedAsync,
+            None,
+            0,
+        );
+
+        let settled = writer(pool.clone())
+            .settle(
+                &claimed,
+                AttemptEnd::KilledForLoop {
+                    code,
+                    retry,
+                    reason: FailureDetail::cut("app.py:7 in fetch"),
+                },
+            )
+            .await;
+
+        assert!(matches!(settled, Settlement::Written(_)), "{name}");
+        let history = history_row(&pool, task_id).await;
+        assert_eq!(history["status"], "FAILED", "{name}");
+        assert_eq!(history["error_code"], name);
+        remove_task(&pool, task_id).await;
+    }
+}
+
+/// The stored options of a shared async task whose policy retries `code`
+/// twice, 5 s apart.
+fn retrying(code: &str) -> String {
+    format!(
+        r#"{{"timeout_ms": 1000, "cancel_grace_ms": 500, "retry_policy": {{
+    "max_retries": 2, "intervals": [5, 5], "backoff_strategy": "fixed", "jitter": false,
+    "max_delay_seconds": null, "auto_retry_for": ["{code}"]}}}}"#
+    )
+}
+
+/// What one settle of a seeded RUNNING `SHARED_ASYNC` row must leave.
+#[derive(Debug)]
+enum Left {
+    /// The row is PENDING again with retry count 1 in `class`; its attempt
+    /// will retry and records `code`.
+    Retried {
+        class: &'static str,
+        code: &'static str,
+    },
+    /// The row failed with `code`; its one attempt does not retry.
+    Failed { code: &'static str },
+}
+
+/// The live attempt rows of a task: will_retry and error code.
+async fn live_attempts(pool: &TestPool, task_id: Uuid) -> Vec<(bool, Option<String>)> {
+    sql::query_as(
+        "SELECT will_retry, error_code FROM horsies_task_attempts
+         WHERE task_id = $1 ORDER BY attempt",
+    )
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+    .expect("read the attempt rows")
+}
+
+/// The archived attempts of a task that moved to history: number,
+/// will_retry and error code.
+async fn archived_attempts(pool: &TestPool, task_id: Uuid) -> Vec<(i32, bool, Option<String>)> {
+    let (version, payload, digest): (i16, Vec<u8>, Vec<u8>) = sql::query_as(
+        "SELECT attempt_archive_version, attempt_snapshot, attempt_snapshot_digest
+         FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read the archived attempt snapshot");
+    decode_attempt_snapshot(
+        version,
+        JSON_UTF8_CODEC,
+        JSON_CONTENT_TYPE,
+        &payload,
+        &digest,
+    )
+    .expect("decode the archived attempt snapshot")
+    .iter()
+    .map(|record| {
+        (
+            record.attempt(),
+            record.will_retry(),
+            record.error_code().map(str::to_owned),
+        )
+    })
+    .collect()
+}
+
+/// Seed a RUNNING `SHARED_ASYNC` row whose policy retries `retried_code`,
+/// settle `end` on it, and check what it left.
+async fn settle_a_shared_run(pool: &TestPool, retried_code: &str, end: AttemptEnd, left: &Left) {
+    let options = retrying(retried_code);
+    let queue = test_queue();
+    let (task_id, generation) = seed(
+        pool,
+        &queue,
+        ExecutionClass::SharedAsync,
+        Held::Running,
+        Some(options.as_str()),
+        2,
+    )
+    .await;
+    let claimed = claimed_row(
+        task_id,
+        &queue,
+        generation,
+        ExecutionClass::SharedAsync,
+        Some(options.as_str()),
+        2,
+    );
+
+    let settled = writer(pool.clone()).settle(&claimed, end).await;
+
+    assert!(matches!(settled, Settlement::Written(_)), "{left:?}");
+    match left {
+        Left::Retried { class, code } => {
+            let row = live_row(pool, task_id)
+                .await
+                .expect("a retried row stays live");
+            assert_eq!(row["status"], "PENDING", "{left:?}");
+            assert_eq!(row["retry_count"], 1, "{left:?}");
+            assert_eq!(row["execution"], *class, "{left:?}");
+            assert_eq!(
+                live_attempts(pool, task_id).await,
+                vec![(true, Some((*code).to_owned()))],
+                "{left:?}"
+            );
+        }
+        Left::Failed { code } => {
+            let history = history_row(pool, task_id).await;
+            assert_eq!(history["status"], "FAILED", "{left:?}");
+            assert_eq!(history["error_code"], *code, "{left:?}");
+            assert_eq!(
+                archived_attempts(pool, task_id).await,
+                vec![(1, false, Some((*code).to_owned()))],
+                "{left:?}"
+            );
+        }
+    }
+    remove_task(pool, task_id).await;
+}
+
+fn loop_kill(code: LoopKillCode, retry: RetryPlacement) -> AttemptEnd {
+    AttemptEnd::KilledForLoop {
+        code,
+        retry,
+        reason: FailureDetail::cut("app.py:3 in fetch"),
+    }
+}
+
+/// The writes of a kill for a blocked loop (the verdict of each run at the kill is
+/// `shared_rules_tests::a_run_of_a_lost_child_gets_the_verdict_of_its_kill`):
+/// the run that blocked the loop retries in an isolated child when its
+/// policy names `TASK_BLOCKED_LOOP`; a neighbour fails with
+/// `NEIGHBOUR_BLOCKED_LOOP` when its policy retries timeouts only, and
+/// retries in its class when its policy names its code.
+#[tokio::test]
+#[serial]
+async fn the_runs_of_a_child_killed_for_a_blocked_loop_retry_by_their_own_code() {
+    let pool = crate::test_support::migrated_pool().await;
+    for (retried_code, end, left) in [
+        (
+            "TASK_BLOCKED_LOOP",
+            loop_kill(LoopKillCode::TaskBlockedLoop, RetryPlacement::Isolated),
+            Left::Retried {
+                class: "ISOLATED",
+                code: "TASK_BLOCKED_LOOP",
+            },
+        ),
+        (
+            "TASK_TIMEOUT",
+            loop_kill(
+                LoopKillCode::NeighbourBlockedLoop,
+                RetryPlacement::SameClass,
+            ),
+            Left::Failed {
+                code: "NEIGHBOUR_BLOCKED_LOOP",
+            },
+        ),
+        (
+            "NEIGHBOUR_BLOCKED_LOOP",
+            loop_kill(
+                LoopKillCode::NeighbourBlockedLoop,
+                RetryPlacement::SameClass,
+            ),
+            Left::Retried {
+                class: "SHARED_ASYNC",
+                code: "NEIGHBOUR_BLOCKED_LOOP",
+            },
+        ),
+    ] {
+        settle_a_shared_run(&pool, retried_code, end, &left).await;
+    }
+}
+
+/// The writes of a run that returned before the kill (a run that returned
+/// before the kill ends with what it returned:
+/// `shared_rules_tests::a_death_the_worker_did_not_cause_takes_the_crash_path`,
+/// `::a_kill_past_deadlines_isolates_only_the_culprit`): the run returned
+/// `UPSTREAM_DOWN`. A policy that retries timeouts only fails it with that
+/// code and one attempt that does not retry; a policy that names the code
+/// retries it in its class, not in an isolated child.
+#[tokio::test]
+#[serial]
+async fn a_run_that_returned_before_the_kill_writes_what_it_returned() {
+    let pool = crate::test_support::migrated_pool().await;
+    let error = TaskError::new("UPSTREAM_DOWN", "upstream down").expect("a code of the task's own");
+    let returned = || {
+        reported_result(ResultEnvelopeText::new(
+            serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error.clone()))
+                .expect("the error envelope encodes"),
+        ))
+    };
+    for (retried_code, left) in [
+        (
+            "TASK_TIMEOUT",
+            Left::Failed {
+                code: "UPSTREAM_DOWN",
+            },
+        ),
+        (
+            "UPSTREAM_DOWN",
+            Left::Retried {
+                class: "SHARED_ASYNC",
+                code: "UPSTREAM_DOWN",
+            },
+        ),
+    ] {
+        settle_a_shared_run(&pool, retried_code, returned(), &left).await;
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn a_task_that_reached_no_child_goes_back_to_the_queue() {
+    let pool = crate::test_support::migrated_pool().await;
+    let queue = test_queue();
+    let (task_id, generation) = seed(
+        &pool,
+        &queue,
+        ExecutionClass::SharedAsync,
+        Held::Claimed,
+        None,
+        0,
+    )
+    .await;
+    let claimed = claimed_row(
+        task_id,
+        &queue,
+        generation,
+        ExecutionClass::SharedAsync,
+        None,
+        0,
+    );
+
+    let settled = writer(pool.clone())
+        .settle(
+            &claimed,
+            AttemptEnd::NotDispatched(NotRunCause::PoolStopping),
+        )
+        .await;
+
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
+    let row = live_row(&pool, task_id).await.expect("the row stays live");
+    assert_eq!(row["status"], "PENDING");
+    assert_eq!(row["claimed_by_worker_id"], serde_json::Value::Null);
+    remove_task(&pool, task_id).await;
+}
+
+/// At the stop, a row that waited for its queue cap goes back to the queue
+/// with the claim fence (`worker::worker::return_held_rows` settles each
+/// held row so).
+#[tokio::test]
+#[serial]
+async fn a_row_held_for_its_queue_cap_goes_back_to_the_queue_at_the_stop() {
+    let pool = crate::test_support::migrated_pool().await;
+    let queue = test_queue();
+    let (task_id, generation) = seed(
+        &pool,
+        &queue,
+        ExecutionClass::Isolated,
+        Held::Claimed,
+        None,
+        0,
+    )
+    .await;
+    let held = claimed_row(
+        task_id,
+        &queue,
+        generation,
+        ExecutionClass::Isolated,
+        None,
+        0,
+    );
+
+    let settled = writer(pool.clone())
+        .settle(
+            &held,
+            AttemptEnd::NotDispatched(NotRunCause::HeldForQueueCap),
+        )
+        .await;
+
+    assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
+    let row = live_row(&pool, task_id).await.expect("the row stays live");
+    assert_eq!(row["status"], "PENDING");
+    assert_eq!(row["claimed_by_worker_id"], serde_json::Value::Null);
+    assert_eq!(row["execution"], "ISOLATED");
+    remove_task(&pool, task_id).await;
+}
+
+/// The number of attempt rows of a task.
+async fn attempt_count(pool: &TestPool, task_id: Uuid) -> i64 {
+    sql::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("count the attempt rows")
+}
+
+/// A child killed before it set its row RUNNING (each unreported end:
+/// a crash, a loop kill, a timeout): the failed-attempt statement under the
+/// claimed-row rule `RELEASE` puts the CLAIMED row back in the queue in its
+/// class, with no attempt row (Python `_write_ended_attempt`, which sends
+/// the release as its own statement).
+#[tokio::test]
+#[serial]
+async fn an_unreported_end_of_a_row_still_claimed_puts_it_back_with_no_attempt_row() {
+    let pool = crate::test_support::migrated_pool().await;
+    let ends = [
+        AttemptEnd::Crashed {
+            reason: FailureDetail::cut("the child was lost"),
+        },
+        AttemptEnd::KilledForLoop {
+            code: LoopKillCode::TaskBlockedLoop,
+            retry: RetryPlacement::Isolated,
+            reason: FailureDetail::cut("app.py:7 in fetch"),
+        },
+        AttemptEnd::TimedOut {
+            timeout: timeout_ms(1_000),
+            retry: RetryPlacement::SameClass,
+            cancel: TimeoutCancel::Ended(CancelEnd::KilledWithChild),
+            seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
+        },
+    ];
+    for end in ends {
+        let queue = test_queue();
+        let (task_id, generation) = seed(
+            &pool,
+            &queue,
+            ExecutionClass::SharedAsync,
+            Held::Claimed,
+            Some(RETRY_ON_TIMEOUT),
+            2,
+        )
+        .await;
+        let claimed = claimed_row(
+            task_id,
+            &queue,
+            generation,
+            ExecutionClass::SharedAsync,
+            Some(RETRY_ON_TIMEOUT),
+            2,
+        );
+        let label = format!("{end:?}");
+
+        let settled = writer(pool.clone()).settle(&claimed, end).await;
+
+        assert!(matches!(settled, Settlement::Written(_)), "{label}");
+        let row = live_row(&pool, task_id).await.expect("the row stays live");
+        assert_eq!(row["status"], "PENDING", "{label}");
+        assert_eq!(row["execution"], "SHARED_ASYNC", "{label}");
+        assert_eq!(row["retry_count"], 0, "{label}");
+        assert_eq!(
+            row["claimed_by_worker_id"],
+            serde_json::Value::Null,
+            "{label}"
+        );
+        assert_eq!(attempt_count(&pool, task_id).await, 0, "{label}");
+        remove_task(&pool, task_id).await;
+    }
+}
+
+/// A task that reached no child, on a row that another claim generation
+/// holds now: the release leaves the row as it is.
+#[tokio::test]
+#[serial]
+async fn a_task_that_reached_no_child_leaves_a_row_of_another_claim_alone() {
+    let pool = crate::test_support::migrated_pool().await;
+    let queue = test_queue();
+    let (task_id, generation) = seed(
+        &pool,
+        &queue,
+        ExecutionClass::Isolated,
+        Held::Claimed,
+        None,
+        0,
+    )
+    .await;
+    let earlier_claim = claimed_row(
+        task_id,
+        &queue,
+        generation - chrono::Duration::seconds(5),
+        ExecutionClass::Isolated,
+        None,
+        0,
+    );
+    let before = live_row(&pool, task_id).await;
+
+    let settled = writer(pool.clone())
+        .settle(
+            &earlier_claim,
+            AttemptEnd::NotDispatched(NotRunCause::QueueFull),
+        )
+        .await;
+
+    assert_eq!(settled, Settlement::NotHeld);
+    assert_eq!(live_row(&pool, task_id).await, before);
+    remove_task(&pool, task_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// The retries of a write
+// ---------------------------------------------------------------------------
+
+/// A CLAIMED workflow task held by [`WORKER_ID`] with no workflow node
+/// linked to it. Returns the claimed task. A workflow task row has no
+/// command fingerprint (baseline `horsies_tasks_command_fingerprint_by_origin`).
+async fn seed_unlinked_workflow_task(pool: &TestPool, queue: &str) -> ClaimedTask {
+    let (task_id, generation) = seed(
+        pool,
+        queue,
+        ExecutionClass::Isolated,
+        Held::Claimed,
+        None,
+        0,
+    )
+    .await;
+    sql::query(
+        "UPDATE horsies_tasks
+         SET is_workflow_task = TRUE,
+             command_fingerprint = NULL,
+             command_fingerprint_version = NULL
+         WHERE id = $1",
+    )
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .expect("mark the row a workflow task");
+    ClaimedTask {
+        kind: TaskKind::WorkflowTask,
+        ..claimed_row(
+            task_id,
+            queue,
+            generation,
+            ExecutionClass::Isolated,
+            None,
+            0,
+        )
+    }
+}
+
+/// A child reports `NODE_NOT_LINKED` only when its stop before start left
+/// the orphan, with the self-heal off; the worker writes nothing, and the
+/// row stays CLAIMED by this claim. The cancel with the self-heal on runs in
+/// the child (`child_host::start_node_tests`).
+#[tokio::test]
+#[serial]
+async fn a_task_whose_node_is_not_linked_stays_claimed() {
+    let pool = crate::test_support::migrated_pool().await;
+    let queue = test_queue();
+    let claimed = seed_unlinked_workflow_task(&pool, &queue).await;
+
+    let settled = writer(pool.clone())
+        .settle(
+            &claimed,
+            AttemptEnd::StoppedBeforeRunning(StopReason::NodeNotLinked),
+        )
+        .await;
+
+    assert_eq!(settled, Settlement::NothingOwed);
+    let row = live_row(&pool, claimed.task_id)
+        .await
+        .expect("the row stays live");
+    assert_eq!(row["status"], "CLAIMED");
+    assert_eq!(row["claimed_by_worker_id"], WORKER_ID);
+    remove_task(&pool, claimed.task_id).await;
+}
+
+/// No server listens on port 1, so every write fails with a retryable pool
+/// timeout after 100 ms.
+fn unreachable_writer() -> OutcomeWriter {
+    let pool = TestPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_millis(100))
+        .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies");
+    writer(pool)
+}
+
+/// The retry waits of one write stage: 0.5 s, 1 s and 2 s.
+const ONE_STAGE_OF_WAITS: Duration = Duration::from_millis(3_500);
+
+/// The write and its log lines (the order is
+/// `exit_not_seen_tests::a_deadline_kill_gives_no_end_before_the_exit_is_seen`):
+/// a write that keeps failing is sent again up to its bound; a timeout
+/// runs its crash recovery stage after the last retry of its own write, a
+/// loop kill or a crash has one stage only. Each settles as spent retries.
+/// Each failed send of the `TASK_TIMEOUT` write is logged with the task and
+/// the stage, and the end of its retries at error with the task.
+#[tokio::test]
+async fn a_failing_timeout_write_runs_crash_recovery_after_its_own_retries() {
+    let claimed = task(1, ExecutionClass::SharedAsync);
+    let writer = unreachable_writer();
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
+
+    let started = Instant::now();
+    let loop_kill = writer
+        .settle(
+            &claimed,
+            AttemptEnd::KilledForLoop {
+                code: LoopKillCode::TaskBlockedLoop,
+                retry: RetryPlacement::Isolated,
+                reason: FailureDetail::cut("app.py:7 in fetch"),
+            },
+        )
+        .await;
+    let one_stage = started.elapsed();
+    let started = Instant::now();
+    let timed_out = writer
+        .settle(
+            &claimed,
+            AttemptEnd::TimedOut {
+                timeout: timeout_ms(1_000),
+                retry: RetryPlacement::Isolated,
+                cancel: TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace),
+                seen: crate::worker::executor::slots::TimeoutSeen::AtKill,
+            },
+        )
+        .await;
+    let two_stages = started.elapsed();
+
+    assert_eq!(loop_kill, Settlement::RetriesExhausted);
+    assert_eq!(timed_out, Settlement::RetriesExhausted);
+    assert!(one_stage >= ONE_STAGE_OF_WAITS, "{one_stage:?}");
+    assert!(one_stage < 2 * ONE_STAGE_OF_WAITS, "{one_stage:?}");
+    assert!(two_stages >= 2 * ONE_STAGE_OF_WAITS, "{two_stages:?}");
+    let timeout_write_retries = capture.lines_starting(
+        tracing::Level::WARN,
+        &format!(
+            "Finalize retry scheduled for task {} stage=timeout_write",
+            claimed.task_id
+        ),
+    );
+    assert_eq!(
+        timeout_write_retries.len(),
+        usize::try_from(super::outcome::WriteStage::TimeoutWrite.max_retries()).unwrap(),
+        "{timeout_write_retries:?}"
+    );
+    let task_id = claimed.task_id.to_string();
+    let spent: Vec<CapturedEvent> = capture.lines_starting(
+        tracing::Level::ERROR,
+        "every retry of the TASK_TIMEOUT write failed",
+    );
+    assert_eq!(spent.len(), 1, "{spent:?}");
+    assert_eq!(spent[0].field("task_id"), Some(task_id.as_str()));
+}
+
+/// The text that the result of [`a_failed_success_write_logs_the_task_and_not_the_result`]
+/// carries, to find it in any log line.
+const RESULT_MARKER: &str = "result-marker-7f3c";
+
+/// Python `test_worker_helpers.py::TestFinalizeErrorLogOmitsResult::test_log_line_has_result_length_not_result`
+/// (case `retries_exhausted`; the line of a write that is not tried again
+/// has the same form): the success write of a plain task fails on every
+/// retry, and its log lines name the task and leave out the result text.
+/// The length of the result has no counterpart: Python logs the `data` dict
+/// of its finalize error with the result replaced by its length; the core's
+/// error is typed and carries no result.
+#[tokio::test]
+async fn a_failed_success_write_logs_the_task_and_not_the_result() {
+    let claimed = task(1, ExecutionClass::Isolated);
+    let writer = unreachable_writer();
+    let capture = LogCapture::new();
+    let _default = capture.set_default();
+    let envelope = format!(r#"{{"__h_task_result__":true,"ok":"{RESULT_MARKER}","err":null}}"#);
+
+    let settled = writer
+        .settle(&claimed, reported_result(ResultEnvelopeText::new(envelope)))
+        .await;
+
+    assert_eq!(settled, Settlement::RetriesExhausted);
+    let task_id = claimed.task_id.to_string();
+    let exhausted = capture.lines_starting(
+        tracing::Level::ERROR,
+        &format!("Finalize retries exhausted for task {task_id}"),
+    );
+    assert_eq!(exhausted.len(), 1, "{exhausted:?}");
+    assert_eq!(exhausted[0].field("task_id"), Some(task_id.as_str()));
+    for event in capture.events() {
+        assert!(!event.message.contains(RESULT_MARKER), "{event:?}");
+        for (name, value) in &event.fields {
+            assert!(!value.contains(RESULT_MARKER), "{name}: {event:?}");
+        }
+    }
+}
+
+/// The work of a shared async run with its stored timeout and grace, as
+/// the route reads it (Python `TestRoute::test_a_row_of_the_shared_async_budget_runs_on_a_seat`
+/// with the grace of `SHARED_OPTIONS`).
+#[test]
+fn a_shared_async_row_runs_on_a_seat_with_its_stored_grace() {
+    assert_eq!(
+        dispatch_route(
+            ExecutionClass::SharedAsync,
+            ClaimPlan::for_children(1, 1, 0),
+            &read_stored_options(Some(r#"{"timeout_ms": 2000, "cancel_grace_ms": 700}"#)),
+        ),
+        Ok(DispatchRoute::SharedAsync(SharedWork::AsyncTask {
+            timeout_ms: timeout_ms(2_000),
+            cancel_grace_ms: CancelGraceMs::new(700).unwrap(),
+        }))
+    );
+}
+
+/// A row of the thread budget runs on a thread seat; one with no usable
+/// timeout is refused on a seat; a worker with no thread children runs it
+/// isolated; thread children alone do not serve an isolated row.
+#[test]
+fn a_shared_thread_row_runs_on_a_thread_seat_or_is_refused_there() {
+    let with_threads = ClaimPlan::for_children(1, 0, 1);
+    let timed = read_stored_options(Some(r#"{"timeout_ms": 2000}"#));
+    assert_eq!(
+        dispatch_route(ExecutionClass::SharedThread, with_threads, &timed),
+        Ok(DispatchRoute::SharedThread(SharedWork::ThreadTask {
+            timeout_ms: timeout_ms(2_000),
+        }))
+    );
+    for plan in [with_threads, ClaimPlan::for_children(0, 0, 1)] {
+        match dispatch_route(
+            ExecutionClass::SharedThread,
+            plan,
+            &read_stored_options(Some("{}")),
+        ) {
+            Ok(DispatchRoute::SharedThread(SharedWork::Refusal(
+                StoredOptionsRefusal::TimeoutValueInvalid(reason),
+            ))) => assert_eq!(
+                reason.as_str(),
+                "stored timeout_ms is absent for execution SHARED_THREAD"
+            ),
+            other => panic!("expected a refusal on a thread seat, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        dispatch_route(
+            ExecutionClass::SharedThread,
+            ClaimPlan::for_children(1, 0, 0),
+            &timed
+        ),
+        Ok(DispatchRoute::Isolated {
+            work: IsolatedWork::Run,
+            deadline: IsolatedDeadline::After(timeout_ms(2_000)),
+        })
+    );
+    assert_eq!(
+        dispatch_route(
+            ExecutionClass::Isolated,
+            ClaimPlan::for_children(0, 0, 1),
+            &timed
+        ),
+        Err(UnservedClass {
+            class: ExecutionClass::Isolated
+        })
+    );
+}
+
+/// The bound is in the type of the timeout, so a run cannot carry one out
+/// of bounds.
+#[test]
+fn a_seat_timeout_out_of_its_bounds_cannot_be_built() {
+    assert!(crate::worker::executor::protocol::TaskTimeoutMs::new(999).is_none());
+    assert!(crate::worker::executor::protocol::TaskTimeoutMs::new(1_000).is_some());
+    assert!(
+        crate::worker::executor::protocol::TaskTimeoutMs::new(u64::from(u32::MAX) + 1).is_none()
+    );
+}

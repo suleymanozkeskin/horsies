@@ -1,5 +1,6 @@
 ---
 title: Typed Node Builder
+section: python
 summary: Create TaskNodes with static type safety using the .node() API.
 related: [workflow-api, workflow-semantics, subworkflows]
 tags: [concepts, workflows, types, api]
@@ -18,7 +19,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://...")),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
 ))
 
 @app.task(task_name='compute_score')

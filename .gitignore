@@ -39,7 +39,7 @@ roadmap/
 orchestrator/
 
 # test results
-tests/test_results
+clients/python/tests/test_results
 
 # external resources
 /external-resources
@@ -50,18 +50,19 @@ ignored-content/
 
 /docs/
 
-# Root scratch folder only; rust/examples/ is a tracked crate.
+# Root scratch folder only; clients/rust/examples/ is a tracked crate.
 /examples/
 
 .coverage
 .env.planetscale
 
 
-# built web UI assets (produced by the webui build, never committed)
-horsies/web/static/
+
+# horsies._core as a local maturin build places it next to the sources
+clients/python/horsies/_core.*.so
 
 # Raw measurement samples: large, unreadable, uploaded as CI artifacts instead.
-tests/perf/results/raw/
+crossclient/perf/results/raw/
 
 # Carried over from horsies-rust (its .gitignore applied to its whole tree)
 .idea/
@@ -75,4 +76,4 @@ ask-for-review/
 ask-review/
 *.profraw
 *.profdata
-crates/horsies-macros/Cargo.toml.bak
+clients/rust/macros/Cargo.toml.bak

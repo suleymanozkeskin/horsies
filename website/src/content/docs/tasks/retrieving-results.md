@@ -1,5 +1,6 @@
 ---
 title: Retrieving Results
+section: python
 summary: Getting task outcomes via TaskHandle.get().
 related: [sending-tasks, ../../concepts/result-handling]
 tags: [tasks, results, TaskHandle, errors]
@@ -121,6 +122,22 @@ if is_ok(info_result) and info_result.ok_value is not None:
 `TaskInfo.attempts` is `None` when `include_attempts=False` (default) and `[]` when requested but no history exists. Attempts are ordered by attempt number descending (most recent first).
 
 Attempt history and `error_code` are only available from version `0.1.0a26` onward.
+
+### Terminal Statuses
+
+`TaskInfo.status` is a `TaskStatus`. Each status has `is_terminal`, and `TASK_TERMINAL_STATES` holds the terminal statuses. The statuses and their transitions are on [Task Lifecycle](/horsies/concepts/task-lifecycle/).
+
+```python
+from horsies import TaskStatus, TASK_TERMINAL_STATES
+
+status = TaskStatus.FAILED
+status.is_terminal  # True
+
+TaskStatus.RUNNING.is_terminal  # False
+
+# Frozenset for use in queries or filters
+TASK_TERMINAL_STATES  # frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.EXPIRED})
+```
 
 ### Testing
 

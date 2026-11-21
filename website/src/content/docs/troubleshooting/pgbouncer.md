@@ -1,27 +1,19 @@
 ---
 title: PgBouncer Troubleshooting
-summary: Fix PgBouncer transaction pooling issues with Horsies and Syce, and size the PgBouncer pool for the workers.
-related: [../configuration/broker-config, ../configuration/remote-postgres, ../workers/worker-profiles, ../monitoring/syce-overview, ../tasks/errors]
+section: shared
+summary: Fix PgBouncer transaction pooling issues with Horsies, and size the PgBouncer pool for the workers.
+related: [../configuration/broker-config, ../configuration/remote-postgres, ../workers/worker-profiles, ../monitoring/web-ui-deployment, ../tasks/errors]
 tags: [troubleshooting, pgbouncer, planetscale, postgres]
 ---
 
 # PgBouncer Troubleshooting
 
 Horsies supports PgBouncer transaction pooling only with a second
-session-capable PostgreSQL URL.
-
-```python
-from pydantic import SecretStr
-from horsies import AppConfig, PostgresConfig
-
-config = AppConfig(
-    broker=PostgresConfig(
-        database_url=SecretStr(os.environ["DATABASE_URL_POOLED"]),
-        session_database_url=SecretStr(os.environ["DATABASE_URL_DIRECT"]),
-        pgbouncer_transaction_mode=True,
-    ),
-)
-```
+session-capable PostgreSQL URL: `database_url` is the pooled URL,
+`session_database_url` is the direct URL, and `pgbouncer_transaction_mode` is
+true. The API is on the client pages:
+[PgBouncer / Transaction Pooling](/horsies/configuration/broker-connections/#pgbouncer--transaction-pooling)
+(Python) and [PostgresConfig](/horsies/rust/configuration/app-config/#postgresconfig) (Rust).
 
 Managed providers, such as PlanetScale Postgres, may show separate pooled and
 direct connection strings. Verify the current ports and URLs in your provider
@@ -48,9 +40,10 @@ pool max_size                                           # pool of the worker pro
 ```
 
 Task code that sends through the app adds the `task_send_pool` of its child
-kind for each event loop that it sends from, also to the pooled
-`database_url`. The 2 listener connections go to `session_database_url`, not
-through PgBouncer. Each `max_size` is the resolved value; see
+kind in each child, also to the pooled
+`database_url`. The listener connection and the session pool of the worker
+process go to `session_database_url`, not through PgBouncer. Each `max_size`
+is the resolved value; see
 [Connections](/horsies/workers/worker-profiles/#connections).
 
 A larger pool of the worker process adds client connections, not server
@@ -113,12 +106,16 @@ server connections then add no throughput.
   a workflow task (`BEGIN`, update, node, `COMMIT`: 4 round trips) and the
   other writes of a workflow task that run as one transaction. Count each as
   its round trips × the RTT between the worker and PgBouncer.
-- The 2 listener connections of each worker go to `session_database_url`, not
+- The listener connection of each worker goes to `session_database_url`, not
   through PgBouncer: `LISTEN` needs a session, and transaction pooling does not
-  keep one. They are not part of `default_pool_size` or of the client
-  connections above. They use 2 direct Postgres slots per worker. For a worker
-  without PgBouncer, `HRS-219` counts them as `listener 2`; with
-  `pgbouncer_transaction_mode=True` it compares nothing.
+  keep one. The session pool of the worker process (schema work and partition
+  maintenance, up to the pool `max_size` of the worker process) goes there
+  too. Neither is part of `default_pool_size` or of the client connections
+  above. They use at most `1 + pool max_size` direct Postgres slots per
+  worker. `HRS-219` counts the listener as `listener 1`, and the session pool
+  as `session pool max_size N` when `session_database_url` differs from
+  `database_url`; with `pgbouncer_transaction_mode=True` it compares
+  nothing.
 
 ## Error: session_database_url required
 
@@ -141,16 +138,18 @@ session_database_url must not use the transaction-pool URL
 Use two different URLs. Put the transaction-pool URL in `database_url`. Put a
 direct or session-pooled URL in `session_database_url`.
 
-## Error: Postgres LISTEN failed
+## Error: Session URL Check Failed
 
 ```text
-Postgres LISTEN failed. If database_url points to PgBouncer transaction pooling,
-set PostgresConfig.session_database_url to a direct/session-capable Postgres URL.
+session URL check failed: LISTEN on <session URL> received no NOTIFY within 2000 ms:
+the session URL does not keep session state (for example PgBouncer transaction pooling);
+set session_database_url to a direct or session-pooled URL
 ```
 
-The worker could not subscribe to PostgreSQL notifications. Check that
-`session_database_url` does not point to transaction-pooled PgBouncer. Horsies
-workers intentionally fail startup here; poll-only workers are not supported.
+At each start, the worker sends a `NOTIFY` and waits at most 2 seconds for it
+on a `LISTEN` of the session URL. Check that `session_database_url` does not
+point to transaction-pooled PgBouncer. Horsies workers intentionally fail
+startup here; poll-only workers are not supported.
 
 ## Warning: LISTEN unavailable
 
@@ -160,7 +159,8 @@ LISTEN unavailable; falling back to polling
 
 Producer-side `handle.get()` and workflow waits can poll when notifications are
 unavailable. This keeps result retrieval working, but it is not worker dispatch
-support. Fix the session URL if workers or Syce need real-time notifications.
+support. Fix the session URL if workers or the web UI event stream need
+real-time notifications.
 
 ## Live Check: Notification Not Delivered
 
@@ -174,23 +174,15 @@ of transaction pooling. Use the direct Postgres URL for `session_database_url`.
 
 ## Prepared Statement Errors
 
-If the pooled URL is used without `pgbouncer_transaction_mode=True`, operators
+If the pooled URL is used without `pgbouncer_transaction_mode` set to true, operators
 may see prepared-statement or statement-cache errors from the pooler. Enable the
-flag:
+flag, with the split URLs above.
 
-```python
-PostgresConfig(
-    database_url=SecretStr(os.environ["DATABASE_URL_POOLED"]),
-    session_database_url=SecretStr(os.environ["DATABASE_URL_DIRECT"]),
-    pgbouncer_transaction_mode=True,
-)
-```
-
-This disables psycopg prepared statements for Horsies runtime SQL. In Syce, pass
-`--pgbouncer-transaction-mode` to disable SQLx's PostgreSQL statement cache.
+In this mode the core prepares no named statement: it sends each statement as the unnamed statement. For the
+standalone web UI, pass `--pgbouncer-transaction-mode` with both URLs:
 
 ```bash
-syce \
+horsies web \
   --database-url "$DATABASE_URL_POOLED" \
   --session-database-url "$DATABASE_URL_DIRECT" \
   --pgbouncer-transaction-mode

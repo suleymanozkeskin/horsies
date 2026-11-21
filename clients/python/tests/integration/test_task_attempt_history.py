@@ -1,0 +1,469 @@
+"""Integration tests for task attempt history (horsies_task_attempts).
+
+Covers the attempt rows of the broker's passes and reads:
+1. Stale runner cleanup → FAILED attempt with WORKER_CRASHED
+2. Stale runner cleanup with retry policy → FAILED attempt, will_retry=True, task PENDING
+3. TaskInfo.attempts newest first, live and after the move to history
+4. Expired PENDING → EXPIRED status with TASK_EXPIRED result, no attempt row
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+import pytest
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+
+from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.codec import JsonValue, encode_task_result
+from horsies.core.codec.json_io import dumps_json
+from horsies.core.models.tasks import (
+    OperationalErrorCode,
+    TaskResult,
+)
+from horsies.core.types.result import is_err, is_ok
+from tests.integration.terminal_writes import complete_plain_task
+from tests.integration.conftest import compute_test_command_fingerprint
+from tests.integration.history_seeding import read_attempts
+
+pytestmark = [pytest.mark.integration]
+
+# The claim generation of every RUNNING row seeded here, which the fences of
+# the worker check.
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _ensure_schema(broker: PostgresBroker) -> None:  # noqa: ARG001
+    """Ensure DB schema (including horsies_task_attempts) exists before tests."""
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+async def _insert_running_task(
+    session: AsyncSession,
+    *,
+    task_name: str = 'attempt_history_test',
+    retry_count: int = 0,
+    max_retries: int = 0,
+    worker_id: str = 'w-test-1',
+    worker_hostname: str = 'host-test',
+    worker_pid: int = 9999,
+    worker_process_name: str = 'proc-test',
+    good_until: datetime | None = None,
+    task_options: str | None = None,
+) -> str:
+    """Insert a RUNNING task with worker identity for attempt context."""
+    task_id = str(uuid.uuid4())
+    sent_at, fingerprint = compute_test_command_fingerprint(
+        task_name=task_name,
+        good_until=good_until,
+        task_options=task_options,
+    )
+    await session.execute(
+        text("""
+            INSERT INTO horsies_tasks
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    claimed_by_worker_id, claimed_at, worker_hostname, worker_pid,
+                    worker_process_name, good_until, task_options, retention_class_key,
+                    command_fingerprint_version, command_fingerprint,
+                    retain_rerun_input, execution, enqueued_at, is_workflow_task
+                ) VALUES (
+                    :id, :task_name, 'default', 100, '{}', 'RUNNING', :sent_at, NOW(),
+                    NOW(), :retry_count, :max_retries, NOW(), :worker_id, :claimed_at,
+                    :worker_hostname, :worker_pid, :worker_process_name, :good_until,
+                    :task_options, 'standard_30d', 1, :command_fingerprint, FALSE,
+                    'ISOLATED', NOW(), FALSE
+                )
+        """),
+        {
+            'id': task_id,
+            'task_name': task_name,
+            'sent_at': sent_at,
+            'command_fingerprint': fingerprint,
+            'retry_count': retry_count,
+            'max_retries': max_retries,
+            'worker_id': worker_id,
+            'claimed_at': CLAIMED_AT,
+            'worker_hostname': worker_hostname,
+            'worker_pid': worker_pid,
+            'worker_process_name': worker_process_name,
+            'good_until': good_until,
+            'task_options': task_options,
+        },
+    )
+    await session.commit()
+    return task_id
+
+
+async def _insert_retried_attempts(
+    session: AsyncSession,
+    task_id: str,
+    *,
+    through: int,
+    worker_id: str = 'w-test-1',
+    worker_hostname: str = 'host-test',
+    worker_pid: int = 9999,
+    worker_process_name: str = 'proc-test',
+) -> None:
+    """Record attempts 1..through as failures that were retried.
+
+    Attempt numbers are `retry_count + 1` at every writing path, so a
+    task seeded at retry_count=N carries these already.
+    """
+    for attempt in range(1, through + 1):
+        await session.execute(
+            text("""
+                INSERT INTO horsies_task_attempts
+                    (task_id, attempt, outcome, will_retry,
+                     started_at, finished_at, error_code,
+                     worker_id, worker_hostname, worker_pid,
+                     worker_process_name)
+                VALUES
+                    (CAST(:task_id AS uuid), :attempt, 'FAILED', TRUE,
+                     NOW(), NOW(), :error_code,
+                     :worker_id, :worker_hostname, :worker_pid,
+                     :worker_process_name)
+            """),
+            {
+                'task_id': task_id,
+                'attempt': attempt,
+                'error_code': OperationalErrorCode.TASK_EXCEPTION.value,
+                'worker_id': worker_id,
+                'worker_hostname': worker_hostname,
+                'worker_pid': worker_pid,
+                'worker_process_name': worker_process_name,
+            },
+        )
+    await session.commit()
+
+
+async def _get_attempts(
+    broker: PostgresBroker,
+    task_id: str,
+) -> list[dict[str, Any]]:
+    """All attempts for a task, attempt ASC, as a Python user reads them.
+
+    ``read_attempts`` reads them through ``get_task_info_async``: the live
+    attempt rows while the task is live; after terminalization the move
+    purges them and the core decodes the history snapshot, which keeps
+    every field this suite asserts on.
+    """
+    return [
+        {
+            'task_id': str(attempt.task_id),
+            'attempt': attempt.attempt,
+            'outcome': attempt.outcome.value,
+            'will_retry': attempt.will_retry,
+            'started_at': attempt.started_at,
+            'finished_at': attempt.finished_at,
+            'error_code': attempt.error_code,
+            'error_message': attempt.error_message,
+            'failed_reason': attempt.failed_reason,
+            'worker_id': attempt.worker_id,
+            'worker_hostname': attempt.worker_hostname,
+            'worker_pid': attempt.worker_pid,
+            'worker_process_name': attempt.worker_process_name,
+        }
+        for attempt in await read_attempts(broker, task_id)
+    ]
+
+
+async def _get_task_error_code(
+    session: AsyncSession,
+    task_id: str,
+) -> str | None:
+    """Read horsies_tasks.error_code for a task."""
+    row = (
+        await session.execute(
+            text('SELECT error_code FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
+            {'id': task_id},
+        )
+    ).fetchone()
+    assert row is not None, f'Task {task_id} not found'
+    return row[0]
+
+
+def _serialize_ok(value: object) -> str:
+    """Build the strict ``__h_task_result__`` envelope for a seeded ok value."""
+    envelope = encode_task_result(TaskResult(ok=value), JsonValue)
+    r = dumps_json(envelope)
+    assert not is_err(r)
+    return r.ok_value
+
+
+# ---------------------------------------------------------------------------
+# 1. Stale runner cleanup → FAILED attempt with WORKER_CRASHED
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_stale_cleanup_writes_failed_attempt_worker_crashed(
+    broker: PostgresBroker,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """mark_stale_tasks_as_failed writes one FAILED attempt with WORKER_CRASHED.
+
+    No worker runs here, so no reaper runs the stale RUNNING pass, as with
+    ``auto_fail_stale_running=False``: the call runs the pass on demand.
+    """
+    task_id = str(uuid.uuid4())
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='stale_attempt_test')
+    # Insert a RUNNING task with started_at far in the past and no heartbeat
+    stale_started_at = datetime.now(timezone.utc) - timedelta(minutes=30)
+    await session.execute(
+        text("""
+            INSERT INTO horsies_tasks
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    claimed_by_worker_id, worker_hostname, worker_pid,
+                    worker_process_name, retention_class_key,
+                    command_fingerprint_version, command_fingerprint,
+                    retain_rerun_input, execution, enqueued_at, is_workflow_task
+                ) VALUES (
+                    :id, 'stale_attempt_test', 'default', 100, '{}', 'RUNNING',
+                    :sent_at, NOW(), NOW(), 0, 0, :stale_started_at, 'w-stale-1',
+                    'stale-host', 1234, 'stale-proc', 'standard_30d', 1,
+                    :command_fingerprint, FALSE, 'ISOLATED', NOW(), FALSE
+                )
+        """),
+        {
+            'id': task_id,
+            'sent_at': sent_at,
+            'command_fingerprint': fingerprint,
+            'stale_started_at': stale_started_at,
+        },
+    )
+    await session.commit()
+
+    # Use a very short threshold so the task is definitely stale
+    result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=1_000)
+
+    assert is_ok(result)
+    assert result.ok_value >= 1
+
+    attempts = await _get_attempts(broker, task_id)
+    assert len(attempts) == 1
+
+    att = attempts[0]
+    assert att['attempt'] == 1
+    assert att['outcome'] == 'FAILED'
+    assert att['will_retry'] is False
+    assert att['error_code'] == 'WORKER_CRASHED'
+    assert att['error_message'] is not None
+    assert 'Worker process crashed' in att['error_message']
+    assert att['failed_reason'] is not None
+    assert att['worker_id'] == 'w-stale-1'
+    assert att['worker_hostname'] == 'stale-host'
+    assert att['worker_pid'] == 1234
+    assert att['worker_process_name'] == 'stale-proc'
+
+    task_ec = await _get_task_error_code(session, task_id)
+    assert task_ec == 'WORKER_CRASHED'
+
+
+# ---------------------------------------------------------------------------
+# 2. Stale runner cleanup with retry policy → FAILED attempt, will_retry=True
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_stale_cleanup_with_retry_policy_schedules_retry(
+    broker: PostgresBroker,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """mark_stale_tasks_as_failed retries when WORKER_CRASHED is in auto_retry_for.
+
+    No worker runs here, so no reaper runs the stale RUNNING pass, as with
+    ``auto_fail_stale_running=False``: the call runs the pass on demand.
+    """
+    task_id = str(uuid.uuid4())
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='stale_retry_test')
+    stale_started_at = datetime.now(timezone.utc) - timedelta(minutes=30)
+    task_options = json.dumps(
+        {
+            'task_name': 'stale_retry_test',
+            'retry_policy': {
+                'max_retries': 3,
+                'intervals': [60, 300, 900],
+                'backoff_strategy': 'fixed',
+                'jitter': False,
+                'auto_retry_for': ['WORKER_CRASHED'],
+            },
+        }
+    )
+    await session.execute(
+        text("""
+            INSERT INTO horsies_tasks
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    task_options, claimed_by_worker_id, worker_hostname, worker_pid,
+                    worker_process_name, retention_class_key,
+                    command_fingerprint_version, command_fingerprint,
+                    retain_rerun_input, execution, enqueued_at, is_workflow_task
+                ) VALUES (
+                    :id, 'stale_retry_test', 'default', 100, '{}', 'RUNNING', :sent_at,
+                    NOW(), NOW(), 0, 3, :stale_started_at, :task_options,
+                    'w-stale-retry', 'stale-host', 9999, 'stale-proc', 'standard_30d',
+                    1, :command_fingerprint, FALSE, 'ISOLATED', NOW(), FALSE
+                )
+        """),
+        {
+            'id': task_id,
+            'sent_at': sent_at,
+            'command_fingerprint': fingerprint,
+            'stale_started_at': stale_started_at,
+            'task_options': task_options,
+        },
+    )
+    await session.commit()
+
+    result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=1_000)
+
+    assert is_ok(result)
+    assert result.ok_value >= 1
+
+    # Task should now be PENDING (retried), not FAILED
+    row = (
+        await session.execute(
+            text(
+                'SELECT status, retry_count, next_retry_at, error_code FROM itest_task_rows WHERE id = CAST(:id AS uuid)'
+            ),
+            {'id': task_id},
+        )
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 'PENDING', f'Expected PENDING after retry, got {row[0]}'
+    assert row[1] == 1, f'Expected retry_count=1, got {row[1]}'
+    assert row[2] is not None, 'next_retry_at should be set'
+    assert row[3] is None, 'error_code should be cleared on retry'
+
+    # Attempt row should say will_retry=True
+    attempts = await _get_attempts(broker, task_id)
+    assert len(attempts) == 1
+    att = attempts[0]
+    assert att['attempt'] == 1
+    assert att['outcome'] == 'FAILED'
+    assert att['will_retry'] is True
+    assert att['error_code'] == 'WORKER_CRASHED'
+    assert att['worker_id'] == 'w-stale-retry'
+
+
+# ---------------------------------------------------------------------------
+# 3. TaskInfo.attempts, live and after the move to history
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_task_info_lists_attempts_newest_first_live_and_history(
+    engine: AsyncEngine,
+    broker: PostgresBroker,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """TaskInfo.attempts is newest first while the task is live and after
+    its terminal record moved to history."""
+    task_id = await _insert_running_task(session, retry_count=2)
+    await _insert_retried_attempts(session, task_id, through=2)
+
+    live = await broker.get_task_info_async(uuid.UUID(task_id), include_attempts=True)
+    assert is_ok(live)
+    live_info = live.ok_value
+    assert live_info is not None
+    assert live_info.attempts is not None
+    assert [a.attempt for a in live_info.attempts] == [2, 1]
+
+    # The worker's plain success moves the row to history.
+    async with engine.begin() as connection:
+        outcome = await complete_plain_task(
+            connection,
+            task_id,
+            worker_id='w-test-1',
+            result_json=_serialize_ok('after retries'),
+        )
+    assert outcome == 'APPLIED'
+
+    history = await broker.get_task_info_async(
+        uuid.UUID(task_id), include_attempts=True,
+    )
+    assert is_ok(history)
+    history_info = history.ok_value
+    assert history_info is not None
+    assert history_info.execution is None  # read from the history archive
+    assert history_info.attempts is not None
+    assert [a.attempt for a in history_info.attempts] == [3, 2, 1]
+    assert history_info.attempts[0].outcome.value == 'COMPLETED'
+
+
+# ---------------------------------------------------------------------------
+# 4. Expired PENDING task → EXPIRED status with TASK_EXPIRED result
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_expire_pending_task_transitions_to_expired(
+    broker: PostgresBroker,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """expire_pending_tasks transitions PENDING + past good_until to EXPIRED."""
+    task_id = str(uuid.uuid4())
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='expire_test')
+    past_good_until = datetime.now(timezone.utc) - timedelta(minutes=10)
+    await session.execute(
+        text("""
+            INSERT INTO horsies_tasks
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, good_until,
+                    retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution, enqueued_at,
+                    is_workflow_task
+                ) VALUES (
+                    :id, 'expire_test', 'default', 100, '{}', 'PENDING', :sent_at,
+                    NOW(), NOW(), 0, 0, :good_until, 'standard_30d', 1,
+                    :command_fingerprint, FALSE, 'ISOLATED', NOW(), FALSE
+                )
+        """),
+        {
+            'id': task_id,
+            'sent_at': sent_at,
+            'command_fingerprint': fingerprint,
+            'good_until': past_good_until,
+        },
+    )
+    await session.commit()
+
+    result = await broker.expire_pending_tasks()
+
+    assert is_ok(result)
+    assert result.ok_value >= 1
+
+    row = (
+        await session.execute(
+            text('SELECT status, error_code, result FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
+            {'id': task_id},
+        )
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 'EXPIRED', f'Expected EXPIRED, got {row[0]}'
+    assert row[1] == 'TASK_EXPIRED'
+    assert row[2] is not None
+    assert 'TASK_EXPIRED' in row[2]
+
+    # No attempt row should exist (task never started)
+    attempts = await _get_attempts(broker, task_id)
+    assert len(attempts) == 0

@@ -1,5 +1,6 @@
 ---
 title: Sending Tasks
+section: python
 summary: How to enqueue tasks for background execution.
 related: [defining-tasks, retrieving-results]
 tags: [tasks, send, async, scheduling]
@@ -32,7 +33,7 @@ from horsies import Ok, Err
 async def my_endpoint():
     match await my_task.send_async(name="alice", count=3):
         case Ok(handle):
-            return {"task_id": handle.task_id}
+            return {"task_id": str(handle.task_id)}
         case Err(send_err):
             return {"error": send_err.message}
 ```
@@ -66,7 +67,7 @@ match my_task.with_options(good_until=deadline).send(name="alice", count=3):
         print(f"Send failed: {err.code}")
 ```
 
-`good_until` must be a timezone-aware `datetime`. Naive datetimes return `Err(VALIDATION_FAILED)`.
+`good_until` must be a timezone-aware `datetime`. Naive datetimes return `Err(VALIDATION_FAILED)`. Compute the deadline at send time, not at module load time.
 
 `with_options()` works with all send methods:
 
@@ -215,6 +216,53 @@ Direct calls bypass the queue entirely. Library features do not apply:
 
 Use only for **unit testing**. For production, always use `.send()` or `.send_async()`.
 
+### Send After a Commit
+
+Commit the application transaction, then send, and handle the `Err` result of the send. No send takes the caller's connection; the rule and its failure windows are on [Atomic Enqueue and Topology](/horsies/operations/atomic-enqueue-and-topology/).
+
+```python
+from sqlalchemy import Engine, text
+
+from horsies import Err, Ok, TaskError, TaskResult, TaskSendEnqueueFailed
+
+from myapp.instance import app
+
+
+@app.task('send_receipt')
+def send_receipt(*, order_id: str) -> TaskResult[None, TaskError]:
+    return TaskResult(ok=None)
+
+
+def place_order(engine: Engine, order_id: str) -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            text('INSERT INTO orders (id) VALUES (:id)'),
+            {'id': order_id},
+        )
+    # The application transaction is committed here. Send after the commit.
+    options = send_receipt.with_options(idempotency_key=f'receipt:{order_id}')
+    match options.send(order_id=order_id):
+        case Ok(handle):
+            print(f'receipt task {handle.task_id}')
+        case Err(TaskSendEnqueueFailed(retryable=True) as error):
+            # The order exists. Repeat the same send with the same key.
+            match send_receipt.retry_send(error):
+                case Ok(handle):
+                    print(f'receipt task {handle.task_id}')
+                case Err(retry_error):
+                    print(f'receipt not queued: {retry_error.code}')
+        case Err(error):
+            print(f'receipt not queued: {error.code}')
+```
+
+In an async function, use `send_async()` and `retry_send_async()`.
+
+### Make a Send Repeatable
+
+Pass `idempotency_key` to `with_options()`, as in the example above. A repeat of the same send returns `Ok(TaskHandle)` for the first task. A repeat with another command returns `Err(TaskSendIdempotencyKeyConflict)`, whose `owner_task_id` names the first task. A key outside 1 to 255 UTF-8 bytes returns `Err(TaskSendEnqueueFailed)` with `retryable=False`. The key rules and the reservation window are on [Atomic Enqueue and Topology](/horsies/operations/atomic-enqueue-and-topology/#make-the-send-repeatable-with-an-idempotency-key).
+
+The reservation window is the `idempotency_reservation_window` argument of `PostgresBroker`. `AppConfig` has no field for it, so `app.get_broker()` uses the default of 24 hours.
+
 ## Things to Avoid
 
 **Don't call `.send()` at module level.**
@@ -245,9 +293,24 @@ my_task.send(connection=db_connection)
 my_task.send(connection_url=str(db_connection.url))
 ```
 
+**Don't send before the commit.** A rollback leaves a task for a write that does not exist.
+
+<!-- check: skip elided -- shows a wrong form next to the right one -->
+```python
+# Wrong
+with engine.begin() as connection:
+    connection.execute(text('INSERT INTO orders (id) VALUES (:id)'), {'id': order_id})
+    send_receipt.send(order_id=order_id)  # runs before the commit
+
+# Correct
+with engine.begin() as connection:
+    connection.execute(text('INSERT INTO orders (id) VALUES (:id)'), {'id': order_id})
+send_receipt.send(order_id=order_id)
+```
+
 ## Retrying Failed Sends
 
-When `.send()` fails with `TaskSendEnqueueFailed` (a broker or database error), use the retry methods to replay the exact same payload without re-supplying arguments. The `enqueue_sha` on the stored `TaskSendPayload` guarantees the retry carries the identical serialized payload.
+When `.send()` fails with `TaskSendEnqueueFailed` (a broker or database error), use the retry methods to replay the exact same payload without re-supplying arguments. The stored `TaskSendPayload` carries the task id, the serialized arguments and the `sent_at` of the first send; if that send was written, the retry finds the same command on the same task id and returns it instead of writing a second row. This holds after the task finished too: a retry reads the task history and does not run the task a second time.
 
 ```python
 from horsies import Err, Ok, TaskSendEnqueueFailed, TaskSendIdempotencyKeyConflict
@@ -267,17 +330,23 @@ match my_task.send(name="alice", count=3):
         print(f"Permanent failure: {err.code}")
 ```
 
-The retry methods take a `TaskSendRetryable`: `TaskSendEnqueueFailed`, `TaskSendAsyncContext`, `TaskSendIdempotencyKeyConflict` or `TaskSendLoopRunnerFailed`. Passing another variant is a type error; at run time it fails an assertion that names the variant. A retry of a `TaskSendIdempotencyKeyConflict` before the key's reservation ends returns the same error. A sync retry of a `TaskSendLoopRunnerFailed` returns the same error, because a stopped runner does not start again; `retry_send_async(err)` or `retry_schedule_async(err)` completes the send.
+The retry methods take a `TaskSendRetryable`: `TaskSendEnqueueFailed`, `TaskSendAsyncContext` or `TaskSendIdempotencyKeyConflict`. Passing another variant is a type error; at run time it fails an assertion that names the variant. A retry of a `TaskSendIdempotencyKeyConflict` before the key's reservation ends returns the same error.
 
 ### Automatic Retry via Config
 
-Set `resend_on_transient_err=True` in `AppConfig` to have the library automatically retry transient enqueue failures before returning the error:
+Set `resend_on_transient_err=True` in `AppConfig` to resend a transient enqueue failure before the send returns the error. The default is `False`. The resend rules are on [Atomic Enqueue and Topology](/horsies/operations/atomic-enqueue-and-topology/#resend-transient-failures).
 
-<!-- check: skip elided -- # ... stands for the other settings, including the broker -->
 ```python
-config = AppConfig(
-    resend_on_transient_err=True,
-    # ...
+from horsies import AppConfig, Horsies, QueueMode
+
+from myapp.config import broker_config
+
+app = Horsies(
+    AppConfig(
+        queue_mode=QueueMode.DEFAULT,
+        broker=broker_config,
+        resend_on_transient_err=True,
+    )
 )
 ```
 
@@ -356,6 +425,12 @@ partition the record moves to at terminalization; it cannot be changed
 afterwards. A retry replays the class its original send chose, so editing
 `queue_retention` governs later sends and never reaches a task in flight.
 
+### `PostgresBroker(config, *, idempotency_reservation_window: timedelta | None = None, ...)`
+
+| Parameter | Type | Default | Description |
+| --------- | ---- | ------- | ----------- |
+| `idempotency_reservation_window` | `timedelta \| None` | 24 hours | Time that a key stays reserved after its task is terminal. Must be greater than zero and at most 30 days. The constructor raises `ValueError` outside this range |
+
 ### `.retry_send(error) -> TaskSendResult[TaskHandle[T]]`
 
 Retry a failed send using the stored payload from the error.
@@ -399,17 +474,17 @@ Use `is_ok(result)` / `is_err(result)` from `horsies` as type-narrowing guards.
 
 ### `TaskSendError`
 
-A union with one frozen variant per `TaskSendErrorCode` member; each variant has only the fields of its failure. The variants, their fields and `NoCause` are in the [Errors Reference](/horsies/tasks/errors/#tasksenderror).
+A union with one frozen variant per `TaskSendErrorCode` member; each variant has only the fields of its failure. The variants, their fields and `NoCause` are in [Error Types](/horsies/tasks/error-types/#tasksenderror).
 
 ### `TaskSendErrorCode`
 
-The codes, and which of them the retry methods accept, are in the [Errors Reference](/horsies/tasks/errors/#tasksenderrorcode).
+The codes, and which of them the retry methods accept, are in the [Errors Reference](/horsies/tasks/errors/#send-error-codes).
 
 ### `TaskHandle[T]`
 
 | Property/Method | Type | Description |
 | --------------- | ---- | ----------- |
-| `.task_id` | `str` | Unique task identifier |
+| `.task_id` | `uuid.UUID` | Unique task identifier |
 | `.get(timeout_ms=None)` | `TaskResult[T, TaskError]` | Wait for result (blocking) |
 | `.get_async(timeout_ms=None)` | `TaskResult[T, TaskError]` | Wait for result (async) |
 | `.info(include_result=False, include_failed_reason=False, include_attempts=False)` | `BrokerResult[TaskInfo \| None]` | Fetch task metadata from broker |

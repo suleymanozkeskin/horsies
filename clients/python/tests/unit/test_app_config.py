@@ -1,0 +1,2009 @@
+"""Unit tests for AppConfig validation."""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from unittest.mock import MagicMock, patch
+
+import pytest
+from pydantic import SecretStr, ValidationError
+
+from horsies._catalog.manifest import (
+    KEEPALIVE_PROBES_MAX,
+    KEEPALIVE_SECONDS_MAX,
+    TCP_USER_TIMEOUT_MS_MAX,
+)
+from horsies._catalog.worker_manifest import (
+    CLAIM_COUNT_MAX,
+    MILLISECONDS_MAX,
+    QUEUE_CONCURRENCY_MAX,
+    TASK_LIMIT_MAX,
+)
+from horsies.core.errors import (
+    ConfigurationError,
+    ErrorCode,
+    HorsiesError,
+    MultipleValidationErrors,
+)
+from horsies.core.models.app import AppConfig
+from datetime import timedelta
+
+from horsies.core.models.broker import (
+    MOVED_TO_PARENT_POOL,
+    MOVED_TO_WORKER_PROFILE,
+    PostgresConfig,
+)
+from horsies.core.models.queues import CustomQueueConfig, QueueMode
+from horsies.core.models.health import WORKER_STATE_LIVE_WINDOW_S
+from horsies.core.models.recovery import (
+    WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS,
+    RecoveryConfig,
+)
+from horsies.core.models.retention import RetentionConfig
+from horsies.core.models.schedule import (
+    DailySchedule,
+    HourlySchedule,
+    IntervalSchedule,
+    MonthlySchedule,
+    ScheduleConfig,
+    TaskSchedule,
+    Weekday,
+    WeeklySchedule,
+)
+from horsies.core.utils.url import mask_database_url
+
+from datetime import time as datetime_time
+
+
+# Shared broker config for all tests
+BROKER = PostgresConfig(
+    database_url='postgresql://user:pass@localhost/db',
+    pool_size=5,
+    max_overflow=5,
+)
+
+# Recovery config with short heartbeat for tests using small claim_lease_ms values.
+# Satisfies the lease >= 2x heartbeat constraint (min_lease = 2000ms).
+SHORT_HB_RECOVERY = RecoveryConfig(claimer_heartbeat_interval_ms=1_000)
+
+
+@pytest.mark.unit
+class TestPostgresConfigPgBouncer:
+    """Tests for split PostgreSQL URL configuration."""
+
+    def test_the_producer_pool_defaults(self) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
+        )
+
+        # Producer defaults follow SQLAlchemy's (spec change, 0.1.7);
+        # the old 30+30 let one producer pin 60 server connections.
+        assert config.pool_size == 5
+        assert config.max_overflow == 10
+
+    def test_sqlalchemy_engine_kwargs_exclude_the_worker_pre_ping(self) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
+        )
+
+        assert 'worker_pool_pre_ping' not in config.sqlalchemy_engine_kwargs()
+
+    @pytest.mark.parametrize('pool_pre_ping', [True, False])
+    def test_sqlalchemy_engine_kwargs_leave_the_ping_to_the_broker(
+        self,
+        pool_pre_ping: bool,
+    ) -> None:
+        """SQLAlchemy's own pre-ping pings at every checkout; it stays off.
+        The broker registers the ping of idle connections itself."""
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
+            pool_pre_ping=pool_pre_ping,
+        )
+
+        assert 'pool_pre_ping' not in config.sqlalchemy_engine_kwargs()
+
+    def test_the_worker_process_does_not_pre_ping_by_default(self) -> None:
+        """The worker's writes are one statement in autocommit; a pre-ping
+        would double their round trips. Producer engines keep theirs, also
+        the one that task code in a child sends with (the task-send pool)."""
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
+        )
+
+        assert config.worker_pool_pre_ping is False
+        assert config.pool_pre_ping is True
+        assert config.with_exact_pool(2).pool_pre_ping is True
+        worker = config.worker_process_config(7)
+        assert worker.pool_pre_ping is False
+        assert (worker.pool_size, worker.max_overflow) == (7, 0)
+
+    def test_the_worker_process_pre_pings_when_set(self) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
+            pool_pre_ping=False,
+            worker_pool_pre_ping=True,
+        )
+
+        assert config.pool_pre_ping is False
+        assert config.with_exact_pool(2).pool_pre_ping is False
+        worker = config.worker_process_config(7)
+        assert worker.pool_pre_ping is True
+        assert (worker.pool_size, worker.max_overflow) == (7, 0)
+
+    @pytest.mark.parametrize('parent_pool', [0, -1])
+    def test_a_worker_process_pool_below_one_is_a_defect(
+        self,
+        parent_pool: int,
+    ) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
+        )
+        with pytest.raises(AssertionError, match='connections must be >= 1'):
+            config.worker_process_config(parent_pool)
+
+    @pytest.mark.parametrize('value', [3, 0, None])
+    @pytest.mark.parametrize(
+        ('field', 'note'),
+        [
+            (
+                'worker_pool_size',
+                'the worker process opens its pool with the resolved '
+                'pool.max_size of its worker profile',
+            ),
+            (
+                'worker_max_overflow',
+                'the pool of the worker process has no overflow: it holds at '
+                'most pool.max_size connections',
+            ),
+        ],
+    )
+    def test_a_removed_worker_pool_field_is_refused(
+        self,
+        field: str,
+        note: str,
+        value: object,
+    ) -> None:
+        """A config that still sets a worker pool field of 0.6, also to
+        None, fails at build, and the help names the pool of the worker
+        process in the profile."""
+        with pytest.raises(ConfigurationError) as exc_info:
+            PostgresConfig.model_validate(
+                {
+                    'database_url': 'postgresql://user:pass@localhost/db',
+                    field: value,
+                },
+            )
+
+        error = exc_info.value
+        assert error.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+        assert error.message == f'{field} was removed in 0.7.0'
+        assert error.notes[0] == note
+        assert error.notes[1] == (
+            'task code in a worker child that sends opens the task_send_pool '
+            'of its child kind, not this pool'
+        )
+        assert (
+            'WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N)))'
+            in (error.help_text or '')
+        )
+
+    def test_every_removed_pool_field_is_reported_at_once(self) -> None:
+        """The worker pool fields and the child pool fields of 0.6 are
+        refused in one report."""
+        with pytest.raises(MultipleValidationErrors) as exc_info:
+            PostgresConfig.model_validate(
+                {
+                    'database_url': 'postgresql://user:pass@localhost/db',
+                    'worker_pool_size': 3,
+                    'worker_max_overflow': 2,
+                    'worker_child_pool_max_size': 2,
+                },
+            )
+
+        messages = [error.message for error in exc_info.value.report.errors]
+        assert messages == [
+            'worker_child_pool_max_size was removed in 0.7.0',
+            'worker_pool_size was removed in 0.7.0',
+            'worker_max_overflow was removed in 0.7.0',
+        ]
+
+    def test_the_removed_worker_pool_fields_are_no_fields(self) -> None:
+        assert set(MOVED_TO_PARENT_POOL) == {'worker_pool_size', 'worker_max_overflow'}
+        assert not set(MOVED_TO_PARENT_POOL) & set(PostgresConfig.model_fields)
+        kwargs = PostgresConfig(
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
+        ).sqlalchemy_engine_kwargs()
+        assert not set(MOVED_TO_PARENT_POOL) & set(kwargs)
+
+    @pytest.mark.parametrize(
+        ('field', 'value', 'pool_argument'),
+        [
+            ('worker_child_pool_min_size', 1, 'min_size=N'),
+            (
+                'worker_child_pool_max_size',
+                4,
+                'max_size=PoolSize(connections=N)',
+            ),
+            ('worker_child_pool_check', False, 'check=False'),
+        ],
+    )
+    def test_a_removed_child_pool_field_is_refused(
+        self,
+        field: str,
+        value: object,
+        pool_argument: str,
+    ) -> None:
+        """A config that still sets a child pool field of 0.6 fails at
+        build, and the help names the pool of each child kind."""
+        with pytest.raises(ConfigurationError) as exc_info:
+            PostgresConfig.model_validate(
+                {
+                    'database_url': 'postgresql://user:pass@localhost/db',
+                    field: value,
+                },
+            )
+
+        error = exc_info.value
+        assert error.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+        assert error.message == f'{field} was removed in 0.7.0'
+        assert f'IsolatedChildren(pool=IsolatedPool({pool_argument}))' in (
+            error.help_text or ''
+        )
+        assert f'SharedAsyncChildren(pool=SharedPool({pool_argument}))' in (
+            error.help_text or ''
+        )
+        assert f'SharedThreadChildren(pool=SharedPool({pool_argument}))' in (
+            error.help_text or ''
+        )
+
+    def test_every_removed_child_pool_field_is_reported_at_once(self) -> None:
+        with pytest.raises(MultipleValidationErrors) as exc_info:
+            PostgresConfig.model_validate(
+                {
+                    'database_url': 'postgresql://user:pass@localhost/db',
+                    'worker_child_pool_min_size': 0,
+                    'worker_child_pool_max_size': 2,
+                    'worker_child_pool_check': True,
+                },
+            )
+
+        messages = [error.message for error in exc_info.value.report.errors]
+        assert messages == [
+            'worker_child_pool_min_size was removed in 0.7.0',
+            'worker_child_pool_max_size was removed in 0.7.0',
+            'worker_child_pool_check was removed in 0.7.0',
+        ]
+
+    def test_the_removed_child_pool_fields_are_no_fields(self) -> None:
+        """The refusal list and the model agree: no removed field is still a
+        field of the model."""
+        assert set(MOVED_TO_WORKER_PROFILE) == {
+            'worker_child_pool_min_size',
+            'worker_child_pool_max_size',
+            'worker_child_pool_check',
+        }
+        assert not set(MOVED_TO_WORKER_PROFILE) & set(PostgresConfig.model_fields)
+
+    def test_effective_session_database_url_defaults_to_database_url(self) -> None:
+        config = PostgresConfig(
+            database_url='postgresql://user:pass@localhost/db',
+        )
+
+        # database_url is SecretStr (0.1.7); the effective property unwraps.
+        assert (
+            config.effective_session_database_url
+            == config.database_url.get_secret_value()
+        )
+
+    def test_split_database_urls_are_valid(self) -> None:
+        config = PostgresConfig(
+            database_url='postgresql://user:pass@pooler:6432/db',
+            session_database_url='postgresql://user:pass@direct:5432/db',
+            pgbouncer_transaction_mode=True,
+        )
+
+        assert config.effective_session_database_url == (
+            'postgresql://user:pass@direct:5432/db'
+        )
+        # Keepalives default on; PgBouncer mode also disables prepared statements.
+        assert config.pooled_connect_args == {
+            'keepalives': 1,
+            'keepalives_idle': 30,
+            'keepalives_interval': 10,
+            'keepalives_count': 3,
+            'tcp_user_timeout': 30_000,
+            'prepare_threshold': None,
+        }
+
+    def test_database_urls_never_leak_via_repr_or_dump(self) -> None:
+        """Credential-bearing URLs are SecretStr: repr/str/model_dump mask.
+
+        Regression for the defense-in-depth gap where any adopter logging
+        the config object (or a debugger/error tracker capturing locals)
+        got the cleartext password.
+        """
+        password = 'sup3r-secret-pw'
+        config = PostgresConfig(
+            database_url=f'postgresql://user:{password}@pooler/db',
+            session_database_url=(
+                f'postgresql://user:{password}@direct/db'
+            ),
+        )
+
+        assert password not in repr(config)
+        assert password not in str(config)
+        assert password not in str(config.model_dump())
+        # The unwrap path still yields the real URL for engine construction.
+        assert password in config.database_url.get_secret_value()
+        assert password in config.effective_session_database_url
+
+
+    def test_pgbouncer_mode_requires_session_database_url(self) -> None:
+        with pytest.raises(ConfigurationError, match='session_database_url required'):
+            PostgresConfig(
+                database_url='postgresql://user:pass@pooler:6432/db',
+                pgbouncer_transaction_mode=True,
+            )
+
+    def test_pgbouncer_mode_rejects_runtime_url_as_session_url(self) -> None:
+        url = 'postgresql://user:pass@pooler:6432/db'
+        with pytest.raises(
+            ConfigurationError,
+            match='session_database_url must not use the transaction-pool URL',
+        ):
+            PostgresConfig(
+                database_url=url,
+                session_database_url=url,
+                pgbouncer_transaction_mode=True,
+            )
+
+    @pytest.mark.parametrize(
+        'url',
+        [
+            'postgresql://user:pass@localhost/db',
+            'postgres://user:pass@localhost/db',
+        ],
+    )
+    def test_database_url_accepts_the_postgresql_and_postgres_schemes(
+        self, url: str,
+    ) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr(url), session_database_url=SecretStr(url),
+        )
+        assert config.database_url.get_secret_value() == url
+        assert config.effective_session_database_url == url
+
+    @pytest.mark.parametrize(
+        'scheme',
+        ['postgresql+psycopg', 'postgresql+psycopg2', 'postgres+asyncpg'],
+    )
+    def test_database_url_that_names_a_driver_is_refused_with_the_fix(
+        self, scheme: str,
+    ) -> None:
+        with pytest.raises(ConfigurationError) as refused:
+            PostgresConfig(
+                database_url=SecretStr(f'{scheme}://user:secret@localhost/db'),
+            )
+        error = refused.value
+        assert error.code == ErrorCode.BROKER_INVALID_URL
+        assert error.message == f'invalid database_url scheme {scheme!r}'
+        assert error.help_text == (
+            f"replace '{scheme}://' with 'postgresql://' "
+            "(postgresql://user:pass@host/db)"
+        )
+        for text in (error.message, error.help_text or '', *error.notes):
+            assert 'secret' not in text
+
+    def test_database_url_with_another_scheme_is_refused(self) -> None:
+        with pytest.raises(ConfigurationError) as refused:
+            PostgresConfig(database_url=SecretStr('mysql://user:pass@localhost/db'))
+        assert refused.value.code == ErrorCode.BROKER_INVALID_URL
+        assert refused.value.message == "invalid database_url scheme 'mysql'"
+
+    def test_database_url_without_a_scheme_is_refused(self) -> None:
+        with pytest.raises(ConfigurationError) as refused:
+            PostgresConfig(database_url=SecretStr('user:pass@localhost/db'))
+        assert refused.value.code == ErrorCode.BROKER_INVALID_URL
+        assert refused.value.message == 'invalid database_url: the URL has no scheme'
+
+    def test_session_database_url_that_names_a_driver_is_refused(self) -> None:
+        with pytest.raises(ConfigurationError) as refused:
+            PostgresConfig(
+                database_url=SecretStr('postgresql://user:pass@localhost/db'),
+                session_database_url=SecretStr(
+                    'postgresql+psycopg://user:pass@localhost/db',
+                ),
+            )
+        assert refused.value.code == ErrorCode.BROKER_INVALID_URL
+        assert refused.value.message == (
+            "invalid session_database_url scheme 'postgresql+psycopg'"
+        )
+
+
+@pytest.mark.unit
+class TestPostgresConfigTcpUserTimeout:
+    """libpq tcp_user_timeout on broker, child and listener connections.
+
+    Keepalives do not probe while sent data is unacknowledged, so without
+    this a write to a dead connection blocks for the kernel retransmission
+    limit (about 15 minutes on Linux).
+    """
+
+    _LOCAL_URL = 'postgresql://user:pass@localhost/db'
+
+    def test_default_is_30_seconds_in_every_connect_args(self) -> None:
+        config = PostgresConfig(database_url=SecretStr(self._LOCAL_URL))
+
+        assert config.tcp_user_timeout_ms == 30_000
+        assert config.tcp_connect_args()['tcp_user_timeout'] == 30_000
+        assert config.pooled_connect_args['tcp_user_timeout'] == 30_000
+
+    def test_zero_passes_through_as_the_system_default(self) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr(self._LOCAL_URL), tcp_user_timeout_ms=0,
+        )
+
+        assert config.pooled_connect_args['tcp_user_timeout'] == 0
+
+    def test_negative_value_is_refused(self) -> None:
+        with pytest.raises(ConfigurationError) as refused:
+            PostgresConfig(
+                database_url=SecretStr(self._LOCAL_URL), tcp_user_timeout_ms=-1,
+            )
+
+        assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
+        assert refused.value.message == 'invalid tcp_user_timeout_ms'
+
+    def test_the_core_bound_is_accepted(self) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr(self._LOCAL_URL),
+            tcp_user_timeout_ms=TCP_USER_TIMEOUT_MS_MAX,
+        )
+
+        assert config.pooled_connect_args['tcp_user_timeout'] == TCP_USER_TIMEOUT_MS_MAX
+
+    def test_a_value_above_the_core_bound_is_refused_with_the_bound(self) -> None:
+        above = TCP_USER_TIMEOUT_MS_MAX + 1
+        with pytest.raises(ConfigurationError) as refused:
+            PostgresConfig(
+                database_url=SecretStr(self._LOCAL_URL), tcp_user_timeout_ms=above,
+            )
+
+        assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
+        assert refused.value.message == 'invalid tcp_user_timeout_ms'
+        assert refused.value.notes == [
+            f'got: tcp_user_timeout_ms={above}',
+            'tcp_user_timeout_ms is 0 (the operating system default) or '
+            f'1 to {TCP_USER_TIMEOUT_MS_MAX} milliseconds',
+        ]
+        assert refused.value.help_text == (
+            f'give 0 or a number of milliseconds from 1 to {TCP_USER_TIMEOUT_MS_MAX}'
+        )
+
+    def test_not_passed_to_the_sqlalchemy_engine(self) -> None:
+        config = PostgresConfig(database_url=SecretStr(self._LOCAL_URL))
+
+        assert 'tcp_user_timeout_ms' not in config.sqlalchemy_engine_kwargs()
+
+
+@pytest.mark.unit
+class TestPostgresConfigKeepalives:
+    """TCP keepalive configuration on broker/child connections.
+
+    Regression for idle pooled connections reaped mid-query: pool_pre_ping
+    and pool_recycle are checkout-time guards and cannot catch an in-flight
+    connection death (GH issue #100).
+    """
+
+    _LOCAL_URL = 'postgresql://user:pass@localhost/db'
+
+    def test_keepalives_default_on(self) -> None:
+        config = PostgresConfig(database_url=self._LOCAL_URL)
+
+        assert config.tcp_keepalives is True
+        assert config.keepalive_connect_args() == {
+            'keepalives': 1,
+            'keepalives_idle': 30,
+            'keepalives_interval': 10,
+            'keepalives_count': 3,
+        }
+
+    def test_keepalives_present_in_pooled_connect_args_without_pgbouncer(
+        self,
+    ) -> None:
+        config = PostgresConfig(database_url=self._LOCAL_URL)
+
+        # Direct (non-PgBouncer) URLs still get keepalives, and no
+        # prepare_threshold knob.
+        assert config.pooled_connect_args == {
+            'keepalives': 1,
+            'keepalives_idle': 30,
+            'keepalives_interval': 10,
+            'keepalives_count': 3,
+            'tcp_user_timeout': 30_000,
+        }
+
+    def test_keepalives_disabled_yields_empty_connect_args(self) -> None:
+        config = PostgresConfig(
+            database_url=self._LOCAL_URL,
+            tcp_keepalives=False,
+        )
+
+        assert config.keepalive_connect_args() == {}
+        assert config.pooled_connect_args == {'tcp_user_timeout': 30_000}
+
+    def test_custom_keepalive_values_flow_through(self) -> None:
+        config = PostgresConfig(
+            database_url=self._LOCAL_URL,
+            tcp_keepalives_idle=15,
+            tcp_keepalives_interval=5,
+            tcp_keepalives_count=2,
+        )
+
+        assert config.pooled_connect_args == {
+            'keepalives': 1,
+            'keepalives_idle': 15,
+            'keepalives_interval': 5,
+            'keepalives_count': 2,
+            'tcp_user_timeout': 30_000,
+        }
+
+    @pytest.mark.parametrize(
+        'field_name',
+        [
+            'tcp_keepalives_idle',
+            'tcp_keepalives_interval',
+            'tcp_keepalives_count',
+        ],
+    )
+    def test_non_positive_keepalive_values_rejected_when_enabled(
+        self, field_name: str
+    ) -> None:
+        with pytest.raises(ConfigurationError) as exc_info:
+            PostgresConfig(
+                database_url=self._LOCAL_URL,
+                **{field_name: 0},
+            )
+
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
+
+    def test_non_positive_values_allowed_when_keepalives_disabled(self) -> None:
+        # Disabled keepalives ignore the interval/idle/count values entirely.
+        config = PostgresConfig(
+            database_url=self._LOCAL_URL,
+            tcp_keepalives=False,
+            tcp_keepalives_idle=0,
+        )
+
+        # tcp_user_timeout does not depend on keepalives.
+        assert config.pooled_connect_args == {'tcp_user_timeout': 30_000}
+
+    @pytest.mark.parametrize(
+        ('field_name', 'bound'),
+        [
+            ('tcp_keepalives_idle', KEEPALIVE_SECONDS_MAX),
+            ('tcp_keepalives_interval', KEEPALIVE_SECONDS_MAX),
+            ('tcp_keepalives_count', KEEPALIVE_PROBES_MAX),
+        ],
+    )
+    def test_keepalive_value_at_the_core_bound_is_accepted(
+        self, field_name: str, bound: int,
+    ) -> None:
+        config = PostgresConfig.model_validate(
+            {'database_url': self._LOCAL_URL, field_name: bound},
+        )
+
+        connect_arg = field_name.removeprefix('tcp_')
+        assert config.keepalive_connect_args()[connect_arg] == bound
+
+    @pytest.mark.parametrize(
+        ('field_name', 'bound'),
+        [
+            ('tcp_keepalives_idle', KEEPALIVE_SECONDS_MAX),
+            ('tcp_keepalives_interval', KEEPALIVE_SECONDS_MAX),
+            ('tcp_keepalives_count', KEEPALIVE_PROBES_MAX),
+        ],
+    )
+    def test_keepalive_value_above_the_core_bound_is_refused_with_the_bound(
+        self, field_name: str, bound: int,
+    ) -> None:
+        with pytest.raises(ConfigurationError) as refused:
+            PostgresConfig.model_validate(
+                {'database_url': self._LOCAL_URL, field_name: bound + 1},
+            )
+
+        assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
+        assert refused.value.message == f'invalid {field_name}'
+        assert refused.value.notes == [
+            f'got: {field_name}={bound + 1}',
+            f'{field_name} is from 1 to {bound} when tcp_keepalives is True',
+        ]
+        assert refused.value.help_text == (
+            f'give a number from 1 to {bound}, or set tcp_keepalives=False '
+            'to turn keepalives off'
+        )
+
+    def test_values_above_the_core_bounds_allowed_when_keepalives_disabled(
+        self,
+    ) -> None:
+        # Disabled keepalives ignore the interval/idle/count values entirely.
+        config = PostgresConfig(
+            database_url=SecretStr(self._LOCAL_URL),
+            tcp_keepalives=False,
+            tcp_keepalives_idle=KEEPALIVE_SECONDS_MAX + 1,
+            tcp_keepalives_interval=KEEPALIVE_SECONDS_MAX + 1,
+            tcp_keepalives_count=KEEPALIVE_PROBES_MAX + 1,
+        )
+
+        assert config.keepalive_connect_args() == {}
+
+    def test_keepalive_fields_excluded_from_engine_kwargs(self) -> None:
+        config = PostgresConfig(database_url=self._LOCAL_URL)
+        engine_kwargs = config.sqlalchemy_engine_kwargs()
+
+        for field_name in (
+            'tcp_keepalives',
+            'tcp_keepalives_idle',
+            'tcp_keepalives_interval',
+            'tcp_keepalives_count',
+        ):
+            assert field_name not in engine_kwargs
+
+
+@pytest.mark.unit
+class TestPrefetchBufferValidation:
+    """Tests for prefetch_buffer configuration validation."""
+
+    def test_prefetch_buffer_zero_is_valid(self) -> None:
+        """prefetch_buffer=0 (hard cap mode) should be valid."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+            prefetch_buffer=0,
+        )
+        assert config.prefetch_buffer == 0
+
+    def test_prefetch_buffer_negative_raises(self) -> None:
+        """prefetch_buffer < 0 should raise ConfigurationError."""
+        with pytest.raises(
+            ConfigurationError, match='prefetch_buffer must be non-negative'
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                prefetch_buffer=-1,
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+
+    def test_prefetch_buffer_positive_requires_claim_lease(self) -> None:
+        """prefetch_buffer > 0 without claim_lease_ms should raise ConfigurationError."""
+        with pytest.raises(
+            ConfigurationError, match='claim_lease_ms required'
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                prefetch_buffer=4,
+                claim_lease_ms=None,
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+
+    def test_prefetch_buffer_positive_with_claim_lease_is_valid(self) -> None:
+        """prefetch_buffer > 0 with valid claim_lease_ms should be valid."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+            prefetch_buffer=4,
+            claim_lease_ms=5000,
+            recovery=SHORT_HB_RECOVERY,
+        )
+        assert config.prefetch_buffer == 4
+        assert config.claim_lease_ms == 5000
+
+
+@pytest.mark.unit
+class TestClaimLeaseMsValidation:
+    """Tests for claim_lease_ms configuration validation."""
+
+    def test_claim_lease_ms_none_is_valid_with_no_prefetch(self) -> None:
+        """claim_lease_ms=None is valid when prefetch_buffer=0."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+            prefetch_buffer=0,
+            claim_lease_ms=None,
+        )
+        assert config.claim_lease_ms is None
+
+    def test_claim_lease_ms_with_no_prefetch_accepted(self) -> None:
+        """claim_lease_ms is allowed in hard-cap mode (overrides default 60s lease)."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+            prefetch_buffer=0,
+            claim_lease_ms=5000,
+            recovery=SHORT_HB_RECOVERY,
+        )
+        assert config.claim_lease_ms == 5000
+
+    def test_claim_lease_ms_zero_raises(self) -> None:
+        """claim_lease_ms=0 should raise ConfigurationError."""
+        with pytest.raises(
+            ConfigurationError, match='claim_lease_ms must be positive'
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                prefetch_buffer=4,
+                claim_lease_ms=0,
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+
+    def test_claim_lease_ms_negative_raises(self) -> None:
+        """claim_lease_ms < 0 should raise ConfigurationError."""
+        with pytest.raises(
+            ConfigurationError, match='claim_lease_ms must be positive'
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                prefetch_buffer=4,
+                claim_lease_ms=-1000,
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+
+    def test_claim_lease_ms_positive_is_valid(self) -> None:
+        """claim_lease_ms > 0 should be valid."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+            prefetch_buffer=4,
+            claim_lease_ms=5000,
+            recovery=SHORT_HB_RECOVERY,
+        )
+        assert config.claim_lease_ms == 5000
+
+
+@pytest.mark.unit
+class TestMaxClaimRenewAgeMsValidation:
+    """Tests for max_claim_renew_age_ms configuration validation."""
+
+    def test_default_value_is_valid(self) -> None:
+        """Default max_claim_renew_age_ms (180_000) should be accepted."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+        )
+        assert config.max_claim_renew_age_ms == 180_000
+
+    def test_zero_raises(self) -> None:
+        """max_claim_renew_age_ms=0 should raise ConfigurationError."""
+        with pytest.raises(
+            ConfigurationError,
+            match='max_claim_renew_age_ms must be positive',
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                max_claim_renew_age_ms=0,
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+
+    def test_negative_raises(self) -> None:
+        """max_claim_renew_age_ms < 0 should raise ConfigurationError."""
+        with pytest.raises(
+            ConfigurationError,
+            match='max_claim_renew_age_ms must be positive',
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                max_claim_renew_age_ms=-1000,
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+
+    def test_less_than_effective_lease_raises(self) -> None:
+        """max_claim_renew_age_ms < effective lease should raise ConfigurationError."""
+        with pytest.raises(
+            ConfigurationError,
+            match='max_claim_renew_age_ms must be >= effective claim lease',
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                claim_lease_ms=10_000,
+                max_claim_renew_age_ms=5_000,
+                recovery=RecoveryConfig(claimer_heartbeat_interval_ms=2_000),
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_PREFETCH
+
+    def test_equal_to_effective_lease_is_valid(self) -> None:
+        """max_claim_renew_age_ms == effective lease is the minimum valid value."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+            claim_lease_ms=5_000,
+            max_claim_renew_age_ms=5_000,
+            recovery=SHORT_HB_RECOVERY,
+        )
+        assert config.max_claim_renew_age_ms == 5_000
+
+    def test_greater_than_effective_lease_is_valid(self) -> None:
+        """max_claim_renew_age_ms > effective lease should be accepted."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+            claim_lease_ms=5_000,
+            max_claim_renew_age_ms=60_000,
+            recovery=SHORT_HB_RECOVERY,
+        )
+        assert config.max_claim_renew_age_ms == 60_000
+
+    def test_uses_default_lease_when_claim_lease_ms_none(self) -> None:
+        """When claim_lease_ms is None, effective lease is DEFAULT_CLAIM_LEASE_MS (60s).
+
+        max_claim_renew_age_ms must be >= 60_000 in that case.
+        """
+        with pytest.raises(
+            ConfigurationError,
+            match='max_claim_renew_age_ms must be >= effective claim lease',
+        ):
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                claim_lease_ms=None,
+                max_claim_renew_age_ms=30_000,
+            )
+
+
+@pytest.mark.unit
+class TestClusterWideCapPrefetchConflict:
+    """Tests for cluster_wide_cap and prefetch_buffer conflict validation."""
+
+    def test_cluster_wide_cap_with_no_prefetch_is_valid(self) -> None:
+        """cluster_wide_cap with prefetch_buffer=0 should be valid (hard cap mode)."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+            cluster_wide_cap=50,
+            prefetch_buffer=0,
+        )
+        assert config.cluster_wide_cap == 50
+        assert config.prefetch_buffer == 0
+
+    def test_cluster_wide_cap_with_prefetch_raises(self) -> None:
+        """cluster_wide_cap with prefetch_buffer > 0 should raise ConfigurationError."""
+        with pytest.raises(
+            ConfigurationError, match='cluster_wide_cap incompatible with prefetch mode'
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                cluster_wide_cap=50,
+                prefetch_buffer=4,
+                claim_lease_ms=5000,
+                recovery=SHORT_HB_RECOVERY,
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
+
+    def test_no_cluster_cap_with_prefetch_is_valid(self) -> None:
+        """No cluster_wide_cap with prefetch_buffer > 0 should be valid (soft cap mode)."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+            cluster_wide_cap=None,
+            prefetch_buffer=4,
+            claim_lease_ms=5000,
+            recovery=SHORT_HB_RECOVERY,
+        )
+        assert config.cluster_wide_cap is None
+        assert config.prefetch_buffer == 4
+
+
+@pytest.mark.unit
+class TestClusterWideCapBoundaries:
+    """Tests for cluster_wide_cap boundary values."""
+
+    def test_cluster_wide_cap_zero_raises(self) -> None:
+        """cluster_wide_cap=0 should raise ConfigurationError."""
+        with pytest.raises(
+            ConfigurationError, match='cluster_wide_cap must be positive'
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                cluster_wide_cap=0,
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
+
+    def test_cluster_wide_cap_negative_raises(self) -> None:
+        """cluster_wide_cap=-1 should raise ConfigurationError."""
+        with pytest.raises(
+            ConfigurationError, match='cluster_wide_cap must be positive'
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                cluster_wide_cap=-1,
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
+
+    def test_cluster_wide_cap_minimum_valid(self) -> None:
+        """cluster_wide_cap=1 should be the minimum valid value."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+            cluster_wide_cap=1,
+        )
+        assert config.cluster_wide_cap == 1
+
+
+def _config_errors(**fields: object) -> list[HorsiesError]:
+    """The errors that AppConfig validation raises for `fields`, one or
+    collected; empty when the config is valid."""
+    try:
+        AppConfig.model_validate({'broker': BROKER, **fields})
+    except MultipleValidationErrors as collected:
+        return list(collected.report.errors)
+    except HorsiesError as error:
+        return [error]
+    return []
+
+
+@pytest.mark.unit
+class TestWorkerManifestBounds:
+    """A claim value above the bound of its worker manifest field is refused
+    at config time, with the code of the field's own checks."""
+
+    @pytest.mark.parametrize(
+        ('fields', 'path', 'maximum', 'code'),
+        [
+            (
+                {'prefetch_buffer': CLAIM_COUNT_MAX + 1, 'claim_lease_ms': 60_000},
+                'prefetch_buffer',
+                CLAIM_COUNT_MAX,
+                ErrorCode.CONFIG_INVALID_PREFETCH,
+            ),
+            (
+                {'claim_lease_ms': MILLISECONDS_MAX + 1},
+                'claim_lease_ms',
+                MILLISECONDS_MAX,
+                ErrorCode.CONFIG_INVALID_PREFETCH,
+            ),
+            (
+                {'max_claim_renew_age_ms': MILLISECONDS_MAX + 1},
+                'max_claim_renew_age_ms',
+                MILLISECONDS_MAX,
+                ErrorCode.CONFIG_INVALID_PREFETCH,
+            ),
+            (
+                {'cluster_wide_cap': TASK_LIMIT_MAX + 1},
+                'cluster_wide_cap',
+                TASK_LIMIT_MAX,
+                ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
+            ),
+            (
+                {
+                    'queue_mode': QueueMode.CUSTOM,
+                    'custom_queues': [
+                        CustomQueueConfig(name='a', max_concurrency=1),
+                        CustomQueueConfig(
+                            name='b', max_concurrency=QUEUE_CONCURRENCY_MAX + 1,
+                        ),
+                    ],
+                },
+                'custom_queues[1].max_concurrency',
+                QUEUE_CONCURRENCY_MAX,
+                ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+            ),
+        ],
+    )
+    def test_a_value_above_its_bound_is_refused_with_the_field_code(
+        self,
+        fields: dict[str, object],
+        path: str,
+        maximum: int,
+        code: ErrorCode,
+    ) -> None:
+        refusals = [
+            error
+            for error in _config_errors(**fields)
+            if error.message == f'{path} is above the bound that a worker takes'
+        ]
+
+        assert len(refusals) == 1, _config_errors(**fields)
+        [refusal] = refusals
+        assert isinstance(refusal, ConfigurationError)
+        assert refusal.code == code
+        assert refusal.notes == [
+            f'got {path}={maximum + 1}',
+            f'the bound of {path} is {maximum}',
+        ]
+        assert refusal.help_text == f'set {path} to {maximum} or less'
+
+    def test_the_largest_values_that_fit_are_accepted(self) -> None:
+        soft_cap = AppConfig(
+            broker=BROKER,
+            prefetch_buffer=CLAIM_COUNT_MAX,
+            claim_lease_ms=MILLISECONDS_MAX,
+            max_claim_renew_age_ms=MILLISECONDS_MAX,
+        )
+        hard_cap = AppConfig(
+            broker=BROKER,
+            cluster_wide_cap=TASK_LIMIT_MAX,
+            queue_mode=QueueMode.CUSTOM,
+            custom_queues=[
+                CustomQueueConfig(name='a', max_concurrency=QUEUE_CONCURRENCY_MAX),
+            ],
+        )
+
+        assert soft_cap.prefetch_buffer == CLAIM_COUNT_MAX
+        assert soft_cap.claim_lease_ms == MILLISECONDS_MAX
+        assert soft_cap.max_claim_renew_age_ms == MILLISECONDS_MAX
+        assert hard_cap.cluster_wide_cap == TASK_LIMIT_MAX
+
+
+@pytest.mark.unit
+class TestQueueModeValidation:
+    """Tests for queue_mode and custom_queues validation."""
+
+    def test_default_mode_with_custom_queues_raises(self) -> None:
+        """DEFAULT mode with custom_queues provided should raise ConfigurationError."""
+        with pytest.raises(
+            ConfigurationError, match='custom_queues must be None in DEFAULT mode'
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                custom_queues=[CustomQueueConfig(name='q1')],
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+
+    def test_custom_mode_with_none_queues_raises(self) -> None:
+        """CUSTOM mode with custom_queues=None should raise ConfigurationError."""
+        with pytest.raises(
+            ConfigurationError, match='custom_queues required in CUSTOM mode'
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.CUSTOM,
+                broker=BROKER,
+                custom_queues=None,
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+
+    def test_custom_mode_with_empty_queues_raises(self) -> None:
+        """CUSTOM mode with empty custom_queues should raise ConfigurationError."""
+        with pytest.raises(
+            ConfigurationError, match='custom_queues required in CUSTOM mode'
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.CUSTOM,
+                broker=BROKER,
+                custom_queues=[],
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+
+    def test_custom_mode_with_duplicate_names_raises(self) -> None:
+        """CUSTOM mode with duplicate queue names should raise ConfigurationError."""
+        with pytest.raises(
+            ConfigurationError, match='duplicate queue names in custom_queues'
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.CUSTOM,
+                broker=BROKER,
+                custom_queues=[
+                    CustomQueueConfig(name='q1'),
+                    CustomQueueConfig(name='q1'),
+                ],
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+
+    def test_max_concurrency_none_means_uncapped(self) -> None:
+        """max_concurrency=None is the explicit uncapped sentinel."""
+        queue = CustomQueueConfig(name='bulk', max_concurrency=None)
+        assert queue.max_concurrency is None
+
+    def test_max_concurrency_zero_pauses_claiming(self) -> None:
+        """0 is a valid edge: the queue is claimable-from by nobody."""
+        queue = CustomQueueConfig(name='drained', max_concurrency=0)
+        assert queue.max_concurrency == 0
+
+    def test_max_concurrency_negative_rejected(self) -> None:
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            CustomQueueConfig(name='bad', max_concurrency=-1)
+
+    def test_format_for_logging_uncapped_queue_labelled(self) -> None:
+        """None renders as 'uncapped' in the startup banner, not 'None'."""
+        config = AppConfig(
+            queue_mode=QueueMode.CUSTOM,
+            broker=BROKER,
+            custom_queues=[
+                CustomQueueConfig(name='bulk', max_concurrency=None),
+            ],
+        )
+        formatted = config._format_for_logging()
+        assert 'max_concurrency=uncapped' in formatted
+        assert 'max_concurrency=None' not in formatted
+
+    def test_custom_mode_with_valid_queues(self) -> None:
+        """CUSTOM mode with valid unique queues should succeed."""
+        config = AppConfig(
+            queue_mode=QueueMode.CUSTOM,
+            broker=BROKER,
+            custom_queues=[
+                CustomQueueConfig(name='high'),
+                CustomQueueConfig(name='low'),
+            ],
+        )
+        assert config.custom_queues is not None
+        assert len(config.custom_queues) == 2
+
+    def test_default_mode_without_custom_queues(self) -> None:
+        """DEFAULT mode without custom_queues should succeed."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+        )
+        assert config.queue_mode == QueueMode.DEFAULT
+        assert config.custom_queues is None
+
+    def test_custom_mode_queue_names_preserved(self) -> None:
+        """Queue names should be preserved exactly as provided."""
+        config = AppConfig(
+            queue_mode=QueueMode.CUSTOM,
+            broker=BROKER,
+            custom_queues=[
+                CustomQueueConfig(name='priority'),
+                CustomQueueConfig(name='background'),
+            ],
+        )
+        assert config.custom_queues is not None
+        names = [q.name for q in config.custom_queues]
+        assert names == ['priority', 'background']
+
+
+@pytest.mark.unit
+class TestDefaultBehavior:
+    """Tests for default configuration behavior."""
+
+    def test_defaults_to_hard_cap_mode(self) -> None:
+        """Default config should use hard cap mode (prefetch_buffer=0)."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+        )
+        assert config.prefetch_buffer == 0
+        assert config.claim_lease_ms is None
+
+    def test_cluster_wide_cap_defaults_to_none(self) -> None:
+        """cluster_wide_cap should default to None (unlimited)."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+        )
+        assert config.cluster_wide_cap is None
+
+    def test_queue_mode_defaults_to_default(self) -> None:
+        """queue_mode should default to DEFAULT."""
+        config = AppConfig(broker=BROKER)
+        assert config.queue_mode == QueueMode.DEFAULT
+
+    def test_custom_queues_defaults_to_none(self) -> None:
+        """custom_queues should default to None."""
+        config = AppConfig(broker=BROKER)
+        assert config.custom_queues is None
+
+    def test_default_unhandled_error_code_default(self) -> None:
+        """default_unhandled_error_code should default to 'UNHANDLED_EXCEPTION'."""
+        config = AppConfig(broker=BROKER)
+        assert config.default_unhandled_error_code == 'UNHANDLED_EXCEPTION'
+
+
+@pytest.mark.unit
+class TestMultiErrorCollection:
+    """Tests for phase-gated error collection in AppConfig."""
+
+    def test_multiple_independent_errors_collected(self) -> None:
+        """Multiple independent config errors are collected together."""
+        with pytest.raises(MultipleValidationErrors) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                cluster_wide_cap=-1,
+                prefetch_buffer=-5,
+            )
+        errors = exc_info.value.report.errors
+        assert len(errors) == 2
+        messages = [e.message for e in errors]
+        assert 'cluster_wide_cap must be positive' in messages
+        assert 'prefetch_buffer must be non-negative' in messages
+
+    def test_single_error_still_raises_original_type(self) -> None:
+        """Single config error still raises ConfigurationError (backward compat)."""
+        with pytest.raises(
+            ConfigurationError, match='cluster_wide_cap must be positive'
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                cluster_wide_cap=-1,
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
+
+    def test_multi_error_is_horsies_error(self) -> None:
+        """MultipleValidationErrors is catchable as HorsiesError."""
+        with pytest.raises(HorsiesError):
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                cluster_wide_cap=-1,
+                prefetch_buffer=-5,
+            )
+
+    def test_three_independent_errors_collected(self) -> None:
+        """Three independent config errors are collected together."""
+        with pytest.raises(MultipleValidationErrors) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                cluster_wide_cap=-1,
+                prefetch_buffer=-5,
+                default_unhandled_error_code='TimeoutError',
+            )
+        errors = exc_info.value.report.errors
+        assert len(errors) == 3
+
+    def test_multi_error_individual_codes(self) -> None:
+        """Each error in a multi-error report has the correct error code."""
+        with pytest.raises(MultipleValidationErrors) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                cluster_wide_cap=-1,
+                prefetch_buffer=-5,
+                default_unhandled_error_code='TimeoutError',
+            )
+        errors = exc_info.value.report.errors
+        codes = {e.code for e in errors}
+        assert ErrorCode.CONFIG_INVALID_CLUSTER_CAP in codes
+        assert ErrorCode.CONFIG_INVALID_PREFETCH in codes
+        assert ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER in codes
+
+
+@pytest.mark.unit
+class TestRetryCodeValidation:
+    """Validation for retry/error-code safety settings."""
+
+    def test_invalid_default_unhandled_error_code_raises(self) -> None:
+        """Exception-like names are rejected as error codes."""
+        with pytest.raises(
+            ConfigurationError,
+            match='default_unhandled_error_code',
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                default_unhandled_error_code='TimeoutError',
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
+
+    def test_invalid_mapper_value_format_raises(self) -> None:
+        """Mapper values that look like exception names are rejected."""
+        with pytest.raises(
+            ConfigurationError,
+            match='Mapper value',
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                exception_mapper={ValueError: 'TimeoutError'},
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
+
+    def test_valid_default_unhandled_error_code(self) -> None:
+        """UPPER_SNAKE_CASE error codes should be accepted."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+            default_unhandled_error_code='CUSTOM_CODE',
+        )
+        assert config.default_unhandled_error_code == 'CUSTOM_CODE'
+
+    def test_lowercase_error_code_raises(self) -> None:
+        """Lowercase error codes should be rejected."""
+        with pytest.raises(
+            ConfigurationError,
+            match='default_unhandled_error_code',
+        ) as exc_info:
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                default_unhandled_error_code='lowercase_code',
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
+
+    def test_non_base_exception_mapper_key_raises(self) -> None:
+        """Mapper keys that are not BaseException subclasses should be rejected.
+
+        Pydantic validates the dict type annotation before the model_validator runs,
+        so this raises pydantic ValidationError, not ConfigurationError.
+        """
+        with pytest.raises(ValidationError, match='is_subclass_of'):
+            AppConfig(
+                queue_mode=QueueMode.DEFAULT,
+                broker=BROKER,
+                exception_mapper={str: 'SOME_CODE'},  # type: ignore[dict-item]
+            )
+
+    def test_valid_exception_mapper_accepted(self) -> None:
+        """Valid exception mapper entries should be accepted."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+            exception_mapper={ValueError: 'VALUE_ERROR'},
+        )
+        assert ValueError in config.exception_mapper
+        assert config.exception_mapper[ValueError] == 'VALUE_ERROR'
+
+
+@pytest.mark.unit
+class TestAppConfigImmutability:
+    """Tests for frozen model behavior."""
+
+    def test_frozen_model_rejects_mutation(self) -> None:
+        """AppConfig is frozen and should reject attribute assignment."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+        )
+        with pytest.raises(ValidationError):
+            config.prefetch_buffer = 1  # type: ignore[misc]
+
+
+@pytest.mark.unit
+class TestLogConfig:
+    """Tests for log_config, _format_for_logging, and mask_database_url."""
+
+    def test_mask_database_url_hides_password(self) -> None:
+        """Password in database URL should be masked."""
+        url = 'postgresql://user:secret@localhost/db'
+        masked = mask_database_url(url)
+        assert 'secret' not in masked
+        assert '***' in masked
+        assert 'user' in masked
+        assert 'localhost' in masked
+
+    def test_mask_database_url_no_password(self) -> None:
+        """URL without password should remain unchanged."""
+        url = 'postgresql://localhost/db'
+        masked = mask_database_url(url)
+        assert masked == url
+
+    def test_mask_database_url_malformed_fallback(self) -> None:
+        """Malformed URL with @ should use fallback masking."""
+        # Force the except branch by providing something that urlparse
+        # handles but has no parsed password, while still containing @
+        url = 'not-a-real-scheme://user:secret@host/db'
+        masked = mask_database_url(url)
+        assert 'secret' not in masked
+
+    def test_format_for_logging_contains_queue_mode(self) -> None:
+        """Formatted output should contain queue_mode."""
+        config = AppConfig(
+            queue_mode=QueueMode.DEFAULT,
+            broker=BROKER,
+        )
+        formatted = config._format_for_logging()
+        assert 'queue_mode:' in formatted
+        assert 'DEFAULT' in formatted
+
+    def test_format_for_logging_custom_queues_listed(self) -> None:
+        """CUSTOM mode should list queue names in formatted output."""
+        config = AppConfig(
+            queue_mode=QueueMode.CUSTOM,
+            broker=BROKER,
+            custom_queues=[
+                CustomQueueConfig(name='fast', priority=1, max_concurrency=10),
+                CustomQueueConfig(name='slow', priority=2, max_concurrency=3),
+            ],
+        )
+        formatted = config._format_for_logging()
+        assert 'fast' in formatted
+        assert 'slow' in formatted
+        assert 'custom_queues:' in formatted
+
+    def test_log_config_skips_in_child_process(self) -> None:
+        """log_config should not log when HORSIES_CHILD_PROCESS=1."""
+        config = AppConfig(broker=BROKER)
+        logger = MagicMock()
+        with patch.dict('os.environ', {'HORSIES_CHILD_PROCESS': '1'}):
+            config.log_config(logger=logger)
+        logger.info.assert_not_called()
+
+    def test_log_config_uses_provided_logger(self) -> None:
+        """log_config should call logger.info when provided."""
+        config = AppConfig(broker=BROKER)
+        logger = MagicMock()
+        with patch.dict('os.environ', {}, clear=False):
+            # Ensure HORSIES_CHILD_PROCESS is not set
+            env = dict(
+                **{
+                    k: v
+                    for k, v in __import__('os').environ.items()
+                    if k != 'HORSIES_CHILD_PROCESS'
+                }
+            )
+            with patch.dict('os.environ', env, clear=True):
+                config.log_config(logger=logger)
+        logger.info.assert_called_once()
+
+    def test_log_config_none_logger_uses_library_logger(self) -> None:
+        """log_config with no logger should use the 'horsies' library logger."""
+        config = AppConfig(broker=BROKER)
+        with patch.dict('os.environ', {}, clear=False):
+            env = {
+                k: v
+                for k, v in __import__('os').environ.items()
+                if k != 'HORSIES_CHILD_PROCESS'
+            }
+            with patch.dict('os.environ', env, clear=True):
+                with patch('logging.getLogger') as mock_get_logger:
+                    mock_logger = MagicMock()
+                    mock_get_logger.return_value = mock_logger
+                    config.log_config(logger=None)
+                    mock_get_logger.assert_called_once_with('horsies')
+                    mock_logger.info.assert_called_once()
+
+
+@pytest.mark.unit
+class TestFormatForLoggingExtended:
+    """Tests for _format_for_logging covering cluster_wide_cap, claim_lease_ms, exception_mapper, schedule."""
+
+    def test_cluster_wide_cap_displayed(self) -> None:
+        """cluster_wide_cap should appear in formatted output when set."""
+        config = AppConfig(broker=BROKER, cluster_wide_cap=50)
+        formatted = config._format_for_logging()
+        assert 'cluster_wide_cap: 50' in formatted
+
+    def test_cluster_wide_cap_omitted_when_none(self) -> None:
+        """cluster_wide_cap should not appear when None."""
+        config = AppConfig(broker=BROKER)
+        formatted = config._format_for_logging()
+        assert 'cluster_wide_cap' not in formatted
+
+    def test_claim_lease_ms_displayed(self) -> None:
+        """claim_lease_ms should appear in formatted output when set."""
+        config = AppConfig(
+            broker=BROKER,
+            prefetch_buffer=4,
+            claim_lease_ms=30_000,
+            recovery=RecoveryConfig(claimer_heartbeat_interval_ms=10_000),
+        )
+        formatted = config._format_for_logging()
+        assert 'claim_lease_ms: 30000ms' in formatted
+
+    def test_claim_lease_ms_omitted_when_none(self) -> None:
+        """claim_lease_ms should not appear when None."""
+        config = AppConfig(broker=BROKER)
+        formatted = config._format_for_logging()
+        assert 'claim_lease_ms' not in formatted
+
+    def test_exception_mapper_displayed(self) -> None:
+        """Non-empty exception mapper should show mapping count."""
+        config = AppConfig(
+            broker=BROKER,
+            exception_mapper={ValueError: 'VALUE_ERROR', TypeError: 'TYPE_ERROR'},
+        )
+        formatted = config._format_for_logging()
+        assert 'exception_mapper: 2 mapping(s)' in formatted
+
+    def test_custom_default_error_code_displayed(self) -> None:
+        """Non-default unhandled error code should appear in output."""
+        config = AppConfig(
+            broker=BROKER,
+            default_unhandled_error_code='MY_ERROR',
+        )
+        formatted = config._format_for_logging()
+        assert 'default_unhandled_error_code: MY_ERROR' in formatted
+
+    def test_default_error_code_omitted_when_default(self) -> None:
+        """Default unhandled error code should not appear in output."""
+        config = AppConfig(broker=BROKER)
+        formatted = config._format_for_logging()
+        assert 'default_unhandled_error_code' not in formatted
+
+    def test_retention_hours_displayed(self) -> None:
+        """Retention hours should appear in formatted output."""
+        config = AppConfig(broker=BROKER)
+        formatted = config._format_for_logging()
+        assert 'retention_hours:' in formatted
+        assert 'heartbeats' not in formatted.split('retention_hours:')[1].split('\n')[0]
+        assert 'worker_states=168' in formatted
+        assert 'terminal_workflows=720' in formatted
+
+    def test_schedule_displayed(self) -> None:
+        """Schedule config should appear when set."""
+        config = AppConfig(
+            broker=BROKER,
+            schedule=ScheduleConfig(
+                enabled=True,
+                schedules=[
+                    TaskSchedule(
+                        name='daily_cleanup',
+                        task_name='cleanup',
+                        pattern=DailySchedule(time=datetime_time(3, 0, 0)),
+                    ),
+                ],
+                check_interval_seconds=5,
+            ),
+        )
+        formatted = config._format_for_logging()
+        assert 'schedule:' in formatted
+        assert 'enabled: True' in formatted
+        assert '1 schedule(s)' in formatted
+        assert 'daily_cleanup' in formatted
+        assert 'cleanup' in formatted
+        assert 'check_interval: 5s' in formatted
+
+    def test_schedule_omitted_when_none(self) -> None:
+        """Schedule section should not appear when schedule is None."""
+        config = AppConfig(broker=BROKER)
+        formatted = config._format_for_logging()
+        assert 'schedule:' not in formatted
+
+
+@pytest.mark.unit
+class TestFormatSchedulePattern:
+    """Tests for AppConfig._format_schedule_pattern covering all match cases."""
+
+    def test_interval_all_components(self) -> None:
+        """Interval with days, hours, minutes, seconds should format all parts."""
+        pattern = IntervalSchedule(days=1, hours=2, minutes=30, seconds=15)
+        result = AppConfig._format_schedule_pattern(pattern)
+        assert result == 'every 1d 2h 30m 15s'
+
+    def test_interval_hours_only(self) -> None:
+        """Interval with only hours should format just hours."""
+        pattern = IntervalSchedule(hours=4)
+        result = AppConfig._format_schedule_pattern(pattern)
+        assert result == 'every 4h'
+
+    def test_interval_minutes_and_seconds(self) -> None:
+        """Interval with minutes and seconds only."""
+        pattern = IntervalSchedule(minutes=10, seconds=30)
+        result = AppConfig._format_schedule_pattern(pattern)
+        assert result == 'every 10m 30s'
+
+    def test_hourly(self) -> None:
+        """Hourly pattern should format with zero-padded minute:second."""
+        pattern = HourlySchedule(minute=5, second=30)
+        result = AppConfig._format_schedule_pattern(pattern)
+        assert result == 'hourly at :05:30'
+
+    def test_hourly_defaults(self) -> None:
+        """Hourly with default second should zero-pad correctly."""
+        pattern = HourlySchedule(minute=15)
+        result = AppConfig._format_schedule_pattern(pattern)
+        assert result == 'hourly at :15:00'
+
+    def test_daily(self) -> None:
+        """Daily pattern should format time as HH:MM:SS."""
+        pattern = DailySchedule(time=datetime_time(14, 30, 0))
+        result = AppConfig._format_schedule_pattern(pattern)
+        assert result == 'daily at 14:30:00'
+
+    def test_weekly(self) -> None:
+        """Weekly pattern should list day names and time."""
+        pattern = WeeklySchedule(
+            days=[Weekday.MONDAY, Weekday.FRIDAY],
+            time=datetime_time(9, 0, 0),
+        )
+        result = AppConfig._format_schedule_pattern(pattern)
+        assert result == 'weekly on monday, friday at 09:00:00'
+
+    def test_monthly(self) -> None:
+        """Monthly pattern should show day number and time."""
+        pattern = MonthlySchedule(day=15, time=datetime_time(3, 0, 0))
+        result = AppConfig._format_schedule_pattern(pattern)
+        assert result == 'monthly on day 15 at 03:00:00'
+
+
+@pytest.mark.unit
+class TestExactPool:
+    """``PostgresConfig.with_exact_pool``: the pool of the worker process and
+    the task-send pool of a child hold exactly ``connections`` connections,
+    with no overflow."""
+
+    _CONFIG = PostgresConfig(
+        database_url=SecretStr('postgresql://user:pass@localhost/db'),
+        pool_size=30,
+        max_overflow=30,
+        pool_timeout=12,
+    )
+
+    def test_the_copy_has_the_pool_and_no_overflow(self) -> None:
+        exact = self._CONFIG.with_exact_pool(7)
+        assert (exact.pool_size, exact.max_overflow) == (7, 0)
+        assert exact.database_url == self._CONFIG.database_url
+        assert exact.pool_timeout == 12
+        assert (self._CONFIG.pool_size, self._CONFIG.max_overflow) == (30, 30)
+
+    @pytest.mark.parametrize('connections', [0, -1])
+    def test_below_one_is_a_defect(self, connections: int) -> None:
+        with pytest.raises(AssertionError, match='connections must be >= 1'):
+            self._CONFIG.with_exact_pool(connections)
+
+
+@pytest.mark.unit
+class TestGetBrokerErrorHandling:
+    """Regression tests for Horsies.get_broker() error wrapping (HRS-211)."""
+
+    def test_a_worker_child_opens_the_task_send_pool_of_its_kind(self) -> None:
+        """A worker child sets its task-send pool at start: the app broker
+        of its task code opens exactly that many, not the producer pool."""
+        from horsies import Horsies
+
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
+            pool_size=30,
+            max_overflow=30,
+        )
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=config))
+        app.set_role('worker')
+        app.set_task_send_pool(4)
+
+        with patch('horsies.core.app.PostgresBroker') as mock_broker_cls:
+            app.get_broker()
+
+        broker_config = mock_broker_cls.call_args.args[0]
+        assert (broker_config.pool_size, broker_config.max_overflow) == (4, 0)
+        assert broker_config.database_url == config.database_url
+        # A producer engine: it keeps pool_pre_ping, not worker_pool_pre_ping.
+        assert (config.pool_pre_ping, config.worker_pool_pre_ping) == (True, False)
+        assert broker_config.pool_pre_ping is True
+
+    @pytest.mark.parametrize('role', ['producer', 'scheduler', 'worker'])
+    def test_without_a_task_send_pool_the_broker_opens_the_config_pool(
+        self,
+        role: str,
+    ) -> None:
+        """A producer, the scheduler, and the worker process itself keep the
+        pool of PostgresConfig: the worker role alone does not resize it."""
+        from horsies import Horsies
+
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql://user:pass@localhost/db'),
+            pool_size=30,
+            max_overflow=30,
+        )
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=config))
+        app.set_role(role)
+
+        with patch('horsies.core.app.PostgresBroker') as mock_broker_cls:
+            app.get_broker()
+
+        broker_config = mock_broker_cls.call_args.args[0]
+        assert (broker_config.pool_size, broker_config.max_overflow) == (30, 30)
+
+    @pytest.mark.parametrize('connections', [0, -1])
+    def test_a_task_send_pool_below_one_is_a_defect(self, connections: int) -> None:
+        from horsies import Horsies
+
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER))
+        with pytest.raises(AssertionError, match='connections must be >= 1'):
+            app.set_task_send_pool(connections)
+
+    def test_non_horsies_error_wrapped_as_broker_init_failed(self) -> None:
+        """Non-HorsiesError exceptions are wrapped with BROKER_INIT_FAILED."""
+        from horsies import Horsies
+
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER))
+        app._broker = None  # ensure fresh init path
+
+        with patch(
+            'horsies.core.app.PostgresBroker',
+            side_effect=RuntimeError('driver missing'),
+        ):
+            with pytest.raises(HorsiesError) as exc_info:
+                app.get_broker()
+
+            assert exc_info.value.code == ErrorCode.BROKER_INIT_FAILED
+            assert 'driver missing' in str(exc_info.value.message)
+            assert exc_info.value.__cause__ is not None
+
+    def test_horsies_error_passes_through(self) -> None:
+        """HorsiesError from broker init is re-raised, not double-wrapped."""
+        from horsies import Horsies
+
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER))
+        app._broker = None
+
+        original = HorsiesError(
+            message='bad config',
+            code=ErrorCode.BROKER_INVALID_URL,
+        )
+        with patch(
+            'horsies.core.app.PostgresBroker',
+            side_effect=original,
+        ):
+            with pytest.raises(HorsiesError) as exc_info:
+                app.get_broker()
+
+            assert exc_info.value is original
+            assert exc_info.value.code == ErrorCode.BROKER_INVALID_URL
+
+
+@pytest.mark.unit
+class TestWorkerStateSnapshotInterval:
+    """RecoveryConfig.worker_state_snapshot_interval_ms bounds and default."""
+
+    def test_default_is_30_seconds(self) -> None:
+        assert RecoveryConfig().worker_state_snapshot_interval_ms == 30_000
+
+    def test_bounds_accept_valid_edges(self) -> None:
+        assert RecoveryConfig(
+            worker_state_snapshot_interval_ms=1_000,
+        ).worker_state_snapshot_interval_ms == 1_000
+        assert RecoveryConfig(
+            worker_state_snapshot_interval_ms=60_000,
+        ).worker_state_snapshot_interval_ms == 60_000
+
+    def test_below_minimum_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            RecoveryConfig(worker_state_snapshot_interval_ms=999)
+
+    def test_cap_is_60_seconds_half_the_120_second_live_window(self) -> None:
+        assert WORKER_STATE_LIVE_WINDOW_S == 120
+        assert WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS == 60_000
+
+    def test_cap_follows_the_live_window(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A changed live window moves the cap, so the two cannot drift.
+
+        Loads a second copy of the recovery module while the window reads
+        200 s. The real module and its RecoveryConfig stay untouched.
+        """
+        import horsies.core.defaults as defaults
+        import horsies.core.models.recovery as recovery
+
+        monkeypatch.setattr(defaults, 'WORKER_STATE_LIVE_WINDOW_S', 200)
+        spec = importlib.util.spec_from_file_location(
+            '_recovery_with_a_200_s_live_window',
+            recovery.__file__,
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, spec.name, module)
+        spec.loader.exec_module(module)
+
+        assert module.WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS == 100_000
+        accepted = module.RecoveryConfig(worker_state_snapshot_interval_ms=100_000)
+        assert accepted.worker_state_snapshot_interval_ms == 100_000
+        with pytest.raises(ConfigurationError, match='above the cap of 100000ms'):
+            module.RecoveryConfig(worker_state_snapshot_interval_ms=100_001)
+
+    @pytest.mark.parametrize(
+        'interval_ms',
+        [10**20, 10**5_000],
+        ids=['21 digits', 'above the int text limit'],
+    )
+    def test_a_huge_value_is_refused_with_its_size(self, interval_ms: int) -> None:
+        """Python refuses to turn an int of more than 4,300 digits into text:
+        the refusal shows the size of the value, and stays HRS-204."""
+        with pytest.raises(ConfigurationError) as exc_info:
+            RecoveryConfig(worker_state_snapshot_interval_ms=interval_ms)
+
+        error = exc_info.value
+        assert error.code == ErrorCode.CONFIG_INVALID_RECOVERY
+        assert error.message == (
+            'worker_state_snapshot_interval_ms has more than 20 digits, above '
+            'the cap of 60000ms'
+        )
+
+    @pytest.mark.parametrize('interval_ms', [60_001, 120_000, 300_000])
+    def test_above_cap_refused_with_field_value_cap_and_reason(
+        self,
+        interval_ms: int,
+    ) -> None:
+        with pytest.raises(ConfigurationError) as exc_info:
+            RecoveryConfig(worker_state_snapshot_interval_ms=interval_ms)
+
+        error = exc_info.value
+        assert type(error) is ConfigurationError
+        assert error.code == ErrorCode.CONFIG_INVALID_RECOVERY
+        assert error.message == (
+            f'worker_state_snapshot_interval_ms={interval_ms}ms '
+            'is above the cap of 60000ms'
+        )
+        notes = ' '.join(error.notes)
+        assert 'half the live window' in notes
+        assert 'WORKER_STATE_LIVE_WINDOW_S=120s' in notes
+        assert 'latest snapshot is inside the live window' in notes
+        assert error.help_text == 'set worker_state_snapshot_interval_ms <= 60000ms'
+
+    def test_above_cap_refused_through_app_config(self) -> None:
+        with pytest.raises(ConfigurationError, match='above the cap of 60000ms'):
+            AppConfig.model_validate(
+                {
+                    'queue_mode': QueueMode.DEFAULT,
+                    'broker': BROKER,
+                    'recovery': {'worker_state_snapshot_interval_ms': 120_000},
+                },
+            )
+
+
+@pytest.mark.unit
+class TestOrphanTaskAuditInterval:
+    '''RecoveryConfig orphan audit interval bounds and default.'''
+
+    def test_default_is_60_seconds(self) -> None:
+        assert RecoveryConfig().orphan_task_audit_interval_ms == 60_000
+
+    def test_bounds_accept_valid_edges(self) -> None:
+        assert RecoveryConfig(
+            orphan_task_audit_interval_ms=1_000,
+        ).orphan_task_audit_interval_ms == 1_000
+        assert RecoveryConfig(
+            orphan_task_audit_interval_ms=86_400_000,
+        ).orphan_task_audit_interval_ms == 86_400_000
+
+    @pytest.mark.parametrize('value', [999, 86_400_001])
+    def test_out_of_range_value_is_rejected(self, value: int) -> None:
+        with pytest.raises(ValidationError):
+            RecoveryConfig(orphan_task_audit_interval_ms=value)
+
+
+@pytest.mark.unit
+class TestRetentionSweepInterval:
+    """RetentionConfig.retention_sweep_interval_s bounds and default."""
+
+    def test_default_is_5_minutes(self) -> None:
+        assert RetentionConfig().retention_sweep_interval_s == 300
+
+    def test_bounds_accept_valid_edges(self) -> None:
+        assert RetentionConfig(retention_sweep_interval_s=30,
+        ).retention_sweep_interval_s == 30
+        assert RetentionConfig(retention_sweep_interval_s=86_400,
+        ).retention_sweep_interval_s == 86_400
+
+    def test_below_minimum_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            RetentionConfig(retention_sweep_interval_s=29)
+
+    def test_above_maximum_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            RetentionConfig(retention_sweep_interval_s=86_401)
+
+
+@pytest.mark.unit
+class TestRetentionDeleteBatchSize:
+    """RetentionConfig.retention_delete_batch_size bounds and default."""
+
+    def test_default_is_500(self) -> None:
+        assert RetentionConfig().retention_delete_batch_size == 500
+
+    def test_bounds_accept_valid_edges(self) -> None:
+        assert RetentionConfig(retention_delete_batch_size=50,
+        ).retention_delete_batch_size == 50
+        assert RetentionConfig(retention_delete_batch_size=10_000,
+        ).retention_delete_batch_size == 10_000
+
+    def test_below_minimum_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            RetentionConfig(retention_delete_batch_size=49)
+
+    def test_above_maximum_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            RetentionConfig(retention_delete_batch_size=10_001)
+
+
+@pytest.mark.unit
+class TestRemovedRetentionKnobsRejected:
+    """The removed knobs fail closed with their successors named."""
+
+    def test_queue_override_names_retention_classes(self) -> None:
+        with pytest.raises(Exception, match='retention class'):
+            RecoveryConfig(
+                queue_terminal_record_retention_hours={'default': 24},
+            )
+
+    def test_heartbeat_window_names_partition_drops(self) -> None:
+        with pytest.raises(Exception, match='drop whole'):
+            RecoveryConfig(heartbeat_retention_hours=24)
+
+    def test_surviving_knob_governs_workflow_records(self) -> None:
+        cfg = RetentionConfig(terminal_record_retention_hours=48)
+        assert cfg.terminal_record_retention_hours == 48
+
+
+class TestPayloadPolicyWiring:
+    """AppConfig carries a PayloadPolicy with warn-only defaults."""
+
+    def test_default_policy(self) -> None:
+        config = AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER)
+        assert config.payload.warn_bytes == 1_048_576
+        assert config.payload.reject_bytes is None
+
+
+@pytest.mark.unit
+class TestQueueRetentionNamesARealQueue:
+    """A mapped queue must be a queue the deployment has.
+
+    The open failure is silent and permanent: a misspelled queue is
+    accepted, its class is registered, and leaves and indexes are built
+    for it on every maintenance pass forever while nothing routes into
+    it — and the queue the adopter meant keeps the 30-day default. The
+    deployment has neither the policy it configured nor an error.
+
+    `RetentionConfig` cannot self-check this: it does not know the queue
+    set. `AppConfig` owns both, so the cross-check lives there.
+    """
+
+    def _broker(self) -> PostgresConfig:
+        return PostgresConfig(
+            database_url='postgresql://u:p@localhost/db'
+        )
+
+    def test_default_mode_accepts_the_default_queue(self) -> None:
+        config = AppConfig(
+            broker=self._broker(),
+            queue_mode=QueueMode.DEFAULT,
+            retention=RetentionConfig(
+                queue_retention={'default': timedelta(days=7)}
+            ),
+        )
+
+        assert 'default' in config.retention.queue_retention
+
+    def test_default_mode_refuses_any_other_queue(self) -> None:
+        with pytest.raises(ConfigurationError) as caught:
+            AppConfig(
+                broker=self._broker(),
+                queue_mode=QueueMode.DEFAULT,
+                retention=RetentionConfig(
+                    queue_retention={'emails': timedelta(days=7)}
+                ),
+            )
+
+        assert 'emails' in str(caught.value)
+
+    def test_custom_mode_accepts_a_configured_queue(self) -> None:
+        config = AppConfig(
+            broker=self._broker(),
+            queue_mode=QueueMode.CUSTOM,
+            custom_queues=[CustomQueueConfig(name='emails', priority=100)],
+            retention=RetentionConfig(
+                queue_retention={'emails': timedelta(days=7)}
+            ),
+        )
+
+        assert config.retention.queue_retention['emails'] == timedelta(days=7)
+
+    def test_custom_mode_refuses_a_typo(self) -> None:
+        """The failure this guard exists for."""
+        with pytest.raises(ConfigurationError) as caught:
+            AppConfig(
+                broker=self._broker(),
+                queue_mode=QueueMode.CUSTOM,
+                custom_queues=[CustomQueueConfig(name='emails', priority=100)],
+                retention=RetentionConfig(
+                    queue_retention={'emals': timedelta(days=7)}
+                ),
+            )
+
+        message = str(caught.value)
+        assert 'emals' in message, 'the refusal must name the bad key'
+        assert 'emails' in message, (
+            'the refusal must list the queues that do exist, or the '
+            'adopter cannot see the typo'
+        )
+
+    def test_an_empty_mapping_is_unaffected(self) -> None:
+        config = AppConfig(broker=self._broker(), queue_mode=QueueMode.DEFAULT)
+
+        assert config.retention.queue_retention == {}

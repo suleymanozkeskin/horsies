@@ -19,9 +19,9 @@ export default defineConfig({
     },
   },
   build: {
-    // The wheel ships this directory as package data; CI builds it before the
-    // wheel build. It lives outside the Vite root, hence the explicit empty.
-    outDir: '../horsies/web/static',
+    // The committed build that horsies-core embeds and serves for both
+    // clients. It lives outside the Vite root, hence the explicit empty.
+    outDir: '../core/webui-dist',
     emptyOutDir: true,
   },
   server: {

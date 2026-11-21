@@ -1,7 +1,8 @@
 version: 2
 updates:
   - package-ecosystem: uv
-    directory: "/"
+    # The Python project (pyproject.toml, uv.lock) is clients/python/.
+    directory: "/clients/python"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
@@ -14,8 +15,6 @@ updates:
           - minor
           - patch
 
-  # The root Cargo workspace and Cargo.lock. syce/ is outside the workspace
-  # and keeps its own lock file.
   - package-ecosystem: cargo
     directory: "/"
     schedule:

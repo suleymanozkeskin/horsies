@@ -1,5 +1,6 @@
 ---
 title: Concurrency
+section: shared
 summary: Worker, queue, and cluster-level concurrency controls.
 related: [worker-architecture, ../../concepts/queue-modes, ../../configuration/app-config]
 tags: [workers, concurrency, claiming, limits]
@@ -8,7 +9,7 @@ tags: [workers, concurrency, claiming, limits]
 ## Operational Notes
 
 - **Priority ordering:** Priority holds within one execution class. Each (queue, class) is its own claim stream in `(priority, enqueued_at, id)` order. A budget that claims more than one class reads the merge of their streams in that order. Two budgets do not compare priorities: a high-priority `SHARED_ASYNC` row does not take a seat from an `ISOLATED` row. Within the same priority, FIFO ordering uses `enqueued_at`. When many tasks share the same timestamp, ordering can appear non-deterministic.
-- **Soft-cap overshoot:** With `prefetch_buffer > 0`, queue concurrency counts only RUNNING tasks; buffered CLAIMED tasks are invisible to the cap and are dispatched without a re-check. A queue's RUNNING count can therefore exceed its nominal cap, the excess lasts for the duration of those tasks (not just the claim pass), and with multiple workers each pass grants against the same RUNNING snapshot — N workers can reach up to N × cap RUNNING, bounded by their aggregate seats. Use hard cap mode (`prefetch_buffer = 0`) where the cap must hold strictly.
+- **Soft-cap start check:** With `prefetch_buffer > 0`, the claim counts only RUNNING tasks against a queue's `max_concurrency`, so a worker can claim more rows of a capped queue than its cap. The worker starts such a row only when the queue has room and a child that runs rows of its class has a free slot or seat at that moment: each claim pass reads, for each capped queue with claimed rows that wait, its RUNNING rows plus the rows that this worker started and that are not RUNNING yet, and starts the waiting rows in claim order while that count stays under the cap and a child is free for each row. A started row goes to a child at once, so another worker counts it as RUNNING after one start. The other rows stay CLAIMED, and the worker returns them to the queue when it stops. Workers read the count without a lock, so two workers that start rows of one queue in the same instant can pass the cap by the rows that they start in that instant. Use hard cap mode (`prefetch_buffer = 0`) where the cap must hold strictly.
 - **Claim leases:** In soft-cap mode, claims can expire and be reclaimed. Workers must verify ownership before running user code.
 
 ## Concurrency Levels
@@ -35,15 +36,7 @@ tags: [workers, concurrency, claiming, limits]
 
 ## Worker-Level: Children
 
-Each worker runs the children of its [worker profile](/horsies/workers/worker-profiles/):
-
-```python
-eight_children = WorkerProfile(isolated=IsolatedChildren(count=8))
-```
-
-```bash
-horsies worker myapp.instance:app --profile default
-```
+Each worker runs the children of its worker profile. A profile with 8 isolated children runs up to 8 tasks at once. The API is on the client pages: [Worker Profiles](/horsies/workers/worker-profiles/) (Python) and [Worker Setup](/horsies/rust/workers/worker-setup/) (Rust).
 
 - Limits concurrent task execution on this worker
 - Each isolated child handles one task at a time
@@ -61,23 +54,7 @@ process is killed.
 `IsolatedRecycle.after` recycles a child after it completes N tasks, returning
 its memory to the OS. **Default: `TaskLimit(tasks=100)`.**
 
-```python
-# The default is 100; raise it for high-throughput or connection-constrained apps
-recycle_after_500 = WorkerProfile(
-    isolated=IsolatedChildren(
-        count=8,
-        recycle=IsolatedRecycle(after=TaskLimit(tasks=500)),
-    ),
-)
-
-# Disable recycling entirely
-no_recycling = WorkerProfile(
-    isolated=IsolatedChildren(
-        count=8,
-        recycle=IsolatedRecycle(after=NoTaskLimit()),
-    ),
-)
-```
+The Python examples are in [Recycling](/horsies/workers/worker-profiles/#recycling).
 
 - **Default `TaskLimit(tasks=100)`.** Tune it for your deployment — there is no
   universal value (see [Choosing N](#choosing-n)).
@@ -135,26 +112,7 @@ child reports its RSS with every result. When that value is at or above the
 limit, the worker stops the child and starts a new one in that slot. Other
 children and their in-flight tasks are untouched. **Disabled by default.**
 
-```python
-# Recycle any child once its RSS reaches 200 MB
-memory_recycling = WorkerProfile(
-    isolated=IsolatedChildren(
-        count=6,
-        recycle=IsolatedRecycle(above=MemoryLimit(mb=200)),
-    ),
-)
-
-# Combine with count recycling: a child recycles when either limit is reached
-count_and_memory = WorkerProfile(
-    isolated=IsolatedChildren(
-        count=6,
-        recycle=IsolatedRecycle(
-            after=TaskLimit(tasks=500),
-            above=MemoryLimit(mb=200),
-        ),
-    ),
-)
-```
+The Python examples are in [Recycling](/horsies/workers/worker-profiles/#recycling).
 
 - **Disabled by default** (`NoMemoryLimit()`). `MemoryLimit(mb=N)` with `N >= 1` enables it.
 - It is a **retention guardrail, not a hard memory sandbox.** A task whose
@@ -225,20 +183,7 @@ sampled at recycle time.
 ### Choosing: count, memory, or both
 
 The two recycle limits combine with **OR** semantics — a child exits when *either*
-limit is reached:
-
-```python
-# recycle at 500 tasks OR once RSS reaches 180 MB, whichever comes first
-either_limit = WorkerProfile(
-    isolated=IsolatedChildren(
-        count=6,
-        recycle=IsolatedRecycle(
-            after=TaskLimit(tasks=500),
-            above=MemoryLimit(mb=180),
-        ),
-    ),
-)
-```
+limit is reached.
 
 - `above` is the primary guard for memory-quota deployments
   (containers, PaaS dynos): it tracks the RSS the quota charges.
@@ -253,43 +198,12 @@ At boot the worker warns when `count × MemoryLimit.mb` is above the memory that
 it can use: the container (cgroup) limit when it is below the host RAM, else the
 host RAM. It starts in every case. See [Worker Profiles](/horsies/workers/worker-profiles/#memory).
 
-To run **memory-only**, disable count recycling explicitly (otherwise its
-default `TaskLimit(tasks=100)` still applies):
-
-```python
-memory_only = WorkerProfile(
-    isolated=IsolatedChildren(
-        count=6,
-        recycle=IsolatedRecycle(after=NoTaskLimit(), above=MemoryLimit(mb=180)),
-    ),
-)
-```
+To run **memory-only**, disable count recycling explicitly (`after=NoTaskLimit()`);
+otherwise its default `TaskLimit(tasks=100)` still applies.
 
 ## Queue-Level: max_concurrency
 
-In CUSTOM mode, limit concurrent tasks per queue:
-
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
-```python
-from horsies.core.models.queues import CustomQueueConfig
-
-config = AppConfig(
-    queue_mode=QueueMode.CUSTOM,
-    custom_queues=[
-        CustomQueueConfig(
-            name="api_calls",
-            priority=1,
-            max_concurrency=5,  # Max 5 tasks running cluster-wide
-        ),
-        CustomQueueConfig(
-            name="low",
-            priority=100,
-            max_concurrency=2,
-        ),
-    ],
-    broker=PostgresConfig(...),
-)
-```
+In CUSTOM mode, `max_concurrency` on a custom queue limits the concurrent tasks of that queue across the cluster. The Python example is in [CUSTOM Mode](/horsies/configuration/app-config/#custom-mode).
 
 `max_concurrency=None` declares the queue uncapped: no per-queue limit is
 enforced and the claim pass skips the in-flight count query for that queue
@@ -305,15 +219,7 @@ Use cases:
 
 ## Cluster-Level: cluster_wide_cap
 
-Limit total concurrent tasks across all workers:
-
-<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
-```python
-config = AppConfig(
-    cluster_wide_cap=50,  # Max 50 tasks in-flight across entire cluster
-    ...
-)
-```
+`cluster_wide_cap` in the app config limits the in-flight tasks across all workers. The Python example is in [Cluster-Wide Concurrency](/horsies/configuration/app-config/#cluster-wide-concurrency).
 
 **Important:** When `cluster_wide_cap` is set, the system operates in **hard cap mode** by default. This counts both RUNNING and CLAIMED tasks to enforce a strict limit. See [Hard Cap vs Soft Cap](#hard-cap-vs-soft-cap) for details.
 
@@ -329,16 +235,7 @@ Horsies provides two modes for enforcing concurrency limits:
 
 ### Hard Cap Mode (Default)
 
-When `prefetch_buffer=0` (default), the system counts **RUNNING + CLAIMED** tasks when enforcing caps:
-
-<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
-```python
-config = AppConfig(
-    cluster_wide_cap=50,
-    prefetch_buffer=0,  # Default: hard cap mode
-    ...
-)
-```
+When `prefetch_buffer=0` (default), the system counts **RUNNING + CLAIMED** tasks when enforcing caps. The Python example is in [Prefetch Configuration](/horsies/configuration/app-config/#prefetch-configuration).
 
 **Behavior:**
 - Strict enforcement: exactly `cluster_wide_cap` tasks can be in-flight at once
@@ -351,22 +248,13 @@ In production, task durations vary wildly. Without hard cap mode, a worker proce
 
 ### Soft Cap Mode (with Prefetch)
 
-When `prefetch_buffer > 0`, queue concurrency counts **RUNNING** tasks, allowing workers to prefetch beyond their running capacity. A worker's local budget still subtracts already-claimed rows so it cannot hold more than its seats + `prefetch_buffer` in total:
-
-<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
-```python
-config = AppConfig(
-    prefetch_buffer=4,      # Allow prefetching up to 4 tasks beyond running
-    claim_lease_ms=5000,    # Required: lease expires after 5 seconds
-    ...
-)
-```
+When `prefetch_buffer > 0`, queue concurrency counts **RUNNING** tasks, allowing workers to prefetch beyond their running capacity. A worker's local budget still subtracts already-claimed rows so it cannot hold more than its seats + `prefetch_buffer` in total. Set `prefetch_buffer` above 0 and `claim_lease_ms`; the Python example is in [Prefetch Configuration](/horsies/configuration/app-config/#prefetch-configuration).
 
 **Behavior:**
 - Prefetch allowed: workers can claim tasks ahead of execution
 - Lease expiry: prefetched claims expire and can be reclaimed by other workers
 - No prefetch without capacity: a budget whose children or seats are all down (capacity in service 0) claims no row, and neither does a worker whose budgets are all at 0. Its rows stay for a worker with seats.
-- Soft limit: RUNNING tasks can exceed the cap — buffered CLAIMED tasks don't count against it and dispatch without a re-check, so the excess persists while those tasks run and scales with worker count (see [Soft-cap overshoot](#operational-notes))
+- Start check: a claimed row of a capped queue starts only while the queue's RUNNING rows, plus the rows that the worker started and that are not RUNNING yet, are under the cap, and a child that runs rows of its class is free; the other claimed rows wait, CLAIMED (see [Soft-cap start check](#operational-notes))
 
 **Important:** `cluster_wide_cap` and `prefetch_buffer > 0` cannot be combined. If you need a global cap, use hard cap mode.
 **Important:** `claim_lease_ms` must be set when `prefetch_buffer > 0`. In hard cap mode (`prefetch_buffer = 0`), it is optional and overrides the default 60s lease.
@@ -443,28 +331,14 @@ Limits claims per queue per claiming pass. The default is `NoTaskLimit()`:
 the worker claims up to the available local/global capacity for that queue.
 Set `TaskLimit(tasks=N)` only when you want an explicit fairness cap per queue
 per pass. A pass under this cap that claims runs the next pass at once,
-because no `NOTIFY` announces work that the pass left.
-
-```python
-fair_batches = WorkerProfile(
-    isolated=IsolatedChildren(count=8),
-    claim=ClaimLimits(per_queue_per_pass=TaskLimit(tasks=4)),
-)
-```
+because no `NOTIFY` announces work that the pass left. The Python example is in [Claim Limits](/horsies/workers/worker-profiles/#claim-limits).
 
 A cap prevents one worker from claiming all available tasks, ensuring
 fairness in multi-worker deployments at the cost of more claim passes.
 
 ### claimed_per_worker
 
-Limits total CLAIMED (not yet running) tasks per worker. It counts the CLAIMED rows of every class, so rows that one class prefetched can stop the claims of another class whose seats are free:
-
-```python
-few_claimed = WorkerProfile(
-    isolated=IsolatedChildren(count=8),
-    claim=ClaimLimits(claimed_per_worker=TaskLimit(tasks=4)),
-)
-```
+Limits total CLAIMED (not yet running) tasks per worker. It counts the CLAIMED rows of every class, so rows that one class prefetched can stop the claims of another class whose seats are free. The Python example is in [Claim Limits](/horsies/workers/worker-profiles/#claim-limits).
 
 **Default behavior** (`NoTaskLimit()`): the capacity is the limit.
 - Hard cap mode (`prefetch_buffer=0`): the seats of the profile (`seat_count()`)
@@ -518,10 +392,9 @@ Key behaviors:
 
 ## Concurrency Calculation
 
-During each claim pass:
+During each claim pass, in pseudo-code:
 
-<!-- check: skip partial -- uses names that the page does not define -->
-```python
+```text
 # Hard cap mode (prefetch_buffer=0): local budgets count RUNNING + CLAIMED
 # Soft cap mode (prefetch_buffer>0): queue caps count RUNNING; the local
 # budgets subtract already-claimed rows, and each may prefetch.
@@ -593,58 +466,7 @@ fleet is on one version.
 
 ## Example Configurations
 
-### Single Worker, Simple
-
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
-```python
-config = AppConfig(
-    queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(...),
-)
-```
-
-```bash
-horsies worker myapp.instance:app --profile default
-```
-
-The `default` profile holds `isolated=IsolatedChildren(count=8)`.
-
-### Multi-Worker with Global Cap
-
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
-```python
-config = AppConfig(
-    queue_mode=QueueMode.DEFAULT,
-    cluster_wide_cap=20,
-    broker=PostgresConfig(...),
-)
-```
-
-```bash
-# Machine 1
-horsies worker myapp.instance:app --profile default
-
-# Machine 2
-horsies worker myapp.instance:app --profile default
-
-# Total: 16 children (8 each), but max 20 RUNNING tasks cluster-wide
-```
-
-### Priority Queues with Rate Limiting
-
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
-```python
-config = AppConfig(
-    queue_mode=QueueMode.CUSTOM,
-    custom_queues=[
-        CustomQueueConfig(name="stripe", priority=1, max_concurrency=3),
-        CustomQueueConfig(name="email", priority=50, max_concurrency=10),
-        CustomQueueConfig(name="reports", priority=100, max_concurrency=2),
-    ],
-    cluster_wide_cap=15,
-    broker=PostgresConfig(...),
-)
-```
+Example app configs for one worker, for several workers with a global cap, and for priority queues with rate limits are in [Example Configurations](/horsies/configuration/app-config/#example-configurations) (Python).
 
 ## Monitoring
 
@@ -672,7 +494,7 @@ Check:
 - `max_concurrency` for queue reached?
 - Tasks expired (`good_until`)?
 - No live worker serves the task's execution class on its queue? The worker
-  logs it, and `get_class_coverage()` reports it as `StreamUnserved()`.
+  logs it, and the class coverage read reports it as unserved.
 
 ### Uneven Distribution
 

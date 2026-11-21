@@ -1,0 +1,39 @@
+[package]
+name = "acme-showcase"
+version = "0.1.0-alpha.27"
+edition = "2021"
+publish = false
+description = "Acme Clothing showcase for horsies"
+license = "MIT"
+repository = "https://github.com/suleymanozkeskin/horsies"
+
+[features]
+default = []
+# `acme web`: the monitoring UI through horsies::web::router.
+web = ["horsies/web", "dep:axum", "tokio/net"]
+
+[dependencies]
+axum = { version = "0.8", optional = true }
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+clap = { version = "4", features = ["derive"] }
+horsies = { path = "../../horsies" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "chrono"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+serial_test = "3"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "acme"
+path = "src/main.rs"

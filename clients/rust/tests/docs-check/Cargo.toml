@@ -1,0 +1,28 @@
+[package]
+name = "horsies-docs-check"
+version = "0.1.0-alpha.1"
+edition = "2021"
+description = "Builds the Rust code blocks of the docs site and of the Rust skill files"
+publish = false
+
+# `build.rs` writes each `rust` block of website/src/content/docs/rust/ and
+# of clients/rust/horsies/.agents/skills/horsies/ as a module of this crate.
+# `cargo check -p horsies-docs-check --all-targets` builds every block, the
+# `#[test]` functions of the testing page included.
+
+[dependencies]
+horsies = { path = "../../horsies", features = ["web", "sqlx", "tokio-postgres"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+axum = "0.8"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+    "uuid",
+    "chrono",
+] }
+# The same pin as the client's rerun adapter.
+tokio-postgres = { version = "=0.7.18", features = ["with-uuid-1", "with-chrono-0_4"] }

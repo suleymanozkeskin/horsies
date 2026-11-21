@@ -1,0 +1,13 @@
+error: `good_until` is not a task attribute: a deadline fixed at registration is in the past for every later send; set it per send with TaskSendOptions::good_until, or per workflow node
+ --> tests/compile_fail/good_until_attribute.rs:4:15
+  |
+4 | #[task("bad", good_until = 1)]
+  |               ^^^^^^^^^^
+
+warning: unused import: `horsies::TaskError`
+ --> tests/compile_fail/good_until_attribute.rs:2:5
+  |
+2 | use horsies::TaskError;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

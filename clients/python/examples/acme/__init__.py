@@ -1,0 +1,14 @@
+# clients/python/examples/acme/__init__.py
+"""Acme Clothing — the horsies showcase application.
+
+A fictional fast-fashion retailer whose orders, payments, stock, and
+shipments are real rows in a real database; only the outside world
+(payment provider, courier, printer, mail gateway) is simulated.
+
+Run everything from the repository root:
+
+    uv run horsies worker examples.acme.app:app --profile default
+    uv run horsies scheduler examples.acme.app:app
+    uv run horsies web examples.acme.app:app --enable-actions
+    uv run python -m examples.acme.scenarios seed
+"""

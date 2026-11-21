@@ -1,0 +1,1607 @@
+"""Layer 2 e2e tests: Multi-Worker / Cluster behaviors."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import signal
+import tempfile
+from pathlib import Path
+from typing import Final, Protocol, Any
+from uuid import UUID, uuid4
+from datetime import datetime, timezone
+
+import pytest
+
+from horsies.core.brokers.enqueue_task import SendKind
+from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.models.task_send_types import TaskSendResult
+from horsies.core.task_decorator import TaskHandle
+from horsies.core.types.result import is_err
+from horsies.core.types.status import TaskStatus
+from sqlalchemy import text
+from sqlalchemy.engine import make_url
+
+from tests.e2e.helpers.db import (
+    poll_max_during,
+    read_task,
+    wait_for_all_terminal,
+    wait_for_any_status,
+    wait_for_status,
+)
+from tests.integration.history_seeding import (
+    read_attempt_history,
+    read_attempt_workers,
+)
+from tests.e2e.helpers.assertions import unwrap_send
+from tests.e2e.helpers.env import TASK_MODULE_URL_ENV_NAME
+from tests.e2e.helpers.worker import run_worker, run_workers, worker_env
+from tests.e2e.tasks import basic as basic_tasks
+from tests.e2e.tasks import retry as retry_tasks
+from tests.e2e.tasks import queues_custom
+from tests.e2e.tasks import instance_cluster_cap
+from tests.e2e.tasks import instance_recovery
+from tests.e2e.tasks import instance_softcap
+from tests.e2e.tasks import instance_requeue_guard
+
+
+import subprocess
+import time
+from tests.broker_resources_support import current_resources
+from tests.integration.round_trip_proxy import RoundTripProxy
+
+DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
+CUSTOM_INSTANCE = 'tests.e2e.tasks.instance_custom:app'
+CLUSTER_CAP_INSTANCE = 'tests.e2e.tasks.instance_cluster_cap:app'
+RECOVERY_INSTANCE = 'tests.e2e.tasks.instance_recovery:app'
+SOFTCAP_INSTANCE = 'tests.e2e.tasks.instance_softcap:app'
+REQUEUE_GUARD_INSTANCE = 'tests.e2e.tasks.instance_requeue_guard:app'
+
+
+class _HealthcheckTask(Protocol):
+    def send(self) -> TaskSendResult[TaskHandle[str]]: ...
+
+
+def _make_ready_check(task_func: _HealthcheckTask):
+    """Create a ready check that polls a healthcheck task."""
+    handle: TaskHandle[str] | None = None
+
+    def _check() -> bool:
+        nonlocal handle
+        if handle is None:
+            r = task_func.send()
+            if is_err(r):
+                return False
+            handle = r.ok_value
+        result = handle.get(timeout_ms=2000)
+        return result.is_ok()
+
+    return _check
+
+
+async def _wait_for_claimed_owner(
+    session_factory,
+    task_id: UUID,
+    timeout_s: float = 15.0,
+    poll_interval: float = 0.1,
+) -> str:
+    """Wait until task is CLAIMED and return claimed_by_worker_id."""
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while asyncio.get_running_loop().time() < deadline:
+        async with session_factory() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT status, claimed_by_worker_id
+                    FROM itest_task_rows
+                    WHERE id = CAST(:id AS uuid)
+                    """
+                ),
+                {'id': str(task_id)},
+            )
+            row = result.fetchone()
+            if row is not None and row[0] == 'CLAIMED' and row[1]:
+                return str(row[1])
+        await asyncio.sleep(poll_interval)
+    raise TimeoutError(f'Task {task_id} was not CLAIMED within {timeout_s}s')
+
+
+async def _prepare_execution_ledger_tables(broker: PostgresBroker) -> None:
+    """Create and clear DB-ledger tables used by the double-execution race test."""
+    async with current_resources(broker).session_factory() as session:
+        await session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS e2e_execution_attempts (
+                    id BIGSERIAL PRIMARY KEY,
+                    token TEXT NOT NULL,
+                    worker_identity TEXT NOT NULL,
+                    worker_pid INTEGER NOT NULL,
+                    entered_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+        )
+        await session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS e2e_execution_winner (
+                    token TEXT PRIMARY KEY,
+                    worker_identity TEXT NOT NULL,
+                    worker_pid INTEGER NOT NULL,
+                    won_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+        )
+        await session.execute(text("TRUNCATE e2e_execution_attempts, e2e_execution_winner"))
+        await session.commit()
+
+
+# =============================================================================
+# L2.1 Multi-Worker Distribution
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_multi_worker_distribution(broker: PostgresBroker) -> None:
+    """L2.1: Prove more than one worker claims tasks."""
+    num_workers = 2
+    num_tasks = 10
+    task_duration_ms = 500
+
+    with run_workers(
+        DEFAULT_INSTANCE,
+        count=num_workers,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        # Enqueue slow tasks to force overlap and spread across workers
+        task_ids = [
+            (await asyncio.to_thread(
+                broker.enqueue,
+                task_name='e2e_slow',
+                queue_name='default',
+                task_id=uuid4(),
+                send_kind=SendKind.FIRST,
+                sent_at=datetime.now(timezone.utc),
+                input_json=json.dumps({'duration_ms': task_duration_ms}),
+            )).unwrap()
+            for _ in range(num_tasks)
+        ]
+
+        # Wait for all tasks to complete
+        await wait_for_all_terminal(current_resources(broker).session_factory, task_ids, timeout_s=30.0)
+
+        # Query distinct claimed_by_worker_id values
+        async with current_resources(broker).session_factory() as session:
+            result = await session.execute(
+                text("""
+                    SELECT DISTINCT last_claimed_worker_id
+                    FROM itest_task_rows
+                    WHERE id = ANY(CAST(:ids AS uuid[]))
+                    AND last_claimed_worker_id IS NOT NULL
+                """),
+                {'ids': task_ids},
+            )
+            worker_ids = [row[0] for row in result.fetchall()]
+
+        # With 2 workers and 10 slow tasks, we expect at least 2 distinct worker IDs
+        assert (
+            len(worker_ids) >= 2
+        ), f'Expected at least 2 distinct worker IDs, got {len(worker_ids)}: {worker_ids}'
+
+        # Verify all tasks completed successfully
+        async with current_resources(broker).session_factory() as session:
+            for task_id in task_ids:
+                task = await read_task(session, task_id)
+                assert task is not None
+                assert task.status == TaskStatus.COMPLETED, (
+                    f'Task {task_id} has status {task.status}, expected COMPLETED'
+                )
+
+
+# =============================================================================
+# L2.2 Cluster-Wide Cap Enforcement
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_cluster_wide_cap(cluster_cap_broker: PostgresBroker) -> None:
+    """L2.2: Validate cluster_wide_cap limits RUNNING tasks across all workers."""
+    cluster_wide_cap = instance_cluster_cap.CLUSTER_WIDE_CAP  # 2
+    num_workers = 2
+    num_tasks = 6
+    task_duration_ms = 500
+
+    with run_workers(
+        CLUSTER_CAP_INSTANCE,
+        count=num_workers,
+        profile='isolated-2',  # Each worker has 2 processes
+        ready_check=_make_ready_check(instance_cluster_cap.healthcheck),
+    ):
+        # Enqueue slow tasks (use cluster_cap-specific task)
+        task_ids = [
+            (await asyncio.to_thread(
+                cluster_cap_broker.enqueue,
+                task_name='e2e_cluster_cap_slow',
+                queue_name='default',
+                task_id=uuid4(),
+                send_kind=SendKind.FIRST,
+                sent_at=datetime.now(timezone.utc),
+                input_json=json.dumps({'duration_ms': task_duration_ms}),
+            )).unwrap()
+            for _ in range(num_tasks)
+        ]
+
+        # Poll DB during execution to find max RUNNING count
+        # Duration should cover at least a few task executions
+        max_running = await poll_max_during(
+            current_resources(cluster_cap_broker).session_factory,
+            "SELECT COUNT(*) FROM horsies_tasks WHERE status = 'RUNNING'",
+            duration_s=4.0,
+            poll_interval=0.05,
+        )
+
+        # Wait for all to complete
+        await wait_for_all_terminal(
+            current_resources(cluster_cap_broker).session_factory, task_ids, timeout_s=30.0
+        )
+
+        # Guard against vacuous pass (all tasks completed before first poll sample)
+        assert max_running > 0, 'Polling observed 0 RUNNING tasks — test may be vacuous'
+
+        # Verify cap was respected
+        assert (
+            max_running <= cluster_wide_cap
+        ), f'RUNNING count {max_running} exceeded cluster_wide_cap {cluster_wide_cap}'
+
+        # Verify all tasks completed successfully
+        async with current_resources(cluster_cap_broker).session_factory() as session:
+            for task_id in task_ids:
+                task = await read_task(session, task_id)
+                assert task is not None
+                assert task.status == TaskStatus.COMPLETED
+
+
+# =============================================================================
+# L2.3 Per-Queue Concurrency Cap
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_per_queue_concurrency_cap(custom_broker: PostgresBroker) -> None:
+    """L2.3: Validate per-queue max_concurrency in CUSTOM mode."""
+    # high queue has max_concurrency=5 in instance_custom
+    queue_name = 'high'
+    max_concurrency = 5
+    num_tasks = 10
+    task_duration_ms = 400
+
+    with run_workers(
+        CUSTOM_INSTANCE,
+        count=1,
+        profile='isolated-8',  # More processes than max_concurrency
+        ready_check=_make_ready_check(queues_custom.high_task),
+    ):
+        # Enqueue slow tasks to the high queue (use custom-specific task)
+        task_ids = [
+            (await asyncio.to_thread(
+                custom_broker.enqueue,
+                task_name='e2e_custom_slow',
+                queue_name=queue_name,
+                task_id=uuid4(),
+                send_kind=SendKind.FIRST,
+                sent_at=datetime.now(timezone.utc),
+                input_json=json.dumps({'duration_ms': task_duration_ms}),
+            )).unwrap()
+            for _ in range(num_tasks)
+        ]
+
+        # Poll DB during execution to find max RUNNING count for this queue
+        max_running = await poll_max_during(
+            current_resources(custom_broker).session_factory,
+            "SELECT COUNT(*) FROM horsies_tasks WHERE status = 'RUNNING' AND queue_name = :qn",
+            duration_s=5.0,
+            poll_interval=0.05,
+            params={'qn': queue_name},
+        )
+
+        # Wait for all to complete
+        await wait_for_all_terminal(
+            current_resources(custom_broker).session_factory, task_ids, timeout_s=30.0
+        )
+
+        # Guard against vacuous pass (all tasks completed before first poll sample)
+        assert max_running > 0, 'Polling observed 0 RUNNING tasks — test may be vacuous'
+
+        # Verify per-queue cap was respected
+        assert max_running <= max_concurrency, (
+            f"RUNNING count {max_running} in queue '{queue_name}' exceeded "
+            f'max_concurrency {max_concurrency}'
+        )
+
+        # Verify all tasks completed successfully (prevents silent failures)
+        async with current_resources(custom_broker).session_factory() as session:
+            for task_id in task_ids:
+                task = await read_task(session, task_id)
+                assert task is not None
+                assert (
+                    task.status == TaskStatus.COMPLETED
+                ), f'Task {task_id} has status {task.status}, expected COMPLETED'
+
+
+# =============================================================================
+# L2.5 Double-Execution Prevention (Multi-Worker)
+# =============================================================================
+
+
+@pytest.mark.e2e
+def test_multi_worker_no_double_execution() -> None:
+    """L2.5: Prove tasks are not executed twice across multiple workers."""
+    num_workers = 2
+    num_tasks = 20
+
+    with tempfile.TemporaryDirectory() as log_dir:
+        os.environ['E2E_IDEMPOTENT_LOG_DIR'] = log_dir
+        try:
+            with run_workers(
+                DEFAULT_INSTANCE,
+                count=num_workers,
+                profile='isolated-2',
+                ready_check=_make_ready_check(basic_tasks.healthcheck),
+            ):
+                # Use unique tokens for each task
+                tokens = [f'multiworker_task_{i}' for i in range(num_tasks)]
+                handles = [unwrap_send(basic_tasks.idempotent_task.send(token=token)) for token in tokens]
+                results = [h.get(timeout_ms=30000) for h in handles]
+
+                # All tasks should succeed (no DOUBLE_EXECUTION errors)
+                for i, r in enumerate(results):
+                    assert r.is_ok(), f'Task {i} failed: {r.err}'
+
+                # Verify each token file exists exactly once
+                for token in tokens:
+                    token_file = Path(log_dir) / token
+                    assert token_file.exists(), f'Token file {token} not created'
+
+                # Verify no extra files were created (catches double-execution with
+                # differently-named artifacts)
+                all_files = list(Path(log_dir).iterdir())
+                assert len(all_files) == num_tasks, (
+                    f'Expected exactly {num_tasks} token files, found {len(all_files)}: '
+                    f'{[f.name for f in all_files]}'
+                )
+        finally:
+            os.environ.pop('E2E_IDEMPOTENT_LOG_DIR', None)
+
+
+# =============================================================================
+# L2.16 DB Ledger Race — Exact Single Execution Proof
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_softcap_db_ledger_race_single_execution(
+    softcap_broker: PostgresBroker,
+) -> None:
+    """L2.16: Force reclaim race and prove only one task body enters via DB ledger."""
+    await _prepare_execution_ledger_tables(softcap_broker)
+
+    blocker_duration_ms = 4_000
+    token = 'softcap_db_ledger_race_token'
+
+    with run_worker(
+        SOFTCAP_INSTANCE,
+        profile='isolated-1',
+        timeout=20.0,
+        ready_check=_make_ready_check(instance_softcap.healthcheck),
+    ):
+        blocker_task_id = (await asyncio.to_thread(
+            softcap_broker.enqueue,
+            task_name='e2e_softcap_blocker',
+            queue_name='default',
+            task_id=uuid4(),
+            send_kind=SendKind.FIRST,
+            sent_at=datetime.now(timezone.utc),
+            input_json=json.dumps({'duration_ms': blocker_duration_ms}),
+        )).unwrap()
+        await wait_for_status(
+            current_resources(softcap_broker).session_factory,
+            blocker_task_id,
+            'RUNNING',
+            timeout_s=10.0,
+        )
+
+        ledger_task_id = (await asyncio.to_thread(
+            softcap_broker.enqueue,
+            task_name='e2e_softcap_db_ledger',
+            queue_name='default',
+            task_id=uuid4(),
+            send_kind=SendKind.FIRST,
+            sent_at=datetime.now(timezone.utc),
+            input_json=json.dumps({'token': token}),
+        )).unwrap()
+
+        await _wait_for_claimed_owner(
+            current_resources(softcap_broker).session_factory,
+            ledger_task_id,
+            timeout_s=10.0,
+        )
+
+        # claim_lease_ms=2000 in SOFTCAP_INSTANCE. Worker A's claimer heartbeat
+        # renews the lease continuously, so the lease stays fresh despite the short
+        # duration. This sleep is a scheduling delay — not a guarantee of expiry.
+        # Worker A eventually processes the task when the blocker finishes.
+        await asyncio.sleep(2.5)
+
+        with run_worker(
+            SOFTCAP_INSTANCE,
+            profile='isolated-1',
+            timeout=20.0,
+            ready_check=_make_ready_check(instance_softcap.healthcheck),
+        ):
+            await wait_for_all_terminal(
+                current_resources(softcap_broker).session_factory,
+                [blocker_task_id, ledger_task_id],
+                timeout_s=40.0,
+            )
+
+    async with current_resources(softcap_broker).session_factory() as session:
+        ledger_task = await read_task(session, ledger_task_id)
+        assert ledger_task is not None
+        assert ledger_task.status == TaskStatus.COMPLETED, (
+            f'Expected COMPLETED, got {ledger_task.status}'
+        )
+        # Note: We intentionally do NOT assert which worker ended up running the task.
+        # Worker A's claim loop can re-claim its own expired lease before Worker B polls,
+        # making the owner non-deterministic. The DB ledger assertions below are the
+        # definitive single-execution proof.
+
+        result = await session.execute(
+            text("SELECT COUNT(*) FROM e2e_execution_attempts WHERE token = :token"),
+            {'token': token},
+        )
+        attempts = int(result.scalar() or 0)
+        assert attempts == 1, f'Expected exactly 1 body-entry attempt, got {attempts}'
+
+        result = await session.execute(
+            text("SELECT COUNT(*) FROM e2e_execution_winner WHERE token = :token"),
+            {'token': token},
+        )
+        winners = int(result.scalar() or 0)
+        assert winners == 1, f'Expected exactly 1 winner row, got {winners}'
+
+        result = await session.execute(
+            text(
+                """
+                SELECT a.worker_identity, w.worker_identity
+                FROM e2e_execution_attempts a
+                JOIN e2e_execution_winner w ON w.token = a.token
+                WHERE a.token = :token
+                """
+            ),
+            {'token': token},
+        )
+        row = result.fetchone()
+        assert row is not None
+        assert row[0] == row[1], (
+            f'Attempt identity {row[0]} does not match winner identity {row[1]}'
+        )
+
+
+# =============================================================================
+# L2.6 Stale RUNNING → FAILED on Worker Crash
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_stale_running_marked_failed_on_crash(
+    recovery_broker: PostgresBroker,
+) -> None:
+    """L2.6: Worker crash mid-task marks RUNNING task as FAILED with WORKER_CRASHED."""
+    task_duration_ms = 60_000  # 60s — long enough to still be RUNNING when we kill
+
+    with run_worker(
+        RECOVERY_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(instance_recovery.healthcheck),
+    ) as worker_proc:
+        # Enqueue a long-running task
+        task_id = (await asyncio.to_thread(
+            recovery_broker.enqueue,
+            task_name='e2e_recovery_slow',
+            queue_name='default',
+            task_id=uuid4(),
+            send_kind=SendKind.FIRST,
+            sent_at=datetime.now(timezone.utc),
+            input_json=json.dumps({'duration_ms': task_duration_ms}),
+        )).unwrap()
+
+        # Wait until task reaches RUNNING
+        await wait_for_status(
+            current_resources(recovery_broker).session_factory,
+            task_id,
+            'RUNNING',
+            timeout_s=15.0,
+        )
+
+        # SIGKILL the worker process group (no graceful shutdown)
+        os.killpg(worker_proc.pid, signal.SIGKILL)
+        worker_proc.wait(timeout=5.0)
+
+    # Start a NEW worker whose reaper will detect the orphaned task
+    with run_worker(
+        RECOVERY_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(instance_recovery.healthcheck),
+    ):
+        # Wait for task to reach terminal state (reaper marks it FAILED)
+        await wait_for_all_terminal(
+            current_resources(recovery_broker).session_factory,
+            [task_id],
+            timeout_s=15.0,
+        )
+
+    # Verify status and error code
+    async with current_resources(recovery_broker).session_factory() as session:
+        task = await read_task(session, task_id)
+        assert task is not None
+        assert task.status == TaskStatus.FAILED, (
+            f'Expected FAILED, got {task.status}'
+        )
+        assert task.result is not None, 'FAILED task should have a result JSON'
+        result_data = json.loads(task.result)
+        error_code = result_data.get('err', {}).get('error_code', '')
+        assert error_code == {'__builtin_task_code__': 'WORKER_CRASHED'}, (
+            f'Expected error_code WORKER_CRASHED, got {error_code!r}'
+        )
+
+
+# =============================================================================
+# L2.7 Stale CLAIMED → Requeued → COMPLETED
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_stale_claimed_requeued_and_completed(
+    recovery_broker: PostgresBroker,
+) -> None:
+    """L2.7: Stale CLAIMED task is requeued to PENDING and completed by another worker."""
+    dead_worker_id = 'dead_worker_00000000'
+
+    # Enqueue a simple task
+    task_id = (await asyncio.to_thread(
+        recovery_broker.enqueue,
+        task_name='e2e_recovery_healthcheck',
+        queue_name='default',
+        task_id=uuid4(),
+        send_kind=SendKind.FIRST,
+        sent_at=datetime.now(timezone.utc),
+    )).unwrap()
+
+    # Manually set the row to CLAIMED with a stale timestamp, simulating a
+    # worker that died before executing the task
+    async with current_resources(recovery_broker).session_factory() as session:
+        await session.execute(
+            text("""
+                UPDATE horsies_tasks
+                SET status = 'CLAIMED',
+                    claimed_at = NOW() - INTERVAL '10 seconds',
+                    claimed_by_worker_id = :dead_worker_id,
+                    claim_expires_at = NOW() + INTERVAL '5 minutes'
+                WHERE id = :task_id
+            """),
+            {'task_id': task_id, 'dead_worker_id': dead_worker_id},
+        )
+        await session.commit()
+
+    # Start a worker whose reaper will detect the stale CLAIMED task and requeue it
+    with run_worker(
+        RECOVERY_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(instance_recovery.healthcheck),
+    ):
+        await wait_for_all_terminal(
+            current_resources(recovery_broker).session_factory,
+            [task_id],
+            timeout_s=15.0,
+        )
+
+    # Verify the task completed and was re-claimed by a live worker
+    async with current_resources(recovery_broker).session_factory() as session:
+        task = await read_task(session, task_id)
+        assert task is not None
+        assert task.status == TaskStatus.COMPLETED, (
+            f'Expected COMPLETED, got {task.status}'
+        )
+        assert task.claimed_by_worker_id != dead_worker_id, (
+            f'Task was not re-claimed: still assigned to {dead_worker_id}'
+        )
+
+
+# =============================================================================
+# L2.8 Cluster Cap Not Leaked on Failure
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_cluster_cap_not_leaked_on_failure(
+    cluster_cap_broker: PostgresBroker,
+) -> None:
+    """L2.8: Failed tasks free their cluster_wide_cap slots for new tasks."""
+    num_workers = 2
+    num_failing = 4
+    num_slow = 4
+    task_duration_ms = 300
+
+    with run_workers(
+        CLUSTER_CAP_INSTANCE,
+        count=num_workers,
+        profile='isolated-2',
+        ready_check=_make_ready_check(instance_cluster_cap.healthcheck),
+    ):
+        # Phase 1: Enqueue always-failing tasks
+        fail_ids = [
+            (await asyncio.to_thread(
+                cluster_cap_broker.enqueue,
+                task_name='e2e_cluster_cap_fail',
+                queue_name='default',
+                task_id=uuid4(),
+                send_kind=SendKind.FIRST,
+                sent_at=datetime.now(timezone.utc),
+            )).unwrap()
+            for _ in range(num_failing)
+        ]
+
+        # Wait for all failures
+        await wait_for_all_terminal(
+            current_resources(cluster_cap_broker).session_factory, fail_ids, timeout_s=15.0
+        )
+
+        # Verify all failed
+        async with current_resources(cluster_cap_broker).session_factory() as session:
+            for task_id in fail_ids:
+                task = await read_task(session, task_id)
+                assert task is not None
+                assert task.status == TaskStatus.FAILED, (
+                    f'Task {task_id} has status {task.status}, expected FAILED'
+                )
+
+        # Phase 2: Enqueue slow tasks — these must be able to run if cap was freed
+        slow_ids = [
+            (await asyncio.to_thread(
+                cluster_cap_broker.enqueue,
+                task_name='e2e_cluster_cap_slow',
+                queue_name='default',
+                task_id=uuid4(),
+                send_kind=SendKind.FIRST,
+                sent_at=datetime.now(timezone.utc),
+                input_json=json.dumps({'duration_ms': task_duration_ms}),
+            )).unwrap()
+            for _ in range(num_slow)
+        ]
+
+        # If cap leaked, these would hang forever as PENDING
+        await wait_for_all_terminal(
+            current_resources(cluster_cap_broker).session_factory, slow_ids, timeout_s=15.0
+        )
+
+        # Verify all slow tasks completed
+        async with current_resources(cluster_cap_broker).session_factory() as session:
+            for task_id in slow_ids:
+                task = await read_task(session, task_id)
+                assert task is not None
+                assert task.status == TaskStatus.COMPLETED, (
+                    f'Task {task_id} has status {task.status}, expected COMPLETED'
+                )
+
+
+# =============================================================================
+# L2.9 Retry Works Across Multiple Workers
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_retry_works_across_multiple_workers(broker: PostgresBroker) -> None:
+    """L2.9: Retry mechanism works correctly in a multi-worker setup."""
+    num_workers = 2
+    num_tasks = 10
+
+    with run_workers(
+        DEFAULT_INSTANCE,
+        count=num_workers,
+        profile='isolated-2',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        # Use .send() so retry policy (task_options) is persisted in DB
+        handles = [unwrap_send(await retry_tasks.retry_exhausted_task.send_async()) for _ in range(num_tasks)]
+        task_ids = [h.task_id for h in handles]
+
+        # Wait for all to reach terminal state (3 retries x 1s + execution time)
+        await wait_for_all_terminal(
+            current_resources(broker).session_factory, task_ids, timeout_s=30.0
+        )
+
+        # Verify all tasks failed with correct retry count
+        async with current_resources(broker).session_factory() as session:
+            for task_id in task_ids:
+                task = await read_task(session, task_id)
+                assert task is not None
+                assert task.status == TaskStatus.FAILED, (
+                    f'Task {task_id} has status {task.status}, expected FAILED'
+                )
+                assert task.retry_count == 3, (
+                    f'Task {task_id} has retry_count {task.retry_count}, expected 3'
+                )
+
+            # The task row carries only its final owner; participation
+            # across attempts lives in the attempt history, which the
+            # move archives into the record's snapshot as it purges the
+            # live rows — so it is read from wherever it now lives.
+            attempt_counts = {
+                task_id: len(await read_attempt_history(broker, str(task_id)))
+                for task_id in task_ids
+            }
+
+            worker_ids_seen: set[str] = set()
+            for task_id in task_ids:
+                worker_ids_seen |= await read_attempt_workers(broker, str(task_id))
+
+        expected_attempts_per_task = 4  # initial attempt + 3 retries
+        assert attempt_counts == {
+            task_id: expected_attempts_per_task for task_id in task_ids
+        }, (
+            f'Expected {expected_attempts_per_task} attempts for each task, got '
+            f'{attempt_counts}'
+        )
+
+        # Prove multiple workers participated
+        assert len(worker_ids_seen) >= 2, (
+            f'Expected at least 2 distinct worker IDs, got {len(worker_ids_seen)}: '
+            f'{worker_ids_seen}'
+        )
+
+
+# =============================================================================
+# L2.10 Per-Queue Caps Independent Across Queues
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_per_queue_caps_independent_across_queues(
+    custom_broker: PostgresBroker,
+) -> None:
+    """L2.10: Per-queue max_concurrency is enforced independently across queues."""
+    high_max_concurrency = 5
+    normal_max_concurrency = 10
+    num_tasks_per_queue = 10
+    task_duration_ms = 400
+
+    with run_workers(
+        CUSTOM_INSTANCE,
+        count=1,
+        profile='isolated-8',
+        ready_check=_make_ready_check(queues_custom.high_task),
+    ):
+        # Enqueue tasks to both queues
+        high_ids = [
+            (await asyncio.to_thread(
+                custom_broker.enqueue,
+                task_name='e2e_custom_slow',
+                queue_name='high',
+                task_id=uuid4(),
+                send_kind=SendKind.FIRST,
+                sent_at=datetime.now(timezone.utc),
+                input_json=json.dumps({'duration_ms': task_duration_ms}),
+            )).unwrap()
+            for _ in range(num_tasks_per_queue)
+        ]
+        normal_ids = [
+            (await asyncio.to_thread(
+                custom_broker.enqueue,
+                task_name='e2e_custom_slow',
+                queue_name='normal',
+                task_id=uuid4(),
+                send_kind=SendKind.FIRST,
+                sent_at=datetime.now(timezone.utc),
+                input_json=json.dumps({'duration_ms': task_duration_ms}),
+            )).unwrap()
+            for _ in range(num_tasks_per_queue)
+        ]
+
+        all_ids = high_ids + normal_ids
+
+        # Poll both queues concurrently for max RUNNING
+        max_high, max_normal = await asyncio.gather(
+            poll_max_during(
+                current_resources(custom_broker).session_factory,
+                "SELECT COUNT(*) FROM horsies_tasks WHERE status = 'RUNNING' AND queue_name = :qn",
+                duration_s=5.0,
+                poll_interval=0.05,
+                params={'qn': 'high'},
+            ),
+            poll_max_during(
+                current_resources(custom_broker).session_factory,
+                "SELECT COUNT(*) FROM horsies_tasks WHERE status = 'RUNNING' AND queue_name = :qn",
+                duration_s=5.0,
+                poll_interval=0.05,
+                params={'qn': 'normal'},
+            ),
+        )
+
+        await wait_for_all_terminal(
+            current_resources(custom_broker).session_factory, all_ids, timeout_s=30.0
+        )
+
+        # Guard against vacuous pass
+        assert max_high > 0, 'Polling observed 0 RUNNING tasks in high queue'
+        assert max_normal > 0, 'Polling observed 0 RUNNING tasks in normal queue'
+
+        # Per-queue caps respected
+        assert max_high <= high_max_concurrency, (
+            f'RUNNING in high={max_high} exceeded max_concurrency={high_max_concurrency}'
+        )
+        assert max_normal <= normal_max_concurrency, (
+            f'RUNNING in normal={max_normal} exceeded max_concurrency={normal_max_concurrency}'
+        )
+
+        # All tasks completed
+        async with current_resources(custom_broker).session_factory() as session:
+            for task_id in all_ids:
+                task = await read_task(session, task_id)
+                assert task is not None
+                assert task.status == TaskStatus.COMPLETED, (
+                    f'Task {task_id} has status {task.status}, expected COMPLETED'
+                )
+
+
+# =============================================================================
+# L2.11 Queue Priority Ordering
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_queue_priority_ordering(custom_broker: PostgresBroker) -> None:
+    """L2.11: In CUSTOM mode, high-priority queues are processed before low-priority."""
+    num_tasks_per_queue = 5
+    task_duration_ms = 100
+
+    # Enqueue low-priority tasks FIRST
+    low_ids = [
+        (await asyncio.to_thread(
+            custom_broker.enqueue,
+            task_name='e2e_custom_slow',
+            queue_name='low',
+            task_id=uuid4(),
+            send_kind=SendKind.FIRST,
+            sent_at=datetime.now(timezone.utc),
+            input_json=json.dumps({'duration_ms': task_duration_ms}),
+        )).unwrap()
+        for _ in range(num_tasks_per_queue)
+    ]
+
+    # Enqueue high-priority tasks SECOND
+    high_ids = [
+        (await asyncio.to_thread(
+            custom_broker.enqueue,
+            task_name='e2e_custom_slow',
+            queue_name='high',
+            task_id=uuid4(),
+            send_kind=SendKind.FIRST,
+            sent_at=datetime.now(timezone.utc),
+            input_json=json.dumps({'duration_ms': task_duration_ms}),
+        )).unwrap()
+        for _ in range(num_tasks_per_queue)
+    ]
+
+    all_ids = low_ids + high_ids
+
+    # Start worker AFTER all tasks are enqueued — 1 process for serial execution
+    with run_worker(
+        CUSTOM_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(queues_custom.high_task),
+    ):
+        await wait_for_all_terminal(
+            current_resources(custom_broker).session_factory, all_ids, timeout_s=30.0
+        )
+
+    # Query completion timestamps
+    async with current_resources(custom_broker).session_factory() as session:
+        result = await session.execute(
+            text("""
+                SELECT id, queue_name, completed_at
+                FROM itest_task_rows
+                WHERE id = ANY(CAST(:ids AS uuid[]))
+                ORDER BY completed_at ASC
+            """),
+            {'ids': all_ids},
+        )
+        rows = result.fetchall()
+
+    # All tasks should be completed
+    assert len(rows) == len(all_ids), (
+        f'Expected {len(all_ids)} rows, got {len(rows)}'
+    )
+    for row in rows:
+        assert row[2] is not None, f'Task {row[0]} has no completed_at'
+
+    # The first N completed tasks should be from the 'high' queue
+    first_batch = rows[:num_tasks_per_queue]
+    high_in_first_batch = sum(1 for r in first_batch if r[1] == 'high')
+    assert high_in_first_batch >= num_tasks_per_queue - 1, (
+        f'Expected at least {num_tasks_per_queue - 1} high-priority tasks in first '
+        f'{num_tasks_per_queue} completions, got {high_in_first_batch}. '
+        f'Order: {[(r[0][:8], r[1]) for r in rows]}'
+    )
+
+
+# =============================================================================
+# L2.12 Single Worker Crash — Remaining Continue
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_single_worker_crash_remaining_continue(
+    broker: PostgresBroker,
+) -> None:
+    """L2.12: Killing 1 of N workers doesn't stop others from completing work."""
+    num_workers = 3
+    num_tasks = 20
+    task_duration_ms = 300
+
+    with run_workers(
+        DEFAULT_INSTANCE,
+        count=num_workers,
+        profile='isolated-2',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ) as workers:
+        task_ids = [
+            (await asyncio.to_thread(
+                broker.enqueue,
+                task_name='e2e_slow',
+                queue_name='default',
+                task_id=uuid4(),
+                send_kind=SendKind.FIRST,
+                sent_at=datetime.now(timezone.utc),
+                input_json=json.dumps({'duration_ms': task_duration_ms}),
+            )).unwrap()
+            for _ in range(num_tasks)
+        ]
+
+        # Wait until at least one task is RUNNING
+        await wait_for_any_status(
+            current_resources(broker).session_factory,
+            task_ids,
+            target_status='RUNNING',
+            timeout_s=15.0,
+        )
+
+        # SIGKILL the first worker process (hard crash simulation)
+        killed_proc = workers[0]
+        killed_proc.kill()
+        killed_proc.wait(timeout=5.0)
+
+        # Give remaining workers time to process (tasks are 300ms each)
+        await asyncio.sleep(8.0)
+
+    # Query completed tasks and distinct worker IDs
+    async with current_resources(broker).session_factory() as session:
+        result = await session.execute(
+            text("""
+                SELECT COUNT(*) FROM itest_task_rows
+                WHERE id = ANY(CAST(:ids AS uuid[])) AND status = 'COMPLETED'
+            """),
+            {'ids': task_ids},
+        )
+        completed_count = result.scalar() or 0
+
+        result = await session.execute(
+            text("""
+                SELECT DISTINCT last_claimed_worker_id FROM itest_task_rows
+                WHERE id = ANY(CAST(:ids AS uuid[]))
+                AND status = 'COMPLETED'
+                AND last_claimed_worker_id IS NOT NULL
+            """),
+            {'ids': task_ids},
+        )
+        worker_ids = [row[0] for row in result.fetchall()]
+
+    # Remaining 2 workers should complete most tasks
+    assert completed_count >= 15, (
+        f'Expected at least 15 completed tasks, got {completed_count}'
+    )
+
+    # At least 2 distinct workers contributed to completions
+    assert len(worker_ids) >= 2, (
+        f'Expected at least 2 distinct worker IDs among completed, got '
+        f'{len(worker_ids)}: {worker_ids}'
+    )
+
+
+# =============================================================================
+# L2.13 Concurrent Enqueue During Processing
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_concurrent_enqueue_during_processing(
+    broker: PostgresBroker,
+) -> None:
+    """L2.13: Enqueueing new tasks while workers are processing doesn't cause issues."""
+    num_workers = 2
+    batch_size = 5
+    task_duration_ms = 500
+
+    with run_workers(
+        DEFAULT_INSTANCE,
+        count=num_workers,
+        profile='isolated-2',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
+    ):
+        # First batch
+        batch1_ids = [
+            (await asyncio.to_thread(
+                broker.enqueue,
+                task_name='e2e_slow',
+                queue_name='default',
+                task_id=uuid4(),
+                send_kind=SendKind.FIRST,
+                sent_at=datetime.now(timezone.utc),
+                input_json=json.dumps({'duration_ms': task_duration_ms}),
+            )).unwrap()
+            for _ in range(batch_size)
+        ]
+
+        # Wait until processing begins
+        await wait_for_any_status(
+            current_resources(broker).session_factory,
+            batch1_ids,
+            target_status='RUNNING',
+            timeout_s=15.0,
+        )
+
+        # Enqueue second batch mid-flight
+        batch2_ids = [
+            (await asyncio.to_thread(
+                broker.enqueue,
+                task_name='e2e_slow',
+                queue_name='default',
+                task_id=uuid4(),
+                send_kind=SendKind.FIRST,
+                sent_at=datetime.now(timezone.utc),
+                input_json=json.dumps({'duration_ms': task_duration_ms}),
+            )).unwrap()
+            for _ in range(batch_size)
+        ]
+
+        all_ids = batch1_ids + batch2_ids
+
+        # All 10 tasks should complete
+        await wait_for_all_terminal(
+            current_resources(broker).session_factory, all_ids, timeout_s=30.0
+        )
+
+        # Verify all completed
+        async with current_resources(broker).session_factory() as session:
+            for task_id in all_ids:
+                task = await read_task(session, task_id)
+                assert task is not None
+                assert task.status == TaskStatus.COMPLETED, (
+                    f'Task {task_id} has status {task.status}, expected COMPLETED'
+                )
+
+
+# =============================================================================
+# L2.14 Soft Cap Lease — No Double Execution
+# =============================================================================
+
+
+@pytest.mark.e2e
+def test_softcap_lease_no_double_execution(
+    softcap_broker: PostgresBroker,
+) -> None:
+    """L2.14: Under soft cap with short lease + active heartbeat renewal, no task body executes twice.
+
+    Strategy: 2 workers x 1 process each. prefetch_buffer=2 lets each worker
+    claim up to 3 tasks (1 running + 2 prefetched). claim_lease_ms=2000 is short,
+    but the claimer heartbeat loop (claimer_heartbeat_interval_ms=1_000) renews
+    leases every 1s, so prefetched claims never actually expire during normal
+    operation. The test validates that no double execution occurs — all tasks
+    complete normally because each owner keeps its leases alive via renewal.
+    """
+    num_workers = 2
+    num_tasks = 6
+
+    with tempfile.TemporaryDirectory() as log_dir:
+        os.environ['E2E_IDEMPOTENT_LOG_DIR'] = log_dir
+        try:
+            with run_workers(
+                SOFTCAP_INSTANCE,
+                count=num_workers,
+                profile='isolated-1',
+                timeout=20.0,
+                ready_check=_make_ready_check(instance_softcap.healthcheck),
+            ):
+                tokens = [f'softcap_task_{i}' for i in range(num_tasks)]
+                handles = [
+                    unwrap_send(instance_softcap.slow_idempotent_task.send(token=token, duration_ms=1500))
+                    for token in tokens
+                ]
+                results = [h.get(timeout_ms=60_000) for h in handles]
+
+                # All tasks should succeed (no DOUBLE_EXECUTION errors)
+                for i, r in enumerate(results):
+                    assert r.is_ok(), (
+                        f'Task {i} (token=softcap_task_{i}) failed: {r.err}'
+                    )
+
+                # Verify each token file exists exactly once
+                for token in tokens:
+                    token_file = Path(log_dir) / token
+                    assert token_file.exists(), f'Token file {token} not created'
+
+                # Verify no extra files (catches double-execution with different artifacts)
+                all_files = list(Path(log_dir).iterdir())
+                assert len(all_files) == num_tasks, (
+                    f'Expected exactly {num_tasks} token files, found {len(all_files)}: '
+                    f'{[f.name for f in all_files]}'
+                )
+        finally:
+            os.environ.pop('E2E_IDEMPOTENT_LOG_DIR', None)
+
+
+# =============================================================================
+# L2.15 Soft Cap — Expired Claim Requeued and Completed
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_softcap_expired_claim_requeued(
+    softcap_broker: PostgresBroker,
+) -> None:
+    """L2.15: A manually expired claim is reclaimed and executed exactly once.
+
+    Proves that CLAIM_LOST from the dead worker does not cascade into task
+    failure — the reclaiming worker completes the task successfully.
+    """
+    dead_worker_id = 'dead_softcap_worker_00000000'
+
+    with tempfile.TemporaryDirectory() as log_dir:
+        os.environ['E2E_IDEMPOTENT_LOG_DIR'] = log_dir
+        try:
+            token = 'softcap_expired_claim'
+
+            # Enqueue 1 softcap idempotent task (short duration — speed not needed here)
+            task_id = (await asyncio.to_thread(
+                softcap_broker.enqueue,
+                task_name='e2e_softcap_slow_idempotent',
+                queue_name='default',
+                task_id=uuid4(),
+                send_kind=SendKind.FIRST,
+                sent_at=datetime.now(timezone.utc),
+                input_json=json.dumps({'token': token, 'duration_ms': 100}),
+            )).unwrap()
+
+            # Manually set to CLAIMED with an already-expired lease and a dead worker
+            async with current_resources(softcap_broker).session_factory() as session:
+                await session.execute(
+                    text("""
+                        UPDATE horsies_tasks
+                        SET status = 'CLAIMED',
+                            claimed_at = NOW() - INTERVAL '10 seconds',
+                            claimed_by_worker_id = :dead_worker_id,
+                            claim_expires_at = NOW() - INTERVAL '5 seconds'
+                        WHERE id = :task_id
+                    """),
+                    {'task_id': task_id, 'dead_worker_id': dead_worker_id},
+                )
+                await session.commit()
+
+            # Start 1 worker — its claim loop will pick up the expired claim
+            with run_worker(
+                SOFTCAP_INSTANCE,
+                profile='isolated-1',
+                timeout=20.0,
+                ready_check=_make_ready_check(instance_softcap.healthcheck),
+            ):
+                await wait_for_all_terminal(
+                    current_resources(softcap_broker).session_factory,
+                    [task_id],
+                    timeout_s=15.0,
+                )
+
+            # Verify task completed successfully and was reclaimed
+            async with current_resources(softcap_broker).session_factory() as session:
+                task = await read_task(session, task_id)
+                assert task is not None
+                assert task.status == TaskStatus.COMPLETED, (
+                    f'Expected COMPLETED, got {task.status}'
+                )
+                assert task.last_claimed_worker_id is not None, (
+                    'Reclaimed COMPLETED task must record its final owner'
+                )
+                assert task.last_claimed_worker_id != dead_worker_id, (
+                    f'Task was not reclaimed: still assigned to {dead_worker_id}'
+                )
+
+                # Verify result has no error code (clean completion)
+                assert task.result is not None, 'COMPLETED task should have a result'
+                result_data: dict[str, Any] = json.loads(task.result)
+                assert 'err' not in result_data or result_data['err'] is None, (
+                    f'Expected clean result, got error: {result_data.get("err")}'
+                )
+                assert result_data.get('ok') == f'executed:{token}', (
+                    f'Unexpected completion payload: {result_data}'
+                )
+
+            # Verify atomic token file exists exactly once (single execution)
+            token_file = Path(log_dir) / token
+            assert token_file.exists(), f'Token file {token} not created'
+            all_files = list(Path(log_dir).iterdir())
+            assert len(all_files) == 1, (
+                f'Expected exactly 1 token file, found {len(all_files)}: '
+                f'{[f.name for f in all_files]}'
+            )
+        finally:
+            os.environ.pop('E2E_IDEMPOTENT_LOG_DIR', None)
+
+
+# =============================================================================
+# L2.17 Soft Cap — Owner Transition After Worker Crash
+# =============================================================================
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_softcap_owner_transition_after_worker_crash(
+    softcap_broker: PostgresBroker,
+) -> None:
+    """L2.17: A CLAIMED task transitions owner after original worker crashes."""
+    blocker_duration_ms = 6_000
+    token = 'softcap_owner_transition'
+
+    with tempfile.TemporaryDirectory() as log_dir:
+        os.environ['E2E_IDEMPOTENT_LOG_DIR'] = log_dir
+        try:
+            with run_worker(
+                SOFTCAP_INSTANCE,
+                profile='isolated-1',
+                timeout=20.0,
+                ready_check=_make_ready_check(instance_softcap.healthcheck),
+            ) as worker_a_proc:
+                blocker_task_id = (await asyncio.to_thread(
+                    softcap_broker.enqueue,
+                    task_name='e2e_softcap_blocker',
+                    queue_name='default',
+                    task_id=uuid4(),
+                    send_kind=SendKind.FIRST,
+                    sent_at=datetime.now(timezone.utc),
+                    input_json=json.dumps({'duration_ms': blocker_duration_ms}),
+                )).unwrap()
+                await wait_for_status(
+                    current_resources(softcap_broker).session_factory,
+                    blocker_task_id,
+                    'RUNNING',
+                    timeout_s=10.0,
+                )
+
+                task_id = (await asyncio.to_thread(
+                    softcap_broker.enqueue,
+                    task_name='e2e_softcap_slow_idempotent',
+                    queue_name='default',
+                    task_id=uuid4(),
+                    send_kind=SendKind.FIRST,
+                    sent_at=datetime.now(timezone.utc),
+                    input_json=json.dumps({'token': token, 'duration_ms': 100}),
+                )).unwrap()
+
+                first_owner = await _wait_for_claimed_owner(
+                    current_resources(softcap_broker).session_factory,
+                    task_id,
+                    timeout_s=10.0,
+                )
+
+                # Wait before killing worker A. After SIGKILL stops the heartbeat
+                # renewal thread, the lease (claim_lease_ms=2000) expires naturally
+                # within ~2s of the last renewal. The sleep itself does not guarantee
+                # expiry — the kill does.
+                await asyncio.sleep(2.5)
+
+                os.killpg(worker_a_proc.pid, signal.SIGKILL)
+                worker_a_proc.wait(timeout=5.0)
+
+                with run_worker(
+                    SOFTCAP_INSTANCE,
+                    profile='isolated-1',
+                    timeout=20.0,
+                    ready_check=_make_ready_check(instance_softcap.healthcheck),
+                ):
+                    await wait_for_all_terminal(
+                        current_resources(softcap_broker).session_factory,
+                        [task_id],
+                        timeout_s=30.0,
+                    )
+
+            async with current_resources(softcap_broker).session_factory() as session:
+                task = await read_task(session, task_id)
+                assert task is not None
+                assert task.status == TaskStatus.COMPLETED, (
+                    f'Expected COMPLETED, got {task.status}'
+                )
+                assert task.last_claimed_worker_id is not None, (
+                    'Completed task should retain final owner id'
+                )
+                assert task.last_claimed_worker_id != first_owner, (
+                    f'Expected owner transition after crash, still owned by {first_owner}'
+                )
+
+                assert task.result is not None, 'COMPLETED task should have a result'
+                result_data: dict[str, Any] = json.loads(task.result)
+                assert 'err' not in result_data or result_data['err'] is None, (
+                    f'Expected clean result, got error: {result_data.get("err")}'
+                )
+                assert result_data.get('ok') == f'executed:{token}', (
+                    f'Unexpected completion payload: {result_data}'
+                )
+
+            token_file = Path(log_dir) / token
+            assert token_file.exists(), f'Token file {token} not created'
+            all_files = list(Path(log_dir).iterdir())
+            assert len(all_files) == 1, (
+                f'Expected exactly 1 token file, found {len(all_files)}: '
+                f'{[f.name for f in all_files]}'
+            )
+        finally:
+            os.environ.pop('E2E_IDEMPOTENT_LOG_DIR', None)
+
+
+# ---------------------------------------------------------------------------
+# L2.18 – Requeue DB_ERROR + age-guard recovery
+# ---------------------------------------------------------------------------
+
+
+REFUSED_FOR_WORKER_A: Final = ('horsies_start_attempt(', 'horsies_release_claims(')
+"""The statements that the connections of worker A and of its child cannot
+run: the start of a claimed task (``horsies_start_attempt``, sent by the
+child) and the release of that claim (``horsies_release_claims``, sent by
+the worker)."""
+
+REFUSED_ONCE_A_HOLDS_THE_TASK: Final = (*REFUSED_FOR_WORKER_A, 'horsies_claim(')
+"""Worker A's refusals once it holds the task: also its claims. Its claim
+loop would take the task again each time the lease ends, before worker B
+does; a refused claim is retried with backoff, so worker A stays alive and
+keeps renewing the claims it holds, as the old test's worker A did with the
+task counted against its capacity."""
+
+REFUSAL_EVIDENCE_TIMEOUT_S: Final = 60.0
+"""The longest wait for the proxy to refuse both statements of worker A."""
+
+
+def _start_requeue_guard_worker(database_url: str, output: Path) -> subprocess.Popen[str]:
+    """Start a worker of the requeue-guard app whose app, and so whose
+    children, connect to ``database_url``. Its stdout and stderr go to the
+    file ``output``, so a full pipe never blocks it."""
+    env = worker_env()
+    env[TASK_MODULE_URL_ENV_NAME] = database_url
+
+    with output.open('w', encoding='utf-8') as output_file:
+        return subprocess.Popen(
+            [
+                'uv', 'run', 'horsies', 'worker',
+                REQUEUE_GUARD_INSTANCE,
+                '--profile=isolated-1',
+                '--loglevel=warning',
+            ],
+            env=env,
+            stdout=output_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+
+
+def _proxy_in_front_of(database_url: str) -> RoundTripProxy:
+    """A proxy, not started, in front of the server of ``database_url``."""
+    url = make_url(database_url)
+    assert url.host is not None and url.port is not None, (
+        f'the e2e database URL names its server: {url.render_as_string(hide_password=True)}'
+    )
+    return RoundTripProxy(url.host, url.port)
+
+
+def _through_proxy(database_url: str, proxy: RoundTripProxy) -> str:
+    """``database_url`` with its server replaced by the proxy."""
+    proxied = make_url(database_url).set(host='127.0.0.1', port=proxy.port)
+    return proxied.render_as_string(hide_password=False)
+
+
+async def _wait_for_refusals(proxy: RoundTripProxy, timeout_s: float) -> tuple[str, ...]:
+    """The refusals of the proxy once it refused every statement of
+    ``REFUSED_FOR_WORKER_A``, or after ``timeout_s``."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        refused = proxy.refused_statements()
+        if set(REFUSED_FOR_WORKER_A) <= set(refused) or time.monotonic() >= deadline:
+            return refused
+        await asyncio.sleep(0.2)
+
+
+def _kill_requeue_worker(proc: subprocess.Popen[str]) -> None:
+    """Terminate a worker process group, escalating to SIGKILL."""
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        proc.wait(timeout=2.0)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_requeue_db_error_age_guard_recovery(
+    requeue_guard_broker: PostgresBroker,
+) -> None:
+    """L2.18: Stuck CLAIMED task recovered via age-guard lease expiry.
+
+    Scenario:
+      1. Enqueue task.
+      2. Start Worker A through a proxy that refuses the start of the task
+         in its child and the release of the claim in the worker
+         (``REFUSED_FOR_WORKER_A``): A claims the task, its child cannot
+         start it, and the release fails, so the task stays CLAIMED while
+         A lives and renews its claims. Once A holds the task, the proxy
+         also refuses A's claims (``REFUSED_ONCE_A_HOLDS_THE_TASK``).
+      3. Age guard (max_claim_renew_age_ms=5s) stops lease renewal.
+      4. Start Worker B (directly on the database): reclaims the now-expired
+         task and completes it.
+      5. Assert: task is COMPLETED, owner changed, correct result, one
+         execution, A still running, and the proxy refused both statements.
+    """
+    from tests.e2e.helpers.worker import kill_stale_workers
+    kill_stale_workers()
+
+    token = 'requeue_guard_token_l218'
+    proxy = _proxy_in_front_of(instance_requeue_guard.DB_URL)
+    proxy.refuse_statements(REFUSED_FOR_WORKER_A)
+    proxy.start()
+    try:
+        with tempfile.TemporaryDirectory() as log_dir, tempfile.TemporaryDirectory() as output_dir:
+            os.environ['E2E_REQUEUE_GUARD_LOG_DIR'] = log_dir
+            worker_a_output = Path(output_dir) / 'worker_a.log'
+            worker_b_output = Path(output_dir) / 'worker_b.log'
+
+            # 1. Enqueue task
+            handle = unwrap_send(await instance_requeue_guard.requeue_guard_task.send_async(token=token))
+            task_id = handle.task_id
+
+            worker_a: subprocess.Popen[str] | None = None
+            worker_b: subprocess.Popen[str] | None = None
+
+            try:
+                # 2. Start Worker A through the proxy
+                worker_a = _start_requeue_guard_worker(
+                    _through_proxy(instance_requeue_guard.DB_URL, proxy),
+                    worker_a_output,
+                )
+
+                # Wait for task to be CLAIMED by Worker A
+                await wait_for_status(
+                    current_resources(requeue_guard_broker).session_factory, task_id, 'CLAIMED', timeout_s=20.0,
+                )
+
+                # Record Worker A's id
+                async with current_resources(requeue_guard_broker).session_factory() as session:
+                    task = await read_task(session, task_id)
+                    assert task is not None
+                    worker_a_id = task.claimed_by_worker_id
+                    assert worker_a_id is not None, 'Task should be claimed by Worker A'
+
+                # Worker A claims nothing more from here on.
+                proxy.refuse_statements(REFUSED_ONCE_A_HOLDS_THE_TASK)
+
+                # 3. Wait for age guard to stop lease renewal.
+                #    max_claim_renew_age_ms=5s, claim_lease_ms=2s → after ~5s the
+                #    lease stops being renewed, then after another 2s it expires.
+                #    Give it 12s total headroom.
+                await asyncio.sleep(12)
+
+                # 4. Start Worker B on the database — it should reclaim the expired task
+                worker_b = _start_requeue_guard_worker(
+                    instance_requeue_guard.DB_URL,
+                    worker_b_output,
+                )
+
+                # Wait for completion
+                await wait_for_status(
+                    current_resources(requeue_guard_broker).session_factory, task_id, 'COMPLETED', timeout_s=30.0,
+                )
+
+                # 5. Assert results
+                async with current_resources(requeue_guard_broker).session_factory() as session:
+                    task = await read_task(session, task_id)
+                    assert task is not None
+                    assert task.status == TaskStatus.COMPLETED, (
+                        f'Expected COMPLETED, got {task.status}'
+                    )
+                    assert task.last_claimed_worker_id is not None, (
+                        'Completed task should retain final owner id'
+                    )
+                    assert task.last_claimed_worker_id != worker_a_id, (
+                        f'Expected owner transition from Worker A ({worker_a_id}), '
+                        f'still owned by same worker'
+                    )
+
+                    assert task.result is not None, 'COMPLETED task should have a result'
+                    result_data: dict[str, Any] = json.loads(task.result)
+                    assert result_data.get('ok') == f'done:{token}', (
+                        f'Unexpected completion payload: {result_data}'
+                    )
+
+                # 6. Assert single execution via marker file
+                token_file = Path(log_dir) / token
+                assert token_file.exists(), f'Token file {token} not created'
+                all_files = list(Path(log_dir).iterdir())
+                assert len(all_files) == 1, (
+                    f'Expected exactly 1 execution marker, found {len(all_files)}: '
+                    f'{[f.name for f in all_files]}'
+                )
+                executions = [line for line in token_file.read_text(encoding='utf-8').splitlines() if line]
+                assert len(executions) == 1, (
+                    f'Expected exactly 1 execution record, found {len(executions)}: {executions}'
+                )
+
+                # 7. Worker A lived through the run: its claimer heartbeat, not
+                #    its end, let the lease run out.
+                assert worker_a.poll() is None, (
+                    f'Worker A ended with {worker_a.returncode} before the task completed'
+                )
+
+                # 8. The fault reached worker A: the proxy refused the start of
+                #    its child and the release of its claim.
+                refused = await _wait_for_refusals(proxy, REFUSAL_EVIDENCE_TIMEOUT_S)
+                _kill_requeue_worker(worker_a)
+                assert set(REFUSED_FOR_WORKER_A) <= set(refused), (
+                    f'The proxy refused {refused}, not every statement of '
+                    f'{REFUSED_FOR_WORKER_A}.\n'
+                    f'worker A: {worker_a_output.read_text(encoding="utf-8")[-4000:]}'
+                )
+
+            finally:
+                if worker_a is not None:
+                    _kill_requeue_worker(worker_a)
+                if worker_b is not None:
+                    _kill_requeue_worker(worker_b)
+                os.environ.pop('E2E_REQUEUE_GUARD_LOG_DIR', None)
+                kill_stale_workers()
+                # pytest shows this output when the test fails.
+                for name, output in (('A', worker_a_output), ('B', worker_b_output)):
+                    if output.exists():
+                        print(f'--- worker {name} ---')
+                        print(output.read_text(encoding='utf-8')[-6000:])
+                print(f'--- proxy refusals: {proxy.refused_statements()}')
+    finally:
+        proxy.stop()

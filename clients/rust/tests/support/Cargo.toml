@@ -1,0 +1,18 @@
+[package]
+name = "horsies-test-support"
+version = "0.1.0-alpha.1"
+edition = "2021"
+description = "Test databases, test processes and database polls of the horsies Rust end-to-end and parity tests"
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# The same pin as the core's statement layer.
+tokio-postgres = { version = "=0.7.18", features = ["with-uuid-1", "with-chrono-0_4"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+url = "2"
+libc = "0.2"
+
+[lints]
+workspace = true

@@ -1,5 +1,6 @@
 ---
 title: Architecture
+section: shared
 summary: System design, components, and data flow.
 related: [task-lifecycle, ../../workers/worker-architecture]
 tags: [concepts, architecture, design]
@@ -45,7 +46,7 @@ Producer                  PostgreSQL                    Worker(s)
 
 Unlike Celery (which typically uses Redis or RabbitMQ), horsies uses PostgreSQL for everything:
 
-- **Task storage**: The `tasks` table holds all task data
+- **Task storage**: The `horsies_tasks` table holds the live tasks, and the history tables hold the tasks that ended
 - **Message passing**: LISTEN/NOTIFY replaces a separate message broker
 - **Coordination**: Advisory locks prevent race conditions
 - **State tracking**: Heartbeats and worker states are database tables
@@ -88,7 +89,7 @@ split:
 Producer/Worker SQL  --> database_url          --> PgBouncer transaction pool
 Worker LISTEN        --> session_database_url  --> direct/session Postgres
 Result wait LISTEN   --> session_database_url  --> direct/session Postgres
-Syce LISTEN          --> session_database_url  --> direct/session Postgres
+Web UI LISTEN        --> session_database_url  --> direct/session Postgres
 Schema setup         --> session_database_url  --> direct/session Postgres
 Partition maintenance --> session_database_url --> direct/session Postgres
 ```

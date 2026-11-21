@@ -14,11 +14,16 @@ import {
   type LifecycleStatus,
 } from '@/lib/status-utils';
 import { cn } from '@/lib/utils';
-import type { Breakdown, GroupBy, GroupRow } from '@/types/tasks';
+import type {
+  Breakdown,
+  BreakdownCounts,
+  BreakdownGroup,
+  GroupBy,
+} from '@/types/tasks';
 
 /** The count field each status occupies on a group row. Keyed by the closed
  * status union, so a new status cannot be added without a column for it. */
-const STATUS_FIELD: Record<LifecycleStatus, keyof GroupRow> = {
+const STATUS_FIELD: Record<LifecycleStatus, keyof BreakdownCounts> = {
   PENDING: 'pending',
   CLAIMED: 'claimed',
   RUNNING: 'running',
@@ -28,7 +33,11 @@ const STATUS_FIELD: Record<LifecycleStatus, keyof GroupRow> = {
   EXPIRED: 'expired',
 };
 
-const STATUS_COLS: { key: keyof GroupRow; label: string; status: string }[] =
+const STATUS_COLS: {
+  key: keyof BreakdownCounts;
+  label: string;
+  status: string;
+}[] =
   TASK_STATUS_ORDER.map(status => ({
     key: STATUS_FIELD[status],
     label: statusLabel(status),
@@ -55,38 +64,69 @@ function CountCell({ value, color }: { value: number; color?: string }) {
   );
 }
 
+/** The text a group row shows. The unclaimed group never reads as a worker id. */
+function groupLabel(group: BreakdownGroup): string {
+  switch (group.kind) {
+    case 'value':
+      return group.value;
+    case 'unclaimed':
+      return 'unclaimed';
+  }
+}
+
+/** The value a click on the group drills into: only a value group names one. */
+function groupDrillValue(group: BreakdownGroup): string | undefined {
+  switch (group.kind) {
+    case 'value':
+      return group.value;
+    case 'unclaimed':
+      return undefined;
+  }
+}
+
+/** A React key that keeps the unclaimed group apart from a value 'unknown'. */
+function groupKey(group: BreakdownGroup): string {
+  switch (group.kind) {
+    case 'value':
+      return `value:${group.value}`;
+    case 'unclaimed':
+      return 'unclaimed';
+  }
+}
+
 function Row({
-  row,
-  onDrill,
+  label,
+  counts,
+  onClick,
   isTotal,
 }: {
-  row: GroupRow;
-  onDrill?: (group: string) => void;
+  label: string;
+  counts: BreakdownCounts;
+  onClick?: () => void;
   isTotal?: boolean;
 }) {
-  const clickable = !isTotal && row.group !== 'unknown' && onDrill !== undefined;
   return (
     <TableRow
       className={cn(
         isTotal && 'border-t-2 font-medium',
-        clickable && 'cursor-pointer'
+        onClick !== undefined && 'cursor-pointer'
       )}
-      onClick={clickable ? () => onDrill(row.group) : undefined}
+      onClick={onClick}
     >
       <TableCell className={cn('font-mono text-xs', isTotal && 'font-semibold')}>
-        {row.group}
+        {label}
       </TableCell>
       <TableCell className="text-right font-semibold tabular-nums">
-        {row.total}
+        {counts.total}
       </TableCell>
       {STATUS_COLS.map(col => (
         <CountCell
           key={col.key}
-          value={row[col.key] as number}
+          value={counts[col.key]}
           color={statusColorVar(col.status)}
         />
       ))}
-      <CountCell value={row.retried} />
+      <CountCell value={counts.retried} />
     </TableRow>
   );
 }
@@ -142,12 +182,26 @@ export function TaskBreakdown({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {breakdown.groups.map(group => (
-            <Row key={group.group} row={group} onDrill={onDrill} />
-          ))}
+          {breakdown.groups.map(row => {
+            const key = groupKey(row.group);
+            const label = groupLabel(row.group);
+            const value = groupDrillValue(row.group);
+            // Only a group with a drill value gets a click handler; the prop
+            // is left out, not set to undefined (exactOptionalPropertyTypes).
+            return value === undefined ? (
+              <Row key={key} label={label} counts={row} />
+            ) : (
+              <Row
+                key={key}
+                label={label}
+                counts={row}
+                onClick={() => onDrill(value)}
+              />
+            );
+          })}
         </TableBody>
         <TableFooter>
-          <Row row={breakdown.total} isTotal />
+          <Row label="TOTAL" counts={breakdown.total} isTotal />
         </TableFooter>
       </Table>
     </div>

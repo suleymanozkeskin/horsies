@@ -1,5 +1,6 @@
 ---
 title: AppConfig
+section: python
 summary: Root configuration for a horsies application.
 related: [broker-config, recovery-config, ../../concepts/queue-modes]
 tags: [configuration, AppConfig]
@@ -13,7 +14,7 @@ from horsies import Horsies, AppConfig, PostgresConfig, QueueMode
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://...")),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
 app = Horsies(config)
 ```
@@ -37,40 +38,89 @@ app = Horsies(config)
 | `exception_mapper` | `ExceptionMapper` | `ExceptionMapper()` | Maps exceptions to `TaskError` codes |
 | `default_unhandled_error_code` | `str` | `"UNHANDLED_EXCEPTION"` | Error code for uncaught exceptions |
 | `resend_on_transient_err` | `bool` | `False` | Auto-retry transient enqueue failures in workflow start |
+| `tracing` | `OtelTracing \| NoTracing` | `NoTracing()` | `OtelTracing()` traces the sends and each attempt that a worker runs with the OpenTelemetry API, and records the producer metrics with its meter. `OtelTracing(parentage=...)` places the span of an attempt: `ChildOfSend()` (the default) or `LinkedToSend()`. `OtelTracing(worker_ended_spans=...)` makes the span of each attempt that the worker ended (a timeout kill, a blocked-loop kill, a lost child) in the handler child: `WorkerEndedSpans.MAKE_SPANS` (the default) or `WorkerEndedSpans.NO_SPANS` ([Event Handlers](/horsies/workers/event-handlers/#spans-of-the-attempts-that-the-worker-ended)). It needs the extra `horsies[otel]` (`pip install 'horsies[otel]'`); without it the config is refused with `HRS-220`. With `NoTracing()` horsies does not import `opentelemetry`. See [Tracing Setup](/horsies/observability/tracing-setup/) |
+| `log_format` | `TextLogs \| JsonLogs` | `TextLogs()` | The format of the horsies log records in `horsies worker`, `scheduler`, `check` and each worker child. `JsonLogs()`: one JSON object per line with the keys `ts`, `level`, `logger`, `message`, `process`, `task_id`, `task_name`, `attempt`, `trace_id`, `span_id`, `exc`. See [Log Setup](/horsies/observability/log-setup/) |
 | `worker_profiles` | `dict[str, WorkerProfile]` | `{}` | Named worker settings. `horsies worker <app> --profile <name>` runs the profile of that name; see [Worker Profiles](../../workers/worker-profiles) |
 
 Every config model refuses unknown keys. This includes the nested models (`PostgresConfig`, `RecoveryConfig`, `PayloadPolicy`, `CustomQueueConfig`, `RetentionConfig`, `WorkerResilienceConfig`, `ScheduleConfig`) and the schedule patterns. A misspelled field raises `ValidationError` with the type `extra_forbidden`.
 
 ## Queue Mode Configuration
 
+The rules of each mode are on [Queue Modes](/horsies/concepts/queue-modes/).
+
 ### DEFAULT Mode
 
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
+`custom_queues` must be `None` or omitted. A task names no queue: it goes to the `default` queue.
+
 ```python
+from pydantic import SecretStr
+from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
+from horsies import QueueMode
+
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(...),
-    # custom_queues must be None or omitted
+    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
+app = Horsies(config)
+
+@app.task("cleanup_sessions")  # Goes to "default" queue
+def cleanup_sessions() -> TaskResult[str, TaskError]:
+    return TaskResult(ok="done")
 ```
 
 ### CUSTOM Mode
 
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
+Each task names its queue with `queue_name`.
+
 ```python
-from horsies import CustomQueueConfig
+from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError, QueueMode, CustomQueueConfig
 
 config = AppConfig(
     queue_mode=QueueMode.CUSTOM,
     custom_queues=[
-        CustomQueueConfig(name="high", priority=1, max_concurrency=10),
-        CustomQueueConfig(name="low", priority=100, max_concurrency=3),
+        CustomQueueConfig(name="critical", priority=1, max_concurrency=10),
+        CustomQueueConfig(name="normal", priority=50, max_concurrency=5),
+        CustomQueueConfig(name="low", priority=100, max_concurrency=2),
     ],
-    broker=PostgresConfig(...),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
+app = Horsies(config)
+
+@app.task("urgent_alert", queue_name="critical")
+def urgent_alert() -> TaskResult[str, TaskError]:
+    return TaskResult(ok="alerted")
+
+@app.task("process_order", queue_name="normal")
+def process_order() -> TaskResult[str, TaskError]:
+    return TaskResult(ok="processed")
+
+@app.task("ship_item", queue_name="low")
+def ship_to_address() -> TaskResult[str, TaskError]:
+    return TaskResult(ok="shipped")
 ```
 
-See [Queue Modes](../../concepts/queue-modes) for details.
+### Unknown Queue Names
+
+A `queue_name` that the config does not list raises `ConfigurationError` with code `HRS-103` when the decorator runs:
+
+```python
+# This raises ConfigurationError (HRS-103) at definition time:
+@app.task("bad_task", queue_name="nonexistent")
+def bad_task() -> TaskResult[str, TaskError]:
+    ...
+```
+
+```text
+error[HRS-103]: invalid queue_name 'nonexistent'
+  --> /app/tasks.py:12
+   |
+12 | @app.task("bad_task", queue_name="nonexistent")
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: valid queues: ['critical', 'normal', 'low']
+
+   = help:
+        use one of the configured queue names
+```
 
 ## Cluster-Wide Concurrency
 
@@ -121,8 +171,8 @@ serialization pass.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `payload.warn_bytes` | `int \| None` | 1 MiB | Warn when a serialized payload exceeds this size; rate-limited to once per task name and payload kind per process. `None` disables |
-| `payload.reject_bytes` | `int \| None` | `None` | Reject an enqueue whose serialized kwargs exceed this size before anything is written. A schedule over this size fails scheduler start and `horsies check`. Results are never rejected — completed work is never destroyed over size. `None` (default) disables |
+| `payload.warn_bytes` | `int \| None` | 1 MiB | Warn when a serialized payload exceeds this size in bytes of its UTF-8 text (a non-ASCII character counts 2 to 4 bytes); rate-limited to once per task name and payload kind per process. `None` disables |
+| `payload.reject_bytes` | `int \| None` | `None` | Reject an enqueue whose serialized kwargs exceed this size in bytes of their UTF-8 text before anything is written. A schedule over this size fails scheduler start and `horsies check`. Results are never rejected — completed work is never destroyed over size. `None` (default) disables |
 
 Coverage by boundary:
 
@@ -154,41 +204,130 @@ nothing.
 
 ## Recovery Configuration
 
-Override crash recovery defaults:
+Override crash recovery defaults. The fields, their defaults and their ranges are on [Recovery Config](/horsies/configuration/recovery-config/#fields). The heartbeat timing rules are on [Timing Guidelines](/horsies/workers/heartbeats-recovery/#timing-guidelines).
 
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 from horsies import RecoveryConfig
 
 config = AppConfig(
-    broker=PostgresConfig(...),
+    broker=broker,
     recovery=RecoveryConfig(
+        # Claimer detection
         auto_requeue_stale_claimed=True,
-        claimed_stale_threshold_ms=120_000,  # 2 minutes
+        claimed_stale_threshold_ms=120_000,     # 2 minutes
+        claimer_heartbeat_interval_ms=30_000,   # 30 seconds
+
+        # Runner detection
         auto_fail_stale_running=True,
-        running_stale_threshold_ms=300_000,  # 5 minutes
+        running_stale_threshold_ms=300_000,     # 5 minutes
         finalizing_stale_threshold_ms=300_000,  # 5 minutes
+        runner_heartbeat_interval_ms=30_000,    # 30 seconds
+
+        # Check frequency
+        check_interval_ms=30_000,               # 30 seconds
     ),
 )
 ```
 
-See [Recovery Config](/horsies/configuration/recovery-config/) for all options.
+### Threshold Rules
+
+`RecoveryConfig` raises `ConfigurationError` with code `HRS-204` when a threshold breaks a [timing rule](/horsies/workers/heartbeats-recovery/#rule-thresholds-hold-the-heartbeats). The error names the fields and the smallest valid value.
+
+<!-- check: skip elided -- shows a wrong form next to the right one -->
+```python
+# Valid
+RecoveryConfig(
+    runner_heartbeat_interval_ms=30_000,  # 30s
+    running_stale_threshold_ms=64_000,    # 64s = 2 x (30s + 2s)
+    finalizing_stale_threshold_ms=60_000, # 60s (2x)
+)
+
+# Invalid - raises ConfigurationError (HRS-204)
+RecoveryConfig(
+    runner_heartbeat_interval_ms=30_000,  # 30s
+    running_stale_threshold_ms=60_000,    # half is 30s: no time for a heartbeat to land
+)
+```
+
+### Quick Tasks
+
+```python
+quick_recovery = RecoveryConfig(
+    runner_heartbeat_interval_ms=10_000,   # 10 seconds
+    running_stale_threshold_ms=40_000,     # 40 seconds
+)
+```
+
+### Disable Recovery
+
+```python
+no_recovery = RecoveryConfig(
+    auto_requeue_stale_claimed=False,
+    auto_fail_stale_running=False,
+)
+```
+
+Stale tasks then stay stuck until they are resolved by hand. See [Manual Recovery](/horsies/workers/heartbeats-recovery/#manual-recovery).
+
+## Retention Configuration
+
+How long records live, the retention classes and the partition settings are on [Retention Config](/horsies/configuration/retention-config/).
+
+```python
+from datetime import timedelta
+from horsies import AppConfig, RetentionConfig
+
+config = AppConfig(
+    broker=broker,
+    retention=RetentionConfig(
+        queue_retention={
+            'emails': timedelta(days=7),
+            'audit': None,
+        },
+        terminal_record_retention_hours=24 * 90,
+        retention_periods=(timedelta(days=365),),
+    ),
+)
+```
+
+### Retention per Queue
+
+`queue_retention` maps a queue name to a `timedelta` of whole days, or to `None` to keep the records of the queue forever.
+
+```python
+retention = RetentionConfig(
+    queue_retention={
+        'emails': timedelta(days=7),     # noisy, short-lived
+        'reports': timedelta(days=90),
+        'audit': None,                   # keep forever
+    },
+)
+```
+
+### Periods a Send Chooses
+
+List each finite period that a send asks for and no queue maps. The send is in [Send With a Listed Retention Period](/horsies/tasks/sending-tasks/#send-with-a-listed-retention-period).
+
+```python
+RetentionConfig(
+    retention_periods=(timedelta(days=365), timedelta(days=2)),
+)
+```
 
 ## Resilience Configuration
 
-Configure worker retry/backoff and NOTIFY fallback polling:
+Configure worker retry/backoff and NOTIFY fallback polling. The fields and their ranges are on [Resilience](/horsies/workers/worker-architecture/#resilience).
 
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 from horsies import WorkerResilienceConfig
 
 config = AppConfig(
-    broker=PostgresConfig(...),
+    broker=broker,
     resilience=WorkerResilienceConfig(
-        db_retry_initial_ms=500,
-        db_retry_max_ms=30_000,
-        db_retry_max_attempts=0,  # 0 = infinite
-        notify_poll_interval_ms=5_000,
+        db_retry_initial_ms=500,      # initial backoff on DB errors
+        db_retry_max_ms=30_000,       # backoff cap
+        db_retry_max_attempts=0,      # 0 = retry forever
+        notify_poll_interval_ms=5_000, # poll fallback when NOTIFY is silent
     ),
 )
 ```
@@ -227,13 +366,15 @@ See [Scheduler Overview](../../scheduling/scheduler-overview) for details.
 - CUSTOM mode requires non-empty `custom_queues`
 - DEFAULT mode must not have `custom_queues`
 - Queue names must be unique
-- Each queue name must be non-empty, must have no leading or trailing whitespace, and must be at most 100 characters (`ConfigurationError` `HRS-200`)
+- Each queue name must be non-empty, must have no leading or trailing whitespace, and must be at most 52 bytes of UTF-8 text (`ConfigurationError` `HRS-200`). A queue's NOTIFY channel is `task_queue_<name>`, and PostgreSQL refuses a channel name over 63 bytes
 - `cluster_wide_cap` must be positive if set
 - `prefetch_buffer` must be non-negative
 - `claim_lease_ms` is required when `prefetch_buffer > 0`
 - `claim_lease_ms` is optional when `prefetch_buffer = 0` (overrides the default 60s lease)
 - `cluster_wide_cap` cannot be combined with `prefetch_buffer > 0`
-- Each worker profile has a valid name, at least one child, claim limits at or below its capacity (seats + `prefetch_buffer`; one seat per isolated child), and, when it sets `ParentPool(max_size=PoolSize(connections=N))`, an N of at least 5 (`PARENT_POOL_MIN_CONNECTIONS`). Each error names the profile and the field path (`ConfigurationError` `HRS-218`). Every profile is validated, not only the one a worker starts with
+- Each claim value is within the bound of the worker: `prefetch_buffer`, `cluster_wide_cap` and each queue's `max_concurrency` are at most 2,147,483,647, and `claim_lease_ms` and `max_claim_renew_age_ms` are at most 4,294,967,295. A larger value is refused with the code of its field: `HRS-202` for `prefetch_buffer`, `claim_lease_ms` and `max_claim_renew_age_ms`, `HRS-201` for `cluster_wide_cap`, `HRS-200` for `custom_queues[i].max_concurrency`
+- `payload.warn_bytes` and `payload.reject_bytes` are at most 18,446,744,073,709,551,615 (`ValidationError`)
+- Each worker profile has a valid name, at least one child, claim limits at or below its capacity (seats + `prefetch_buffer`; one seat per isolated child), and, when it sets `ParentPool(max_size=PoolSize(connections=N))`, an N of at least 3 (`PARENT_POOL_MIN_CONNECTIONS`). Each error names the profile and the field path (`ConfigurationError` `HRS-218`). Every profile is validated, not only the one a worker starts with
 
 Multiple validation errors within the same phase are collected and reported together (compiler-style), rather than stopping at the first error.
 
@@ -307,6 +448,63 @@ For deterministic, high-confidence workflow validity in CI:
 4. Run `horsies check` in CI and fail the pipeline on any errors.
 5. Treat HRS-030 as additional lint signal, not the primary guarantee mechanism.
 
+## Example Configurations
+
+The limits that these configs set are on [Concurrency](/horsies/workers/concurrency/).
+
+### Single Worker, Simple
+
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
+```python
+config = AppConfig(
+    queue_mode=QueueMode.DEFAULT,
+    broker=PostgresConfig(...),
+)
+```
+
+```bash
+horsies worker myapp.instance:app --profile default
+```
+
+The `default` profile holds `isolated=IsolatedChildren(count=8)`.
+
+### Multi-Worker with Global Cap
+
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
+```python
+config = AppConfig(
+    queue_mode=QueueMode.DEFAULT,
+    cluster_wide_cap=20,
+    broker=PostgresConfig(...),
+)
+```
+
+```bash
+# Machine 1
+horsies worker myapp.instance:app --profile default
+
+# Machine 2
+horsies worker myapp.instance:app --profile default
+
+# Total: 16 children (8 each), but max 20 RUNNING tasks cluster-wide
+```
+
+### Priority Queues with Rate Limiting
+
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
+```python
+config = AppConfig(
+    queue_mode=QueueMode.CUSTOM,
+    custom_queues=[
+        CustomQueueConfig(name="stripe", priority=1, max_concurrency=3),
+        CustomQueueConfig(name="email", priority=50, max_concurrency=10),
+        CustomQueueConfig(name="reports", priority=100, max_concurrency=2),
+    ],
+    cluster_wide_cap=15,
+    broker=PostgresConfig(...),
+)
+```
+
 ## Logging Configuration
 
 Log the configuration (with masked password):
@@ -324,7 +522,7 @@ Output:
 AppConfig:
   queue_mode: DEFAULT
   broker:
-    database_url: postgresql+psycopg://user:***@localhost/db
+    database_url: postgresql://user:***@localhost/db
     pool_size: 5
     max_overflow: 10
   recovery:

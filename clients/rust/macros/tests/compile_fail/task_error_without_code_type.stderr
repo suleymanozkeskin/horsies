@@ -1,0 +1,13 @@
+error: name the code type of the task's own errors: TaskError<YourCode>, or TaskError<std::convert::Infallible> for a task that has none
+ --> tests/compile_fail/task_error_without_code_type.rs:5:35
+  |
+5 | async fn bad(_: ()) -> Result<(), TaskError> {
+  |                                   ^^^^^^^^^
+
+warning: unused import: `TaskError`
+ --> tests/compile_fail/task_error_without_code_type.rs:2:21
+  |
+2 | use horsies::{task, TaskError};
+  |                     ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

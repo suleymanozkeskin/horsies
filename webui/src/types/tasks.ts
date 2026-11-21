@@ -98,9 +98,15 @@ export type TaskSortBy =
 
 export type SortDir = 'asc' | 'desc';
 
-/** One group's per-status counts. `group` is 'TOTAL' for the rollup row. */
-export interface GroupRow {
-  group: string;
+/** What one breakdown group holds: one stored value (a worker id, task name or
+ * queue name), or, for the worker grouping only, the tasks no worker claimed.
+ * A worker whose id is 'unknown' is a value group of its own. */
+export type BreakdownGroup =
+  | { kind: 'value'; value: string }
+  | { kind: 'unclaimed' };
+
+/** Per-status counts, the task total, and the tasks retried at least once. */
+export interface BreakdownCounts {
   total: number;
   pending: number;
   claimed: number;
@@ -112,12 +118,17 @@ export interface GroupRow {
   retried: number;
 }
 
-/** Per-group status pivot plus the rollup TOTAL row. `groups` is capped;
+/** One group's per-status counts. */
+export interface GroupRow extends BreakdownCounts {
+  group: BreakdownGroup;
+}
+
+/** Per-group status pivot plus the counts of every group. `groups` is capped;
  * `group_count` is the true number of distinct groups (for truncation UX). */
 export interface Breakdown {
   group_by: GroupBy;
   groups: GroupRow[];
-  total: GroupRow;
+  total: BreakdownCounts;
   group_count: number;
 }
 

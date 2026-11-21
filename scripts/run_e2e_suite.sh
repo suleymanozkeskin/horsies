@@ -17,13 +17,14 @@
 
 set -u
 
-E2E_DIR="tests/e2e"
+E2E_DIR="clients/python/tests/e2e"
 
 # Excluded from the normal-topology run. Each entry documents the job that
 # owns it instead. Existence is asserted so a renamed or deleted file fails
 # here loudly instead of silently vanishing from the job that runs it.
 EXCLUDED=(
-    "tests/e2e/test_pgbouncer_smoke.py"  # PgBouncer topology; dedicated job
+    "clients/python/tests/e2e/test_pgbouncer_smoke.py"  # PgBouncer topology; dedicated job
+    "clients/python/tests/e2e/test_observability_stack.py"  # Collector containers; observability-stack job
 )
 
 for excluded in "${EXCLUDED[@]}"; do
@@ -67,7 +68,7 @@ for file in "${discovered[@]}"; do
         continue
     fi
     echo "::group::${file}"
-    uv run pytest "${file}" "$@"
+    uv run --project clients/python pytest "${file}" "$@"
     status=$?
     cleanup_workers
     echo "::endgroup::"

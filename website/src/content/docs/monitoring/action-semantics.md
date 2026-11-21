@@ -1,13 +1,14 @@
 ---
 title: Action Semantics
-summary: Exactly what task cancel, the `rerun_task` function, and workflow pause, resume, and cancel do to the rows and the processes behind them.
-related: [web-ui-overview, web-ui-deployment, ../concepts/task-lifecycle, ../concepts/workflows/workflow-api]
+section: shared
+summary: Exactly what task cancel, task rerun, and workflow pause, resume, and cancel do to the rows and the processes behind them.
+related: [web-ui-overview, web-ui-deployment, ../concepts/task-lifecycle, ../concepts/workflows/workflow-api, ../operations/rerun-in-your-transaction]
 tags: [monitoring, actions, cancel, rerun, pause, resume, workflow]
 ---
 
 Four actions are available from the web UI: task cancel, and workflow pause,
-resume and cancel. Each acts on database rows. Task rerun is the Python function
-`rerun_task`. The web UI has no rerun action. Two of them leave a process running afterwards, and this page
+resume and cancel. Each acts on database rows. Task rerun is a client call,
+not a web UI action. Two of them leave a process running afterwards, and this page
 states which and why.
 
 Every action is a compare-and-swap against the row's current status. Two
@@ -74,53 +75,36 @@ archive, so there is no row to reset. Re-execution is a **new request**:
 rerun mints a new task with a new id and records its lineage back to the
 source (`rerun_of_task_id`, and `rerun_root_task_id` for a chain).
 
-| Source task | Result |
+| Source task | Outcome |
 |---|---|
-| `FAILED`, `CANCELLED`, `EXPIRED` with a retained rerun input | New task enqueued (`RerunEnqueued` carries `new_task_id`) |
-| `COMPLETED` | Refused, `RerunNotEligible(COMPLETED_SOURCE)` — a succeeded request is not re-executed by replay |
-| Still live (`PENDING`, `CLAIMED`, `RUNNING`) | Refused, `RerunSourceLive` — its own lifecycle owns retry |
-| Input not retained or undecodable | Refused, `RerunInputUnavailable` or `RerunInputCorrupt` |
-| History row does not decode (for example a stored status that is not a `TaskStatus` member) | Refused, `RerunSourceCorrupt` with the `HistoryContractError` as `exception`; nothing is written |
-| Not found in live or history | Refused, `RerunSourceAbsent`; its `reason` is a `TaskAbsenceReason`; it says whether retention can explain the absence |
-| Row is a workflow node | Refused, `RerunNotEligible(WORKFLOW_TASK)` |
-| Caller key already used | `RerunKeyReplay` (same request) or `RerunKeyConflict` (different request under that key) |
+| `FAILED`, `CANCELLED`, `EXPIRED` with a retained rerun input | Enqueued: a new task, with its id |
+| `COMPLETED` | Refused, not eligible (completed source): a succeeded request is not re-executed by replay |
+| Still live (`PENDING`, `CLAIMED`, `RUNNING`) | Refused, source live: its own lifecycle owns retry |
+| Input not retained, or does not decode | Refused, input unavailable (with the stored reason) or input corrupt |
+| History row does not decode (for example a stored status that is not a task status) | Refused, source corrupt; nothing is written |
+| Not found in live or history | Refused, source absent, with a `TaskAbsenceReason` that says whether retention can explain the absence |
+| Row is a workflow node | Refused, not eligible (workflow task) |
+| Caller key already used | Key replay (same request: the id of the task it enqueued) or key conflict (a different request under that key) |
 
 Whether a task can be rerun is decided **at enqueue**, not at rerun time: the
 `retain_rerun_input_default` broker setting (with a per-task override)
 decides whether the enqueue input is preserved with the record. A task
 enqueued without a retained input cannot be rerun later.
 
-Programmatic callers use the same contract:
+Every outcome other than enqueued writes nothing.
 
-<!-- check: skip partial -- uses names that the page does not define -->
-```python
-from datetime import timedelta
+The caller supplies the enqueue policy of the new request, because enqueue
+policy lives in configuration, not in the rerun contract: the **new** request
+gets its own retention class, its own rerun-input retention, and its own
+key-reservation window. The caller also states the deadline of the new task,
+or no deadline.
 
-from horsies import rerun_task, RerunTask, RerunEnqueuePolicy, RerunEnqueued
+Each refusal is a distinct outcome, so a caller that matches over the
+outcomes cannot miss one.
 
-outcome = await rerun_task(
-    connection,
-    RerunTask(source_task_id=task_id, deadline=None),
-    RerunEnqueuePolicy(
-        retention=timedelta(days=30),
-        retain_rerun_input=True,
-        reservation_window=timedelta(hours=24),
-    ),
-)
-match outcome:
-    case RerunEnqueued(new_task_id=new_id):
-        ...
-```
+The API is on the client pages: [Rerun in Your Transaction](/horsies/operations/rerun-in-your-transaction/) (Python) and [Rerun in Your Transaction](/horsies/rust/operations/rerun-in-your-transaction/) (Rust).
 
-The policy is supplied by the caller because enqueue policy lives in
-configuration, not in the rerun contract: the **new** request gets its own
-retention class, its own rerun-input retention, and its own key-reservation
-window.
-
-`RerunOutcome` is an exhaustive union — every refusal is a distinct typed
-variant, so a caller matching over it cannot silently miss one.
-
-**Settled when:** the response carries the new task id. The source record is
+**Settled when:** the call returns the new task id. The source record is
 unchanged: rerun never mutates history.
 
 ## Workflow pause
@@ -226,7 +210,10 @@ List and aggregate reads are **window-scoped**. They cover live rows plus a
 bounded slice of terminal history: the last 24 hours by default, with
 optional `since` / `until`. Bounds must be timezone-aware and increasing,
 and the span may not exceed 30 days — a request over the maximum is refused
-with the bound named, never silently clamped.
+with the bound named, never silently clamped. The default and the maximum are
+elapsed time: each bound is converted to a UTC instant first. Across a
+daylight saving change, the wall-clock span and the elapsed span differ by the
+change, and the elapsed span counts.
 
 The page total follows a stated contract: **exact when any filter is
 active, a planner estimate on the unfiltered view.** An unfiltered total is
@@ -242,7 +229,8 @@ concurrency control.
 |---|---|---|
 | 200 | The CAS matched and committed | Observe the entity |
 | 400 | The row is a workflow node; task actions do not apply | Use the workflow actions |
-| 404 | The row no longer exists | Retention may have removed it |
+| 400 | A task id in the path of a task route, or a workflow id in the path of a workflow action (`pause`, `resume`, `cancel`), is not a UUID (`INVALID_INPUT`, with a `detail`); nothing was read or changed | Send the id as UUID text |
+| 404 | The row no longer exists. On the workflow read routes also a workflow id that is not a UUID, and a node index outside the 32-bit node index column; nothing was read | Retention may have removed it |
 | 409 | Another change won the race, or the schema does not match this build | Re-read the entity; the body carries `current_status` |
 | 500 | Stored data that does not parse (`STORED_DATA_INVALID`): a stored value of the workflow run, or, on a task cancel, a history status that is not a task status. Or a server defect | Check the server logs and re-read the entity. For `STORED_DATA_INVALID`, nothing was committed, and a repeat gets the same answer until the stored row changes |
 | 503 | Broker or database failure | The action may or may not have committed; re-read before retrying |

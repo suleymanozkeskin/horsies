@@ -1,0 +1,250 @@
+"""Database helpers for e2e tests.
+
+The waiters poll the readback view rather than the live table: a task
+that reaches a terminal status LEAVES the live table in the same
+transaction, so a live-only poll can never observe the status it was
+told to wait for."""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Callable
+from uuid import UUID
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from horsies.core.types.status import TaskStatus
+
+
+@dataclass(frozen=True, slots=True)
+class TaskRow:
+    """One task as the tests read it, from either lifecycle side.
+
+    A terminal task is no longer a live row, so an ORM load of the live
+    entity answers None for exactly the tasks these assertions are about.
+    This carries the fields the e2e suites assert on, typed the way the
+    entity typed them, and the claim and retry columns keep their live
+    meaning: a history record has no claimant, and its retry_count is the
+    count it terminalized with.
+    """
+
+    id: UUID
+    task_name: str
+    queue_name: str
+    status: TaskStatus
+    result: str | None
+    retry_count: int
+    max_retries: int
+    claimed_by_worker_id: str | None
+    """The LEASE: who holds the task now. Absent once it terminalizes."""
+    last_claimed_worker_id: str | None
+    """PROVENANCE: who ran it. Survives the move."""
+    claimed_at: datetime | None
+    next_retry_at: datetime | None
+    sent_at: datetime | None
+    enqueued_at: datetime | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    failed_at: datetime | None
+    error_code: str | None
+
+
+def uuid_of_column(value: object, *, column: str) -> UUID:
+    """The ``uuid.UUID`` of a non-null uuid column value: the test-side engine
+    reads it as text, a connection without the text loader as ``uuid.UUID``.
+
+    Raises:
+        TypeError: the value is neither; ``column`` names the column.
+        ValueError: the text is not a UUID; ``column`` names the column.
+    """
+    match value:
+        case UUID():
+            return value
+        case str():
+            try:
+                return UUID(value)
+            except ValueError as exc:
+                raise ValueError(
+                    f'uuid column {column} read text that is not a UUID: {value!r}'
+                ) from exc
+        case _:
+            raise TypeError(
+                f'uuid column {column} read a {type(value).__name__}, '
+                'not text or uuid.UUID'
+            )
+
+
+_READ_TASK_SQL = text("""
+    SELECT id, task_name, queue_name, status, result, retry_count,
+           max_retries, claimed_by_worker_id, last_claimed_worker_id,
+           claimed_at, next_retry_at,
+           sent_at, enqueued_at, started_at, completed_at, failed_at,
+           error_code
+    FROM itest_task_rows
+    WHERE id = CAST(:id AS uuid)
+""")
+
+
+async def read_task(session: AsyncSession, task_id: UUID) -> TaskRow | None:
+    """Read one task from whichever lifecycle side holds it.
+
+    ``None`` means the task is on neither side — genuinely absent, not
+    merely terminal.
+    """
+    row = (
+        await session.execute(_READ_TASK_SQL, {'id': str(task_id)})
+    ).fetchone()
+    if row is None:
+        return None
+    return TaskRow(
+        id=uuid_of_column(row.id, column='itest_task_rows.id'),
+        task_name=row.task_name,
+        queue_name=row.queue_name,
+        status=TaskStatus(row.status),
+        result=row.result,
+        retry_count=row.retry_count,
+        max_retries=row.max_retries,
+        claimed_by_worker_id=row.claimed_by_worker_id,
+        last_claimed_worker_id=row.last_claimed_worker_id,
+        claimed_at=row.claimed_at,
+        next_retry_at=row.next_retry_at,
+        sent_at=row.sent_at,
+        enqueued_at=row.enqueued_at,
+        started_at=row.started_at,
+        completed_at=row.completed_at,
+        failed_at=row.failed_at,
+        error_code=row.error_code,
+    )
+
+
+async def cleanup_tables(session: AsyncSession) -> None:
+    """Truncate task-related tables between tests.
+
+    The history table is half of task storage: every task that reaches a
+    terminal status lives there and nowhere else, so leaving it behind
+    carries one test's finished tasks into the next one's counts.
+
+    The phase-2 outbox goes with them. A pending row whose workflow was
+    truncated away is unresolvable, and the recovery pass re-reads it
+    every second for the rest of the session — the accumulated backlog
+    then competes with live work for a bounded discovery.
+    """
+    await session.execute(
+        text("""
+            TRUNCATE horsies_tasks, horsies_task_history, horsies_workflow_tasks, horsies_workflows, horsies_workflow_phase2_pending, horsies_schedule_state, horsies_heartbeats CASCADE
+        """),
+    )
+    await session.commit()
+
+
+async def poll_max_during(
+    session_factory: Callable[[], Any],
+    sql: str,
+    duration_s: float,
+    poll_interval: float = 0.05,
+    params: dict[str, Any] | None = None,
+) -> int:
+    """Poll DB for duration_s and return max COUNT(*) observed."""
+    max_count = 0
+    deadline = time.time() + duration_s
+
+    while time.time() < deadline:
+        async with session_factory() as session:
+            result = await session.execute(text(sql), params or {})
+            count = result.scalar() or 0
+            max_count = max(max_count, count)
+        await asyncio.sleep(poll_interval)
+
+    return max_count
+
+
+async def wait_for_all_terminal(
+    session_factory: Callable[[], Any],
+    task_ids: list[UUID],
+    timeout_s: float = 30.0,
+    poll_interval: float = 0.2,
+) -> None:
+    """Wait until all tasks reach terminal state (COMPLETED, FAILED, ERROR)."""
+    deadline = time.time() + timeout_s
+
+    while time.time() < deadline:
+        async with session_factory() as session:
+            result = await session.execute(
+                text("""
+                    SELECT COUNT(*) FROM itest_task_rows
+                    WHERE id = ANY(CAST(:ids AS uuid[]))
+                    AND status NOT IN ('COMPLETED', 'FAILED', 'ERROR')
+                """),
+                {'ids': [str(task_id) for task_id in task_ids]},
+            )
+            pending = result.scalar() or 0
+            if pending == 0:
+                return
+        await asyncio.sleep(poll_interval)
+
+    raise TimeoutError(f'Tasks did not complete within {timeout_s}s')
+
+
+async def wait_for_status(
+    session_factory: Callable[[], Any],
+    task_id: UUID,
+    target_status: str,
+    timeout_s: float = 15.0,
+    poll_interval: float = 0.2,
+) -> None:
+    """Wait until a single task reaches the target status."""
+    deadline = time.time() + timeout_s
+
+    while time.time() < deadline:
+        async with session_factory() as session:
+            result = await session.execute(
+                text("""
+                    SELECT status FROM itest_task_rows
+                    WHERE id = CAST(:id AS uuid)
+                """),
+                {'id': str(task_id)},
+            )
+            row = result.fetchone()
+            if row is not None and row[0] == target_status:
+                return
+        await asyncio.sleep(poll_interval)
+
+    raise TimeoutError(
+        f'Task {task_id} did not reach status {target_status} within {timeout_s}s'
+    )
+
+
+async def wait_for_any_status(
+    session_factory: Callable[[], Any],
+    task_ids: list[UUID],
+    target_status: str,
+    timeout_s: float = 15.0,
+    poll_interval: float = 0.2,
+) -> None:
+    """Wait until at least one task from the list reaches the target status."""
+    deadline = time.time() + timeout_s
+
+    while time.time() < deadline:
+        async with session_factory() as session:
+            result = await session.execute(
+                text("""
+                    SELECT COUNT(*) FROM itest_task_rows
+                    WHERE id = ANY(CAST(:ids AS uuid[])) AND status = :status
+                """),
+                {
+                    'ids': [str(task_id) for task_id in task_ids],
+                    'status': target_status,
+                },
+            )
+            count = result.scalar() or 0
+            if count > 0:
+                return
+        await asyncio.sleep(poll_interval)
+
+    raise TimeoutError(
+        f'No task reached status {target_status} within {timeout_s}s'
+    )

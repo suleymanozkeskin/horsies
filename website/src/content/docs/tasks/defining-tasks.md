@@ -1,5 +1,6 @@
 ---
 title: Defining Tasks
+section: python
 summary: How to define tasks with the @app.task decorator.
 related: [sending-tasks, retrieving-results, ../../concepts/result-handling]
 tags: [tasks, decorator, definition]
@@ -18,7 +19,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError, JsonValue
 
 config = AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://...")),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
 )
 app = Horsies(config)
 
@@ -99,7 +100,7 @@ from horsies import Ok, Err
 async def refresh_price(*, symbol: str) -> TaskResult[str, TaskError]:
     match await fetch_price.send_async(symbol=symbol):
         case Ok(handle):
-            return TaskResult(ok=handle.task_id)
+            return TaskResult(ok=str(handle.task_id))
         case Err(send_err):
             return TaskResult(err=TaskError(error_code="SEND_FAILED", message=send_err.message))
 ```
@@ -166,52 +167,221 @@ def might_crash() -> TaskResult[str, TaskError]:
 
 ### Configure Retries
 
-With explicit try/except:
+`retry_policy` takes a `RetryPolicy`. A failure retries when its error code is in `auto_retry_for` and retries remain. The policy fields, the delay steps and the retry rules are on [Retry Policy](/horsies/tasks/retry-policy/).
 
-<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import RetryPolicy, TaskResult, TaskError, JsonValue
 
 @app.task(
-    "some_api_call",
-    retry_policy=RetryPolicy.exponential(
-        base_seconds=30,
-        max_retries=5,
-        auto_retry_for=["TIMEOUT", "CONNECTION_ERROR"],
-    ),
+    "flaky_task",
+    retry_policy=RetryPolicy.fixed([60, 300, 900], auto_retry_for=["TRANSIENT_ERROR"]),
 )
-def some_api_call() -> TaskResult[dict[str, JsonValue], TaskError]:
-    try:
-        result = call_external_api()
-        return TaskResult(ok=result)
-    except TimeoutError:
-        return TaskResult(err=TaskError(error_code="TIMEOUT", message="Request timed out"))
-    except ConnectionError:
-        return TaskResult(err=TaskError(error_code="CONNECTION_ERROR", message="Connection failed"))
+def flaky_task() -> TaskResult[str, TaskError]:
+    # Retries up to 3 times, after 1 min, 5 min and 15 min
+    ...
 ```
 
-Or with the exception mapper (no try/except needed):
+#### RetryPolicy Constructors
 
-<!-- check: skip partial -- uses names that the page does not define -->
+| Constructor | Policy |
+| ----------- | ------ |
+| `RetryPolicy.fixed(intervals, *, auto_retry_for, jitter=True)` | `fixed` backoff. `max_retries` is `len(intervals)` |
+| `RetryPolicy.exponential(base_seconds, *, max_retries, auto_retry_for, jitter=True, max_delay_seconds=None)` | `exponential` backoff from one base interval |
+| `RetryPolicy(...)` | Every field, with the defaults below |
+
+```python
+# Fixed: wait 1 min, then 5 min, then 15 min
+RetryPolicy.fixed([60, 300, 900], auto_retry_for=["TRANSIENT_ERROR"])
+
+# Equivalent to:
+RetryPolicy(
+    max_retries=3,
+    intervals=[60, 300, 900],
+    backoff_strategy='fixed',
+    auto_retry_for=["TRANSIENT_ERROR"],
+)
+
+# Exponential with base 30 s: retry after 30 s, 60 s, 120 s, 240 s, 480 s
+RetryPolicy.exponential(base_seconds=30, max_retries=5, auto_retry_for=["TRANSIENT_ERROR"])
+
+# Equivalent to:
+RetryPolicy(
+    max_retries=5,
+    intervals=[30],  # one base interval
+    backoff_strategy='exponential',
+    auto_retry_for=["TRANSIENT_ERROR"],
+)
+
+# No jitter, for delays that are the same on each run
+RetryPolicy.fixed([60, 300, 900], auto_retry_for=["TRANSIENT_ERROR"], jitter=False)
+
+# Exponential, but never wait longer than 10 minutes between retries
+RetryPolicy.exponential(
+    base_seconds=30,
+    max_retries=10,
+    auto_retry_for=["TRANSIENT_ERROR"],
+    max_delay_seconds=600,
+)
+
+# Equivalent to:
+RetryPolicy(
+    max_retries=10,
+    intervals=[30],
+    backoff_strategy='exponential',
+    max_delay_seconds=600,
+    auto_retry_for=["TRANSIENT_ERROR"],
+)
+```
+
+`RetryPolicy.fixed()` has no `max_delay_seconds` parameter. For a `fixed` policy with a cap, use `RetryPolicy(...)`.
+
+| Field | Type | Default |
+| ----- | ---- | ------- |
+| `auto_retry_for` | `list[str \| BuiltInTaskCode]` | (required) |
+| `max_retries` | `int` | `3` |
+| `intervals` | `list[int]` | `[60, 300, 900]` |
+| `backoff_strategy` | `Literal['fixed', 'exponential']` | `'fixed'` |
+| `jitter` | `bool` | `True` |
+| `max_delay_seconds` | `int \| None` | `None` (no cap) |
+
+An `auto_retry_for` entry is a code string or a `BuiltInTaskCode` member. A name in the form of an exception class, such as `"TimeoutError"`, is refused: retries match error codes only.
+
+A policy that breaks a rule of [Policy Fields](/horsies/tasks/retry-policy/#policy-fields) raises `ValueError` when it is built:
+
+```python
+# This raises ValueError:
+RetryPolicy(
+    max_retries=3,
+    intervals=[60, 300],  # Only 2 intervals for 3 retries
+    backoff_strategy='fixed',
+    auto_retry_for=["TRANSIENT_ERROR"],
+)
+
+# This also raises ValueError:
+RetryPolicy(
+    max_retries=3,
+    intervals=[60, 300, 900],  # Multiple intervals
+    backoff_strategy='exponential',  # Exponential needs exactly 1 interval
+    auto_retry_for=["TRANSIENT_ERROR"],
+)
+```
+
+#### Return a Retryable Error
+
+Return a `TaskError` with a code that `auto_retry_for` lists:
+
 ```python
 @app.task(
-    "some_api_call",
+    "call_external_api",
     retry_policy=RetryPolicy.exponential(
-        base_seconds=30,
+        base_seconds=60,
         max_retries=5,
-        auto_retry_for=["TIMEOUT", "CONNECTION_ERROR"],
+        auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"],
     ),
+)
+def call_external_api() -> TaskResult[dict[str, JsonValue], TaskError]:
+    try:
+        response = requests.get("https://api.example.com")
+        if response.status_code == 429:
+            return TaskResult(err=TaskError(
+                error_code="RATE_LIMITED",
+                message="the API answered 429",
+            ))
+        return TaskResult(ok=response.json())
+    except requests.Timeout:
+        return TaskResult(err=TaskError(
+            error_code="TIMEOUT",
+            message="the API did not answer in time",
+        ))
+```
+
+`auto_retry_for` reads `error_code` only. `message` is optional: `TaskError(error_code="RATE_LIMITED")` retries in the same way.
+
+#### Map Exceptions to Codes
+
+`exception_mapper` maps an exception that the task raises to an error code, so the task needs no try/except. The mapper matches the exact exception class (`type(exc)`).
+
+```python
+@app.task(
+    "call_api",
+    retry_policy=RetryPolicy.fixed([30, 60, 120], auto_retry_for=["TIMEOUT", "CONNECTION_ERROR"]),
     exception_mapper={
         TimeoutError: "TIMEOUT",
         ConnectionError: "CONNECTION_ERROR",
     },
 )
-def some_api_call() -> TaskResult[dict[str, JsonValue], TaskError]:
-    result = call_external_api()
-    return TaskResult(ok=result)
+def call_api() -> TaskResult[dict[str, JsonValue], TaskError]:
+    # No try/except: a TimeoutError becomes "TIMEOUT"
+    response = requests.get("https://api.example.com", timeout=10)
+    return TaskResult(ok=response.json())
 ```
 
-For backoff strategies, jitter, and auto-retry triggers, see [Retry Policy](../retry-policy).
+A mapper on `AppConfig` applies to all tasks:
+
+```python
+from pydantic import SecretStr
+
+config = AppConfig(
+    broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
+    exception_mapper={
+        TimeoutError: "TIMEOUT",
+        ConnectionError: "CONNECTION_ERROR",
+        PermissionError: "PERMISSION_DENIED",
+    },
+    default_unhandled_error_code="UNHANDLED_EXCEPTION",
+)
+```
+
+When the task raises an exception, the code comes from the first match in this order:
+
+1. The task's `exception_mapper` (exact class lookup)
+2. `AppConfig.exception_mapper` (exact class lookup)
+3. The task's `default_unhandled_error_code`
+4. `AppConfig.default_unhandled_error_code` (default `"UNHANDLED_EXCEPTION"`)
+
+A task entry has priority over a global entry. A task that returns `TaskResult(err=...)` does not use the mapper.
+
+Only the exact class matches; a subclass does not. Map each subclass that you expect.
+
+#### Declare Error Codes
+
+`error_codes` declares the task's own error codes: the values of the `error_code` label of its worker metrics besides the built-in codes and `undeclared` ([Declared Error Codes](/horsies/tasks/errors/#declared-error-codes)). Pass an `Enum` class, whose member values are the codes, or a tuple of strings:
+
+```python
+from enum import Enum
+
+from horsies import Horsies, TaskError, TaskResult
+
+
+class ChargeCode(Enum):
+    CARD_DECLINED = "CARD_DECLINED"
+    RATE_LIMITED = "RATE_LIMITED"
+
+
+def register(app: Horsies) -> None:
+    @app.task("charge_card", error_codes=ChargeCode)
+    def charge_card(*, amount_cents: int) -> TaskResult[str, TaskError]:
+        if amount_cents > 100_000:
+            return TaskResult(err=TaskError(error_code=ChargeCode.CARD_DECLINED.value))
+        return TaskResult(ok="charged")
+
+    @app.task("send_receipt", error_codes=("BOUNCED",))
+    def send_receipt(*, email: str) -> TaskResult[str, TaskError]:
+        return TaskResult(ok=email)
+```
+
+A `TaskError` takes the code as a plain `str`: pass `ChargeCode.CARD_DECLINED.value`, not the member. Declaring is optional, and the default is `()`. A user code that the task does not declare still works everywhere; its metric label is `undeclared`.
+
+The codes that the exception mappers can produce are declared with no second declaration: the values of the task's `exception_mapper` and of `AppConfig.exception_mapper` (as the app config holds it when the task is defined). A code that a task body returns directly needs `error_codes=`.
+
+The decorator refuses:
+
+- a value that is neither an `Enum` class nor a tuple (a list, a string, an `Enum` member): `HRS-102`;
+- a code that is empty, not `UPPER_SNAKE_CASE`, or an exception class name: `HRS-112`;
+- a built-in code or `WORKFLOW_STOPPED`: `HRS-212`;
+- a code given twice: `HRS-113`.
+
+The task function keeps the codes in `task_error_codes`: the declared codes in the order of the declaration, then each mapper code that is not in the list yet, first the task's mapper, then the app's. `horsies check` lists them.
 
 ### Assign to Queue (CUSTOM Mode)
 
@@ -277,6 +447,23 @@ def render_thumbnail(*, image_id: str) -> TaskResult[str, TaskError]:
     ...
 ```
 
+A `SHARED_THREAD` task runs next to itself and to the other thread tasks of its child. Guard module state with a lock:
+
+```python
+import threading
+
+_seen: set[str] = set()
+_seen_lock = threading.Lock()
+
+
+@app.task('mark_seen', execution=Execution.SHARED_THREAD, timeout_ms=10_000)
+def mark_seen(*, key: str) -> TaskResult[bool, TaskError]:
+    with _seen_lock:
+        first = key not in _seen
+        _seen.add(key)
+    return TaskResult(ok=first)
+```
+
 A `SHARED_ASYNC` task runs on a seat of a shared async child when the worker profile has `shared_async=SharedAsyncChildren(...)`, and in an isolated child otherwise. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/). A `SHARED_THREAD` task runs on a seat thread of a shared thread child when the profile has `shared_thread=SharedThreadChildren(...)`, and in an isolated child otherwise. See [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/).
 
 `cancel_grace_ms` is the time that a `SHARED_ASYNC` task gets to stop after its cancel. After it, the child cancels the task a second time. A thread cannot be cancelled, so only `SHARED_ASYNC` takes it. The value is from `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (10,000). A `SHARED_ASYNC` task that sets none gets `DEFAULT_CANCEL_GRACE_MS` (1,000). The stored options of the task hold the value in effect when the task is sent, so a later change of the default does not change a queued task.
@@ -323,6 +510,25 @@ def good_task() -> TaskResult[dict[str, JsonValue], TaskError]:
     return TaskResult(ok={"status": "done"})
 ```
 
+**Don't block the event loop in a `SHARED_ASYNC` task.** A blocking call stops every task of the child for that time.
+
+```python
+import time
+
+# Wrong: stops every task of the child for 2 seconds
+@app.task('wait_wrong', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
+async def wait_wrong() -> TaskResult[None, TaskError]:
+    time.sleep(2)
+    return TaskResult(ok=None)
+
+
+# Correct
+@app.task('wait_right', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
+async def wait_right() -> TaskResult[None, TaskError]:
+    await asyncio.sleep(2)
+    return TaskResult(ok=None)
+```
+
 **Don't reuse task names.**
 
 ```python
@@ -346,6 +552,7 @@ def task_two() -> TaskResult[str, TaskError]:
 | `retry_policy` | `RetryPolicy` | No | Retry timing, backoff, and auto-retry triggers |
 | `exception_mapper` | `dict[type[BaseException], str]` | No | Maps exception classes to error codes |
 | `default_unhandled_error_code` | `str` | No | Error code for unmapped exceptions (overrides global) |
+| `error_codes` | `type[Enum] \| tuple[str, ...]` | No | The task's own error codes: an `Enum` class (its member values) or a tuple of strings. Default `()`. See [Declare Error Codes](#declare-error-codes) |
 | `timeout_ms` | `int` | No | Execution time limit in milliseconds, from 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295), measured from the moment a child takes the task. On expiry the child process is killed and the task fails with `TASK_TIMEOUT` |
 | `execution` | `Execution` | No | How a worker runs the task: `ISOLATED` (default), `SHARED_ASYNC` or `SHARED_THREAD`. See [Choose the Execution Class](#choose-the-execution-class) |
 | `cancel_grace_ms` | `int` | No | `SHARED_ASYNC` only. The time to stop after a cancel, from 100 to 10,000 ms. Default 1,000 ms |

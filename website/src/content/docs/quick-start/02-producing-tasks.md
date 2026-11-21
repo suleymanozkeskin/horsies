@@ -1,5 +1,6 @@
 ---
 title: Producing Tasks
+section: python
 summary: Define tasks and send them for execution.
 related: [01-configuring-horsies, 03-defining-workflows]
 tags: [quickstart, tasks]

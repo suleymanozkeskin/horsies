@@ -1,5 +1,6 @@
 ---
 title: Recovery Config
+section: shared
 summary: Automatic detection and recovery of stale tasks.
 related: [retention-config, ../../workers/heartbeats-recovery, app-config]
 tags: [configuration, recovery, heartbeats]
@@ -15,23 +16,7 @@ Tasks can become stale when:
 
 Horsies automatically detects and recovers these tasks.
 
-## Basic Usage
-
-<!-- check: skip elided -- ... stands for a config shown on other pages -->
-```python
-from horsies.core.models.recovery import RecoveryConfig
-
-config = AppConfig(
-    broker=PostgresConfig(...),
-    recovery=RecoveryConfig(
-        auto_requeue_stale_claimed=True,
-        claimed_stale_threshold_ms=120_000,
-        auto_fail_stale_running=True,
-        running_stale_threshold_ms=300_000,
-        finalizing_stale_threshold_ms=300_000,
-    ),
-)
-```
+The settings are the `recovery` section of the app config. The API is on the client pages: [Recovery Configuration](/horsies/configuration/app-config/#recovery-configuration) (Python) and [AppConfig](/horsies/rust/configuration/app-config/#appconfig) (Rust).
 
 ## Fields
 
@@ -66,33 +51,11 @@ Retention and partition-coverage fields moved to
 
 ## Recovery Behaviors
 
-### Stale CLAIMED Tasks
+What the reaper does with a stale CLAIMED or RUNNING task, and what a worker does when it cannot write
+its runner heartbeats, is on [Heartbeats & Recovery](/horsies/workers/heartbeats-recovery/#recovery-actions).
+The thresholds that decide it are in [Fields](#fields).
 
-When a task is CLAIMED but the claimer heartbeat stops:
-
-- **Safe to requeue**: User code never started executing
-- Task is reset to PENDING for another worker to claim
-- Original worker may have crashed before dispatching
-
-### Stale RUNNING Tasks
-
-When a **regular** task is RUNNING but the runner heartbeat stops:
-
-- **Not safe to blindly requeue**: User code was executing, could have partial side effects
-- If the task has a retry policy with `WORKER_CRASHED` in `auto_retry_for` and retries remaining: scheduled for retry (returns to PENDING with `next_retry_at`)
-- Otherwise: marked as FAILED with `WORKER_CRASHED` error
-
-`running_stale_threshold_ms` is based on missing runner heartbeats, not total
-task duration. Long tasks remain healthy as long as the worker writes their
-heartbeats. With `auto_fail_stale_running` on, a worker that cannot write them
-for half of `running_stale_threshold_ms` kills its tasks and exits non-zero, so
-the reaper does not fail a task that still runs. That half must hold one
-`runner_heartbeat_interval_ms` plus 2 s for a heartbeat to land, so the
-threshold is at least `2 × (runner_heartbeat_interval_ms + 2_000)`. With it
-off, the worker logs the failed writes and keeps running.
-After user code returns, the child marks the task as finalizing before the
-parent writes the terminal result. The reaper will not recover that task until
-`finalizing_stale_threshold_ms` has also elapsed.
+### Workflow Progression After a Crash
 
 For **workflow** tasks, terminalization records the owed workflow progression in a transactional outbox as it moves the task to history, and the reaper consumes those records. Task finalization is two transactions — the task is terminalized first, then the workflow DAG is advanced — so a progression can be owed for a brief moment while its finalizer is still in flight. The reaper waits `crashed_worker_recovery_grace_ms` (default 10s) before consuming such a record, so it does not race a healthy finalizer; only a genuine crash in that gap is recovered (after the grace plus one reaper sweep). This grace is independent of the heartbeat-coupled thresholds. See [Heartbeats & Recovery](../../workers/heartbeats-recovery) for details.
 
@@ -137,8 +100,8 @@ intervals after the first pass, which is about 720 seconds.
   worker restart keeps it, and all workers share it. A pass that is lost also
   loses its count, so the bound moves later, never sooner.
 - **The count has no reset, so a later unrelated raise after a repair reaches
-  the limit sooner.** Delete the row of a workflow to start its count again. The
-  retention sweep deletes a row after its workflow is gone.
+  the limit sooner.** Delete the row of a workflow to start its count again. A
+  row is deleted with its workflow.
 - **The resume pass does not count.** It logs the raise, and the reaper counts
   the same candidate.
 
@@ -162,17 +125,6 @@ If the limit write fails, the count stays, the workflow stays `RUNNING`, and a
 again. `over_failure_limit` on the worker health surface counts such workflows
 and the ones with live nodes.
 
-## Heartbeat System
-
-<!-- todo:diagram-needed - Heartbeat flow diagram -->
-
-Two heartbeat types:
-
-1. **Claimer heartbeat**: Sent by worker for CLAIMED tasks (not yet running)
-2. **Runner heartbeat**: Written by the worker process, from its own thread, for the RUNNING tasks that its children hold
-
-The reaper (running in each worker) checks for missing heartbeats.
-
 ## Threshold Guidelines
 
 | Threshold | Constraint |
@@ -186,36 +138,12 @@ The reaper (running in each worker) checks for missing heartbeats.
 | Check interval | 1 second to 10 minutes |
 | Heartbeat intervals | 1 second to 2 minutes |
 
-### For CPU-Heavy Tasks
-
-A task that holds the GIL does not delay its runner heartbeats, because the
-worker process writes them. CPU-bound tasks need no extra margin.
-
-### For Quick Tasks
-
-Fast tasks can use tighter thresholds:
-
-```python
-RecoveryConfig(
-    runner_heartbeat_interval_ms=10_000,    # Heartbeat every 10s
-    running_stale_threshold_ms=40_000,      # 40s before considered stale
-)
-```
-
-The worker stops when no heartbeat lands for 20 s, so a heartbeat may take up
-to 10 s to land.
+For the heartbeat timing rules, CPU-heavy tasks and quick tasks, see
+[Timing Guidelines](/horsies/workers/heartbeats-recovery/#timing-guidelines).
 
 ## Validation
 
-The config validates that thresholds are safe:
-
-```python
-# This raises ConfigurationError (HRS-204):
-RecoveryConfig(
-    runner_heartbeat_interval_ms=30_000,
-    running_stale_threshold_ms=60_000,  # Must be >= 64_000: 2 x (30s + 2s)
-)
-```
+A config that breaks a rule of [Threshold Guidelines](#threshold-guidelines) is refused with `HRS-204`. The refusal names the fields and the smallest valid value. See the example in [Rule: Thresholds Hold the Heartbeats](/horsies/workers/heartbeats-recovery/#rule-thresholds-hold-the-heartbeats).
 
 ## Retention
 
@@ -229,32 +157,25 @@ history.
 Setting a retention field on `RecoveryConfig` fails at construction and
 names its new home; there is no alias.
 
+## Automatic and Manual Passes
+
+The reaper of each worker runs the recovery passes below. Each pass has a method that runs it once, on demand. Three of the passes also have a setting that turns the automatic pass on or off. The method runs the pass also when that setting is off.
+
+| Pass | Setting (default `True`) | Automatic interval | Method of `PostgresBroker` (Python) |
+|------|--------------------------|--------------------|-------------------------------------|
+| Stale CLAIMED tasks go back to PENDING | `auto_requeue_stale_claimed` | `check_interval_ms` | `requeue_stale_claimed()` |
+| Stale RUNNING tasks are retried or failed | `auto_fail_stale_running` | `check_interval_ms` | `mark_stale_tasks_as_failed()` |
+| One page of orphan workflow tasks is cancelled | `auto_terminate_orphaned_workflow_tasks` | `orphan_task_audit_interval_ms` (default 60,000) | `terminate_orphaned_workflow_tasks()` |
+| PENDING tasks past their `good_until` expire | None; the reaper always runs this pass | `check_interval_ms` | `expire_pending_tasks()` |
+
+[Broker Methods](/horsies/monitoring/broker-methods/#methods) documents `requeue_stale_claimed`, `mark_stale_tasks_as_failed` and `terminate_orphaned_workflow_tasks`. The Rust client has no method for these passes.
+
 ## Disabling Recovery
 
-To disable automatic recovery (not recommended):
+To disable automatic recovery (not recommended), set `auto_requeue_stale_claimed` and `auto_fail_stale_running` to false. See [Disable Recovery](/horsies/configuration/app-config/#disable-recovery) (Python).
 
-```python
-RecoveryConfig(
-    auto_requeue_stale_claimed=False,
-    auto_fail_stale_running=False,
-)
-```
-
-Tasks will remain stuck until manually resolved.
+Tasks will remain stuck until manually resolved, for example with the methods of [Automatic and Manual Passes](#automatic-and-manual-passes).
 
 ## Manual Recovery
 
-Query stale tasks via broker:
-
-```python
-broker = app.get_broker()
-
-# Find stale tasks
-stale = await broker.get_stale_tasks(stale_threshold_minutes=5)
-
-# Manually fail stale RUNNING tasks
-failed_count = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
-
-# Manually requeue stale CLAIMED tasks
-requeued_count = await broker.requeue_stale_claimed(stale_threshold_ms=120_000)
-```
+See [Manual Recovery](/horsies/workers/heartbeats-recovery/#manual-recovery).

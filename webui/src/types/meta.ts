@@ -1,11 +1,11 @@
 // `GET /api/meta` — deployment capabilities the SPA gates its UI on.
 
-/** The server's schema verdict, as `SchemaState` in `horsies/web/schema.py`. */
+/** The server's schema verdict, as `SchemaState` in `clients/python/horsies/web/schema.py`. */
 export type ServerSchemaState =
   | 'MATCH'
   | 'MISMATCH'
-  | 'CUTOVER_REQUIRED'
   | 'ABSENT'
+  | 'ZERO_X'
   | 'UNKNOWN';
 
 export interface MonitoringMeta {
@@ -28,4 +28,7 @@ export interface MonitoringMeta {
    * `SCHEMA_UNKNOWN` means the schema probe has never succeeded — it is the
    * only signal that separates an unreachable database from an empty one. */
   actions_disabled_reason: 'SCHEMA_INCOMPATIBLE' | 'SCHEMA_UNKNOWN' | null;
+  /** The link of a task's trace id: an http or https URL with one
+   * `{trace_id}`, checked by the server. Null: the id is shown as text. */
+  trace_link_template: string | null;
 }

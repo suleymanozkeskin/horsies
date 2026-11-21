@@ -1,0 +1,424 @@
+# Changelog
+
+From 0.8.0, `horsies-core`, `horsies-core-derive`, `horsies-macros`, the
+`horsies` crate and the Python package carry one version and one
+changelog: the
+[`CHANGELOG.md`](https://github.com/suleymanozkeskin/horsies/blob/main/CHANGELOG.md)
+at the root of the repository. Its section `[0.8.0]` lists the changes of
+0.8.0.
+
+The entries below are the last releases of horsies-rust, `0.1.0-alpha.26`
+to `0.1.0-alpha.36`, before 0.8.0. They follow
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [0.1.0-alpha.36] - 2026-10-25
+
+### Fixed
+
+- The runtime pool in PgBouncer transaction mode keeps the SQLx statement
+  cache. With a cache capacity of zero, SQLx still prepares every query under
+  a statement name, but it uses a new name for each execution and never closes
+  it: N executions of one query leave N statement names on the connection,
+  and a pooler that tracks prepared statements holds one entry per execution
+  until the client disconnects. With the cache, a connection prepares each
+  query once and holds at most 100 names. PgBouncer transaction mode still
+  requires `max_prepared_statements > 0`.
+
+## [0.1.0-alpha.35] - 2026-09-29
+
+### Work reductions
+
+- Every new connection of the broker pools runs `SET jit = off`, except the
+  runtime pool in PgBouncer transaction mode, whose server sessions are
+  shared. On a PostgreSQL build with JIT on, the partition coverage probe
+  (cost estimate far above `jit_above_cost`) spent about 0.7 s in JIT
+  compilation for about 2 ms of execution on each call.
+- The partition coverage probe's cost estimate stays below the default
+  `jit_above_cost`, so it runs without JIT on any pool, including pools
+  passed to `PostgresBroker::from_pool`.
+- Drop `horsies_task_notify_update_trigger`. It ran
+  `horsies_notify_task_changes()` on every live status change: claim, start
+  and requeue. Its UPDATE branch sends `task_done` only for terminal
+  statuses, which live rows cannot hold. The terminalization functions send
+  `task_done`. The function keeps its INSERT branch (`task_new`,
+  `task_queue_<queue>`).
+- Drop the 24 single-column CHECK constraints of `horsies_task_history`.
+  PostgreSQL rebuilt every CHECK expression from its stored text on each
+  history INSERT. The cross-column CHECK constraints stay. The Horsies
+  writers produce values inside the dropped rules.
+- The `forever` class uses one open-ended history leaf instead of one daily
+  leaf per day. Partition coverage creates it after the last daily `forever`
+  leaf and no longer creates daily `forever` leaves. The pruning pass
+  detaches and drops closed daily `forever` leaves that hold no rows (at most
+  32 per pass). Before, each day added a `forever` leaf that was never
+  removed, and every staged-reader miss and duplicate-identity guard probed
+  it. With PR #52's pruned guard, the guard for a UUIDv7 id probes today's and
+  the horizon's standard leaves plus one `forever` leaf.
+
+### Changed
+
+- The staged reader publisher also installs `horsies_task_result_staged(uuid)`.
+  It returns only the result columns of one task, as flat output columns, from
+  the live table or from a history leaf, under one snapshot.
+- `get_result` and `TaskHandle::get` read a task result in one statement.
+  Before, a history read sent three statements: a live-table read, a
+  `to_regprocedure` check, and a full `horsies_task_detail_staged` row with its
+  attempt snapshot.
+- Healthy partition coverage republishes the staged readers when the detail
+  reader, the result reader, or the rendered duplicate guard is absent. It
+  still uses three catalog statements.
+- `LeafCreation::CoveredByOpenEndedLeaf`: `create_daily_leaf` refuses a daily
+  `forever` leaf that the open-ended leaf covers, and creates nothing.
+- `LeafInspection` renames `expires_at` to `eligible_at` and adds
+  `KeptNonEmpty`. The inspection, finalize and drop commands carry a
+  `LeafLifecycle`; existing constructors use `Retention`.
+- `PrunePass` adds `forever_swept`.
+- The move family's duplicate-identity guard calls
+  `horsies_task_history_duplicate_staged(uuid)`. The staged reader publisher
+  renders it from the leaf manifest: a UUIDv7 id probes only the history
+  leaves that can hold it. The readers' clock-violation fallback probes are
+  omitted, so the guard does not detect a duplicate that a wrong client clock
+  placed in an older leaf. Other ids probe every leaf. The readers keep their
+  fallback. Before, every completion probed every history leaf.
+- Cutover relocation checks every selected legacy row against the dropped
+  rules before its first write. A row outside them stops the batch with
+  `RelocationError::ColumnRuleViolation { task_id, rule }`, and the batch
+  makes no change.
+- `horsies transcode plan` rejects a target version below 1 and a target
+  codec outside 1 to 64 bytes. The run path reads the target as a checked
+  `TranscodeTarget` from the job row.
+- `horsies transcode plan` and `horsies transcode run` refuse a target that
+  this binary's decoder does not read, before maintenance begins. Today the
+  decoder reads version 1 with `json-utf8` (`row-v1` for the history row
+  component). `plan_transcode` takes a `DecodableTarget`, parsed against a
+  named `DecoderSet`; `DecoderSet::current()` is built from the decoder's
+  constants.
+
+### Upgrade
+
+- Apply migrations 0063, 0064 and 0065 before processes use this release.
+- Migration 0065 installs a first version of the guard with the full probe.
+  The next partition coverage pass (worker startup) replaces it with the
+  rendered version.
+- Migration 0064 refuses a database whose single-column CHECK set on
+  `horsies_task_history` differs from the 24 expected names. It takes a short
+  exclusive lock on the history parent and its leaves, and scans no rows.
+- The next partition coverage pass installs `horsies_task_result_staged`.
+  Until then, result reads use the previous three-statement path.
+- Upgrade every worker in one deployment. A worker of an earlier release
+  still creates daily `forever` leaves; once this release creates the
+  open-ended `forever` leaf, the earlier worker's next daily `forever` leaf
+  overlaps it, and its partition coverage fails until it is upgraded.
+
+### Testing
+
+- The release workflow runs the default, `web` and `arbitrary-precision`
+  test variants as parallel jobs, each with its own PostgreSQL service.
+
+## [0.1.0-alpha.34] - 2026-09-17
+
+### Fixed
+
+- Constrain persisted workflow-node statuses to the seven supported values.
+  Reject unsupported existing values before the migration changes the schema.
+  Stop accepting `CANCELLED` as a node terminal status in SQL functions.
+
+### Work reductions
+
+- Index nonterminal workflow nodes by workflow ID. Recovery probes use the
+  partial index without scanning terminal nodes in the same workflow.
+- Reuse a generic plan for claim candidate selection. Keep automatic planning
+  for in-flight accounting and preserve claim ordering, leases, and caps.
+
+### Observability
+
+- Add claim-call debug timings on the `horsies::claim` target. Record pool wait,
+  database-call duration, total duration, returned count, and success.
+
+### Upgrade
+
+- Apply migrations 0059 through 0062 before processes use this release.
+- The node-status migration refuses rows outside the supported status set.
+  Correct those rows before retrying the migration.
+
+## [0.1.0-alpha.33] - 2026-09-17
+
+### Fixed
+
+- Return expired pending tasks in deadline order.
+- Persist workflow recovery health in worker snapshots. Include completion
+  candidate yield as candidates divided by workflows scanned.
+
+### Work reductions
+
+- Remove three workflow-node indexes whose readers use the remaining indexes.
+- Reuse a generic plan for the phase-two history lookup.
+- Skip loader republication when partition detach does not change the manifest.
+- Bound non-runnable workflow checks by claimed task IDs and reuse a generic
+  plan. Skip node lookups when no workflow is paused or cancelled.
+
+### Upgrade
+
+- Apply migrations 0053 through 0058 before processes use this release.
+
+## [0.1.0-alpha.32] - 2026-09-16
+
+### Fixed
+
+- Keep schedules stopped when their stored `next_run_at` becomes `NULL`.
+- Use a private connection pool for scheduler locks. A runtime pool with one
+  connection no longer blocks the scheduler while it holds its lock.
+- Poll for the migration lock without retaining an active transaction.
+  Waiting migrators no longer block a concurrent index build.
+- Wake the claim loop when local execution capacity is released. Available
+  capacity no longer waits for the polling interval after a consumed wake.
+
+### Work reductions
+
+- Skip unused UUID generation when enqueue receives a predetermined task ID.
+- Reuse the nonterminal-node existence result during workflow recovery.
+- Bound claim candidate locks by queue capacity and batch size. Use indexed
+  task lookup for the claim update while preserving dispatch order.
+- Combine workflow finalization metadata reads, skip discarded success
+  results on failure paths, and remove the redundant completion notification.
+- Skip workflow-node updates during handoff when the node is already running.
+- Reuse terminal result digests and encode each task's attempt snapshot once
+  in batch terminalization.
+- Write each history manifest with one DELETE and one bulk INSERT. Publish
+  readers once per changed retention class during coverage creation.
+- Index active history catalog records so retention scans can exclude
+  dropped-partition records.
+
+### Testing
+
+- Isolate recovery cursors and pending rows in tests. Wait for database
+  sessions to close before cleanup.
+
+### Upgrade
+
+- Apply migrations 0049 through 0052 before processes use this release.
+- The scheduler lock pool can use one additional database connection.
+
+## [0.1.0-alpha.31] - 2026-08-26
+
+### Fixed
+
+- Partition startup and periodic maintenance now use the session-capable
+  database pool. PgBouncer transaction-pool connections no longer run session
+  advisory locks or partition DDL.
+- Healthy partition coverage uses three catalog statements. It starts no
+  transaction and takes no advisory or relation lock. Required leaf repairs
+  use nonblocking advisory and relation locks and commit one leaf per
+  transaction.
+- Global recovery scans use bounded pages, fixed cycle upper watermarks, and
+  durable claims. New rows cannot prevent cursor wrap, and concurrent reapers
+  cannot process the same claimed page.
+- Recovery index migrations use retry-safe concurrent builds. Startup verifies
+  each index before the bounded recovery functions become active.
+
+### Changed
+
+- Partition mutation outcomes include explicit `Busy` variants.
+  `finalize_interrupted_detach` returns
+  `FinalizeInterruptedLeafOutcome`.
+- Recovery health data includes per-case row counts, candidate counts,
+  duration, refusals, and errors.
+- `RecoveryConfig.orphan_task_audit_interval_ms` controls the bounded orphan
+  workflow-task audit interval. Its default is 60 seconds.
+
+### Upgrade
+
+- Apply migrations 0045 through 0048 before processes use this release.
+
+## [0.1.0-alpha.30] - 2026-08-25
+
+### Fixed
+
+- Delayed-retry and stale-task retry wake-ups now send the task UUID to
+  PostgreSQL `pg_notify` as text. PostgreSQL rejected the previous UUID bind.
+  The retry state stayed durable and worker polling found it later, but the
+  direct wake-up did not occur.
+
+### Changed
+
+- The monitoring `/api/tasks/stats` route now caches each successful request
+  scope for 10 seconds. Concurrent requests for the same scope share one
+  aggregate query. Errors are not cached. The cache holds at most 256 scopes.
+
+### Removed
+
+- Migration 0044 drops `idx_horsies_tasks_retention` and
+  `idx_horsies_tasks_queue_retention`. Terminal tasks move to partitioned
+  history, so live-task retention does not use these indexes.
+
+### Upgrade
+
+- Apply migration 0044 before processes use this release.
+
+## [0.1.0-alpha.29] - 2026-08-19
+
+### Fixed
+
+- `serde_json/arbitrary_precision` now sits behind the off-by-default
+  `arbitrary-precision` Cargo feature. The flag changes `serde_json` number
+  handling for the whole build graph, and Cargo has no negative features, so
+  every crate that depended on horsies inherited it. Under the flag, any
+  `#[serde(flatten)]`, `#[serde(tag = "...")]` or `#[serde(untagged)]`
+  container rejects a typed float with `invalid type: map, expected f64`,
+  including containers horsies never sees. Enable the feature only for
+  byte-exact rerun-input fingerprints over integers outside the i64/u64
+  domain.
+
+### Changed
+
+- The default build rejects an integer literal outside the i64/u64 domain in
+  `args`, `kwargs`, `task_options`, and in a stored rerun-input envelope.
+  Without the retained source lexeme, such a literal parses to binary64 and
+  loses digits with no error, which would anchor the input digest to a value
+  the caller did not send. Build with `arbitrary-precision` to accept these
+  literals.
+- Without `arbitrary-precision`, the canonical form of the `-0` literal is
+  `-0.0` rather than `0`. The parse cannot separate `-0` from `-0.0` without
+  the source lexeme. Turning the feature on therefore changes the input
+  digest for inputs that carry `-0`.
+
+## [0.1.0-alpha.28] - 2026-08-14
+
+### Fixed
+
+- Worker panic conversion on the blocking and join paths now reports
+  `UNHANDLED_ERROR`. These paths reported `TASK_ERROR` before. The
+  documented vocabulary maps a worker-captured panic to
+  `UNHANDLED_ERROR` and a returned `Err(TaskError)` to `TASK_ERROR`.
+  The async panic path already followed the documented mapping.
+
+## [0.1.0-alpha.27] - 2026-08-13
+
+This release adds the browser monitoring dashboard and its transport-free read
+and action API. The migration chain advances from 0042 to 0043.
+
+### Added
+
+- Added the optional `web` Cargo feature. It provides an axum router and an
+  embedded React dashboard for tasks, workflows, workers, and schedules.
+- Added the transport-free `horsies::monitoring` module. It provides typed
+  live-plus-history reads and task or workflow action decisions.
+- Added `horsies web` with TOML and database-URL modes. The command supports
+  view-only service, trusted proxy headers, actions, custom CSS, and PgBouncer
+  split URLs.
+- Added migration 0043 with the task `enqueued_at` and `task_name` monitoring
+  indexes.
+- Added server-sent invalidation events for task, workflow, and worker changes.
+
+### Changed
+
+- Dashboard task lists and aggregates now merge live tasks with a bounded
+  retained-history window. The default window is 24 hours. The maximum window
+  is 30 days.
+- Dashboard actions require authorization, `X-Horsies-Intent: action`, an exact
+  schema version, and the task-history cutover attestation.
+- The standalone dashboard uses observe-only startup. It never applies
+  migrations or writes cutover state.
+- Monitoring task actions now cancel eligible live tasks. Workflow actions now
+  pause, resume, or cancel eligible workflows.
+
+### Removed
+
+- Removed the stale manual-retry control from the vendored dashboard. Use the
+  programmatic `rerun_task` API to create a new lineage-bearing task from an
+  eligible retained source.
+
+### Security
+
+- `--auth none` now requires a loopback bind. Network deployments must use a
+  trusted proxy or mount a custom `MonitoringAuthPolicy`.
+- Trusted-header mode requires the proxy to strip or overwrite the configured
+  identity header. The CLI prints this requirement at startup.
+- Schema mismatch, absent schema, incomplete cutover, and unknown schema states
+  disable actions without running DDL.
+
+### Upgrade
+
+- Apply migration 0043 before enabling actions. Reads can remain available
+  while the schema probe reports a version mismatch.
+- Rebuild with `--features web` to include the monitoring router and dashboard.
+- See the [web UI deployment guide](https://suleymanozkeskin.github.io/horsies-rust/monitoring/web-ui-deployment/).
+
+## [0.1.0-alpha.26] - 2026-08-13
+
+This release adds the task-history live/archive split. The Rust migration chain
+advances from 0032 to 0042. Migration 0032 is the schema-v26 compatibility
+boundary. The final table shape matches task-history schema v35.
+
+### Added
+
+- Added `RetentionConfig` and `RetentionClassConfig` under
+  `AppConfig.retention`.
+- Added immutable finite retention classes. Daily partitions enforce each
+  class window.
+- Added per-queue retention through `queue_retention`. An explicit send choice
+  overrides the queue mapping. Unmapped queues use `standard_30d`.
+- Added `TaskSendOptions::retention_class(...)` and
+  `TaskSendOptions::retain_forever()`.
+- Added scoped idempotency keys through
+  `TaskSendOptions::idempotency_key(...)`.
+- Added retained-task rerun through `rerun_task`, `RerunTask`, and
+  `RerunEnqueuePolicy`. A rerun creates a new UUID and records lineage.
+- Added the phase-2 workflow outbox and quarantine. The worker reports pending,
+  failed, over-bound, and quarantined recovery evidence.
+- Added `WorkflowStatus::Expired`. Optional paused-workflow expiry stores a
+  structured `WORKFLOW_EXPIRED` error.
+- Added the `horsies cutover` and `horsies transcode` operator commands.
+
+### Changed
+
+- Terminal tasks now move from `horsies_tasks` to partitioned
+  `horsies_task_history` in the terminalization transaction.
+- `horsies_tasks` now accepts only `PENDING`, `CLAIMED`, and `RUNNING`.
+- Task, workflow, workflow-node, and heartbeat identities now use PostgreSQL
+  `uuid`. Public task and workflow handles expose `uuid::Uuid`. New task IDs
+  use UUIDv7. Scheduler state keeps its compatibility link in `VARCHAR(36)` and
+  converts it at the runtime boundary.
+- Terminal attempt rows now become a verified snapshot in the history row.
+  Live attempt rows are deleted in the same transaction.
+- Task retention now drops whole partitions. It no longer deletes terminal task
+  rows in batches.
+- Heartbeats now use hourly partitions. The worker creates and drops heartbeat
+  leaves during partition maintenance.
+- History lookups now use staged reader functions. UUIDv7 time is a lookup hint.
+  Every skipped leaf is probed before absence is returned.
+- Each history leaf now has a task-ID index and an `enqueued_at` index.
+- Worker startup requires migration 0042 and the
+  `task_history_v1_validated_v1` cutover attestation.
+- Pausing a workflow now relocates claimed backing tasks to history. Resume
+  creates fresh backing task rows.
+- A regular workflow node now records `started_at` when it first reaches
+  `RUNNING`, not when its backing task is enqueued. A replay preserves the
+  first timestamp. A requeue or pause reset clears it.
+- Retention fields moved from `RecoveryConfig` to `AppConfig.retention`:
+  `terminal_record_retention_hours`, `worker_state_retention_hours`,
+  `retention_sweep_interval_s`, and `retention_delete_batch_size`.
+
+### Removed
+
+- Removed `RecoveryConfig.queue_terminal_record_retention_hours`. Use
+  `AppConfig.retention.queue_retention`.
+- Removed `RecoveryConfig.heartbeat_retention_hours`. Use partitioned heartbeat
+  storage and `AppConfig.retention.heartbeat_leaf_horizon_hours`.
+- Removed terminal task row cleanup from
+  `terminal_record_retention_hours`. Use task retention classes.
+
+### Upgrade
+
+- Existing databases at migration 0032 require an offline cutover. Stop all
+  processes. Take a named backup. Apply migrations 0033–0042. Run the
+  documented stage order. Restart only after validation writes the cutover
+  attestation.
+- Fresh databases start at migration 0042 and need no cutover.
+- See the [task-history cutover runbook](https://suleymanozkeskin.github.io/horsies-rust/operations/cutover-runbook/).
+
+### Known incompatibilities
+
+- The current Syce release does not support the task-history schema. A
+  compatible Syce release is required for complete terminal task and result
+  views.

@@ -1,161 +1,140 @@
 ---
 title: Getting Started
-summary: Minimal working example with a task producer and worker.
-related: [../../tasks/defining-tasks, ../../tasks/sending-tasks, ../../concepts/task-lifecycle]
-tags: [quickstart, installation, tutorial]
+summary: Add the horsies crate, define a task, build the app in one binary that is the worker and the producer, run a worker, and send the task.
+related: [../tasks/defining-tasks, ../configuration/app-config, ../workers/worker-setup, ../cli, ../tasks/sending-tasks]
+tags: [rust, quick start, install, first task, worker]
 ---
+
+# Getting Started
+
+One binary of a Rust app is the producer, the worker and each child of the worker. `main` builds the app, registers the tasks, and hands the command line to `horsies::cli::run`, which runs the worker, the scheduler or the check. This page builds an app with one task, runs a worker, and sends the task.
 
 ## Prerequisites
 
-- PostgreSQL 14+
-- Stable Rust
+- Rust 1.91 or later.
+- A PostgreSQL database for the app. A database belongs to one client: the core refuses a database that the Python client installed.
 
-## Installation
+## Add the Crate
 
-```sh
+```bash
 cargo add horsies
+cargo add tokio --features rt-multi-thread,macros
 ```
 
-## 1. Create the App Instance
+The default feature `cli` gives `horsies::cli::run`. The other features are `web` (the monitoring UI), `tokio-postgres` and `sqlx` (rerun in the caller's transaction). See [Overview](/horsies/rust/).
+
+## Write the App
 
 ```rust
-use horsies::{Horsies, AppConfig};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = AppConfig::for_database_url(
-        "postgresql://user:password@localhost:5432/mydb"
-    );
-
-    let mut app = Horsies::new(config)?;
-    Ok(())
-}
-```
-
-## 2. Define Tasks
-
-Create task functions annotated with `#[task]`:
-
-```rust
-use horsies::{task, TaskError};
-use serde::{Deserialize, Serialize};
-
-#[derive(Serialize, Deserialize)]
-struct AddInput { a: i32, b: i32 }
-
-#[task("add_numbers")]
-async fn add_numbers(input: AddInput) -> Result<i32, TaskError> {
-    Ok(input.a + input.b)
-}
-
-#[derive(Serialize, Deserialize)]
-struct ProcessInput { data: Vec<String> }
-
-#[task("process_data")]
-async fn process_data(input: ProcessInput) -> Result<String, TaskError> {
-    if input.data.is_empty() {
-        return Err(TaskError::new(
-            "EMPTY_DATA",
-            "Data cannot be empty",
-        ));
-    }
-    Ok(format!("Processed {} items", input.data.len()))
-}
-```
-
-Register tasks on the app:
-
-```rust
-add_numbers::register(&mut app)?;
-process_data::register(&mut app)?;
-```
-
-Requirements:
-
-- Every task returns `Result<T, TaskError>`
-- `Ok(value)` for success
-- `Err(TaskError::new(...))` for domain errors
-- Each task must be registered via `task_name::register(&mut app)`
-
-## 3. Send Tasks
-
-```rust
+use std::collections::BTreeMap;
+use std::convert::Infallible;
+use std::process::ExitCode;
 use std::time::Duration;
-use horsies::TaskResult;
 
-// Send and wait for result
-match add_numbers::send(AddInput { a: 5, b: 3 }).await {
-    Ok(handle) => {
-        match handle.get(Some(Duration::from_secs(5))).await {
-            TaskResult::Ok(value) => println!("Result: {}", value),
-            TaskResult::Err(err) => {
-                println!("Task failed: {:?} - {:?}", err.error_code, err.message);
-            }
-        }
-    }
-    Err(send_err) => {
-        println!("Send failed: {} - {}", send_err.code, send_err.message);
-    }
-}
-```
-
-## 4. Run the Worker
-
-```rust
-// In your binary's main function:
-app.run_worker().await?;
-```
-
-Or with custom configuration:
-
-```rust
-use horsies::WorkerConfig;
-
-let worker_config = WorkerConfig {
-    concurrency: 50,
-    ..Default::default()
+use horsies::{
+    task, AppConfig, Horsies, IsolatedChildCount, IsolatedChildren,
+    IsolatedSetting, TaskError, TaskOutcome, WaitLimit, WorkerProfile,
 };
 
-app.run_worker_with(worker_config).await?;
-```
+const DATABASE_URL: &str = "postgresql://postgres:postgres@localhost:5432/horsies";
 
-The worker connects to PostgreSQL, subscribes to LISTEN/NOTIFY, claims tasks, executes them, and stores results.
+#[task("greet")]
+async fn greet(name: String) -> Result<String, TaskError<Infallible>> {
+    Ok(format!("hello, {name}"))
+}
 
-## 5. Delayed Execution
+/// Every process builds the same app: the producer, the worker and each child.
+fn build_app() -> Result<Horsies, Box<dyn std::error::Error>> {
+    let profile = WorkerProfile {
+        isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
+            IsolatedChildCount::try_from(2)?,
+        )),
+        ..WorkerProfile::default()
+    };
+    let config = AppConfig {
+        worker_profiles: BTreeMap::from([("default".to_owned(), profile)]),
+        ..AppConfig::for_database_url(DATABASE_URL)
+    };
+    let mut app = Horsies::new(config)?;
+    let _greet = greet::register(&mut app)?;
+    Ok(app)
+}
 
-Schedule a task to run after a delay:
+async fn send_greeting() -> Result<(), Box<dyn std::error::Error>> {
+    let handle = greet::send("world".to_owned()).await?;
+    let limit = WaitLimit::parse(Some(Duration::from_secs(30)))?;
+    match handle.get(limit).await? {
+        TaskOutcome::Succeeded(greeting) => println!("{greeting}"),
+        TaskOutcome::Failed(error) => println!("greet failed: {}", error.code().text()),
+    }
+    Ok(())
+}
 
-```rust
-use std::time::Duration;
+fn run_send(_app: Horsies) -> ExitCode {
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("the runtime did not start: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(send_greeting()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
 
-match add_numbers::schedule(
-    Duration::from_secs(300),
-    AddInput { a: 10, b: 20 },
-).await {
-    Ok(handle) => println!("Scheduled: {}", handle.task_id()),
-    Err(err) => println!("Schedule failed: {}", err.code),
+fn main() -> ExitCode {
+    let app = match build_app() {
+        Ok(app) => app,
+        Err(refused) => {
+            eprintln!("{refused}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match std::env::args_os().nth(1) {
+        Some(command) if command == "send" => run_send(app),
+        Some(_) | None => horsies::cli::run(app),
+    }
 }
 ```
 
-## Project Structure
+- `#[task("greet")]` defines the task `greet`. Its parameter `name` is stored under its name: the input `{"name": "world"}`. See [Defining Tasks](/horsies/rust/tasks/defining-tasks/).
+- `Horsies::new` does no I/O. The app connects at its first operation and installs the schema there. See [App Config](/horsies/rust/configuration/app-config/).
+- The worker profile `default` has two isolated children. It does not set `preload`: the default, `ChildPreload::NoPreload`, is the only value that a Rust worker takes. See [Worker Setup](/horsies/rust/workers/worker-setup/).
+- `greet::send` sends through the function of `greet::register`. `get` waits for the outcome. See [Sending Tasks](/horsies/rust/tasks/sending-tasks/) and [Retrieving Results](/horsies/rust/tasks/retrieving-results/).
+- The worker starts this binary again for each child, with arguments of its own. `horsies::cli::run` serves them. Every line of `main` before it runs in each child too: build the app there and start nothing else.
 
-Simplest start — an overview of components:
+## Run It
 
-```text
-myproject/
-├── Cargo.toml
-├── src/
-│   ├── main.rs          # App setup, registration, entry point
-│   ├── config.rs        # AppConfig construction
-│   ├── tasks.rs         # Task definitions (#[task])
-│   └── workflows.rs     # Workflow definitions (WorkflowDefinition)
+Start a worker of the profile `default`:
+
+```bash
+cargo run -- worker --profile default
 ```
 
-Adjust to your project needs.
-Isolate entry points, configs, and workflow definitions.
+In a second terminal, send the task:
+
+```bash
+cargo run -- send
+```
+
+```text
+hello, world
+```
+
+`cargo run -- check` checks the app without a database. The commands, their options and their exit codes are on [CLI Reference](/horsies/rust/cli/).
 
 ## Next Steps
 
-- [Task Lifecycle](../../concepts/task-lifecycle) — task states and transitions
-- [Queue Modes](../../concepts/queue-modes) — multiple queues
-- [Scheduler Overview](../../scheduling/scheduler-overview) — scheduled tasks
-- [Recovery Config](../../configuration/recovery-config) — crash recovery
+| Topic | Page |
+|-------|------|
+| Task attributes, execution classes, retries, `TaskRuntime` | [Defining Tasks](/horsies/rust/tasks/defining-tasks/) |
+| Errors of a task and their codes | [Task Errors](/horsies/rust/tasks/errors/) |
+| Workflows | [Workflow API](/horsies/rust/concepts/workflows/workflow-api/) |
+| Schedules | [Schedule Config](/horsies/rust/scheduling/schedule-config/) |
+| A program with no tokio runtime | [Blocking API](/horsies/rust/tasks/blocking-api/) |
+| Tests of task bodies | [Testing](/horsies/rust/operations/testing/) |

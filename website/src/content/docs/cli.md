@@ -1,6 +1,7 @@
 ---
 title: CLI Reference
-summary: Command-line interface for running workers, the scheduler, and the monitoring web UI.
+section: python
+summary: Command-line interface for running workers, the scheduler, the fleet metrics server and the monitoring web UI.
 related: [../workers/worker-architecture, ../scheduling/scheduler-overview]
 tags: [cli, worker, scheduler, commands]
 ---
@@ -27,8 +28,11 @@ horsies worker <module> --profile NAME [OPTIONS]
 | ------ | ------- | ----------- |
 | `--profile NAME` | (required) | Name of the worker profile in `AppConfig.worker_profiles`. The profile holds the settings of the worker: children, recycling, claim limits, drain timeout and preload. See [Worker Profiles](/horsies/workers/worker-profiles/) |
 | `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
+| `--metrics-listen HOST:PORT` | none | Serve the worker metrics (`GET /metrics`) and the health probes (`GET /livez`, `GET /readyz`) on `HOST:PORT`, or `[IPV6]:PORT`. There is no default: without it the worker serves no endpoint. See [Metrics](/horsies/observability/metrics/) |
 
 There is no default profile. A missing or unknown `--profile` exits with code 1 before the app check and before any child starts. The message lists the defined profile names.
+
+A `--metrics-listen` value that does not parse exits with code 2 before the worker starts. An address that does not bind does not stop the worker: the endpoint binds again with a backoff.
 
 The flags `--processes`, `--max-claim-batch`, `--max-claim-per-worker`, `--max-tasks-per-child`, `--max-memory-per-child-mb`, `--drain-timeout` and `--child-preload` were removed in 0.7.0. Each one exits with code 2 and names the profile field that replaces it. See [Migrating to 0.7.0](/horsies/migrations/migration-to-0-7-0/).
 
@@ -46,6 +50,9 @@ horsies worker myapp.instance:app --profile default --loglevel=DEBUG
 
 # Using file path (also supported)
 horsies worker app/configs/instance.py:app --profile default
+
+# Serve the worker metrics and the health probes on port 9464
+horsies worker myapp.instance:app --profile default --metrics-listen 0.0.0.0:9464
 ```
 
 At boot, before any child starts, the worker logs the settings of the profile, and warns when the per-child memory limits add up to more than the memory that the worker can use (the container limit, or the host RAM), or when one worker opens more Postgres connections itself than the server has usable slots. See [Validation](/horsies/workers/worker-profiles/#validation).
@@ -143,6 +150,7 @@ Pass either `app_path` or `--database-url`, not both. With `--database-url` the 
 | `--auth MODE` | none | `none` (loopback hosts only) or `trusted-header` |
 | `--trusted-header NAME` | X-Forwarded-User | Identity header that the proxy sets |
 | `--enable-actions` | false | Allow task cancel, and workflow pause, resume and cancel (default is view-only) |
+| `--trace-link TEMPLATE` | none | The link of a task's trace id in the task detail: an `http` or `https` URL with one `{trace_id}`. A template that breaks a rule exits 2 and names the rule. Without it the id shows as text |
 | `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
 
 **Examples:**
@@ -152,12 +160,53 @@ Pass either `app_path` or `--database-url`, not both. With `--database-url` the 
 horsies web myapp.tasks:app
 
 # Monitor a database directly
-horsies web --database-url postgresql+psycopg://user:pw@host/db
+horsies web --database-url postgresql://user:pw@host/db
 
 # Behind a proxy that authenticates callers and sets the header
 horsies web myapp.tasks:app --host 0.0.0.0 \
     --auth trusted-header --trusted-header X-Forwarded-User --enable-actions
+
+# Behind a transaction-pooled PgBouncer: the listener takes a direct URL
+horsies web \
+    --database-url "$DATABASE_URL_POOLED" \
+    --session-database-url "$DATABASE_URL_DIRECT" \
+    --pgbouncer-transaction-mode
 ```
+
+The bind rules, the trusted-header contract and the PgBouncer rule are in [Web UI Deployment & Authentication](/horsies/monitoring/web-ui-deployment/#standalone-cli).
+
+### horsies metrics
+
+Serve the fleet metrics of the app's database at `GET /metrics`, in the Prometheus text format. What the metrics hold and when the command reads them: [Fleet Collector](/horsies/observability/fleet-collector/).
+
+```bash
+horsies metrics <module> --listen HOST:PORT [OPTIONS]
+```
+
+**Arguments:**
+
+| Argument | Description |
+| -------- | ----------- |
+| `module` | Dotted module path or file path containing Horsies instance |
+
+**Options:**
+
+| Option | Default | Description |
+| ------ | ------- | ----------- |
+| `--listen HOST:PORT` | required | The address to serve on: `HOST:PORT`, or `[IPV6]:PORT`. The port is 1 to 65535. There is no default |
+| `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
+
+**Examples:**
+
+```bash
+# Serve on all interfaces, port 9465
+horsies metrics myapp.instance:app --listen 0.0.0.0:9465
+
+# Serve on the IPv6 loopback address
+horsies metrics myapp.instance:app --listen '[::1]:9465'
+```
+
+An address that does not parse exits with code 2. The command exits with code 0 at `SIGTERM` or `SIGINT`, and with code 1 when the app cannot be loaded, the broker does not build, or the address does not bind. A database that does not answer does not end it.
 
 ### horsies get-docs
 
@@ -232,8 +281,8 @@ Each agent tool reads a different folder, so `--target` has no default. The comm
 ## Agent Skills (Repository)
 
 Horsies ships guidance-oriented skill files as one skill folder in the package,
-`horsies/.agents/skills/horsies/`. The wheel contains it, and a source checkout
-has it at the same path. Copy it into your project with
+`horsies/.agents/skills/horsies/`. The wheel contains it; a source checkout has
+it at `clients/python/horsies/.agents/skills/horsies/`. Copy it into your project with
 [`horsies skills install`](#horsies-skills-install).
 
 Available files:
@@ -276,7 +325,7 @@ from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, TaskError, TaskResult
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb")),
+    broker=PostgresConfig(database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb")),
 ))  # Auto-discovered
 
 @app.task("my_task")
@@ -293,7 +342,7 @@ Requirements:
 
 ## Process Signals
 
-Both commands handle graceful shutdown:
+`horsies worker`, `horsies scheduler` and `horsies metrics` handle graceful shutdown:
 
 | Signal | Behavior |
 | ------ | -------- |
@@ -310,11 +359,27 @@ Workers wait up to the `drain_timeout` of their profile for running tasks. See [
 | 1 | Error (check logs), including a missing or unknown `--profile` |
 | 2 | Invalid `horsies web` arguments, a removed worker flag, or an argparse error |
 | 77 | `horsies worker`: the worker could not write runner heartbeats, and it had not stopped 120 seconds after it started to stop. See [When the Worker Cannot Write Heartbeats](/horsies/workers/heartbeats-recovery/#when-the-worker-cannot-write-heartbeats) |
+| 79 | `horsies worker`: the worker held a task, and its liveness lock was not held for 60 seconds. See [Worker Liveness Lock](/horsies/workers/heartbeats-recovery/#worker-liveness-lock) |
+
+A worker child exits with one of these codes; the worker reads it to name how the child ended.
+
+| Code | Meaning |
+| ---- | ------- |
+| 0 | The worker sent its stop frame |
+| 71 | The worker is gone |
+| 72 | The worker sent a malformed frame, or a frame over the bounds |
+| 73 | The child arguments cannot be used |
+| 74 | The child stopped while threads of its task loop executor still ran |
+| 75 | The child start failed, after a report that names the cause |
+| 76 | A child that the preload process forked did not reparent to the worker |
+| 78 | The worker speaks another protocol version: the worker and its children come from different builds |
+| 80 | The core of the child stopped (a panic in a core background task), or the child was forked after its core started. The child ended itself at its next core call |
+| 173 | A child start hook failed or ran past its bound |
 
 ## Environment Variables
 
 ```bash
-DATABASE_URL=postgresql+psycopg://... horsies worker myapp.instance:app --profile default
+DATABASE_URL=postgresql://... horsies worker myapp.instance:app --profile default
 ```
 
 Use in config:
@@ -371,4 +436,17 @@ Use this exec form. With the shell form, `sh` receives SIGTERM and the worker do
 ```text
 worker: horsies worker myapp.instance:app --profile default
 scheduler: horsies scheduler myapp.instance:app
+```
+
+## Things to Avoid
+
+**Don't serve `horsies web` on a non-loopback address with `--auth none`.** The command exits with code 2. See [Things to Avoid](/horsies/monitoring/web-ui-deployment/#things-to-avoid) of Web UI Deployment & Authentication.
+
+```bash
+# Wrong — refused with exit 2
+horsies web myapp.tasks:app --host 0.0.0.0 --auth none
+
+# Correct — a proxy owns identity, and it strips the header on ingress
+horsies web myapp.tasks:app --host 0.0.0.0 \
+    --auth trusted-header --trusted-header X-Forwarded-User
 ```
