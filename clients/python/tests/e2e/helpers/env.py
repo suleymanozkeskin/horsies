@@ -34,6 +34,11 @@ TASK_MODULE_URL_ENV_NAME = 'HORSES_E2E_DB_URL'
 """The variable that every e2e task module reads at import, in the test
 process and in each scheduler or worker subprocess."""
 
+CHECK_LIVE_URL_ENV_NAME = 'HORSIES_E2E_CHECK_LIVE_DATABASE_URL'
+"""The variable that ``tests.e2e.tasks.instance_check_live`` reads at import,
+in place of ``TASK_MODULE_URL_ENV_NAME``: each ``horsies check --live``
+process test gives its own database URL to the app. It has no default."""
+
 
 def e2e_database_url(*env_names: str) -> str:
     """The e2e database URL: first override set, else built locally.
