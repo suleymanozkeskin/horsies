@@ -654,11 +654,10 @@ impl Listener {
             filter,
             slot: Arc::clone(&slot),
         };
-        let id = self.subscribe(channel, sink).await?;
+        let registration = self.subscribe(channel, sink).await?;
         Ok(WakeSubscription {
-            id,
+            _registration: registration,
             slot,
-            shared: Arc::clone(&self.owner.shared),
         })
     }
 
@@ -669,13 +668,12 @@ impl Listener {
         capacity: QueueCapacity,
     ) -> Result<PayloadSubscription, SubscribeError> {
         let queue = Arc::new(PayloadQueue::new(capacity));
-        let id = self
+        let registration = self
             .subscribe(channel, Sink::Payloads(Arc::clone(&queue)))
             .await?;
         Ok(PayloadSubscription {
-            id,
+            _registration: registration,
             queue,
-            shared: Arc::clone(&self.owner.shared),
         })
     }
 
@@ -716,14 +714,18 @@ impl Listener {
         outcome
     }
 
+    /// Puts a subscriber into the registry and waits until the listener
+    /// confirms its LISTEN. The returned [`Registration`] owns the removal of
+    /// the subscriber from the moment it enters the registry: a caller that
+    /// is dropped while it waits, a refusal and a timeout all remove it.
     async fn subscribe(
         &self,
         channel: ChannelName,
         sink: Sink,
-    ) -> Result<SubscriberId, SubscribeError> {
+    ) -> Result<Registration, SubscribeError> {
         let shared = &self.owner.shared;
         let (sender, receiver) = oneshot::channel();
-        let id = {
+        let registration = {
             let mut registry = lock(&shared.registry);
             match registry.lifecycle {
                 Lifecycle::Closing => return Err(SubscribeError::ListenerStopped),
@@ -744,31 +746,42 @@ impl Listener {
                     confirmation: Confirmation::Waiting(sender),
                 },
             );
-            id
+            Registration {
+                id,
+                shared: Arc::clone(shared),
+            }
         };
         shared.task_wake.notify_one();
         match tokio::time::timeout(self.owner.subscribe_bound, receiver).await {
-            Ok(Ok(Ok(()))) => Ok(id),
+            Ok(Ok(Ok(()))) => Ok(registration),
             Ok(Ok(Err(error))) => Err(error),
-            Ok(Err(_task_gone)) => {
-                shared.remove(id);
-                Err(SubscribeError::ListenerStopped)
-            }
-            Err(_elapsed) => {
-                shared.remove(id);
-                Err(SubscribeError::TimedOut {
-                    bound: self.owner.subscribe_bound,
-                })
-            }
+            Ok(Err(_task_gone)) => Err(SubscribeError::ListenerStopped),
+            Err(_elapsed) => Err(SubscribeError::TimedOut {
+                bound: self.owner.subscribe_bound,
+            }),
         }
+    }
+}
+
+/// A subscriber in the registry. Dropping it removes the subscriber, so the
+/// listener UNLISTENs a channel that no subscriber wants any more. A removal
+/// of a subscriber that a failure already removed changes nothing.
+struct Registration {
+    id: SubscriberId,
+    shared: Arc<Shared>,
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        self.shared.remove(self.id);
     }
 }
 
 /// A wake subscription. Dropping it unsubscribes.
 pub struct WakeSubscription {
-    id: SubscriberId,
+    /// Removes the subscriber when the subscription drops.
+    _registration: Registration,
     slot: Arc<WakeSlot>,
-    shared: Arc<Shared>,
 }
 
 impl WakeSubscription {
@@ -778,29 +791,17 @@ impl WakeSubscription {
     }
 }
 
-impl Drop for WakeSubscription {
-    fn drop(&mut self) {
-        self.shared.remove(self.id);
-    }
-}
-
 /// A payload subscription. Dropping it unsubscribes.
 pub struct PayloadSubscription {
-    id: SubscriberId,
+    /// Removes the subscriber when the subscription drops.
+    _registration: Registration,
     queue: Arc<PayloadQueue>,
-    shared: Arc<Shared>,
 }
 
 impl PayloadSubscription {
     /// Waits for the next event.
     pub async fn recv(&self) -> PayloadEvent {
         self.queue.recv().await
-    }
-}
-
-impl Drop for PayloadSubscription {
-    fn drop(&mut self) {
-        self.shared.remove(self.id);
     }
 }
 
@@ -1309,5 +1310,53 @@ mod tests {
         shared.stop_all();
         assert_eq!(other_channel.recv().await, WakeEvent::Stopped);
         assert_eq!(queue.recv().await, PayloadEvent::Stopped);
+    }
+
+    /// The subscribers in the registry of `listener`.
+    fn subscriber_count(listener: &Listener) -> usize {
+        lock(&listener.owner.shared.registry).subscribers.len()
+    }
+
+    /// A caller that is dropped while its subscribe waits for the LISTEN
+    /// leaves no subscriber behind, so the listener UNLISTENs the channel.
+    /// The server accepts the connection and never answers, so the LISTEN
+    /// cannot confirm while the test runs.
+    #[tokio::test]
+    async fn a_subscribe_dropped_before_its_listen_confirms_leaves_no_subscriber() {
+        use crate::db::connect::DEFAULT_SOCKET_SETTINGS;
+        use crate::db::environment::ConnectionEnvironment;
+        use crate::db::url::parse_connection_url;
+
+        let silent_server = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a local port");
+        let port = silent_server
+            .local_addr()
+            .expect("the bound address")
+            .port();
+        let environment = ConnectionEnvironment::isolated();
+        let settings = parse_connection_url(
+            &format!("postgresql://user:pw@127.0.0.1:{port}/db"),
+            &environment,
+        )
+        .expect("the URL parses");
+        let plan = ConnectPlan::load(&settings, &environment, &DEFAULT_SOCKET_SETTINGS)
+            .expect("the plan loads");
+        let listener = Listener::start(Arc::new(plan));
+        let channel = ChannelName::parse("task_done").expect("valid name");
+
+        let mut subscribe = Box::pin(listener.subscribe_wake(channel, PayloadFilter::AnyPayload));
+        assert!(
+            futures::poll!(&mut subscribe).is_pending(),
+            "the LISTEN cannot confirm on a server that never answers",
+        );
+        assert_eq!(subscriber_count(&listener), 1, "the subscribe registered");
+        drop(subscribe);
+
+        assert_eq!(
+            subscriber_count(&listener),
+            0,
+            "the dropped subscribe left its subscriber behind",
+        );
+        drop(listener);
+        drop(silent_server);
     }
 }
