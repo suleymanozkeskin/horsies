@@ -495,14 +495,13 @@ pub(crate) fn core_pool_for_test_url(url: &str) -> CorePool {
         runtime_protocol(&config),
     )
     .expect("the size of a test pool is accepted by the statement layer");
-    let core_pool = open_pool(
+    open_pool(
         &config.database_url,
         plan,
         &ConnectionEnvironment::isolated(),
         &config.socket_settings(),
     )
-    .expect("the URL of a test pool is accepted by the statement layer");
-    core_pool
+    .expect("the URL of a test pool is accepted by the statement layer")
 }
 
 /// A worker profile core pool of `size` connections on the test database of
@@ -521,14 +520,13 @@ pub(crate) fn worker_core_pool_for_test_url(url: &str, size: u32) -> CorePool {
         runtime_protocol(&config),
     )
     .expect("a test worker pool is larger than its reserve");
-    let core_pool = open_pool(
+    open_pool(
         &config.database_url,
         plan,
         &ConnectionEnvironment::isolated(),
         &config.socket_settings(),
     )
-    .expect("the URL of a test pool is accepted by the statement layer");
-    core_pool
+    .expect("the URL of a test pool is accepted by the statement layer")
 }
 
 /// A session pool of `size` connections on the test database of `url`: no
@@ -546,14 +544,13 @@ pub(crate) fn session_core_pool_for_test_url(url: &str, size: u32) -> CorePool {
         StatementProtocol::PreparedPerConnection,
     )
     .expect("a test session pool has at least one connection");
-    let core_pool = open_pool(
+    open_pool(
         &config.database_url,
         plan,
         &ConnectionEnvironment::isolated(),
         &config.socket_settings(),
     )
-    .expect("the URL of a test pool is accepted by the statement layer");
-    core_pool
+    .expect("the URL of a test pool is accepted by the statement layer")
 }
 
 /// The checkout wait of [`unpinged_single_connection_core_pool_for_url`].
@@ -576,14 +573,13 @@ pub(crate) fn unpinged_single_connection_core_pool_for_url(url: &str) -> CorePoo
         max_age: ConnectionAge::Unlimited,
         protocol: StatementProtocol::PreparedPerConnection,
     };
-    let core_pool = open_pool(
+    open_pool(
         url,
         plan,
         &ConnectionEnvironment::isolated(),
         &crate::db::DEFAULT_SOCKET_SETTINGS,
     )
-    .expect("the URL of a test pool is accepted by the statement layer");
-    core_pool
+    .expect("the URL of a test pool is accepted by the statement layer")
 }
 
 #[cfg(test)]

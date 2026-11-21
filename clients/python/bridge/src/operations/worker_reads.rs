@@ -234,7 +234,7 @@ pub trait ToRecord {
 
 /// The answer of `get_worker_state`.
 pub enum WorkerStateLookup {
-    Found(WorkerStateSnapshot),
+    Found(Box<WorkerStateSnapshot>),
     Absent { worker_id: String },
 }
 
@@ -543,7 +543,7 @@ pub async fn worker_state_operation(
         Err(error) => return WorkerReadOutcome::Failed(connect_failed("get_worker_state", error)),
     };
     match broker.get_worker_state(&worker_id).await {
-        Ok(Some(snapshot)) => WorkerReadOutcome::Read(WorkerStateLookup::Found(snapshot)),
+        Ok(Some(snapshot)) => WorkerReadOutcome::Read(WorkerStateLookup::Found(Box::new(snapshot))),
         Ok(None) => WorkerReadOutcome::Read(WorkerStateLookup::Absent { worker_id }),
         Err(error) => {
             WorkerReadOutcome::Failed(BrokerFailure::of_operation_error("get_worker_state", error))

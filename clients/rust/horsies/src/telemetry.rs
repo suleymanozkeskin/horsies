@@ -89,6 +89,14 @@ pub(crate) fn body_span(run: &BodyRun<'_>) -> tracing::Span {
 
 /// The facts of one task send that its span carries.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(
+    not(feature = "otel"),
+    expect(
+        dead_code,
+        reason = "only the send span of the `otel` feature reads the facts; \
+                  without it the send builds the subject and opens no span"
+    )
+)]
 pub(crate) struct TaskSendSubject<'a> {
     pub(crate) task_id: Uuid,
     pub(crate) task_name: &'a str,
@@ -97,6 +105,14 @@ pub(crate) struct TaskSendSubject<'a> {
 
 /// The facts of one workflow start that its span carries.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(
+    not(feature = "otel"),
+    expect(
+        dead_code,
+        reason = "only the start span of the `otel` feature reads the facts; \
+                  without it the start builds the subject and opens no span"
+    )
+)]
 pub(crate) struct WorkflowStartSubject<'a> {
     pub(crate) workflow_id: Uuid,
     pub(crate) workflow_name: &'a str,

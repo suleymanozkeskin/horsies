@@ -62,6 +62,11 @@ fn failure(error_code: &str, message: String) -> TaskError<WfCode> {
 
 /// Python `e2e_wf_step`.
 #[blocking_task("e2e_wf_step")]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the parameters of a task are its wire contract: the task attribute decodes each \
+              input as an owned value"
+)]
 pub fn step(step: String) -> Result<String, TaskError<WfCode>> {
     node_run();
     Ok(format!("completed_{step}"))
@@ -69,6 +74,11 @@ pub fn step(step: String) -> Result<String, TaskError<WfCode>> {
 
 /// Python `e2e_wf_slow_step`.
 #[blocking_task("e2e_wf_slow_step")]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the parameters of a task are its wire contract: the task attribute decodes each \
+              input as an owned value"
+)]
 pub fn slow_step(step: String, delay_ms: u64) -> Result<String, TaskError<WfCode>> {
     std::thread::sleep(Duration::from_millis(delay_ms));
     Ok(format!("completed_{step}"))
@@ -94,6 +104,11 @@ pub fn fail() -> Result<i64, TaskError<WfCode>> {
 /// Python `e2e_wf_fail_with`: always fails with the code named
 /// `error_code`.
 #[blocking_task("e2e_wf_fail_with")]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the parameters of a task are its wire contract: the task attribute decodes each \
+              input as an owned value"
+)]
 pub fn fail_with(error_code: String) -> Result<i64, TaskError<WfCode>> {
     node_run();
     Err(failure(&error_code, format!("Failed with {error_code}")))
@@ -122,6 +137,11 @@ pub fn slow_mark(value: String, delay_ms: u64) -> Result<String, TaskError<WfCod
     "e2e_wf_retry_then_ok",
     retry_policy = RetryPolicy::exponential(1, 3, false).expect("a valid exponential policy"),
     auto_retry_for = ["RETRY_NEEDED"]
+)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the parameters of a task are its wire contract: the task attribute decodes each \
+              input as an owned value"
 )]
 pub fn retry_then_ok(token: String, succeed_on_attempt: u32) -> Result<String, TaskError<WfCode>> {
     node_run();

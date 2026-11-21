@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn data_outside_i64_and_u64_keeps_every_digit() {
         let error = declined().with_data(BTreeMap::from([
-            ("wide", i128::try_from(u64::MAX).unwrap() + 1),
+            ("wide", i128::from(u64::MAX) + 1),
             ("below", i128::from(i64::MIN) - 1),
         ]));
         assert_eq!(

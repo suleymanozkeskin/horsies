@@ -149,7 +149,7 @@ mod tests {
 
     use super::*;
 
-    fn envelope(value: Value) -> StoredEnvelopeText {
+    fn envelope(value: &Value) -> StoredEnvelopeText {
         StoredEnvelopeText::parse(value.to_string())
             .unwrap()
             .expect("an envelope is an object")
@@ -160,7 +160,7 @@ mod tests {
             task_id: Uuid::from_u128(9),
             task_name: "add".to_owned(),
             status,
-            raw_result: raw_result.map(envelope),
+            raw_result: raw_result.as_ref().map(envelope),
         }
     }
 

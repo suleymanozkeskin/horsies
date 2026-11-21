@@ -273,7 +273,10 @@ mod tests {
 
     #[test]
     fn infallible_has_no_code() {
-        assert!(<std::convert::Infallible as UserErrorCode>::CODES.is_empty());
+        assert_eq!(
+            <std::convert::Infallible as UserErrorCode>::CODES,
+            &[] as &[&str]
+        );
         assert_eq!(
             <std::convert::Infallible as UserErrorCode>::from_code("ANY"),
             None
@@ -282,7 +285,7 @@ mod tests {
 
     #[test]
     fn user_code_reads_every_user_code_and_no_built_in_name() {
-        assert!(<UserCode as UserErrorCode>::CODES.is_empty());
+        assert_eq!(<UserCode as UserErrorCode>::CODES, &[] as &[&str]);
         let read = <UserCode as UserErrorCode>::from_code("RATE_LIMITED").unwrap();
         assert_eq!(read.code(), "RATE_LIMITED");
         assert_eq!(<UserCode as UserErrorCode>::from_code("TASK_TIMEOUT"), None);

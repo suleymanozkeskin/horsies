@@ -162,6 +162,11 @@ pub fn thread_hang() -> Result<String, TaskError<Infallible>> {
     retry_policy = RetryPolicy::fixed(vec![1, 1, 1], false).expect("a valid policy"),
     auto_retry_for = ["TASK_TIMEOUT"]
 )]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the parameters of a task are its wire contract: the task attribute decodes each \
+              input as an owned value"
+)]
 pub fn thread_overrun(token: String) -> Result<String, TaskError<ClassCode>> {
     let marker_failed =
         |cause: markers::MarkerError| TaskError::user(ClassCode::MarkerFailed, cause.to_string());

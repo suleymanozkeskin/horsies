@@ -640,7 +640,7 @@ async fn settle_a_shared_run(pool: &TestPool, retried_code: &str, end: AttemptEn
         2,
     );
 
-    let settled = writer(&pool).settle(&claimed, end).await;
+    let settled = writer(pool).settle(&claimed, end).await;
 
     assert!(matches!(settled, Settlement::Written(_)), "{left:?}");
     match left {

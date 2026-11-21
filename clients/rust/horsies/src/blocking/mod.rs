@@ -135,6 +135,12 @@ where
     }
 
     /// `TaskFunction::send_with_options`, blocking.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the blocking form takes the arguments of \
+                  `TaskFunction::send_with_options` by value; a reference would change \
+                  every caller"
+    )]
     pub fn send_with_options(
         &self,
         options: TaskSendOptions,
@@ -153,6 +159,12 @@ where
     }
 
     /// `TaskFunction::schedule_with_options`, blocking.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the blocking form takes the arguments of \
+                  `TaskFunction::schedule_with_options` by value; a reference would change \
+                  every caller"
+    )]
     pub fn schedule_with_options(
         &self,
         options: TaskSendOptions,

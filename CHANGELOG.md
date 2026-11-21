@@ -8,6 +8,37 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Changed
+
+- **Rust crates: a large payload of an error or read type is boxed.** The
+  field or variant holds the value in a `Box`, so the types that hold it
+  are small. `Display`, `Debug`, the serde form, the error codes and the
+  messages do not change. Code that builds or destructures one of these
+  values changes. In `horsies-core`:
+  - `db::ConnectFailure::ServerRefused(Box<DbError>)`
+  - `db::CheckoutFailure::ConnectFailed { cause: Box<ConnectError>, .. }`
+  - `db::RefusalCause::Server(Box<DbError>)` and
+    `db::RefusalCause::CancelledAfterBound { error: Box<DbError>, .. }`
+  - `db::UnknownOutcomeCause::SessionTerminated(Box<DbError>)`
+  - `db::ConnectPlanError::Tls(Box<TlsLoadError>)`
+  - `TaskError::exception: Option<Box<ExceptionRecord>>` and
+    `TaskErrorKind::SubWorkflow(Box<SubWorkflowFailure>)`
+  - `BrokerOperationError::OperationFailed { cause: Box<BrokerOperationSource> }`,
+    and `EnqueueFailed` and `InvalidJsonPayload` with
+    `cause: Box<BrokerCheckCause>`
+  - `WorkflowStartError::EnqueueFailed { cause: Box<WorkflowError> }` and
+    `StartRefusalCause::Error(Box<WorkflowError>)`
+  - `monitoring::TaskActionError::DbOperationFailed { cause: Box<BrokerError> }`
+  - `monitoring::TaskDetailRead::Found(Box<TaskDetail>)`
+  - `SchedulerStartError::CommandRefused { cause: Box<BrokerError>, .. }`
+
+  The crate `horsies` re-exports `BrokerOperationError`,
+  `WorkflowStartError`, `StartRefusalCause`, `TaskActionError` and
+  `TaskDetailRead` with the same change. In `horsies-core`,
+  `core::lifecycle::outcomes::decode_raw` and
+  `HandleOperationError::connect_failed` take their first argument by
+  reference.
+
 ## [0.8.0] - 2026-11-21
 
 0.8.0 runs the Python client and the Rust client on one core, written in
