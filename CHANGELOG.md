@@ -8,10 +8,18 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
-Draft notes of 0.8.0. The Python client and the Rust client run on one core,
-written in Rust, on a new baseline schema. Read the
+## [0.8.0] - 2026-11-21
+
+0.8.0 runs the Python client and the Rust client on one core, written in
+Rust. Observability is opt-in: metrics, traces, logs, events, a Grafana
+dashboard and Prometheus alert rules. The `HRS-nnn` error codes of both
+clients come from one list in the core. 0.8.0 starts on a new database with
+a new baseline schema: the core does not upgrade a 0.7 database. The
+release is breaking: read the
 [migration guide to 0.8.0](https://suleymanozkeskin.github.io/horsies/migrations/migration-to-0-8-0/)
-before you upgrade a 0.7 deployment.
+before you upgrade a 0.7 deployment. For a `horsies-rust` 0.1.0-alpha app,
+read
+[Switching to 0.8.0](https://suleymanozkeskin.github.io/horsies/rust/migrations/switching-to-0-8-0/).
 
 ### Added
 

@@ -1,6 +1,6 @@
 [package]
 name = "horsies"
-version = "0.1.0-alpha.36"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.91"
 description = "Rust client of the horsies task queue and workflow engine"
@@ -53,8 +53,8 @@ name = "tools_cli"
 required-features = ["cli"]
 
 [dependencies]
-horsies-core = { version = "0.1.0-alpha.36", path = "../../../core" }
-horsies-macros = { version = "0.1.0-alpha.36", path = "../macros" }
+horsies-core = { version = "0.8.0", path = "../../../core" }
+horsies-macros = { version = "0.8.0", path = "../macros" }
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 # `unbounded_depth`: a task input or a returned value that the strict reader
