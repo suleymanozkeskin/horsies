@@ -60,9 +60,8 @@ use crate::workflow_engine::steps::{advance_parents, OwedParentAdvances, ParentA
 /// The worker that holds every task a test runs.
 pub(super) const WORKER: &str = "workflow-port-worker";
 
-/// The queue of the task nodes that the ports start. No worker test claims
-/// from it, so a live task that a test leaves on the shared database stays
-/// where it is.
+/// The queue of the task nodes that the ports start. No worker claims from
+/// it, so a live task that a test leaves stays where it is.
 pub(super) const PORT_QUEUE: &str = "port_workflow_q";
 
 /// Task options that are not a JSON object (Python's `PoisonOptionsChild`
@@ -90,8 +89,7 @@ pub(super) fn poison_success_policy() -> serde_json::Value {
     serde_json::json!({"cases": [1]})
 }
 
-/// The shared migrated database. A test on it must not leave a RUNNING
-/// workflow with stuck work, because other tests run global passes on it.
+/// The migrated database of the running test (`migrated_pool`).
 pub(super) async fn shared_pool() -> TestPool {
     crate::test_support::migrated_pool().await
 }
@@ -101,7 +99,7 @@ const TEST_POOL_CONNECTIONS: u32 = 5;
 
 /// How long [`IsolatedDatabase::drop`] waits for its pool to close. The
 /// close waits for every checked-out connection, so a connection that a
-/// test never gives back would stop the whole `#[serial]` run.
+/// test never gives back would stop the test.
 const POOL_CLOSE_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// History leaves the coverage pass creates ahead, in days and in hours.
@@ -1739,8 +1737,7 @@ impl Notifications {
     }
 }
 
-/// Ends seeded workflows that a test leaves RUNNING or PAUSED on the shared
-/// database, so no global pass of another test works on them.
+/// Ends the seeded workflows that a test leaves RUNNING or PAUSED.
 pub(super) async fn end_workflows(pool: &TestPool, workflow_ids: &[Uuid]) {
     sql::query(
         "UPDATE horsies_workflows

@@ -3976,8 +3976,6 @@ mod tests {
 
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    static EXECUTION_COUNT: AtomicU32 = AtomicU32::new(0);
-
     async fn succeed(_: ()) -> Result<String, TaskError> {
         Ok("done".to_owned())
     }
@@ -4000,9 +3998,17 @@ mod tests {
         Ok("workflow-done".to_owned())
     }
 
-    async fn counted_success_task(_: ()) -> Result<String, TaskError> {
-        EXECUTION_COUNT.fetch_add(1, Ordering::SeqCst);
-        Ok("counted".to_owned())
+    /// A task that adds one to `runs` at each run. Each test gives its own
+    /// counter.
+    fn counted_success_task(runs: &Arc<AtomicU32>) -> RegisteredTask {
+        let runs = Arc::clone(runs);
+        test_task(move |_: ()| {
+            let runs = Arc::clone(&runs);
+            async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                Ok::<String, TaskError>("counted".to_owned())
+            }
+        })
     }
 
     async fn panic_task(_: ()) -> Result<String, TaskError> {
@@ -4684,7 +4690,6 @@ mod tests {
     /// and the claim is released at once with the fenced release. Before, a
     /// failed node statement was treated as informational and user code ran.
     #[tokio::test]
-    #[serial(process_globals)]
     async fn a_failed_workflow_node_check_runs_no_user_code_and_releases_the_claim() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4693,14 +4698,14 @@ mod tests {
         let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
         link_task_to_workflow(&pool, &task_id, Some(0)).await;
-        EXECUTION_COUNT.store(0, Ordering::SeqCst);
+        let runs = Arc::new(AtomicU32::new(0));
 
         let (function_name, trigger_name) = install_fail_workflow_task_running_trigger(&pool).await;
         let result = AssertUnwindSafe(async {
-            run_finalize(&broker, test_task(counted_success_task), task_id).await;
+            run_finalize(&broker, counted_success_task(&runs), task_id).await;
 
             assert_eq!(
-                EXECUTION_COUNT.load(Ordering::SeqCst),
+                runs.load(Ordering::SeqCst),
                 0,
                 "user code must not run when the workflow node check fails",
             );
@@ -4724,7 +4729,6 @@ mod tests {
     /// a workflow task with no runnable node does not run; with orphan
     /// self-heal off nothing is written and the row stays CLAIMED.
     #[tokio::test]
-    #[serial(process_globals)]
     async fn an_unlinked_workflow_task_with_self_heal_off_runs_nothing_and_stays_claimed() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4745,11 +4749,11 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        EXECUTION_COUNT.store(0, Ordering::SeqCst);
+        let runs = Arc::new(AtomicU32::new(0));
 
         let (end, settled) = run_finalize_with(
             &broker,
-            test_task(counted_success_task),
+            counted_success_task(&runs),
             task_id,
             OrphanSelfHeal::Off,
         )
@@ -4765,13 +4769,12 @@ mod tests {
             settled,
             crate::worker::executor::slots::Settlement::NothingOwed
         );
-        assert_eq!(EXECUTION_COUNT.load(Ordering::SeqCst), 0);
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
         let (status, _, _) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(status, "CLAIMED");
     }
 
     #[tokio::test]
-    #[serial(process_globals)]
     async fn finalize_paused_workflow_cancels_without_running_user_code() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4785,11 +4788,11 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        EXECUTION_COUNT.store(0, Ordering::SeqCst);
+        let runs = Arc::new(AtomicU32::new(0));
 
-        run_finalize(&broker, test_task(counted_success_task), task_id).await;
+        run_finalize(&broker, counted_success_task(&runs), task_id).await;
 
-        assert_eq!(EXECUTION_COUNT.load(Ordering::SeqCst), 0);
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
 
         // Paused-workflow claimed-but-not-started task is moved to terminal
         // CANCELLED (not back to PENDING), so it cannot run as a duplicate of the
@@ -4806,7 +4809,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(process_globals)]
     async fn finalize_cancelled_workflow_skips_without_running_user_code() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4820,11 +4822,11 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        EXECUTION_COUNT.store(0, Ordering::SeqCst);
+        let runs = Arc::new(AtomicU32::new(0));
 
-        run_finalize(&broker, test_task(counted_success_task), task_id).await;
+        run_finalize(&broker, counted_success_task(&runs), task_id).await;
 
-        assert_eq!(EXECUTION_COUNT.load(Ordering::SeqCst), 0);
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
 
         let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(status, "CANCELLED");
@@ -4910,10 +4912,12 @@ mod tests {
 
         let task_id = Uuid::new_v4();
         // Python's stored layout: auto_retry_for lives inside retry_policy.
+        // The retry is 60 s away, so the check of a future next_retry_at
+        // holds when the finalize and the reads are slow.
         let task_options = serde_json::json!({
             "retry_policy": {
                 "max_retries": 3,
-                "intervals": [1, 1, 1],
+                "intervals": [60, 60, 60],
                 "backoff_strategy": "fixed",
                 "jitter": false,
                 "max_delay_seconds": null,
@@ -5218,7 +5222,8 @@ mod tests {
     struct FreshDatabase {
         pool: TestPool,
         database: crate::test_support::TestDatabase,
-        /// The shared test database URL, for the worker's config only: the
+        /// The URL of the migrated database of this test
+        /// (`migrated_database_url`), for the worker's config only: the
         /// worker reaches this database through `pool`.
         config_url: String,
     }

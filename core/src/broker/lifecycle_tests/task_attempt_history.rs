@@ -106,7 +106,7 @@ async fn stale_cleanup_writes_failed_attempt_worker_crashed() {
         .await
         .expect("stale recovery");
 
-    // The shared test database can hold stale rows of other tests.
+    // The count holds every stale row of the database, not only this one.
     assert!(processed >= 1, "processed {processed}");
     let image = history_row(&pool, task_id).await.expect("history row");
     assert_eq!(image.status, "FAILED");

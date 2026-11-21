@@ -9,13 +9,12 @@
 //! `test_statement_error_hides_parameters.py` and
 //! `test_sync_send_caller_thread.py`.
 //!
-//! Every test sends under a task name of its own, so the rows of one test
-//! never meet the counts of another on the shared database.
+//! Each test runs on a database of its own (`migrated_pool`) and sends
+//! under a task name of its own.
 
 use std::time::Duration;
 
 use chrono::Utc;
-use serial_test::serial;
 use uuid::Uuid;
 
 use crate::broker::{BrokerError, PostgresBroker, SendKind};
@@ -325,13 +324,17 @@ async fn a_key_held_by_another_command_names_its_owner_and_a_resend_meets_the_sa
     remove_task_name(&pool, &task_name).await;
 }
 
-/// Cancel the one backend that waits for a lock on `horsies_tasks`, and
-/// return its pid. Bounded by [`STATE_POLL_LIMIT`] polls.
+/// Cancel the one backend of this test's database that waits for a lock
+/// on `horsies_tasks`, and return its pid. Every test database is a copy of
+/// one template, so `horsies_tasks` has the same OID in each: the read
+/// filters on the database too. Bounded by [`STATE_POLL_LIMIT`] polls.
 async fn cancel_the_insert_that_waits_for_the_table(pool: &TestPool) -> i32 {
     for _ in 0..STATE_POLL_LIMIT {
         let waiting: Option<i32> = sql::query_scalar(
             "SELECT pid FROM pg_locks
-             WHERE relation = 'horsies_tasks'::regclass AND NOT granted
+             WHERE database = (SELECT oid FROM pg_database WHERE datname = current_database())
+               AND relation = 'horsies_tasks'::regclass
+               AND NOT granted
              LIMIT 1",
         )
         .fetch_optional(pool)
@@ -357,7 +360,6 @@ async fn cancel_the_insert_that_waits_for_the_table(pool: &TestPool) -> i32 {
 /// as a retryable `ENQUEUE_FAILED` whose message names the cause, and
 /// neither the message nor the error text holds a bound input value.
 #[tokio::test]
-#[serial(server)]
 async fn a_failed_enqueue_statement_names_its_cause_and_holds_no_input_value() {
     let pool = migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);

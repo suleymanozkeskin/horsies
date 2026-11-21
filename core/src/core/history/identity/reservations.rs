@@ -339,7 +339,7 @@ mod tests {
     async fn cleanup_pass_stops_at_its_batch_bound_and_reports_truncation() {
         let pool = crate::test_support::migrated_pool().await;
         let core = crate::broker::pools::core_pool_for_test_url(pool.url());
-        // Start from no expired row of other tests in the shared database.
+        // Start from no expired row in the database.
         cleanup_expired_reservations_pass(&core, StatementLog::Off, 10_000, 100)
             .await
             .expect("clear expired reservations");

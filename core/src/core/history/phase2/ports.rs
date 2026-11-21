@@ -3,7 +3,7 @@
 //!
 //! Python specification: `clients/python/tests/integration/test_phase2_consume_plan.py` and
 //! `test_task_history_phase2_quarantine.py`. Each test runs in one
-//! transaction that it rolls back, on the shared migrated database.
+//! transaction that it rolls back, on the migrated database of the test.
 
 use uuid::Uuid;
 

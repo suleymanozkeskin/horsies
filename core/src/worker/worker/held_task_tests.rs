@@ -50,6 +50,12 @@ const BEAT_INTERVAL_MS: u64 = 1_000;
 /// The last lines of the worker log that a failed wait shows.
 const FAILURE_LOG_LINES: usize = 200;
 
+/// The stale threshold of the test whose runner beats must land: a
+/// fail-closed window of 30 s (the threshold divided by
+/// `FAIL_CLOSED_WINDOW_DIVISOR`), so a beat that lands late under load does
+/// not stop the worker.
+const HELD_TASK_STALE_THRESHOLD_MS: u64 = 60_000;
+
 /// A drain that ends soon after the stop: the pool kills a child that
 /// still holds its task.
 const SHORT_DRAIN_SECS: u64 = 1;
@@ -201,12 +207,9 @@ async fn a_task_held_in_a_child_gets_the_runner_beats_of_the_worker() {
     let (database, pool) = database().await;
     let dir = test_dir("held-task-beats");
     let pid_file = dir.join("child.pid");
-    let worker = worker_holding_one_task(
-        config_with_fast_beats(database.url()),
-        &pid_file,
-        SHORT_DRAIN_SECS,
-    )
-    .await;
+    let mut config = config_with_fast_beats(database.url());
+    config.recovery.running_stale_threshold_ms = HELD_TASK_STALE_THRESHOLD_MS;
+    let worker = worker_holding_one_task(config, &pid_file, SHORT_DRAIN_SECS).await;
     let worker_id = worker.worker_id().to_owned();
     let task_id = insert_pending_task(&pool).await;
     let cancel = worker.cancel_token();

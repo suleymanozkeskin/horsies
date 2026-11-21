@@ -1214,8 +1214,7 @@ async fn a_snapshot_ten_minutes_old_in_database_time_is_stale() {
 }
 
 /// Python `test_web_api.py::TestWorkerReads::test_class_report_answers_with_streams_and_budgets`.
-/// The web tests share one database, so the test reads only its own queue
-/// and worker.
+/// The test reads only its own queue and worker.
 #[tokio::test]
 async fn class_report_answers_with_streams_and_budgets() {
     let state = migrated_state().await;
@@ -1577,8 +1576,8 @@ async fn a_listener_gap_sends_one_refresh_per_topic() {
     .unwrap();
     assert_eq!(terminated, 1, "exactly the listener backend is terminated");
 
-    // Events with ids come from other writers of the shared test database;
-    // the refreshes are the events with no ids.
+    // Events with ids come from other writers of the test database; the
+    // refreshes are the events with no ids.
     let mut refreshed = std::collections::BTreeSet::new();
     while refreshed.len() < CHANNEL_TOPICS.len() {
         let event = tokio::time::timeout(Duration::from_secs(10), subscription.recv())

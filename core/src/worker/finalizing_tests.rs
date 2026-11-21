@@ -281,8 +281,8 @@ async fn finalizing_handoff_rechecks_owner_and_generation_after_lock_wait() {
         let waiter = tokio::spawn(async move {
             mark_task_finalizing(&waiter_broker, id, "current-worker", generation).await
         });
-        // The tests are serial: the only session that the owner can block
-        // is the marker's.
+        // The owner can block only sessions of its own database, and the
+        // only one there is the marker's.
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let blocked: bool = sql::query_scalar(

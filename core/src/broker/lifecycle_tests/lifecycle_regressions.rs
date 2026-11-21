@@ -352,7 +352,7 @@ async fn finalizer_row_lock_wins_reaper_race() {
         .expect("the reaper ends after the finalizer commits")
         .expect("reaper join")
         .expect("stale recovery");
-    // Other stale rows of the shared database may be processed; this one is not.
+    // Other stale rows of the database may be processed; this one is not.
     let _other_rows: u64 = processed;
     assert_eq!(
         history_row(&pool, task_id)

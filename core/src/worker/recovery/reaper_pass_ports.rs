@@ -964,8 +964,7 @@ async fn an_orphan_audit_whose_page_cannot_run_is_an_error() {
 }
 
 /// The recovery events of `task_ids` in `events`: the task id and the
-/// action of each, sorted by task id. The shared test database can hold rows
-/// of other tests, whose events are left out.
+/// action of each, sorted by task id. The events of other rows are left out.
 fn recoveries_of(
     events: Vec<crate::events::Event>,
     task_ids: &[Uuid],

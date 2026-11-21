@@ -70,7 +70,7 @@ pub(super) fn owned_claim() -> OwnedClaim {
     }
 }
 
-/// The shared migrated database of the terminalization matrix.
+/// The migrated database of the running test (`migrated_pool`).
 pub(super) async fn pool() -> TestPool {
     crate::test_support::migrated_pool().await
 }

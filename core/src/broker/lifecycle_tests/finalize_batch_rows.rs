@@ -11,7 +11,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
@@ -177,12 +176,14 @@ async fn release_task_lock(holder: &mut TestConnection, task_id: Uuid) {
         .expect("release the task's advisory lock");
 }
 
-/// The backend that runs the batch statement and waits on a lock.
+/// The backend of this test's database that runs the batch statement and
+/// waits on a lock.
 async fn batch_backend_waiting(pool: &TestPool) -> i32 {
     for _ in 0..WAIT_POLLS {
         let waiting: Option<i32> = sql::query_scalar(
             "SELECT pid FROM pg_stat_activity
-             WHERE query LIKE '%horsies_complete_tasks_fused(%'
+             WHERE datname = current_database()
+               AND query LIKE '%horsies_complete_tasks_fused(%'
                AND wait_event_type = 'Lock'
                AND pid <> pg_backend_pid()
              LIMIT 1",
@@ -508,7 +509,6 @@ async fn a_lost_reply_of_a_batch_is_classified_by_the_replay_of_each_row() {
 /// has not returned, every row is RUNNING, and no capacity wake is out.
 /// Once the lock is free, every row completes and the queue wakes.
 #[tokio::test]
-#[serial(server)]
 async fn the_answer_and_the_capacity_wake_follow_the_commit() {
     let pool = pool().await;
     let core = Arc::new(core_pool_for_test_url(pool.url()));
@@ -552,7 +552,6 @@ async fn the_answer_and_the_capacity_wake_follow_the_commit() {
 /// Nothing of it commits: the write fails with an unknown outcome, which
 /// may clear, and each row stays RUNNING with no history row.
 #[tokio::test]
-#[serial(server)]
 async fn a_batch_killed_mid_statement_leaves_its_rows_running() {
     let pool = pool().await;
     let core = Arc::new(core_pool_for_test_url(pool.url()));
@@ -595,7 +594,6 @@ async fn a_batch_killed_mid_statement_leaves_its_rows_running() {
 /// and has not reached the high one. Once the lock is free, every row
 /// completes, answered in input order.
 #[tokio::test]
-#[serial(server)]
 async fn the_batch_locks_its_rows_in_sorted_task_id_order() {
     let pool = pool().await;
     let core = Arc::new(core_pool_for_test_url(pool.url()));

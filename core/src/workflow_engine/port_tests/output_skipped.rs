@@ -6,8 +6,8 @@
 //! child result that does not parse, makes a FAILED node, so
 //! `allow_failed_deps = false`, `join` and a success case hold by status.
 //!
-//! A test that leaves a live task row runs in its own database, so no worker
-//! test of the shared database claims it.
+//! A test that leaves a live task row runs in a database of its own
+//! (`IsolatedDatabase`).
 
 use std::time::Duration;
 

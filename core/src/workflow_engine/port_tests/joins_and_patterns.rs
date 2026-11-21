@@ -2,8 +2,8 @@
 //! Python: `clients/python/tests/integration/test_workflow_join.py` and
 //! `test_workflow_composed_patterns.py`.
 //!
-//! The nodes run on [`PORT_QUEUE`], which no worker test claims, so a live
-//! task left on the shared database stays where it is.
+//! The nodes run on [`PORT_QUEUE`], which no worker claims, so a live task
+//! that a test leaves stays where it is.
 
 use uuid::Uuid;
 

@@ -200,7 +200,7 @@ mod tests {
 
     const BEAT_WORKER: &str = "beat-worker";
 
-    /// The shared test database, with heartbeat leaves for the current hours.
+    /// The test database, with heartbeat leaves for the current hours.
     async fn covered_pool() -> TestPool {
         use crate::core::history::maintenance::coverage::{
             ensure_partition_coverage_in_pool, CoverageOutcome,

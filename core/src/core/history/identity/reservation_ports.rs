@@ -212,7 +212,7 @@ async fn cleanup_deletes_only_expired_terminal_rows_and_never_live_ones() {
     let expired = Uuid::new_v4();
     let live = Uuid::new_v4();
     let mut transaction = pool.begin().await.expect("begin");
-    // Expired rows that other tests left in the shared database go first.
+    // Expired rows that the database holds already go first.
     while cleanup_expired_reservations(&mut transaction, 1_000)
         .await
         .expect("clear earlier expired rows")

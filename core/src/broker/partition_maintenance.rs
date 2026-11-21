@@ -279,9 +279,8 @@ mod tests {
     }
 
     /// A pruning pass on a database of this handle's family passes the family
-    /// check and ends with a report. The shared database may hold expired
-    /// leaves of other tests, so the report itself is not checked here; the
-    /// pass tests of `core::history::partitions::tests` check it.
+    /// check and ends with a report. This test does not check the report;
+    /// the pass tests of `core::history::partitions::tests` check it.
     #[tokio::test]
     async fn a_pruning_pass_of_the_recorded_family_ends_with_a_report() {
         let pool = crate::test_support::migrated_pool().await;

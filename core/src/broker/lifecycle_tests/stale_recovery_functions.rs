@@ -49,8 +49,8 @@ use crate::worker::recovery::{mark_stale_running_as_failed, requeue_stale_claime
 const QUEUE: &str = "q_stale";
 const CHANNEL: &str = "task_queue_q_stale";
 
-/// The largest scan, so a candidate of this test is inside it whatever stale
-/// rows other tests left.
+/// The largest scan, so each candidate of this test is inside it whatever
+/// other stale rows the database holds.
 fn whole_scan() -> RecoveryBatch {
     RecoveryBatch::new(10_000).expect("10000 rows is a recovery batch")
 }
@@ -669,8 +669,8 @@ mod finish {
 }
 
 /// The recovery events of `task_ids` in `events`: the task id, the action,
-/// the task name and the queue of each, sorted by task id. The shared test
-/// database can hold rows of other tests, whose events are left out.
+/// the task name and the queue of each, sorted by task id. The events of
+/// other rows are left out.
 fn recoveries_of(
     events: Vec<Event>,
     task_ids: &[Uuid],
@@ -782,7 +782,7 @@ mod reaper_pass {
         .await
         .expect("stale pass");
 
-        // The shared test database can hold stale rows of other tests.
+        // The count holds every stale row of the database, not only these.
         assert!(recovered >= 2, "recovered {recovered}");
         let row = live_row(&pool, retried).await.expect("the retried row");
         assert_eq!(row["status"], "PENDING");
@@ -940,7 +940,7 @@ mod requeue {
         .await
         .expect("stale claim requeue");
 
-        // The shared test database can hold stale claims of other tests.
+        // The count holds every stale claim of the database, not only these.
         assert!(requeued >= 2, "requeued {requeued}");
         let mut statuses = Vec::new();
         for task_id in [silent, beaten, fresh, orphan, linked] {

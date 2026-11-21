@@ -2359,8 +2359,8 @@ mod tests {
     const DRAIN_BATCH_LIMIT: u32 = 1_000;
 
     /// Delete every terminal workflow of the test database with no live
-    /// backing task, of any age: the leftovers of other tests, so that the
-    /// counts of a test see only its own workflows.
+    /// backing task, of any age, so that the counts of a test see only the
+    /// workflows that it seeds after the drain.
     async fn drain_expired_workflows(pool: &TestPool) {
         for _ in 0..DRAIN_BATCH_LIMIT {
             let deleted = sql::query(DELETE_EXPIRED_WORKFLOWS_SQL)
@@ -2699,7 +2699,7 @@ mod tests {
     async fn retention_retains_workflow_with_live_backing_task() {
         let pool = test_pool().await;
 
-        // Drain pre-existing eligible candidates (other tests' leftovers) so
+        // Drain the eligible candidates that the database holds already, so
         // the rows_affected assertions below see only this test's workflow.
         drain_expired_workflows(&pool).await;
 
@@ -2861,7 +2861,7 @@ mod tests {
     async fn workflow_retention_budgets_nodes_and_drains_on_empty_batch() {
         let pool = test_pool().await;
 
-        // Drain pre-existing eligible candidates (other tests' leftovers) so
+        // Drain the eligible candidates that the database holds already, so
         // the rows_affected assertions below see only this test's workflows.
         drain_expired_workflows(&pool).await;
 
@@ -3152,7 +3152,7 @@ mod tests {
 
         let requeued = requeue_stale_claimed(&pool, 60.0).await.expect("requeue");
 
-        // The shared test database can hold stale claims of other modules.
+        // The count holds every stale claim of the database, not only these.
         assert!(requeued >= 2, "requeued {requeued}");
         assert_eq!(task_status(&pool, silent).await, "PENDING");
         assert_eq!(task_status(&pool, beating).await, "CLAIMED");
@@ -3203,7 +3203,7 @@ mod tests {
             .await
             .expect("stale recovery");
 
-        // The shared test database can hold stale rows of other modules.
+        // The count holds every stale row of the database, not only this one.
         assert!(processed >= 1, "processed {processed}");
         let row: serde_json::Value =
             sql::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")

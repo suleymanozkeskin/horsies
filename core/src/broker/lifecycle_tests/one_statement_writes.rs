@@ -7,8 +7,10 @@
 //! `stop_before_start.rs`), on a broker whose core pools connect through a
 //! counting proxy. A first call of the same statement opens the connection,
 //! runs the client family check and prepares the statement, so the counted
-//! call is in the steady state of the statement cache and within the idle
-//! ping limit of the pool.
+//! call is in the steady state of the statement cache. A call of the same
+//! statement comes directly before the counted call, with no statement of
+//! another pool between them, so the counted call is within the 1 s idle
+//! ping limit of the pool also when the server is slow.
 
 use std::time::Duration;
 
@@ -28,6 +30,9 @@ use crate::test_support::sql::{self, TestPool};
 use crate::worker::execution::FinalizingMark;
 
 const QUEUE: &str = "lifecycle_one_statement_writes";
+/// A queue with no task: the claim pass on it, directly before the counted
+/// claim pass, claims nothing.
+const EMPTY_QUEUE: &str = "lifecycle_one_statement_writes_empty";
 /// The window of a start whose run has a deadline a minute away (Python
 /// `StartWithin(milliseconds=60_000)`, a seat of a shared thread child).
 const A_MINUTE: Duration = Duration::from_secs(60);
@@ -114,6 +119,7 @@ async fn a_start_is_one_statement_in_either_window() {
         StartWindow::Until(std::time::Instant::now() + A_MINUTE),
     ] {
         let task_id = seed_task(&pool, &claimed(Origin::Send)).await;
+        let _just_before = start_on(&counted.broker, Uuid::new_v4(), window).await;
 
         counted.proxy.reset_round_trips();
         let outcome = start_on(&counted.broker, task_id, window).await;
@@ -135,9 +141,9 @@ async fn a_start_is_one_statement_in_either_window() {
 async fn a_workflow_task_start_is_one_statement() {
     let pool = pool().await;
     let counted = Counted::open(&pool).await;
-    let _warm_up = start_on(&counted.broker, Uuid::new_v4(), StartWindow::Open).await;
     let task_id = seed_task(&pool, &claimed(Origin::WorkflowNode)).await;
     let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "RUNNING").await;
+    let _warm_up = start_on(&counted.broker, Uuid::new_v4(), StartWindow::Open).await;
 
     counted.proxy.reset_round_trips();
     let outcome = start_on(&counted.broker, task_id, StartWindow::Open).await;
@@ -163,6 +169,7 @@ async fn a_stop_before_start_is_one_statement_after_the_start() {
     let pool = pool().await;
     let counted = Counted::open(&pool).await;
     let warm_up_task = seed_task(&pool, &claimed(Origin::WorkflowNode)).await;
+    let task_id = seed_task(&pool, &claimed(Origin::WorkflowNode)).await;
     let _warm_up_start = start_on(&counted.broker, warm_up_task, StartWindow::Open).await;
     let _warm_up_stop = counted
         .broker
@@ -174,7 +181,6 @@ async fn a_stop_before_start_is_one_statement_after_the_start() {
         )
         .await
         .expect("warm up the stop");
-    let task_id = seed_task(&pool, &claimed(Origin::WorkflowNode)).await;
 
     counted.proxy.reset_round_trips();
     let outcome = start_on(&counted.broker, task_id, StartWindow::Open).await;
@@ -210,12 +216,6 @@ async fn a_stop_before_start_is_one_statement_after_the_start() {
 async fn a_finalizing_marker_is_one_statement() {
     let pool = pool().await;
     let counted = Counted::open(&pool).await;
-    let warm_up = counted
-        .broker
-        .mark_finalizing(Uuid::new_v4(), &owned_claim())
-        .await
-        .expect("warm up");
-    assert_eq!(warm_up, FinalizingMark::NotHeld);
     let task_id = seed_task(
         &pool,
         &TaskSeed {
@@ -224,6 +224,12 @@ async fn a_finalizing_marker_is_one_statement() {
         },
     )
     .await;
+    let warm_up = counted
+        .broker
+        .mark_finalizing(Uuid::new_v4(), &owned_claim())
+        .await
+        .expect("warm up");
+    assert_eq!(warm_up, FinalizingMark::NotHeld);
 
     counted.proxy.reset_round_trips();
     let marked = counted
@@ -259,6 +265,12 @@ async fn a_claim_pass_is_one_statement() {
         },
     )
     .await;
+    let just_before = counted
+        .broker
+        .claim_pass(&claim_request(EMPTY_QUEUE))
+        .await
+        .expect("the claim pass on the empty queue");
+    assert!(just_before.claimed.is_empty());
 
     counted.proxy.reset_round_trips();
     let pass = counted

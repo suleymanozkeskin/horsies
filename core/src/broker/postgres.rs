@@ -5206,7 +5206,7 @@ mod client_family_tests {
             .expect("read the family row")
     }
 
-    /// The shared test database is installed for the Rust client.
+    /// The test database is installed for the Rust client.
     #[tokio::test]
     async fn the_install_records_the_family_and_a_rust_handle_may_write() {
         let pool = crate::test_support::migrated_pool().await;
