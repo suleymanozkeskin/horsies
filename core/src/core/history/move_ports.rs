@@ -10,7 +10,6 @@
 
 use crate::test_support::sql::{self, TestPool, TestTransaction};
 use chrono::{DateTime, Duration, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use crate::broker::terminalization::on_test_pool::{
@@ -139,7 +138,6 @@ async fn is_live(transaction: &mut TestTransaction<'_>, task_id: Uuid) -> bool {
 /// a runner beat older than every threshold gives the verdict of no beat:
 /// the stale failure applies.
 #[tokio::test]
-#[serial]
 async fn a_heartbeat_beyond_the_recency_bound_cannot_flip_the_verdict() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
@@ -199,7 +197,6 @@ async fn a_heartbeat_beyond_the_recency_bound_cannot_flip_the_verdict() {
 /// cannot move (55H01, the class partition exists and the leaf does not);
 /// the live row stays and its key reservation stays LIVE.
 #[tokio::test]
-#[serial]
 async fn a_move_with_no_history_leaf_keeps_the_task_and_its_reservation_live() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");

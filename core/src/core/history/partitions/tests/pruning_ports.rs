@@ -55,7 +55,6 @@ fn swept_names(pass: &PrunePass) -> Vec<&str> {
 /// two leaves of the same age, one in a 7-day class and one in a 30-day class.
 /// Only the period can explain why one drops and the other stays.
 #[tokio::test]
-#[serial]
 async fn same_age_leaves_diverge_on_the_declared_period() {
     let database = TestDatabase::create_with_connections(3).await;
     let short_parent = register_class(&database.pool, "standard_7d", 7).await;
@@ -84,7 +83,6 @@ async fn same_age_leaves_diverge_on_the_declared_period() {
 /// minimum. Today's and yesterday's leaves stay, because a leaf leaves only
 /// one period after its whole day ended; a leaf three days old drops.
 #[tokio::test]
-#[serial]
 async fn the_smallest_period_still_retains_each_whole_day() {
     let database = TestDatabase::create_with_connections(3).await;
     let parent = register_class(&database.pool, "standard_1d", 1).await;
@@ -111,7 +109,6 @@ async fn the_smallest_period_still_retains_each_whole_day() {
 /// an overdue leaf drops; a past leaf inside its period and today's leaf stay,
 /// with no catalog drop stamp.
 #[tokio::test]
-#[serial]
 async fn an_overdue_leaf_drops_and_leaves_inside_their_period_stay() {
     let database = TestDatabase::create_with_connections(3).await;
     let parent = register_class(&database.pool, "standard_30d", 30).await;

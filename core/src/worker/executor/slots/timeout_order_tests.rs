@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::isolated::ISOLATED_LEFTOVER_BACKSTOP;
@@ -281,7 +280,6 @@ fn timed_out() -> AttemptEnd {
 
 /// The timeout of a plain task fails its row and owes no phase 2.
 #[tokio::test]
-#[serial]
 async fn a_timeout_of_a_plain_task_owes_no_phase_two() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -307,7 +305,6 @@ async fn a_timeout_of_a_plain_task_owes_no_phase_two() {
 /// The write; the order after the exit is the slot's. A row that its
 /// child never set RUNNING goes back to the queue.
 #[tokio::test]
-#[serial]
 async fn a_timeout_of_a_row_still_claimed_puts_it_back_in_the_queue() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -327,7 +324,6 @@ async fn a_timeout_of_a_row_still_claimed_puts_it_back_in_the_queue() {
 /// The timeout write of a row that this claim does not hold changes
 /// nothing. A row in another status is a row this claim does not hold.
 #[tokio::test]
-#[serial]
 async fn a_timeout_of_a_row_this_claim_does_not_hold_changes_nothing() {
     let pool = crate::test_support::migrated_pool().await;
     for (state, holder) in [
@@ -422,7 +418,6 @@ async fn wakes_before_sentinel(
 /// sent again (a replay after a lost reply) writes nothing: still one
 /// attempt, no other wake, and no phase-2 record.
 #[tokio::test]
-#[serial]
 async fn a_timeout_fails_a_running_row_once_and_its_replay_writes_nothing() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -569,7 +564,6 @@ fn phase_two_owed(written: Result<UnreportedAttemptWrite, FinalizeError>) -> Pha
 /// 2 of the committed failure as a replay. The task keeps one attempt, and
 /// its phase-2 record waits for that phase 2.
 #[tokio::test]
-#[serial]
 async fn a_replayed_timeout_write_of_a_workflow_task_owes_phase_two_and_adds_no_attempt() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -620,7 +614,6 @@ async fn a_replayed_timeout_write_of_a_workflow_task_owes_phase_two_and_adds_no_
 /// row with `TASK_TIMEOUT` and no retry, then phase 2 runs: it consumes the
 /// phase-2 record, fails the node, and fails the one-node workflow.
 #[tokio::test]
-#[serial]
 async fn a_timeout_of_a_workflow_task_fails_it_then_phase_two_runs() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();

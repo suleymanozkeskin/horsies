@@ -2,7 +2,6 @@
 //! Python: `clients/python/tests/integration/test_workflow_recovery.py` and
 //! `test_orphaned_workflow_task_repro.py`.
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -48,7 +47,6 @@ fn recovery_child() -> WorkflowSpec {
 /// `test_recover_ready_not_enqueued` (case 1) and `test_recover_idempotent`:
 /// a READY node with no task is enqueued once; a second pass finds nothing.
 #[tokio::test]
-#[serial]
 async fn a_ready_node_with_no_task_is_enqueued_once() {
     let db = IsolatedDatabase::create().await;
     let child_specs = TestChildSpecs::empty();
@@ -68,7 +66,6 @@ async fn a_ready_node_with_no_task_is_enqueued_once() {
 
 /// `test_recover_paused_not_touched`
 #[tokio::test]
-#[serial]
 async fn recovery_leaves_a_paused_workflow_alone() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(
@@ -96,7 +93,6 @@ async fn recovery_leaves_a_paused_workflow_alone() {
 
 /// `test_recover_completed_sets_timestamp` (case 2+3)
 #[tokio::test]
-#[serial]
 async fn recovery_completes_a_workflow_whose_nodes_all_ended_and_sets_completed_at() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
@@ -119,7 +115,6 @@ async fn recovery_completes_a_workflow_whose_nodes_all_ended_and_sets_completed_
 /// each workflow counts one recovery; the workflow whose case is not met ends
 /// FAILED with the error of its failed required node.
 #[tokio::test]
-#[serial]
 async fn recovery_decides_by_the_success_policy() {
     let db = IsolatedDatabase::create().await;
     let mut cases = Vec::new();
@@ -167,7 +162,6 @@ async fn recovery_decides_by_the_success_policy() {
 /// transaction of the skip, so the pass counts one case-0 recovery and case
 /// 2/3 finds no workflow left.
 #[tokio::test]
-#[serial]
 async fn a_pending_node_after_a_failed_dependency_is_skipped_and_the_workflow_fails() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
@@ -193,7 +187,6 @@ async fn a_pending_node_after_a_failed_dependency_is_skipped_and_the_workflow_fa
 
 /// `test_recover_pending_deps_failed_allow_continue` (case 0)
 #[tokio::test]
-#[serial]
 async fn a_pending_allow_failed_deps_node_after_a_failure_is_enqueued() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
@@ -221,7 +214,6 @@ async fn a_pending_allow_failed_deps_node_after_a_failure_is_enqueued() {
 
 /// `test_recover_subworkflow_ready_with_broker` (case 1.5)
 #[tokio::test]
-#[serial]
 async fn a_ready_sub_workflow_node_with_no_child_starts_its_child() {
     let db = IsolatedDatabase::create().await;
     let child = recovery_child();
@@ -302,7 +294,6 @@ async fn seed_parent_of_an_ended_child(
 
 /// `test_recover_child_completed_parent_not_updated` (case 1.6)
 #[tokio::test]
-#[serial]
 async fn a_completed_child_advances_its_parent_node() {
     let db = IsolatedDatabase::create().await;
     let (parent, _child) =
@@ -321,7 +312,6 @@ async fn a_completed_child_advances_its_parent_node() {
 /// `test_workflow_subworkflow.py::TestSubworkflowIntegration.test_recovery_child_failed_parent_still_running`:
 /// a child that did not complete fails its parent node.
 #[tokio::test]
-#[serial]
 async fn a_cancelled_or_failed_child_fails_its_parent_node() {
     let db = IsolatedDatabase::create().await;
     let mut parents = Vec::new();
@@ -350,7 +340,6 @@ async fn a_cancelled_or_failed_child_fails_its_parent_node() {
 /// writes nothing either
 /// (`worker/executor/slots/settle_tests.rs::a_task_whose_node_is_not_linked_stays_claimed_when_the_self_heal_is_off`).
 #[tokio::test]
-#[serial]
 async fn an_orphan_stays_claimed_when_self_heal_is_off() {
     let db = IsolatedDatabase::create().await;
     let task_id = Uuid::new_v4();
@@ -386,7 +375,6 @@ async fn an_orphan_stays_claimed_when_self_heal_is_off() {
 /// `test_recover_completed_not_marked` (case 2+3): a RUNNING workflow whose
 /// only node COMPLETED ends COMPLETED and stores its result.
 #[tokio::test]
-#[serial]
 async fn recovery_completes_a_workflow_whose_node_completed_and_stores_its_result() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
@@ -409,7 +397,6 @@ async fn recovery_completes_a_workflow_whose_node_completed_and_stores_its_resul
 /// node FAILED, with no stored workflow error, ends FAILED with the node's
 /// error and no result.
 #[tokio::test]
-#[serial]
 async fn recovery_fails_a_workflow_whose_node_failed_with_its_error_and_no_result() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
@@ -436,7 +423,6 @@ async fn recovery_fails_a_workflow_whose_node_failed_with_its_error_and_no_resul
 /// workflow that stores the error of its second failed node is finalized
 /// FAILED with the error of its first failed node by index, and no result.
 #[tokio::test]
-#[serial]
 async fn recovery_fails_a_workflow_with_the_error_of_its_first_failed_node() {
     let db = IsolatedDatabase::create().await;
     let later = serde_json::to_string(
@@ -473,7 +459,6 @@ async fn recovery_fails_a_workflow_with_the_error_of_its_first_failed_node() {
 /// index, its task and its status, with the dependency index in `data`; the
 /// envelope names the source task.
 #[tokio::test]
-#[serial]
 async fn a_dependency_with_no_stored_result_gives_its_consumer_the_missing_result_error() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
@@ -557,7 +542,6 @@ async fn crash_the_task_of_node_0(pool: &TestPool, workflow_id: Uuid) {
 /// whose task already FAILED with `WORKER_CRASHED` is FAILED by the phase-2
 /// pass, and the workflow ends FAILED.
 #[tokio::test]
-#[serial]
 async fn a_crashed_task_of_a_running_node_fails_the_node_and_the_workflow() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = start(
@@ -579,7 +563,6 @@ async fn a_crashed_task_of_a_running_node_fails_the_node_and_the_workflow() {
 /// `test_recover_crashed_worker_idempotent` (case 1.7): a second phase-2
 /// pass after the pass that failed the crashed node advances nothing.
 #[tokio::test]
-#[serial]
 async fn a_second_pass_after_a_crashed_task_advances_nothing() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = start(
@@ -605,7 +588,6 @@ async fn a_second_pass_after_a_crashed_task_advances_nothing() {
 /// `test_recover_crashed_worker_dependent_propagation` (case 1.7): after the
 /// phase-2 pass fails the crashed node, its dependent is SKIPPED.
 #[tokio::test]
-#[serial]
 async fn a_crashed_task_fails_its_node_and_skips_the_dependent() {
     let db = IsolatedDatabase::create().await;
     let mut dependent = task_node(1, "recover_dep_b");

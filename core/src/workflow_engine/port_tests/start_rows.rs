@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, SubsecRound, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -173,7 +172,6 @@ fn fanout(name: &str, n_roots: usize, with_dependent: bool) -> WorkflowSpec {
 
 /// `test_workflow_start.py::TestWorkflowStart.test_start_sets_workflow_sent_at_from_python_call_site`
 #[tokio::test]
-#[serial]
 async fn start_stores_the_caller_start_time_as_sent_at() {
     let pool = shared_pool().await;
     let before = Utc::now().trunc_subsecs(6);
@@ -195,7 +193,6 @@ async fn start_stores_the_caller_start_time_as_sent_at() {
 
 /// `TestWorkflowStart.test_custom_workflow_id`
 #[tokio::test]
-#[serial]
 async fn start_uses_the_caller_workflow_id() {
     let pool = shared_pool().await;
     let workflow_id = Uuid::new_v4();
@@ -215,7 +212,6 @@ async fn start_uses_the_caller_workflow_id() {
 
 /// `TestWorkflowStart.test_on_error_stored`
 #[tokio::test]
-#[serial]
 async fn start_stores_the_failure_policy() {
     let pool = shared_pool().await;
     for (on_error, stored) in [(OnError::Fail, "fail"), (OnError::Pause, "pause")] {
@@ -231,7 +227,6 @@ async fn start_stores_the_failure_policy() {
 /// `TestWorkflowStart.test_output_task_index_stored` and
 /// `.test_output_task_index_null_when_no_output`
 #[tokio::test]
-#[serial]
 async fn start_stores_the_output_index_or_null() {
     let pool = shared_pool().await;
     let mut second = task_node(1, "output_b");
@@ -258,7 +253,6 @@ async fn start_stores_the_output_index_or_null() {
 /// `.test_args_from_stored_as_jsonb`, `.test_workflow_ctx_from_stored` and
 /// `.test_allow_failed_deps_stored`
 #[tokio::test]
-#[serial]
 async fn start_stores_the_edges_and_the_dataflow_of_each_node() {
     let pool = shared_pool().await;
     let mut join = task_node(2, "edges_join");
@@ -293,7 +287,6 @@ async fn start_stores_the_edges_and_the_dataflow_of_each_node() {
 
 /// `TestWorkflowStart.test_retry_policy_honored_in_workflow_tasks`
 #[tokio::test]
-#[serial]
 async fn a_root_node_stores_its_retry_options_and_its_task_gets_max_retries() {
     let pool = shared_pool().await;
     let mut root = task_node(0, "retry_wf_task");
@@ -319,7 +312,6 @@ async fn a_root_node_stores_its_retry_options_and_its_task_gets_max_retries() {
 
 /// `TestWorkflowStart.test_retry_policy_honored_for_non_root_task`
 #[tokio::test]
-#[serial]
 async fn a_promoted_node_task_gets_its_max_retries() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -350,7 +342,6 @@ async fn a_promoted_node_task_gets_its_max_retries() {
 
 /// `TestWorkflowStart.test_duplicate_workflow_id_returns_existing_handle`
 #[tokio::test]
-#[serial]
 async fn a_second_start_with_the_same_id_and_name_returns_the_existing_workflow() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -382,7 +373,6 @@ async fn a_second_start_with_the_same_id_and_name_returns_the_existing_workflow(
 
 /// `TestWorkflowStart.test_duplicate_workflow_id_with_different_name_is_an_id_conflict`
 #[tokio::test]
-#[serial]
 async fn a_start_with_an_id_of_another_workflow_name_is_an_id_conflict() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -411,7 +401,6 @@ async fn a_start_with_an_id_of_another_workflow_name_is_an_id_conflict() {
 
 /// `TestWorkflowStart.test_concurrent_duplicate_workflow_id_returns_existing_handle`
 #[tokio::test]
-#[serial]
 async fn two_concurrent_starts_with_one_id_make_one_workflow() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -443,7 +432,6 @@ async fn two_concurrent_starts_with_one_id_make_one_workflow() {
 
 /// `TestWorkflowStart.test_concurrent_auto_id_creates_distinct_workflows`
 #[tokio::test]
-#[serial]
 async fn two_concurrent_starts_with_no_id_make_two_workflows() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -463,7 +451,6 @@ async fn two_concurrent_starts_with_no_id_make_two_workflows() {
 
 /// `test_workflow_start_batched.py::TestBatchedStartShape.test_fast_roots_enqueued_linked_and_dependent_pending`
 #[tokio::test]
-#[serial]
 async fn plain_roots_start_enqueued_with_linked_pending_tasks_and_a_dependent_waits() {
     let pool = shared_pool().await;
     let workflow_id = start(
@@ -497,7 +484,6 @@ async fn plain_roots_start_enqueued_with_linked_pending_tasks_and_a_dependent_wa
 
 /// The meta half of `test_fast_roots_enqueued_linked_and_dependent_pending`.
 #[tokio::test]
-#[serial]
 async fn start_writes_the_workflow_meta_into_each_root_task() {
     let pool = shared_pool().await;
     let workflow_id = start(
@@ -521,7 +507,6 @@ async fn start_writes_the_workflow_meta_into_each_root_task() {
 
 /// `TestBatchedStartShape.test_idempotent_restart_returns_existing_handle`
 #[tokio::test]
-#[serial]
 async fn a_restart_with_the_same_id_writes_nothing_more() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -548,7 +533,6 @@ async fn a_restart_with_the_same_id_writes_nothing_more() {
 /// `TestBatchedStartShape.test_serialization_failure_rolls_back_everything`:
 /// a node input that the start cannot store fails the start, and no row stays.
 #[tokio::test]
-#[serial]
 async fn a_node_input_that_cannot_be_stored_fails_the_start_and_leaves_no_row() {
     let pool = shared_pool().await;
     let name = unique_name("batched_start_bad_input");
@@ -564,7 +548,6 @@ async fn a_node_input_that_cannot_be_stored_fails_the_start_and_leaves_no_row() 
 
 /// `TestBatchedStartShape.test_fast_root_carries_retry_policy_and_good_until`
 #[tokio::test]
-#[serial]
 async fn a_plain_root_task_carries_its_retries_deadline_and_options() {
     let pool = shared_pool().await;
     let deadline = (Utc::now() + Duration::hours(1)).trunc_subsecs(6);
@@ -598,7 +581,6 @@ async fn a_plain_root_task_carries_its_retries_deadline_and_options() {
 
 /// `TestBatchedStartShape.test_corrupt_task_options_propagate_and_roll_back`
 #[tokio::test]
-#[serial]
 async fn task_options_that_do_not_parse_fail_the_start_and_leave_no_row() {
     let pool = shared_pool().await;
     let name = unique_name("batched_corrupt_wf");
@@ -666,7 +648,6 @@ async fn assert_paused_before_plain_roots_got_tasks(
 /// `test_workflow_start_batched.py::TestStartPauseGate.test_pause_policy_slow_root_failure_reverts_fast_roots`:
 /// the child of the sub-workflow root has no definition under its key.
 #[tokio::test]
-#[serial]
 async fn a_root_child_that_cannot_load_pauses_the_workflow_before_plain_roots_get_tasks() {
     let db = IsolatedDatabase::create().await;
     let child_specs = TestChildSpecs::empty();
@@ -697,7 +678,6 @@ async fn a_root_child_that_cannot_load_pauses_the_workflow_before_plain_roots_ge
 /// the child fails in its own start, because its only root is a child whose
 /// builder fails, and the parent hears it before its plain roots get tasks.
 #[tokio::test]
-#[serial]
 async fn a_child_that_fails_in_its_start_pauses_the_parent_before_plain_roots_get_tasks() {
     let db = IsolatedDatabase::create().await;
     let grandchild_key = "tests.port.pause_prop_grandchild.v1";
@@ -750,7 +730,6 @@ fn child_chain(name: &str, n: usize, root_options: Option<&str>) -> WorkflowSpec
 
 /// `test_subworkflow_start_batched.py::TestBulkChildStart.test_child_rows_equivalent_to_per_node_path`
 #[tokio::test]
-#[serial]
 async fn a_child_start_enqueues_its_root_and_leaves_its_chain_pending() {
     let pool = shared_pool().await;
     let child = child_chain("bulk_child_wf", 3, None);
@@ -778,7 +757,6 @@ async fn a_child_start_enqueues_its_root_and_leaves_its_chain_pending() {
 
 /// The meta half of `test_child_rows_equivalent_to_per_node_path`.
 #[tokio::test]
-#[serial]
 async fn a_child_start_writes_the_child_meta_into_its_root_task() {
     let pool = shared_pool().await;
     let child = child_chain("bulk_child_meta_wf", 2, None);
@@ -803,7 +781,6 @@ async fn a_child_start_writes_the_child_meta_into_its_root_task() {
 /// task options of a child root that do not parse fail the start, and no
 /// parent or child row stays.
 #[tokio::test]
-#[serial]
 async fn child_root_options_that_do_not_parse_fail_the_start_and_leave_no_row() {
     let pool = shared_pool().await;
     let child_name = unique_name("bulk_child_corrupt_wf");
@@ -828,7 +805,6 @@ async fn child_root_options_that_do_not_parse_fail_the_start_and_leave_no_row() 
 
 /// `TestBulkChildStart.test_pause_policy_slow_root_failure_reverts_fast_siblings`
 #[tokio::test]
-#[serial]
 async fn a_child_root_that_cannot_build_pauses_the_child_before_its_plain_roots_get_tasks() {
     let db = IsolatedDatabase::create().await;
     let broken_key = "tests.port.broken_build.v1";
@@ -861,7 +837,6 @@ async fn a_child_root_that_cannot_build_pauses_the_child_before_its_plain_roots_
 
 /// `TestBulkChildStart.test_nested_parent_propagation_pause_reverts_child_fast_siblings`
 #[tokio::test]
-#[serial]
 async fn a_grandchild_failure_pauses_the_child_before_its_plain_roots_get_tasks() {
     let db = IsolatedDatabase::create().await;
     let broken_key = "tests.port.nested_broken_build.v1";
@@ -903,7 +878,6 @@ async fn a_grandchild_failure_pauses_the_child_before_its_plain_roots_get_tasks(
 /// (Python's `task_args` / `task_kwargs` pair is one `input` column on the
 /// baseline: decision "How task input is stored".)
 #[tokio::test]
-#[serial]
 async fn a_task_node_stores_its_input_as_one_value() {
     let pool = shared_pool().await;
     let mut root = task_node(0, "kwargs_only_task");
@@ -927,7 +901,6 @@ async fn a_task_node_stores_its_input_as_one_value() {
 /// `TestKwargsOnlyWrites.test_new_subworkflow_node_persists_empty_task_args`:
 /// a sub-workflow node that gives no params stores the empty input `{}`.
 #[tokio::test]
-#[serial]
 async fn a_sub_workflow_node_with_no_params_stores_an_empty_input() {
     let pool = shared_pool().await;
     let child = spec(
@@ -950,7 +923,6 @@ async fn a_sub_workflow_node_with_no_params_stores_an_empty_input() {
 /// `TestRecoveryKwargsCompat.test_recovery_ready_kwargs_task_enqueued`: the
 /// recovery pass enqueues a READY node with no task, with the node's input.
 #[tokio::test]
-#[serial]
 async fn recovery_enqueues_a_ready_node_with_its_input() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
@@ -1013,7 +985,6 @@ fn scraping_parent(child_key: &str) -> WorkflowSpec {
 /// of the child's spec. The client resolves them from its task and queue
 /// config (Rust: `spec_data::tests::a_node_on_another_queue_takes_its_priority_and_class`).
 #[tokio::test]
-#[serial]
 async fn a_child_built_by_its_builder_binds_the_queue_priority_on_node_and_task() {
     let db = IsolatedDatabase::create().await;
     let child_key = "tests.port.client_sync.v1";
@@ -1045,7 +1016,6 @@ async fn a_child_built_by_its_builder_binds_the_queue_priority_on_node_and_task(
 /// the child's task and a task sent later on the same queue have the same
 /// priority, and the claim takes the child's task first.
 #[tokio::test]
-#[serial]
 async fn a_built_child_task_keeps_fifo_order_with_a_later_send_on_its_queue() {
     let db = IsolatedDatabase::create().await;
     let child_key = "tests.port.client_sync_order.v1";

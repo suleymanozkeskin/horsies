@@ -10,7 +10,6 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use serde_json::json;
-use serial_test::serial;
 
 use super::*;
 use crate::broker::client_family::ClientFamily;
@@ -497,7 +496,6 @@ async fn on_a_handle_an_unreachable_server_is_one_unreadable_limit_error() {
 /// pools alone pass it; the formula names the pool of each child kind, and
 /// the second note the task-send pool of each. `small` fits.
 #[tokio::test]
-#[serial]
 async fn each_child_kind_counts_its_own_pool_against_the_server() {
     let usable = usable_slots_of_the_test_server().await;
     let per_async_child = usable.min(MAX_CHILD_POOL_CONNECTIONS);
@@ -566,7 +564,6 @@ async fn each_child_kind_counts_its_own_pool_against_the_server() {
 /// a parent pool above the usable slots alone fails the check, and the
 /// formula names it. The pool of `PostgresConfig` plays no part.
 #[tokio::test]
-#[serial]
 async fn the_parent_pool_of_the_profile_is_counted_against_the_server() {
     let usable = usable_slots_of_the_test_server().await;
     let parent_pool = (usable + 1).min(MAX_CHILD_POOL_CONNECTIONS);
@@ -621,7 +618,6 @@ fn with_application_name(url: &str, application_name: &str) -> String {
 /// not fit with one. The check reads the limit through `broker` and connects
 /// nothing on the session URL.
 #[tokio::test]
-#[serial]
 async fn a_separate_session_url_counts_its_session_pool_against_the_server() {
     let usable = usable_slots_of_the_test_server().await;
     let set_parent_pool = usable
@@ -807,7 +803,6 @@ fn a_name_is_quoted_as_python_s_repr() {
 /// setting before PostgreSQL 16: 0). The settings are read here from
 /// `pg_settings`, not through the code under test.
 #[tokio::test]
-#[serial]
 async fn the_read_returns_max_connections_and_both_reserved_settings() {
     let pool = migrated_pool().await;
     let (max_connections, superuser_reserved, reserved): (i32, i32, i32) = sql::query_as(
@@ -840,7 +835,6 @@ async fn the_read_returns_max_connections_and_both_reserved_settings() {
 /// database does not exist), and the limit is unreadable with the server's
 /// error.
 #[tokio::test]
-#[serial]
 async fn a_server_error_makes_the_limit_unreadable() {
     let url = migrated_database_url().await;
     let missing = crate::test_support::with_database(
@@ -1228,7 +1222,6 @@ fn a_set_worker_pool_is_counted_as_set() {
 /// test server, and a profile whose worker fits in the usable slots gives no
 /// error.
 #[tokio::test]
-#[serial]
 async fn profiles_that_fit_have_no_error() {
     let usable = usable_slots_of_the_test_server().await;
     let mut config = AppConfig::for_database_url(migrated_database_url().await);

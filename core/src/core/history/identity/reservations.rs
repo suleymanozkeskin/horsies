@@ -248,7 +248,6 @@ pub(crate) fn decode_reservation_row(
 mod tests {
     use super::*;
     use crate::test_support::sql;
-    use serial_test::serial;
 
     #[test]
     fn reservation_row_decode_fails_closed() {
@@ -263,7 +262,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn cleanup_wrapper_deletes_only_expired_terminal_rows_with_the_requested_bound() {
         let pool = crate::test_support::migrated_pool().await;
         let expired = [vec![31_u8; 32], vec![32_u8; 32]];
@@ -338,11 +336,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn cleanup_pass_stops_at_its_batch_bound_and_reports_truncation() {
         let pool = crate::test_support::migrated_pool().await;
         let core = crate::broker::pools::core_pool_for_test_url(pool.url());
-        // Start from no expired row of other tests in the shared database.
+        // Start from no expired row in the database.
         cleanup_expired_reservations_pass(&core, StatementLog::Off, 10_000, 100)
             .await
             .expect("clear expired reservations");

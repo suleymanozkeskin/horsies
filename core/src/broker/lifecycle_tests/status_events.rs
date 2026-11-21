@@ -4,15 +4,12 @@
 //! are `broker::monitoring_schema_tests::a_start_sends_no_status_event` and
 //! `::a_terminal_move_sends_task_done_and_the_status_event` (#621).
 
-use serial_test::serial;
-
 use super::support::*;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{BatchSize, TerminalizationCommand};
 
 /// Python `test_a_batch_move_sends_one_status_event_per_task`.
 #[tokio::test]
-#[serial]
 async fn a_batch_move_sends_one_status_event_per_task() {
     let pool = pool().await;
     drain_pending_expiry(&pool).await;

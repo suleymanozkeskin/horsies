@@ -7,8 +7,6 @@
 
 use std::collections::HashSet;
 
-use serial_test::serial;
-
 use super::*;
 use crate::core::WorkflowTaskStatus;
 use crate::test_support::sql::{self, TestPool, TestPoolOptions};
@@ -177,7 +175,6 @@ fn waiting_nodes(rows: Vec<StuckPendingRow>) -> HashSet<Uuid> {
 /// dependent, and only a workflow whose nodes are all terminal is a
 /// completion candidate.
 #[tokio::test]
-#[serial]
 async fn the_recovery_discovery_treats_each_node_status_by_the_enum() {
     let (database, pool) = owned_database().await;
     let seeded = seed_status_workflows(&pool).await;
@@ -253,7 +250,6 @@ async fn the_recovery_discovery_treats_each_node_status_by_the_enum() {
 /// nonterminal status of the enum and for no terminal one. The stored
 /// predicate is evaluated for each status, not compared as text.
 #[tokio::test]
-#[serial]
 async fn the_nonterminal_node_index_holds_exactly_the_nonterminal_statuses() {
     let pool = crate::test_support::migrated_pool().await;
     let predicate: String = sql::query_scalar(
@@ -314,7 +310,6 @@ fn a_failed_pass_keeps_the_completion_yield_of_its_audit() {
 /// `test_yield_per_audit_result` (case `candidates`): the yield is the
 /// completion candidates divided by the workflows that the audit scanned.
 #[tokio::test]
-#[serial]
 async fn the_completion_yield_is_the_share_of_scanned_workflows_that_are_candidates() {
     let (database, pool) = owned_database().await;
     let candidate = seed_running_workflow(&pool).await;
@@ -347,7 +342,6 @@ async fn the_completion_yield_is_the_share_of_scanned_workflows_that_are_candida
 /// `no-candidates` (a page with no candidate gives 0.0) is
 /// `tests::empty_global_workflow_audit_is_bounded_at_fifty_thousand_rows`.
 #[tokio::test]
-#[serial]
 async fn an_audit_page_that_scanned_no_workflow_has_no_completion_yield() {
     let (database, pool) = owned_database().await;
     let mut report = RecoveryReport::default();

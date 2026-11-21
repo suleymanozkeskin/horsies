@@ -18,7 +18,6 @@
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
@@ -259,7 +258,6 @@ impl SoftCapWorker {
 /// cap 2 with one row RUNNING on another worker: one claimed row starts; the
 /// rows that later passes claim stay CLAIMED and are not started.
 #[tokio::test]
-#[serial]
 async fn rows_of_a_capped_queue_past_the_cap_are_claimed_and_not_started() {
     let pool = pool().await;
     let names = Names::fresh();
@@ -290,7 +288,6 @@ async fn rows_of_a_capped_queue_past_the_cap_are_claimed_and_not_started() {
 /// cap 1: the first row starts; while it is still CLAIMED, the next claimed
 /// row is not started.
 #[tokio::test]
-#[serial]
 async fn a_started_row_counts_before_its_child_sets_it_running() {
     let pool = pool().await;
     let names = Names::fresh();
@@ -314,7 +311,6 @@ async fn a_started_row_counts_before_its_child_sets_it_running() {
 /// held row does not start while the started row runs, and starts on the
 /// first pass after that row ended.
 #[tokio::test]
-#[serial]
 async fn a_held_row_starts_when_the_queue_has_room_again() {
     let pool = pool().await;
     let names = Names::fresh();
@@ -340,7 +336,6 @@ async fn a_held_row_starts_when_the_queue_has_room_again() {
 
 /// Python `test_rows_of_an_uncapped_queue_start_while_a_capped_queue_waits`.
 #[tokio::test]
-#[serial]
 async fn rows_of_an_uncapped_queue_start_while_a_capped_queue_waits() {
     let pool = pool().await;
     let names = Names::fresh();
@@ -370,7 +365,6 @@ async fn rows_of_an_uncapped_queue_start_while_a_capped_queue_waits() {
 /// the cap's worth starts, and the queue never has more RUNNING rows than
 /// its cap.
 #[tokio::test]
-#[serial]
 async fn buffered_dispatch_respects_queue_cap_in_soft_mode() {
     let pool = pool().await;
     let names = Names::fresh();
@@ -413,7 +407,6 @@ async fn buffered_dispatch_respects_queue_cap_in_soft_mode() {
 /// queue stays held while its queue has room; it starts on the first pass
 /// after the slot frees.
 #[tokio::test]
-#[serial]
 async fn a_row_under_the_cap_waits_for_a_free_child() {
     let pool = pool().await;
     let names = Names::fresh();
@@ -442,7 +435,6 @@ async fn a_row_under_the_cap_waits_for_a_free_child() {
 /// row runs. When A's slot frees, A counts B's RUNNING row and keeps its row
 /// held: one row of the queue starts on the two workers, never two.
 #[tokio::test]
-#[serial]
 async fn a_row_that_waits_for_a_child_lets_no_other_worker_pass_the_cap() {
     let pool = pool().await;
     let names_a = Names::fresh();

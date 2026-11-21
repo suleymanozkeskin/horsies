@@ -381,7 +381,6 @@ impl InstallLockFailure {
 
 #[cfg(test)]
 mod tests {
-    use serial_test::serial;
     use tokio_postgres::error::DbError;
 
     use super::*;
@@ -406,7 +405,6 @@ mod tests {
     /// `refused`, `worker::recovery`). Another SQLSTATE, and an error with no
     /// server cause, are not.
     #[tokio::test]
-    #[serial]
     async fn the_lock_refusal_is_read_from_the_server_cause() {
         assert!(refused(server_error("55P03").await).is_lock_not_available());
         assert!(!refused(server_error("40001").await).is_lock_not_available());
@@ -424,7 +422,6 @@ mod tests {
     /// timeout. A statement that the server refuses with one of them is
     /// retryable.
     #[tokio::test]
-    #[serial]
     async fn every_sqlstate_of_the_five_classes_is_retryable() {
         for code in [
             "08000", "08006", "08P01", "40001", "40P01", "53000", "53300", "55P03", "55006",
@@ -438,7 +435,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn a_sqlstate_outside_the_five_classes_is_not_retryable() {
         for code in [
             "23505", "23514", "22P02", "42P01", "42883", "P0001", "XX000", "58030", "54000",

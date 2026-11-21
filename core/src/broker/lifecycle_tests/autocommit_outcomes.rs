@@ -11,7 +11,6 @@
 //! and is not ported (test map: NOT CORE).
 
 use chrono::Duration;
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
@@ -69,7 +68,6 @@ fn assert_retryable(result: Result<Vec<TerminalizationOutcome>, BrokerError>) {
 
 /// Python `test_a_replay_is_already_applied_and_writes_nothing`.
 #[tokio::test]
-#[serial]
 async fn a_replay_is_already_applied_and_writes_nothing() {
     let pool = pool().await;
     let mut wakes = Wakes::listen(&pool, CHANNEL).await;
@@ -103,7 +101,6 @@ async fn a_replay_is_already_applied_and_writes_nothing() {
 
 /// Python `test_a_lost_claim_generation_writes_nothing`.
 #[tokio::test]
-#[serial]
 async fn a_lost_claim_generation_writes_nothing() {
     let pool = pool().await;
     let mut wakes = Wakes::listen(&pool, CHANNEL).await;
@@ -141,7 +138,6 @@ async fn a_lost_claim_generation_writes_nothing() {
 /// completion commits and its reply never reaches the caller. The failure is
 /// `OutcomeUnknown` and retryable, and the retry is `AlreadyApplied`.
 #[tokio::test]
-#[serial]
 async fn a_lost_reply_is_retried_and_classified_on_the_replay() {
     let pool = pool().await;
     let upstream = pool.url();
@@ -208,7 +204,6 @@ async fn a_lost_reply_is_retried_and_classified_on_the_replay() {
 /// it. Either way the completion applies once: the first call applies, or it
 /// fails as retryable with nothing written and the retry applies.
 #[tokio::test]
-#[serial]
 async fn a_dead_connection_fails_the_completion_and_the_retry_applies() {
     let pool = pool().await;
     let unpinged = unpinged_single_connection_core_pool_for_url(pool.url());
@@ -275,7 +270,6 @@ async fn plain_phase_two(broker: &PostgresBroker) -> Result<(), FinalizeError> {
 /// is its one request: the server runs it, and the proxy drops the reply and
 /// closes the connection.
 #[tokio::test]
-#[serial]
 async fn a_dead_connection_fails_phase_two_as_retryable() {
     let pool = pool().await;
     let upstream = pool.url();
@@ -311,7 +305,6 @@ async fn a_dead_connection_fails_phase_two_as_retryable() {
 /// way the row is claimed once: the first pass claims it, or it fails as
 /// retryable with the row still PENDING and the next pass claims it.
 #[tokio::test]
-#[serial]
 async fn a_dead_connection_fails_the_claim_pass_as_retryable() {
     let pool = pool().await;
     let unpinged = unpinged_single_connection_core_pool_for_url(pool.url());

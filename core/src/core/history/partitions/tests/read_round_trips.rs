@@ -94,7 +94,6 @@ async fn published_database() -> TestDatabase {
 
 /// `TestStagedResultReader.test_a_history_result_is_one_statement`.
 #[tokio::test]
-#[serial]
 async fn a_history_result_read_is_one_statement() {
     let database = published_database().await;
     let task_id = crate::core::history::identity::uuid7::mint_task_id().expect("mint a task id");
@@ -123,7 +122,6 @@ async fn a_history_result_read_is_one_statement() {
 
 /// `TestStagedResultReader.test_a_live_task_is_one_statement`.
 #[tokio::test]
-#[serial]
 async fn a_live_result_read_is_one_statement() {
     let database = published_database().await;
     let task_id = Uuid::new_v4();

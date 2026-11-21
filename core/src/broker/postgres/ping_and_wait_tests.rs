@@ -10,7 +10,6 @@
 
 use std::time::{Duration, Instant};
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::{decode_pong, PostgresBroker};
@@ -113,7 +112,6 @@ fn a_pong_of_another_round_is_dropped() {
 /// its 5 s window. A responder on the ping channel answers each request on
 /// its reply channel, as a worker does.
 #[tokio::test]
-#[serial]
 async fn the_ping_returns_at_the_first_pong_when_one_is_enough() {
     let (broker, pool) = listener_broker("ping_min_responses").await;
     let mut requests = TestListener::connect_with(&pool)
@@ -154,7 +152,6 @@ async fn the_ping_returns_at_the_first_pong_when_one_is_enough() {
 /// behind. The drop of the subscription is synchronous, so no second cancel
 /// can interrupt it; the listener then UNLISTENs the channel of the wait.
 #[tokio::test]
-#[serial]
 async fn a_result_wait_dropped_while_it_waits_unlistens_its_channel() {
     let application_name = format!("result_wait_drop_{}", Uuid::new_v4().simple());
     let (broker, pool) = listener_broker(&application_name).await;
@@ -198,7 +195,6 @@ async fn a_result_wait_dropped_while_it_waits_unlistens_its_channel() {
 /// LISTEN behind. The drop of its subscription is synchronous, so no second
 /// cancel can interrupt it; the listener then UNLISTENs `workflow_done`.
 #[tokio::test]
-#[serial]
 async fn a_workflow_wait_dropped_while_it_waits_unlistens_its_channel() {
     let application_name = format!("workflow_wait_drop_{}", Uuid::new_v4().simple());
     let (broker, pool) = listener_broker(&application_name).await;

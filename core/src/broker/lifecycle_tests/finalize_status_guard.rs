@@ -8,7 +8,6 @@
 //! (differences ledger, row 18), and that statement's generation fence is
 //! `attempt_writes::tests::a_stale_claim_generation_writes_no_failure`.
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
@@ -99,7 +98,6 @@ fn assert_refused_by_the_reaper(outcome: &FailedAttemptOutcome) {
 /// Python `test_fail_guard_blocks_when_not_running`: the reaper put the row
 /// back to PENDING; the failure write refuses it and writes nothing.
 #[tokio::test]
-#[serial]
 async fn fail_guard_blocks_when_not_running() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -131,7 +129,6 @@ async fn fail_guard_blocks_when_not_running() {
 /// Python `test_fail_worker_guard_blocks_when_not_running`: a worker-level
 /// failure refuses a row that the reaper already failed.
 #[tokio::test]
-#[serial]
 async fn fail_worker_guard_blocks_when_not_running() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -158,7 +155,6 @@ async fn fail_worker_guard_blocks_when_not_running() {
 /// Python `test_retry_guard_blocks_when_not_running`: the retry write
 /// refuses a row that is no longer RUNNING.
 #[tokio::test]
-#[serial]
 async fn retry_guard_blocks_when_not_running() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -180,7 +176,6 @@ async fn retry_guard_blocks_when_not_running() {
 /// then a late worker asks for a retry. The row stays FAILED and does not
 /// come back as PENDING.
 #[tokio::test]
-#[serial]
 async fn reaper_then_retry_race_sequence() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -203,7 +198,6 @@ async fn reaper_then_retry_race_sequence() {
 /// design: the claim returns `retry_count` and `max_retries`, and no read
 /// runs before the failure write (differences ledger, row 18).
 #[tokio::test]
-#[serial]
 async fn the_claim_returns_the_retry_facts() {
     let pool = pool().await;
     let task_id = seed_task(
@@ -237,7 +231,6 @@ async fn the_claim_returns_the_retry_facts() {
 /// of a workflow task refuses a RUNNING row of another worker and writes
 /// nothing; the owner's success applies.
 #[tokio::test]
-#[serial]
 async fn workflow_success_blocks_on_ownership_mismatch() {
     let pool = pool().await;
     let task_id = seed_task(
@@ -287,7 +280,6 @@ async fn workflow_success_blocks_on_ownership_mismatch() {
 /// core's rule: the stored fused completion refuses a NULL generation before
 /// any lock or write (differences ledger, row 3).
 #[tokio::test]
-#[serial]
 async fn fused_finalize_null_fence_is_refused() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;

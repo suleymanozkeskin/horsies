@@ -136,7 +136,6 @@ async fn options_that_the_command_rules_refuse_refuse_the_start_before_any_state
 /// and the options text as written, the queue's priority, the retention
 /// class and the rerun-input posture of the manifest.
 #[tokio::test]
-#[serial]
 async fn a_manifest_scheduler_starts_and_fires_with_the_send_facts_of_the_manifest() {
     let pool = test_pool().await;
     let name = format!("manifest_start_{}", Uuid::new_v4().simple());

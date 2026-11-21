@@ -348,7 +348,6 @@ mod tests {
     /// that its client gave: `PYTHON` for the Python bridge's handle, `RUST`
     /// for the Rust client's.
     #[tokio::test]
-    #[serial_test::serial]
     async fn the_first_install_of_a_handle_records_the_family_of_its_client() {
         for family in [ClientFamily::Python, ClientFamily::Rust] {
             let database = TestDatabase::create_empty().await;

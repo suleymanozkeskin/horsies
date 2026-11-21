@@ -1,7 +1,5 @@
 //! Port of Python `clients/python/tests/integration/test_task_history_terminalization_move.py`.
 
-use serial_test::serial;
-
 use super::support::*;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationKind, TerminalizationOutcome};
@@ -12,7 +10,6 @@ use crate::test_support::sql;
 /// of the result, its last owner, and its one COMPLETED attempt in the
 /// snapshot; no live row and no live attempt row stay.
 #[tokio::test]
-#[serial]
 async fn fused_completion_moves_the_row() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -68,7 +65,6 @@ async fn fused_completion_moves_the_row() {
 /// a completed task archives NEVER_ELIGIBLE with no envelope, even when its
 /// input is retained.
 #[tokio::test]
-#[serial]
 async fn completed_is_never_eligible_even_with_retained_input() {
     let pool = pool().await;
     let task_id = seed_task(
@@ -115,7 +111,6 @@ async fn completed_is_never_eligible_even_with_retained_input() {
 /// a workflow task cannot defer phase 2 with nothing to defer, so the move
 /// refuses a deferred completion with no result.
 #[tokio::test]
-#[serial]
 async fn deferred_terminalization_requires_a_result_payload() {
     let pool = pool().await;
     let task_id = seed_task(
@@ -142,7 +137,6 @@ async fn deferred_terminalization_requires_a_result_payload() {
 /// move refuses it and writes nothing: the live row and its attempts stay,
 /// history keeps the one planted row, and no phase-2 record is written.
 #[tokio::test]
-#[serial]
 async fn duplicate_identity_fails_closed() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;

@@ -100,7 +100,6 @@ async fn clock_exception_count(pool: &TestPool, task_id: Uuid) -> i64 {
 /// duplicate guard finds it through that record. An id born before its
 /// terminal time is not recorded.
 #[tokio::test]
-#[serial]
 async fn a_clock_ahead_move_is_recorded_and_the_guard_finds_it() {
     let database = TestDatabase::create().await;
     publish_readers(&database.pool).await;
@@ -125,7 +124,6 @@ async fn a_clock_ahead_move_is_recorded_and_the_guard_finds_it() {
 /// that kept its input carries the rerun envelope the move built, with its
 /// version and digest, on the history detail.
 #[tokio::test]
-#[serial]
 async fn the_detail_carries_the_archived_inline_rerun_input() {
     let database = TestDatabase::create().await;
     publish_readers(&database.pool).await;
@@ -172,7 +170,6 @@ async fn the_detail_carries_the_archived_inline_rerun_input() {
 /// id that is not a UUIDv7 and that no table holds is absent and not
 /// classified.
 #[tokio::test]
-#[serial]
 async fn an_absent_id_that_is_not_a_uuid7_is_not_classified() {
     let database = TestDatabase::create().await;
     publish_readers(&database.pool).await;
@@ -245,7 +242,6 @@ async fn mark_reader_stale(connection: &mut TestConnection, signature: &str) {
 /// that missed the other class) misses the other class's row; one republish
 /// renders it again and it finds the row.
 #[tokio::test]
-#[serial]
 async fn one_republish_heals_a_stale_provenance_body() {
     let database = TestDatabase::create().await;
     let (row_a, row_b) = seed_two_classes(&database.pool).await;
@@ -282,7 +278,6 @@ async fn one_republish_heals_a_stale_provenance_body() {
 
 /// `TestPublicationAtomicity.test_publisher_keeps_the_detail_function_in_agreement`.
 #[tokio::test]
-#[serial]
 async fn one_republish_heals_a_stale_detail_body() {
     let database = TestDatabase::create().await;
     let (_, row_b) = seed_two_classes(&database.pool).await;
@@ -327,7 +322,6 @@ async fn one_republish_heals_a_stale_detail_body() {
 /// every rendered reader carries `enable_seqscan = off`, so a probe of a new,
 /// unanalyzed leaf keeps an index plan.
 #[tokio::test]
-#[serial]
 async fn every_rendered_reader_runs_without_sequential_scans() {
     let database = TestDatabase::create().await;
     publish_readers(&database.pool).await;
@@ -357,7 +351,6 @@ async fn every_rendered_reader_runs_without_sequential_scans() {
 /// broker do, and run on one connection of a core pool, so the second read
 /// meets the statement that the first read prepared.
 #[tokio::test]
-#[serial]
 async fn a_result_reader_dropped_after_it_was_seen_fails_once() {
     let database = TestDatabase::create().await;
     publish_readers(&database.pool).await;
@@ -407,7 +400,6 @@ async fn a_result_reader_dropped_after_it_was_seen_fails_once() {
 /// `horsies_task_detail_staged`. After the next coverage pass publishes the
 /// readers, the next call answers.
 #[tokio::test]
-#[serial]
 async fn a_dropped_detail_reader_fails_the_call_until_the_readers_are_published() {
     let database = TestDatabase::create().await;
     publish_readers(&database.pool).await;

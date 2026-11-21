@@ -206,7 +206,6 @@ impl PostgresBroker {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use serial_test::serial;
     use uuid::Uuid;
 
     use super::*;
@@ -229,7 +228,6 @@ mod tests {
     /// A pass on a database of this handle's family ends with an outcome
     /// that covers the present heartbeat hour.
     #[tokio::test]
-    #[serial]
     async fn a_pass_of_the_recorded_family_ends_covered() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
@@ -246,7 +244,6 @@ mod tests {
     /// A handle of the other family is refused before the pass writes: the
     /// class rows do not change, and the refusal is not retryable.
     #[tokio::test]
-    #[serial]
     async fn a_handle_of_the_other_family_is_refused_before_the_pass() {
         let pool = crate::test_support::migrated_pool().await;
         let before = class_rows(&pool).await;
@@ -282,11 +279,9 @@ mod tests {
     }
 
     /// A pruning pass on a database of this handle's family passes the family
-    /// check and ends with a report. The shared database may hold expired
-    /// leaves of other tests, so the report itself is not checked here; the
-    /// pass tests of `core::history::partitions::tests` check it.
+    /// check and ends with a report. This test does not check the report;
+    /// the pass tests of `core::history::partitions::tests` check it.
     #[tokio::test]
-    #[serial]
     async fn a_pruning_pass_of_the_recorded_family_ends_with_a_report() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
@@ -300,7 +295,6 @@ mod tests {
     /// A handle of the other family is refused before the pruning pass
     /// writes: no catalog stamp changes, and the refusal is not retryable.
     #[tokio::test]
-    #[serial]
     async fn a_handle_of_the_other_family_is_refused_before_the_pruning_pass() {
         let pool = crate::test_support::migrated_pool().await;
         let before = catalog_stamps(&pool).await;
@@ -394,7 +388,6 @@ mod tests {
     /// move) of a task of the default class both move to history. Before the
     /// pass, the cancel failed with 23514 (no partition for the row).
     #[tokio::test]
-    #[serial]
     async fn a_fresh_install_covers_the_terminal_writes_of_a_producer_with_no_worker() {
         let database = TestDatabase::create_empty().await;
         let seven_days =
@@ -462,7 +455,6 @@ mod tests {
     /// default retention config at its install: the cancel of a task of the
     /// default class moves to history with no worker.
     #[tokio::test]
-    #[serial]
     async fn the_install_of_a_handle_with_no_request_covers_the_default_class() {
         let database = TestDatabase::create_empty().await;
         let broker = PostgresBroker::connect(database.url(), ClientFamily::Rust)

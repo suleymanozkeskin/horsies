@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -421,7 +420,6 @@ pub(super) fn success_surface_parent() -> WorkflowSpec {
 /// `test_subworkflow_success_full_surface_matrix`: `get()`, the node row, the
 /// summary, the child row links, `tasks()` and `result_for()` agree.
 #[tokio::test]
-#[serial]
 async fn a_child_success_reads_the_same_on_every_surface() {
     let pool = shared_pool().await;
     let workflow_id = run(&pool, &success_surface_parent()).await;
@@ -480,7 +478,6 @@ async fn a_child_success_reads_the_same_on_every_surface() {
 /// `test_subworkflow_reconstructed_handle_status`, `..._tasks` and `..._results`:
 /// a handle built from the workflow id reads the finished workflow.
 #[tokio::test]
-#[serial]
 async fn a_handle_built_from_the_id_reads_status_tasks_and_results() {
     let pool = shared_pool().await;
     let workflow_id = run(&pool, &success_surface_parent()).await;
@@ -522,7 +519,6 @@ async fn a_handle_built_from_the_id_reads_status_tasks_and_results() {
 /// the workflow error column, `get()`, `tasks()` and `result_for()` hold the
 /// same sub-workflow error.
 #[tokio::test]
-#[serial]
 async fn a_child_failure_reads_the_same_sub_workflow_error_on_every_surface() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -583,7 +579,6 @@ async fn a_child_failure_reads_the_same_sub_workflow_error_on_every_surface() {
 /// dependent gets the same sub-workflow error through `args_from` and the
 /// context, and the context holds the child summary.
 #[tokio::test]
-#[serial]
 async fn a_failed_child_reaches_its_dependent_through_args_from_and_the_context() {
     let pool = shared_pool().await;
     let child_specs = matrix_children();
@@ -638,7 +633,6 @@ pub(super) fn outputless_parent() -> WorkflowSpec {
 
 /// `test_outputless_success_policy_keeps_failed_subworkflow_result`
 #[tokio::test]
-#[serial]
 async fn an_outputless_workflow_holds_the_optional_child_error_in_its_map() {
     let pool = shared_pool().await;
     let workflow_id = run(&pool, &outputless_parent()).await;
@@ -655,7 +649,6 @@ async fn an_outputless_workflow_holds_the_optional_child_error_in_its_map() {
 
 /// `test_nested_subworkflow_success_records_depth_root_and_result`
 #[tokio::test]
-#[serial]
 async fn a_nested_child_success_records_its_links_depth_and_root() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -688,7 +681,6 @@ async fn a_nested_child_success_records_its_links_depth_and_root() {
 /// `test_nested_subworkflow_failure_surfaces_each_child_error`: the root, the
 /// middle workflow and the middle node each hold a sub-workflow error.
 #[tokio::test]
-#[serial]
 async fn a_nested_child_failure_gives_a_sub_workflow_error_at_each_level() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -730,7 +722,6 @@ async fn a_nested_child_failure_gives_a_sub_workflow_error_at_each_level() {
 /// and `test_subworkflow_skip_allow_failed_deps`: the child builder receives
 /// the failed upstream result with its code, and the child completes.
 #[tokio::test]
-#[serial]
 async fn an_allow_failed_deps_child_builder_receives_the_failed_upstream_result() {
     let pool = shared_pool().await;
     let mut child = after(sub_workflow_node(1, &failed_input_child()), &[0]);
@@ -784,7 +775,6 @@ fn expected(statuses: &[&str]) -> HashMap<String, String> {
 /// `test_subworkflow_join_any_first_success`: the child starts while the slow
 /// dependency still runs, and keeps its child to the end.
 #[tokio::test]
-#[serial]
 async fn a_join_any_child_starts_on_the_first_success() {
     let pool = shared_pool().await;
     let child_specs = matrix_children();
@@ -829,7 +819,6 @@ async fn a_join_any_child_starts_on_the_first_success() {
 
 /// `test_subworkflow_join_any_all_fail`
 #[tokio::test]
-#[serial]
 async fn a_join_any_child_with_every_dependency_failed_is_skipped_with_no_child() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -861,7 +850,6 @@ async fn a_join_any_child_with_every_dependency_failed_is_skipped_with_no_child(
 
 /// `test_subworkflow_join_quorum_met`
 #[tokio::test]
-#[serial]
 async fn a_quorum_child_starts_when_its_quorum_is_met() {
     let pool = shared_pool().await;
     let mut quorum = parent(
@@ -892,7 +880,6 @@ async fn a_quorum_child_starts_when_its_quorum_is_met() {
 
 /// `test_subworkflow_join_quorum_unmet`
 #[tokio::test]
-#[serial]
 async fn a_quorum_child_is_skipped_when_its_quorum_fails() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -925,7 +912,6 @@ async fn a_quorum_child_is_skipped_when_its_quorum_fails() {
 /// `test_subworkflow_join_quorum_impossible`: the child is SKIPPED with no
 /// child once two of three dependencies failed, while the third still runs.
 #[tokio::test]
-#[serial]
 async fn a_quorum_child_is_skipped_once_its_quorum_is_impossible() {
     let pool = shared_pool().await;
     let child_specs = matrix_children();
@@ -971,7 +957,6 @@ async fn a_quorum_child_is_skipped_once_its_quorum_is_impossible() {
 
 /// `test_subworkflow_skip_task_fail_to_sub_skip`
 #[tokio::test]
-#[serial]
 async fn a_failed_task_skips_a_dependent_child_node() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -996,7 +981,6 @@ async fn a_failed_task_skips_a_dependent_child_node() {
 
 /// `test_subworkflow_skip_sub_fail_to_task_skip`
 #[tokio::test]
-#[serial]
 async fn a_failed_child_skips_a_dependent_task_node() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -1021,7 +1005,6 @@ async fn a_failed_child_skips_a_dependent_task_node() {
 
 /// `test_subworkflow_skip_chain_skip`
 #[tokio::test]
-#[serial]
 async fn a_skip_cascades_through_child_and_task_nodes() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -1052,7 +1035,6 @@ async fn a_skip_cascades_through_child_and_task_nodes() {
 
 /// `test_subworkflow_success_policy_required_fail_workflow_fail`
 #[tokio::test]
-#[serial]
 async fn a_required_failed_child_fails_the_workflow() {
     let pool = shared_pool().await;
     let mut required_fail = parent(
@@ -1070,7 +1052,6 @@ async fn a_required_failed_child_fails_the_workflow() {
 
 /// `test_subworkflow_success_policy_multi_case_any`
 #[tokio::test]
-#[serial]
 async fn a_second_case_met_by_a_child_completes_the_workflow() {
     let pool = shared_pool().await;
     let mut multi = parent(
@@ -1095,7 +1076,6 @@ async fn a_second_case_met_by_a_child_completes_the_workflow() {
 /// `test_subworkflow_success_policy_mixed_required_optional`: `results()` holds
 /// the required child's output and the optional child's error.
 #[tokio::test]
-#[serial]
 async fn required_and_optional_children_hold_their_results() {
     let pool = shared_pool().await;
     let mut mixed = parent(
@@ -1123,7 +1103,6 @@ async fn required_and_optional_children_hold_their_results() {
 
 /// `test_subworkflow_deep_outputless_nested_failed_optional`
 #[tokio::test]
-#[serial]
 async fn an_optional_nested_failed_child_appears_in_the_outputless_map() {
     let pool = shared_pool().await;
     let mut deep = parent(
@@ -1153,7 +1132,6 @@ async fn an_optional_nested_failed_child_appears_in_the_outputless_map() {
 
 /// `test_subworkflow_deep_outputless_all_failed_required`
 #[tokio::test]
-#[serial]
 async fn two_required_failed_children_fail_the_workflow_with_sub_workflow_errors() {
     let pool = shared_pool().await;
     let mut deep = parent(
@@ -1182,7 +1160,6 @@ async fn two_required_failed_children_fail_the_workflow_with_sub_workflow_errors
 /// that receives the failed source, and an optional nested failure in one
 /// outputless workflow.
 #[tokio::test]
-#[serial]
 async fn success_allow_failed_and_nested_optional_failure_in_one_outputless_workflow() {
     let pool = shared_pool().await;
     let mut allow_failed = after(sub_workflow_node(2, &failed_input_child()), &[1]);

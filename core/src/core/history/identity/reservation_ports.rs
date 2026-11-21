@@ -5,7 +5,6 @@
 //! migrated database, under a key digest of its own.
 
 use crate::test_support::sql::{self, TestConnection, TestPool};
-use serial_test::serial;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -59,7 +58,6 @@ async fn shared_pool() -> TestPool {
 /// `TestClaimReplayConflict.test_window_above_maximum_is_rejected_before_mutation`:
 /// the claim function refuses a window above 30 days and writes nothing.
 #[tokio::test]
-#[serial]
 async fn a_window_above_thirty_days_is_refused_before_any_write() {
     let pool = shared_pool().await;
     let key = fresh_key();
@@ -101,7 +99,6 @@ async fn a_window_above_thirty_days_is_refused_before_any_write() {
 /// `TestTerminalizationAndReuse.test_terminalize_verifies_ownership`: only the
 /// owner terminalizes the reservation, and only once.
 #[tokio::test]
-#[serial]
 async fn only_the_owner_terminalizes_a_reservation_once() {
     let pool = shared_pool().await;
     let key = fresh_key();
@@ -130,7 +127,6 @@ async fn only_the_owner_terminalizes_a_reservation_once() {
 /// that names the task that holds the key and the fingerprint version it
 /// observed.
 #[tokio::test]
-#[serial]
 async fn a_claim_with_another_fingerprint_is_a_typed_conflict() {
     let pool = shared_pool().await;
     let key = fresh_key();
@@ -161,7 +157,6 @@ async fn a_claim_with_another_fingerprint_is_a_typed_conflict() {
 
 /// `TestTerminalizationAndReuse.test_unexpired_terminal_reservation_still_replays`.
 #[tokio::test]
-#[serial]
 async fn an_unexpired_terminal_reservation_still_replays() {
     let pool = shared_pool().await;
     let key = fresh_key();
@@ -184,7 +179,6 @@ async fn an_unexpired_terminal_reservation_still_replays() {
 /// after the window passed, the key applies to a new task, even with another
 /// command.
 #[tokio::test]
-#[serial]
 async fn an_expired_terminal_reservation_is_reused() {
     let pool = shared_pool().await;
     let key = fresh_key();
@@ -211,7 +205,6 @@ async fn an_expired_terminal_reservation_is_reused() {
 /// `TestCleanup.test_cleanup_deletes_only_expired_terminal_rows`: cleanup
 /// removes an expired terminal reservation and never a live one.
 #[tokio::test]
-#[serial]
 async fn cleanup_deletes_only_expired_terminal_rows_and_never_live_ones() {
     let pool = shared_pool().await;
     let expired_key = fresh_key();
@@ -219,7 +212,7 @@ async fn cleanup_deletes_only_expired_terminal_rows_and_never_live_ones() {
     let expired = Uuid::new_v4();
     let live = Uuid::new_v4();
     let mut transaction = pool.begin().await.expect("begin");
-    // Expired rows that other tests left in the shared database go first.
+    // Expired rows that the database holds already go first.
     while cleanup_expired_reservations(&mut transaction, 1_000)
         .await
         .expect("clear earlier expired rows")

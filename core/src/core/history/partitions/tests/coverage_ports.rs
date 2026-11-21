@@ -102,7 +102,6 @@ fn ensured(outcome: CoverageOutcome) -> CoverageEnsured {
 /// does not publish; the manifest rows share one timestamp and have
 /// contiguous positions.
 #[tokio::test]
-#[serial]
 async fn coverage_creating_leaves_in_two_classes_leaves_the_readers_current() {
     let database = TestDatabase::create_with_connections(4).await;
     let outcome = ensure_partition_coverage_in_pool(
@@ -144,7 +143,6 @@ async fn coverage_creating_leaves_in_two_classes_leaves_the_readers_current() {
 /// leaf name is taken by a foreign relation is refused and named, and a class
 /// that sorts after it still gets every leaf it is owed.
 #[tokio::test]
-#[serial]
 async fn a_returned_refusal_is_contained_like_a_raise() {
     let database = TestDatabase::create_with_connections(4).await;
     // `standard_10d` sorts before `standard_7d`.
@@ -178,7 +176,6 @@ async fn a_returned_refusal_is_contained_like_a_raise() {
 /// `test_a_refusal_keeps_the_leaves_created_before_it`: the second pass
 /// creates day+3 of the class and then refuses day+4; the day it created stays.
 #[tokio::test]
-#[serial]
 async fn a_refusal_keeps_the_leaves_created_before_it() {
     let database = TestDatabase::create_with_connections(4).await;
     let class_key = "standard_7d";
@@ -227,7 +224,6 @@ async fn a_refusal_keeps_the_leaves_created_before_it() {
 /// `test_horizon_retune_is_a_success_not_a_failure`: a pass with a new
 /// heartbeat horizon is a coverage success and stores the new horizon.
 #[tokio::test]
-#[serial]
 async fn a_heartbeat_horizon_retune_is_a_success_and_is_stored() {
     let database = TestDatabase::create_with_connections(4).await;
     settled_pool_pass(&database.pool, 2, 3).await;
@@ -256,7 +252,6 @@ async fn a_heartbeat_horizon_retune_is_a_success_and_is_stored() {
 /// spans every hour of a day, and every hourly leaf the pass creates is
 /// named on the 24-hour clock, so the next pass finds them all conformant.
 #[tokio::test]
-#[serial]
 async fn the_probe_names_heartbeat_leaves_on_the_24_hour_clock() {
     let database = TestDatabase::create_with_connections(4).await;
     let first = ensure_partition_coverage_in_pool(
@@ -303,7 +298,6 @@ async fn the_probe_names_heartbeat_leaves_on_the_24_hour_clock() {
 /// replaced by the canonical ones. The heartbeat half is
 /// `coverage_repairs_a_nondefault_heartbeat_operator_class`.
 #[tokio::test]
-#[serial]
 async fn coverage_repairs_descending_history_index_shapes() {
     let database = TestDatabase::create_with_connections(4).await;
     settled_pool_pass(&database.pool, 2, 2).await;
@@ -342,7 +336,6 @@ async fn coverage_repairs_descending_history_index_shapes() {
 /// `test_stale_manifest_metadata_is_republished`: manifest rows that differ
 /// from the catalog are written again by a pass that creates nothing.
 #[tokio::test]
-#[serial]
 async fn stale_manifest_rows_are_republished() {
     let database = TestDatabase::create_with_connections(4).await;
     settled_pool_pass(&database.pool, 2, 2).await;
@@ -380,7 +373,6 @@ async fn stale_manifest_rows_are_republished() {
 /// leaf cataloged with another index schema version fails the pass for the
 /// heartbeat class.
 #[tokio::test]
-#[serial]
 async fn a_stale_index_schema_version_fails_the_heartbeat_class() {
     let database = TestDatabase::create_with_connections(4).await;
     settled_pool_pass(&database.pool, 3, 6).await;
@@ -415,7 +407,6 @@ async fn a_stale_index_schema_version_fails_the_heartbeat_class() {
 /// database refuses a heartbeat class row with no horizon, so coverage never
 /// reads one.
 #[tokio::test]
-#[serial]
 async fn a_heartbeat_class_row_without_a_horizon_is_refused() {
     let database = TestDatabase::create_with_connections(4).await;
     settled_pool_pass(&database.pool, 3, 6).await;
@@ -439,7 +430,6 @@ async fn a_heartbeat_class_row_without_a_horizon_is_refused() {
 /// that fails (its leaf lock is held) does not stop the repair of the current
 /// heartbeat leaf in the same pass.
 #[tokio::test]
-#[serial]
 async fn a_history_failure_does_not_stop_heartbeat_repair() {
     let database = TestDatabase::create_with_connections(4).await;
     settled_pool_pass(&database.pool, 3, 6).await;
@@ -498,7 +488,6 @@ async fn a_history_failure_does_not_stop_heartbeat_repair() {
 /// fresh database refuses while another session holds the lock of the
 /// current heartbeat leaf.
 #[tokio::test]
-#[serial]
 async fn startup_refuses_while_the_current_heartbeat_leaf_is_busy() {
     let database = TestDatabase::create_with_connections(4).await;
     let hour = database_hour(&database.pool).await;
@@ -534,7 +523,6 @@ async fn startup_refuses_while_the_current_heartbeat_leaf_is_busy() {
 /// a leaf older than the horizon removed out of band makes a pass that creates
 /// nothing republish, and the pass names the leaf.
 #[tokio::test]
-#[serial]
 async fn a_pass_republishes_on_a_vanished_leaf_alone() {
     let database = TestDatabase::create_with_connections(4).await;
     let parent = register_class(&database.pool, "standard_30d", 30).await;
@@ -575,7 +563,6 @@ async fn a_pass_republishes_on_a_vanished_leaf_alone() {
 /// the current leaf of a class removed out of band fails that class and is
 /// reported, but startup stays ready because heartbeats are covered.
 #[tokio::test]
-#[serial]
 async fn an_in_horizon_loss_does_not_refuse_worker_startup() {
     let database = TestDatabase::create_with_connections(4).await;
     settled_pool_pass(&database.pool, 2, 2).await;
@@ -610,7 +597,6 @@ async fn an_in_horizon_loss_does_not_refuse_worker_startup() {
 /// `TestMissingLeafBreaksAndHeals.test_no_parent_resolving_at_all_raises`: the
 /// publication fails closed (`42P01`) when no history parent resolves.
 #[tokio::test]
-#[serial]
 async fn the_manifest_read_fails_closed_when_no_history_parent_resolves() {
     let database = TestDatabase::create().await;
     let parent = register_class(&database.pool, "standard_30d", 30).await;
@@ -651,7 +637,6 @@ async fn the_manifest_read_fails_closed_when_no_history_parent_resolves() {
 
 /// `TestMissingLeafBreaksAndHeals.test_one_history_parent_gone_is_reported_not_raised`.
 #[tokio::test]
-#[serial]
 async fn one_history_parent_gone_is_reported_not_raised() {
     let database = TestDatabase::create().await;
     let today = database_today(&database.pool).await;

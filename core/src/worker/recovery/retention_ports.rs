@@ -9,7 +9,6 @@
 //! are global to a database.
 
 use chrono::{DateTime, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::*;
@@ -142,7 +141,6 @@ async fn registered_classes(pool: &TestPool) -> Vec<String> {
 /// the pass drops the leaf past its period and keeps an older leaf that is
 /// still inside it.
 #[tokio::test]
-#[serial]
 async fn the_pass_keeps_a_leaf_inside_its_period() {
     let database = RetentionDatabase::create().await;
     let today = database_today(&database.pool).await;
@@ -173,7 +171,6 @@ async fn the_pass_keeps_a_leaf_inside_its_period() {
 
 /// `TestReaperRegistersDeclaredClasses.test_the_pass_registers_a_declared_class`.
 #[tokio::test]
-#[serial]
 async fn the_pass_registers_a_declared_period() {
     let database = RetentionDatabase::create().await;
     let mut retention = RetentionConfig::default();
@@ -197,7 +194,6 @@ async fn the_pass_registers_a_declared_period() {
 
 /// `TestReaperRegistersDeclaredClasses.test_declaring_nothing_registers_nothing_extra`.
 #[tokio::test]
-#[serial]
 async fn declaring_nothing_registers_nothing_extra() {
     let database = RetentionDatabase::create().await;
 
@@ -242,7 +238,6 @@ async fn seed_worker_state(pool: &TestPool, worker_id: &str, age_hours: i32) {
 /// `test_expired_worker_states_deleted`: a snapshot older than the window is
 /// deleted; a recent one stays.
 #[tokio::test]
-#[serial]
 async fn expired_worker_states_go_and_recent_ones_stay() {
     let database = RetentionDatabase::create().await;
     seed_worker_state(&database.pool, "port-old-worker", 48).await;
@@ -324,7 +319,6 @@ async fn seed_node(pool: &TestPool, workflow_id: Uuid) {
 /// `test_expired_terminal_workflows_deleted`: an old terminal workflow goes
 /// with its nodes; an old RUNNING workflow and a recent terminal one stay.
 #[tokio::test]
-#[serial]
 async fn expired_terminal_workflows_go_and_running_or_recent_ones_stay() {
     let database = RetentionDatabase::create().await;
     let old_completed = seed_workflow(&database.pool, "COMPLETED", 48).await;
@@ -402,7 +396,6 @@ async fn seed_running_task(pool: &TestPool, class_key: &str, worker_id: &str) ->
 /// a completed row is stored in the static forever leaf, or in the leaf of
 /// its class for the day of its terminal time.
 #[tokio::test]
-#[serial]
 async fn a_finished_row_lands_in_the_leaf_of_its_class() {
     let database = RetentionDatabase::create().await;
     let coverage = ensure_partition_coverage_in_pool(
@@ -464,7 +457,6 @@ async fn a_finished_row_lands_in_the_leaf_of_its_class() {
 /// `TestEveryPathStampsThePeriodClass.test_a_delayed_send_stamps_the_period_class`:
 /// a delayed send to a queue mapped to 7 days stores `standard_7d`.
 #[tokio::test]
-#[serial]
 async fn a_delayed_send_stamps_the_mapped_period_class() {
     let database = RetentionDatabase::create().await;
     let mut retention = RetentionConfig::default();

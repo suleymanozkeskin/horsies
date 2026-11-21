@@ -2,7 +2,6 @@ use super::{mark_task_finalizing, FinalizingMark, MARK_FINALIZING_SQL};
 use crate::broker::PostgresBroker;
 use crate::test_support::sql::{self, TestPool};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use serial_test::serial;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -61,7 +60,6 @@ async fn remove(pool: &TestPool, id: Uuid) {
 }
 
 #[tokio::test]
-#[serial]
 async fn finalizing_handoff_rejects_stale_owner_and_generation() {
     let pool = crate::test_support::migrated_pool().await;
     let (id, generation) = seed(&pool).await;
@@ -84,7 +82,6 @@ async fn finalizing_handoff_rejects_stale_owner_and_generation() {
 }
 
 #[tokio::test]
-#[serial]
 async fn finalizing_handoff_commits_for_current_claim_and_blocks_stale_recovery() {
     let pool = crate::test_support::migrated_pool().await;
     let (id, generation) = seed(&pool).await;
@@ -129,7 +126,6 @@ async fn finalizing_handoff_commits_for_current_claim_and_blocks_stale_recovery(
 /// `horsies_mark_finalizing` requires the claim time, so a NULL claim time
 /// is refused with 22023 and nothing can turn off the generation half.
 #[tokio::test]
-#[serial]
 async fn the_finalizing_marker_refuses_a_null_claim_generation() {
     let pool = crate::test_support::migrated_pool().await;
     let (id, _) = seed(&pool).await;
@@ -188,7 +184,6 @@ fn marker_row_read(definition: &str, id: Uuid, generation: DateTime<Utc>) -> Str
 /// `test_task_row_plans.py::test_the_finalizing_marker_reads_its_row_through_the_primary_key`:
 /// the row read of the installed `horsies_mark_finalizing`.
 #[tokio::test]
-#[serial]
 async fn the_finalizing_marker_reads_its_row_through_the_primary_key() {
     let pool = crate::test_support::migrated_pool().await;
     let (id, generation) = seed(&pool).await;
@@ -217,7 +212,6 @@ async fn the_finalizing_marker_reads_its_row_through_the_primary_key() {
 }
 
 #[tokio::test]
-#[serial]
 async fn finalizing_handoff_ignores_non_running_and_missing_tasks() {
     let pool = crate::test_support::migrated_pool().await;
     let (id, generation) = seed(&pool).await;
@@ -253,7 +247,6 @@ async fn finalizing_handoff_ignores_non_running_and_missing_tasks() {
 }
 
 #[tokio::test]
-#[serial]
 async fn finalizing_handoff_rechecks_owner_and_generation_after_lock_wait() {
     let pool = crate::test_support::migrated_pool().await;
     let waiting_broker = std::sync::Arc::new(broker(&pool));
@@ -288,8 +281,8 @@ async fn finalizing_handoff_rechecks_owner_and_generation_after_lock_wait() {
         let waiter = tokio::spawn(async move {
             mark_task_finalizing(&waiter_broker, id, "current-worker", generation).await
         });
-        // The tests are serial: the only session that the owner can block
-        // is the marker's.
+        // The owner can block only sessions of its own database, and the
+        // only one there is the marker's.
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let blocked: bool = sql::query_scalar(

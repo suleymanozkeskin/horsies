@@ -6,7 +6,6 @@
 //! it.
 
 use chrono::{DateTime, Duration, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
@@ -45,7 +44,6 @@ fn link_of(task_id: Option<Uuid>) -> NodeLink {
 
 /// Python `test_t03_stale_generation_does_not_cancel_reclaimed_task`.
 #[tokio::test]
-#[serial]
 async fn t03_stale_generation_does_not_cancel_reclaimed_task() {
     let pool = pool().await;
     let (dispatched, reclaimed) = generations();
@@ -69,7 +67,6 @@ async fn t03_stale_generation_does_not_cancel_reclaimed_task() {
 /// Python `test_batch_fences_each_task_on_its_own_generation`: one batch can
 /// span claim transactions, so the fence is per task.
 #[tokio::test]
-#[serial]
 async fn batch_fences_each_task_on_its_own_generation() {
     let pool = pool().await;
     let (dispatched, reclaimed) = generations();
@@ -92,7 +89,6 @@ async fn batch_fences_each_task_on_its_own_generation() {
 /// Python `test_real_claim_path_arms_the_fence`: the rows of the production
 /// claim carry the generation that the post-claim check fences on.
 #[tokio::test]
-#[serial]
 async fn real_claim_path_arms_the_fence() {
     let pool = pool().await;
     let task_id = seed_task(
@@ -210,7 +206,6 @@ async fn child_prestart_fences(case: PrestartCase) {
 
 /// Python `test_child_prestart_fences_on_claim_generation`, PAUSED case.
 #[tokio::test]
-#[serial]
 async fn child_prestart_fences_on_claim_generation_paused() {
     child_prestart_fences(PrestartCase {
         workflow_status: "PAUSED",
@@ -223,7 +218,6 @@ async fn child_prestart_fences_on_claim_generation_paused() {
 
 /// Python `test_child_prestart_fences_on_claim_generation`, CANCELLED case.
 #[tokio::test]
-#[serial]
 async fn child_prestart_fences_on_claim_generation_cancelled() {
     child_prestart_fences(PrestartCase {
         workflow_status: "CANCELLED",
@@ -239,7 +233,6 @@ async fn child_prestart_fences_on_claim_generation_cancelled() {
 /// and gets no history row; the orphan of the dispatched generation is
 /// cancelled.
 #[tokio::test]
-#[serial]
 async fn child_prestart_orphan_cancel_fences_on_claim_generation() {
     let pool = pool().await;
     let (dispatched, reclaimed) = generations();
@@ -273,7 +266,6 @@ async fn child_prestart_orphan_cancel_fences_on_claim_generation() {
 /// Python `test_child_prestart_still_cancels_requeued_pending_row`: a row
 /// that the reaper requeued carries no claim, so the fence must not gate it.
 #[tokio::test]
-#[serial]
 async fn child_prestart_still_cancels_requeued_pending_row() {
     let pool = pool().await;
     let (dispatched, _) = generations();
@@ -301,7 +293,6 @@ async fn child_prestart_still_cancels_requeued_pending_row() {
 /// Python `test_t16_skips_tasks_whose_workflow_is_not_cancelled`: the cancel
 /// batch needs a live CANCELLED workflow.
 #[tokio::test]
-#[serial]
 async fn t16_skips_tasks_whose_workflow_is_not_cancelled() {
     let pool = pool().await;
     let (_, reclaimed) = generations();

@@ -101,7 +101,6 @@ async fn a_failed_tick_is_logged_and_the_run_ticks_again() {
 /// before the run ends the run after its start. The start ran (it wrote the
 /// state row of a new schedule) and no tick fired the row that was due.
 #[tokio::test]
-#[serial]
 async fn a_stop_asked_for_before_the_run_ends_the_run_after_its_start() {
     let pool = test_pool().await;
     let mut due = interval_schedule_secs(&format!("stopped_due_{}", Uuid::new_v4().simple()), 60);
@@ -151,7 +150,6 @@ async fn a_stop_asked_for_before_the_run_ends_the_run_after_its_start() {
 /// (another scheduler may own it), logs it, and writes the row of its own
 /// schedule.
 #[tokio::test]
-#[serial]
 async fn the_start_keeps_and_logs_the_row_of_a_schedule_not_in_its_config() {
     let pool = test_pool().await;
     let core = core_pool_of(&pool);
@@ -204,7 +202,6 @@ async fn the_start_keeps_and_logs_the_row_of_a_schedule_not_in_its_config() {
 /// a database error of the start write is logged and does not refuse the
 /// start; the row is left to the tick's existence heal.
 #[tokio::test]
-#[serial]
 async fn a_failed_start_write_is_logged_and_the_start_goes_on() {
     let pool = test_pool().await;
     let core = core_pool_of(&pool);

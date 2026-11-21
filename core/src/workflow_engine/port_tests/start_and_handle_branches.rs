@@ -7,7 +7,6 @@
 //! `clients/python/tests/unit/test_workflow_node_status_check.py`. Each test names the
 //! Python tests that it ports.
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -130,7 +129,6 @@ async fn starts_with_corrupt_options(
 /// task options of a node that do not parse refuse the start, and nothing is
 /// written.
 #[tokio::test]
-#[serial]
 async fn a_node_whose_options_do_not_parse_refuses_the_start_and_writes_nothing() {
     let pool = shared_pool().await;
     for (case, refused, rows) in starts_with_corrupt_options(&pool).await {
@@ -152,7 +150,6 @@ async fn a_node_whose_options_do_not_parse_refuses_the_start_and_writes_nothing(
 /// [`a_node_whose_options_do_not_parse_refuses_the_start_and_writes_nothing`]:
 /// the refusal names the task of the node, as Python's does.
 #[tokio::test]
-#[serial]
 async fn the_refusal_of_options_that_do_not_parse_names_the_task_of_the_node() {
     let pool = shared_pool().await;
     for (case, refused, _rows) in starts_with_corrupt_options(&pool).await {
@@ -167,7 +164,6 @@ async fn the_refusal_of_options_that_do_not_parse_names_the_task_of_the_node() {
 /// a task node with no resolved priority refuses the start, and nothing is
 /// written.
 #[tokio::test]
-#[serial]
 async fn a_task_node_without_a_resolved_priority_refuses_the_start_and_writes_nothing() {
     let pool = shared_pool().await;
     let task_name = "start_branch_no_priority";
@@ -195,7 +191,6 @@ async fn a_task_node_without_a_resolved_priority_refuses_the_start_and_writes_no
 /// (`test_success_policy_subworkflow_node.py`): the start stores a success
 /// policy whose cases and optional list name sub-workflow nodes.
 #[tokio::test]
-#[serial]
 async fn the_start_stores_a_success_policy_that_names_sub_workflow_nodes() {
     let pool = shared_pool().await;
     let child = spec(
@@ -241,7 +236,6 @@ async fn the_start_stores_a_success_policy_that_names_sub_workflow_nodes() {
 /// success policy of the child, whose case and optional list name
 /// sub-workflow nodes of the child.
 #[tokio::test]
-#[serial]
 async fn the_child_start_stores_a_success_policy_that_names_sub_workflow_nodes() {
     let pool = shared_pool().await;
     let grandchild = spec(
@@ -294,7 +288,6 @@ async fn the_child_start_stores_a_success_policy_that_names_sub_workflow_nodes()
 /// missing workflow is absent, not an empty list; a client reads it as
 /// `WORKFLOW_NOT_FOUND`.
 #[tokio::test]
-#[serial]
 async fn the_node_results_of_a_missing_workflow_are_absent() {
     let pool = shared_pool().await;
     let workflow_id = Uuid::new_v4();
@@ -309,7 +302,6 @@ async fn the_node_results_of_a_missing_workflow_are_absent() {
 /// workflow is absent, not an empty list; a client reads it as
 /// `WORKFLOW_NOT_FOUND`.
 #[tokio::test]
-#[serial]
 async fn the_nodes_of_a_missing_workflow_are_absent() {
     let pool = shared_pool().await;
     let workflow_id = Uuid::new_v4();
@@ -322,7 +314,6 @@ async fn the_nodes_of_a_missing_workflow_are_absent() {
 /// `TestTasks::test_a_workflow_without_a_node_is_an_empty_list`
 /// (`test_workflow_handle_missing_workflow.py`).
 #[tokio::test]
-#[serial]
 async fn tasks_of_a_workflow_without_a_node_is_an_empty_list() {
     let pool = shared_pool().await;
     let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
@@ -338,7 +329,6 @@ async fn tasks_of_a_workflow_without_a_node_is_an_empty_list() {
 /// stored summary nested past the read's depth bound as stored; a client
 /// refuses it with `STORED_DATA_INVALID`.
 #[tokio::test]
-#[serial]
 async fn a_summary_past_the_depth_bound_is_read_as_stored() {
     let pool = shared_pool().await;
     let parent = seed_workflow(&pool, &WorkflowSeed::running()).await;
@@ -390,7 +380,6 @@ async fn seed_one_node_per_status(pool: &TestPool) -> Uuid {
 /// (`test_workflow_node_status_check.py`): the node status CHECK accepts the
 /// text of each status of the enum and refuses any other text.
 #[tokio::test]
-#[serial]
 async fn the_node_status_check_accepts_each_status_of_the_enum_and_refuses_another() {
     let pool = shared_pool().await;
     let workflow_id = seed_one_node_per_status(&pool).await;
@@ -432,7 +421,6 @@ async fn the_node_status_check_accepts_each_status_of_the_enum_and_refuses_anoth
 /// (`test_workflow_node_status_check.py`): `tasks()` reads the stored text of
 /// each status as that member of the enum.
 #[tokio::test]
-#[serial]
 async fn tasks_reads_each_stored_node_status_as_its_enum_member() {
     let pool = shared_pool().await;
     let workflow_id = seed_one_node_per_status(&pool).await;
@@ -453,7 +441,6 @@ async fn tasks_reads_each_stored_node_status_as_its_enum_member() {
 /// status outside the enum (possible only without the CHECK) as stored; a
 /// client refuses it with `STORED_DATA_INVALID`.
 #[tokio::test]
-#[serial]
 async fn a_node_status_outside_the_enum_is_read_as_stored() {
     let db = IsolatedDatabase::create().await;
     execute(

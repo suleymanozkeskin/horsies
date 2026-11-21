@@ -6,7 +6,6 @@
 //! more `Applied` cases: the error that a pausing workflow records, and a
 //! record whose evidence is in quarantine.
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use crate::broker::PostgresBroker;
@@ -149,7 +148,6 @@ async fn complete(
 /// record is deleted, and the dependent is promoted with a task row. A second
 /// call is a replay that writes nothing.
 #[tokio::test]
-#[serial]
 async fn a_node_of_a_live_workflow_completes_and_promotes_its_dependent() {
     let broker = test_broker().await;
     let pool = crate::test_support::migrated_pool().await;
@@ -180,7 +178,6 @@ async fn a_node_of_a_live_workflow_completes_and_promotes_its_dependent() {
 /// dependent keeps the status that the end left it (a cancel skips a PENDING
 /// node; a failure leaves it PENDING), and the workflow keeps its status.
 #[tokio::test]
-#[serial]
 async fn a_node_of_an_ended_workflow_completes_and_enqueues_nothing() {
     for ended_as in ["CANCELLED", "FAILED"] {
         let broker = test_broker().await;
@@ -234,7 +231,6 @@ async fn a_node_of_an_ended_workflow_completes_and_enqueues_nothing() {
 
 /// A task with no phase-2 record and no terminal node writes nothing.
 #[tokio::test]
-#[serial]
 async fn a_task_without_a_record_is_pending_absent() {
     let broker = test_broker().await;
 
@@ -246,7 +242,6 @@ async fn a_task_without_a_record_is_pending_absent() {
 /// A record whose stored digest differs from the history row is kept, and
 /// the node is not written.
 #[tokio::test]
-#[serial]
 async fn a_record_whose_result_fails_its_check_is_kept() {
     let broker = test_broker().await;
     let pool = crate::test_support::migrated_pool().await;
@@ -283,7 +278,6 @@ async fn a_record_whose_result_fails_its_check_is_kept() {
 /// A node write that raises fails the node finish; nothing commits and the
 /// record stays.
 #[tokio::test]
-#[serial]
 async fn a_node_finish_that_raises_commits_nothing() {
     let broker = test_broker().await;
     let pool = crate::test_support::migrated_pool().await;
@@ -436,7 +430,6 @@ async fn fail_task(pool: &TestPool, task_id: Uuid, error: &TaskError) {
 /// `pause`), and the workflow takes the error of that node, not the error of
 /// the node that failed before it (`horsies_workflow_record_failure`).
 #[tokio::test]
-#[serial]
 async fn a_pausing_workflow_records_the_error_of_the_node_that_phase_two_failed() {
     let broker = test_broker().await;
     let pool = crate::test_support::migrated_pool().await;
@@ -473,7 +466,6 @@ async fn a_pausing_workflow_records_the_error_of_the_node_that_phase_two_failed(
 /// quarantine table (verdict `REPOINTED`): phase 2 reads the result from the
 /// copy, completes the node, and deletes the record and the copy.
 #[tokio::test]
-#[serial]
 async fn a_record_whose_evidence_is_in_quarantine_completes_the_node_and_drains_both_rows() {
     let broker = test_broker().await;
     let pool = crate::test_support::migrated_pool().await;

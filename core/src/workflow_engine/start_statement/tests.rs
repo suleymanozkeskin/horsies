@@ -4,8 +4,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serial_test::serial;
-
 use super::*;
 use crate::broker::workflow_start::ClientStartOutcome;
 use crate::core::workflow::node::{JoinType, SubWorkflowParams};
@@ -650,7 +648,6 @@ fn a_build_that_the_client_did_not_run_refuses_the_start() {
 /// on every workflow row of the tree (the parent and its pre-built child)
 /// and on the task rows of their nodes.
 #[tokio::test]
-#[serial]
 async fn a_traced_start_stores_its_carrier_on_every_row_of_the_tree() {
     use std::collections::BTreeMap;
 
@@ -716,7 +713,6 @@ async fn a_traced_start_stores_its_carrier_on_every_row_of_the_tree() {
 /// RUNNING sub-workflow node, and the child's root task row (ENQUEUED node,
 /// PENDING task).
 #[tokio::test]
-#[serial]
 async fn the_start_writes_the_tree_in_one_statement() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = Arc::new(PostgresBroker::from_test_url(

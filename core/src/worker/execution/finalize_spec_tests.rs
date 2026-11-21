@@ -351,7 +351,7 @@ fn test_queue() -> String {
 /// `next_retry_at`, one attempt that will retry, and a wake of the queue
 /// after the retry delay, not before.
 #[tokio::test]
-#[serial]
+#[serial(timing)]
 async fn a_listed_code_schedules_the_retry_and_wakes_its_queue_after_the_delay() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -404,7 +404,6 @@ async fn a_listed_code_schedules_the_retry_and_wakes_its_queue_after_the_delay()
 /// the past before the write. The write judges the value it locks, so the
 /// task fails instead of retrying.
 #[tokio::test]
-#[serial]
 async fn good_until_is_judged_under_the_lock() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -444,7 +443,6 @@ async fn good_until_is_judged_under_the_lock() {
 /// The failure path: the reaper failed the row first; the worker's
 /// failure write is refused, owes nothing and changes nothing.
 #[tokio::test]
-#[serial]
 async fn a_failure_for_a_row_the_reaper_already_failed_changes_nothing() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -478,7 +476,6 @@ async fn a_failure_for_a_row_the_reaper_already_failed_changes_nothing() {
 /// A plain task: a second phase 1 of a committed failure writes nothing,
 /// and a plain task owes no phase 2 either time.
 #[tokio::test]
-#[serial]
 async fn a_plain_failure_replay_after_a_lost_reply_writes_nothing() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -509,7 +506,6 @@ async fn a_plain_failure_replay_after_a_lost_reply_writes_nothing() {
 /// A workflow task: the replay writes nothing, and the workflow task still
 /// owes its phase 2 for the committed failure.
 #[tokio::test]
-#[serial]
 async fn a_workflow_failure_replay_after_a_lost_reply_owes_phase_two() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -544,7 +540,6 @@ async fn a_workflow_failure_replay_after_a_lost_reply_owes_phase_two() {
 /// A committed workflow success replays phase 2, not phase 1; the replay
 /// adds no attempt and leaves the committed record as it was.
 #[tokio::test]
-#[serial]
 async fn a_workflow_success_replay_owes_phase_two() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -580,7 +575,6 @@ async fn a_workflow_success_replay_owes_phase_two() {
 /// generation is refused, owes nothing, and leaves the row of the newer
 /// claim RUNNING with no attempt.
 #[tokio::test]
-#[serial]
 async fn a_stale_generation_success_leaves_the_newer_claim_unchanged() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -613,7 +607,6 @@ async fn a_stale_generation_success_leaves_the_newer_claim_unchanged() {
 /// (horsies #500): the terminal write of a plain task, success or failure,
 /// sends its capacity wake in the same statement and owes no phase 2.
 #[tokio::test]
-#[serial]
 async fn a_plain_task_owes_no_phase_two() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -665,7 +658,6 @@ fn a_task_result_cannot_carry_the_workflow_stopped_code() {
 /// retries keep the `sent_at` of the send, and the second retry waits longer
 /// than the first.
 #[tokio::test]
-#[serial]
 async fn retries_keep_the_sent_at_and_the_second_delay_is_longer() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -838,7 +830,6 @@ async fn node_and_phase_two_record(
 /// transaction that completes the node (#722). The payload is the constant
 /// `capacity` of the baseline function (`0005_workflow_functions.sql:1972`).
 #[tokio::test]
-#[serial]
 async fn phase_two_of_a_workflow_task_wakes_its_queue_once() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -882,7 +873,6 @@ async fn phase_two_of_a_workflow_task_wakes_its_queue_once() {
 /// A plain task: its phase 2 is the capacity wake alone, one `capacity`
 /// wake on its queue (#722).
 #[tokio::test]
-#[serial]
 async fn phase_two_of_a_plain_task_wakes_its_queue_once() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -904,7 +894,6 @@ async fn phase_two_of_a_plain_task_wakes_its_queue_once() {
 /// (`test_phase_two_wakes_the_queue_of_the_task_once[no_node]`) sends the
 /// wake from its own statement before the node lookup, so it wakes here.
 #[tokio::test]
-#[serial]
 async fn phase_two_of_a_workflow_task_with_no_record_sends_no_wake() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -943,7 +932,6 @@ fn longest_queue() -> String {
 /// channel from the caller's queue. A refused wake of a plain task stays a
 /// phase-2 error (`a_refused_wake_of_a_plain_task_is_a_phase_two_error_not_retried`).
 #[tokio::test]
-#[serial]
 async fn the_node_finish_wakes_the_queue_of_the_node_row() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = longest_queue();
@@ -1004,7 +992,6 @@ async fn the_node_finish_wakes_the_queue_of_the_node_row() {
 /// is a phase-2 error that is not retried, because the refusal repeats
 /// (#722).
 #[tokio::test]
-#[serial]
 async fn a_refused_wake_of_a_plain_task_is_a_phase_two_error_not_retried() {
     let pool = crate::test_support::migrated_pool().await;
 
@@ -1045,7 +1032,6 @@ fn with_query_parameter(url: &str, parameter: &str) -> String {
 /// lock timeout, SQLSTATE 55P03) is a retryable phase-2 error, the node and
 /// its phase-2 record stay, and the retry completes the node (#865).
 #[tokio::test]
-#[serial]
 async fn a_transient_error_at_the_consume_is_a_retryable_phase_two_error() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();

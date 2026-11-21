@@ -152,7 +152,6 @@ async fn the_worker_broker_is_of_the_family_of_its_caller() {
 /// the Rust client's. A worker broker that took a default family instead
 /// recorded `RUST` for the Python worker.
 #[tokio::test]
-#[serial_test::serial]
 async fn the_install_of_the_worker_broker_records_the_family_of_its_caller() {
     for family in [ClientFamily::Python, ClientFamily::Rust] {
         let database = TestDatabase::create_empty().await;

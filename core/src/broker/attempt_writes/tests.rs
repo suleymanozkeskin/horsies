@@ -3,7 +3,6 @@
 //! stale claim generation.
 
 use chrono::{DateTime, Duration, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::*;
@@ -188,7 +187,6 @@ async fn cleanup(pool: &TestPool, task_id: Uuid) {
 /// the retry time is the database time under the row lock plus the delay,
 /// and every claim and run field is cleared.
 #[tokio::test]
-#[serial]
 async fn a_retry_writes_pending_and_an_attempt_that_will_retry() {
     let pool = crate::test_support::migrated_pool().await;
     let seeded = seed_running(&pool, 1, 3, None, false).await;
@@ -246,7 +244,6 @@ async fn a_retry_writes_pending_and_an_attempt_that_will_retry() {
 /// Python `TestRetry::test_a_retry_at_or_after_good_until_is_the_terminal_failure`:
 /// the deadline is judged on the database clock under the lock.
 #[tokio::test]
-#[serial]
 async fn a_retry_at_or_after_good_until_is_the_terminal_failure() {
     let pool = crate::test_support::migrated_pool().await;
     let good_until = Utc::now() + Duration::seconds(10);
@@ -274,7 +271,6 @@ async fn a_retry_at_or_after_good_until_is_the_terminal_failure() {
 
 /// Python `TestTerminalFailure::test_a_plain_failure_moves_the_row_with_its_attempt_and_wakes_the_queue`.
 #[tokio::test]
-#[serial]
 async fn a_plain_failure_moves_the_row_with_its_attempt() {
     let pool = crate::test_support::migrated_pool().await;
     let seeded = seed_running(&pool, 0, 0, None, false).await;
@@ -310,7 +306,6 @@ async fn a_plain_failure_moves_the_row_with_its_attempt() {
 
 /// Python `TestNoWrite::test_a_changed_retry_count_is_part_of_the_fence`.
 #[tokio::test]
-#[serial]
 async fn a_changed_retry_count_is_part_of_the_fence() {
     let pool = crate::test_support::migrated_pool().await;
     let seeded = seed_running(&pool, 1, 3, None, false).await;
@@ -329,7 +324,6 @@ async fn a_changed_retry_count_is_part_of_the_fence() {
 /// The failed attempt: a stale claim generation of the same worker writes
 /// nothing.
 #[tokio::test]
-#[serial]
 async fn a_stale_claim_generation_writes_no_failure() {
     let pool = crate::test_support::migrated_pool().await;
     let seeded = seed_running(&pool, 0, 0, None, false).await;
@@ -352,7 +346,6 @@ async fn a_stale_claim_generation_writes_no_failure() {
 }
 
 #[tokio::test]
-#[serial]
 async fn a_stale_claim_generation_writes_no_workflow_success() {
     let pool = crate::test_support::migrated_pool().await;
     let seeded = seed_running(&pool, 0, 0, None, true).await;
@@ -381,7 +374,6 @@ async fn a_stale_claim_generation_writes_no_workflow_success() {
 }
 
 #[tokio::test]
-#[serial]
 async fn a_plain_task_success_through_the_workflow_writer_is_refused() {
     let pool = crate::test_support::migrated_pool().await;
     let seeded = seed_running(&pool, 0, 0, None, false).await;

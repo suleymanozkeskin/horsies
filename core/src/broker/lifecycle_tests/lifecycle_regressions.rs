@@ -12,7 +12,6 @@
 
 use std::time::Duration as StdDuration;
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
@@ -89,7 +88,6 @@ fn worker_failure(task_id: Uuid) -> FinishFailedAttempt {
 
 /// Python `test_future_failure_on_non_retryable_running_task_is_terminal_failed`.
 #[tokio::test]
-#[serial]
 async fn future_failure_on_non_retryable_running_task_is_terminal_failed() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &running(Origin::Send)).await;
@@ -130,7 +128,6 @@ async fn future_failure_on_non_retryable_running_task_is_terminal_failed() {
 /// `AlreadyApplied`, adds no attempt, and leaves the phase-2 record that
 /// phase 2 consumes. The worker's phase 2 of a replay is #700.
 #[tokio::test]
-#[serial]
 async fn future_failure_retry_replays_committed_terminal_phase() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &running(Origin::WorkflowNode)).await;
@@ -170,7 +167,6 @@ async fn future_failure_retry_replays_committed_terminal_phase() {
 
 /// Python `test_future_failure_replay_of_a_plain_task_sends_no_second_wake`.
 #[tokio::test]
-#[serial]
 async fn future_failure_replay_of_a_plain_task_sends_no_second_wake() {
     let pool = pool().await;
     let mut wakes = Wakes::listen(&pool, CHANNEL).await;
@@ -210,7 +206,6 @@ async fn future_failure_replay_of_a_plain_task_sends_no_second_wake() {
 /// Python `test_future_failure_on_retryable_running_task_respects_retry_policy`:
 /// WORKER_CRASHED retries only when the policy names it.
 #[tokio::test]
-#[serial]
 async fn future_failure_on_retryable_running_task_respects_retry_policy() {
     let naming = read_stored_options(Some(&crash_policy("WORKER_CRASHED")));
     let other = read_stored_options(Some(&crash_policy("TASK_EXCEPTION")));
@@ -257,7 +252,6 @@ async fn future_failure_on_retryable_running_task_respects_retry_policy() {
 /// Python `test_finalize_worker_failure_runs_phase2`: a worker-level failure
 /// of a workflow task owes phase 2.
 #[tokio::test]
-#[serial]
 async fn finalize_worker_failure_runs_phase2() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &running(Origin::WorkflowNode)).await;
@@ -285,7 +279,6 @@ async fn finalize_worker_failure_runs_phase2() {
 /// Python `test_plain_worker_failure_wakes_the_queue_in_its_write`: one
 /// capacity wake, sent by the write itself.
 #[tokio::test]
-#[serial]
 async fn plain_worker_failure_wakes_the_queue_in_its_write() {
     let pool = pool().await;
     let mut wakes = Wakes::listen(&pool, CHANNEL).await;
@@ -317,7 +310,6 @@ async fn plain_worker_failure_wakes_the_queue_in_its_write() {
 /// its locks and commits; the recovery then finds the row moved and writes
 /// nothing for it.
 #[tokio::test]
-#[serial]
 async fn finalizer_row_lock_wins_reaper_race() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &running(Origin::WorkflowNode)).await;
@@ -360,7 +352,7 @@ async fn finalizer_row_lock_wins_reaper_race() {
         .expect("the reaper ends after the finalizer commits")
         .expect("reaper join")
         .expect("stale recovery");
-    // Other stale rows of the shared database may be processed; this one is not.
+    // Other stale rows of the database may be processed; this one is not.
     let _other_rows: u64 = processed;
     assert_eq!(
         history_row(&pool, task_id)
@@ -401,7 +393,6 @@ async fn until_a_backend_waits_on_a_lock(pool: &TestPool, function: &str) {
 /// cancels a CLAIMED task in its retry window and resets its node, so the
 /// workflow stays resumable.
 #[tokio::test]
-#[serial]
 async fn pause_resets_retry_window_claimed_workflow_task() {
     let pool = pool().await;
     let task_id = seed_task(
@@ -451,7 +442,6 @@ async fn pause_resets_retry_window_claimed_workflow_task() {
 /// Python `test_reaper_recovers_stale_runner_when_owner_worker_state_is_fresh`:
 /// a fresh worker snapshot of the owner does not save a silent runner.
 #[tokio::test]
-#[serial]
 async fn reaper_recovers_stale_runner_when_owner_worker_state_is_fresh() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &running(Origin::Send)).await;

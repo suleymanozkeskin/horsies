@@ -546,7 +546,6 @@ mod resume_idempotency_tests {
     use super::*;
     use crate::broker::PostgresBroker;
     use crate::test_support::sql::{self, TestPool};
-    use serial_test::serial;
     use uuid::Uuid;
 
     /// A child row names its parent node (`horsies_workflows_parent_pair`) and sits one level below its
@@ -626,7 +625,6 @@ mod resume_idempotency_tests {
     /// stranded state that the earlier rule recovered cannot arise when the
     /// status change and the cascade commit together (#872).
     #[tokio::test]
-    #[serial]
     async fn resume_of_a_running_workflow_writes_nothing() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -660,7 +658,6 @@ mod resume_idempotency_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn resume_on_consistent_running_workflow_is_noop_false() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -690,7 +687,6 @@ mod resume_idempotency_tests {
     /// A READY task node whose `args_from` names a member of its static input fails on resume with
     /// Python's conflict error and gets no task row (`core/workflows/engine.py:834-839`).
     #[tokio::test]
-    #[serial]
     async fn resume_fails_a_ready_node_whose_args_from_names_a_static_member() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -758,7 +754,6 @@ mod resume_idempotency_tests {
     /// The resume mints the task row of a READY node with the typed facts of the node row: its
     /// retention class, no command fingerprint, no retained input, and the node's enqueue time.
     #[tokio::test]
-    #[serial]
     async fn p6_workflow_enqueue_lifecycle_resume_persists_never_eligible_facts() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -854,7 +849,6 @@ mod p7_lifecycle_tests {
     use super::*;
     use crate::core::{OutcomeCode, TaskError};
     use crate::test_support::sql::{self, TestPool};
-    use serial_test::serial;
 
     /// An age that the config reader accepted. A test defect panics.
     fn age(duration: chrono::Duration) -> PausedWorkflowAge {
@@ -1018,7 +1012,6 @@ mod p7_lifecycle_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn resume_recovery_is_restricted_to_the_resumed_workflow_tree() {
         let pool = crate::test_support::migrated_pool().await;
         let root_id = Uuid::new_v4();
@@ -1057,7 +1050,6 @@ mod p7_lifecycle_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn pause_relocates_claimed_backing_and_resume_mints_a_fresh_uuid7() {
         let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
@@ -1116,7 +1108,6 @@ mod p7_lifecycle_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn paused_expiry_stores_structured_error_and_archives_backing_task() {
         let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
@@ -1175,7 +1166,6 @@ mod p7_lifecycle_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn expired_child_fails_its_parent_node_and_parent_workflow() {
         let pool = crate::test_support::migrated_pool().await;
         let parent_id = Uuid::new_v4();
@@ -1261,7 +1251,6 @@ mod p7_lifecycle_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn paused_child_expiry_commits_before_poisoned_parent_recovery() {
         let pool = crate::test_support::migrated_pool().await;
         let parent_id = Uuid::new_v4();
@@ -1390,7 +1379,6 @@ mod cancel_lock_order_tests {
     use super::*;
     use crate::broker::PostgresBroker;
     use crate::test_support::sql::{self, TestPool};
-    use serial_test::serial;
     use uuid::Uuid;
 
     async fn insert_running_workflow(pool: &TestPool, id: &str) {
@@ -1450,7 +1438,6 @@ mod cancel_lock_order_tests {
     /// the workflow row, closing a cycle against the completion-order holder and
     /// deadlocking (Postgres aborts one side with 40P01).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
     async fn cancel_matches_completion_lock_order_no_deadlock() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -1535,7 +1522,6 @@ mod cancel_tree_tests {
     use super::*;
     use crate::core::workflow::handle_types::HandleErrorCode;
     use crate::test_support::sql::{self, TestPool};
-    use serial_test::serial;
 
     async fn seed_workflow(pool: &TestPool, id: Uuid, status: &str, parent: Option<Uuid>) {
         sql::query(
@@ -1598,7 +1584,6 @@ mod cancel_tree_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn a_tree_cancel_sets_completed_at_and_skips_nodes_with_completed_at() {
         let pool = crate::test_support::migrated_pool().await;
         let parent_id = Uuid::new_v4();
@@ -1628,7 +1613,6 @@ mod cancel_tree_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn a_failed_descendant_cancel_rolls_back_the_whole_tree() {
         let pool = crate::test_support::migrated_pool().await;
         let parent_id = Uuid::new_v4();
@@ -1824,7 +1808,6 @@ mod client_family_tests {
     use crate::broker::client_family::ClientFamily;
     use crate::core::workflow::handle_types::HandleErrorCode;
     use crate::test_support::sql::{self, TestPool};
-    use serial_test::serial;
 
     async fn workflow_status(pool: &TestPool, workflow_id: Uuid) -> String {
         sql::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
@@ -1838,7 +1821,6 @@ mod client_family_tests {
     /// `DB_OPERATION_FAILED`, not retryable, and write nothing. A handle of the recorded family
     /// passes the same check.
     #[tokio::test]
-    #[serial]
     async fn pause_resume_and_cancel_of_another_family_write_nothing() {
         let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();

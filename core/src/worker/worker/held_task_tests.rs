@@ -50,6 +50,12 @@ const BEAT_INTERVAL_MS: u64 = 1_000;
 /// The last lines of the worker log that a failed wait shows.
 const FAILURE_LOG_LINES: usize = 200;
 
+/// The stale threshold of the test whose runner beats must land: a
+/// fail-closed window of 30 s (the threshold divided by
+/// `FAIL_CLOSED_WINDOW_DIVISOR`), so a beat that lands late under load does
+/// not stop the worker.
+const HELD_TASK_STALE_THRESHOLD_MS: u64 = 60_000;
+
 /// A drain that ends soon after the stop: the pool kills a child that
 /// still holds its task.
 const SHORT_DRAIN_SECS: u64 = 1;
@@ -196,17 +202,14 @@ fn child_pid(pid_file: &Path) -> i32 {
 /// the run, the worker writes no
 /// end of it: the row stays RUNNING with no history row.
 #[tokio::test]
-#[serial_test::serial]
+#[serial_test::serial(timing)]
 async fn a_task_held_in_a_child_gets_the_runner_beats_of_the_worker() {
     let (database, pool) = database().await;
     let dir = test_dir("held-task-beats");
     let pid_file = dir.join("child.pid");
-    let worker = worker_holding_one_task(
-        config_with_fast_beats(database.url()),
-        &pid_file,
-        SHORT_DRAIN_SECS,
-    )
-    .await;
+    let mut config = config_with_fast_beats(database.url());
+    config.recovery.running_stale_threshold_ms = HELD_TASK_STALE_THRESHOLD_MS;
+    let worker = worker_holding_one_task(config, &pid_file, SHORT_DRAIN_SECS).await;
     let worker_id = worker.worker_id().to_owned();
     let task_id = insert_pending_task(&pool).await;
     let cancel = worker.cancel_token();
@@ -262,7 +265,6 @@ async fn a_task_held_in_a_child_gets_the_runner_beats_of_the_worker() {
 /// run, so a run that ends within the bound had its child killed by the
 /// watchdog.
 #[tokio::test]
-#[serial_test::serial]
 async fn runner_beats_that_cannot_land_stop_the_worker_with_runner_heartbeat_lost() {
     let (database, pool) = database().await;
     let refusal =
@@ -340,7 +342,6 @@ async fn runner_beats_that_cannot_land_stop_the_worker_with_runner_heartbeat_los
 /// of committed attempt writes, which an AFTER trigger writes in the
 /// transaction of the write, holds the task once, and the retry was logged.
 #[tokio::test]
-#[serial_test::serial]
 async fn the_stop_waits_for_an_outcome_write_that_is_tried_again() {
     let (database, pool) = database().await;
     sql::raw_sql(

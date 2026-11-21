@@ -6,7 +6,6 @@ use crate::test_support::history::{
 };
 use crate::test_support::sql::{self, CallError, TestConnection, TestPool, TestPoolOptions};
 use chrono::{DateTime, Duration, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use crate::broker::core_rows::StatementLog;
@@ -305,7 +304,6 @@ async fn provenance_found(connection: &mut TestConnection, task_id: Uuid) -> boo
 /// resolve history ids of two classes (a birth-pruned id, a fast-clock id, a
 /// non-UUIDv7 id), a live id and an unknown id.
 #[tokio::test]
-#[serial]
 async fn publisher_installs_the_four_readers_and_resolves_live_history_and_absent_ids() {
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
@@ -473,7 +471,6 @@ async fn detail_reader_exists(connection: &mut TestConnection) -> bool {
 }
 
 #[tokio::test]
-#[serial]
 async fn coverage_republishes_the_triple_when_only_the_detail_function_is_missing() {
     let database = TestDatabase::create().await;
     let core = core_pool_for_test_url(database.pool.url());
@@ -508,7 +505,6 @@ async fn coverage_republishes_the_triple_when_only_the_detail_function_is_missin
 }
 
 #[tokio::test]
-#[serial]
 async fn missing_relation_is_detected_excluded_reported_and_not_misclassified_as_ageing() {
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
@@ -588,7 +584,6 @@ async fn missing_relation_is_detected_excluded_reported_and_not_misclassified_as
 }
 
 #[tokio::test]
-#[serial]
 async fn detail_refuses_a_stored_status_that_is_not_a_task_status() {
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
@@ -631,7 +626,6 @@ async fn detail_refuses_a_stored_status_that_is_not_a_task_status() {
 }
 
 #[tokio::test]
-#[serial]
 async fn detail_refuses_attempt_digest_corruption_and_purged_floor_is_typed() {
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
@@ -732,7 +726,6 @@ async fn detail_refuses_attempt_digest_corruption_and_purged_floor_is_typed() {
 }
 
 #[tokio::test]
-#[serial]
 async fn duplicate_guard_finds_a_recorded_clock_exception() {
     let database = TestDatabase::create().await;
     let core = core_pool_for_test_url(database.pool.url());
@@ -789,7 +782,6 @@ async fn reader_stamps(connection: &mut TestConnection) -> Vec<Option<String>> {
 /// time zone; the publisher reads them as current, and one reader with
 /// another stamp makes them need a publication.
 #[tokio::test]
-#[serial]
 async fn publication_stamps_every_rendered_reader_independent_of_the_time_zone() {
     let database = TestDatabase::create().await;
     let core = core_pool_for_test_url(database.pool.url());
@@ -861,7 +853,6 @@ async fn guard_marker(connection: &mut TestConnection) -> Option<String> {
 /// the install returns, so a fresh database already holds a stamped guard,
 /// and a guard dropped out of band comes back with the next publication.
 #[tokio::test]
-#[serial]
 async fn duplicate_guard_probes_the_pruned_set_and_a_dropped_guard_is_published_again() {
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
@@ -1073,7 +1064,6 @@ fn stored_ok(record: &crate::broker::RawResultRecord) -> serde_json::Value {
 /// a result reader published before a leaf existed misses a row of that
 /// leaf; the detail reader finds the COMPLETED row and its result.
 #[tokio::test]
-#[serial]
 async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
     use crate::broker::postgres::PostgresBroker;
     use crate::core::TaskResult;
@@ -1145,7 +1135,6 @@ async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
 }
 
 #[tokio::test]
-#[serial]
 async fn result_reader_resolves_each_location_and_falls_back_while_unpublished() {
     use crate::broker::postgres::PostgresBroker;
     use crate::core::TaskResult;

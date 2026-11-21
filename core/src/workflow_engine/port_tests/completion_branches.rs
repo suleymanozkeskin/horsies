@@ -5,7 +5,6 @@
 //! Each node runs on [`COMPLETION_QUEUE`], which no other test uses, so a
 //! listener on its channel hears only the test's own notifications.
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -61,7 +60,6 @@ async fn seed_owed_phase_two(
 /// `TestOnWorkflowTaskComplete::test_paused_workflow_stores_result_without_propagation`:
 /// phase 2 under a PAUSED workflow writes the node and promotes nothing.
 #[tokio::test]
-#[serial]
 async fn phase_two_under_a_paused_workflow_writes_the_node_and_promotes_nothing() {
     let pool = shared_pool().await;
     let (workflow_id, task_id) = seed_owed_phase_two(&pool, "PAUSED", true).await;
@@ -94,7 +92,6 @@ async fn phase_two_under_a_paused_workflow_writes_the_node_and_promotes_nothing(
 /// workflow completes. The `has_dependents` case is
 /// `engine/task_complete_tests.rs::a_node_of_a_live_workflow_completes_and_promotes_its_dependent`.
 #[tokio::test]
-#[serial]
 async fn a_node_finish_that_reads_no_dependents_still_completes_its_workflow() {
     let pool = shared_pool().await;
     let (workflow_id, task_id) = seed_owed_phase_two(&pool, "RUNNING", false).await;
@@ -124,7 +121,6 @@ async fn a_node_finish_that_reads_no_dependents_still_completes_its_workflow() {
 /// so a PENDING dependent stays PENDING with no task; `DependentsWithoutSubworkflow`
 /// sends `'READ'`, so the dependent is promoted with its task row.
 #[tokio::test]
-#[serial]
 async fn the_form_of_a_node_finish_decides_whether_the_dependents_are_read() {
     let pool = shared_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -172,7 +168,6 @@ async fn the_form_of_a_node_finish_decides_whether_the_dependents_are_read() {
 /// `on_workflow_task_complete` sends no capacity wake on the queue of the
 /// node.
 #[tokio::test]
-#[serial]
 async fn the_phase_two_of_on_workflow_task_complete_sends_no_capacity_wake() {
     let pool = shared_pool().await;
     let (workflow_id, task_id) = seed_owed_phase_two(&pool, "RUNNING", false).await;

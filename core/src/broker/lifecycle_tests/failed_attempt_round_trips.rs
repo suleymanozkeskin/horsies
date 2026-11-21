@@ -7,7 +7,6 @@
 //! `pre_ping_off` case; the ping rule of a reused connection belongs to the
 //! statement layer).
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
@@ -103,7 +102,6 @@ async fn measure(pool: &TestPool, failure: Failure) -> (u32, FailedAttemptOutcom
 
 /// Python `test_a_worker_level_failure_is_one_statement`.
 #[tokio::test]
-#[serial]
 async fn a_worker_level_failure_is_one_statement() {
     let pool = pool().await;
     let (round_trips, outcome, task_id) = measure(&pool, Failure::WorkerLevel).await;
@@ -150,7 +148,6 @@ async fn assert_one_statement_per_task_error(error_code: &'static str) {
 /// Python `test_a_task_error_is_one_read_and_one_statement`, with the
 /// core's design: no read before the statement.
 #[tokio::test]
-#[serial]
 async fn a_task_error_is_one_statement() {
     assert_one_statement_per_task_error("FLAKY").await;
 }
@@ -158,7 +155,6 @@ async fn a_task_error_is_one_statement() {
 /// Python `test_a_timeout_is_one_read_and_one_statement`, with the core's
 /// design: no read before the statement.
 #[tokio::test]
-#[serial]
 async fn a_timeout_is_one_statement() {
     assert_one_statement_per_task_error("TASK_TIMEOUT").await;
 }

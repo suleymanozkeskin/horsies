@@ -80,7 +80,6 @@ mod p7_maintenance_tests {
     use crate::test_support::sql::{self, TestPool};
     use crate::test_support::terminal_writes;
     use chrono::Timelike;
-    use serial_test::serial;
     use uuid::Uuid;
 
     async fn seed_terminal_workflow_with_pending(
@@ -168,7 +167,6 @@ mod p7_maintenance_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn retention_owns_only_worker_state_and_workflow_rows() {
         let pool = crate::test_support::migrated_pool().await;
         let outcome = ensure_startup_coverage_in_pool(
@@ -266,7 +264,6 @@ mod p7_maintenance_tests {
     /// pass runs the partition maintenance (its coverage health is set) and
     /// sets the next deadline one interval ahead.
     #[tokio::test]
-    #[serial]
     async fn a_pass_after_a_host_sleep_runs_the_partition_maintenance() {
         let pool = crate::test_support::migrated_pool().await;
         let recovery = RecoveryConfig {
@@ -318,7 +315,6 @@ mod p7_maintenance_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn periodic_maintenance_publishes_all_health_and_contains_coverage_failure() {
         let pool = crate::test_support::migrated_pool().await;
         let mut recovery = RecoveryConfig::default();
@@ -382,7 +378,6 @@ mod p7_maintenance_tests {
     /// so a stale claim whose `good_until` has passed is requeued and expired
     /// in one pass. Expiry first would leave it PENDING after the pass.
     #[tokio::test]
-    #[serial]
     async fn a_stale_claim_past_its_deadline_is_requeued_then_expired_in_one_pass() {
         let pool = crate::test_support::migrated_pool().await;
         let coverage =
@@ -473,7 +468,6 @@ mod p7_maintenance_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn periodic_maintenance_runs_non_phase2_workflow_recovery() {
         let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
@@ -534,7 +528,6 @@ mod p7_maintenance_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn periodic_maintenance_creates_ahead_prunes_both_partition_families_and_contains_a_blocker(
     ) {
         let pool = crate::test_support::migrated_pool().await;
@@ -2352,7 +2345,6 @@ mod tests {
     };
     use crate::telemetry::registry::OptionalCounter;
     use crate::test_support::sql::{self, TestPool, TestPoolOptions};
-    use serial_test::serial;
     use uuid::Uuid;
 
     /// The scan limit of a reaper pass, as the test helper takes it.
@@ -2367,8 +2359,8 @@ mod tests {
     const DRAIN_BATCH_LIMIT: u32 = 1_000;
 
     /// Delete every terminal workflow of the test database with no live
-    /// backing task, of any age: the leftovers of other tests, so that the
-    /// counts of a test see only its own workflows.
+    /// backing task, of any age, so that the counts of a test see only the
+    /// workflows that it seeds after the drain.
     async fn drain_expired_workflows(pool: &TestPool) {
         for _ in 0..DRAIN_BATCH_LIMIT {
             let deleted = sql::query(DELETE_EXPIRED_WORKFLOWS_SQL)
@@ -2419,7 +2411,6 @@ mod tests {
 
     /// A gate that another session holds is busy: the pass does not run.
     #[tokio::test]
-    #[serial]
     async fn a_gate_held_by_another_session_skips_the_pass() {
         let pool = crate::test_support::migrated_pool().await;
         let mut holder = pool.begin().await.expect("begin the holder");
@@ -2447,7 +2438,6 @@ mod tests {
     /// profile pool, so a pass completes while batch checkouts hold every
     /// batch connection.
     #[tokio::test]
-    #[serial]
     async fn a_reaper_pass_completes_on_the_reserve_while_batch_checkouts_hold_the_pool() {
         let seed = test_pool().await;
         let task_id = Uuid::new_v4();
@@ -2592,7 +2582,6 @@ mod tests {
     /// P8: the Phase-1 scan is bounded by `scan_limit`, so one pass processes at
     /// most that many stale tasks and successive passes drain the rest.
     #[tokio::test]
-    #[serial]
     async fn stale_running_scan_is_bounded_by_limit() {
         let pool = test_pool().await;
         // Clean this test's namespace so only our stale tasks are in play.
@@ -2647,7 +2636,6 @@ mod tests {
     /// A task actively finalizing (recent finalizing_at) must NOT be reclaimed
     /// by the stale-RUNNING reaper even though its runner heartbeat has stopped.
     #[tokio::test]
-    #[serial]
     async fn reaper_skips_actively_finalizing_task() {
         let pool = test_pool().await;
         let task_id = Uuid::new_v4();
@@ -2677,7 +2665,6 @@ mod tests {
     /// A task whose finalizing stamp is older than the finalizing threshold is
     /// treated as genuinely stuck and IS reclaimed (marked FAILED).
     #[tokio::test]
-    #[serial]
     async fn reaper_reclaims_task_finalizing_past_threshold() {
         let pool = test_pool().await;
         let task_id = Uuid::new_v4();
@@ -2709,11 +2696,10 @@ mod tests {
     /// backing task row is still live; once that task is terminal, it sweeps.
     /// Parity with horsies PR #143 (defensive prevent lever).
     #[tokio::test]
-    #[serial]
     async fn retention_retains_workflow_with_live_backing_task() {
         let pool = test_pool().await;
 
-        // Drain pre-existing eligible candidates (other tests' leftovers) so
+        // Drain the eligible candidates that the database holds already, so
         // the rows_affected assertions below see only this test's workflow.
         drain_expired_workflows(&pool).await;
 
@@ -2872,11 +2858,10 @@ mod tests {
     /// the whole budget drains alone instead of starving.
     /// Parity with horsies PR #216.
     #[tokio::test]
-    #[serial]
     async fn workflow_retention_budgets_nodes_and_drains_on_empty_batch() {
         let pool = test_pool().await;
 
-        // Drain pre-existing eligible candidates (other tests' leftovers) so
+        // Drain the eligible candidates that the database holds already, so
         // the rows_affected assertions below see only this test's workflows.
         drain_expired_workflows(&pool).await;
 
@@ -2985,7 +2970,6 @@ mod tests {
     /// The plan must also carry the set-wise node purge as its own Delete
     /// node (parity with horsies PR #216).
     #[tokio::test]
-    #[serial]
     async fn workflow_retention_deletes_use_retention_index() {
         let pool = test_pool().await;
 
@@ -3134,7 +3118,6 @@ mod tests {
     /// staleness is judged by claimer beats, an orphaned workflow task is
     /// never requeued, and the requeue clears the finalizing marker.
     #[tokio::test]
-    #[serial]
     async fn stale_claimed_requeue_follows_claimer_beats_and_skips_orphans() {
         let pool = test_pool().await;
         let silent = Uuid::new_v4();
@@ -3169,7 +3152,7 @@ mod tests {
 
         let requeued = requeue_stale_claimed(&pool, 60.0).await.expect("requeue");
 
-        // The shared test database can hold stale claims of other modules.
+        // The count holds every stale claim of the database, not only these.
         assert!(requeued >= 2, "requeued {requeued}");
         assert_eq!(task_status(&pool, silent).await, "PENDING");
         assert_eq!(task_status(&pool, beating).await, "CLAIMED");
@@ -3200,7 +3183,6 @@ mod tests {
     /// built-in code compares by value, horsies-rust #68), the attempt
     /// outcome is FAILED, and the retried row keeps no claim or run field.
     #[tokio::test]
-    #[serial]
     async fn a_stale_running_task_retries_when_its_policy_names_the_crash() {
         let pool = test_pool().await;
         let task_id = Uuid::new_v4();
@@ -3221,7 +3203,7 @@ mod tests {
             .await
             .expect("stale recovery");
 
-        // The shared test database can hold stale rows of other modules.
+        // The count holds every stale row of the database, not only this one.
         assert!(processed >= 1, "processed {processed}");
         let row: serde_json::Value =
             sql::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")

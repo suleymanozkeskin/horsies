@@ -8,7 +8,6 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::*;
@@ -142,7 +141,6 @@ async fn remove(pool: &TestPool, task_id: Uuid) {
 /// queue at once, with its class and every claim and run field cleared, and
 /// writes no attempt.
 #[tokio::test]
-#[serial]
 async fn an_unconfirmed_start_releases_the_claim_at_once() {
     let pool = migrated_pool().await;
     let task_id = Uuid::new_v4();
@@ -179,7 +177,6 @@ async fn an_unconfirmed_start_releases_the_claim_at_once() {
 /// The release is fenced on the dispatch generation: a row that the same
 /// worker claimed again is not touched.
 #[tokio::test]
-#[serial]
 async fn an_unconfirmed_start_does_not_touch_a_later_claim() {
     let pool = migrated_pool().await;
     let task_id = Uuid::new_v4();
@@ -203,7 +200,6 @@ async fn an_unconfirmed_start_does_not_touch_a_later_claim() {
 /// orphan self-heal off, `NODE_NOT_LINKED` writes nothing either, and an
 /// orphan that the child's stop function cancelled owes nothing.
 #[tokio::test]
-#[serial]
 async fn other_stops_of_a_plain_task_write_nothing() {
     let pool = migrated_pool().await;
     for reason in [
@@ -297,7 +293,6 @@ async fn remove_history(pool: &TestPool, task_id: Uuid) {
 /// no retry. A plain task owes no phase 2: the row moves to history and no
 /// phase-2 record waits for it.
 #[tokio::test]
-#[serial]
 async fn a_result_that_is_json_but_not_an_envelope_fails_the_task_as_a_serialization_error() {
     let pool = migrated_pool().await;
     let task_id = Uuid::new_v4();
@@ -342,7 +337,6 @@ async fn a_result_that_is_json_but_not_an_envelope_fails_the_task_as_a_serializa
 /// logged once per task name and process, so the task name is this test's
 /// own.
 #[tokio::test]
-#[serial]
 async fn an_oversized_result_is_logged_once_and_written() {
     let pool = migrated_pool().await;
     let task_id = Uuid::new_v4();

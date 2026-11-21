@@ -10,8 +10,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serial_test::serial;
-
 use super::*;
 use crate::broker::workflow_start::ClientStartOutcome;
 use crate::broker::PostgresBroker;
@@ -868,7 +866,6 @@ fn a_step_past_the_node_bound_fails_closed() {
 /// Phase 2 in the transaction form promotes a sub-workflow node; its child
 /// starts in the same transaction.
 #[tokio::test]
-#[serial]
 async fn phase_two_commits_the_child_of_the_node_it_promotes() {
     let broker = test_broker().await;
     let pool = crate::test_support::migrated_pool().await;
@@ -893,7 +890,6 @@ async fn phase_two_commits_the_child_of_the_node_it_promotes() {
 /// A promoted sub-workflow node whose child has no registration fails in the
 /// same transaction (`FAILURE`), and the failure policy ends the workflow.
 #[tokio::test]
-#[serial]
 async fn phase_two_fails_a_promoted_node_whose_child_cannot_load() {
     let broker = test_broker().await;
     let pool = crate::test_support::migrated_pool().await;
@@ -943,7 +939,6 @@ async fn phase_two_fails_a_promoted_node_whose_child_cannot_load() {
 /// The advance of a parent node promotes its sub-workflow dependent; that
 /// child starts in the advance's transaction.
 #[tokio::test]
-#[serial]
 async fn a_parent_advance_commits_the_child_of_the_node_it_promotes() {
     let broker = test_broker().await;
     let pool = crate::test_support::migrated_pool().await;
@@ -990,7 +985,6 @@ async fn a_parent_advance_commits_the_child_of_the_node_it_promotes() {
 /// failure promotes a sub-workflow node that allows failed dependencies, and
 /// its child starts in the start's transaction.
 #[tokio::test]
-#[serial]
 async fn a_start_with_a_failed_root_commits_the_child_its_progression_owes() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = Arc::new(PostgresBroker::from_test_url(
@@ -1054,7 +1048,6 @@ async fn a_start_with_a_failed_root_commits_the_child_its_progression_owes() {
 /// A resume enqueues a READY sub-workflow node; its child starts in the
 /// resume's transaction.
 #[tokio::test]
-#[serial]
 async fn a_resume_commits_the_child_of_a_ready_subworkflow_node() {
     let broker = test_broker().await;
     let pool = crate::test_support::migrated_pool().await;

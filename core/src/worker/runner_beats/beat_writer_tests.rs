@@ -10,7 +10,6 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -200,7 +199,6 @@ async fn cleanup(pool: &TestPool, task_ids: &[Uuid]) {
 /// Python `test_a_running_row_of_this_claim_gets_a_beat`: the row gets one
 /// beat that names this worker, the runner role and the worker's pid.
 #[tokio::test]
-#[serial]
 async fn a_running_row_of_this_claim_gets_a_beat() {
     let pool = migrated_pool_with_heartbeat_leaves().await;
     let claimed_at = claim_time_minutes_ago(&pool, 31).await;
@@ -239,7 +237,6 @@ async fn a_running_row_of_this_claim_gets_a_beat() {
 /// again since the dispatch, a row whose attempt ended (finalizing marker),
 /// and a row back in the queue each get no beat.
 #[tokio::test]
-#[serial]
 async fn a_row_outside_the_fence_gets_no_beat() {
     let pool = migrated_pool_with_heartbeat_leaves().await;
     let dispatch_generation = claim_time_minutes_ago(&pool, 31).await;
@@ -316,7 +313,6 @@ async fn a_row_outside_the_fence_gets_no_beat() {
 /// matches no task, also a task of this worker. [`LiveDispatches`] cannot
 /// hold such a row, so the statement runs with hand-built parameters.
 #[tokio::test]
-#[serial]
 async fn a_null_generation_gets_no_beat() {
     let pool = migrated_pool_with_heartbeat_leaves().await;
     let claimed_at = claim_time_minutes_ago(&pool, 31).await;
@@ -357,7 +353,6 @@ async fn a_null_generation_gets_no_beat() {
 /// Python `test_one_statement_beats_every_fenced_row`: one write beats three
 /// held rows, each at its own claim generation.
 #[tokio::test]
-#[serial]
 async fn one_statement_beats_every_fenced_row() {
     let pool = migrated_pool_with_heartbeat_leaves().await;
     let newest = claim_time_minutes_ago(&pool, 31).await;
@@ -399,7 +394,6 @@ async fn one_statement_beats_every_fenced_row() {
 /// entered at the reaper, only the newest runner beat decides staleness.
 /// Both rows started 30 minutes ago; one gets a beat from the writer.
 #[tokio::test]
-#[serial]
 async fn the_reaper_leaves_a_beaten_row_and_fails_an_unbeaten_one() {
     let pool = migrated_pool_with_heartbeat_leaves().await;
     let beaten_claim = claim_time_minutes_ago(&pool, 31).await;
@@ -451,7 +445,6 @@ async fn the_reaper_leaves_a_beaten_row_and_fails_an_unbeaten_one() {
 /// hold fails. The child half (a task that holds its interpreter lock)
 /// waits for the executor.
 #[tokio::test]
-#[serial]
 async fn the_beat_loop_keeps_a_held_row_out_of_stale_recovery() {
     let pool = migrated_pool_with_heartbeat_leaves().await;
     let held_claim = claim_time_minutes_ago(&pool, 31).await;

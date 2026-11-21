@@ -15,7 +15,6 @@
 
 use crate::test_support::sql::{self, TestPool, TestTransaction};
 use serde_json::{json, Value};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::pool;
@@ -281,7 +280,6 @@ mod budgets {
     /// three classes interleave in priority; the isolated budget reads them
     /// as one order and returns each row's class.
     #[tokio::test]
-    #[serial]
     async fn an_isolated_budget_claims_the_merge_of_every_class() {
         let pool = pool().await;
         let ids = seed_many(
@@ -317,7 +315,6 @@ mod budgets {
     /// own head, and the isolated children never run a class that has
     /// children of its own.
     #[tokio::test]
-    #[serial]
     async fn priority_holds_within_each_budget_not_across() {
         let pool = pool().await;
         let async_rows =
@@ -356,7 +353,6 @@ mod budgets {
     /// isolated budget of 2 claims ISOLATED and SHARED_THREAD rows; each
     /// stream alone could fill it, and the worker total is 4.
     #[tokio::test]
-    #[serial]
     async fn a_budget_never_takes_more_than_its_capacity_over_classes() {
         let pool = pool().await;
         for _ in 0..3 {
@@ -380,7 +376,6 @@ mod budgets {
     /// async row and one live CLAIMED isolated row of this worker leave one
     /// seat in each budget of 2. Rows of another worker do not count.
     #[tokio::test]
-    #[serial]
     async fn this_workers_rows_count_against_their_budget() {
         let pool = pool().await;
         let params = Params::new(
@@ -413,7 +408,6 @@ mod budgets {
 
     /// `test_claimed_per_worker_bounds_the_worker_across_budgets`.
     #[tokio::test]
-    #[serial]
     async fn claimed_per_worker_bounds_the_worker_across_budgets() {
         let pool = pool().await;
         for _ in 0..3 {
@@ -438,7 +432,6 @@ mod budgets {
 
     /// `test_the_batch_limit_bounds_each_queue_across_budgets`.
     #[tokio::test]
-    #[serial]
     async fn the_batch_limit_bounds_each_queue_across_budgets() {
         let pool = pool().await;
         for _ in 0..3 {
@@ -465,7 +458,6 @@ mod budgets {
     /// capacity 1 + 1 and prefetch 1: each budget may hold 2, the worker 3.
     /// Isolated rows rank first, so the third row is the async one.
     #[tokio::test]
-    #[serial]
     async fn soft_cap_lets_each_budget_prefetch_within_the_worker_total() {
         let pool = pool().await;
         for _ in 0..4 {
@@ -496,7 +488,6 @@ mod budgets {
     /// rows rank first and stay for a worker with seats; the ISOLATED budget
     /// of 1 still prefetches 3.
     #[tokio::test]
-    #[serial]
     async fn a_budget_with_no_capacity_in_service_gets_no_prefetch() {
         let pool = pool().await;
         for _ in 0..5 {
@@ -522,7 +513,6 @@ mod budgets {
     /// `test_a_worker_with_no_capacity_in_service_claims_nothing`: every
     /// child of the worker is down: prefetch takes no row.
     #[tokio::test]
-    #[serial]
     async fn a_worker_with_no_capacity_in_service_claims_nothing() {
         let pool = pool().await;
         for _ in 0..3 {
@@ -554,7 +544,6 @@ mod budgets {
     /// `test_a_route_to_a_budget_that_is_not_passed_is_refused`: 22023 with
     /// the function's own message.
     #[tokio::test]
-    #[serial]
     async fn a_route_to_a_budget_that_is_not_passed_is_refused() {
         let pool = pool().await;
 
@@ -588,7 +577,6 @@ mod one_walk {
     /// ISOLATED rows, which the full budget drops, then SHARED_ASYNC rows:
     /// Q's room of 2 goes to those.
     #[tokio::test]
-    #[serial]
     async fn a_row_its_budget_drops_takes_no_queue_room() {
         let pool = pool().await;
         let mut p_rows = Vec::new();
@@ -651,7 +639,6 @@ mod one_walk {
     /// the pending ISOLATED rows rank before the SHARED_ASYNC rows, and the
     /// ISOLATED budget takes 2: the 2 async seats still fill.
     #[tokio::test]
-    #[serial]
     async fn expired_rows_of_a_full_budget_leave_the_other_budget_its_seats() {
         let pool = pool().await;
         let mut expired = Vec::new();
@@ -698,7 +685,6 @@ mod one_walk {
     /// pending and expired rows of one class interleave in priority; a
     /// budget of 3 takes the 3 best of both, not 3 of each.
     #[tokio::test]
-    #[serial]
     async fn a_stream_reads_its_pending_and_expired_rows_as_one_order() {
         let pool = pool().await;
         let first = seed(&pool, &Seed::pending("ISOLATED").priority(1)).await;
@@ -741,7 +727,6 @@ mod expired_arm {
 
     /// `test_an_expired_claim_follows_the_routes`.
     #[tokio::test]
-    #[serial]
     async fn an_expired_claim_follows_the_routes() {
         let pool = pool().await;
         let lapsed = seed(
@@ -772,7 +757,6 @@ mod expired_arm {
     /// ranks first, and this worker serves only ISOLATED: the one seat goes
     /// to the pending isolated row.
     #[tokio::test]
-    #[serial]
     async fn an_unserved_expired_row_takes_no_budget() {
         let pool = pool().await;
         seed(
@@ -796,7 +780,6 @@ mod expired_arm {
     /// `test_the_expired_arm_takes_only_a_served_class`: two expired rows;
     /// the async one ranks first and is not served.
     #[tokio::test]
-    #[serial]
     async fn the_expired_arm_takes_only_a_served_class() {
         let pool = pool().await;
         seed(
@@ -831,7 +814,6 @@ mod locks {
     /// in one isolated budget of 5: while the claim is open, another worker
     /// can still lock the other 25.
     #[tokio::test]
-    #[serial]
     async fn a_claim_locks_only_the_rows_it_takes() {
         let pool = pool().await;
         for _ in 0..15 {
@@ -867,7 +849,6 @@ mod locks {
     /// is locked elsewhere: the claim takes the next row of the same class
     /// instead of none.
     #[tokio::test]
-    #[serial]
     async fn a_row_held_by_another_claim_is_skipped() {
         let pool = pool().await;
         let head = seed(&pool, &Seed::pending("ISOLATED").priority(1)).await;
@@ -902,7 +883,6 @@ mod short_take {
     /// claim commits, the next claim takes the SHARED_THREAD rows that the
     /// first plan left out.
     #[tokio::test]
-    #[serial]
     async fn a_take_short_of_its_plan_reports_the_rows_it_missed() {
         let pool = pool().await;
         let held = seed_many(&pool, &vec![Seed::pending("ISOLATED").priority(1); 4]).await;

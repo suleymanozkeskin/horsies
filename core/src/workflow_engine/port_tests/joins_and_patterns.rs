@@ -2,10 +2,9 @@
 //! Python: `clients/python/tests/integration/test_workflow_join.py` and
 //! `test_workflow_composed_patterns.py`.
 //!
-//! The nodes run on [`PORT_QUEUE`], which no worker test claims, so a live
-//! task left on the shared database stays where it is.
+//! The nodes run on [`PORT_QUEUE`], which no worker claims, so a live task
+//! that a test leaves stays where it is.
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -77,7 +76,6 @@ async fn assert_status(pool: &TestPool, workflow_id: Uuid, index: i32, expected:
 
 /// `test_workflow_join.py::TestOrJoin.test_any_join_runs_when_first_dep_succeeds`
 #[tokio::test]
-#[serial]
 async fn join_any_is_enqueued_on_the_first_success() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -101,7 +99,6 @@ async fn join_any_is_enqueued_on_the_first_success() {
 
 /// `TestOrJoin.test_any_join_stays_pending_while_possible`
 #[tokio::test]
-#[serial]
 async fn join_any_stays_pending_while_a_success_is_possible() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -126,7 +123,6 @@ async fn join_any_stays_pending_while_a_success_is_possible() {
 
 /// `TestOrJoin.test_any_join_single_dep_succeeds` and `.test_any_join_single_dep_fails`
 #[tokio::test]
-#[serial]
 async fn join_any_with_one_dependency_follows_it() {
     let pool = shared_pool().await;
     let single = || {
@@ -147,7 +143,6 @@ async fn join_any_with_one_dependency_follows_it() {
 
 /// `TestOrJoin.test_any_join_cascade_skips_downstream`
 #[tokio::test]
-#[serial]
 async fn a_skipped_join_any_node_skips_its_join_all_dependent() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -171,7 +166,6 @@ async fn a_skipped_join_any_node_skips_its_join_all_dependent() {
 
 /// `TestOrJoin.test_any_join_idempotent_after_enqueue`
 #[tokio::test]
-#[serial]
 async fn another_dependency_finishing_leaves_an_enqueued_join_any_node() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -198,7 +192,6 @@ async fn another_dependency_finishing_leaves_an_enqueued_join_any_node() {
 
 /// `TestOrJoin.test_any_join_out_of_order_completion`
 #[tokio::test]
-#[serial]
 async fn join_any_is_enqueued_when_the_last_dependency_finishes_first() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -244,7 +237,6 @@ async fn met_join_with_a_terminal_ctx_dependency(
 
 /// `TestOrJoin.test_any_join_ctx_dep_fails`
 #[tokio::test]
-#[serial]
 async fn join_any_proceeds_when_its_context_dependency_failed() {
     assert_eq!(
         met_join_with_a_terminal_ctx_dependency("test_any_ctx_fail", JoinType::Any, None).await,
@@ -254,7 +246,6 @@ async fn join_any_proceeds_when_its_context_dependency_failed() {
 
 /// `TestQuorumJoin.test_quorum_ctx_dep_fails`
 #[tokio::test]
-#[serial]
 async fn a_met_quorum_proceeds_when_its_context_dependency_failed() {
     assert_eq!(
         met_join_with_a_terminal_ctx_dependency("test_quorum_ctx_fail", JoinType::Quorum, Some(1))
@@ -265,7 +256,6 @@ async fn a_met_quorum_proceeds_when_its_context_dependency_failed() {
 
 /// `TestOrJoin.test_any_join_ctx_dep_skipped`
 #[tokio::test]
-#[serial]
 async fn join_any_proceeds_when_its_context_dependency_was_skipped() {
     let pool = shared_pool().await;
     let mut aggregator = joined(3, &[1, 2], JoinType::Any, None);
@@ -301,7 +291,6 @@ fn quorum_of_three(name: &str, min_success: i32) -> WorkflowSpec {
 
 /// `TestQuorumJoin.test_quorum_runs_when_threshold_met`
 #[tokio::test]
-#[serial]
 async fn quorum_is_enqueued_when_min_success_succeed() {
     let pool = shared_pool().await;
     let workflow_id = run(&pool, &quorum_of_three("test_quorum", 2)).await;
@@ -314,7 +303,6 @@ async fn quorum_is_enqueued_when_min_success_succeed() {
 
 /// `TestQuorumJoin.test_quorum_stays_pending_while_possible`
 #[tokio::test]
-#[serial]
 async fn quorum_stays_pending_while_its_threshold_is_reachable() {
     let pool = shared_pool().await;
     let workflow_id = run(&pool, &quorum_of_three("test_quorum_pending", 2)).await;
@@ -330,7 +318,6 @@ async fn quorum_stays_pending_while_its_threshold_is_reachable() {
 
 /// `TestQuorumJoin.test_quorum_min_success_equals_total_deps`
 #[tokio::test]
-#[serial]
 async fn quorum_of_every_dependency_needs_all_to_succeed() {
     let pool = shared_pool().await;
     let workflow_id = run(&pool, &quorum_of_three("test_quorum_all", 3)).await;
@@ -345,7 +332,6 @@ async fn quorum_of_every_dependency_needs_all_to_succeed() {
 
 /// `TestQuorumJoin.test_quorum_min_success_one`
 #[tokio::test]
-#[serial]
 async fn quorum_of_one_is_enqueued_on_the_first_success() {
     let pool = shared_pool().await;
     let workflow_id = run(&pool, &quorum_of_three("test_quorum_one", 1)).await;
@@ -357,7 +343,6 @@ async fn quorum_of_one_is_enqueued_on_the_first_success() {
 
 /// `TestQuorumJoin.test_quorum_cascade_skips_downstream`
 #[tokio::test]
-#[serial]
 async fn an_unreachable_quorum_skips_itself_and_its_join_all_dependent() {
     let pool = shared_pool().await;
     let mut workflow_spec = quorum_of_three("test_quorum_cascade", 2);
@@ -373,7 +358,6 @@ async fn an_unreachable_quorum_skips_itself_and_its_join_all_dependent() {
 
 /// `TestQuorumJoin.test_quorum_exact_threshold_boundary`
 #[tokio::test]
-#[serial]
 async fn quorum_waits_at_one_success_and_one_failure_and_promotes_on_the_second_success() {
     let pool = shared_pool().await;
     let workflow_id = run(&pool, &quorum_of_three("test_quorum_boundary", 2)).await;
@@ -397,7 +381,6 @@ fn diamond(name: &str, sink: AnyNode) -> WorkflowSpec {
 
 /// `test_workflow_composed_patterns.py::TestComposedPatterns.test_diamond_join_any_on_sink`
 #[tokio::test]
-#[serial]
 async fn a_join_any_sink_is_enqueued_when_the_first_arm_succeeds() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -421,7 +404,6 @@ async fn a_join_any_sink_is_enqueued_when_the_first_arm_succeeds() {
 
 /// `TestComposedPatterns.test_diamond_join_any_first_arm_fails`
 #[tokio::test]
-#[serial]
 async fn a_join_any_sink_waits_after_a_failed_arm_and_runs_after_the_other() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -445,7 +427,6 @@ async fn a_join_any_sink_waits_after_a_failed_arm_and_runs_after_the_other() {
 
 /// `TestComposedPatterns.test_diamond_allow_failed_deps_on_sink`
 #[tokio::test]
-#[serial]
 async fn an_allow_failed_deps_sink_gets_both_results_one_failed() {
     let pool = shared_pool().await;
     let mut sink = after(3, &[1, 2]);
@@ -475,7 +456,6 @@ async fn an_allow_failed_deps_sink_gets_both_results_one_failed() {
 
 /// `TestComposedPatterns.test_fan_out_with_success_policy`
 #[tokio::test]
-#[serial]
 async fn a_policy_that_requires_one_child_completes_when_the_others_fail() {
     let pool = shared_pool().await;
     let mut workflow_spec = spec(
@@ -502,7 +482,6 @@ async fn a_policy_that_requires_one_child_completes_when_the_others_fail() {
 
 /// `TestComposedPatterns.test_wide_fan_in_quorum_on_sink`
 #[tokio::test]
-#[serial]
 async fn a_quorum_sink_is_enqueued_while_other_dependencies_still_run() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -545,7 +524,6 @@ fn recovery(index: usize, source: usize) -> AnyNode {
 
 /// `TestComposedPatterns.test_mixed_dag_failure_with_recovery_branch`
 #[tokio::test]
-#[serial]
 async fn a_recovery_branch_runs_after_a_failure_and_the_workflow_still_fails() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -579,7 +557,6 @@ async fn a_recovery_branch_runs_after_a_failure_and_the_workflow_still_fails() {
 
 /// `TestComposedPatterns.test_join_any_with_args_from_partial_terminal`
 #[tokio::test]
-#[serial]
 async fn join_any_leaves_out_an_args_from_dependency_that_did_not_finish() {
     let pool = shared_pool().await;
     let mut sink = joined(3, &[1, 2], JoinType::Any, None);
@@ -602,7 +579,6 @@ async fn join_any_leaves_out_an_args_from_dependency_that_did_not_finish() {
 
 /// `TestComposedPatterns.test_recovery_branch_itself_fails`
 #[tokio::test]
-#[serial]
 async fn a_failed_recovery_branch_skips_the_rest_of_the_chain() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -632,7 +608,6 @@ async fn a_failed_recovery_branch_skips_the_rest_of_the_chain() {
 
 /// `TestComposedPatterns.test_success_policy_with_recovery_on_diamond`
 #[tokio::test]
-#[serial]
 async fn a_policy_that_requires_the_recovery_node_completes_the_workflow() {
     let pool = shared_pool().await;
     let mut workflow_spec = spec(
@@ -659,7 +634,6 @@ async fn a_policy_that_requires_the_recovery_node_completes_the_workflow() {
 
 /// `TestComposedPatterns.test_join_any_on_intermediate_chains_downstream`
 #[tokio::test]
-#[serial]
 async fn an_early_join_any_middle_node_leads_its_dependent() {
     let pool = shared_pool().await;
     let mut workflow_spec = diamond(
@@ -686,7 +660,6 @@ async fn an_early_join_any_middle_node_leads_its_dependent() {
 
 /// `TestComposedPatterns.test_pause_fires_before_success_policy_evaluation`
 #[tokio::test]
-#[serial]
 async fn on_error_pause_pauses_before_a_policy_that_could_still_succeed() {
     let pool = shared_pool().await;
     let mut workflow_spec = spec("pause_overrides_policy", vec![after(0, &[]), after(1, &[])]);
@@ -708,7 +681,6 @@ async fn on_error_pause_pauses_before_a_policy_that_could_still_succeed() {
 /// Promoted siblings carry their node priority, and the claim takes the
 /// smaller number first.
 #[tokio::test]
-#[serial]
 async fn promoted_siblings_are_claimed_in_priority_order() {
     let db = IsolatedDatabase::create().await;
     let mut urgent = after(1, &[0]);
@@ -734,7 +706,6 @@ async fn promoted_siblings_are_claimed_in_priority_order() {
 
 /// `TestDAGPatterns.test_mixed_pattern`
 #[tokio::test]
-#[serial]
 async fn a_mixed_dag_runs_in_dependency_order_and_completes() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -769,7 +740,6 @@ async fn a_mixed_dag_runs_in_dependency_order_and_completes() {
 
 /// `TestDAGPatterns.test_wide_fan_out_fan_in`
 #[tokio::test]
-#[serial]
 async fn ten_middle_nodes_fan_out_and_fan_in() {
     let pool = shared_pool().await;
     let mut tasks = vec![after(0, &[])];
@@ -797,7 +767,6 @@ async fn ten_middle_nodes_fan_out_and_fan_in() {
 
 /// `TestDAGPatterns.test_fan_in_reverse_completion_order`
 #[tokio::test]
-#[serial]
 async fn a_join_node_runs_when_its_parents_finish_in_reverse_order() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -827,7 +796,6 @@ async fn a_join_node_runs_when_its_parents_finish_in_reverse_order() {
 
 /// `TestDAGPatterns.test_fan_out_root_fails`
 #[tokio::test]
-#[serial]
 async fn a_failed_root_skips_every_child() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -855,7 +823,6 @@ async fn a_failed_root_skips_every_child() {
 
 /// `TestDAGPatterns.test_mixed_pattern_mid_node_fails`
 #[tokio::test]
-#[serial]
 async fn a_failed_middle_node_skips_across_levels() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -886,7 +853,6 @@ async fn a_failed_middle_node_skips_across_levels() {
 /// `TestDAGPatterns.test_linear_chain`: A -> B -> C runs in order; each
 /// node is enqueued when the one before it completes.
 #[tokio::test]
-#[serial]
 async fn a_linear_chain_runs_in_order() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -917,7 +883,6 @@ async fn a_linear_chain_runs_in_order() {
 /// `TestDAGPatterns.test_fan_in`: [A, B, C] -> D; D is enqueued only after
 /// its last parent completes.
 #[tokio::test]
-#[serial]
 async fn a_fan_in_node_runs_after_all_its_parents() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -951,7 +916,6 @@ async fn a_fan_in_node_runs_after_all_its_parents() {
 
 /// `TestDAGPatterns.test_diamond`: A -> [B, C] -> D.
 #[tokio::test]
-#[serial]
 async fn a_diamond_runs_its_sink_after_both_arms() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -984,7 +948,6 @@ async fn a_diamond_runs_its_sink_after_both_arms() {
 /// `TestDAGPatterns.test_deep_linear`: A -> B -> C -> D -> E; each node is
 /// enqueued in turn and completes.
 #[tokio::test]
-#[serial]
 async fn a_deep_chain_runs_each_node_in_turn() {
     let pool = shared_pool().await;
     let mut tasks = vec![after(0, &[])];
@@ -1002,7 +965,6 @@ async fn a_deep_chain_runs_each_node_in_turn() {
 
 /// `TestDAGPatterns.test_multiple_roots`: [A, B] -> C.
 #[tokio::test]
-#[serial]
 async fn two_roots_start_together_and_lead_their_join() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -1028,7 +990,6 @@ async fn two_roots_start_together_and_lead_their_join() {
 /// `TestDAGPatterns.test_single_task_workflow`: one root with no
 /// dependencies completes the workflow.
 #[tokio::test]
-#[serial]
 async fn a_single_node_completes_its_workflow() {
     let pool = shared_pool().await;
     let workflow_id = run(&pool, &spec("single", vec![after(0, &[])])).await;
@@ -1044,7 +1005,6 @@ async fn a_single_node_completes_its_workflow() {
 /// D waits until C is terminal too, then is SKIPPED (no
 /// `allow_failed_deps`), and the workflow fails.
 #[tokio::test]
-#[serial]
 async fn a_failed_diamond_arm_skips_the_sink_once_the_other_arm_ends() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -1110,7 +1070,6 @@ async fn task_rows_and_links(
 /// completes with exactly one task row for the join node, which the node
 /// links, and no task row that no node links.
 #[tokio::test]
-#[serial]
 async fn a_wide_fan_in_mints_one_join_task() {
     const ROOT_TASK: &str = "wide_fan_in_root";
     const JOIN_TASK: &str = "wide_fan_in_join";

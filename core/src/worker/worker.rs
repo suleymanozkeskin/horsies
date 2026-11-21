@@ -2466,7 +2466,6 @@ mod tests {
     /// The boot check passes on a direct URL, and the claim wakes and the
     /// ping replies both travel over the broker's one listener.
     #[tokio::test]
-    #[serial]
     async fn a_booted_worker_wakes_on_its_queue_and_answers_pings() {
         let broker = Arc::new(PostgresBroker::from_test_url_and_session_url(
             test_pool().await.url(),
@@ -3977,8 +3976,6 @@ mod tests {
 
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    static EXECUTION_COUNT: AtomicU32 = AtomicU32::new(0);
-
     async fn succeed(_: ()) -> Result<String, TaskError> {
         Ok("done".to_owned())
     }
@@ -4001,9 +3998,17 @@ mod tests {
         Ok("workflow-done".to_owned())
     }
 
-    async fn counted_success_task(_: ()) -> Result<String, TaskError> {
-        EXECUTION_COUNT.fetch_add(1, Ordering::SeqCst);
-        Ok("counted".to_owned())
+    /// A task that adds one to `runs` at each run. Each test gives its own
+    /// counter.
+    fn counted_success_task(runs: &Arc<AtomicU32>) -> RegisteredTask {
+        let runs = Arc::clone(runs);
+        test_task(move |_: ()| {
+            let runs = Arc::clone(&runs);
+            async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                Ok::<String, TaskError>("counted".to_owned())
+            }
+        })
     }
 
     async fn panic_task(_: ()) -> Result<String, TaskError> {
@@ -4246,7 +4251,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn finalize_success_completes_task_and_records_attempt() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4312,7 +4316,6 @@ mod tests {
     /// RUNNING again — so the ownership guard (`claimed_by_worker_id = $wid`) is
     /// load-bearing. Parity with horsies PR #101 dc2cbbd6.
     #[tokio::test]
-    #[serial]
     async fn finalize_primitives_reject_stale_owner_and_accept_current_owner() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4420,7 +4423,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn finalize_success_advances_workflow_end_to_end() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4522,7 +4524,6 @@ mod tests {
     /// names the one-statement form, and phase 2 promotes the dependent: the
     /// dependent node is ENQUEUED with a minted PENDING task row.
     #[tokio::test]
-    #[serial]
     async fn phase_two_of_a_node_with_dependents_promotes_them_in_one_statement() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4571,7 +4572,6 @@ mod tests {
     /// its commit (`horsies_workflow_child_finish`): the sub-workflow node is
     /// COMPLETED and the parent workflow completes.
     #[tokio::test]
-    #[serial]
     async fn phase_two_that_ends_a_child_workflow_advances_the_parent_node() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4604,7 +4604,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn finalize_phase1_commit_is_durable_before_phase2_runs() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4646,7 +4645,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn finalize_phase2_failure_keeps_terminal_task_durable() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4692,7 +4690,6 @@ mod tests {
     /// and the claim is released at once with the fenced release. Before, a
     /// failed node statement was treated as informational and user code ran.
     #[tokio::test]
-    #[serial]
     async fn a_failed_workflow_node_check_runs_no_user_code_and_releases_the_claim() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4701,14 +4698,14 @@ mod tests {
         let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
         link_task_to_workflow(&pool, &task_id, Some(0)).await;
-        EXECUTION_COUNT.store(0, Ordering::SeqCst);
+        let runs = Arc::new(AtomicU32::new(0));
 
         let (function_name, trigger_name) = install_fail_workflow_task_running_trigger(&pool).await;
         let result = AssertUnwindSafe(async {
-            run_finalize(&broker, test_task(counted_success_task), task_id).await;
+            run_finalize(&broker, counted_success_task(&runs), task_id).await;
 
             assert_eq!(
-                EXECUTION_COUNT.load(Ordering::SeqCst),
+                runs.load(Ordering::SeqCst),
                 0,
                 "user code must not run when the workflow node check fails",
             );
@@ -4732,7 +4729,6 @@ mod tests {
     /// a workflow task with no runnable node does not run; with orphan
     /// self-heal off nothing is written and the row stays CLAIMED.
     #[tokio::test]
-    #[serial]
     async fn an_unlinked_workflow_task_with_self_heal_off_runs_nothing_and_stays_claimed() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4753,11 +4749,11 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        EXECUTION_COUNT.store(0, Ordering::SeqCst);
+        let runs = Arc::new(AtomicU32::new(0));
 
         let (end, settled) = run_finalize_with(
             &broker,
-            test_task(counted_success_task),
+            counted_success_task(&runs),
             task_id,
             OrphanSelfHeal::Off,
         )
@@ -4773,13 +4769,12 @@ mod tests {
             settled,
             crate::worker::executor::slots::Settlement::NothingOwed
         );
-        assert_eq!(EXECUTION_COUNT.load(Ordering::SeqCst), 0);
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
         let (status, _, _) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(status, "CLAIMED");
     }
 
     #[tokio::test]
-    #[serial]
     async fn finalize_paused_workflow_cancels_without_running_user_code() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4793,11 +4788,11 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        EXECUTION_COUNT.store(0, Ordering::SeqCst);
+        let runs = Arc::new(AtomicU32::new(0));
 
-        run_finalize(&broker, test_task(counted_success_task), task_id).await;
+        run_finalize(&broker, counted_success_task(&runs), task_id).await;
 
-        assert_eq!(EXECUTION_COUNT.load(Ordering::SeqCst), 0);
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
 
         // Paused-workflow claimed-but-not-started task is moved to terminal
         // CANCELLED (not back to PENDING), so it cannot run as a duplicate of the
@@ -4814,7 +4809,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn finalize_cancelled_workflow_skips_without_running_user_code() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4828,11 +4822,11 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        EXECUTION_COUNT.store(0, Ordering::SeqCst);
+        let runs = Arc::new(AtomicU32::new(0));
 
-        run_finalize(&broker, test_task(counted_success_task), task_id).await;
+        run_finalize(&broker, counted_success_task(&runs), task_id).await;
 
-        assert_eq!(EXECUTION_COUNT.load(Ordering::SeqCst), 0);
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
 
         let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(status, "CANCELLED");
@@ -4849,7 +4843,6 @@ mod tests {
     /// with WORKER_SERIALIZATION_ERROR, and the task does not retry (its
     /// retry policy is inside the unreadable text).
     #[tokio::test]
-    #[serial]
     async fn unreadable_stored_options_fail_the_task_before_user_code_runs() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4876,7 +4869,6 @@ mod tests {
     /// A stored timeout above the limit refuses the run, and a readable
     /// policy that names WORKER_SERIALIZATION_ERROR still retries it.
     #[tokio::test]
-    #[serial]
     async fn a_refused_timeout_retries_when_the_policy_names_the_refusal() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4912,7 +4904,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(timing)]
     async fn finalize_retryable_failure_requeues_and_skips_callback() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4920,10 +4912,12 @@ mod tests {
 
         let task_id = Uuid::new_v4();
         // Python's stored layout: auto_retry_for lives inside retry_policy.
+        // The retry is 60 s away, so the check of a future next_retry_at
+        // holds when the finalize and the reads are slow.
         let task_options = serde_json::json!({
             "retry_policy": {
                 "max_retries": 3,
-                "intervals": [1, 1, 1],
+                "intervals": [60, 60, 60],
                 "backoff_strategy": "fixed",
                 "jitter": false,
                 "max_delay_seconds": null,
@@ -4967,7 +4961,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn finalize_non_retryable_failure_records_terminal_state() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -4997,7 +4990,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn finalize_async_panic_records_terminal_failure() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -5042,7 +5034,6 @@ mod tests {
     /// nothing, and the next try sends the same statement. Before, an error
     /// of the retry write fell through to the terminal failure write.
     #[tokio::test]
-    #[serial]
     async fn a_database_error_in_the_failed_attempt_write_decides_nothing() {
         let pool = test_pool().await;
         clean(&pool).await;
@@ -5092,7 +5083,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn finalize_phase1_db_failure_leaves_task_running_for_reaper() {
         let pool = test_pool().await;
         clean(&pool).await;
@@ -5132,7 +5122,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn finalize_invalid_ok_payload_falls_back_to_serialization_failure() {
         let pool = test_pool().await;
         let broker = test_broker().await;
@@ -5167,7 +5156,6 @@ mod tests {
     /// listen on task_new (parity with horsies PR #101 cafc9200). The payload
     /// is the constant `capacity` that the baseline functions also send.
     #[tokio::test]
-    #[serial]
     async fn capacity_wake_emits_queue_specific_signal_only() {
         let pool = test_pool().await;
         clean(&pool).await;
@@ -5205,7 +5193,6 @@ mod tests {
     /// A capacity wake that the database refuses is an error, never dropped
     /// (#722): a closed pool answers `PoolClosed`, and nothing was sent.
     #[tokio::test]
-    #[serial]
     async fn capacity_wake_on_a_closed_pool_is_an_error() {
         let pool = test_pool().await;
         let core_pool = crate::broker::pools::core_pool_for_test_url(pool.url());
@@ -5235,7 +5222,8 @@ mod tests {
     struct FreshDatabase {
         pool: TestPool,
         database: crate::test_support::TestDatabase,
-        /// The shared test database URL, for the worker's config only: the
+        /// The URL of the migrated database of this test
+        /// (`migrated_database_url`), for the worker's config only: the
         /// worker reaches this database through `pool`.
         config_url: String,
     }
@@ -5416,7 +5404,6 @@ mod tests {
     /// With the install on, a database of the Python family fails the schema
     /// step: no coverage, no runtime loop, no claim.
     #[tokio::test]
-    #[serial]
     async fn a_start_refused_at_the_schema_step_writes_nothing_later() {
         use crate::broker::client_family::{ClientFamily, RecordedFamily};
         use crate::broker::BrokerError;
@@ -5448,7 +5435,6 @@ mod tests {
     /// Python family fail the family step: no coverage, no runtime loop, no
     /// claim. Both refusals are not retryable.
     #[tokio::test]
-    #[serial]
     async fn a_start_refused_at_the_family_step_writes_nothing_later() {
         use crate::broker::client_family::{ClientFamily, RecordedFamily};
         use crate::broker::BrokerError;
@@ -5552,7 +5538,6 @@ mod tests {
     /// answers `Busy` and no heartbeat leaf covers the present instant. No
     /// runtime loop starts: no worker state, no heartbeat, no claim.
     #[tokio::test]
-    #[serial]
     async fn a_start_refused_at_the_coverage_step_starts_no_runtime_loop() {
         let database = FreshDatabase::create().await;
         database.record_family("RUST").await;
@@ -5588,7 +5573,7 @@ mod tests {
     /// the gate; the next attempt takes it, creates the current heartbeat
     /// leaf, and the start ends `Started` with no error line.
     #[tokio::test]
-    #[serial]
+    #[serial(timing)]
     async fn a_start_that_finds_the_coverage_gate_held_starts_once_the_gate_is_released() {
         use crate::core::config::WorkerResilienceConfig;
         use crate::core::history::names::{HEARTBEAT_CLASS_KEY, LEAF_CATALOG};
@@ -5678,7 +5663,6 @@ mod tests {
     /// time waited and the attempts. Each retry wait logs one info line. No
     /// coverage, no runtime loop, no claim.
     #[tokio::test]
-    #[serial]
     async fn a_start_whose_coverage_gate_stays_held_past_the_budget_is_refused() {
         let database = FreshDatabase::create().await;
         database.record_family("RUST").await;
@@ -5740,7 +5724,6 @@ mod tests {
     /// The startup coverage runs on the core pools of a broker with a
     /// separate session URL: the database start completes.
     #[tokio::test]
-    #[serial]
     async fn startup_coverage_runs_on_the_session_pool() {
         use crate::core::config::PostgresConfig;
 
@@ -5834,7 +5817,6 @@ mod tests {
     /// claimer's renewal of a held claim both write the default lease. A
     /// trigger logs every lease written on a CLAIMED row.
     #[tokio::test]
-    #[serial]
     async fn claims_and_renewals_write_the_default_lease() {
         let database = FreshDatabase::create().await;
         database.record_family("RUST").await;
@@ -5934,7 +5916,6 @@ mod tests {
     /// ends at its run frame, and the crash end returns the CLAIMED row to
     /// the queue (`ClaimedRowRule::Release`), at the stop at the latest.
     #[tokio::test]
-    #[serial]
     async fn a_claim_error_that_can_clear_backs_off_and_the_loop_claims_again() {
         let database = FreshDatabase::create().await;
         database.record_family("RUST").await;
@@ -6050,7 +6031,6 @@ mod tests {
     /// partition maintenance on the session pool. Each pool has its own
     /// `application_name`; statement triggers log which session wrote.
     #[tokio::test]
-    #[serial]
     async fn the_reaper_recovers_on_the_runtime_pool_and_maintains_on_the_session_pool() {
         use crate::core::config::PostgresConfig;
         use crate::core::history::names::LEAF_CATALOG;

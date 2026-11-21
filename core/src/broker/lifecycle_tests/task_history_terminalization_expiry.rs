@@ -3,8 +3,6 @@
 //! `TestDiscoveryBatch::test_skip_locked_steps_around_a_held_row` is
 //! `terminalization_functions::expire_pending_tasks::a_row_a_concurrent_claim_holds_is_stepped_around`.
 
-use serial_test::serial;
-
 use super::support::*;
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{
@@ -29,7 +27,6 @@ fn expire_pending() -> TerminalizationCommand {
 /// input is framed inline, a workflow task is never eligible, and its
 /// phase-2 record carries the digest of the expiry result.
 #[tokio::test]
-#[serial]
 async fn mixed_batch_moves_only_eligible_rows() {
     let pool = pool().await;
     drain_pending_expiry(&pool).await;
@@ -125,7 +122,6 @@ async fn mixed_batch_moves_only_eligible_rows() {
 /// a due workflow task owes phase 2, and phase 2 needs a result payload, so a
 /// sweep with no result is refused before any row moves.
 #[tokio::test]
-#[serial]
 async fn batch_deferred_fence_raises_before_any_move() {
     let pool = pool().await;
     drain_pending_expiry(&pool).await;

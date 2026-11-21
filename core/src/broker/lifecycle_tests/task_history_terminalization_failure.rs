@@ -5,7 +5,6 @@
 //! `TestStalenessGuard::test_absent_task_classifies_through_the_null_claim_path`
 //! is `terminalization_functions::fail_stale::a_task_that_does_not_exist`.
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
@@ -49,7 +48,6 @@ mod disposition_ladder {
 
     /// Python `TestDispositionLadder::test_declined_snapshot_archives_declined_by_policy`.
     #[tokio::test]
-    #[serial]
     async fn declined_snapshot_archives_declined_by_policy() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -73,7 +71,6 @@ mod disposition_ladder {
     /// (the test map names it `test_retained_prepared_envelope_carries_byte_identically`):
     /// the move frames the stored input byte for byte, with its digest.
     #[tokio::test]
-    #[serial]
     async fn retained_input_is_framed_byte_identically() {
         let pool = pool().await;
         let input = r#"{"precious":"failure input"}"#;
@@ -104,7 +101,6 @@ mod disposition_ladder {
 
     /// Python `TestDispositionLadder::test_workflow_backing_failure_is_never_eligible_with_pending`.
     #[tokio::test]
-    #[serial]
     async fn workflow_backing_failure_is_never_eligible_with_pending() {
         let pool = pool().await;
         let task_id = seed_task(
@@ -148,7 +144,6 @@ mod deferred_result_fence {
     /// the phase-2 record needs the digest of a result, so the move refuses a
     /// deferred failure with no result, for both failure kinds.
     #[tokio::test]
-    #[serial]
     async fn workflow_failure_without_result_raises_typed() {
         let pool = pool().await;
         for kind in ["FAIL_RUNNING", "FAIL_STALE"] {

@@ -660,7 +660,6 @@ async fn passes_judge_no_owner(
 /// both rows within the span and a few passes, far inside the stale
 /// thresholds. While the process lived, no pass judged it.
 #[tokio::test]
-#[serial]
 async fn a_killed_worker_process_is_recovered_within_the_detection_time() {
     let pool = migrated_pool().await;
     let url = migrated_database_url().await;
@@ -708,7 +707,6 @@ async fn a_killed_worker_process_is_recovered_within_the_detection_time() {
 /// A worker that is alive but stalled keeps its connection, so it keeps its
 /// lock: no pass judges it gone, and its rows stay.
 #[tokio::test]
-#[serial]
 async fn a_stalled_worker_that_keeps_its_lock_is_never_recovered() {
     let pool = migrated_pool().await;
     let url = migrated_database_url().await;
@@ -742,7 +740,6 @@ async fn a_stalled_worker_that_keeps_its_lock_is_never_recovered() {
 /// passes, with the span of that bound plus a margin, judge nothing, and the
 /// worker runs on with a task held.
 #[tokio::test]
-#[serial]
 async fn a_lock_lost_and_regained_within_the_bound_causes_no_recovery() {
     let pool = migrated_pool().await;
     let url = migrated_database_url().await;
@@ -785,7 +782,7 @@ async fn a_lock_lost_and_regained_within_the_bound_causes_no_recovery() {
 /// task held, the worker fails closed and its process ends with
 /// [`LIVENESS_LOCK_LOST_EXIT_CODE`].
 #[tokio::test]
-#[serial]
+#[serial(timing)]
 async fn a_lock_lost_past_the_bound_makes_the_worker_fail_closed() {
     let pool = migrated_pool().await;
     let url = migrated_database_url().await;
@@ -830,7 +827,6 @@ async fn a_lock_lost_past_the_bound_makes_the_worker_fail_closed() {
 /// The stop of a running liveness lock closes its connection: the server
 /// releases the lock.
 #[tokio::test]
-#[serial]
 async fn a_stopped_liveness_lock_is_released() {
     let pool = migrated_pool().await;
     let url = migrated_database_url().await;
@@ -862,7 +858,6 @@ async fn a_stopped_liveness_lock_is_released() {
 /// returns the new generation, so no owner is gone, and the worker runs on
 /// with its rows.
 #[tokio::test]
-#[serial]
 async fn two_losses_with_a_regain_between_two_reads_mark_no_owner_gone() {
     let pool = migrated_pool().await;
     let url = migrated_database_url().await;
@@ -938,7 +933,6 @@ async fn two_losses_with_a_regain_between_two_reads_mark_no_owner_gone() {
 /// each recovered row is told once: the RUNNING row as `RunningFailed`, the
 /// CLAIMED row as `ClaimRequeued`.
 #[tokio::test]
-#[serial]
 async fn a_single_loss_past_the_bound_marks_the_owner_gone() {
     let mut watched = WatchedTelemetry::new();
     let pool = migrated_pool().await;
@@ -1006,7 +1000,7 @@ async fn a_single_loss_past_the_bound_marks_the_owner_gone() {
 /// count the lock while the write waits, and fails closed past its bound
 /// while the new session holds the lock.
 #[tokio::test]
-#[serial]
+#[serial(timing)]
 async fn a_regain_whose_generation_write_did_not_commit_counts_as_no_regain() {
     let pool = migrated_pool().await;
     let url = migrated_database_url().await;
@@ -1039,7 +1033,6 @@ async fn a_regain_whose_generation_write_did_not_commit_counts_as_no_regain() {
 /// with no recorded generation. The next session finds the lock held, the
 /// worker does not count it, and it fails closed past its bound.
 #[tokio::test]
-#[serial]
 async fn a_lock_held_by_a_session_whose_write_did_not_end_confirms_nothing() {
     let pool = migrated_pool().await;
     let url = migrated_database_url().await;

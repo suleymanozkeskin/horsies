@@ -408,7 +408,6 @@ async fn seeded_generation(pool: &TestPool, id: &str) -> DateTime<Utc> {
 /// The writer of COMPLETE_LOCKED is phase 1 of a workflow task's success
 /// (`horsies_finish_workflow_success`).
 #[tokio::test]
-#[serial]
 async fn complete_locked_moves_to_history_and_preserves_last_claim_evidence() {
     let pool = migrated_pool().await;
     let id = Uuid::new_v4().to_string();
@@ -454,7 +453,6 @@ async fn complete_locked_moves_to_history_and_preserves_last_claim_evidence() {
 }
 
 #[tokio::test]
-#[serial]
 async fn complete_replay_within_class_is_already_applied() {
     let pool = migrated_pool().await;
     let id = Uuid::new_v4().to_string();
@@ -490,7 +488,6 @@ async fn complete_replay_within_class_is_already_applied() {
 }
 
 #[tokio::test]
-#[serial]
 async fn complete_locked_wrong_worker_is_lost_claim_and_absent_is_absent() {
     let pool = migrated_pool().await;
     let id = Uuid::new_v4().to_string();
@@ -535,7 +532,6 @@ async fn complete_locked_wrong_worker_is_lost_claim_and_absent_is_absent() {
 }
 
 #[tokio::test]
-#[serial]
 async fn fused_applies_with_attempt_notify_and_generation_fence() {
     let pool = migrated_pool().await;
     let id = Uuid::new_v4().to_string();
@@ -637,7 +633,6 @@ async fn fused_applies_with_attempt_notify_and_generation_fence() {
 }
 
 #[tokio::test]
-#[serial]
 async fn move_terminalizes_the_key_reservation_at_the_history_anchor() {
     let pool = migrated_pool().await;
     let task_uuid = Uuid::new_v4();
@@ -698,7 +693,6 @@ async fn move_terminalizes_the_key_reservation_at_the_history_anchor() {
 }
 
 #[tokio::test]
-#[serial]
 async fn fused_stale_generation_is_lost_claim() {
     let pool = migrated_pool().await;
     let id = Uuid::new_v4().to_string();
@@ -740,7 +734,6 @@ async fn fused_stale_generation_is_lost_claim() {
 }
 
 #[tokio::test]
-#[serial]
 async fn fused_on_matching_claim_outside_source_state_is_conflict() {
     let pool = migrated_pool().await;
     let id = Uuid::new_v4().to_string();
@@ -783,7 +776,6 @@ async fn fused_on_matching_claim_outside_source_state_is_conflict() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[serial]
 async fn fail_locked_assigns_failed_reason_unconditionally() {
     let pool = migrated_pool().await;
     let id = Uuid::new_v4().to_string();
@@ -818,7 +810,6 @@ async fn fail_locked_assigns_failed_reason_unconditionally() {
 }
 
 #[tokio::test]
-#[serial]
 async fn cross_class_replay_names_the_foreign_kind() {
     let pool = migrated_pool().await;
     let id = Uuid::new_v4().to_string();
@@ -866,7 +857,6 @@ async fn cross_class_replay_names_the_foreign_kind() {
 }
 
 #[tokio::test]
-#[serial]
 async fn fail_stale_applies_on_silence_and_refuses_on_heartbeat() {
     let pool = migrated_pool().await;
     let silent = Uuid::new_v4().to_string();
@@ -948,7 +938,6 @@ async fn fail_stale_applies_on_silence_and_refuses_on_heartbeat() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[serial]
 async fn expire_owned_claim_applies_for_any_generation_and_reports_deadline() {
     let pool = migrated_pool().await;
     let expired = Uuid::new_v4().to_string();
@@ -1054,7 +1043,6 @@ async fn drain_pending_expiry(pool: &TestPool) {
 }
 
 #[tokio::test]
-#[serial]
 async fn expire_pending_batch_is_bounded_and_deadline_ordered() {
     let pool = migrated_pool().await;
     assert_pending_expiry_order(&pool).await;
@@ -1139,7 +1127,6 @@ async fn assert_pending_expiry_order(pool: &TestPool) {
 }
 
 #[tokio::test]
-#[serial]
 async fn discovery_bounds_raise_in_function_too() {
     let pool = migrated_pool().await;
     for sql in [
@@ -1158,7 +1145,6 @@ async fn discovery_bounds_raise_in_function_too() {
 }
 
 #[tokio::test]
-#[serial]
 async fn phase2_expectation_table_matches_every_installed_wire_projection() {
     let pool = migrated_pool().await;
     let mut vocabulary: Vec<&str> = TerminalizationKind::ALL
@@ -1259,7 +1245,6 @@ fn projection_arm<'a>(definition: &'a str, kind: &str) -> Option<&'a str> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[serial]
 async fn cancel_task_applies_and_refuses_a_running_task_without_the_opt_in() {
     let pool = migrated_pool().await;
     let pending = Uuid::new_v4().to_string();
@@ -1314,7 +1299,6 @@ async fn cancel_task_applies_and_refuses_a_running_task_without_the_opt_in() {
 }
 
 #[tokio::test]
-#[serial]
 async fn cancel_task_refuses_workflow_tasks_and_never_overwrites_terminal() {
     let pool = migrated_pool().await;
     let wf_task = Uuid::new_v4().to_string();
@@ -1380,7 +1364,6 @@ async fn cancel_task_refuses_workflow_tasks_and_never_overwrites_terminal() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[serial]
 async fn cancel_owned_orphan_applies_only_without_runnable_linkage() {
     let pool = migrated_pool().await;
     let wf_id = Uuid::new_v4().to_string();
@@ -1484,7 +1467,6 @@ async fn drain_orphan_sweep(pool: &TestPool) {
 }
 
 #[tokio::test]
-#[serial]
 async fn orphan_sweep_cancels_unlinked_and_retains_linked() {
     let pool = migrated_pool().await;
     drain_orphan_sweep(&pool).await;
@@ -1543,7 +1525,6 @@ async fn orphan_sweep_cancels_unlinked_and_retains_linked() {
 }
 
 #[tokio::test]
-#[serial]
 async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
     let database = IsolatedTerminalizationTestDatabase::create().await;
     let pool = database.pool.clone();
@@ -1922,7 +1903,6 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
 }
 
 #[tokio::test]
-#[serial]
 async fn orphan_sweep_rollback_keeps_the_candidate_for_the_next_audit() {
     let pool = migrated_pool().await;
     let task_id = "00000000-0000-7000-8000-000000000001";
@@ -1978,7 +1958,7 @@ async fn orphan_sweep_rollback_keeps_the_candidate_for_the_next_audit() {
 }
 
 #[tokio::test]
-#[serial]
+#[serial(timing)]
 async fn orphan_sweep_cursor_lock_refuses_a_concurrent_audit() {
     let pool = migrated_pool().await;
     let mut holder = pool.begin().await.unwrap();
@@ -2007,7 +1987,6 @@ async fn orphan_sweep_cursor_lock_refuses_a_concurrent_audit() {
 }
 
 #[tokio::test]
-#[serial]
 async fn orphan_cycle_watermark_revisits_old_rows_while_new_rows_arrive() {
     let pool = migrated_pool().await;
     let workflow_id = Uuid::new_v4().to_string();
@@ -2100,7 +2079,6 @@ async fn orphan_cycle_watermark_revisits_old_rows_while_new_rows_arrive() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[serial]
 async fn abandon_owned_node_applies_and_fences_generation() {
     let pool = migrated_pool().await;
     let id = Uuid::new_v4().to_string();
@@ -2160,7 +2138,6 @@ async fn abandon_owned_node_applies_and_fences_generation() {
 }
 
 #[tokio::test]
-#[serial]
 async fn abandon_owned_nodes_reports_per_ordinal_in_caller_order() {
     let pool = migrated_pool().await;
     let mine = Uuid::new_v4().to_string();
@@ -2263,7 +2240,6 @@ async fn abandon_owned_nodes_reports_per_ordinal_in_caller_order() {
 }
 
 #[tokio::test]
-#[serial]
 async fn batch_input_contracts_raise_22023_in_function() {
     let pool = migrated_pool().await;
     for (sql, label) in [
@@ -2293,7 +2269,6 @@ async fn batch_input_contracts_raise_22023_in_function() {
 }
 
 #[tokio::test]
-#[serial]
 async fn abandon_nodes_of_paused_workflows_reaches_only_paused_enqueued() {
     let pool = migrated_pool().await;
     let paused_wf = Uuid::new_v4().to_string();
@@ -2363,7 +2338,6 @@ async fn abandon_nodes_of_paused_workflows_reaches_only_paused_enqueued() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[serial]
 async fn cancel_owned_node_honors_requeued_pending_carveout() {
     let pool = migrated_pool().await;
     let requeued = Uuid::new_v4().to_string();
@@ -2420,7 +2394,6 @@ async fn cancel_owned_node_honors_requeued_pending_carveout() {
 }
 
 #[tokio::test]
-#[serial]
 async fn cancel_owned_nodes_batch_applies_owned_claims() {
     let pool = migrated_pool().await;
     let a = Uuid::new_v4().to_string();
@@ -2478,7 +2451,6 @@ async fn cancel_owned_nodes_batch_applies_owned_claims() {
 }
 
 #[tokio::test]
-#[serial]
 async fn cancel_nodes_of_cancelled_workflow_reaches_briefly_running_enqueued() {
     let pool = migrated_pool().await;
     let wf_id = Uuid::new_v4().to_string();
@@ -2540,7 +2512,6 @@ async fn cancel_nodes_of_cancelled_workflow_reaches_briefly_running_enqueued() {
 }
 
 #[tokio::test]
-#[serial]
 async fn deferred_projection_table_mints_phase2_for_all_five_deferred_wire_kinds() {
     let pool = migrated_pool().await;
     drain_pending_expiry(&pool).await;
@@ -2705,7 +2676,6 @@ async fn deferred_projection_table_mints_phase2_for_all_five_deferred_wire_kinds
     cleanup_workflow(&pool, &workflow_id).await;
 }
 #[tokio::test]
-#[serial]
 async fn batch_terminalization_encodes_each_attempt_snapshot_once() {
     let database = IsolatedTerminalizationTestDatabase::create().await;
     let pool = &database.pool;
@@ -2890,7 +2860,6 @@ async fn assert_batch_snapshot_encoding(pool: &TestPool) {
 /// stores the payload it was given and its sha256 digest, and the deferred
 /// record of a workflow task carries the same digest.
 #[tokio::test]
-#[serial]
 async fn terminal_result_digest_preserves_null_prior_and_deferred_payloads() {
     let pool = migrated_pool().await;
     assert_terminal_result_digests(&pool).await;

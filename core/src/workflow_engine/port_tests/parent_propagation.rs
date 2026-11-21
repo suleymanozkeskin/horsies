@@ -6,7 +6,6 @@
 //! transaction per level (`horsies_workflow_child_finish`, from phase 2 and
 //! from recovery case 1.6).
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -69,7 +68,6 @@ fn completed_twice() -> (String, String) {
 /// already COMPLETED; its completion call alone advances the parent node
 /// with the child's output and completes the parent.
 #[tokio::test]
-#[serial]
 async fn a_completed_child_advances_and_completes_its_parent() {
     let pool = shared_pool().await;
     let (parent, child) = seed_parent_of_a_completed_child(&pool).await;
@@ -94,7 +92,6 @@ async fn a_completed_child_advances_and_completes_its_parent() {
 /// then advances the grandparent node and completes the grandparent, each
 /// level in its own transaction.
 #[tokio::test]
-#[serial]
 async fn a_completed_child_advances_every_ancestor_level() {
     let pool = shared_pool().await;
     let grandparent = seed_workflow(&pool, &WorkflowSeed::running()).await;
@@ -138,7 +135,6 @@ async fn a_completed_child_advances_every_ancestor_level() {
 /// first parent is refused; that candidate fails alone, and the pass
 /// advances and completes the second parent.
 #[tokio::test]
-#[serial]
 async fn recovery_contains_a_failing_parent_advance_and_completes_the_next_parent() {
     let db = IsolatedDatabase::create().await;
     let (poison_parent, _poison_child) = seed_parent_of_a_completed_child(&db.pool).await;
@@ -189,7 +185,6 @@ async fn recovery_contains_a_failing_parent_advance_and_completes_the_next_paren
 /// connection failure). Phase 2 is retryable, and its retry ends the child,
 /// advances the parent node and completes the parent.
 #[tokio::test]
-#[serial]
 async fn a_transient_failure_of_the_parent_advance_is_retried_and_completes_the_parent() {
     let db = IsolatedDatabase::create().await;
     let parent = seed_workflow(&db.pool, &WorkflowSeed::running()).await;

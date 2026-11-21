@@ -758,7 +758,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
     async fn worker_snapshots_persist_workflow_recovery_health() {
         use crate::worker::recovery::new_reaper_health;
         use serde_json::json;
@@ -1197,7 +1196,6 @@ mod tests {
     /// statement named neither column and bound NULL for the empty maps, so every
     /// insert failed and no row landed.
     #[tokio::test]
-    #[serial_test::serial]
     async fn a_snapshot_with_empty_queue_maps_lands_with_every_baseline_column() {
         use crate::worker::recovery::new_reaper_health;
         use std::time::Duration;
@@ -1381,7 +1379,6 @@ mod tests {
     /// in flight of its count up to the seats, and the RSS behind
     /// `memory_usage_mb`. An expired lease holds no seat.
     #[tokio::test]
-    #[serial_test::serial]
     async fn a_snapshot_sets_the_worker_gauges_from_the_values_it_writes() {
         use crate::telemetry::catalog::MetricId;
         use crate::worker::executor::slots::SlotPhase;
@@ -1478,7 +1475,6 @@ mod tests {
     /// `children_rss` member of `telemetry`, not counted. A result frame
     /// replaces the ready frame's reading; a slot that boots has none.
     #[tokio::test]
-    #[serial_test::serial]
     async fn a_snapshot_writes_the_children_rss_from_the_last_reading_of_each_child() {
         use crate::telemetry::catalog::MetricId;
         use crate::worker::executor::protocol::{ProcessId, RssMb, RssReading};
@@ -1559,7 +1555,6 @@ mod tests {
     /// A count of the held rows that fails leaves the seats in use with no
     /// series, and the read before the count still sets the seats.
     #[tokio::test]
-    #[serial_test::serial]
     async fn a_failed_count_leaves_the_seats_in_use_with_no_series() {
         use crate::telemetry::catalog::MetricId;
 
@@ -1636,7 +1631,6 @@ mod tests {
     /// A failed count of claimed rows writes no snapshot. The old
     /// loop wrote the snapshot with `tasks_claimed = 0`.
     #[tokio::test]
-    #[serial_test::serial]
     async fn a_failed_claimed_count_writes_no_snapshot() {
         let migrated = crate::test_support::migrated_pool().await;
         // On the one connection of this pool a temporary `horsies_tasks`
@@ -1717,7 +1711,6 @@ mod tests {
     /// (Python `_worker_state_heartbeat_loop`), so the fleet check sees a
     /// starting worker at once.
     #[tokio::test]
-    #[serial_test::serial]
     async fn first_snapshot_is_written_at_start() {
         use crate::worker::recovery::new_reaper_health;
         use std::time::Duration;

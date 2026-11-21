@@ -9,7 +9,6 @@
 //! none. Every node here runs through the worker's finalize: phase 1, then
 //! phase 2 in the form that phase 1 named.
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -86,7 +85,6 @@ async fn finalize_success(
 /// `test_a_node_that_another_node_waits_for_has_dependents`: the head of the
 /// DAG and a node that a fan-in waits for.
 #[tokio::test]
-#[serial]
 async fn a_node_that_another_node_waits_for_has_dependents() {
     let db = IsolatedDatabase::create().await;
     let broker = broker(&db.pool);
@@ -104,7 +102,6 @@ async fn a_node_that_another_node_waits_for_has_dependents() {
 /// only the nodes of the same workflow count. In the chain of four a node
 /// lists index 2; node 2 of the fan-in is still a leaf.
 #[tokio::test]
-#[serial]
 async fn a_leaf_has_no_dependents_when_another_workflow_waits_for_its_index() {
     let db = IsolatedDatabase::create().await;
     let broker = broker(&db.pool);
@@ -128,7 +125,6 @@ async fn a_leaf_has_no_dependents_when_another_workflow_waits_for_its_index() {
 /// is one of the DAG, not of the state of the dependents. Node 2 is SKIPPED
 /// before node 0 finishes; node 0 still has dependents.
 #[tokio::test]
-#[serial]
 async fn a_node_whose_dependent_is_terminal_still_has_dependents() {
     let db = IsolatedDatabase::create().await;
     let broker = broker(&db.pool);
@@ -154,7 +150,6 @@ async fn a_node_whose_dependent_is_terminal_still_has_dependents() {
 /// round trip, counted after the same finalize of another workflow prepared
 /// the statements.
 #[tokio::test]
-#[serial]
 async fn phase_two_of_a_leaf_reads_no_dependents() {
     let db = IsolatedDatabase::create().await;
     let workflows = [

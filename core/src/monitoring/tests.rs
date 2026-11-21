@@ -3,7 +3,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{Duration, TimeZone, Utc};
 use serde::Serialize;
 use serde_json::json;
-use serial_test::serial;
 use uuid::Uuid;
 
 use crate::broker::terminalization::on_test_pool::terminalize;
@@ -922,7 +921,6 @@ fn test_window() -> crate::core::history::reads::pages::HistoryWindow {
 }
 
 #[tokio::test]
-#[serial]
 async fn live_and_history_aggregates_merge_before_caps() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("aggregate");
@@ -1125,7 +1123,6 @@ async fn live_and_history_aggregates_merge_before_caps() {
 }
 
 #[tokio::test]
-#[serial]
 async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("list");
@@ -1277,7 +1274,6 @@ async fn stats_by_status(broker: &PostgresBroker, filters: TaskFilters) -> BTree
 /// an error code or category filter selects history rows only. A history
 /// row's spans are closed; a live row's run span counts up.
 #[tokio::test]
-#[serial]
 async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("filters");
@@ -1485,7 +1481,6 @@ async fn seed_node(
 }
 
 #[tokio::test]
-#[serial]
 async fn task_detail_uses_live_attempts_then_digest_verified_history() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("detail");
@@ -1590,7 +1585,6 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
 }
 
 #[tokio::test]
-#[serial]
 async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("workflow");
@@ -1766,7 +1760,6 @@ async fn database_failure_is_typed_and_retryable() {
 /// named database error, not an absence; once the readers are published
 /// again, the read finds the task (owner decision of 2026-11-16 on #838).
 #[tokio::test]
-#[serial]
 async fn a_dropped_staged_reader_fails_the_detail_until_it_is_published_again() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("unpub");

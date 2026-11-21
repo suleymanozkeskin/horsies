@@ -10,7 +10,6 @@
 use std::collections::BTreeMap;
 use std::sync::PoisonError;
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::spec_support::{
@@ -81,7 +80,6 @@ async fn seed_schedule(
 
 /// Python `TestWorkflowNames::test_returns_sorted_distinct_root_names`.
 #[tokio::test]
-#[serial]
 async fn workflow_names_are_the_sorted_distinct_names_of_root_runs() {
     let database = SpecDatabase::create().await;
     let root = RunSeed::running("zeta_flow");
@@ -100,7 +98,6 @@ async fn workflow_names_are_the_sorted_distinct_names_of_root_runs() {
 
 /// Python `TestWorkflowNames::test_empty_database_yields_empty_list`.
 #[tokio::test]
-#[serial]
 async fn no_run_gives_no_workflow_name() {
     let database = SpecDatabase::create().await;
 
@@ -114,7 +111,6 @@ async fn no_run_gives_no_workflow_name() {
 
 /// Python `TestListWorkflowRuns::test_newest_first_and_children_excluded`.
 #[tokio::test]
-#[serial]
 async fn runs_come_newest_first_without_child_runs() {
     let database = SpecDatabase::create().await;
     let mut root = RunSeed::running("alpha_flow");
@@ -138,7 +134,6 @@ async fn runs_come_newest_first_without_child_runs() {
 
 /// Python `TestListWorkflowRuns::test_limit_truncates_the_result`.
 #[tokio::test]
-#[serial]
 async fn the_run_limit_truncates_the_list() {
     let database = SpecDatabase::create().await;
     for index in 0..4 {
@@ -164,7 +159,6 @@ async fn the_run_limit_truncates_the_list() {
 /// an open run's wall time counts up; a finished run's wall time is closed
 /// at its completion.
 #[tokio::test]
-#[serial]
 async fn wall_time_counts_up_until_the_run_completes() {
     let database = SpecDatabase::create().await;
     let mut open = RunSeed::running("open_flow");
@@ -196,7 +190,6 @@ async fn wall_time_counts_up_until_the_run_completes() {
 
 /// Python `TestGetWorkflowRun::test_failed_nodes_are_indexed_in_ascending_order`.
 #[tokio::test]
-#[serial]
 async fn failed_node_indices_come_in_ascending_order() {
     let database = SpecDatabase::create().await;
     let mut run = RunSeed::running("alpha_flow");
@@ -222,7 +215,6 @@ async fn failed_node_indices_come_in_ascending_order() {
 /// and the node detail the trace id of its backing task; a run started with
 /// no trace carries none.
 #[tokio::test]
-#[serial]
 async fn the_run_and_its_node_carry_the_trace_id_of_their_start() {
     let database = SpecDatabase::create().await;
     let traced = RunSeed::running("alpha_flow");
@@ -279,7 +271,6 @@ async fn the_run_and_its_node_carry_the_trace_id_of_their_start() {
 /// a sub-workflow node counts the nodes of its child run; a child run with
 /// no node, and a task node, carry no counts.
 #[tokio::test]
-#[serial]
 async fn a_sub_workflow_node_counts_its_child_and_an_empty_child_gives_no_counts() {
     let database = SpecDatabase::create().await;
     let run = RunSeed::running("alpha_flow");
@@ -336,7 +327,6 @@ async fn a_sub_workflow_node_counts_its_child_and_an_empty_child_gives_no_counts
 
 /// Python `TestGetWorkflowRun::test_child_run_is_reachable_by_the_same_query`.
 #[tokio::test]
-#[serial]
 async fn a_child_run_is_read_by_the_run_detail() {
     let database = SpecDatabase::create().await;
     let run = RunSeed::running("alpha_flow");
@@ -359,7 +349,6 @@ async fn a_child_run_is_read_by_the_run_detail() {
 /// RUNNING node counts up, a COMPLETED node is closed, a SKIPPED node with
 /// no completion and an ENQUEUED node have none.
 #[tokio::test]
-#[serial]
 async fn node_execution_time_follows_the_node_status() {
     let database = SpecDatabase::create().await;
     let run = RunSeed::running("alpha_flow");
@@ -395,7 +384,6 @@ async fn node_execution_time_follows_the_node_status() {
 /// node detail carries the node id, the node error, the backing task and its
 /// attempts in ascending order.
 #[tokio::test]
-#[serial]
 async fn a_node_reports_its_id_error_backing_task_and_attempts() {
     let database = SpecDatabase::create().await;
     let run = RunSeed::running("alpha_flow");
@@ -447,7 +435,6 @@ async fn a_node_reports_its_id_error_backing_task_and_attempts() {
 
 /// Python `TestGetWorkflowNode::test_backing_history_row_with_an_unknown_status_is_a_contract_violation`.
 #[tokio::test]
-#[serial]
 async fn an_unknown_status_of_the_backing_history_row_is_a_contract_violation() {
     let database = SpecDatabase::create().await;
     let run = RunSeed::running("alpha_flow");
@@ -482,7 +469,6 @@ async fn an_unknown_status_of_the_backing_history_row_is_a_contract_violation() 
 /// retention can remove the task while the node row stays; the node still
 /// resolves, with no leaf and no attempts.
 #[tokio::test]
-#[serial]
 async fn a_node_whose_task_is_gone_still_resolves_without_a_leaf() {
     let database = SpecDatabase::create().await;
     let run = RunSeed::running("alpha_flow");
@@ -507,7 +493,6 @@ async fn a_node_whose_task_is_gone_still_resolves_without_a_leaf() {
 /// Python `TestGetWorkflowNode::test_empty_node_error_is_normalized_to_none`:
 /// a stored error with an empty message shows no node error.
 #[tokio::test]
-#[serial]
 async fn an_empty_node_error_reads_as_absent() {
     let database = SpecDatabase::create().await;
     let run = RunSeed::running("alpha_flow");
@@ -528,7 +513,6 @@ async fn an_empty_node_error_reads_as_absent() {
 
 /// Python `TestListSchedules::test_empty_state_yields_empty_list`.
 #[tokio::test]
-#[serial]
 async fn no_schedule_state_gives_an_empty_schedule_list() {
     let database = SpecDatabase::create().await;
 
@@ -545,7 +529,6 @@ async fn no_schedule_state_gives_an_empty_schedule_list() {
 /// the id of its last task, read from the `uuid` column; the one that never
 /// ran carries none.
 #[tokio::test]
-#[serial]
 async fn schedules_come_in_next_run_order_with_their_run_count() {
     let database = SpecDatabase::create().await;
     let last_task_id = Uuid::new_v4();
@@ -642,7 +625,6 @@ async fn seed_plan_population(pool: &TestPool) {
 /// `auto_explain` with `log_nested_statements`, as notices, in a
 /// transaction that is rolled back.
 #[tokio::test]
-#[serial]
 async fn the_task_list_page_reads_the_live_enqueue_index_in_both_directions() {
     let database = SpecDatabase::create().await;
     seed_plan_population(&database.pool).await;
@@ -757,7 +739,6 @@ async fn seed_history_population(pool: &TestPool) {
 /// pruned: the plan does not name it. The current `standard_30d` leaf and
 /// the forever leaf are in the window; the leaf of ten days back is not.
 #[tokio::test]
-#[serial]
 async fn the_task_list_page_reads_the_history_leaves_on_the_enqueue_index_and_prunes_the_rest() {
     let database = SpecDatabase::create().await;
     let current_leaf = standard_leaf(&database.pool, 0).await;
@@ -835,7 +816,6 @@ const LAST_DAY_STATS: &str = "SELECT * FROM horsies_monitoring_task_stats(
 /// `standard_30d` leaf and the forever leaf are in the window and read; the
 /// leaf of ten days back is not.
 #[tokio::test]
-#[serial]
 async fn the_task_stats_read_prunes_the_history_leaves_outside_the_window() {
     let database = SpecDatabase::create().await;
     let current_leaf = standard_leaf(&database.pool, 0).await;

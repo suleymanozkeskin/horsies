@@ -611,7 +611,6 @@ impl<F: Future> Future for CatchPanic<F> {
 mod tests {
     use super::*;
     use crate::test_support::sql::{self, TestPool, TestPoolOptions};
-    use serial_test::serial;
 
     /// A broker on the database of `pool`: the failure writes run on its core pools.
     fn broker_of(pool: &TestPool) -> PostgresBroker {
@@ -965,7 +964,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn a_workflow_counts_once_per_pass() {
         let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
@@ -1019,7 +1017,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn the_limit_fails_a_workflow_with_no_live_node() {
         let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
@@ -1084,7 +1081,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn the_limit_keeps_a_stored_first_error_and_leaves_a_live_node_to_finish() {
         let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
@@ -1130,7 +1126,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn a_workflow_that_is_not_running_refuses_the_limit_and_keeps_the_count() {
         let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
@@ -1161,7 +1156,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn a_panicking_candidate_counts_toward_the_bound() {
         let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
@@ -1191,7 +1185,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn the_over_limit_count_takes_running_workflows_only() {
         let pool = crate::test_support::migrated_pool().await;
         let before = count_over_failure_limit(&broker_of(&pool), 1_000)

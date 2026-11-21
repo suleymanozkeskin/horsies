@@ -4,7 +4,6 @@
 //! status from the record's kind. A replay of a committed workflow write
 //! owes the phase 2 of its committed outcome; a plain task owes nothing.
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::{replay_of_committed_write, FinalizeError, FinalizeOutcome, PhaseTwoForm};
@@ -103,7 +102,6 @@ fn describe(outcome: &Result<FinalizeOutcome, FinalizeError>) -> String {
 
 /// A replay of a committed workflow success owes phase 2.
 #[tokio::test]
-#[serial]
 async fn a_complete_locked_record_owes_phase_two() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -127,7 +125,6 @@ async fn a_complete_locked_record_owes_phase_two() {
 
 /// A replay of a committed failure or expiry owes phase 2.
 #[tokio::test]
-#[serial]
 async fn failure_and_expiry_records_owe_phase_two() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -158,7 +155,6 @@ async fn failure_and_expiry_records_owe_phase_two() {
 
 /// With no phase-2 record, phase 2 consumed it: the replay owes nothing.
 #[tokio::test]
-#[serial]
 async fn a_consumed_record_owes_nothing() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -174,7 +170,6 @@ async fn a_consumed_record_owes_nothing() {
 
 /// A plain task owes no phase 2, whatever the record table holds.
 #[tokio::test]
-#[serial]
 async fn a_plain_task_replay_owes_nothing() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);

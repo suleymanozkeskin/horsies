@@ -5,7 +5,6 @@
 //! guards `good_until`, so user code never starts after the deadline).
 
 use chrono::{DateTime, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use crate::broker::claims::{start_attempt, StartAttempt, StartMiss, StartOutcome};
@@ -55,7 +54,6 @@ async fn seed_claim_past_its_deadline(pool: &TestPool, task_id: Uuid) -> DateTim
 /// and names the deadline: the row stays CLAIMED, and no runner heartbeat is
 /// written.
 #[tokio::test]
-#[serial]
 async fn a_claim_past_its_deadline_does_not_start() {
     let pool = migrated_pool().await;
     let task_id = Uuid::new_v4();

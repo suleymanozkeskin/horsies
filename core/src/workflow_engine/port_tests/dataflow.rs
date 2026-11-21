@@ -8,7 +8,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -73,7 +72,6 @@ fn recovering_pair(name: &str) -> WorkflowSpec {
 /// `test_workflow_args_from.py::TestArgsFromInjection.test_args_from_err_result`
 /// and `.test_failed_dep_passes_original_error_not_skipped_sentinel`
 #[tokio::test]
-#[serial]
 async fn a_failed_dependency_passes_its_own_error_to_an_allow_failed_deps_node() {
     let pool = shared_pool().await;
     let workflow_id = run(&pool, &recovering_pair("err_result_test")).await;
@@ -94,7 +92,6 @@ async fn a_failed_dependency_passes_its_own_error_to_an_allow_failed_deps_node()
 
 /// `TestArgsFromInjection.test_args_from_same_dep_multiple_kwargs`
 #[tokio::test]
-#[serial]
 async fn one_dependency_mapped_to_two_keys_fills_both() {
     let pool = shared_pool().await;
     let mut receiver = after(1, "dual_receiver", &[0]);
@@ -118,7 +115,6 @@ async fn one_dependency_mapped_to_two_keys_fills_both() {
 
 /// `TestArgsFromInjection.test_skipped_dep_injects_upstream_skipped_sentinel`
 #[tokio::test]
-#[serial]
 async fn a_skipped_dependency_is_injected_as_upstream_skipped_with_its_index() {
     let pool = shared_pool().await;
     let mut receiver = after(2, "skipped_sentinel_c", &[1]);
@@ -152,7 +148,6 @@ async fn a_skipped_dependency_is_injected_as_upstream_skipped_with_its_index() {
 
 /// `TestArgsFromInjection.test_partial_args_from_only_mapped_deps_injected`
 #[tokio::test]
-#[serial]
 async fn only_mapped_dependencies_are_injected() {
     let pool = shared_pool().await;
     let mut receiver = after(2, "partial_map_c", &[0, 1]);
@@ -188,7 +183,6 @@ async fn only_mapped_dependencies_are_injected() {
 /// the context names the workflow, the node and its task, and holds the
 /// dependency's result.
 #[tokio::test]
-#[serial]
 async fn the_context_names_the_node_and_holds_its_dependency_result() {
     let pool = shared_pool().await;
     let mut reader = after(1, "ctx_inject_b", &[0]);
@@ -221,7 +215,6 @@ async fn the_context_names_the_node_and_holds_its_dependency_result() {
 /// `TestWorkflowCtx.test_ctx_not_injected_without_ctx_from` and
 /// `.test_ctx_empty_ctx_from_no_injection`
 #[tokio::test]
-#[serial]
 async fn no_context_is_injected_without_a_context_dependency() {
     let pool = shared_pool().await;
     for ctx_from in [None, Some(Vec::new())] {
@@ -248,7 +241,6 @@ async fn no_context_is_injected_without_a_context_dependency() {
 
 /// `TestWorkflowCtx.test_workflow_meta_injected_without_ctx_from`
 #[tokio::test]
-#[serial]
 async fn the_workflow_meta_is_injected_without_a_context_dependency() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -273,7 +265,6 @@ async fn the_workflow_meta_is_injected_without_a_context_dependency() {
 
 /// `TestWorkflowCtx.test_ctx_skipped_dep_returns_upstream_skipped`
 #[tokio::test]
-#[serial]
 async fn a_skipped_context_dependency_reads_as_upstream_skipped_with_its_index() {
     let pool = shared_pool().await;
     let mut reader = after(2, "ctx_skipped_c", &[1]);
@@ -306,7 +297,6 @@ async fn a_skipped_context_dependency_reads_as_upstream_skipped_with_its_index()
 
 /// `TestWorkflowCtx.test_ctx_failed_dep_returns_original_error`
 #[tokio::test]
-#[serial]
 async fn a_failed_context_dependency_reads_as_its_original_error() {
     let pool = shared_pool().await;
     let mut reader = after(1, "ctx_failed_c", &[0]);
@@ -375,7 +365,6 @@ fn stored_input(text: &str) -> serde_json::Value {
 /// a root sub-workflow node, a child task node and a child sub-workflow node
 /// store their container input, and the child task gets it.
 #[tokio::test]
-#[serial]
 async fn a_sub_workflow_node_and_its_children_store_their_container_input() {
     let pool = shared_pool().await;
     let child_key = "tests.port.container_child.v1";
@@ -424,7 +413,6 @@ fn policy_with_optional(required_index: usize, optional: Vec<usize>) -> SuccessP
 /// B runs after A fails, receives A's own error, and the case on B completes
 /// the workflow.
 #[tokio::test]
-#[serial]
 async fn a_node_after_a_failure_receives_the_original_error() {
     let pool = shared_pool().await;
     let mut workflow_spec = recovering_pair("e2e_failed_propagation");
@@ -451,7 +439,6 @@ async fn a_node_after_a_failure_receives_the_original_error() {
 
 /// `clients/python/tests/e2e/test_layer5_workflow_dataflow.py::test_skipped_propagation`
 #[tokio::test]
-#[serial]
 async fn a_node_after_a_skip_receives_upstream_skipped() {
     let pool = shared_pool().await;
     let mut checker = after(2, "check_upstream_skipped", &[1]);
@@ -489,7 +476,6 @@ async fn a_node_after_a_skip_receives_upstream_skipped() {
 /// `clients/python/tests/e2e/test_layer5_workflow_dataflow.py::test_mixed_args_from_and_ctx`:
 /// D gets B's result through `args_from` and C's through the context.
 #[tokio::test]
-#[serial]
 async fn one_node_gets_args_from_of_one_dependency_and_the_context_of_another() {
     let pool = shared_pool().await;
     let mut reader = after(3, "mixed_reader", &[1, 2]);
@@ -526,7 +512,6 @@ async fn one_node_gets_args_from_of_one_dependency_and_the_context_of_another() 
 
 /// `clients/python/tests/e2e/test_layer5_workflow_dataflow.py::test_dual_injection_same_node`
 #[tokio::test]
-#[serial]
 async fn one_dependency_read_through_args_from_and_the_context_gives_one_value() {
     let pool = shared_pool().await;
     let mut reader = after(1, "dual_reader", &[0]);
@@ -554,7 +539,6 @@ async fn one_dependency_read_through_args_from_and_the_context_gives_one_value()
 /// `clients/python/tests/e2e/test_layer4_workflow_structure.py::test_fanout_sequential_with_single_process`:
 /// a fan-out completes when its nodes finish one at a time.
 #[tokio::test]
-#[serial]
 async fn a_fan_out_completes_when_its_nodes_finish_one_at_a_time() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -583,7 +567,6 @@ async fn a_fan_out_completes_when_its_nodes_finish_one_at_a_time() {
 
 /// `clients/python/tests/e2e/test_layer4_workflow_structure.py::test_fanin_aggregator_pending_during_execution`
 #[tokio::test]
-#[serial]
 async fn a_fan_in_aggregator_stays_pending_while_some_roots_run() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -613,7 +596,6 @@ async fn a_fan_in_aggregator_stays_pending_while_some_roots_run() {
 /// `clients/python/tests/e2e/test_layer4_workflow_structure.py::test_complex_dag`: a node
 /// starts (is enqueued) only after each of its dependencies completed.
 #[tokio::test]
-#[serial]
 async fn a_seven_node_dag_starts_each_level_after_the_one_before() {
     let pool = shared_pool().await;
     let workflow_id = run(
@@ -666,7 +648,6 @@ async fn a_seven_node_dag_starts_each_level_after_the_one_before() {
 
 /// `clients/python/tests/e2e/test_layer4_workflow_structure.py::test_workflow_task_expires_before_claim`
 #[tokio::test]
-#[serial]
 async fn a_workflow_task_past_its_deadline_is_not_claimed() {
     let db = IsolatedDatabase::create().await;
     let mut expiring = after(0, "step", &[]);
@@ -702,7 +683,6 @@ async fn a_workflow_task_past_its_deadline_is_not_claimed() {
 
 /// `clients/python/tests/e2e/test_layer4_workflow_structure.py::test_workflow_task_completes_before_expiry`
 #[tokio::test]
-#[serial]
 async fn a_workflow_task_with_a_future_deadline_completes() {
     let pool = shared_pool().await;
     let mut valid = after(0, "step", &[]);
@@ -729,7 +709,6 @@ fn linear(name: &str) -> WorkflowSpec {
 
 /// `clients/python/tests/e2e/test_layer4_workflow_structure.py::test_workflow_cancellation`
 #[tokio::test]
-#[serial]
 async fn a_cancel_skips_waiting_nodes_and_get_gives_workflow_cancelled() {
     let pool = shared_pool().await;
     let workflow_id = run(&pool, &linear("slow_linear_cancel")).await;
@@ -755,7 +734,6 @@ async fn a_cancel_skips_waiting_nodes_and_get_gives_workflow_cancelled() {
 
 /// `clients/python/tests/e2e/test_layer4_workflow_structure.py::test_handle_get_timeout`
 #[tokio::test]
-#[serial]
 async fn get_of_a_workflow_that_does_not_finish_gives_wait_timeout() {
     let pool = shared_pool().await;
     let workflow_id = run(&pool, &linear("slow_linear_timeout")).await;

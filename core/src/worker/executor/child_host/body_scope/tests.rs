@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::Utc;
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::super::in_process::run_isolated_in_process_scoped;
@@ -537,7 +536,6 @@ fn a_thread_seat_body_runs_inside_the_span_on_the_seat_thread() {
 /// plain task) and its stored carrier, runs the body inside the span, and
 /// closes the scope with the end.
 #[tokio::test]
-#[serial]
 async fn an_isolated_run_opens_its_scope_with_its_facts_and_its_stored_carrier() {
     let pool = crate::test_support::migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;

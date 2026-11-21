@@ -269,7 +269,6 @@ mod tests {
     use crate::core::OnError;
     use crate::test_support::child_specs::TestChildSpecs;
     use crate::test_support::sql;
-    use serial_test::serial;
 
     /// Starts `spec` as the workflow `workflow_id` at `sent_at`, through the
     /// core's start of a client spec, with no sub-workflow child and the
@@ -441,7 +440,6 @@ mod tests {
     /// The start stores each node's `downstream_subworkflow` from the static graph, and
     /// `sub_workflow_params` on the sub-workflow node only.
     #[tokio::test]
-    #[serial]
     async fn the_start_stores_the_downstream_subworkflow_fact_of_each_node() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let spec = keyed_spec(
@@ -607,7 +605,6 @@ mod tests {
     /// A start through a handle of the other client family is refused before its first write:
     /// `ENQUEUE_FAILED`, not retryable, and no workflow row.
     #[tokio::test]
-    #[serial]
     async fn a_start_of_another_client_family_is_refused_and_writes_nothing() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let broker = Arc::new(PostgresBroker::from_test_url(
@@ -691,7 +688,6 @@ mod tests {
     /// guesses a limit (3 for a policy without an integer `max_retries`) lets the start write its rows, and
     /// passes 21 on to the baseline CHECK (`max_retries BETWEEN 0 AND 20`) as a database error.
     #[tokio::test]
-    #[serial]
     async fn a_node_whose_retry_policy_does_not_fit_is_refused_before_any_row() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let broker = Arc::new(PostgresBroker::from_test_url(
@@ -779,7 +775,6 @@ mod tests {
     /// deadline is merged in, and a stored `good_until` that is not an RFC 3339 text is not read as no
     /// deadline.
     #[tokio::test]
-    #[serial]
     async fn a_node_whose_options_or_deadline_do_not_read_is_refused_before_any_row() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let broker = Arc::new(PostgresBroker::from_test_url(
@@ -847,7 +842,6 @@ mod tests {
     /// A node whose retry policy fits stores its `max_retries` on the node row and on its task row, from
     /// the same reader as a task row (Python `stored_max_retries`).
     #[tokio::test]
-    #[serial]
     async fn a_node_whose_retry_policy_fits_stores_its_limit_on_both_rows() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let broker = Arc::new(PostgresBroker::from_test_url(
@@ -906,7 +900,6 @@ mod tests {
     /// context source and a root that names one. The start statement writes both node rows and their task
     /// rows, so the time equals `enqueued_at` of the node's task row.
     #[tokio::test]
-    #[serial]
     async fn an_enqueued_root_node_holds_its_enqueue_time() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let mut fast = node_with(false, Some(17));
@@ -973,7 +966,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn an_id_of_another_workflow_name_is_a_conflict_and_writes_nothing() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = Arc::new(PostgresBroker::from_test_url(
@@ -1031,7 +1023,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn p6_workflow_enqueue_start_paths_persist_mapped_class_and_never_eligible_facts() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let workflow_name = "p6_workflow_facts";
@@ -1098,7 +1089,6 @@ mod tests {
     /// A root task row stores the start call time of its workflow as `sent_at`, not the time the start
     /// wrote the row (the start mints every root task row through `horsies_workflow_node_tasks_insert`).
     #[tokio::test]
-    #[serial]
     async fn a_root_task_row_stores_the_start_call_time_of_its_workflow() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let task_name = "sent_at_root_task";

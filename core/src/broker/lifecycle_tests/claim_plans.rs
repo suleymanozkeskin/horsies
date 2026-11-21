@@ -8,8 +8,6 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use serial_test::serial;
-
 use crate::test_support::{connect_collecting_notices, TestDatabase};
 
 /// The rows of the in-flight count tests.
@@ -40,16 +38,22 @@ const RUNNING_ROWS: &str = "SELECT task_name FROM horsies_tasks WHERE status = '
 /// The polls of the wait for older transactions: at most 60 s.
 const OLDER_HOLDER_POLLS: u32 = 300;
 const OLDER_HOLDER_POLL_INTERVAL: Duration = Duration::from_millis(200);
-/// Each holder of an xid or a snapshot xmin at or before the xid `$1`, in
-/// any database of the server. `age` compares the two xids: the older one
-/// has the larger age.
+/// Each holder of an xid or a snapshot xmin at or before the xid `$1` that
+/// holds back the removal horizon of the tables of this database: the
+/// backends and the prepared transactions of this database, and every
+/// replication slot.
+/// From PostgreSQL 14, the removal horizon of a table that is not shared
+/// counts only the backends and prepared transactions of its own database;
+/// the xmin of a slot counts for every database. `age` compares the two
+/// xids: the older one has the larger age.
 const OLDER_HOLDERS: &str = "
     SELECT format(
         'backend pid %s (database %s, state %s, transaction start %s, query %L)',
         pid, datname, state, xact_start, left(query, 200)
     )
     FROM pg_stat_activity
-    WHERE pid <> pg_backend_pid()
+    WHERE datname = current_database()
+      AND pid <> pg_backend_pid()
       AND (
           age(backend_xid) >= age($1::text::xid)
           OR age(backend_xmin) >= age($1::text::xid)
@@ -57,7 +61,8 @@ const OLDER_HOLDERS: &str = "
     UNION ALL
     SELECT format('prepared transaction %L (database %s, prepared %s)', gid, database, prepared)
     FROM pg_prepared_xacts
-    WHERE age(transaction) >= age($1::text::xid)
+    WHERE database = current_database()
+      AND age(transaction) >= age($1::text::xid)
     UNION ALL
     SELECT format('replication slot %L (database %s)', slot_name, database)
     FROM pg_replication_slots
@@ -186,7 +191,7 @@ async fn bitmap_running_entries(client: &tokio_postgres::Client) -> f64 {
     panic!("no bitmap index scan in {plan}");
 }
 
-/// Wait until no transaction on the server is as old as `delete_xid`.
+/// Wait until no holder of `OLDER_HOLDERS` is as old as `delete_xid`.
 /// Fails the test with the holders when they remain: then no scan can mark
 /// the deleted entries.
 async fn wait_for_older_transactions(client: &tokio_postgres::Client, delete_xid: &str) {
@@ -216,7 +221,6 @@ async fn wait_for_older_transactions(client: &tokio_postgres::Client, delete_xid
 /// count inside the claim reads the status index (the function turns the
 /// sequential and the bitmap scan off).
 #[tokio::test]
-#[serial]
 async fn the_count_reads_the_status_index_when_most_rows_are_in_flight() {
     let database = TestDatabase::create().await;
     let (client, notices) = connect_collecting_notices(database.url()).await;
@@ -265,7 +269,6 @@ async fn the_count_reads_the_status_index_when_most_rows_are_in_flight() {
 /// index is dead. Once no transaction from before the delete runs, one
 /// claim (rolled back) marks all of them: a later bitmap scan returns none.
 #[tokio::test]
-#[serial]
 async fn a_claim_marks_the_dead_running_entries() {
     let database = TestDatabase::create().await;
     let (client, notices) = connect_collecting_notices(database.url()).await;
@@ -340,7 +343,6 @@ async fn seed_plan_population(client: &tokio_postgres::Client) {
 /// does not appear, and no stream scans the heap (sequential scans off, as
 /// a production-sized table plans).
 #[tokio::test]
-#[serial]
 async fn the_claim_streams_plan_on_the_class_indexes() {
     let database = TestDatabase::create().await;
     let (client, notices) = connect_collecting_notices(database.url()).await;
@@ -450,7 +452,6 @@ async fn in_flight_counts(
 /// PENDING row count nowhere), and per capped queue the rows in flight
 /// under the hard cap and the RUNNING rows under the soft cap.
 #[tokio::test]
-#[serial]
 async fn the_in_flight_counts_of_a_claim_pass() {
     const OTHER_WORKER: &str = "in-flight-count-other";
     let database = TestDatabase::create().await;

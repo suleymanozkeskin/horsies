@@ -9,7 +9,6 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::state::test_rows::{delete_state, seed_state, state_row};
@@ -129,7 +128,6 @@ fn schedule_plan(schedule_name: &str, task_name: &str) -> ActivePlan {
 }
 
 #[tokio::test]
-#[serial]
 async fn a_slot_that_an_earlier_version_enqueued_counts_as_fired() {
     let pool = crate::test_support::migrated_pool().await;
     let suffix = Uuid::new_v4().simple().to_string();

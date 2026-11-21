@@ -887,8 +887,6 @@ mod repair_round_tests {
 
 #[cfg(test)]
 mod repair_round_database_tests {
-    use serial_test::serial;
-
     use super::*;
     use crate::broker::pools::core_pool_for_test_url;
     use crate::core::history::heartbeats::partitioning::hourly_leaf_name;
@@ -932,7 +930,6 @@ mod repair_round_database_tests {
     /// hour of the database clock changes during it: the final probe then
     /// lists one more unlisted leaf, which the same second round creates.
     #[tokio::test]
-    #[serial]
     async fn a_leaf_of_an_hour_that_starts_during_the_repair_is_created_by_the_next_round() {
         let pool = migrated_pool().await;
         let hour = database_hour(&pool).await;

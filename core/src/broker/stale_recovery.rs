@@ -1051,7 +1051,6 @@ mod tests {
     /// A scan row without a start is outside the scan's contract; its read
     /// fails closed on `started_at`.
     #[tokio::test]
-    #[serial_test::serial]
     async fn a_scan_row_without_a_start_does_not_read() {
         let pool = crate::test_support::migrated_pool().await;
         let core = crate::broker::pools::core_pool_for_test_url(pool.url());

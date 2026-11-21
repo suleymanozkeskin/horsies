@@ -5,7 +5,6 @@
 //!
 //! Each node's task finishes as a worker finishes it (phase 1, then phase 2).
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -30,7 +29,6 @@ async fn start_chain(pool: &TestPool, name: &str, on_error: OnError) -> Uuid {
 /// `test_terminal_cas_is_idempotent`: a second phase 2 of the same task does
 /// not write the node again.
 #[tokio::test]
-#[serial]
 async fn a_second_completion_of_a_node_keeps_the_first_result() {
     let pool = shared_pool().await;
     let workflow_id = start_chain(&pool, "completion_idempotent", OnError::Fail).await;
@@ -66,7 +64,6 @@ async fn a_second_completion_of_a_node_keeps_the_first_result() {
 /// `on_error = fail`, the failure is stored as the workflow error, the
 /// dependent is skipped and the workflow ends FAILED in the same phase 2.
 #[tokio::test]
-#[serial]
 async fn a_failure_under_on_error_fail_stores_the_error_and_resolves_the_workflow() {
     let pool = shared_pool().await;
     let workflow_id = start_chain(&pool, "completion_fail", OnError::Fail).await;
@@ -92,7 +89,6 @@ async fn a_failure_under_on_error_fail_stores_the_error_and_resolves_the_workflo
 /// failure pauses the workflow with the failure as its error, and the
 /// dependent stays PENDING for a resume.
 #[tokio::test]
-#[serial]
 async fn a_failure_under_on_error_pause_pauses_and_leaves_the_dependent_pending() {
     let pool = shared_pool().await;
     let workflow_id = start_chain(&pool, "completion_pause", OnError::Pause).await;
@@ -118,7 +114,6 @@ async fn a_failure_under_on_error_pause_pauses_and_leaves_the_dependent_pending(
 /// `test_paused_workflow_stores_result_without_promoting`: a node of a
 /// PAUSED workflow takes its result, and its dependent stays PENDING.
 #[tokio::test]
-#[serial]
 async fn a_node_of_a_paused_workflow_stores_its_result_and_promotes_nothing() {
     let pool = shared_pool().await;
     let workflow_id = start_chain(&pool, "completion_paused", OnError::Fail).await;
@@ -151,7 +146,6 @@ async fn a_node_of_a_paused_workflow_stores_its_result_and_promotes_nothing() {
 /// `test_non_workflow_task_is_noop`: phase 2 of a task that no node links
 /// returns without an error.
 #[tokio::test]
-#[serial]
 async fn phase_two_of_a_task_with_no_node_changes_nothing() {
     let pool = shared_pool().await;
     let task_id = Uuid::new_v4();

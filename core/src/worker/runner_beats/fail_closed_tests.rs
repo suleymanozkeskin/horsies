@@ -364,7 +364,7 @@ async fn a_dead_writer_stops_the_worker() {
 /// 0.7 s, well inside the 2 s window; the beat that lands then restarts the
 /// window, and the worker runs on past it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial_test::serial]
+#[serial_test::serial(timing)]
 async fn a_failed_write_inside_the_window_recovers() {
     let database = crate::test_support::migrated_pool().await;
     let (host, port) = crate::test_support::sql::endpoint_of(database.url());

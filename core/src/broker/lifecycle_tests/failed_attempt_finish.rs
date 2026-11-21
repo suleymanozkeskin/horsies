@@ -12,7 +12,6 @@
 //! `a_task_that_does_not_exist`).
 
 use chrono::{DateTime, Duration, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
@@ -75,7 +74,6 @@ mod terminal_failure {
 
     /// Python `TestTerminalFailure::test_a_plain_failure_moves_the_row_with_its_attempt_and_wakes_the_queue`.
     #[tokio::test]
-    #[serial]
     async fn a_plain_failure_moves_the_row_with_its_attempt_and_wakes_the_queue() {
         let pool = pool().await;
         let mut wakes = Wakes::listen(&pool, CHANNEL).await;
@@ -156,7 +154,6 @@ mod terminal_failure {
 
     /// Python `TestTerminalFailure::test_a_workflow_task_failure_owes_phase_two_and_sends_no_wake`.
     #[tokio::test]
-    #[serial]
     async fn a_workflow_task_failure_owes_phase_two_and_sends_no_wake() {
         let pool = pool().await;
         let mut wakes = Wakes::listen(&pool, CHANNEL).await;
@@ -206,7 +203,6 @@ mod terminal_failure {
 
     /// Python `TestTerminalFailure::test_a_worker_failure_records_its_attempt_outcome`.
     #[tokio::test]
-    #[serial]
     async fn a_worker_failure_records_its_attempt_outcome() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &running()).await;
@@ -254,7 +250,6 @@ mod retry {
 
     /// Python `TestRetry::test_an_isolated_retry_moves_the_row_to_the_isolated_class`.
     #[tokio::test]
-    #[serial]
     async fn an_isolated_retry_moves_the_row_to_the_isolated_class() {
         let pool = pool().await;
         let task_id = seed_task(
@@ -337,7 +332,6 @@ mod retry {
     /// Python `TestRetry::test_a_retry_at_or_after_good_until_is_the_terminal_failure`,
     /// case `next_attempt_after_good_until`.
     #[tokio::test]
-    #[serial]
     async fn a_retry_at_or_after_good_until_is_the_terminal_failure_next_attempt_after_good_until()
     {
         a_retry_past_its_deadline_is_the_terminal_failure(Deadline::AheadSeconds(10.0)).await;
@@ -346,14 +340,12 @@ mod retry {
     /// Python `TestRetry::test_a_retry_at_or_after_good_until_is_the_terminal_failure`,
     /// case `good_until_already_past`.
     #[tokio::test]
-    #[serial]
     async fn a_retry_at_or_after_good_until_is_the_terminal_failure_good_until_already_past() {
         a_retry_past_its_deadline_is_the_terminal_failure(Deadline::PassedSecondsAgo(10.0)).await;
     }
 
     /// Python `TestRetry::test_a_retry_before_good_until_is_scheduled`.
     #[tokio::test]
-    #[serial]
     async fn a_retry_before_good_until_is_scheduled() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &running()).await;
@@ -380,7 +372,6 @@ mod no_write {
 
     /// Python `TestNoWrite::test_a_replay_of_a_failure_is_already_applied_and_writes_nothing`.
     #[tokio::test]
-    #[serial]
     async fn a_replay_of_a_failure_is_already_applied_and_writes_nothing() {
         let pool = pool().await;
         let mut wakes = Wakes::listen(&pool, CHANNEL).await;
@@ -419,7 +410,6 @@ mod no_write {
     /// the retry ended the claim generation, so a replay of the retry is a
     /// lost claim with no second write.
     #[tokio::test]
-    #[serial]
     async fn a_replay_of_a_scheduled_retry_is_a_lost_claim() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &running()).await;
@@ -448,7 +438,6 @@ mod no_write {
     /// Python `TestNoWrite::test_a_claim_this_call_does_not_hold_is_a_lost_claim`,
     /// cases `stale_generation` and `another_worker`.
     #[tokio::test]
-    #[serial]
     async fn a_claim_this_call_does_not_hold_is_a_lost_claim() {
         let pool = pool().await;
         for (worker, shift) in [
@@ -502,7 +491,6 @@ mod claimed_row_release {
     /// A CLAIMED row of this worker at this claim generation goes back to
     /// PENDING with its claim fields cleared and no attempt row.
     #[tokio::test]
-    #[serial]
     async fn a_claimed_row_of_this_generation_is_released() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &claimed()).await;
@@ -536,7 +524,6 @@ mod claimed_row_release {
     /// A CLAIMED row of an earlier claim generation of this worker is not
     /// released and not written.
     #[tokio::test]
-    #[serial]
     async fn a_claimed_row_of_another_generation_is_not_released() {
         let pool = pool().await;
         let task_id = seed_task(
@@ -571,7 +558,6 @@ mod claimed_row_release {
     /// A row the child started is RUNNING: the rule `RELEASE` writes the
     /// failure as the rule `REFUSE` does.
     #[tokio::test]
-    #[serial]
     async fn a_running_row_is_written_as_a_failure() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &running()).await;
@@ -598,7 +584,6 @@ mod claimed_row_release {
     /// The rule `REFUSE` leaves a CLAIMED row of this claim generation as it
     /// is: the child reported, so the row must be RUNNING.
     #[tokio::test]
-    #[serial]
     async fn the_refuse_rule_leaves_a_claimed_row_in_place() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &claimed()).await;
@@ -710,7 +695,6 @@ mod arguments {
     /// Python `TestArguments::test_a_wrong_argument_raises_and_writes_nothing`:
     /// a wrong argument is refused before any lock or write.
     #[tokio::test]
-    #[serial]
     async fn a_wrong_argument_raises_and_writes_nothing() {
         let pool = pool().await;
         for call in &WRONG_CALLS {

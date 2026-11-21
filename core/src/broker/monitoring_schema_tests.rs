@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use serial_test::serial;
 use tokio::time::timeout;
 use uuid::Uuid;
 
@@ -120,7 +119,6 @@ async fn explain(pool: &TestPool, statement: &str) -> String {
 }
 
 #[tokio::test]
-#[serial]
 async fn monitoring_indexes_match_v16_and_serve_reads_without_stealing_claims() {
     let pool = migrated_pool().await;
 
@@ -229,7 +227,6 @@ async fn monitoring_indexes_match_v16_and_serve_reads_without_stealing_claims() 
 }
 
 #[tokio::test]
-#[serial]
 async fn migration_0038_monitoring_triggers_deliver_each_channel() {
     let pool = migrated_pool().await;
 
@@ -345,7 +342,6 @@ async fn migration_0038_monitoring_triggers_deliver_each_channel() {
 /// than the start sends a `horsies_task_status` event; the start (to
 /// RUNNING) sends none.
 #[tokio::test]
-#[serial]
 async fn a_start_sends_no_status_event() {
     let pool = migrated_pool().await;
     let task_id = Uuid::new_v4();
@@ -396,7 +392,6 @@ async fn a_start_sends_no_status_event() {
 /// A terminal move sends `task_done`, then the `horsies_task_status` event, so
 /// the web app does not show a finished task as still live.
 #[tokio::test]
-#[serial]
 async fn a_terminal_move_sends_task_done_and_the_status_event() {
     let pool = migrated_pool().await;
     let task_id = Uuid::new_v4();

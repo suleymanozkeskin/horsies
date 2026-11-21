@@ -708,7 +708,6 @@ fn heartbeat_derivation_and_command_contracts_match_the_authority() {
 /// `counts_toward_prune_bound` counts every `LeafDetached`. Both report the
 /// Python outcome name `LeafDetached`.
 #[tokio::test]
-#[serial]
 async fn a_second_detach_reports_the_leaf_detached_by_the_first() {
     let database = TestDatabase::create().await;
     let class_key = "standard_1d";
@@ -754,7 +753,7 @@ async fn a_second_detach_reports_the_leaf_detached_by_the_first() {
 }
 
 #[tokio::test]
-#[serial]
+#[serial(timing)]
 async fn detach_returns_busy_without_waiting_for_a_leaf_session_lock() {
     let database = TestDatabase::create_with_connections(3).await;
     let class_key = "standard_1d";
@@ -872,7 +871,6 @@ async fn wait_for_an_advisory_lock_wait(pool: &TestPool) {
 }
 
 #[tokio::test]
-#[serial]
 async fn cancelled_detach_closes_its_connection_and_releases_the_session_lock() {
     let database = TestDatabase::create_with_connections(3).await;
     let class_key = "standard_1d";
@@ -950,7 +948,6 @@ async fn cancelled_detach_closes_its_connection_and_releases_the_session_lock() 
 }
 
 #[tokio::test]
-#[serial]
 async fn pool_coverage_releases_each_leaf_transaction_before_returning() {
     let database = TestDatabase::create_with_connections(4).await;
     let outcome = ensure_partition_coverage_in_pool(
@@ -976,7 +973,6 @@ async fn pool_coverage_releases_each_leaf_transaction_before_returning() {
 }
 
 #[tokio::test]
-#[serial]
 async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
     let database = TestDatabase::create_with_connections(4).await;
     let declared: Vec<RetentionDays> = (0..50)
@@ -1089,7 +1085,6 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
 }
 
 #[tokio::test]
-#[serial]
 async fn failed_post_commit_publication_is_retried_by_the_next_healthy_pass() {
     let database = TestDatabase::create_with_connections(4).await;
     let core_pool = crate::broker::pools::core_pool_for_test_url(database.pool.url());
@@ -1170,7 +1165,6 @@ async fn failed_post_commit_publication_is_retried_by_the_next_healthy_pass() {
 }
 
 #[tokio::test]
-#[serial]
 async fn current_heartbeat_with_a_wrong_physical_range_refuses_startup() {
     let database = TestDatabase::create_with_connections(4).await;
     let setup = ensure_partition_coverage_in_pool(
@@ -1254,7 +1248,6 @@ async fn current_heartbeat_with_a_wrong_physical_range_refuses_startup() {
 }
 
 #[tokio::test]
-#[serial]
 async fn coverage_repairs_same_name_wrong_shape_and_invalid_indexes() {
     let database = TestDatabase::create_with_connections(4).await;
     let setup = ensure_partition_coverage_in_pool(
@@ -1334,7 +1327,6 @@ async fn coverage_repairs_same_name_wrong_shape_and_invalid_indexes() {
 }
 
 #[tokio::test]
-#[serial]
 async fn coverage_repairs_a_nondefault_heartbeat_operator_class() {
     let database = TestDatabase::create_with_connections(4).await;
     let setup = ensure_partition_coverage_in_pool(
@@ -1396,7 +1388,6 @@ async fn coverage_repairs_a_nondefault_heartbeat_operator_class() {
 }
 
 #[tokio::test]
-#[serial]
 async fn pool_coverage_repairs_only_the_damaged_leaf_in_one_mutation_transaction() {
     let database = TestDatabase::create_with_connections(4).await;
     let setup = ensure_partition_coverage_in_pool(
@@ -1470,7 +1461,6 @@ async fn pool_coverage_repairs_only_the_damaged_leaf_in_one_mutation_transaction
 /// takes no gate, so it does not wait for a second checkout until the pool
 /// timeout; it repairs under the per-leaf locks.
 #[tokio::test]
-#[serial]
 async fn a_gated_pass_on_one_connection_repairs_without_the_gate() {
     let database = TestDatabase::create_with_connections(4).await;
     let pool = crate::broker::pools::session_core_pool_for_test_url(database.pool.url(), 1);
@@ -1495,7 +1485,6 @@ async fn a_gated_pass_on_one_connection_repairs_without_the_gate() {
 }
 
 #[tokio::test]
-#[serial]
 async fn busy_coverage_gate_keeps_startup_ready_when_current_heartbeat_exists() {
     let database = TestDatabase::create_with_connections(4).await;
     let setup = ensure_partition_coverage_in_pool(
@@ -1546,7 +1535,6 @@ async fn busy_coverage_gate_keeps_startup_ready_when_current_heartbeat_exists() 
 }
 
 #[tokio::test]
-#[serial]
 async fn periodic_coverage_repairs_while_a_startup_pass_holds_the_gate() {
     let database = TestDatabase::create_with_connections(4).await;
     let setup = ensure_partition_coverage_in_pool(
@@ -1629,7 +1617,6 @@ async fn periodic_coverage_repairs_while_a_startup_pass_holds_the_gate() {
 /// A busy coverage gate with no current heartbeat leaf is the transient
 /// `GateBusy` verdict, which the worker start retries, not a refusal.
 #[tokio::test]
-#[serial]
 async fn busy_coverage_gate_makes_startup_wait_when_current_heartbeat_is_absent() {
     let database = TestDatabase::create_with_connections(4).await;
     let mut holder = database
@@ -1669,7 +1656,6 @@ async fn busy_coverage_gate_makes_startup_wait_when_current_heartbeat_is_absent(
 }
 
 #[tokio::test]
-#[serial]
 async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconciles_catalog() {
     let database = TestDatabase::create().await;
     let class_key = "standard_1d";
@@ -1843,7 +1829,6 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
 }
 
 #[tokio::test]
-#[serial]
 async fn dropping_a_leaf_deletes_the_clock_exceptions_of_its_rows() {
     let database = TestDatabase::create_with_connections(4).await;
     let class_key = "standard_1d";
@@ -1913,7 +1898,6 @@ async fn dropping_a_leaf_deletes_the_clock_exceptions_of_its_rows() {
 }
 
 #[tokio::test]
-#[serial]
 async fn heartbeat_sweep_reports_one_leaf_error_and_sweeps_the_next_leaf() {
     let database = TestDatabase::create_with_connections(3).await;
     let mut transaction = database.pool.begin().await.expect("begin heartbeat setup");
@@ -1964,7 +1948,6 @@ async fn heartbeat_sweep_reports_one_leaf_error_and_sweeps_the_next_leaf() {
 }
 
 #[tokio::test]
-#[serial]
 async fn pruning_finalizes_a_timeout_interrupted_detach_before_sweeping_it() {
     let database = TestDatabase::create_with_connections(4).await;
     let class_key = "standard_1d";
@@ -2039,7 +2022,6 @@ async fn pruning_finalizes_a_timeout_interrupted_detach_before_sweeping_it() {
 }
 
 #[tokio::test]
-#[serial]
 async fn history_sweep_stops_at_its_leaf_bound_and_reports_truncation() {
     let database = TestDatabase::create_with_connections(4).await;
     let class_key = "standard_1d";
@@ -2092,7 +2074,6 @@ async fn history_sweep_stops_at_its_leaf_bound_and_reports_truncation() {
 }
 
 #[tokio::test]
-#[serial]
 async fn a_refused_leaf_does_not_count_toward_the_leaf_bound() {
     let database = TestDatabase::create_with_connections(4).await;
     let class_key = "standard_1d";
@@ -2195,7 +2176,6 @@ async fn expired_heartbeat_leaves(pool: &TestPool, hours_ago: &[i64]) -> Vec<Lea
 /// of 1, the expired heartbeat leaf is swept, the expired period leaf is
 /// left for the next pass, and the pass is `Truncated`.
 #[tokio::test]
-#[serial]
 async fn heartbeat_leaves_take_the_leaf_bound_first() {
     let database = TestDatabase::create_with_connections(4).await;
     let heartbeat_leaves = expired_heartbeat_leaves(&database.pool, &[6]).await;
@@ -2235,7 +2215,6 @@ async fn heartbeat_leaves_take_the_leaf_bound_first() {
 /// only one reported, the newer expired leaf is left for the next pass, and
 /// the sweep is `Truncated`.
 #[tokio::test]
-#[serial]
 async fn a_failed_leaf_counts_toward_the_leaf_bound() {
     let database = TestDatabase::create_with_connections(4).await;
     let leaves = expired_heartbeat_leaves(&database.pool, &[7, 6]).await;
@@ -2267,7 +2246,6 @@ async fn a_failed_leaf_counts_toward_the_leaf_bound() {
 /// A leaf bound of 0 is a budget that acts on nothing: the expired leaf
 /// stays, and the sweep is `Truncated`.
 #[tokio::test]
-#[serial]
 async fn a_zero_leaf_bound_acts_on_no_leaf() {
     let database = TestDatabase::create_with_connections(4).await;
     let class_key = "standard_1d";
@@ -2298,7 +2276,6 @@ async fn a_zero_leaf_bound_acts_on_no_leaf() {
 }
 
 #[tokio::test]
-#[serial]
 async fn pruning_contains_one_leaf_error_and_one_drop_refusal_then_keeps_going() {
     let database = TestDatabase::create_with_connections(4).await;
     let class_key = "standard_1d";
@@ -2389,7 +2366,6 @@ async fn reader_write_version(pool: &TestPool) -> String {
 /// heartbeat leaf; a second finalize publishes nothing. After both, the
 /// readers are current and do not name the leaf.
 #[tokio::test]
-#[serial]
 async fn detach_publishes_changed_history_only_and_finalization_repairs_stale_readers() {
     use super::manager::finalize_interrupted_detach;
     use crate::core::history::commands::FinalizeInterruptedLeafDetach;
@@ -2489,7 +2465,6 @@ async fn detach_publishes_changed_history_only_and_finalization_repairs_stale_re
 /// finalize records the detach and publishes the readers in
 /// `horsies_begin_leaf_detach`, and a repeat publishes nothing.
 #[tokio::test]
-#[serial]
 async fn finalization_retries_publication_after_detach_committed() {
     use super::manager::finalize_interrupted_detach;
     use crate::core::history::commands::FinalizeInterruptedLeafDetach;
@@ -2598,7 +2573,6 @@ async fn forever_leaves(
 }
 
 #[tokio::test]
-#[serial]
 async fn pool_coverage_creates_the_period_leaves_and_no_forever_leaf() {
     let database = TestDatabase::create_with_connections(4).await;
     let mut reader = database.pool.acquire().await.unwrap();

@@ -148,7 +148,6 @@ async fn usable_slots_of_the_test_server() -> i64 {
 /// one warning for its connections, and the start of its service loops.
 /// The worker starts: the warning refuses nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial_test::serial]
 async fn the_boot_logs_the_memory_fit_then_the_connection_fit_and_the_worker_starts() {
     // The parent pool, the listener, the runner heartbeat, the liveness lock,
     // and the pool of the one isolated child.

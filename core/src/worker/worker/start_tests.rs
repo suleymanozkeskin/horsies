@@ -131,7 +131,6 @@ fn unreachable_broker() -> Arc<PostgresBroker> {
 
 /// Python `TestStartWithResilienceConfig::test_success_returns_immediately`.
 #[tokio::test]
-#[serial_test::serial]
 async fn a_start_on_a_ready_database_starts_with_no_retry() {
     let pool = crate::test_support::migrated_pool().await;
     let worker = worker_on(
@@ -178,7 +177,6 @@ async fn a_start_error_that_can_clear_is_retried_until_its_budget_ends() {
 /// a database that does not exist is no condition that clears; the start
 /// returns its error at once, with no retry wait.
 #[tokio::test]
-#[serial_test::serial]
 async fn a_start_error_that_cannot_clear_is_returned_at_once() {
     let url = crate::test_support::migrated_database_url().await;
     let missing = crate::test_support::with_database(
@@ -303,7 +301,6 @@ async fn send_burst(broker: &PostgresBroker, witness: &crate::db::WakeSubscripti
 /// signals of the burst that are already pending, at most
 /// `coalesce_notifies` of them.
 #[tokio::test]
-#[serial_test::serial]
 async fn a_notification_wakes_the_claim_wait_and_the_drain_takes_the_burst() {
     let session_url = crate::test_support::migrated_database_url().await;
     let broker = Arc::new(PostgresBroker::from_test_url_and_session_url(

@@ -812,7 +812,6 @@ mod catalog_tests {
     use super::*;
     use crate::core::lifecycle::TerminalizationKind;
     use crate::test_support::sql::{self, TestPool};
-    use serial_test::serial;
 
     async fn migrated_pool() -> TestPool {
         crate::test_support::migrated_pool().await
@@ -916,7 +915,6 @@ mod catalog_tests {
     ];
 
     #[tokio::test]
-    #[serial]
     async fn installed_functions_match_vocabulary_signatures() {
         let pool = migrated_pool().await;
         let names: Vec<String> = EXPECTED_SIGNATURES
@@ -956,7 +954,6 @@ mod catalog_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn outcome_type_matches_wire_contract() {
         let pool = migrated_pool().await;
         let rows = sql::query(
@@ -993,7 +990,6 @@ mod catalog_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn body_canary_fragments_present() {
         let pool = migrated_pool().await;
         let fused: String = sql::query_scalar(
@@ -1060,7 +1056,6 @@ mod catalog_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn decoder_rejects_wrong_row_shape() {
         let pool = migrated_pool().await;
         let core = crate::broker::pools::core_pool_for_test_url(pool.url());
@@ -1114,7 +1109,6 @@ mod catalog_tests {
     /// the moved row; the outcome decoder refuses it, and the discovery
     /// decoder refuses a row of the outcome columns alone.
     #[tokio::test]
-    #[serial]
     async fn a_discovery_row_names_the_moved_task_and_has_its_own_shape() {
         let moved = one_core_row(&MOVED_ROW).await;
         let wrong = one_core_row(&WRONG_ROW_SHAPE).await;

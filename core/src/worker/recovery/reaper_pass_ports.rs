@@ -385,7 +385,7 @@ fn the_crash_result_names_the_silent_attempt() {
 /// it), a row started 2.7 s ago fails, and a row whose finalizing marker is
 /// 2.2 s old stays (a threshold cut to 2 s would fail it).
 #[tokio::test]
-#[serial]
+#[serial(timing)]
 async fn the_stale_pass_judges_its_thresholds_to_the_millisecond() {
     let pool = migrated_pool().await;
     let core = core_pool_for_test_url(pool.url());
@@ -434,7 +434,6 @@ async fn the_stale_pass_judges_its_thresholds_to_the_millisecond() {
 /// Python `TestMarkStaleTasksAsFailed::test_no_stale_tasks_returns_zero`: a
 /// pass with no stale row recovers none and writes nothing.
 #[tokio::test]
-#[serial]
 async fn a_stale_pass_with_no_stale_row_recovers_none_and_writes_nothing() {
     let pool = migrated_pool().await;
     let core = core_pool_for_test_url(pool.url());
@@ -470,7 +469,6 @@ async fn a_stale_pass_with_no_stale_row_recovers_none_and_writes_nothing() {
 /// each stale row with no crash retry fails, its failure is committed, and
 /// the pass counts each one.
 #[tokio::test]
-#[serial]
 async fn a_stale_pass_fails_each_stale_row_and_counts_it() {
     let pool = migrated_pool().await;
     let core = core_pool_for_test_url(pool.url());
@@ -501,7 +499,6 @@ async fn a_stale_pass_fails_each_stale_row_and_counts_it() {
 /// stale: the pass fails it with `WORKER_CRASHED`, and its live row, with
 /// the marker, moves to history.
 #[tokio::test]
-#[serial]
 async fn a_stale_pass_fails_a_row_whose_finalizing_marker_is_past_its_threshold() {
     let pool = migrated_pool().await;
     let core = core_pool_for_test_url(pool.url());
@@ -533,7 +530,6 @@ async fn a_stale_pass_fails_a_row_whose_finalizing_marker_is_past_its_threshold(
 /// A stale pass whose scan reads its whole batch warns on `horsies.broker`
 /// that the rest is recovered next pass, and counts the rows it recovered.
 #[tokio::test]
-#[serial]
 async fn a_stale_pass_whose_scan_reads_its_whole_batch_warns_that_the_rest_waits() {
     let pool = migrated_pool().await;
     let core = core_pool_for_test_url(pool.url());
@@ -571,7 +567,6 @@ async fn a_stale_pass_whose_scan_reads_its_whole_batch_warns_that_the_rest_waits
 /// A stale pass whose scan cannot run (its pool is closed) is an error, not
 /// a count; nothing is written.
 #[tokio::test]
-#[serial]
 async fn a_stale_pass_whose_scan_cannot_run_is_an_error() {
     let pool = migrated_pool().await;
     let core = core_pool_for_test_url(pool.url());
@@ -596,7 +591,6 @@ async fn a_stale_pass_whose_scan_cannot_run_is_an_error() {
 /// at the database: the failed task stores `WORKER_CRASHED` as its code and
 /// in its result, and its archived attempt 1 is FAILED with that code.
 #[tokio::test]
-#[serial]
 async fn a_stale_failure_stores_the_crash_code_in_the_task_and_its_attempt() {
     let pool = migrated_pool().await;
     let core = core_pool_for_test_url(pool.url());
@@ -648,7 +642,6 @@ async fn a_stale_failure_stores_the_crash_code_in_the_task_and_its_attempt() {
 /// Python `TestExpirePendingTasks::test_no_expired_returns_zero`: a pass
 /// with no due row expires none.
 #[tokio::test]
-#[serial]
 async fn a_pending_expiry_pass_with_no_due_row_expires_none() {
     let pool = migrated_pool().await;
     let core = core_pool_for_test_url(pool.url());
@@ -677,7 +670,6 @@ async fn a_pending_expiry_pass_with_no_due_row_expires_none() {
 /// due row is expired with `TASK_EXPIRED` as its code and in its result, and
 /// counted.
 #[tokio::test]
-#[serial]
 async fn a_pending_expiry_pass_expires_each_due_row_with_task_expired() {
     let pool = migrated_pool().await;
     let core = core_pool_for_test_url(pool.url());
@@ -715,7 +707,6 @@ async fn a_pending_expiry_pass_expires_each_due_row_with_task_expired() {
 /// a full batch of 500 is followed by the next batch in the same pass, which
 /// ends at the short one.
 #[tokio::test]
-#[serial]
 async fn a_pending_expiry_pass_runs_batches_until_a_short_one() {
     let pool = migrated_pool().await;
     let core = core_pool_for_test_url(pool.url());
@@ -764,7 +755,6 @@ fn a_pending_expiry_batch_with_an_outcome_other_than_applied_is_a_contract_error
 /// nothing. The batch function is replaced, in this test's database, by one
 /// that writes a marker row and reports a TASK_ABSENT row.
 #[tokio::test]
-#[serial]
 async fn a_pending_expiry_batch_with_an_outcome_other_than_applied_commits_nothing() {
     let pool = migrated_pool().await;
     sql::raw_sql(
@@ -816,7 +806,6 @@ async fn a_pending_expiry_batch_with_an_outcome_other_than_applied_commits_nothi
 /// Python `TestExpirePendingTasks::test_db_error_returns_err`: a batch that
 /// cannot run is an error, not a count.
 #[tokio::test]
-#[serial]
 async fn a_pending_expiry_pass_whose_batch_cannot_run_is_an_error() {
     let pool = migrated_pool().await;
     let core = core_pool_for_test_url(pool.url());
@@ -841,7 +830,6 @@ async fn a_pending_expiry_pass_whose_batch_cannot_run_is_an_error() {
 /// Python `TestTerminateOrphanedWorkflowTasks::test_no_orphans_returns_zero`:
 /// a page with no orphan cancels none and reports ready.
 #[tokio::test]
-#[serial]
 async fn an_orphan_audit_with_no_orphan_cancels_none() {
     let pool = migrated_pool().await;
     let core = core_pool_for_test_url(pool.url());
@@ -862,7 +850,6 @@ async fn an_orphan_audit_with_no_orphan_cancels_none() {
 /// the audit cancels the PENDING and CLAIMED workflow tasks that have no
 /// workflow link and counts them; a sent task stays.
 #[tokio::test]
-#[serial]
 async fn an_orphan_audit_cancels_and_counts_only_unlinked_workflow_tasks() {
     let pool = migrated_pool().await;
     let pending = seed_task(&pool, &Seed::unlinked_workflow_task("PENDING")).await;
@@ -909,7 +896,6 @@ async fn an_orphan_audit_cancels_and_counts_only_unlinked_workflow_tasks() {
 /// this test's database, by one that records one candidate in the cursor
 /// and reports a TASK_ABSENT row.
 #[tokio::test]
-#[serial]
 async fn an_orphan_audit_with_an_outcome_other_than_applied_fails_and_commits_nothing() {
     let pool = migrated_pool().await;
     sql::raw_sql(
@@ -962,7 +948,6 @@ async fn an_orphan_audit_with_an_outcome_other_than_applied_fails_and_commits_no
 /// Python `TestTerminateOrphanedWorkflowTasks::test_database_error_returns_err`:
 /// a page that cannot run is an error and cancels nothing.
 #[tokio::test]
-#[serial]
 async fn an_orphan_audit_whose_page_cannot_run_is_an_error() {
     let pool = migrated_pool().await;
     let orphan = seed_task(&pool, &Seed::unlinked_workflow_task("PENDING")).await;
@@ -979,8 +964,7 @@ async fn an_orphan_audit_whose_page_cannot_run_is_an_error() {
 }
 
 /// The recovery events of `task_ids` in `events`: the task id and the
-/// action of each, sorted by task id. The shared test database can hold rows
-/// of other tests, whose events are left out.
+/// action of each, sorted by task id. The events of other rows are left out.
 fn recoveries_of(
     events: Vec<crate::events::Event>,
     task_ids: &[Uuid],
@@ -1005,7 +989,6 @@ fn recoveries_of(
 /// `PendingExpired`, the unlinked workflow task as `OrphanCancelled`, each
 /// counted under its action.
 #[tokio::test]
-#[serial]
 async fn a_reaper_pass_tells_each_expired_and_cancelled_row_once() {
     let pool = migrated_pool().await;
     let due = seed_task(&pool, &Seed::due_pending()).await;
