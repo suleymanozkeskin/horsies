@@ -1,6 +1,6 @@
 [package]
 name = "horsies-core-derive"
-version = "0.1.0-alpha.36"
+version = "0.8.0"
 edition = "2021"
 description = "Derives of horsies-core for its code catalogs and manifest types"
 license = "MIT"
