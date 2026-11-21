@@ -3,7 +3,9 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
-      publish:
+      # Each registry has its own input. With publish_pypi off, the Python
+      # jobs still build and check the source distribution and every wheel.
+      publish_pypi:
         description: Publish the built distributions to PyPI
         required: true
         default: true
@@ -15,6 +17,21 @@ on:
         required: true
         default: false
         type: boolean
+      # How each crate publish job gets its crates.io token. Each mode is its
+      # own step; one mode never falls back to the other.
+      # trusted: crates.io trusted publishing. The crate must exist on
+      #   crates.io and name this repository, release.yml and the crates-io
+      #   environment as a trusted publisher.
+      # token: the secret CARGO_REGISTRY_TOKEN of the crates-io environment.
+      #   A crate that is not on crates.io yet can only be published this way.
+      crates_auth:
+        description: crates.io authentication of the crate publish jobs (trusted = trusted publishing, token = the CARGO_REGISTRY_TOKEN secret of the crates-io environment)
+        required: true
+        default: trusted
+        type: choice
+        options:
+          - trusted
+          - token
 
 concurrency:
   group: release-${{ github.ref }}
@@ -22,16 +39,19 @@ concurrency:
 
 permissions: {}
 
-# The Python project is clients/python/. A step that runs uv at the
-# repository root uses its pyproject.toml, uv.lock and .venv.
+# The maturin release that builds the source distribution and every wheel.
+# It must satisfy [build-system] requires of clients/python/pyproject.toml.
 env:
-  UV_PROJECT: ${{ github.workspace }}/clients/python
+  BUILD_MATURIN_VERSION: v1.16.0
 
 jobs:
   # The wheel and every published crate carry one version: pyproject.toml,
   # horsies-core-derive, horsies-core, horsies-macros and horsies, and each
   # version requirement of one of these crates on another. Every build and
-  # publish job reads it here.
+  # publish job reads it here. The Python build jobs also read the Rust
+  # toolchain that rust-toolchain.toml pins here, and give it to
+  # maturin-action: the wheel jobs build from the unpacked source
+  # distribution, not from a checkout of the repository.
   metadata:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -39,6 +59,7 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
+      rust_toolchain: ${{ steps.toolchain.outputs.channel }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -84,6 +105,25 @@ jobs:
           print(f"horsies {version}: the wheel, horsies-core-derive, horsies-core, horsies-macros and horsies")
           PY
 
+      - name: Read the pinned Rust toolchain
+        id: toolchain
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          toolchain = tomllib.loads(Path("rust-toolchain.toml").read_text()).get("toolchain")
+          channel = toolchain.get("channel") if isinstance(toolchain, dict) else None
+          if not isinstance(channel, str) or not channel:
+              print("::error::rust-toolchain.toml has no [toolchain] channel")
+              sys.exit(1)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"channel={channel}\n")
+          print(f"Rust toolchain {channel}")
+          PY
+
   # The publish gate is the full suite — both PostgreSQL majors, every e2e
   # file, PgBouncer, and the measurement-harness control — run against the
   # exact commit being published. Calling the reusable workflow keeps one
@@ -94,29 +134,184 @@ jobs:
       contents: read
     uses: ./.github/workflows/tests-full.yml
 
-  build:
+  # The source distribution, built once. Every wheel is built from it, as
+  # pip and uv build from it on a platform that has no wheel. A wheel that
+  # passes its checks also shows that the source distribution holds what a
+  # build needs: the Rust sources, the baseline SQL files, the web UI build
+  # and the skill files.
+  build-sdist:
     needs: [metadata, tests]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # maturin-action runs `python3 -m pip` on the runner.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Build the source distribution
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          args: --out ${{ github.workspace }}/dist
+          working-directory: clients/python
+          maturin-version: ${{ env.BUILD_MATURIN_VERSION }}
+          rust-toolchain: ${{ needs.metadata.outputs.rust_toolchain }}
+
+      - name: Upload the source distribution
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: horsies-dist-sdist-${{ needs.metadata.outputs.version }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # One wheel per platform, built from the source distribution with the
+  # pinned Rust toolchain. horsies._core uses the CPython 3.13 stable ABI
+  # (PyO3 feature abi3-py313 in clients/python/bridge/Cargo.toml), so each
+  # wheel is tagged cp313-abi3 and serves CPython 3.13 and later.
+  #
+  # One matrix row per platform:
+  #   name          the job name and the artifact name
+  #   runner        a runner of the wheel's own platform: the build and the
+  #                 import check run natively
+  #   target        the Rust target triple
+  #   manylinux     Linux only: the platform policy that maturin builds and
+  #                 audits the wheel against
+  #   platform_tag  the platform tag that the wheel name must carry
+  #   import_image  Linux only: the Python image that the import check runs in
+  #   web_ui_check  true: the web UI check runs on this wheel
+  # A musllinux wheel is one more row: a *-unknown-linux-musl target,
+  # manylinux musllinux_1_2, platform_tag musllinux_1_2_<arch> and a musl
+  # image such as python:3.13-alpine.
+  build-wheels:
+    name: build-wheels (${{ matrix.name }})
+    needs: [metadata, build-sdist]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      # Every platform reports its result, also when another one fails.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: '2_28'
+            platform_tag: manylinux_2_28_x86_64
+            import_image: python:3.13-slim-trixie
+            web_ui_check: true
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            manylinux: '2_28'
+            platform_tag: manylinux_2_28_aarch64
+            import_image: python:3.13-slim-trixie
+            web_ui_check: false
+          # maturin tags the wheel with the macOS version that rustc gives as
+          # the default deployment target of aarch64-apple-darwin.
+          - name: macos-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            platform_tag: macosx_11_0_arm64
+            web_ui_check: false
+    env:
+      # The import check. -I keeps the working folder off sys.path, so that
+      # horsies comes from the installed wheel.
+      IMPORT_CHECK: |
+        import horsies._core
+        import horsies
+        print(f'OK: horsies {horsies.__version__} imports horsies._core from {horsies._core.__file__}')
+    steps:
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
 
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: 0.11.14
           enable-cache: false
 
-      - name: Install dependencies
-        run: uv sync --dev
+      - name: Download the source distribution
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: horsies-dist-sdist-${{ needs.metadata.outputs.version }}
+          path: sdist
 
-      - name: Clean dist directory
-        run: rm -rf dist
+      # The job has no checkout: no Cargo workspace or rust-toolchain.toml of
+      # the repository is above the unpacked folder.
+      - name: Unpack the source distribution
+        id: source
+        run: |
+          python3 -I - <<'PY'
+          import os
+          import sys
+          import tarfile
+          from pathlib import Path
 
-      - name: Build distributions
-        run: uv build clients/python --out-dir dist
+          archives = sorted(Path("sdist").glob("*.tar.gz"))
+          if len(archives) != 1:
+              print(f"::error::sdist/ holds {len(archives)} source distributions; the build needs exactly 1")
+              sys.exit(1)
+          with tarfile.open(archives[0]) as archive:
+              archive.extractall("source", filter="data")
+          roots = sorted(Path("source").iterdir())
+          if len(roots) != 1 or not (roots[0] / "pyproject.toml").is_file():
+              print(f"::error::{archives[0].name} does not hold exactly one top-level folder with a pyproject.toml")
+              sys.exit(1)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"folder={roots[0]}\n")
+          print(f"OK: {archives[0].name} unpacked to {roots[0]}")
+          PY
+
+      - name: Build the wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out ${{ github.workspace }}/dist
+          working-directory: ${{ steps.source.outputs.folder }}
+          maturin-version: ${{ env.BUILD_MATURIN_VERSION }}
+          rust-toolchain: ${{ needs.metadata.outputs.rust_toolchain }}
+
+      - name: Verify the wheel name carries the expected tags
+        # A wheel name is
+        # {distribution}-{version}(-{build tag})?-{python tag}-{abi tag}-{platform tag}.whl.
+        # A wheel with another ABI or platform tag installs on other
+        # interpreters or systems than this row states, so this is
+        # release-blocking.
+        env:
+          EXPECTED_TAGS: cp313-abi3-${{ matrix.platform_tag }}
+        run: |
+          python3 -I - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          expected = os.environ["EXPECTED_TAGS"]
+          wheels = sorted(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              names = ", ".join(wheel.name for wheel in wheels)
+              print(f"::error::dist/ holds {len(wheels)} wheels ({names}); this job builds exactly 1")
+              sys.exit(1)
+          name = wheels[0].name
+          parts = name.removesuffix(".whl").split("-")
+          if parts[0] != "horsies" or len(parts) not in (5, 6) or "-".join(parts[-3:]) != expected:
+              print(f"::error::{name} does not carry the tags {expected}")
+              sys.exit(1)
+          print(f"OK: {name} carries the tags {expected}")
+          PY
 
       - name: Verify the wheel serves the web UI from horsies._core
+        if: ${{ matrix.web_ui_check }}
         # horsies._core embeds core/webui-dist. The installed
         # wheel serves the page and its script with no database: a wheel
         # whose page answers 503 installs cleanly and then fails every
@@ -125,7 +320,7 @@ jobs:
           set -euo pipefail
           wheel=$(ls dist/horsies-*.whl)
           echo "Inspecting $wheel"
-          uv venv /tmp/wheel-check
+          uv venv --python 3.13 /tmp/wheel-check
           uv pip install --python /tmp/wheel-check/bin/python \
             "horsies[web] @ file://${PWD}/${wheel}" httpx
           /tmp/wheel-check/bin/python - <<'PY'
@@ -169,37 +364,83 @@ jobs:
       - name: Verify the wheel carries the agent skill folder
         # `horsies skills install` copies this folder from the installed
         # package. A wheel without it installs cleanly and the command then
-        # fails for every user, so this is release-blocking.
+        # fails for every user, so this is release-blocking. grep reads a
+        # here-string, not a pipe: with `set -o pipefail`, a `grep -q` that
+        # exits before the writer ends can fail the pipe on a match.
         run: |
           set -euo pipefail
           wheel=$(ls dist/horsies-*.whl)
           contents=$(unzip -l "$wheel")
           for name in SKILL.md tasks.md workflows.md configs.md monitoring.md; do
-            echo "$contents" | grep -q "horsies/.agents/skills/horsies/$name" \
+            grep -q "horsies/.agents/skills/horsies/$name" <<< "$contents" \
               || { echo "FAIL: horsies/.agents/skills/horsies/$name missing from wheel"; exit 1; }
           done
           echo 'OK: wheel carries the agent skill folder'
 
-      - name: Upload build artifacts
+      # horsies imports psycopg, and psycopg needs libpq. The check installs
+      # the pg-binary extra, which brings libpq, so that the result does not
+      # depend on the libpq of the image or the runner. A wheel that installs
+      # and then fails `import horsies` fails every user of its platform, so
+      # this is release-blocking.
+      #
+      # Linux: in a container of the row's image, so that a musllinux row
+      # runs the check on musl.
+      - name: Verify the wheel imports in a container of its platform
+        if: ${{ runner.os == 'Linux' }}
+        env:
+          IMPORT_IMAGE: ${{ matrix.import_image }}
+        run: |
+          set -euo pipefail
+          if [ -z "$IMPORT_IMAGE" ]; then
+            echo "::error::the matrix row ${{ matrix.name }} has no import_image"
+            exit 1
+          fi
+          wheel=$(cd dist && ls horsies-*.whl)
+          docker run --rm \
+            --volume "$PWD/dist:/dist:ro" \
+            --env WHEEL="$wheel" \
+            --env IMPORT_CHECK \
+            "$IMPORT_IMAGE" \
+            sh -euc '
+              python -m venv /tmp/import-check
+              /tmp/import-check/bin/python -m pip install --quiet --disable-pip-version-check "horsies[pg-binary] @ file:///dist/$WHEEL"
+              /tmp/import-check/bin/python -I -c "$IMPORT_CHECK"
+            '
+
+      # macOS: on the runner, which is the wheel's platform.
+      - name: Verify the wheel imports on the runner
+        if: ${{ runner.os == 'macOS' }}
+        run: |
+          set -euo pipefail
+          wheel=$(ls dist/horsies-*.whl)
+          uv venv --python 3.13 "$RUNNER_TEMP/import-check"
+          uv pip install --python "$RUNNER_TEMP/import-check/bin/python" \
+            "horsies[pg-binary] @ file://${PWD}/${wheel}"
+          "$RUNNER_TEMP/import-check/bin/python" -I -c "$IMPORT_CHECK"
+
+      - name: Upload the wheel
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: horsies-dist-${{ needs.metadata.outputs.version }}
-          path: dist/*
+          name: horsies-dist-wheel-${{ matrix.name }}-${{ needs.metadata.outputs.version }}
+          path: dist/*.whl
           if-no-files-found: error
 
+  # Publishes the source distribution and every wheel together, from one
+  # dist/ folder.
   publish:
-    if: ${{ inputs.publish }}
-    needs: [metadata, build]
+    if: ${{ inputs.publish_pypi }}
+    needs: [metadata, build-sdist, build-wheels]
     runs-on: ubuntu-latest
     environment:
       name: pypi
     permissions:
       id-token: write
     steps:
-      - name: Download build artifacts
+      - name: Download the source distribution and every wheel
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: horsies-dist-${{ needs.metadata.outputs.version }}
+          pattern: horsies-dist-*-${{ needs.metadata.outputs.version }}
+          merge-multiple: true
           path: dist
 
       - name: Publish to PyPI
@@ -295,6 +536,19 @@ jobs:
     env:
       VERSION: ${{ needs.metadata.outputs.version }}
     steps:
+      # crates_auth=token: the job stops here, before any other step, when
+      # the secret is empty or not set.
+      - name: Check the CARGO_REGISTRY_TOKEN secret
+        if: ${{ inputs.crates_auth == 'token' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::crates_auth=token needs the secret CARGO_REGISTRY_TOKEN of the crates-io environment; the secret is empty or not set"
+            exit 1
+          fi
+          echo "OK: the secret CARGO_REGISTRY_TOKEN of the crates-io environment is set"
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
@@ -326,15 +580,26 @@ jobs:
           fi
           echo "OK: $name sha256 $built"
 
-      # Trusted publishing: crates.io exchanges this job's OIDC token for a
-      # token that the action revokes when the job ends.
+      # crates_auth=trusted: crates.io trusted publishing. crates.io
+      # exchanges this job's OIDC token for a token that the action revokes
+      # when the job ends.
       - name: Get a crates.io token
         id: crates-io-auth
+        if: ${{ inputs.crates_auth == 'trusted' }}
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
 
-      - name: Publish horsies-core-derive
+      - name: Publish horsies-core-derive with the trusted publishing token
+        if: ${{ inputs.crates_auth == 'trusted' }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+        run: cargo publish -p horsies-core-derive
+
+      # crates_auth=token: the secret CARGO_REGISTRY_TOKEN of the crates-io
+      # environment, which the first step of the job checks.
+      - name: Publish horsies-core-derive with the CARGO_REGISTRY_TOKEN secret
+        if: ${{ inputs.crates_auth == 'token' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p horsies-core-derive
 
   publish-horsies-core:
@@ -350,6 +615,19 @@ jobs:
     env:
       VERSION: ${{ needs.metadata.outputs.version }}
     steps:
+      # crates_auth=token: the job stops here, before any other step, when
+      # the secret is empty or not set.
+      - name: Check the CARGO_REGISTRY_TOKEN secret
+        if: ${{ inputs.crates_auth == 'token' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::crates_auth=token needs the secret CARGO_REGISTRY_TOKEN of the crates-io environment; the secret is empty or not set"
+            exit 1
+          fi
+          echo "OK: the secret CARGO_REGISTRY_TOKEN of the crates-io environment is set"
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
@@ -383,11 +661,19 @@ jobs:
 
       - name: Get a crates.io token
         id: crates-io-auth
+        if: ${{ inputs.crates_auth == 'trusted' }}
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
 
-      - name: Publish horsies-core
+      - name: Publish horsies-core with the trusted publishing token
+        if: ${{ inputs.crates_auth == 'trusted' }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+        run: cargo publish -p horsies-core
+
+      - name: Publish horsies-core with the CARGO_REGISTRY_TOKEN secret
+        if: ${{ inputs.crates_auth == 'token' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p horsies-core
 
   publish-horsies-macros:
@@ -403,6 +689,19 @@ jobs:
     env:
       VERSION: ${{ needs.metadata.outputs.version }}
     steps:
+      # crates_auth=token: the job stops here, before any other step, when
+      # the secret is empty or not set.
+      - name: Check the CARGO_REGISTRY_TOKEN secret
+        if: ${{ inputs.crates_auth == 'token' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::crates_auth=token needs the secret CARGO_REGISTRY_TOKEN of the crates-io environment; the secret is empty or not set"
+            exit 1
+          fi
+          echo "OK: the secret CARGO_REGISTRY_TOKEN of the crates-io environment is set"
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
@@ -433,11 +732,19 @@ jobs:
 
       - name: Get a crates.io token
         id: crates-io-auth
+        if: ${{ inputs.crates_auth == 'trusted' }}
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
 
-      - name: Publish horsies-macros
+      - name: Publish horsies-macros with the trusted publishing token
+        if: ${{ inputs.crates_auth == 'trusted' }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+        run: cargo publish -p horsies-macros
+
+      - name: Publish horsies-macros with the CARGO_REGISTRY_TOKEN secret
+        if: ${{ inputs.crates_auth == 'token' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p horsies-macros
 
   publish-horsies:
@@ -453,6 +760,19 @@ jobs:
     env:
       VERSION: ${{ needs.metadata.outputs.version }}
     steps:
+      # crates_auth=token: the job stops here, before any other step, when
+      # the secret is empty or not set.
+      - name: Check the CARGO_REGISTRY_TOKEN secret
+        if: ${{ inputs.crates_auth == 'token' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::crates_auth=token needs the secret CARGO_REGISTRY_TOKEN of the crates-io environment; the secret is empty or not set"
+            exit 1
+          fi
+          echo "OK: the secret CARGO_REGISTRY_TOKEN of the crates-io environment is set"
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
@@ -487,9 +807,17 @@ jobs:
 
       - name: Get a crates.io token
         id: crates-io-auth
+        if: ${{ inputs.crates_auth == 'trusted' }}
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
 
-      - name: Publish horsies
+      - name: Publish horsies with the trusted publishing token
+        if: ${{ inputs.crates_auth == 'trusted' }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+        run: cargo publish -p horsies
+
+      - name: Publish horsies with the CARGO_REGISTRY_TOKEN secret
+        if: ${{ inputs.crates_auth == 'token' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p horsies
