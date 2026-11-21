@@ -60,7 +60,7 @@ pub struct TaskError<E> {
     code: TaskErrorCode<E>,
     message: Option<String>,
     data: Option<JsonText>,
-    exception: Option<ExceptionRecord>,
+    exception: Option<Box<ExceptionRecord>>,
     kind: TaskErrorKind,
 }
 
@@ -142,7 +142,7 @@ impl<E: UserErrorCode> TaskError<E> {
 
     /// The exception record: set by the library for a panic of the task body.
     pub fn exception(&self) -> Option<&ExceptionRecord> {
-        self.exception.as_ref()
+        self.exception.as_deref()
     }
 
     /// The failed child workflow, when this error is a sub-workflow failure.
@@ -424,7 +424,7 @@ mod tests {
             },
         };
         let stored = horsies_core::TaskError {
-            kind: TaskErrorKind::SubWorkflow(failure.clone()),
+            kind: TaskErrorKind::SubWorkflow(Box::new(failure.clone())),
             ..horsies_core::TaskError::builtin(OutcomeCode::SubworkflowFailed, "child failed")
         };
         let read = TaskError::<ChargeCode>::from_stored(stored).unwrap();

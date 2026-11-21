@@ -245,7 +245,7 @@ fn connect_failed(
         retryable: error.is_retryable(),
         workflow_name: workflow_name.to_owned(),
         workflow_id,
-        cause: WorkflowError::Broker(error),
+        cause: Box::new(WorkflowError::Broker(error)),
     })
 }
 

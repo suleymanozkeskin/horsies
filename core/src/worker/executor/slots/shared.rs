@@ -15,7 +15,10 @@ use std::time::Duration;
 use tokio::sync::{oneshot, Notify};
 use tokio::task::JoinSet;
 
-use super::board::{PoolBoard, PoolHealth, SlotPhase};
+use super::board::PoolBoard;
+#[cfg(test)]
+use super::board::SlotPhase;
+#[cfg(test)]
 use super::budgets::SharedSlotService;
 use super::dispatch::{AttemptEnd, AttemptLog, ClaimedTask, ExecutionClass, NotRunCause};
 use super::pool::{
@@ -111,7 +114,7 @@ struct SlotLoad {
 
 /// What a slot got from the FIFO.
 pub(super) enum Take {
-    Run(QueuedSeatRun),
+    Run(Box<QueuedSeatRun>),
     /// The rule picks another slot: wake it.
     WakeOther(usize),
     Nothing,
@@ -211,7 +214,7 @@ impl SharedPoolShared {
             Placement::OnSlot(_) => match placer.queue.pop_front() {
                 Some(queued) => {
                     placer.loads[local].runs += 1;
-                    Take::Run(queued)
+                    Take::Run(Box::new(queued))
                 }
                 None => Take::Nothing,
             },
@@ -324,11 +327,12 @@ impl SharedPool {
     /// Queue one task for a seat. Its run number is the next of the pool.
     /// The input is dropped once the frame is sent. Work that does not fit
     /// the pool's kind is a defect of the route: it crashes loud.
+    #[cfg(test)]
     pub fn submit(&self, task: &ClaimedTask, input: TaskInputText, work: SharedWork) -> Submitted {
         self.submit_watched(task, input, work, PlacementWatch::Unwatched)
     }
 
-    /// As [`SharedPool::submit`]; `watch` is told when a child takes the
+    /// As `SharedPool::submit`; `watch` is told when a child takes the
     /// task, with the class of this pool as the kind of the child.
     pub fn submit_watched(
         &self,
@@ -348,7 +352,7 @@ impl SharedPool {
             let mut placer = lock(&self.shared.placer);
             // Read under the placer lock: a failure that fires after this
             // read finds the task in the queue and answers it.
-            if let Some(cause) = not_run_cause(self.shared.board.health()) {
+            if let Some(cause) = not_run_cause(&self.shared.board.health()) {
                 return Submitted::NotDispatched(cause);
             }
             if placer.queue.len() >= self.shared.config.pending_limit.get() {
@@ -393,6 +397,7 @@ impl SharedPool {
     }
 
     /// The service of each slot with its seats, for the claim budget.
+    #[cfg(test)]
     pub fn service(&self) -> Vec<SharedSlotService> {
         self.slot_states()
             .iter()
@@ -404,12 +409,9 @@ impl SharedPool {
     }
 
     /// The state of each slot of the pool, for the worker snapshot.
+    #[cfg(test)]
     pub fn slot_states(&self) -> Vec<SlotPhase> {
         self.shared.board.phases_of(self.shared.class)
-    }
-
-    pub fn health(&self) -> PoolHealth {
-        self.shared.board.health()
     }
 
     /// Stop: waiting tasks get `NotDispatched(PoolStopping)`; each open

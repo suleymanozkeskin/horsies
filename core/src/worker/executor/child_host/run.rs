@@ -430,7 +430,7 @@ pub(super) fn refusal_end(refusal: &StoredOptionsRefusal) -> RunEnd {
 /// A run ready for its body, or the end of a run that cannot start one.
 pub(super) enum Prepared {
     Body {
-        task: RegisteredTask,
+        task: Box<RegisteredTask>,
         input: Vec<u8>,
     },
     Ended(RunEnd),
@@ -450,7 +450,10 @@ pub(super) fn prepare(app: &ChildApp, task_name: &str, input: &TaskInputText) ->
         }
     };
     match build_task_input(input.as_str(), task.accepts_workflow_ctx()) {
-        Ok(input) => Prepared::Body { task, input },
+        Ok(input) => Prepared::Body {
+            task: Box::new(task),
+            input,
+        },
         Err(error) => Prepared::Ended(error_envelope(error)),
     }
 }

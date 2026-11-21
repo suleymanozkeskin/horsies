@@ -574,6 +574,7 @@ fn preload_outcome(mode: PreloadMode, start: PreloadStart) -> PreloadOutcome {
         (PreloadMode::Library, PreloadStart::Unsupported(PreloadUnsupported::NotLinux { .. })) => {
             PreloadOutcome::Exec { warning: None }
         }
+        #[cfg(any(test, target_os = "linux"))]
         (_, PreloadStart::Unsupported(PreloadUnsupported::MissingKernelSupport { reason })) => {
             PreloadOutcome::Exec {
                 warning: Some(format!(
@@ -1626,7 +1627,7 @@ impl Worker {
             match (hold.holds(&row.queue_name), plan.route(row.execution)) {
                 (true, ClaimRoute::ServedBy(budget)) => hold.hold(row, budget),
                 (false, _) | (true, ClaimRoute::NotServed) => {
-                    self.dispatch(children, writer, writes, row, StartCount::Unchecked)
+                    self.dispatch(children, writer, writes, row, StartCount::Unchecked);
                 }
             }
         }
@@ -1640,7 +1641,9 @@ impl Worker {
                 writer,
                 writes,
                 admitted.row,
-                StartCount::Admitted(admitted.started),
+                StartCount::Admitted {
+                    _started: admitted.started,
+                },
             );
         }
         Ok(claimed.counts)
@@ -1958,7 +1961,7 @@ impl Worker {
         liveness.stop().await;
         RunningChildren::stop_spawner(spawner).await;
         tracing::info!("Worker stopped");
-        Self::stop_result(services, stops, fatal_claim_error)
+        Self::stop_result(services, &stops, fatal_claim_error)
     }
 
     /// The result of a stopped worker, the first cause that holds: the
@@ -1967,7 +1970,7 @@ impl Worker {
     /// worker gracefully.
     fn stop_result(
         mut services: ServicesStopped,
-        stops: ChildrenStopCell,
+        stops: &ChildrenStopCell,
         fatal_claim_error: Option<WorkerError>,
     ) -> Result<(), WorkerError> {
         match services.fail_closed_stop.state() {
@@ -3161,7 +3164,7 @@ mod tests {
                 assert!(
                     message.contains("the profile starts no children"),
                     "{message}"
-                )
+                );
             }
             Err(other) => panic!("another error: {other}"),
             Ok(_) => panic!("a worker with no child must be refused"),
@@ -3427,7 +3430,7 @@ mod tests {
             .expect("the watch joins");
 
         assert!(cancel.is_cancelled());
-        let stopped = Worker::stop_result(stopped_services(), stops, None)
+        let stopped = Worker::stop_result(stopped_services(), &stops, None)
             .expect_err("a pool that cannot start a child stops the worker with an error");
         assert!(matches!(stopped, WorkerError::PoolFailed(_)), "{stopped:?}");
         assert!(!stopped.is_retryable());
@@ -3570,7 +3573,7 @@ mod tests {
             if let Some(stop) = stop {
                 stops.stop_worker(stop, &CancellationToken::new());
             }
-            Worker::stop_result(stopped_services(), stops, claim)
+            Worker::stop_result(stopped_services(), &stops, claim)
         };
         assert!(ended(None, None).is_ok());
         assert!(ended(Some(ChildrenStop::HookFailed), None).is_ok());
@@ -3980,12 +3983,6 @@ mod tests {
         Ok("done".to_owned())
     }
 
-    /// A task that stays RUNNING long enough for a test to observe concurrency.
-    async fn block_a_while(_: ()) -> Result<String, TaskError> {
-        tokio::time::sleep(Duration::from_secs(30)).await;
-        Ok("done".to_owned())
-    }
-
     async fn retryable_failure(_: ()) -> Result<String, TaskError> {
         Err(TaskError::new("RETRY_ME", "retry me").unwrap())
     }
@@ -4138,13 +4135,14 @@ mod tests {
         registry
             .register(task.task_name.clone(), task_fn)
             .expect("one task registers");
-        let work = match crate::worker::executor::slots::dispatch_route(
-            task.execution,
-            crate::worker::executor::slots::ClaimPlan::for_children(1, 0, 0),
-            &task.options,
-        ) {
-            Ok(crate::worker::executor::slots::DispatchRoute::Isolated { work, .. }) => work,
-            Ok(_) | Err(_) => panic!("an isolated row on a plan of one isolated child runs there"),
+        let Ok(crate::worker::executor::slots::DispatchRoute::Isolated { work, .. }) =
+            crate::worker::executor::slots::dispatch_route(
+                task.execution,
+                crate::worker::executor::slots::ClaimPlan::for_children(1, 0, 0),
+                &task.options,
+            )
+        else {
+            panic!("an isolated row on a plan of one isolated child runs there")
         };
         let frame = crate::worker::executor::protocol::RunFrame {
             task_id: task.task_id,
@@ -4784,7 +4782,7 @@ mod tests {
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
         let workflow_id = link_task_to_workflow(&pool, &task_id, Some(0)).await;
         sql::query("UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = $1")
-            .bind(&workflow_id)
+            .bind(workflow_id)
             .execute(&pool)
             .await
             .unwrap();
@@ -4818,7 +4816,7 @@ mod tests {
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
         let workflow_id = link_task_to_workflow(&pool, &task_id, Some(0)).await;
         sql::query("UPDATE horsies_workflows SET status = 'CANCELLED' WHERE id = $1")
-            .bind(&workflow_id)
+            .bind(workflow_id)
             .execute(&pool)
             .await
             .unwrap();
@@ -4936,7 +4934,7 @@ mod tests {
 
         let retry_count: i32 =
             sql::query_scalar("SELECT retry_count FROM horsies_tasks WHERE id = $1")
-                .bind(&task_id)
+                .bind(task_id)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
@@ -4944,7 +4942,7 @@ mod tests {
 
         let next_retry_at: Option<chrono::DateTime<Utc>> =
             sql::query_scalar("SELECT next_retry_at FROM horsies_tasks WHERE id = $1")
-                .bind(&task_id)
+                .bind(task_id)
                 .fetch_one(&pool)
                 .await
                 .unwrap();

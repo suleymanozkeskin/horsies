@@ -804,19 +804,21 @@ mod tests {
             }
         }
 
-        let mut disabled = RetentionConfig::default();
-        disabled.worker_state_retention_hours = None;
-        disabled.terminal_record_retention_hours = None;
+        let disabled = RetentionConfig {
+            worker_state_retention_hours: None,
+            terminal_record_retention_hours: None,
+            ..RetentionConfig::default()
+        };
         assert!(disabled.validate().is_empty());
     }
 
     fn set_numeric(config: &mut RetentionConfig, field: &str, value: u64) {
         match field {
             "worker_state_retention_hours" => {
-                config.worker_state_retention_hours = Some(value as u32)
+                config.worker_state_retention_hours = Some(value as u32);
             }
             "terminal_record_retention_hours" => {
-                config.terminal_record_retention_hours = Some(value as u32)
+                config.terminal_record_retention_hours = Some(value as u32);
             }
             "history_leaf_horizon_days" => config.history_leaf_horizon_days = value as u32,
             "heartbeat_leaf_horizon_hours" => config.heartbeat_leaf_horizon_hours = value as u32,

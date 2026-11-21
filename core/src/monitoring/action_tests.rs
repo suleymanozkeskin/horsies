@@ -256,7 +256,9 @@ fn action_models_and_task_mapping_serialize_exactly() {
                 message: "database".to_owned(),
                 retryable: true,
                 task_id,
-                cause: crate::broker::BrokerError::ConnectionFailed("refused".to_owned()),
+                cause: Box::new(crate::broker::BrokerError::ConnectionFailed(
+                    "refused".to_owned(),
+                )),
             },
             503,
             r#"{"detail":"database"}"#,

@@ -384,6 +384,10 @@ fn first_class_capacity_of(profile: &WorkerProfile) -> Value {
     class_capacity_json(&budget_columns(&children.service()))
 }
 
+/// A profile case: name, worker profile, and the budgets it reads back as
+/// (class, capacity, classes the budget serves).
+type ProfileCase = (&'static str, Value, Vec<(Execution, u64, Vec<Execution>)>);
+
 /// Python `test_claim_plan.py::TestClassCapacityOfAProfile::test_the_snapshot_value_reads_back`:
 /// the class capacity that a worker of each profile writes in its snapshot
 /// reads back through the worker state read as the budgets of the profile.
@@ -391,7 +395,7 @@ fn first_class_capacity_of(profile: &WorkerProfile) -> Value {
 async fn the_class_capacity_a_worker_of_each_profile_writes_reads_back() {
     let database = MonitoringTestDatabase::create().await;
     let broker = database.broker();
-    let cases: [(&str, Value, Vec<(Execution, u64, Vec<Execution>)>); 4] = [
+    let cases: [ProfileCase; 4] = [
         (
             "isolated-and-shared",
             json!({

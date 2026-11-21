@@ -603,9 +603,7 @@ fn split_scheme(text: &str) -> Result<(&str, &str), UrlError> {
 /// Splits the text after `://`. The user info ends at the first `@` before
 /// the first `/` or `?` (libpq's rule: a `@` in a password is percent-encoded).
 fn split_parts(rest: &str) -> UrlParts<'_> {
-    let authority_end = rest
-        .find(|character: char| character == '/' || character == '?')
-        .unwrap_or(rest.len());
+    let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
     let (authority, remainder) = rest.split_at(authority_end);
     let (userinfo, hostspec) = match authority.split_once('@') {
         Some((userinfo, hostspec)) => (Some(userinfo), hostspec),
@@ -806,7 +804,7 @@ fn parse_query(query: Option<&str>) -> Result<ParsedQuery, UrlError> {
             "password" => "password=***".to_owned(),
             _ => (*piece).to_owned(),
         });
-        store_parameter(&mut parameters, name, raw_value)?;
+        store_parameter(&mut parameters, &name, raw_value)?;
     }
     Ok(ParsedQuery {
         parameters,
@@ -816,14 +814,16 @@ fn parse_query(query: Option<&str>) -> Result<ParsedQuery, UrlError> {
 
 fn store_parameter(
     parameters: &mut QueryParameters,
-    name: String,
+    name: &str,
     raw_value: &str,
 ) -> Result<(), UrlError> {
-    let component = UrlComponent::ParameterValue { name: name.clone() };
-    let slot = match name.as_str() {
+    let component = UrlComponent::ParameterValue {
+        name: name.to_owned(),
+    };
+    let slot = match name {
         "password" => {
             let value = percent_decode(raw_value, &component)?;
-            return store(&mut parameters.password, &name, value);
+            return store(&mut parameters.password, name, value);
         }
         "host" => &mut parameters.host,
         "port" => &mut parameters.port,
@@ -848,7 +848,7 @@ fn store_parameter(
         }
     };
     let value = decode_text(raw_value, &component)?;
-    store(slot, &name, value)
+    store(slot, name, value)
 }
 
 fn unsupported_reason(name: &str) -> UnsupportedReason {
@@ -906,10 +906,10 @@ fn assemble(
     };
     let tls = TlsSettings::resolve(
         sslmode_source(parameters.sslmode)?,
-        root_certificates(parameters.sslrootcert),
-        client_file(parameters.sslcert),
-        client_file(parameters.sslkey),
-        tls_negotiation(parameters.sslnegotiation)?,
+        root_certificates(parameters.sslrootcert.as_deref()),
+        client_file(parameters.sslcert.as_deref()),
+        client_file(parameters.sslkey.as_deref()),
+        tls_negotiation(parameters.sslnegotiation.as_deref())?,
     )
     .map_err(UrlError::Tls)?;
     Ok(ConnectionSettings {
@@ -921,9 +921,9 @@ fn assemble(
         options: parameters.options,
         connect_timeout: connect_timeout(parameters.connect_timeout)?,
         tls,
-        target_session: target_session(parameters.target_session_attrs)?,
-        channel_binding: channel_binding(parameters.channel_binding)?,
-        host_order: host_order(parameters.load_balance_hosts)?,
+        target_session: target_session(parameters.target_session_attrs.as_deref())?,
+        channel_binding: channel_binding(parameters.channel_binding.as_deref())?,
+        host_order: host_order(parameters.load_balance_hosts.as_deref())?,
         masked_url,
     })
 }
@@ -1023,8 +1023,8 @@ fn sslmode_source(value: Option<String>) -> Result<SslModeSource, UrlError> {
 }
 
 /// Unset or empty means libpq's default file, as in libpq.
-fn root_certificates(value: Option<String>) -> RootCertificates {
-    match value.as_deref() {
+fn root_certificates(value: Option<&str>) -> RootCertificates {
+    match value {
         None | Some("") => RootCertificates::Default,
         Some("system") => RootCertificates::System,
         Some(path) => RootCertificates::File(std::path::PathBuf::from(path)),
@@ -1032,15 +1032,15 @@ fn root_certificates(value: Option<String>) -> RootCertificates {
 }
 
 /// Unset or empty means libpq's default file, as in libpq.
-fn client_file(value: Option<String>) -> ClientFile {
-    match value.as_deref() {
+fn client_file(value: Option<&str>) -> ClientFile {
+    match value {
         None | Some("") => ClientFile::Default,
         Some(path) => ClientFile::File(std::path::PathBuf::from(path)),
     }
 }
 
-fn tls_negotiation(value: Option<String>) -> Result<TlsNegotiation, UrlError> {
-    match value.as_deref() {
+fn tls_negotiation(value: Option<&str>) -> Result<TlsNegotiation, UrlError> {
+    match value {
         None | Some("postgres") => Ok(TlsNegotiation::Postgres),
         Some("direct") => Ok(TlsNegotiation::Direct),
         Some(other) => Err(UrlError::UnsupportedValue {
@@ -1075,8 +1075,8 @@ fn connect_timeout(value: Option<String>) -> Result<Duration, UrlError> {
     }
 }
 
-fn target_session(value: Option<String>) -> Result<TargetSession, UrlError> {
-    match value.as_deref() {
+fn target_session(value: Option<&str>) -> Result<TargetSession, UrlError> {
+    match value {
         None | Some("any") => Ok(TargetSession::Any),
         Some("read-write") => Ok(TargetSession::ReadWrite),
         Some("read-only") => Ok(TargetSession::ReadOnly),
@@ -1087,8 +1087,8 @@ fn target_session(value: Option<String>) -> Result<TargetSession, UrlError> {
     }
 }
 
-fn channel_binding(value: Option<String>) -> Result<ChannelBindingPolicy, UrlError> {
-    match value.as_deref() {
+fn channel_binding(value: Option<&str>) -> Result<ChannelBindingPolicy, UrlError> {
+    match value {
         None | Some("prefer") => Ok(ChannelBindingPolicy::Prefer),
         Some("disable") => Ok(ChannelBindingPolicy::Disable),
         Some("require") => Ok(ChannelBindingPolicy::Require),
@@ -1099,8 +1099,8 @@ fn channel_binding(value: Option<String>) -> Result<ChannelBindingPolicy, UrlErr
     }
 }
 
-fn host_order(value: Option<String>) -> Result<HostOrder, UrlError> {
-    match value.as_deref() {
+fn host_order(value: Option<&str>) -> Result<HostOrder, UrlError> {
+    match value {
         None | Some("disable") => Ok(HostOrder::AsGiven),
         Some("random") => Ok(HostOrder::Random),
         Some(other) => Err(UrlError::UnsupportedValue {

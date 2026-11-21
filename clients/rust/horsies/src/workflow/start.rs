@@ -214,7 +214,7 @@ fn start_error(
             message: refused.to_string(),
             workflow_name: workflow_name.to_owned(),
             workflow_id,
-            cause: StartRefusalCause::Error(refused),
+            cause: StartRefusalCause::Error(Box::new(refused)),
         },
         failed @ (ClientStartError::SchemaInstall(_)
         | ClientStartError::Start(

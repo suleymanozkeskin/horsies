@@ -61,7 +61,7 @@ fn dynamic_node(
     index: usize,
     name: &str,
     definition_key: &str,
-    input: serde_json::Value,
+    input: &serde_json::Value,
 ) -> AnyNode {
     AnyNode {
         input_json: input.to_string(),
@@ -224,7 +224,7 @@ fn root_nesting(key: &'static str) -> TestChildBuild {
                     0,
                     "root_nesting_workflow",
                     key,
-                    serde_json::json!({"level": level + 1}),
+                    &serde_json::json!({"level": level + 1}),
                 )],
             );
             nesting.definition_key = Some(key.to_owned());
@@ -245,7 +245,7 @@ fn dependent_nesting(key: &'static str) -> TestChildBuild {
                 true => {
                     let mut root = spec(
                         "dependent_nesting_workflow",
-                        vec![dynamic_node(0, "dependent_nesting_workflow", key, deeper)],
+                        vec![dynamic_node(0, "dependent_nesting_workflow", key, &deeper)],
                     );
                     root.output_index = Some(0);
                     root
@@ -256,7 +256,7 @@ fn dependent_nesting(key: &'static str) -> TestChildBuild {
                         vec![
                             task_node(0, "dependent_nesting_leaf_task"),
                             after(
-                                dynamic_node(1, "dependent_nesting_workflow", key, deeper),
+                                dynamic_node(1, "dependent_nesting_workflow", key, &deeper),
                                 &[0],
                             ),
                         ],
@@ -320,7 +320,7 @@ async fn a_root_nesting_stops_at_the_depth_limit() {
             0,
             "root_nesting_workflow",
             key,
-            serde_json::json!({"level": 1}),
+            &serde_json::json!({"level": 1}),
         )],
     );
     parent.output_index = Some(0);
@@ -355,7 +355,7 @@ async fn a_dependent_nesting_stops_at_the_depth_limit() {
             0,
             "dependent_nesting_workflow",
             key,
-            serde_json::json!({"level": 1}),
+            &serde_json::json!({"level": 1}),
         )],
     );
     parent.output_index = Some(0);
@@ -411,7 +411,7 @@ async fn a_child_node_that_cannot_be_prepared_fails_the_parent_node_and_keeps_no
                     1,
                     "later_node_prep_failure_child_workflow",
                     key,
-                    serde_json::json!({}),
+                    &serde_json::json!({}),
                 ),
                 &[0],
             ),
@@ -727,7 +727,7 @@ async fn a_child_node_with_two_args_from_keys_starts() {
         ),
     );
     let mut sub = after(
-        dynamic_node(2, "multi_param_child_workflow", key, serde_json::json!({})),
+        dynamic_node(2, "multi_param_child_workflow", key, &serde_json::json!({})),
         &[0, 1],
     );
     sub.args_from.insert("first".to_owned(), 0);
@@ -802,7 +802,7 @@ async fn a_child_builder_gets_its_args_from_result_and_the_child_output_complete
         ),
     );
     let mut sub = after(
-        dynamic_node(1, "param_child_workflow", key, serde_json::json!({})),
+        dynamic_node(1, "param_child_workflow", key, &serde_json::json!({})),
         &[0],
     );
     sub.args_from.insert("value".to_owned(), 0);

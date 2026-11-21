@@ -1544,7 +1544,10 @@ mod tests {
     /// `TestChildPoolMinSizeBounds`.
     #[test]
     fn every_bounded_value_accepts_its_ends_and_refuses_one_step_out() {
-        let cases: [(&str, i64, i64, fn(i64) -> Value); 12] = [
+        /// A bounded value: name, lowest, highest, and the profile that
+        /// carries a value.
+        type BoundCase = (&'static str, i64, i64, fn(i64) -> Value);
+        let cases: [BoundCase; 12] = [
             (
                 "isolated count",
                 1,

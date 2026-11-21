@@ -517,7 +517,7 @@ pub async fn fire_schedule(
 }
 
 /// A fire answer that breaks the function's contract: a defect.
-fn contract_breach(schedule_name: &str, error: RowDecodeError) -> ! {
+fn contract_breach(schedule_name: &str, error: &RowDecodeError) -> ! {
     panic!("the fire of schedule '{schedule_name}' answered a row outside its contract: {error}")
 }
 
@@ -543,14 +543,14 @@ fn fire_answer(fire: &ScheduleFire<'_>, rows: &[Row]) -> ScheduleFireAnswer {
         );
     };
     let kind: String = column(first, statement, "row_kind")
-        .unwrap_or_else(|error| contract_breach(fire.schedule_name, error));
+        .unwrap_or_else(|error| contract_breach(fire.schedule_name, &error));
     match kind.as_str() {
         "ADVANCED" => {
             let slots: Vec<FiredSlot> = slot_rows
                 .iter()
                 .map(|row| {
                     fired_slot(fire, row)
-                        .unwrap_or_else(|error| contract_breach(fire.schedule_name, error))
+                        .unwrap_or_else(|error| contract_breach(fire.schedule_name, &error))
                 })
                 .collect();
             let answered: Vec<DateTime<Utc>> = slots.iter().map(|slot| slot.slot_at).collect();

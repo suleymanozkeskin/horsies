@@ -14,7 +14,10 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::board::{PoolBoard, PoolHealth, SlotPhase};
+#[cfg(test)]
+use super::board::SlotPhase;
+use super::board::{PoolBoard, PoolHealth};
+#[cfg(test)]
 use super::budgets::SlotService;
 use super::dispatch::{AttemptEnd, AttemptLog, ClaimedTask, ExecutionClass, NotRunCause};
 use super::isolated::run_slot;
@@ -174,6 +177,7 @@ pub(super) struct Answer {
 }
 
 impl Answer {
+    #[cfg(test)]
     pub(super) fn new(sender: oneshot::Sender<AttemptEnd>) -> Self {
         Self::watched(sender, PlacementWatch::Unwatched, ExecutionClass::Isolated)
     }
@@ -373,7 +377,7 @@ async fn answer_at_failure(shared: Arc<PoolShared>) {
 }
 
 /// The task never reaches a child when the pools stop or failed.
-pub(super) fn not_run_cause(health: PoolHealth) -> Option<NotRunCause> {
+pub(super) fn not_run_cause(health: &PoolHealth) -> Option<NotRunCause> {
     match health {
         PoolHealth::Serving => None,
         PoolHealth::Failed(_) => Some(NotRunCause::PoolFailed),
@@ -494,6 +498,7 @@ impl IsolatedPool {
 
     /// Queue one task for the next idle slot. The input is dropped once the
     /// frame is sent.
+    #[cfg(test)]
     pub fn submit(
         &self,
         task: &ClaimedTask,
@@ -504,7 +509,7 @@ impl IsolatedPool {
         self.submit_watched(task, input, work, deadline, PlacementWatch::Unwatched)
     }
 
-    /// As [`IsolatedPool::submit`]; `watch` is told when a child takes the
+    /// As `IsolatedPool::submit`; `watch` is told when a child takes the
     /// task, with the kind `ISOLATED`.
     pub fn submit_watched(
         &self,
@@ -519,7 +524,7 @@ impl IsolatedPool {
             let mut queue = lock(&self.shared.queue);
             // Read under the queue lock: a failure that fires after this
             // read finds the task in the queue and answers it.
-            if let Some(cause) = not_run_cause(self.shared.board.health()) {
+            if let Some(cause) = not_run_cause(&self.shared.board.health()) {
                 return Submitted::NotDispatched(cause);
             }
             if queue.runs.len() >= self.shared.config.pending_limit.get() {
@@ -555,15 +560,18 @@ impl IsolatedPool {
     }
 
     /// The service state of each isolated slot, for the claim budget.
+    #[cfg(test)]
     pub fn service(&self) -> Vec<SlotService> {
         self.slot_states().iter().map(SlotPhase::service).collect()
     }
 
     /// The state of each isolated slot, for the worker snapshot.
+    #[cfg(test)]
     pub fn slot_states(&self) -> Vec<SlotPhase> {
         self.shared.board.phases_of(ExecutionClass::Isolated)
     }
 
+    #[cfg(test)]
     pub fn health(&self) -> PoolHealth {
         self.shared.board.health()
     }

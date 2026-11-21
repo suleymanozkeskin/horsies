@@ -562,7 +562,6 @@ pub(super) async fn seed_node(pool: &TestPool, seed: &NodeSeed) -> Uuid {
 /// The live status of a seeded workflow task row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LiveStatus {
-    Pending,
     Claimed,
     Running,
 }
@@ -570,7 +569,6 @@ pub(super) enum LiveStatus {
 impl LiveStatus {
     fn as_sql(self) -> &'static str {
         match self {
-            Self::Pending => "PENDING",
             Self::Claimed => "CLAIMED",
             Self::Running => "RUNNING",
         }

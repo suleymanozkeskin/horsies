@@ -2547,15 +2547,19 @@ async fn finalization_retries_publication_after_detach_committed() {
     database.drop().await;
 }
 
+/// One catalog row of a leaf: name, lower bound kind, lower anchor, upper
+/// anchor.
+type LeafCatalogRow = (
+    String,
+    String,
+    Option<chrono::DateTime<Utc>>,
+    chrono::DateTime<Utc>,
+);
+
 async fn forever_leaves(
     connection: &mut TestConnection,
 ) -> Vec<(String, LeafLowerBound, chrono::DateTime<Utc>)> {
-    let rows: Vec<(
-        String,
-        String,
-        Option<chrono::DateTime<Utc>>,
-        chrono::DateTime<Utc>,
-    )> = sql::query_as(&format!(
+    let rows: Vec<LeafCatalogRow> = sql::query_as(&format!(
         "SELECT leaf_name, lower_bound_kind::text, lower_anchor, upper_anchor
              FROM {LEAF_CATALOG}
              WHERE class_key = 'forever' AND detached_at IS NULL AND dropped_at IS NULL

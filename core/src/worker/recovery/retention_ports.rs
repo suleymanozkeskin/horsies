@@ -63,10 +63,12 @@ async fn run_maintenance_pass(
     pool: &TestPool,
     retention: &RetentionConfig,
 ) -> ReaperHealthSnapshot {
-    let mut recovery = RecoveryConfig::default();
-    recovery.auto_requeue_stale_claimed = false;
-    recovery.auto_fail_stale_running = false;
-    recovery.auto_terminate_orphaned_workflow_tasks = false;
+    let recovery = RecoveryConfig {
+        auto_requeue_stale_claimed: false,
+        auto_fail_stale_running: false,
+        auto_terminate_orphaned_workflow_tasks: false,
+        ..RecoveryConfig::default()
+    };
     let health = new_reaper_health();
     let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(3_600);
     let mut next_partition_maintenance = super::MaintenanceDue::now();
@@ -173,8 +175,10 @@ async fn the_pass_keeps_a_leaf_inside_its_period() {
 #[tokio::test]
 async fn the_pass_registers_a_declared_period() {
     let database = RetentionDatabase::create().await;
-    let mut retention = RetentionConfig::default();
-    retention.retention_periods = vec![chrono::Duration::days(11)];
+    let retention = RetentionConfig {
+        retention_periods: vec![chrono::Duration::days(11)],
+        ..RetentionConfig::default()
+    };
 
     let _ = run_maintenance_pass(&database.pool, &retention).await;
 
@@ -242,9 +246,11 @@ async fn expired_worker_states_go_and_recent_ones_stay() {
     let database = RetentionDatabase::create().await;
     seed_worker_state(&database.pool, "port-old-worker", 48).await;
     seed_worker_state(&database.pool, "port-recent-worker", 1).await;
-    let mut retention = RetentionConfig::default();
-    retention.worker_state_retention_hours = Some(RETENTION_HOURS);
-    retention.terminal_record_retention_hours = None;
+    let retention = RetentionConfig {
+        worker_state_retention_hours: Some(RETENTION_HOURS),
+        terminal_record_retention_hours: None,
+        ..RetentionConfig::default()
+    };
 
     run_retention_cleanup(
         &crate::broker::PostgresBroker::from_test_url(
@@ -326,9 +332,11 @@ async fn expired_terminal_workflows_go_and_running_or_recent_ones_stay() {
     let recent_completed = seed_workflow(&database.pool, "COMPLETED", 1).await;
     seed_node(&database.pool, old_completed).await;
     seed_node(&database.pool, old_running).await;
-    let mut retention = RetentionConfig::default();
-    retention.worker_state_retention_hours = None;
-    retention.terminal_record_retention_hours = Some(RETENTION_HOURS);
+    let retention = RetentionConfig {
+        worker_state_retention_hours: None,
+        terminal_record_retention_hours: Some(RETENTION_HOURS),
+        ..RetentionConfig::default()
+    };
 
     run_retention_cleanup(
         &crate::broker::PostgresBroker::from_test_url(

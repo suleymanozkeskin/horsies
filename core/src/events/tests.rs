@@ -586,7 +586,7 @@ fn a_duration_or_a_time_outside_the_wire_is_an_encode_refusal() {
 fn path_of(names: &[&'static str]) -> WirePath {
     let mut refusal = EncodeRefusal::new(EncodeCause::DurationOverBound { nanos: 0 });
     for name in names.iter().rev() {
-        refusal = refusal.inside(*name);
+        refusal = refusal.inside(name);
     }
     refusal.path
 }
@@ -1113,7 +1113,7 @@ fn contract_snapshot() -> String {
                     match fields.is_empty() {
                         true => text.push_str(&format!("  {}\n", variant.tag)),
                         false => {
-                            text.push_str(&format!("  {}({})\n", variant.tag, fields.join(", ")))
+                            text.push_str(&format!("  {}({})\n", variant.tag, fields.join(", ")));
                         }
                     }
                 }
@@ -1158,9 +1158,12 @@ fn is_of<E: UnionEvent>(event: &Event) -> bool {
 /// `of_event` of each type gives the record of an event of that type, and
 /// `None` for an event of every other type. The list has one entry per
 /// type of the union, so a new type fails here until it is added.
+/// An event type and the check that an event is of that type.
+type TypeCheck = (EventTypeName, fn(&Event) -> bool);
+
 #[test]
 fn of_event_gives_the_record_of_its_own_type_only() {
-    let checks: [(EventTypeName, fn(&Event) -> bool); 11] = [
+    let checks: [TypeCheck; 11] = [
         (EventTypeName::TaskClaimed, is_of::<TaskClaimed>),
         (EventTypeName::ClaimReleased, is_of::<ClaimReleased>),
         (EventTypeName::AttemptPlaced, is_of::<AttemptPlaced>),

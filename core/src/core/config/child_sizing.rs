@@ -114,9 +114,8 @@ impl SeatRule {
             1 <= floor && floor <= cap,
             "a seat rule needs 1 <= floor <= cap"
         );
-        let seats_per_unit = match NonZeroU32::new(seats_per_unit) {
-            Some(seats_per_unit) => seats_per_unit,
-            None => panic!("a seat rule needs seats_per_unit >= 1"),
+        let Some(seats_per_unit) = NonZeroU32::new(seats_per_unit) else {
+            panic!("a seat rule needs seats_per_unit >= 1")
         };
         Self {
             seats_per_unit,

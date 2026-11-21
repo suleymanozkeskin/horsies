@@ -554,7 +554,7 @@ fn the_start_hooks_of_the_handler_child_run_in_order_and_a_failure_exits_173() {
         ended_spans: EndedSpanScope::NoSpans,
     };
     let (ours, _theirs) = UnixStream::pair().unwrap();
-    let exit = boot_and_serve_handlers_on(&runtime, app, ours, FrameReader::new());
+    let exit = boot_and_serve_handlers_on(&runtime, app, &ours, FrameReader::new());
     assert_eq!(exit, ChildHostExit::ChildHookFailed);
     assert_eq!(exit.code(), 173);
     assert_eq!(*calls.lock().unwrap(), vec!["first"]);

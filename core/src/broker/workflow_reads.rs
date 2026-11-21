@@ -31,7 +31,7 @@ impl PostgresBroker {
     pub async fn workflow_status(&self, workflow_id: Uuid) -> HandleResult<WorkflowStatus> {
         query::get_workflow_status(self, workflow_id)
             .await
-            .map_err(|error| handle_operation_error(HandleOperation::Status, error, workflow_id))
+            .map_err(|error| handle_operation_error(&HandleOperation::Status, error, workflow_id))
     }
 
     /// Wait for the end of a workflow, up to `timeout` (none: no limit), with its stored values
@@ -49,7 +49,7 @@ impl PostgresBroker {
     ) -> HandleResult<WorkflowWait> {
         query::wait_workflow_end(self, workflow_id, timeout)
             .await
-            .map_err(|error| handle_operation_error(HandleOperation::Get, error, workflow_id))
+            .map_err(|error| handle_operation_error(&HandleOperation::Get, error, workflow_id))
     }
 
     /// The nodes of a workflow that store a result: one read (Python
@@ -61,7 +61,7 @@ impl PostgresBroker {
     pub async fn workflow_node_results(&self, workflow_id: Uuid) -> HandleResult<NodeResultsRead> {
         query::read_workflow_node_results(self, workflow_id)
             .await
-            .map_err(|error| handle_operation_error(HandleOperation::Results, error, workflow_id))
+            .map_err(|error| handle_operation_error(&HandleOperation::Results, error, workflow_id))
     }
 
     /// The stored result of one node: one read (Python `WorkflowHandle.result_for_async`).
@@ -82,7 +82,7 @@ impl PostgresBroker {
                 let operation = HandleOperation::ResultFor {
                     node_id: node_id.to_owned(),
                 };
-                handle_operation_error(operation, error, workflow_id)
+                handle_operation_error(&operation, error, workflow_id)
             })
     }
 
@@ -94,6 +94,6 @@ impl PostgresBroker {
     pub async fn workflow_nodes(&self, workflow_id: Uuid) -> HandleResult<NodesRead> {
         query::read_workflow_nodes(self, workflow_id)
             .await
-            .map_err(|error| handle_operation_error(HandleOperation::Tasks, error, workflow_id))
+            .map_err(|error| handle_operation_error(&HandleOperation::Tasks, error, workflow_id))
     }
 }

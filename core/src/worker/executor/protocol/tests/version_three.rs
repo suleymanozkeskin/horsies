@@ -490,7 +490,7 @@ fn each_malformed_queue_name_is_refused_with_its_field() {
 
 /// The metadata of a result frame that ends with `end` and starts with
 /// `started_at`.
-fn result_meta(end: Value, started_at: Value) -> Value {
+fn result_meta(end: &Value, started_at: &Value) -> Value {
     json!({
         "kind": "result",
         "task_id": T1,
@@ -504,7 +504,7 @@ fn result_meta(end: Value, started_at: Value) -> Value {
 
 /// The metadata of a shared result frame that ends with `end` and starts
 /// with `started_at`.
-fn shared_result_meta(end: Value, started_at: Value) -> Value {
+fn shared_result_meta(end: &Value, started_at: &Value) -> Value {
     json!({
         "kind": "shared_result",
         "dispatch": 1,
@@ -539,22 +539,19 @@ fn a_start_that_does_not_fit_the_end_is_refused() {
     let not_reported = json!({"kind": "not_reported"});
     let result_end = json!({"kind": "result"});
     assert_eq!(
-        malformed_child_meta(&result_meta(stopped_end(), reported_start()), b""),
+        malformed_child_meta(&result_meta(&stopped_end(), &reported_start()), b""),
         no_start
     );
     assert_eq!(
-        malformed_child_meta(&shared_result_meta(stopped_end(), reported_start()), b""),
+        malformed_child_meta(&shared_result_meta(&stopped_end(), &reported_start()), b""),
         no_start
     );
     assert_eq!(
-        malformed_child_meta(
-            &result_meta(result_end.clone(), not_reported.clone()),
-            b"{}"
-        ),
+        malformed_child_meta(&result_meta(&result_end, &not_reported), b"{}"),
         start_owed
     );
     assert_eq!(
-        malformed_child_meta(&shared_result_meta(result_end, not_reported), b"{}"),
+        malformed_child_meta(&shared_result_meta(&result_end, &not_reported), b"{}"),
         start_owed
     );
 }
@@ -565,12 +562,12 @@ fn a_start_that_does_not_fit_the_end_is_refused() {
 fn a_worker_failure_and_a_timeout_take_either_start() {
     let failure = json!({"kind": "worker_failure", "detail": "x"});
     for started_at in [reported_start(), json!({"kind": "not_reported"})] {
-        let result = result_meta(failure.clone(), started_at.clone());
+        let result = result_meta(&failure, &started_at);
         assert!(
             decode_child_bytes(&framed(&result.to_string(), b"")).is_ok(),
             "{result}"
         );
-        let timed_out = shared_result_meta(json!({"kind": "timed_out"}), started_at);
+        let timed_out = shared_result_meta(&json!({"kind": "timed_out"}), &started_at);
         assert!(
             decode_child_bytes(&framed(&timed_out.to_string(), b"")).is_ok(),
             "{timed_out}"
@@ -580,7 +577,7 @@ fn a_worker_failure_and_a_timeout_take_either_start() {
 
 #[test]
 fn each_malformed_start_is_refused_with_its_field() {
-    let result = result_meta(json!({"kind": "result"}), reported_start());
+    let result = result_meta(&json!({"kind": "result"}), &reported_start());
     let cases: Vec<(Option<Value>, MalformedFrame)> = vec![
         (
             None,

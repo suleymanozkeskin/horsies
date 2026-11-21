@@ -149,7 +149,7 @@ impl StepDisposition for ChildStartDisposition {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ChildStartKind {
     /// The child built: its tree (`TREE`).
-    Tree(StartArguments),
+    Tree(Box<StartArguments>),
     /// The child cannot start: the node's error in its result envelope
     /// (`FAILURE`).
     Failure { failure_result: String },
@@ -285,7 +285,7 @@ pub(crate) async fn child_start_kind(
             spec,
             depth,
             classes,
-        } => Ok(ChildStartKind::Tree(
+        } => Ok(ChildStartKind::Tree(Box::new(
             child_tree_arguments(
                 ChildTree {
                     spec,
@@ -298,7 +298,7 @@ pub(crate) async fn child_start_kind(
                 build,
             )
             .await?,
-        )),
+        ))),
         ChildBuildOutcome::NodeFails(failure) => {
             tracing::error!(
                 workflow_id = %owed.workflow_id,

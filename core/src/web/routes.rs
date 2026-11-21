@@ -184,7 +184,7 @@ async fn read_task_stats(
         .get_or_try_init(cache_key, || task_stats(&state.broker, &query))
         .await
         .map(Json)
-        .map_err(|error| query_failed("Task stats", error))
+        .map_err(|error| query_failed("Task stats", &error))
 }
 
 #[derive(Debug, Default)]
@@ -223,7 +223,7 @@ async fn read_task_facets(
         .get_or_try_init(cache_key, || task_facets(&state.broker, &query))
         .await
         .map(Json)
-        .map_err(|error| query_failed("Task facets", error))
+        .map_err(|error| query_failed("Task facets", &error))
 }
 
 #[derive(Debug)]
@@ -284,7 +284,7 @@ async fn read_task_breakdown(
         .get_or_try_init(cache_key, || task_breakdown(&state.broker, &query))
         .await
         .map(Json)
-        .map_err(|error| query_failed("Task breakdown", error))
+        .map_err(|error| query_failed("Task breakdown", &error))
 }
 
 #[derive(Debug)]
@@ -357,7 +357,7 @@ async fn read_tasks(
     list_tasks(&state.broker, &query)
         .await
         .map(Json)
-        .map_err(|error| query_failed("Task list", error))
+        .map_err(|error| query_failed("Task list", &error))
 }
 
 async fn read_task(
@@ -367,9 +367,9 @@ async fn read_task(
     let task_id = parse_path_uuid("task_id", &task_id)?;
     match get_task_detail(&state.broker, task_id)
         .await
-        .map_err(|error| query_failed("Task detail", error))?
+        .map_err(|error| query_failed("Task detail", &error))?
     {
-        TaskDetailRead::Found(detail) => Ok(Json(detail)),
+        TaskDetailRead::Found(detail) => Ok(Json(*detail)),
         TaskDetailRead::NotFound(TaskDetailNotFound { reason, .. }) => Err(ApiError::detail(
             StatusCode::NOT_FOUND,
             task_not_found_text(reason),
@@ -393,7 +393,7 @@ async fn read_workflow_names(State(state): State<WebState>) -> Result<Json<Vec<S
     list_workflow_names(&state.broker)
         .await
         .map(Json)
-        .map_err(|error| query_failed("Workflow names", error))
+        .map_err(|error| query_failed("Workflow names", &error))
 }
 
 #[derive(Debug)]
@@ -428,7 +428,7 @@ async fn read_workflows(
     list_workflow_runs(&state.broker, &query)
         .await
         .map(Json)
-        .map_err(|error| query_failed("Workflow runs", error))
+        .map_err(|error| query_failed("Workflow runs", &error))
 }
 
 /// The 404 of a workflow run that the read did not find.
@@ -454,7 +454,7 @@ async fn read_workflow(
     };
     get_workflow_run(&state.broker, workflow_id)
         .await
-        .map_err(|error| query_failed("Workflow run", error))?
+        .map_err(|error| query_failed("Workflow run", &error))?
         .map(Json)
         .ok_or_else(workflow_run_not_found)
 }
@@ -495,7 +495,7 @@ async fn read_workflow_task(
     };
     get_workflow_node(&state.broker, workflow_id, task_index)
         .await
-        .map_err(|error| query_failed("Workflow task", error))?
+        .map_err(|error| query_failed("Workflow task", &error))?
         .map(Json)
         .ok_or_else(workflow_task_not_found)
 }
@@ -551,7 +551,7 @@ async fn read_schedules(
     list_schedules(&state.broker)
         .await
         .map(Json)
-        .map_err(|error| query_failed("Schedule state", error))
+        .map_err(|error| query_failed("Schedule state", &error))
 }
 
 /// Pending streams per (queue, class) with their oldest wait and coverage,
@@ -758,8 +758,8 @@ async fn cancel_task(
 /// The workflow path id of an action route. Text that is not a UUID is
 /// refused with 400 `INVALID_INPUT` before any statement, as the task
 /// cancel route refuses its id (Python `require_path_uuid`).
-fn workflow_action_id(workflow_id: &str) -> Result<Uuid, Response> {
-    parse_path_uuid("workflow_id", workflow_id).map_err(IntoResponse::into_response)
+fn workflow_action_id(workflow_id: &str) -> Result<Uuid, ApiError> {
+    parse_path_uuid("workflow_id", workflow_id)
 }
 
 async fn pause_workflow(
@@ -768,7 +768,7 @@ async fn pause_workflow(
 ) -> Response {
     let workflow_id = match workflow_action_id(&workflow_id) {
         Ok(workflow_id) => workflow_id,
-        Err(response) => return response,
+        Err(refused) => return refused.into_response(),
     };
     action_response(
         "workflows.pause",
@@ -783,7 +783,7 @@ async fn resume_workflow(
 ) -> Response {
     let workflow_id = match workflow_action_id(&workflow_id) {
         Ok(workflow_id) => workflow_id,
-        Err(response) => return response,
+        Err(refused) => return refused.into_response(),
     };
     action_response(
         "workflows.resume",
@@ -798,7 +798,7 @@ async fn cancel_workflow(
 ) -> Response {
     let workflow_id = match workflow_action_id(&workflow_id) {
         Ok(workflow_id) => workflow_id,
-        Err(response) => return response,
+        Err(refused) => return refused.into_response(),
     };
     action_response(
         "workflows.cancel",

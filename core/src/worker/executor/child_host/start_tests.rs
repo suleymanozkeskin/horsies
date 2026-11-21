@@ -68,7 +68,7 @@ fn context_on(broker: PostgresBroker) -> (HostContext, UnixStream) {
 }
 
 /// A child context on `pool`; its frames go to a socket no one reads.
-fn context(pool: TestPool) -> (HostContext, UnixStream) {
+fn context(pool: &TestPool) -> (HostContext, UnixStream) {
     context_on(PostgresBroker::from_test_url(
         pool.url(),
         crate::ClientFamily::Rust,
@@ -82,7 +82,7 @@ fn unreachable_context() -> (HostContext, UnixStream) {
         .max_connections(1)
         .acquire_timeout(Duration::from_millis(100))
         .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies");
-    context(pool)
+    context(&pool)
 }
 
 /// The broker of a child whose core pool holds one connection, on the
@@ -334,7 +334,7 @@ async fn until_a_checkout_waits(pool: &CorePool) {
 async fn a_held_claim_starts_running_with_the_process_of_its_child() {
     let pool = crate::test_support::migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
-    let (context, _peer) = context(pool.clone());
+    let (context, _peer) = context(&pool);
 
     let started = start_attempt(&context, &facts(task_id, generation)).await;
 
@@ -353,7 +353,7 @@ async fn a_held_claim_starts_running_with_the_process_of_its_child() {
 async fn a_start_reports_the_started_at_that_it_wrote() {
     let pool = crate::test_support::migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
-    let (context, _peer) = context(pool.clone());
+    let (context, _peer) = context(&pool);
 
     let started = start_attempt(&context, &facts(task_id, generation)).await;
 
@@ -382,7 +382,7 @@ async fn a_start_reports_the_started_at_that_it_wrote() {
 async fn a_start_of_another_claim_generation_is_a_lost_claim() {
     let pool = crate::test_support::migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
-    let (context, _peer) = context(pool.clone());
+    let (context, _peer) = context(&pool);
     let before = live_row(&pool, task_id).await;
 
     let started = start_attempt(
@@ -402,7 +402,7 @@ async fn a_start_of_another_claim_generation_is_a_lost_claim() {
 async fn a_passed_deadline_expires_the_claim_before_the_start() {
     let pool = crate::test_support::migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, true).await;
-    let (context, _peer) = context(pool.clone());
+    let (context, _peer) = context(&pool);
 
     let started = start_attempt(&context, &facts(task_id, generation)).await;
 
@@ -428,7 +428,7 @@ async fn a_workflow_task_whose_node_is_not_linked_stops_and_writes_nothing() {
     let pool = migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
     make_workflow_task(&pool, task_id).await;
-    let (context, _peer) = context(pool.clone());
+    let (context, _peer) = context(&pool);
     let before = live_row(&pool, task_id).await;
 
     let started = start_attempt(&context, &workflow_facts(task_id, generation)).await;
@@ -475,7 +475,7 @@ async fn a_start_after_the_claim_lease_ended_is_a_lost_claim_with_no_write() {
     .execute(&pool)
     .await
     .expect("end the claim lease");
-    let (context, _peer) = context(pool.clone());
+    let (context, _peer) = context(&pool);
     let before = live_row(&pool, task_id).await;
 
     let started = start_attempt(&context, &facts(task_id, generation)).await;
@@ -495,7 +495,7 @@ async fn a_start_after_the_claim_lease_ended_is_a_lost_claim_with_no_write() {
 async fn a_refused_expiry_before_the_start_is_a_lost_claim() {
     let pool = migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, true).await;
-    let (context, _peer) = context(pool.clone());
+    let (context, _peer) = context(&pool);
     let run = facts(task_id, generation);
     let mut lock_holder = pool.begin().await.expect("begin the lock holder");
     sql::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 731))")
@@ -539,7 +539,7 @@ async fn a_resume_before_the_abandon_starts_the_task_on_the_next_attempt() {
     let (task_id, generation) = seed_claimed(&pool, false).await;
     make_workflow_task(&pool, task_id).await;
     let workflow_id = link_to_workflow(&pool, task_id, "PAUSED").await;
-    let (context, _peer) = context(pool.clone());
+    let (context, _peer) = context(&pool);
     let run = workflow_facts(task_id, generation);
     let mut resume = pool.begin().await.expect("begin the resume");
     set_workflow_status(&mut resume, workflow_id, "RUNNING").await;
@@ -660,7 +660,7 @@ async fn a_marker_that_cannot_reach_the_database_lets_the_run_go_on() {
 async fn the_start_of_the_child_writes_no_heartbeat() {
     let pool = migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
-    let (context, _peer) = context(pool.clone());
+    let (context, _peer) = context(&pool);
 
     let started = start_attempt(&context, &facts(task_id, generation)).await;
 
@@ -761,7 +761,7 @@ async fn a_refused_or_absent_expiry_is_not_an_expiry() {
 async fn a_start_that_waits_on_a_row_lock_ends_at_its_bound() {
     let pool = migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
-    let (context, _peer) = context(pool.clone());
+    let (context, _peer) = context(&pool);
     let run = facts(task_id, generation);
     let mut lock_holder = pool.begin().await.expect("begin the lock holder");
     lock_the_row(&mut lock_holder, task_id).await;
@@ -790,7 +790,7 @@ async fn a_start_that_waits_on_a_row_lock_ends_at_its_bound() {
 async fn a_marker_that_waits_on_a_row_lock_ends_at_its_bound() {
     let pool = migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
-    let (context, _peer) = context(pool.clone());
+    let (context, _peer) = context(&pool);
     let run = facts(task_id, generation);
     assert!(matches!(
         start_attempt(&context, &run).await,

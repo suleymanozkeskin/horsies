@@ -27,6 +27,11 @@ pub mod runner_beats;
 pub mod scheduler;
 mod supervision;
 mod thread_dispatch;
+#[expect(
+    clippy::module_inception,
+    reason = "the worker loop is the `worker` of the worker module; a rename moves the file, \
+              its test folder and every `worker::worker` path that source-reading tests check"
+)]
 pub mod worker;
 pub mod worker_state;
 

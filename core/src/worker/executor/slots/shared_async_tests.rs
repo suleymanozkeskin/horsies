@@ -77,7 +77,7 @@ fn children(dir: &TestDir, seats: u64, actions: &[(&ClaimedTask, String)], runs:
 }
 
 /// Log `<boot number> <task id>`, then do `action`.
-fn logged(dir: &TestDir, task: &ClaimedTask, action: String) -> String {
+fn logged(dir: &TestDir, task: &ClaimedTask, action: &str) -> String {
     format!(
         r#"echo "$n {}" >> "{}"; {action}"#,
         task.task_id,
@@ -320,7 +320,7 @@ async fn tasks_spread_over_the_open_children_by_their_runs() {
                 "sleep 0.3; {}",
                 send(&[shared_result(run_ref(task, u64::from(value)), value)])
             );
-            (task, logged(&dir, task, answer))
+            (task, logged(&dir, task, &answer))
         })
         .collect();
     let script = children(&dir, 3, &actions, 2);
@@ -363,7 +363,7 @@ async fn a_shared_child_closes_after_its_tasks_per_seat() {
         .zip(1_u32..)
         .map(|(task, value)| {
             let answer = send(&[shared_result(run_ref(task, u64::from(value)), value)]);
-            (task, logged(&dir, task, answer))
+            (task, logged(&dir, task, &answer))
         })
         .collect();
     let script = children(&dir, 2, &actions, 2);
@@ -405,11 +405,11 @@ async fn a_closing_child_finishes_its_runs_before_it_retires() {
     let actions = vec![
         (
             &tasks[0],
-            logged(&dir, &tasks[0], send_later("1.5", &[result(0)])),
+            logged(&dir, &tasks[0], &send_later("1.5", &[result(0)])),
         ),
-        (&tasks[1], logged(&dir, &tasks[1], send(&[result(1)]))),
-        (&tasks[2], logged(&dir, &tasks[2], send(&[result(2)]))),
-        (&tasks[3], logged(&dir, &tasks[3], send(&[result(3)]))),
+        (&tasks[1], logged(&dir, &tasks[1], &send(&[result(1)]))),
+        (&tasks[2], logged(&dir, &tasks[2], &send(&[result(2)]))),
+        (&tasks[3], logged(&dir, &tasks[3], &send(&[result(3)]))),
     ];
     let script = children(&dir, 2, &actions, 3);
     let spawner = Spawner::start().unwrap();
@@ -504,7 +504,7 @@ async fn a_shared_child_above_its_memory_limit_is_replaced() {
                 value,
                 rss,
             )]);
-            (task, logged(&dir, task, answer))
+            (task, logged(&dir, task, &answer))
         })
         .collect();
     let script = children(&dir, 2, &actions, 1);

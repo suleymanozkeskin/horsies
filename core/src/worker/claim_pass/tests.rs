@@ -121,8 +121,11 @@ struct ScriptedSteps {
     released: Vec<Uuid>,
     requests: Mutex<Vec<ClaimClasses>>,
     filtered: Mutex<Vec<Vec<Uuid>>>,
-    returned: Mutex<Vec<Vec<(Uuid, DateTime<Utc>)>>>,
+    returned: Mutex<Vec<ReturnedRows>>,
 }
+
+/// The rows of one return call: task id and claim generation.
+type ReturnedRows = Vec<(Uuid, DateTime<Utc>)>;
 
 impl ScriptedSteps {
     fn new(claimed: Vec<ClaimedRow>, take: ClaimTake) -> ScriptedSteps {

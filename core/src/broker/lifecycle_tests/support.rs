@@ -440,7 +440,7 @@ pub(super) async fn copy_live_row_to_history(
 pub(super) async fn force_terminal(pool: &TestPool, task_id: Uuid, status: &str, kind: &str) {
     let mut transaction = pool.begin().await.expect("begin force terminal");
     let inserted = copy_live_row_to_history(
-        &mut *transaction,
+        &mut transaction,
         task_id,
         status,
         Some(kind),
@@ -658,15 +658,6 @@ pub(super) async fn link_workflow_task(
     workflow_id
 }
 
-/// The status of a workflow node row.
-pub(super) async fn node_status(pool: &TestPool, node_row_id: Uuid) -> String {
-    sql::query_scalar("SELECT status::text FROM horsies_workflow_tasks WHERE id = $1")
-        .bind(node_row_id)
-        .fetch_one(pool)
-        .await
-        .expect("read node status")
-}
-
 /// Whether a phase-2 record waits for the task.
 pub(super) async fn phase2_pending(pool: &TestPool, task_id: Uuid) -> bool {
     sql::query_scalar(
@@ -752,7 +743,7 @@ pub(super) async fn insert_beat(
 /// Insert one heartbeat in its own transaction.
 pub(super) async fn beat(pool: &TestPool, task_id: Uuid, role: BeatRole, ago: Duration) {
     let mut connection = pool.acquire().await.expect("acquire for heartbeat");
-    insert_beat(&mut *connection, task_id, role, ago).await;
+    insert_beat(&mut connection, task_id, role, ago).await;
 }
 
 /// The constraint that a refusal must name.

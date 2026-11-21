@@ -87,8 +87,11 @@ static SWEPT: OnceCell<()> = OnceCell::const_new();
 /// The template of this process: its name.
 static TEMPLATE: OnceCell<String> = OnceCell::const_new();
 
+/// The database of one test runtime, set once by its first test.
+type RuntimeDatabaseCell = Arc<OnceCell<Arc<RuntimeDatabase>>>;
+
 /// The database of each live test runtime ([`database_of_this_test`]).
-static RUNTIME_DATABASES: LazyLock<Mutex<HashMap<RuntimeId, Arc<OnceCell<Arc<RuntimeDatabase>>>>>> =
+static RUNTIME_DATABASES: LazyLock<Mutex<HashMap<RuntimeId, RuntimeDatabaseCell>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// The prefix of every test database name.
@@ -131,12 +134,11 @@ pub(crate) fn is_generated_name(name: &str, prefix: &str) -> bool {
     let Some(rest) = name.strip_prefix(prefix) else {
         return false;
     };
-    let suffix = match (
+    let ((Some(suffix), _) | (None, Some(suffix))) = (
         rest.strip_prefix(TEMPLATE_KIND),
         rest.strip_prefix(TEST_DATABASE_KIND),
-    ) {
-        (Some(suffix), _) | (None, Some(suffix)) => suffix,
-        (None, None) => return false,
+    ) else {
+        return false;
     };
     suffix.len() == 32
         && suffix
@@ -178,9 +180,7 @@ pub(crate) fn server_url() -> String {
 /// `url` with its database replaced by `database`; the query is kept.
 pub(crate) fn with_database(url: &str, database: &str) -> String {
     let (scheme, rest) = url.split_once("://").expect("the test URL has a scheme");
-    let authority_end = rest
-        .find(|character: char| character == '/' || character == '?')
-        .unwrap_or(rest.len());
+    let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
     let (authority, remainder) = rest.split_at(authority_end);
     match remainder.split_once('?') {
         Some((_, query)) => format!("{scheme}://{authority}/{database}?{query}"),

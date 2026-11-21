@@ -244,7 +244,7 @@ fn test_queue() -> String {
     format!("timeout_{}", &Uuid::new_v4().simple().to_string()[..8])
 }
 
-fn writer(pool: TestPool) -> OutcomeWriter {
+fn writer(pool: &TestPool) -> OutcomeWriter {
     let broker = Arc::new(PostgresBroker::from_test_url(
         pool.url(),
         crate::ClientFamily::Rust,
@@ -285,7 +285,7 @@ async fn a_timeout_of_a_plain_task_owes_no_phase_two() {
     let queue = test_queue();
     let (task_id, generation) = seed(&pool, &queue, RowState::Running, WORKER_ID).await;
 
-    let settled = writer(pool.clone())
+    let settled = writer(&pool)
         .settle(&claimed(task_id, &queue, generation), timed_out())
         .await;
 
@@ -310,7 +310,7 @@ async fn a_timeout_of_a_row_still_claimed_puts_it_back_in_the_queue() {
     let queue = test_queue();
     let (task_id, generation) = seed(&pool, &queue, RowState::Claimed, WORKER_ID).await;
 
-    let settled = writer(pool.clone())
+    let settled = writer(&pool)
         .settle(&claimed(task_id, &queue, generation), timed_out())
         .await;
 
@@ -334,7 +334,7 @@ async fn a_timeout_of_a_row_this_claim_does_not_hold_changes_nothing() {
         let (task_id, generation) = seed(&pool, &queue, state, holder).await;
         let before = live_row(&pool, task_id).await;
 
-        let settled = writer(pool.clone())
+        let settled = writer(&pool)
             .settle(&claimed(task_id, &queue, generation), timed_out())
             .await;
 
@@ -423,7 +423,7 @@ async fn a_timeout_fails_a_running_row_once_and_its_replay_writes_nothing() {
     let queue = test_queue();
     let (task_id, generation) = seed(&pool, &queue, RowState::Running, WORKER_ID).await;
     let task = claimed(task_id, &queue, generation);
-    let writer = writer(pool.clone());
+    let writer = writer(&pool);
     let mut listener = listen_on_queue(&pool, &queue).await;
 
     let first = writer.settle(&task, timed_out()).await;
@@ -623,7 +623,7 @@ async fn a_timeout_of_a_workflow_task_fails_it_then_phase_two_runs() {
         ..claimed(task_id, &queue, generation)
     };
 
-    let settled = writer(pool.clone()).settle(&task, timed_out()).await;
+    let settled = writer(&pool).settle(&task, timed_out()).await;
 
     assert!(matches!(settled, Settlement::Written(_)), "{:?}", settled);
     assert_eq!(live_row(&pool, task_id).await, None);

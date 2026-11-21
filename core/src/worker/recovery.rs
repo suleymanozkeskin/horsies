@@ -215,9 +215,11 @@ mod p7_maintenance_tests {
         .await
         .unwrap();
 
-        let mut config = RetentionConfig::default();
-        config.worker_state_retention_hours = Some(1);
-        config.terminal_record_retention_hours = Some(1);
+        let config = RetentionConfig {
+            worker_state_retention_hours: Some(1),
+            terminal_record_retention_hours: Some(1),
+            ..RetentionConfig::default()
+        };
         run_retention_cleanup(
             &PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust),
             &config,
@@ -317,17 +319,21 @@ mod p7_maintenance_tests {
     #[tokio::test]
     async fn periodic_maintenance_publishes_all_health_and_contains_coverage_failure() {
         let pool = crate::test_support::migrated_pool().await;
-        let mut recovery = RecoveryConfig::default();
-        recovery.auto_requeue_stale_claimed = false;
-        recovery.auto_fail_stale_running = false;
-        recovery.auto_terminate_orphaned_workflow_tasks = false;
-        let mut retention = RetentionConfig::default();
-        retention.worker_state_retention_hours = None;
-        retention.terminal_record_retention_hours = None;
-        // Below the coverage floor of two future leaves: the coverage call
-        // fails before any write. Config validation refuses this value, so
-        // the pass sees it only when a config bypasses validation.
-        retention.history_leaf_horizon_days = 1;
+        let recovery = RecoveryConfig {
+            auto_requeue_stale_claimed: false,
+            auto_fail_stale_running: false,
+            auto_terminate_orphaned_workflow_tasks: false,
+            ..RecoveryConfig::default()
+        };
+        let retention = RetentionConfig {
+            worker_state_retention_hours: None,
+            terminal_record_retention_hours: None,
+            // Below the coverage floor of two future leaves: the coverage call
+            // fails before any write. Config validation refuses this value, so
+            // the pass sees it only when a config bypasses validation.
+            history_leaf_horizon_days: 1,
+            ..RetentionConfig::default()
+        };
         let health = new_reaper_health();
         let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
         let mut next_partition_maintenance = MaintenanceDue::now();
@@ -421,10 +427,12 @@ mod p7_maintenance_tests {
         .execute(&pool)
         .await
         .expect("seed a stale claim past its deadline");
-        let mut recovery = RecoveryConfig::default();
-        recovery.auto_requeue_stale_claimed = true;
-        recovery.auto_fail_stale_running = false;
-        recovery.auto_terminate_orphaned_workflow_tasks = false;
+        let recovery = RecoveryConfig {
+            auto_requeue_stale_claimed: true,
+            auto_fail_stale_running: false,
+            auto_terminate_orphaned_workflow_tasks: false,
+            ..RecoveryConfig::default()
+        };
         let retention = RetentionConfig::default();
         let health = new_reaper_health();
         let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
@@ -483,10 +491,12 @@ mod p7_maintenance_tests {
         .execute(&pool)
         .await
         .unwrap();
-        let mut recovery = RecoveryConfig::default();
-        recovery.auto_requeue_stale_claimed = false;
-        recovery.auto_fail_stale_running = false;
-        recovery.auto_terminate_orphaned_workflow_tasks = false;
+        let recovery = RecoveryConfig {
+            auto_requeue_stale_claimed: false,
+            auto_fail_stale_running: false,
+            auto_terminate_orphaned_workflow_tasks: false,
+            ..RecoveryConfig::default()
+        };
         let retention = RetentionConfig::default();
         let health = new_reaper_health();
         let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
@@ -531,13 +541,17 @@ mod p7_maintenance_tests {
     async fn periodic_maintenance_creates_ahead_prunes_both_partition_families_and_contains_a_blocker(
     ) {
         let pool = crate::test_support::migrated_pool().await;
-        let mut recovery = RecoveryConfig::default();
-        recovery.auto_requeue_stale_claimed = false;
-        recovery.auto_fail_stale_running = false;
-        recovery.auto_terminate_orphaned_workflow_tasks = false;
-        let mut retention = RetentionConfig::default();
-        retention.worker_state_retention_hours = Some(1);
-        retention.terminal_record_retention_hours = Some(1);
+        let recovery = RecoveryConfig {
+            auto_requeue_stale_claimed: false,
+            auto_fail_stale_running: false,
+            auto_terminate_orphaned_workflow_tasks: false,
+            ..RecoveryConfig::default()
+        };
+        let retention = RetentionConfig {
+            worker_state_retention_hours: Some(1),
+            terminal_record_retention_hours: Some(1),
+            ..RetentionConfig::default()
+        };
         // Two short periods that no other test of this database registers.
         let blocked_period = RetentionDays::parse_period(chrono::Duration::days(1)).unwrap();
         let valid_period = RetentionDays::parse_period(chrono::Duration::days(2)).unwrap();
@@ -2467,10 +2481,12 @@ mod tests {
             "the batch checkouts hold every batch connection",
         );
 
-        let mut recovery = RecoveryConfig::default();
-        recovery.auto_requeue_stale_claimed = false;
-        recovery.auto_terminate_orphaned_workflow_tasks = false;
-        recovery.auto_fail_stale_running = true;
+        let recovery = RecoveryConfig {
+            auto_requeue_stale_claimed: false,
+            auto_terminate_orphaned_workflow_tasks: false,
+            auto_fail_stale_running: true,
+            ..RecoveryConfig::default()
+        };
         let health = new_reaper_health();
         let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
         let mut next_partition_maintenance = MaintenanceDue::after(Duration::from_secs(60));

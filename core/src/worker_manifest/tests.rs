@@ -59,7 +59,7 @@ fn isolated_profile(count: u32) -> Value {
     profile
 }
 
-pub(crate) fn manifest(profiles: Value, request: Value) -> Value {
+pub(crate) fn manifest(profiles: &Value, request: &Value) -> Value {
     json!({
         "manifest_version": 1,
         "database": {
@@ -206,7 +206,10 @@ fn bounded<const MIN: u32, const MAX: u32>(value: u32) -> BoundedU32<MIN, MAX> {
 
 #[test]
 fn a_complete_manifest_parses() {
-    let manifest = parsed(&manifest(json!({"batch": full_profile()}), named("batch")));
+    let manifest = parsed(&manifest(
+        &json!({"batch": full_profile()}),
+        &named("batch"),
+    ));
     assert_eq!(manifest.manifest_version, WorkerManifestVersion::CURRENT);
     assert_eq!(
         manifest.profile,
@@ -232,7 +235,10 @@ fn a_complete_manifest_parses() {
 /// Every setting of the manifest profile reaches the config profile.
 #[test]
 fn a_profile_maps_to_the_config_profile_field_by_field() {
-    let manifest = parsed(&manifest(json!({"batch": full_profile()}), named("batch")));
+    let manifest = parsed(&manifest(
+        &json!({"batch": full_profile()}),
+        &named("batch"),
+    ));
     let profile = manifest.profiles["batch"].to_profile();
     let expected = WorkerProfile {
         isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren {
@@ -289,7 +295,7 @@ fn a_drain_timeout_is_whole_milliseconds_from_one_to_a_day() {
     ] {
         let mut profile = full_profile();
         profile["drain_timeout_ms"] = json!(milliseconds);
-        let manifest = parsed(&manifest(json!({"batch": profile}), named("batch")));
+        let manifest = parsed(&manifest(&json!({"batch": profile}), &named("batch")));
         assert_eq!(
             manifest.profiles["batch"].to_profile().drain_timeout.get(),
             duration
@@ -304,7 +310,7 @@ fn a_drain_timeout_is_whole_milliseconds_from_one_to_a_day() {
         let mut profile = full_profile();
         profile["drain_timeout_ms"] = outside;
         assert_eq!(
-            refused_path(&manifest(json!({"batch": profile}), named("batch"))),
+            refused_path(&manifest(&json!({"batch": profile}), &named("batch"))),
             "profiles.batch.drain_timeout_ms"
         );
     }
@@ -315,7 +321,7 @@ fn an_unknown_field_or_a_missing_one_is_refused_with_its_path() {
     let mut profile = full_profile();
     profile["pool"]["min_size"] = json!(1);
     assert_eq!(
-        refused_path(&manifest(json!({"batch": profile}), named("batch"))),
+        refused_path(&manifest(&json!({"batch": profile}), &named("batch"))),
         "profiles.batch.pool.min_size"
     );
     let mut profile = full_profile();
@@ -325,7 +331,7 @@ fn an_unknown_field_or_a_missing_one_is_refused_with_its_path() {
         .remove("preload");
     assert!(removed.is_some());
     assert!(
-        refused_path(&manifest(json!({"batch": profile}), named("batch")))
+        refused_path(&manifest(&json!({"batch": profile}), &named("batch")))
             .starts_with("profiles.batch")
     );
 }
@@ -344,7 +350,7 @@ fn a_bad_set_of_declared_codes_is_refused_at_the_task_field() {
         json!([7]),
         json!("RATE_LIMITED"),
     ] {
-        let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+        let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
         document["tasks"]["app.tasks.fetch"]["error_codes"] = codes.clone();
         let path = refused_path(&document);
         assert!(
@@ -375,7 +381,7 @@ fn a_metrics_endpoint_is_an_address_in_bounds_or_none() {
             65_535,
         ),
     ] {
-        let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+        let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
         document["metrics_endpoint"] = endpoint;
         match parsed(&document).metrics_endpoint {
             MetricsEndpoint::ListenAddress {
@@ -388,7 +394,7 @@ fn a_metrics_endpoint_is_an_address_in_bounds_or_none() {
             MetricsEndpoint::NoMetricsEndpoint => panic!("an address is an endpoint"),
         }
     }
-    let document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     assert_eq!(
         parsed(&document).metrics_endpoint,
         MetricsEndpoint::NoMetricsEndpoint
@@ -406,12 +412,12 @@ fn a_metrics_endpoint_is_an_address_in_bounds_or_none() {
         json!({"kind": "DEFAULT"}),
         json!("0.0.0.0:9100"),
     ] {
-        let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+        let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
         document["metrics_endpoint"] = endpoint.clone();
         let path = refused_path(&document);
         assert!(path.starts_with("metrics_endpoint"), "{endpoint}: {path}");
     }
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     let _removed = document
         .as_object_mut()
         .expect("a manifest is an object")
@@ -422,13 +428,13 @@ fn a_metrics_endpoint_is_an_address_in_bounds_or_none() {
 /// A task record holds both facts and nothing else.
 #[test]
 fn a_task_record_without_its_codes_or_with_another_field_is_refused() {
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["tasks"]["app.tasks.add"] = json!({"execution": "ISOLATED"});
     assert!(refused_path(&document).starts_with("tasks."));
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["tasks"]["app.tasks.add"] = json!("ISOLATED");
     assert!(refused_path(&document).starts_with("tasks."));
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["tasks"]["app.tasks.add"]["queue"] = json!("default");
     assert!(refused_path(&document).starts_with("tasks."));
 }
@@ -437,7 +443,7 @@ fn a_task_record_without_its_codes_or_with_another_field_is_refused() {
 /// both span switches parse from their wire names.
 #[test]
 fn the_handlers_and_the_span_switch_parse() {
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["handlers"] = json!({
         "kind": "HANDLERS",
         "handlers": [
@@ -471,7 +477,7 @@ fn the_handlers_and_the_span_switch_parse() {
 }
 
 fn manifest_with_no_handler() -> Value {
-    manifest(json!({"batch": full_profile()}), named("batch"))
+    manifest(&json!({"batch": full_profile()}), &named("batch"))
 }
 
 /// A handler list is refused at its field when it is empty, holds more than
@@ -542,7 +548,10 @@ fn the_declared_codes_of_a_task_give_its_error_code_labels() {
     use crate::core::task::{
         error_code_label, ErrorCodeLabel, OperationalErrorCode, TaskErrorCode, UserCode,
     };
-    let manifest = parsed(&manifest(json!({"batch": full_profile()}), named("batch")));
+    let manifest = parsed(&manifest(
+        &json!({"batch": full_profile()}),
+        &named("batch"),
+    ));
     let fetch = &manifest.tasks["app.tasks.fetch"].error_codes;
     let declared = TaskErrorCode::User(UserCode::parse("RATE_LIMITED").expect("a user code"));
     let other = TaskErrorCode::User(UserCode::parse("GONE").expect("a user code"));
@@ -554,27 +563,30 @@ fn the_declared_codes_of_a_task_give_its_error_code_labels() {
 
 #[test]
 fn another_manifest_version_is_refused() {
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["manifest_version"] = json!(2);
     assert_eq!(refused_path(&document), "manifest_version");
 }
 
 #[test]
 fn a_refusal_never_holds_the_url_password() {
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["claim"]["prefetch_buffer"] = json!("postgresql://u:secret@h/d");
     let refused = parse_worker_manifest(&document.to_string()).expect_err("text is not a count");
     assert_eq!(refused.field_path, "claim.prefetch_buffer");
     assert!(!refused.to_string().contains("secret"));
-    let manifest = parsed(&manifest(json!({"batch": full_profile()}), named("batch")));
+    let manifest = parsed(&manifest(
+        &json!({"batch": full_profile()}),
+        &named("batch"),
+    ));
     assert!(!format!("{manifest:?}").contains("secret"));
 }
 
 #[test]
 fn the_named_profile_is_selected() {
     let manifest = parsed(&manifest(
-        json!({"batch": full_profile(), "small": isolated_profile(1)}),
-        named("small"),
+        &json!({"batch": full_profile(), "small": isolated_profile(1)}),
+        &named("small"),
     ));
     let selected = manifest
         .selected_profile()
@@ -588,7 +600,7 @@ fn the_named_profile_is_selected() {
 #[test]
 fn no_name_and_an_unknown_name_are_refused_with_the_defined_names() {
     let profiles = json!({"small": isolated_profile(1), "batch": full_profile()});
-    let not_given = parsed(&manifest(profiles.clone(), json!({"kind": "NOT_GIVEN"})))
+    let not_given = parsed(&manifest(&profiles, &json!({"kind": "NOT_GIVEN"})))
         .selected_profile()
         .expect_err("no profile was named");
     let ProfileSelectionRefused::NotGiven { defined } = &not_given else {
@@ -611,7 +623,7 @@ fn no_name_and_an_unknown_name_are_refused_with_the_defined_names() {
         Some("start the worker with: horsies worker <app> --profile batch")
     );
 
-    let unknown = parsed(&manifest(profiles, named("large")))
+    let unknown = parsed(&manifest(&profiles, &named("large")))
         .selected_profile()
         .expect_err("large is not a profile of the set");
     let [error]: [HorsiesError; 1] = unknown.errors().try_into().expect("one error");
@@ -621,7 +633,7 @@ fn no_name_and_an_unknown_name_are_refused_with_the_defined_names() {
 
 #[test]
 fn an_app_with_no_profiles_is_told_how_to_add_one() {
-    let refused = parsed(&manifest(json!({}), named("default")))
+    let refused = parsed(&manifest(&json!({}), &named("default")))
         .selected_profile()
         .expect_err("the set is empty");
     let [error]: [HorsiesError; 1] = refused.errors().try_into().expect("one error");
@@ -647,8 +659,8 @@ fn a_profile_of_the_set_that_validation_refuses_stops_the_selection() {
     idle["isolated"] = json!({"kind": "NO_CHILDREN"});
     idle["shared_async"] = json!({"kind": "NO_CHILDREN"});
     let refused = parsed(&manifest(
-        json!({"batch": full_profile(), "idle": idle}),
-        named("batch"),
+        &json!({"batch": full_profile(), "idle": idle}),
+        &named("batch"),
     ))
     .selected_profile()
     .expect_err("idle starts no children");
@@ -667,7 +679,7 @@ fn a_profile_of_the_set_that_validation_refuses_stops_the_selection() {
 fn a_claim_limit_above_the_capacity_with_the_prefetch_buffer_is_refused() {
     let mut profile = isolated_profile(1);
     profile["claim"]["claimed_per_worker"] = json!({"kind": "TASKS", "tasks": 3});
-    let mut document = manifest(json!({"small": profile}), named("small"));
+    let mut document = manifest(&json!({"small": profile}), &named("small"));
     document["claim"]["prefetch_buffer"] = json!(2);
     assert!(parsed(&document).selected_profile().is_ok());
     document["claim"]["prefetch_buffer"] = json!(1);
@@ -685,7 +697,10 @@ fn a_claim_limit_above_the_capacity_with_the_prefetch_buffer_is_refused() {
 /// worker pre-ping.
 #[test]
 fn the_worker_process_pool_is_the_resolved_pool_of_the_profile() {
-    let manifest = parsed(&manifest(json!({"batch": full_profile()}), named("batch")));
+    let manifest = parsed(&manifest(
+        &json!({"batch": full_profile()}),
+        &named("batch"),
+    ));
     let selected = manifest
         .selected_profile()
         .expect("batch is a valid profile");
@@ -706,7 +721,7 @@ fn the_worker_process_pool_is_the_resolved_pool_of_the_profile() {
 
 #[test]
 fn keepalives_off_and_the_system_timeout_reach_the_worker_process_config() {
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["database"]["tcp_keepalives"] = json!({"kind": "OFF"});
     document["database"]["tcp_user_timeout"] = json!({"kind": "SYSTEM_DEFAULT"});
     let manifest = parsed(&document);
@@ -725,7 +740,7 @@ fn keepalives_off_and_the_system_timeout_reach_the_worker_process_config() {
 #[test]
 fn a_missing_or_out_of_bound_socket_setting_is_refused() {
     for field in ["tcp_keepalives", "tcp_user_timeout"] {
-        let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+        let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
         let removed = document["database"]
             .as_object_mut()
             .expect("the database section is an object")
@@ -733,7 +748,7 @@ fn a_missing_or_out_of_bound_socket_setting_is_refused() {
         assert!(removed.is_some());
         assert!(refused_path(&document).starts_with("database"), "{field}");
     }
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["database"]["tcp_keepalives"]["probes"] = json!(0);
     // An internally tagged enum reads its content after its tag, so the path
     // ends at the enum.
@@ -749,7 +764,7 @@ fn each_choice_parses_from_its_wire_name() {
         ("ERROR", WorkerLogLevel::Error),
         ("CRITICAL", WorkerLogLevel::Critical),
     ] {
-        let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+        let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
         document["child_launch"]["log_level"] = json!(wire);
         assert_eq!(parsed(&document).child_launch.log_level, level);
     }
@@ -760,10 +775,10 @@ fn each_choice_parses_from_its_wire_name() {
     ] {
         let mut profile = full_profile();
         profile["preload"] = json!(wire);
-        let manifest = parsed(&manifest(json!({"batch": profile}), named("batch")));
+        let manifest = parsed(&manifest(&json!({"batch": profile}), &named("batch")));
         assert_eq!(manifest.profiles["batch"].to_profile().preload, preload);
     }
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["claim"]["claim_lease"] = json!({"kind": "MILLISECONDS", "ms": 30_000});
     document["claim"]["queues"] = json!({"kind": "DEFAULT"});
     document["child_launch"]["program"] = json!({"kind": "RUST"});
@@ -779,7 +794,7 @@ fn each_choice_parses_from_its_wire_name() {
 #[test]
 fn a_queue_priority_outside_one_to_a_hundred_is_refused() {
     for priority in [0, MAX_QUEUE_PRIORITY + 1] {
-        let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+        let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
         document["claim"]["queues"]["queues"][0]["priority"] = json!(priority);
         // An internally tagged enum reads its content after its tag, so the
         // path ends at the enum.
@@ -790,7 +805,10 @@ fn a_queue_priority_outside_one_to_a_hundred_is_refused() {
 /// Every field of the recovery section reaches the config type.
 #[test]
 fn the_recovery_section_maps_to_the_config_field_by_field() {
-    let manifest = parsed(&manifest(json!({"batch": full_profile()}), named("batch")));
+    let manifest = parsed(&manifest(
+        &json!({"batch": full_profile()}),
+        &named("batch"),
+    ));
     let config = manifest.recovery.to_config();
     assert!(config.auto_requeue_stale_claimed);
     assert_eq!(config.claimed_stale_threshold_ms, 120_000);
@@ -813,7 +831,10 @@ fn the_recovery_section_maps_to_the_config_field_by_field() {
 /// is whole days and the paused age is exact to the microsecond.
 #[test]
 fn the_retention_section_maps_to_the_config_field_by_field() {
-    let manifest = parsed(&manifest(json!({"batch": full_profile()}), named("batch")));
+    let manifest = parsed(&manifest(
+        &json!({"batch": full_profile()}),
+        &named("batch"),
+    ));
     let config = manifest.retention.to_config();
     assert_eq!(config.worker_state_retention_hours, Some(168));
     assert_eq!(config.terminal_record_retention_hours, None);
@@ -844,7 +865,7 @@ fn the_retention_section_maps_to_the_config_field_by_field() {
 /// The other variant of each retention choice.
 #[test]
 fn a_retention_rule_that_is_off_maps_to_none() {
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["retention"]["worker_state_retention"] = json!({"kind": "NO_PRUNING"});
     document["retention"]["terminal_record_retention"] = json!({"kind": "HOURS", "hours": 43_800});
     document["retention"]["paused_workflow_auto_cancel_after"] = json!({"kind": "NO_EXPIRY"});
@@ -863,22 +884,22 @@ fn a_retention_value_outside_its_bounds_is_refused() {
         0,
         u32::from(crate::core::history::periods::MAX_RETENTION_DAYS) + 1,
     ] {
-        let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+        let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
         document["retention"]["retention_periods"] = json!([days]);
         assert!(
             refused_path(&document).starts_with("retention.retention_periods"),
             "{days}"
         );
     }
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["retention"]["paused_workflow_auto_cancel_after"] =
         json!({"kind": "AFTER", "micros": 0});
     assert!(refused_path(&document).starts_with("retention.paused_workflow_auto_cancel_after"));
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["retention"]["paused_workflow_auto_cancel_after"] =
         json!({"kind": "AFTER", "micros": MAX_PAUSED_AGE_MICROS + 1});
     assert!(refused_path(&document).starts_with("retention.paused_workflow_auto_cancel_after"));
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["retention"]["paused_workflow_auto_cancel_after"] =
         json!({"kind": "AFTER", "micros": MAX_PAUSED_AGE_MICROS});
     let config = parsed(&document).retention.to_config();
@@ -894,7 +915,7 @@ fn a_retention_value_outside_its_bounds_is_refused() {
 /// config's 0.
 #[test]
 fn the_resilience_section_maps_to_the_config_and_no_limit_is_zero() {
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     let config = parsed(&document).resilience.to_config();
     assert_eq!(config.db_retry_initial_ms, 250);
     assert_eq!(config.db_retry_max_ms, 20_000);
@@ -916,7 +937,7 @@ fn the_resilience_section_maps_to_the_config_and_no_limit_is_zero() {
 /// bytes is refused.
 #[test]
 fn the_payload_section_maps_to_the_config_and_refuses_zero_bytes() {
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     let config = parsed(&document).payload.to_config();
     assert_eq!(config.warn_bytes, Some(1_048_576));
     assert_eq!(config.reject_bytes, None);
@@ -935,7 +956,7 @@ fn the_payload_section_maps_to_the_config_and_refuses_zero_bytes() {
 #[test]
 fn a_missing_section_is_refused() {
     for section in ["recovery", "retention", "resilience", "payload"] {
-        let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+        let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
         let removed = document
             .as_object_mut()
             .expect("a manifest is an object")
@@ -952,7 +973,7 @@ fn a_missing_section_is_refused() {
 /// preload process parses too.
 #[test]
 fn the_preload_launch_parses_in_both_forms() {
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     let preload = parsed(&document).child_launch.preload;
     match preload {
         PreloadLaunch::Command { command } => {
@@ -987,7 +1008,7 @@ fn a_profile_set_parses_as_the_profiles_of_a_manifest() {
 
     let set = parse_worker_profiles(&profiles.to_string()).expect("a valid profile set");
 
-    let from_manifest = parsed(&manifest(profiles, named("batch"))).profile_set();
+    let from_manifest = parsed(&manifest(&profiles, &named("batch"))).profile_set();
     assert_eq!(set, from_manifest);
 }
 

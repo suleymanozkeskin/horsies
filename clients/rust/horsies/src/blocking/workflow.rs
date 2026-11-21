@@ -81,12 +81,12 @@ fn block_start<H>(
             retryable: true,
             workflow_name: names.workflow_name.to_owned(),
             workflow_id,
-            cause: WorkflowError::Broker(BrokerError::ProcessRuntime(
+            cause: Box::new(WorkflowError::Broker(BrokerError::ProcessRuntime(
                 ProcessRuntimeRefusal::StartFailed {
                     cause: failed.cause,
                     os_error: failed.os_error,
                 },
-            )),
+            ))),
         }),
     }
 }

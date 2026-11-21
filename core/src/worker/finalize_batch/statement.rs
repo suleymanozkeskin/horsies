@@ -170,7 +170,7 @@ fn decode_outcome(row: &Row) -> Result<TerminalizationOutcome, BatchWriteError> 
     let raw = raw_outcome(row).map_err(|error| BatchWriteError::ContractBroken {
         detail: error.to_string(),
     })?;
-    decode_raw(raw).map_err(|error| BatchWriteError::ContractBroken {
+    decode_raw(&raw).map_err(|error| BatchWriteError::ContractBroken {
         detail: format!("{}: {error}", COMPLETE_PLAIN_SUCCESSES.name()),
     })
 }

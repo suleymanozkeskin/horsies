@@ -177,7 +177,7 @@ impl PostgresBroker {
             .map_err(|failure: ParentAdvanceFailure| ParentAdvanceStopped {
                 failed_child_workflow_id: failure.failed_child_workflow_id,
                 still_owed: failure.still_owed().child_workflow_ids().to_vec(),
-                error: failure.error,
+                error: *failure.error,
             })
     }
 }

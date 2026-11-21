@@ -148,6 +148,7 @@ impl PoolService {
     /// shared slot (Python `core/worker/config.py`, the seat count). The
     /// claim of today takes this one number until it takes a budget per
     /// class.
+    #[cfg(test)]
     pub fn total_capacity(&self) -> u32 {
         self.capacities()
             .iter()

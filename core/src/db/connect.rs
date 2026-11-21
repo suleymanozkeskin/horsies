@@ -129,7 +129,7 @@ impl fmt::Debug for ConnectPlan {
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectPlanError {
     #[error("{0}")]
-    Tls(TlsLoadError),
+    Tls(Box<TlsLoadError>),
     #[error("{0}")]
     PasswordFile(PasswordFileError),
     #[error("the URL names no user and the process user name could not be read: {cause}")]
@@ -165,7 +165,8 @@ impl ConnectPlan {
             DatabaseName::SameAsUser => user.clone(),
         };
         let password = resolve_password(settings, environment, &user, &database)?;
-        let loaded = load_tls(settings.tls(), environment.home()).map_err(ConnectPlanError::Tls)?;
+        let loaded = load_tls(settings.tls(), environment.home())
+            .map_err(|error| ConnectPlanError::Tls(Box::new(error)))?;
         let base = base_config(settings, &user, &database, &password, socket);
         let attempts = match &loaded.policy {
             TlsPolicy::Disabled => {

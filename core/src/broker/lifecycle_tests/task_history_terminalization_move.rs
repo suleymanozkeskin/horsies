@@ -143,7 +143,7 @@ async fn duplicate_identity_fails_closed() {
     let attempts_before = live_attempts(&pool, task_id).await;
     let mut connection = pool.acquire().await.expect("acquire");
     let copied = copy_live_row_to_history(
-        &mut *connection,
+        &mut connection,
         task_id,
         "COMPLETED",
         Some("COMPLETE_FUSED"),

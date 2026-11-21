@@ -5,7 +5,7 @@
 //! - [`preload_plan`]: the preload process of the profile, when its children
 //!   fork from one.
 //! - [`WorkerChildren::start`]: the pools of the profile, booting at once.
-//! - [`WorkerChildren::submit`]: the route of a claimed row and its submit
+//! - [`WorkerChildren::submit_watched`]: the route of a claimed row and its submit
 //!   to the pool of its kind.
 //! - [`WorkerChildren::service`]: the capacity in service of each budget, for
 //!   the claim; [`WorkerChildren::down_slots`] for the worker snapshot.
@@ -252,9 +252,8 @@ fn init_frame(launch: &ChildLaunch, child_kind: ChildKind) -> InitFrame {
 /// handler kind and its process name, on the CPUs of the children of
 /// `placement`, with the bounds of a worker. Pure.
 pub fn handler_child_config(launch: &ChildLaunch, placement: &CpuPlacement) -> HandlerChildConfig {
-    let task_send_pool = match TaskSendPool::new(HANDLER_TASK_SEND_CONNECTIONS) {
-        Some(pool) => pool,
-        None => panic!("HANDLER_TASK_SEND_CONNECTIONS is within the bounds of a task send pool"),
+    let Some(task_send_pool) = TaskSendPool::new(HANDLER_TASK_SEND_CONNECTIONS) else {
+        panic!("HANDLER_TASK_SEND_CONNECTIONS is within the bounds of a task send pool")
     };
     HandlerChildConfig {
         command: launch.command.clone(),
@@ -566,6 +565,7 @@ impl WorkerChildren {
     }
 
     /// Every slot that is down, with its board index, for the snapshot.
+    #[cfg(test)]
     pub fn down_slots(&self) -> Vec<(usize, DownState)> {
         self.view.down_slots()
     }
@@ -591,11 +591,12 @@ impl WorkerChildren {
     /// `Submitted::Queued`, exactly once. A row of a class this worker does
     /// not serve, or a route to a kind with no pool, never reaches a child:
     /// `NotDispatched(NoChildOfItsKind)`; its claim goes back to the queue.
+    #[cfg(test)]
     pub fn submit(&self, claimed: Claimed) -> Submitted {
         self.submit_watched(claimed, PlacementWatch::Unwatched)
     }
 
-    /// As [`WorkerChildren::submit`]; `watch` is told when a child takes the
+    /// As `WorkerChildren::submit`; `watch` is told when a child takes the
     /// task. A task that reaches no child drops `watch` untold.
     pub fn submit_watched(&self, claimed: Claimed, watch: PlacementWatch) -> Submitted {
         let Claimed { task, input } = claimed;

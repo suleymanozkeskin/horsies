@@ -122,7 +122,9 @@ async fn refused_sqlstate(
             .sqlstate()
             .map(str::to_owned)
             .unwrap_or_else(|| panic!("no SQLSTATE: {error}")),
-        other => panic!("expected a database refusal, got {other:?}"),
+        InTransactionError::Contract(error) => {
+            panic!("expected a database refusal, got Contract({error:?})")
+        }
     }
 }
 

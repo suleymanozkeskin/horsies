@@ -44,7 +44,7 @@ pub(crate) struct PoolingCheckPassed;
 /// What the check found.
 enum PoolingVerdict {
     KeepsTransactions,
-    StatementPooled(DbError),
+    StatementPooled(Box<DbError>),
     Failed(PoolingCheckFailure),
 }
 
@@ -91,7 +91,7 @@ async fn judge(client: &Client) -> PoolingVerdict {
     for step in TRANSACTION_STEPS {
         if let Err(error) = client.batch_execute(step).await {
             return match error.as_db_error().cloned() {
-                Some(server_error) => PoolingVerdict::StatementPooled(server_error),
+                Some(server_error) => PoolingVerdict::StatementPooled(Box::new(server_error)),
                 None => PoolingVerdict::Failed(PoolingCheckFailure::ConnectionLost(error)),
             };
         }

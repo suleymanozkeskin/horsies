@@ -110,7 +110,7 @@ fn a_value_that_is_not_json_is_a_serialization_error() {
     let parsed: TaskResult<serde_json::Value> = serde_json::from_str(&envelope).unwrap();
     match parsed {
         TaskResult::Err(error) => {
-            assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR")
+            assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
         }
         TaskResult::Ok(_) => panic!("expected an error envelope"),
     }

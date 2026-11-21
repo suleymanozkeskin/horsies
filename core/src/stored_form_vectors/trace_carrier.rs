@@ -44,7 +44,7 @@ fn form() -> TraceCarrierForm {
 /// The bytes of the hex text `hex` (two lowercase digits per byte).
 fn hex_bytes(name: &str, hex: &str) -> Vec<u8> {
     assert!(
-        hex.len() % 2 == 0,
+        hex.len().is_multiple_of(2),
         "{name}: {hex} has an odd number of digits"
     );
     (0..hex.len())

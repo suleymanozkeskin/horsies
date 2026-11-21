@@ -18,7 +18,7 @@
 //! - A fork request sets `PR_SET_CHILD_SUBREAPER`, sends the byte `S` with
 //!   the child end of a new socket pair through `SCM_RIGHTS`, and waits for
 //!   `child_forked`. At its end the flag is cleared, and the exited orphans
-//!   that landed on the worker are reaped, at most [`ORPHAN_SWEEP_LIMIT`].
+//!   that landed on the worker are reaped, at most `ORPHAN_SWEEP_LIMIT`.
 //!   The forked child is watched through a pidfd and reaped as an `exec`
 //!   child is.
 //! - A request that gives no child starts the child with `exec` and a new
@@ -68,7 +68,8 @@ pub const PRELOAD_RESTART_DELAY: Duration = Duration::from_secs(5);
 /// (Python `PRELOAD_RESTART_LIMIT`).
 pub const PRELOAD_RESTART_LIMIT: u32 = 5;
 /// The most landed orphans that one sweep reaps (Python
-/// `ORPHAN_SWEEP_LIMIT`).
+/// `ORPHAN_SWEEP_LIMIT`). Only the Linux fork path sweeps.
+#[cfg(target_os = "linux")]
 pub const ORPHAN_SWEEP_LIMIT: u32 = 64;
 /// The most reads of the preload socket in one pass of the spawner loop. A
 /// preload frame has no body and fits one read; more input waits for the
@@ -111,7 +112,9 @@ pub struct PreloadPlan {
 pub enum PreloadUnsupported {
     /// The platform has no preload path; `exec` is the normal path there.
     NotLinux { platform: &'static str },
-    /// This Linux kernel refuses a pidfd or the subreaper flag.
+    /// This Linux kernel refuses a pidfd or the subreaper flag. Only a Linux
+    /// host builds it; the tests of every platform build it too.
+    #[cfg(any(test, target_os = "linux"))]
     MissingKernelSupport { reason: String },
 }
 
@@ -124,6 +127,7 @@ impl fmt::Display for PreloadUnsupported {
                     "the preload path needs Linux, this is {platform}"
                 )
             }
+            #[cfg(any(test, target_os = "linux"))]
             Self::MissingKernelSupport { reason } => formatter.write_str(reason),
         }
     }
@@ -832,7 +836,7 @@ impl SpawnerLoop {
     ) {
         let (watch, watch_error) = self.watch.watch(pid);
         let id = ChildId {
-            serial: self.next_id,
+            _serial: self.next_id,
             pid,
         };
         self.next_id += 1;

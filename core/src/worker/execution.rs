@@ -22,9 +22,11 @@ use std::collections::HashSet;
 use std::time::Duration;
 use uuid::Uuid;
 
+#[cfg(test)]
+use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::attempt_writes::{
     finish_failed_attempt, finish_unreported_attempt, finish_workflow_success, AttemptFailure,
-    AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement, RetryRequest,
+    AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryRequest,
 };
 use crate::broker::child_writes::{query_within, WriteDeadline};
 use crate::broker::core_rows::{column, one_row, scalar, StatementLog};
@@ -35,6 +37,7 @@ use crate::core::codec::check_json_text;
 use crate::core::codec::user_value::{
     check_input_members, check_input_text, input_text_kind, InputRefused, InputText,
 };
+#[cfg(test)]
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::lifecycle::{
     AfterFailure, AttemptWriteRefusal, FailedAttemptOutcome, OwnedClaim, PhaseTwoStep,
@@ -57,7 +60,10 @@ use crate::workflow_engine::steps::{
     NodeFinishDisposition, OwedParentAdvances,
 };
 
-use crate::worker::executor::slots::{AttemptLog, ClaimedTask, RetryFacts};
+use crate::worker::executor::slots::AttemptLog;
+#[cfg(test)]
+use crate::worker::executor::slots::{ClaimedTask, RetryFacts};
+#[cfg(test)]
 use crate::worker::retry::{admit_retry, RetryAdmission, StoredOptions};
 
 use self::parse::workflow_ctx_text;
@@ -376,6 +382,7 @@ fn input_refused(refusal: &InputRefused) -> TaskError {
 /// `task` is the claimed task as the claim returned it: its claim generation
 /// fences every write, and its retry facts and stored options decide the
 /// retry of a failure.
+#[cfg(test)]
 pub(crate) async fn persist_terminal_state(
     broker: &PostgresBroker,
     task: &ClaimedTask,
@@ -428,7 +435,7 @@ pub(crate) async fn persist_terminal_state(
             let retry = retry_request_for(&task.retry, &task.options, error_code.as_deref());
             let result_json =
                 serde_json::to_string(&TaskResult::<serde_json::Value>::Err(task_error.clone()))
-                    .map_err(|error| envelope_error(task_id, error))?;
+                    .map_err(|error| envelope_error(task_id, &error))?;
             // Warn-only: error envelopes can carry oversized data too.
             enforce_payload_policy(
                 payload_policy,
@@ -458,6 +465,7 @@ pub(crate) async fn persist_terminal_state(
 /// (Python `retry_request_for`). Pure. `retry_count` and `max_retries` come
 /// from the claim of this claim generation; the write fences on that count.
 /// The deadline is judged by the write, on the database clock.
+#[cfg(test)]
 fn retry_request_for(
     retry: &RetryFacts,
     stored_options: &StoredOptions,
@@ -508,7 +516,7 @@ pub(crate) async fn persist_ok_result(
         }
     };
     let result_json = serde_json::to_string(&TaskResult::Ok(raw))
-        .map_err(|error| envelope_error(task_id, error))?;
+        .map_err(|error| envelope_error(task_id, &error))?;
     match is_workflow_task {
         true => persist_workflow_success(broker, task_id, fence, result_json).await,
         false => persist_plain_success(broker, task_id, fence, result_json).await,
@@ -531,10 +539,10 @@ async fn persist_plain_success(
     };
     let (open, _write) = broker
         .core_pools_for_write()
-        .map_err(|error| phase1_error(task_id, "complete-fused", error))?;
+        .map_err(|error| phase1_error(task_id, "complete-fused", &error))?;
     let outcomes = terminalize(open.main(), broker.statement_log(), &command)
         .await
-        .map_err(|error| phase1_error(task_id, "complete-fused", error))?;
+        .map_err(|error| phase1_error(task_id, "complete-fused", &error))?;
     match outcomes.into_iter().next() {
         // A replay found its own class committed: nothing is owed.
         Some(
@@ -569,10 +577,10 @@ async fn persist_workflow_success(
     };
     let (open, _write) = broker
         .core_pools_for_write()
-        .map_err(|error| phase1_error(task_id, "workflow success", error))?;
+        .map_err(|error| phase1_error(task_id, "workflow success", &error))?;
     let outcome = finish_workflow_success(open.main(), broker.statement_log(), &command)
         .await
-        .map_err(|error| phase1_error(task_id, "workflow success", error))?;
+        .map_err(|error| phase1_error(task_id, "workflow success", &error))?;
     match outcome {
         WorkflowSuccessOutcome::SuccessApplied { phase_two, .. } => Ok(FinalizeOutcome::Terminal {
             capacity_notified: false,
@@ -607,7 +615,7 @@ pub(crate) async fn persist_undecodable_result(
         message.clone(),
     );
     let result_json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error))
-        .map_err(|error| envelope_error(task_id, error))?;
+        .map_err(|error| envelope_error(task_id, &error))?;
     let command = FinishFailedAttempt {
         task_id,
         fence,
@@ -638,10 +646,10 @@ pub(crate) async fn persist_failed_attempt(
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let (open, _write) = broker
         .core_pools_for_write()
-        .map_err(|error| phase1_error(command.task_id, "failed attempt", error))?;
+        .map_err(|error| phase1_error(command.task_id, "failed attempt", &error))?;
     let outcome = finish_failed_attempt(open.main(), broker.statement_log(), command)
         .await
-        .map_err(|error| phase1_error(command.task_id, "failed attempt", error))?;
+        .map_err(|error| phase1_error(command.task_id, "failed attempt", &error))?;
     after_failed_attempt(broker, command, log, is_workflow_task, outcome).await
 }
 
@@ -670,10 +678,10 @@ pub(crate) async fn persist_unreported_attempt(
 ) -> Result<UnreportedAttemptWrite, FinalizeError> {
     let (open, _write) = broker
         .core_pools_for_write()
-        .map_err(|error| phase1_error(command.task_id, "unreported attempt", error))?;
+        .map_err(|error| phase1_error(command.task_id, "unreported attempt", &error))?;
     let outcome = finish_unreported_attempt(open.main(), broker.statement_log(), command)
         .await
-        .map_err(|error| phase1_error(command.task_id, "unreported attempt", error))?;
+        .map_err(|error| phase1_error(command.task_id, "unreported attempt", &error))?;
     match outcome {
         UnreportedAttemptOutcome::Released(_) => Ok(UnreportedAttemptWrite::ClaimReleased),
         UnreportedAttemptOutcome::Failed(failed) => {
@@ -808,7 +816,7 @@ async fn replay_of_committed_write(
 }
 
 /// The phase-1 error of a failed write: retryable when the connection failed.
-fn phase1_error(task_id: Uuid, write: &str, error: crate::broker::BrokerError) -> FinalizeError {
+fn phase1_error(task_id: Uuid, write: &str, error: &crate::broker::BrokerError) -> FinalizeError {
     FinalizeError {
         stage: FinalizeStage::Phase1Persist,
         task_id,
@@ -819,7 +827,7 @@ fn phase1_error(task_id: Uuid, write: &str, error: crate::broker::BrokerError) -
 
 /// A result envelope that does not encode is a defect of the value, not of
 /// the database: not retryable.
-fn envelope_error(task_id: Uuid, error: serde_json::Error) -> FinalizeError {
+fn envelope_error(task_id: Uuid, error: &serde_json::Error) -> FinalizeError {
     FinalizeError {
         stage: FinalizeStage::Phase1Persist,
         task_id,
@@ -907,8 +915,7 @@ static SEND_PHASE2_WAKE: TypedStatement = TypedStatement::new(
 );
 
 /// Send `wake` as one statement in autocommit on `pool`, a per-task write
-/// ([`CheckoutClass::Reserved`]). Writes nothing else. [`Phase2Wake::NoWake`]
-/// sends nothing.
+/// ([`CheckoutClass::Reserved`]). Writes nothing else.
 ///
 /// Errors: the failed statement, for example on a dead connection or a
 /// channel name that the server refuses; nothing was sent, or the outcome is
@@ -931,7 +938,6 @@ pub(crate) async fn send_phase2_wake(
             .await
             .map(|_notified| ())
         }
-        Phase2Wake::NoWake => Ok(()),
     }
 }
 

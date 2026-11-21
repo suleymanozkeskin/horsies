@@ -247,7 +247,7 @@ mod tests {
     use chrono::TimeZone;
     use serde_json::json;
 
-    fn entry(slot: Value) -> Value {
+    fn entry(slot: &Value) -> Value {
         json!({
             "slot": slot,
             "cause": {"kind": "resource_shortage", "errno": "EMFILE"},
@@ -258,7 +258,7 @@ mod tests {
     }
 
     fn with_field(field: &str, value: Value) -> Value {
-        let mut stored = entry(json!(1));
+        let mut stored = entry(&json!(1));
         stored[field] = value;
         json!([stored])
     }
@@ -279,10 +279,10 @@ mod tests {
 
     #[test]
     fn down_slots_read_every_field_in_slot_order() {
-        let mut thread = entry(json!(0));
+        let mut thread = entry(&json!(0));
         thread["cause"] = json!({"kind": "thread_start_refused"});
         thread["down_since"] = json!("2026-01-01T02:00:00+02:00");
-        let stored = json!([entry(json!(3)), thread]);
+        let stored = json!([entry(&json!(3)), thread]);
 
         let Ok(SlotHealth::SlotsDown(slots)) = parse_slot_health(&stored, 4) else {
             panic!("two down slots");
@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn more_entries_than_processes_is_unreadable() {
-        let stored = json!([entry(json!(0)), entry(json!(1))]);
+        let stored = json!([entry(&json!(0)), entry(&json!(1))]);
         assert_eq!(
             reason(&stored, 1),
             "slots_down lists more slots than processes"
@@ -350,19 +350,19 @@ mod tests {
     #[test]
     fn a_slot_outside_the_processes_or_not_a_whole_number_is_unreadable() {
         assert_eq!(
-            reason(&json!([entry(json!(2))]), 2),
+            reason(&json!([entry(&json!(2))]), 2),
             "slot 2 is out of range"
         );
         assert_eq!(
-            reason(&json!([entry(json!(-1))]), 2),
+            reason(&json!([entry(&json!(-1))]), 2),
             "slot -1 is out of range"
         );
         assert_eq!(
-            reason(&json!([entry(json!("1"))]), 2),
+            reason(&json!([entry(&json!("1"))]), 2),
             "slot '1' is out of range"
         );
         assert_eq!(
-            reason(&json!([entry(json!(true))]), 2),
+            reason(&json!([entry(&json!(true))]), 2),
             "slot True is not a whole number"
         );
     }
@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn one_slot_named_twice_is_unreadable() {
-        let stored = json!([entry(json!(1)), entry(json!(1))]);
+        let stored = json!([entry(&json!(1)), entry(&json!(1))]);
         assert_eq!(reason(&stored, 2), "slots_down names one slot twice");
     }
 
