@@ -155,12 +155,12 @@ mod tests {
             .expect("an envelope is an object")
     }
 
-    fn record(status: TaskStatus, raw_result: Option<Value>) -> RawResultRecord {
+    fn record(status: TaskStatus, raw_result: Option<&Value>) -> RawResultRecord {
         RawResultRecord {
             task_id: Uuid::from_u128(9),
             task_name: "add".to_owned(),
             status,
-            raw_result: raw_result.as_ref().map(envelope),
+            raw_result: raw_result.map(envelope),
         }
     }
 
@@ -168,7 +168,7 @@ mod tests {
     fn a_terminal_task_gives_its_envelope_text() {
         let stored = stored_result(record(
             TaskStatus::Completed,
-            Some(json!({"__h_task_result__": true, "ok": 3, "err": null})),
+            Some(&json!({"__h_task_result__": true, "ok": 3, "err": null})),
         ))
         .unwrap();
         assert_eq!(stored.status, TaskStatus::Completed);
