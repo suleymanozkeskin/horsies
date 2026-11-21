@@ -485,7 +485,7 @@ pub(crate) async fn resume_with(
             &AfterResumeCommit::ParentAdvance {
                 child_workflow_id: failure.failed_child_workflow_id,
             },
-            failure.error,
+            *failure.error,
         ))
     })?;
     // Recovery completion pass: a child workflow may have COMPLETED while the parent was paused, leaving the

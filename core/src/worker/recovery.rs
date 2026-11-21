@@ -547,7 +547,7 @@ mod p7_maintenance_tests {
             auto_terminate_orphaned_workflow_tasks: false,
             ..RecoveryConfig::default()
         };
-        let retention = RetentionConfig {
+        let mut retention = RetentionConfig {
             worker_state_retention_hours: Some(1),
             terminal_record_retention_hours: Some(1),
             ..RetentionConfig::default()

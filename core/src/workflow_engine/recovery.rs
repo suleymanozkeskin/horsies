@@ -837,7 +837,7 @@ async fn advance_after_candidate(
             pass.build,
         ))
         .await
-        .map_err(|failure| failure.error)
+        .map_err(|failure| *failure.error)
     })
     .await;
     if let Err(failure) = advanced {

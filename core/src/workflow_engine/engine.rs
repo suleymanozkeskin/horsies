@@ -117,7 +117,7 @@ pub(crate) async fn on_workflow_task_complete_with(
     .map_err(|failure| WorkflowTaskCompletionError::ParentAdvance {
         task_id,
         child_workflow_id: failure.failed_child_workflow_id,
-        error: failure.error,
+        error: *failure.error,
     })?;
     Ok(completion)
 }
