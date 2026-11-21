@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::outcome::{
@@ -687,7 +686,6 @@ async fn remove_workflow(pool: &TestPool, workflow_id: Uuid) {
 /// `WORKER_SERIALIZATION_ERROR` and no failed reason; its attempt is FAILED,
 /// with the decode diagnosis as its message and no reason.
 #[tokio::test]
-#[serial]
 async fn an_undecodable_result_fails_the_task_as_a_serialization_error_with_no_reason() {
     let pool = migrated_pool().await;
     let queue = test_queue();
@@ -728,7 +726,6 @@ async fn an_undecodable_result_fails_the_task_as_a_serialization_error_with_no_r
 /// which fails the node and consumes its phase-2 record. Otherwise the node
 /// waits ENQUEUED against a terminal task until recovery.
 #[tokio::test]
-#[serial]
 async fn an_expired_workflow_task_replays_its_phase_two() {
     let pool = migrated_pool().await;
     let queue = test_queue();
@@ -770,7 +767,6 @@ async fn an_expired_workflow_task_replays_its_phase_two() {
 /// alone, with no recovery: node 0 fails with the `TASK_EXPIRED` result,
 /// node 1 is skipped, and the workflow (`on_error` `fail`) fails.
 #[tokio::test]
-#[serial]
 async fn an_expired_workflow_task_fails_its_node_skips_its_dependent_and_fails_the_workflow() {
     let pool = migrated_pool().await;
     let queue = test_queue();
@@ -847,7 +843,6 @@ async fn an_expired_workflow_task_fails_its_node_skips_its_dependent_and_fails_t
 /// the fused write (`COMPLETE_FUSED`), which sends one capacity wake on the
 /// task's queue in the same transaction.
 #[tokio::test]
-#[serial]
 async fn a_plain_success_completes_in_the_fused_write_and_wakes_its_queue() {
     let pool = migrated_pool().await;
     let queue = test_queue();
@@ -881,7 +876,6 @@ async fn a_plain_success_completes_in_the_fused_write_and_wakes_its_queue() {
 /// in the locked write (`COMPLETE_LOCKED`), which records the phase-2 work,
 /// and phase 2 then completes the node and consumes the record.
 #[tokio::test]
-#[serial]
 async fn a_workflow_success_completes_in_the_locked_write_and_finishes_its_node() {
     let pool = migrated_pool().await;
     let queue = test_queue();
@@ -977,7 +971,6 @@ fn row_ending_reports() -> Vec<(&'static str, Seed, AttemptEnd)> {
 /// no attempt row and no history row exist. A workflow task has its node,
 /// so only the fence refuses the write.
 #[tokio::test]
-#[serial]
 async fn a_reported_end_on_a_later_claim_of_the_row_writes_nothing() {
     let pool = migrated_pool().await;
     let mut workflows = Vec::new();
@@ -1015,7 +1008,6 @@ async fn a_reported_end_on_a_later_claim_of_the_row_writes_nothing() {
 /// stop settles as nothing owed; the live row is unchanged, and no attempt
 /// row and no history row exist.
 #[tokio::test]
-#[serial]
 async fn the_stops_that_the_child_wrote_owe_nothing_for_a_workflow_task() {
     let pool = migrated_pool().await;
     for reason in [
@@ -1088,7 +1080,6 @@ fn assert_attempt_failed_with_reason(
 /// `Worker child lost: child died: exit code 9` as its message and its
 /// failed reason.
 #[tokio::test]
-#[serial]
 async fn a_lost_child_stores_its_reason_on_the_attempt() {
     let end = AttemptEnd::of_lost_child(&child_died_with_exit_code_9());
 
@@ -1111,7 +1102,6 @@ async fn a_lost_child_stores_its_reason_on_the_attempt() {
 /// drain deadline
 /// (`stop_and_loss_tests::the_drain_deadline_kills_a_busy_child_and_its_task_takes_the_crash_path`).
 #[tokio::test]
-#[serial]
 async fn a_child_killed_at_the_drain_deadline_stores_its_reason_on_the_attempt() {
     let killed_at_drain_deadline = ChildLost {
         cause: LossCause::KilledByParent,
@@ -1216,7 +1206,6 @@ async fn stored_error_message(pool: &TestPool, task_id: Uuid) -> Option<String> 
 /// `Retry after future-stage finalize error: ` and the first message as the
 /// task's error message, and as the attempt's message and failed reason.
 #[tokio::test]
-#[serial]
 async fn a_crash_write_sent_again_stores_python_s_retry_text() {
     let pool = migrated_pool().await;
     let queue = test_queue();
@@ -1249,7 +1238,6 @@ async fn a_crash_write_sent_again_stores_python_s_retry_text() {
 /// running task with `TASK_TIMEOUT`; the attempt stores
 /// `Task exceeded timeout_ms=1000` as its message and its failed reason.
 #[tokio::test]
-#[serial]
 async fn a_timed_out_attempt_stores_its_reason() {
     let end = AttemptEnd::TimedOut {
         timeout: TaskTimeoutMs::new(1_000).expect("1 s is a valid task timeout"),
@@ -1272,7 +1260,6 @@ async fn a_timed_out_attempt_stores_its_reason() {
 /// event loop fails with `TASK_BLOCKED_LOOP`; the attempt stores the block
 /// message as its message and its failed reason.
 #[tokio::test]
-#[serial]
 async fn a_run_that_blocked_the_loop_stores_its_reason_on_the_attempt() {
     let text = "Task held the event loop of its shared async child for 5200 ms, past the \
                 block limit, at app/tasks.py:12; the worker killed the child \
@@ -1292,7 +1279,6 @@ async fn a_run_that_blocked_the_loop_stores_its_reason_on_the_attempt() {
 /// run that held the event loop fails with `NEIGHBOUR_BLOCKED_LOOP`; the
 /// attempt stores the block message as its message and its failed reason.
 #[tokio::test]
-#[serial]
 async fn a_run_beside_a_blocked_loop_stores_its_reason_on_the_attempt() {
     let text = "Task 00000000-0000-0000-0000-000000000001 held the event loop of the shared \
                 async child of this task for 5200 ms, past the block limit; the worker \

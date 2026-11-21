@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::host::{ChildApp, ChildLogSetup, ChildStartHook};
@@ -332,7 +331,6 @@ async fn until_a_checkout_waits(pool: &CorePool) {
 /// one statement, with the process of the child: its pid and the name
 /// `worker-<pid>`.
 #[tokio::test]
-#[serial]
 async fn a_held_claim_starts_running_with_the_process_of_its_child() {
     let pool = crate::test_support::migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
@@ -352,7 +350,6 @@ async fn a_held_claim_starts_running_with_the_process_of_its_child() {
 /// The start reports the time that it wrote as the row's `started_at`: the
 /// result frames of the run carry it.
 #[tokio::test]
-#[serial]
 async fn a_start_reports_the_started_at_that_it_wrote() {
     let pool = crate::test_support::migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
@@ -382,7 +379,6 @@ async fn a_start_reports_the_started_at_that_it_wrote() {
 /// Python `_after_missed_start`, `NOT_HELD`: a start of an older claim
 /// generation writes nothing and stops with `CLAIM_LOST`.
 #[tokio::test]
-#[serial]
 async fn a_start_of_another_claim_generation_is_a_lost_claim() {
     let pool = crate::test_support::migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
@@ -403,7 +399,6 @@ async fn a_start_of_another_claim_generation_is_a_lost_claim() {
 /// Python `_after_missed_start`, `DEADLINE_PASSED`: the claim of a row whose
 /// `good_until` passed is expired, and the run stops with `TASK_EXPIRED`.
 #[tokio::test]
-#[serial]
 async fn a_passed_deadline_expires_the_claim_before_the_start() {
     let pool = crate::test_support::migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, true).await;
@@ -429,7 +424,6 @@ async fn a_passed_deadline_expires_the_claim_before_the_start() {
 /// (Python's `WORKFLOW_CHECK_FAILED`). With the self-heal on, the stop
 /// before start cancels the orphan (`start_node_tests`).
 #[tokio::test]
-#[serial]
 async fn a_workflow_task_whose_node_is_not_linked_stops_and_writes_nothing() {
     let pool = migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
@@ -470,7 +464,6 @@ async fn a_start_that_cannot_reach_the_database_is_ownership_unconfirmed() {
 /// `a_start_of_another_claim_generation_is_a_lost_claim`): a start after the
 /// claim lease ended writes nothing and stops with `CLAIM_LOST`.
 #[tokio::test]
-#[serial]
 async fn a_start_after_the_claim_lease_ended_is_a_lost_claim_with_no_write() {
     let pool = migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
@@ -499,7 +492,6 @@ async fn a_start_after_the_claim_lease_ended_is_a_lost_claim_with_no_write() {
 /// expiry takes first and the start does not take, and moves the claim while
 /// the expiry waits for it.
 #[tokio::test]
-#[serial]
 async fn a_refused_expiry_before_the_start_is_a_lost_claim() {
     let pool = migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, true).await;
@@ -542,7 +534,6 @@ async fn a_refused_expiry_before_the_start_is_a_lost_claim() {
 /// start does not, and commits the resume while that statement waits, within
 /// its statement bound: the miss path ends by the resume, not by its bound.
 #[tokio::test]
-#[serial]
 async fn a_resume_before_the_abandon_starts_the_task_on_the_next_attempt() {
     let pool = migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
@@ -587,7 +578,6 @@ async fn a_resume_before_the_abandon_starts_the_task_on_the_next_attempt() {
 /// opens the second resume. Each miss path ends by its resume, within its
 /// statement bound.
 #[tokio::test]
-#[serial]
 async fn a_resume_on_every_attempt_leaves_the_claim_to_its_lease() {
     let (context, _peer) = context_on(one_connection_child_broker().await);
     let pool = migrated_pool().await;
@@ -667,7 +657,6 @@ async fn a_marker_that_cannot_reach_the_database_lets_the_run_go_on() {
 /// from the worker process, and the stale RUNNING rule judges the attempt
 /// from its `started_at` until the first one.
 #[tokio::test]
-#[serial]
 async fn the_start_of_the_child_writes_no_heartbeat() {
     let pool = migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
@@ -690,7 +679,6 @@ async fn the_start_of_the_child_writes_no_heartbeat() {
 /// the expiry before the start records `TASK_EXPIRED` as the error code and
 /// in the stored result, and its replay also reads as expired.
 #[tokio::test]
-#[serial]
 async fn the_expiry_before_the_start_records_task_expired_and_a_replay_reads_as_expired() {
     let pool = migrated_pool().await;
     let (task_id, _generation) = seed_claimed(&pool, true).await;
@@ -726,7 +714,6 @@ async fn the_expiry_before_the_start_records_task_expired_and_a_replay_reads_as_
 /// deadline that has not passed (`SOURCE_STATE_CONFLICT`), and the expiry of
 /// an absent task (`TASK_ABSENT`), are not expiries and write nothing.
 #[tokio::test]
-#[serial]
 async fn a_refused_or_absent_expiry_is_not_an_expiry() {
     let pool = migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -771,7 +758,6 @@ async fn a_refused_or_absent_expiry_is_not_an_expiry() {
 /// waits on the same lock, in the time left of the attempt), and its write
 /// does not commit after the lock ends.
 #[tokio::test]
-#[serial]
 async fn a_start_that_waits_on_a_row_lock_ends_at_its_bound() {
     let pool = migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;
@@ -801,7 +787,6 @@ async fn a_start_that_waits_on_a_row_lock_ends_at_its_bound() {
 /// a marker that waits on a row lock ends at its bound, and it is not
 /// written after the lock ends.
 #[tokio::test]
-#[serial]
 async fn a_marker_that_waits_on_a_row_lock_ends_at_its_bound() {
     let pool = migrated_pool().await;
     let (task_id, generation) = seed_claimed(&pool, false).await;

@@ -112,7 +112,6 @@ async fn insert_history_row(
 /// `horsies_tasks_rerun_lineage_pair`). The live-status half is
 /// `terminalization_functions.rs::status_and_terminal_at_must_agree`.
 #[tokio::test]
-#[serial_test::serial]
 async fn a_live_row_carries_both_rerun_ids_or_neither() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::pending()).await;
@@ -149,7 +148,6 @@ async fn a_live_row_carries_both_rerun_ids_or_neither() {
 /// a COMPLETED row and a workflow row store no rerun input (CHECK
 /// `horsies_task_history_rerun_input_shape`). A FAILED plain row may.
 #[tokio::test]
-#[serial_test::serial]
 async fn completed_and_workflow_history_rows_refuse_rerun_input() {
     let pool = pool().await;
     let mut connection = pool.acquire().await.expect("acquire");
@@ -199,7 +197,6 @@ async fn completed_and_workflow_history_rows_refuse_rerun_input() {
 /// an administrative cancel stores no result (CHECK
 /// `horsies_task_history_result_domain`).
 #[tokio::test]
-#[serial_test::serial]
 async fn an_administrative_cancel_refuses_a_stored_result() {
     let pool = pool().await;
     let mut connection = pool.acquire().await.expect("acquire");
@@ -227,7 +224,6 @@ async fn an_administrative_cancel_refuses_a_stored_result() {
 /// routing refuses a row whose class or time no leaf covers. The aligned
 /// attempt leaves are a prototype layout; attempts are not partitioned.
 #[tokio::test]
-#[serial_test::serial]
 async fn the_history_and_heartbeat_trees_have_no_default_partition() {
     let pool = pool().await;
     let config = RetentionConfig::default();

@@ -3,7 +3,6 @@ use crate::scheduler_manifest::{parse_scheduler_manifest, ScheduleTaskOptions};
 use crate::test_support::sql::{self, TestPool};
 use chrono::{TimeZone, Utc};
 use serde_json::json;
-use serial_test::serial;
 use uuid::Uuid;
 
 #[test]
@@ -77,7 +76,6 @@ fn compute_config_hash_covers_pattern_and_timezone_only() {
 /// `SchedulerStartError::ClientFamily` with the mismatch, not retryable,
 /// and no state row is written.
 #[tokio::test]
-#[serial]
 async fn a_handle_of_the_other_family_starts_no_scheduler_and_writes_no_state() {
     use crate::broker::client_family::{ClientFamily, RecordedFamily};
     use crate::broker::BrokerError;
@@ -115,7 +113,6 @@ async fn a_handle_of_the_other_family_starts_no_scheduler_and_writes_no_state() 
 /// slot with a second fire of no slots, records no run and writes no task
 /// (horsies-rust #77).
 #[tokio::test]
-#[serial]
 async fn normal_run_permanent_failure_skips_slot() {
     let pool = test_pool().await;
     let name = format!("permanent_skip_{}", Uuid::new_v4().simple());
@@ -145,7 +142,6 @@ async fn normal_run_permanent_failure_skips_slot() {
 /// in catch-up mode a refused fire of three due slots moves past the first
 /// slot only, records no run and writes no task.
 #[tokio::test]
-#[serial]
 async fn catch_up_permanent_failure_skips_doomed_slot() {
     let pool = test_pool().await;
     let name = format!("catch_up_skip_{}", Uuid::new_v4().simple());
@@ -428,7 +424,6 @@ fn command_for(schedule: &TestSchedule) -> SendCommand {
 /// rerun-input posture of its manifest send, a command fingerprint and the
 /// input as one JSON value.
 #[tokio::test]
-#[serial]
 async fn scheduled_enqueue_persists_the_class_and_shared_facts_of_its_send() {
     let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
     let task_name = "p6_scheduled_facts";
@@ -477,7 +472,6 @@ async fn scheduled_enqueue_persists_the_class_and_shared_facts_of_its_send() {
 /// `TASK_EXCEPTION`, as the Python task does: a policy with no code does
 /// not validate as Python `RetryPolicy`, and the send refuses it.
 #[tokio::test]
-#[serial]
 async fn a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task() {
     let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
     let name = format!("fired_options_{}", Uuid::new_v4().simple());
@@ -523,7 +517,6 @@ async fn a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task() {
 /// above): a fired slot stores the options text of its task and the
 /// task's execution class, and a shared async task keeps its cancel grace.
 #[tokio::test]
-#[serial]
 async fn a_scheduled_run_stores_the_execution_and_cancel_grace_of_its_task() {
     let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
     for (execution, cancel_grace_ms, stored_execution) in [
@@ -578,7 +571,6 @@ async fn a_scheduled_run_stores_the_execution_and_cancel_grace_of_its_task() {
 /// one period from it (slot-anchored, not database-clock; horsies PR #46).
 /// No skip occurs because the following slot is future.
 #[tokio::test]
-#[serial]
 async fn a_single_late_tick_fires_the_stored_slot_and_anchors_the_next_run_to_it() {
     let pool = test_pool().await;
     let name = "pr46_slot_anchor";
@@ -618,7 +610,6 @@ async fn a_single_late_tick_fires_the_stored_slot_and_anchors_the_next_run_to_it
 /// time of the due read. 5 s interval, stored slot 12:00:00, due read at
 /// 12:00:17: missed 12:00:05/10/15, fire 12:00:15, next 12:00:20.
 #[tokio::test]
-#[serial]
 async fn a_backlog_without_catch_up_fires_only_the_latest_due_slot() {
     let pool = test_pool().await;
     let name = "c5_skip_latest";
@@ -950,7 +941,6 @@ fn the_command_of_a_schedule_is_the_send_command_of_its_texts() {
 /// (with a strictly-future next_run), leaves an existing row's next_run
 /// untouched, and skips disabled schedules. Parity with horsies PR #123.
 #[tokio::test]
-#[serial]
 async fn ensure_states_exist_heals_missing_and_preserves_existing() {
     let pool = test_pool().await;
     let core = core_pool_of(&pool);
@@ -1009,7 +999,6 @@ async fn ensure_states_exist_heals_missing_and_preserves_existing() {
 /// The start computes a new schedule's first run from the database time
 /// of its read, and stores the schedule's digest.
 #[tokio::test]
-#[serial]
 async fn initialize_schedules_computes_first_runs_from_the_database_time() {
     let pool = test_pool().await;
     let core = core_pool_of(&pool);

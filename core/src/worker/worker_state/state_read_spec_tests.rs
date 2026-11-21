@@ -3,7 +3,6 @@
 //! class capacity of another shape fails the worker state read with the
 //! worker named, instead of reading as a default.
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use crate::broker::{BrokerErrorCode, PostgresBroker};
@@ -44,7 +43,6 @@ async fn delete_snapshots(pool: &TestPool, worker_id: &str) {
 
 /// Python `test_an_unreadable_slot_health_fails_the_read`.
 #[tokio::test]
-#[serial]
 async fn an_unreadable_slot_health_fails_the_read() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -67,7 +65,6 @@ async fn an_unreadable_slot_health_fails_the_read() {
 /// Python `test_an_unreadable_class_capacity_fails_the_read`: an unknown
 /// budget name fails the read and is named.
 #[tokio::test]
-#[serial]
 async fn an_unreadable_class_capacity_fails_the_read() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);

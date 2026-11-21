@@ -280,7 +280,6 @@ fn action_models_and_task_mapping_serialize_exactly() {
 }
 
 #[tokio::test]
-#[serial]
 async fn task_cancel_applies_only_to_the_three_eligible_live_states() {
     let pool = migrated_pool().await;
     clean_w3(&pool).await;
@@ -363,7 +362,6 @@ async fn task_cancel_applies_only_to_the_three_eligible_live_states() {
 }
 
 #[tokio::test]
-#[serial]
 async fn task_cancel_live_miss_and_workflow_diagnoses_are_exact() {
     let pool = migrated_pool().await;
     clean_w3(&pool).await;
@@ -460,7 +458,6 @@ async fn task_and_workflow_database_failures_are_service_unavailable() {
 }
 
 #[tokio::test]
-#[serial]
 async fn workflow_actions_resolve_success_noop_and_missing_outcomes() {
     let pool = migrated_pool().await;
     clean_w3(&pool).await;
@@ -562,7 +559,7 @@ const LOCK_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(20)
 /// lock first, the holder's `FOR UPDATE NOWAIT` fails with 55P03 and a
 /// finalize deadlocks (40P01).
 #[tokio::test]
-#[serial]
+#[serial(server)]
 async fn task_cancel_takes_the_advisory_lock_before_the_row_lock() {
     let pool = migrated_pool().await;
     clean_w3(&pool).await;

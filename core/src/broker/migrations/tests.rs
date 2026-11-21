@@ -9,7 +9,6 @@
 use std::time::Duration;
 
 use rand::Rng;
-use serial_test::serial;
 use sha2::{Digest, Sha384};
 use tokio_postgres::error::SqlState;
 use tokio_postgres::Client;
@@ -770,7 +769,6 @@ fn each_refusal_names_what_the_database_holds() {
 /// An empty database gets the whole chain in its bookkeeping, the 0.x guard
 /// row and this client's family row.
 #[tokio::test]
-#[serial]
 async fn an_empty_database_gets_the_chain_the_guard_row_and_the_family() {
     let database = MigrationTestDatabase::create().await;
 
@@ -814,7 +812,6 @@ async fn an_empty_database_gets_the_chain_the_guard_row_and_the_family() {
 /// A database that holds the chain and this client's family gets no lock
 /// and no write: the install returns while another session holds its lock.
 #[tokio::test]
-#[serial]
 async fn a_current_database_is_left_alone_without_the_lock() {
     let database = MigrationTestDatabase::create().await;
     database
@@ -836,7 +833,6 @@ async fn a_current_database_is_left_alone_without_the_lock() {
 }
 
 #[tokio::test]
-#[serial]
 async fn a_zero_x_python_database_is_refused_unchanged() {
     let database = MigrationTestDatabase::create().await;
     database
@@ -866,7 +862,6 @@ async fn a_zero_x_python_database_is_refused_unchanged() {
 }
 
 #[tokio::test]
-#[serial]
 async fn horsies_tables_with_no_bookkeeping_are_refused_unchanged() {
     let database = MigrationTestDatabase::create().await;
     database
@@ -888,7 +883,6 @@ async fn horsies_tables_with_no_bookkeeping_are_refused_unchanged() {
 }
 
 #[tokio::test]
-#[serial]
 async fn a_newer_version_is_refused_unchanged() {
     let database = MigrationTestDatabase::create().await;
     database
@@ -929,7 +923,6 @@ async fn a_newer_version_is_refused_unchanged() {
 /// A horsies-rust 0.x ledger (versions 1 to 65) is foreign. The read takes
 /// the newest 64 rows, so the refusal names versions 2 to 65.
 #[tokio::test]
-#[serial]
 async fn a_horsies_rust_zero_x_ledger_is_refused_as_foreign() {
     let database = MigrationTestDatabase::create().await;
     database
@@ -957,7 +950,6 @@ async fn a_horsies_rust_zero_x_ledger_is_refused_as_foreign() {
 }
 
 #[tokio::test]
-#[serial]
 async fn a_failed_migration_row_is_refused_as_incomplete() {
     let database = MigrationTestDatabase::create().await;
     database
@@ -988,7 +980,6 @@ async fn a_failed_migration_row_is_refused_as_incomplete() {
 }
 
 #[tokio::test]
-#[serial]
 async fn a_changed_checksum_is_refused_as_edited() {
     let database = MigrationTestDatabase::create().await;
     database
@@ -1026,7 +1017,6 @@ async fn a_changed_checksum_is_refused_as_edited() {
 /// A database that holds migration 1000 alone, as Python's install leaves
 /// it, gets the rest of the chain and keeps its family.
 #[tokio::test]
-#[serial]
 async fn a_database_with_the_baseline_only_gets_the_rest_of_the_chain() {
     let database = MigrationTestDatabase::create().await;
     database.install_baseline_only(ClientFamily::Python).await;
@@ -1048,7 +1038,6 @@ async fn a_database_with_the_baseline_only_gets_the_rest_of_the_chain() {
 /// The other family is refused before any write: on a database behind the
 /// chain no migration is applied, and on a current database nothing changes.
 #[tokio::test]
-#[serial]
 async fn a_database_of_the_other_family_is_refused_before_any_write() {
     let behind = MigrationTestDatabase::create().await;
     behind.install_baseline_only(ClientFamily::Python).await;
@@ -1097,7 +1086,6 @@ async fn a_database_of_the_other_family_is_refused_before_any_write() {
 /// A database that holds the chain with no family row gets this client's
 /// row, and no migration runs again (Python `CompleteInstall`).
 #[tokio::test]
-#[serial]
 async fn a_database_with_no_family_row_gets_this_client_s_row() {
     let database = MigrationTestDatabase::create().await;
     database
@@ -1122,7 +1110,6 @@ async fn a_database_with_no_family_row_gets_this_client_s_row() {
 /// read, and changes nothing. The test writes the row past its CHECK
 /// (`horsies_client_family_family_known`), which it drops first.
 #[tokio::test]
-#[serial]
 async fn a_family_row_that_holds_no_client_family_is_refused_and_unchanged() {
     let database = MigrationTestDatabase::create().await;
     database
@@ -1192,7 +1179,6 @@ async fn manifest_leaves(database: &MigrationTestDatabase) -> Vec<String> {
 /// (Python `CompleteInstall`;
 /// `test_an_install_that_stopped_before_the_publication_is_completed`).
 #[tokio::test]
-#[serial]
 async fn a_database_whose_readers_are_missing_gets_them_published() {
     let database = MigrationTestDatabase::create().await;
     database
@@ -1240,7 +1226,6 @@ async fn a_database_whose_readers_are_missing_gets_them_published() {
 /// A database with readers missing and no family row gets both, the
 /// readers first (Python `CompleteInstall`).
 #[tokio::test]
-#[serial]
 async fn a_database_with_no_readers_and_no_family_row_gets_both() {
     let database = MigrationTestDatabase::create().await;
     database
@@ -1274,7 +1259,6 @@ async fn a_database_with_no_readers_and_no_family_row_gets_both() {
 /// A database of the other family with readers missing is refused and
 /// changed in nothing: the family is checked before the publication.
 #[tokio::test]
-#[serial]
 async fn a_database_of_the_other_family_with_readers_missing_is_refused_unchanged() {
     let database = MigrationTestDatabase::create().await;
     database
@@ -1310,7 +1294,6 @@ async fn a_database_of_the_other_family_with_readers_missing_is_refused_unchange
 /// refuses with a retryable failure and changes nothing; once the lock is
 /// free, it installs.
 #[tokio::test]
-#[serial]
 async fn a_busy_lock_refuses_after_its_wait_and_changes_nothing() {
     let database = MigrationTestDatabase::create().await;
     let lock = test_lock();
@@ -1349,7 +1332,6 @@ async fn a_busy_lock_refuses_after_its_wait_and_changes_nothing() {
 /// another installer finished the chain during the wait, the waiter applies
 /// nothing and returns.
 #[tokio::test]
-#[serial]
 async fn an_install_finished_by_another_installer_during_the_wait_is_not_repeated() {
     let database = MigrationTestDatabase::create().await;
     let lock = InstallLockPlan {
@@ -1429,7 +1411,6 @@ async fn wait_for_a_lock_try(observer: &Client, holder_pid: i32) -> bool {
 /// installer waits, and the installer installs the chain once the lock is
 /// released.
 #[tokio::test]
-#[serial]
 async fn an_installer_that_waits_for_the_lock_does_not_block_a_concurrent_index_build() {
     let database = MigrationTestDatabase::create().await;
     let lock = InstallLockPlan {
@@ -1490,7 +1471,6 @@ async fn an_installer_that_waits_for_the_lock_does_not_block_a_concurrent_index_
 /// an observe-only broker runs no schema statement. On an empty database its
 /// install calls return and the database stays empty.
 #[tokio::test]
-#[serial]
 async fn an_observe_only_broker_runs_no_schema_statement() {
     let database = MigrationTestDatabase::create().await;
     let broker = crate::broker::PostgresBroker::connect_observe_only(
@@ -1522,7 +1502,6 @@ async fn an_observe_only_broker_runs_no_schema_statement() {
 /// migration: the bookkeeping rows keep their install times. (The install's
 /// coverage pass writes leaves; `partition_maintenance` tests it.)
 #[tokio::test]
-#[serial]
 async fn the_install_of_a_broker_on_a_current_database_is_ok_and_writes_nothing() {
     let database = MigrationTestDatabase::create().await;
     database
@@ -1655,7 +1634,6 @@ async fn install_through_a_new_broker(database: &MigrationTestDatabase) {
 /// parent, the forever history relation and the key reservation table
 /// unchanged, and the stored version stays the baseline version.
 #[tokio::test]
-#[serial]
 async fn a_second_install_leaves_the_history_relations_unchanged() {
     let database = MigrationTestDatabase::create().await;
     install_through_a_new_broker(&database).await;
@@ -1677,7 +1655,6 @@ async fn a_second_install_leaves_the_history_relations_unchanged() {
 /// A statement of migration 1000 fails: its transaction rolls back with the
 /// bookkeeping and family rows, and the lock is released.
 #[tokio::test]
-#[serial]
 async fn a_failed_migration_rolls_back_and_releases_the_lock() {
     let database = MigrationTestDatabase::create().await;
     // A view is not a table, so the state read sees an empty schema; the
@@ -1708,7 +1685,6 @@ async fn a_failed_migration_rolls_back_and_releases_the_lock() {
 
 /// A release that frees no lock is reported as lost ownership.
 #[tokio::test]
-#[serial]
 async fn a_release_that_frees_no_lock_is_ownership_lost() {
     let database = MigrationTestDatabase::create().await;
     let handle = core_handle(database.database.url());
@@ -1745,7 +1721,6 @@ async fn a_release_that_frees_no_lock_is_ownership_lost() {
 /// caller left) discards its connection. The server ends that session and
 /// its lock, so another session takes the lock.
 #[tokio::test]
-#[serial]
 async fn a_dropped_lock_session_frees_the_lock_with_its_session() {
     let database = MigrationTestDatabase::create().await;
     let handle = core_handle(database.database.url());
@@ -1793,7 +1768,6 @@ async fn a_dropped_lock_session_frees_the_lock_with_its_session() {
 /// A deadlock runs the whole install again: the first two runs meet one,
 /// the third installs.
 #[tokio::test]
-#[serial]
 async fn a_deadlock_runs_the_install_again() {
     let database = MigrationTestDatabase::create().await;
     inject_deadlocks(&database, 2).await;
@@ -1813,7 +1787,6 @@ async fn a_deadlock_runs_the_install_again() {
 /// A deadlock on every run ends after [`INSTALL_MAX_ATTEMPTS`] runs with the
 /// deadlock, and nothing is installed.
 #[tokio::test]
-#[serial]
 async fn a_deadlock_on_every_run_stops_after_the_last_attempt() {
     let database = MigrationTestDatabase::create().await;
     inject_deadlocks(&database, i64::MAX).await;
@@ -1848,7 +1821,6 @@ async fn a_deadlock_on_every_run_stops_after_the_last_attempt() {
 /// is the static forever leaf, and the detail reader answers an unknown id
 /// with no row (Python `test_install_returns_with_the_history_readers_published`).
 #[tokio::test]
-#[serial]
 async fn an_installed_database_has_its_history_readers() {
     let database = MigrationTestDatabase::create().await;
 
@@ -1906,7 +1878,6 @@ async fn an_installed_database_has_its_history_readers() {
 /// The transaction of a migration is READ COMMITTED whatever the server
 /// default is: the publication refuses any other isolation (25000).
 #[tokio::test]
-#[serial]
 async fn the_readers_are_published_under_a_serializable_server_default() {
     let database = MigrationTestDatabase::create().await;
     database
@@ -1935,7 +1906,6 @@ async fn the_readers_are_published_under_a_serializable_server_default() {
 /// bookkeeping row, no family row, no table. An event trigger fails the DDL
 /// of the publication statement only.
 #[tokio::test]
-#[serial]
 async fn a_failed_reader_publication_rolls_back_migration_1000() {
     let database = MigrationTestDatabase::create().await;
     database
@@ -2126,7 +2096,6 @@ fn every_declared_index_name_leaves_room_for_its_build_and_claim_names() {
 /// Python `TestExactIndexInstall::test_an_upgrade_keeps_each_exact_index_whose_shape_matches`:
 /// an index whose name and form match the declaration is kept, not rebuilt.
 #[tokio::test]
-#[serial]
 async fn an_index_step_keeps_an_exact_index_whose_form_matches() {
     let database = MigrationTestDatabase::create().await;
     database.install_baseline_only(ClientFamily::Rust).await;
@@ -2158,7 +2127,6 @@ async fn an_index_step_keeps_an_exact_index_whose_form_matches() {
 /// built again, and the build and claim indexes that an interrupted
 /// replacement left are dropped.
 #[tokio::test]
-#[serial]
 async fn an_index_step_builds_an_invalid_index_again_and_drops_the_leftovers() {
     let database = MigrationTestDatabase::create().await;
     database.install_baseline_only(ClientFamily::Rust).await;
@@ -2213,7 +2181,6 @@ async fn an_index_step_builds_an_invalid_index_again_and_drops_the_leftovers() {
 /// dblink, so the recording writes nothing in the transaction of the drop
 /// (`DROP INDEX CONCURRENTLY` must be its first action).
 #[tokio::test]
-#[serial]
 async fn a_replaced_index_keeps_its_name_while_the_old_one_drops() {
     let database = MigrationTestDatabase::create().await;
     database.install_baseline_only(ClientFamily::Rust).await;
@@ -2280,7 +2247,6 @@ fn sql_literal(text: &str) -> String {
 /// and no bookkeeping row is written; the next apply drops them after its
 /// row commits.
 #[tokio::test]
-#[serial]
 async fn a_failed_migration_keeps_the_indexes_that_it_retires() {
     let database = MigrationTestDatabase::create().await;
     database.install_baseline_only(ClientFamily::Rust).await;
@@ -2324,7 +2290,6 @@ async fn a_failed_migration_keeps_the_indexes_that_it_retires() {
 /// A relation other than an index of the table holds the name of an exact
 /// index: the migration is refused, and nothing of it is written.
 #[tokio::test]
-#[serial]
 async fn an_index_name_held_by_another_relation_refuses_the_migration() {
     let database = MigrationTestDatabase::create().await;
     database.install_baseline_only(ClientFamily::Rust).await;

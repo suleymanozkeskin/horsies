@@ -7,7 +7,6 @@
 //! own ([`SpecDatabase`]).
 
 use chrono::{DateTime, Duration, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::spec_support::{
@@ -125,7 +124,6 @@ async fn seed_finished(database: &SpecDatabase, task_name: &str) {
 
 /// Python `TestListTasks::test_sort_direction`, both directions.
 #[tokio::test]
-#[serial]
 async fn the_list_sorts_by_enqueue_time_in_both_directions() {
     let database = SpecDatabase::create().await;
     for (task_name, enqueued_seconds_ago) in [("first", 30), ("second", 20), ("third", 10)] {
@@ -155,7 +153,6 @@ async fn the_list_sorts_by_enqueue_time_in_both_directions() {
 /// directions: the function takes each key of `TaskSortField::ALL` with
 /// `ASC` and with `DESC`.
 #[tokio::test]
-#[serial]
 async fn every_sort_key_reads_both_sides_in_both_directions() {
     let database = SpecDatabase::create().await;
     seed_live(&database.pool, &LiveTask::running("live_task", "worker-1")).await;
@@ -187,7 +184,6 @@ async fn every_sort_key_reads_both_sides_in_both_directions() {
 /// running row shows a growing `exec_s` but has no span to sort on, so it
 /// sorts after a finished row.
 #[tokio::test]
-#[serial]
 async fn a_running_row_sorts_as_null_on_the_execution_span() {
     let database = SpecDatabase::create().await;
     let mut running = LiveTask::running("running_now", "worker-1");
@@ -209,7 +205,6 @@ async fn a_running_row_sorts_as_null_on_the_execution_span() {
 /// for a live row: a live row has no end time, so it sorts after every
 /// history row on `completed_at` in both directions.
 #[tokio::test]
-#[serial]
 async fn a_live_row_sorts_after_a_finished_row_on_the_end_time_in_both_directions() {
     let database = SpecDatabase::create().await;
     seed_live(&database.pool, &LiveTask::pending("never_ran")).await;
@@ -226,7 +221,6 @@ async fn a_live_row_sorts_after_a_finished_row_on_the_end_time_in_both_direction
 
 /// Python `TestListTasks::test_rows_carry_derived_error_category_and_worker_id`.
 #[tokio::test]
-#[serial]
 async fn a_list_row_carries_its_category_worker_and_host() {
     let database = SpecDatabase::create().await;
     let mut task = LiveTask::pending("alpha_task").with_worker(Some("worker-7"));
@@ -244,7 +238,6 @@ async fn a_list_row_carries_its_category_worker_and_host() {
 
 /// Python `TestListTasks::test_empty_error_code_is_reported_as_absent`.
 #[tokio::test]
-#[serial]
 async fn an_empty_stored_code_reads_as_no_code_and_no_category() {
     let database = SpecDatabase::create().await;
     seed_terminal(
@@ -267,7 +260,6 @@ async fn an_empty_stored_code_reads_as_no_code_and_no_category() {
 /// count. The value is set in the catalog, because whether a TRUNCATE
 /// resets it depends on the server version.
 #[tokio::test]
-#[serial]
 async fn an_unsampled_live_table_gives_an_exact_total() {
     let database = SpecDatabase::create().await;
     sql::query("UPDATE pg_class SET reltuples = -1 WHERE oid = 'horsies_tasks'::regclass")
@@ -288,7 +280,6 @@ async fn an_unsampled_live_table_gives_an_exact_total() {
 /// an emptied history adds zero to the unfiltered total, not the rows of
 /// statistics sampled before the TRUNCATE.
 #[tokio::test]
-#[serial]
 async fn an_emptied_history_adds_nothing_to_the_unfiltered_total() {
     let database = SpecDatabase::create().await;
     for ending in [Ending::Completed, Ending::Completed, Ending::failed("BOOM")] {
@@ -343,7 +334,6 @@ fn an_unreadable_estimate_is_a_contract_violation_that_is_not_retryable() {
 /// Python `TestGetTaskDetail::test_missing_task_is_not_found`: a UUIDv4 has
 /// no birth, so the absence is not classified.
 #[tokio::test]
-#[serial]
 async fn a_missing_task_is_not_found_and_a_v4_id_is_not_classified() {
     let database = SpecDatabase::create().await;
     let task_id = Uuid::new_v4();
@@ -356,7 +346,6 @@ async fn a_missing_task_is_not_found_and_a_v4_id_is_not_classified() {
 
 /// Python `TestGetTaskDetail::test_an_absent_v7_task_with_no_detached_leaf_is_within_retained_history`.
 #[tokio::test]
-#[serial]
 async fn an_absent_v7_task_with_no_detached_leaf_is_within_retained_history() {
     let database = SpecDatabase::create().await;
     let task_id = uuid7_born_at(Utc::now() - Duration::days(2));
@@ -374,7 +363,6 @@ async fn an_absent_v7_task_with_no_detached_leaf_is_within_retained_history() {
 /// a birth before the upper anchor of a detached period leaf predates the
 /// retained history; a birth after it is within it.
 #[tokio::test]
-#[serial]
 async fn an_absent_v7_task_born_before_a_detached_leaf_predates_retained_history() {
     let database = SpecDatabase::create().await;
     let detached_upper = Utc::now() - Duration::days(1);
@@ -401,7 +389,6 @@ async fn an_absent_v7_task_born_before_a_detached_leaf_predates_retained_history
 /// a history status that is not a task status is a contract violation that
 /// names the stored value; it is not read as absence.
 #[tokio::test]
-#[serial]
 async fn an_unknown_stored_status_in_history_is_a_contract_violation() {
     let database = SpecDatabase::create().await;
     let task = LiveTask::pending("alpha_task");
@@ -428,7 +415,6 @@ async fn an_unknown_stored_status_in_history_is_a_contract_violation() {
 /// steady state of the statement cache; they run within the idle ping limit
 /// of the pool, so no ping is sent before them.
 #[tokio::test]
-#[serial]
 async fn the_task_detail_and_the_node_read_are_one_round_trip_each() {
     let database = SpecDatabase::create().await;
     let mut task = LiveTask::pending("alpha_task");
@@ -472,7 +458,6 @@ async fn the_task_detail_and_the_node_read_are_one_round_trip_each() {
 /// not retryable, and the message names the task and the live miss. A
 /// stand-in reader that answers `LIVE` for every id gives that answer.
 #[tokio::test]
-#[serial]
 async fn a_live_answer_of_the_reader_after_a_live_miss_is_a_contract_violation() {
     let database = SpecDatabase::create().await;
     let task_id = Uuid::new_v4();
@@ -525,7 +510,6 @@ async fn a_live_answer_of_the_reader_after_a_live_miss_is_a_contract_violation()
 
 /// Python `TestGetTaskDetail::test_standalone_task_has_no_workflow_linkage`.
 #[tokio::test]
-#[serial]
 async fn a_standalone_task_has_no_workflow_link() {
     let database = SpecDatabase::create().await;
     let task = LiveTask::pending("alpha_task");
@@ -541,7 +525,6 @@ async fn a_standalone_task_has_no_workflow_link() {
 /// Python `TestGetTaskDetail::test_a_node_row_pointing_elsewhere_does_not_leak_in`:
 /// the link matches on the task id, not on membership in some workflow.
 #[tokio::test]
-#[serial]
 async fn a_node_of_another_task_does_not_link_this_task() {
     let database = SpecDatabase::create().await;
     let run = RunSeed::running("alpha_flow");
@@ -568,7 +551,6 @@ async fn a_node_of_another_task_does_not_link_this_task() {
 /// leaf of a live task carries its stored class; a task read from history
 /// carries none, as history does not keep the class.
 #[tokio::test]
-#[serial]
 async fn a_live_leaf_shows_its_class_and_a_history_leaf_shows_none() {
     let database = SpecDatabase::create().await;
     let live = LiveTask::pending("alpha_task");
@@ -593,7 +575,6 @@ async fn a_live_leaf_shows_its_class_and_a_history_leaf_shows_none() {
 /// the span that sent it, as 32 lowercase hex digits; a task sent with no
 /// trace carries none.
 #[tokio::test]
-#[serial]
 async fn a_leaf_carries_the_trace_id_of_its_send_live_and_in_history() {
     let database = SpecDatabase::create().await;
     let traced = LiveTask::pending("alpha_task");
@@ -634,7 +615,6 @@ async fn a_leaf_carries_the_trace_id_of_its_send_live_and_in_history() {
 
 /// Python `TestGetTaskDetail::test_reports_good_until_and_workflow_membership`.
 #[tokio::test]
-#[serial]
 async fn the_detail_reports_the_deadline_and_the_workflow_membership() {
     let database = SpecDatabase::create().await;
     let deadline = Utc::now() + Duration::hours(2);
@@ -658,7 +638,6 @@ async fn the_detail_reports_the_deadline_and_the_workflow_membership() {
 /// empty and blank stored texts of the leaf and of an attempt read as
 /// absent.
 #[tokio::test]
-#[serial]
 async fn empty_and_blank_attempt_texts_read_as_absent() {
     let database = SpecDatabase::create().await;
     let task = LiveTask::pending("alpha_task");
@@ -687,7 +666,6 @@ async fn empty_and_blank_attempt_texts_read_as_absent() {
 
 /// Python `TestTaskDurations::test_claimed_task_queue_time_counts_up`.
 #[tokio::test]
-#[serial]
 async fn a_claimed_task_counts_its_queue_time_up() {
     let database = SpecDatabase::create().await;
     let mut task = LiveTask::claimed("alpha_task", "worker-1");
@@ -704,7 +682,6 @@ async fn a_claimed_task_counts_its_queue_time_up() {
 
 /// Python `TestTaskDurations::test_completed_task_reports_both_closed_spans`.
 #[tokio::test]
-#[serial]
 async fn a_completed_task_reports_both_closed_spans() {
     let database = SpecDatabase::create().await;
     let task = LiveTask::pending("alpha_task");
@@ -721,7 +698,6 @@ async fn a_completed_task_reports_both_closed_spans() {
 /// the terminal instant closes the queue span, and a task that never
 /// started has no execution span.
 #[tokio::test]
-#[serial]
 async fn a_task_cancelled_before_it_started_reports_a_closed_queue_span() {
     let database = SpecDatabase::create().await;
     let task = LiveTask::pending("alpha_task");
@@ -736,7 +712,6 @@ async fn a_task_cancelled_before_it_started_reports_a_closed_queue_span() {
 
 /// Python `TestTaskDurations::test_expired_before_start_reports_the_closed_queue_span`.
 #[tokio::test]
-#[serial]
 async fn a_task_expired_before_it_started_reports_a_closed_queue_span() {
     let database = SpecDatabase::create().await;
     let mut task = LiveTask::pending("alpha_task");
@@ -766,7 +741,6 @@ async fn a_task_expired_before_it_started_reports_a_closed_queue_span() {
 
 /// Python `TestTaskDurations::test_detail_leaf_uses_the_same_spans_as_the_list_row`.
 #[tokio::test]
-#[serial]
 async fn the_detail_leaf_and_the_list_row_report_the_same_spans() {
     let database = SpecDatabase::create().await;
     let task = LiveTask::pending("alpha_task");

@@ -196,7 +196,7 @@ fn child_pid(pid_file: &Path) -> i32 {
 /// the run, the worker writes no
 /// end of it: the row stays RUNNING with no history row.
 #[tokio::test]
-#[serial_test::serial]
+#[serial_test::serial(timing)]
 async fn a_task_held_in_a_child_gets_the_runner_beats_of_the_worker() {
     let (database, pool) = database().await;
     let dir = test_dir("held-task-beats");
@@ -262,7 +262,6 @@ async fn a_task_held_in_a_child_gets_the_runner_beats_of_the_worker() {
 /// run, so a run that ends within the bound had its child killed by the
 /// watchdog.
 #[tokio::test]
-#[serial_test::serial]
 async fn runner_beats_that_cannot_land_stop_the_worker_with_runner_heartbeat_lost() {
     let (database, pool) = database().await;
     let refusal =
@@ -340,7 +339,6 @@ async fn runner_beats_that_cannot_land_stop_the_worker_with_runner_heartbeat_los
 /// of committed attempt writes, which an AFTER trigger writes in the
 /// transaction of the write, holds the task once, and the retry was logged.
 #[tokio::test]
-#[serial_test::serial]
 async fn the_stop_waits_for_an_outcome_write_that_is_tried_again() {
     let (database, pool) = database().await;
     sql::raw_sql(

@@ -7,7 +7,6 @@
 
 use serde::Deserialize;
 use serde_json::Value;
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::{task_error_of, vector_file};
@@ -155,7 +154,6 @@ fn the_engine_merge_errors_are_python_s_texts() {
 /// of each vector. The non-ASCII vectors pin that Postgres writes the
 /// characters as Python does, not as `\u` escapes.
 #[tokio::test]
-#[serial]
 async fn the_sql_writer_builds_python_s_engine_errors() {
     let pool = crate::test_support::migrated_pool().await;
     for name in [

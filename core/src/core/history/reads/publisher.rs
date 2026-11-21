@@ -187,12 +187,10 @@ pub(crate) async fn published_manifest_absent_leaves(
 mod publication_contract_tests {
     use super::*;
     use crate::test_support::sql;
-    use serial_test::serial;
 
     /// A publication that fails inside the caller's transaction leaves the
     /// manifest and the four readers as they were once the caller rolls back.
     #[tokio::test]
-    #[serial]
     async fn failed_publication_restores_manifest_and_reader_definitions_on_rollback() {
         let pool = crate::test_support::migrated_pool().await;
         let mut tx = pool.begin().await.unwrap();

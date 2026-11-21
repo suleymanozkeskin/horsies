@@ -15,7 +15,6 @@
 
 use std::sync::Arc;
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -209,7 +208,6 @@ async fn node_statuses(pool: &TestPool, workflow_id: Uuid) -> Vec<String> {
 /// `test_phase_one_of_a_success_is_one_statement` (`chain`, `single`): phase 1
 /// of a success is one round trip, `horsies_finish_workflow_success`.
 #[tokio::test]
-#[serial]
 async fn phase_one_of_a_success_is_one_round_trip() {
     let db = IsolatedDatabase::create().await;
     for shape in [Shape::Chain, Shape::Single] {
@@ -223,7 +221,6 @@ async fn phase_one_of_a_success_is_one_round_trip() {
 /// of a failure is one round trip, `horsies_finish_failed_attempt`. The core
 /// reads no row before it.
 #[tokio::test]
-#[serial]
 async fn phase_one_of_a_failure_is_one_round_trip() {
     let db = IsolatedDatabase::create().await;
     for shape in [Shape::Chain, Shape::Single] {
@@ -237,7 +234,6 @@ async fn phase_one_of_a_failure_is_one_round_trip() {
 /// sub-workflow node is below the node, and `BEGIN`, the step, the owed child
 /// start and `COMMIT` when one is.
 #[tokio::test]
-#[serial]
 async fn phase_two_round_trips_follow_the_shape() {
     let db = IsolatedDatabase::create().await;
     let cases = [
@@ -298,7 +294,6 @@ async fn phase_two_round_trips_follow_the_shape() {
 /// trip; phase 2 of B, which has no dependents and completes the workflow,
 /// is one round trip.
 #[tokio::test]
-#[serial]
 async fn a_success_completion_is_one_round_trip_with_and_without_dependents() {
     let db = IsolatedDatabase::create().await;
     let child_specs = child_specs_of(&[]);
@@ -322,7 +317,6 @@ async fn a_success_completion_is_one_round_trip_with_and_without_dependents() {
 /// the failure of A under `on_error = fail` runs the failure policy, the skip
 /// of B and the completion (FAILED) in one round trip.
 #[tokio::test]
-#[serial]
 async fn a_failed_completion_under_on_error_fail_is_one_round_trip() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, measured) = measure_node_a(&db.pool, Shape::Chain, NodeReport::Failure).await;
@@ -341,7 +335,6 @@ async fn a_failed_completion_under_on_error_fail_is_one_round_trip() {
 /// of a root that promotes F task dependents is one round trip, for F = 5
 /// and F = 20.
 #[tokio::test]
-#[serial]
 async fn a_fan_out_promotion_is_one_round_trip_for_any_width() {
     let db = IsolatedDatabase::create().await;
     for width in [SMALL_FAN_OUT, LARGE_FAN_OUT] {
@@ -392,7 +385,6 @@ fn child_of_shape(name: &str, chained: bool) -> WorkflowSpec {
 /// of plain roots is one round trip (`horsies_workflow_start`), for one root
 /// and for 50.
 #[tokio::test]
-#[serial]
 async fn a_start_is_one_round_trip_for_one_root_and_for_fifty() {
     let db = IsolatedDatabase::create().await;
     let counted = CountedBroker::open(&db.pool).await;
@@ -438,7 +430,6 @@ async fn a_start_is_one_round_trip_for_one_root_and_for_fifty() {
 /// start whose root is a sub-workflow node starts the child in the same
 /// statement, one round trip for a child of 20 roots and for a chain of 20.
 #[tokio::test]
-#[serial]
 async fn a_child_start_is_one_round_trip_for_any_child_shape() {
     let db = IsolatedDatabase::create().await;
     let flat = child_of_shape("round_trip_flat_child", false);

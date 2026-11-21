@@ -412,7 +412,6 @@ mod tests {
     use std::sync::PoisonError;
 
     use serde_json::Value;
-    use serial_test::serial;
 
     use super::MAX_PRUNE_CANDIDATES_PER_PASS;
     use crate::core::history::names::{LEAF_CATALOG, RETENTION_CLASSES};
@@ -507,7 +506,6 @@ mod tests {
     /// with `log_nested_statements`, as a notice. Rows are not counted:
     /// EXPLAIN gives a scan's rows as a rounded mean per loop.
     #[tokio::test]
-    #[serial]
     async fn the_candidate_read_scans_only_active_catalog_records() {
         let url = crate::test_support::migrated_database_url().await;
         let (client, notices) = connect_collecting_notices(&url).await;

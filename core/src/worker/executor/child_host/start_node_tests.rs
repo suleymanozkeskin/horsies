@@ -13,7 +13,6 @@ use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::host::{ChildApp, ChildLogSetup, ChildStartHook};
@@ -182,7 +181,6 @@ async fn remove_case(pool: &TestPool, workflow_id: Option<Uuid>, task_id: Uuid) 
 /// node's first start, and gives the node: its workflow, its index and the
 /// root of its tree (the workflow itself at depth 0).
 #[tokio::test]
-#[serial]
 async fn workflow_task_still_transitions_node_to_running() {
     let pool = crate::test_support::migrated_pool().await;
     let workflow_id = Uuid::new_v4();
@@ -234,7 +232,6 @@ async fn workflow_task_still_transitions_node_to_running() {
 /// The start of a node that is RUNNING already keeps its first start and
 /// writes no new node tuple.
 #[tokio::test]
-#[serial]
 async fn running_replay_preserves_the_first_node_start() {
     let pool = crate::test_support::migrated_pool().await;
     let workflow_id = Uuid::new_v4();
@@ -286,7 +283,6 @@ async fn running_replay_preserves_the_first_node_start() {
 
 /// The start of a plain task sets its row RUNNING with no workflow write.
 #[tokio::test]
-#[serial]
 async fn plain_task_starts_running_without_workflow_update() {
     let pool = crate::test_support::migrated_pool().await;
     let task_id = Uuid::new_v4();
@@ -312,7 +308,6 @@ async fn plain_task_starts_running_without_workflow_update() {
 /// that holds the node's lock makes the start wait, and the start then sees
 /// the new state.
 #[tokio::test]
-#[serial]
 async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
     let pool = crate::test_support::migrated_pool().await;
     for status in [
@@ -430,7 +425,6 @@ async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
 /// moved the row to history as CANCELLED with `WORKFLOW_CHECK_FAILED`, in
 /// the child.
 #[tokio::test]
-#[serial]
 async fn an_unlinked_task_is_cancelled_in_the_child_when_the_self_heal_is_on() {
     let pool = crate::test_support::migrated_pool().await;
     let task_id = Uuid::new_v4();
@@ -463,7 +457,6 @@ async fn an_unlinked_task_is_cancelled_in_the_child_when_the_self_heal_is_on() {
 /// `NODE_NOT_LINKED`, and the row stays CLAIMED by this claim with no
 /// history row.
 #[tokio::test]
-#[serial]
 async fn an_unlinked_task_stays_claimed_when_the_self_heal_is_off() {
     let pool = crate::test_support::migrated_pool().await;
     let task_id = Uuid::new_v4();

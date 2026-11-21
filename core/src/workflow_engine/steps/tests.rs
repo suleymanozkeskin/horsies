@@ -6,7 +6,6 @@
 //! - The operation tests call the step functions of `0005_workflow_functions.sql`
 //!   through the public lifecycle functions.
 
-use serial_test::serial;
 use tokio_postgres::Row;
 use uuid::Uuid;
 
@@ -194,7 +193,6 @@ async fn cancel_row(
 }
 
 #[tokio::test]
-#[serial]
 async fn each_pause_outcome_reads_into_its_variant() {
     let broker = test_broker().await;
     let id = Uuid::new_v4();
@@ -217,7 +215,6 @@ async fn each_pause_outcome_reads_into_its_variant() {
 }
 
 #[tokio::test]
-#[serial]
 async fn a_pause_row_outside_the_contract_is_refused() {
     let broker = test_broker().await;
     let id = Uuid::new_v4();
@@ -249,7 +246,6 @@ async fn a_pause_row_outside_the_contract_is_refused() {
 }
 
 #[tokio::test]
-#[serial]
 async fn each_cancel_outcome_reads_into_its_variant() {
     let broker = test_broker().await;
     let id = Uuid::new_v4();
@@ -302,7 +298,6 @@ fn a_step_contract_error_has_no_handle_catalog_entry_and_panics() {
 /// COMPLETED child alone, abandons the CLAIMED task behind the child's
 /// ENQUEUED node and puts that node back to READY with no task.
 #[tokio::test]
-#[serial]
 async fn pause_pauses_the_running_tree_and_abandons_its_claimed_tasks() {
     let broker = test_broker().await;
     let pool = crate::test_support::migrated_pool().await;
@@ -337,7 +332,6 @@ async fn pause_pauses_the_running_tree_and_abandons_its_claimed_tasks() {
 /// A workflow that is not RUNNING is not paused (`false`, nothing written);
 /// an id with no workflow is `WORKFLOW_NOT_FOUND`.
 #[tokio::test]
-#[serial]
 async fn pause_answers_not_running_and_missing_workflows() {
     let broker = test_broker().await;
     let pool = crate::test_support::migrated_pool().await;
@@ -360,7 +354,6 @@ async fn pause_answers_not_running_and_missing_workflows() {
 /// Cancel moves the root and its PAUSED child to CANCELLED, moves the CLAIMED
 /// task behind the child's ENQUEUED node to history, and skips that node.
 #[tokio::test]
-#[serial]
 async fn cancel_cancels_the_tree_and_the_tasks_behind_its_enqueued_nodes() {
     let broker = test_broker().await;
     let pool = crate::test_support::migrated_pool().await;
@@ -388,7 +381,6 @@ async fn cancel_cancels_the_tree_and_the_tasks_behind_its_enqueued_nodes() {
 /// A terminal workflow is not cancelled again (`false`, nothing written); an
 /// id with no workflow is `WORKFLOW_NOT_FOUND`.
 #[tokio::test]
-#[serial]
 async fn cancel_answers_terminal_and_missing_workflows() {
     let broker = test_broker().await;
     let pool = crate::test_support::migrated_pool().await;
@@ -508,7 +500,6 @@ async fn step_row_of_kind(broker: &PostgresBroker, row_kind: &str, disposition: 
 }
 
 #[tokio::test]
-#[serial]
 async fn step_rows_read_the_outcome_and_the_owed_child_starts_in_any_order() {
     let broker = test_broker().await;
     let workflow_id = Uuid::new_v4();
@@ -562,7 +553,6 @@ async fn step_rows_read_the_outcome_and_the_owed_child_starts_in_any_order() {
 /// outside `GIVEN` and `NOT_GIVEN`, and a `CHILD_START` row with no parent
 /// workflow name break the contract.
 #[tokio::test]
-#[serial]
 async fn child_start_rows_outside_the_contract_are_refused() {
     let broker = test_broker().await;
     let workflow_id = Uuid::new_v4();
@@ -619,7 +609,6 @@ async fn child_start_rows_outside_the_contract_are_refused() {
 }
 
 #[tokio::test]
-#[serial]
 async fn an_outcome_row_alone_owes_no_child_start_and_keeps_its_detail() {
     let broker = test_broker().await;
     let rows = step_row_of_kind(&broker, "OUTCOME", "NOT_PAUSED").await;
@@ -643,7 +632,6 @@ async fn an_outcome_row_alone_owes_no_child_start_and_keeps_its_detail() {
 }
 
 #[tokio::test]
-#[serial]
 async fn step_rows_outside_the_contract_are_refused() {
     let broker = test_broker().await;
 
@@ -829,7 +817,6 @@ fn every_resume_disposition_text_reads_and_others_do_not() {
 /// A second resume finds the root RUNNING: `false`, nothing written. An id
 /// with no workflow is `WORKFLOW_NOT_FOUND`.
 #[tokio::test]
-#[serial]
 async fn resume_resumes_the_paused_tree_and_answers_the_other_outcomes() {
     let broker = test_broker().await;
     let pool = crate::test_support::migrated_pool().await;

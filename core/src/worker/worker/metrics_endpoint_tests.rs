@@ -198,7 +198,7 @@ async fn get(port: u16, path: &str) -> (String, String) {
 }
 
 #[tokio::test]
-#[serial_test::serial]
+#[serial_test::serial(process_globals)]
 async fn a_port_in_use_leaves_the_worker_claiming_and_the_endpoint_serves_once_free() {
     let database = TestDatabase::create().await;
     let pool = TestPool::connect(database.url())

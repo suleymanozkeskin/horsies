@@ -8,7 +8,6 @@
 //! record, a live claim or a trigger uses its own database.
 
 use chrono::{DateTime, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -279,7 +278,6 @@ fn completed_locked() -> Option<(String, String)> {
 /// Phase 1 committed and phase 2 never ran. The worker's finalize gets
 /// `AlreadyApplied`, reads the phase-2 record and runs phase 2.
 #[tokio::test]
-#[serial]
 async fn a_replay_of_a_committed_success_runs_phase_two() {
     let pool = shared_pool().await;
     let node_a = run_node_a(&pool, start_chain(&pool, "finalize_replay").await).await;
@@ -337,7 +335,6 @@ async fn a_replay_of_a_committed_success_runs_phase_two() {
 /// `_one_pooled_connection`). The warm-up returns the connection to the pool
 /// at once, so the finalize takes it within the idle ping limit.
 #[tokio::test]
-#[serial]
 async fn a_lost_reply_is_retried_and_the_replay_runs_phase_two() {
     let pool = shared_pool().await;
     let upstream = pool.url();
@@ -415,7 +412,6 @@ enum WorkflowEnd {
 /// record, and the ended workflow promotes no dependent: B keeps the status
 /// the end left it.
 #[tokio::test]
-#[serial]
 async fn a_node_of_an_ended_workflow_completes_and_enqueues_nothing() {
     let pool = shared_pool().await;
     for end in [WorkflowEnd::Cancelled, WorkflowEnd::Failed] {
@@ -526,7 +522,6 @@ async fn live_status(pool: &TestPool, task_id: Uuid) -> Option<String> {
 /// cancels the owned orphan (`worker/executor/slots/settle_tests.rs::a_task_whose_node_is_not_linked_is_cancelled_when_the_self_heal_is_on`),
 /// with it off the row stays CLAIMED (`::a_task_whose_node_is_not_linked_stays_claimed_when_the_self_heal_is_off`).
 #[tokio::test]
-#[serial]
 async fn a_failed_workflow_check_keeps_the_claim_and_writes_no_runner_beat() {
     let db = IsolatedDatabase::create().await;
     let (_workflow_id, task_id, claimed_at) = seed_claimed_task_of_a_completed_node(&db.pool).await;
@@ -607,7 +602,6 @@ fn assert_a_phase_two_error(result: &Result<(), FinalizeError>) -> &FinalizeErro
 /// phase-2 error that is not retryable. The advancement fails on the stored
 /// success policy, which does not parse (the completion check reads it).
 #[tokio::test]
-#[serial]
 async fn a_failure_in_the_advancement_is_a_phase_two_error_that_is_not_retryable() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id) = seed_owed_phase_two(&db.pool, Some(poison_success_policy())).await;
@@ -624,7 +618,6 @@ async fn a_failure_in_the_advancement_is_a_phase_two_error_that_is_not_retryable
 /// A database error: a refused node write (SQLSTATE `XX000`, not a
 /// connection error) is a phase-2 error that is not retryable.
 #[tokio::test]
-#[serial]
 async fn a_database_error_in_the_advancement_that_is_not_a_connection_error_is_not_retryable() {
     let db = IsolatedDatabase::create().await;
     let (_workflow_id, task_id) = seed_owed_phase_two(&db.pool, None).await;
@@ -668,7 +661,6 @@ enum WakeCase {
 /// is channel `task_queue_<queue>` with payload `capacity`, as every baseline
 /// write sends it; no receiver reads the payload on a queue channel.
 #[tokio::test]
-#[serial]
 async fn phase_two_wakes_the_queue_of_the_task_once() {
     let pool = shared_pool().await;
     for case in [WakeCase::Node, WakeCase::NoNode] {
@@ -711,7 +703,6 @@ async fn phase_two_wakes_the_queue_of_the_task_once() {
 /// policy is repaired, the retry of phase 2 commits, and the same listener
 /// hears its wake.
 #[tokio::test]
-#[serial]
 async fn a_phase_two_that_fails_sends_no_wake() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id) = seed_owed_phase_two(&db.pool, Some(poison_success_policy())).await;
@@ -770,7 +761,6 @@ async fn node_image(pool: &TestPool, workflow_id: Uuid, task_index: i32) -> serd
 /// server rolls the transaction back. The retry on a direct connection is
 /// the control: it applies the kept record, and the listener hears its wake.
 #[tokio::test]
-#[serial]
 async fn a_phase_two_lost_after_its_step_ran_commits_neither_the_wake_nor_the_node_write() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id) = seed_owed_phase_two(&db.pool, None).await;

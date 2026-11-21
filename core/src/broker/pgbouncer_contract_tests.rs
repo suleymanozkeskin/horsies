@@ -25,7 +25,6 @@
 //! name to the server.
 
 use chrono::Utc;
-use serial_test::serial;
 use uuid::Uuid;
 
 use crate::broker::{BrokerError, PostgresBroker, SendKind};
@@ -225,7 +224,6 @@ async fn direct_pool(url: &str) -> TestPool {
 /// session lock on the session pool, and takes repeated enqueues through a
 /// pool that tracks no prepared statements.
 #[tokio::test]
-#[serial]
 #[cfg_attr(
     not(feature = "pgbouncer-fixture-tests"),
     ignore = "needs the PgBouncer fixture of clients/python/tests/fixtures/pgbouncer and the feature pgbouncer-fixture-tests"
@@ -313,7 +311,6 @@ async fn a_transaction_pool_with_a_direct_session_installs_checks_locks_and_enqu
 /// the worker's session check refuses it. The same URL is refused again, so
 /// the refusal is not retryable.
 #[tokio::test]
-#[serial]
 #[cfg_attr(
     not(feature = "pgbouncer-fixture-tests"),
     ignore = "needs the PgBouncer fixture of clients/python/tests/fixtures/pgbouncer and the feature pgbouncer-fixture-tests"
@@ -348,7 +345,6 @@ async fn a_session_url_on_the_transaction_pool_fails_the_worker_session_check() 
 /// a session-pooled URL, with no transaction mode, installs the schema,
 /// takes an enqueue and delivers a NOTIFY to a LISTEN.
 #[tokio::test]
-#[serial]
 #[cfg_attr(
     not(feature = "pgbouncer-fixture-tests"),
     ignore = "needs the PgBouncer fixture of clients/python/tests/fixtures/pgbouncer and the feature pgbouncer-fixture-tests"
@@ -391,7 +387,6 @@ async fn a_session_pooled_url_installs_enqueues_and_delivers_a_notify() {
 /// that is not retryable (decision "Public API changes forced by earlier
 /// decisions": a statement-pooled URL answers `retryable = false`).
 #[tokio::test]
-#[serial]
 #[cfg_attr(
     not(feature = "pgbouncer-fixture-tests"),
     ignore = "needs the PgBouncer fixture of clients/python/tests/fixtures/pgbouncer and the feature pgbouncer-fixture-tests"

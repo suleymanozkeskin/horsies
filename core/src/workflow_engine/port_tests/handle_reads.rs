@@ -4,7 +4,6 @@
 
 use std::time::Duration;
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -53,7 +52,6 @@ fn ok_value(result: &TaskResult<serde_json::Value>) -> &serde_json::Value {
 
 /// `TestWorkflowHandleStatus.test_status_running`
 #[tokio::test]
-#[serial]
 async fn status_reads_running() {
     let pool = shared_pool().await;
     let workflow_id = start(&pool, &chain("status_running"), &TestChildSpecs::empty()).await;
@@ -63,7 +61,6 @@ async fn status_reads_running() {
 
 /// `TestWorkflowHandleStatus.test_status_completed`
 #[tokio::test]
-#[serial]
 async fn status_reads_completed() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -87,7 +84,6 @@ async fn status_reads_completed() {
 
 /// `TestWorkflowHandleStatus.test_status_failed`
 #[tokio::test]
-#[serial]
 async fn status_reads_failed() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -106,7 +102,6 @@ async fn status_reads_failed() {
 
 /// `TestWorkflowHandleStatus.test_status_paused`
 #[tokio::test]
-#[serial]
 async fn status_reads_paused() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -130,7 +125,6 @@ async fn status_reads_paused() {
 
 /// `TestWorkflowHandleStatus.test_status_nonexistent_returns_not_found`
 #[tokio::test]
-#[serial]
 async fn status_of_an_unknown_id_is_workflow_not_found() {
     let pool = shared_pool().await;
     let workflow_id = Uuid::new_v4();
@@ -166,7 +160,6 @@ async fn paused_an_hour_ago(pool: &TestPool, name: &str) -> Uuid {
 /// not ported: the clean slate keeps no 0.x stored values, and the core fails
 /// closed on such a text (`the_result_read_fails_closed_on_a_malformed_expiry_error`).
 #[tokio::test]
-#[serial]
 async fn an_expired_pause_reads_expired_and_get_gives_workflow_expired() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = paused_an_hour_ago(&db.pool, "get_expired_pause").await;
@@ -192,7 +185,6 @@ async fn an_expired_pause_reads_expired_and_get_gives_workflow_expired() {
 /// config refuses it (`config::retention` tests); the sweep takes only an
 /// age of the config.
 #[tokio::test]
-#[serial]
 async fn the_smallest_age_expires_a_paused_workflow() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = paused_an_hour_ago(&db.pool, "get_expired_pause_zero_age").await;
@@ -211,7 +203,6 @@ async fn the_smallest_age_expires_a_paused_workflow() {
 /// the candidate read without a timestamp or interval range error: an hour
 /// old pause is not a candidate, and nothing is expired.
 #[tokio::test]
-#[serial]
 async fn the_longest_age_reads_its_candidates_without_a_range_error() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = paused_an_hour_ago(&db.pool, "longest_paused_age").await;
@@ -229,7 +220,6 @@ async fn the_longest_age_reads_its_candidates_without_a_range_error() {
 
 /// `TestWorkflowHandleGet.test_get_timeout`
 #[tokio::test]
-#[serial]
 async fn get_gives_wait_timeout_when_the_workflow_does_not_finish() {
     let pool = shared_pool().await;
     let workflow_id = start(&pool, &chain("get_timeout"), &TestChildSpecs::empty()).await;
@@ -244,7 +234,6 @@ async fn get_gives_wait_timeout_when_the_workflow_does_not_finish() {
 
 /// `TestWorkflowHandleGet.test_get_cancelled_returns_cancelled_error`
 #[tokio::test]
-#[serial]
 async fn get_after_cancel_gives_workflow_cancelled() {
     let pool = shared_pool().await;
     let workflow_id = start(&pool, &chain("get_cancelled"), &TestChildSpecs::empty()).await;
@@ -262,7 +251,6 @@ async fn get_after_cancel_gives_workflow_cancelled() {
 /// `TestWorkflowHandleGet.test_get_completed_returns_result`: a workflow of
 /// one node whose output is that node gives the node's result at `get()`.
 #[tokio::test]
-#[serial]
 async fn get_of_a_completed_workflow_gives_the_result_of_its_output_node() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -292,7 +280,6 @@ async fn get_of_a_completed_workflow_gives_the_result_of_its_output_node() {
 /// `TestWorkflowHandleGet.test_get_failed_returns_error`: a workflow whose
 /// one node fails gives the node's error at `get()`.
 #[tokio::test]
-#[serial]
 async fn get_of_a_failed_workflow_gives_the_error_of_its_node() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -340,7 +327,6 @@ async fn finished_chain(pool: &TestPool, name: &str) -> Uuid {
 
 /// `TestWorkflowHandleResults.test_results_returns_all`
 #[tokio::test]
-#[serial]
 async fn results_gives_every_stored_node_result_by_node_id() {
     let pool = shared_pool().await;
     let workflow_id = finished_chain(&pool, "results_all").await;
@@ -357,7 +343,6 @@ async fn results_gives_every_stored_node_result_by_node_id() {
 
 /// `TestWorkflowHandleResults.test_result_for_returns_typed_result`
 #[tokio::test]
-#[serial]
 async fn result_for_gives_the_typed_result_of_one_node() {
     let pool = shared_pool().await;
     let workflow_id = finished_chain(&pool, "result_for").await;
@@ -379,7 +364,6 @@ async fn result_for_gives_the_typed_result_of_one_node() {
 /// the node of an unfinished workflow stores no result, which a client reads
 /// as `RESULT_NOT_READY`.
 #[tokio::test]
-#[serial]
 async fn an_unfinished_node_stores_no_result() {
     let pool = shared_pool().await;
     let workflow_id = start(
@@ -399,7 +383,6 @@ async fn an_unfinished_node_stores_no_result() {
 
 /// `TestWorkflowHandleResults.test_results_empty_when_no_tasks_completed`
 #[tokio::test]
-#[serial]
 async fn results_is_empty_before_any_node_finishes() {
     let pool = shared_pool().await;
     let workflow_id = start(&pool, &chain("results_empty"), &TestChildSpecs::empty()).await;
@@ -414,7 +397,6 @@ async fn results_is_empty_before_any_node_finishes() {
 
 /// `TestWorkflowHandleResults.test_tasks_returns_info`
 #[tokio::test]
-#[serial]
 async fn tasks_gives_one_entry_per_node_with_its_task_name() {
     let pool = shared_pool().await;
     let workflow_id = start(&pool, &chain("tasks_info"), &TestChildSpecs::empty()).await;
@@ -427,7 +409,6 @@ async fn tasks_gives_one_entry_per_node_with_its_task_name() {
 
 /// `TestWorkflowHandleResults.test_tasks_ordered_by_index`
 #[tokio::test]
-#[serial]
 async fn tasks_is_ordered_by_node_index() {
     let pool = shared_pool().await;
     let mut join = task_node(2, "tasks_order_c");
@@ -454,7 +435,6 @@ async fn tasks_is_ordered_by_node_index() {
 
 /// `TestWorkflowHandleResults.test_tasks_status_fields`
 #[tokio::test]
-#[serial]
 async fn tasks_gives_enqueued_for_a_root_and_pending_for_a_dependent() {
     let pool = shared_pool().await;
     let workflow_id = start(&pool, &chain("tasks_status"), &TestChildSpecs::empty()).await;
@@ -469,7 +449,6 @@ async fn tasks_gives_enqueued_for_a_root_and_pending_for_a_dependent() {
 
 /// `TestWorkflowHandleResults.test_tasks_completed_fields`
 #[tokio::test]
-#[serial]
 async fn tasks_gives_the_result_and_times_of_a_finished_node() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -496,7 +475,6 @@ async fn tasks_gives_the_result_and_times_of_a_finished_node() {
 
 /// `TestWorkflowHandleSubWorkflowFields.test_regular_task_has_none_subworkflow_fields`
 #[tokio::test]
-#[serial]
 async fn a_task_node_has_no_child_and_no_summary() {
     let pool = shared_pool().await;
     let workflow_id = start(
@@ -535,7 +513,6 @@ async fn seed_linked_child(
 
 /// `TestWorkflowHandleSubWorkflowFields.test_subworkflow_node_exposes_sub_workflow_id`
 #[tokio::test]
-#[serial]
 async fn a_started_sub_workflow_node_gives_its_child_id() {
     let pool = shared_pool().await;
     let (parent, child) = seed_linked_child(&pool, "RUNNING", "RUNNING", None).await;
@@ -549,7 +526,6 @@ async fn a_started_sub_workflow_node_gives_its_child_id() {
 
 /// `TestWorkflowHandleSubWorkflowFields.test_subworkflow_node_with_valid_summary`
 #[tokio::test]
-#[serial]
 async fn a_finished_sub_workflow_node_gives_its_summary() {
     let pool = shared_pool().await;
     let summary = r#"{"status": "COMPLETED", "output": null, "total_tasks": 3, "completed_tasks": 3, "failed_tasks": 0, "skipped_tasks": 0, "error_summary": null}"#;
@@ -589,7 +565,6 @@ async fn stored_summary_of(pool: &TestPool, parent: Uuid) -> Option<String> {
 /// the node read returns a summary that is not JSON as stored; a client
 /// refuses it with `STORED_DATA_INVALID`.
 #[tokio::test]
-#[serial]
 async fn a_corrupt_summary_is_read_as_stored() {
     let pool = shared_pool().await;
     let (parent, child) =
@@ -605,7 +580,6 @@ async fn a_corrupt_summary_is_read_as_stored() {
 /// the node read returns a summary with an unknown status as stored; a
 /// client refuses it with `STORED_DATA_INVALID` and never reads it as FAILED.
 #[tokio::test]
-#[serial]
 async fn a_summary_with_an_unknown_status_is_read_as_stored() {
     let pool = shared_pool().await;
     let stored = r#"{"status": "NOT_A_STATUS", "total_tasks": 1}"#;
@@ -619,7 +593,6 @@ async fn a_summary_with_an_unknown_status_is_read_as_stored() {
 
 /// `TestWorkflowHandleOutput.test_output_failed_returns_failed`
 #[tokio::test]
-#[serial]
 async fn a_failed_output_node_makes_get_give_its_error() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -653,7 +626,6 @@ async fn a_failed_output_node_makes_get_give_its_error() {
 
 /// `TestWorkflowHandleOutput.test_duplicate_task_names_preserved`
 #[tokio::test]
-#[serial]
 async fn results_keys_two_nodes_of_one_task_by_node_id() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -699,7 +671,6 @@ async fn results_keys_two_nodes_of_one_task_by_node_id() {
 /// into the schema. The value fits `status varchar(9)`, as Python's `BOGUS`,
 /// so the CHECK and not the length limit refuses it.
 #[tokio::test]
-#[serial]
 async fn the_database_refuses_an_unknown_workflow_status() {
     let pool = shared_pool().await;
     let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
@@ -780,7 +751,6 @@ async fn a_lost_database_makes_results_give_db_operation_failed() {
 /// the listener's new connection is refused while the pool keeps its open
 /// connections; `get()` reads the finished workflow by polling.
 #[tokio::test]
-#[serial]
 async fn get_polls_when_the_listener_cannot_connect() {
     let mut db = IsolatedDatabase::create().await;
     let child_specs = TestChildSpecs::empty();

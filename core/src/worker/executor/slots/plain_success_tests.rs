@@ -119,7 +119,6 @@ fn reported_value() -> AttemptEnd {
 /// Two plain successes settled at once both end through the batcher: each
 /// settles as written, and each row is COMPLETED in history.
 #[tokio::test]
-#[serial_test::serial]
 async fn plain_successes_settle_through_the_batcher() {
     let pool = crate::test_support::migrated_pool().await;
     let first = claimed_now();
@@ -158,7 +157,6 @@ async fn plain_successes_settle_through_the_batcher() {
 /// A plain success on a row that another worker holds writes nothing and
 /// settles as not held (Python: the refusal answers `Ok(None)`).
 #[tokio::test]
-#[serial_test::serial]
 async fn a_plain_success_on_a_row_this_claim_does_not_hold_writes_nothing() {
     let pool = crate::test_support::migrated_pool().await;
     let claimed = claimed_now();
@@ -280,7 +278,6 @@ async fn seed_workflow_node_task(
 /// (phase 1, then phase 2) settle at the same time. Every write ends, no
 /// row is refused, and no row stays live.
 #[tokio::test]
-#[serial_test::serial]
 async fn two_flushers_and_workflow_node_successes_do_not_deadlock() {
     let pool = crate::test_support::migrated_pool().await;
     let writer = Arc::new(writer_with_queue_room(Arc::new(
@@ -365,7 +362,7 @@ async fn two_flushers_and_workflow_node_successes_do_not_deadlock() {
 /// one round trip on a warm connection of a broker whose pools ping a
 /// connection only after it was idle past their limit.
 #[tokio::test]
-#[serial_test::serial]
+#[serial_test::serial(timing)]
 async fn a_plain_success_settle_is_one_round_trip() {
     let pool = crate::test_support::migrated_pool().await;
     let upstream = pool.url();
@@ -401,7 +398,6 @@ async fn a_plain_success_settle_is_one_round_trip() {
 /// statement. The row stays CLAIMED
 /// (`settle_tests::a_task_whose_node_is_not_linked_stays_claimed`).
 #[tokio::test]
-#[serial_test::serial]
 async fn a_stop_for_a_node_not_linked_sends_no_statement() {
     let pool = crate::test_support::migrated_pool().await;
     let upstream = pool.url();

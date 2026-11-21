@@ -1059,8 +1059,6 @@ mod kept_session_tests {
 
     use std::num::NonZeroU32;
 
-    use serial_test::serial;
-
     use super::*;
     use crate::db::{
         CheckoutClass, IsolationLevel, PooledConnection, RollbackOutcome, StatementBound,
@@ -1135,7 +1133,6 @@ mod kept_session_tests {
     /// statement-pooling check; the transaction of the test rolls back after
     /// both, and the setting stays.
     #[tokio::test]
-    #[serial]
     async fn a_kept_session_runs_without_jit_after_a_transaction_rolls_back() {
         let url = migrated_database_url().await;
         let pools = open_test_pools(&one_connection_config(&url));
@@ -1172,7 +1169,6 @@ mod kept_session_tests {
     /// The two URLs reach the same server directly and differ only in
     /// `application_name`, so the session URL gets a pool of its own.
     #[tokio::test]
-    #[serial]
     async fn in_transaction_mode_only_the_session_pool_turns_jit_off() {
         let url = migrated_database_url().await;
         let separator = if url.contains('?') { '&' } else { '?' };
@@ -1212,7 +1208,6 @@ mod kept_session_tests {
     /// Python `ConnectionPool(min_size=2).open()`: the connections open
     /// without a checkout, and the pool keeps no more than `min_size`.
     #[tokio::test]
-    #[serial]
     async fn a_child_pool_opens_its_kept_connections_without_a_checkout() {
         let url = migrated_database_url().await;
         let mut config = PostgresConfig::from_url(&url);

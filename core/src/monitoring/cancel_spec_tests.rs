@@ -6,7 +6,6 @@
 //! its own ([`SpecDatabase`]), so a claim pass sees only its rows.
 
 use chrono::{DateTime, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::spec_support::{
@@ -99,7 +98,6 @@ async fn claim_once(pool: &TestPool, worker_id: &str) -> Vec<Uuid> {
 /// the cancel of a CLAIMED row moves it to history, so no live row is left
 /// to claim; the history row keeps the claim time as provenance.
 #[tokio::test]
-#[serial]
 async fn a_cancelled_claim_leaves_no_live_row_and_keeps_its_claim_time() {
     let database = SpecDatabase::create().await;
     let task = LiveTask::claimed("alpha_task", WORKER);
@@ -129,7 +127,6 @@ async fn a_cancelled_claim_leaves_no_live_row_and_keeps_its_claim_time() {
 /// a history status that is not a task status is `STORED_DATA_INVALID`,
 /// not retryable, naming the value; the row does not change.
 #[tokio::test]
-#[serial]
 async fn an_unknown_stored_history_status_is_stored_data_invalid_and_nothing_changes() {
     let database = SpecDatabase::create().await;
     let task = LiveTask::pending("alpha_task");
@@ -160,7 +157,6 @@ async fn an_unknown_stored_history_status_is_stored_data_invalid_and_nothing_cha
 /// source-state conflict; the row stays CANCELLED with no result, and no
 /// attempt row is left.
 #[tokio::test]
-#[serial]
 async fn a_success_finalize_after_the_cancel_of_a_running_task_changes_nothing() {
     let database = SpecDatabase::create().await;
     let task = LiveTask::running("alpha_task", WORKER);
@@ -211,7 +207,6 @@ async fn a_success_finalize_after_the_cancel_of_a_running_task_changes_nothing()
 /// a claim through the claim function lands first, then the cancel takes
 /// the row.
 #[tokio::test]
-#[serial]
 async fn the_cancel_of_a_row_the_claim_function_just_claimed_wins() {
     let database = SpecDatabase::create().await;
     let task = LiveTask::pending("alpha_task");
@@ -238,7 +233,6 @@ async fn the_cancel_of_a_row_the_claim_function_just_claimed_wins() {
 /// loses to a later status and the row is not CANCELLED. No attempt row is
 /// written either way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn a_concurrent_claim_and_cancel_leave_one_consistent_outcome() {
     let database = SpecDatabase::create().await;
     let task = LiveTask::pending("alpha_task");

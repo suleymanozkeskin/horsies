@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::scripted::{
@@ -241,7 +240,6 @@ async fn remove_task(pool: &TestPool, task_id: Uuid) {
 /// `WORKER_CRASHED`. The live row is gone, and the history row keeps the
 /// claimant and the process that ran the task as provenance.
 #[tokio::test]
-#[serial]
 async fn a_crash_whose_exit_was_seen_fails_the_row_with_worker_crashed() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = format!("slots_{}", &Uuid::new_v4().simple().to_string()[..8]);

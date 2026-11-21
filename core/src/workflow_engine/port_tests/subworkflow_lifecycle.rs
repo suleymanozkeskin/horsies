@@ -6,7 +6,6 @@
 //! stuck-workflow scan. Tests that run a pass use their own database.
 
 use chrono::{DateTime, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::subworkflow_matrix::{
@@ -140,7 +139,6 @@ async fn revert_end(pool: &TestPool, workflow_id: Uuid, revert_node: bool) {
 /// `test_subworkflow_cancel_before_start`: a PENDING child node is SKIPPED and
 /// starts no child.
 #[tokio::test]
-#[serial]
 async fn cancel_before_the_child_starts_skips_the_node_and_starts_no_child() {
     let pool = shared_pool().await;
     let workflow_id = start(
@@ -167,7 +165,6 @@ async fn cancel_before_the_child_starts_skips_the_node_and_starts_no_child() {
 
 /// `test_subworkflow_cancel_after_complete_noop`
 #[tokio::test]
-#[serial]
 async fn cancel_of_a_completed_workflow_changes_nothing() {
     let pool = shared_pool().await;
     let child_specs = matrix_children();
@@ -184,7 +181,6 @@ async fn cancel_of_a_completed_workflow_changes_nothing() {
 /// `test_subworkflow_cancel_nested_cascade`: cancel reaches the middle and the
 /// leaf workflow.
 #[tokio::test]
-#[serial]
 async fn cancel_reaches_the_middle_and_the_leaf_workflow() {
     let pool = shared_pool().await;
     let workflow_id = start(
@@ -217,7 +213,6 @@ async fn cancel_reaches_the_middle_and_the_leaf_workflow() {
 
 /// `test_subworkflow_pause_running_child`
 #[tokio::test]
-#[serial]
 async fn pause_of_the_parent_pauses_its_running_child() {
     let pool = shared_pool().await;
     let workflow_id = start(
@@ -242,7 +237,6 @@ async fn pause_of_the_parent_pauses_its_running_child() {
 
 /// `test_subworkflow_pause_resume_completes`
 #[tokio::test]
-#[serial]
 async fn pause_then_resume_of_the_parent_completes_parent_and_child() {
     let pool = shared_pool().await;
     let child_specs = matrix_children();
@@ -272,7 +266,6 @@ async fn pause_then_resume_of_the_parent_completes_parent_and_child() {
 
 /// `test_subworkflow_pause_then_cancel`
 #[tokio::test]
-#[serial]
 async fn cancel_of_a_paused_parent_cancels_its_paused_child() {
     let pool = shared_pool().await;
     let workflow_id = start(
@@ -298,7 +291,6 @@ async fn cancel_of_a_paused_parent_cancels_its_paused_child() {
 /// `test_subworkflow_recovery_ready_unstarted`: recovery starts the child of a
 /// READY sub-workflow node, and the workflow then completes.
 #[tokio::test]
-#[serial]
 async fn recovery_starts_the_child_of_a_ready_node_and_the_workflow_completes() {
     let db = IsolatedDatabase::create().await;
     let child_specs = matrix_children();
@@ -338,7 +330,6 @@ async fn recovery_starts_the_child_of_a_ready_node_and_the_workflow_completes() 
 /// `test_subworkflow_recovery_failed_child_parent_not_updated`: recovery
 /// writes an ended child into its RUNNING parent node and ends the parent.
 #[tokio::test]
-#[serial]
 async fn recovery_writes_an_ended_child_into_its_running_parent_node() {
     let db = IsolatedDatabase::create().await;
     let child_specs = matrix_children();
@@ -372,7 +363,6 @@ async fn recovery_writes_an_ended_child_into_its_running_parent_node() {
 /// completed and nothing advanced it; recovery completes the child, then the
 /// parent.
 #[tokio::test]
-#[serial]
 async fn recovery_completes_a_child_whose_task_completed_and_then_its_parent() {
     let db = IsolatedDatabase::create().await;
     let child_specs = matrix_children();
@@ -399,7 +389,6 @@ async fn recovery_completes_a_child_whose_task_completed_and_then_its_parent() {
 /// `test_subworkflow_recovery_outputless_recovery`: recovery rebuilds the
 /// outputless map with the failed child's error.
 #[tokio::test]
-#[serial]
 async fn recovery_rebuilds_an_outputless_map_with_the_failed_child_error() {
     let db = IsolatedDatabase::create().await;
     let child_specs = matrix_children();
@@ -533,7 +522,6 @@ fn retry_children() -> TestChildSpecs {
 /// `test_subworkflow_child_retries_succeed_eventually`: the child task fails
 /// once, is retried, and its second attempt completes child and parent.
 #[tokio::test]
-#[serial]
 async fn a_child_task_that_succeeds_on_its_retry_completes_the_parent() {
     let pool = shared_pool().await;
     let child_specs = retry_children();
@@ -564,7 +552,6 @@ async fn a_child_task_that_succeeds_on_its_retry_completes_the_parent() {
 /// `test_subworkflow_child_retries_exhaust`: the child task fails 1 + 3 times;
 /// the last failure ends it, and the parent fails with the child error.
 #[tokio::test]
-#[serial]
 async fn a_child_task_that_spends_its_retries_fails_the_parent() {
     let pool = shared_pool().await;
     let child_specs = retry_children();
@@ -598,7 +585,6 @@ async fn a_child_task_that_spends_its_retries_fails_the_parent() {
 /// `test_subworkflow_child_good_until_expired`: the child task expires before
 /// a claim; recovery fails the child and the parent with a sub-workflow error.
 #[tokio::test]
-#[serial]
 async fn an_expired_child_task_fails_the_child_and_the_parent() {
     let db = IsolatedDatabase::create().await;
     let mut expiring = task_node(0, "mark_task");

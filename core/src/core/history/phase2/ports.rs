@@ -5,7 +5,6 @@
 //! `test_task_history_phase2_quarantine.py`. Each test runs in one
 //! transaction that it rolls back, on the shared migrated database.
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::consumption::{consume_phase2, Phase2CallError, Phase2DispositionKind};
@@ -194,7 +193,6 @@ async fn node_state(
 /// `test_phase2_consume_plan.py::test_caller_plan_setting_survives_the_call`:
 /// the function's own plan setting does not leak into the caller's session.
 #[tokio::test]
-#[serial]
 async fn the_caller_plan_setting_survives_the_consume_call() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
@@ -221,7 +219,6 @@ async fn the_caller_plan_setting_survives_the_consume_call() {
 /// consumption writes the node from the history row and deletes the pending
 /// row.
 #[tokio::test]
-#[serial]
 async fn consumption_applies_the_history_result_to_the_node() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
@@ -248,7 +245,6 @@ async fn consumption_applies_the_history_result_to_the_node() {
 /// a second consumption, after the first deleted the pending row, is
 /// `ALREADY_APPLIED` and reports the node status that the first wrote.
 #[tokio::test]
-#[serial]
 async fn a_replay_after_the_evidence_is_gone_is_already_applied() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
@@ -275,7 +271,6 @@ async fn a_replay_after_the_evidence_is_gone_is_already_applied() {
 /// `test_phase2_applies_node_from_history_while_running_or_paused` (prototype,
 /// PAUSED half).
 #[tokio::test]
-#[serial]
 async fn a_paused_workflow_still_records_the_node() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
@@ -297,7 +292,6 @@ async fn a_paused_workflow_still_records_the_node() {
 /// `TestRepoint.test_copy_goes_with_its_node`: deleting the workflow removes
 /// the node, its pending row and its quarantine copy.
 #[tokio::test]
-#[serial]
 async fn deleting_a_workflow_removes_the_pending_row_and_the_quarantine_copy() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
@@ -356,7 +350,6 @@ async fn deleting_a_workflow_removes_the_pending_row_and_the_quarantine_copy() {
 /// pending row whose node belongs to another workflow is refused by the
 /// locator key.
 #[tokio::test]
-#[serial]
 async fn the_pending_locator_pins_its_node_to_its_workflow() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
@@ -384,7 +377,6 @@ async fn the_pending_locator_pins_its_node_to_its_workflow() {
 /// kind, the class and the payload of the history row, and the pending row
 /// points at it.
 #[tokio::test]
-#[serial]
 async fn a_locator_is_copied_verified_and_repointed() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
@@ -420,7 +412,6 @@ async fn a_locator_is_copied_verified_and_repointed() {
 /// locator that points at no history row is refused, and the pending row
 /// keeps its history source.
 #[tokio::test]
-#[serial]
 async fn a_broken_locator_refuses_and_keeps_its_history_source() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
@@ -449,7 +440,6 @@ async fn a_broken_locator_refuses_and_keeps_its_history_source() {
 
 /// `TestRefusal.test_unknown_task_is_pending_gone`.
 #[tokio::test]
-#[serial]
 async fn an_unknown_task_is_pending_gone() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
@@ -465,7 +455,6 @@ async fn an_unknown_task_is_pending_gone() {
 /// refuses it with `invalid_parameter_value` (22023) before it reads
 /// anything, and the client returns that refusal.
 #[tokio::test]
-#[serial]
 async fn consumption_refuses_a_node_status_that_is_not_terminal() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
@@ -557,7 +546,6 @@ async fn quarantine_copies(transaction: &mut TestTransaction<'_>, task_id: Uuid)
 /// so a refused repoint leaves no copy and the pending row keeps its history
 /// source.
 #[tokio::test]
-#[serial]
 async fn a_refused_repoint_leaves_no_quarantine_copy() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");
@@ -597,7 +585,6 @@ async fn a_refused_repoint_leaves_no_quarantine_copy() {
 /// pending delete leaves the node unwritten and both recovery rows in place.
 /// The prototype's parent-propagation rows have no baseline counterpart.
 #[tokio::test]
-#[serial]
 async fn a_refused_pending_delete_leaves_the_node_and_both_recovery_rows() {
     let pool = shared_pool().await;
     let mut transaction = pool.begin().await.expect("begin");

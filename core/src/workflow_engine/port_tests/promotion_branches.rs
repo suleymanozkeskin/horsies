@@ -3,7 +3,6 @@
 //! through the tree recovery pass), for a task node and for a sub-workflow
 //! node whose child start the step owes.
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -104,7 +103,6 @@ async fn assert_node_1_failed_alone(pool: &TestPool, workflow_id: Uuid, case: &s
 /// not a map of integer indexes fails the node alone with
 /// `WORKER_SERIALIZATION_ERROR`, and no task row is written.
 #[tokio::test]
-#[serial]
 async fn a_promoted_node_whose_args_from_is_not_a_map_of_indexes_fails_alone() {
     let pool = shared_pool().await;
     let child_specs = child_specs_of(&[]);
@@ -138,7 +136,6 @@ async fn a_promoted_node_whose_args_from_is_not_a_map_of_indexes_fails_alone() {
 /// node input that does not parse fails the node alone with
 /// `WORKER_SERIALIZATION_ERROR`, and no task row is written.
 #[tokio::test]
-#[serial]
 async fn a_promoted_node_whose_stored_input_does_not_parse_fails_alone() {
     let pool = shared_pool().await;
     let workflow_id =
@@ -160,7 +157,6 @@ async fn a_promoted_node_whose_stored_input_does_not_parse_fails_alone() {
 /// input of a sub-workflow node that does not parse fails the node with
 /// `WORKER_SERIALIZATION_ERROR`, and no child starts.
 #[tokio::test]
-#[serial]
 async fn a_sub_workflow_node_whose_stored_input_does_not_parse_fails_alone() {
     let pool = shared_pool().await;
     let workflow_id =
@@ -182,7 +178,6 @@ async fn a_sub_workflow_node_whose_stored_input_does_not_parse_fails_alone() {
 /// an `args_from` value that is not an integer fails the sub-workflow node
 /// with `WORKER_SERIALIZATION_ERROR`, and no child starts.
 #[tokio::test]
-#[serial]
 async fn a_sub_workflow_node_whose_args_from_holds_a_value_that_is_not_an_index_fails_alone() {
     let pool = shared_pool().await;
     let workflow_id = seed_completed_root_and_dependent(&pool, true, |mut dependent| {
@@ -206,7 +201,6 @@ async fn a_sub_workflow_node_whose_args_from_holds_a_value_that_is_not_an_index_
 /// `args_from` stored as a JSON string fails the sub-workflow node with
 /// `WORKER_SERIALIZATION_ERROR`, and no child starts.
 #[tokio::test]
-#[serial]
 async fn a_sub_workflow_node_whose_args_from_is_a_json_string_fails_alone() {
     let pool = shared_pool().await;
     let workflow_id = seed_completed_root_and_dependent(&pool, true, |mut dependent| {
@@ -232,7 +226,6 @@ async fn a_sub_workflow_node_whose_args_from_is_a_json_string_fails_alone() {
 /// and mints its task row. Python leaves such a node PENDING; the core keeps
 /// its rule, because it recovers a root that a start left PENDING.
 #[tokio::test]
-#[serial]
 async fn a_pending_node_without_dependencies_is_promoted() {
     let pool = shared_pool().await;
     let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
@@ -254,7 +247,6 @@ async fn a_pending_node_without_dependencies_is_promoted() {
 /// status, with the dependency index in `data`. A context of task nodes only
 /// holds no summary (`TestBuildWorkflowContextData::test_empty_ctx_from_ids_no_summaries`).
 #[tokio::test]
-#[serial]
 async fn a_context_node_with_no_stored_result_gets_the_missing_result_entry() {
     let pool = shared_pool().await;
     for status in ["COMPLETED", "FAILED"] {
@@ -302,7 +294,6 @@ async fn a_context_node_with_no_stored_result_gets_the_missing_result_entry() {
 /// context of a node carries the stored summary text of a sub-workflow
 /// context node.
 #[tokio::test]
-#[serial]
 async fn a_context_entry_of_a_sub_workflow_node_carries_its_stored_summary() {
     let pool = shared_pool().await;
     let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
@@ -338,7 +329,6 @@ async fn a_context_entry_of_a_sub_workflow_node_carries_its_stored_summary() {
 /// integer indexes, or that is an empty map, is read: the promoted node is
 /// enqueued with its task, and a mapped key holds the dependency's result.
 #[tokio::test]
-#[serial]
 async fn a_promoted_node_whose_args_from_is_a_map_of_indexes_or_empty_is_enqueued() {
     let pool = shared_pool().await;
     for args_from in [serde_json::json!({"x": 0}), serde_json::json!({})] {
@@ -365,7 +355,6 @@ async fn a_promoted_node_whose_args_from_is_a_map_of_indexes_or_empty_is_enqueue
 /// message (`horsies_workflow_task_options_refusal`), and no task row is
 /// written.
 #[tokio::test]
-#[serial]
 async fn a_promoted_node_whose_stored_options_do_not_read_fails_alone() {
     let pool = shared_pool().await;
     for (options, message) in [
@@ -391,7 +380,6 @@ async fn a_promoted_node_whose_stored_options_do_not_read_fails_alone() {
 /// processes its dependents: the dependent that waits for it (join `all`) is
 /// SKIPPED too.
 #[tokio::test]
-#[serial]
 async fn a_pending_join_any_node_without_dependencies_is_skipped_with_its_dependent() {
     let pool = shared_pool().await;
     let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;

@@ -56,7 +56,6 @@ async fn resume(pool: &TestPool, workflow_id: Uuid, child_specs: &TestChildSpecs
 
 /// `TestWorkflowHandleCancel.test_cancel_skips_pending`
 #[tokio::test]
-#[serial]
 async fn cancel_skips_a_pending_node() {
     let pool = shared_pool().await;
     let workflow_id = start(&pool, &chain("cancel_skip"), &TestChildSpecs::empty()).await;
@@ -74,7 +73,6 @@ async fn cancel_skips_a_pending_node() {
 
 /// `TestWorkflowHandleCancel.test_cancel_completed_is_noop`
 #[tokio::test]
-#[serial]
 async fn cancel_of_a_completed_workflow_changes_nothing() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -106,7 +104,6 @@ async fn cancel_of_a_completed_workflow_changes_nothing() {
 /// peer that holds the workflow row and then takes the node does not
 /// deadlock with it.
 #[tokio::test]
-#[serial]
 async fn a_descendant_cancel_locks_the_workflow_row_before_its_nodes() {
     let pool = shared_pool().await;
     let parent = start(
@@ -154,7 +151,6 @@ async fn a_descendant_cancel_locks_the_workflow_row_before_its_nodes() {
 
 /// `TestWorkflowHandleCancel.test_cancel_leaves_no_pending_ready_enqueued_workflow_tasks`
 #[tokio::test]
-#[serial]
 async fn cancel_leaves_no_queueable_node_and_moves_the_root_task_to_history() {
     let pool = shared_pool().await;
     let workflow_id = start(
@@ -192,7 +188,6 @@ async fn cancel_leaves_no_queueable_node_and_moves_the_root_task_to_history() {
 
 /// `TestWorkflowHandleCancel.test_cancel_marks_claimed_not_started_task_not_claimable`
 #[tokio::test]
-#[serial]
 async fn cancel_moves_a_claimed_task_that_did_not_start_to_history() {
     let pool = shared_pool().await;
     let workflow_id = start(
@@ -237,7 +232,7 @@ async fn cancel_moves_a_claimed_task_that_did_not_start_to_history() {
 /// `TestWorkflowHandleCancel.test_cancel_locks_backing_task_before_workflow_status_update`:
 /// while the cancel waits in its status write, a claim cannot take the task.
 #[tokio::test]
-#[serial]
+#[serial(timing)]
 async fn a_claim_cannot_take_a_task_while_its_cancel_is_uncommitted() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = start(
@@ -291,7 +286,6 @@ async fn a_claim_cannot_take_a_task_while_its_cancel_is_uncommitted() {
 
 /// `TestWorkflowHandleCancel.test_cancel_nonexistent_returns_not_found`
 #[tokio::test]
-#[serial]
 async fn cancel_of_an_unknown_id_is_workflow_not_found() {
     let pool = shared_pool().await;
 
@@ -306,7 +300,6 @@ async fn cancel_of_an_unknown_id_is_workflow_not_found() {
 
 /// `TestWorkflowHandlePauseResume.test_pause_non_running_returns_false`
 #[tokio::test]
-#[serial]
 async fn pause_of_a_completed_workflow_returns_false() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -329,7 +322,6 @@ async fn pause_of_a_completed_workflow_returns_false() {
 /// `TestWorkflowHandlePauseResume.test_pause_nonexistent_returns_not_found`
 /// and `.test_resume_nonexistent_returns_not_found`
 #[tokio::test]
-#[serial]
 async fn pause_and_resume_of_an_unknown_id_are_workflow_not_found() {
     let pool = shared_pool().await;
     let workflow_handle = handle(&pool, Uuid::new_v4());
@@ -351,7 +343,6 @@ async fn pause_and_resume_of_an_unknown_id_are_workflow_not_found() {
 /// a database error after the status change and before the commit rolls the
 /// whole resume back.
 #[tokio::test]
-#[serial]
 async fn a_database_error_before_the_resume_commit_keeps_the_workflow_paused() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running().status("PAUSED")).await;
@@ -413,7 +404,6 @@ async fn a_database_error_before_the_resume_commit_keeps_the_workflow_paused() {
 /// core pool holds one connection, which the resume and the recovery pass
 /// both take.
 #[tokio::test]
-#[serial]
 async fn a_database_error_after_the_resume_commit_is_resume_recovery_failed() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running().status("PAUSED")).await;
@@ -478,7 +468,6 @@ async fn a_database_error_after_the_resume_commit_is_resume_recovery_failed() {
 ///
 /// The message names the parent advance and the child whose advance failed.
 #[tokio::test]
-#[serial]
 async fn a_failed_parent_advance_after_the_resume_commit_is_resume_recovery_failed() {
     const REFUSAL: &str = "parent advance refused by the test";
     let db = IsolatedDatabase::create().await;
@@ -577,7 +566,6 @@ fn sorted(mut ids: Vec<String>) -> Vec<String> {
 /// one `workflow_done` per paused workflow. (The Python test also checks that
 /// the pause path sends no `pg_notify` of its own; that is #551.)
 #[tokio::test]
-#[serial]
 async fn a_handle_pause_notifies_each_paused_workflow_once() {
     let db = IsolatedDatabase::create().await;
     let (parent, child) = seed_parent_with_child(&db.pool, "fail").await;
@@ -601,7 +589,6 @@ async fn a_handle_pause_notifies_each_paused_workflow_once() {
 /// a node failure under `on_error = pause` pauses the tree and notifies each
 /// paused workflow once.
 #[tokio::test]
-#[serial]
 async fn an_on_error_pause_notifies_each_paused_workflow_once() {
     let db = IsolatedDatabase::create().await;
     let (parent, child) = seed_parent_with_child(&db.pool, "pause").await;
@@ -699,7 +686,6 @@ fn assert_refused_by_a_running_workflow(
 /// The core settles the claim check in one statement, so a resume commits
 /// before or after it, never between the read and the abandon.
 #[tokio::test]
-#[serial]
 async fn the_claim_filter_dispatches_a_claim_whose_workflow_was_resumed() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id, claimed_at) = seed_paused_workflow_with_claimed_node(&db.pool).await;
@@ -724,7 +710,6 @@ async fn the_claim_filter_dispatches_a_claim_whose_workflow_was_resumed() {
 }
 
 #[tokio::test]
-#[serial]
 async fn the_batch_abandon_refuses_after_a_committed_resume() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id, claimed_at) = seed_paused_workflow_with_claimed_node(&db.pool).await;
@@ -757,7 +742,6 @@ async fn the_batch_abandon_refuses_after_a_committed_resume() {
 /// committed resume, so the start can run the task. The start half is
 /// `worker::executor::child_host::start_tests::a_resume_before_the_abandon_starts_the_task_on_the_next_attempt`.
 #[tokio::test]
-#[serial]
 async fn the_start_abandon_refuses_after_a_committed_resume() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id, claimed_at) = seed_paused_workflow_with_claimed_node(&db.pool).await;
@@ -801,7 +785,6 @@ fn pausing_child() -> WorkflowSpec {
 /// a resume cascades to the paused child, skips its pending node and
 /// finalizes it FAILED.
 #[tokio::test]
-#[serial]
 async fn a_cascade_resume_finalizes_a_child_whose_nodes_all_ended() {
     let pool = shared_pool().await;
     let child_specs = child_specs_of(&[pausing_child()]);
@@ -846,7 +829,6 @@ async fn a_cascade_resume_finalizes_a_child_whose_nodes_all_ended() {
 /// `test_resume_dependency_results.py::test_resume_injects_real_dependency_results`:
 /// a node re-enqueued by resume gets its dependency's stored result.
 #[tokio::test]
-#[serial]
 async fn a_resumed_node_receives_its_dependency_result() {
     let db = IsolatedDatabase::create().await;
     let child_specs = TestChildSpecs::empty();
@@ -896,7 +878,6 @@ async fn a_resumed_node_receives_its_dependency_result() {
 
 /// `clients/python/tests/e2e/test_layer6_workflow_advanced.py::test_pause_then_cancel`
 #[tokio::test]
-#[serial]
 async fn a_paused_workflow_cancels_and_skips_its_pending_node() {
     let pool = shared_pool().await;
     let workflow_id = start(&pool, &chain("pause_then_cancel"), &TestChildSpecs::empty()).await;
@@ -914,7 +895,6 @@ async fn a_paused_workflow_cancels_and_skips_its_pending_node() {
 /// `WORKER_CRASHED`; the `allow_failed_deps` node and its dependent then run
 /// on their own queue, and the workflow ends FAILED.
 #[tokio::test]
-#[serial]
 async fn a_crashed_worker_fails_its_nodes_and_allow_failed_deps_nodes_run() {
     let db = IsolatedDatabase::create().await;
     let child_specs = TestChildSpecs::empty();

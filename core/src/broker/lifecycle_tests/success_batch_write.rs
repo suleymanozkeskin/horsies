@@ -5,7 +5,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
@@ -38,7 +37,6 @@ fn batch_of(task_ids: &[Uuid]) -> SuccessBatch {
 /// outcome of its own task, in input order, whatever order the function
 /// writes the rows in (task id order).
 #[tokio::test]
-#[serial]
 async fn each_row_gets_the_outcome_of_its_own_task_in_input_order() {
     let pool = pool().await;
     let mine = seed_task(&pool, &TaskSeed::running()).await;
@@ -88,7 +86,6 @@ async fn each_row_gets_the_outcome_of_its_own_task_in_input_order() {
 /// A batch sent again after its commit (the replay after an unknown
 /// outcome) answers each committed row `AlreadyApplied` and writes nothing.
 #[tokio::test]
-#[serial]
 async fn a_replay_of_a_committed_batch_answers_already_applied() {
     let pool = pool().await;
     let first = seed_task(&pool, &TaskSeed::running()).await;
@@ -129,7 +126,6 @@ static REFUSED_BATCH_ARGUMENTS: TypedStatement = TypedStatement::new(
 /// deadlock refusal (40P01) is transient; the batch function's argument
 /// refusal (22023) is not.
 #[tokio::test]
-#[serial]
 async fn a_server_refusal_keeps_the_transience_of_its_sqlstate() {
     let pool = pool().await;
     let core = core_pool_for_test_url(pool.url());
@@ -164,7 +160,6 @@ async fn a_server_refusal_keeps_the_transience_of_its_sqlstate() {
 /// The statement waits on the task's advisory lock, which the test holds, so
 /// the pool is read while the statement runs.
 #[tokio::test]
-#[serial]
 async fn a_batch_holds_its_connection_only_while_its_statement_runs() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;

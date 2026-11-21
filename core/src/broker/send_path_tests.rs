@@ -202,7 +202,6 @@ fn malformed_policies() -> Vec<(&'static str, String)> {
 /// path reports it as `VALIDATION_FAILED` (Python's `INVALID_TASK_OPTIONS`),
 /// and no row is written.
 #[tokio::test]
-#[serial]
 async fn a_malformed_retry_policy_is_refused_before_any_row() {
     let pool = migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -233,7 +232,6 @@ async fn a_malformed_retry_policy_is_refused_before_any_row() {
 /// the policies with a limit: the row stores the limit as sent, up to the
 /// bound of 20.
 #[tokio::test]
-#[serial]
 async fn valid_retry_policies_store_their_limits() {
     let pool = migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -256,7 +254,6 @@ async fn valid_retry_policies_store_their_limits() {
 /// the `null` policy: a task with no policy has no retry, so the row stores
 /// 0.
 #[tokio::test]
-#[serial]
 async fn a_null_retry_policy_stores_zero_retries() {
     let pool = migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -277,7 +274,6 @@ async fn a_null_retry_policy_stores_zero_retries() {
 /// resend methods accept it; a resend while the reservation is active meets
 /// the same conflict with the same owner. Nothing more is written.
 #[tokio::test]
-#[serial]
 async fn a_key_held_by_another_command_names_its_owner_and_a_resend_meets_the_same_conflict() {
     let pool = migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -361,7 +357,7 @@ async fn cancel_the_insert_that_waits_for_the_table(pool: &TestPool) -> i32 {
 /// as a retryable `ENQUEUE_FAILED` whose message names the cause, and
 /// neither the message nor the error text holds a bound input value.
 #[tokio::test]
-#[serial]
+#[serial(server)]
 async fn a_failed_enqueue_statement_names_its_cause_and_holds_no_input_value() {
     let pool = migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -449,7 +445,6 @@ async fn terminate_application(pool: &TestPool, application_name: &str) {
 /// and the first send writes its row; that answer is also accepted. A send
 /// never fails as not retryable, and the second send always writes.
 #[tokio::test]
-#[serial]
 async fn a_send_on_a_closed_pooled_connection_is_retryable_and_the_next_send_writes() {
     let pool = migrated_pool().await;
     let url = migrated_database_url().await;
@@ -506,7 +501,6 @@ async fn a_send_on_a_closed_pooled_connection_is_retryable_and_the_next_send_wri
 /// input that the move to history builds reads that text. Each text is a
 /// value the send accepts: an object, `null` and a list.
 #[tokio::test]
-#[serial]
 async fn the_row_stores_the_sent_input_text_byte_for_byte() {
     let pool = migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -581,7 +575,6 @@ async fn send_traced(broker: &PostgresBroker, task_name: &str, trace: SendTrace)
 /// with no carrier and a send whose carrier breaks a bound store neither,
 /// and both are enqueued.
 #[tokio::test]
-#[serial]
 async fn a_send_stores_its_checked_carrier_and_a_carrier_over_a_bound_stores_none() {
     let pool = migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);

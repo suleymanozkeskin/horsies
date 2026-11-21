@@ -1,7 +1,6 @@
 //! P6 enqueue and retention persistence gate.
 
 use chrono::{Duration, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use crate::broker::core_rows::StatementLog;
@@ -124,7 +123,6 @@ async fn enqueue_keyed(
 }
 
 #[tokio::test]
-#[serial]
 async fn direct_enqueue_persists_v27_facts_and_key_outcomes() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
@@ -228,7 +226,6 @@ async fn direct_enqueue_persists_v27_facts_and_key_outcomes() {
 }
 
 #[tokio::test]
-#[serial]
 async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
@@ -416,7 +413,6 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
 /// stored as 0.5 s (whole seconds stored 1 s and 0 s, and the key claim
 /// refused the 0 s window).
 #[tokio::test]
-#[serial]
 async fn a_keyed_send_stores_its_window_exact_to_the_microsecond() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
@@ -464,7 +460,6 @@ async fn a_keyed_send_stores_its_window_exact_to_the_microsecond() {
 }
 
 #[tokio::test]
-#[serial]
 async fn broker_retain_default_is_inherited_and_explicit_false_wins() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
@@ -533,7 +528,6 @@ async fn broker_retain_default_is_inherited_and_explicit_false_wins() {
 /// outcome and the task id, and answers no catalog error. The function is
 /// replaced, in this test's database, by one that reports `SOMETHING_ELSE`.
 #[tokio::test]
-#[serial]
 async fn an_enqueue_outcome_outside_the_contract_panics_with_the_outcome_and_the_task() {
     let pool = migrated_pool().await;
     sql::raw_sql(

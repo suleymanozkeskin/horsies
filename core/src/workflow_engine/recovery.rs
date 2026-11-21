@@ -2048,7 +2048,6 @@ mod cap_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn recovery_case_4_fails_an_orphaned_workflow_with_the_catalog_code() {
         let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
@@ -2122,7 +2121,6 @@ mod cap_tests {
     }
 
     #[tokio::test]
-    #[serial]
     /// A page of zero workflows is outside the audit function's bound (1 to 1000): the audit is refused
     /// (22023), both case metrics note the error, and the report has no completion yield.
     async fn a_zero_page_size_is_refused_and_has_undefined_completion_yield() {
@@ -2148,7 +2146,6 @@ mod cap_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn case0_advances_the_selected_root_without_touching_unready_siblings() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -2226,7 +2223,6 @@ mod cap_tests {
     /// The per-query cap bounds how many candidates one global pass processes;
     /// an uncapped (None) pass processes the rest. Parity with horsies PR #103.
     #[tokio::test]
-    #[serial]
     async fn recovery_cap_limits_rows_then_uncapped_processes_rest() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -2377,7 +2373,6 @@ mod cap_tests {
     /// 1000, which are COMPLETED in the first round and RUNNING in the second. The page statement runs with a
     /// generic plan (the function's `plan_cache_mode`), and examines at most two node rows per workflow.
     #[tokio::test]
-    #[serial]
     async fn generic_audit_uses_partial_index_for_wide_and_narrow_workflows() {
         let url = crate::test_support::migrated_database_url().await;
         let (client, notices) = crate::test_support::connect_collecting_notices(&url).await;
@@ -2444,7 +2439,6 @@ mod cap_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn empty_global_workflow_audit_is_bounded_at_fifty_thousand_rows() {
         let pool = crate::test_support::migrated_pool().await;
         sql::query("DELETE FROM horsies_workflow_tasks")
@@ -2627,7 +2621,6 @@ mod cap_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn global_workflow_cursor_reaches_a_completion_after_a_stable_page() {
         let pool = crate::test_support::migrated_pool().await;
         sql::query("DELETE FROM horsies_workflow_tasks")
@@ -2743,7 +2736,6 @@ mod cap_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn global_cycle_watermark_revisits_old_rows_while_new_rows_arrive() {
         let pool = crate::test_support::migrated_pool().await;
         sql::query("DELETE FROM horsies_workflow_tasks")
@@ -2860,7 +2852,6 @@ mod cap_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn global_workflow_claim_refuses_a_second_caller_until_the_owner_expires() {
         let pool = crate::test_support::migrated_pool().await;
         sql::query("DELETE FROM horsies_workflow_tasks")
@@ -2988,7 +2979,7 @@ mod cap_tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(timing)]
     async fn workflow_action_fences_the_claim_after_lease_expiry() {
         let pool = crate::test_support::migrated_pool().await;
         sql::query("DELETE FROM horsies_workflow_tasks")
@@ -3156,7 +3147,6 @@ mod cap_tests {
     /// workflow stays RUNNING. The Python candidate answers `CLAIM_LOST`; so
     /// does the core's fenced write (`AUDIT_CLAIM_LOST`).
     #[tokio::test]
-    #[serial]
     async fn stale_page_owner_cannot_mutate_after_claim_takeover() {
         let pool = crate::test_support::migrated_pool().await;
         for statement in [
@@ -3270,7 +3260,7 @@ mod cap_tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(timing)]
     async fn busy_global_workflow_cursor_refuses_without_waiting() {
         let pool = crate::test_support::migrated_pool().await;
         let mut holder = pool.begin().await.unwrap();
@@ -3302,7 +3292,6 @@ mod cap_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn workflow_tree_recovery_does_not_mutate_an_unrelated_orphan() {
         let pool = crate::test_support::migrated_pool().await;
         let selected = Uuid::new_v4();
@@ -3339,7 +3328,6 @@ mod cap_tests {
     /// with Python's conflict error and no task row (`core/workflows/engine.py:834-839`). The node left
     /// READY, so the step is `APPLIED` (`horsies_workflow_unbuildable_nodes`).
     #[tokio::test]
-    #[serial]
     async fn case_1_fails_a_ready_node_whose_args_from_names_a_static_member() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
@@ -3464,7 +3452,6 @@ mod cap_tests {
     /// workflow, with `on_error = fail` and no other node, ends FAILED. A reader that guesses a limit
     /// enqueues the node instead.
     #[tokio::test]
-    #[serial]
     async fn a_ready_node_that_cannot_be_prepared_fails_alone() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         for (task_name, options, refusal) in [
@@ -3551,7 +3538,6 @@ mod cap_tests {
     /// failure limit (Python `_build_enqueued_task_params` passes `str()` of the member to its insert,
     /// `clients/python/horsies/core/workflows/engine.py:831-835`).
     #[tokio::test]
-    #[serial]
     async fn a_stored_deadline_that_does_not_read_raises_and_keeps_the_ready_node() {
         use crate::workflow_engine::recovery_limit::{CandidateFailure, FailureClass};
 
@@ -3622,7 +3608,6 @@ mod cap_tests {
     /// raises (a stored `good_until` that the database cannot read) rolls the READY mark back, and the node
     /// stays PENDING with no task. A READY node left behind would be selected again by case 1 in the same pass.
     #[tokio::test]
-    #[serial]
     async fn a_case_0_node_whose_task_insert_raises_stays_pending() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let task_name = "recovery_case0_raise_node";
@@ -3703,7 +3688,6 @@ mod cap_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn p6_workflow_enqueue_recovery_persists_never_eligible_facts() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let workflow_id = Uuid::new_v4();

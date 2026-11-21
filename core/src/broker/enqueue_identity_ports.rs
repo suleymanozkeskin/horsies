@@ -11,7 +11,6 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use serial_test::serial;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -256,7 +255,6 @@ fn the_applied_send(outcomes: &[ConcurrentOutcome]) -> (Uuid, i32) {
 /// sends of one command under one key commit one task; the other 63 replay
 /// it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
 async fn concurrent_sends_of_one_key_apply_once_and_replay_the_rest() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
@@ -283,7 +281,6 @@ async fn concurrent_sends_of_one_key_apply_once_and_replay_the_rest() {
 /// against the one that applied: the same command replays it, the other
 /// command is a key conflict that names it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
 async fn concurrent_sends_of_two_commands_are_classified_by_the_winner() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
@@ -317,7 +314,6 @@ async fn concurrent_sends_of_two_commands_are_classified_by_the_winner() {
 /// history and its history row is gone, the key still replays the task until
 /// the reservation expires.
 #[tokio::test]
-#[serial]
 async fn a_key_replays_its_task_after_the_history_row_is_gone() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
@@ -346,7 +342,6 @@ async fn a_key_replays_its_task_after_the_history_row_is_gone() {
 /// the terminal reservation has expired, the key applies to a new task, and
 /// the old task's history row stays.
 #[tokio::test]
-#[serial]
 async fn an_expired_key_applies_to_a_new_task_and_the_old_task_stays() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
@@ -387,7 +382,6 @@ async fn an_expired_key_applies_to_a_new_task_and_the_old_task_stays() {
 /// production rule: the resend returns the same task, and the key binding
 /// stays.
 #[tokio::test]
-#[serial]
 async fn an_unkeyed_resend_of_a_keyed_task_returns_it_and_keeps_its_key() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
@@ -418,7 +412,6 @@ async fn an_unkeyed_resend_of_a_keyed_task_returns_it_and_keeps_its_key() {
 /// reservation window, a send of the same command under the same key after
 /// the move returns the moved task and writes no row.
 #[tokio::test]
-#[serial]
 async fn a_replay_after_the_move_returns_the_moved_task() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
@@ -444,7 +437,6 @@ async fn a_replay_after_the_move_returns_the_moved_task() {
 /// payload mismatch and writes nothing; a `FIRST` send does not read history
 /// and writes a new live row.
 #[tokio::test]
-#[serial]
 async fn a_repeat_send_of_a_finished_task_answers_from_history() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
@@ -486,7 +478,6 @@ async fn a_repeat_send_of_a_finished_task_answers_from_history() {
 /// `test_unkeyed_enqueue_creates_no_key_only_registry_row`: unkeyed sends
 /// write no reservation.
 #[tokio::test]
-#[serial]
 async fn unkeyed_sends_write_no_reservation() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
@@ -503,7 +494,6 @@ async fn unkeyed_sends_write_no_reservation() {
 /// send (the input takes the keyword slot, the positional slot is null). The expected bytes
 /// come from the literal array, not from the core's fingerprint code.
 #[tokio::test]
-#[serial]
 async fn a_new_row_stores_the_exact_version_one_fingerprint() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
@@ -560,7 +550,6 @@ async fn a_new_row_stores_the_exact_version_one_fingerprint() {
 /// a keyed resend of an unkeyed task binds the key to it; after the bind, a
 /// send of the same command under the key with a new id replays the task.
 #[tokio::test]
-#[serial]
 async fn after_the_bind_a_send_with_a_new_id_replays_the_bound_task() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
@@ -601,7 +590,6 @@ async fn after_the_bind_a_send_with_a_new_id_replays_the_bound_task() {
 /// payload mismatch, not a key conflict; the first reservation is the only
 /// one.
 #[tokio::test]
-#[serial]
 async fn a_keyed_task_resent_under_a_second_key_is_a_payload_mismatch() {
     let pool = migrated_pool().await;
     clear_enqueue_state(&pool).await;
@@ -631,7 +619,6 @@ async fn a_keyed_task_resent_under_a_second_key_is_a_payload_mismatch() {
 /// `TestKeyedEnqueue::test_registry_indexes_are_present_since_emission`: the
 /// reservation table has exactly its primary key and the expiry index.
 #[tokio::test]
-#[serial]
 async fn the_reservation_table_has_exactly_its_key_and_expiry_index() {
     let pool = migrated_pool().await;
     let names: Vec<String> = sql::query_scalar(

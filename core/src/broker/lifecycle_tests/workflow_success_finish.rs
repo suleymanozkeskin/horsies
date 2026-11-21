@@ -13,7 +13,6 @@
 //! `terminalization_matrix`, `attempt_writes::tests`, `worker::worker` and
 //! `worker::finalizing_tests`.
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
@@ -72,7 +71,6 @@ async fn cleanup(pool: &TestPool, task_id: Uuid, workflow_id: Option<Uuid>) {
 /// one statement moves the row with its attempt and writes the phase-2
 /// record; it sends no capacity wake (phase 2 sends it).
 #[tokio::test]
-#[serial]
 async fn the_success_moves_the_row_with_its_attempt_and_owes_phase_two() {
     let pool = pool().await;
     let mut wakes = Wakes::listen(&pool, CHANNEL).await;
@@ -162,7 +160,6 @@ async fn the_success_moves_the_row_with_its_attempt_and_owes_phase_two() {
 /// Python `TestApplied::test_the_attempt_number_follows_the_retry_count`: two
 /// failed attempts were retried; the success is the third.
 #[tokio::test]
-#[serial]
 async fn the_attempt_number_follows_the_retry_count() {
     let pool = pool().await;
     let (task_id, workflow_id) = seed(&pool, 2, Origin::WorkflowNode).await;
@@ -225,7 +222,6 @@ enum RefusedCall {
 /// `no_result`): the function's own refusal, by its SQLSTATE and its
 /// message, and no write.
 #[tokio::test]
-#[serial]
 async fn a_refused_call_raises_and_writes_nothing() {
     let pool = pool().await;
     for call in [RefusedCall::PlainTask, RefusedCall::NoResult] {

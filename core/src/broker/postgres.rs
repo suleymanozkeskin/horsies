@@ -3335,7 +3335,6 @@ mod fused_finalize_tests {
     use crate::broker::terminalization::on_test_pool::terminalize;
     use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
     use crate::test_support::sql::{self, TestPool};
-    use serial_test::serial;
     use uuid::Uuid;
 
     async fn fused(
@@ -3424,7 +3423,6 @@ mod fused_finalize_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn fused_finalize_completes_running_task() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -3456,7 +3454,6 @@ mod fused_finalize_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn fused_finalize_noop_when_not_running() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -3480,7 +3477,6 @@ mod fused_finalize_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn fused_finalize_noop_on_wrong_worker() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -3513,7 +3509,6 @@ mod fused_finalize_tests {
     /// a task the same worker re-claimed (new `claimed_at`) after a reaper
     /// requeue.
     #[tokio::test]
-    #[serial]
     async fn fused_finalize_fenced_by_claimed_at() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -3570,7 +3565,6 @@ mod prestart_expiry_tests {
     //! (`expire_claimed_task_before_start`, `horsies_expire_owned_claim`).
     use super::*;
     use crate::test_support::sql::{self, TestPool};
-    use serial_test::serial;
     use uuid::Uuid;
 
     async fn seed_claimed(pool: &TestPool, id: &str, worker: &str) {
@@ -3623,7 +3617,6 @@ mod prestart_expiry_tests {
     /// generation is
     /// `lifecycle_tests::claim_start_release::start::a_start_that_does_not_hold_writes_nothing_and_names_its_reason`.
     #[tokio::test]
-    #[serial]
     async fn prestart_expiry_waits_for_the_deadline_and_then_expires_any_generation() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -3685,7 +3678,6 @@ mod absent_result_wait_tests {
     //! task that does not exist (pruned by retention, or a bogus id) answers
     //! its absence from the first probe instead of hanging.
     use super::*;
-    use serial_test::serial;
     use std::time::Duration;
     use uuid::Uuid;
 
@@ -3721,7 +3713,6 @@ mod absent_result_wait_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn a_result_wait_with_no_limit_ends_for_a_missing_task() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -3749,7 +3740,6 @@ mod filter_non_runnable_tests {
     //! functional outcome (both mutations applied, id returned as filtered).
     use super::*;
     use crate::test_support::sql;
-    use serial_test::serial;
     use uuid::Uuid;
 
     /// The bounded lookup of the interim function.
@@ -3757,7 +3747,6 @@ mod filter_non_runnable_tests {
         "SELECT id, status FROM horsies_find_non_runnable_workflow_tasks($1)";
 
     #[tokio::test]
-    #[serial]
     async fn bounded_lookup_preserves_rows_for_duplicates_missing_links_and_status_changes() {
         let pool = crate::test_support::migrated_pool().await;
         let mut tx = pool.begin().await.unwrap();
@@ -3854,7 +3843,6 @@ mod filter_non_runnable_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn paused_workflow_cancels_task_and_resets_node() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -3988,7 +3976,6 @@ mod terminal_at_stamp_tests {
     //! the rest structurally.
     use super::*;
     use crate::test_support::sql::{self, TestPool};
-    use serial_test::serial;
     use uuid::Uuid;
 
     async fn connect() -> (PostgresBroker, TestPool) {
@@ -4105,7 +4092,6 @@ mod terminal_at_stamp_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn completed_row_gets_terminal_at() {
         let (broker, pool) = connect().await;
         let id = Uuid::new_v4().to_string();
@@ -4144,7 +4130,6 @@ mod terminal_at_stamp_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn failed_row_gets_terminal_at() {
         let (broker, pool) = connect().await;
         let id = Uuid::new_v4().to_string();
@@ -4174,7 +4159,6 @@ mod terminal_at_stamp_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn cancelled_row_gets_terminal_at() {
         let (broker, pool) = connect().await;
         let id = Uuid::new_v4().to_string();
@@ -4196,7 +4180,6 @@ mod terminal_at_stamp_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn expired_row_gets_terminal_at() {
         let (broker, pool) = connect().await;
         let id = Uuid::new_v4().to_string();
@@ -4223,7 +4206,6 @@ mod terminal_at_stamp_tests {
     /// field, as the baseline retry write
     /// (`core/baseline/0004_lifecycle_functions.sql:1479-1496`).
     #[tokio::test]
-    #[serial]
     async fn requeue_keeps_the_row_live_and_writes_no_history_row() {
         let (broker, pool) = connect().await;
         let id = Uuid::new_v4().to_string();
@@ -4273,7 +4255,6 @@ mod terminal_at_stamp_tests {
     /// A requeue with no retry time is due at once: `next_retry_at` and the
     /// NOT NULL `enqueued_at` take the database clock of the requeue.
     #[tokio::test]
-    #[serial]
     async fn requeue_with_no_retry_time_is_due_at_the_database_clock() {
         let (broker, pool) = connect().await;
         let id = Uuid::new_v4().to_string();
@@ -4628,7 +4609,6 @@ mod result_wait_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn a_pause_without_a_wake_keeps_the_subscription() {
         let broker = listener_broker("result_wait_keep").await;
         let mut mode = broker.result_wait_mode(Uuid::new_v4()).await;
@@ -4641,7 +4621,6 @@ mod result_wait_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn a_task_done_notification_for_the_task_ends_the_pause() {
         let broker = listener_broker("result_wait_notify").await;
         let task_id = Uuid::new_v4();
@@ -4663,7 +4642,7 @@ mod result_wait_tests {
     /// The listener loses its connection: it connects again, LISTENs again
     /// and sends a gap, and the wait reads at once instead of at its repoll.
     #[tokio::test]
-    #[serial]
+    #[serial(timing)]
     async fn a_listener_gap_ends_the_pause_at_once() {
         let application_name = format!("result_wait_gap_{}", Uuid::new_v4().simple());
         let broker = listener_broker(&application_name).await;
@@ -4696,7 +4675,6 @@ mod result_wait_tests {
     /// An observe-only broker keeps its listener, as Python's web tool
     /// (`run_schema_migrations=False`): its waits subscribe and it can ping.
     #[tokio::test]
-    #[serial]
     async fn an_observe_only_broker_keeps_its_listener() {
         let config = PostgresConfig {
             database_url: crate::test_support::migrated_database_url().await,
@@ -4728,7 +4706,6 @@ mod result_wait_tests {
     /// Two brokers on one session URL in one process share one listener
     /// connection.
     #[tokio::test]
-    #[serial]
     async fn two_brokers_on_one_session_url_open_one_listener_connection() {
         let application_name = format!("shared_listener_{}", Uuid::new_v4().simple());
         let first = listener_broker(&application_name).await;
@@ -4751,7 +4728,6 @@ mod result_wait_tests {
     /// Dropping the broker stops its listener. The wait turns into polling,
     /// so the loop does not spin on a stopped subscription.
     #[tokio::test]
-    #[serial]
     async fn a_stopped_listener_turns_the_wait_into_polling() {
         let broker = listener_broker("result_wait_stop").await;
         let mut mode = broker.result_wait_mode(Uuid::new_v4()).await;
@@ -4773,7 +4749,6 @@ mod stale_and_expired_list_tests {
     use crate::broker::result_types::BrokerErrorCode;
     use crate::test_support::history::{covered_beat_instant, SeedInstant};
     use crate::test_support::sql::{self, TestPool, TestPoolOptions};
-    use serial_test::serial;
 
     #[tokio::test]
     async fn a_threshold_outside_one_year_is_refused_before_any_read() {
@@ -4864,7 +4839,6 @@ mod stale_and_expired_list_tests {
     /// A row with no beat and a row whose latest beat is older than the
     /// threshold are stale, beatless first; a fresh beat keeps a row out.
     #[tokio::test]
-    #[serial]
     async fn the_stale_list_follows_the_latest_beat() {
         let pool = crate::test_support::migrated_pool().await;
         let task_name = format!("stale_list_{}", Uuid::new_v4().simple());
@@ -4894,7 +4868,6 @@ mod stale_and_expired_list_tests {
     /// Python's expired record: `enqueued_at` and how long ago the deadline
     /// passed, on the database clock.
     #[tokio::test]
-    #[serial]
     async fn the_expired_list_carries_enqueued_at_and_expired_for() {
         let pool = crate::test_support::migrated_pool().await;
         let task_name = format!("expired_list_{}", Uuid::new_v4().simple());
@@ -5225,7 +5198,6 @@ mod client_family_tests {
     //! checked.
     use super::*;
     use crate::test_support::sql::{self, TestPool};
-    use serial_test::serial;
 
     async fn family_row(pool: &TestPool) -> Option<String> {
         sql::query_scalar("SELECT family FROM horsies_client_family")
@@ -5236,7 +5208,6 @@ mod client_family_tests {
 
     /// The shared test database is installed for the Rust client.
     #[tokio::test]
-    #[serial]
     async fn the_install_records_the_family_and_a_rust_handle_may_write() {
         let pool = crate::test_support::migrated_pool().await;
         assert_eq!(family_row(&pool).await.as_deref(), Some("RUST"));
@@ -5251,7 +5222,6 @@ mod client_family_tests {
     /// A handle of the other family is refused before it writes, and the
     /// refusal is not retryable. The check reads only.
     #[tokio::test]
-    #[serial]
     async fn a_handle_of_the_other_family_is_refused_before_its_first_write() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Python);
@@ -5273,7 +5243,6 @@ mod client_family_tests {
     /// first send checks the family: on a database of the other family the
     /// send is refused before the insert, not retryable, and writes no row.
     #[tokio::test]
-    #[serial]
     async fn a_send_of_a_handle_with_migrations_off_into_the_other_family_is_refused() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = PostgresBroker::from_test_url_observe_only(pool.url(), ClientFamily::Python);
@@ -5338,7 +5307,6 @@ mod client_family_tests {
     /// write and the first send are refused with the stored value, not
     /// retryable, and the send writes no row.
     #[tokio::test]
-    #[serial]
     async fn a_family_row_that_holds_no_client_family_is_refused_before_any_write() {
         let pool = crate::test_support::migrated_pool().await;
         corrupt_family_row(&pool, "GO").await;

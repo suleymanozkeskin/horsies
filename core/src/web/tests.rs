@@ -928,7 +928,6 @@ fn an_asset_resolves_only_to_a_built_file_inside_the_tree() {
 }
 
 #[tokio::test]
-#[serial]
 async fn embedded_spa_and_each_primary_view_api_roundtrip_against_postgres() {
     let mut state = migrated_state().await;
     state.assets = Arc::new(EmbeddedAssets);
@@ -1019,7 +1018,6 @@ async fn missing_embedded_index_is_a_factual_503_while_api_still_answers() {
 
 /// Python `test_web_api.py::TestWorkerReads::test_worker_list_carries_the_slot_health`.
 #[tokio::test]
-#[serial]
 async fn worker_list_carries_the_slot_health() {
     let state = migrated_state().await;
     let pool = migrated_pool().await;
@@ -1164,7 +1162,6 @@ fn worker_list_ages_are_measured_to_the_read_time() {
 /// `test_web_api.py::TestWorkerReads::test_worker_list_answers` for the
 /// shape: 200 and a JSON array.
 #[tokio::test]
-#[serial]
 async fn a_snapshot_ten_minutes_old_in_database_time_is_stale() {
     let state = migrated_state().await;
     let pool = migrated_pool().await;
@@ -1220,7 +1217,6 @@ async fn a_snapshot_ten_minutes_old_in_database_time_is_stale() {
 /// The web tests share one database, so the test reads only its own queue
 /// and worker.
 #[tokio::test]
-#[serial]
 async fn class_report_answers_with_streams_and_budgets() {
     let state = migrated_state().await;
     let pool = migrated_pool().await;
@@ -1392,7 +1388,6 @@ fn status_count(stats: &serde_json::Value, status: &str) -> i64 {
 }
 
 #[tokio::test]
-#[serial]
 async fn task_stats_route_reuses_a_successful_scope_within_the_ttl() {
     let state = migrated_state().await;
     let prefix = format!("stats_cache_{}__", Uuid::new_v4().simple());
@@ -1424,7 +1419,6 @@ async fn task_stats_route_reuses_a_successful_scope_within_the_ttl() {
 }
 
 #[tokio::test]
-#[serial]
 async fn all_http_surfaces_route_to_the_monitoring_and_action_layers() {
     let state = migrated_state().await;
     let prefix = format!("w4_http_{}__", Uuid::new_v4().simple());
@@ -1509,7 +1503,7 @@ async fn all_http_surfaces_route_to_the_monitoring_and_action_layers() {
 }
 
 #[tokio::test]
-#[serial]
+#[serial(timing)]
 async fn broadcaster_subscribes_on_the_broker_listener_and_batches_real_notify_bursts() {
     let pool = migrated_pool().await;
     let broker = Arc::new(PostgresBroker::from_test_url_and_session_url(
@@ -1558,7 +1552,6 @@ async fn broadcaster_subscribes_on_the_broker_listener_and_batches_real_notify_b
 /// and the stream sends one event with no ids per topic, because
 /// notifications sent in between are lost.
 #[tokio::test]
-#[serial]
 async fn a_listener_gap_sends_one_refresh_per_topic() {
     let pool = migrated_pool().await;
     let url = migrated_database_url().await;
@@ -1623,7 +1616,6 @@ async fn a_listener_that_cannot_start_degrades_the_stream() {
 }
 
 #[tokio::test]
-#[serial]
 async fn sse_route_emits_idle_heartbeat_comments() {
     let state = migrated_state().await;
     let broadcaster = Arc::clone(&state.events);
@@ -1645,7 +1637,6 @@ async fn sse_route_emits_idle_heartbeat_comments() {
 }
 
 #[tokio::test]
-#[serial]
 async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
     let database = crate::test_support::TestDatabase::create_empty().await;
     let broker = Arc::new(
@@ -1934,7 +1925,6 @@ fn uuid7_born_at(birth: chrono::DateTime<chrono::Utc>) -> Uuid {
 /// upper anchor of a detached period leaf answers that it is older than the
 /// retained history; a UUIDv4 and a later UUIDv7 answer `Task not found.`.
 #[tokio::test]
-#[serial]
 async fn an_absent_task_is_not_found_with_the_text_of_its_absence_reason() {
     let state = migrated_state().await;
     let detached_upper = chrono::Utc::now() - chrono::Duration::days(1);
@@ -1980,7 +1970,6 @@ async fn an_absent_task_is_not_found_with_the_text_of_its_absence_reason() {
 /// Python `test_web_api.py::TestTaskReads::test_stats_returns_seven_fixed_cards`:
 /// seven status cards in a fixed order, whatever the counts.
 #[tokio::test]
-#[serial]
 async fn the_stats_route_answers_the_seven_status_cards_in_a_fixed_order() {
     let state = migrated_state().await;
 
@@ -2046,7 +2035,6 @@ async fn an_unknown_error_category_is_a_bad_request_on_every_task_route() {
 /// Python `test_web_api.py::TestWorkflowReads::test_run_detail_carries_nodes_and_edges`:
 /// the run route answers the run, its failed node indices and its edges.
 #[tokio::test]
-#[serial]
 async fn the_run_route_answers_the_run_its_failed_indices_and_its_edges() {
     let state = migrated_state().await;
     let pool = migrated_pool().await;
@@ -2114,7 +2102,6 @@ async fn the_run_route_answers_the_run_its_failed_indices_and_its_edges() {
 /// route answer 500 with the stored value in the detail. The detail route
 /// half reads the live columns of #842 first.
 #[tokio::test]
-#[serial]
 async fn a_cancel_of_stored_data_that_does_not_parse_is_a_server_error() {
     let state = migrated_state().await;
     let pool = migrated_pool().await;
@@ -2272,7 +2259,6 @@ async fn seed_paused_parent_of_a_ready_child(pool: &TestPool, prefix: &str) -> U
 /// exception, and commits nothing: the workflow stays PAUSED and its node
 /// READY. The build was asked once.
 #[tokio::test]
-#[serial]
 async fn a_resume_whose_child_build_raised_is_python_s_internal_server_error() {
     let mut state = migrated_state().await;
     let build = Arc::new(RaisingChildBuild::default());
@@ -2351,7 +2337,6 @@ async fn horsies_objects(
 /// `SCHEMA_INCOMPATIBLE` and Python's detail, and the database still holds no
 /// horsies relation or function afterwards.
 #[tokio::test]
-#[serial]
 async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_nothing() {
     let database = crate::test_support::TestDatabase::create_empty().await;
     let url = database.url().to_owned();

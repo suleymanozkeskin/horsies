@@ -51,7 +51,6 @@ async fn relation_exists(pool: &TestPool, relation: &str) -> bool {
 /// whose ref names another class than the catalog row is a contract error,
 /// and the caller's rollback keeps the relation.
 #[tokio::test]
-#[serial]
 async fn a_drop_of_a_ref_that_differs_from_the_catalog_rolls_back() {
     let database = TestDatabase::create_with_connections(2).await;
     let class_key = "standard_1d";
@@ -92,7 +91,6 @@ async fn a_drop_of_a_ref_that_differs_from_the_catalog_rolls_back() {
 /// `horsies_begin_leaf_detach` records it, no detach statement runs, and the
 /// leaf is reported detached.
 #[tokio::test]
-#[serial]
 async fn finalize_records_a_detach_made_out_of_band() {
     let database = TestDatabase::create_with_connections(2).await;
     let class_key = "standard_1d";
@@ -131,7 +129,6 @@ async fn finalize_records_a_detach_made_out_of_band() {
 /// transaction holds the leaf locks, the detach of one leaf and the drop of
 /// another (already detached) are `Busy`, and neither waits.
 #[tokio::test]
-#[serial]
 async fn a_held_leaf_lock_makes_the_detach_and_the_drop_busy() {
     let database = TestDatabase::create_with_connections(3).await;
     let class_key = "standard_1d";

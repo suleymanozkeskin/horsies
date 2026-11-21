@@ -4,7 +4,6 @@
 //! (`horsies_workflow_try_complete` under the workflow row lock), and the
 //! parent node advances through `horsies_workflow_child_finish`.
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -54,7 +53,6 @@ async fn seed_parent_and_child(pool: &TestPool, child: WorkflowSeed) -> (Uuid, U
 /// `test_success_policy_does_not_finalize_with_live_non_required_task`: a
 /// satisfied case is evaluated only once every node is terminal.
 #[tokio::test]
-#[serial]
 async fn a_met_success_case_waits_for_a_live_node_that_it_does_not_require() {
     let db = IsolatedDatabase::create().await;
     let pool = db.pool.clone();
@@ -80,7 +78,6 @@ async fn a_met_success_case_waits_for_a_live_node_that_it_does_not_require() {
 /// node as it reads the status of a task node: COMPLETED meets the case and
 /// the workflow completes; FAILED or SKIPPED does not, and the workflow fails.
 #[tokio::test]
-#[serial]
 async fn the_status_of_a_required_sub_workflow_node_decides_the_success_case() {
     let pool = shared_pool().await;
     let done = serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the output");
@@ -124,7 +121,6 @@ async fn the_status_of_a_required_sub_workflow_node_decides_the_success_case() {
 /// child's output node completed, but the child FAILED, so the parent's
 /// summary has no output.
 #[tokio::test]
-#[serial]
 async fn a_failed_child_gives_its_parent_a_summary_without_output() {
     let pool = shared_pool().await;
     let (parent_id, child_id) =
@@ -159,7 +155,6 @@ async fn a_failed_child_gives_its_parent_a_summary_without_output() {
 /// `test_child_info_single_pass_matches_correlated_form`: the counts of the
 /// summary equal the child's node statuses, over ten mixes.
 #[tokio::test]
-#[serial]
 async fn child_summary_counts_follow_the_child_node_statuses() {
     let pool = shared_pool().await;
     let statuses = ["COMPLETED", "FAILED", "SKIPPED"];
@@ -202,7 +197,6 @@ async fn child_summary_counts_follow_the_child_node_statuses() {
 /// with three empty maps (`clients/python/horsies/core/workflows/engine.py:3935-3983`; the
 /// baseline `horsies_workflow_outputless_result`).
 #[tokio::test]
-#[serial]
 async fn a_workflow_with_no_node_completes_with_an_empty_terminal_set() {
     let pool = shared_pool().await;
     let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
@@ -228,7 +222,6 @@ async fn a_workflow_with_no_node_completes_with_an_empty_terminal_set() {
 /// `test_child_info_counts_zero_for_taskless_workflow`: a child with no node
 /// reports a total of 0.
 #[tokio::test]
-#[serial]
 async fn a_child_with_no_node_reports_a_total_of_zero() {
     let pool = shared_pool().await;
     let (parent_id, child_id) =
@@ -254,7 +247,6 @@ async fn a_child_with_no_node_reports_a_total_of_zero() {
 /// and `_completed_child_node`, `clients/python/horsies/core/workflows/engine.py`; the baseline
 /// `horsies_workflow_child_node_result`).
 #[tokio::test]
-#[serial]
 async fn an_outputless_child_completes_its_parent_node_with_an_ok_null() {
     let pool = shared_pool().await;
     let outputless = serde_json::json!({
@@ -296,7 +288,6 @@ async fn an_outputless_child_completes_its_parent_node_with_an_ok_null() {
 /// ended parent keeps its status, and a second advance does not write the
 /// terminal node again.
 #[tokio::test]
-#[serial]
 async fn the_parent_node_of_an_ended_parent_is_written_once() {
     let pool = shared_pool().await;
     let (parent_id, child_id) = seed_parent_and_child(
@@ -341,7 +332,6 @@ async fn the_parent_node_of_an_ended_parent_is_written_once() {
 /// JSON object; the first 200 characters of a text that is not JSON, an empty
 /// text included (no writer stores one); none for other JSON and no text.
 #[tokio::test]
-#[serial]
 async fn the_error_summary_of_a_failed_child_follows_python() {
     let pool = shared_pool().await;
     let long = "x".repeat(300);
@@ -375,7 +365,6 @@ async fn the_error_summary_of_a_failed_child_follows_python() {
 /// `None` for it and takes the first 200 characters of the text, `"null"`
 /// (`horsies_workflow_child_node_result` reads it the same way).
 #[tokio::test]
-#[serial]
 async fn a_child_error_stored_as_json_null_is_summarized_as_its_text() {
     let pool = shared_pool().await;
     let mut child = WorkflowSeed::running().status("FAILED");
@@ -394,7 +383,6 @@ async fn a_child_error_stored_as_json_null_is_summarized_as_its_text() {
 /// FAILED and keeps that error (Python `check_workflow_completion`: a stored
 /// error fails the default success rule, and the failure error is kept).
 #[tokio::test]
-#[serial]
 async fn a_completion_with_a_stored_error_and_no_failed_node_keeps_that_error() {
     let pool = shared_pool().await;
     let first_error =
@@ -423,7 +411,6 @@ async fn a_completion_with_a_stored_error_and_no_failed_node_keeps_that_error() 
 /// result. Each completion sends one `workflow_done` notification with the
 /// workflow id.
 #[tokio::test]
-#[serial]
 async fn finalization_preserves_explicit_and_default_outputs() {
     let pool = shared_pool().await;
     let mut listener = TestListener::connect_with(&pool)
@@ -522,7 +509,6 @@ async fn finalization_preserves_explicit_and_default_outputs() {
 /// `_decode_err_only` text for that cause
 /// (`horsies_workflow_unreadable_result_cause`).
 #[tokio::test]
-#[serial]
 async fn a_first_failed_node_result_that_does_not_decode_gives_result_deserialization_error() {
     let pool = shared_pool().await;
     let error = serde_json::json!({"error_code": "BOOM", "message": "boom", "data": null});
@@ -629,7 +615,6 @@ async fn a_first_failed_node_result_that_does_not_decode_gives_result_deserializ
 /// (Python `check_workflow_completion`; the baseline
 /// `horsies_workflow_try_complete`).
 #[tokio::test]
-#[serial]
 async fn a_completion_check_does_not_resurrect_a_cancelled_workflow() {
     let pool = shared_pool().await;
     let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
@@ -658,7 +643,6 @@ async fn a_completion_check_does_not_resurrect_a_cancelled_workflow() {
 /// `TestOnChildWorkflowComplete::test_child_not_found_returns`: the advance
 /// of a child that has no row writes nothing (`CHILD_ABSENT`).
 #[tokio::test]
-#[serial]
 async fn a_parent_advance_of_a_child_with_no_row_writes_nothing() {
     let pool = shared_pool().await;
     let (parent_id, child_id) =
@@ -678,7 +662,6 @@ async fn a_parent_advance_of_a_child_with_no_row_writes_nothing() {
 /// end of a child writes its parent node, and a PAUSED parent promotes
 /// nothing: the dependent of the node stays PENDING with no task row.
 #[tokio::test]
-#[serial]
 async fn a_child_end_under_a_paused_parent_writes_the_node_and_promotes_nothing() {
     let pool = shared_pool().await;
     let (parent_id, child_id) = seed_parent_and_child(
@@ -709,7 +692,6 @@ async fn a_child_end_under_a_paused_parent_writes_the_node_and_promotes_nothing(
 /// that requires no node is never met. With no other case the workflow
 /// fails with `WORKFLOW_SUCCESS_CASE_NOT_MET`.
 #[tokio::test]
-#[serial]
 async fn a_case_that_requires_no_node_is_never_met() {
     let pool = shared_pool().await;
     let workflow_id = seed_workflow(
@@ -739,7 +721,6 @@ async fn a_case_that_requires_no_node_is_never_met() {
 /// FAILED node whose stored envelope holds an ok value gives no failure
 /// error; the workflow fails and keeps its stored error (none here).
 #[tokio::test]
-#[serial]
 async fn a_first_failed_node_with_an_ok_envelope_gives_no_failure_error() {
     let pool = shared_pool().await;
     let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
@@ -763,7 +744,6 @@ async fn a_first_failed_node_with_an_ok_envelope_gives_no_failure_error() {
 /// terminal node whose stored text is not a result envelope; it is still
 /// built.
 #[tokio::test]
-#[serial]
 async fn the_outputless_result_skips_a_node_without_an_id_and_reads_other_text_as_null() {
     let pool = shared_pool().await;
     let workflow_id = seed_workflow(&pool, &WorkflowSeed::running()).await;
@@ -816,7 +796,6 @@ async fn the_outputless_result_skips_a_node_without_an_id_and_reads_other_text_a
 /// The completion check reads the parent link under the workflow row lock and
 /// owes the parent advance of a child workflow that it ends, never of a root.
 #[tokio::test]
-#[serial]
 async fn the_completion_of_a_child_owes_its_parent_advance_and_a_root_owes_none() {
     let pool = shared_pool().await;
     let done = serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the result");
@@ -864,7 +843,6 @@ async fn the_completion_of_a_child_owes_its_parent_advance_and_a_root_owes_none(
 /// `horsies_workflow_child_finish` answers `NOT_A_CHILD`, and the driver of
 /// the advances ends without an error.
 #[tokio::test]
-#[serial]
 async fn a_parent_advance_of_a_workflow_with_no_parent_is_not_a_child() {
     let pool = shared_pool().await;
     let done = serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the result");

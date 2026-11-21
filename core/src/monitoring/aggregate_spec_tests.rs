@@ -8,7 +8,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, Utc};
-use serial_test::serial;
 
 use super::spec_support::{
     seed_failures, seed_live, seed_terminal, set_history_error_code, window, Ending, LiveTask,
@@ -144,7 +143,6 @@ async fn seed_one_failure_per_family(pool: &TestPool) {
 
 /// Python `TestTaskStats::test_zero_fills_all_statuses_in_fixed_order`.
 #[tokio::test]
-#[serial]
 async fn stats_zero_fill_every_status_in_a_fixed_order() {
     let database = SpecDatabase::create().await;
 
@@ -161,7 +159,6 @@ async fn stats_zero_fill_every_status_in_a_fixed_order() {
 /// Python `TestTaskFacets::test_reports_distinct_values_with_counts`: the
 /// task-name and the queue facets count each distinct value.
 #[tokio::test]
-#[serial]
 async fn facets_count_each_distinct_task_name_and_queue() {
     let database = SpecDatabase::create().await;
     for task in [
@@ -194,7 +191,6 @@ async fn facets_count_each_distinct_task_name_and_queue() {
 /// the steady state of the statement cache; it runs within the idle ping
 /// limit of the pool, so no ping is sent before it.
 #[tokio::test]
-#[serial]
 async fn a_facets_poll_is_one_round_trip_for_both_sides() {
     let database = SpecDatabase::create().await;
     seed_live(&database.pool, &LiveTask::pending("alpha_task")).await;
@@ -228,7 +224,6 @@ async fn a_facets_poll_is_one_round_trip_for_both_sides() {
 /// with equal counts come in the order of the database collation, for the
 /// task names and for the codes.
 #[tokio::test]
-#[serial]
 async fn facet_ties_follow_the_database_collation() {
     let database = SpecDatabase::create().await;
     let names: Vec<String> = ["b_task", "B_task", "a_task", "A_task", "_task", "Z_task"]
@@ -267,7 +262,6 @@ async fn facet_ties_follow_the_database_collation() {
 /// of codes: 1,000 distinct codes give 30 code facets, and the category
 /// total counts all of them.
 #[tokio::test]
-#[serial]
 async fn the_code_facets_stay_bounded_with_a_thousand_distinct_codes() {
     let database = SpecDatabase::create().await;
     let codes: Vec<String> = (0..1_000).map(|index| format!("DOMAIN_{index}")).collect();
@@ -285,7 +279,6 @@ async fn the_code_facets_stay_bounded_with_a_thousand_distinct_codes() {
 
 /// Python `TestTaskFacets::test_unclaimed_tasks_are_absent_from_the_worker_facet`.
 #[tokio::test]
-#[serial]
 async fn an_unclaimed_task_is_not_in_the_worker_facet() {
     let database = SpecDatabase::create().await;
     seed_live(
@@ -306,7 +299,6 @@ async fn an_unclaimed_task_is_not_in_the_worker_facet() {
 
 /// Python `TestTaskFacets::test_null_and_empty_error_codes_are_excluded`.
 #[tokio::test]
-#[serial]
 async fn null_and_empty_error_codes_are_not_facet_values() {
     let database = SpecDatabase::create().await;
     seed_terminal(
@@ -343,7 +335,6 @@ async fn null_and_empty_error_codes_are_not_facet_values() {
 /// Python `TestTaskFacets::test_error_codes_on_completed_tasks_are_counted`:
 /// the facet counts tasks that carry a code, not failures.
 #[tokio::test]
-#[serial]
 async fn an_error_code_on_a_completed_task_is_counted() {
     let database = SpecDatabase::create().await;
     let completed = LiveTask::pending("alpha_task");
@@ -364,7 +355,6 @@ async fn an_error_code_on_a_completed_task_is_counted() {
 /// Python `TestTaskFacets::test_error_codes_carry_their_taxonomy_category`:
 /// each code facet carries its category, and the totals count per category.
 #[tokio::test]
-#[serial]
 async fn each_code_facet_carries_its_category() {
     let database = SpecDatabase::create().await;
     seed_terminal(
@@ -423,7 +413,6 @@ fn two_hundred_and_one_domain_codes() -> Vec<String> {
 /// a selected family filters the codes before the cap, so a family code
 /// that ranks after 201 other codes is still listed.
 #[tokio::test]
-#[serial]
 async fn a_selected_family_is_filtered_before_its_code_cap() {
     let database = SpecDatabase::create().await;
     seed_failures(
@@ -456,7 +445,6 @@ async fn a_selected_family_is_filtered_before_its_code_cap() {
 
 /// Python `TestTaskFacets::test_history_category_totals_exceed_the_history_facet_cap`.
 #[tokio::test]
-#[serial]
 async fn category_totals_count_codes_past_the_facet_cap() {
     let database = SpecDatabase::create().await;
     seed_failures(
@@ -480,7 +468,6 @@ async fn category_totals_count_codes_past_the_facet_cap() {
 /// groups by worker with a count per status and of retried tasks, and a
 /// total over every group.
 #[tokio::test]
-#[serial]
 async fn the_worker_breakdown_counts_each_status_the_retried_tasks_and_a_total() {
     let database = SpecDatabase::create().await;
     seed_terminal(
@@ -522,7 +509,6 @@ async fn the_worker_breakdown_counts_each_status_the_retried_tasks_and_a_total()
 
 /// Python `TestTaskBreakdown::test_empty_scope_yields_no_groups_and_a_zero_total`.
 #[tokio::test]
-#[serial]
 async fn an_empty_scope_gives_no_groups_and_a_zero_total() {
     let database = SpecDatabase::create().await;
 
@@ -537,7 +523,6 @@ async fn an_empty_scope_gives_no_groups_and_a_zero_total() {
 /// Python `TestTaskBreakdown::test_tasks_no_worker_claimed_are_the_unclaimed_group`:
 /// a live task and a history task that no worker claimed are one group.
 #[tokio::test]
-#[serial]
 async fn the_tasks_no_worker_claimed_are_the_unclaimed_group() {
     let database = SpecDatabase::create().await;
     seed_live(&database.pool, &LiveTask::pending("alpha_task")).await;
@@ -559,7 +544,6 @@ async fn the_tasks_no_worker_claimed_are_the_unclaimed_group() {
 
 /// Python `TestTaskBreakdown::test_a_worker_named_unknown_is_a_group_apart_from_the_unclaimed_tasks`.
 #[tokio::test]
-#[serial]
 async fn a_worker_named_unknown_is_a_group_apart_from_the_unclaimed_tasks() {
     let database = SpecDatabase::create().await;
     seed_live(&database.pool, &LiveTask::running("alpha_task", "unknown")).await;
@@ -593,7 +577,6 @@ async fn a_worker_named_unknown_is_a_group_apart_from_the_unclaimed_tasks() {
 /// the unclaimed group sorts as the text `unknown`, after a value group
 /// `unknown` with the same total.
 #[tokio::test]
-#[serial]
 async fn with_one_total_a_worker_named_unknown_comes_before_the_unclaimed_group() {
     let database = SpecDatabase::create().await;
     seed_terminal(
@@ -628,7 +611,6 @@ async fn with_one_total_a_worker_named_unknown_comes_before_the_unclaimed_group(
 /// Python `TestTaskBreakdown::test_filters_apply_to_groups_and_total`: a row
 /// outside the filter is in no group and not in the total.
 #[tokio::test]
-#[serial]
 async fn the_filters_scope_the_groups_and_the_total() {
     let database = SpecDatabase::create().await;
     seed_live(
@@ -665,7 +647,6 @@ async fn the_filters_scope_the_groups_and_the_total() {
 /// Python `TestErrorCategoryFilter::test_a_family_selects_exactly_its_own_codes`
 /// (every family, also CONTRACT, RETRIEVAL and DOMAIN).
 #[tokio::test]
-#[serial]
 async fn each_family_selects_exactly_its_own_codes() {
     let database = SpecDatabase::create().await;
     seed_one_failure_per_family(&database.pool).await;
@@ -682,7 +663,6 @@ async fn each_family_selects_exactly_its_own_codes() {
 
 /// Python `TestErrorCategoryFilter::test_a_user_defined_code_is_domain_and_no_family_claims_it`.
 #[tokio::test]
-#[serial]
 async fn a_user_code_is_domain_and_no_built_in_family_selects_it() {
     let database = SpecDatabase::create().await;
     seed_terminal(
@@ -709,7 +689,6 @@ async fn a_user_code_is_domain_and_no_built_in_family_selects_it() {
 /// Python `TestErrorCategoryFilter::test_absent_and_empty_codes_match_no_category`:
 /// DOMAIN means "carries a code the library does not define", not "no code".
 #[tokio::test]
-#[serial]
 async fn absent_and_empty_codes_match_no_category() {
     let database = SpecDatabase::create().await;
     seed_terminal(
@@ -735,7 +714,6 @@ async fn absent_and_empty_codes_match_no_category() {
 
 /// Python `TestErrorCategoryFilter::test_categories_are_or_combined`.
 #[tokio::test]
-#[serial]
 async fn two_categories_select_the_codes_of_either() {
     let database = SpecDatabase::create().await;
     seed_one_failure_per_family(&database.pool).await;
@@ -771,7 +749,6 @@ fn built_in_codes() -> Vec<String> {
 /// the category a row reports and the filter of that category are one
 /// mapping, so a row is reachable from the category it shows.
 #[tokio::test]
-#[serial]
 async fn every_built_in_code_is_selected_by_the_category_it_reports() {
     let database = SpecDatabase::create().await;
     let codes = built_in_codes();
@@ -807,7 +784,6 @@ async fn every_built_in_code_is_selected_by_the_category_it_reports() {
 
 /// Python `TestErrorCategoryFilter::test_stats_and_breakdown_apply_the_same_expansion`.
 #[tokio::test]
-#[serial]
 async fn stats_and_breakdown_expand_a_category_the_same_way() {
     let database = SpecDatabase::create().await;
     seed_one_failure_per_family(&database.pool).await;
@@ -838,7 +814,6 @@ async fn stats_and_breakdown_expand_a_category_the_same_way() {
 /// Each group column of the breakdown (worker, task name, queue) counts the
 /// retried tasks of its groups and of the total.
 #[tokio::test]
-#[serial]
 async fn each_group_column_counts_the_retried_tasks() {
     let database = SpecDatabase::create().await;
     seed_terminal(
@@ -883,7 +858,6 @@ async fn each_group_column_counts_the_retried_tasks() {
 /// it and one at the upper bound are not, in the list, the stats, the facets
 /// and the breakdown.
 #[tokio::test]
-#[serial]
 async fn the_history_window_holds_its_lower_bound_and_not_its_upper_bound() {
     let database = SpecDatabase::create().await;
     let at_lower = LiveTask::pending("at_lower_task");

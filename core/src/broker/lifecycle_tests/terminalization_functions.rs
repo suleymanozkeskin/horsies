@@ -9,7 +9,6 @@
 //! `horsies_cancel_task` writes `CANCEL_ADMIN`.
 
 use chrono::Duration;
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
@@ -119,7 +118,6 @@ mod terminal_at_invariant {
     /// range key of the history leaves, so partition routing refuses the row
     /// (23514) before the NOT NULL check runs.
     #[tokio::test]
-    #[serial]
     async fn status_and_terminal_at_must_agree() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::pending()).await;
@@ -164,7 +162,6 @@ mod applied_transitions {
     /// terminal row carries no failure summary, and attempt one keeps its
     /// reason.
     #[tokio::test]
-    #[serial]
     async fn completion_clears_an_earlier_attempts_failure_summary_fused() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -201,7 +198,6 @@ mod applied_transitions {
     /// `COMPLETE_LOCKED`). The one-statement writer records the completion as
     /// attempt two; Python's locked writer wrote no attempt of its own.
     #[tokio::test]
-    #[serial]
     async fn completion_clears_an_earlier_attempts_failure_summary_workflow_success() {
         let pool = pool().await;
         let workflow_id = Uuid::new_v4();
@@ -247,7 +243,6 @@ mod refusals {
     /// PENDING row with its claim cleared is the requeue case: both completion
     /// writers report a lost claim, not a state conflict, and write nothing.
     #[tokio::test]
-    #[serial]
     async fn a_requeued_row_reports_a_lost_claim() {
         let pool = pool().await;
         let plain = seed_task(&pool, &TaskSeed::pending()).await;
@@ -296,7 +291,6 @@ mod kind_vocabulary {
     /// Python `TestKindVocabularyIsEnforced::test_the_database_rejects_a_kind_outside_the_vocabulary`,
     /// on the history table: a typo cannot become history.
     #[tokio::test]
-    #[serial]
     async fn the_database_rejects_a_kind_outside_the_vocabulary() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -321,7 +315,6 @@ mod kind_vocabulary {
     /// move functions, and the baseline removes it (differences ledger, row
     /// 4). A history row without a kind is refused.
     #[tokio::test]
-    #[serial]
     async fn a_null_kind_is_refused() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -346,7 +339,6 @@ mod kind_vocabulary {
     /// that missed answers `AlreadyApplied` by the database class; the core
     /// judges a replay by its own.
     #[tokio::test]
-    #[serial]
     async fn the_miss_classes_of_the_database_are_the_equivalence_classes() {
         let pool = pool().await;
         let mut families: Vec<(TerminalizationKind, String)> = Vec::new();
@@ -387,7 +379,6 @@ mod fail_locked {
 
     /// Python `TestFailLocked::test_a_null_reason_clears_an_earlier_attempts_reason`.
     #[tokio::test]
-    #[serial]
     async fn a_null_reason_clears_an_earlier_attempts_reason() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -415,7 +406,6 @@ mod fail_locked {
 
     /// Python `TestFailLocked::test_a_supplied_reason_overwrites`.
     #[tokio::test]
-    #[serial]
     async fn a_supplied_reason_overwrites() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -449,7 +439,6 @@ mod fail_locked {
     /// Both write FAILED; they are not one class, so the caller is told to
     /// look instead of being told its work is done.
     #[tokio::test]
-    #[serial]
     async fn a_stale_failure_is_a_conflict_not_a_replay() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -474,7 +463,6 @@ mod fail_locked {
     /// Python `TestFailLocked::test_the_source_status_is_wrong`: owned by this
     /// worker at this generation, but not yet running.
     #[tokio::test]
-    #[serial]
     async fn the_source_status_is_wrong() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::claimed()).await;
@@ -502,7 +490,6 @@ mod fail_locked {
 
     /// Python `TestFailLocked::test_a_task_that_does_not_exist`.
     #[tokio::test]
-    #[serial]
     async fn a_task_that_does_not_exist() {
         let pool = pool().await;
         let task_id = Uuid::new_v4();
@@ -530,7 +517,6 @@ mod fail_stale {
     /// the millisecond contract reaches the guard unchanged. The beat and the
     /// call share one transaction, so both read one `NOW()`.
     #[tokio::test]
-    #[serial]
     async fn fractional_second_threshold_is_not_truncated() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -585,7 +571,6 @@ mod fail_stale {
     /// Only the runner's beats prove the runner alive; the baseline knows two
     /// roles, so the other role is the claimer.
     #[tokio::test]
-    #[serial]
     async fn a_heartbeat_from_another_role_does_not_count() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -612,7 +597,6 @@ mod fail_stale {
     /// Python `TestFailStale::test_a_row_that_never_started_refuses`: with no
     /// `started_at` the guard has no instant to measure silence from.
     #[tokio::test]
-    #[serial]
     async fn a_row_that_never_started_refuses() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -642,7 +626,6 @@ mod fail_stale {
     /// silent past its threshold, so only the finalizer arm can refuse, and
     /// its instant sits inside the window it was judged against.
     #[tokio::test]
-    #[serial]
     async fn an_active_finalizer_defers() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -675,7 +658,6 @@ mod fail_stale {
 
     /// Python `TestFailStale::test_replay_is_already_applied`.
     #[tokio::test]
-    #[serial]
     async fn replay_is_already_applied() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -707,7 +689,6 @@ mod fail_stale {
 
     /// Python `TestFailStale::test_a_locked_failure_is_a_conflict_not_a_replay`.
     #[tokio::test]
-    #[serial]
     async fn a_locked_failure_is_a_conflict_not_a_replay() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -731,7 +712,6 @@ mod fail_stale {
     /// Python `TestFailStale::test_the_source_status_is_wrong`: not RUNNING,
     /// so no staleness was judged and the evidence is the claim.
     #[tokio::test]
-    #[serial]
     async fn the_source_status_is_wrong() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::claimed()).await;
@@ -753,7 +733,6 @@ mod fail_stale {
 
     /// Python `TestFailStale::test_a_task_that_does_not_exist`.
     #[tokio::test]
-    #[serial]
     async fn a_task_that_does_not_exist() {
         let pool = pool().await;
         let outcomes = terminal_writes::fail_stale_task(&pool, Uuid::new_v4(), &stale_failure())
@@ -776,7 +755,6 @@ mod expire_owned_claim {
     /// expiry has no failure reason of its own, and attempt one keeps its
     /// reason.
     #[tokio::test]
-    #[serial]
     async fn expiry_clears_an_earlier_attempts_reason() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::claimed()).await;
@@ -815,7 +793,6 @@ mod expire_owned_claim {
     /// A concurrent transaction holds the row with a past deadline; the
     /// expiry waits for it and applies from the locked post-commit image.
     #[tokio::test]
-    #[serial]
     async fn deadline_change_while_waiting_on_the_row_is_rechecked() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::claimed()).await;
@@ -864,7 +841,6 @@ mod expire_owned_claim {
 
     /// Python `TestExpireOwnedClaim::test_a_row_with_no_deadline_refuses`.
     #[tokio::test]
-    #[serial]
     async fn a_row_with_no_deadline_refuses() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::claimed()).await;
@@ -894,7 +870,6 @@ mod expire_owned_claim {
     /// expiry is a lost claim that names that worker, and the row stays
     /// CLAIMED.
     #[tokio::test]
-    #[serial]
     async fn another_workers_claim_is_lost() {
         let pool = pool().await;
         let task_id = seed_task(
@@ -924,7 +899,6 @@ mod expire_owned_claim {
 
     /// Python `TestExpireOwnedClaim::test_the_pending_expiry_counts_as_the_same_work`.
     #[tokio::test]
-    #[serial]
     async fn the_pending_expiry_counts_as_the_same_work() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::claimed()).await;
@@ -949,7 +923,6 @@ mod expire_owned_claim {
 
     /// Python `TestExpireOwnedClaim::test_a_foreign_kind_is_a_conflict_not_a_replay`.
     #[tokio::test]
-    #[serial]
     async fn a_foreign_kind_is_a_conflict_not_a_replay() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::claimed()).await;
@@ -973,7 +946,6 @@ mod expire_owned_claim {
     /// Python `TestExpireOwnedClaim::test_the_source_status_is_wrong`: RUNNING
     /// is past this operation's window even with the deadline gone.
     #[tokio::test]
-    #[serial]
     async fn the_source_status_is_wrong() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -996,7 +968,6 @@ mod expire_owned_claim {
 
     /// Python `TestExpireOwnedClaim::test_a_task_that_does_not_exist`.
     #[tokio::test]
-    #[serial]
     async fn a_task_that_does_not_exist() {
         let pool = pool().await;
         let outcomes = terminalize(&pool, &expire_claim(Uuid::new_v4()))
@@ -1068,7 +1039,6 @@ mod expire_pending_tasks {
     /// a requeued PENDING row expires without its old reason, and attempt one
     /// keeps its reason.
     #[tokio::test]
-    #[serial]
     async fn the_sweep_clears_an_earlier_attempts_reason() {
         let pool = pool().await;
         drain_pending_expiry(&pool).await;
@@ -1105,7 +1075,6 @@ mod expire_pending_tasks {
     /// Python `TestExpirePendingTasks::test_a_row_a_concurrent_claim_holds_is_stepped_around`:
     /// SKIP LOCKED, so neither side waits.
     #[tokio::test]
-    #[serial]
     async fn a_row_a_concurrent_claim_holds_is_stepped_around() {
         let pool = pool().await;
         drain_pending_expiry(&pool).await;
@@ -1147,7 +1116,6 @@ mod cancel_task {
 
     /// Python `TestCancelTask::test_replay_is_already_applied`.
     #[tokio::test]
-    #[serial]
     async fn replay_is_already_applied() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &TaskSeed::claimed()).await;
@@ -1178,7 +1146,6 @@ mod cancel_task {
 
     /// Python `TestCancelTask::test_absence_is_an_outcome`.
     #[tokio::test]
-    #[serial]
     async fn absence_is_an_outcome() {
         let pool = pool().await;
         let outcomes = terminal_writes::cancel_live_task(&pool, Uuid::new_v4(), false)
@@ -1200,7 +1167,6 @@ mod cancel_owned_orphan {
     /// Python `TestCancelOwnedOrphan::test_a_terminal_link_still_leaves_the_backing_task_orphaned`:
     /// a node that is already COMPLETED is not a runnable link.
     #[tokio::test]
-    #[serial]
     async fn a_terminal_link_still_leaves_the_backing_task_orphaned() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &claimed_workflow_task()).await;
@@ -1230,7 +1196,6 @@ mod cancel_owned_orphan {
     /// Python `TestCancelOwnedOrphan::test_a_stale_generation_is_a_lost_claim_even_with_a_live_link`:
     /// the fence is judged before the link guard.
     #[tokio::test]
-    #[serial]
     async fn a_stale_generation_is_a_lost_claim_even_with_a_live_link() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &claimed_workflow_task()).await;
@@ -1263,7 +1228,6 @@ mod cancel_owned_orphan {
 
     /// Python `TestCancelOwnedOrphan::test_the_sweep_kind_counts_as_the_same_work`.
     #[tokio::test]
-    #[serial]
     async fn the_sweep_kind_counts_as_the_same_work() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &claimed_workflow_task()).await;
@@ -1288,7 +1252,6 @@ mod cancel_owned_orphan {
 
     /// Python `TestCancelOwnedOrphan::test_an_administrative_cancellation_is_a_conflict`.
     #[tokio::test]
-    #[serial]
     async fn an_administrative_cancellation_is_a_conflict() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &claimed_workflow_task()).await;
@@ -1311,7 +1274,6 @@ mod cancel_owned_orphan {
 
     /// Python `TestCancelOwnedOrphan::test_absence_is_an_outcome`.
     #[tokio::test]
-    #[serial]
     async fn absence_is_an_outcome() {
         let pool = pool().await;
         let outcomes = terminalize(&pool, &cancel_owned_orphan(Uuid::new_v4(), owned_claim()))
@@ -1334,7 +1296,6 @@ mod cancel_orphaned_tasks {
     /// the sweep cancels unlinked workflow tasks that are CLAIMED or PENDING;
     /// a linked task, a plain task and a RUNNING task stay.
     #[tokio::test]
-    #[serial]
     async fn transitions_only_orphans_in_the_effective_source_set() {
         let pool = pool().await;
         drain_orphan_sweep(&pool).await;
@@ -1405,7 +1366,6 @@ mod cancel_orphaned_tasks {
 
     /// Python `TestCancelOrphanedTasks::test_a_locked_orphan_is_stepped_around`.
     #[tokio::test]
-    #[serial]
     async fn a_locked_orphan_is_stepped_around() {
         let pool = pool().await;
         drain_orphan_sweep(&pool).await;
@@ -1437,7 +1397,6 @@ mod abandon_owned_node {
     /// with the core's rule: the stored function refuses a NULL generation
     /// before any lock or write (differences ledger, row 3).
     #[tokio::test]
-    #[serial]
     async fn a_null_generation_is_refused() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &claimed_workflow_task()).await;
@@ -1457,7 +1416,6 @@ mod abandon_owned_node {
 
     /// Python `TestAbandonOwnedNode::test_pause_kinds_are_equivalent_but_workflow_cancel_is_not`.
     #[tokio::test]
-    #[serial]
     async fn pause_kinds_are_equivalent_but_workflow_cancel_is_not() {
         let pool = pool().await;
         let same = seed_task(&pool, &claimed_workflow_task()).await;
@@ -1498,7 +1456,6 @@ mod abandon_owned_node {
 
     /// Python `TestAbandonOwnedNode::test_absence_is_an_outcome`.
     #[tokio::test]
-    #[serial]
     async fn absence_is_an_outcome() {
         let pool = pool().await;
         let outcomes = terminalize(&pool, &abandon_owned(Uuid::new_v4(), owned_claim()))
@@ -1521,7 +1478,6 @@ mod cancel_owned_node {
     /// A worker-side node cancel has no error summary of its own, so the
     /// summary of an earlier attempt does not reach the history row.
     #[tokio::test]
-    #[serial]
     async fn the_terminal_record_carries_its_own_summary() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &claimed_workflow_task()).await;
@@ -1550,7 +1506,6 @@ mod cancel_owned_node {
 
     /// Python `TestCancelOwnedNode::test_a_stale_claim_is_lost`.
     #[tokio::test]
-    #[serial]
     async fn a_stale_claim_is_lost() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &claimed_workflow_task()).await;
@@ -1575,7 +1530,6 @@ mod cancel_owned_node {
 
     /// Python `TestCancelOwnedNode::test_replay_foreign_kind_wrong_source_and_absence_are_distinct`.
     #[tokio::test]
-    #[serial]
     async fn replay_foreign_kind_wrong_source_and_absence_are_distinct() {
         let pool = pool().await;
         let replay_id = seed_task(&pool, &claimed_workflow_task()).await;
@@ -1797,14 +1751,12 @@ mod id_keyed_workflow_batches {
 
     /// `test_one_ordered_outcome_per_input_across_every_outcome`, abandon batch.
     #[tokio::test]
-    #[serial]
     async fn one_ordered_outcome_per_input_across_every_outcome_abandon() {
         one_ordered_outcome_per_input(Batch::Abandon).await;
     }
 
     /// `test_one_ordered_outcome_per_input_across_every_outcome`, cancel batch.
     #[tokio::test]
-    #[serial]
     async fn one_ordered_outcome_per_input_across_every_outcome_cancel() {
         one_ordered_outcome_per_input(Batch::Cancel).await;
     }
@@ -1813,7 +1765,6 @@ mod id_keyed_workflow_batches {
     /// with the core's rule: a NULL element of the generation array is
     /// refused before any lock or write (differences ledger, row 3).
     #[tokio::test]
-    #[serial]
     async fn a_null_generation_is_refused() {
         let pool = pool().await;
         for function in ["horsies_abandon_owned_nodes", "horsies_cancel_owned_nodes"] {
@@ -1837,7 +1788,6 @@ mod id_keyed_workflow_batches {
 
     /// Python `TestIdKeyedWorkflowBatches::test_empty_input_is_valid`.
     #[tokio::test]
-    #[serial]
     async fn empty_input_is_valid() {
         let pool = pool().await;
         for batch in [Batch::Abandon, Batch::Cancel] {
@@ -1858,7 +1808,6 @@ mod workflow_scoped_batches {
     /// workflow. The history row keeps the claim time as provenance; the
     /// live claim ends with the live row.
     #[tokio::test]
-    #[serial]
     async fn pause_applies_only_under_both_live_guards() {
         let pool = pool().await;
         let eligible = seed_task(&pool, &claimed_workflow_task()).await;
@@ -1960,7 +1909,6 @@ mod workflow_scoped_batches {
     /// PENDING, CLAIMED and RUNNING rows under a CANCELLED workflow. The
     /// sweep carries no error summary of its own.
     #[tokio::test]
-    #[serial]
     async fn cancel_accepts_all_three_legacy_task_source_states() {
         let pool = pool().await;
         let mut task_ids = Vec::new();
@@ -2024,7 +1972,6 @@ mod workflow_scoped_batches {
 
     /// Python `TestWorkflowScopedBatches::test_cancel_refuses_a_live_workflow_or_non_enqueued_link`.
     #[tokio::test]
-    #[serial]
     async fn cancel_refuses_a_live_workflow_or_non_enqueued_link() {
         let pool = pool().await;
         let live_workflow_task = seed_task(&pool, &claimed_workflow_task()).await;
@@ -2058,7 +2005,6 @@ mod workflow_scoped_batches {
     /// means it. The pause sweep acts only under a PAUSED workflow and the
     /// cancel sweep only under a CANCELLED one, so neither acts for the other.
     #[tokio::test]
-    #[serial]
     async fn each_workflow_sweep_acts_only_under_the_status_of_its_variant() {
         let pool = pool().await;
         let paused_task = seed_task(&pool, &claimed_workflow_task()).await;

@@ -12,7 +12,6 @@ use crate::test_support::sql;
 /// writes no task. The detail carries the text of Python's reader
 /// (`clients/python/horsies/core/codec/json_value.py:156, 180, 294`).
 #[tokio::test]
-#[serial]
 async fn a_refused_value_in_a_stored_envelope_fails_closed() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);

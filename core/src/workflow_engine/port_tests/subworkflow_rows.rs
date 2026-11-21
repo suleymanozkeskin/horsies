@@ -4,7 +4,6 @@
 
 use std::sync::Arc;
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -99,7 +98,6 @@ async fn children_of(pool: &TestPool, parent_id: Uuid) -> i64 {
 /// completion starts the child, links it to the parent node, and stamps its
 /// `sent_at`.
 #[tokio::test]
-#[serial]
 async fn a_dependency_completion_starts_the_child_and_links_it() {
     let pool = shared_pool().await;
     let child_specs = subworkflow_children();
@@ -138,7 +136,6 @@ async fn a_dependency_completion_starts_the_child_and_links_it() {
 /// (child completed, child failed): a replayed child completion leaves a
 /// terminal parent node and the parent's error as they are.
 #[tokio::test]
-#[serial]
 async fn a_replayed_child_completion_does_not_rewrite_a_terminal_parent_node() {
     let pool = shared_pool().await;
     let child_specs = subworkflow_children();
@@ -313,7 +310,6 @@ async fn failed_node_code(pool: &TestPool, workflow_id: Uuid, task_index: i32) -
 /// the workflow at depth 32 fails its root node, and the failure reaches the
 /// root workflow.
 #[tokio::test]
-#[serial]
 async fn a_root_nesting_stops_at_the_depth_limit() {
     let db = IsolatedDatabase::create().await;
     let key = "tests.port.root_nesting.v1";
@@ -349,7 +345,6 @@ async fn a_root_nesting_stops_at_the_depth_limit() {
 
 /// `TestSubworkflowIntegration.test_a_dependent_nesting_stops_at_the_depth_limit`
 #[tokio::test]
-#[serial]
 async fn a_dependent_nesting_stops_at_the_depth_limit() {
     let db = IsolatedDatabase::create().await;
     let key = "tests.port.dependent_nesting.v1";
@@ -393,7 +388,6 @@ async fn a_dependent_nesting_stops_at_the_depth_limit() {
 /// parent node with `WORKFLOW_ENQUEUE_FAILED` naming that node, and no child
 /// row is kept.
 #[tokio::test]
-#[serial]
 async fn a_child_node_that_cannot_be_prepared_fails_the_parent_node_and_keeps_no_child() {
     let db = IsolatedDatabase::create().await;
     let key = "tests.port.later_node_prep_failure_child_workflow.v1";
@@ -456,7 +450,6 @@ async fn a_child_node_that_cannot_be_prepared_fails_the_parent_node_and_keeps_no
 /// node is an error of phase 2, and the step rolls back: no child row, the
 /// parent node stays PENDING, and the upstream node is not written.
 #[tokio::test]
-#[serial]
 async fn a_failure_while_the_child_start_writes_a_nested_node_rolls_the_step_back() {
     let db = IsolatedDatabase::create().await;
     let grandchild_key = "tests.port.nested_sub_partial_grandchild.v1";
@@ -527,7 +520,6 @@ async fn a_failure_while_the_child_start_writes_a_nested_node_rolls_the_step_bac
 
 /// `TestSubworkflowIntegration.test_parallel_child_one_fails_downstream_skipped`
 #[tokio::test]
-#[serial]
 async fn one_failed_child_of_two_skips_a_join_all_dependent() {
     let pool = shared_pool().await;
     let child_specs = subworkflow_children();
@@ -559,7 +551,6 @@ async fn one_failed_child_of_two_skips_a_join_all_dependent() {
 /// while a third root runs, the parent stays RUNNING and keeps the error of
 /// the first failed child.
 #[tokio::test]
-#[serial]
 async fn two_failed_children_keep_the_first_error_on_the_parent() {
     let pool = shared_pool().await;
     let child_specs = subworkflow_children();
@@ -600,7 +591,6 @@ async fn two_failed_children_keep_the_first_error_on_the_parent() {
 
 /// `TestSubworkflowIntegration.test_subworkflow_join_any_starts_on_first_dep`
 #[tokio::test]
-#[serial]
 async fn a_join_any_child_starts_on_the_first_completed_dependency() {
     let pool = shared_pool().await;
     let child_specs = subworkflow_children();
@@ -629,7 +619,6 @@ async fn a_join_any_child_starts_on_the_first_completed_dependency() {
 
 /// `TestSubworkflowIntegration.test_subworkflow_mid_chain_result_flows`
 #[tokio::test]
-#[serial]
 async fn a_child_output_completes_its_node_and_enqueues_the_dependent() {
     let pool = shared_pool().await;
     let child_specs = subworkflow_children();
@@ -665,7 +654,6 @@ async fn a_child_output_completes_its_node_and_enqueues_the_dependent() {
 
 /// `TestSubworkflowIntegration.test_summary_for_failed_child_has_error_fields`
 #[tokio::test]
-#[serial]
 async fn a_failed_child_summary_holds_its_counts_and_error_summary() {
     let pool = shared_pool().await;
     let child_specs = subworkflow_children();
@@ -709,7 +697,6 @@ async fn a_failed_child_summary_holds_its_counts_and_error_summary() {
 /// `TestSubworkflowIntegration.test_multiple_args_from_keys`: the child
 /// builder gets both `args_from` keys, and the child starts.
 #[tokio::test]
-#[serial]
 async fn a_child_node_with_two_args_from_keys_starts() {
     let pool = shared_pool().await;
     let key = "tests.port.multi_param_child.v1";
@@ -783,7 +770,6 @@ async fn a_child_node_with_two_args_from_keys_starts() {
 /// `ParamChildWorkflow`) and builds its task with the value; the child's
 /// output then completes the parent node with that value.
 #[tokio::test]
-#[serial]
 async fn a_child_builder_gets_its_args_from_result_and_the_child_output_completes_the_node() {
     let pool = shared_pool().await;
     let key = "tests.port.param_child.v1";
@@ -847,7 +833,6 @@ async fn a_child_builder_gets_its_args_from_result_and_the_child_output_complete
 /// sub-workflow roots start their children together; once both children
 /// complete, the node that waits on both is ENQUEUED.
 #[tokio::test]
-#[serial]
 async fn two_root_children_run_together_and_their_join_is_enqueued() {
     let pool = shared_pool().await;
     let child_specs = subworkflow_children();
@@ -883,7 +868,6 @@ async fn two_root_children_run_together_and_their_join_is_enqueued() {
 /// of the Python file (`test_valid_options_of_a_fast_root_reach_the_insert`)
 /// is [`a_dependency_completion_starts_the_child_and_links_it`].
 #[tokio::test]
-#[serial]
 async fn a_child_whose_root_options_do_not_read_refuses_its_start_and_the_step_rolls_back() {
     let db = IsolatedDatabase::create().await;
     let deadline = chrono::Utc::now() + chrono::Duration::hours(1);
@@ -937,7 +921,6 @@ async fn a_child_whose_root_options_do_not_read_refuses_its_start_and_the_step_r
 /// is merged into the task options of the child's root node and set on its
 /// task row.
 #[tokio::test]
-#[serial]
 async fn a_child_whose_root_task_has_a_deadline_starts_with_the_deadline_merged() {
     let pool = shared_pool().await;
     let mut child_task = task_node(0, "child_deadline_task");

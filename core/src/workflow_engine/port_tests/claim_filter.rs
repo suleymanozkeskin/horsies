@@ -7,7 +7,6 @@
 
 use crate::test_support::sql::{self, TestPool};
 use chrono::{DateTime, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -85,7 +84,6 @@ fn moved(status: &str, kind: &str) -> Option<(String, String)> {
 /// task of a PAUSED workflow whose node is RUNNING (a retry window) ends,
 /// and its node goes back to READY with no task.
 #[tokio::test]
-#[serial]
 async fn a_paused_claim_with_a_running_node_ends_and_the_node_goes_back_to_ready() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id, claimed_at) = seed_claimed_node(&db.pool, "PAUSED", "RUNNING").await;
@@ -109,7 +107,6 @@ async fn a_paused_claim_with_a_running_node_ends_and_the_node_goes_back_to_ready
 /// `test_cancelled_workflow_cancels_and_skips`: a claimed task of a
 /// CANCELLED workflow ends, and its node is skipped.
 #[tokio::test]
-#[serial]
 async fn a_cancelled_claim_ends_and_its_node_is_skipped() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id, claimed_at) =
@@ -134,7 +131,6 @@ async fn a_cancelled_claim_ends_and_its_node_is_skipped() {
 /// with no workflow stays and is dispatched; the claims of a PAUSED and of
 /// a CANCELLED workflow end, and the cancelled one's node is skipped.
 #[tokio::test]
-#[serial]
 async fn one_batch_keeps_the_plain_claim_and_ends_the_paused_and_cancelled_ones() {
     let db = IsolatedDatabase::create().await;
     let plain_task = Uuid::new_v4();
@@ -193,7 +189,6 @@ const OTHER_WORKER: &str = "workflow-port-other-worker";
 /// PAUSED or CANCELLED workflow, and leaves that claim and its node as they
 /// are.
 #[tokio::test]
-#[serial]
 async fn another_workers_claim_in_a_paused_or_cancelled_workflow_is_left_alone() {
     let db = IsolatedDatabase::create().await;
     for workflow_status in ["PAUSED", "CANCELLED"] {

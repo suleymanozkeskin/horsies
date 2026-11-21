@@ -10,7 +10,6 @@
 use std::time::Duration as StdDuration;
 
 use chrono::Duration;
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
@@ -156,7 +155,6 @@ async fn cleanup(pool: &TestPool, task_id: Uuid, workflow_id: Option<Uuid>) {
 
 /// Python `test_a_failure_finalize_waits_for_a_stale_recovery_that_holds_its_locks`.
 #[tokio::test]
-#[serial]
 async fn a_failure_finalize_waits_for_a_stale_recovery_that_holds_its_locks() {
     let pool = pool().await;
     let (task_id, workflow_id) = stale_task(&pool, Origin::Send).await;
@@ -199,7 +197,6 @@ async fn a_failure_finalize_waits_for_a_stale_recovery_that_holds_its_locks() {
 
 /// Python `test_a_workflow_success_waits_for_a_stale_recovery_that_holds_its_locks`.
 #[tokio::test]
-#[serial]
 async fn a_workflow_success_waits_for_a_stale_recovery_that_holds_its_locks() {
     let pool = pool().await;
     let (task_id, workflow_id) = stale_task(&pool, Origin::WorkflowNode).await;
@@ -251,7 +248,6 @@ async fn a_workflow_success_waits_for_a_stale_recovery_that_holds_its_locks() {
 /// the success runs in a transaction that stays open and holds both locks;
 /// the stale move waits, and finds the row moved after the commit.
 #[tokio::test]
-#[serial]
 async fn the_stale_move_waits_for_a_workflow_success_that_holds_its_locks() {
     let pool = pool().await;
     let (task_id, workflow_id) = stale_task(&pool, Origin::WorkflowNode).await;
@@ -303,7 +299,6 @@ async fn the_stale_move_waits_for_a_workflow_success_that_holds_its_locks() {
 /// holder plays the failure write. The cancel waits on the task lock while it
 /// holds no row lock, and no deadlock occurs.
 #[tokio::test]
-#[serial]
 async fn a_failure_finalize_waits_for_a_monitoring_cancel_that_holds_its_locks() {
     let pool = pool().await;
     let (task_id, workflow_id) = stale_task(&pool, Origin::Send).await;
@@ -365,7 +360,6 @@ async fn a_failure_finalize_waits_for_a_monitoring_cancel_that_holds_its_locks()
 /// and holds no row lock after it returns, so the holder of the task lock can
 /// lock the row, and the miss path then waits for the task lock.
 #[tokio::test]
-#[serial]
 async fn the_row_lock_of_a_start_ends_before_its_miss_path() {
     let pool = pool().await;
     let task_id = seed_task(
@@ -451,7 +445,6 @@ async fn the_row_lock_of_a_start_ends_before_its_miss_path() {
 /// the abandon of a task of a PAUSED workflow waits for the workflow row
 /// first, and holds neither the task lock nor the task row while it waits.
 #[tokio::test]
-#[serial]
 async fn an_abandon_waits_for_the_workflow_without_task_locks() {
     let pool = pool().await;
     let task_id = seed_task(
@@ -524,7 +517,6 @@ async fn an_abandon_waits_for_the_workflow_without_task_locks() {
 /// of one task race, round after round. Neither side fails, and exactly one
 /// of them moves the task.
 #[tokio::test]
-#[serial]
 async fn a_free_race_of_finalize_and_stale_recovery_never_deadlocks() {
     let pool = pool().await;
     for origin in [Origin::Send, Origin::WorkflowNode] {

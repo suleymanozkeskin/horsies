@@ -204,7 +204,6 @@ async fn batch_backend_waiting(pool: &TestPool) -> i32 {
 /// and wakes the queue once. The same batch sent again answers each row
 /// `AlreadyApplied`, wakes nothing and adds no attempt.
 #[tokio::test]
-#[serial]
 async fn a_batch_completes_every_row_once_and_its_replay_writes_nothing() {
     let pool = pool().await;
     let core = core_pool_for_test_url(pool.url());
@@ -249,7 +248,6 @@ async fn a_batch_completes_every_row_once_and_its_replay_writes_nothing() {
 /// absent task and a committed row in one statement: each row answers on
 /// its own fence, and only the held row moves.
 #[tokio::test]
-#[serial]
 async fn each_row_keeps_its_own_fence_in_one_batch() {
     let pool = pool().await;
     let core = core_pool_for_test_url(pool.url());
@@ -316,7 +314,6 @@ async fn each_row_keeps_its_own_fence_in_one_batch() {
 /// whitespace and characters outside ASCII reach the history row
 /// unchanged.
 #[tokio::test]
-#[serial]
 async fn a_batch_writes_each_result_text_as_given() {
     let pool = pool().await;
     let core = core_pool_for_test_url(pool.url());
@@ -362,7 +359,6 @@ async fn a_batch_writes_each_result_text_as_given() {
 /// microsecond later is another claim. The offset half has no counterpart:
 /// a core claim generation is a `DateTime<Utc>`, an instant with no offset.
 #[tokio::test]
-#[serial]
 async fn a_claim_generation_keeps_its_microseconds() {
     let pool = pool().await;
     let core = core_pool_for_test_url(pool.url());
@@ -389,7 +385,6 @@ async fn a_claim_generation_keeps_its_microseconds() {
 /// [`BATCH_ROWS`] rows is one round trip on a warm connection, counted at
 /// the wire.
 #[tokio::test]
-#[serial]
 async fn a_batch_of_rows_is_one_round_trip() {
     let pool = pool().await;
     let upstream = pool.url();
@@ -424,7 +419,6 @@ async fn a_batch_of_rows_is_one_round_trip() {
 /// coverage pass creates the leaf). Each row sent alone then completes,
 /// except the bad row, which is refused again and stays RUNNING.
 #[tokio::test]
-#[serial]
 async fn a_bad_row_refuses_its_whole_batch_and_each_row_alone_writes_its_own() {
     let pool = pool().await;
     let core = core_pool_for_test_url(pool.url());
@@ -470,7 +464,6 @@ async fn a_bad_row_refuses_its_whole_batch_and_each_row_alone_writes_its_own() {
 /// fails with an unknown outcome, which may clear; the replay answers each
 /// row `AlreadyApplied`, and each task keeps one attempt.
 #[tokio::test]
-#[serial]
 async fn a_lost_reply_of_a_batch_is_classified_by_the_replay_of_each_row() {
     let pool = pool().await;
     let upstream = pool.url();
@@ -515,7 +508,7 @@ async fn a_lost_reply_of_a_batch_is_classified_by_the_replay_of_each_row() {
 /// has not returned, every row is RUNNING, and no capacity wake is out.
 /// Once the lock is free, every row completes and the queue wakes.
 #[tokio::test]
-#[serial]
+#[serial(server)]
 async fn the_answer_and_the_capacity_wake_follow_the_commit() {
     let pool = pool().await;
     let core = Arc::new(core_pool_for_test_url(pool.url()));
@@ -559,7 +552,7 @@ async fn the_answer_and_the_capacity_wake_follow_the_commit() {
 /// Nothing of it commits: the write fails with an unknown outcome, which
 /// may clear, and each row stays RUNNING with no history row.
 #[tokio::test]
-#[serial]
+#[serial(server)]
 async fn a_batch_killed_mid_statement_leaves_its_rows_running() {
     let pool = pool().await;
     let core = Arc::new(core_pool_for_test_url(pool.url()));
@@ -602,7 +595,7 @@ async fn a_batch_killed_mid_statement_leaves_its_rows_running() {
 /// and has not reached the high one. Once the lock is free, every row
 /// completes, answered in input order.
 #[tokio::test]
-#[serial]
+#[serial(server)]
 async fn the_batch_locks_its_rows_in_sorted_task_id_order() {
     let pool = pool().await;
     let core = Arc::new(core_pool_for_test_url(pool.url()));

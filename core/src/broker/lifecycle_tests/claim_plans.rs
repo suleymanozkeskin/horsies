@@ -216,7 +216,6 @@ async fn wait_for_older_transactions(client: &tokio_postgres::Client, delete_xid
 /// count inside the claim reads the status index (the function turns the
 /// sequential and the bitmap scan off).
 #[tokio::test]
-#[serial]
 async fn the_count_reads_the_status_index_when_most_rows_are_in_flight() {
     let database = TestDatabase::create().await;
     let (client, notices) = connect_collecting_notices(database.url()).await;
@@ -265,7 +264,7 @@ async fn the_count_reads_the_status_index_when_most_rows_are_in_flight() {
 /// index is dead. Once no transaction from before the delete runs, one
 /// claim (rolled back) marks all of them: a later bitmap scan returns none.
 #[tokio::test]
-#[serial]
+#[serial(server)]
 async fn a_claim_marks_the_dead_running_entries() {
     let database = TestDatabase::create().await;
     let (client, notices) = connect_collecting_notices(database.url()).await;
@@ -340,7 +339,6 @@ async fn seed_plan_population(client: &tokio_postgres::Client) {
 /// does not appear, and no stream scans the heap (sequential scans off, as
 /// a production-sized table plans).
 #[tokio::test]
-#[serial]
 async fn the_claim_streams_plan_on_the_class_indexes() {
     let database = TestDatabase::create().await;
     let (client, notices) = connect_collecting_notices(database.url()).await;
@@ -450,7 +448,6 @@ async fn in_flight_counts(
 /// PENDING row count nowhere), and per capped queue the rows in flight
 /// under the hard cap and the RUNNING rows under the soft cap.
 #[tokio::test]
-#[serial]
 async fn the_in_flight_counts_of_a_claim_pass() {
     const OTHER_WORKER: &str = "in-flight-count-other";
     let database = TestDatabase::create().await;

@@ -95,7 +95,6 @@ async fn detail_lookup_locks(pool: &TestPool, task_id: Uuid) -> (Option<String>,
 /// fast producer clock) locks the pruned leaves and the fallback leaves down
 /// to its own, and not the older ones; an absent id locks every leaf.
 #[tokio::test]
-#[serial]
 async fn the_staged_lookup_locks_only_the_leaves_it_probes() {
     let database = TestDatabase::create().await;
     let mut transaction = database.pool.begin().await.expect("begin the setup");

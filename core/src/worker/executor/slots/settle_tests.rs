@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::scripted::{ok_envelope, task, timeout_ms, WORKER_ID};
@@ -343,7 +342,6 @@ const RETRY_ON_TIMEOUT: &str = r#"{"timeout_ms": 1000, "cancel_grace_ms": 500, "
 
 /// A reported result of a shared run completes its row.
 #[tokio::test]
-#[serial]
 async fn a_reported_result_of_a_shared_run_completes_the_row() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -378,7 +376,6 @@ async fn a_reported_result_of_a_shared_run_completes_the_row() {
 /// isolated placement moves the row to the `ISOLATED` class. The attempt
 /// records `TASK_TIMEOUT` and will retry.
 #[tokio::test]
-#[serial]
 async fn a_timeout_retries_the_row_at_the_placement_of_its_end() {
     let pool = crate::test_support::migrated_pool().await;
     for (execution, placement, cancel, class_after) in [
@@ -460,7 +457,6 @@ async fn a_timeout_retries_the_row_at_the_placement_of_its_end() {
 
 /// A timeout with no retry fails the row with `TASK_TIMEOUT`.
 #[tokio::test]
-#[serial]
 async fn a_timeout_with_no_retry_fails_the_row_with_task_timeout() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -504,7 +500,6 @@ async fn a_timeout_with_no_retry_fails_the_row_with_task_timeout() {
 /// Each run
 /// of a child killed for a blocked loop fails with its own code.
 #[tokio::test]
-#[serial]
 async fn a_loop_kill_fails_the_row_with_its_code() {
     let pool = crate::test_support::migrated_pool().await;
     for (code, retry, name) in [
@@ -691,7 +686,6 @@ fn loop_kill(code: LoopKillCode, retry: RetryPlacement) -> AttemptEnd {
 /// `NEIGHBOUR_BLOCKED_LOOP` when its policy retries timeouts only, and
 /// retries in its class when its policy names its code.
 #[tokio::test]
-#[serial]
 async fn the_runs_of_a_child_killed_for_a_blocked_loop_retry_by_their_own_code() {
     let pool = crate::test_support::migrated_pool().await;
     for (retried_code, end, left) in [
@@ -737,7 +731,6 @@ async fn the_runs_of_a_child_killed_for_a_blocked_loop_retry_by_their_own_code()
 /// code and one attempt that does not retry; a policy that names the code
 /// retries it in its class, not in an isolated child.
 #[tokio::test]
-#[serial]
 async fn a_run_that_returned_before_the_kill_writes_what_it_returned() {
     let pool = crate::test_support::migrated_pool().await;
     let error = TaskError::new("UPSTREAM_DOWN", "upstream down").expect("a code of the task's own");
@@ -767,7 +760,6 @@ async fn a_run_that_returned_before_the_kill_writes_what_it_returned() {
 }
 
 #[tokio::test]
-#[serial]
 async fn a_task_that_reached_no_child_goes_back_to_the_queue() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -807,7 +799,6 @@ async fn a_task_that_reached_no_child_goes_back_to_the_queue() {
 /// with the claim fence (`worker::worker::return_held_rows` settles each
 /// held row so).
 #[tokio::test]
-#[serial]
 async fn a_row_held_for_its_queue_cap_goes_back_to_the_queue_at_the_stop() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -859,7 +850,6 @@ async fn attempt_count(pool: &TestPool, task_id: Uuid) -> i64 {
 /// class, with no attempt row (Python `_write_ended_attempt`, which sends
 /// the release as its own statement).
 #[tokio::test]
-#[serial]
 async fn an_unreported_end_of_a_row_still_claimed_puts_it_back_with_no_attempt_row() {
     let pool = crate::test_support::migrated_pool().await;
     let ends = [
@@ -919,7 +909,6 @@ async fn an_unreported_end_of_a_row_still_claimed_puts_it_back_with_no_attempt_r
 /// A task that reached no child, on a row that another claim generation
 /// holds now: the release leaves the row as it is.
 #[tokio::test]
-#[serial]
 async fn a_task_that_reached_no_child_leaves_a_row_of_another_claim_alone() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();
@@ -1000,7 +989,6 @@ async fn seed_unlinked_workflow_task(pool: &TestPool, queue: &str) -> ClaimedTas
 /// row stays CLAIMED by this claim. The cancel with the self-heal on runs in
 /// the child (`child_host::start_node_tests`).
 #[tokio::test]
-#[serial]
 async fn a_task_whose_node_is_not_linked_stays_claimed() {
     let pool = crate::test_support::migrated_pool().await;
     let queue = test_queue();

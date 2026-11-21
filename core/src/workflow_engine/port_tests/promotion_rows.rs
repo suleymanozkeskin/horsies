@@ -9,7 +9,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -140,7 +139,6 @@ async fn live_task_count(pool: &TestPool) -> i64 {
 
 /// `TestBatchedPromotionSemantics.test_any_join_promotes_on_first_success`
 #[tokio::test]
-#[serial]
 async fn join_any_is_enqueued_on_the_first_of_two_successes() {
     let pool = shared_pool().await;
     let mut joined = after(2, "promotion_any_task", &[0, 1]);
@@ -170,7 +168,6 @@ async fn join_any_is_enqueued_on_the_first_of_two_successes() {
 /// a dependent that reads the workflow context and a plain dependent of the
 /// same level are both enqueued.
 #[tokio::test]
-#[serial]
 async fn a_context_dependent_and_a_plain_dependent_of_one_level_are_both_enqueued() {
     let pool = shared_pool().await;
     let mut reader = after(2, "promotion_mixed_ctx_task", &[0]);
@@ -208,7 +205,6 @@ async fn a_context_dependent_and_a_plain_dependent_of_one_level_are_both_enqueue
 /// once (PostgreSQL delivers identical notifications of one transaction
 /// once). Phase 2 runs alone after phase 1, as in Python's `complete_task`.
 #[tokio::test]
-#[serial]
 async fn promoted_nodes_and_their_tasks_carry_the_transaction_time_and_each_insert_notifies() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = run(&db.pool, &root_with_three_dependents("promotion_notify")).await;
@@ -269,7 +265,6 @@ async fn promoted_nodes_and_their_tasks_carry_the_transaction_time_and_each_inse
 /// transaction; node 2, whose join cannot be met, is skipped with no start
 /// time; node 3, which is no longer PENDING, is not written.
 #[tokio::test]
-#[serial]
 async fn the_promotion_moves_only_pending_nodes() {
     let pool = shared_pool().await;
     let task_name = "promotion_write_task";
@@ -366,7 +361,6 @@ async fn sole_waiter_on(pool: &TestPool, holder_pid: i32) -> i32 {
 /// the test holds. The pause starts while the step waits there, and the test
 /// releases the step once the pause waits on the step.
 #[tokio::test]
-#[serial]
 async fn a_pause_during_the_case_zero_step_applies_after_its_commit() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
@@ -492,7 +486,6 @@ async fn a_pause_during_the_case_zero_step_applies_after_its_commit() {
 /// the nodes whose dependencies all completed, at the time of its own
 /// transaction, each with one task; the last one completes the workflow.
 #[tokio::test]
-#[serial]
 async fn a_fan_out_and_fan_in_across_levels_enqueues_each_node_once_and_completes() {
     let pool = shared_pool().await;
     let task_name = "promotion_levels_task";
@@ -640,7 +633,6 @@ async fn complete_the_root(pool: &TestPool, workflow_id: Uuid) {
 /// dependent whose stored task options do not parse fails alone, with no
 /// task; its sibling is enqueued.
 #[tokio::test]
-#[serial]
 async fn a_dependent_whose_options_do_not_parse_fails_alone() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = start_with_a_corrupt_dependent(&db.pool, OnError::Fail).await;
@@ -667,7 +659,6 @@ async fn a_dependent_whose_options_do_not_parse_fails_alone() {
 /// workflow and its sibling goes back to READY with no task and no start
 /// time; a resume enqueues the sibling.
 #[tokio::test]
-#[serial]
 async fn a_dependent_whose_options_do_not_parse_pauses_and_its_sibling_stays_ready() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = start_with_a_corrupt_dependent(&db.pool, OnError::Pause).await;
@@ -701,7 +692,6 @@ async fn a_dependent_whose_options_do_not_parse_pauses_and_its_sibling_stays_rea
 /// promotion: the database refuses the stored text, so the promotion raises;
 /// the dependent never gets a task without its deadline.
 #[tokio::test]
-#[serial]
 async fn a_dependent_whose_stored_deadline_does_not_parse_gets_no_task() {
     let db = IsolatedDatabase::create().await;
     for stored_options in [r#"{"good_until":"not-a-date"}"#, r#"{"good_until":12345}"#] {

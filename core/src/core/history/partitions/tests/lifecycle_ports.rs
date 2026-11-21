@@ -176,7 +176,6 @@ async fn seed_history_pending_row(pool: &TestPool, class_key: &str, leaf_lower: 
 /// fixes the period, and the database refuses a row whose key and days
 /// disagree.
 #[tokio::test]
-#[serial]
 async fn a_registered_period_registers_again_as_already_registered() {
     let database = TestDatabase::create().await;
     let period = RetentionDays::parse_period(Duration::days(30)).expect("thirty days");
@@ -221,7 +220,6 @@ async fn a_registered_period_registers_again_as_already_registered() {
 /// changes. `horsies_create_history_leaf` names the leaf from the requested
 /// day, so the test shifts the catalog row, not the request.
 #[tokio::test]
-#[serial]
 async fn a_request_whose_bounds_differ_from_the_catalog_is_a_catalog_conflict() {
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
@@ -283,7 +281,6 @@ async fn a_request_whose_bounds_differ_from_the_catalog_is_a_catalog_conflict() 
 /// contract error, the leaf lock that `horsies_begin_leaf_detach` took is
 /// free again, and the leaf stays attached and detachable.
 #[tokio::test]
-#[serial]
 async fn a_detach_whose_bounds_differ_from_the_catalog_raises_and_frees_the_lock() {
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
@@ -349,7 +346,6 @@ async fn a_detach_whose_bounds_differ_from_the_catalog_raises_and_frees_the_lock
 /// missing and not cataloged, and the static forever leaf is refused, since
 /// retention never inspects a leaf of the forever class.
 #[tokio::test]
-#[serial]
 async fn inspection_of_an_unknown_class_and_of_the_forever_class() {
     let database = TestDatabase::create().await;
     let today = database_today(&database.pool).await;
@@ -406,7 +402,6 @@ async fn inspection_of_an_unknown_class_and_of_the_forever_class() {
 /// `test_unexpired_leaf_is_not_detachable` (prototype): today's leaf is not
 /// expired until its upper bound plus the class period, and a detach keeps it.
 #[tokio::test]
-#[serial]
 async fn a_fresh_leaf_is_not_expired_and_a_detach_keeps_it() {
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
@@ -457,7 +452,7 @@ async fn a_fresh_leaf_is_not_expired_and_a_detach_keeps_it() {
 /// timeout, and the session's statement and lock timeouts are the ones it had
 /// before the call.
 #[tokio::test]
-#[serial]
+#[serial(timing)]
 async fn a_busy_detach_is_bounded_and_restores_both_timeouts() {
     let database = TestDatabase::create_with_connections(2).await;
     let class_key = "standard_1d";
@@ -512,7 +507,7 @@ async fn a_busy_detach_is_bounded_and_restores_both_timeouts() {
 /// a detach cancelled right after it took the leaf's session lock closes its
 /// connection, so the lock is free again.
 #[tokio::test]
-#[serial]
+#[serial(timing)]
 async fn a_detach_cancelled_right_after_the_lock_frees_the_lock() {
     let database = TestDatabase::create_with_connections(2).await;
     let class_key = "standard_1d";
@@ -578,7 +573,6 @@ async fn a_detach_cancelled_right_after_the_lock_frees_the_lock() {
 /// leaf detached outside maintenance that a HISTORY pending row still points
 /// into is not dropped.
 #[tokio::test]
-#[serial]
 async fn a_drop_keeps_an_out_of_band_detached_leaf_with_a_pending_row() {
     let database = TestDatabase::create().await;
     let class_key = "standard_1d";
@@ -628,7 +622,6 @@ async fn a_drop_keeps_an_out_of_band_detached_leaf_with_a_pending_row() {
 /// operator half belonged to the partition health survey, which the core
 /// leaves out.
 #[tokio::test]
-#[serial]
 async fn a_role_without_create_privilege_cannot_create_a_leaf() {
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
@@ -682,7 +675,6 @@ async fn a_role_without_create_privilege_cannot_create_a_leaf() {
 /// the premise of the time-zone tests. PostgreSQL renders a partition bound in
 /// the session time zone.
 #[tokio::test]
-#[serial]
 async fn raw_bound_rendering_differs_across_the_probe_time_zones() {
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
@@ -715,7 +707,6 @@ async fn raw_bound_rendering_differs_across_the_probe_time_zones() {
 /// both directions: a leaf created from one side of UTC is conformant and
 /// inspectable from the other side. One class per direction.
 #[tokio::test]
-#[serial]
 async fn a_leaf_created_on_one_side_of_utc_is_conformant_on_the_other() {
     let database = TestDatabase::create().await;
     for (class_key, days, creating, inspecting) in [
@@ -777,7 +768,6 @@ async fn a_leaf_created_on_one_side_of_utc_is_conformant_on_the_other() {
 
 /// `TestConformanceIsSessionIndependent.test_heartbeat_leaf_conformance_crosses_utc_both_ways`.
 #[tokio::test]
-#[serial]
 async fn a_heartbeat_leaf_is_conformant_across_utc_both_ways() {
     let database = TestDatabase::create().await;
     let hour = database_hour(&database.pool).await;
@@ -818,7 +808,6 @@ async fn a_heartbeat_leaf_is_conformant_across_utc_both_ways() {
 /// sessions, the daily leaves on both sides of the 2026 fold are created,
 /// then verify as conformant and inspect as not expired or detachable.
 #[tokio::test]
-#[serial]
 async fn daily_leaves_at_the_fold_verify_as_conformant() {
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";
@@ -874,7 +863,6 @@ async fn register_heartbeats(pool: &TestPool) {
 
 /// `test_hourly_leaves_at_the_fold_verify_as_conformant`.
 #[tokio::test]
-#[serial]
 async fn hourly_leaves_at_the_fold_verify_as_conformant() {
     let database = TestDatabase::create().await;
     let berlin = pool_in_zone(&database, DST_ZONE, 1).await;
@@ -906,7 +894,6 @@ async fn hourly_leaves_at_the_fold_verify_as_conformant() {
 /// Europe/Berlin sessions, detaches and drops the two hourly leaves of the
 /// 2025 fold.
 #[tokio::test]
-#[serial]
 async fn the_heartbeat_sweep_drops_leaves_across_a_fold() {
     let database = TestDatabase::create().await;
     let berlin = pool_in_zone(&database, DST_ZONE, 2).await;
@@ -974,7 +961,6 @@ async fn the_heartbeat_sweep_drops_leaves_across_a_fold() {
 /// `TestCoverageAndWrites.test_heartbeats_route_through_the_parent_into_leaves`:
 /// a beat written to the partitioned parent is stored in the leaf of its hour.
 #[tokio::test]
-#[serial]
 async fn a_heartbeat_written_to_the_parent_lands_in_its_hour_leaf() {
     let database = TestDatabase::create().await;
     let coverage = ensure_partition_coverage_in_pool(
@@ -1017,7 +1003,6 @@ async fn a_heartbeat_written_to_the_parent_lands_in_its_hour_leaf() {
 
 /// `TestLeafBirth.test_forever_leaf_carries_the_ordering_index`.
 #[tokio::test]
-#[serial]
 async fn the_static_forever_leaf_carries_the_ordering_index() {
     let database = TestDatabase::create().await;
     assert!(ordering_index_exists(&database.pool, TASK_HISTORY_FOREVER_LEAF).await);
@@ -1026,7 +1011,6 @@ async fn the_static_forever_leaf_carries_the_ordering_index() {
 
 /// `TestLeafRepair.test_repair_recreates_a_dropped_ordering_index`.
 #[tokio::test]
-#[serial]
 async fn leaf_repair_recreates_a_dropped_ordering_index() {
     let database = TestDatabase::create().await;
     let class_key = "standard_30d";

@@ -20,7 +20,6 @@
 //!   5, `removed-for-the-clean-slate.md`).
 
 use chrono::Duration;
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
@@ -79,7 +78,6 @@ fn database_error(result: Result<Vec<TerminalizationOutcome>, InTransactionError
 /// attempt encoder of the move gives the bytes of the archive codec, also
 /// for quotes, a backslash and non-ASCII text.
 #[tokio::test]
-#[serial]
 async fn sql_attempt_encoder_matches_archive_codec_bytes() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -133,7 +131,6 @@ async fn sql_attempt_encoder_matches_archive_codec_bytes() {
 /// the history row carries the request facts and the last worker's
 /// attribution.
 #[tokio::test]
-#[serial]
 async fn terminalization_copies_request_and_last_worker_attribution() {
     let pool = pool().await;
     let task_id = seed_task(
@@ -203,7 +200,6 @@ async fn terminalization_copies_request_and_last_worker_attribution() {
 /// due workflow task with no node refuses the whole batch, so a due plain
 /// task of the same batch stays live too.
 #[tokio::test]
-#[serial]
 async fn pending_expiry_missing_workflow_link_aborts_whole_batch() {
     let pool = pool().await;
     drain_pending_expiry(&pool).await;
@@ -232,7 +228,6 @@ async fn pending_expiry_missing_workflow_link_aborts_whole_batch() {
 /// Python `test_pending_expiry_emits_one_transactional_raw_id_per_task`: a
 /// batch expiry sends one `task_done` per task, with the raw task id.
 #[tokio::test]
-#[serial]
 async fn pending_expiry_emits_one_transactional_raw_id_per_task() {
     let pool = pool().await;
     drain_pending_expiry(&pool).await;
@@ -268,7 +263,6 @@ async fn pending_expiry_emits_one_transactional_raw_id_per_task() {
 /// a task that the sweep cancelled replays through the single orphan cancel
 /// as `AlreadyApplied` with the sweep's kind.
 #[tokio::test]
-#[serial]
 async fn orphan_sweep_is_bounded_and_replays_through_single_variant() {
     let pool = pool().await;
     drain_orphan_sweep(&pool).await;
@@ -323,7 +317,6 @@ async fn orphan_sweep_is_bounded_and_replays_through_single_variant() {
 /// differs between the prototype (the move rolls back) and Python's
 /// production code (the abandon applies), so it is not asserted.
 #[tokio::test]
-#[serial]
 async fn coupled_node_failure_rolls_back_history_and_live_delete() {
     let pool = pool().await;
     let task_id = seed_task(
@@ -363,7 +356,6 @@ async fn coupled_node_failure_rolls_back_history_and_live_delete() {
 /// workflow whose node is already COMPLETED leaves the node COMPLETED with
 /// its task link (#785).
 #[tokio::test]
-#[serial]
 async fn post_claim_abandon_keeps_a_finished_node() {
     let pool = pool().await;
     let task_id = seed_task(
@@ -393,7 +385,6 @@ async fn post_claim_abandon_keeps_a_finished_node() {
 /// node half: the post-claim cancel of a task of a CANCELLED workflow skips
 /// its node and keeps the node's task link.
 #[tokio::test]
-#[serial]
 async fn pairwise_cancel_batch_skips_the_node() {
     let pool = pool().await;
     let task_id = seed_task(
@@ -475,7 +466,6 @@ impl Boundary {
 /// faulted: the move calls `pg_notify` directly, and the core move writes no
 /// node (#785 owns the coupled node write).
 #[tokio::test]
-#[serial]
 async fn terminalization_boundary_failure_rolls_back_every_relation() {
     let pool = pool().await;
     for boundary in [
@@ -567,7 +557,6 @@ async fn terminalization_boundary_failure_rolls_back_every_relation() {
 /// wake cannot be refused: the CHECK refuses a 53-byte queue name, and the
 /// completion of a seeded row applies with its wake.
 #[tokio::test]
-#[serial]
 async fn capacity_notification_failure_rolls_back_fused_completion() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -610,7 +599,6 @@ async fn capacity_notification_failure_rolls_back_fused_completion() {
 /// Python `test_completion_equivalence_replays_from_history`: either
 /// completion writer, replayed after the other, is `AlreadyApplied`.
 #[tokio::test]
-#[serial]
 async fn completion_equivalence_replays_from_history() {
     let pool = pool().await;
     let success = |task_id: Uuid| FinishWorkflowSuccess {
@@ -672,7 +660,6 @@ async fn completion_equivalence_replays_from_history() {
 /// Python `test_missing_workflow_link_rolls_back_the_move`: a deferring move
 /// of a workflow task with no node is refused, and the task stays live.
 #[tokio::test]
-#[serial]
 async fn missing_workflow_link_rolls_back_the_move() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &running_workflow_task()).await;
@@ -692,7 +679,6 @@ async fn missing_workflow_link_rolls_back_the_move() {
 /// and the missing UTC day, and its attempt and its live delete roll back
 /// with it.
 #[tokio::test]
-#[serial]
 async fn missing_history_leaf_rolls_back_fused_attempt_and_live_delete() {
     let pool = pool().await;
     let task_id = seed_task(
@@ -735,7 +721,6 @@ async fn missing_history_leaf_rolls_back_fused_attempt_and_live_delete() {
 /// the fused completion refuses a workflow task, whose success owes phase 2,
 /// and writes nothing.
 #[tokio::test]
-#[serial]
 async fn fused_completion_rejects_workflow_task_without_losing_phase2() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &running_workflow_task()).await;
@@ -763,7 +748,6 @@ async fn fused_completion_rejects_workflow_task_without_losing_phase2() {
 /// `task_done` carries the raw task id and is sent only when the move
 /// commits.
 #[tokio::test]
-#[serial]
 async fn task_done_notification_is_transactional_raw_task_id() {
     let pool = pool().await;
     let mut wakes = Wakes::listen(&pool, "task_done").await;

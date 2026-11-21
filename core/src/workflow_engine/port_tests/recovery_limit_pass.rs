@@ -15,7 +15,6 @@
 //! A child start raises on [`POISON_TASK_OPTIONS`] with a deadline
 //! ([`poison_child_specs`]).
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -292,7 +291,6 @@ async fn pending_attempts(pool: &TestPool, task_id: Uuid) -> (i32, Option<String
 
 /// `test_each_pass_counts_once_and_changes_nothing_else`
 #[tokio::test]
-#[serial]
 async fn each_pass_counts_once_and_changes_nothing_else() {
     let db = IsolatedDatabase::create().await;
     let child_specs = TestChildSpecs::empty();
@@ -314,7 +312,6 @@ async fn each_pass_counts_once_and_changes_nothing_else() {
 /// `test_two_cases_of_one_workflow_count_once_in_one_pass`: one pass id
 /// serves every case, so a fan-out cannot reach the limit in one pass.
 #[tokio::test]
-#[serial]
 async fn two_cases_of_one_workflow_count_once_in_one_pass() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
@@ -344,7 +341,6 @@ async fn two_cases_of_one_workflow_count_once_in_one_pass() {
 /// `test_a_new_process_continues_the_count`: the reaper moves to another
 /// process; the stored count goes on.
 #[tokio::test]
-#[serial]
 async fn a_new_process_continues_the_count() {
     let db = IsolatedDatabase::create().await;
     let child_specs = TestChildSpecs::empty();
@@ -362,7 +358,6 @@ async fn a_new_process_continues_the_count() {
 
 /// `test_a_repair_before_the_limit_saves_the_workflow`
 #[tokio::test]
-#[serial]
 async fn a_repair_before_the_limit_saves_the_workflow() {
     let db = IsolatedDatabase::create().await;
     let child_specs = TestChildSpecs::empty();
@@ -387,7 +382,6 @@ async fn a_repair_before_the_limit_saves_the_workflow() {
 /// `test_a_healthy_pass_writes_nothing`: a recovered candidate and an idle
 /// workflow cost no count write.
 #[tokio::test]
-#[serial]
 async fn a_healthy_pass_writes_nothing() {
     let db = IsolatedDatabase::create().await;
     let recovered = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
@@ -413,7 +407,6 @@ async fn a_healthy_pass_writes_nothing() {
 /// `test_a_transient_raise_never_counts` (lock, deadlock, statement timeout,
 /// too many connections).
 #[tokio::test]
-#[serial]
 async fn a_transient_raise_never_counts() {
     for sqlstate in ["55P03", "40P01", "57014", "53300"] {
         let db = IsolatedDatabase::create().await;
@@ -455,7 +448,6 @@ async fn a_transient_raise_never_counts() {
 /// the pass goes on with the next candidate (Python's pass fails as a whole,
 /// because one session serves it).
 #[tokio::test]
-#[serial]
 async fn a_connection_loss_counts_no_candidate_of_the_pass() {
     let db = IsolatedDatabase::create().await;
     let first = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
@@ -480,7 +472,6 @@ async fn a_connection_loss_counts_no_candidate_of_the_pass() {
 /// `test_the_real_raise_after_a_connection_loss_is_transient`: the classifier
 /// rule rests on the error the driver gives after a lost connection.
 #[tokio::test]
-#[serial]
 async fn the_real_raise_after_a_connection_loss_is_transient() {
     let db = IsolatedDatabase::create().await;
     // The lost session is a core connection, so the classifier sees the
@@ -528,7 +519,6 @@ static BACKEND_PID: crate::db::TypedStatement =
 
 /// `test_the_resume_pass_logs_and_does_not_count`
 #[tokio::test]
-#[serial]
 async fn the_resume_pass_logs_and_does_not_count() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_poison_ready(&db.pool, WorkflowSeed::running()).await;
@@ -550,7 +540,6 @@ async fn the_resume_pass_logs_and_does_not_count() {
 
 /// `test_case_0_pending_node`
 #[tokio::test]
-#[serial]
 async fn the_limit_bounds_case_0() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
@@ -572,7 +561,6 @@ async fn the_limit_bounds_case_0() {
 
 /// `test_case_1_ready_node_with_other_nodes`
 #[tokio::test]
-#[serial]
 async fn the_limit_bounds_case_1_and_get_returns_the_limit_error() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_poison_ready(&db.pool, WorkflowSeed::running()).await;
@@ -610,7 +598,6 @@ async fn the_limit_bounds_case_1_and_get_returns_the_limit_error() {
 /// `test_case_1_5_serialization_defect`: a child start that fails on stored
 /// data is counted and bounded.
 #[tokio::test]
-#[serial]
 async fn the_limit_bounds_case_1_5() {
     let db = IsolatedDatabase::create().await;
     let child_specs = poison_child_specs();
@@ -648,7 +635,6 @@ async fn the_limit_bounds_case_1_5() {
 /// `test_case_1_6_fails_the_parent_workflow`: the candidate is atomic, so the
 /// parent node is still RUNNING at the limit and the limit fails it.
 #[tokio::test]
-#[serial]
 async fn the_limit_bounds_case_1_6_and_fails_the_parent_workflow() {
     let db = IsolatedDatabase::create().await;
     let parent = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
@@ -687,7 +673,6 @@ async fn the_limit_bounds_case_1_6_and_fails_the_parent_workflow() {
 
 /// `test_case_2_3_keeps_a_stored_first_failure`
 #[tokio::test]
-#[serial]
 async fn the_limit_bounds_case_2_3_and_keeps_a_stored_first_failure() {
     let db = IsolatedDatabase::create().await;
     let first_failure = serde_json::to_string(
@@ -716,7 +701,6 @@ async fn the_limit_bounds_case_2_3_and_keeps_a_stored_first_failure() {
 /// `test_case_2_3_assertion_defect`: the output index has no node row, so the
 /// final result fails on each pass, and the limit bounds it.
 #[tokio::test]
-#[serial]
 async fn the_limit_bounds_a_missing_output_node_row() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running().output(7)).await;
@@ -736,7 +720,6 @@ async fn the_limit_bounds_a_missing_output_node_row() {
 
 /// `test_on_error_pause_still_ends_failed`
 #[tokio::test]
-#[serial]
 async fn the_limit_fails_an_on_error_pause_workflow() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_poison_ready(&db.pool, WorkflowSeed::running().on_error("pause")).await;
@@ -763,7 +746,6 @@ async fn seed_poison_with_live_node(pool: &TestPool, seed: WorkflowSeed) -> (Uui
 
 /// `test_live_node_finishes_and_ends_the_workflow`
 #[tokio::test]
-#[serial]
 async fn a_live_node_finishes_and_ends_the_workflow() {
     let db = IsolatedDatabase::create().await;
     let child_specs = TestChildSpecs::empty();
@@ -793,7 +775,6 @@ async fn a_live_node_finishes_and_ends_the_workflow() {
 /// `test_success_policy_met_by_a_live_node_can_complete`: the nodes that the
 /// success case requires completed, so the declared policy decides.
 #[tokio::test]
-#[serial]
 async fn a_success_policy_met_by_a_live_node_completes_the_workflow() {
     let db = IsolatedDatabase::create().await;
     let child_specs = TestChildSpecs::empty();
@@ -813,7 +794,6 @@ async fn a_success_policy_met_by_a_live_node_completes_the_workflow() {
 
 /// `test_child_at_the_limit_fails_the_parent_node`
 #[tokio::test]
-#[serial]
 async fn a_child_at_the_limit_fails_the_parent_node() {
     let db = IsolatedDatabase::create().await;
     let parent = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
@@ -849,7 +829,6 @@ async fn a_child_at_the_limit_fails_the_parent_node() {
 /// If that raise reached the child completion, the child would come back on
 /// every pass with no count.
 #[tokio::test]
-#[serial]
 async fn a_parent_advance_raise_keeps_the_child_and_counts_on_the_parent() {
     let db = IsolatedDatabase::create().await;
     let child_specs = TestChildSpecs::empty();
@@ -889,7 +868,6 @@ async fn a_parent_advance_raise_keeps_the_child_and_counts_on_the_parent() {
 /// `test_a_connection_loss_in_a_completion_is_one_error`: the pass goes on,
 /// and the workflow finishes on the next pass.
 #[tokio::test]
-#[serial]
 async fn a_connection_loss_in_a_completion_is_one_uncounted_error() {
     let db = IsolatedDatabase::create().await;
     let child_specs = TestChildSpecs::empty();
@@ -911,7 +889,6 @@ async fn a_connection_loss_in_a_completion_is_one_uncounted_error() {
 
 /// `test_a_raised_completion_commits_its_count`
 #[tokio::test]
-#[serial]
 async fn a_raised_completion_commits_its_count() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(
@@ -930,7 +907,6 @@ async fn a_raised_completion_commits_its_count() {
 
 /// `test_a_failed_count_write_changes_nothing_and_the_pass_goes_on`
 #[tokio::test]
-#[serial]
 async fn a_failed_count_write_changes_nothing_and_the_pass_goes_on() {
     let db = IsolatedDatabase::create().await;
     let poison = seed_poison_ready(&db.pool, WorkflowSeed::running()).await;
@@ -967,7 +943,6 @@ async fn a_failed_count_write_changes_nothing_and_the_pass_goes_on() {
 
 /// `test_a_failed_limit_write_keeps_the_count_and_retries`
 #[tokio::test]
-#[serial]
 async fn a_failed_limit_write_keeps_the_count_and_retries() {
     let db = IsolatedDatabase::create().await;
     let child_specs = TestChildSpecs::empty();
@@ -994,7 +969,6 @@ async fn a_failed_limit_write_keeps_the_count_and_retries() {
 /// `test_a_workflow_that_is_not_running_is_refused` (PAUSED and CANCELLED):
 /// the limit write changes nothing on a workflow that is not RUNNING.
 #[tokio::test]
-#[serial]
 async fn the_limit_write_refuses_a_workflow_that_is_not_running() {
     let db = IsolatedDatabase::create().await;
     for status in ["PAUSED", "CANCELLED"] {
@@ -1032,7 +1006,6 @@ async fn the_limit_write_refuses_a_workflow_that_is_not_running() {
 
 /// `test_a_raised_row_is_counted_and_fails_the_workflow_at_the_bound`
 #[tokio::test]
-#[serial]
 async fn a_raised_phase2_row_is_counted_and_fails_the_workflow_at_the_bound() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id) = start_a_then_b(&db.pool).await;
@@ -1060,7 +1033,6 @@ async fn a_raised_phase2_row_is_counted_and_fails_the_workflow_at_the_bound() {
 
 /// `test_a_transient_raise_stays_uncounted`
 #[tokio::test]
-#[serial]
 async fn a_transient_phase2_raise_stays_uncounted() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id) = start_a_then_b(&db.pool).await;
@@ -1088,7 +1060,6 @@ async fn a_transient_phase2_raise_stays_uncounted() {
 /// at the bound, so the row stays under it, or no later pass would try the
 /// write again.
 #[tokio::test]
-#[serial]
 async fn a_failed_phase2_limit_write_keeps_the_row_under_the_bound() {
     let db = IsolatedDatabase::create().await;
     let (workflow_id, task_id) = start_a_then_b(&db.pool).await;
@@ -1112,7 +1083,6 @@ async fn a_failed_phase2_limit_write_keeps_the_row_under_the_bound() {
 /// delete cascades to its child, and the foreign key of the count removes the
 /// child's count in the same statement.
 #[tokio::test]
-#[serial]
 async fn count_rows_go_with_their_workflow_and_with_a_cascaded_child() {
     let db = IsolatedDatabase::create().await;
     let parent = seed_workflow(&db.pool, &WorkflowSeed::running().status("FAILED")).await;

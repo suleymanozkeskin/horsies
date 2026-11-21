@@ -1,5 +1,4 @@
 use chrono::{DateTime, Duration, DurationRound, Utc};
-use serial_test::serial;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -348,7 +347,6 @@ async fn cleanup(pool: &TestPool, task_ids: &[Uuid], workflow_ids: &[Uuid]) {
 }
 
 #[tokio::test]
-#[serial]
 async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
@@ -486,7 +484,6 @@ async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
 }
 
 #[tokio::test]
-#[serial]
 async fn root_lineage_is_preserved_across_multiple_reruns() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
@@ -512,7 +509,6 @@ async fn root_lineage_is_preserved_across_multiple_reruns() {
 }
 
 #[tokio::test]
-#[serial]
 async fn python_float_exponent_bytes_drive_rerun_input_and_fingerprint() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
@@ -581,7 +577,6 @@ async fn python_float_exponent_bytes_drive_rerun_input_and_fingerprint() {
 }
 
 #[tokio::test]
-#[serial]
 async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
@@ -785,7 +780,6 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
 }
 
 #[tokio::test]
-#[serial]
 async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
@@ -968,7 +962,6 @@ async fn rerun_count(pool: &TestPool, source: Uuid) -> i64 {
 }
 
 #[tokio::test]
-#[serial]
 async fn an_unknown_stored_status_is_source_corrupt() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
@@ -994,7 +987,6 @@ async fn an_unknown_stored_status_is_source_corrupt() {
 }
 
 #[tokio::test]
-#[serial]
 async fn a_rerun_keeps_the_execution_class_of_the_request() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
@@ -1020,7 +1012,6 @@ async fn a_rerun_keeps_the_execution_class_of_the_request() {
 }
 
 #[tokio::test]
-#[serial]
 async fn an_invalid_stored_execution_is_input_corrupt() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
@@ -1042,7 +1033,6 @@ async fn an_invalid_stored_execution_is_input_corrupt() {
 }
 
 #[tokio::test]
-#[serial]
 async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
@@ -1121,7 +1111,6 @@ async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
 }
 
 #[tokio::test]
-#[serial]
 async fn broker_rolls_back_an_applied_reservation_when_the_live_insert_fails() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
@@ -1197,7 +1186,6 @@ async fn broker_rolls_back_an_applied_reservation_when_the_live_insert_fails() {
 }
 
 #[tokio::test]
-#[serial]
 async fn unregistered_class_refuses_before_source_or_reservation_writes() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
@@ -1264,7 +1252,6 @@ async fn unregistered_class_refuses_before_source_or_reservation_writes() {
 }
 
 #[tokio::test]
-#[serial]
 async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
@@ -1443,7 +1430,6 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
 }
 
 #[tokio::test]
-#[serial]
 async fn provenance_table_is_exhaustive_over_the_live_schema() {
     let pool = crate::test_support::migrated_pool().await;
     let actual: std::collections::BTreeSet<String> = sql::query_scalar(
@@ -1498,7 +1484,6 @@ fn public_facade_exports_the_complete_typed_surface() {
 /// A handle of another client family is refused before the rerun reads or
 /// writes anything: no new task row and no key reservation.
 #[tokio::test]
-#[serial]
 async fn a_handle_of_another_client_family_reruns_nothing() {
     use crate::broker::client_family::{ClientFamily, RecordedFamily};
 
@@ -1558,7 +1543,6 @@ async fn prepared_write(
 /// The same prepared rerun write run twice in one transaction gives one
 /// task: the second run answers `SAME_COMMAND`, which is the enqueued rerun.
 #[tokio::test]
-#[serial]
 async fn the_same_prepared_rerun_write_run_twice_gives_one_task() {
     use super::caller::CallerTransaction;
     use super::steps::{decode_rerun_write, RerunWriteOutcome};
@@ -1596,7 +1580,6 @@ async fn the_same_prepared_rerun_write_run_twice_gives_one_task() {
 /// A keyed rerun that the caller's transaction rolls back leaves no task and
 /// no key reservation.
 #[tokio::test]
-#[serial]
 async fn a_rerun_rolls_back_with_the_callers_transaction() {
     use super::caller::CallerTransaction;
     use super::steps::{decode_rerun_write, RerunWriteOutcome};

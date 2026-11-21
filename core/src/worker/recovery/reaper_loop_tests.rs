@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 
 use super::{new_reaper_health, spawn_reaper};
@@ -140,7 +139,6 @@ fn maintenance_only_recovery() -> RecoveryConfig {
 /// first pass runs at start and drops a heartbeat leaf past its horizon,
 /// with no direct call of the maintenance step.
 #[tokio::test]
-#[serial]
 async fn a_started_reaper_drops_an_overdue_heartbeat_leaf() {
     let pool = pool_at_worker_start().await;
     let leaf = unremembered_hour(&pool).await;
@@ -186,7 +184,6 @@ async fn a_started_reaper_drops_an_overdue_heartbeat_leaf() {
 /// the test above. A leaf younger than the heartbeat horizon would prove
 /// nothing.
 #[tokio::test]
-#[serial]
 async fn the_planted_heartbeat_leaf_is_past_the_heartbeat_horizon() {
     let pool = pool_at_worker_start().await;
     let horizon_hours: i16 = sql::query_scalar(

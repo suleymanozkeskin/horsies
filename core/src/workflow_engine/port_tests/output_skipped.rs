@@ -11,7 +11,6 @@
 
 use std::time::Duration;
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -145,7 +144,6 @@ async fn get_code(pool: &TestPool, workflow_id: Uuid) -> Option<String> {
 
 /// `test_skipped_output_gives_the_named_outcome`
 #[tokio::test]
-#[serial]
 async fn a_skipped_output_gives_the_named_outcome() {
     let pool = shared_pool().await;
     let child_specs = output_children();
@@ -176,7 +174,6 @@ async fn a_skipped_output_gives_the_named_outcome() {
 
 /// `test_failed_output_outside_the_required_set_keeps_its_error`
 #[tokio::test]
-#[serial]
 async fn a_failed_output_outside_the_required_set_keeps_its_error() {
     let pool = shared_pool().await;
     let child_specs = output_children();
@@ -200,7 +197,6 @@ async fn a_failed_output_outside_the_required_set_keeps_its_error() {
 /// `test_err_output_fails_the_node_and_skips_a_default_dependent`
 /// (skipped output, failed output)
 #[tokio::test]
-#[serial]
 async fn an_err_output_fails_the_node_and_skips_a_default_dependent() {
     let pool = shared_pool().await;
     let child_specs = output_children();
@@ -262,7 +258,6 @@ async fn an_err_output_fails_the_node_and_skips_a_default_dependent() {
 
 /// `test_allow_failed_deps_dependent_receives_the_err` (skipped output, failed output)
 #[tokio::test]
-#[serial]
 async fn an_allow_failed_deps_dependent_receives_the_err() {
     let db = IsolatedDatabase::create().await;
     let pool = db.pool.clone();
@@ -296,7 +291,6 @@ async fn an_allow_failed_deps_dependent_receives_the_err() {
 
 /// `test_workflow_context_holds_the_named_outcome`
 #[tokio::test]
-#[serial]
 async fn the_workflow_context_holds_the_named_outcome() {
     let db = IsolatedDatabase::create().await;
     let pool = db.pool.clone();
@@ -326,7 +320,6 @@ async fn the_workflow_context_holds_the_named_outcome() {
 
 /// `test_join_any_does_not_count_the_failed_node`
 #[tokio::test]
-#[serial]
 async fn join_any_does_not_count_the_failed_node() {
     let pool = shared_pool().await;
     let child_specs = output_children();
@@ -354,7 +347,6 @@ async fn join_any_does_not_count_the_failed_node() {
 
 /// `test_join_quorum_does_not_count_the_failed_node`
 #[tokio::test]
-#[serial]
 async fn join_quorum_does_not_count_the_failed_node() {
     let pool = shared_pool().await;
     let child_specs = output_children();
@@ -390,7 +382,6 @@ async fn join_quorum_does_not_count_the_failed_node() {
 
 /// `test_parent_success_case_is_not_met_and_get_names_the_cause`
 #[tokio::test]
-#[serial]
 async fn a_parent_success_case_is_not_met_and_get_names_the_cause() {
     let pool = shared_pool().await;
     let child_specs = output_children();
@@ -423,7 +414,6 @@ async fn a_parent_success_case_is_not_met_and_get_names_the_cause() {
 /// `test_policy_parent_with_the_node_in_no_case_keeps_its_error`: the node is
 /// FAILED, `on_error` runs, and the case decides COMPLETED.
 #[tokio::test]
-#[serial]
 async fn a_policy_parent_with_the_node_in_no_case_keeps_its_error() {
     let pool = shared_pool().await;
     let child_specs = output_children();
@@ -468,7 +458,6 @@ async fn a_policy_parent_with_the_node_in_no_case_keeps_its_error() {
 
 /// `test_pause_policy_pauses_the_parent_and_resume_finishes_it`
 #[tokio::test]
-#[serial]
 async fn a_pause_policy_pauses_the_parent_and_resume_finishes_it() {
     let pool = shared_pool().await;
     let child_specs = output_children();
@@ -505,7 +494,6 @@ async fn a_pause_policy_pauses_the_parent_and_resume_finishes_it() {
 
 /// `test_two_levels_with_default_policy_give_subworkflow_failed`
 #[tokio::test]
-#[serial]
 async fn two_levels_with_the_default_policy_give_subworkflow_failed() {
     let pool = shared_pool().await;
     let child_specs = output_children();
@@ -534,7 +522,6 @@ async fn two_levels_with_the_default_policy_give_subworkflow_failed() {
 
 /// `test_two_levels_with_a_mid_case_keep_the_named_outcome`
 #[tokio::test]
-#[serial]
 async fn two_levels_with_a_mid_case_keep_the_named_outcome() {
     let pool = shared_pool().await;
     let child_specs = output_children();
@@ -582,7 +569,6 @@ fn outputless_entry(
 
 /// `test_outputless_parent_entry_holds_the_named_outcome`
 #[tokio::test]
-#[serial]
 async fn an_outputless_parent_entry_holds_the_named_outcome() {
     let pool = shared_pool().await;
     let child_specs = output_children();
@@ -653,7 +639,6 @@ async fn seed_parent_of_a_completed_child(
 /// `test_child_text_that_does_not_parse_fails_the_node`: the node holds an
 /// envelope that names the cause, and the raw text stays on the child row.
 #[tokio::test]
-#[serial]
 async fn child_result_text_that_does_not_parse_fails_the_node() {
     let db = IsolatedDatabase::create().await;
     let pool = db.pool.clone();
@@ -705,7 +690,6 @@ async fn child_result_text_that_does_not_parse_fails_the_node() {
 
 /// `test_required_unreadable_node_reports_the_cause_at_get`
 #[tokio::test]
-#[serial]
 async fn a_required_unreadable_node_reports_the_cause_at_get() {
     let pool = shared_pool().await;
     let child_specs = output_children();
@@ -737,7 +721,6 @@ async fn a_required_unreadable_node_reports_the_cause_at_get() {
 
 /// `test_outputless_skipped_terminal_holds_the_named_outcome`
 #[tokio::test]
-#[serial]
 async fn an_outputless_skipped_terminal_holds_the_named_outcome() {
     let pool = shared_pool().await;
     let child_specs = output_children();

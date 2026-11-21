@@ -636,7 +636,6 @@ mod wait_tests {
     /// pool holds all end at their limit (`TimedOut`), and none fails on an
     /// exhausted session pool.
     #[tokio::test]
-    #[serial]
     async fn many_concurrent_result_waits_share_one_listener() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = Arc::new(PostgresBroker::from_test_url_and_session_url(
@@ -683,7 +682,6 @@ mod wait_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn a_wait_with_no_timeout_returns_not_found_for_a_missing_workflow() {
         let broker = PostgresBroker::from_test_url(
             crate::test_support::migrated_pool().await.url(),
@@ -711,7 +709,7 @@ mod wait_tests {
     /// for no repoll; on a COMPLETED workflow it gives the stored result. A
     /// broker with no listener polls, as the Python test's failed subscribe.
     #[tokio::test]
-    #[serial]
+    #[serial(timing)]
     async fn a_zero_timeout_ends_the_wait_at_once_with_the_end_or_timed_out() {
         const COMPLETED_RESULT: &str = r#"{"ok":42}"#;
         let pool = crate::test_support::migrated_pool().await;
@@ -770,7 +768,6 @@ mod wait_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn the_wait_returns_immediately_for_a_paused_workflow() {
         let broker = Arc::new(PostgresBroker::from_test_url(
             crate::test_support::migrated_pool().await.url(),
@@ -810,7 +807,6 @@ mod wait_tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn the_wait_returns_a_structured_expiry_error_as_stored() {
         let broker = Arc::new(PostgresBroker::from_test_url(
             crate::test_support::migrated_pool().await.url(),
@@ -871,7 +867,6 @@ mod wait_tests {
     /// The wait returns a stored error that does not decode as stored; a
     /// client refuses it (`RESULT_DESERIALIZATION_ERROR`).
     #[tokio::test]
-    #[serial]
     async fn the_wait_returns_a_malformed_expiry_error_as_stored() {
         let broker = Arc::new(PostgresBroker::from_test_url(
             crate::test_support::migrated_pool().await.url(),

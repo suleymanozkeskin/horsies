@@ -9,7 +9,6 @@
 //! body.
 
 use crate::test_support::sql;
-use serial_test::serial;
 
 use super::support::*;
 
@@ -73,7 +72,6 @@ fn start_row_read(definition: &str, task_id: uuid::Uuid) -> String {
 /// through the primary key, whatever the statistics make other indexes look
 /// like.
 #[tokio::test]
-#[serial]
 async fn the_start_reads_its_row_through_the_primary_key() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::claimed()).await;

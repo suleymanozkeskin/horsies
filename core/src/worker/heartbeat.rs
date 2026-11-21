@@ -196,7 +196,6 @@ mod tests {
     use super::*;
     use crate::test_support::sql::{self, TestPool};
     use chrono::{DateTime, Utc};
-    use serial_test::serial;
     use uuid::Uuid;
 
     const BEAT_WORKER: &str = "beat-worker";
@@ -226,7 +225,6 @@ mod tests {
     /// The claimer beat and the lease renewal run in one transaction, and the
     /// new lease is the database time plus the lease length.
     #[tokio::test]
-    #[serial]
     async fn the_claimer_beat_renews_the_lease_on_the_database_clock() {
         let pool = covered_pool().await;
         let task_id = Uuid::new_v4();
@@ -316,7 +314,6 @@ mod tests {
     /// than `max_claim_renew_age_ms`; a claim older than that, and a claim of
     /// another worker, keep their lease.
     #[tokio::test]
-    #[serial]
     async fn the_claimer_loop_renews_only_young_claims_of_its_own_worker() {
         let pool = covered_pool().await;
         let young = Uuid::new_v4();

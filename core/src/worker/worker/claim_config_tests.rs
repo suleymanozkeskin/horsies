@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::{
@@ -212,7 +211,6 @@ mod claim_function {
     /// `test_equal_queue_priority_fifo`: equal queue priority and equal task
     /// priority: the older enqueued task wins, whatever its queue name.
     #[tokio::test]
-    #[serial]
     async fn equal_queue_priority_fifo() {
         let pool = crate::test_support::migrated_pool().await;
         let older = seed(&pool, "q2", 100, 30.0).await;
@@ -238,7 +236,6 @@ mod claim_function {
     /// the queue with the better priority is claimed, though the task of the
     /// other queue is older.
     #[tokio::test]
-    #[serial]
     async fn distinct_queue_priority_wins() {
         let pool = crate::test_support::migrated_pool().await;
         let high = seed(&pool, "q_hi", 1, 0.0).await;
@@ -268,7 +265,6 @@ mod claim_function {
     /// queue priorities, a task of a better task priority (a workflow node,
     /// for example) is claimed before an older task of the default priority.
     #[tokio::test]
-    #[serial]
     async fn equal_queue_priority_explicit_task_priority_wins() {
         let pool = crate::test_support::migrated_pool().await;
         seed(&pool, "q1", 100, 30.0).await;
@@ -295,7 +291,6 @@ mod claim_function {
     /// expired-claim arms: queue priority first, then task priority, then
     /// age. The rows are seeded in the opposite order of that rank.
     #[tokio::test]
-    #[serial]
     async fn claim_returns_rows_in_dispatch_order() {
         let pool = crate::test_support::migrated_pool().await;
         let low_queue = seed(&pool, "bounds_low", 1, 50.0).await;
@@ -333,7 +328,6 @@ mod claim_function {
     /// `test_per_queue_cap_never_over_claims`: concurrent claimers never
     /// exceed the `max_concurrency` of a queue in hard-cap mode.
     #[tokio::test]
-    #[serial]
     async fn per_queue_cap_never_over_claims() {
         let pool = crate::test_support::migrated_pool().await;
         seed_n(&pool, "a", 50, 300).await;
@@ -356,7 +350,6 @@ mod claim_function {
     /// `test_cluster_cap_never_over_claims`: concurrent claimers never
     /// exceed `cluster_wide_cap`.
     #[tokio::test]
-    #[serial]
     async fn cluster_cap_never_over_claims() {
         let pool = crate::test_support::migrated_pool().await;
         seed_n(&pool, "a", 50, 300).await;
@@ -379,7 +372,6 @@ mod claim_function {
     /// `max_concurrency` and no priorities is serviced, and claimed only up
     /// to its cap.
     #[tokio::test]
-    #[serial]
     async fn cap_only_queue_is_serviced_and_capped() {
         let pool = crate::test_support::migrated_pool().await;
         seed_n(&pool, "capped", 50, 20).await;
@@ -404,7 +396,6 @@ mod claim_function {
     /// `test_cap_without_priorities_never_over_claims`: concurrent claimers
     /// keep the caps of their queues with no priorities set.
     #[tokio::test]
-    #[serial]
     async fn cap_without_priorities_never_over_claims() {
         let pool = crate::test_support::migrated_pool().await;
         seed_n(&pool, "a", 50, 300).await;
@@ -442,7 +433,6 @@ mod claim_lock_scoping {
     /// `test_disjoint_capped_queue_does_not_block`: the lock of capped queue
     /// A held elsewhere does not hold back a pass over capped queue B.
     #[tokio::test]
-    #[serial]
     async fn disjoint_capped_queue_does_not_block() {
         let pool = crate::test_support::migrated_pool().await;
         let passer = ClaimerConfig {
@@ -474,7 +464,6 @@ mod claim_lock_scoping {
     /// `test_same_capped_queue_blocks`: the lock of the same capped queue
     /// held elsewhere holds back the pass until it ends.
     #[tokio::test]
-    #[serial]
     async fn same_capped_queue_blocks() {
         let pool = crate::test_support::migrated_pool().await;
         let passer = ClaimerConfig {
@@ -501,7 +490,6 @@ mod claim_lock_scoping {
     /// `cluster_wide_cap` the pass takes the one global key, so a pass over
     /// any queue waits while that key is held.
     #[tokio::test]
-    #[serial]
     async fn global_cap_still_blocks_across_queues() {
         let pool = crate::test_support::migrated_pool().await;
         let passer = ClaimerConfig {
@@ -535,7 +523,6 @@ mod claim_cap_expired {
     /// the per-queue count of the claim leaves out a CLAIMED row whose lease
     /// expired; a live claim of each queue counts.
     #[tokio::test]
-    #[serial]
     async fn an_expired_claim_is_not_counted_in_the_queue_hard_cap() {
         let pool = crate::test_support::migrated_pool().await;
         let expired_default = seed(&pool, "default", 100, 0.0).await;
@@ -585,7 +572,6 @@ mod claim_cap_expired {
     /// with a cluster cap of 1 and a claim whose lease expired, the pass
     /// still claims the pending row that ranks first.
     #[tokio::test]
-    #[serial]
     async fn a_pass_under_the_caps_claims_the_pending_row_beside_an_expired_claim() {
         let pool = crate::test_support::migrated_pool().await;
         let pending = seed(&pool, "default", 100, 30.0 * 60.0).await;

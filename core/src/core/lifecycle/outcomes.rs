@@ -1063,7 +1063,6 @@ mod tests {
     /// `TestBatchOrdinality::test_non_integer_ordinality_is_refused`: a row
     /// whose ordinality is not an integer fails closed and names the column.
     #[tokio::test]
-    #[serial_test::serial]
     async fn a_non_integer_ordinality_is_refused() {
         let pool = crate::test_support::migrated_pool().await;
         let broker =

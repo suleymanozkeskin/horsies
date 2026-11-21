@@ -56,7 +56,6 @@ async fn database_time(pool: &TestPool) -> DateTime<Utc> {
 /// Rows due at the database time, soonest first, only of the given
 /// names, and the database time of the read, also when nothing is due.
 #[tokio::test]
-#[serial_test::serial]
 async fn due_read_returns_the_database_time_and_the_rows_due_at_it() {
     let pool = crate::test_support::migrated_pool().await;
     let core = crate::broker::pools::core_pool_for_test_url(pool.url());
@@ -101,7 +100,6 @@ async fn due_read_returns_the_database_time_and_the_rows_due_at_it() {
 /// creates a new row, moves a changed row and keeps its run record, and
 /// leaves a row with the same digest alone.
 #[tokio::test]
-#[serial_test::serial]
 async fn start_read_and_write_follow_the_stored_digests() {
     let pool = crate::test_support::migrated_pool().await;
     let core = crate::broker::pools::core_pool_for_test_url(pool.url());
@@ -188,7 +186,6 @@ async fn start_read_and_write_follow_the_stored_digests() {
 /// `next_run_at` (the old per-row insert, `insert_state_if_absent`, is the
 /// heal of one row).
 #[tokio::test]
-#[serial_test::serial]
 async fn heal_creates_missing_rows_and_leaves_existing_rows() {
     let pool = crate::test_support::migrated_pool().await;
     let core = crate::broker::pools::core_pool_for_test_url(pool.url());
@@ -273,7 +270,6 @@ fn command_of(pool: &TestPool, task_name: &str) -> SendCommand {
 /// once the row is due at it again and the task is live, answers
 /// `SAME_COMMAND` and records the run; no second task is written.
 #[tokio::test]
-#[serial_test::serial]
 async fn the_fire_answers_each_state_of_the_row() {
     let pool = crate::test_support::migrated_pool().await;
     let core = crate::broker::pools::core_pool_for_test_url(pool.url());
@@ -352,7 +348,6 @@ async fn the_fire_answers_each_state_of_the_row() {
 /// function (SQLSTATE 22023): a defect of the caller, which panics.
 /// Nothing is written.
 #[tokio::test]
-#[serial_test::serial]
 #[should_panic(expected = "broke a precondition of horsies_fire_schedule")]
 async fn a_slot_after_the_database_time_is_a_caller_defect() {
     let pool = crate::test_support::migrated_pool().await;

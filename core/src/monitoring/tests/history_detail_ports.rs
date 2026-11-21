@@ -11,7 +11,6 @@ use super::*;
 /// A COMPLETED task carries `completed_at` and no `failed_at`; a CANCELLED
 /// task carries `failed_at` and no `completed_at`; an unknown id is not found.
 #[tokio::test]
-#[serial]
 async fn a_moved_task_detail_carries_the_end_stamp_of_its_status() {
     let pool = migrated_pool().await;
     let scope = TestScope::new("end_stamp");

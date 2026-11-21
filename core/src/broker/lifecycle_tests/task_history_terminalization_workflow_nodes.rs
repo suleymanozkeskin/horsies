@@ -3,7 +3,6 @@
 //! `TestWorkflowStateMatrix::test_paused_sweep_takes_claimed_behind_runnable_nodes_only`
 //! is `terminalization_functions::workflow_scoped_batches::pause_applies_only_under_both_live_guards`.
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
@@ -40,7 +39,6 @@ fn swept_ids(outcomes: &[TerminalizationOutcome]) -> Vec<Uuid> {
 
 /// Python `TestWorkflowStateMatrix::test_running_workflow_is_untouched_by_both_sweeps`.
 #[tokio::test]
-#[serial]
 async fn running_workflow_is_untouched_by_both_sweeps() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &claimed_workflow_task()).await;
@@ -68,7 +66,6 @@ async fn running_workflow_is_untouched_by_both_sweeps() {
 /// runs. The sweep judges from its one capture and does not wait for the
 /// node update.
 #[tokio::test]
-#[serial]
 async fn paused_sweep_judges_from_the_capture_not_a_reread() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &claimed_workflow_task()).await;
@@ -132,7 +129,6 @@ impl Sweep {
 /// Python `TestWorkflowStateMatrix::test_sweeps_respect_the_workflow_scope`:
 /// a sweep touches only the workflows that it names.
 #[tokio::test]
-#[serial]
 async fn sweeps_respect_the_workflow_scope() {
     let pool = pool().await;
     for sweep in [Sweep::Paused, Sweep::Cancelled] {

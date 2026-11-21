@@ -1472,7 +1472,6 @@ mod tests {
     /// held RUNNING rows of this worker at their claim generation, and no row
     /// of another generation, another worker, or with the finalizing marker.
     #[tokio::test]
-    #[serial_test::serial]
     async fn one_statement_beats_only_rows_that_pass_the_fence() {
         let pool = crate::test_support::migrated_pool().await;
         // The heartbeat table has no default partition: the current hour

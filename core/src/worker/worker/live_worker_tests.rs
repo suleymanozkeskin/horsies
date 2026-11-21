@@ -32,7 +32,6 @@ const PING_WINDOW: Duration = Duration::from_secs(10);
 const STOP_BOUND: Duration = Duration::from_secs(30);
 
 #[tokio::test]
-#[serial_test::serial]
 #[ignore = "waits on #678: the claim writes the removed claimed column"]
 async fn a_live_worker_answers_a_ping_and_lists_its_state() {
     let url = crate::test_support::migrated_database_url().await;

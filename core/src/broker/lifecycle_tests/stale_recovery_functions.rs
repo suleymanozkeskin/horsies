@@ -19,7 +19,6 @@
 //! is prepared on the connection, with no checkout ping.
 
 use chrono::Duration;
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
@@ -156,7 +155,6 @@ mod scan {
 
     /// Case `stale scan: the silent rows, not the beaten or finalizing ones`.
     #[tokio::test]
-    #[serial]
     async fn the_silent_rows_not_the_beaten_or_finalizing_ones() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -187,7 +185,6 @@ mod scan {
 
     /// Case `stale scan: the facts of a candidate`.
     #[tokio::test]
-    #[serial]
     async fn the_facts_of_a_candidate() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -238,7 +235,6 @@ mod scan {
 
     /// Case `stale scan: the batch bound`.
     #[tokio::test]
-    #[serial]
     async fn the_batch_bound() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -269,7 +265,6 @@ mod finish {
     /// Case `stale attempt: no retry fails the task` and `stale attempt: the
     /// history row`.
     #[tokio::test]
-    #[serial]
     async fn no_retry_fails_the_task() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -329,7 +324,6 @@ mod finish {
 
     /// Case `stale attempt: a replay is already applied`.
     #[tokio::test]
-    #[serial]
     async fn a_replay_is_already_applied() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -353,7 +347,6 @@ mod finish {
     /// Case `stale attempt: a crash retry by policy` and `stale attempt: the
     /// retried row and its FAILED attempt`.
     #[tokio::test]
-    #[serial]
     async fn a_crash_retry_by_policy() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -421,7 +414,6 @@ mod finish {
 
     /// Case `stale attempt: a fresh beat is not stale`.
     #[tokio::test]
-    #[serial]
     async fn a_fresh_beat_is_not_stale() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -447,7 +439,6 @@ mod finish {
 
     /// Case `stale attempt: a recent finalizing marker is not stale`.
     #[tokio::test]
-    #[serial]
     async fn a_recent_finalizing_marker_is_not_stale() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -473,7 +464,6 @@ mod finish {
 
     /// Case `stale attempt: a retry from another retry count is refused`.
     #[tokio::test]
-    #[serial]
     async fn a_retry_from_another_retry_count_is_refused() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -506,7 +496,6 @@ mod finish {
     /// Case `stale attempt: a crash retry at or after the deadline fails the
     /// task`.
     #[tokio::test]
-    #[serial]
     async fn a_crash_retry_at_or_after_the_deadline_fails_the_task() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -542,7 +531,6 @@ mod finish {
 
     /// Case `stale attempt: a row that is not RUNNING`.
     #[tokio::test]
-    #[serial]
     async fn a_row_that_is_not_running() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -563,7 +551,6 @@ mod finish {
 
     /// Case `stale attempt: an absent task`.
     #[tokio::test]
-    #[serial]
     async fn an_absent_task() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -581,7 +568,6 @@ mod finish {
     /// Case `stale attempt: a workflow task owes phase 2 and reports its
     /// dependents`.
     #[tokio::test]
-    #[serial]
     async fn a_workflow_task_owes_phase_two() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -625,7 +611,6 @@ mod finish {
     /// its `started_at`: the scan does not list it, and the recovery refuses
     /// it with no beat in the evidence.
     #[tokio::test]
-    #[serial]
     async fn a_beat_of_an_earlier_attempt_does_not_make_a_restarted_task_stale() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -727,7 +712,6 @@ mod reaper_pass {
     /// counts once under its action. With telemetry off the pass writes the
     /// same rows (`a_pass_retries_by_policy_fails_the_rest_and_wakes_the_retried_queue`).
     #[tokio::test]
-    #[serial]
     async fn a_pass_tells_each_recovered_row_once_with_its_action() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -781,7 +765,6 @@ mod reaper_pass {
     /// (Python `core/brokers/postgres.py:3307-3323`); a row with no policy
     /// fails, with no wake (as Python).
     #[tokio::test]
-    #[serial]
     async fn a_pass_retries_by_policy_fails_the_rest_and_wakes_the_retried_queue() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -830,7 +813,6 @@ mod requeue {
     /// count of the pass is the count of the told rows. With telemetry off
     /// the pass requeues the same rows and tells nothing.
     #[tokio::test]
-    #[serial]
     async fn a_requeue_tells_each_requeued_row_once_and_nothing_with_telemetry_off() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -900,7 +882,6 @@ mod requeue {
 
     /// Case `requeue: the batch bound`.
     #[tokio::test]
-    #[serial]
     async fn the_batch_bound() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -932,7 +913,6 @@ mod requeue {
     /// run field cleared`, through the reaper's step, which repeats the
     /// batch until one is short.
     #[tokio::test]
-    #[serial]
     async fn silent_claims_go_back_a_beaten_claim_a_fresh_claim_and_an_orphan_stay() {
         let pool = pool().await;
         let core = core_pool_for_test_url(pool.url());
@@ -1008,7 +988,6 @@ mod round_trips {
 
     /// The stale RUNNING scan is one statement.
     #[tokio::test]
-    #[serial]
     async fn the_stale_scan_is_one_statement() {
         let pool = pool().await;
         let counted = counted_pool(&pool).await;
@@ -1031,7 +1010,6 @@ mod round_trips {
 
     /// The stale failure and the stale retry are one statement each.
     #[tokio::test]
-    #[serial]
     async fn a_stale_failure_and_a_stale_retry_are_one_statement_each() {
         let pool = pool().await;
         let counted = counted_pool(&pool).await;
@@ -1070,7 +1048,6 @@ mod round_trips {
 
     /// A batch of the stale claim requeue is one statement.
     #[tokio::test]
-    #[serial]
     async fn a_stale_claim_requeue_batch_is_one_statement() {
         let pool = pool().await;
         let counted = counted_pool(&pool).await;
@@ -1100,7 +1077,6 @@ mod round_trips {
     /// round trips: `BEGIN`, the batch statement and `COMMIT`. The commit
     /// waits for the check of the batch's outcomes.
     #[tokio::test]
-    #[serial]
     async fn a_pending_expiry_batch_is_one_transaction_of_three_round_trips() {
         let pool = pool().await;
         drain_pending_expiry(&pool).await;

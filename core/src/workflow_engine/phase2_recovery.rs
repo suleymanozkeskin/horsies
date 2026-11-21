@@ -559,7 +559,6 @@ mod tests {
     use crate::test_support::child_specs::TestChildSpecs;
     use crate::test_support::sql::{self, TestPool, TestPoolOptions};
     use crate::test_support::terminal_writes::{self, TerminalFailure};
-    use serial_test::serial;
 
     /// One recovery pass with the given grace, cap and attempt bound, and no
     /// child specs.
@@ -776,7 +775,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn recovery_contains_retaining_row_advances_healthy_row_and_quarantines_at_bound() {
         let pool = crate::test_support::migrated_pool().await;
         sql::query("DELETE FROM horsies_workflow_phase2_pending")
@@ -856,7 +854,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn recovery_rolls_back_one_failed_row_counts_its_raise_and_advances_the_next_candidate() {
         let pool = crate::test_support::migrated_pool().await;
         sql::query("DELETE FROM horsies_workflow_phase2_pending")
@@ -965,7 +962,6 @@ mod tests {
     /// node instead (`horsies_workflow_node_finish`;
     /// `engine/task_complete_tests.rs::a_node_of_an_ended_workflow_completes_and_enqueues_nothing`).
     #[tokio::test]
-    #[serial]
     async fn terminal_workflow_supersedes_pending_evidence_without_touching_the_node() {
         let pool = crate::test_support::migrated_pool().await;
         for workflow_status in ["COMPLETED", "FAILED", "CANCELLED", "EXPIRED"] {
@@ -1012,7 +1008,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn every_retaining_disposition_preserves_available_evidence() {
         let pool = crate::test_support::migrated_pool().await;
 
@@ -1129,7 +1124,6 @@ mod tests {
     /// status column) and recovers a `FAIL_RUNNING` record with the FAILED
     /// node status.
     #[tokio::test]
-    #[serial]
     async fn recovery_reads_the_kind_of_a_failure_record_and_fails_its_node() {
         let pool = crate::test_support::migrated_pool().await;
         sql::query("DELETE FROM horsies_workflow_phase2_pending")
@@ -1200,7 +1194,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn discovery_is_oldest_first_strictly_graced_and_capped() {
         let pool = crate::test_support::migrated_pool().await;
         let mut cases = Vec::new();
@@ -1257,7 +1250,6 @@ mod tests {
     /// passes retained the row; this pass reaches the bound of 3, the smallest
     /// bound that `horsies_workflow_phase2_recover` takes (3..1000).
     #[tokio::test]
-    #[serial]
     async fn the_recovery_loop_quarantines_a_retaining_row_at_the_attempt_bound() {
         let pool = crate::test_support::migrated_pool().await;
         sql::query("DELETE FROM horsies_workflow_phase2_pending")
@@ -1426,7 +1418,6 @@ mod tests {
     /// `WORKFLOW_RECOVERY_LIMIT_REACHED`, fails the record's node, adds the
     /// attempt and quarantines the evidence.
     #[tokio::test]
-    #[serial]
     async fn a_raise_at_the_bound_fails_the_workflow_closed_and_quarantines() {
         let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
@@ -1484,7 +1475,6 @@ mod tests {
     /// A transient raise (40001, retryable) adds no attempt: an outage does
     /// not march a record to the bound.
     #[tokio::test]
-    #[serial]
     async fn a_transient_raise_adds_no_attempt() {
         let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
@@ -1508,7 +1498,6 @@ mod tests {
     /// A raise that would reach the bound while the workflow is PAUSED is not
     /// recorded: nothing is written, and a pass after a resume raises again.
     #[tokio::test]
-    #[serial]
     async fn a_raise_at_the_bound_of_a_paused_workflow_is_not_recorded() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -1546,7 +1535,6 @@ mod tests {
     /// Under the bound a raise is counted; a record that is gone is
     /// `PENDING_ABSENT`.
     #[tokio::test]
-    #[serial]
     async fn a_raise_under_the_bound_is_counted_and_a_gone_record_is_absent() {
         let pool = crate::test_support::migrated_pool().await;
         let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
@@ -1578,7 +1566,6 @@ mod tests {
     /// child start: with no registration under the child's key, the node fails
     /// in the record's transaction.
     #[tokio::test]
-    #[serial]
     async fn recovery_runs_the_child_start_that_its_record_owes() {
         let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
@@ -1761,7 +1748,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn each_raise_record_outcome_reads_into_its_variant() {
         let broker = PostgresBroker::from_test_url(
             crate::test_support::migrated_pool().await.url(),
@@ -1853,7 +1839,6 @@ mod tests {
     /// phase-2 recovery writes the failed node with the error that the task
     /// stored, also an error with a code and no message.
     #[tokio::test]
-    #[serial]
     async fn recovery_writes_the_stored_error_of_a_failed_task_into_its_node() {
         let pool = crate::test_support::migrated_pool().await;
         let with_message =

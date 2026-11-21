@@ -600,7 +600,6 @@ mod tests {
     /// #1495: two runtimes of one process subscribe on one session URL, and
     /// the database sees one listener connection.
     #[test]
-    #[serial_test::serial]
     fn two_runtimes_listen_on_one_connection() {
         let first = caller_runtime();
         let second = caller_runtime();
@@ -857,7 +856,6 @@ mod tests {
     /// refused with the failed LISTEN as its cause, and the refusal may
     /// clear.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial]
     async fn a_listener_whose_listen_fails_refuses_its_first_subscription_with_the_cause() {
         use crate::broker::lifecycle_tests::support::WireProxy;
 
@@ -884,7 +882,6 @@ mod tests {
     /// Python `TestCallerUnwrapContract::test_broker_ensure_initialized_does_not_start_listener`:
     /// the schema install of a broker does not start its listener.
     #[tokio::test]
-    #[serial_test::serial]
     async fn the_schema_install_does_not_start_the_listener() {
         let url = crate::test_support::migrated_database_url().await;
         let broker = crate::broker::PostgresBroker::connect(&url, crate::ClientFamily::Rust)

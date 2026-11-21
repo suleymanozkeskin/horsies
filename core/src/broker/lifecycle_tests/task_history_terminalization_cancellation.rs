@@ -9,7 +9,6 @@
 //! `TestOrphanSweep::test_sweep_moves_only_orphans_among_mixed_candidates` is
 //! `terminalization_functions::cancel_orphaned_tasks::transitions_only_orphans_in_the_effective_source_set`.
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
@@ -19,7 +18,6 @@ use super::support::*;
 /// refuses a second link, so no cancel can find a task that two workflows
 /// claim.
 #[tokio::test]
-#[serial]
 async fn links_to_distinct_workflows_fail_closed() {
     let pool = pool().await;
     let task_id = seed_task(

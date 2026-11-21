@@ -1255,7 +1255,6 @@ mod tests {
     /// core's class of each cause with the same text and the error's retry
     /// rule.
     #[tokio::test]
-    #[serial_test::serial]
     async fn a_database_failure_builds_its_exception_from_its_cause_for_each_cause() {
         let cases = [
             (
@@ -1565,7 +1564,6 @@ mod tests {
     /// error is the core's class of its cause with the error's text and its
     /// retry rule.
     #[tokio::test]
-    #[serial_test::serial]
     async fn a_workflow_error_builds_the_core_class_of_its_cause() {
         let statement = statement_timeout().await;
         let statement_text = statement.to_string();

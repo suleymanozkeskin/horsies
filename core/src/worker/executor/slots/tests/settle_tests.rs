@@ -333,7 +333,6 @@ fn crashed() -> AttemptEnd {
 /// and `TestRequeueDbErrorContainment::test_requeue_success_logs_no_critical`:
 /// the claim is released at its generation and the row is PENDING again.
 #[tokio::test]
-#[serial_test::serial]
 async fn a_task_that_never_reached_a_child_goes_back_to_the_queue() {
     let pool = crate::test_support::migrated_pool().await;
     let claimed = claimed_now();
@@ -375,7 +374,6 @@ async fn a_release_that_cannot_reach_the_database_is_not_written() {
 /// Python `TestFinalizeAfterSlotOutcome::test_finished_task_goes_to_persist`:
 /// a reported value completes the task.
 #[tokio::test]
-#[serial_test::serial]
 async fn a_reported_value_completes_the_task() {
     let pool = crate::test_support::migrated_pool().await;
     let claimed = claimed_now();
@@ -400,7 +398,6 @@ async fn a_reported_value_completes_the_task() {
 /// the write that applies: a lost child fails its RUNNING task with
 /// `WORKER_CRASHED`, with no retry when the task has no policy.
 #[tokio::test]
-#[serial_test::serial]
 async fn a_lost_child_fails_its_running_task_as_crashed() {
     let pool = crate::test_support::migrated_pool().await;
     let claimed = claimed_now();
@@ -427,7 +424,6 @@ async fn a_lost_child_fails_its_running_task_as_crashed() {
 /// two node updates are refused with SQLSTATE 40001; the third try passes
 /// after waits of 0.5 s and 1 s.
 #[tokio::test]
-#[serial_test::serial]
 async fn a_phase_two_error_after_a_lost_child_write_is_tried_again() {
     let pool = crate::test_support::migrated_pool().await;
     let claimed = ClaimedTask {
@@ -467,7 +463,6 @@ async fn a_phase_two_error_after_a_lost_child_write_is_tried_again() {
 /// a row that another worker holds is not this claim's; the write changes
 /// nothing and is not tried again.
 #[tokio::test]
-#[serial_test::serial]
 async fn a_crash_write_on_a_row_this_claim_does_not_hold_writes_nothing() {
     let pool = crate::test_support::migrated_pool().await;
     let claimed = claimed_now();
@@ -524,7 +519,7 @@ async fn a_write_that_cannot_reach_the_database_is_sent_three_more_times() {
 /// a write error that cannot clear (the database does not exist) is not
 /// sent again, and the end does not read as written.
 #[tokio::test]
-#[serial_test::serial]
+#[serial_test::serial(timing)]
 async fn a_write_error_that_cannot_clear_is_not_sent_again() {
     let url = crate::test_support::migrated_database_url().await;
     let missing = crate::test_support::with_database(

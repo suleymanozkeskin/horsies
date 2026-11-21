@@ -5,7 +5,6 @@
 //! (#613) and is not repeated.
 
 use chrono::Duration;
-use serial_test::serial;
 
 use super::support::*;
 use crate::broker::attempt_writes::{
@@ -32,7 +31,6 @@ const STALE_SCAN_LIMIT: i64 = 1_000;
 /// retry. The decision that turns a lost child into this write (code
 /// `BROKER_ERROR`, never retried) belongs to the executor's outcome writer.
 #[tokio::test]
-#[serial]
 async fn worker_failure_writes_worker_failure_attempt() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -99,7 +97,6 @@ async fn worker_failure_writes_worker_failure_attempt() {
 /// stale recovery fails a silent runner with a FAILED attempt (not
 /// WORKER_FAILURE) and the code WORKER_CRASHED.
 #[tokio::test]
-#[serial]
 async fn stale_cleanup_writes_failed_attempt_worker_crashed() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -133,7 +130,6 @@ async fn stale_cleanup_writes_failed_attempt_worker_crashed() {
 /// Python `test_replay_does_not_create_duplicate_attempt`: the phase-1 write
 /// of one success, run twice, leaves one attempt.
 #[tokio::test]
-#[serial]
 async fn replay_does_not_create_duplicate_attempt() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
@@ -178,7 +174,6 @@ async fn replay_does_not_create_duplicate_attempt() {
 /// (`horsies_start_attempt`) that finds its claim lost is refused as
 /// `NOT_HELD`, and the dispatch writes no attempt.
 #[tokio::test]
-#[serial]
 async fn claim_lost_writes_no_attempt() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::claimed()).await;

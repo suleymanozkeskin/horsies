@@ -4,7 +4,6 @@
 //! release of claimed rows (#764).
 
 use chrono::Duration;
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::*;
@@ -71,7 +70,6 @@ mod claim {
     /// A pass whose plan routes a row's class to a budget claims the row,
     /// with its class and retry facts.
     #[tokio::test]
-    #[serial]
     async fn a_routed_class_is_claimed_with_its_class_and_retry_facts() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &pending("SHARED_THREAD")).await;
@@ -100,7 +98,6 @@ mod claim {
     /// The claim returns the trace carrier that the send stored on the row,
     /// as its text; a row with no carrier claims with no carrier.
     #[tokio::test]
-    #[serial]
     async fn a_claimed_row_carries_its_stored_trace_carrier() {
         let carrier =
             r#"{"traceparent":"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}"#;
@@ -144,7 +141,6 @@ mod claim {
 
     /// A class that no route names is not served: its row stays PENDING.
     #[tokio::test]
-    #[serial]
     async fn a_class_with_no_route_is_not_claimed() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &pending("SHARED_ASYNC")).await;
@@ -178,7 +174,6 @@ mod start {
     /// start writes no runner beat: the stale RUNNING rule judges the
     /// attempt from its `started_at` until the first beat of the worker.
     #[tokio::test]
-    #[serial]
     async fn a_held_claim_starts_and_writes_no_runner_beat() {
         let pool = pool().await;
         ensure_recent_heartbeat_leaves(&pool).await;
@@ -207,7 +202,6 @@ mod start {
 
     /// The miss reasons of a plain task, each with nothing written.
     #[tokio::test]
-    #[serial]
     async fn a_start_that_does_not_hold_writes_nothing_and_names_its_reason() {
         let pool = pool().await;
         ensure_recent_heartbeat_leaves(&pool).await;
@@ -263,7 +257,6 @@ mod start {
     /// `DeadlineBeforeStart`). An open window, and a window that is still
     /// open at the checkout, start the row.
     #[tokio::test]
-    #[serial]
     async fn a_closed_window_sends_no_statement_and_an_open_one_starts() {
         let pool = pool().await;
         ensure_recent_heartbeat_leaves(&pool).await;
@@ -319,7 +312,6 @@ mod release {
     /// A held claim goes back to PENDING with its class; a claim of another
     /// generation is not touched.
     #[tokio::test]
-    #[serial]
     async fn a_held_claim_is_released_and_another_generation_is_not() {
         let pool = pool().await;
         let held = seed_task(&pool, &claimed()).await;
@@ -369,7 +361,6 @@ mod release {
     /// A release clears every claim and run field and the finalizing
     /// marker: a released PENDING row names no worker, no claim and no run.
     #[tokio::test]
-    #[serial]
     async fn a_release_clears_every_claim_and_run_field() {
         let pool = pool().await;
         let task_id = seed_task(&pool, &claimed()).await;
@@ -420,7 +411,6 @@ mod release {
     /// The placement ISOLATED writes the class (Python's return of a row
     /// whose class does not fit its task).
     #[tokio::test]
-    #[serial]
     async fn an_isolated_release_writes_the_class() {
         let pool = pool().await;
         let task_id = seed_task(

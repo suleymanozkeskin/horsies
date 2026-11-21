@@ -100,7 +100,7 @@ async fn finalizing_at_is_set(pool: &TestPool, task_id: Uuid) -> bool {
 /// the start of a plain task is one round trip,
 /// with an open window and with a window of a minute.
 #[tokio::test]
-#[serial]
+#[serial(timing)]
 async fn a_start_is_one_statement_in_either_window() {
     let pool = pool().await;
     let counted = Counted::open(&pool).await;
@@ -131,7 +131,7 @@ async fn a_start_is_one_statement_in_either_window() {
 /// `test_a_shared_async_workflow_start_is_one_statement`: the start of a
 /// workflow task and the write of its node are one statement.
 #[tokio::test]
-#[serial]
+#[serial(timing)]
 async fn a_workflow_task_start_is_one_statement() {
     let pool = pool().await;
     let counted = Counted::open(&pool).await;
@@ -158,7 +158,7 @@ async fn a_workflow_task_start_is_one_statement() {
 /// `NODE_NOT_LINKED`, and the stop before start cancels the orphan (the
 /// orphan self-heal on): two statements in all, and the task is CANCELLED.
 #[tokio::test]
-#[serial]
+#[serial(timing)]
 async fn a_stop_before_start_is_one_statement_after_the_start() {
     let pool = pool().await;
     let counted = Counted::open(&pool).await;
@@ -206,7 +206,7 @@ async fn a_stop_before_start_is_one_statement_after_the_start() {
 /// `test_a_shared_async_finalizing_marker_is_one_statement`: the finalizing
 /// marker of a run is one round trip.
 #[tokio::test]
-#[serial]
+#[serial(timing)]
 async fn a_finalizing_marker_is_one_statement() {
     let pool = pool().await;
     let counted = Counted::open(&pool).await;
@@ -243,7 +243,7 @@ async fn a_finalizing_marker_is_one_statement() {
 /// Python `test_a_claim_pass_is_one_statement`: `horsies_claim` claims and
 /// commits in one round trip.
 #[tokio::test]
-#[serial]
+#[serial(timing)]
 async fn a_claim_pass_is_one_statement() {
     let pool = pool().await;
     let counted = Counted::open(&pool).await;
@@ -281,7 +281,6 @@ async fn a_claim_pass_is_one_statement() {
 /// A claim pass over three capped queues with nothing to claim takes its
 /// queue locks, counts the rows in flight and claims in one statement.
 #[tokio::test]
-#[serial]
 async fn an_empty_capped_claim_pass_is_one_statement() {
     let pool = pool().await;
     let counted = Counted::open(&pool).await;
@@ -313,7 +312,6 @@ async fn an_empty_capped_claim_pass_is_one_statement() {
 /// Python `test_the_delayed_retry_wake_is_one_statement`: the wake of a
 /// queue when a retry comes due is one statement in autocommit.
 #[tokio::test]
-#[serial]
 async fn the_delayed_retry_wake_is_one_statement() {
     let pool = pool().await;
     let upstream = pool.url();

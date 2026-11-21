@@ -4,7 +4,6 @@
 
 use std::sync::Arc;
 
-use serial_test::serial;
 use uuid::Uuid;
 
 use super::support::{
@@ -64,7 +63,6 @@ async fn fail(pool: &TestPool, workflow_id: Uuid, index: i32, error_code: &str) 
 /// (`horsies_workflow_child_start`), which answers `STALE` for a terminal node
 /// and keeps its result.
 #[tokio::test]
-#[serial]
 async fn a_load_failure_mark_does_not_overwrite_a_terminal_node() {
     let pool = shared_pool().await;
     let failure = node_failure_result(subworkflow_load_failed_error(
@@ -120,7 +118,6 @@ WHERE row_kind = 'OUTCOME'";
 /// `test_fail_with_allow_failed_deps_output` and `test_allow_failed_deps_can_recover`:
 /// the recovering output node keeps its result; the FAILED workflow stores none.
 #[tokio::test]
-#[serial]
 async fn a_recovering_node_keeps_its_result_and_the_failed_workflow_stores_none() {
     let pool = shared_pool().await;
     let mut workflow_spec = spec(
@@ -153,7 +150,6 @@ async fn a_recovering_node_keeps_its_result_and_the_failed_workflow_stores_none(
 
 /// `test_pause_second_failure_does_not_overwrite_error`
 #[tokio::test]
-#[serial]
 async fn a_second_failure_while_paused_keeps_the_first_error() {
     let pool = shared_pool().await;
     let mut workflow_spec = spec(
@@ -181,7 +177,6 @@ async fn a_second_failure_while_paused_keeps_the_first_error() {
 /// the failures finish in. Node 2 never finishes, so the workflow stays
 /// RUNNING.
 #[tokio::test]
-#[serial]
 async fn the_stored_error_is_the_one_of_the_lowest_failed_index() {
     let pool = shared_pool().await;
     let mut workflow_spec = spec(
@@ -209,7 +204,6 @@ async fn the_stored_error_is_the_one_of_the_lowest_failed_index() {
 /// `test_pause_guard_blocks_ready_to_enqueued`: a READY node of a PAUSED
 /// workflow gets no task when a dependency finishes.
 #[tokio::test]
-#[serial]
 async fn a_ready_node_of_a_paused_workflow_is_not_enqueued() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(
@@ -247,7 +241,6 @@ async fn a_ready_node_of_a_paused_workflow_is_not_enqueued() {
 /// `test_enqueue_workflow_task_args_from_conflict_marks_failed`: an
 /// `args_from` key that names a member of the node's input fails the node.
 #[tokio::test]
-#[serial]
 async fn an_args_from_key_that_names_an_input_member_fails_the_node() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
@@ -295,7 +288,6 @@ async fn an_args_from_key_that_names_an_input_member_fails_the_node() {
 
 /// `test_enqueue_subworkflow_build_exception_marks_failed`
 #[tokio::test]
-#[serial]
 async fn a_child_builder_failure_at_promotion_fails_the_node() {
     let db = IsolatedDatabase::create().await;
     let broken_key = "tests.port.broken_child_enqueue.v1";
@@ -373,7 +365,6 @@ async fn store_node_options(pool: &TestPool, workflow_id: Uuid, task_index: i32,
 /// The node is not left READY, and the step that promoted it is not rolled back. The baseline step writes the
 /// same error (`horsies_workflow_unbuildable_nodes`, `horsies_workflow_task_options_refusal`).
 #[tokio::test]
-#[serial]
 async fn a_task_node_that_cannot_be_prepared_at_promotion_fails_alone() {
     let db = IsolatedDatabase::create().await;
     let child_specs = TestChildSpecs::empty();
@@ -432,7 +423,6 @@ async fn a_task_node_that_cannot_be_prepared_at_promotion_fails_alone() {
 /// fail the node: Python passes its text to the task insert, which raises, and the step rolls back
 /// (`clients/python/horsies/core/workflows/engine.py:832-835`; the baseline `horsies_workflow_node_tasks_insert`).
 #[tokio::test]
-#[serial]
 async fn a_node_that_cannot_be_prepared_pauses_the_workflow_and_promotes_no_sibling() {
     let db = IsolatedDatabase::create().await;
     let child_specs = TestChildSpecs::empty();
@@ -479,7 +469,6 @@ async fn a_node_that_cannot_be_prepared_pauses_the_workflow_and_promotes_no_sibl
 
 /// `test_resume_noop_when_completed` and `test_resume_noop_when_failed`
 #[tokio::test]
-#[serial]
 async fn resume_of_a_completed_or_failed_workflow_returns_false() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -508,7 +497,6 @@ async fn resume_of_a_completed_or_failed_workflow_returns_false() {
 
 /// `test_allow_failed_deps_chain`
 #[tokio::test]
-#[serial]
 async fn a_chain_of_allow_failed_deps_nodes_is_enqueued() {
     let pool = shared_pool().await;
     let workflow_id = start(
@@ -533,7 +521,6 @@ async fn a_chain_of_allow_failed_deps_nodes_is_enqueued() {
 
 /// `test_allow_failed_deps_partial`
 #[tokio::test]
-#[serial]
 async fn a_node_with_one_failed_and_one_ok_dependency_is_enqueued() {
     let pool = shared_pool().await;
     let mut receiver = after(2, "partial_receiver", &[0, 1]);
@@ -571,7 +558,6 @@ async fn a_node_with_one_failed_and_one_ok_dependency_is_enqueued() {
 
 /// `test_allow_failed_deps_receives_upstream_skipped`
 #[tokio::test]
-#[serial]
 async fn an_allow_failed_deps_node_receives_upstream_skipped_for_a_skipped_dependency() {
     let pool = shared_pool().await;
     let workflow_id = start(
@@ -601,7 +587,6 @@ async fn an_allow_failed_deps_node_receives_upstream_skipped_for_a_skipped_depen
 
 /// `test_direct_workflow_spec_fails_without_queue` and `test_start_unresolved_queue`
 #[tokio::test]
-#[serial]
 async fn start_refuses_a_task_node_with_no_resolved_queue() {
     let pool = shared_pool().await;
     let mut unresolved = task_node(0, "val_q_task");
@@ -632,7 +617,6 @@ async fn start_refuses_a_task_node_with_no_resolved_queue() {
 /// `test_success_case_not_met_error`: the required node was SKIPPED, not
 /// FAILED, so the workflow error is the named outcome.
 #[tokio::test]
-#[serial]
 async fn a_skipped_required_node_gives_workflow_success_case_not_met() {
     let pool = shared_pool().await;
     let mut workflow_spec = spec(
@@ -677,7 +661,6 @@ async fn a_start_that_cannot_reach_the_database_is_a_retryable_schema_install_fa
 /// `test_start_rollback_integrity`: a database failure after the workflow row
 /// is written, inside the start, leaves no row.
 #[tokio::test]
-#[serial]
 async fn a_failure_in_the_middle_of_a_start_leaves_no_row() {
     let db = IsolatedDatabase::create().await;
     super::support::execute(
@@ -739,7 +722,6 @@ const FAIL_UNBUILDABLE_SQL: &str = "SELECT horsies_workflow_fail_unbuildable($1,
 /// when it is ENQUEUED (the last case). Python also logs a warning for the
 /// skipped mark; the SQL function writes no log.
 #[tokio::test]
-#[serial]
 async fn a_build_failure_mark_does_not_overwrite_a_terminal_task_node() {
     let pool = shared_pool().await;
     for terminal in ["COMPLETED", "FAILED", "SKIPPED"] {
@@ -787,7 +769,6 @@ async fn a_build_failure_mark_does_not_overwrite_a_terminal_task_node() {
 /// a chain whose nodes all succeed completes, and the workflow stores no
 /// error.
 #[tokio::test]
-#[serial]
 async fn a_chain_that_succeeds_under_on_error_fail_completes_with_no_error() {
     let pool = shared_pool().await;
     let workflow_id = start(
@@ -815,7 +796,6 @@ async fn a_chain_that_succeeds_under_on_error_fail_completes_with_no_error() {
 /// dependent has `allow_failed_deps` stores its error on the workflow; the
 /// workflow stays RUNNING, and the dependent is ENQUEUED.
 #[tokio::test]
-#[serial]
 async fn a_failure_with_a_dependent_that_still_runs_stores_the_error_and_keeps_running() {
     let pool = shared_pool().await;
     let workflow_id = start(
@@ -847,7 +827,6 @@ async fn a_failure_with_a_dependent_that_still_runs_stores_the_error_and_keeps_r
 /// is SKIPPED when its dependency fails, and the resolved workflow ends
 /// FAILED.
 #[tokio::test]
-#[serial]
 async fn a_dependent_of_a_failed_node_is_skipped_and_the_workflow_fails() {
     let pool = shared_pool().await;
     let workflow_id = start(
@@ -870,7 +849,6 @@ async fn a_dependent_of_a_failed_node_is_skipped_and_the_workflow_fails() {
 /// independent roots fail in index order; the workflow ends FAILED with the
 /// error of the first.
 #[tokio::test]
-#[serial]
 async fn two_failed_roots_end_the_workflow_failed_with_the_first_error() {
     let pool = shared_pool().await;
     let workflow_id = start(
@@ -897,7 +875,6 @@ async fn two_failed_roots_end_the_workflow_failed_with_the_first_error() {
 /// the dependent of the failed node stays PENDING, though it has
 /// `allow_failed_deps` and would run under `on_error = fail`.
 #[tokio::test]
-#[serial]
 async fn a_pause_on_error_leaves_an_allow_failed_deps_dependent_pending() {
     let pool = shared_pool().await;
     let mut dependent = after(1, "pause_stop_b", &[0]);
@@ -920,7 +897,6 @@ async fn a_pause_on_error_leaves_an_allow_failed_deps_dependent_pending() {
 /// `on_error = pause`, the PENDING nodes of a chain after the failed node stay
 /// PENDING.
 #[tokio::test]
-#[serial]
 async fn a_pause_on_error_leaves_the_pending_chain_pending() {
     let pool = shared_pool().await;
     let mut workflow_spec = spec(
@@ -945,7 +921,6 @@ async fn a_pause_on_error_leaves_the_pending_chain_pending() {
 /// finished while the workflow was PAUSED stays PENDING; the resume makes the
 /// workflow RUNNING again and enqueues the node.
 #[tokio::test]
-#[serial]
 async fn a_resume_enqueues_a_node_whose_dependency_finished_while_paused() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -980,7 +955,6 @@ async fn a_resume_enqueues_a_node_whose_dependency_finished_while_paused() {
 /// the resume of a workflow paused by its only root's failure skips the
 /// dependent, and the workflow ends FAILED.
 #[tokio::test]
-#[serial]
 async fn a_resume_that_leaves_no_node_to_run_skips_the_dependent_and_fails_the_workflow() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -1012,7 +986,6 @@ async fn a_resume_that_leaves_no_node_to_run_skips_the_dependent_and_fails_the_w
 /// after the resume, though the other root completed; the workflow keeps the
 /// error of the failed root.
 #[tokio::test]
-#[serial]
 async fn a_workflow_resumed_after_a_failure_ends_failed_with_that_error() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
@@ -1066,7 +1039,6 @@ async fn start_roots(
 /// `TestSuccessPolicy.test_default_behavior_any_failure_fails`: with no
 /// success policy, one failed node fails the workflow.
 #[tokio::test]
-#[serial]
 async fn with_no_policy_one_failed_node_fails_the_workflow() {
     let pool = shared_pool().await;
     let workflow_id = start_roots(&pool, "sp_default", false, None).await;
@@ -1080,7 +1052,6 @@ async fn with_no_policy_one_failed_node_fails_the_workflow() {
 /// `TestSuccessPolicy.test_success_case_satisfied_completes`: a met success
 /// case completes the workflow though another node failed.
 #[tokio::test]
-#[serial]
 async fn a_met_success_case_completes_the_workflow_despite_a_failure() {
     let pool = shared_pool().await;
     let workflow_id = start_roots(&pool, "sp_satisfied", false, Some(required(&[&[0]]))).await;
@@ -1094,7 +1065,6 @@ async fn a_met_success_case_completes_the_workflow_despite_a_failure() {
 /// `TestSuccessPolicy.test_optional_fails_but_case_satisfied_completes`: an
 /// optional node fails, the case of node 0 is met, and the workflow completes.
 #[tokio::test]
-#[serial]
 async fn a_failed_optional_node_does_not_fail_a_workflow_whose_case_is_met() {
     let pool = shared_pool().await;
     let mut policy = required(&[&[0]]);
@@ -1111,7 +1081,6 @@ async fn a_failed_optional_node_does_not_fail_a_workflow_whose_case_is_met() {
 /// `TestSuccessPolicy.test_multiple_success_cases_any_satisfied`: of two
 /// cases, the one of the completed node is met, and the workflow completes.
 #[tokio::test]
-#[serial]
 async fn one_met_case_of_several_completes_the_workflow() {
     let pool = shared_pool().await;
     let workflow_id = start_roots(&pool, "sp_multi", false, Some(required(&[&[0], &[1]]))).await;
@@ -1129,7 +1098,6 @@ async fn one_met_case_of_several_completes_the_workflow() {
 /// `_build_enqueued_task_params`). The promotion fails the node with this
 /// message (`a_task_node_that_cannot_be_prepared_at_promotion_fails_alone`).
 #[tokio::test]
-#[serial]
 async fn the_promotion_refuses_a_negative_retry_limit_with_python_s_text() {
     let pool = shared_pool().await;
     let options = r#"{"retry_policy": {"max_retries": -1, "intervals": [5],

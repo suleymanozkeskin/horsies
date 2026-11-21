@@ -89,7 +89,6 @@ async fn slot_task_id(pool: &TestPool, schedule_name: &str, slot: DateTime<Utc>)
 /// fires the due slot, stores its task with the slot time as `sent_at`, and
 /// records one run at the database time of the fire.
 #[tokio::test]
-#[serial]
 async fn a_due_slot_fires_and_records_its_run_at_the_database_time() {
     let pool = test_pool().await;
     let core = core_pool_of(&pool);
@@ -136,7 +135,6 @@ async fn a_due_slot_fires_and_records_its_run_at_the_database_time() {
 /// creates the row with the first run after the database time of the due
 /// read, and writes no task (Python `_heal_one`).
 #[tokio::test]
-#[serial]
 async fn a_fire_that_finds_no_state_row_creates_it_and_writes_no_task() {
     let pool = test_pool().await;
     let schedule = own_schedule("state_missing");
@@ -177,7 +175,6 @@ async fn a_fire_that_finds_no_state_row_creates_it_and_writes_no_task() {
 /// four fires of one due slot run at once, each on its own pool. The fire
 /// locks the state row, so the others find it moved and write nothing.
 #[tokio::test]
-#[serial]
 async fn concurrent_fires_of_one_slot_write_one_task_and_one_run() {
     let pool = test_pool().await;
     let schedule = own_schedule("competition");
@@ -220,7 +217,6 @@ async fn concurrent_fires_of_one_slot_write_one_task_and_one_run() {
 /// `horsies_tasks`, finds the row moved and writes no second task; the next
 /// tick does not show the slot either.
 #[tokio::test]
-#[serial]
 async fn a_fire_repeated_after_its_commit_writes_nothing_once_the_task_left_the_live_table() {
     let pool = test_pool().await;
     let schedule = own_schedule("repeat_after_commit");
@@ -298,7 +294,6 @@ async fn terminate_the_waiting_fire(transaction: &mut TestTransaction<'_>) {
 /// state row: no slot and no state move commit. The next tick fires the
 /// three slots once and records one run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn a_catch_up_whose_fire_fails_commits_nothing_and_the_next_tick_fires_each_slot_once() {
     let pool = test_pool().await;
     let mut schedule = own_schedule("catch_up_lost");
@@ -371,7 +366,6 @@ async fn a_catch_up_whose_fire_fails_commits_nothing_and_the_next_tick_fires_eac
 /// A tick needs one connection: the due read and the fire run on a pool of
 /// one connection, with no second connection for a lock.
 #[tokio::test]
-#[serial]
 async fn a_tick_fires_a_due_slot_on_a_pool_of_one_connection() {
     let pool = test_pool().await;
     let core = one_connection_pool(&pool, Duration::from_secs(10));
@@ -397,7 +391,6 @@ async fn a_tick_fires_a_due_slot_on_a_pool_of_one_connection() {
 /// A tick whose pool has no free connection fails at the due read and
 /// writes nothing; the next tick fires the slot once.
 #[tokio::test]
-#[serial]
 async fn a_tick_with_no_free_connection_fails_at_the_due_read_and_writes_nothing() {
     let pool = test_pool().await;
     let core = one_connection_pool(&pool, Duration::from_millis(200));
@@ -440,7 +433,6 @@ async fn a_tick_with_no_free_connection_fails_at_the_due_read_and_writes_nothing
 /// slot rows and the state move are one statement). The next fire, after
 /// the failure clears, fires the slot once.
 #[tokio::test]
-#[serial]
 async fn a_fire_whose_state_move_fails_writes_no_task_and_the_next_tick_fires_once() {
     let pool = test_pool().await;
     let schedule = own_schedule("state_failure");
@@ -493,7 +485,6 @@ async fn a_fire_whose_state_move_fails_writes_no_task_and_the_next_tick_fires_on
 /// the main core pool of its broker, and ends at its stop request with no
 /// start error.
 #[tokio::test]
-#[serial]
 async fn a_running_scheduler_fires_a_due_slot_and_stops() {
     let pool = test_pool().await;
     let broker = Arc::new(PostgresBroker::from_test_url(
@@ -552,7 +543,6 @@ async fn a_running_scheduler_fires_a_due_slot_and_stops() {
 /// slot with microseconds inside one millisecond, a name that is not ASCII,
 /// and the Unix epoch). Each id has the UUIDv7 layout of its slot time.
 #[tokio::test]
-#[serial]
 async fn the_slot_task_id_of_the_database_matches_its_vectors_and_layout() {
     let pool = test_pool().await;
     let slot = Utc.with_ymd_and_hms(2026, 11, 16, 10, 0, 0).unwrap();
@@ -620,7 +610,6 @@ async fn the_slot_task_id_of_the_database_matches_its_vectors_and_layout() {
 /// id: the database function refuses it with SQLSTATE 22023; the last
 /// microsecond below the bound has one.
 #[tokio::test]
-#[serial]
 async fn the_slot_task_id_refuses_a_slot_time_outside_the_uuid7_range() {
     let pool = test_pool().await;
     let end = DateTime::from_timestamp_millis(1_i64 << 48).expect("2^48 ms is a valid time");
@@ -643,7 +632,6 @@ async fn the_slot_task_id_refuses_a_slot_time_outside_the_uuid7_range() {
 /// one tick fires every schedule of its due read: each due slot gets its
 /// task and each row records one run.
 #[tokio::test]
-#[serial]
 async fn one_tick_fires_every_due_schedule_of_its_due_read() {
     let pool = test_pool().await;
     let core = core_pool_of(&pool);
@@ -681,7 +669,6 @@ async fn one_tick_fires_every_due_schedule_of_its_due_read() {
 /// the database refuses the fire of the first due schedule; the tick moves
 /// that row past its slot with no run, and still fires the next schedule.
 #[tokio::test]
-#[serial]
 async fn a_refused_fire_of_one_schedule_does_not_stop_the_fire_of_the_next() {
     let pool = test_pool().await;
     let core = core_pool_of(&pool);
@@ -731,7 +718,6 @@ async fn a_refused_fire_of_one_schedule_does_not_stop_the_fire_of_the_next() {
 /// row past the refused slot fails too. Both are logged; the row keeps its
 /// slot and records no run, and no task is written.
 #[tokio::test]
-#[serial]
 async fn a_skip_that_fails_after_a_refused_fire_is_logged_and_leaves_the_row() {
     let pool = test_pool().await;
     let schedule = own_schedule("skip_failure");
