@@ -71,6 +71,14 @@ fn with_driver_scheme(url: &str) -> String {
     format!("postgresql+psycopg://{rest}")
 }
 
+/// `url` with the query parameter `parameter` (`name=value`) added.
+fn with_query_parameter(url: &str, parameter: &str) -> String {
+    match url.contains('?') {
+        true => format!("{url}&{parameter}"),
+        false => format!("{url}?{parameter}"),
+    }
+}
+
 /// Python: `test_check_live_command.py::test_check_live_on_the_test_database_passes`.
 /// The live phases connect, read the connection limit and compare each
 /// worker profile of the instance with it.
@@ -111,6 +119,37 @@ async fn test_check_live_refuses_a_url_that_names_a_driver_before_any_connect() 
     );
     assert!(
         !end.output.contains("broker connectivity check failed"),
+        "{}",
+        end.output
+    );
+    assert!(
+        !end.output.contains("ok: all validations passed"),
+        "{}",
+        end.output
+    );
+}
+
+/// Python: `test_check_live_command.py::test_check_live_reports_a_refused_url_setting_as_a_connectivity_failure`.
+/// The config admits `keepalives` in the URL; the core refuses it when it
+/// opens its first pool, in the live phase. The note names the parameter.
+#[tokio::test]
+#[serial]
+async fn test_check_live_reports_a_refused_url_setting_as_a_connectivity_failure() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let refused_setting_url =
+        with_query_parameter(&suite.config().broker.database_url, "keepalives=1");
+
+    let end = run_check_live(&env_with_database_url(&suite, &refused_setting_url)).await;
+
+    assert_eq!(end.code, Some(1), "{}", end.output);
+    assert!(
+        end.output
+            .contains("error[HRS-203]: broker connectivity check failed"),
+        "{}",
+        end.output
+    );
+    assert!(
+        end.output.contains("the parameter keepalives is refused"),
         "{}",
         end.output
     );

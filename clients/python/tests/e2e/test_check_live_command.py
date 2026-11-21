@@ -98,6 +98,25 @@ def test_check_live_refuses_a_url_that_names_a_driver_before_any_connect() -> No
     assert 'ok: all validations passed' not in output, _report(run)
 
 
+def test_check_live_reports_a_refused_url_setting_as_a_connectivity_failure() -> None:
+    """``PostgresConfig`` admits ``keepalives`` in the URL; the core refuses
+    it when it opens its first pool, in the live phase. The note names the
+    parameter."""
+    refused_setting_url = (
+        make_url(DB_URL)
+        .update_query_dict({'keepalives': '1'})
+        .render_as_string(hide_password=False)
+    )
+
+    run = _run_check_live(database_url=refused_setting_url)
+
+    output = run.stdout + run.stderr
+    assert run.returncode == 1, _report(run)
+    assert 'error[HRS-203]: broker connectivity check failed' in output, _report(run)
+    assert 'the parameter keepalives is refused' in output, _report(run)
+    assert 'ok: all validations passed' not in output, _report(run)
+
+
 def test_check_live_reports_a_port_with_no_server_as_a_connectivity_failure() -> None:
     """The static check passes; the connect of the live phase is refused."""
     run = _run_check_live(database_url=UNREACHABLE_DATABASE_URL)
