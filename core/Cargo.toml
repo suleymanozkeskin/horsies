@@ -103,7 +103,7 @@ log = "0.4"
 rand = "0.8"
 gethostname = "0.4"
 owo-colors = "4"
-toml = "0.8"
+toml = "1.2"
 sysinfo = "0.32"
 libc = "0.2"
 
