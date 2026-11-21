@@ -122,7 +122,9 @@
     "tests/e2e/test_event_handlers.py",
     "tests/e2e/tasks/instance_event_handlers.py",
     "horsies/core/errors.py",
-    "tests/unit/test_error_code_catalog.py"
+    "tests/unit/test_error_code_catalog.py",
+    "tests/e2e/test_check_live_command.py",
+    "tests/e2e/tasks/instance_check_live.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error",
   "executionEnvironments": [

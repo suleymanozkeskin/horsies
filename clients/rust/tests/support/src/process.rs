@@ -1,5 +1,6 @@
 //! A worker or scheduler process of a test (Python
-//! `clients/python/tests/e2e/helpers/worker.py`).
+//! `clients/python/tests/e2e/helpers/worker.py`), or a command that ends on
+//! its own, such as `check --live`.
 //!
 //! The process starts in a process group of its own, with stdin closed and
 //! stdout and stderr drained into a bounded buffer of lines, so a full pipe
@@ -53,7 +54,7 @@ pub struct TestProcess {
     child: Child,
     logs: LogLines,
     /// The drain threads of stdout and stderr; detached at drop.
-    _drains: Vec<JoinHandle<()>>,
+    drains: Vec<JoinHandle<()>>,
 }
 
 impl TestProcess {
@@ -91,7 +92,7 @@ impl TestProcess {
             label: format!("{label}[pid={}]", child.id()),
             child,
             logs,
-            _drains: drains,
+            drains,
         }
     }
 
@@ -185,6 +186,26 @@ impl TestProcess {
         loop {
             if let Some(status) = self.exit_status() {
                 return Some(status);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    /// Wait until the process exits on its own and its stdout and stderr
+    /// are read to their end, at most `limit`: [`Self::logs`] then holds
+    /// every line that the process wrote. `None` when `limit` passes first:
+    /// the process still runs, or a process that it started holds its
+    /// stdout or stderr open.
+    pub async fn wait_exit_with_output(&mut self, limit: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + limit;
+        loop {
+            let output_read = self.drains.iter().all(JoinHandle::is_finished);
+            match (self.exit_status(), output_read) {
+                (Some(status), true) => return Some(status),
+                (Some(_), false) | (None, _) => {}
             }
             if Instant::now() >= deadline {
                 return None;
@@ -315,4 +336,46 @@ fn lock(logs: &LogLines) -> MutexGuard<'_, VecDeque<String>> {
     // No code that holds the lock can panic: it pushes, pops or reads.
     logs.lock()
         .expect("the log buffer lock is never held across a panic")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SHELL: &str = "/bin/sh";
+
+    const NO_ENV: [(&str, &str); 0] = [];
+
+    #[tokio::test]
+    async fn wait_exit_with_output_gives_the_status_and_every_line_of_both_streams() {
+        let mut process = TestProcess::spawn(
+            "shell",
+            Path::new(SHELL),
+            ["-c", "echo out; echo err >&2; exit 3"],
+            &NO_ENV,
+        );
+
+        let status = process
+            .wait_exit_with_output(Duration::from_secs(10))
+            .await
+            .unwrap_or_else(|| panic!("the shell did not end\n{}", process.report()));
+
+        assert_eq!(status.code(), Some(3));
+        let mut lines = process.logs();
+        lines.sort();
+        assert_eq!(lines, vec!["err".to_owned(), "out".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn wait_exit_with_output_is_none_while_the_process_runs() {
+        let mut process =
+            TestProcess::spawn("sleep", Path::new(SHELL), ["-c", "sleep 30"], &NO_ENV);
+
+        let ended = process
+            .wait_exit_with_output(Duration::from_millis(300))
+            .await;
+
+        assert_eq!(ended, None);
+        assert_eq!(process.exit_status(), None);
+    }
 }
