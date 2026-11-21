@@ -92,6 +92,9 @@ jobs:
         run: |
           uv sync --dev --no-install-project
           uv pip install --python clients/python/.venv --no-deps dist/horsies-*.whl
+          # pytest puts clients/python/ first on sys.path, so `import horsies`
+          # loads the source folder; give it the compiled module of the wheel.
+          unzip -o -j dist/horsies-*.whl 'horsies/_core*.so' -d clients/python/horsies
 
       # Strict pyright over the paths listed in pyrightconfig.clean.json. The
       # list holds files that are clean today, and the type pins.
@@ -170,6 +173,9 @@ jobs:
         run: |
           uv sync --dev --no-install-project
           uv pip install --python clients/python/.venv --no-deps dist/horsies-*.whl
+          # pytest puts clients/python/ first on sys.path, so `import horsies`
+          # loads the source folder; give it the compiled module of the wheel.
+          unzip -o -j dist/horsies-*.whl 'horsies/_core*.so' -d clients/python/horsies
 
       - name: Run dual-run integration tests
         env:
@@ -221,6 +227,9 @@ jobs:
         run: |
           uv sync --dev --no-install-project
           uv pip install --python clients/python/.venv --no-deps dist/horsies-*.whl
+          # pytest puts clients/python/ first on sys.path, so `import horsies`
+          # loads the source folder; give it the compiled module of the wheel.
+          unzip -o -j dist/horsies-*.whl 'horsies/_core*.so' -d clients/python/horsies
 
       - name: Run the extension module tests
         env:
@@ -254,6 +263,9 @@ jobs:
         run: |
           uv sync --dev --no-install-project --upgrade-package pydantic --upgrade-package pydantic-core
           uv pip install --python clients/python/.venv --no-deps dist/horsies-*.whl
+          # pytest puts clients/python/ first on sys.path, so `import horsies`
+          # loads the source folder; give it the compiled module of the wheel.
+          unzip -o -j dist/horsies-*.whl 'horsies/_core*.so' -d clients/python/horsies
 
       - name: Run the type contract tests
         run: uv run --no-sync pytest clients/python/tests/unit/test_wire_shape.py clients/python/tests/unit/test_strict_codec.py clients/python/tests/unit/test_workflow_node_wire_kwargs.py clients/python/tests/unit/test_signature_check.py clients/python/tests/unit/test_type_contract_send_return.py -v --tb=short
@@ -303,6 +315,9 @@ jobs:
         run: |
           uv sync --dev --no-install-project
           uv pip install --python clients/python/.venv --no-deps dist/horsies-*.whl
+          # pytest puts clients/python/ first on sys.path, so `import horsies`
+          # loads the source folder; give it the compiled module of the wheel.
+          unzip -o -j dist/horsies-*.whl 'horsies/_core*.so' -d clients/python/horsies
 
       # No --live: this validates config, imports, every workflow DAG, and each
       # registered builder without a database. It is what keeps the showcase

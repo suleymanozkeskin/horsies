@@ -16,6 +16,8 @@ irreversible refund rather than a judgement about a returned item.
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from horsies import Err, Ok
 
 from .. import store, tuning
@@ -28,7 +30,7 @@ from ..workflows.warehouse_transfer import build_warehouse_transfer
 from . import WEB_BASE_URL, bullet, heading, say
 
 
-def _started(label: str, workflow_id: str) -> None:
+def _started(label: str, workflow_id: UUID) -> None:
     say(f'{label:22s} ->  {WEB_BASE_URL}/workflows?run={workflow_id}')
 
 
