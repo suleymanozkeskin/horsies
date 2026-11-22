@@ -32,9 +32,12 @@ serde_json = "1"
 
 # musl's malloc is slow under allocation from many threads, and the core is
 # multi-threaded. glibc targets keep the system allocator until a measurement
-# shows a gain there too.
+# shows a gain there too. `local_dynamic_tls` builds mimalloc with the
+# local-dynamic TLS model: Python loads this module with dlopen, and musl's
+# loader refuses initial-exec TLS in such a library ("initial-exec TLS
+# resolves to dynamic definition" at import).
 [target.'cfg(target_env = "musl")'.dependencies]
-mimalloc = { version = "0.1", default-features = false }
+mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"] }
 
 [lints]
 workspace = true
