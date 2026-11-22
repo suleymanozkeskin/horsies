@@ -795,6 +795,10 @@ fn the_sweep_leaves_an_exited_child_of_the_worker_session_to_its_waiter() {
     in_own_process(
         "the_sweep_leaves_an_exited_child_of_the_worker_session_to_its_waiter",
         || {
+            #[expect(
+                clippy::zombie_processes,
+                reason = "the orphan sweep under test must reap this child; a wait here would take its exit status first"
+            )]
             let child = std::process::Command::new("/bin/sh")
                 .args(["-c", "exit 3"])
                 .spawn()
@@ -828,6 +832,10 @@ fn one_sweep_reaps_at_most_its_bound_of_landed_orphans() {
                 unsafe {
                     command.pre_exec(lead_a_new_session);
                 }
+                #[expect(
+                    clippy::zombie_processes,
+                    reason = "the orphan sweep under test must reap this child; a wait here would take its exit status first"
+                )]
                 let child = command.spawn().unwrap();
                 pids.push(libc::pid_t::try_from(child.id()).unwrap());
             }

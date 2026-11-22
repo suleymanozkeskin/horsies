@@ -111,6 +111,9 @@ pub struct PreloadPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreloadUnsupported {
     /// The platform has no preload path; `exec` is the normal path there.
+    /// Only a host that is not Linux builds it; the tests of every platform
+    /// build it too.
+    #[cfg(any(test, not(target_os = "linux")))]
     NotLinux { platform: &'static str },
     /// This Linux kernel refuses a pidfd or the subreaper flag. Only a Linux
     /// host builds it; the tests of every platform build it too.
@@ -121,6 +124,7 @@ pub enum PreloadUnsupported {
 impl fmt::Display for PreloadUnsupported {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(any(test, not(target_os = "linux")))]
             Self::NotLinux { platform } => {
                 write!(
                     formatter,

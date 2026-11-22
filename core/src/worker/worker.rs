@@ -563,6 +563,7 @@ enum PreloadOutcome {
 fn preload_outcome(mode: PreloadMode, start: PreloadStart) -> PreloadOutcome {
     match (mode, start) {
         (_, PreloadStart::Ready { .. }) => PreloadOutcome::Forks,
+        #[cfg(any(test, not(target_os = "linux")))]
         (
             PreloadMode::App,
             PreloadStart::Unsupported(PreloadUnsupported::NotLinux { platform }),
@@ -571,6 +572,7 @@ fn preload_outcome(mode: PreloadMode, start: PreloadStart) -> PreloadOutcome {
                 "App preload needs Linux, this is {platform}. Using exec."
             )),
         },
+        #[cfg(any(test, not(target_os = "linux")))]
         (PreloadMode::Library, PreloadStart::Unsupported(PreloadUnsupported::NotLinux { .. })) => {
             PreloadOutcome::Exec { warning: None }
         }

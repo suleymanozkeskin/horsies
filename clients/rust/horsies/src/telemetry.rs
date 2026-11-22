@@ -280,7 +280,7 @@ mod tests {
     fn without_the_otel_feature_a_record_of_the_body_carries_the_task_and_the_attempt() {
         use std::sync::{Arc, Mutex, PoisonError};
 
-        use horsies_core::{BodyCarrier, BodySpans, Execution, RunWorkflow};
+        use horsies_core::{BodyCarrier, Execution, RunWorkflow};
         use tracing_subscriber::layer::SubscriberExt;
 
         let BodyScope::Spans(spans) = body_scope() else {
