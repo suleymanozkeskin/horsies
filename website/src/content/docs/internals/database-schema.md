@@ -13,7 +13,7 @@ The schema is a chain of migrations. Each migration runs in its own transaction,
 | Version | Files | Holds |
 | ------- | ----- | ----- |
 | 1000 | `core/baseline/*.sql`, run in name order as one text | The baseline schema (the files below) |
-| 1001 | `core/migrations/1001_lifecycle_record.sql` | The phase record of each attempt: two columns on `horsies_tasks`, nine columns on `horsies_task_attempts`, the attempt writers that fill them, and attempt archive version 2 |
+| 1001 | `core/migrations/1001_lifecycle_record.sql` | The phase record of each attempt: two columns on `horsies_tasks`, nine columns on `horsies_task_attempts`, the attempt writers that fill them, and attempt archive version 2. The events of each workflow run: the table `horsies_workflow_events` and the moves and workflow steps that write it |
 
 The files of migration 1000:
 
@@ -61,10 +61,13 @@ Upgrade from 0.8.0 (version 1000) to version 1001:
   database holds a newer version.
 - A database at version 1001 does not go back to a 0.8.0 build.
 - The migration adds nullable columns with no default, so it rewrites no table. It takes `ACCESS EXCLUSIVE` on
-  `horsies_tasks` and `horsies_task_attempts` until it commits, and each new `CHECK` reads its table once.
+  `horsies_tasks` and `horsies_task_attempts` until it commits, and each new `CHECK` reads its table once. The
+  foreign keys of the new table `horsies_workflow_events` take `SHARE ROW EXCLUSIVE` on `horsies_workflows` and
+  `horsies_workflow_tasks` until it commits.
 - The migration writes no value into old rows. A live row of an attempt that began before it has
   `attempt_claims` NULL (claims not counted); an attempt row written before it has `phase_record_version` NULL
-  (no phase record).
+  (no phase record). It writes no workflow event: a run that began before it has the events of the steps after
+  it only.
 
 `horsies_migrations` has the sqlx form: `version`, `description`, `installed_on`, `success`, `checksum`
 (SHA-384 of the migration text) and `execution_time` (nanoseconds). The text of a released migration never
@@ -199,6 +202,53 @@ whose recovery raised a persistent error, deleted with its workflow (`ON DELETE 
 | `last_task_index` | `integer` | Task index of the last failure, when the case names a node |
 | `last_error_type` | `varchar(255)` | Exception type of the last failure |
 
+## horsies_workflow_events
+
+The facts of a workflow run that no task row or node row holds, one row per event (migration 1001). The
+statement that changes the state writes the event in the same transaction. No trigger writes an event.
+
+| Column | Type | Description |
+| ------ | ---- | ----------- |
+| `workflow_id` | `uuid` | The workflow of the event |
+| `event_id` | `bigint` | The next value of the sequence `horsies_workflow_event_id`. It orders the events of one run: one statement can write several events at one `occurred_at` |
+| `event_kind` | `varchar(16)` | `WORKFLOW_PAUSED`, `WORKFLOW_RESUMED`, `NODE_READY`, `NODE_ENQUEUED` or `TASK_MOVED` |
+| `occurred_at` | `timestamptz` | The transaction time of the statement. For `TASK_MOVED`: the `terminal_at` of the history row |
+| `workflow_node_row_id` | `uuid` | The node of a node event. NULL: a run event (`WORKFLOW_PAUSED`, `WORKFLOW_RESUMED`) |
+| `task_id` | `uuid` | `TASK_MOVED` only: the task that moved |
+| `history_class` | `varchar(64)` | `TASK_MOVED` only: the retention class of the history row |
+| `terminalization_kind` | `varchar(32)` | `TASK_MOVED` only: the kind of the move |
+| `run_workflow_id` | `uuid` | Generated: `workflow_id` on a run event, NULL on a node event |
+
+The kinds and the statements that write them:
+
+| Kind | Written by |
+| ---- | ---------- |
+| `WORKFLOW_PAUSED` | `horsies_workflow_pause` and the failure policy `pause` (`horsies_workflow_record_failure`): one event for the workflow, then one for each descendant that it paused |
+| `WORKFLOW_RESUMED` | `horsies_workflow_resume`: one event for the workflow, then one for each descendant that it resumed |
+| `NODE_READY` | A node that goes back to `READY` with no work: the abandon of a claimed task of a paused run (`horsies_workflow_pause`, `horsies_workflow_claimed_tasks_settle`, `horsies_workflow_task_stop_before_start`), the pause gate of a promotion (`horsies_workflow_promote`), a child start that finds its workflow not `RUNNING` (`horsies_workflow_child_start`) |
+| `NODE_ENQUEUED` | A sub-workflow node that goes `ENQUEUED` and waits for its child start (`horsies_workflow_promote`, `horsies_workflow_promote_level`) |
+| `TASK_MOVED` | The move to history of a task that a node links (`horsies_move_task_to_history`, `horsies_move_tasks_to_history`) |
+
+No event is written for a node insert, a task node that goes `ENQUEUED` (its task row holds the time), a node that
+goes `RUNNING`, or a node that goes terminal: the rows hold those times. A pause that a cancel or a paused expiry
+ends has no end event: the `completed_at` of the run ends it. A plain task and a workflow task that no node links
+have no event.
+
+`history_class`, `occurred_at` and `task_id` of `TASK_MOVED` are the locator of the history row: the read of the
+row probes one leaf, as the phase-2 read of a pending row does.
+
+The `CHECK` `horsies_workflow_events_kind_shape` admits three shapes: a run event with no node, task, class or
+move kind; a node event (`NODE_READY`, `NODE_ENQUEUED`) with a node and no task, class or move kind; `TASK_MOVED`
+with a node, a task, a class (`forever` or `standard_<days>d`) and a move kind. The move kinds are the kinds of
+`horsies_task_history` less `COMPLETE_FUSED` and `CANCEL_ADMIN`, which the move refuses for a workflow task.
+
+Keys and indexes: the primary key `(workflow_id, event_id)` serves the read of one run and the retention delete.
+A node event refers to its node (`(workflow_node_row_id, workflow_id)` to `horsies_workflow_tasks`, `ON DELETE
+CASCADE`); a run event refers to its workflow through `run_workflow_id` (`ON DELETE CASCADE`). A node event does
+not refer to the workflow row, so the move of a task, which holds the task row, takes no lock on the workflow row:
+workflow steps lock workflow rows before task rows. Two partial indexes, on `workflow_node_row_id` and on
+`run_workflow_id`, serve the two foreign keys.
+
 ## horsies_task_attempts
 
 Per-attempt execution history for live tasks. One row per finished attempt, written with the task state
@@ -321,13 +371,17 @@ ahead of writes. A deployment that withholds it must run an external coverage jo
 |------|-----------|--------|
 | Terminal task records | Partition drop by retention class (assigned at enqueue; default 30-day class, explicit `None` = forever) | none — per-task class |
 | Heartbeats | Hourly partition drop | none |
-| Terminal workflow records (`horsies_workflows`, `horsies_workflow_tasks`) | Batched row delete by the reaper sweep | `terminal_record_retention_hours` |
+| Terminal workflow records (`horsies_workflows`, `horsies_workflow_tasks`, `horsies_workflow_events`) | Batched row delete by the reaper sweep | `terminal_record_retention_hours` |
 | Worker states | Batched row delete, same sweep | `worker_state_retention_hours` |
 | Worker liveness generations (`horsies_worker_liveness`) | Batched row delete, same sweep: rows of workers that own no CLAIMED or RUNNING row and whose lock no session holds | none |
 
 Workflow-record deletes run in batches of `retention_delete_batch_size` rows (default 500), one transaction per
-batch; deleting a workflow also removes its unconsumed progression evidence and its recovery count (the cascades
-above). See [Retention Config](../../configuration/retention-config#row-delete-sweep).
+batch. A batch counts the node rows and the event rows of its workflows, and always takes its first workflow, so a
+workflow with more rows than the batch size is deleted alone. A batch deletes the events and the nodes of its
+workflows with them; deleting a workflow also removes its unconsumed progression evidence and its recovery count
+(the cascades above). A history class that is shorter than `terminal_record_retention_hours` drops the history
+row of a moved task before the workflow retention deletes its `TASK_MOVED` event, so the locator of that event
+then finds no row. See [Retention Config](../../configuration/retention-config#row-delete-sweep).
 
 The partition-drop mechanism's cost character, measured with the
 mechanism as the only variable (the delete arm reproducing the

@@ -19,7 +19,7 @@ use super::harness::{describe, BaselineDatabase};
 
 const FUNCTION_CALLS_SQL: &str = include_str!("cases/baseline_function_calls.sql");
 
-const EXPECTED_TABLES: [&str; 23] = [
+const EXPECTED_TABLES: [&str; 24] = [
     "horsies_client_family",
     "horsies_heartbeats",
     "horsies_key_reservations",
@@ -38,6 +38,8 @@ const EXPECTED_TABLES: [&str; 23] = [
     "horsies_tasks",
     "horsies_worker_liveness",
     "horsies_worker_states",
+    // core/migrations/1001_lifecycle_record.sql.
+    "horsies_workflow_events",
     "horsies_workflow_phase2_pending",
     "horsies_workflow_phase2_quarantine",
     "horsies_workflow_recovery_failures",

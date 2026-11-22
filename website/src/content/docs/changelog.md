@@ -29,6 +29,19 @@ there is no migration contract between pre-1.0 versions.
   the new values: no statement is added per task. A row written before the
   migration keeps NULL in each new column. The Python worker records no
   placement (`placed_at` NULL).
+- **Each workflow run keeps a record of its node and pause events.**
+  Migration 1001 adds the table `horsies_workflow_events`. The statement
+  that changes the state writes the event: `NODE_READY` (a node goes back
+  to `READY` with no work), `NODE_ENQUEUED` (a sub-workflow node waits for
+  its child start), `TASK_MOVED` (a task of a node moves to history; the
+  event holds the locator of the history row: retention class, terminal
+  time and task id), `WORKFLOW_PAUSED` and `WORKFLOW_RESUMED` (one for
+  each workflow of the tree that the pause or the resume moves). No
+  statement is added: a plain task writes no event, and a workflow task
+  writes its event in the statement of its move. The events go with their
+  workflow: the workflow retention deletes them, and the foreign keys
+  delete them with a deleted node or workflow. The migration writes no
+  event for a run that began before it.
 
 ### Changed
 
@@ -39,8 +52,10 @@ there is no migration contract between pre-1.0 versions.
   changed (SQLSTATE 42883); a 0.8.0 process that starts after it is
   refused, because the database holds a newer version. A database at 1001
   does not go back to 0.8.0. The migration rewrites no table; it holds
-  `ACCESS EXCLUSIVE` on `horsies_tasks` and `horsies_task_attempts` until it
-  commits. The web monitoring schema check expects version 1001.
+  `ACCESS EXCLUSIVE` on `horsies_tasks` and `horsies_task_attempts`, and
+  `SHARE ROW EXCLUSIVE` on `horsies_workflows` and `horsies_workflow_tasks`
+  (the foreign keys of the new event table), until it commits. The web
+  monitoring schema check expects version 1001.
 - **Task history: attempt archive version 2.** Each move to history from
   migration 1001 stores the attempts of the task with their phase records,
   and the open attempt of a task that ended with no attempt row (a cancel,
@@ -48,6 +63,10 @@ there is no migration contract between pre-1.0 versions.
   finalizing marker. The live branch of the monitoring task detail reads
   the same form. History rows of version 1 stay as they are; the core reads
   both versions.
+- **Workflow retention: a batch counts the event rows.** A batch of the
+  workflow retention counts the node rows and the event rows of its
+  workflows against `retention_delete_batch_size` (it counted the node rows
+  only), and deletes the events with their workflows.
 - **Rust crates: the attempt writes carry the placement of the attempt.**
   In `horsies-core`, `PlainSuccess`, `FinishFailedAttempt`,
   `FinishWorkflowSuccess` and `core::lifecycle::TerminalizationCommand::CompleteTaskFused`

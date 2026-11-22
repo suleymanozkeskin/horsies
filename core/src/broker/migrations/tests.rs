@@ -2539,10 +2539,11 @@ async fn a_0_8_0_database_with_live_rows_gets_the_lifecycle_record() {
 }
 
 /// The shape of the horsies objects of a database, as one text: the columns
-/// of every `horsies_` relation (name, type, length, nullability, default, in
-/// column order), every constraint definition, every index definition, and
-/// every `horsies_` function (identity arguments, result, and the MD5 of its
-/// body).
+/// of every `horsies_` relation (name, type, length, nullability, default,
+/// generation expression, in column order), every constraint definition,
+/// every index definition, every `horsies_` sequence (type, bounds, step,
+/// cycle), and every `horsies_` function (identity arguments, result, and the
+/// MD5 of its body).
 async fn schema_shape(database: &MigrationTestDatabase) -> String {
     database
         .client()
@@ -2551,7 +2552,8 @@ async fn schema_shape(database: &MigrationTestDatabase) -> String {
                  'columns', (
                      SELECT jsonb_agg(jsonb_build_array(
                          c.table_name, c.ordinal_position, c.column_name, c.data_type,
-                         c.character_maximum_length, c.is_nullable, c.column_default
+                         c.character_maximum_length, c.is_nullable, c.column_default,
+                         c.generation_expression
                      ) ORDER BY c.table_name, c.ordinal_position)
                      FROM information_schema.columns AS c
                      WHERE c.table_schema = current_schema() AND c.table_name LIKE 'horsies\_%'
@@ -2571,6 +2573,14 @@ async fn schema_shape(database: &MigrationTestDatabase) -> String {
                      FROM pg_indexes AS i
                      WHERE i.schemaname = current_schema() AND i.tablename LIKE 'horsies\_%'
                  ),
+                 'sequences', (
+                     SELECT jsonb_agg(jsonb_build_array(
+                         s.sequencename, s.data_type::text, s.start_value, s.min_value, s.max_value,
+                         s.increment_by, s.cycle
+                     ) ORDER BY s.sequencename)
+                     FROM pg_sequences AS s
+                     WHERE s.schemaname = current_schema() AND s.sequencename LIKE 'horsies\_%'
+                 ),
                  'functions', (
                      SELECT jsonb_agg(jsonb_build_array(
                          p.proname, pg_get_function_identity_arguments(p.oid),
@@ -2588,9 +2598,112 @@ async fn schema_shape(database: &MigrationTestDatabase) -> String {
         .get(0)
 }
 
-/// A fresh install and an upgrade from migration 1000 with live rows end in
-/// the same schema: the same columns, constraints, indexes and functions, and
-/// the same bookkeeping.
+/// The workflow rows that a 0.8.0 process leaves: a RUNNING workflow whose
+/// sub-workflow node links a RUNNING child workflow, each with every column
+/// of migration 1000 named.
+const WORKFLOWS_OF_A_0_8_0_DATABASE: &str = "
+INSERT INTO horsies_workflows (
+    id, name, definition_key, status, on_error, output_task_index, success_policy, result, error,
+    parent_workflow_id, parent_task_index, root_workflow_id, depth, sent_at, created_at, started_at,
+    completed_at, updated_at, trace_carrier, trace_id
+) VALUES
+    ('00000000-0000-4000-8000-00000000b001', 'upgrade.parent', NULL, 'RUNNING', 'fail', NULL, NULL, NULL, NULL,
+     NULL, NULL, '00000000-0000-4000-8000-00000000b001', 0, now(), now(), now(), NULL, now(), NULL, NULL),
+    ('00000000-0000-4000-8000-00000000b002', 'upgrade.child', NULL, 'RUNNING', 'fail', NULL, NULL, NULL, NULL,
+     '00000000-0000-4000-8000-00000000b001', 0, '00000000-0000-4000-8000-00000000b001', 1, now(), now(), now(),
+     NULL, now(), NULL, NULL);
+INSERT INTO horsies_workflow_tasks (
+    id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies, args_from,
+    workflow_ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries, execution,
+    good_until, retention_class_key, downstream_subworkflow, status, task_id, is_subworkflow, sub_workflow_id,
+    sub_workflow_name, sub_definition_key, sub_workflow_params, sub_workflow_summary, result, error,
+    created_at, started_at, completed_at
+) VALUES (
+    '00000000-0000-4000-8000-00000000b011', '00000000-0000-4000-8000-00000000b001', 0, 'n0', 'upgrade.sub', '{}',
+    'default', 50, '{}', NULL, NULL, FALSE, 'all', NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', 'RUNNING', NULL,
+    TRUE, '00000000-0000-4000-8000-00000000b002', 'child.wf', 'child.key', 'NOT_GIVEN', NULL, NULL, NULL,
+    now(), now(), NULL
+);
+";
+
+/// A database at migration 1000 that holds a RUNNING workflow with a RUNNING
+/// child gets migration 1001 from the install: the event table is empty (the
+/// migration writes no event for a run that began before it), and its CHECK
+/// and its two foreign keys are validated. A pause after the upgrade writes
+/// one WORKFLOW_PAUSED for the workflow, then one for its child.
+#[tokio::test]
+async fn a_0_8_0_database_with_workflows_gets_the_event_table_with_no_event() {
+    let database = MigrationTestDatabase::create().await;
+    database.install_baseline_only(ClientFamily::Rust).await;
+    database.execute(WORKFLOWS_OF_A_0_8_0_DATABASE).await;
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migration 1001 over the workflow rows");
+
+    let events: i64 = database
+        .client()
+        .query_one("SELECT count(*) FROM horsies_workflow_events", &[])
+        .await
+        .expect("count the events")
+        .get(0);
+    assert_eq!(events, 0, "the migration writes no event");
+    let constraints: Vec<(String, bool)> = database
+        .client()
+        .query(
+            "SELECT conname::text, convalidated FROM pg_constraint
+             WHERE conrelid = 'horsies_workflow_events'::regclass AND contype IN ('c', 'f')
+             ORDER BY conname",
+            &[],
+        )
+        .await
+        .expect("read the constraints of the event table")
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(
+        constraints,
+        vec![
+            ("horsies_workflow_events_kind_shape".to_owned(), true),
+            ("horsies_workflow_events_node_fkey".to_owned(), true),
+            ("horsies_workflow_events_run_fkey".to_owned(), true),
+        ]
+    );
+
+    database
+        .execute("SELECT * FROM horsies_workflow_pause('00000000-0000-4000-8000-00000000b001')")
+        .await;
+    let paused: Vec<(String, String)> = database
+        .client()
+        .query(
+            "SELECT workflow_id::text, event_kind::text FROM horsies_workflow_events ORDER BY event_id",
+            &[],
+        )
+        .await
+        .expect("read the events of the pause")
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(
+        paused,
+        vec![
+            (
+                "00000000-0000-4000-8000-00000000b001".to_owned(),
+                "WORKFLOW_PAUSED".to_owned()
+            ),
+            (
+                "00000000-0000-4000-8000-00000000b002".to_owned(),
+                "WORKFLOW_PAUSED".to_owned()
+            ),
+        ]
+    );
+    database.drop().await;
+}
+
+/// A fresh install and an upgrade from migration 1000 with live rows and
+/// workflow rows end in the same schema: the same columns, constraints,
+/// indexes, sequences and functions, and the same bookkeeping.
 #[tokio::test]
 async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     let fresh = MigrationTestDatabase::create().await;
@@ -2601,6 +2714,7 @@ async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     let upgraded = MigrationTestDatabase::create().await;
     upgraded.install_baseline_only(ClientFamily::Rust).await;
     upgraded.execute(ROWS_OF_A_0_8_0_DATABASE).await;
+    upgraded.execute(WORKFLOWS_OF_A_0_8_0_DATABASE).await;
     upgraded
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await

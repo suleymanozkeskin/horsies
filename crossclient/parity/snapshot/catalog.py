@@ -841,6 +841,37 @@ _PHASE2_PENDING: Final = TableRules(
     identity=('task_id',),
 )
 
+_WORKFLOW_EVENTS: Final = TableRules(
+    name='horsies_workflow_events',
+    columns=_columns(
+        ('workflow_id', WORKFLOW_ID),
+        (
+            'event_id',
+            Ignored(
+                reason=(
+                    'a value of the sequence horsies_workflow_event_id, which no seed reset '
+                    'rewinds: it counts the events of every earlier run'
+                ),
+            ),
+        ),
+        ('event_kind', EXACT),
+        ('occurred_at', RUN_CLOCK),
+        ('workflow_node_row_id', WORKFLOW_NODE_ID),
+        ('task_id', TASK_ID),
+        ('history_class', EXACT),
+        ('terminalization_kind', EXACT),
+        ('run_workflow_id', WORKFLOW_ID),
+    ),
+    order_by=('workflow_id', 'event_kind', 'workflow_node_row_id', 'task_id', 'occurred_at'),
+    identity=('workflow_id', 'event_kind', 'workflow_node_row_id', 'task_id'),
+)
+"""The events of a workflow run (migration 1001). A run event has no node and
+no task; a node event has no task; ``TASK_MOVED`` names its task, the class
+and the kind of its history row, and its ``occurred_at`` is the terminal time
+of that row. The events of one identity (two pauses of one workflow, two
+returns of one node to READY) compare as a multiset; their order, which
+``event_id`` holds, is not compared."""
+
 _RECOVERY_FAILURES: Final = TableRules(
     name='horsies_workflow_recovery_failures',
     columns=_columns(
@@ -936,6 +967,7 @@ BASELINE_CATALOG: Final = SnapshotCatalog(
         _WORKER_LIVENESS,
         _PHASE2_QUARANTINE,
         _PHASE2_PENDING,
+        _WORKFLOW_EVENTS,
         _RECOVERY_FAILURES,
         _SCAN_CURSORS,
         _KEY_RESERVATIONS,
@@ -943,7 +975,7 @@ BASELINE_CATALOG: Final = SnapshotCatalog(
         _SCHEDULE_STATE,
     ),
 )
-"""The rules of the 21 baseline tables, in labelling order."""
+"""The rules of the 22 tables of the migration chain, in labelling order."""
 
 
 # ---- Notifications ----

@@ -283,6 +283,18 @@ Deleting a workflow also removes any unconsumed crashed-worker
 progression evidence still waiting in the outbox, so retention is never
 held up by a stalled consumer.
 
+A workflow batch counts the node rows and the event rows
+(`horsies_workflow_events`) of its workflows against
+`retention_delete_batch_size`, and deletes them with their workflows. The
+first workflow of a batch always goes, so a workflow with more rows than
+the batch size is deleted alone.
+
+The events of a run live as long as its workflow record, and the history
+record of each task lives as long as its retention class. When a class is
+shorter than `terminal_record_retention_hours`, the history record of a
+moved task goes first: the `TASK_MOVED` event of the run then points to a
+record that no longer exists.
+
 ## Paused-workflow expiry
 
 | Setting | Default | Controls |
