@@ -35,6 +35,8 @@ BEGIN
         AND v_task.retry_count = 0 AND v_task.good_until IS NULL,
         'start: minted root task row carries the node facts and no fingerprint'
     );
+    PERFORM wft_check(v_task.attempt_claims = 0 AND v_task.first_claimed_at IS NULL,
+                      'start: a node task starts its first attempt with count 0 and no first claim');
     PERFORM wft_check(
         v_task.input = '{"x":1,"__h_workflow_meta__":{"workflow_id":"' || v_wf || '","task_index":0,"task_name":"t0"}}',
         'start: root input is the static input with the workflow meta'
@@ -1519,7 +1521,8 @@ BEGIN
     );
     v_claimed := wft_task_of(v_child, 0);
     UPDATE horsies_tasks SET status = 'CLAIMED', claimed_at = now(), claimed_by_worker_id = 'worker-1',
-        claim_expires_at = now() + interval '1 minute' WHERE id = v_claimed;
+        claim_expires_at = now() + interval '1 minute', attempt_claims = 1, first_claimed_at = now()
+    WHERE id = v_claimed;
     SELECT * INTO v_row FROM horsies_workflow_pause(v_wf);
     PERFORM wft_check(v_row.outcome = 'PAUSED' AND v_row.paused_workflow_ids = ARRAY[v_wf, v_child]
                       AND v_row.abandoned_task_ids = ARRAY[v_claimed], 'pause: tree PAUSED, claimed task abandoned');
@@ -1593,7 +1596,7 @@ BEGIN
     );
     v_running := wft_task_of(v_wf, 2);
     UPDATE horsies_tasks SET status = 'RUNNING', claimed_at = now(), claimed_by_worker_id = 'worker-1',
-        started_at = now() WHERE id = v_running;
+        started_at = now(), attempt_claims = 1, first_claimed_at = now() WHERE id = v_running;
     UPDATE horsies_workflow_tasks SET status = 'RUNNING' WHERE workflow_id = v_wf AND task_index = 2;
     v_pending_task := wft_task_of(v_wf, 1);
     SELECT * INTO v_row FROM horsies_workflow_cancel(v_wf);
@@ -1809,27 +1812,33 @@ BEGIN
     PERFORM * FROM wft_start1(v_leaf, 'fail', '[{"idx":0}]');
     v_task := wft_task_of(v_reach, 0);
     UPDATE horsies_tasks SET status = 'RUNNING', claimed_at = v_claimed, claimed_by_worker_id = 'worker-1',
-        started_at = now(), worker_pid = 1, worker_hostname = 'host', worker_process_name = 'proc' WHERE id = v_task;
-    SELECT * INTO v_out FROM horsies_finish_workflow_success(v_task, 'worker-1', v_claimed, wft_ok('1'));
+        started_at = now(), worker_pid = 1, worker_hostname = 'host', worker_process_name = 'proc',
+        attempt_claims = 1, first_claimed_at = v_claimed WHERE id = v_task;
+    SELECT * INTO v_out FROM horsies_finish_workflow_success(
+        v_task, 'worker-1', v_claimed, wft_ok('1'), 'NOT_OBSERVED', NULL);
     PERFORM wft_check(v_out.outcome = 'APPLIED' AND v_out.node_has_dependents
                       AND v_out.downstream_subworkflow = 'REACHABLE',
                       'phase 1 (success) returns downstream_subworkflow REACHABLE with node_has_dependents');
     v_task := wft_task_of(v_none, 0);
     UPDATE horsies_tasks SET status = 'RUNNING', claimed_at = v_claimed, claimed_by_worker_id = 'worker-1',
-        started_at = now(), worker_pid = 1, worker_hostname = 'host', worker_process_name = 'proc' WHERE id = v_task;
+        started_at = now(), worker_pid = 1, worker_hostname = 'host', worker_process_name = 'proc',
+        attempt_claims = 1, first_claimed_at = v_claimed WHERE id = v_task;
     SELECT * INTO v_out FROM horsies_finish_failed_attempt(
         v_task, 'worker-1', v_claimed, 'NONE', NULL, NULL, NULL, wft_err('USER'), 'USER', 'boom',
-        'FAILED', 'boom', 'boom', 'REFUSE', TRUE);
+        'FAILED', 'boom', 'boom', 'REFUSE', TRUE, 'NOT_OBSERVED', NULL);
     PERFORM wft_check(v_out.outcome = 'APPLIED' AND v_out.node_has_dependents
                       AND v_out.downstream_subworkflow = 'NONE',
                       'phase 1 (failure) returns downstream_subworkflow NONE for task-only dependents');
     v_task := wft_task_of(v_leaf, 0);
     UPDATE horsies_tasks SET status = 'RUNNING', claimed_at = v_claimed, claimed_by_worker_id = 'worker-1',
-        started_at = now(), worker_pid = 1, worker_hostname = 'host', worker_process_name = 'proc' WHERE id = v_task;
-    SELECT * INTO v_out FROM horsies_finish_workflow_success(v_task, 'worker-1', v_claimed, wft_ok('1'));
+        started_at = now(), worker_pid = 1, worker_hostname = 'host', worker_process_name = 'proc',
+        attempt_claims = 1, first_claimed_at = v_claimed WHERE id = v_task;
+    SELECT * INTO v_out FROM horsies_finish_workflow_success(
+        v_task, 'worker-1', v_claimed, wft_ok('1'), 'NOT_OBSERVED', NULL);
     PERFORM wft_check(v_out.outcome = 'APPLIED' AND NOT v_out.node_has_dependents
                       AND v_out.downstream_subworkflow = 'NONE', 'phase 1 of a leaf: no dependents, NONE');
-    SELECT * INTO v_out FROM horsies_finish_workflow_success(v_task, 'worker-1', v_claimed, wft_ok('1'));
+    SELECT * INTO v_out FROM horsies_finish_workflow_success(
+        v_task, 'worker-1', v_claimed, wft_ok('1'), 'NOT_OBSERVED', NULL);
     PERFORM wft_check(v_out.outcome <> 'APPLIED' AND v_out.node_has_dependents IS NULL
                       AND v_out.downstream_subworkflow IS NULL, 'phase 1 miss: both facts NULL');
 END $$;
@@ -2356,7 +2365,7 @@ BEGIN
     v_pending_task := wft_task_of(v_wf, 1);
     v_running_task := wft_task_of(v_wf, 2);
     UPDATE horsies_tasks SET status = 'RUNNING', claimed_at = now(), claimed_by_worker_id = 'worker-1',
-        started_at = now() WHERE id = v_running_task;
+        started_at = now(), attempt_claims = 1, first_claimed_at = now() WHERE id = v_running_task;
     UPDATE horsies_workflow_tasks SET status = 'RUNNING' WHERE workflow_id = v_wf AND task_index = 2;
     PERFORM horsies_workflow_pause(v_wf);
     UPDATE horsies_workflows SET updated_at = now() - interval '2 hours' WHERE id IN (v_wf, v_child);

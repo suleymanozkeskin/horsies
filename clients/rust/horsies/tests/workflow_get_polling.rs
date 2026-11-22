@@ -185,7 +185,7 @@ async fn end_the_node(database: &TestDatabase, worker: &PostgresBroker, workflow
     let claimed_at: DateTime<Utc> = client
         .query_one(
             "UPDATE horsies_tasks
-             SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $2,
+             SET status = 'RUNNING', attempt_claims = 1, first_claimed_at = NOW(), claimed_at = NOW(), claimed_by_worker_id = $2,
                  claim_expires_at = NULL, started_at = NOW(), worker_pid = $3,
                  worker_hostname = $4, worker_process_name = $5, updated_at = NOW()
              WHERE id = $1 AND status IN ('PENDING', 'CLAIMED')
@@ -212,6 +212,7 @@ async fn end_the_node(database: &TestDatabase, worker: &PostgresBroker, workflow
                 claimed_at,
             },
             result_json,
+            placement: horsies_core::core::lifecycle::AttemptPlacement::NotObserved,
         })
         .await
         .expect("phase 1 of the task");

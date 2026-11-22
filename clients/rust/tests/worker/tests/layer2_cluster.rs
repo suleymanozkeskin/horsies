@@ -58,7 +58,7 @@ async fn most_running(client: &Client, queue: Option<&str>, duration: Duration) 
 async fn claim_for_dead_worker(client: &Client, task_id: Uuid, lease_end: &str) {
     let statement = format!(
         "UPDATE horsies_tasks SET status = 'CLAIMED', \
-         claimed_at = NOW() - INTERVAL '10 seconds', claimed_by_worker_id = $2, \
+         attempt_claims = 1, first_claimed_at = NOW() - INTERVAL '10 seconds', claimed_at = NOW() - INTERVAL '10 seconds', claimed_by_worker_id = $2, \
          claim_expires_at = NOW() + INTERVAL '{lease_end}' WHERE id = $1"
     );
     let changed = client

@@ -1,6 +1,6 @@
 //! The placement watch of a submitted task: the child that took the task,
 //! told once, with the kind of the child; a task that reached no child is
-//! not placed.
+//! not placed; the placement that the attempt row keeps.
 
 use std::time::Duration;
 
@@ -93,11 +93,39 @@ async fn a_task_that_reaches_no_child_is_not_placed() {
     stop_pool(pool, spawner).await;
 }
 
-/// An unwatched submit tells no one, and its receipt ends at once.
-#[tokio::test]
-async fn an_unwatched_placement_is_not_watched() {
+/// A placed task gives its attempt row the slot wait from the read of the
+/// claim result to the placement.
+#[test]
+fn a_placed_task_gives_its_attempt_the_slot_wait_from_the_read() {
+    use crate::broker::claims::ClaimRead;
+    use crate::core::lifecycle::{AttemptPlacement, SlotWait};
+    use crate::worker::executor::protocol::ProcessId;
+    let read = ClaimRead::now();
+    let placed = Placed {
+        child_pid: ProcessId::new(4242).unwrap(),
+        child_kind: ExecutionClass::Isolated,
+        at: read.at + Duration::from_micros(2_500),
+        wall: read.wall,
+    };
+
+    let placement = ChildPlacement::Placed(placed).attempt_placement(read);
+
     assert_eq!(
-        PlacementReceipt::Unwatched.placement().await,
-        ChildPlacement::NotWatched
+        placement,
+        AttemptPlacement::Placed {
+            slot_wait: SlotWait::between(read.at, placed.at),
+        }
+    );
+    assert_eq!(placement.slot_wait_us(), Some(2_500));
+}
+
+/// A task that reached no child gives its attempt row no placement.
+#[test]
+fn a_task_that_reached_no_child_gives_no_attempt_placement() {
+    use crate::broker::claims::ClaimRead;
+    use crate::core::lifecycle::AttemptPlacement;
+    assert_eq!(
+        ChildPlacement::NotPlaced.attempt_placement(ClaimRead::now()),
+        AttemptPlacement::NotObserved
     );
 }

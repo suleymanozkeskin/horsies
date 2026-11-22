@@ -282,7 +282,6 @@ fn a_placed_task_gives_one_attempt_placed_with_its_child_and_one_slot_wait() {
 
 #[test]
 fn a_task_that_no_child_took_or_telemetry_off_gives_no_placement() {
-    use crate::worker::executor::slots::{PlacementReceipt, PlacementWatch};
     let mut watched = WatchedTelemetry::new();
     let task = claimed_task(Execution::Isolated);
     let read = ClaimRead::now();
@@ -294,10 +293,6 @@ fn a_task_that_no_child_took_or_telemetry_off_gives_no_placement() {
 
     assert!(watched.events().is_empty());
     assert!(watched.series(MetricId::TaskSlotWaitDuration).is_empty());
-    assert!(matches!(
-        WorkerTelemetry::Off.placement_watch(),
-        (PlacementWatch::Unwatched, PlacementReceipt::Unwatched)
-    ));
 }
 
 /// A watched telemetry value whose registry declares the queue `default`

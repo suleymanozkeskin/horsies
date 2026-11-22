@@ -236,10 +236,11 @@ DECLARE
     v_failed boolean := (p_result::json -> 'err')::text <> 'null';
     v_task horsies_tasks;
 BEGIN
-    -- The move takes the row that the UPDATE returned.
+    -- The move takes the row that the UPDATE returned. The stand-in claim counts one claim of the attempt.
     UPDATE horsies_tasks
     SET status = 'RUNNING', claimed_at = now(), claimed_by_worker_id = 'worker-1', started_at = now(),
-        claim_expires_at = NULL, worker_pid = 1, worker_hostname = 'host', worker_process_name = 'proc'
+        claim_expires_at = NULL, worker_pid = 1, worker_hostname = 'host', worker_process_name = 'proc',
+        attempt_claims = 1, first_claimed_at = now()
     WHERE id = p_task_id
     RETURNING * INTO v_task;
     PERFORM wft_check(FOUND, 'phase-1 fixture finds task ' || p_task_id);
@@ -268,12 +269,13 @@ BEGIN
 END;
 $$;
 
--- Claims the task of a node for worker-1 at p_claimed_at, with a live lease, as horsies_claim leaves it.
+-- Claims the task of a node for worker-1 at p_claimed_at, with a live lease and the first claim of its attempt, as
+-- horsies_claim leaves it.
 CREATE FUNCTION wft_claim(p_task_id uuid, p_claimed_at timestamptz) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
     UPDATE horsies_tasks
     SET status = 'CLAIMED', claimed_at = p_claimed_at, claimed_by_worker_id = 'worker-1',
-        claim_expires_at = now() + interval '1 minute'
+        claim_expires_at = now() + interval '1 minute', attempt_claims = 1, first_claimed_at = p_claimed_at
     WHERE id = p_task_id AND status = 'PENDING';
     PERFORM wft_check(FOUND, 'claim fixture finds the PENDING task ' || p_task_id);
 END;

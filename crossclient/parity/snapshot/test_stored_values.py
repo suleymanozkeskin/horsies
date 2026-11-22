@@ -132,6 +132,8 @@ def _epoch_us(at: datetime) -> int:
 
 
 def _archive(worker: str, run: datetime) -> bytes:
+    """An attempt archive of version 2: one attempt that the worker recorded
+    with its phase record, and the open next attempt, claimed once."""
     attempt = [
         1,
         'FAILED',
@@ -145,8 +147,18 @@ def _archive(worker: str, run: datetime) -> bytes:
         'host',
         7,
         'proc',
+        1,
+        _epoch_us(run),
+        _epoch_us(run + timedelta(milliseconds=200)),
+        1,
+        _epoch_us(run + timedelta(milliseconds=200)),
+        _epoch_us(run + timedelta(milliseconds=300)),
+        None,
+        'WORKER',
+        None,
     ]
-    return json.dumps([attempt], separators=(',', ':')).encode()
+    open_attempt = [1, _epoch_us(run + timedelta(seconds=3)), None]
+    return json.dumps([[attempt], open_attempt], separators=(',', ':')).encode()
 
 
 def _row(
@@ -155,7 +167,7 @@ def _row(
     *,
     doc: str | None = None,
     options: str | None = '{"good_until":null,"retry_policy":null}',
-    version: str = '1',
+    version: str = '2',
     digest: str | None = None,
     leaf: str | None = None,
 ) -> RawRow:
@@ -927,9 +939,21 @@ def test_archive_times_and_worker_ids_are_normalized_field_by_field() -> None:
 
     leaves = _leaves(_cell(snapshot, 'archive'))
     assert leaves == [
+        # started_at, finished_at, worker_id
         DuringRun(),
         DuringRun(),
         IdLabel(family=IdFamily.WORKER, ordinal=1),
+        # enqueued_at, claimed_at, first_claimed_at, placed_at, finalizing_at
+        # (not marked), last_seen_at (a worker's record)
+        DuringRun(),
+        DuringRun(),
+        DuringRun(),
+        DuringRun(),
+        NullValue(),
+        NullValue(),
+        # the open attempt: first_claimed_at, finalizing_at
+        DuringRun(),
+        NullValue(),
     ]
     assert _cell(snapshot, 'worker') == IdLabel(family=IdFamily.WORKER, ordinal=1)
 
@@ -962,14 +986,16 @@ def test_archives_of_two_runs_compare_equal_and_a_changed_outcome_differs() -> N
 
 
 def test_an_archive_of_another_format_version_is_an_error() -> None:
-    outcome = _normalized([_row('a1', RUN_A, version='2')], RUN_A)
+    """Every move of the chain writes version 2, so a version-1 archive in a
+    snapshot is an error, not a document read with the wrong paths."""
+    outcome = _normalized([_row('a1', RUN_A, version='1')], RUN_A)
 
     assert outcome == Err(
         UnsupportedStoredFormat(
             table='runs',
             column='archive',
             version_column='attempt_archive_version',
-            found='2',
+            found='1',
         ),
     )
 

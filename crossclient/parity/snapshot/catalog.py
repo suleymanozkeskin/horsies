@@ -1,4 +1,5 @@
-"""``BASELINE_CATALOG``: the rule of every column of the baseline schema (migration 1000).
+"""``BASELINE_CATALOG``: the rule of every column of the schema of the migration chain
+(migration 1000 and the migrations after it).
 
 The table order is the labelling order: a table that owns an id comes before
 the tables that refer to it, so a label is assigned by the owner's natural
@@ -287,25 +288,45 @@ that the worker or the stale recovery writes names the task and the worker,
 and the stale recovery's also the start of the silent attempt and the time it
 was detected."""
 
+_EPOCH_RUN_CLOCK: Final = JsonTime(encoding=TimeEncoding.EPOCH_MICROSECONDS, rule=RUN_CLOCK)
+ARCHIVE_ATTEMPT: Final = (Index(position=0), EachItem())
+"""Each attempt of a version-2 archive: the items of its first item."""
+_ARCHIVE_OPEN: Final = Index(position=1)
+"""The open attempt of a version-2 archive: its second item."""
+
 ATTEMPT_ARCHIVE: Final = StoredJson(
     storage=JsonStorage.UTF8_BYTES,
-    format=FormatVersion(column='attempt_archive_version', version=1),
+    format=FormatVersion(column='attempt_archive_version', version=2),
     paths=(
-        JsonPath(
-            steps=(EachItem(), Index(position=3)),
-            rule=JsonTime(encoding=TimeEncoding.EPOCH_MICROSECONDS, rule=RUN_CLOCK),
-        ),
-        JsonPath(
-            steps=(EachItem(), Index(position=4)),
-            rule=JsonTime(encoding=TimeEncoding.EPOCH_MICROSECONDS, rule=RUN_CLOCK),
-        ),
-        JsonPath(steps=(EachItem(), Index(position=8)), rule=WORKER_ID),
+        JsonPath(steps=(*ARCHIVE_ATTEMPT, Index(position=3)), rule=_EPOCH_RUN_CLOCK),
+        JsonPath(steps=(*ARCHIVE_ATTEMPT, Index(position=4)), rule=_EPOCH_RUN_CLOCK),
+        JsonPath(steps=(*ARCHIVE_ATTEMPT, Index(position=8)), rule=WORKER_ID),
+        JsonPath(steps=(*ARCHIVE_ATTEMPT, Index(position=13)), rule=_EPOCH_RUN_CLOCK),
+        JsonPath(steps=(*ARCHIVE_ATTEMPT, Index(position=14)), rule=_EPOCH_RUN_CLOCK),
+        JsonPath(steps=(*ARCHIVE_ATTEMPT, Index(position=16)), rule=_EPOCH_RUN_CLOCK),
+        JsonPath(steps=(*ARCHIVE_ATTEMPT, Index(position=17)), rule=_EPOCH_RUN_CLOCK),
+        JsonPath(steps=(*ARCHIVE_ATTEMPT, Index(position=18)), rule=_EPOCH_RUN_CLOCK),
+        JsonPath(steps=(*ARCHIVE_ATTEMPT, Index(position=20)), rule=_EPOCH_RUN_CLOCK),
+        JsonPath(steps=(_ARCHIVE_OPEN, Index(position=1)), rule=_EPOCH_RUN_CLOCK),
+        JsonPath(steps=(_ARCHIVE_OPEN, Index(position=2)), rule=_EPOCH_RUN_CLOCK),
     ),
 )
-"""Attempt archive version 1: one 12-field array per attempt (attempt, outcome,
-will_retry, started_at, finished_at as epoch microseconds, error_code,
-error_message, failed_reason, worker_id, worker_hostname, worker_pid,
-worker_process_name)."""
+"""Attempt archive version 2 (migration 1001): ``[attempts, open]``.
+
+- Each attempt is a 21-field array: the 12 fields of version 1 (attempt,
+  outcome, will_retry, started_at, finished_at as epoch microseconds,
+  error_code, error_message, failed_reason, worker_id, worker_hostname,
+  worker_pid, worker_process_name), then the phase record:
+  phase_record_version, enqueued_at, claimed_at, attempt_claims,
+  first_claimed_at, placed_at, finalizing_at, recorded_by, last_seen_at
+  (times as epoch microseconds; all null for an attempt with no phase
+  record). Every time is a run clock value: an attempt row exists only for an
+  attempt that a claim took, so its due time (13) is at or before its claim.
+- ``open`` is null when the last attempt ended with its row, else
+  ``[attempt_claims, first_claimed_at, finalizing_at]`` of the task row.
+
+Every history row that a move writes from migration 1001 on holds version 2,
+so a version-1 archive in a snapshot is an error (``UnsupportedStoredFormat``)."""
 
 RERUN_ENVELOPE: Final = StoredJson(
     storage=JsonStorage.UTF8_BYTES,
@@ -595,6 +616,8 @@ _TASKS: Final = TableRules(
         ('rerun_root_task_id', TASK_ID),
         ('trace_carrier', TRACE),
         ('trace_id', TRACE),
+        ('attempt_claims', EXACT),
+        ('first_claimed_at', RUN_CLOCK),
     ),
     order_by=(
         'id',
@@ -686,10 +709,24 @@ _TASK_ATTEMPTS: Final = TableRules(
         ('worker_hostname', EXACT),
         ('worker_pid', EXACT),
         ('worker_process_name', EXACT),
+        ('phase_record_version', EXACT),
+        ('enqueued_at', RUN_CLOCK),
+        ('claimed_at', RUN_CLOCK),
+        ('attempt_claims', EXACT),
+        ('first_claimed_at', RUN_CLOCK),
+        ('placed_at', RUN_CLOCK),
+        ('finalizing_at', RUN_CLOCK),
+        ('recorded_by', EXACT),
+        ('last_seen_at', RUN_CLOCK),
     ),
     order_by=('task_id', 'attempt'),
     identity=('task_id', 'attempt'),
 )
+"""The phase record of an attempt (migration 1001). Every time is a run clock
+value: an attempt row exists only for an attempt that a claim took, so its
+due time (``enqueued_at``) is at or before its claim, which the run makes.
+The ``enqueued_at`` of a task is ranked instead: a send can set a due time
+far from the run."""
 
 _HEARTBEATS: Final = TableRules(
     name='horsies_heartbeats',

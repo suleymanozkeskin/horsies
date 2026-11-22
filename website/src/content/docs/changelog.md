@@ -13,8 +13,49 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
+### Added
+
+- **Each attempt row keeps the phase times of its attempt.** Schema
+  migration 1001 adds a phase record to `horsies_task_attempts`: the due
+  time (`enqueued_at`), the claim that ran the attempt (`claimed_at`), the
+  claim count and the first claim of the attempt (`attempt_claims`,
+  `first_claimed_at`), the time a child of the worker took the task
+  (`placed_at`, the claim time plus the slot wait that the worker
+  measured), the finalizing marker (`finalizing_at`), the writer
+  (`recorded_by`: `WORKER` or `RECOVERY`) and, for a stale recovery, the
+  last time the attempt was known alive (`last_seen_at`). `horsies_tasks`
+  counts the claims of the current attempt (`attempt_claims`,
+  `first_claimed_at`). The statements that already write these rows write
+  the new values: no statement is added per task. A row written before the
+  migration keeps NULL in each new column. The Python worker records no
+  placement (`placed_at` NULL).
+
 ### Changed
 
+- **Schema migration 1001: stop every 0.8.0 process before the upgrade.**
+  The first start of this build applies migration 1001
+  (`core/migrations/1001_lifecycle_record.sql`) after migration 1000. A
+  0.8.0 process that runs on after it calls functions whose argument list
+  changed (SQLSTATE 42883); a 0.8.0 process that starts after it is
+  refused, because the database holds a newer version. A database at 1001
+  does not go back to 0.8.0. The migration rewrites no table; it holds
+  `ACCESS EXCLUSIVE` on `horsies_tasks` and `horsies_task_attempts` until it
+  commits. The web monitoring schema check expects version 1001.
+- **Task history: attempt archive version 2.** Each move to history from
+  migration 1001 stores the attempts of the task with their phase records,
+  and the open attempt of a task that ended with no attempt row (a cancel,
+  an expiry or a pause abandon): its claim count, its first claim and its
+  finalizing marker. The live branch of the monitoring task detail reads
+  the same form. History rows of version 1 stay as they are; the core reads
+  both versions.
+- **Rust crates: the attempt writes carry the placement of the attempt.**
+  In `horsies-core`, `PlainSuccess`, `FinishFailedAttempt`,
+  `FinishWorkflowSuccess` and `core::lifecycle::TerminalizationCommand::CompleteTaskFused`
+  gain the field `placement: core::lifecycle::AttemptPlacement`
+  (`Placed { slot_wait }` or `NotObserved`). Code that builds one of these
+  values sets it; a caller with no placement passes
+  `AttemptPlacement::NotObserved`. `migration_sql_file_texts()` lists every
+  SQL file of the migration chain, in run order.
 - **Rust crates: a large payload of an error or read type is boxed.** The
   field or variant holds the value in a `Box`, so the types that hold it
   are small. `Display`, `Debug`, the serde form, the error codes and the

@@ -1,15 +1,21 @@
 ---
 title: Database Schema
 section: shared
-summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (baseline schema, migration 1000).
+summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (migration chain 1000 and 1001).
 related: [../../configuration/broker-config]
 tags: [internals, database, schema, PostgreSQL, task-history]
 ---
 
 ## Schema Creation
 
-The schema is one migration, version 1000: the SQL files in
-`core/baseline/`, run in name order in one transaction.
+The schema is a chain of migrations. Each migration runs in its own transaction, with its bookkeeping row:
+
+| Version | Files | Holds |
+| ------- | ----- | ----- |
+| 1000 | `core/baseline/*.sql`, run in name order as one text | The baseline schema (the files below) |
+| 1001 | `core/migrations/1001_lifecycle_record.sql` | The phase record of each attempt: two columns on `horsies_tasks`, nine columns on `horsies_task_attempts`, the attempt writers that fill them, and attempt archive version 2 |
+
+The files of migration 1000:
 
 | File | Holds |
 | ---- | ----- |
@@ -32,8 +38,9 @@ enqueue, result wait, task info read, workflow start or scheduler start):
    publishes the history readers (`horsies_task_lookup_staged`, `horsies_task_provenance_staged`,
    `horsies_task_detail_staged`, `horsies_task_result_staged`, `horsies_task_history_duplicate_staged`)
    from the leaf catalog, in a second transaction, before it returns.
-3. A database that holds version 1000 with this build's checksum, the `PYTHON` family row and every
-   history reader: nothing to do, no lock. A missing family row or a missing reader (an install that
+3. A database that holds the whole chain with this build's checksums, the `PYTHON` family row and every
+   history reader: nothing to do, no lock. A database that holds the start of the chain (version 1000 only)
+   gets the rest of the chain under the lock, each migration in its own transaction. A missing family row or a missing reader (an install that
    stopped between its two transactions): it takes the lock, publishes the readers and writes the family
    row.
 4. Any other database is refused with `SCHEMA_INIT_FAILED`, and nothing is changed. The refusal names what the
@@ -46,8 +53,22 @@ enqueue, result wait, task info read, workflow start or scheduler start):
 
 There is no upgrade from a 0.x database. Drain it and point the fleet at a new database.
 
+Upgrade from 0.8.0 (version 1000) to version 1001:
+
+- Stop every 0.8.0 process (workers, schedulers, producers, the monitoring server) before the first start of
+  this build. The first start applies migration 1001. A 0.8.0 process that runs on after it calls functions whose
+  argument list changed and gets SQLSTATE 42883; a 0.8.0 process that starts after it is refused, because the
+  database holds a newer version.
+- A database at version 1001 does not go back to a 0.8.0 build.
+- The migration adds nullable columns with no default, so it rewrites no table. It takes `ACCESS EXCLUSIVE` on
+  `horsies_tasks` and `horsies_task_attempts` until it commits, and each new `CHECK` reads its table once.
+- The migration writes no value into old rows. A live row of an attempt that began before it has
+  `attempt_claims` NULL (claims not counted); an attempt row written before it has `phase_record_version` NULL
+  (no phase record).
+
 `horsies_migrations` has the sqlx form: `version`, `description`, `installed_on`, `success`, `checksum`
-(SHA-384 of the migration text) and `execution_time` (nanoseconds). `horsies_schema_version` holds one row with
+(SHA-384 of the migration text) and `execution_time` (nanoseconds). The text of a released migration never
+changes: a database that holds another checksum for a version is refused. `horsies_schema_version` holds one row with
 version 1000 only so that a 0.x process that runs migrations stops with "database schema is newer than this build
 supports".
 
@@ -93,6 +114,11 @@ Live task storage.
 | `retain_rerun_input` | `boolean` | Whether history keeps the input for a rerun |
 | `rerun_of_task_id`, `rerun_root_task_id` | `uuid` | Rerun lineage, both set or both empty |
 | `trace_carrier`, `trace_id` | `text`, `bytea` | The trace carrier of the send span, as one JSON text, and its 16-byte trace id; both set or both empty. Empty for a send with no trace, a carrier over a bound, and a schedule run. A workflow task copies the pair of its workflow. See [The Trace Carrier](/horsies/observability/tracing/#the-trace-carrier) |
+| `attempt_claims` | `integer` | Claims of the current attempt (`retry_count + 1`). 0 before its first claim; each claim adds 1; a release and a stale claim requeue keep it; a retry sets 0. NULL: the attempt began before migration 1001, so its claims are not counted (a claim keeps NULL) |
+| `first_claimed_at` | `timestamptz` | Time of the first claim of the current attempt. NULL when `attempt_claims` is 0 or NULL |
+
+The `CHECK` `horsies_tasks_attempt_claims_shape` admits three pairs: both NULL; `attempt_claims` 0 with no
+`first_claimed_at` on a `PENDING` row; `attempt_claims` 1 or more with `first_claimed_at` set.
 
 The claim reads `horsies_tasks_claim_pending` and `horsies_tasks_claim_expired_order`, keyed `(queue_name,
 execution, priority, enqueued_at, id)` over `PENDING` and `CLAIMED` rows, and `horsies_tasks_claim_expired_at`,
@@ -107,11 +133,23 @@ whole partitions and never deletes rows.
 
 A record holds the task's terminal projection (status, `terminalization_kind`, `terminal_at`, the final error
 code and failed reason, the last worker), the result envelope (`result_envelope_version`, `result_payload`,
-`result_digest`), the attempt archive (`attempt_snapshot` and its digest), and the rerun input envelope
+`result_digest`), the attempt archive (`attempt_archive_version`, `attempt_snapshot` and its digest), and the rerun input envelope
 (`rerun_input_disposition`: `INLINE`, `OVER_BOUND`, `DECLINED_BY_POLICY` or `NEVER_ELIGIBLE`). The move builds the
 rerun envelope from the live row's `input` and `task_options`. It copies `trace_id` of the live row; the carrier is not
 kept. The format version of each envelope implies its
 codec (JSON, UTF-8).
+
+The attempt archive has two versions; the core reads both:
+
+- Version 1 (rows moved before migration 1001): a JSON array of attempts, each an array of 12 values (`attempt`,
+  `outcome`, `will_retry`, `started_at`, `finished_at`, `error_code`, `error_message`, `failed_reason`,
+  `worker_id`, `worker_hostname`, `worker_pid`, `worker_process_name`).
+- Version 2 (`horsies_encode_attempt_archive`, every move from migration 1001): `[attempts, open]`. Each attempt
+  is an array of 21 values: the 12 values of version 1, then the phase record (`phase_record_version`,
+  `enqueued_at`, `claimed_at`, `attempt_claims`, `first_claimed_at`, `placed_at`, `finalizing_at`, `recorded_by`,
+  `last_seen_at`). `open` is `null` when the last attempt ended with its row, else `[attempt_claims,
+  first_claimed_at, finalizing_at]` of the attempt that has no row: a cancel, an expiry or a pause abandon ended
+  it. Times are epoch microseconds; a missing value is `null`.
 
 Every leaf carries two indexes: `(task_id)` for point lookups and `(enqueued_at)` for the monitoring list's
 default sort.
@@ -176,6 +214,23 @@ are deleted.
 | `started_at`, `finished_at` | `timestamptz` | Attempt window |
 | `error_code`, `error_message`, `failed_reason` | `text` | Per-attempt failure detail |
 | `worker_id`, `worker_hostname`, `worker_pid`, `worker_process_name` | | Executing process identity |
+| `phase_record_version` | `smallint` | 1: the attempt row has the phase record of migration 1001. NULL: written before it; every phase column below is NULL |
+| `enqueued_at` | `timestamptz` | Due time of the attempt (the send's due time, or `next_retry_at` after a retry) |
+| `claimed_at` | `timestamptz` | The claim generation that ran the attempt |
+| `attempt_claims`, `first_claimed_at` | `integer`, `timestamptz` | Claims of the attempt (1 or more) and the time of its first claim. Both NULL: the claims were not counted (the attempt began before migration 1001) |
+| `placed_at` | `timestamptz` | When a child of the worker took the task: `claimed_at` plus the slot wait that the worker measured on its monotonic clock. NULL: no placement observed (always for `RECOVERY`) |
+| `finalizing_at` | `timestamptz` | The finalizing marker of the claim. NULL: no marker |
+| `recorded_by` | `varchar(8)` | `WORKER` (the worker wrote the end) or `RECOVERY` (stale `RUNNING` recovery wrote it) |
+| `last_seen_at` | `timestamptz` | `RECOVERY` only: the last time the attempt was known alive, the greatest of `started_at`, `finalizing_at` and the newest runner heartbeat of the attempt |
+
+The statement that writes the attempt row writes the phase record from the locked live row:
+`horsies_complete_task_fused`, `horsies_finish_workflow_success` and `horsies_finish_failed_attempt` (each with the
+placement pair `p_placement_kind` `PLACED` or `NOT_OBSERVED` and `p_slot_wait_us`), and
+`horsies_finish_stale_attempt`. `finished_at` is the time the attempt was recorded. The `CHECK`
+`horsies_task_attempts_phase_record_shape` admits a row with no phase record, or a version-1 record with
+`enqueued_at` and `claimed_at` set, both claim columns set or both NULL, `recorded_by` `WORKER` with no
+`last_seen_at`, or `recorded_by` `RECOVERY` with `last_seen_at` and no `placed_at`. No `CHECK` orders the times:
+a step of the database clock can break the order, and a write is never refused for it.
 
 Primary key: `(task_id, attempt)`. Pre-execution aborts (`CLAIM_LOST`, `OWNERSHIP_UNCONFIRMED`,
 `WORKFLOW_CHECK_FAILED`, `WORKFLOW_STOPPED`) do not create attempt rows.
@@ -290,4 +345,5 @@ byte-identical.)
 
 ## File Location
 
-`core/baseline/` (the schema); `core/src/broker/migrations.rs` (the install).
+`core/baseline/` (migration 1000); `core/migrations/` (each later migration); `core/src/broker/migrations.rs` (the
+install).

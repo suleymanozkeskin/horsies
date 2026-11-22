@@ -324,7 +324,7 @@ async fn run_the_task(database: &TestDatabase, task_id: Uuid) -> DateTime<Utc> {
         .client()
         .query_one(
             "UPDATE horsies_tasks
-             SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $2,
+             SET status = 'RUNNING', attempt_claims = 1, first_claimed_at = NOW(), claimed_at = NOW(), claimed_by_worker_id = $2,
                  claim_expires_at = NULL, started_at = NOW(), worker_pid = $3,
                  worker_hostname = $4, worker_process_name = $5, updated_at = NOW()
              WHERE id = $1 AND status IN ('PENDING', 'CLAIMED')
@@ -359,6 +359,7 @@ async fn complete_the_task(database: &TestDatabase, worker: &PostgresBroker, tas
         task_id,
         claimed_at,
         result_json: success_text(SENT_VALUE),
+        placement: horsies_core::core::lifecycle::AttemptPlacement::NotObserved,
     }])
     .expect("a batch of one row");
     let outcomes = worker
@@ -418,6 +419,7 @@ async fn end_the_node(database: &TestDatabase, worker: &PostgresBroker, workflow
                 claimed_at,
             },
             result_json: success_text(ANSWER),
+            placement: horsies_core::core::lifecycle::AttemptPlacement::NotObserved,
         })
         .await
         .expect("phase 1 of the task");

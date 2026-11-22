@@ -684,6 +684,8 @@ SELECT test_raises('workflow run refuses a NULL id',
 -- horsies_monitoring_workflow_node
 ------------------------------------------------------------------------------------------------------------------------
 
+-- The live archive is version 2, [attempts, open]: attempt 2 (retry_count + 1) has no row, so it is open, with the
+-- claim facts of the live row (not counted: the row was written with no claim count).
 SELECT test_check(
     'workflow node: a node of a live task carries the live row, its trace id and its attempts (encoded as in history)',
     n.row_kind = 'NODE' AND n.node_task_index = 0 AND n.node_id = 'node-0' AND n.node_task_name = 'step_0'
@@ -691,8 +693,9 @@ SELECT test_check(
     AND n.node_task_id = '00000000-0000-4000-8000-0000000000a1' AND n.node_result IS NULL
     AND n.location = 'LIVE' AND n.task_id = n.node_task_id AND n.status = 'PENDING' AND n.retry_count = 1
     AND n.execution = 'SHARED_ASYNC' AND n.worker_hostname IS NULL AND n.terminal_at IS NULL
-    AND n.attempt_archive_version = 1
-    AND jsonb_array_length(convert_from(n.attempt_snapshot, 'UTF8')::jsonb) = 1
+    AND n.attempt_archive_version = 2
+    AND jsonb_array_length(convert_from(n.attempt_snapshot, 'UTF8')::jsonb -> 0) = 1
+    AND (convert_from(n.attempt_snapshot, 'UTF8')::jsonb -> 1) = '[null, null, null]'::jsonb
     AND n.workflow_id = '00000000-0000-4000-8000-00000000f001' AND n.workflow_task_index = 0
     AND n.trace_id = decode(repeat('a1', 16), 'hex'),
     row_to_json(n)::text
@@ -975,7 +978,7 @@ SELECT dblink_send_query(
 SELECT test_check(
     'workflow node: a move that commits during the statement leaves the answer LIVE with its attempt',
     n.location = 'LIVE' AND n.status = 'PENDING'
-    AND jsonb_array_length(convert_from(n.attempt_snapshot, 'UTF8')::jsonb) = 1,
+    AND jsonb_array_length(convert_from(n.attempt_snapshot, 'UTF8')::jsonb -> 0) = 1,
     row_to_json(n)::text
 )
 FROM (SELECT pg_sleep(1.5)) AS wait

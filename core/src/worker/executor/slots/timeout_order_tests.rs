@@ -579,6 +579,7 @@ async fn a_replayed_timeout_write_of_a_workflow_task_owes_phase_two_and_adds_no_
         timeout_ms(1_000),
         RetryPlacement::SameClass,
         TimeoutCancel::NoSignal,
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
     );
 
     let first = persist_unreported_attempt(&broker, &command, task.log(), true).await;

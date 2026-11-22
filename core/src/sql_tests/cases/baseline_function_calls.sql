@@ -104,7 +104,7 @@ SELECT expect_value(
     (SELECT outcome FROM horsies_complete_task_fused(
         '00000000-0000-7000-8000-000000000001', 'w1',
         (SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000001'),
-        '{"ok":1}', TRUE)),
+        '{"ok":1}', TRUE, 'NOT_OBSERVED', NULL)),
     'APPLIED'
 );
 SELECT fixture_task('00000000-0000-7000-8000-000000000002', 'RUNNING', 'w1', FALSE);
@@ -113,7 +113,7 @@ SELECT expect_value(
     (SELECT string_agg(outcome, ',') FROM horsies_complete_tasks_fused(
         ARRAY['00000000-0000-7000-8000-000000000002'::uuid],
         ARRAY[(SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000002')],
-        ARRAY['{"ok":2}'], 'w1', TRUE)),
+        ARRAY['{"ok":2}'], 'w1', TRUE, ARRAY['NOT_OBSERVED'], ARRAY[NULL]::bigint[])),
     'APPLIED'
 );
 
@@ -124,18 +124,21 @@ SELECT expect_value(
     (SELECT outcome FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-000000000004', 'w1',
         (SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000004'),
-        'RETRY', 0, 1.0, 'SAME_CLASS', '{"err":1}', 'E1', 'reason', 'FAILED', 'message', 'reason', 'REFUSE', TRUE)),
+        'RETRY', 0, 1.0, 'SAME_CLASS', '{"err":1}', 'E1', 'reason', 'FAILED', 'message', 'reason', 'REFUSE', TRUE,
+        'NOT_OBSERVED', NULL)),
     'RETRY_SCHEDULED'
 );
+-- The retry set the claim count of the next attempt to 0; the stand-in claim counts one claim.
 UPDATE horsies_tasks SET status = 'RUNNING', claimed_at = now(), claimed_by_worker_id = 'w1', started_at = now(),
-    worker_pid = 1, worker_hostname = 'h', worker_process_name = 'p'
+    worker_pid = 1, worker_hostname = 'h', worker_process_name = 'p', attempt_claims = 1, first_claimed_at = now()
 WHERE id = '00000000-0000-7000-8000-000000000004';
 SELECT expect_value(
     'finish_failed_attempt final',
     (SELECT outcome FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-000000000004', 'w1',
         (SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-000000000004'),
-        'NONE', NULL, NULL, NULL, '{"err":2}', 'E1', 'reason', 'FAILED', 'message', 'reason', 'REFUSE', TRUE)),
+        'NONE', NULL, NULL, NULL, '{"err":2}', 'E1', 'reason', 'FAILED', 'message', 'reason', 'REFUSE', TRUE,
+        'NOT_OBSERVED', NULL)),
     'APPLIED'
 );
 SELECT expect_value(
@@ -145,10 +148,10 @@ SELECT expect_value(
     'INLINE:{"input":{"x":1},"options":null}'
 );
 SELECT expect_value(
-    'encode_task_attempts',
-    (SELECT (octet_length(attempt_snapshot) > 0)::text FROM horsies_task_history
+    'encode_attempt_archive',
+    (SELECT attempt_archive_version || ':' || (octet_length(attempt_snapshot) > 0)::text FROM horsies_task_history
      WHERE task_id = '00000000-0000-7000-8000-000000000004'),
-    'true'
+    '2:true'
 );
 
 -- Claimed expiry.
@@ -218,7 +221,8 @@ SELECT expect_value(
     'finish_workflow_success',
     (SELECT outcome FROM horsies_finish_workflow_success(
         '00000000-0000-7000-8000-00000000000c', 'w1',
-        (SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-00000000000c'), '{"ok":1}')),
+        (SELECT claimed_at FROM horsies_tasks WHERE id = '00000000-0000-7000-8000-00000000000c'), '{"ok":1}',
+        'NOT_OBSERVED', NULL)),
     'APPLIED'
 );
 

@@ -127,6 +127,16 @@ fn baseline_sql_files() -> Vec<(&'static str, &'static str)> {
     horsies_core::BASELINE_SQL_FILE_TEXTS.to_vec()
 }
 
+/// Every SQL file of the migration chain as `(migration version, file name,
+/// text)`, in the order they run: the files of migration 1000, then one file
+/// per later migration (`horsies_core::migration_sql_file_texts`). A test
+/// harness installs the schema of this build by running each text in this
+/// order. Pure: no I/O, and it starts no runtime.
+#[pyfunction]
+fn migration_sql_files() -> Vec<(i64, &'static str, &'static str)> {
+    horsies_core::migration_sql_file_texts()
+}
+
 /// Set what a panic in a core background task does in this process:
 /// `'STOP_CORE'` (the default: the core stops, every later call raises
 /// `CoreStopped`) or `'ABORT_PROCESS'` (a worker process: the panic is logged
@@ -381,6 +391,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<fleet_metrics::FleetMetricsStopped>()?;
     module.add_class::<fleet_metrics::FleetMetricsFailed>()?;
     module.add_function(wrap_pyfunction!(baseline_sql_files, module)?)?;
+    module.add_function(wrap_pyfunction!(migration_sql_files, module)?)?;
     module.add_function(wrap_pyfunction!(core_state, module)?)?;
     module.add_function(wrap_pyfunction!(mint_task_id, module)?)?;
     module.add_function(wrap_pyfunction!(

@@ -253,7 +253,7 @@ async fn start_a_then_b(pool: &TestPool) -> (Uuid, Uuid) {
         .expect("A has its task at start");
     sql::query(
         "UPDATE horsies_tasks
-         SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $2,
+         SET status = 'RUNNING', attempt_claims = 1, first_claimed_at = NOW(), claimed_at = NOW(), claimed_by_worker_id = $2,
              claim_expires_at = NULL, started_at = NOW(), worker_pid = 4242,
              worker_hostname = 'port-host', worker_process_name = 'port-process',
              updated_at = NOW()

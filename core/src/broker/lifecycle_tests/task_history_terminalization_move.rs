@@ -21,6 +21,7 @@ async fn fused_completion_moves_the_row() {
             task_id,
             fence: owned_claim(),
             result_json: result.to_owned(),
+            placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
         },
     )
     .await
@@ -83,6 +84,7 @@ async fn completed_is_never_eligible_even_with_retained_input() {
             task_id,
             fence: owned_claim(),
             result_json: r#"{"ok": 1}"#.to_owned(),
+            placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
         },
     )
     .await
@@ -160,6 +162,7 @@ async fn duplicate_identity_fails_closed() {
             task_id,
             fence: owned_claim(),
             result_json: r#"{"ok": 1}"#.to_owned(),
+            placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
         },
     )
     .await;

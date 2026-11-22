@@ -3847,6 +3847,12 @@ const FUNCTIONS: &[StubFunction] = &[
         doc: "Encode a preload frame: its bytes. Pure.",
     },
     StubFunction {
+        name: "migration_sql_files",
+        parameters: &[],
+        returns: TypeText::Plain("list[tuple[int, str, str]]"),
+        doc: "Every SQL file of the migration chain as (migration version, file name, text), in run\norder. Starts nothing.",
+    },
+    StubFunction {
         name: "mint_task_id",
         parameters: &[],
         returns: TypeText::Plain("uuid.UUID | IdMintRefused"),

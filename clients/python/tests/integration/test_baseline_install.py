@@ -35,13 +35,26 @@ from horsies.core.types.status import TaskStatus
 from horsies.monitoring import cancel_task
 from horsies.core.utils.url import to_psycopg_url
 from tests.sqlalchemy_url import sqlalchemy_url
-from tests.baseline_sql import baseline_checksum
+from tests.baseline_sql import migration_checksum, migration_versions
 from tests.integration.conftest import DB_URL
 from tests.integration.isolated_database import isolated_test_database
 
 pytestmark = [pytest.mark.integration]
 
 Connection = psycopg.AsyncConnection[tuple[object, ...]]
+
+_MIGRATION_DESCRIPTIONS: Final[dict[int, str]] = {
+    1000: 'baseline',
+    1001: 'lifecycle record',
+}
+"""The description that the bookkeeping row of each migration of the chain
+stores (``MIGRATION_SOURCES``, ``core/src/broker/migrations.rs``)."""
+
+_BOOKKEEPING_TIMES_SQL: Final[LiteralString] = """
+    SELECT array_agg(installed_on ORDER BY version), array_agg(execution_time ORDER BY version)
+    FROM horsies_migrations
+"""
+"""The install time and the run time of every bookkeeping row, in version order."""
 
 _OBJECT_COUNT_SQL: Final[LiteralString] = """
     SELECT
@@ -141,17 +154,30 @@ async def _publication_is_current(url: str) -> bool:
     return current
 
 
+def _chain_rows() -> list[tuple[object, ...]]:
+    """The bookkeeping row of each migration of the chain: version,
+    description, success, checksum."""
+    rows: list[tuple[object, ...]] = []
+    for version in migration_versions():
+        description = _MIGRATION_DESCRIPTIONS.get(version)
+        if description is None:
+            pytest.fail(f'migration {version} has no description in this test')
+        rows.append((version, description, True, migration_checksum(version)))
+    return rows
+
+
 @pytest.mark.asyncio(loop_scope='function')
-async def test_fresh_database_reaches_version_1000(database_url: str) -> None:
+async def test_fresh_database_reaches_the_newest_version(database_url: str) -> None:
+    """A fresh install applies every migration of the chain, migration 1000
+    first, each with its bookkeeping row."""
     await _installed(database_url)
     connection = await _connect(database_url)
     try:
         cursor = await connection.execute(
-            'SELECT version, description, success, checksum FROM horsies_migrations'
+            'SELECT version, description, success, checksum FROM horsies_migrations '
+            'ORDER BY version'
         )
-        assert await cursor.fetchall() == [
-            (1000, 'baseline', True, baseline_checksum()),
-        ]
+        assert await cursor.fetchall() == _chain_rows()
         assert await _fetch_one(connection, 'SELECT only_row, family FROM horsies_client_family') == (
             True,
             'PYTHON',
@@ -166,13 +192,13 @@ async def test_second_install_changes_nothing(database_url: str) -> None:
     connection = await _connect(database_url)
     try:
         before = (
-            await _fetch_one(connection, 'SELECT installed_on, execution_time FROM horsies_migrations'),
+            await _fetch_one(connection, _BOOKKEEPING_TIMES_SQL),
             await _fetch_one(connection, 'SELECT recorded_at FROM horsies_client_family'),
             await _fetch_one(connection, _OBJECT_COUNT_SQL),
         )
         await _installed(database_url)
         after = (
-            await _fetch_one(connection, 'SELECT installed_on, execution_time FROM horsies_migrations'),
+            await _fetch_one(connection, _BOOKKEEPING_TIMES_SQL),
             await _fetch_one(connection, 'SELECT recorded_at FROM horsies_client_family'),
             await _fetch_one(connection, _OBJECT_COUNT_SQL),
         )
@@ -182,12 +208,14 @@ async def test_second_install_changes_nothing(database_url: str) -> None:
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_concurrent_installs_apply_the_migration_once(database_url: str) -> None:
+async def test_concurrent_installs_apply_each_migration_once(database_url: str) -> None:
     results = await asyncio.gather(*(_initialize(database_url) for _ in range(3)))
     assert results == [Ok(None)] * 3
     connection = await _connect(database_url)
     try:
-        assert await _fetch_one(connection, 'SELECT count(*) FROM horsies_migrations') == (1,)
+        assert await _fetch_one(connection, 'SELECT count(*) FROM horsies_migrations') == (
+            len(migration_versions()),
+        )
     finally:
         await connection.close()
 
@@ -344,17 +372,10 @@ async def test_an_install_that_stopped_before_the_publication_is_completed(
             'horsies_task_detail_staged(uuid)',
             'horsies_task_result_staged(uuid)',
         ]
-        before = await _fetch_one(
-            connection, 'SELECT installed_on, execution_time FROM horsies_migrations'
-        )
+        before = await _fetch_one(connection, _BOOKKEEPING_TIMES_SQL)
         await _installed(database_url)
         assert await _missing_readers(connection) is None
-        assert (
-            await _fetch_one(
-                connection, 'SELECT installed_on, execution_time FROM horsies_migrations'
-            )
-            == before
-        )
+        assert await _fetch_one(connection, _BOOKKEEPING_TIMES_SQL) == before
     finally:
         await connection.close()
     assert await _publication_is_current(database_url)
@@ -410,8 +431,9 @@ async def test_unknown_horsies_tables_are_refused(database_url: str) -> None:
     [
         ("UPDATE horsies_migrations SET checksum = sha256('other'::bytea)", 'applied from another text'),
         ('UPDATE horsies_migrations SET success = FALSE', 'recorded as failed'),
+        # A version above every migration that this build ships.
         (
-            "INSERT INTO horsies_migrations VALUES (1001, 'later', now(), TRUE, sha256('x'::bytea), 1)",
+            "INSERT INTO horsies_migrations VALUES (9999, 'later', now(), TRUE, sha256('x'::bytea), 1)",
             'newer than this build supports',
         ),
         (
@@ -496,7 +518,8 @@ async def test_missing_family_row_is_written(database_url: str) -> None:
 
 @pytest.mark.asyncio(loop_scope='function')
 async def test_install_holds_the_objects_of_the_0_7_0_schema_checks(database_url: str) -> None:
-    """The execution column and its CHECK, the class claim index, class_capacity, the batched success."""
+    """The execution column and its CHECK, the class claim index, class_capacity, the batched success
+    (with the attempt placement arguments of migration 1001)."""
     await _installed(database_url)
     connection = await _connect(database_url)
     try:
@@ -512,7 +535,8 @@ async def test_install_holds_the_objects_of_the_0_7_0_schema_checks(database_url
                 (SELECT attnotnull FROM pg_attribute
                  WHERE attrelid = 'horsies_worker_states'::regclass AND attname = 'class_capacity'),
                 to_regprocedure(
-                    'horsies_complete_tasks_fused(uuid[], timestamptz[], text[], text, boolean)'
+                    'horsies_complete_tasks_fused('
+                    'uuid[], timestamptz[], text[], text, boolean, text[], bigint[])'
                 ) IS NOT NULL
             """,
         )

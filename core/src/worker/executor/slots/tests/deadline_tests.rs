@@ -221,6 +221,7 @@ async fn a_lost_child_names_its_exit_in_the_crash_reason() {
         OperationalErrorCode::WorkerCrashed.into(),
         reason.as_str().to_owned(),
         RetryPlacement::SameClass,
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
     );
     assert_eq!(write.error_code.as_deref(), Some("WORKER_CRASHED"));
     assert_eq!(

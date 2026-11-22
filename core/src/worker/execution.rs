@@ -40,8 +40,8 @@ use crate::core::codec::user_value::{
 #[cfg(test)]
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::lifecycle::{
-    AfterFailure, AttemptWriteRefusal, FailedAttemptOutcome, OwnedClaim, PhaseTwoStep,
-    TerminalizationCommand, TerminalizationOutcome, UnreportedAttemptOutcome,
+    AfterFailure, AttemptPlacement, AttemptWriteRefusal, FailedAttemptOutcome, OwnedClaim,
+    PhaseTwoStep, TerminalizationCommand, TerminalizationOutcome, UnreportedAttemptOutcome,
     WorkflowSuccessOutcome,
 };
 use crate::core::task::error::{OperationalErrorCode, TaskError};
@@ -414,6 +414,7 @@ pub(crate) async fn persist_terminal_state(
                 result_bytes,
                 fence,
                 is_workflow_task,
+                AttemptPlacement::NotObserved,
             )
             .await
         }
@@ -455,6 +456,7 @@ pub(crate) async fn persist_terminal_state(
                     error_message: task_error.message.clone(),
                     failed_reason: None,
                 },
+                placement: AttemptPlacement::NotObserved,
             };
             persist_failed_attempt(broker, &command, task.log(), is_workflow_task).await
         }
@@ -489,7 +491,8 @@ fn retry_request_for(
 }
 
 /// Persist a success, or fail a result that is not valid JSON. `log` names
-/// the attempt in the records of the write.
+/// the attempt in the records of the write; `placement` is the placement of
+/// the attempt that its attempt row keeps.
 pub(crate) async fn persist_ok_result(
     broker: &PostgresBroker,
     task_id: Uuid,
@@ -497,6 +500,7 @@ pub(crate) async fn persist_ok_result(
     result_bytes: &[u8],
     fence: OwnedClaim,
     is_workflow_task: bool,
+    placement: AttemptPlacement,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     // Wrap the task's result bytes via `&RawValue`: parsing validates the JSON,
     // and the adjacently-tagged wrapper embeds the original bytes verbatim
@@ -511,6 +515,7 @@ pub(crate) async fn persist_ok_result(
                 fence,
                 is_workflow_task,
                 &parse_error.to_string(),
+                placement,
             )
             .await
         }
@@ -518,8 +523,8 @@ pub(crate) async fn persist_ok_result(
     let result_json = serde_json::to_string(&TaskResult::Ok(raw))
         .map_err(|error| envelope_error(task_id, &error))?;
     match is_workflow_task {
-        true => persist_workflow_success(broker, task_id, fence, result_json).await,
-        false => persist_plain_success(broker, task_id, fence, result_json).await,
+        true => persist_workflow_success(broker, task_id, fence, result_json, placement).await,
+        false => persist_plain_success(broker, task_id, fence, result_json, placement).await,
     }
 }
 
@@ -531,11 +536,13 @@ async fn persist_plain_success(
     task_id: Uuid,
     fence: OwnedClaim,
     result_json: String,
+    placement: AttemptPlacement,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let command = TerminalizationCommand::CompleteTaskFused {
         task_id,
         fence,
         result_json,
+        placement,
     };
     let (open, _write) = broker
         .core_pools_for_write()
@@ -569,11 +576,13 @@ async fn persist_workflow_success(
     task_id: Uuid,
     fence: OwnedClaim,
     result_json: String,
+    placement: AttemptPlacement,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let command = FinishWorkflowSuccess {
         task_id,
         fence,
         result_json,
+        placement,
     };
     let (open, _write) = broker
         .core_pools_for_write()
@@ -600,7 +609,8 @@ async fn persist_workflow_success(
 /// A result that is not valid JSON fails the task with
 /// `WORKER_SERIALIZATION_ERROR`, never retried, with the decode diagnosis as
 /// the attempt message (Python `ResultUndecodable`). `log` names the
-/// attempt in the records of the write.
+/// attempt in the records of the write; `placement` is the placement of the
+/// attempt that its attempt row keeps.
 pub(crate) async fn persist_undecodable_result(
     broker: &PostgresBroker,
     task_id: Uuid,
@@ -608,6 +618,7 @@ pub(crate) async fn persist_undecodable_result(
     fence: OwnedClaim,
     is_workflow_task: bool,
     diagnosis: &str,
+    placement: AttemptPlacement,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let message = format!("failed to parse task result JSON: {diagnosis}");
     let error = TaskError::builtin(
@@ -628,6 +639,7 @@ pub(crate) async fn persist_undecodable_result(
             error_message: Some(message),
             failed_reason: None,
         },
+        placement,
     };
     persist_failed_attempt(broker, &command, log, is_workflow_task).await
 }

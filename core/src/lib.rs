@@ -102,8 +102,9 @@ pub use crate::core::history::maintenance::coverage::{
 pub use crate::core::history::maintenance::pruning::{PrunePass, PruneReach};
 pub use crate::core::history::periods::RetentionDays;
 
-// The baseline SQL files, which horsies._core hands to the Python install.
-pub use crate::broker::migrations::BASELINE_SQL_FILE_TEXTS;
+// The baseline SQL files, which horsies._core hands to the Python install,
+// and every SQL file of the migration chain, for the test harnesses.
+pub use crate::broker::migrations::{migration_sql_file_texts, BASELINE_SQL_FILE_TEXTS};
 
 // lifecycle operations of a client handle (`PostgresBroker::release_claims`,
 // `PostgresBroker::requeue_stale_claimed`, `PostgresBroker::cancel_task`)

@@ -2,8 +2,10 @@
 //! ([`crate::test_support::sql::Target`]): a pool, a session, or the session
 //! of an open transaction (`&mut *transaction`).
 //!
-//! Each function runs the baseline function that a run of the core calls for
-//! that end (`baseline/0004_lifecycle_functions.sql`), with no retry, and
+//! Each function runs the function that a run of the core calls for that end
+//! (`baseline/0004_lifecycle_functions.sql`, the writers that
+//! `migrations/1001_lifecycle_record.sql` replaces), with no retry and, for a
+//! writer that takes one, no observed placement (`NOT_OBSERVED`), and
 //! decodes the ten outcome columns of its row with the product decoder
 //! ([`decode_outcome_row`]). A seed that needs a terminal row gets it
 //! here, through the write path of a real run, never through an insert of a
@@ -38,7 +40,8 @@ pub(super) const COMPLETE_PLAIN_TASK_SQL: &str = "SELECT task_id, ordinality, ou
         terminalization_kind, observed_status, observed_worker_id, observed_claimed_at,
         guard_kind, observed_guard
      FROM horsies_complete_task_fused(
-         $1, $2, (SELECT t.claimed_at FROM horsies_tasks t WHERE t.id = $1), $3, TRUE)";
+         $1, $2, (SELECT t.claimed_at FROM horsies_tasks t WHERE t.id = $1), $3, TRUE,
+         'NOT_OBSERVED', NULL)";
 
 /// `horsies_finish_workflow_success`, phase 1 of a workflow task's success.
 /// Parameters: task id, worker id, result.
@@ -47,7 +50,8 @@ pub(super) const COMPLETE_WORKFLOW_TASK_SQL: &str =
         terminalization_kind, observed_status, observed_worker_id, observed_claimed_at,
         guard_kind, observed_guard
      FROM horsies_finish_workflow_success(
-         $1, $2, (SELECT t.claimed_at FROM horsies_tasks t WHERE t.id = $1), $3)";
+         $1, $2, (SELECT t.claimed_at FROM horsies_tasks t WHERE t.id = $1), $3, 'NOT_OBSERVED',
+         NULL)";
 
 /// [`COMPLETE_WORKFLOW_TASK_SQL`] under the caller's claim generation.
 /// Parameters: task id, worker id, claim generation, result.
@@ -55,7 +59,7 @@ pub(super) const COMPLETE_WORKFLOW_TASK_AT_SQL: &str =
     "SELECT task_id, ordinality, outcome, terminal_at,
         terminalization_kind, observed_status, observed_worker_id, observed_claimed_at,
         guard_kind, observed_guard
-     FROM horsies_finish_workflow_success($1, $2, $3, $4)";
+     FROM horsies_finish_workflow_success($1, $2, $3, $4, 'NOT_OBSERVED', NULL)";
 
 /// `horsies_finish_failed_attempt` with no retry, under the claimed-row rule
 /// `REFUSE` and with the capacity wake, as the worker's failure of a task
@@ -66,7 +70,7 @@ pub(super) const FAIL_RUNNING_TASK_SQL: &str = "SELECT task_id, ordinality, outc
         guard_kind, observed_guard
      FROM horsies_finish_failed_attempt(
          $1, $2, (SELECT t.claimed_at FROM horsies_tasks t WHERE t.id = $1),
-         'NONE', NULL, NULL, NULL, $3, $4, $5, $6, $7, $8, 'REFUSE', TRUE)";
+         'NONE', NULL, NULL, NULL, $3, $4, $5, $6, $7, $8, 'REFUSE', TRUE, 'NOT_OBSERVED', NULL)";
 
 /// [`FAIL_RUNNING_TASK_SQL`] under the caller's claim generation.
 /// Parameters: task id, worker id, claim generation, result, error code,
@@ -76,7 +80,8 @@ pub(super) const FAIL_RUNNING_TASK_AT_SQL: &str =
         terminalization_kind, observed_status, observed_worker_id, observed_claimed_at,
         guard_kind, observed_guard
      FROM horsies_finish_failed_attempt(
-         $1, $2, $3, 'NONE', NULL, NULL, NULL, $4, $5, $6, $7, $8, $9, 'REFUSE', TRUE)";
+         $1, $2, $3, 'NONE', NULL, NULL, NULL, $4, $5, $6, $7, $8, $9, 'REFUSE', TRUE,
+         'NOT_OBSERVED', NULL)";
 
 /// `horsies_finish_stale_attempt` with no retry, as the stale RUNNING pass
 /// writes the failure: the attempt message and reason are the failed reason.

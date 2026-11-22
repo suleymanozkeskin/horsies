@@ -88,7 +88,7 @@ async fn run_node_a(pool: &TestPool, workflow_id: Uuid) -> RunningNode {
         .expect("node A has a task");
     let held = sql::query(
         "UPDATE horsies_tasks
-         SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $2,
+         SET status = 'RUNNING', attempt_claims = 1, first_claimed_at = NOW(), claimed_at = NOW(), claimed_by_worker_id = $2,
              claim_expires_at = NULL, started_at = NOW(), worker_pid = $3,
              worker_hostname = $4, worker_process_name = $5, updated_at = NOW()
          WHERE id = $1 AND status = 'PENDING'",
@@ -291,6 +291,7 @@ async fn a_replay_of_a_committed_success_runs_phase_two() {
                 claimed_at: node_a.claimed_at(),
             },
             result_json: ok_json(),
+            placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
         },
     )
     .await
@@ -356,6 +357,7 @@ async fn a_lost_reply_is_retried_and_the_replay_runs_phase_two() {
                     claimed_at: Utc::now(),
                 },
                 result_json: ok_json(),
+                placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
             },
         )
         .await

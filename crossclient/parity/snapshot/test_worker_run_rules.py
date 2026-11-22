@@ -94,11 +94,15 @@ def test_the_attempt_archive_adds_the_process_id_and_kill_report_fields() -> Non
     ignored = added[: len(ARCHIVE_PROCESS_ID_POSITIONS)]
     reports = added[len(ARCHIVE_PROCESS_ID_POSITIONS) :]
     assert [path.steps for path in ignored] == [
-        (EachItem(), Index(position=position)) for position in ARCHIVE_PROCESS_ID_POSITIONS
+        (Index(position=0), EachItem(), Index(position=position))
+        for position in ARCHIVE_PROCESS_ID_POSITIONS
     ]
     assert all(isinstance(path.rule, Ignored) for path in ignored)
     assert list(reports) == [
-        JsonPath(steps=(EachItem(), Index(position=position)), rule=KILL_REPORT_MEASURES)
+        JsonPath(
+            steps=(Index(position=0), EachItem(), Index(position=position)),
+            rule=KILL_REPORT_MEASURES,
+        )
         for position in ARCHIVE_REPORT_POSITIONS
     ]
 

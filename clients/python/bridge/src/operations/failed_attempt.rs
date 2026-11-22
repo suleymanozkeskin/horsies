@@ -21,7 +21,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use horsies_core::core::lifecycle::{
-    AfterFailure, FailedAttemptOutcome, OwnedClaim, RetryRefusal, UnreportedAttemptOutcome,
+    AfterFailure, AttemptPlacement, FailedAttemptOutcome, OwnedClaim, RetryRefusal,
+    UnreportedAttemptOutcome,
 };
 use horsies_core::{
     AttemptFailure, AttemptFailureKind, BrokerError, FinishFailedAttempt, RetryPlacement,
@@ -180,6 +181,8 @@ impl FinishFailedAttemptRequest {
                     error_message: attempt_error_message,
                     failed_reason: attempt_failed_reason,
                 },
+                // The call carries no placement of the attempt on a child.
+                placement: AttemptPlacement::NotObserved,
             }),
         })
     }

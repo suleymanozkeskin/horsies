@@ -117,7 +117,7 @@ async fn start(client: &tokio_postgres::Client, rows: i64) {
     client
         .execute(
             "UPDATE horsies_tasks
-             SET status = 'RUNNING', claimed_at = NOW(),
+             SET status = 'RUNNING', attempt_claims = 1, first_claimed_at = NOW(), claimed_at = NOW(),
                  claimed_by_worker_id = $1, started_at = NOW()
              WHERE id IN (
                  SELECT id FROM horsies_tasks WHERE status = 'PENDING' ORDER BY id LIMIT $2

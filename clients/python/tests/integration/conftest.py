@@ -319,7 +319,7 @@ _RUN_NODE_TASK_SQL = text("""
     SET status = 'RUNNING', claimed_at = now(), claimed_by_worker_id = :worker,
         claim_expires_at = NULL, started_at = now(), worker_pid = 4242,
         worker_hostname = 'integration-host', worker_process_name = 'integration-worker',
-        updated_at = now()
+        updated_at = now(), attempt_claims = 1, first_claimed_at = now()
     WHERE id = CAST(:task AS uuid) AND status IN ('PENDING', 'CLAIMED')
     RETURNING claimed_at
 """)

@@ -464,6 +464,7 @@ async fn complete_replay_within_class_is_already_applied() {
             task_id: uuid(&id),
             fence: owned("w1", generation),
             result_json: "{}".to_owned(),
+            placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
         },
     )
     .await
@@ -562,6 +563,7 @@ async fn fused_applies_with_attempt_notify_and_generation_fence() {
             task_id: uuid(&id),
             fence: owned("w1", claimed_at),
             result_json: "{\"Ok\":7}".to_owned(),
+            placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
         },
     )
     .await
@@ -582,7 +584,7 @@ async fn fused_applies_with_attempt_notify_and_generation_fence() {
     );
     assert_phase2_presence(&pool, &id, false).await;
 
-    // The baseline stores no codec or content type: archive format version 1
+    // History stores no codec or content type: each attempt archive version
     // implies the json-utf8 codec and the application/json content type.
     let (version, snapshot, digest): (i16, Vec<u8>, Vec<u8>) = sql::query_as(
         "SELECT attempt_archive_version, attempt_snapshot, attempt_snapshot_digest
@@ -670,6 +672,7 @@ async fn move_terminalizes_the_key_reservation_at_the_history_anchor() {
             task_id: uuid(&id),
             fence: owned("w1", seeded_generation(&pool, &id).await),
             result_json: "{}".to_owned(),
+            placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
         },
     )
     .await
@@ -713,6 +716,7 @@ async fn fused_stale_generation_is_lost_claim() {
             task_id: uuid(&id),
             fence: owned("w1", stale),
             result_json: "{}".to_owned(),
+            placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
         },
     )
     .await
@@ -755,6 +759,7 @@ async fn fused_on_matching_claim_outside_source_state_is_conflict() {
             task_id: uuid(&id),
             fence: owned("w1", claimed_at),
             result_json: "{}".to_owned(),
+            placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
         },
     )
     .await
@@ -1322,6 +1327,7 @@ async fn cancel_task_refuses_workflow_tasks_and_never_overwrites_terminal() {
             task_id: uuid(&done),
             fence: owned("w1", seeded_generation(&pool, &done).await),
             result_json: "{}".to_owned(),
+            placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
         },
     )
     .await
@@ -2685,25 +2691,25 @@ async fn batch_terminalization_encodes_each_attempt_snapshot_once() {
 
 async fn assert_batch_snapshot_encoding(pool: &TestPool) {
     let definition: String = sql::query_scalar(
-        "SELECT pg_get_functiondef('horsies_encode_task_attempts(uuid)'::regprocedure)",
+        "SELECT pg_get_functiondef('horsies_encode_attempt_archive(horsies_tasks)'::regprocedure)",
     )
     .fetch_one(pool)
     .await
     .unwrap();
     sql::raw_sql(&definition.replace(
-        "horsies_encode_task_attempts",
-        "test_encode_task_attempts_original",
+        "horsies_encode_attempt_archive",
+        "test_encode_attempt_archive_original",
     ))
     .execute(pool)
     .await
     .unwrap();
     sql::raw_sql(
         "CREATE TABLE test_attempt_encoding_calls (task_id uuid NOT NULL);
-     CREATE OR REPLACE FUNCTION horsies_encode_task_attempts(p_task_id uuid)
+     CREATE OR REPLACE FUNCTION horsies_encode_attempt_archive(p_task horsies_tasks)
      RETURNS bytea LANGUAGE plpgsql VOLATILE STRICT AS $$
      BEGIN
-         INSERT INTO test_attempt_encoding_calls VALUES (p_task_id);
-         RETURN test_encode_task_attempts_original(p_task_id);
+         INSERT INTO test_attempt_encoding_calls VALUES (p_task.id);
+         RETURN test_encode_attempt_archive_original(p_task);
      END $$;",
     )
     .execute(pool)
@@ -2772,12 +2778,14 @@ async fn assert_batch_snapshot_encoding(pool: &TestPool) {
                 .await
                 .unwrap();
             }
-            let expected: Vec<u8> =
-                sql::query_scalar("SELECT test_encode_task_attempts_original($1)")
-                    .bind(id)
-                    .fetch_one(pool)
-                    .await
-                    .unwrap();
+            let expected: Vec<u8> = sql::query_scalar(
+                "SELECT test_encode_attempt_archive_original(t) FROM horsies_tasks AS t
+                 WHERE t.id = $1",
+            )
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
             snapshots.push(expected);
         }
         // One outcome row per task; a refusal row is not a move.

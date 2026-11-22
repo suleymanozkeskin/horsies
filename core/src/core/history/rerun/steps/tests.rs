@@ -9,7 +9,10 @@ use chrono::Duration;
 use sha2::{Digest, Sha256};
 
 use super::*;
-use crate::core::history::archive::attempts::encode_attempt_snapshot;
+use crate::core::history::archive::attempts::{
+    encode_attempt_archive, encode_attempt_snapshot, Finalizing, OpenAttempt, OpenAttemptFacts,
+    OpenClaims,
+};
 use crate::core::history::identity::keys::IDEMPOTENCY_SCOPE_VERSION;
 
 const SOURCE: Uuid = Uuid::from_u128(0x0190_f0f0_0000_7000_8000_0000_0000_00e0);
@@ -292,6 +295,44 @@ fn a_history_row_that_does_not_decode_is_a_corrupt_source() {
     );
     assert!(matches!(
         refusal(snapshot),
+        RerunRefusal::SourceCorrupt { .. }
+    ));
+}
+
+/// A source whose attempts history keeps in archive version 2 (migration
+/// 1001) prepares its write as a version-1 source does; an archive version
+/// that the attempt domain does not retain is a corrupt source.
+#[test]
+fn a_source_archived_in_version_two_is_read_and_an_unknown_version_is_corrupt() {
+    let open = OpenAttempt::Open(OpenAttemptFacts::new(
+        OpenClaims::NotClaimed,
+        Finalizing::NotMarked,
+    ));
+    let archive = encode_attempt_archive(&[], &open).expect("an empty version-2 archive");
+    let version_two = with(
+        with(
+            with(
+                history_values(),
+                "attempt_archive_version",
+                StatementValue::Int2(archive.version),
+            ),
+            "attempt_snapshot",
+            StatementValue::Bytea(archive.payload.clone()),
+        ),
+        "attempt_snapshot_digest",
+        StatementValue::Bytea(archive.digest.to_vec()),
+    );
+    assert!(matches!(
+        prepare_values(version_two.clone(), None),
+        RerunPreparation::Write(_)
+    ));
+    let version_three = with(
+        version_two,
+        "attempt_archive_version",
+        StatementValue::Int2(3),
+    );
+    assert!(matches!(
+        refusal(version_three),
         RerunRefusal::SourceCorrupt { .. }
     ));
 }

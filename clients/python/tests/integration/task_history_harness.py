@@ -1,9 +1,9 @@
 """Disposable-schema harness for task-history integration tests.
 
-Each test gets its own PostgreSQL schema with the baseline migration
+Each test gets its own PostgreSQL schema with the migration chain
 installed and `search_path` baked into every connection the engine hands
 out — including the autocommit connections the detach path creates for
-itself. The baseline SQL names no schema, so every relation and function
+itself. The migration SQL names no schema, so every relation and function
 resolves into the disposable schema.
 
 Nothing here touches shared relations: setup creates the schema, teardown
@@ -23,7 +23,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from tests.attempt_snapshot_support import encode_attempt_snapshot
-from tests.baseline_sql import baseline_sql
+from tests.baseline_sql import chain_sql
 from tests.integration.history_seeding import publish_history_readers
 from tests.task_ids import mint_task_id
 from tests.sqlalchemy_url import sqlalchemy_url
@@ -52,8 +52,8 @@ class HistorySchema:
     engine: AsyncEngine
 
 
-async def install_baseline_schema(connection: AsyncConnection) -> None:
-    """Run the baseline migration in the connection's current schema.
+async def install_chain_schema(connection: AsyncConnection) -> None:
+    """Run the text of the migration chain in the connection's current schema.
 
     The text goes through the driver connection with no parameters, so
     psycopg sends it with the simple query protocol and reads no
@@ -62,7 +62,7 @@ async def install_baseline_schema(connection: AsyncConnection) -> None:
     raw = await connection.get_raw_connection()
     driver = raw.driver_connection
     assert driver is not None, 'the engine has a driver connection'
-    await driver.execute(baseline_sql().encode('utf-8'))
+    await driver.execute(chain_sql().encode('utf-8'))
 
 
 def task_history_schema_fixture(schema_name: str):  # type: ignore[no-untyped-def]
@@ -89,7 +89,7 @@ def task_history_schema_fixture(schema_name: str):  # type: ignore[no-untyped-de
             connect_args={'options': f'-csearch_path={schema_name}'},
         )
         async with engine.begin() as connection:
-            await install_baseline_schema(connection)
+            await install_chain_schema(connection)
         yield HistorySchema(schema_name=schema_name, engine=engine)
         await engine.dispose()
         async with admin_engine.connect() as connection:
@@ -255,7 +255,7 @@ def terminalization_schema_fixture(  # type: ignore[no-untyped-def]
             connect_args={'options': f'-csearch_path={schema_name}'},
         )
         async with engine.begin() as connection:
-            await install_baseline_schema(connection)
+            await install_chain_schema(connection)
         yield HistorySchema(schema_name=schema_name, engine=engine)
         await engine.dispose()
         async with admin_engine.connect() as connection:
