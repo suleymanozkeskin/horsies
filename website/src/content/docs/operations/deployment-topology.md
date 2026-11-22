@@ -20,7 +20,7 @@ Run horsies on its own PostgreSQL instance, apart from the instance of the appli
 
 | Resource | What horsies uses | On a dedicated instance |
 | -------- | ----------------- | ----------------------- |
-| Connections | A worker with 8 isolated children holds 16 connections at the defaults. One of them is the session of its liveness lock. A producer holds a pool of up to `pool_size + max_overflow` connections, 15 at the defaults | The connections count against the `max_connections` of the horsies instance only |
+| Connections | A worker with 8 isolated children holds 16 connections at the defaults. One of them is the session of its liveness lock. A producer holds a pool of up to `pool_size + max_overflow` connections | The connections count against the `max_connections` of the horsies instance only |
 | Writes and vacuum | Each task writes and deletes rows in tables with a high rate of change: the claim, the heartbeats, the attempt, the move to history. Partition maintenance creates and drops partitions every `partition_maintenance_interval_s` | The WAL, the autovacuum workers and the table settings of [Autovacuum Tuning](/horsies/operations/autovacuum-tuning/) serve horsies only |
 | Commit durability | Each claim pass, attempt start and task end is a commit | The settings of [Settings That Lose No Commit](#settings-that-lose-no-commit) apply to horsies only. They add no standby round trip to the commits of the application |
 | Access | Write access to `horsies_tasks` is the privilege to run tasks | The roles of the instance limit who can write the horsies tables. See [Trust Boundary](/horsies/internals/database-schema/#trust-boundary) |
