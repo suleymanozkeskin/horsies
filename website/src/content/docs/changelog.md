@@ -44,6 +44,33 @@ there is no migration contract between pre-1.0 versions.
   `HandleOperationError::connect_failed` take their first argument by
   reference.
 
+### Documentation
+
+- **New page: Deployment Topology** (`operations/deployment-topology`). It
+  recommends a dedicated PostgreSQL instance for horsies and gives the
+  reasons: connections, writes and vacuum, commit durability, access. It
+  states the transaction boundary between the application write and the
+  send, and the connections of each URL with the pooler mode that each
+  URL accepts. It states what a failover under asynchronous replication
+  can lose and what follows for each loss: a send with its key
+  reservation, a workflow start, a claim or an attempt start, the end of a
+  task, the workflow progress of a finished task, and the worker liveness
+  lock. It names the settings that lose no commit
+  (`synchronous_standby_names`, `synchronous_commit`) and the design for
+  asynchronous replication.
+- **Retention Config: the guarantees that end with retention.** A table
+  gives each guarantee that reads a record, and when the record ends: the
+  key reservation (the reservation window after the end of the task, 24
+  hours by default, at most 30 days), the workflow row of a start with the
+  same workflow id (`terminal_record_retention_hours`, 720 hours by
+  default), the task history record with its attempts (the period of its
+  retention class), and the heartbeat partitions
+  (`heartbeat_leaf_horizon_hours`).
+- **Retention Config and Database Schema: `heartbeat_leaf_horizon_hours`
+  is also the heartbeat window.** A heartbeat partition is dropped
+  `heartbeat_leaf_horizon_hours` after its hour ends. The pages said that
+  the setting controls only the partitions kept ahead.
+
 ## 0.8.0 — 2026-11-21
 
 0.8.0 runs the Python client and the Rust client on one core, written in

@@ -133,7 +133,7 @@ delete:
 | Category | Mechanism | Setting |
 |---|---|---|
 | Terminal **task** records | **Partition drop** — records live in `horsies_task_history`, partitioned by the retention class assigned at enqueue; a partition past its class's window is dropped whole | `queue_retention` per queue, or `retention` per send |
-| Heartbeats | **Partition drop** — hourly partitions drop whole | `heartbeat_leaf_horizon_hours` (coverage, not the window) |
+| Heartbeats | **Partition drop** — hourly partitions drop whole | `heartbeat_leaf_horizon_hours` (the window, and the coverage ahead) |
 | Terminal **workflow** records | **Row delete** in batches | `terminal_record_retention_hours` |
 | Worker states | **Row delete**, same sweep | `worker_state_retention_hours` |
 
@@ -141,6 +141,26 @@ A partition drop returns its space to the filesystem at once. A row
 delete marks tuples dead and returns nothing until autovacuum reaches
 them, so the two are not interchangeable — which is why terminal task
 records use the first.
+
+## Guarantees That End with Retention
+
+A guarantee that reads a record holds only while the record exists. The
+table gives each such guarantee, the record that it reads, when the record
+ends, and the setting that moves the end.
+
+| Guarantee | Record | Ends | Setting |
+|---|---|---|---|
+| A repeat of a keyed send returns the first task, or a conflict that names it | The key reservation | It holds while the task is live. It ends when the reservation window has passed after the end of the task: 24 hours by default, at most 30 days | The reservation window; see [Make the Send Repeatable](/horsies/operations/atomic-enqueue-and-topology/#make-the-send-repeatable-with-an-idempotency-key) |
+| A start with the same workflow id returns the first workflow | The workflow row | At least `terminal_record_retention_hours` after the end of the workflow: 720 hours (30 days) by default. The next retention sweep deletes it. A workflow that has a live task keeps its row | `terminal_record_retention_hours`; `None` keeps the rows |
+| A read of a finished task: its status, result, error and attempts. A rerun of the task | The task history record. The attempts are archived in it | At least the period of its retention class after the end of the task: 30 days by default. See [Retention classes](#retention-classes) | `queue_retention`, or the retention of the send; `None` keeps the record |
+| A read of the heartbeats of a task | The hourly heartbeat partition | At least `heartbeat_leaf_horizon_hours` after the end of its UTC hour: 6 hours by default, 2 to 48. The next maintenance pass drops it | `heartbeat_leaf_horizon_hours` |
+
+For a longer dedupe or audit horizon, raise the setting, or keep your own
+record of the key or of the outcome.
+
+The records end independently. A key reservation can outlive the history
+record of its task: a repeat of the send then returns the id of a task
+whose record is gone.
 
 ## Retention classes
 
@@ -191,11 +211,14 @@ another number of days for that period.
 | Setting | Default | Controls |
 |---|---|---|
 | `history_leaf_horizon_days` | 3 | complete future daily history partitions kept ahead of writes (2–14) |
-| `heartbeat_leaf_horizon_hours` | 6 | complete future hourly heartbeat partitions kept ahead (2–48) |
+| `heartbeat_leaf_horizon_hours` | 6 | complete future hourly heartbeat partitions kept ahead, and the hours that a heartbeat partition is kept after its hour ends (2–48) |
 | `partition_maintenance_interval_s` | 900 | seconds between coverage and pruning passes (60–3600) |
 
-These decide how far **ahead** storage is prepared, not how long records
-live. Raising `history_leaf_horizon_days` does not keep tasks longer.
+`history_leaf_horizon_days` decides how far **ahead** storage is
+prepared, not how long records live. Raising `history_leaf_horizon_days`
+does not keep tasks longer. `heartbeat_leaf_horizon_hours` decides both:
+the hourly partitions kept ahead, and the hours that a heartbeat partition
+is kept after its hour ends.
 
 The same pass that creates partitions ahead also drops those past their
 horizon. A refused drop — recovery evidence still pinning it, or a

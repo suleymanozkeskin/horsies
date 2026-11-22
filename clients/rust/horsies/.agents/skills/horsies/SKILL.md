@@ -32,6 +32,11 @@ read `https://suleymanozkeskin.github.io/horsies/rust/llms.txt`.
 - Use a dedicated PostgreSQL instance for the broker. Ownership,
   finalization and workflow transitions are transactional state changes in
   that database.
+- A failover under asynchronous replication can lose committed sends,
+  claims, task ends and workflow progress, so a task body can run again.
+  Use synchronous replication for the horsies instance, or make each effect
+  outside horsies idempotent. The reasons, the connections of each URL and
+  the failover limits are on the docs page `operations/deployment-topology`.
 - A database belongs to one client. The core refuses a database that the
   Python client installed.
 - 0.8.0 starts on a new database. The core refuses a database of
