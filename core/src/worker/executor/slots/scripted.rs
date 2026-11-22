@@ -50,18 +50,15 @@ pub(super) const ANSWER_WAIT: Duration = Duration::from_secs(60);
 pub(crate) const STATE_WAIT: Duration = Duration::from_secs(30);
 /// The bound of the spawner stop at the end of a test.
 pub(crate) const SPAWNER_STOP_WAIT: Duration = Duration::from_secs(10);
-/// The most `mkdir` calls that one child makes for its ticket (see
-/// [`ticket`]). Every call counts: a ticket that exists and a failed call.
-/// No test boots this many children, so only a child whose `mkdir` keeps
-/// failing reaches it.
+/// The most creates that one child tries for its ticket (see [`ticket`]).
+/// Every try counts: a ticket that exists and a failed create. No test
+/// boots this many children, so only a child whose create keeps failing
+/// reaches it.
 const TICKET_ATTEMPTS: u32 = 64;
 /// The exit code of a child that took no ticket in [`TICKET_ATTEMPTS`]
-/// calls. No other scripted child and no exit code of the child protocol
+/// tries. No other scripted child and no exit code of the child protocol
 /// uses it.
 const NO_TICKET_EXIT_CODE: i32 = 97;
-/// The file in a ticket folder that holds the pid of the child that took
-/// the ticket.
-const TICKET_PID_FILE: &str = "pid";
 
 /// The claim generation of every scripted task.
 pub(super) fn claimed_at() -> DateTime<Utc> {
@@ -529,22 +526,27 @@ pub(super) fn idle_child(init: &InitFrame) -> String {
 }
 
 /// Take a unique number from 1 up in `dir` as `$n`: the boot count of the
-/// children of a test. The child writes its pid into the ticket, for the
-/// report of a wait that times out ([`Shown::Tickets`]). The steps are
-/// those of [`ticket_step`].
+/// children of a test. The ticket is a file that holds the pid of the
+/// child, for the report of a wait that times out ([`Shown::Tickets`]).
+/// The steps are those of [`ticket_step`].
 pub(crate) fn ticket(dir: &TestDir) -> String {
     ticket_step(dir.path())
 }
 
 /// Shell step that takes the lowest free ticket number from 1 up in
-/// `folder` as `$n`, then writes `$$` into [`TICKET_PID_FILE`] of the
-/// ticket.
+/// `folder` as `$n`: it creates the file `ticket-$n`, which holds `$$`.
 ///
-/// - A `mkdir` that fails because the ticket exists moves to the next
-///   number.
-/// - A `mkdir` that fails for any other cause writes its error to standard
-///   error (the test log), and the next call tries the same number.
-/// - After [`TICKET_ATTEMPTS`] calls with no ticket, the child writes why to
+/// - The create is exclusive. With `set -C` (noclobber), bash opens a file
+///   that does not exist with `O_CREAT | O_EXCL`, so the kernel gives each
+///   name to one child only. No external program takes part: the uutils
+///   `mkdir` 0.8.0 and 0.10.0 exits 0 when a concurrent call made the
+///   folder first.
+/// - The create runs in a command substitution: `set -C` stays in its
+///   subshell, and `$$` there is the pid of the child.
+/// - A create that fails while the ticket exists moves to the next number.
+/// - A create that fails for any other cause writes its error to standard
+///   error (the test log), and the next try takes the same number.
+/// - After [`TICKET_ATTEMPTS`] tries with no ticket, the child writes why to
 ///   standard error and exits with [`NO_TICKET_EXIT_CODE`]. The slot then
 ///   sees a child that ended before its first frame.
 ///
@@ -552,7 +554,7 @@ pub(crate) fn ticket(dir: &TestDir) -> String {
 fn ticket_step(folder: &Path) -> String {
     let ticket = format!("{}/ticket-$n", folder.display());
     format!(
-        r#"n=1; ticket_attempt=1; while ! ticket_error=$(mkdir "{ticket}" 2>&1); do if [ -d "{ticket}" ]; then n=$((n + 1)); else echo "scripted child $$: mkdir {ticket} failed: $ticket_error" >&2; fi; if [ "$ticket_attempt" -ge {TICKET_ATTEMPTS} ]; then echo "scripted child $$: no ticket in {folder} after {TICKET_ATTEMPTS} mkdir calls, exit {NO_TICKET_EXIT_CODE}" >&2; exit {NO_TICKET_EXIT_CODE}; fi; ticket_attempt=$((ticket_attempt + 1)); done; echo $$ > "{ticket}/{TICKET_PID_FILE}"; "#,
+        r#"n=1; ticket_attempt=1; while ! ticket_error=$( {{ set -C; echo $$ > "{ticket}"; }} 2>&1 ); do if [ -e "{ticket}" ]; then n=$((n + 1)); else echo "scripted child $$: create of {ticket} failed: $ticket_error" >&2; fi; if [ "$ticket_attempt" -ge {TICKET_ATTEMPTS} ]; then echo "scripted child $$: no ticket in {folder} after {TICKET_ATTEMPTS} creates, exit {NO_TICKET_EXIT_CODE}" >&2; exit {NO_TICKET_EXIT_CODE}; fi; ticket_attempt=$((ticket_attempt + 1)); done; "#,
         folder = folder.display(),
     )
 }
@@ -776,12 +778,11 @@ fn ticket_lines(dir: &TestDir) -> Vec<String> {
     let folder = dir.path();
     match ticket_names(folder) {
         Ok(names) => std::iter::once(format!("tickets in {}: {}", folder.display(), names.len()))
-            .chain(names.iter().map(|name| {
-                format!(
-                    "  {name}: {}",
-                    ticket_child_line(&folder.join(name).join(TICKET_PID_FILE))
-                )
-            }))
+            .chain(
+                names
+                    .iter()
+                    .map(|name| format!("  {name}: {}", ticket_child_line(&folder.join(name)))),
+            )
             .collect(),
         Err(error) => vec![format!(
             "tickets in {}: the folder was not read: {error}",
@@ -790,7 +791,7 @@ fn ticket_lines(dir: &TestDir) -> Vec<String> {
     }
 }
 
-/// The names of the ticket folders in `folder`, in ticket order.
+/// The names of the tickets in `folder`, in ticket order.
 fn ticket_names(folder: &Path) -> std::io::Result<Vec<String>> {
     let mut names = Vec::new();
     for entry in std::fs::read_dir(folder)? {
@@ -802,18 +803,19 @@ fn ticket_names(folder: &Path) -> std::io::Result<Vec<String>> {
     Ok(names)
 }
 
-/// The pid in `pid_file` of a ticket and the process state of that child,
-/// or why there is no pid.
-fn ticket_child_line(pid_file: &Path) -> String {
-    match std::fs::read_to_string(pid_file) {
-        Ok(text) => match text.trim().parse::<libc::pid_t>() {
-            Ok(pid) => process_line(pid),
-            Err(error) => format!("the pid file holds {text:?}: {error}"),
+/// The pid in the file `ticket` and the process state of that child, or why
+/// there is no pid. A ticket is empty from its create until its child
+/// writes the pid.
+fn ticket_child_line(ticket: &Path) -> String {
+    match std::fs::read_to_string(ticket) {
+        Ok(text) => match text.trim() {
+            "" => "the ticket is empty: the child did not write its pid yet".to_owned(),
+            pid_text => match pid_text.parse::<libc::pid_t>() {
+                Ok(pid) => process_line(pid),
+                Err(error) => format!("the ticket holds {text:?}: {error}"),
+            },
         },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            "no pid file: the child did not write its pid".to_owned()
-        }
-        Err(error) => format!("the pid file was not read: {error}"),
+        Err(error) => format!("the ticket was not read: {error}"),
     }
 }
 
@@ -951,6 +953,103 @@ fn the_scripted_envelope_reads_as_a_task_result() {
         Ok(TaskResultText::Ok(value)) => assert_eq!(value.get(), "3"),
         other => panic!("expected the value 3, got {other:?}"),
     }
+}
+
+/// The children that [`children_released_at_once_take_each_ticket_once`]
+/// releases at once.
+const CONCURRENT_TAKERS: usize = 32;
+// A child tries at most one number for each child before it, so no child
+// of that test reaches the bound of the ticket step.
+const _: () = assert!(CONCURRENT_TAKERS <= TICKET_ATTEMPTS as usize);
+/// The longest wait of that test until each child is ready, and again
+/// until each child has ended.
+const TAKERS_WAIT: Duration = Duration::from_secs(30);
+
+/// [`CONCURRENT_TAKERS`] bash children run only the ticket step on one
+/// folder. Each child marks that it is ready, then waits on one shared
+/// pipe. The test writes the release only when every child is ready, so
+/// all children race for the same numbers. Each number from 1 to
+/// [`CONCURRENT_TAKERS`] goes to exactly one child, and the folder holds
+/// exactly those tickets.
+#[tokio::test]
+async fn children_released_at_once_take_each_ticket_once() {
+    use std::collections::BTreeSet;
+    use std::io::Write;
+    use std::process::{Child, Command, Output, Stdio};
+
+    let dir = TestDir::new();
+    let tickets = dir.path().join("tickets");
+    let ready = dir.path().join("ready");
+    std::fs::create_dir(&tickets).unwrap();
+    std::fs::create_dir(&ready).unwrap();
+    let command = shell(&format!(
+        r#": > "{}/$$"; read -r release; {}echo "$n""#,
+        ready.display(),
+        ticket_step(&tickets),
+    ));
+    let (release_reader, mut release_writer) = std::io::pipe().unwrap();
+    let mut children: Vec<Child> = (0..CONCURRENT_TAKERS)
+        .map(|_| {
+            Command::new(&command.program)
+                .args(&command.args)
+                .stdin(release_reader.try_clone().unwrap())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    drop(release_reader);
+    until("each child is ready", TAKERS_WAIT, &[], || {
+        std::fs::read_dir(&ready).unwrap().count() == CONCURRENT_TAKERS
+    })
+    .await;
+
+    // One line for each child, in one write. bash reads a pipe one byte per
+    // `read`, so each child takes one line and all children go on at once.
+    release_writer
+        .write_all(&[b'\n'; CONCURRENT_TAKERS])
+        .unwrap();
+    drop(release_writer);
+    until("each child ended", TAKERS_WAIT, &[], || {
+        children
+            .iter_mut()
+            .all(|child| child.try_wait().unwrap().is_some())
+    })
+    .await;
+    let ends: Vec<Output> = children
+        .into_iter()
+        .map(|child| child.wait_with_output().unwrap())
+        .collect();
+    let mut numbers: Vec<usize> = ends
+        .iter()
+        .map(|end| {
+            assert!(end.status.success(), "a child failed: {end:?}");
+            String::from_utf8_lossy(&end.stdout)
+                .trim()
+                .parse()
+                .unwrap_or_else(|error| {
+                    panic!("a child printed no ticket number: {end:?}: {error}")
+                })
+        })
+        .collect();
+    numbers.sort_unstable();
+    let names: BTreeSet<String> = std::fs::read_dir(&tickets)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+
+    assert_eq!(
+        numbers,
+        (1..=CONCURRENT_TAKERS).collect::<Vec<_>>(),
+        "the ticket number of each child, sorted"
+    );
+    assert_eq!(
+        names,
+        (1..=CONCURRENT_TAKERS)
+            .map(|number| format!("ticket-{number}"))
+            .collect::<BTreeSet<_>>()
+    );
 }
 
 // ---------------------------------------------------------------------------
