@@ -14,11 +14,12 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{
-    launch_runner_beats, test_beat_pool, write_beats, BeatSender, DispatchRunner, FailClosedStop,
-    LiveDispatches, StaleRunningRecovery, INSERT_RUNNER_HEARTBEATS_SQL,
+    end_child, launch_runner_beats, sleeping_child, test_beat_pool, write_beats, BeatSender,
+    FailClosedStop, LiveDispatches, StaleRunningRecovery, INSERT_RUNNER_HEARTBEATS_SQL,
 };
 use crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool;
 use crate::test_support::sql::{self, TestPool};
+use crate::worker::executor::supervisor::Spawner;
 use crate::worker::recovery::on_test_pool::mark_stale_running_as_failed;
 
 const WORKER_ID: &str = "beat-spec-worker-1";
@@ -464,9 +465,11 @@ async fn the_beat_loop_keeps_a_held_row_out_of_stale_recovery() {
         )
         .await;
     }
+    let spawner = Spawner::start().expect("the spawner starts");
+    let (spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
     let dispatch = live
-        .hold(held, held_claim, DispatchRunner::WorkerProcess)
+        .hold(held, held_claim, child)
         .expect("an open registry holds the dispatch");
     let cancel = CancellationToken::new();
     let (watch, writer) = launch_runner_beats(
@@ -501,6 +504,7 @@ async fn the_beat_loop_keeps_a_held_row_out_of_stale_recovery() {
     writer.await.expect("the beat loop ends");
     watch.stop();
     drop(dispatch);
+    end_child(spawner, spawned).await;
 
     first_beat.expect("the beat loop beats a held row within the bound");
     assert_eq!(held_status, "RUNNING");

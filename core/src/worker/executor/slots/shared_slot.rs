@@ -49,7 +49,7 @@ use crate::worker::executor::supervisor::{
     log_core_stopped_child, ChildChannel, ChildExit, ChildLost, EndWithoutTask, ExitState,
     FrameWait, LossCause, MailboxBound, SendFailure,
 };
-use crate::worker::runner_beats::{DispatchRunner, HeldChild, HeldDispatch, RegistryClosed};
+use crate::worker::runner_beats::{HeldChild, HeldDispatch, RegistryClosed};
 
 /// Whether the runner beats of a run go on.
 enum Beats {
@@ -519,13 +519,13 @@ async fn send_run(pool: &SharedPoolShared, generation: &mut Generation, queued: 
         task_id: frame.task_id,
     };
     let channel = &generation.channel;
-    let runner = DispatchRunner::Child(HeldChild {
+    let child = HeldChild {
         id: channel.id(),
         pid: channel.pid(),
         spawner: pool.spawner.clone(),
         kill_mark: channel.kill_mark(),
-    });
-    let held = match pool.live.hold(frame.task_id, frame.claimed_at, runner) {
+    };
+    let held = match pool.live.hold(frame.task_id, frame.claimed_at, child) {
         Ok(held) => held,
         Err(RegistryClosed) => {
             tracing::error!(
