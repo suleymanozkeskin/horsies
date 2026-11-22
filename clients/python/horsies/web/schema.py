@@ -46,9 +46,9 @@ SCHEMA_TTL_SECONDS = 60.0
 SCHEMA_INCOMPATIBLE = 'SCHEMA_INCOMPATIBLE'
 SCHEMA_UNKNOWN = 'SCHEMA_UNKNOWN'
 
-EXPECTED_SCHEMA_VERSION: Final = 1000
+EXPECTED_SCHEMA_VERSION: Final = 1001
 """The schema version this build writes through: the version of the
-baseline migration (``BASELINE_MIGRATION_VERSION``,
+newest migration of the chain (``MIGRATION_SOURCES``,
 ``core/src/broker/migrations.rs``). The core answers an
 observed status with its own expected version (``SchemaStatusRecord``);
 this value fills the status of a probe that has never read one."""

@@ -3286,6 +3286,12 @@ def encode_preload_frame(frame: PreloadReadyFrame | ChildForkedFrame | ForkFaile
     """Encode a preload frame: its bytes. Pure."""
 
 
+def migration_sql_files() -> list[tuple[int, str, str]]:
+    """Every SQL file of the migration chain as (migration version, file name, text), in run
+    order. Starts nothing.
+    """
+
+
 def mint_task_id() -> uuid.UUID | IdMintRefused:
     """Mint a new task id (UUIDv7). Starts no runtime."""
 

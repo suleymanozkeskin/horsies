@@ -15,23 +15,24 @@ import pytest
 
 from horsies.core.lifecycle.operations import TerminalizationKind
 from tests.baseline_sql import (
-    baseline_function,
     baseline_sql,
     baseline_table,
     baseline_type,
+    installed_function,
+    installed_function_position,
 )
 
 pytestmark = [pytest.mark.unit]
 
 
-# The functions under test, read from the baseline migration, grouped as the
-# families they were written in.
-MOVE_BODY = baseline_function('horsies_move_task_to_history')
+# The functions under test, as the migration chain installs them, grouped as
+# the families they were written in.
+MOVE_BODY = installed_function('horsies_move_task_to_history')
 """The single move that the writers call: it takes the row the writer locked."""
-BATCH_MOVE_BODY = baseline_function('horsies_move_tasks_to_history')
+BATCH_MOVE_BODY = installed_function('horsies_move_tasks_to_history')
 """The batch move stage that every batch writer calls with the ids it locked."""
 _BATCH_MOVE_CALL = 'horsies_move_tasks_to_history('
-ATTEMPT_ENCODER_FUNCTION = 'horsies_encode_task_attempts'
+ATTEMPT_ENCODER_FUNCTION = 'horsies_encode_attempt_archive'
 COMPLETE_FUSED_FUNCTION = 'horsies_complete_task_fused'
 COMPLETE_FUSED_BATCH_FUNCTION = 'horsies_complete_tasks_fused'
 FINISH_FAILED_ATTEMPT_FUNCTION = 'horsies_finish_failed_attempt'
@@ -40,15 +41,15 @@ FINISH_WORKFLOW_SUCCESS_FUNCTION = 'horsies_finish_workflow_success'
 
 
 def _functions(*names: str) -> list[str]:
-    return [baseline_function(name) for name in names]
+    return [installed_function(name) for name in names]
 
 
 def completion_family_fragments() -> list[str]:
     return [
-        baseline_function(ATTEMPT_ENCODER_FUNCTION),
+        installed_function(ATTEMPT_ENCODER_FUNCTION),
         MOVE_BODY,
-        baseline_function(FINISH_WORKFLOW_SUCCESS_FUNCTION),
-        baseline_function(COMPLETE_FUSED_FUNCTION),
+        installed_function(FINISH_WORKFLOW_SUCCESS_FUNCTION),
+        installed_function(COMPLETE_FUSED_FUNCTION),
     ]
 
 
@@ -86,13 +87,13 @@ def completion_batch_fragments() -> list[str]:
 def outcome_fragments() -> list[str]:
     return [
         baseline_type('horsies_terminalization_outcome'),
-        baseline_function('horsies_terminalization_miss'),
+        installed_function('horsies_terminalization_miss'),
     ]
 
 
 OUTCOME_TYPE_DDL = baseline_type('horsies_terminalization_outcome')
-MISS_CLASSIFIER_DDL = baseline_function('horsies_terminalization_miss')
-ATTEMPT_ENCODER_DDL = baseline_function(ATTEMPT_ENCODER_FUNCTION)
+MISS_CLASSIFIER_DDL = installed_function('horsies_terminalization_miss')
+ATTEMPT_ENCODER_DDL = installed_function(ATTEMPT_ENCODER_FUNCTION)
 
 
 class TestOutcomeLayer:
@@ -607,16 +608,27 @@ class TestWorkflowNodeFamily:
 
 
 class TestAttemptEncoder:
+    """Attempt archive version 2: ``[attempts, open]`` from the live row."""
+
     def test_never_renders_a_jsonb_array_to_text(self) -> None:
         assert 'jsonb_agg' not in ATTEMPT_ENCODER_DDL
         assert 'json_agg' not in ATTEMPT_ENCODER_DDL
         assert 'string_agg' in ATTEMPT_ENCODER_DDL
 
     def test_timestamps_are_floor_epoch_microsecond_bigints(self) -> None:
-        assert (
-            'floor(\n                        extract(epoch FROM a.started_at)'
-            ' * 1000000\n                    )::bigint'
-        ) in ATTEMPT_ENCODER_DDL
+        for column in (
+            'a.started_at',
+            'a.finished_at',
+            'a.enqueued_at',
+            'a.claimed_at',
+            'a.first_claimed_at',
+            'a.placed_at',
+            'a.finalizing_at',
+            'a.last_seen_at',
+            'p_task.first_claimed_at',
+            'p_task.finalizing_at',
+        ):
+            assert f'floor(extract(epoch FROM {column}) * 1000000)::bigint' in ATTEMPT_ENCODER_DDL
 
     def test_orders_by_attempt(self) -> None:
         assert "',' ORDER BY a.attempt" in ATTEMPT_ENCODER_DDL
@@ -624,6 +636,84 @@ class TestAttemptEncoder:
     def test_empty_sequence_is_the_empty_array(self) -> None:
         assert "COALESCE(" in ATTEMPT_ENCODER_DDL
         assert "'' || ']'" not in ATTEMPT_ENCODER_DDL
+
+    def test_the_encoder_takes_the_live_row(self) -> None:
+        """The open attempt comes from the row the caller read, so the
+        encoder takes that row, not an id it would read again."""
+        assert 'horsies_encode_attempt_archive(p_task horsies_tasks) RETURNS bytea' in (
+            ATTEMPT_ENCODER_DDL
+        )
+        assert 'WHERE a.task_id = p_task.id' in ATTEMPT_ENCODER_DDL
+
+    def test_the_open_record_is_null_when_the_current_attempt_has_its_row(self) -> None:
+        open_rule = ATTEMPT_ENCODER_DDL.index('bool_or(a.attempt = p_task.retry_count + 1)')
+        assert ATTEMPT_ENCODER_DDL.index("THEN 'null'", open_rule) > open_rule
+        assert 'p_task.attempt_claims' in ATTEMPT_ENCODER_DDL
+
+    def test_the_moves_store_version_two(self) -> None:
+        assert 'horsies_encode_attempt_archive(p_task)' in MOVE_BODY
+        assert '1, 2, v_attempt_snapshot, sha256(v_attempt_snapshot),' in MOVE_BODY
+        assert 'horsies_encode_attempt_archive(t) AS snapshot' in BATCH_MOVE_BODY
+        assert '1, 2, attempt_data.snapshot, sha256(attempt_data.snapshot),' in BATCH_MOVE_BODY
+
+
+class TestAttemptPhaseRecord:
+    """Each attempt writer fills the phase record in the statement that
+    writes the attempt row; the retries start the claim count again."""
+
+    _PHASE_COLUMNS = (
+        'phase_record_version, enqueued_at, claimed_at, attempt_claims, first_claimed_at, placed_at, '
+        'finalizing_at, recorded_by, last_seen_at'
+    )
+
+    @pytest.mark.parametrize(
+        'name',
+        [
+            COMPLETE_FUSED_FUNCTION,
+            FINISH_WORKFLOW_SUCCESS_FUNCTION,
+            FINISH_FAILED_ATTEMPT_FUNCTION,
+            FINISH_STALE_ATTEMPT_FUNCTION,
+        ],
+    )
+    def test_every_attempt_writer_names_the_phase_columns(self, name: str) -> None:
+        body = ' '.join(installed_function(name).split())
+        assert self._PHASE_COLUMNS in body
+        assert 'last_seen_at = EXCLUDED.last_seen_at;' in body
+
+    @pytest.mark.parametrize(
+        'name',
+        [COMPLETE_FUSED_FUNCTION, FINISH_WORKFLOW_SUCCESS_FUNCTION, FINISH_FAILED_ATTEMPT_FUNCTION],
+    )
+    def test_a_worker_writer_records_its_placement(self, name: str) -> None:
+        body = installed_function(name)
+        assert 'p_placement_kind text,\n    p_slot_wait_us bigint\n)' in body
+        assert f"horsies_require_attempt_placement('{name}', p_placement_kind, p_slot_wait_us)" in body
+        assert "v_ctx.finalizing_at, 'WORKER', NULL" in body
+        assert body.index('horsies_require_attempt_placement') < body.index('pg_advisory_xact_lock')
+
+    def test_recovery_records_the_last_sign_of_life_and_no_placement(self) -> None:
+        body = installed_function(FINISH_STALE_ATTEMPT_FUNCTION)
+        assert "'RECOVERY', GREATEST(v_ctx.started_at, v_ctx.finalizing_at, v_ctx.newest_runner_beat)" in body
+        assert 'p_placement_kind' not in body
+
+    @pytest.mark.parametrize('name', [FINISH_FAILED_ATTEMPT_FUNCTION, FINISH_STALE_ATTEMPT_FUNCTION])
+    def test_a_retry_starts_the_claim_count_again(self, name: str) -> None:
+        body = installed_function(name)
+        retry = body.index("'RETRY_SCHEDULED'::text")
+        reset = body.rindex('attempt_claims = 0,', 0, retry)
+        assert body.index('first_claimed_at = NULL,', reset) < retry
+
+    def test_the_claim_counts_on_the_current_attempt(self) -> None:
+        body = installed_function('horsies_claim_candidates')
+        assert 'attempt_claims = t.attempt_claims + 1,' in body
+        assert (
+            'first_claimed_at = CASE WHEN t.attempt_claims = 0 THEN now() ELSE t.first_claimed_at END,'
+        ) in body
+
+    def test_a_new_row_starts_with_no_claim(self) -> None:
+        body = ' '.join(installed_function('horsies_insert_task_rows').split())
+        assert 'trace_id, attempt_claims, first_claimed_at )' in body
+        assert 'r.trace_carrier, r.trace_id, 0, NULL FROM unnest(' in body
 
 
 class TestLiveStatusDomain:
@@ -676,8 +766,11 @@ class TestBatchedFusedCompletion:
         """Each row passes its own id, claim generation and result; the
         worker and the wake are those of the batch."""
         assert (
-            f'FROM {COMPLETE_FUSED_FUNCTION}(v_item.id, p_worker_id, '
-            'v_item.claimed_at, v_item.result, p_wake) AS c;'
+            f'FROM {COMPLETE_FUSED_FUNCTION}(\n'
+            '            v_item.id, p_worker_id, v_item.claimed_at, v_item.result, p_wake, '
+            'v_item.placement_kind,\n'
+            '            v_item.slot_wait_us\n'
+            '        ) AS c;'
         ) in self.BODY
 
     def test_rows_run_in_sorted_task_id_order_at_their_input_ordinality(
@@ -708,13 +801,13 @@ class TestBatchedFusedCompletion:
             'batch array lengths differ',
             'batch task ids must be distinct and non-NULL',
             'every row needs its claim generation',
+            'horsies_require_attempt_placement(',
         ):
             assert self.BODY.index(check) < loop
 
     def test_the_install_creates_it_after_the_fused_completion(self) -> None:
-        sql = baseline_sql()
-        fused = sql.index(f'CREATE FUNCTION {COMPLETE_FUSED_FUNCTION}(')
-        batched = sql.index(f'CREATE FUNCTION {COMPLETE_FUSED_BATCH_FUNCTION}(')
+        fused = installed_function_position(COMPLETE_FUSED_FUNCTION)
+        batched = installed_function_position(COMPLETE_FUSED_BATCH_FUNCTION)
         assert fused < batched
 
 _LOCKING_READ = re.compile(
@@ -726,7 +819,7 @@ table alias."""
 
 
 def _function_ddl(name: str) -> str:
-    return baseline_function(name)
+    return installed_function(name)
 
 
 class TestLockingReads:

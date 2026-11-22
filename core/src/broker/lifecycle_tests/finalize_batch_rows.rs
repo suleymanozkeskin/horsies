@@ -48,6 +48,7 @@ fn success_at(task_id: Uuid, claimed_at: chrono::DateTime<chrono::Utc>) -> Plain
         task_id,
         claimed_at,
         result_json: result_text(),
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     }
 }
 

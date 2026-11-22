@@ -484,6 +484,7 @@ fn a_timeout_write_asks_for_the_retry_of_its_policy() {
         TaskTimeoutMs::new(1_000).unwrap(),
         RetryPlacement::SameClass,
         TimeoutCancel::NoSignal,
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
     );
 
     assert_eq!(write.error_code.as_deref(), Some("TASK_TIMEOUT"));
@@ -506,6 +507,7 @@ fn a_killed_child_write_names_its_code() {
         OutcomeCode::TaskTimeout.into(),
         "task exceeded timeout_ms=1000".to_owned(),
         RetryPlacement::SameClass,
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
     );
     assert_eq!(write.error_code.as_deref(), Some("TASK_TIMEOUT"));
     assert_eq!(write.attempt.kind, AttemptFailureKind::Failed);
@@ -517,6 +519,7 @@ fn a_killed_child_write_names_its_code() {
         LoopKillCode::NeighbourBlockedLoop.code().into(),
         "blocked".to_owned(),
         RetryPlacement::SameClass,
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
     );
     assert_eq!(
         loop_write.error_code.as_deref(),
@@ -545,6 +548,7 @@ fn a_killed_child_write_stores_the_task_and_the_worker() {
             code.into(),
             "the child ended".to_owned(),
             RetryPlacement::SameClass,
+            crate::core::lifecycle::AttemptPlacement::NotObserved,
         );
         assert_eq!(write.error_code.as_deref(), Some(code_text.as_str()));
         assert_eq!(
@@ -558,6 +562,7 @@ fn a_killed_child_write_stores_the_task_and_the_worker() {
         "worker-1",
         TaskTimeoutMs::new(1000).unwrap(),
         RetryPlacement::Isolated,
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
     )
     .first;
     assert_eq!(recovery.error_code.as_deref(), Some("TASK_TIMEOUT"));
@@ -610,6 +615,7 @@ fn the_timeout_data_names_how_a_shared_async_run_ended() {
             timeout,
             RetryPlacement::SameClass,
             cancel,
+            crate::core::lifecycle::AttemptPlacement::NotObserved,
         );
         let mut expected = serde_json::json!({"task_id": task_id, "timeout_ms": 1000});
         if let Some(end) = cancel_end {
@@ -641,9 +647,16 @@ fn crash_recovery_of_a_timeout_keeps_its_code_and_placement() {
         timeout,
         RetryPlacement::Isolated,
         TimeoutCancel::Ended(CancelEnd::ReturnedAfterSignal),
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
     );
-    let recovery =
-        timeout_recovery_writes(&claimed, "worker-1", timeout, RetryPlacement::Isolated).first;
+    let recovery = timeout_recovery_writes(
+        &claimed,
+        "worker-1",
+        timeout,
+        RetryPlacement::Isolated,
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
+    )
+    .first;
     for write in [&first, &recovery] {
         assert_eq!(write.error_code.as_deref(), Some("TASK_TIMEOUT"));
         assert_eq!(write.fence.claimed_at, claimed.claimed_at);
@@ -670,9 +683,15 @@ fn crash_recovery_of_a_timeout_keeps_its_code_and_placement() {
         ..claimed
     };
     assert_eq!(
-        timeout_recovery_writes(&spent, "worker-1", timeout, RetryPlacement::Isolated)
-            .first
-            .retry,
+        timeout_recovery_writes(
+            &spent,
+            "worker-1",
+            timeout,
+            RetryPlacement::Isolated,
+            crate::core::lifecycle::AttemptPlacement::NotObserved
+        )
+        .first
+        .retry,
         RetryRequest::NoRetry
     );
 }
@@ -701,6 +720,7 @@ fn a_crash_recovery_write_sent_again_names_the_retry() {
         OperationalErrorCode::WorkerCrashed.into(),
         lost.to_owned(),
         RetryPlacement::SameClass,
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
     );
     let loop_kill = crash_recovery_writes(
         &claimed,
@@ -708,12 +728,14 @@ fn a_crash_recovery_write_sent_again_names_the_retry() {
         LoopKillCode::TaskBlockedLoop.code().into(),
         "blocked".to_owned(),
         RetryPlacement::Isolated,
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
     );
     let timeout = timeout_recovery_writes(
         &claimed,
         "worker-1",
         TaskTimeoutMs::new(1000).unwrap(),
         RetryPlacement::Isolated,
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
     );
     let expected = [
         (
@@ -756,7 +778,12 @@ fn a_crash_recovery_write_sent_again_names_the_retry() {
 #[test]
 fn a_worker_failure_is_a_broker_error_that_never_retries() {
     let claimed = task(ExecutionClass::Isolated, RETRY_ON_TIMEOUT);
-    let write = worker_failure_write(&claimed, "worker-1", "");
+    let write = worker_failure_write(
+        &claimed,
+        "worker-1",
+        "",
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
+    );
     assert_eq!(write.error_code.as_deref(), Some("BROKER_ERROR"));
     assert_eq!(write.retry, RetryRequest::NoRetry);
     assert_eq!(write.attempt.kind, AttemptFailureKind::WorkerFailure);
@@ -773,7 +800,13 @@ fn a_reported_task_error_keeps_its_envelope_and_retries_by_policy() {
         )
         .unwrap(),
     );
-    let write = task_error_write(&claimed, "worker-1", &error, &envelope);
+    let write = task_error_write(
+        &claimed,
+        "worker-1",
+        &error,
+        &envelope,
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
+    );
     assert_eq!(write.result_json, envelope.as_str());
     assert_eq!(write.error_code.as_deref(), Some("TASK_EXCEPTION"));
     assert_eq!(write.retry, RetryRequest::NoRetry);

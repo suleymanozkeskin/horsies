@@ -178,7 +178,8 @@ async def _attempts(broker: PostgresBroker, task_id: str) -> tuple[TaskAttemptIn
 _DIRECT_SQL: Final = """
     SELECT * FROM horsies_finish_workflow_success(
         CAST(:id AS uuid), :worker,
-        (SELECT claimed_at FROM horsies_tasks WHERE id = CAST(:id AS uuid)), :result
+        (SELECT claimed_at FROM horsies_tasks WHERE id = CAST(:id AS uuid)), :result,
+        'NOT_OBSERVED', NULL
     )
 """
 

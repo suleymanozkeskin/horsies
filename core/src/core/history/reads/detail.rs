@@ -221,8 +221,9 @@ pub(crate) fn history_detail_from_wire(
     row: HistoryDetailWireRow,
 ) -> Result<HistoryTaskDetail, HistoryError> {
     let status = history_status(row.task_id, &row.status)?;
-    // Archive format version 1 implies the json-utf8 codec and the
-    // application/json content type; the decode refuses any other version.
+    // Each retained attempt archive version (1, and 2 from migration 1001)
+    // implies the json-utf8 codec and the application/json content type; the
+    // decode refuses any other version.
     let attempts = decode_attempt_snapshot(
         row.attempt_archive_version,
         JSON_UTF8_CODEC,

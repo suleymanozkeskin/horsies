@@ -25,6 +25,7 @@ fn success(task_id: Uuid) -> PlainSuccess {
         task_id,
         claimed_at: generation(),
         result_json: r#"{"__type":"ok","value":1}"#.to_owned(),
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     }
 }
 
@@ -118,7 +119,7 @@ static RAISE_DEADLOCK: TypedStatement = TypedStatement::new(
 
 static REFUSED_BATCH_ARGUMENTS: TypedStatement = TypedStatement::new(
     "refused_batch_arguments",
-    "SELECT * FROM horsies_complete_tasks_fused(NULL, NULL, NULL, NULL, TRUE)",
+    "SELECT * FROM horsies_complete_tasks_fused(NULL, NULL, NULL, NULL, TRUE, NULL, NULL)",
     &[],
 );
 

@@ -698,7 +698,7 @@ async fn retries_keep_the_sent_at_and_the_second_delay_is_longer() {
         // The next attempt: claimed again and started by this worker.
         sql::query(
             "UPDATE horsies_tasks
-             SET status = 'RUNNING', claimed_at = date_trunc('milliseconds', NOW()),
+             SET status = 'RUNNING', attempt_claims = 1, first_claimed_at = date_trunc('milliseconds', NOW()), claimed_at = date_trunc('milliseconds', NOW()),
                  claimed_by_worker_id = $2, claim_expires_at = NULL, started_at = NOW(),
                  worker_pid = 4242, worker_hostname = 'finalize-host',
                  worker_process_name = 'finalize-process', next_retry_at = NULL

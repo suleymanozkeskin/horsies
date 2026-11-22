@@ -175,6 +175,7 @@ async fn a_success_finalize_after_the_cancel_of_a_running_task_changes_nothing()
                 claimed_at: generation,
             },
             result_json: r#"{"ok": 99}"#.to_owned(),
+            placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
         },
     )
     .await

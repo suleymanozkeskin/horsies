@@ -12,9 +12,16 @@
 //!   UTF-8 bytes of the result. It creates [`MIGRATIONS_TABLE`], the 0.x guard
 //!   row of `horsies_schema_version` and the empty `horsies_client_family`
 //!   table itself. The Python package reads the same files through
-//!   `horsies._core` ([`BASELINE_SQL_FILE_TEXTS`]) and installs them as its
-//!   migration 1000 with the same checksum rule, so both write the same
-//!   bookkeeping row.
+//!   `horsies._core` ([`BASELINE_SQL_FILE_TEXTS`]).
+//! - Each later version is one file of `core/migrations/`
+//!   ([`LATER_MIGRATION_FILES`]), with the SHA-384 checksum of its text. It
+//!   writes no family row and does not publish the history readers. Version
+//!   1001 (`1001_lifecycle_record.sql`) adds the phase record of each attempt.
+//!
+//! The released text of a migration never changes: a database that applied
+//! another text of it is refused ([`SchemaRefusal::MigrationEdited`]), so a
+//! schema change is a new migration. [`migration_sql_file_texts`] gives every
+//! file of the chain, in run order, to the test harnesses of both clients.
 //!
 //! The install ([`install_schema_on`]):
 //! 1. Read the state of the current schema on a session-work connection, with
@@ -113,6 +120,37 @@ baseline_sql_files!(
     "0008_history_maintenance_functions.sql",
 );
 
+/// Version of the migration that adds the phase record of each attempt
+/// (`core/migrations/1001_lifecycle_record.sql`).
+pub(crate) const LIFECYCLE_RECORD_MIGRATION_VERSION: i64 = 1001;
+
+/// The files of `core/migrations/`, one per migration after the baseline,
+/// in apply order: the version of the migration, the file name and the text.
+/// The core includes them by relative path and keeps no copy. A file added to
+/// the folder without a line here fails
+/// `later_migration_list_is_the_whole_folder`.
+pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 1] = [(
+    LIFECYCLE_RECORD_MIGRATION_VERSION,
+    "1001_lifecycle_record.sql",
+    include_str!("../../migrations/1001_lifecycle_record.sql"),
+)];
+
+/// Every SQL file of the embedded chain, in run order, with the version of
+/// its migration: the files of migration 1000
+/// ([`BASELINE_SQL_FILE_TEXTS`]), then the file of each later migration
+/// ([`LATER_MIGRATION_FILES`]). The text of one migration is its files,
+/// concatenated in this order with no separator. A test harness installs
+/// the schema of this build by running every text in this order; the
+/// Python package reads the list through `horsies._core`
+/// (`migration_sql_files`). Pure.
+pub fn migration_sql_file_texts() -> Vec<(i64, &'static str, &'static str)> {
+    BASELINE_SQL_FILE_TEXTS
+        .iter()
+        .map(|(name, text)| (BASELINE_MIGRATION_VERSION, *name, *text))
+        .chain(LATER_MIGRATION_FILES.iter().copied())
+        .collect()
+}
+
 /// The tables file of the baseline.
 #[cfg(test)]
 pub(crate) const BASELINE_TABLES_SQL: &str = include_str!("../../baseline/0001_tables.sql");
@@ -132,9 +170,7 @@ enum FamilyRow {
     /// row (Python `install_baseline`).
     WrittenWithMigration,
     /// The migration writes no family row: every migration after the
-    /// baseline. The chain holds the baseline only until the first migration
-    /// after it, so only tests construct this variant now.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// baseline.
     NotWritten,
 }
 
@@ -146,10 +182,8 @@ enum ReaderPublication {
     /// the publication function; its transaction publishes the readers, so a
     /// recorded version 1000 always has them.
     PublishedWithMigration,
-    /// The migration does not change what the readers read. As
-    /// [`FamilyRow::NotWritten`], only tests construct it while the chain
-    /// holds the baseline only.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The migration does not change what the readers read: every
+    /// migration after the baseline so far.
     NotPublished,
 }
 
@@ -170,17 +204,34 @@ struct MigrationSource {
     retired_indexes: &'static [RetiredIndex],
 }
 
-/// The embedded chain, in apply order: the baseline only, the chain that
-/// the Python client installs too.
-const MIGRATION_SOURCES: [MigrationSource; 1] = [MigrationSource {
-    version: BASELINE_MIGRATION_VERSION,
-    description: "baseline",
-    script: SqlScript::new("migration_1000_baseline", BASELINE_SQL),
-    family_row: FamilyRow::WrittenWithMigration,
-    readers: ReaderPublication::PublishedWithMigration,
-    exact_indexes: &[],
-    retired_indexes: &[],
-}];
+/// The embedded chain, in apply order: the baseline, then the migrations of
+/// [`LATER_MIGRATION_FILES`]. The Python client installs through the core,
+/// so both clients apply the same chain.
+const MIGRATION_SOURCES: [MigrationSource; 2] = [
+    MigrationSource {
+        version: BASELINE_MIGRATION_VERSION,
+        description: "baseline",
+        script: SqlScript::new("migration_1000_baseline", BASELINE_SQL),
+        family_row: FamilyRow::WrittenWithMigration,
+        readers: ReaderPublication::PublishedWithMigration,
+        exact_indexes: &[],
+        retired_indexes: &[],
+    },
+    // The new columns are nullable and the new constraints are CHECKs, so the
+    // migration builds no index: no exact or retired index step.
+    MigrationSource {
+        version: LATER_MIGRATION_FILES[0].0,
+        description: "lifecycle record",
+        script: SqlScript::new(
+            "migration_1001_lifecycle_record",
+            LATER_MIGRATION_FILES[0].2,
+        ),
+        family_row: FamilyRow::NotWritten,
+        readers: ReaderPublication::NotPublished,
+        exact_indexes: &[],
+        retired_indexes: &[],
+    },
+];
 
 /// The most rows that one state read returns: `horsies_` table names, and
 /// bookkeeping rows (Python `CATALOG_NAME_LIMIT`).

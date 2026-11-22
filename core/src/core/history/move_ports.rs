@@ -103,6 +103,7 @@ fn complete(task_id: Uuid, claimed_at: DateTime<Utc>) -> TerminalizationCommand 
             claimed_at,
         },
         result_json: SUCCESS_RESULT.to_owned(),
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     }
 }
 

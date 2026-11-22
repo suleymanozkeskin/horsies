@@ -40,6 +40,9 @@ _SCHEDULE_AHEAD: Final = timedelta(hours=1)
 _HOST: Final = 'host-a'
 _PID: Final = 4242
 _PROCESS: Final = 'horsies-worker-1'
+_CLAIM_TO_PLACEMENT: Final = timedelta(milliseconds=3)
+"""The step between two phase times of one attempt that the timeline does
+not name (a claim and its placement, a placement and its start)."""
 _EXTRACT_INPUT: Final = '{"source":"s3://bucket/a"}'
 
 
@@ -183,14 +186,16 @@ _TASK_SQL: Final[LiteralString] = """
         idempotency_key_digest, status, enqueued_at, claimed_at, claimed_by_worker_id,
         claim_expires_at, started_at, finalizing_at, finalizing_by_worker_id, worker_pid,
         worker_hostname, worker_process_name, retry_count, max_retries, next_retry_at, good_until,
-        is_workflow_task, updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+        is_workflow_task, updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id,
+        attempt_claims, first_claimed_at
     ) VALUES (
         %(id)s, %(task_name)s, %(queue_name)s, %(priority)s, %(input)s, NULL, %(execution)s,
         'forever', %(sent_at)s, %(sent_at)s, %(fingerprint_version)s, %(fingerprint)s,
         %(key_digest)s, %(status)s, %(enqueued_at)s, %(claimed_at)s, %(claimed_by)s,
         %(claim_expires_at)s, NULL, NULL, NULL, NULL,
         NULL, NULL, %(retry_count)s, %(max_retries)s, %(next_retry_at)s, %(good_until)s,
-        %(is_workflow_task)s, %(updated_at)s, %(retain_rerun_input)s, %(rerun_of)s, %(rerun_of)s
+        %(is_workflow_task)s, %(updated_at)s, %(retain_rerun_input)s, %(rerun_of)s, %(rerun_of)s,
+        %(attempt_claims)s, %(first_claimed_at)s
     )
 """
 
@@ -222,6 +227,9 @@ def _task_row(
         'updated_at': sent_at,
         'retain_rerun_input': False,
         'rerun_of': None,
+        # The current attempt has no claim yet.
+        'attempt_claims': 0,
+        'first_claimed_at': None,
     }
     row.update(fields)
     return row
@@ -242,6 +250,8 @@ def _task_rows(
             claimed_at=at[40],
             claimed_by=ids.worker,
             claim_expires_at=at[40] + _LEASE,
+            attempt_claims=1,
+            first_claimed_at=at[40],
             good_until=base + _DEADLINE,
             is_workflow_task=True,
             updated_at=at[40],
@@ -271,12 +281,18 @@ def _task_rows(
 _ATTEMPT_SQL: Final[LiteralString] = """
     INSERT INTO horsies_task_attempts (
         task_id, attempt, outcome, will_retry, started_at, finished_at, error_code, error_message,
-        failed_reason, worker_id, worker_hostname, worker_pid, worker_process_name
+        failed_reason, worker_id, worker_hostname, worker_pid, worker_process_name,
+        phase_record_version, enqueued_at, claimed_at, attempt_claims, first_claimed_at, placed_at,
+        finalizing_at, recorded_by, last_seen_at
     ) VALUES (
         %(task_id)s, 1, 'FAILED', TRUE, %(started_at)s, %(finished_at)s, 'TIMEOUT',
-        'upstream timed out', NULL, %(worker)s, %(host)s, %(pid)s, %(process)s
+        'upstream timed out', NULL, %(worker)s, %(host)s, %(pid)s, %(process)s,
+        1, %(enqueued_at)s, %(claimed_at)s, 1, %(claimed_at)s, %(placed_at)s,
+        NULL, 'WORKER', NULL
     )
 """
+"""Attempt 1 of ``send_invoice``, which the worker recorded with its phase
+record: one claim, the placement on a child, no finalizing marker."""
 
 _HISTORY_SQL: Final[LiteralString] = """
     INSERT INTO horsies_task_history (
@@ -296,7 +312,7 @@ _HISTORY_SQL: Final[LiteralString] = """
         'COMPLETE_LOCKED', 0, 0, %(worker)s,
         %(host)s, %(pid)s, %(process)s, NULL,
         NULL, 1, %(payload)s, %(payload_digest)s,
-        1, 1, %(snapshot)s, %(snapshot_digest)s,
+        1, 2, %(snapshot)s, %(snapshot_digest)s,
         'NEVER_ELIGIBLE', NULL, NULL, NULL
     )
 """
@@ -308,7 +324,11 @@ def _epoch_microseconds(at: datetime) -> int:
 
 def _history_row(ids: _Ids, at: dict[int, datetime]) -> Params:
     payload = b'{"ok":3}'
-    # Attempt archive version 1: one 12-field array per attempt.
+    # Attempt archive version 2: [attempts, open]. One 21-field array per
+    # attempt (the 12 fields of version 1, then the phase record of a worker:
+    # version, enqueued_at, claimed_at, attempt_claims, first_claimed_at,
+    # placed_at, finalizing_at, recorded_by, last_seen_at); open is null, as
+    # the attempt ended with its row.
     attempts = [
         [
             1,
@@ -323,9 +343,18 @@ def _history_row(ids: _Ids, at: dict[int, datetime]) -> Params:
             _HOST,
             _PID,
             _PROCESS,
+            1,
+            _epoch_microseconds(at[0]),
+            _epoch_microseconds(at[10]),
+            1,
+            _epoch_microseconds(at[10]),
+            _epoch_microseconds(at[10] + _CLAIM_TO_PLACEMENT),
+            _epoch_microseconds(at[20] + _CLAIM_TO_PLACEMENT),
+            'WORKER',
+            None,
         ],
     ]
-    snapshot = json.dumps(attempts, separators=(',', ':')).encode()
+    snapshot = json.dumps([attempts, None], separators=(',', ':')).encode()
     return {
         'task_id': ids.extract,
         'workflow_id': ids.workflow,
@@ -459,7 +488,14 @@ def _write(connection: Connection, ids: _Ids, variant: ScenarioVariant) -> datet
         )
         cursor.executemany(_CURSOR_SQL, _ordered(_cursor_rows(ids, at), order))
     host = {'worker': ids.worker, 'host': _HOST, 'pid': _PID, 'process': _PROCESS}
-    attempt = {'task_id': ids.invoice, 'started_at': at[60], 'finished_at': at[70]}
+    attempt = {
+        'task_id': ids.invoice,
+        'enqueued_at': at[50],
+        'claimed_at': at[50] + _CLAIM_TO_PLACEMENT,
+        'placed_at': at[50] + 2 * _CLAIM_TO_PLACEMENT,
+        'started_at': at[60],
+        'finished_at': at[70],
+    }
     _ = connection.execute(_ATTEMPT_SQL, attempt | host)
     _ = connection.execute(_HISTORY_SQL, _history_row(ids, at))
     sample = {

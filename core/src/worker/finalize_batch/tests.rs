@@ -61,6 +61,7 @@ fn row(name: &str) -> PlainSuccess {
         task_id: task(name),
         claimed_at: claimed_at(),
         result_json: r#"{"__type":"ok","value":null}"#.to_owned(),
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     }
 }
 

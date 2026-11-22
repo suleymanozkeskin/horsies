@@ -1,8 +1,8 @@
 //! The databases, the sessions and the case-file runner of the SQL tests.
 //!
 //! - [`BaselineDatabase::create`] creates an empty database for the test
-//!   and applies the baseline migration text, then each setup text, in one
-//!   transaction that commits.
+//!   and applies the text of every migration of the chain, then each setup
+//!   text, in one transaction that commits.
 //! - A [`Session`] is one connection to that database. It keeps the notices
 //!   and the notifications that the server sends to it, in arrival order.
 //! - [`Session::run_script`] sends a text as one simple-query message, so
@@ -17,8 +17,8 @@ use crate::db::{
     open_connection, parse_connection_url, ConnectPlan, ConnectionEnvironment,
     DEFAULT_SOCKET_SETTINGS,
 };
+use crate::migration_sql_file_texts;
 use crate::test_support::TestDatabase;
-use crate::BASELINE_SQL_FILE_TEXTS;
 
 /// The setup text that adds dblink, for the case files that open peer
 /// sessions.
@@ -31,12 +31,14 @@ pub(super) const PASSED_PREFIX: &str = "ok: ";
 /// The setting that names the database for the peer sessions of a case file.
 const PEER_CONNECTION_SQL: &str = "SELECT set_config('horsies_test.peer_connstr', $1, false)";
 
-/// The baseline migration text: the baseline files in run order,
-/// concatenated with no separator (the text of migration 1000).
-pub(super) fn baseline_sql() -> String {
-    BASELINE_SQL_FILE_TEXTS
-        .iter()
-        .map(|(_, text)| *text)
+/// The text of the migration chain: every file of every migration in run
+/// order (migration 1000, then each later migration), concatenated with no
+/// separator. A function that a later migration replaces has its last
+/// definition in force, as on a database that the install migrated.
+pub(super) fn chain_sql() -> String {
+    migration_sql_file_texts()
+        .into_iter()
+        .map(|(_, _, text)| text)
         .collect()
 }
 
@@ -55,14 +57,14 @@ pub(super) fn describe(error: &tokio_postgres::Error) -> String {
     }
 }
 
-/// A database of one test that holds the baseline migration.
+/// A database of one test that holds the migration chain.
 pub(super) struct BaselineDatabase {
     database: TestDatabase,
 }
 
 impl BaselineDatabase {
-    /// Creates an empty database and applies the baseline migration text and
-    /// then each text of `setup`, in one transaction that commits.
+    /// Creates an empty database and applies the text of the migration chain
+    /// and then each text of `setup`, in one transaction that commits.
     ///
     /// # Panics
     ///
@@ -87,12 +89,12 @@ impl BaselineDatabase {
         .await
     }
 
-    /// Applies the baseline migration text and then each text of `setup` to
-    /// the empty `database`, in one transaction that commits.
+    /// Applies the text of the migration chain and then each text of `setup`
+    /// to the empty `database`, in one transaction that commits.
     async fn install(database: TestDatabase, setup: &[&str]) -> BaselineDatabase {
         let client = database.client();
         run(client, "BEGIN", "BEGIN").await;
-        run(client, "the baseline migration", &baseline_sql()).await;
+        run(client, "the migration chain", &chain_sql()).await;
         for text in setup {
             run(client, "a setup text", text).await;
         }

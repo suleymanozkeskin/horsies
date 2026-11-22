@@ -100,7 +100,7 @@ async fn seed_pending(pool: &TestPool, queue_name: &str, age_s: i32) -> Uuid {
 async fn set_running(pool: &TestPool, task_id: Uuid, worker_id: &str) {
     sql::query(
         "UPDATE horsies_tasks
-         SET status = 'RUNNING', claimed_at = NOW(), claim_expires_at = NULL,
+         SET status = 'RUNNING', attempt_claims = 1, first_claimed_at = NOW(), claimed_at = NOW(), claim_expires_at = NULL,
              claimed_by_worker_id = $2, started_at = NOW(), updated_at = NOW()
          WHERE id = $1",
     )

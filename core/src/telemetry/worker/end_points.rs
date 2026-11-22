@@ -291,9 +291,9 @@ impl TelemetryOn {
             }
             EndKind::Ran(ran) => match placement {
                 ChildPlacement::Placed(placed) => self.ran(task, placed, ran, seen),
-                ChildPlacement::NotWatched | ChildPlacement::NotPlaced => {
+                ChildPlacement::NotPlaced => {
                     // A child sent this end, so it took the task: the
-                    // placement of a watched task is told before its end.
+                    // placement of a task is told before its end.
                     tracing::error!(
                         task_id = %task.task_id,
                         attempt = task.retry.attempt().get(),

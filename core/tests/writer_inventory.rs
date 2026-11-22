@@ -273,7 +273,9 @@ async fn v35_catalog_has_only_move_program_terminal_writers_and_a_live_only_chec
     // are the only direct writers: the single move takes one locked row, the
     // batch move a locked id array. Every other writer calls one of them: the
     // lifecycle writes of 0004_lifecycle_functions.sql and the interim
-    // terminal writes of 0003_interim_functions.sql. Any other function with
+    // terminal writes of 0003_interim_functions.sql (migration 1001 replaces
+    // four of the lifecycle writes with the arguments of the attempt
+    // placement). Any other function with
     // one of those properties, or any function that updates live storage to a
     // terminal status, is an unreviewed terminal writer and changes the
     // catalog-wide inventory.
@@ -289,17 +291,17 @@ async fn v35_catalog_has_only_move_program_terminal_writers_and_a_live_only_chec
             true,
         ),
         (
-            "horsies_complete_task_fused(uuid,text,timestamp with time zone,text,boolean)",
+            "horsies_complete_task_fused(uuid,text,timestamp with time zone,text,boolean,text,bigint)",
             true,
             false,
         ),
         (
-            "horsies_finish_workflow_success(uuid,text,timestamp with time zone,text)",
+            "horsies_finish_workflow_success(uuid,text,timestamp with time zone,text,text,bigint)",
             true,
             false,
         ),
         (
-            "horsies_finish_failed_attempt(uuid,text,timestamp with time zone,text,integer,double precision,text,text,text,text,text,text,text,text,boolean)",
+            "horsies_finish_failed_attempt(uuid,text,timestamp with time zone,text,integer,double precision,text,text,text,text,text,text,text,text,boolean,text,bigint)",
             true,
             false,
         ),
