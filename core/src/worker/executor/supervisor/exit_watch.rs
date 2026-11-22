@@ -210,14 +210,11 @@ impl ExitWatch {
     /// or the queue is full) becomes a polled one; the error is returned for
     /// the log.
     pub(super) fn watch(&mut self, pid: ProcessId) -> (ChildWatch, Option<io::Error>) {
-        let ident = match usize::try_from(pid.get()) {
-            Ok(ident) => ident,
-            Err(_) => {
-                return (
-                    ChildWatch::Polled,
-                    Some(io::Error::from(io::ErrorKind::InvalidInput)),
-                )
-            }
+        let Ok(ident) = usize::try_from(pid.get()) else {
+            return (
+                ChildWatch::Polled,
+                Some(io::Error::from(io::ErrorKind::InvalidInput)),
+            );
         };
         match self.change(
             ident,
@@ -264,15 +261,12 @@ impl ExitWatch {
                 &wait,
             )
         };
-        let count = match usize::try_from(count) {
-            Ok(count) => count,
-            Err(_) => {
-                let error = io::Error::last_os_error();
-                return match error.kind() {
-                    io::ErrorKind::Interrupted => Ok(Wake::default()),
-                    _ => Err(error),
-                };
-            }
+        let Ok(count) = usize::try_from(count) else {
+            let error = io::Error::last_os_error();
+            return match error.kind() {
+                io::ErrorKind::Interrupted => Ok(Wake::default()),
+                _ => Err(error),
+            };
         };
         let mut wake = Wake::default();
         for event in &events[..count] {

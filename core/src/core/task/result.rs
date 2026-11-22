@@ -603,7 +603,7 @@ mod tests {
             let text = format!(r#"{{"__h_task_result__":true,"ok":null,"err":{err_slot}}}"#);
             match read_task_result_text(&text) {
                 Err(refused @ TaskResultTextRefused::ErrorRefused(_)) => {
-                    assert!(refused.to_string().contains(cause), "{text}: {refused}")
+                    assert!(refused.to_string().contains(cause), "{text}: {refused}");
                 }
                 other => panic!("{text} must be refused for its err slot, got {other:?}"),
             }

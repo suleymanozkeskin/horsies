@@ -57,6 +57,10 @@ impl CoverageRequestArgument {
 impl CoverageRequestArgument {
     #[new]
     #[pyo3(signature = (*, history_horizon_days, heartbeat_horizon_hours, declared_period_days, serialization))]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 extracts a Python list into an owned `Vec`, not into a slice"
+    )]
     fn new(
         history_horizon_days: u32,
         heartbeat_horizon_hours: u32,
@@ -96,6 +100,10 @@ impl InstallCoverageArgument {
 impl InstallCoverageArgument {
     #[new]
     #[pyo3(signature = (*, history_horizon_days, heartbeat_horizon_hours, declared_period_days))]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 extracts a Python list into an owned `Vec`, not into a slice"
+    )]
     fn new(
         history_horizon_days: u32,
         heartbeat_horizon_hours: u32,

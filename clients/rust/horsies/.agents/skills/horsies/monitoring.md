@@ -42,7 +42,7 @@ async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
   argument is `InvalidInput`; an app with no listener is
   `ListenerDisabled`. The message is Python's: `ping_database failed:
   <cause>`, `ping_workers failed: <cause>`, `<read> failed: <cause>`.
-  `OperationFailed` carries its `cause`, a `BrokerOperationSource` (the
+  `OperationFailed` carries its `cause`, a `Box<BrokerOperationSource>` (the
   `BrokerError`, a refused class read, a snapshot that does not read, a
   refused subscription); `InvalidInput` carries `BrokerRefusalCause::Check`.
   Each read connects the app's handle and installs the schema once per
@@ -94,7 +94,7 @@ async fn failed_tasks_of_last_day(app: &Horsies) -> Result<(), Box<dyn std::erro
 | `task_facets(&app, &TaskFacetsQuery)` | `Facets`: workers, task names, queues and error codes with counts |
 | `task_breakdown(&app, &TaskBreakdownQuery)` | `Breakdown`: counts per `TaskGroupBy` (`Worker`, `TaskName`, `Queue`) |
 | `list_tasks(&app, &TaskListQuery)` | `TaskListPage` (`rows: Vec<TaskSummary>`, `total`) |
-| `get_task_detail(&app, task_id)` | `TaskDetailRead`: `Found(TaskDetail)` or `NotFound(TaskDetailNotFound { task_id, reason })` |
+| `get_task_detail(&app, task_id)` | `TaskDetailRead`: `Found(Box<TaskDetail>)` or `NotFound(TaskDetailNotFound { task_id, reason })` |
 | `list_workflow_names(&app)` | `Vec<String>`, at most `LIST_ROW_BOUND` (10,000) |
 | `list_workflow_runs(&app, &WorkflowRunsQuery)` | `Vec<WorkflowRunSummary>`, newest first |
 | `get_workflow_run(&app, workflow_id)` | `Option<WorkflowRunDetail>`: nodes and edges; `None` when no run has the id |
@@ -177,7 +177,7 @@ and `task_id`; `code()`, `message()`, `retryable()`, `task_id()` and
 | `NotFound` | 404 | No live or history row has the id. Nothing changed |
 | `NotCancellable { current_status, .. }` | 409 | Terminal, or RUNNING without `include_running`; `current_status` is the status found. Nothing changed |
 | `WorkflowTask { current_status, .. }` | 400 | The task belongs to a workflow. Nothing changed |
-| `DbOperationFailed { retryable, cause, .. }` | 503 | The statement or the connect failed; `cause` is the `BrokerError`. Nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `NotCancellable` with `CANCELLED` |
+| `DbOperationFailed { retryable, cause, .. }` | 503 | The statement or the connect failed; `cause` is the `Box<BrokerError>`. Nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `NotCancellable` with `CANCELLED` |
 | `StoredDataInvalid { cause, .. }` | 500 | Stored data does not parse; `cause` is the `OutcomeDecodeError`. Nothing changed |
 
 There is no manual retry action. Re-execution is a rerun (see `tasks.md`).

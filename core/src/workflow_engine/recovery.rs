@@ -837,7 +837,7 @@ async fn advance_after_candidate(
             pass.build,
         ))
         .await
-        .map_err(|failure| failure.error)
+        .map_err(|failure| *failure.error)
     })
     .await;
     if let Err(failure) = advanced {
@@ -3532,6 +3532,18 @@ mod cap_tests {
         }
     }
 
+    impl sql::FromTestRow for GlobalWorkflowAuditRow {
+        fn from_row(row: &tokio_postgres::Row) -> Result<Self, sql::Error> {
+            Ok(Self {
+                scanned_count: sql::named(row, "scanned_count")?,
+                completion_ids: sql::named(row, "completion_ids")?,
+                orphan_ids: sql::named(row, "orphan_ids")?,
+                orphan_names: sql::named(row, "orphan_names")?,
+                claim_token: sql::named(row, "claim_token")?,
+            })
+        }
+    }
+
     /// A stored `good_until` that the database cannot read is not a refusal of the node: the task insert
     /// casts the text and raises (22007), the transaction rolls back, and the node stays READY with no task
     /// while the workflow stays RUNNING. The error is persistent, so the recovery pass counts it toward the
@@ -3540,18 +3552,6 @@ mod cap_tests {
     #[tokio::test]
     async fn a_stored_deadline_that_does_not_read_raises_and_keeps_the_ready_node() {
         use crate::workflow_engine::recovery_limit::{CandidateFailure, FailureClass};
-
-        impl sql::FromTestRow for GlobalWorkflowAuditRow {
-            fn from_row(row: &tokio_postgres::Row) -> Result<Self, sql::Error> {
-                Ok(Self {
-                    scanned_count: sql::named(row, "scanned_count")?,
-                    completion_ids: sql::named(row, "completion_ids")?,
-                    orphan_ids: sql::named(row, "orphan_ids")?,
-                    orphan_names: sql::named(row, "orphan_names")?,
-                    claim_token: sql::named(row, "claim_token")?,
-                })
-            }
-        }
 
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let task_name = "recovery_unreadable_deadline_node";
@@ -3702,7 +3702,7 @@ mod cap_tests {
                 NOW(), NOW(), NOW()
              )",
         )
-        .bind(&workflow_id)
+        .bind(workflow_id)
         .execute(&pool)
         .await
         .expect("insert recovery workflow");
@@ -3717,7 +3717,7 @@ mod cap_tests {
             )",
         )
         .bind(Uuid::new_v4())
-        .bind(&workflow_id)
+        .bind(workflow_id)
         .execute(&pool)
         .await
         .expect("insert ready recovery node");
@@ -3734,7 +3734,7 @@ mod cap_tests {
              JOIN horsies_tasks t ON t.id = wt.task_id
              WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
         )
-        .bind(&workflow_id)
+        .bind(workflow_id)
         .fetch_one(&pool)
         .await
         .expect("read the recovery node enqueue time");
@@ -3746,7 +3746,7 @@ mod cap_tests {
              JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
              WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
         )
-        .bind(&workflow_id)
+        .bind(workflow_id)
         .fetch_one(&pool)
         .await
         .expect("read recovery enqueue facts");
@@ -3761,7 +3761,7 @@ mod cap_tests {
              JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
              WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
         )
-        .bind(&workflow_id)
+        .bind(workflow_id)
         .fetch_one(&pool)
         .await
         .expect("read recovery task sent_at");
@@ -3772,17 +3772,17 @@ mod cap_tests {
                 SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1::uuid
              )",
         )
-        .bind(&workflow_id)
+        .bind(workflow_id)
         .execute(&pool)
         .await
         .ok();
         sql::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1::uuid")
-            .bind(&workflow_id)
+            .bind(workflow_id)
             .execute(&pool)
             .await
             .ok();
         sql::query("DELETE FROM horsies_workflows WHERE id = $1::uuid")
-            .bind(&workflow_id)
+            .bind(workflow_id)
             .execute(&pool)
             .await
             .ok();

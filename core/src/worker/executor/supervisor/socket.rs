@@ -59,6 +59,7 @@ fn set_int_option(fd: RawFd, option: libc::c_int, value: libc::c_int) -> io::Res
 
 /// The size of one buffer option of `fd`, as the OS reports it. Linux
 /// reports twice the size it was given.
+#[cfg(test)]
 pub fn buffer_size(fd: RawFd, option: libc::c_int) -> io::Result<libc::c_int> {
     let mut value: libc::c_int = 0;
     let mut length = libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>())

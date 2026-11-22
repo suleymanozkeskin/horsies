@@ -75,7 +75,7 @@ pub fn run_blocking<T, F>(
     py: Python<'_>,
     core: &'static Core,
     subject: &'static str,
-    stop: StopSignal,
+    stop: &StopSignal,
     run: F,
 ) -> PyResult<Py<PyAny>>
 where
@@ -270,7 +270,7 @@ asyncio.run(main())
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 7_i64
             };
-            let outcome = run_blocking(py, core, "test run", StopSignal::new(|| {}), run)
+            let outcome = run_blocking(py, core, "test run", &StopSignal::new(|| {}), run)
                 .expect("the run ends");
             assert_eq!(outcome.bind(py).extract::<i64>().expect("an int"), 7);
         });
@@ -298,7 +298,7 @@ asyncio.run(main())
                 std::thread::sleep(Duration::from_millis(200));
                 Python::attach(|py| py.run(SEND_SIGUSR1, None, None)).expect("the signal is sent");
             });
-            let raised = run_blocking(py, core, "test run", stop, run)
+            let raised = run_blocking(py, core, "test run", &stop, run)
                 .expect_err("the exception of the handler is raised");
             assert!(raised.is_instance_of::<PyKeyboardInterrupt>(py), "{raised}");
         });
@@ -328,7 +328,7 @@ asyncio.run(main())
                 let run = async move {
                     ran_in_run.store(true, Ordering::SeqCst);
                 };
-                let raised = run_blocking(py, core, "test run", StopSignal::new(|| {}), run)
+                let raised = run_blocking(py, core, "test run", &StopSignal::new(|| {}), run)
                     .expect_err("a run off the main thread is refused");
                 raised.is_instance_of::<NotMainThread>(py)
             })

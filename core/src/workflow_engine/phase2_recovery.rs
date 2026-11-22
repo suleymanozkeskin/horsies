@@ -13,7 +13,9 @@ use uuid::Uuid;
 
 use crate::broker::core_rows::{column, first_row, one_row, RowDecodeError};
 use crate::broker::PostgresBroker;
+#[cfg(test)]
 use crate::core::lifecycle::TerminalizationKind;
+#[cfg(test)]
 use crate::core::types::status::TaskStatus;
 use crate::db::{CheckoutClass, ParameterType, Row, TypedStatement};
 use crate::workflow_engine::child_spec::ChildSpecSource;
@@ -149,6 +151,7 @@ enum QuarantineResult {
 /// A phase-2 record names a kind whose terminal move writes no phase-2
 /// record. The pending CHECK admits five kinds, so this is a value that the
 /// table refuses or that a later schema added.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("phase-2 record names terminalization kind {kind:?}, which writes no phase-2 record")]
 pub(crate) struct PendingKindWithoutPhase2 {
@@ -164,6 +167,7 @@ pub(crate) struct PendingKindWithoutPhase2 {
 /// and `EXPIRE_PENDING` are EXPIRED. No cancel kind writes a record, so a
 /// record never stands for a CANCELLED task. Every other value, known kind
 /// or not, is `PendingKindWithoutPhase2`. Pure.
+#[cfg(test)]
 pub(crate) fn terminal_status_of_pending_kind(
     kind: &str,
 ) -> Result<TaskStatus, PendingKindWithoutPhase2> {
@@ -193,15 +197,13 @@ pub(crate) fn terminal_status_of_pending_kind(
     }
 }
 
-/// The capacity wake that phase 2 sends (Python `QueueWake | NoQueueWake`,
+/// The capacity wake that phase 2 sends (Python `QueueWake`,
 /// `core/workflows/engine.py:1766-1780`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase2Wake {
     /// `pg_notify(channel, payload)`. Inside a transaction, PostgreSQL
     /// delivers it at COMMIT and drops it at rollback.
     Queue { channel: String, payload: String },
-    /// The caller sends no wake.
-    NoWake,
 }
 
 /// One bounded pass over the phase-2 records, with the children of the owed
@@ -395,7 +397,7 @@ async fn advance_after_recovery(
             build,
         )
         .await
-        .map_err(|failure| failure.error)
+        .map_err(|failure| *failure.error)
     })
     .await;
     if let Err(failure) = advanced {

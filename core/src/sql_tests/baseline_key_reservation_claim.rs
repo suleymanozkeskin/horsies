@@ -342,17 +342,14 @@ async fn a_reservation_that_is_expired_at_the_second_read_is_reused() {
 async fn a_claim_whose_reservation_changes_in_every_round_raises_40001() {
     let database = BaselineDatabase::create(&[]).await;
     let mut sessions = connect_many(&database, 5).await.into_iter();
-    let (setup, gate, locker, caller, observer) = match (
+    let (Some(setup), Some(gate), Some(locker), Some(caller), Some(observer)) = (
         sessions.next(),
         sessions.next(),
         sessions.next(),
         sessions.next(),
         sessions.next(),
-    ) {
-        (Some(setup), Some(gate), Some(locker), Some(caller), Some(observer)) => {
-            (setup, gate, locker, caller, observer)
-        }
-        _ => unreachable!("connect_many returns the count it was asked for"),
+    ) else {
+        unreachable!("connect_many returns the count it was asked for")
     };
     setup
         .run_script("PAUSE_TRIGGER_SQL", PAUSE_TRIGGER_SQL)
@@ -445,9 +442,8 @@ async fn send(sender: &Session, task_id: Uuid, command: Vec<u8>) -> SendOutcome 
 /// Sends `commands[i]` under [`key`] with a new task id each, all at once.
 async fn concurrent_sends(database: &BaselineDatabase, commands: &[Vec<u8>]) -> Vec<SendOutcome> {
     let mut sessions = connect_many(database, 2 + commands.len()).await.into_iter();
-    let (gate, observer) = match (sessions.next(), sessions.next()) {
-        (Some(gate), Some(observer)) => (gate, observer),
-        _ => unreachable!("connect_many returns the count it was asked for"),
+    let (Some(gate), Some(observer)) = (sessions.next(), sessions.next()) else {
+        unreachable!("connect_many returns the count it was asked for")
     };
     let senders: Vec<Session> = sessions.collect();
     let pids: Vec<i32> = senders.iter().map(Session::backend_pid).collect();

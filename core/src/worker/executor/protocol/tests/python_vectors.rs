@@ -6,7 +6,7 @@
 //! two version-1 frames that changed (`ready`, `init`) are kept to check
 //! that a version-1 peer is named as a protocol mismatch.
 
-pub(super) const PY_STOP: &str = concat!("0000000f00000000000000007b226b696e64223a2273746f70227d",);
+pub(super) const PY_STOP: &str = "0000000f00000000000000007b226b696e64223a2273746f70227d";
 pub(super) const PY_BOOT_FAILED_SHORTAGE: &str = concat!(
     "0000008d00000000000000007b226b696e64223a22626f6f745f6661696c6564222c226361757365",
     "223a7b226b696e64223a227265736f757263655f73686f7274616765222c226572726e6f223a2245",

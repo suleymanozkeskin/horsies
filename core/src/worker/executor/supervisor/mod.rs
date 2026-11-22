@@ -24,23 +24,27 @@ mod child_io_tests;
 mod tests;
 
 pub use boot::{
-    boot_end_of, outside_kill_delay, slot_down_delay, BootCounts, BootDecision, BootEnd,
-    BootFailure, BootFailureCause, BootReply, CauseKind, LastRecord, MismatchSeen, PoolAtFailure,
-    CHILD_BOOT_ATTEMPTS, CHILD_READY_TIMEOUT,
+    boot_end_of, slot_down_delay, BootCounts, BootDecision, BootEnd, BootFailure, BootFailureCause,
+    BootReply, CauseKind, LastRecord, PoolAtFailure, CHILD_BOOT_ATTEMPTS, CHILD_READY_TIMEOUT,
 };
+#[cfg(test)]
+pub use boot::{outside_kill_delay, MismatchSeen};
+#[cfg(test)]
+pub use channel::PartialFrame;
 pub use channel::{
-    ChildChannel, ChildLost, FrameWait, LossCause, MailboxBound, PartialFrame, SendFailure,
-    WorkerKillMark, CHANNEL_LOST_GRACE, CHILD_KILL_WAIT, CHILD_STOP_TIMEOUT,
+    ChildChannel, ChildLost, FrameWait, LossCause, MailboxBound, SendFailure, WorkerKillMark,
+    CHANNEL_LOST_GRACE, CHILD_KILL_WAIT, CHILD_STOP_TIMEOUT,
 };
-pub use exit::{
-    log_core_stopped_child, ChildExit, EndWithoutTask, ExitMeaning, ExitState, ReapedExit,
-};
+pub use exit::{log_core_stopped_child, ChildExit, EndWithoutTask, ExitState};
+#[cfg(test)]
+pub use exit::{ExitMeaning, ReapedExit};
+#[cfg(all(test, target_os = "linux"))]
 pub use exit_watch::POLLED_EXIT_INTERVAL;
-pub use socket::{child_socket_pair, ChildSocketPair, SOCKET_BUFFER_BYTES};
+#[cfg(test)]
+pub use socket::SOCKET_BUFFER_BYTES;
 pub use source::{ChildSource, SpawnFuture};
 pub use spawner::{
     wait_for_exit, ChildCommand, ChildId, KillOutcome, PreloadMode, PreloadPlan, PreloadStart,
     PreloadUnsupported, SpawnError, SpawnedChild, Spawner, SpawnerHandle, SpawnerStartError,
-    SpawnerStopReport, ORPHAN_SWEEP_LIMIT, PRELOAD_FORK_TIMEOUT, PRELOAD_READY_TIMEOUT,
-    PRELOAD_RESTART_DELAY, PRELOAD_RESTART_LIMIT, PRELOAD_STOP_TIMEOUT,
+    SpawnerStopReport,
 };

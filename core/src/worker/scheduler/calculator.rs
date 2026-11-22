@@ -255,6 +255,7 @@ fn next_cron(cron: &CronSchedule, local: DateTime<Tz>, tz: Tz) -> Option<DateTim
 /// - Returns `true` if `next_run_at` is `None` (first run — should execute).
 /// - Returns `true` if `next_run_at <= check_time` (schedule is due).
 /// - Returns `false` otherwise (schedule is in the future).
+#[cfg(test)]
 pub fn should_run_now(next_run_at: Option<DateTime<Utc>>, check_time: DateTime<Utc>) -> bool {
     match next_run_at {
         None => true,

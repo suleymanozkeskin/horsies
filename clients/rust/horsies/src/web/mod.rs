@@ -189,7 +189,7 @@ where
         Err(error) => {
             return detail(
                 StatusCode::SERVICE_UNAVAILABLE,
-                format!("The monitoring handler could not connect its broker: {error}"),
+                &format!("The monitoring handler could not connect its broker: {error}"),
             )
         }
     };
@@ -204,7 +204,7 @@ where
                 Err(error) => {
                     return detail(
                         StatusCode::BAD_REQUEST,
-                        format!("The request body could not be read: {error}"),
+                        &format!("The request body could not be read: {error}"),
                     )
                 }
             };
@@ -345,7 +345,7 @@ fn event_stream(frames: EventFrames) -> Response {
 
 /// A refusal of the mount itself, `{"detail": ...}` as the core's
 /// refusals. Pure.
-fn detail(status: StatusCode, detail: String) -> Response {
+fn detail(status: StatusCode, detail: &str) -> Response {
     (status, Json(serde_json::json!({ "detail": detail }))).into_response()
 }
 

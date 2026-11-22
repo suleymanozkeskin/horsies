@@ -107,6 +107,7 @@ enum WebPolicy {
 /// Why `web` did not serve, or stopped serving with a failure.
 #[derive(Debug, thiserror::Error)]
 enum WebError {
+    #[cfg(not(feature = "web"))]
     #[error("horsies web requires the `web` cargo feature")]
     MissingFeature,
     #[error(
@@ -155,8 +156,9 @@ impl WebError {
             | Self::BlankTrustedHeader
             | Self::InvalidTrustedHeader { .. }
             | Self::InvalidTraceLink { .. } => 2,
-            Self::MissingFeature
-            | Self::ConfigRead { .. }
+            #[cfg(not(feature = "web"))]
+            Self::MissingFeature => 1,
+            Self::ConfigRead { .. }
             | Self::ConfigTooLarge { .. }
             | Self::ConfigParse { .. }
             | Self::ConfigInvalid(_)

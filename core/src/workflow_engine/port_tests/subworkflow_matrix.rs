@@ -83,7 +83,7 @@ pub(super) fn nested_slow_middle() -> WorkflowSpec {
             0,
             "e2e_sub_slow_workflow",
             SLOW_KEY,
-            serde_json::json!({"value": "nested_slow_leaf", "delay_ms": 1000}),
+            &serde_json::json!({"value": "nested_slow_leaf", "delay_ms": 1000}),
         ),
     )
 }
@@ -102,7 +102,7 @@ pub(super) fn given_params_node(
     index: usize,
     name: &str,
     definition_key: &str,
-    input: serde_json::Value,
+    input: &serde_json::Value,
 ) -> AnyNode {
     AnyNode {
         input_json: input.to_string(),
@@ -335,9 +335,12 @@ pub(super) fn assert_subworkflow_error(
     details.sub_workflow_summary.clone()
 }
 
-pub(super) fn assert_ok_value(result: &TaskResult<serde_json::Value>, expected: serde_json::Value) {
+pub(super) fn assert_ok_value(
+    result: &TaskResult<serde_json::Value>,
+    expected: &serde_json::Value,
+) {
     match result {
-        TaskResult::Ok(value) => assert_eq!(value, &expected),
+        TaskResult::Ok(value) => assert_eq!(value, expected),
         TaskResult::Err(error) => panic!("expected ok {expected}, got {error:?}"),
     }
 }
@@ -425,11 +428,11 @@ async fn a_child_success_reads_the_same_on_every_surface() {
     let workflow_id = run(&pool, &success_surface_parent()).await;
 
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
-    assert_ok_value(&get(&pool, workflow_id).await, serde_json::json!(11));
+    assert_ok_value(&get(&pool, workflow_id).await, &serde_json::json!(11));
     let sub = node(&pool, workflow_id, 0).await;
     assert_eq!(sub.status, "COMPLETED");
     let child_id = sub.sub_workflow_id.expect("the node holds its child");
-    assert_ok_value(&node_result(sub.result), serde_json::json!(11));
+    assert_ok_value(&node_result(sub.result), &serde_json::json!(11));
     let summary = summary_of(sub.sub_workflow_summary.as_deref());
     assert_eq!(summary.status, WorkflowStatus::Completed);
     assert_eq!(
@@ -464,14 +467,14 @@ async fn a_child_success_reads_the_same_on_every_surface() {
     );
     assert_ok_value(
         infos[0].result.as_ref().expect("tasks() holds the result"),
-        serde_json::json!(11),
+        &serde_json::json!(11),
     );
     assert_ok_value(
         &handle(&pool, workflow_id)
             .result_for::<serde_json::Value>("node_0")
             .await
             .expect("the node result read"),
-        serde_json::json!(11),
+        &serde_json::json!(11),
     );
 }
 
@@ -489,7 +492,7 @@ async fn a_handle_built_from_the_id_reads_status_tasks_and_results() {
     );
     assert_ok_value(
         &rebuilt.get(Some(GET_WAIT)).await.expect("the result read"),
-        serde_json::json!(11),
+        &serde_json::json!(11),
     );
     let infos = rebuilt.tasks().await.expect("tasks()");
     assert_eq!(infos.len(), 1);
@@ -505,14 +508,14 @@ async fn a_handle_built_from_the_id_reads_status_tasks_and_results() {
     );
     assert_ok_value(
         infos[0].result.as_ref().expect("tasks() holds the result"),
-        serde_json::json!(11),
+        &serde_json::json!(11),
     );
     let results = rebuilt.results().await.expect("results()");
     assert_eq!(
         results.keys().map(String::as_str).collect::<Vec<_>>(),
         vec!["node_0"]
     );
-    assert_ok_value(&results["node_0"], serde_json::json!(11));
+    assert_ok_value(&results["node_0"], &serde_json::json!(11));
 }
 
 /// `test_subworkflow_failure_fail_policy_preserves_error_everywhere`: the node,
@@ -641,7 +644,7 @@ async fn an_outputless_workflow_holds_the_optional_child_error_in_its_map() {
     let got = get(&pool, workflow_id).await;
     assert_ok_value(
         &outputless_entry(&got, "node_0"),
-        serde_json::json!("required_ok"),
+        &serde_json::json!("required_ok"),
     );
     let child_id = child_of(&pool, workflow_id, 1).await;
     let _summary = assert_subworkflow_error(&outputless_entry(&got, "node_1"), Some(child_id));
@@ -662,7 +665,7 @@ async fn a_nested_child_success_records_its_links_depth_and_root() {
     .await;
 
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
-    assert_ok_value(&get(&pool, workflow_id).await, serde_json::json!(11));
+    assert_ok_value(&get(&pool, workflow_id).await, &serde_json::json!(11));
     let rows = tree(&pool, workflow_id).await;
     assert_eq!(rows.len(), 3);
     let (root, middle, leaf) = (&rows[0], &rows[1], &rows[2]);
@@ -741,7 +744,7 @@ async fn an_allow_failed_deps_child_builder_receives_the_failed_upstream_result(
     assert_eq!(node_status(&pool, workflow_id, 1).await, "COMPLETED");
     assert_ok_value(
         &get(&pool, workflow_id).await,
-        serde_json::json!({
+        &serde_json::json!({
             "input_is_err": true,
             "input_error_code": "E2E_UPSTREAM_FAIL",
             "input_value": null,
@@ -811,7 +814,7 @@ async fn a_join_any_child_starts_on_the_first_success() {
     drive(&pool, workflow_id, &child_specs).await;
 
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
-    assert_ok_value(&get(&pool, workflow_id).await, serde_json::json!(11));
+    assert_ok_value(&get(&pool, workflow_id).await, &serde_json::json!(11));
     let sub = node(&pool, workflow_id, 2).await;
     assert_eq!(sub.sub_workflow_id, Some(child_id));
     assert_eq!(sub.status, "COMPLETED");
@@ -871,7 +874,7 @@ async fn a_quorum_child_starts_when_its_quorum_is_met() {
     let workflow_id = run(&pool, &quorum).await;
 
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
-    assert_ok_value(&get(&pool, workflow_id).await, serde_json::json!(11));
+    assert_ok_value(&get(&pool, workflow_id).await, &serde_json::json!(11));
     assert_eq!(
         statuses(&pool, workflow_id, 4).await,
         expected(&["COMPLETED", "COMPLETED", "FAILED", "COMPLETED"])
@@ -1066,7 +1069,7 @@ async fn a_second_case_met_by_a_child_completes_the_workflow() {
     let workflow_id = run(&pool, &multi).await;
 
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
-    assert_ok_value(&get(&pool, workflow_id).await, serde_json::json!(11));
+    assert_ok_value(&get(&pool, workflow_id).await, &serde_json::json!(11));
     assert_eq!(
         statuses(&pool, workflow_id, 2).await,
         expected(&["FAILED", "COMPLETED"])
@@ -1091,12 +1094,15 @@ async fn required_and_optional_children_hold_their_results() {
     let workflow_id = run(&pool, &mixed).await;
 
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
-    assert_ok_value(&get(&pool, workflow_id).await, serde_json::json!("task_ok"));
+    assert_ok_value(
+        &get(&pool, workflow_id).await,
+        &serde_json::json!("task_ok"),
+    );
     let results = handle(&pool, workflow_id)
         .results()
         .await
         .expect("results()");
-    assert_ok_value(&results["node_0"], serde_json::json!(11));
+    assert_ok_value(&results["node_0"], &serde_json::json!(11));
     let optional_child = child_of(&pool, workflow_id, 2).await;
     let _summary = assert_subworkflow_error(&results["node_2"], Some(optional_child));
 }
@@ -1120,7 +1126,7 @@ async fn an_optional_nested_failed_child_appears_in_the_outputless_map() {
     let got = get(&pool, workflow_id).await;
     assert_ok_value(
         &outputless_entry(&got, "node_0"),
-        serde_json::json!("required_ok"),
+        &serde_json::json!("required_ok"),
     );
     let middle_id = child_of(&pool, workflow_id, 1).await;
     let _summary = assert_subworkflow_error(&outputless_entry(&got, "node_1"), Some(middle_id));
@@ -1181,10 +1187,10 @@ async fn success_allow_failed_and_nested_optional_failure_in_one_outputless_work
 
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
     let got = get(&pool, workflow_id).await;
-    assert_ok_value(&outputless_entry(&got, "node_0"), serde_json::json!(11));
+    assert_ok_value(&outputless_entry(&got, "node_0"), &serde_json::json!(11));
     assert_ok_value(
         &outputless_entry(&got, "node_2"),
-        serde_json::json!({
+        &serde_json::json!({
             "input_is_err": true,
             "input_error_code": "L7_DEEP_MIXED_SOURCE_FAIL",
             "input_value": null,

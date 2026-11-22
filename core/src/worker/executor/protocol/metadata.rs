@@ -302,9 +302,8 @@ impl<'a> Fields<'a> {
     }
 
     pub(super) fn text_list(&self, key: &str) -> Result<Vec<String>, MalformedFrame> {
-        let items = match self.value(key)? {
-            Value::Array(items) => items,
-            _ => return Err(self.wrong_type(key, ExpectedType::ListOfText)),
+        let Value::Array(items) = self.value(key)? else {
+            return Err(self.wrong_type(key, ExpectedType::ListOfText));
         };
         items
             .iter()
@@ -352,9 +351,8 @@ impl<'a> Fields<'a> {
     /// The objects of the list in field `key`, each with its path
     /// (`key[index]`).
     pub(super) fn objects(&self, key: &str) -> Result<Vec<Fields<'a>>, MalformedFrame> {
-        let items = match self.value(key)? {
-            Value::Array(items) => items,
-            _ => return Err(self.wrong_type(key, ExpectedType::ListOfObjects)),
+        let Value::Array(items) = self.value(key)? else {
+            return Err(self.wrong_type(key, ExpectedType::ListOfObjects));
         };
         items
             .iter()

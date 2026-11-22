@@ -217,7 +217,7 @@ mod publication_contract_tests {
             .execute(&mut *tx)
             .await
             .unwrap();
-        assert!(StagedLoaderPublisher.republish(&mut *tx).await.is_err());
+        assert!(StagedLoaderPublisher.republish(&mut tx).await.is_err());
         sql::query("ROLLBACK TO SAVEPOINT publication_attempt")
             .execute(&mut *tx)
             .await

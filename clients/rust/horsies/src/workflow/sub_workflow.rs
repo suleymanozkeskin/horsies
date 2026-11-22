@@ -120,6 +120,11 @@ where
     ///
     /// Errors: `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (HRS-031) for a value that
     /// does not encode or read back as `F`.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "a public builder method takes the param value by value, as a send does; a \
+                  reference would change every caller"
+    )]
     pub fn set<F>(mut self, field: InputField<P, F>, value: F) -> Result<Self, HorsiesError>
     where
         F: Serialize + DeserializeOwned,

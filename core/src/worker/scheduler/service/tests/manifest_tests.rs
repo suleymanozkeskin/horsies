@@ -16,7 +16,7 @@ const INPUT_TEXT: &str = "{\"z\":1,\"a\":[true,null],\"m\":\"text\"}";
 const OPTIONS_TEXT: &str = "{\"task_name\":\"manifest_task\",\"timeout_ms\":5000}";
 
 /// An enabled schedule of a 60 s interval with the send facts of `task_name`.
-fn enabled_schedule(name: &str, task_name: &str, timezone: &str, options: Value) -> Value {
+fn enabled_schedule(name: &str, task_name: &str, timezone: &str, options: &Value) -> Value {
     json!({
         "name": name,
         "activation": {
@@ -43,7 +43,7 @@ fn encoded_options() -> Value {
     json!({"kind": "ENCODED", "json": OPTIONS_TEXT})
 }
 
-fn manifest_of(enabled: bool, schedules: Value) -> SchedulerManifest {
+fn manifest_of(enabled: bool, schedules: &Value) -> SchedulerManifest {
     let document = json!({
         "manifest_version": 1,
         "enabled": enabled,
@@ -79,14 +79,14 @@ async fn start_of(
 async fn a_manifest_with_the_master_switch_off_or_no_schedule_starts_idle() {
     let off = manifest_of(
         false,
-        json!([enabled_schedule("off", "task", "UTC", encoded_options())]),
+        &json!([enabled_schedule("off", "task", "UTC", &encoded_options())]),
     );
     assert!(matches!(
         start_of(unreachable_broker(), off).await,
         Ok(SchedulerStarted::Idle)
     ));
     assert!(matches!(
-        start_of(unreachable_broker(), manifest_of(true, json!([]))).await,
+        start_of(unreachable_broker(), manifest_of(true, &json!([]))).await,
         Ok(SchedulerStarted::Idle)
     ));
 }
@@ -95,9 +95,9 @@ async fn a_manifest_with_the_master_switch_off_or_no_schedule_starts_idle() {
 async fn a_zone_that_the_core_does_not_know_refuses_the_start_before_any_statement() {
     let manifest = manifest_of(
         true,
-        json!([
-            enabled_schedule("known", "task", "Europe/Berlin", encoded_options()),
-            enabled_schedule("unknown", "task", "Not/A_Zone", encoded_options())
+        &json!([
+            enabled_schedule("known", "task", "Europe/Berlin", &encoded_options()),
+            enabled_schedule("unknown", "task", "Not/A_Zone", &encoded_options())
         ]),
     );
     assert!(matches!(
@@ -114,13 +114,13 @@ async fn a_zone_that_the_core_does_not_know_refuses_the_start_before_any_stateme
 async fn options_that_the_command_rules_refuse_refuse_the_start_before_any_statement() {
     let manifest = manifest_of(
         true,
-        json!([
+        &json!([
             {"name": "paused", "activation": {"kind": "DISABLED"}},
             enabled_schedule(
                 "bad_options",
                 "task",
                 "UTC",
-                json!({"kind": "ENCODED", "json": "not json"})
+                &json!({"kind": "ENCODED", "json": "not json"})
             )
         ]),
     );
@@ -143,8 +143,8 @@ async fn a_manifest_scheduler_starts_and_fires_with_the_send_facts_of_the_manife
     let paused = format!("manifest_paused_{}", Uuid::new_v4().simple());
     let manifest = manifest_of(
         true,
-        json!([
-            enabled_schedule(&name, &task_name, "UTC", encoded_options()),
+        &json!([
+            enabled_schedule(&name, &task_name, "UTC", &encoded_options()),
             {"name": paused, "activation": {"kind": "DISABLED"}}
         ]),
     );

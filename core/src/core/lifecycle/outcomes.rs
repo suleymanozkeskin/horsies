@@ -324,7 +324,7 @@ pub struct RawOutcomeRow {
 pub fn decode_outcome_row(row: &CoreRow) -> Result<TerminalizationOutcome, OutcomeDecodeError> {
     let present: Vec<&str> = row.columns().iter().map(|column| column.name()).collect();
     require_exact_columns(&present, &ROW_COLUMNS)?;
-    decode_raw(raw_outcome_row(row)?)
+    decode_raw(&raw_outcome_row(row)?)
 }
 
 /// Decode one row of a discovery batch into its outcome and the task name
@@ -334,7 +334,7 @@ pub fn decode_moved_row(row: &CoreRow) -> Result<MovedRow, OutcomeDecodeError> {
     let present: Vec<&str> = row.columns().iter().map(|column| column.name()).collect();
     require_exact_columns(&present, &MOVED_ROW_COLUMNS)?;
     Ok(MovedRow {
-        outcome: decode_raw(raw_outcome_row(row)?)?,
+        outcome: decode_raw(&raw_outcome_row(row)?)?,
         task_name: core_column(row, "task_name")?,
         queue_name: core_column(row, "queue_name")?,
     })
@@ -386,7 +386,7 @@ fn require_exact_columns(present: &[&str], expected: &[&str]) -> Result<(), Outc
 }
 
 /// Interpret an extracted row against the wire contract.
-pub fn decode_raw(raw: RawOutcomeRow) -> Result<TerminalizationOutcome, OutcomeDecodeError> {
+pub fn decode_raw(raw: &RawOutcomeRow) -> Result<TerminalizationOutcome, OutcomeDecodeError> {
     let observed = ObservedTaskState {
         status: parse_optional_status(raw.observed_status.as_deref(), "observed_status")?,
         worker_id: raw.observed_worker_id.clone(),
@@ -397,15 +397,15 @@ pub fn decode_raw(raw: RawOutcomeRow) -> Result<TerminalizationOutcome, OutcomeD
         "APPLIED" => Ok(TerminalizationOutcome::Applied {
             task_id: raw.task_id,
             ordinality: raw.ordinality,
-            terminal_at: require_terminal_at(&raw)?,
-            kind: require_kind(&raw)?,
+            terminal_at: require_terminal_at(raw)?,
+            kind: require_kind(raw)?,
             observed,
         }),
         "ALREADY_APPLIED" => Ok(TerminalizationOutcome::AlreadyApplied {
             task_id: raw.task_id,
             ordinality: raw.ordinality,
-            terminal_at: require_terminal_at(&raw)?,
-            kind: require_kind(&raw)?,
+            terminal_at: require_terminal_at(raw)?,
+            kind: require_kind(raw)?,
             observed,
         }),
         "LOST_CLAIM" => Ok(TerminalizationOutcome::LostClaim {
@@ -414,7 +414,7 @@ pub fn decode_raw(raw: RawOutcomeRow) -> Result<TerminalizationOutcome, OutcomeD
             observed,
         }),
         "SOURCE_STATE_CONFLICT" => {
-            let evidence = decode_evidence(&raw, &observed)?;
+            let evidence = decode_evidence(raw, &observed)?;
             Ok(TerminalizationOutcome::SourceStateConflict {
                 task_id: raw.task_id,
                 ordinality: raw.ordinality,
@@ -423,7 +423,7 @@ pub fn decode_raw(raw: RawOutcomeRow) -> Result<TerminalizationOutcome, OutcomeD
             })
         }
         "TASK_ABSENT" => {
-            require_absent_row_is_empty(&raw)?;
+            require_absent_row_is_empty(raw)?;
             Ok(TerminalizationOutcome::TaskAbsent {
                 task_id: raw.task_id,
                 ordinality: raw.ordinality,
@@ -761,7 +761,7 @@ mod tests {
 
     #[test]
     fn unknown_outcome_fails_closed() {
-        let err = decode_raw(base_raw("SOMETHING_NEW")).unwrap_err();
+        let err = decode_raw(&base_raw("SOMETHING_NEW")).unwrap_err();
         assert!(err.to_string().contains("unknown outcome"));
     }
 
@@ -769,15 +769,15 @@ mod tests {
     fn applied_requires_kind_and_terminal_at() {
         let mut raw = base_raw("APPLIED");
         raw.observed_status = Some("RUNNING".to_owned());
-        let err = decode_raw(raw.clone()).unwrap_err();
+        let err = decode_raw(&raw).unwrap_err();
         assert!(err.to_string().contains("terminal_at is required"));
 
         raw.terminal_at = Some(Utc::now());
-        let err = decode_raw(raw.clone()).unwrap_err();
+        let err = decode_raw(&raw).unwrap_err();
         assert!(err.to_string().contains("no terminalization kind"));
 
         raw.terminalization_kind = Some("COMPLETE_FUSED".to_owned());
-        let decoded = decode_raw(raw).unwrap();
+        let decoded = decode_raw(&raw).unwrap();
         assert!(matches!(
             decoded,
             TerminalizationOutcome::Applied {
@@ -792,7 +792,7 @@ mod tests {
         let mut raw = base_raw("ALREADY_APPLIED");
         raw.terminal_at = Some(Utc::now());
         raw.terminalization_kind = Some("KIND_FROM_THE_FUTURE".to_owned());
-        let err = decode_raw(raw).unwrap_err();
+        let err = decode_raw(&raw).unwrap_err();
         assert!(err.to_string().contains("unknown terminalization kind"));
     }
 
@@ -801,7 +801,7 @@ mod tests {
         let mut raw = base_raw("SOURCE_STATE_CONFLICT");
         raw.observed_status = Some("RUNNING".to_owned());
         raw.guard_kind = Some("GUARD_FROM_THE_FUTURE".to_owned());
-        let err = decode_raw(raw).unwrap_err();
+        let err = decode_raw(&raw).unwrap_err();
         assert!(err.to_string().contains("unknown guard_kind"));
     }
 
@@ -809,7 +809,7 @@ mod tests {
     fn payload_without_discriminant_fails_closed() {
         let mut raw = base_raw("SOURCE_STATE_CONFLICT");
         raw.observed_guard = Some(serde_json::json!({"x": 1}));
-        let err = decode_raw(raw).unwrap_err();
+        let err = decode_raw(&raw).unwrap_err();
         assert!(err.to_string().contains("no guard_kind"));
     }
 
@@ -818,7 +818,7 @@ mod tests {
         let mut raw = base_raw("SOURCE_STATE_CONFLICT");
         raw.observed_status = Some("PENDING".to_owned());
         raw.observed_worker_id = Some("w-other".to_owned());
-        let decoded = decode_raw(raw).unwrap();
+        let decoded = decode_raw(&raw).unwrap();
         let TerminalizationOutcome::SourceStateConflict { evidence, .. } = decoded else {
             panic!("expected conflict");
         };
@@ -834,13 +834,13 @@ mod tests {
         let mut raw = base_raw("SOURCE_STATE_CONFLICT");
         raw.guard_kind = Some("DEADLINE".to_owned());
         raw.observed_guard = Some(serde_json::json!({"good_until": null}));
-        let err = decode_raw(raw.clone()).unwrap_err();
+        let err = decode_raw(&raw).unwrap_err();
         assert!(err.to_string().contains("missing"), "{err}");
 
         raw.observed_guard = Some(serde_json::json!({
             "good_until": null, "evaluated_at": "2026-08-06T10:00:00+00:00", "extra": 1
         }));
-        let err = decode_raw(raw).unwrap_err();
+        let err = decode_raw(&raw).unwrap_err();
         assert!(err.to_string().contains("unexpected"), "{err}");
     }
 
@@ -852,7 +852,7 @@ mod tests {
         raw.terminalization_kind = Some("CANCEL_ADMIN".to_owned());
         raw.guard_kind = Some("FOREIGN_TERMINALIZATION".to_owned());
         raw.observed_guard = Some(serde_json::json!({"why": "not"}));
-        let err = decode_raw(raw).unwrap_err();
+        let err = decode_raw(&raw).unwrap_err();
         assert!(err.to_string().contains("must not send a payload"));
     }
 
@@ -871,7 +871,7 @@ mod tests {
 
         for (raw, status) in [(live, TaskStatus::Pending), (finished, TaskStatus::Failed)] {
             let TerminalizationOutcome::SourceStateConflict { evidence, .. } =
-                decode_raw(raw).unwrap()
+                decode_raw(&raw).unwrap()
             else {
                 panic!("expected conflict");
             };
@@ -888,7 +888,7 @@ mod tests {
     fn a_workflow_task_refusal_without_a_status_or_with_a_payload_fails_closed() {
         let mut raw = base_raw("SOURCE_STATE_CONFLICT");
         raw.guard_kind = Some("WORKFLOW_TASK".to_owned());
-        let err = decode_raw(raw.clone()).unwrap_err();
+        let err = decode_raw(&raw).unwrap_err();
         assert!(
             err.to_string().contains("without an observed status"),
             "{err}"
@@ -896,7 +896,7 @@ mod tests {
 
         raw.observed_status = Some("PENDING".to_owned());
         raw.observed_guard = Some(serde_json::json!({"node_status": "READY"}));
-        let err = decode_raw(raw).unwrap_err();
+        let err = decode_raw(&raw).unwrap_err();
         assert!(err.to_string().contains("must not send a payload"), "{err}");
     }
 
@@ -907,7 +907,7 @@ mod tests {
         raw.terminal_at = Some(Utc::now());
         raw.terminalization_kind = Some("COMPLETE_FUSED".to_owned());
         raw.guard_kind = Some("FOREIGN_TERMINALIZATION".to_owned());
-        let decoded = decode_raw(raw).unwrap();
+        let decoded = decode_raw(&raw).unwrap();
         let TerminalizationOutcome::SourceStateConflict { evidence, .. } = decoded else {
             panic!("expected conflict");
         };
@@ -925,7 +925,7 @@ mod tests {
     fn foreign_terminalization_without_status_fails_closed() {
         let mut raw = base_raw("SOURCE_STATE_CONFLICT");
         raw.guard_kind = Some("FOREIGN_TERMINALIZATION".to_owned());
-        let err = decode_raw(raw).unwrap_err();
+        let err = decode_raw(&raw).unwrap_err();
         assert!(err.to_string().contains("without an observed status"));
     }
 
@@ -933,10 +933,10 @@ mod tests {
     fn task_absent_with_observations_fails_closed() {
         let mut raw = base_raw("TASK_ABSENT");
         raw.observed_status = Some("PENDING".to_owned());
-        let err = decode_raw(raw).unwrap_err();
+        let err = decode_raw(&raw).unwrap_err();
         assert!(err.to_string().contains("observations of a row"));
 
-        let decoded = decode_raw(base_raw("TASK_ABSENT")).unwrap();
+        let decoded = decode_raw(&base_raw("TASK_ABSENT")).unwrap();
         assert!(matches!(decoded, TerminalizationOutcome::TaskAbsent { .. }));
     }
 
@@ -953,7 +953,7 @@ mod tests {
             "finalizing_stale_after_ms": 60000,
             "evaluated_at": "2026-08-06T10:00:30+00:00"
         }));
-        let decoded = decode_raw(raw).unwrap();
+        let decoded = decode_raw(&raw).unwrap();
         let TerminalizationOutcome::SourceStateConflict {
             evidence: GuardEvidence::Staleness(staleness),
             ..
@@ -975,7 +975,7 @@ mod tests {
             "expected_retry_count": 0,
             "retry_count": 1
         }));
-        let decoded = decode_raw(raw.clone()).expect("a retry-count conflict");
+        let decoded = decode_raw(&raw).expect("a retry-count conflict");
         let TerminalizationOutcome::SourceStateConflict {
             evidence: GuardEvidence::RetryCount(observed),
             ..
@@ -992,7 +992,7 @@ mod tests {
         );
 
         raw.observed_guard = Some(serde_json::json!({"retry_count": 1}));
-        let err = decode_raw(raw).expect_err("a payload without the expected count");
+        let err = decode_raw(&raw).expect_err("a payload without the expected count");
         assert!(err.to_string().contains("documented keys"), "{err}");
     }
 
@@ -1003,7 +1003,7 @@ mod tests {
         raw.observed_guard = Some(serde_json::json!({
             "good_until": "yesterday-ish", "evaluated_at": "2026-08-06T10:00:00+00:00"
         }));
-        let err = decode_raw(raw).unwrap_err();
+        let err = decode_raw(&raw).unwrap_err();
         assert!(err.to_string().contains("ISO-8601"));
     }
 
@@ -1011,7 +1011,7 @@ mod tests {
     fn unknown_observed_status_fails_closed() {
         let mut raw = base_raw("LOST_CLAIM");
         raw.observed_status = Some("LIMBO".to_owned());
-        let err = decode_raw(raw).unwrap_err();
+        let err = decode_raw(&raw).unwrap_err();
         assert!(err.to_string().contains("not a task status"));
     }
 
@@ -1031,7 +1031,7 @@ mod tests {
     fn the_ordinality_of_each_row_travels_with_its_outcome() {
         let ordinalities: Vec<Option<i64>> = [2, 1, 3]
             .into_iter()
-            .map(|ordinality| decode_raw(applied_raw(Some(ordinality))))
+            .map(|ordinality| decode_raw(&applied_raw(Some(ordinality))))
             .map(|decoded| decoded.expect("an applied row decodes").ordinality())
             .collect();
         assert_eq!(ordinalities, vec![Some(2), Some(1), Some(3)]);
@@ -1040,7 +1040,7 @@ mod tests {
     /// `TestBatchOrdinality::test_single_row_operations_carry_no_ordinal`.
     #[test]
     fn a_single_row_outcome_carries_no_ordinality() {
-        let decoded = decode_raw(applied_raw(None)).expect("an applied row decodes");
+        let decoded = decode_raw(&applied_raw(None)).expect("an applied row decodes");
         assert_eq!(decoded.ordinality(), None);
     }
 

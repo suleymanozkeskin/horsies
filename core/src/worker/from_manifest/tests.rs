@@ -12,7 +12,10 @@ use crate::worker_manifest::parse_worker_manifest;
 use crate::worker_manifest::tests::{full_profile, manifest, named, parsed};
 
 fn batch_plan() -> WorkerPlan {
-    let manifest = parsed(&manifest(json!({"batch": full_profile()}), named("batch")));
+    let manifest = parsed(&manifest(
+        &json!({"batch": full_profile()}),
+        &named("batch"),
+    ));
     match WorkerPlan::of_manifest(&manifest) {
         Ok(plan) => plan,
         Err(refused) => panic!("the batch manifest gives a plan: {refused}"),
@@ -102,7 +105,7 @@ fn the_worker_process_and_the_app_broker_configs_differ_only_where_python_does()
 
 #[test]
 fn the_default_queue_mode_serves_the_one_default_queue() {
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["claim"]["queues"] = json!({"kind": "DEFAULT"});
     let plan = WorkerPlan::of_manifest(&parsed(&document)).expect("a plan");
     assert_eq!(plan.app_config.queue_mode, QueueMode::Default);
@@ -112,7 +115,10 @@ fn the_default_queue_mode_serves_the_one_default_queue() {
 
 #[test]
 fn an_unknown_profile_gives_no_plan() {
-    let manifest = parsed(&manifest(json!({"batch": full_profile()}), named("other")));
+    let manifest = parsed(&manifest(
+        &json!({"batch": full_profile()}),
+        &named("other"),
+    ));
     assert!(matches!(
         WorkerPlan::of_manifest(&manifest),
         Err(WorkerPlanRefused::Profile(
@@ -123,7 +129,7 @@ fn an_unknown_profile_gives_no_plan() {
 
 #[test]
 fn transaction_mode_with_no_session_url_is_a_refused_connection_setting() {
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["database"]["pgbouncer_transaction_mode"] = json!(true);
     let manifest = parse_worker_manifest(&document.to_string()).expect("the manifest parses");
     assert!(matches!(
@@ -178,7 +184,7 @@ async fn the_install_of_the_worker_broker_records_the_family_of_its_caller() {
 /// A manifest of the batch profile whose app has `handlers` and the span
 /// switch `spans`.
 fn plan_with(handlers: serde_json::Value, spans: &str) -> WorkerPlan {
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["handlers"] = handlers;
     document["worker_ended_spans"] = json!(spans);
     WorkerPlan::of_manifest(&parsed(&document)).expect("a plan")
@@ -326,7 +332,7 @@ async fn a_handler_gives_the_worker_a_queue_a_child_and_its_label() {
 
 /// The manifest of the batch profile with the metrics endpoint `endpoint`.
 fn manifest_with_endpoint(endpoint: serde_json::Value) -> serde_json::Value {
-    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    let mut document = manifest(&json!({"batch": full_profile()}), &named("batch"));
     document["metrics_endpoint"] = endpoint;
     document
 }

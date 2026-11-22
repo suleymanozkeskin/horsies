@@ -168,6 +168,10 @@ impl TaskListQuery {
         limit,
     ))]
     #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 extracts a Python list into an owned `Vec`, not into a slice"
+    )]
     fn new(
         window_lower: &Bound<'_, PyAny>,
         window_upper: &Bound<'_, PyAny>,
@@ -225,6 +229,10 @@ impl TaskFacetsQuery {
 impl TaskFacetsQuery {
     #[new]
     #[pyo3(signature = (*, window_lower, window_upper, statuses, error_categories, retried_only))]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 extracts a Python list into an owned `Vec`, not into a slice"
+    )]
     fn new(
         window_lower: &Bound<'_, PyAny>,
         window_upper: &Bound<'_, PyAny>,
@@ -272,6 +280,10 @@ impl TaskStatsQuery {
         error_categories,
         retried_only,
     ))]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 extracts a Python list into an owned `Vec`, not into a slice"
+    )]
     fn new(
         window_lower: &Bound<'_, PyAny>,
         window_upper: &Bound<'_, PyAny>,
@@ -332,6 +344,10 @@ impl TaskBreakdownQuery {
         limit,
     ))]
     #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 extracts a Python list into an owned `Vec`, not into a slice"
+    )]
     fn new(
         window_lower: &Bound<'_, PyAny>,
         window_upper: &Bound<'_, PyAny>,

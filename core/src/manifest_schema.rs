@@ -543,7 +543,7 @@ mod tests {
                     ];
                     for value in outside.into_iter().flatten() {
                         let mut document = sample_text.clone();
-                        let changed = replace_field(&mut document, field.name, Value::from(value));
+                        let changed = replace_field(&mut document, field.name, &Value::from(value));
                         assert!(changed, "{} is in the sample", field.name);
                         assert!(
                             (parsed.parse)(&document.to_string()).is_err(),
@@ -559,7 +559,7 @@ mod tests {
 
     /// Set every field called `name` in `document` to `value`. Bounded by
     /// the sample depth.
-    fn replace_field(document: &mut Value, name: &str, value: Value) -> bool {
+    fn replace_field(document: &mut Value, name: &str, value: &Value) -> bool {
         fn walk(node: &mut Value, name: &str, value: &Value, depth: usize) -> bool {
             assert!(depth <= MAX_SAMPLE_DEPTH, "the manifest nests too deep");
             match node {
@@ -585,7 +585,7 @@ mod tests {
                 Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
             }
         }
-        walk(document, name, &value, 0)
+        walk(document, name, value, 0)
     }
 
     #[test]

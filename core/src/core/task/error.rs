@@ -536,7 +536,7 @@ pub enum TaskErrorKind {
     /// A plain `TaskError`.
     Plain,
     /// A failed child workflow (`SubWorkflowError`).
-    SubWorkflow(SubWorkflowFailure),
+    SubWorkflow(Box<SubWorkflowFailure>),
 }
 
 /// The child workflow of a sub-workflow error.
@@ -572,7 +572,7 @@ impl SubWorkflowFailure {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskError {
     /// The flattened exception, when the library recorded one.
-    pub exception: Option<ExceptionRecord>,
+    pub exception: Option<Box<ExceptionRecord>>,
 
     /// Error code identifying the failure category. Required: the retry rule and outcome routing read it.
     pub error_code: TaskErrorCode,
@@ -696,12 +696,12 @@ impl TaskError {
             return Err(StoredErrorRefused::UnknownKey(key.clone()));
         }
         let error_code: TaskErrorCode = required_field(&members, ERROR_CODE_KEY)?;
-        let exception: Option<ExceptionRecord> = optional_field(&members, EXCEPTION_KEY)?;
+        let exception: Option<Box<ExceptionRecord>> = optional_field(&members, EXCEPTION_KEY)?;
         let message: Option<String> = optional_field(&members, MESSAGE_KEY)?;
         let data = stored_data(&members)?;
         let kind = match is_sub_workflow {
             false => TaskErrorKind::Plain,
-            true => TaskErrorKind::SubWorkflow(read_sub_workflow_failure(&members)?),
+            true => TaskErrorKind::SubWorkflow(Box::new(read_sub_workflow_failure(&members)?)),
         };
         Ok(Self {
             exception,
@@ -850,7 +850,7 @@ impl Serialize for TaskError {
             map.serialize_entry(SUB_WORKFLOW_ID_KEY, &failure.sub_workflow_id)?;
             match self.summary_output_refusal() {
                 None => {
-                    map.serialize_entry(SUB_WORKFLOW_SUMMARY_KEY, &failure.sub_workflow_summary)?
+                    map.serialize_entry(SUB_WORKFLOW_SUMMARY_KEY, &failure.sub_workflow_summary)?;
                 }
                 Some(_) => map
                     .serialize_entry(SUB_WORKFLOW_SUMMARY_KEY, &failure.summary_without_output())?,
@@ -894,8 +894,8 @@ mod tests {
     }
 
     /// The text of a JSON value, as the `data` of an error.
-    fn text(value: serde_json::Value) -> JsonText {
-        JsonText::of(&value).unwrap()
+    fn text(value: &serde_json::Value) -> JsonText {
+        JsonText::of(value).unwrap()
     }
 
     fn failed_summary() -> SubWorkflowSummary {
@@ -916,10 +916,10 @@ mod tests {
             error_code: OutcomeCode::SubworkflowFailed.into(),
             data: None,
             message: Some("Subworkflow 00000000-0000-0000-0000-000000000000 failed".to_owned()),
-            kind: TaskErrorKind::SubWorkflow(SubWorkflowFailure {
+            kind: TaskErrorKind::SubWorkflow(Box::new(SubWorkflowFailure {
                 sub_workflow_id: uuid::Uuid::nil(),
                 sub_workflow_summary: summary,
-            }),
+            })),
         }
     }
 
@@ -1052,7 +1052,7 @@ mod tests {
             r#"{"exception":null,"error_code":"RATE_LIMITED","data":null,"message":"slow down"}"#
         );
         let builtin = TaskError {
-            data: Some(text(json!({"elapsed_ms": 5000}))),
+            data: Some(text(&json!({"elapsed_ms": 5000}))),
             message: None,
             ..TaskError::builtin(RetrievalCode::WaitTimeout, "")
         };
@@ -1065,15 +1065,15 @@ mod tests {
     #[test]
     fn task_error_full_serde_round_trip() {
         let err = TaskError {
-            exception: Some(ExceptionRecord {
+            exception: Some(Box::new(ExceptionRecord {
                 type_name: "ValueError".to_owned(),
                 module: "builtins".to_owned(),
                 message: "boom".to_owned(),
                 repr: "ValueError('boom')".to_owned(),
                 traceback: "Traceback (most recent call last):\n".to_owned(),
-            }),
+            })),
             error_code: RetrievalCode::WaitTimeout.into(),
-            data: Some(text(json!({"elapsed_ms": 5000}))),
+            data: Some(text(&json!({"elapsed_ms": 5000}))),
             message: Some("timeout".to_owned()),
             kind: TaskErrorKind::Plain,
         };
@@ -1147,7 +1147,7 @@ mod tests {
             (nested_list(250), "ValueValidationError"),
         ] {
             let err = TaskError {
-                data: Some(text(data)),
+                data: Some(text(&data)),
                 ..TaskError::new("RATE_LIMITED", "m").unwrap()
             };
             let text = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(err)).unwrap();
@@ -1166,12 +1166,12 @@ mod tests {
     fn data_of_199_levels_is_kept() {
         let data = nested_list(ERROR_DATA_DEPTH_LIMIT);
         let err = TaskError {
-            data: Some(text(data.clone())),
+            data: Some(text(&data)),
             ..TaskError::builtin(OperationalErrorCode::BrokerError, "m")
         };
         assert_eq!(err.storage_refusal(), None);
         let back: TaskError = serde_json::from_str(&serde_json::to_string(&err).unwrap()).unwrap();
-        assert_eq!(back.data, Some(text(data)));
+        assert_eq!(back.data, Some(text(&data)));
     }
 
     #[test]
@@ -1183,12 +1183,12 @@ mod tests {
             json!(5),
         ] {
             let err = TaskError {
-                data: Some(text(data.clone())),
+                data: Some(text(&data)),
                 ..TaskError::new("RATE_LIMITED", "m").unwrap()
             };
             let back: TaskError =
                 serde_json::from_str(&serde_json::to_string(&err).unwrap()).unwrap();
-            assert_eq!(back.data, Some(text(data)));
+            assert_eq!(back.data, Some(text(&data)));
         }
     }
 

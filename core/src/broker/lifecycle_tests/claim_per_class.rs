@@ -213,11 +213,15 @@ struct Claimed {
     short_by: i32,
 }
 
+/// One row of the claim statement: kind, task id, execution class, short
+/// count.
+type ClaimRow = (String, Option<Uuid>, Option<String>, Option<i32>);
+
 async fn claim_on<'e>(
     target: impl Into<sql::Target<'e>>,
     params: &Params,
 ) -> Result<Claimed, sql::Error> {
-    let rows: Vec<(String, Option<Uuid>, Option<String>, Option<i32>)> = sql::query_as(CLAIM_SQL)
+    let rows: Vec<ClaimRow> = sql::query_as(CLAIM_SQL)
         .bind(&params.worker_id)
         .bind(json!(params.queues))
         .bind(&params.queue_priority)

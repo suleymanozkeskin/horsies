@@ -733,7 +733,7 @@ fn child_chain(name: &str, n: usize, root_options: Option<&str>) -> WorkflowSpec
 async fn a_child_start_enqueues_its_root_and_leaves_its_chain_pending() {
     let pool = shared_pool().await;
     let child = child_chain("bulk_child_wf", 3, None);
-    let child_specs = child_specs_of(&[child.clone()]);
+    let child_specs = child_specs_of(std::slice::from_ref(&child));
     let parent_id = start(
         &pool,
         &spec("bulk_parent", vec![sub_workflow_node(0, &child)]),
@@ -760,7 +760,7 @@ async fn a_child_start_enqueues_its_root_and_leaves_its_chain_pending() {
 async fn a_child_start_writes_the_child_meta_into_its_root_task() {
     let pool = shared_pool().await;
     let child = child_chain("bulk_child_meta_wf", 2, None);
-    let child_specs = child_specs_of(&[child.clone()]);
+    let child_specs = child_specs_of(std::slice::from_ref(&child));
     let parent_id = start(
         &pool,
         &spec("bulk_parent_meta", vec![sub_workflow_node(0, &child)]),
@@ -907,7 +907,7 @@ async fn a_sub_workflow_node_with_no_params_stores_an_empty_input() {
         "kwargs_only_child",
         vec![task_node(0, "kwargs_only_child_task")],
     );
-    let child_specs = child_specs_of(&[child.clone()]);
+    let child_specs = child_specs_of(std::slice::from_ref(&child));
     let workflow_id = start(
         &pool,
         &spec("kwargs_only_parent", vec![sub_workflow_node(0, &child)]),

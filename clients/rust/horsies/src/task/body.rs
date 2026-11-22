@@ -651,8 +651,8 @@ mod tests {
 
     const MARKER: &str = "secret-marker-7f3a";
 
-    fn bytes(value: serde_json::Value) -> Vec<u8> {
-        serde_json::to_vec(&value).unwrap()
+    fn bytes(value: &serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(value).unwrap()
     }
 
     fn text_of(error: &StoredTaskError) -> String {
@@ -702,7 +702,7 @@ mod tests {
 
     /// The message of the refusal of `input` by the schedule check of
     /// [`Shipment`]; it never holds [`MARKER`], the value of the unread key.
-    fn shipment_refusal(input: serde_json::Value) -> String {
+    fn shipment_refusal(input: &serde_json::Value) -> String {
         let refused = check_input::<Shipment>(&bytes(input)).unwrap_err();
         assert_serialization_error(&refused);
         assert!(!text_of(&refused).contains(MARKER));
@@ -714,7 +714,7 @@ mod tests {
     /// and names its key path.
     #[test]
     fn check_input_names_an_unread_member_of_a_nested_object() {
-        let message = shipment_refusal(json!({
+        let message = shipment_refusal(&json!({
             "label": "a", "options": {"retriess": MARKER}, "parcels": [],
         }));
         assert!(message.contains("'options.retriess'"), "{message}");
@@ -723,7 +723,7 @@ mod tests {
     /// #571: the same inside an element of a list.
     #[test]
     fn check_input_names_an_unread_member_of_a_list_element() {
-        let message = shipment_refusal(json!({
+        let message = shipment_refusal(&json!({
             "label": "a", "options": {},
             "parcels": [{"weight": 1}, {"weight": 2, "wieght": MARKER}],
         }));
@@ -734,7 +734,7 @@ mod tests {
     /// the top level.
     #[test]
     fn check_input_takes_a_nested_member_whose_value_is_null() {
-        let input = bytes(json!({
+        let input = bytes(&json!({
             "label": "a", "options": {"note": null}, "parcels": [{"weight": 1, "tag": null}],
         }));
         assert!(check_input::<Shipment>(&input).is_ok());
@@ -744,7 +744,7 @@ mod tests {
     /// type no longer has still decodes, at any depth.
     #[test]
     fn the_worker_read_ignores_a_key_that_the_type_no_longer_has() {
-        let input = bytes(json!({
+        let input = bytes(&json!({
             "label": "a", "options": {"removed": 1}, "parcels": [{"weight": 1, "removed": 2}],
             "removed": 3,
         }));
@@ -888,7 +888,7 @@ mod tests {
 
     #[test]
     fn an_input_of_the_type_decodes() {
-        let input = bytes(json!({"id": 7, "items": [{"name": "pen", "count": 2}]}));
+        let input = bytes(&json!({"id": 7, "items": [{"name": "pen", "count": 2}]}));
         let order: Order = decode_input(&input).unwrap();
         assert_eq!(order.items[0].count, 2);
     }
@@ -914,7 +914,7 @@ mod tests {
     fn a_unit_input_reads_null_and_an_empty_object() {
         decode_unit_input(b"null").unwrap();
         decode_unit_input(b" { } ").unwrap();
-        let member = decode_unit_input(&bytes(json!({"secret-key-7": 1}))).unwrap_err();
+        let member = decode_unit_input(&bytes(&json!({"secret-key-7": 1}))).unwrap_err();
         assert_serialization_error(&member);
         assert!(
             member
@@ -924,7 +924,7 @@ mod tests {
                 .contains("unknown field `secret-key-7`"),
             "{member:?}"
         );
-        let number = decode_unit_input(&bytes(json!(MARKER))).unwrap_err();
+        let number = decode_unit_input(&bytes(&json!(MARKER))).unwrap_err();
         assert_serialization_error(&number);
         assert!(!number.message.as_deref().unwrap().contains(MARKER));
         assert_serialization_error(&decode_unit_input(b"{").unwrap_err());
@@ -952,7 +952,7 @@ mod tests {
 
     #[test]
     fn a_wrong_type_names_the_path_and_never_the_value() {
-        let input = bytes(json!({"id": 7, "items": [{"name": "pen", "count": MARKER}]}));
+        let input = bytes(&json!({"id": 7, "items": [{"name": "pen", "count": MARKER}]}));
         let error = decode_input::<Order>(&input).unwrap_err();
         assert_serialization_error(&error);
         let message = error.message.clone().unwrap();
@@ -970,7 +970,7 @@ mod tests {
 
     #[test]
     fn an_unknown_variant_hides_the_input_text() {
-        let error = decode_input::<Shape>(&bytes(json!(MARKER))).unwrap_err();
+        let error = decode_input::<Shape>(&bytes(&json!(MARKER))).unwrap_err();
         let message = error.message.clone().unwrap();
         assert!(
             message.contains("unknown variant <input>, expected `Circle` or `Square`"),
@@ -981,10 +981,10 @@ mod tests {
 
     #[test]
     fn a_missing_field_and_an_unknown_key_are_named() {
-        let missing = decode_input::<Item>(&bytes(json!({"name": "pen"}))).unwrap_err();
+        let missing = decode_input::<Item>(&bytes(&json!({"name": "pen"}))).unwrap_err();
         assert!(missing.message.unwrap().contains("missing field `count`"));
         let unknown =
-            decode_input::<Item>(&bytes(json!({"name": "pen", "count": 1, "colour": "red"})))
+            decode_input::<Item>(&bytes(&json!({"name": "pen", "count": 1, "colour": "red"})))
                 .unwrap_err();
         let message = unknown.message.unwrap();
         assert!(message.contains("unknown field `colour`"), "{message}");

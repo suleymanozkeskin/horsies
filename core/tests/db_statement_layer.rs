@@ -138,9 +138,7 @@ async fn install_template(url: &str) {
 /// The same URL with another database and extra query parameters.
 fn with_database(url: &str, database: &str, extra_query: &str) -> String {
     let (scheme, rest) = url.split_once("://").expect("URL has a scheme");
-    let authority_end = rest
-        .find(|character: char| character == '/' || character == '?')
-        .unwrap_or(rest.len());
+    let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
     let (authority, remainder) = rest.split_at(authority_end);
     let query = remainder
         .split_once('?')

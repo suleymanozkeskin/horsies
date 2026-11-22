@@ -180,7 +180,7 @@ fn handle_failed(error: HandleOperationError) -> ActionOutcome {
     }
 }
 
-fn status_failed(workflow_id: Uuid, error: WorkflowError) -> ActionOutcome {
+fn status_failed(workflow_id: Uuid, error: &WorkflowError) -> ActionOutcome {
     match error {
         WorkflowError::WorkflowNotFound { .. } => workflow_not_found(workflow_id),
         WorkflowError::Broker(_)
@@ -199,7 +199,7 @@ async fn current_status(
 ) -> Result<WorkflowStatus, ActionOutcome> {
     crate::workflow_engine::query::get_workflow_status(broker, workflow_id)
         .await
-        .map_err(|error| status_failed(workflow_id, error))
+        .map_err(|error| status_failed(workflow_id, &error))
 }
 
 pub fn task_action_outcome(result: TaskActionResult<TaskCancelled>) -> ActionOutcome {
@@ -434,7 +434,8 @@ mod tests {
 
         // Any other failure of a resume is not a resume, whatever another actor
         // did to the workflow meanwhile.
-        for code in [HandleErrorCode::DbOperationFailed] {
+        {
+            let code = HandleErrorCode::DbOperationFailed;
             let outcome = resume_failure(error(code));
             assert_eq!(outcome.status_code(), 503);
             assert_eq!(

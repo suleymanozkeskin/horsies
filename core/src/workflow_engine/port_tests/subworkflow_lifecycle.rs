@@ -55,7 +55,7 @@ fn slow_parent(name: &str, value: &str) -> WorkflowSpec {
             0,
             "e2e_sub_slow_workflow",
             SLOW_KEY,
-            serde_json::json!({"value": value, "delay_ms": 1000}),
+            &serde_json::json!({"value": value, "delay_ms": 1000}),
         )],
         Some(0),
     )
@@ -175,7 +175,7 @@ async fn cancel_of_a_completed_workflow_changes_nothing() {
     handle(&pool, workflow_id).cancel().await.expect("cancel()");
 
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
-    assert_ok_value(&get(&pool, workflow_id).await, serde_json::json!(11));
+    assert_ok_value(&get(&pool, workflow_id).await, &serde_json::json!(11));
 }
 
 /// `test_subworkflow_cancel_nested_cascade`: cancel reaches the middle and the
@@ -260,7 +260,7 @@ async fn pause_then_resume_of_the_parent_completes_parent_and_child() {
     assert_eq!(workflow_status(&pool, child_id).await, "COMPLETED");
     assert_ok_value(
         &get(&pool, workflow_id).await,
-        serde_json::json!("resume_me"),
+        &serde_json::json!("resume_me"),
     );
 }
 
@@ -322,7 +322,7 @@ async fn recovery_starts_the_child_of_a_ready_node_and_the_workflow_completes() 
 
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "COMPLETED");
     assert_eq!(workflow_status(&db.pool, child_id).await, "COMPLETED");
-    assert_ok_value(&get(&db.pool, workflow_id).await, serde_json::json!(11));
+    assert_ok_value(&get(&db.pool, workflow_id).await, &serde_json::json!(11));
     db.drop().await;
 }
 
@@ -352,7 +352,7 @@ async fn recovery_writes_an_ended_child_into_its_running_parent_node() {
     assert!(recovery_pass(&db.pool, &child_specs).await >= 1);
 
     assert_eq!(workflow_status(&db.pool, succeeded).await, "COMPLETED");
-    assert_ok_value(&get(&db.pool, succeeded).await, serde_json::json!(11));
+    assert_ok_value(&get(&db.pool, succeeded).await, &serde_json::json!(11));
     assert_eq!(workflow_status(&db.pool, failed).await, "FAILED");
     let failed_child = child_of(&db.pool, failed, 0).await;
     let _summary = assert_subworkflow_error(&get(&db.pool, failed).await, Some(failed_child));
@@ -381,7 +381,7 @@ async fn recovery_completes_a_child_whose_task_completed_and_then_its_parent() {
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "COMPLETED");
     assert_ok_value(
         &get(&db.pool, workflow_id).await,
-        serde_json::json!("recovered_child"),
+        &serde_json::json!("recovered_child"),
     );
     db.drop().await;
 }
@@ -403,7 +403,7 @@ async fn recovery_rebuilds_an_outputless_map_with_the_failed_child_error() {
     let got = get(&db.pool, workflow_id).await;
     assert_ok_value(
         &outputless_entry(&got, "node_0"),
-        serde_json::json!("required_ok"),
+        &serde_json::json!("required_ok"),
     );
     let _summary = assert_subworkflow_error(&outputless_entry(&got, "node_1"), None);
     db.drop().await;
@@ -545,7 +545,7 @@ async fn a_child_task_that_succeeds_on_its_retry_completes_the_parent() {
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
     assert_ok_value(
         &get(&pool, workflow_id).await,
-        serde_json::json!("succeeded_on_attempt_2"),
+        &serde_json::json!("succeeded_on_attempt_2"),
     );
 }
 

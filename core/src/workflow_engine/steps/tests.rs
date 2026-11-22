@@ -281,7 +281,7 @@ async fn each_cancel_outcome_reads_into_its_variant() {
 #[should_panic(expected = "returned the outcome \"SUSPENDED\", which is outside its contract")]
 fn a_step_contract_error_has_no_handle_catalog_entry_and_panics() {
     let _error = crate::workflow_engine::lifecycle::handle_operation_error(
-        crate::core::workflow::handle_types::HandleOperation::Pause,
+        &crate::core::workflow::handle_types::HandleOperation::Pause,
         WorkflowError::StepContract(StepContractError::UnknownOutcome {
             function: "horsies_workflow_pause",
             outcome: "SUSPENDED".to_owned(),
@@ -750,7 +750,7 @@ fn a_drive_past_the_tree_depth_fails_closed() {
     assert!(failure.owed_after.is_empty());
     assert!(
         matches!(
-            failure.error,
+            *failure.error,
             WorkflowError::StepContract(StepContractError::ParentChainTooLong { bound })
                 if bound == MAX_PARENT_ADVANCES
         ),
@@ -786,7 +786,7 @@ fn a_failed_parent_advance_owes_its_level_first_then_the_rest_in_order() {
     let failure = ParentAdvanceFailure {
         failed_child_workflow_id: failed,
         owed_after: owed_from_stack(vec![last, next]),
-        error: WorkflowError::Validation("level failed".to_owned()),
+        error: Box::new(WorkflowError::Validation("level failed".to_owned())),
     };
     assert_eq!(
         failure.still_owed().child_workflow_ids(),

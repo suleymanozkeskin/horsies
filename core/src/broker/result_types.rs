@@ -166,7 +166,7 @@ pub enum BrokerOperationError {
         retryable: bool,
         /// What the operation met.
         #[error_slot(cause)]
-        cause: BrokerOperationSource,
+        cause: Box<BrokerOperationSource>,
     },
     /// The enqueue write failed or could not be confirmed. The row may or may not exist.
     ///
@@ -187,7 +187,7 @@ pub enum BrokerOperationError {
         /// The broker error of the write, or the check that found the
         /// conflicting row gone.
         #[error_slot(cause)]
-        cause: BrokerCheckCause,
+        cause: Box<BrokerCheckCause>,
     },
     /// The task id holds a different command or ``sent_at``, or its live row a
     /// different idempotency key. Nothing was written. The same enqueue fails
@@ -234,7 +234,7 @@ pub enum BrokerOperationError {
         message: String,
         /// The error that refused the value, or the check of the core.
         #[error_slot(cause)]
-        cause: BrokerCheckCause,
+        cause: Box<BrokerCheckCause>,
     },
     /// The task options are not valid JSON or carry a retry limit that cannot be stored.
     ///
@@ -401,7 +401,7 @@ impl std::error::Error for BrokerOperationError {
     /// argument, input or task options has no error.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::OperationFailed { cause, .. } => Some(cause),
+            Self::OperationFailed { cause, .. } => Some(&**cause),
             Self::EnqueueFailed { cause, .. } | Self::InvalidJsonPayload { cause, .. } => {
                 cause.error()
             }
@@ -430,7 +430,7 @@ impl BrokerOperationError {
             code,
             message,
             retryable: source.is_retryable(),
-            cause: source,
+            cause: Box::new(source),
         }
     }
 
@@ -464,7 +464,7 @@ impl BrokerOperationError {
     ) -> Self {
         Self::InvalidJsonPayload {
             message: format!("get_task_info failed for {task_id}: {detail}"),
-            cause,
+            cause: Box::new(cause),
         }
     }
 
@@ -567,7 +567,7 @@ impl BrokerOperationError {
             BrokerError::EnqueueConflictUnverifiable { .. } => Self::EnqueueFailed {
                 message: error.to_string(),
                 retryable: false,
-                cause: BrokerCheckCause::Check,
+                cause: Box::new(BrokerCheckCause::Check),
             },
             BrokerError::InvalidWorkflowNodeStatus
             | BrokerError::IncompleteTaskHistoryCutover
@@ -635,7 +635,7 @@ impl BrokerOperationError {
         Self::EnqueueFailed {
             message: format!("Failed to enqueue task {task_name}: {error}"),
             retryable: error.is_retryable(),
-            cause: BrokerCheckCause::Error(error),
+            cause: Box::new(BrokerCheckCause::Error(error)),
         }
     }
 }
@@ -923,7 +923,7 @@ mod tests {
                 BrokerOperationError::EnqueueFailed {
                     message: message(),
                     retryable: true,
-                    cause: BrokerCheckCause::Check,
+                    cause: Box::new(BrokerCheckCause::Check),
                 },
                 BrokerErrorCode::EnqueueFailed,
             ),
@@ -941,7 +941,7 @@ mod tests {
             (
                 BrokerOperationError::InvalidJsonPayload {
                     message: message(),
-                    cause: BrokerCheckCause::Check,
+                    cause: Box::new(BrokerCheckCause::Check),
                 },
                 BrokerErrorCode::InvalidJsonPayload,
             ),

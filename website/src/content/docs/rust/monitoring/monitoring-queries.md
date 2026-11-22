@@ -44,7 +44,7 @@ async fn failed_tasks_of_last_day(app: &Horsies) -> Result<(), Box<dyn std::erro
 | `task_facets(&app, &TaskFacetsQuery)` | `Facets`: `workers`, `task_names`, `queues` and `error_codes` with counts, and `error_category_totals` |
 | `task_breakdown(&app, &TaskBreakdownQuery)` | `Breakdown`: the counts per group, highest total first, with the total and the number of groups |
 | `list_tasks(&app, &TaskListQuery)` | `TaskListPage`: `rows: Vec<TaskSummary>` and `total` |
-| `get_task_detail(&app, task_id)` | `TaskDetailRead`: `Found(TaskDetail)` or `NotFound(TaskDetailNotFound { task_id, reason })` |
+| `get_task_detail(&app, task_id)` | `TaskDetailRead`: `Found(Box<TaskDetail>)` or `NotFound(TaskDetailNotFound { task_id, reason })` |
 | `list_workflow_names(&app)` | `Vec<String>`: the distinct names of the root runs, at most `LIST_ROW_BOUND` (10,000) |
 | `list_workflow_runs(&app, &WorkflowRunsQuery)` | `Vec<WorkflowRunSummary>`: the newest root runs |
 | `get_workflow_run(&app, workflow_id)` | `Option<WorkflowRunDetail>`: the run with its nodes and edges; `None` when no run has the id |
@@ -136,7 +136,7 @@ The rules are on [Action Semantics](/horsies/monitoring/action-semantics/#task-c
 | `NotFound` | `TaskNotFound` | No live or history row has the id. Nothing changed |
 | `NotCancellable { current_status, .. }` | `TaskNotCancellable` | The task is terminal, or RUNNING without `include_running`; `current_status` is the status that the cancel found. Nothing changed |
 | `WorkflowTask { current_status, .. }` | `TaskIsWorkflowTask` | The task belongs to a workflow. Nothing changed |
-| `DbOperationFailed { retryable, cause, .. }` | `DbOperationFailed` | The connect or the statement failed; `cause` is the `BrokerError`. Nothing was written, or the commit reply was lost. A cancel again tells which: a committed cancel answers `NotCancellable` with `Cancelled` |
+| `DbOperationFailed { retryable, cause, .. }` | `DbOperationFailed` | The connect or the statement failed; `cause` is the `Box<BrokerError>`. Nothing was written, or the commit reply was lost. A cancel again tells which: a committed cancel answers `NotCancellable` with `Cancelled` |
 | `StoredDataInvalid { cause, .. }` | `StoredDataInvalid` | Stored data does not parse; `cause` is the `OutcomeDecodeError`. Nothing changed. Not retryable |
 
 ## Actions as the Web Routes Answer

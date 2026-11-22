@@ -458,11 +458,8 @@ impl EventBroadcaster {
     }
 
     async fn degrade(&self) {
-        if !self.degraded.swap(true, Ordering::AcqRel) {
-            self.publish(None).await;
-        } else {
-            self.publish(None).await;
-        }
+        let _was_degraded = self.degraded.swap(true, Ordering::AcqRel);
+        self.publish(None).await;
     }
 
     pub async fn close(&self) {

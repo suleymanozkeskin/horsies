@@ -235,7 +235,7 @@ pub struct TaskDetail {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaskDetailRead {
     /// The live row, or the history row when the live table has no row.
-    Found(TaskDetail),
+    Found(Box<TaskDetail>),
     /// Neither the live table nor the history holds the task.
     NotFound(TaskDetailNotFound),
 }

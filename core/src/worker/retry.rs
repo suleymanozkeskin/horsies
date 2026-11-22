@@ -6,7 +6,7 @@
 //! The stored `task_options` text is read once, when the task is dispatched,
 //! into [`StoredOptions`]. A value that does not fit the rule that wrote it is
 //! not replaced by a default: the task fails before user code runs, with
-//! `WORKER_SERIALIZATION_ERROR` (see [`StoredOptions::run_permit`]). The text
+//! `WORKER_SERIALIZATION_ERROR` (see `StoredOptions::run_permit`). The text
 //! is read by Python's `loads_json` rule (`core::codec::python_loads`): an
 //! int of up to 4300 digits reads, and an object that repeats a key does not.
 //! The `retry_policy` is read by Python's `RetryPolicy` rule
@@ -191,6 +191,7 @@ pub struct RetryRule {
 }
 
 /// Whether the dispatch may run user code, from the stored options.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunPermit {
     /// Run with no time limit.
@@ -403,6 +404,7 @@ impl StoredOptions {
     /// and the child's refusal path). Unreadable options, a timeout that does
     /// not fit its rule, and a retry policy that does not fit its rule each
     /// refuse the run.
+    #[cfg(test)]
     pub fn run_permit(&self) -> RunPermit {
         match self {
             Self::Unreadable { reason } => RunPermit::Refuse(reason.clone()),
@@ -426,7 +428,7 @@ impl StoredOptions {
     }
 
     /// The cancel grace the options hold. Unreadable options hold none; the
-    /// route refuses them through [`Self::run_permit`] first.
+    /// route refuses them through `Self::run_permit` first.
     pub fn cancel_grace(&self) -> StoredCancelGrace {
         match self {
             Self::Readable { cancel_grace, .. } => *cancel_grace,

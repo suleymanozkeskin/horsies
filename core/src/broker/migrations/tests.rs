@@ -234,8 +234,6 @@ fn baseline_sql_folder() -> std::path::PathBuf {
 /// here.
 #[test]
 fn baseline_file_list_is_the_whole_folder() {
-    assert!(!BASELINE_SQL_FILES.is_empty(), "the baseline list is empty");
-
     let mut folder: Vec<String> = std::fs::read_dir(baseline_sql_folder())
         .expect("read the baseline SQL folder")
         .map(|entry| {
@@ -248,6 +246,9 @@ fn baseline_file_list_is_the_whole_folder() {
         .filter(|name| name.ends_with(".sql"))
         .collect();
     folder.sort();
+    // The list equals the folder below, so a non-empty folder is a non-empty
+    // list.
+    assert!(!folder.is_empty(), "the baseline folder is empty");
     assert_eq!(BASELINE_SQL_FILES, folder.as_slice());
 }
 

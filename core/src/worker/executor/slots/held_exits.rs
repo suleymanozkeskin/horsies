@@ -41,11 +41,6 @@ impl HeldExits {
         })
     }
 
-    /// From now on, the exit of every child waits for [`Self::release`].
-    pub(super) fn hold(&self) {
-        let _ = self.release.send_replace(ExitRelease::Held);
-    }
-
     /// Publish every exit that waits, and every later one at once.
     pub(super) fn release(&self) {
         let _ = self.release.send_replace(ExitRelease::Released);

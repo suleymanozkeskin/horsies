@@ -179,18 +179,18 @@ impl TypedCheck for OneParameter<'_> {
     }
 }
 
+/// The `register` function that the task attribute generates for a task
+/// with no parameters.
+type RegisterUnitTask =
+    fn(&mut crate::Horsies) -> Result<crate::TaskFunction<(), (), Infallible>, crate::HorsiesError>;
+
 /// The vectors that use tasks of the attribute.
 fn check_attribute_task(vector: &Vector) {
     let name = vector.name.as_str();
     match (name, vector.parameters.as_slice()) {
         ("no_parameters", []) => {
             // A task with no parameters has the input `()`.
-            let _register: fn(
-                &mut crate::Horsies,
-            ) -> Result<
-                crate::TaskFunction<(), (), Infallible>,
-                crate::HorsiesError,
-            > = no_parameters::register;
+            let _register: RegisterUnitTask = no_parameters::register;
             assert_eq!(sent(name, &()), expected(vector), "{name}");
             decode_unit_input(vector.text.as_bytes())
                 .unwrap_or_else(|refused| panic!("{name}: refused Python's text: {refused}"));

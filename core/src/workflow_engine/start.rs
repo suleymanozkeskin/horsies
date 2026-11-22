@@ -1066,7 +1066,10 @@ mod tests {
             .expect("start workflow with a root task");
         assert_eq!(started, ClientStartOutcome::Started);
 
-        let rows: Vec<(String, String, Option<i32>, Option<i16>, bool)> = sql::query_as(
+        // Id, retention class, fingerprint length, fingerprint version,
+        // rerun input kept.
+        type TaskFactsRow = (String, String, Option<i32>, Option<i16>, bool);
+        let rows: Vec<TaskFactsRow> = sql::query_as(
             "SELECT id::text, retention_class_key,
                     octet_length(command_fingerprint), command_fingerprint_version,
                     retain_rerun_input

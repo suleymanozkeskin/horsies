@@ -264,9 +264,8 @@ fn absent_timeout(class: &str) -> StoredOptionsRefusal {
 fn shared_async_work(
     options: &StoredOptions,
 ) -> Result<(TaskTimeoutMs, CancelGraceMs), StoredOptionsRefusal> {
-    let timeout = match usable_timeout(options)? {
-        Some(timeout) => timeout,
-        None => return Err(absent_timeout("SHARED_ASYNC")),
+    let Some(timeout) = usable_timeout(options)? else {
+        return Err(absent_timeout("SHARED_ASYNC"));
     };
     match options.cancel_grace() {
         StoredCancelGrace::Grace(grace) => Ok((timeout, grace_ms(grace))),

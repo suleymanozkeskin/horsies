@@ -187,7 +187,7 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
                         workflow,
                     },
                 );
-                result_end(isolated_body(&scope, &facts.task_name, task, input, body).await)
+                result_end(isolated_body(&scope, &facts.task_name, *task, input, body).await)
             }
         },
     };
@@ -499,19 +499,15 @@ async fn async_body(
     let (task, module, input): (Arc<dyn AsyncTaskFn>, TaskModule, Vec<u8>) =
         match prepare(&context.app, &facts.task_name, input) {
             Prepared::Ended(end) => return (SeatEnd::Finished(end), Marker::Write),
-            Prepared::Body {
-                task: RegisteredTask::Async { task, meta },
-                input,
-            } => (task, meta.module, input),
-            Prepared::Body {
-                task: RegisteredTask::Blocking { .. },
-                ..
-            } => {
-                return (
-                    SeatEnd::Finished(kind_mismatch_end(&facts.task_name, "shared async")),
-                    Marker::Write,
-                )
-            }
+            Prepared::Body { task, input } => match *task {
+                RegisteredTask::Async { task, meta } => (task, meta.module, input),
+                RegisteredTask::Blocking { .. } => {
+                    return (
+                        SeatEnd::Finished(kind_mismatch_end(&facts.task_name, "shared async")),
+                        Marker::Write,
+                    )
+                }
+            },
         };
     let scope = RunScope::timed(watch.register(run_ref));
     let open = context
@@ -773,7 +769,7 @@ pub(super) async fn serve_shared_thread(
         let started = thread::Builder::new()
             .name(SEAT_THREAD_NAME.to_owned())
             .spawn(move || {
-                thread_seat(&seat_context, &seat_runtime, run, work);
+                thread_seat(&seat_context, &seat_runtime, &run, work);
                 seat_in_flight.fetch_sub(1, Ordering::AcqRel);
             });
         if let Err(error) = started {
@@ -796,11 +792,11 @@ pub(super) async fn serve_shared_thread(
 fn thread_seat(
     context: &HostContext,
     runtime: &tokio::runtime::Handle,
-    run: SharedRunFrame,
+    run: &SharedRunFrame,
     work: ThreadSeatWork,
 ) {
-    let run_ref = run_ref_of(&run);
-    let facts = facts_of(&run);
+    let run_ref = run_ref_of(run);
+    let facts = facts_of(run);
     let (end, started) = match runtime.block_on(start_attempt(context, &facts)) {
         Started::Stopped(reason) => (
             SeatEnd::Finished(RunEnd::StoppedBeforeRunning(reason)),
@@ -890,14 +886,12 @@ fn thread_body(
 ) -> SeatEnd {
     let (task, module, input) = match prepare(&context.app, &facts.task_name, input) {
         Prepared::Ended(end) => return SeatEnd::Finished(end),
-        Prepared::Body {
-            task: RegisteredTask::Blocking { task, meta },
-            input,
-        } => (task, meta.module, input),
-        Prepared::Body {
-            task: RegisteredTask::Async { .. },
-            ..
-        } => return SeatEnd::Finished(kind_mismatch_end(&facts.task_name, "shared thread")),
+        Prepared::Body { task, input } => match *task {
+            RegisteredTask::Blocking { task, meta } => (task, meta.module, input),
+            RegisteredTask::Async { .. } => {
+                return SeatEnd::Finished(kind_mismatch_end(&facts.task_name, "shared thread"))
+            }
+        },
     };
     let gate = Arc::new(DeadlineGate::new());
     let timer_gate = Arc::clone(&gate);

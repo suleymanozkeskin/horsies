@@ -202,7 +202,7 @@ mod tests {
             task(),
             Err(BrokerOperationError::InvalidJsonPayload {
                 message: "digest mismatch".to_owned(),
-                cause: horsies_core::BrokerCheckCause::Check,
+                cause: Box::new(horsies_core::BrokerCheckCause::Check),
             }),
         ) else {
             panic!("a failed read gives BrokerFailure");

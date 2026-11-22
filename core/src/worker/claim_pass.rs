@@ -87,9 +87,8 @@ pub fn check_row_class(
     task_name: &str,
     registered: &RegisteredClasses,
 ) -> RowClassCheck {
-    let registered_class = match registered.class_of(task_name) {
-        Some(registered_class) => registered_class,
-        None => return RowClassCheck::TaskNotRegistered,
+    let Some(registered_class) = registered.class_of(task_name) else {
+        return RowClassCheck::TaskNotRegistered;
     };
     match (row_class, registered_class == row_class) {
         (Execution::Isolated, _) | (Execution::SharedAsync | Execution::SharedThread, true) => {

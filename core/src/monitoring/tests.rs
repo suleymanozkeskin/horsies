@@ -21,7 +21,7 @@ mod history_detail_ports;
 /// test.
 fn found_detail(read: TaskDetailRead) -> TaskDetail {
     match read {
-        TaskDetailRead::Found(detail) => detail,
+        TaskDetailRead::Found(detail) => *detail,
         TaskDetailRead::NotFound(absent) => panic!("the task detail is not found: {absent:?}"),
     }
 }

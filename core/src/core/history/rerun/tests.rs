@@ -87,7 +87,7 @@ static DROP_DETAIL_READER: SqlScript = SqlScript::new(
 );
 
 /// Whether a test transaction rolled back and kept its connection.
-fn rolled_back(outcome: RollbackOutcome) -> bool {
+fn rolled_back(outcome: &RollbackOutcome) -> bool {
     matches!(outcome, RollbackOutcome::RolledBack)
 }
 
@@ -633,7 +633,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
             reason: NotEligibleReason::WorkflowTask,
         }
     );
-    assert!(rolled_back(corrupt_eligibility.rollback().await));
+    assert!(rolled_back(&corrupt_eligibility.rollback().await));
     let live = Uuid::new_v4();
     sql::query(
         "INSERT INTO horsies_tasks (
@@ -767,7 +767,7 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
             reason: TaskAbsenceReason::PredatesRetainedHistory,
         }
     );
-    assert!(rolled_back(transaction.rollback().await));
+    assert!(rolled_back(&transaction.rollback().await));
     drop(connection);
     core.close();
 
@@ -852,7 +852,7 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
         RerunOutcome::InputCorrupt { task_id, ref detail }
             if task_id == source && detail.contains("incomplete")
     ));
-    assert!(rolled_back(incomplete.rollback().await));
+    assert!(rolled_back(&incomplete.rollback().await));
     drop(connection);
     core.close();
 
@@ -1245,7 +1245,7 @@ async fn unregistered_class_refuses_before_source_or_reservation_writes() {
         ),
         "{error:?}"
     );
-    assert!(rolled_back(missing_reader.rollback().await));
+    assert!(rolled_back(&missing_reader.rollback().await));
     drop(connection);
     core.close();
     cleanup(&pool, &[source], &[]).await;
@@ -1418,7 +1418,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     assert!(refused.message().contains("42883"), "{}", refused.message());
     let mut publication = pool.begin().await.unwrap();
     StagedLoaderPublisher
-        .republish(&mut *publication)
+        .republish(&mut publication)
         .await
         .unwrap();
     publication.commit().await.unwrap();
@@ -1463,7 +1463,7 @@ fn public_facade_exports_the_complete_typed_surface() {
     let _: crate::NotEligibleReason = crate::NotEligibleReason::WorkflowTask;
     let _: Option<crate::RawResultRecord> = None;
 
-    fn exhaustive(outcome: crate::RerunOutcome) {
+    fn exhaustive(outcome: &crate::RerunOutcome) {
         match outcome {
             crate::RerunOutcome::Enqueued { .. }
             | crate::RerunOutcome::SourceLive { .. }
@@ -1476,7 +1476,7 @@ fn public_facade_exports_the_complete_typed_surface() {
             | crate::RerunOutcome::KeyReplay { .. } => {}
         }
     }
-    exhaustive(crate::RerunOutcome::SourceLive {
+    exhaustive(&crate::RerunOutcome::SourceLive {
         task_id: Uuid::nil(),
     });
 }
@@ -1600,7 +1600,7 @@ async fn a_rerun_rolls_back_with_the_callers_transaction() {
         decode_rerun_write(&write, &row).unwrap(),
         RerunWriteOutcome::Enqueued { .. }
     ));
-    assert!(rolled_back(transaction.rollback().await));
+    assert!(rolled_back(&transaction.rollback().await));
     drop(connection);
     let (tasks, reservations): (i64, i64) = sql::query_as(
         "SELECT (SELECT count(*) FROM horsies_tasks WHERE id = $1),

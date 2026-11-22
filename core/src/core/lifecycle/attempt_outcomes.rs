@@ -415,11 +415,11 @@ pub fn decode_failed_attempt_row(
         task_name: get(row, "task_name")?,
         facts: NodeFactColumns::read(row)?,
     };
-    decode_failed_attempt(raw, extra)
+    decode_failed_attempt(&raw, extra)
 }
 
 fn decode_failed_attempt(
-    raw: RawOutcomeRow,
+    raw: &RawOutcomeRow,
     extra: FailedAttemptColumns,
 ) -> Result<UnreportedAttemptOutcome, OutcomeDecodeError> {
     match raw.outcome.as_str() {
@@ -454,7 +454,7 @@ struct AppliedFailure {
 }
 
 fn decode_failure_applied(
-    raw: RawOutcomeRow,
+    raw: &RawOutcomeRow,
     extra: FailedAttemptColumns,
 ) -> Result<FailedAttemptOutcome, OutcomeDecodeError> {
     let applied = decode_applied_failure(raw, extra, TerminalizationKind::FailRunning)?;
@@ -473,7 +473,7 @@ fn decode_failure_applied(
 /// An `APPLIED` row of the kind `expected`: the retry disposition, and the
 /// facts of a workflow task (its dependents fact, task and queue).
 fn decode_applied_failure(
-    raw: RawOutcomeRow,
+    raw: &RawOutcomeRow,
     extra: FailedAttemptColumns,
     expected: TerminalizationKind,
 ) -> Result<AppliedFailure, OutcomeDecodeError> {
@@ -552,7 +552,7 @@ fn decode_applied_failure(
 }
 
 fn decode_retry_scheduled(
-    raw: RawOutcomeRow,
+    raw: &RawOutcomeRow,
     extra: FailedAttemptColumns,
 ) -> Result<FailedAttemptOutcome, OutcomeDecodeError> {
     let scheduled = decode_scheduled_retry(raw, extra)?;
@@ -577,7 +577,7 @@ struct ScheduledRetry {
 /// A `RETRY_SCHEDULED` row: the new retry count, the retry time and the
 /// queue; every terminal and refusal column NULL.
 fn decode_scheduled_retry(
-    raw: RawOutcomeRow,
+    raw: &RawOutcomeRow,
     extra: FailedAttemptColumns,
 ) -> Result<ScheduledRetry, OutcomeDecodeError> {
     let mut populated: Vec<&'static str> = Vec::new();
@@ -612,14 +612,14 @@ fn decode_scheduled_retry(
         retry_count: require(extra.retry_count, "retry_count")?,
         next_retry_at: require(extra.next_retry_at, "next_retry_at")?,
         queue_name: require(extra.queue_name, "queue_name")?,
-        observed: observed_of(&raw)?,
+        observed: observed_of(raw)?,
     })
 }
 
 /// A `RELEASED` row: the row and its queue, every other column NULL, and
 /// the row seen CLAIMED.
 fn decode_released(
-    raw: RawOutcomeRow,
+    raw: &RawOutcomeRow,
     extra: FailedAttemptColumns,
 ) -> Result<ReleasedClaim, OutcomeDecodeError> {
     let mut populated: Vec<&'static str> = Vec::new();
@@ -661,7 +661,7 @@ fn decode_released(
     );
     populated.extend(facts.populated());
     require_null(&populated, "RELEASED")?;
-    let observed = observed_of(&raw)?;
+    let observed = observed_of(raw)?;
     if observed.status != Some(TaskStatus::Claimed) {
         return Err(OutcomeDecodeError(format!(
             "RELEASED row observed status {:?}, not CLAIMED",
@@ -691,11 +691,11 @@ pub fn decode_stale_attempt_row(row: &Row) -> Result<StaleAttemptOutcome, Outcom
         task_name: get(row, "task_name")?,
         facts: NodeFactColumns::read(row)?,
     };
-    decode_stale_attempt(raw, extra)
+    decode_stale_attempt(&raw, extra)
 }
 
 fn decode_stale_attempt(
-    raw: RawOutcomeRow,
+    raw: &RawOutcomeRow,
     extra: FailedAttemptColumns,
 ) -> Result<StaleAttemptOutcome, OutcomeDecodeError> {
     match raw.outcome.as_str() {
@@ -743,11 +743,11 @@ pub fn decode_workflow_success_row(
         task_name: get(row, "task_name")?,
         facts: NodeFactColumns::read(row)?,
     };
-    decode_workflow_success(raw, extra)
+    decode_workflow_success(&raw, extra)
 }
 
 fn decode_workflow_success(
-    raw: RawOutcomeRow,
+    raw: &RawOutcomeRow,
     extra: WorkflowSuccessColumns,
 ) -> Result<WorkflowSuccessOutcome, OutcomeDecodeError> {
     let WorkflowSuccessColumns {

@@ -6,7 +6,6 @@
 use std::collections::BTreeMap;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::time::Duration;
 
 use serde_json::json;
@@ -849,23 +848,22 @@ async fn a_server_error_makes_the_limit_unreadable() {
 
     let read = read_server_connection_limit(&broker).await;
 
-    match read {
+    match &read {
         Err(ConnectionLimitUnreadable::Database(BrokerError::Statement(
             crate::db::StatementFailure::NotSent {
                 cause:
                     crate::db::NotSentCause::Checkout(crate::db::CheckoutFailure::ConnectFailed {
-                        cause:
-                            crate::db::ConnectError {
-                                cause: crate::db::ConnectFailure::ServerRefused(error),
-                                ..
-                            },
+                        cause: connect,
                         ..
                     }),
                 ..
             },
-        ))) => {
-            assert_eq!(error.code().code(), "3D000", "{error}");
-        }
+        ))) => match &connect.cause {
+            crate::db::ConnectFailure::ServerRefused(error) => {
+                assert_eq!(error.code().code(), "3D000", "{error}");
+            }
+            _ => panic!("expected the server's refusal, got {read:?}"),
+        },
         other => panic!("expected the server's refusal, got {other:?}"),
     }
 }

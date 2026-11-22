@@ -100,13 +100,13 @@ impl HandlerChildTimes {
 /// serve it until the stop frame or the end of the parent.
 pub(super) fn boot_and_serve_handlers(
     app: HandlerChildApp,
-    socket: UnixStream,
+    socket: &UnixStream,
     reader: FrameReader,
 ) -> ChildHostExit {
     let runtime = match start_child_runtime(HANDLER_RUNTIME_THREADS) {
         Ok(runtime) => runtime,
         Err((cause, detail)) => {
-            return boot_failed(&socket, cause, "RuntimeStartFailed", &detail);
+            return boot_failed(socket, cause, "RuntimeStartFailed", &detail);
         }
     };
     boot_and_serve_handlers_on(runtime, app, socket, reader)
@@ -116,7 +116,7 @@ pub(super) fn boot_and_serve_handlers(
 pub(super) fn boot_and_serve_handlers_on(
     runtime: &tokio::runtime::Runtime,
     app: HandlerChildApp,
-    socket: UnixStream,
+    socket: &UnixStream,
     reader: FrameReader,
 ) -> ChildHostExit {
     let HandlerChildApp {
@@ -136,14 +136,14 @@ pub(super) fn boot_and_serve_handlers_on(
         Ok(running) => running,
         Err(failed) => {
             let cause = shortage_or(&failed.error, ReportedBootCause::ThreadStartRefused);
-            return boot_failed(&socket, cause, "ThreadStartFailed", &failed.to_string());
+            return boot_failed(socket, cause, "ThreadStartFailed", &failed.to_string());
         }
     };
-    let (writer, mut frames) = match start_links(&socket, reader) {
+    let (writer, mut frames) = match start_links(socket, reader) {
         Ok(links) => links,
         Err(error) => {
             let cause = shortage_or(&error, ReportedBootCause::ThreadStartRefused);
-            return boot_failed(&socket, cause, "ThreadStartFailed", &error.to_string());
+            return boot_failed(socket, cause, "ThreadStartFailed", &error.to_string());
         }
     };
     let pid = ProcessId::new(std::process::id())

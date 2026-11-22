@@ -97,14 +97,14 @@ pub enum CallbackFailure {
     RaisedException {
         subject: String,
         cause: RaisedCause,
-        exception: PyErr,
+        exception: Box<PyErr>,
     },
     /// The call raised a `BaseException` that is not an `Exception`.
     /// `exception` is the raised object, for the caller to raise again.
     RaisedBaseException {
         subject: String,
         cause: RaisedCause,
-        exception: PyErr,
+        exception: Box<PyErr>,
     },
     /// The call panicked. The thread runs on.
     Panicked { subject: String, cause: String },
@@ -239,12 +239,12 @@ fn classify(py: Python<'_>, subject: String, raised: PyErr) -> CallbackFailure {
         (false, true) => CallbackFailure::RaisedException {
             subject,
             cause,
-            exception: raised,
+            exception: Box::new(raised),
         },
         (false, false) => CallbackFailure::RaisedBaseException {
             subject,
             cause,
-            exception: raised,
+            exception: Box::new(raised),
         },
     }
 }
@@ -611,7 +611,7 @@ mod tests {
                 exception_type: "KeyError".to_owned(),
                 message: "'day'".to_owned(),
             },
-            exception: pyo3::exceptions::PyKeyError::new_err("'day'"),
+            exception: Box::new(pyo3::exceptions::PyKeyError::new_err("'day'")),
         };
         assert_eq!(
             failure.to_string(),

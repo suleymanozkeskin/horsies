@@ -258,6 +258,14 @@ pub trait ExceptionCause {
     fn exception_value(&self) -> ExceptionValue;
 }
 
+/// A boxed cause is the exception of the cause in the box: a variant keeps
+/// a large cause in a `Box` so that its error stays small.
+impl<T: ExceptionCause + ?Sized> ExceptionCause for Box<T> {
+    fn exception_value(&self) -> ExceptionValue {
+        T::exception_value(self)
+    }
+}
+
 /// A broker error is the core's class of its cause, with its text and its
 /// retry rule.
 impl ExceptionCause for BrokerError {
@@ -757,7 +765,7 @@ mod tests {
                 match exceptions.as_slice() {
                     [] => {}
                     [position] => {
-                        assert_eq!(*position, class.slots.len() - 1, "{}", class.python_class)
+                        assert_eq!(*position, class.slots.len() - 1, "{}", class.python_class);
                     }
                     more => panic!("{} has {} exception slots", class.python_class, more.len()),
                 }
@@ -1102,8 +1110,8 @@ mod tests {
             code: BrokerOperationFailedCode::CloseFailed,
             message: "close failed".to_owned(),
             retryable: true,
-            cause: crate::BrokerOperationSource::Broker(crate::BrokerError::ConnectionFailed(
-                "lost".to_owned(),
+            cause: Box::new(crate::BrokerOperationSource::Broker(
+                crate::BrokerError::ConnectionFailed("lost".to_owned()),
             )),
         };
         assert_eq!(failed.python_class(), "BrokerOperationFailed");
@@ -1134,13 +1142,13 @@ mod tests {
     async fn statement_timeout() -> BrokerError {
         BrokerError::Statement(crate::db::StatementFailure::StatementRefused {
             statement: "test_statement",
-            cause: crate::db::RefusalCause::Server(
+            cause: crate::db::RefusalCause::Server(Box::new(
                 crate::test_support::raised_server_error(
                     "57014",
                     "canceling statement due to statement timeout",
                 )
                 .await,
-            ),
+            )),
         })
     }
 
@@ -1472,7 +1480,7 @@ mod tests {
         vec![
             HandleOperationError::not_found(WORKFLOW),
             HandleOperationError::connect_failed(
-                crate::HandleOperation::Status,
+                &crate::HandleOperation::Status,
                 WORKFLOW,
                 refused(),
             ),
@@ -1527,7 +1535,7 @@ mod tests {
     #[test]
     fn a_handle_database_failure_builds_its_exception_from_its_cause() {
         let failed = HandleOperationError::connect_failed(
-            crate::HandleOperation::Status,
+            &crate::HandleOperation::Status,
             WORKFLOW,
             refused(),
         );
@@ -1641,7 +1649,7 @@ mod tests {
             BrokerOperationError::EnqueueFailed {
                 message: "enqueue unconfirmed".to_owned(),
                 retryable: true,
-                cause: BrokerCheckCause::Error(refused()),
+                cause: Box::new(BrokerCheckCause::Error(refused())),
             },
             BrokerOperationError::PayloadMismatch {
                 message: "payload mismatch".to_owned(),

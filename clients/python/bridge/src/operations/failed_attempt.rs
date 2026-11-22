@@ -78,6 +78,11 @@ impl RetryAfter {
 /// The retry argument of a request: one of the two retry classes.
 #[derive(FromPyObject)]
 pub enum RetryArgument<'py> {
+    #[expect(
+        dead_code,
+        reason = "the field selects the variant: PyO3 extracts the variant only from an \
+                  instance of the class; nothing reads the instance"
+    )]
     No(Bound<'py, NoRetry>),
     After(Bound<'py, RetryAfter>),
 }

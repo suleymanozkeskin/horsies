@@ -473,7 +473,7 @@ pub(crate) struct CommittedStep<D> {
 pub(crate) struct ParentAdvanceFailure {
     pub(crate) failed_child_workflow_id: Uuid,
     pub(crate) owed_after: OwedParentAdvances,
-    pub(crate) error: WorkflowError,
+    pub(crate) error: Box<WorkflowError>,
 }
 
 impl ParentAdvanceFailure {
@@ -548,7 +548,7 @@ impl ParentAdvanceDrive {
         ParentAdvanceFailure {
             failed_child_workflow_id,
             owed_after: owed_from_stack(std::mem::take(&mut self.pending)),
-            error,
+            error: Box::new(error),
         }
     }
 }

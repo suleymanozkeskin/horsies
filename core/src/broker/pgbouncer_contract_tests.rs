@@ -99,9 +99,7 @@ fn template_url(variable: &str, port: u16) -> String {
 /// The same URL with another database name; the query is kept.
 fn with_database(url: &str, database: &str) -> String {
     let (scheme, rest) = url.split_once("://").expect("the URL has a scheme");
-    let authority_end = rest
-        .find(|character: char| character == '/' || character == '?')
-        .unwrap_or(rest.len());
+    let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
     let (authority, remainder) = rest.split_at(authority_end);
     match remainder.split_once('?') {
         Some((_, query)) => format!("{scheme}://{authority}/{database}?{query}"),

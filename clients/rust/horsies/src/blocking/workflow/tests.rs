@@ -141,8 +141,8 @@ async fn a_blocking_retry_checks_its_error_before_the_thread() {
         retryable: true,
         workflow_name: workflow_name.to_owned(),
         workflow_id,
-        cause: horsies_core::WorkflowError::Broker(horsies_core::BrokerError::ConnectionFailed(
-            "the commit reply was lost".to_owned(),
+        cause: Box::new(horsies_core::WorkflowError::Broker(
+            horsies_core::BrokerError::ConnectionFailed("the commit reply was lost".to_owned()),
         )),
     };
     let other = function

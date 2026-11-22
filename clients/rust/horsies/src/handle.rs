@@ -900,7 +900,7 @@ mod tests {
             task(),
             BrokerOperationError::InvalidJsonPayload {
                 message: "digest mismatch".to_owned(),
-                cause: horsies_core::BrokerCheckCause::Check,
+                cause: Box::new(horsies_core::BrokerCheckCause::Check),
             },
         );
         assert!(matches!(

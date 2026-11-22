@@ -102,21 +102,25 @@ impl AccessGrant {
     /// Whether this grant answers exactly the verdicts that `need` asks, in
     /// order: a verdict after a refusal is not asked.
     fn fits(self, need: AccessNeed) -> bool {
-        match (need, self.view, self.act) {
-            (AccessNeed::Public, Verdict::NotAsked, Verdict::NotAsked) => true,
-            (AccessNeed::View, Verdict::Allowed | Verdict::Refused, Verdict::NotAsked) => true,
-            (
-                AccessNeed::ViewReportAct | AccessNeed::ViewAndAct,
-                Verdict::Allowed,
-                Verdict::Allowed | Verdict::Refused,
-            ) => true,
-            (
-                AccessNeed::ViewReportAct | AccessNeed::ViewAndAct,
-                Verdict::Refused,
-                Verdict::NotAsked,
-            ) => true,
-            _ => false,
-        }
+        matches!(
+            (need, self.view, self.act),
+            (AccessNeed::Public, Verdict::NotAsked, Verdict::NotAsked)
+                | (
+                    AccessNeed::View,
+                    Verdict::Allowed | Verdict::Refused,
+                    Verdict::NotAsked
+                )
+                | (
+                    AccessNeed::ViewReportAct | AccessNeed::ViewAndAct,
+                    Verdict::Allowed,
+                    Verdict::Allowed | Verdict::Refused,
+                )
+                | (
+                    AccessNeed::ViewReportAct | AccessNeed::ViewAndAct,
+                    Verdict::Refused,
+                    Verdict::NotAsked,
+                )
+        )
     }
 }
 

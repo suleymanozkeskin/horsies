@@ -197,7 +197,7 @@ pub fn run_child_host(app: ChildApp, args: ChildArgs) -> ChildHostExit {
         Ok(init) => init,
         Err(exit) => return exit,
     };
-    boot_and_serve(app, socket, reader, init)
+    boot_and_serve(app, &socket, reader, &init)
 }
 
 /// Linux: die with the worker, and exit at once when it is gone already.
@@ -248,7 +248,7 @@ fn read_init(socket: &UnixStream, reader: &mut FrameReader) -> Result<InitFrame,
     let mut stream = socket;
     let raw = match read_frame(&mut stream, reader) {
         Ok(raw) => raw,
-        Err(ReadEnd::Eof | ReadEnd::Failed(_)) => return Err(ChildHostExit::ParentGone),
+        Err(ReadEnd::Eof | ReadEnd::Failed) => return Err(ChildHostExit::ParentGone),
         Err(ReadEnd::OverBound(over)) => {
             tracing::error!(error = %over, "Parent sent a frame over the bounds: {over}");
             return Err(ChildHostExit::BadParentFrame);
@@ -652,9 +652,9 @@ fn run_one_start_hook(
 
 fn boot_and_serve(
     mut app: ChildApp,
-    socket: UnixStream,
+    socket: &UnixStream,
     reader: FrameReader,
-    init: InitFrame,
+    init: &InitFrame,
 ) -> ChildHostExit {
     match std::mem::replace(&mut app.log_setup, ChildLogSetup::NoSetup) {
         ChildLogSetup::NoSetup => {}
@@ -665,7 +665,7 @@ fn boot_and_serve(
         app.family,
     );
     match hosted_child(init.child_kind) {
-        HostedChild::Task(kind) => boot_and_serve_tasks(app, socket, reader, &init, kind),
+        HostedChild::Task(kind) => boot_and_serve_tasks(app, socket, reader, init, kind),
         HostedChild::Handler => boot_and_serve_handlers(app.handler_child, socket, reader),
     }
 }
@@ -674,7 +674,7 @@ fn boot_and_serve(
 /// the end of the parent.
 fn boot_and_serve_tasks(
     mut app: ChildApp,
-    socket: UnixStream,
+    socket: &UnixStream,
     reader: FrameReader,
     init: &InitFrame,
     kind: TaskChild,
@@ -683,14 +683,14 @@ fn boot_and_serve_tasks(
     let runtime = match start_child_runtime(runtime_threads(kind)) {
         Ok(runtime) => runtime,
         Err((cause, detail)) => {
-            return boot_failed(&socket, cause, "RuntimeStartFailed", &detail);
+            return boot_failed(socket, cause, "RuntimeStartFailed", &detail);
         }
     };
     let broker = match runtime.block_on(connect(init, kind, app.family)) {
         Ok(broker) => Arc::new(broker),
         Err(detail) => {
             return boot_failed(
-                &socket,
+                socket,
                 ReportedBootCause::ChildPoolSetupFailed,
                 "DatabaseError",
                 &detail,
@@ -706,11 +706,11 @@ fn boot_and_serve_tasks(
     ) {
         return exit;
     }
-    let (writer, serving, mut frames) = match start_threads(&socket, reader, kind) {
+    let (writer, serving, mut frames) = match start_threads(socket, reader, kind) {
         Ok(threads) => threads,
         Err(error) => {
             let cause = shortage_or(&error, ReportedBootCause::ThreadStartRefused);
-            return boot_failed(&socket, cause, "ThreadStartFailed", &error.to_string());
+            return boot_failed(socket, cause, "ThreadStartFailed", &error.to_string());
         }
     };
     let pid = std::process::id();

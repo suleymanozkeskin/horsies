@@ -80,7 +80,7 @@ fn a_refused_schedule_is_a_refusal_that_names_it() {
         },
         SchedulerStartError::CommandRefused {
             schedule: "nightly".to_owned(),
-            cause: BrokerError::ClaimContract("refused options".to_owned()),
+            cause: Box::new(BrokerError::ClaimContract("refused options".to_owned())),
         },
         SchedulerStartError::NoNextSlot {
             schedule: "nightly".to_owned(),

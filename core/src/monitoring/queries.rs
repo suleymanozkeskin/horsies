@@ -153,18 +153,6 @@ pub struct TaskFilters {
     pub retried_only: bool,
 }
 
-impl TaskFilters {
-    fn is_empty(&self) -> bool {
-        self.statuses.is_empty()
-            && self.task_names.is_empty()
-            && self.queues.is_empty()
-            && self.workers.is_empty()
-            && self.error_codes.is_empty()
-            && self.error_categories.is_empty()
-            && !self.retried_only
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{reason}")]
 pub struct PaginationRefused {
@@ -858,7 +846,7 @@ pub async fn get_workflow_run(
         .await
         .map_err(|error| function_failure(operation, error))?;
     match workflow_run(&rows, statement).map_err(|error| row_failure(operation, error))? {
-        RunRead::Found(detail) => Ok(Some(detail)),
+        RunRead::Found(detail) => Ok(Some(*detail)),
         RunRead::Absent => Ok(None),
     }
 }
@@ -887,7 +875,7 @@ pub async fn get_workflow_node(
         .await
         .map_err(|error| function_failure(operation, error))?;
     match workflow_node(&rows, statement) {
-        Ok(NodeRead::Found(detail)) => Ok(Some(detail)),
+        Ok(NodeRead::Found(detail)) => Ok(Some(*detail)),
         Ok(NodeRead::Absent) => Ok(None),
         Err(error) => Err(detail_row_failure(operation, error)),
     }

@@ -121,7 +121,7 @@ impl ManifestValue for CatchUpRuns {
 /// fraction of a second included).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(try_from = "String")]
-pub struct PatternJson(SchedulePattern);
+pub struct PatternJson(Box<SchedulePattern>);
 
 impl PatternJson {
     /// The parsed pattern.
@@ -131,7 +131,7 @@ impl PatternJson {
 
     /// The parsed pattern, by value.
     pub fn into_pattern(self) -> SchedulePattern {
-        self.0
+        *self.0
     }
 }
 
@@ -144,7 +144,7 @@ impl TryFrom<String> for PatternJson {
         pattern
             .validate()
             .map_err(|broken| format!("the pattern breaks its rules: {broken}"))?;
-        Ok(Self(pattern))
+        Ok(Self(Box::new(pattern)))
     }
 }
 

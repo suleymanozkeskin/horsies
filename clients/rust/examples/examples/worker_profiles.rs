@@ -39,7 +39,7 @@ enum FetchCode {
 /// One task at a time in its own process: for code that may crash or leak.
 #[blocking_task("checksum", execution = isolated)]
 fn checksum(data: Vec<u8>) -> Result<u64, TaskError<Infallible>> {
-    Ok(data.iter().map(|byte| u64::from(*byte)).sum())
+    Ok(data.into_iter().map(u64::from).sum())
 }
 
 /// Many runs on one runtime of a child. At `timeout_ms` the run gets the

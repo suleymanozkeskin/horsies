@@ -516,9 +516,17 @@ fn each_miss_reason_decodes() {
     }
 }
 
+/// A start row case: name, outcome, reason, start time.
+type StartRowCase = (
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+    Option<DateTime<Utc>>,
+);
+
 #[test]
 fn a_start_row_against_its_outcome_fails_closed() {
-    let cases: [(&str, &str, Option<&str>, Option<DateTime<Utc>>); 5] = [
+    let cases: [StartRowCase; 5] = [
         ("started_without_a_start", "STARTED", None, None),
         (
             "started_with_a_reason",
@@ -596,10 +604,13 @@ fn release_outcomes_follow_the_input_order() {
     );
 }
 
+/// A release case: name and the rows (ordinal, task id, status).
+type ReleaseRowsCase = (&'static str, Vec<(i64, Uuid, String)>);
+
 #[test]
 fn release_rows_that_break_the_contract_fail_closed() {
     let input = [task(1), task(2)];
-    let cases: Vec<(&str, Vec<(i64, Uuid, String)>)> = vec![
+    let cases: Vec<ReleaseRowsCase> = vec![
         ("missing_row", vec![(1, task(1), "RELEASED".to_owned())]),
         (
             "row_answered_twice",
@@ -667,11 +678,14 @@ fn a_queue_with_no_row_counts_0() {
     assert_eq!(starts.of("a"), 0);
 }
 
+/// A count case: name and the rows (queue, running, started).
+type CountRowsCase = (&'static str, Vec<(String, i64, i64)>);
+
 /// Python `test_a_queue_counted_twice_is_a_defect`, and the other rows
 /// the statement never returns.
 #[test]
 fn count_rows_that_break_the_contract_fail_closed() {
-    let cases: Vec<(&str, Vec<(String, i64, i64)>)> = vec![
+    let cases: Vec<CountRowsCase> = vec![
         (
             "queue_counted_twice",
             vec![("a".to_owned(), 1, 0), ("a".to_owned(), 1, 0)],

@@ -159,7 +159,7 @@ async fn a_failure_finalize_waits_for_a_stale_recovery_that_holds_its_locks() {
     let pool = pool().await;
     let (task_id, workflow_id) = stale_task(&pool, Origin::Send).await;
     let mut recovery = pool.begin().await.expect("begin the recovery");
-    let recovery_pid = backend_pid(&mut *recovery).await;
+    let recovery_pid = backend_pid(&mut recovery).await;
     sql::query(TASK_LOCK_SQL)
         .bind(task_id)
         .execute(&mut *recovery)
@@ -170,7 +170,7 @@ async fn a_failure_finalize_waits_for_a_stale_recovery_that_holds_its_locks() {
     let finalize =
         tokio::spawn(async move { write_failed_attempt(&finalize_pool, &failure(task_id)).await });
     let waited = a_backend_waits_on(&pool, recovery_pid).await;
-    let moved = stale_move_in(&mut *recovery, task_id).await;
+    let moved = stale_move_in(&mut recovery, task_id).await;
     recovery.commit().await.expect("commit the recovery");
     let finalized = tokio::time::timeout(SIDE_WAIT, finalize)
         .await
@@ -201,7 +201,7 @@ async fn a_workflow_success_waits_for_a_stale_recovery_that_holds_its_locks() {
     let pool = pool().await;
     let (task_id, workflow_id) = stale_task(&pool, Origin::WorkflowNode).await;
     let mut recovery = pool.begin().await.expect("begin the recovery");
-    let recovery_pid = backend_pid(&mut *recovery).await;
+    let recovery_pid = backend_pid(&mut recovery).await;
     sql::query(TASK_LOCK_SQL)
         .bind(task_id)
         .execute(&mut *recovery)
@@ -214,7 +214,7 @@ async fn a_workflow_success_waits_for_a_stale_recovery_that_holds_its_locks() {
             async move { write_workflow_success(&finalize_pool, &success(task_id)).await },
         );
     let waited = a_backend_waits_on(&pool, recovery_pid).await;
-    let moved = stale_move_in(&mut *recovery, task_id).await;
+    let moved = stale_move_in(&mut recovery, task_id).await;
     recovery.commit().await.expect("commit the recovery");
     let finalized = tokio::time::timeout(SIDE_WAIT, finalize)
         .await
@@ -252,7 +252,7 @@ async fn the_stale_move_waits_for_a_workflow_success_that_holds_its_locks() {
     let pool = pool().await;
     let (task_id, workflow_id) = stale_task(&pool, Origin::WorkflowNode).await;
     let mut holder = pool.begin().await.expect("begin the success");
-    let holder_pid = backend_pid(&mut *holder).await;
+    let holder_pid = backend_pid(&mut holder).await;
     let applied: String =
         sql::query_scalar("SELECT outcome FROM horsies_finish_workflow_success($1, $2, $3, $4)")
             .bind(task_id)
@@ -303,7 +303,7 @@ async fn a_failure_finalize_waits_for_a_monitoring_cancel_that_holds_its_locks()
     let pool = pool().await;
     let (task_id, workflow_id) = stale_task(&pool, Origin::Send).await;
     let mut finalizer = pool.begin().await.expect("begin the failure write");
-    let finalizer_pid = backend_pid(&mut *finalizer).await;
+    let finalizer_pid = backend_pid(&mut finalizer).await;
     sql::query(TASK_LOCK_SQL)
         .bind(task_id)
         .execute(&mut *finalizer)
@@ -376,7 +376,7 @@ async fn the_row_lock_of_a_start_ends_before_its_miss_path() {
     .await;
     let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "RUNNING").await;
     let mut holder = pool.begin().await.expect("begin the holder");
-    let holder_pid = backend_pid(&mut *holder).await;
+    let holder_pid = backend_pid(&mut holder).await;
     sql::query(TASK_LOCK_SQL)
         .bind(task_id)
         .execute(&mut *holder)
@@ -457,7 +457,7 @@ async fn an_abandon_waits_for_the_workflow_without_task_locks() {
     .await;
     let workflow_id = link_workflow_task(&pool, task_id, "ENQUEUED", "PAUSED").await;
     let mut holder = pool.begin().await.expect("begin the workflow holder");
-    let holder_pid = backend_pid(&mut *holder).await;
+    let holder_pid = backend_pid(&mut holder).await;
     sql::query("SELECT id FROM horsies_workflows WHERE id = $1 FOR UPDATE")
         .bind(workflow_id)
         .execute(&mut *holder)

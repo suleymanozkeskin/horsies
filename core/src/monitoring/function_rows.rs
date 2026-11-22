@@ -291,7 +291,7 @@ impl ListTotals {
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum TaskListRow {
     Totals(ListTotals),
-    Task(TaskSummary),
+    Task(Box<TaskSummary>),
 }
 
 /// Where a task row of the list or the detail comes from.
@@ -360,7 +360,7 @@ pub(super) fn task_list_row(
                 terminal_at: column(row, statement, "terminal_at")?,
             };
             summary_from_fields(fields)
-                .map(TaskListRow::Task)
+                .map(|summary| TaskListRow::Task(Box::new(summary)))
                 .map_err(|reason| shape(statement, reason))
         }
         other => Err(shape(statement, format!("unknown row_kind {other:?}"))),
@@ -458,7 +458,7 @@ pub(super) fn page_from_rows(
             (TaskListRow::Totals(_), Some(_)) => {
                 return Err("the task list returned two TOTALS rows".to_owned())
             }
-            (TaskListRow::Task(summary), _) => summaries.push(summary),
+            (TaskListRow::Task(summary), _) => summaries.push(*summary),
         }
     }
     let totals = totals.ok_or_else(|| "the task list returned no TOTALS row".to_owned())?;
@@ -596,7 +596,7 @@ pub(super) fn task_detail_row(
         execution,
         trace_id,
     };
-    Ok(TaskDetailRead::Found(TaskDetail {
+    Ok(TaskDetailRead::Found(Box::new(TaskDetail {
         leaf,
         task_name: column(row, statement, "task_name")?,
         queue_name: column(row, statement, "queue_name")?,
@@ -607,7 +607,7 @@ pub(super) fn task_detail_row(
         attempts: records.iter().map(attempt_info).collect(),
         workflow_id: column(row, statement, "workflow_id")?,
         workflow_task_index: column(row, statement, "workflow_task_index")?,
-    }))
+    })))
 }
 
 /// The `ABSENT` row of the detail function: the task id and the reason
@@ -953,7 +953,7 @@ fn run_detail(
 /// The answer of the run function.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum RunRead {
-    Found(WorkflowRunDetail),
+    Found(Box<WorkflowRunDetail>),
     /// No run has the id.
     Absent,
 }
@@ -984,7 +984,7 @@ pub(super) fn workflow_run(
                 .iter()
                 .map(|row| run_node(row, statement))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(RunRead::Found(run_detail(run, nodes, trace_id)))
+            Ok(RunRead::Found(Box::new(run_detail(run, nodes, trace_id))))
         }
         (other, _) => Err(shape(statement, format!("unknown row_kind {other:?}"))),
     }
@@ -1025,7 +1025,7 @@ fn node_error_from_result(task_index: i32, result: Option<&str>) -> Result<Optio
 /// The answer of the node function.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum NodeRead {
-    Found(WorkflowTaskDetail),
+    Found(Box<WorkflowTaskDetail>),
     /// The run has no node at the index.
     Absent,
 }
@@ -1044,7 +1044,7 @@ pub(super) fn workflow_node(
     let kind: String = column(row, statement, "row_kind")?;
     match kind.as_str() {
         "ABSENT" => Ok(NodeRead::Absent),
-        "NODE" => node_detail(row, statement).map(NodeRead::Found),
+        "NODE" => node_detail(row, statement).map(|detail| NodeRead::Found(Box::new(detail))),
         other => Err(DetailRowError::Row(shape(
             statement,
             format!("unknown row_kind {other:?}"),
@@ -1148,7 +1148,7 @@ mod tests {
         let summary = summary_from_fields(fields(Location::Live, "PENDING", None)).expect("live");
         let (totals, rows) = page_from_rows(vec![
             TaskListRow::Totals(ListTotals::EstimateHistoryEmpty { live: 4 }),
-            TaskListRow::Task(summary.clone()),
+            TaskListRow::Task(Box::new(summary.clone())),
         ])
         .expect("page");
         assert_eq!(totals.total(), Ok(4));

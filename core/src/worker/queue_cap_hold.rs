@@ -126,8 +126,8 @@ pub enum StartCount {
     /// A row that the check does not hold: a row of an uncapped queue, or
     /// any row in hard-cap mode.
     Unchecked,
-    /// A row that the check admitted; it counts until this drops.
-    Admitted(StartedClaim),
+    /// A row that the check admitted; it counts until `_started` drops.
+    Admitted { _started: StartedClaim },
 }
 
 /// A held row that may start now, and its count in the start check.
@@ -204,6 +204,7 @@ impl QueueCapHold {
     }
 
     /// How many rows wait for the start check.
+    #[cfg(test)]
     pub fn held_count(&self) -> usize {
         self.held.len()
     }

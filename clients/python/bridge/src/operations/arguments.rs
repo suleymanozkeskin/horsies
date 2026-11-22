@@ -66,6 +66,11 @@ pub enum StartRule {
 /// The start argument of a call: one of the three start classes.
 #[derive(FromPyObject)]
 pub enum StartArgument<'py> {
+    #[expect(
+        dead_code,
+        reason = "the field selects the variant: PyO3 extracts the variant only from an \
+                  instance of the class; nothing reads the instance"
+    )]
     Now(Bound<'py, StartNow>),
     AfterDelay(Bound<'py, StartAfterDelay>),
     At(Bound<'py, StartAt>),
@@ -134,6 +139,11 @@ impl TraceCarrier {
 /// classes.
 #[derive(FromPyObject)]
 pub enum TraceArgument<'py> {
+    #[expect(
+        dead_code,
+        reason = "the field selects the variant: PyO3 extracts the variant only from an \
+                  instance of the class; nothing reads the instance"
+    )]
     NoCarrier(Bound<'py, NoTraceCarrier>),
     Carrier(Bound<'py, TraceCarrier>),
 }

@@ -41,11 +41,7 @@ use crate::worker::executor::protocol::{ProcessId, ShortageErrno};
 
 mod preload;
 
-pub use preload::{
-    PreloadMode, PreloadPlan, PreloadStart, PreloadUnsupported, ORPHAN_SWEEP_LIMIT,
-    PRELOAD_FORK_TIMEOUT, PRELOAD_READY_TIMEOUT, PRELOAD_RESTART_DELAY, PRELOAD_RESTART_LIMIT,
-    PRELOAD_STOP_TIMEOUT,
-};
+pub use preload::{PreloadMode, PreloadPlan, PreloadStart, PreloadUnsupported};
 
 /// The name of the spawner thread.
 const SPAWNER_THREAD_NAME: &str = "horsies-spawner";
@@ -68,21 +64,19 @@ const WAKE_DRAIN_READS: u32 = 16;
 /// wait that names an id cannot reach the next child of the same slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ChildId {
-    serial: u64,
+    /// Only the derived `Eq`, `Hash` and `Ord` read it: it is the identity
+    /// of the id.
+    _serial: u64,
     pid: ProcessId,
 }
 
 impl ChildId {
-    pub fn get(self) -> u64 {
-        self.serial
-    }
-
     /// The id of a reaped child whose pid `pid` now belongs to another
     /// process. Serials start at 1, so serial 0 names no child that the
     /// spawner started.
     #[cfg(test)]
     pub(super) fn reaped_child_with_pid(pid: ProcessId) -> Self {
-        Self { serial: 0, pid }
+        Self { _serial: 0, pid }
     }
 }
 
@@ -196,7 +190,7 @@ enum Request {
         reply: oneshot::Sender<KillOutcome>,
     },
     StartPreload {
-        plan: PreloadPlan,
+        plan: Box<PreloadPlan>,
         reply: oneshot::Sender<PreloadStart>,
     },
     Shutdown,
@@ -400,9 +394,10 @@ impl SpawnerHandle {
                         detail: SpawnError::QueueFull.to_string(),
                     }
                 }
-                (Intake::Open, false) => queue
-                    .requests
-                    .push_back(Request::StartPreload { plan, reply }),
+                (Intake::Open, false) => queue.requests.push_back(Request::StartPreload {
+                    plan: Box::new(plan),
+                    reply,
+                }),
             }
         }
         self.shared.waker.wake();
@@ -646,7 +641,7 @@ impl SpawnerLoop {
                 // The requester may have gone away; the kill is sent anyway.
                 let _ = reply.send(self.kill(child));
             }
-            Request::StartPreload { plan, reply } => self.start_preload(plan, reply),
+            Request::StartPreload { plan, reply } => self.start_preload(*plan, reply),
             Request::Shutdown => {
                 self.shutting_down = true;
                 self.stop_preload(Instant::now());

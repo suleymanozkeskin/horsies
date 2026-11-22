@@ -192,9 +192,8 @@ impl Horsies {
     /// queue, the input read back with the task's input type, the input
     /// size. Pure.
     fn schedule_refusal(&self, schedule: &TaskSchedule) -> Option<HorsiesError> {
-        let task = match self.tasks().get(&schedule.task_name) {
-            Ok(task) => task,
-            Err(_) => return Some(self.unregistered_task(schedule)),
+        let Ok(task) = self.tasks().get(&schedule.task_name) else {
+            return Some(self.unregistered_task(schedule));
         };
         if let Err(cause) = schedule_queue(self, task, schedule) {
             return Some(

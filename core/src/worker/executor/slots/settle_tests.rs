@@ -298,7 +298,7 @@ fn test_queue() -> String {
     format!("settle_{}", &Uuid::new_v4().simple().to_string()[..8])
 }
 
-fn writer(pool: TestPool) -> OutcomeWriter {
+fn writer(pool: &TestPool) -> OutcomeWriter {
     let broker = Arc::new(PostgresBroker::from_test_url(
         pool.url(),
         crate::ClientFamily::Rust,
@@ -363,7 +363,7 @@ async fn a_reported_result_of_a_shared_run_completes_the_row() {
         0,
     );
 
-    let settled = writer(pool.clone())
+    let settled = writer(&pool)
         .settle(&claimed, reported_result(ok_envelope(7)))
         .await;
 
@@ -417,7 +417,7 @@ async fn a_timeout_retries_the_row_at_the_placement_of_its_end() {
             2,
         );
 
-        let settled = writer(pool.clone())
+        let settled = writer(&pool)
             .settle(
                 &claimed,
                 AttemptEnd::TimedOut {
@@ -478,7 +478,7 @@ async fn a_timeout_with_no_retry_fails_the_row_with_task_timeout() {
         0,
     );
 
-    let settled = writer(pool.clone())
+    let settled = writer(&pool)
         .settle(
             &claimed,
             AttemptEnd::TimedOut {
@@ -533,7 +533,7 @@ async fn a_loop_kill_fails_the_row_with_its_code() {
             0,
         );
 
-        let settled = writer(pool.clone())
+        let settled = writer(&pool)
             .settle(
                 &claimed,
                 AttemptEnd::KilledForLoop {
@@ -640,7 +640,7 @@ async fn settle_a_shared_run(pool: &TestPool, retried_code: &str, end: AttemptEn
         2,
     );
 
-    let settled = writer(pool.clone()).settle(&claimed, end).await;
+    let settled = writer(pool).settle(&claimed, end).await;
 
     assert!(matches!(settled, Settlement::Written(_)), "{left:?}");
     match left {
@@ -781,7 +781,7 @@ async fn a_task_that_reached_no_child_goes_back_to_the_queue() {
         0,
     );
 
-    let settled = writer(pool.clone())
+    let settled = writer(&pool)
         .settle(
             &claimed,
             AttemptEnd::NotDispatched(NotRunCause::PoolStopping),
@@ -820,7 +820,7 @@ async fn a_row_held_for_its_queue_cap_goes_back_to_the_queue_at_the_stop() {
         0,
     );
 
-    let settled = writer(pool.clone())
+    let settled = writer(&pool)
         .settle(
             &held,
             AttemptEnd::NotDispatched(NotRunCause::HeldForQueueCap),
@@ -889,7 +889,7 @@ async fn an_unreported_end_of_a_row_still_claimed_puts_it_back_with_no_attempt_r
         );
         let label = format!("{end:?}");
 
-        let settled = writer(pool.clone()).settle(&claimed, end).await;
+        let settled = writer(&pool).settle(&claimed, end).await;
 
         assert!(matches!(settled, Settlement::Written(_)), "{label}");
         let row = live_row(&pool, task_id).await.expect("the row stays live");
@@ -931,7 +931,7 @@ async fn a_task_that_reached_no_child_leaves_a_row_of_another_claim_alone() {
     );
     let before = live_row(&pool, task_id).await;
 
-    let settled = writer(pool.clone())
+    let settled = writer(&pool)
         .settle(
             &earlier_claim,
             AttemptEnd::NotDispatched(NotRunCause::QueueFull),
@@ -994,7 +994,7 @@ async fn a_task_whose_node_is_not_linked_stays_claimed() {
     let queue = test_queue();
     let claimed = seed_unlinked_workflow_task(&pool, &queue).await;
 
-    let settled = writer(pool.clone())
+    let settled = writer(&pool)
         .settle(
             &claimed,
             AttemptEnd::StoppedBeforeRunning(StopReason::NodeNotLinked),
@@ -1017,7 +1017,7 @@ fn unreachable_writer() -> OutcomeWriter {
         .max_connections(1)
         .acquire_timeout(Duration::from_millis(100))
         .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies");
-    writer(pool)
+    writer(&pool)
 }
 
 /// The retry waits of one write stage: 0.5 s, 1 s and 2 s.

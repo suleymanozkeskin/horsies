@@ -53,7 +53,9 @@ use crate::worker::runner_beats::{DispatchRunner, HeldChild, HeldDispatch, Regis
 
 /// Whether the runner beats of a run go on.
 enum Beats {
-    Held(HeldDispatch),
+    /// The runner beats go on while the dispatch is held; dropping it ends
+    /// them.
+    Held { _dispatch: HeldDispatch },
     /// The end was read or a kill was sent.
     Ended,
 }
@@ -493,7 +495,7 @@ async fn pull_runs(pool: &SharedPoolShared, local: usize, generation: &mut Gener
         }
         publish(pool, local, generation);
         match pool.take_for(local) {
-            Take::Run(queued) => send_run(pool, generation, queued).await,
+            Take::Run(queued) => send_run(pool, generation, *queued).await,
             Take::WakeOther(slot) => {
                 pool.wakes[slot].notify_one();
                 return;
@@ -550,7 +552,7 @@ async fn send_run(pool: &SharedPoolShared, generation: &mut Generation, queued: 
         report: RunStopReport::NotReported,
         attached: RunHold {
             answer,
-            beats: Beats::Held(held),
+            beats: Beats::Held { _dispatch: held },
             backstop: Backstop::after_send(work, sent_at),
             log,
         },
@@ -692,14 +694,16 @@ async fn on_frame(
             Ok(())
         }
         ChildFrame::SecondCancel(run) => {
-            on_stop_report(generation, StopReportFrame::SecondCancel(run))
+            on_stop_report(generation, &StopReportFrame::SecondCancel(run))
         }
-        ChildFrame::RunStuck(stuck) => on_stop_report(generation, StopReportFrame::RunStuck(stuck)),
+        ChildFrame::RunStuck(stuck) => {
+            on_stop_report(generation, &StopReportFrame::RunStuck(stuck))
+        }
         ChildFrame::LeftoverCancel(cancel) => {
-            on_stop_report(generation, StopReportFrame::LeftoverCancel(cancel))
+            on_stop_report(generation, &StopReportFrame::LeftoverCancel(cancel))
         }
         ChildFrame::LeftoverStuck(stuck) => {
-            on_stop_report(generation, StopReportFrame::LeftoverStuck(stuck))
+            on_stop_report(generation, &StopReportFrame::LeftoverStuck(stuck))
         }
         ChildFrame::LoopBlocked(blocked) => {
             match generation
@@ -770,11 +774,11 @@ fn on_result(
 }
 
 /// Record a step of the stop of an async run, and close the child.
-fn on_stop_report(generation: &mut Generation, report: StopReportFrame) -> Result<(), BadFrame> {
+fn on_stop_report(generation: &mut Generation, report: &StopReportFrame) -> Result<(), BadFrame> {
     let pid = generation.channel.pid().get();
     match generation
         .runs
-        .note_stop_report(&report)
+        .note_stop_report(report)
         .map_err(BadFrame::OutOfTurn)?
     {
         StopStep::Close(reason) => {
@@ -864,7 +868,7 @@ async fn kill_past_deadlines(
             }
         }
         LossSight::NotSeen(lost) => {
-            answer_without_seen_exit(pool, seats, lost, generation.kill, exit)
+            answer_without_seen_exit(pool, seats, lost, generation.kill, exit);
         }
     }
     let _ = generation.channel.dispose_lost().await;
@@ -917,7 +921,7 @@ async fn lose_child(pool: &SharedPoolShared, mut generation: Generation, lost: C
             }
         }
         LossSight::NotSeen(lost) => {
-            answer_without_seen_exit(pool, seats, lost, generation.kill, exit)
+            answer_without_seen_exit(pool, seats, lost, generation.kill, exit);
         }
     }
     let exit = generation.channel.dispose_lost().await;
