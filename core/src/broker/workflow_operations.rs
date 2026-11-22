@@ -7,7 +7,7 @@
 //!   of a workflow tree.
 //! - [`PostgresBroker::resume_client_workflow`]: `horsies_workflow_resume`, the
 //!   resume of a PAUSED tree, with its child starts from the client's source.
-//! - [`PostgresBroker::expire_paused_workflows`]: `horsies_workflow_expire_paused`
+//! - [`PostgresBroker::expire_paused_workflows`][]: `horsies_workflow_expire_paused`
 //!   per candidate, the paused expiry of the reaper.
 //! - [`PostgresBroker::delete_expired_workflows`]: the workflow retention
 //!   delete of the reaper, in bounded batches (not a 0005 function: one

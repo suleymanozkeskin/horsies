@@ -51,10 +51,9 @@ mod supervise;
 #[cfg(test)]
 mod tests;
 
-pub use state::{
-    handler_child_json, AfterDown, HandlerChildDown, HandlerChildState, HandlerChildView,
-    HandlerDownCause,
-};
+pub use state::{handler_child_json, HandlerChildState, HandlerChildView};
+#[cfg(test)]
+pub use state::{AfterDown, HandlerChildDown, HandlerDownCause};
 
 /// The longest wait for the ready frame of one boot of the handler child.
 /// The worker waits at most this long for its first ready frame before the

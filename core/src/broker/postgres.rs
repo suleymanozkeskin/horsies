@@ -53,13 +53,13 @@ use crate::broker::process_listener::{
     TASK_DONE_CHANNEL, WORKER_PONG_CHANNEL_PREFIX,
 };
 use crate::broker::task_lists::{
-    bounded_list_from_rows, BoundedTaskList, ListShapeError, StaleMinutes, TASK_LIST_BOUND,
+    bounded_list_from_rows, BoundedTaskList, ListShapeError, StaleMinutes,
 };
 use crate::broker::wait_limit::WaitLimit;
 use crate::core::history::maintenance::coverage::CoverageRequest;
-use crate::db::{
-    PayloadEvent, PayloadFilter, WakeEvent, WakeSubscription, DEFAULT_SOCKET_SETTINGS,
-};
+#[cfg(test)]
+use crate::db::DEFAULT_SOCKET_SETTINGS;
+use crate::db::{PayloadEvent, PayloadFilter, WakeEvent, WakeSubscription};
 
 use crate::broker::pools::{
     CloseOutcome, CoreHandle, OpenPools, PoolProfile, SessionPool, WriteInFlight,
@@ -2050,7 +2050,7 @@ impl PostgresBroker {
                     .map_err(|error| task_info_history_error(task_id, error))?;
                 match detail {
                     TaskDetailResult::History(detail) => history_task_info(
-                        detail,
+                        *detail,
                         include_result,
                         include_failed_reason,
                         include_attempts,
@@ -2356,7 +2356,8 @@ impl PostgresBroker {
     /// reaper recovers stale tasks.
     ///
     /// A threshold outside 0 to one year is `INVALID_INPUT` with no database
-    /// call. At most [`TASK_LIST_BOUND`] rows come back; more is
+    /// call. At most [`TASK_LIST_BOUND`](crate::broker::task_lists::TASK_LIST_BOUND)
+    /// rows come back; more is
     /// [`BoundedTaskList::Truncated`]. A database failure is
     /// `MONITORING_QUERY_FAILED` with the driver classification.
     /// Mirrors `PostgresBroker.get_stale_tasks()` in the Python library.
@@ -2467,7 +2468,8 @@ impl PostgresBroker {
     /// filters on `good_until > now()`. Surfacing them helps operators detect
     /// under-provisioned queues or misconfigured deadlines.
     ///
-    /// At most [`TASK_LIST_BOUND`] rows come back, oldest deadline first;
+    /// At most [`TASK_LIST_BOUND`](crate::broker::task_lists::TASK_LIST_BOUND)
+    /// rows come back, oldest deadline first;
     /// more is [`BoundedTaskList::Truncated`]. A database failure is
     /// `MONITORING_QUERY_FAILED` with the driver classification.
     /// Mirrors `PostgresBroker.get_expired_tasks()` in the Python library.
@@ -2819,7 +2821,7 @@ fn stored_envelope_text(text: String) -> BrokerResult<Option<StoredEnvelopeText>
 fn invalid_raw_result(message: String) -> BrokerOperationError {
     BrokerOperationError::InvalidJsonPayload {
         message,
-        cause: BrokerCheckCause::Check,
+        cause: Box::new(BrokerCheckCause::Check),
     }
 }
 
@@ -2834,7 +2836,7 @@ fn raw_result_operation_error(task_id: Uuid, error: BrokerError) -> BrokerOperat
         | BrokerError::HistoryReadContract(_)
         | BrokerError::InvalidStatus(_)) => BrokerOperationError::InvalidJsonPayload {
             message: unreadable.to_string(),
-            cause: BrokerCheckCause::Error(unreadable),
+            cause: Box::new(BrokerCheckCause::Error(unreadable)),
         },
         other => BrokerOperationError::raw_result_query_failed(task_id, other),
     }
@@ -3123,12 +3125,6 @@ fn enqueue_max_retries(task_name: &str, task_options: Option<&str>) -> Result<i3
 // ---------------------------------------------------------------------------
 // Result wait
 // ---------------------------------------------------------------------------
-
-/// Re-poll interval of the workflow result wait (`wait_workflow_end`),
-/// bounding each `subscription.recv()` so a NOTIFY lost during a listener
-/// reconnect is recovered by a fresh terminal-status poll instead of hanging
-/// the caller forever.
-pub(crate) const RESULT_WAIT_REPOLL: Duration = Duration::from_secs(30);
 
 /// Repoll interval of a task result wait whose listener works: a lost
 /// notification costs at most this long (Python's 5 s,
@@ -3858,7 +3854,7 @@ mod filter_non_runnable_tests {
             ) VALUES ($1, 'c15_wf', 'PAUSED', 'fail', NULL, 'test.c15.v1', 0, $1,
                       NOW(), NOW(), NOW(), NOW())",
         )
-        .bind(&wf_id)
+        .bind(wf_id)
         .execute(&pool)
         .await
         .expect("insert workflow");
@@ -3875,8 +3871,8 @@ mod filter_non_runnable_tests {
                       $3, NOW())",
         )
         .bind(Uuid::new_v4())
-        .bind(&wf_id)
-        .bind(&task_id)
+        .bind(wf_id)
+        .bind(task_id)
         .execute(&pool)
         .await
         .expect("insert workflow_task");
@@ -3902,7 +3898,7 @@ mod filter_non_runnable_tests {
                 NOW(), FALSE, NULL, NULL
             )",
         )
-        .bind(&task_id)
+        .bind(task_id)
         .execute(&pool)
         .await
         .expect("insert task");
@@ -3917,15 +3913,11 @@ mod filter_non_runnable_tests {
             .filter_non_runnable_workflow_tasks(&[(task_id, generation)], "w1")
             .await
             .expect("filter");
-        assert_eq!(
-            filtered,
-            vec![task_id.clone()],
-            "paused task must be filtered"
-        );
+        assert_eq!(filtered, vec![task_id], "paused task must be filtered");
 
         let task_status: String =
             sql::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
-                .bind(&task_id)
+                .bind(task_id)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
@@ -3934,7 +3926,7 @@ mod filter_non_runnable_tests {
         let (node_status, linked): (String, Option<Uuid>) = sql::query_as(
             "SELECT status, task_id FROM horsies_workflow_tasks WHERE workflow_id = $1",
         )
-        .bind(&wf_id)
+        .bind(wf_id)
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -3942,22 +3934,22 @@ mod filter_non_runnable_tests {
         assert!(linked.is_none(), "node's task_id must be cleared on reset");
 
         sql::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
-            .bind(&wf_id)
+            .bind(wf_id)
             .execute(&pool)
             .await
             .ok();
         sql::query("DELETE FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id)
+            .bind(task_id)
             .execute(&pool)
             .await
             .ok();
         sql::query("DELETE FROM horsies_task_history WHERE task_id = $1")
-            .bind(&task_id)
+            .bind(task_id)
             .execute(&pool)
             .await
             .ok();
         sql::query("DELETE FROM horsies_workflows WHERE id = $1")
-            .bind(&wf_id)
+            .bind(wf_id)
             .execute(&pool)
             .await
             .ok();
@@ -4093,7 +4085,7 @@ mod terminal_at_stamp_tests {
 
     #[tokio::test]
     async fn completed_row_gets_terminal_at() {
-        let (broker, pool) = connect().await;
+        let (_broker, pool) = connect().await;
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "RUNNING", Some("w1"), None).await;
         // The fused completion fences on the claim generation: stamp one.
@@ -4131,7 +4123,7 @@ mod terminal_at_stamp_tests {
 
     #[tokio::test]
     async fn failed_row_gets_terminal_at() {
-        let (broker, pool) = connect().await;
+        let (_broker, pool) = connect().await;
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "RUNNING", Some("w1"), None).await;
         let before = database_now(&pool).await;

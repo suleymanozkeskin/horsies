@@ -110,7 +110,7 @@ pub enum SchedulerStartError {
     CommandRefused {
         schedule: String,
         #[source]
-        cause: BrokerError,
+        cause: Box<BrokerError>,
     },
     /// An enabled schedule of a manifest names a timezone that the core
     /// does not know. The client checked the name with its own zone
@@ -456,7 +456,7 @@ fn manifest_plan(manifest: SchedulerManifest) -> Result<StartPlan, SchedulerStar
         let command =
             manifest_command(send).map_err(|cause| SchedulerStartError::CommandRefused {
                 schedule: schedule.name.clone(),
-                cause,
+                cause: Box::new(cause),
             })?;
         let _first_command = commands.insert(schedule.name.clone(), command);
     }

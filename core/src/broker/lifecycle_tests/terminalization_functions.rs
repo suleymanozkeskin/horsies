@@ -17,7 +17,7 @@ use crate::broker::attempt_writes::{
 };
 use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::terminalization::on_test_pool::terminalize_in_transaction;
-use crate::core::lifecycle::outcomes::{ObservedClaim, ObservedWorkflowLink};
+use crate::core::lifecycle::outcomes::ObservedClaim;
 use crate::core::lifecycle::{
     AttemptWriteRefusal, BatchSize, FailedAttemptOutcome, GuardEvidence, OwnedClaim,
     OwnedClaimBatch, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
@@ -30,7 +30,6 @@ use crate::test_support::terminal_writes::{self, StaleFailure};
 const STALE_AFTER_MS: i32 = 60_000;
 const FINALIZING_STALE_AFTER_MS: i32 = 30_000;
 const STALE_AFTER_SECONDS: f64 = 60.0;
-const FINALIZING_STALE_AFTER_SECONDS: f64 = 30.0;
 
 /// The claim evidence of a row that `WORKER` holds at `generation()`.
 fn this_workers_claim() -> GuardEvidence {
@@ -140,7 +139,7 @@ mod terminal_at_invariant {
 
         let mut connection = pool.acquire().await.expect("acquire");
         let history_without_terminal_at = copy_live_row_to_history(
-            &mut *connection,
+            &mut connection,
             task_id,
             "CANCELLED",
             Some("CANCEL_ADMIN"),
@@ -297,7 +296,7 @@ mod kind_vocabulary {
 
         let mut connection = pool.acquire().await.expect("acquire");
         let refused = copy_live_row_to_history(
-            &mut *connection,
+            &mut connection,
             task_id,
             "COMPLETED",
             Some("COMPLETE_ISH"),
@@ -321,7 +320,7 @@ mod kind_vocabulary {
 
         let mut connection = pool.acquire().await.expect("acquire");
         let refused = copy_live_row_to_history(
-            &mut *connection,
+            &mut connection,
             task_id,
             "COMPLETED",
             None,
@@ -531,7 +530,7 @@ mod fail_stale {
         .await
         .expect("age the start");
         insert_beat(
-            &mut *transaction,
+            &mut transaction,
             task_id,
             BeatRole::Runner,
             Duration::milliseconds(1_250),
@@ -799,7 +798,7 @@ mod expire_owned_claim {
         set_deadline(&pool, task_id, Deadline::AheadSeconds(3_600.0)).await;
 
         let mut mutator = pool.begin().await.expect("begin mutator");
-        let mutator_pid = backend_pid(&mut *mutator).await;
+        let mutator_pid = backend_pid(&mut mutator).await;
         sql::query("UPDATE horsies_tasks SET good_until = NOW() - interval '1 hour' WHERE id = $1")
             .bind(task_id)
             .execute(&mut *mutator)
@@ -807,7 +806,7 @@ mod expire_owned_claim {
             .expect("move the deadline under the row lock");
 
         let mut applier = pool.begin().await.expect("begin applier");
-        let applier_pid = backend_pid(&mut *applier).await;
+        let applier_pid = backend_pid(&mut applier).await;
         let command = expire_claim(task_id);
         let application = tokio::spawn(async move {
             let outcomes = terminalize_in_transaction(&mut applier, &command).await;

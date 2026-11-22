@@ -396,12 +396,12 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 11, 10, 12, 0, 0).unwrap()
     }
 
-    fn worker(worker_id: &str, queues: &[&str], stored: Value) -> LiveWorker {
+    fn worker(worker_id: &str, queues: &[&str], stored: &Value) -> LiveWorker {
         live_worker(
             worker_id.to_owned(),
             at(),
             queues.iter().map(|queue| (*queue).to_owned()).collect(),
-            &stored,
+            stored,
         )
         .expect("readable budgets")
     }
@@ -409,13 +409,13 @@ mod tests {
     /// A worker with isolated children only: its budget serves every class.
     fn isolated_worker(worker_id: &str, capacity: u64, queues: &[&str]) -> LiveWorker {
         let stored = json!({"ISOLATED": {"capacity": capacity, "serves": ["ISOLATED", "SHARED_ASYNC", "SHARED_THREAD"]}});
-        worker(worker_id, queues, stored)
+        worker(worker_id, queues, &stored)
     }
 
     /// A worker with `SHARED_ASYNC` children and no isolated ones.
     fn async_only_worker(worker_id: &str, capacity: u64, queues: &[&str]) -> LiveWorker {
         let stored = json!({"SHARED_ASYNC": {"capacity": capacity, "serves": ["SHARED_ASYNC"]}});
-        worker(worker_id, queues, stored)
+        worker(worker_id, queues, &stored)
     }
 
     fn coverage(queue: &str, execution: Execution, workers: &[LiveWorker]) -> StreamCoverageState {
@@ -480,7 +480,7 @@ mod tests {
                 capacity: 40
             }
         );
-        let serves_nothing = [worker("w1", &["default"], json!({}))];
+        let serves_nothing = [worker("w1", &["default"], &json!({}))];
         for execution in ALL {
             assert_eq!(
                 coverage("default", execution, &serves_nothing),
@@ -615,7 +615,7 @@ mod tests {
             "ISOLATED": {"capacity": 4, "serves": ["ISOLATED", "SHARED_THREAD"]},
             "SHARED_ASYNC": {"capacity": 40, "serves": ["SHARED_ASYNC"]},
         });
-        let two_budgets = worker("w1", &["default"], stored);
+        let two_budgets = worker("w1", &["default"], &stored);
         let held = BTreeMap::from([(ISOLATED, 1), (THREAD, 2), (ASYNC, 39)]);
 
         assert_eq!(

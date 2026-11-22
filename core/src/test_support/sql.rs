@@ -658,9 +658,7 @@ impl<T: TestDatabaseUrl + ?Sized> TestDatabaseUrl for &T {
 /// test.
 pub(crate) fn endpoint_of(url: &str) -> (String, u16) {
     let (_scheme, rest) = url.split_once("://").expect("the test URL has a scheme");
-    let authority_end = rest
-        .find(|character: char| character == '/' || character == '?')
-        .unwrap_or(rest.len());
+    let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
     let host_port = authority
         .rsplit_once('@')
@@ -686,9 +684,7 @@ pub(crate) fn endpoint_of(url: &str) -> (String, u16) {
 /// When the URL has no scheme: a defect of the test.
 pub(crate) fn with_endpoint(url: &str, host: &str, port: u16) -> String {
     let (scheme, rest) = url.split_once("://").expect("the test URL has a scheme");
-    let authority_end = rest
-        .find(|character: char| character == '/' || character == '?')
-        .unwrap_or(rest.len());
+    let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
     let (authority, remainder) = rest.split_at(authority_end);
     match authority.rsplit_once('@') {
         Some((user_info, _)) => format!("{scheme}://{user_info}@{host}:{port}{remainder}"),
@@ -736,12 +732,6 @@ impl TestConnection {
             depth: 0,
             dropped: DroppedEnds::default(),
         })
-    }
-
-    /// The driver client of this session, for the statements of a test that
-    /// read the driver's own types.
-    pub(crate) fn client(&self) -> &Client {
-        &self.client
     }
 
     /// Ends the session.
@@ -876,7 +866,7 @@ enum TransactionEnd {
 /// The session of a transaction: a session that the transaction checked out
 /// of a pool, or the test's own session.
 enum HeldSession<'c> {
-    Pooled(PooledConnection),
+    Pooled(Box<PooledConnection>),
     Borrowed(&'c mut TestConnection),
 }
 
@@ -1120,7 +1110,7 @@ impl TestPool {
         let mut connection = self.acquire().await?;
         connection.session().open_transaction().await?;
         Ok(TestTransaction {
-            held: HeldSession::Pooled(connection),
+            held: HeldSession::Pooled(Box::new(connection)),
             end: TransactionEnd::Open,
         })
     }

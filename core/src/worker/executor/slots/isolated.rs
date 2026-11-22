@@ -306,7 +306,7 @@ enum IdleEnd {
 
 /// What the wait for work gave.
 enum NextRun {
-    Run(QueuedRun),
+    Run(Box<QueuedRun>),
     /// The child takes no task.
     NoRun(IdleEnd),
 }
@@ -333,7 +333,7 @@ async fn serve_generation(
     let mut notice = ReadyNotice::AtFirstWait;
     let leaves = loop {
         let run = match next_run(shared, &channel, notice).await {
-            NextRun::Run(run) => run,
+            NextRun::Run(run) => *run,
             NextRun::NoRun(idle) => break ChildLeaves::Idle(idle),
         };
         notice = ReadyNotice::Quiet;
@@ -515,7 +515,7 @@ async fn next_run(shared: &PoolShared, channel: &ChildChannel, mut notice: Ready
             (false, false) => {}
         }
         if let Some(run) = idle.take() {
-            return NextRun::Run(run);
+            return NextRun::Run(Box::new(run));
         }
         match notice {
             ReadyNotice::AtFirstWait => {

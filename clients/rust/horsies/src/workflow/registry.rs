@@ -212,7 +212,7 @@ impl WorkflowRegistry {
         if let Some(existing) = registered.definitions.get(&definition.definition_key) {
             return Err(duplicate(
                 &definition,
-                format!(
+                &format!(
                     "definition key '{}' is registered for workflow '{}'",
                     definition.definition_key, existing.name
                 ),
@@ -225,7 +225,7 @@ impl WorkflowRegistry {
         {
             return Err(duplicate(
                 &definition,
-                format!("workflow name '{}' is registered", definition.name),
+                &format!("workflow name '{}' is registered", definition.name),
             ));
         }
         let _previous = registered
@@ -709,7 +709,7 @@ fn child_for_check(
     }
 }
 
-fn duplicate(definition: &Definition, cause: String) -> HorsiesError {
+fn duplicate(definition: &Definition, cause: &str) -> HorsiesError {
     HorsiesError::new(format!(
         "workflow definition '{}' ({}) is registered twice: {cause}",
         definition.name, definition.definition_key

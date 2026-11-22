@@ -395,7 +395,7 @@ impl WorkflowSpecBuilder {
         }
         self.check_success_policy(&mut second);
         second.into_result()?;
-        Ok(self.into_spec(node_ids))
+        Ok(self.into_spec(&node_ids))
     }
 
     // -- gate 1 ------------------------------------------------------------
@@ -613,12 +613,12 @@ impl WorkflowSpecBuilder {
 
     // -- the spec ----------------------------------------------------------
 
-    fn into_spec(self, node_ids: Vec<String>) -> WorkflowSpec {
+    fn into_spec(self, node_ids: &[String]) -> WorkflowSpec {
         let nodes = self
             .nodes
             .into_iter()
             .enumerate()
-            .map(|(index, node)| spec_node(index, node, &node_ids))
+            .map(|(index, node)| spec_node(index, node, node_ids))
             .collect::<Vec<SpecNode>>();
         let output = match self.output {
             Some(reference) => SpecOutput::Node {

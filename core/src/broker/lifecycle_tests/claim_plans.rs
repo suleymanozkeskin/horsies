@@ -390,7 +390,7 @@ enum Lease {
     /// The lease ended a minute ago.
     Expired,
     /// No lease: a RUNNING or PENDING row.
-    NoLease,
+    Absent,
 }
 
 /// The values of one task row of `status` on `queue`, held by `worker`
@@ -403,7 +403,7 @@ fn row_values(status: &str, queue: &str, worker: Option<&str>, lease: Lease) -> 
     let expires = match lease {
         Lease::Live => "NOW() + interval '5 minutes'",
         Lease::Expired => "NOW() - interval '1 minute'",
-        Lease::NoLease => "NULL",
+        Lease::Absent => "NULL",
     };
     let started_at = match status {
         "RUNNING" => "NOW()",
@@ -455,11 +455,11 @@ async fn the_in_flight_counts_of_a_claim_pass() {
         row_values("CLAIMED", "q_a", Some(WORKER_ID), Lease::Live),
         row_values("CLAIMED", "q_a", Some(WORKER_ID), Lease::Expired),
         row_values("CLAIMED", "q_b", Some(WORKER_ID), Lease::Live),
-        row_values("RUNNING", "q_b", Some(WORKER_ID), Lease::NoLease),
+        row_values("RUNNING", "q_b", Some(WORKER_ID), Lease::Absent),
         row_values("CLAIMED", "q_a", Some(OTHER_WORKER), Lease::Live),
         row_values("CLAIMED", "q_b", Some(OTHER_WORKER), Lease::Expired),
-        row_values("RUNNING", "q_a", Some(OTHER_WORKER), Lease::NoLease),
-        row_values("PENDING", "q_a", None, Lease::NoLease),
+        row_values("RUNNING", "q_a", Some(OTHER_WORKER), Lease::Absent),
+        row_values("PENDING", "q_a", None, Lease::Absent),
     ];
     client
         .batch_execute(&format!(

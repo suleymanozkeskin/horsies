@@ -772,7 +772,7 @@ impl HandlerStatsFrameRecord {
         rss_mb: RssArgument,
     ) -> PyResult<Self> {
         let counts = handlers
-            .iter()
+            .into_iter()
             .map(|record| record.get().counts.clone())
             .collect();
         let handlers = HandlerCountsList::new(counts)

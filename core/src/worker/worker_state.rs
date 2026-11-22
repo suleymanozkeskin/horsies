@@ -28,9 +28,11 @@ use crate::worker::recovery::ReaperHealth;
 
 mod gauge_facts;
 
+#[cfg(test)]
+pub use gauge_facts::UnreadableChild;
 pub use gauge_facts::{
     children_rss_of, down_by_kind, seats_in_use_of, seats_of, ChildrenRss, ClassCounts, ParentRss,
-    SeatsInUse, UnreadableChild,
+    SeatsInUse,
 };
 
 /// One worker snapshot. Every NOT NULL column of the baseline table is named
@@ -782,7 +784,7 @@ mod tests {
             std::process::id() as i32,
             worker_config,
             app_config,
-            health.clone(),
+            Arc::clone(&health),
             isolated_children(1),
             isolated_claim_columns(1),
             Utc::now(),

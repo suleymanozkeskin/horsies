@@ -157,7 +157,7 @@ pub enum ConnectFailure {
     /// The server answered the startup with an error (for example a failed
     /// authentication, or too many connections).
     #[error("the server refused the connection: {}", DbErrorText(.0))]
-    ServerRefused(DbError),
+    ServerRefused(Box<DbError>),
     /// The socket, the TLS handshake or the protocol failed.
     #[error("the connection could not be made: {}", DriverErrorText(.0))]
     TransportFailed(tokio_postgres::Error),
@@ -179,7 +179,7 @@ impl ConnectError {
     pub(crate) fn from_driver(masked_url: MaskedUrl, error: tokio_postgres::Error) -> Self {
         let server_error = error.as_db_error().cloned();
         let cause = match server_error {
-            Some(server_error) => ConnectFailure::ServerRefused(server_error),
+            Some(server_error) => ConnectFailure::ServerRefused(Box::new(server_error)),
             None => ConnectFailure::TransportFailed(error),
         };
         ConnectError { masked_url, cause }
@@ -273,7 +273,10 @@ pub enum CheckoutFailure {
     TimedOut { role: PoolRole, waited: Duration },
     /// The pool had room, and opening a new connection failed.
     #[error("the {role} pool could not open a connection: {cause}")]
-    ConnectFailed { role: PoolRole, cause: ConnectError },
+    ConnectFailed {
+        role: PoolRole,
+        cause: Box<ConnectError>,
+    },
     /// The pool was closed on purpose. Not retryable.
     #[error("the {role} pool is closed")]
     PoolClosed { role: PoolRole },
@@ -351,7 +354,7 @@ impl StatementFailure {
         match self {
             StatementFailure::NotSent { statement, .. }
             | StatementFailure::StatementRefused { statement, .. }
-            | StatementFailure::OutcomeUnknown { statement, .. } => *statement,
+            | StatementFailure::OutcomeUnknown { statement, .. } => statement,
         }
     }
 
@@ -409,11 +412,14 @@ impl NotSentCause {
 pub enum RefusalCause {
     /// The server answered with an ERROR.
     #[error("{}", DbErrorText(.0))]
-    Server(DbError),
+    Server(Box<DbError>),
     /// The statement ran past its bound; the core sent a cancel request and
     /// the server answered with `query_canceled` (57014).
     #[error("cancelled after the bound of {bound:?}: {}", DbErrorText(.error))]
-    CancelledAfterBound { bound: Duration, error: DbError },
+    CancelledAfterBound {
+        bound: Duration,
+        error: Box<DbError>,
+    },
 }
 
 impl RefusalCause {
@@ -442,7 +448,7 @@ pub enum UnknownOutcomeCause {
     /// The server ended the session (FATAL or PANIC) after the statement was
     /// sent; it may have committed before the session ended.
     #[error("the server ended the session after the statement was sent: {}", DbErrorText(.0))]
-    SessionTerminated(DbError),
+    SessionTerminated(Box<DbError>),
     /// The driver failed with an error that is not a server error while the
     /// connection stayed open (a parameter value that does not encode, or a
     /// protocol message the driver did not expect).

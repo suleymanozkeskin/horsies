@@ -50,7 +50,7 @@ enum UnitParameter {
     /// The function takes no input parameter.
     Absent,
     /// The function takes one parameter of type `()`; the body passes `()`.
-    Given(Param),
+    Given(Box<Param>),
 }
 
 #[derive(Clone)]
@@ -535,7 +535,7 @@ fn params_module(signature: &Signature) -> TokenStream {
 fn send_params(signature: &Signature) -> TokenStream {
     let params: Vec<&Param> = match &signature.input {
         InputShape::Unit(UnitParameter::Absent) => vec![],
-        InputShape::Unit(UnitParameter::Given(param)) => vec![param],
+        InputShape::Unit(UnitParameter::Given(param)) => vec![&**param],
         InputShape::Wrapped(params) => params.iter().collect(),
     };
     let params = params.iter().map(|param| {
@@ -654,9 +654,9 @@ fn validate_signature(func: &ItemFn, kind: BodyKind) -> syn::Result<Signature> {
 fn input_shape(params: &[&syn::PatType]) -> syn::Result<InputShape> {
     match params {
         [] => Ok(InputShape::Unit(UnitParameter::Absent)),
-        [single] if is_unit_type(&single.ty) => {
-            Ok(InputShape::Unit(UnitParameter::Given(unit_param(single)?)))
-        }
+        [single] if is_unit_type(&single.ty) => Ok(InputShape::Unit(UnitParameter::Given(
+            Box::new(unit_param(single)?),
+        ))),
         _ => params
             .iter()
             .map(|param| stored_param(param))

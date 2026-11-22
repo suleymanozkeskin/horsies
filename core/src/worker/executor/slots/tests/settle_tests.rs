@@ -12,7 +12,6 @@
 //! - After the write for a lost child, a phase-2 error that can clear is
 //!   tried again until the node finishes.
 
-use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};

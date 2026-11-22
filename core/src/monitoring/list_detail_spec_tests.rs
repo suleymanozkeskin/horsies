@@ -55,7 +55,7 @@ async fn detail_of(broker: &PostgresBroker, task_id: Uuid) -> TaskDetail {
         .await
         .expect("read the task detail")
     {
-        TaskDetailRead::Found(detail) => detail,
+        TaskDetailRead::Found(detail) => *detail,
         TaskDetailRead::NotFound(absent) => panic!("the task has no detail: {absent:?}"),
     }
 }

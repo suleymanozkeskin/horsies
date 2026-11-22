@@ -122,7 +122,7 @@ fn miss_extra() -> FailedAttemptColumns {
 
 /// The outcome of a row that is not `RELEASED`.
 fn decode_written(
-    raw: RawOutcomeRow,
+    raw: &RawOutcomeRow,
     extra: FailedAttemptColumns,
 ) -> Result<FailedAttemptOutcome, OutcomeDecodeError> {
     match decode_failed_attempt(raw, extra)? {
@@ -157,7 +157,7 @@ fn released_extra() -> FailedAttemptColumns {
 #[test]
 fn a_plain_failure_is_applied_and_woken() {
     assert_eq!(
-        decode_written(applied_raw(), applied_extra()).unwrap(),
+        decode_written(&applied_raw(), applied_extra()).unwrap(),
         FailedAttemptOutcome::FailureApplied {
             task_id: task_id(),
             terminal_at: now(),
@@ -175,7 +175,7 @@ fn a_workflow_failure_owes_phase_two() {
         facts: facts(true, Some("NONE")),
         ..applied_extra()
     };
-    match decode_written(applied_raw(), extra).unwrap() {
+    match decode_written(&applied_raw(), extra).unwrap() {
         FailedAttemptOutcome::FailureApplied { after, .. } => assert_eq!(
             after,
             AfterFailure::PhaseTwoOwed(PhaseTwoOwed {
@@ -208,7 +208,7 @@ fn the_node_facts_give_the_phase_two_step() {
             facts: node_facts,
             ..applied_extra()
         };
-        match decode_written(applied_raw(), extra).unwrap() {
+        match decode_written(&applied_raw(), extra).unwrap() {
             FailedAttemptOutcome::FailureApplied {
                 after: AfterFailure::PhaseTwoOwed(owed),
                 ..
@@ -231,7 +231,7 @@ fn node_facts_that_disagree_or_are_unknown_fail_closed() {
             facts: node_facts,
             ..applied_extra()
         };
-        assert!(decode_failed_attempt(applied_raw(), extra).is_err());
+        assert!(decode_failed_attempt(&applied_raw(), extra).is_err());
     }
 }
 
@@ -248,7 +248,7 @@ fn node_facts_on_a_row_without_phase_two_fail_closed() {
             facts: facts(true, Some("NONE")),
             ..extra
         };
-        assert!(decode_failed_attempt(raw, extra).is_err());
+        assert!(decode_failed_attempt(&raw, extra).is_err());
     }
 }
 
@@ -260,7 +260,7 @@ fn a_retry_past_its_deadline_carries_both_instants() {
         good_until: Some(now()),
         ..applied_extra()
     };
-    match decode_written(applied_raw(), extra).unwrap() {
+    match decode_written(&applied_raw(), extra).unwrap() {
         FailedAttemptOutcome::FailureApplied { retry, .. } => assert_eq!(
             retry,
             RetryRefusal::PastDeadline {
@@ -275,7 +275,7 @@ fn a_retry_past_its_deadline_carries_both_instants() {
 #[test]
 fn a_scheduled_retry() {
     assert_eq!(
-        decode_written(retry_raw(), retry_extra()).unwrap(),
+        decode_written(&retry_raw(), retry_extra()).unwrap(),
         FailedAttemptOutcome::RetryScheduled {
             task_id: task_id(),
             retry_count: 2,
@@ -298,9 +298,9 @@ fn a_replay_is_already_applied() {
         observed_claimed_at: None,
         ..miss_raw("ALREADY_APPLIED")
     };
-    match decode_written(raw, miss_extra()).unwrap() {
+    match decode_written(&raw, miss_extra()).unwrap() {
         FailedAttemptOutcome::Refused(AttemptWriteRefusal::AlreadyApplied { kind, .. }) => {
-            assert_eq!(kind, TerminalizationKind::FailRunning)
+            assert_eq!(kind, TerminalizationKind::FailRunning);
         }
         other => panic!("expected AlreadyApplied, got {other:?}"),
     }
@@ -309,7 +309,7 @@ fn a_replay_is_already_applied() {
 #[test]
 fn a_lost_claim() {
     assert!(matches!(
-        decode_written(miss_raw("LOST_CLAIM"), miss_extra()).unwrap(),
+        decode_written(&miss_raw("LOST_CLAIM"), miss_extra()).unwrap(),
         FailedAttemptOutcome::Refused(AttemptWriteRefusal::LostClaim { .. })
     ));
 }
@@ -321,7 +321,7 @@ fn a_conflict() {
         ..miss_raw("SOURCE_STATE_CONFLICT")
     };
     assert!(matches!(
-        decode_written(raw, miss_extra()).unwrap(),
+        decode_written(&raw, miss_extra()).unwrap(),
         FailedAttemptOutcome::Refused(AttemptWriteRefusal::SourceStateConflict { .. })
     ));
 }
@@ -335,7 +335,7 @@ fn an_absent_task() {
         ..miss_raw("TASK_ABSENT")
     };
     assert_eq!(
-        decode_written(raw, miss_extra()).unwrap(),
+        decode_written(&raw, miss_extra()).unwrap(),
         FailedAttemptOutcome::Refused(AttemptWriteRefusal::TaskAbsent { task_id: task_id() })
     );
 }
@@ -345,7 +345,7 @@ fn an_absent_task() {
 #[test]
 fn a_claimed_row_is_released() {
     assert_eq!(
-        decode_failed_attempt(released_raw(), released_extra()).unwrap(),
+        decode_failed_attempt(&released_raw(), released_extra()).unwrap(),
         UnreportedAttemptOutcome::Released(ReleasedClaim {
             task_id: task_id(),
             queue_name: "q1".to_owned(),
@@ -548,7 +548,7 @@ fn a_column_against_its_outcome_fails_closed() {
     ];
     for (name, raw, extra) in cases {
         assert!(
-            decode_failed_attempt(raw, extra).is_err(),
+            decode_failed_attempt(&raw, extra).is_err(),
             "{name} must fail closed"
         );
     }
@@ -567,7 +567,7 @@ fn stale_applied_raw() -> RawOutcomeRow {
 #[test]
 fn a_stale_plain_failure_owes_nothing() {
     assert_eq!(
-        decode_stale_attempt(stale_applied_raw(), applied_extra()).expect("a stale failure"),
+        decode_stale_attempt(&stale_applied_raw(), applied_extra()).expect("a stale failure"),
         StaleAttemptOutcome::FailureApplied {
             task_id: task_id(),
             terminal_at: now(),
@@ -585,7 +585,7 @@ fn a_stale_workflow_failure_owes_phase_two() {
         facts: facts(false, Some("NONE")),
         ..applied_extra()
     };
-    match decode_stale_attempt(stale_applied_raw(), extra).expect("a stale failure") {
+    match decode_stale_attempt(&stale_applied_raw(), extra).expect("a stale failure") {
         StaleAttemptOutcome::FailureApplied { after, .. } => assert_eq!(
             after,
             AfterStaleFailure::PhaseTwoOwed(PhaseTwoOwed {
@@ -606,7 +606,7 @@ fn a_stale_retry_past_its_deadline_is_a_failure() {
         good_until: Some(now()),
         ..applied_extra()
     };
-    match decode_stale_attempt(stale_applied_raw(), extra).expect("a stale failure") {
+    match decode_stale_attempt(&stale_applied_raw(), extra).expect("a stale failure") {
         StaleAttemptOutcome::FailureApplied { retry, .. } => assert_eq!(
             retry,
             RetryRefusal::PastDeadline {
@@ -621,7 +621,7 @@ fn a_stale_retry_past_its_deadline_is_a_failure() {
 #[test]
 fn a_stale_retry_is_scheduled() {
     assert_eq!(
-        decode_stale_attempt(retry_raw(), retry_extra()).expect("a stale retry"),
+        decode_stale_attempt(&retry_raw(), retry_extra()).expect("a stale retry"),
         StaleAttemptOutcome::RetryScheduled {
             task_id: task_id(),
             retry_count: 2,
@@ -642,7 +642,7 @@ fn a_stale_retry_count_conflict_is_refused() {
         })),
         ..miss_raw("SOURCE_STATE_CONFLICT")
     };
-    match decode_stale_attempt(raw, miss_extra()).expect("a refusal") {
+    match decode_stale_attempt(&raw, miss_extra()).expect("a refusal") {
         StaleAttemptOutcome::Refused(AttemptWriteRefusal::SourceStateConflict {
             evidence: GuardEvidence::RetryCount(counts),
             ..
@@ -697,7 +697,7 @@ fn a_stale_row_against_its_outcome_fails_closed() {
     ];
     for (name, raw, extra) in cases {
         assert!(
-            decode_stale_attempt(raw, extra).is_err(),
+            decode_stale_attempt(&raw, extra).is_err(),
             "{name} must fail closed"
         );
     }
@@ -715,7 +715,7 @@ fn a_stale_failure_of_a_plain_task_with_a_node_fact_fails_closed() {
         ..applied_extra()
     };
 
-    let refused = decode_stale_attempt(stale_applied_raw(), extra)
+    let refused = decode_stale_attempt(&stale_applied_raw(), extra)
         .expect_err("a node fact on a plain task is refused");
 
     assert!(
@@ -749,7 +749,7 @@ fn success_columns(
 fn an_applied_success_owes_phase_two() {
     assert_eq!(
         decode_workflow_success(
-            success_raw(),
+            &success_raw(),
             success_columns(Some("q1"), Some("task_a"), facts(true, Some("REACHABLE")))
         )
         .unwrap(),
@@ -777,7 +777,7 @@ fn a_success_replay_is_already_applied() {
         ..miss_raw("ALREADY_APPLIED")
     };
     assert!(matches!(
-        decode_workflow_success(raw, success_columns(None, None, no_facts())).unwrap(),
+        decode_workflow_success(&raw, success_columns(None, None, no_facts())).unwrap(),
         WorkflowSuccessOutcome::Refused(AttemptWriteRefusal::AlreadyApplied { .. })
     ));
 }
@@ -786,7 +786,7 @@ fn a_success_replay_is_already_applied() {
 fn a_success_refusal_is_decoded() {
     assert!(matches!(
         decode_workflow_success(
-            miss_raw("LOST_CLAIM"),
+            &miss_raw("LOST_CLAIM"),
             success_columns(None, None, no_facts())
         )
         .unwrap(),
@@ -840,7 +840,7 @@ fn a_success_against_its_outcome_fails_closed() {
     ];
     for (name, raw, columns) in cases {
         assert!(
-            decode_workflow_success(raw, columns).is_err(),
+            decode_workflow_success(&raw, columns).is_err(),
             "{name} must fail closed"
         );
     }

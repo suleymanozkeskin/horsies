@@ -37,6 +37,11 @@ async fn add(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 
 /// A blocking task: a `fn` on a thread of its child.
 #[blocking_task("word_count")]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the parameters of a task are its wire contract: the task attribute decodes each \
+              input as an owned value"
+)]
 fn word_count(text: String) -> Result<usize, TaskError<Infallible>> {
     Ok(text.split_whitespace().count())
 }

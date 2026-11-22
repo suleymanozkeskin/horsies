@@ -213,7 +213,7 @@ impl PreparedWorker {
             py,
             core,
             RUN_SUBJECT,
-            StopSignal::new(move || signal.request_stop()),
+            &StopSignal::new(move || signal.request_stop()),
             run_operation(
                 core,
                 *plan,

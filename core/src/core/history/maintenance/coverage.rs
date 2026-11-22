@@ -1,6 +1,6 @@
 //! Startup and periodic owner for coverage plus reader publication.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 
 use crate::broker::core_rows::{one_row, query_in, scalar, StatementLog};
 
@@ -887,6 +887,8 @@ mod repair_round_tests {
 
 #[cfg(test)]
 mod repair_round_database_tests {
+    use chrono::Duration;
+
     use super::*;
     use crate::broker::pools::core_pool_for_test_url;
     use crate::core::history::heartbeats::partitioning::hourly_leaf_name;

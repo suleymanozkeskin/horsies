@@ -84,14 +84,14 @@ pub(crate) fn task_error_of(
     });
     let exception = match &notation["exception"] {
         Value::Null => None,
-        record => Some(
+        record => Some(Box::new(
             serde_json::from_value::<ExceptionRecord>(record.clone())
                 .unwrap_or_else(|error| panic!("{name}: {error}")),
-        ),
+        )),
     };
     let kind = match notation.get("sub_workflow") {
         None => TaskErrorKind::Plain,
-        Some(sub_workflow) => TaskErrorKind::SubWorkflow(SubWorkflowFailure {
+        Some(sub_workflow) => TaskErrorKind::SubWorkflow(Box::new(SubWorkflowFailure {
             sub_workflow_id: Uuid::parse_str(
                 sub_workflow["id"]
                     .as_str()
@@ -102,7 +102,7 @@ pub(crate) fn task_error_of(
                 &sub_workflow["summary"].to_string(),
             )
             .unwrap_or_else(|refused| panic!("{name}: {refused}")),
-        }),
+        })),
     };
     TaskError {
         exception,

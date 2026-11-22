@@ -52,10 +52,10 @@ const FORMATTER_ATTRIBUTES: [&str; 2] = ["message", "asctime"];
 /// of the process.
 pub fn start_forwarder(
     records: Receiver<CoreLogRecord>,
-    sink: Arc<LogSink>,
+    sink: &Arc<LogSink>,
 ) -> std::io::Result<()> {
     sink.mark_forwarder_running();
-    let thread_sink = Arc::clone(&sink);
+    let thread_sink = Arc::clone(sink);
     let spawned = std::thread::Builder::new()
         .name(FORWARDER_THREAD_NAME.to_owned())
         .spawn(move || {
@@ -266,9 +266,7 @@ fn set_field_attributes<'py>(
     let attributes = log_record.getattr("__dict__")?;
     for field in fields {
         let is_taken = |name: &str| -> PyResult<bool> {
-            let reserved = FORMATTER_ATTRIBUTES
-                .iter()
-                .any(|attribute| *attribute == name);
+            let reserved = FORMATTER_ATTRIBUTES.contains(&name);
             Ok(reserved || attributes.contains(name)?)
         };
         if let Some(name) = attribute_name(field.name, is_taken)? {
@@ -360,7 +358,7 @@ mod tests {
 
     /// `is_taken` over a fixed list of taken names.
     fn taken_among<'a>(names: &'a [&'a str]) -> impl FnMut(&str) -> Result<bool, Infallible> + 'a {
-        move |name| Ok(names.iter().any(|taken| *taken == name))
+        move |name| Ok(names.contains(&name))
     }
 
     /// The `LogRecord` of a WARNING record of `horsies.monitoring` with

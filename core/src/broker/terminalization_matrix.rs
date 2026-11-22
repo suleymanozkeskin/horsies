@@ -15,7 +15,7 @@ use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
 use uuid::Uuid;
 
-use crate::broker::terminalization::on_test_pool::{terminalize, terminalize_in_transaction};
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::history::identity::reservations::{
     decode_reservation_row, key_reservation_claim_sql, ReservationClaim,
 };
@@ -27,7 +27,7 @@ use crate::core::lifecycle::{
 use crate::core::types::status::TaskStatus;
 use crate::test_support::sql::{self, TestListener, TestPool, TestPoolOptions};
 use crate::test_support::terminal_writes::{self, StaleFailure, TerminalFailure};
-use crate::test_support::{cover_partitions, migrated_database_url, migrated_pool};
+use crate::test_support::{cover_partitions, migrated_pool};
 
 pub(super) const WIRE_PHASE2_EXPECTATIONS: [(&str, bool); 15] = [
     ("COMPLETE_LOCKED", true),

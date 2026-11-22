@@ -224,13 +224,15 @@ impl LogSink {
     pub fn push(&self, record: CoreLogRecord) {
         match self.try_enqueue(record) {
             Ok(()) => {}
-            Err(TrySendError::Full(record)) => match record.level.waits_when_full() {
-                false => {
-                    let _previous = self.dropped_low.fetch_add(1, Ordering::Relaxed);
-                }
-                true => self.push_waiting(record),
+            Err(refused) => match *refused {
+                TrySendError::Full(record) => match record.level.waits_when_full() {
+                    false => {
+                        let _previous = self.dropped_low.fetch_add(1, Ordering::Relaxed);
+                    }
+                    true => self.push_waiting(record),
+                },
+                TrySendError::Disconnected(record) => self.spill(&record),
             },
-            Err(TrySendError::Disconnected(record)) => self.spill(&record),
         }
     }
 
@@ -240,25 +242,29 @@ impl LogSink {
             std::thread::sleep(HIGH_RECORD_RETRY_PAUSE);
             match self.try_enqueue(waiting) {
                 Ok(()) => return,
-                Err(TrySendError::Full(record)) => waiting = record,
-                Err(TrySendError::Disconnected(record)) => {
-                    self.spill(&record);
-                    return;
-                }
+                Err(refused) => match *refused {
+                    TrySendError::Full(record) => waiting = record,
+                    TrySendError::Disconnected(record) => {
+                        self.spill(&record);
+                        return;
+                    }
+                },
             }
         }
         let _previous = self.spilled_high.fetch_add(1, Ordering::Relaxed);
         self.spill(&waiting);
     }
 
-    /// Send one record into the channel, counted while it is there.
-    fn try_enqueue(&self, record: CoreLogRecord) -> Result<(), TrySendError<CoreLogRecord>> {
+    /// Send one record into the channel, counted while it is there. A
+    /// refused send gives the record back in a box: the record is large, and
+    /// only a full or closed channel pays for the box.
+    fn try_enqueue(&self, record: CoreLogRecord) -> Result<(), Box<TrySendError<CoreLogRecord>>> {
         let _previous = self.in_channel.fetch_add(1, Ordering::SeqCst);
         let sent = self.sender.try_send(record);
         if sent.is_err() {
             let _previous = self.in_channel.fetch_sub(1, Ordering::SeqCst);
         }
-        sent
+        sent.map_err(Box::new)
     }
 
     /// The forwarder handled `count` records: they reached Python `logging`

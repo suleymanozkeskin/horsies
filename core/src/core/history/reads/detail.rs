@@ -100,7 +100,7 @@ pub enum TaskDetailResult {
     Live {
         task_id: Uuid,
     },
-    History(HistoryTaskDetail),
+    History(Box<HistoryTaskDetail>),
     Absent {
         task_id: Uuid,
         reason: TaskAbsenceReason,
@@ -196,7 +196,7 @@ pub(crate) async fn read_task_detail(
         "HISTORY" => crate::broker::history_reads::history_detail_wire_row(&row)
             .map_err(|error| CallError::Contract(HistoryError::from(error)))
             .and_then(|wire| history_detail_from_wire(wire).map_err(CallError::Contract))
-            .map(TaskDetailResult::History),
+            .map(|detail| TaskDetailResult::History(Box::new(detail))),
         other => Err(CallError::Contract(HistoryError::contract(format!(
             "staged detail returned unknown location {other:?}"
         )))),

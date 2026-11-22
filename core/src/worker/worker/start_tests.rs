@@ -13,7 +13,6 @@
 //! - A queue notification wakes the claim loop, which then takes at most
 //!   `coalesce_notifies` more signals that are already pending.
 
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -281,7 +280,7 @@ const BURST_QUEUES: [&str; 4] = ["burst_a", "burst_b", "burst_c", "burst_d"];
 /// signal. The listener delivers the notifications of a transaction in
 /// order, each to every subscriber of its channel at once, so then every
 /// subscription of the burst holds its signal.
-async fn send_burst(broker: &PostgresBroker, witness: &crate::db::WakeSubscription) {
+async fn send_burst(witness: &crate::db::WakeSubscription) {
     let notifies: Vec<String> = BURST_QUEUES
         .iter()
         .map(|queue| format!("pg_notify('task_queue_{queue}', 'wake')"))
@@ -349,7 +348,7 @@ async fn a_notification_wakes_the_claim_wait_and_the_drain_takes_the_burst() {
     };
 
     // The wait takes one signal; the drain (limit 5) takes the other three.
-    send_burst(&broker, &witness).await;
+    send_burst(&witness).await;
     let wake = tokio::time::timeout(WAIT, claim_wait())
         .await
         .expect("the burst wakes the claim wait");
@@ -364,7 +363,7 @@ async fn a_notification_wakes_the_claim_wait_and_the_drain_takes_the_burst() {
 
     // A drain takes at most its limit: with 2, one signal is left, and the
     // next wait returns at once.
-    send_burst(&broker, &witness).await;
+    send_burst(&witness).await;
     let wake = tokio::time::timeout(WAIT, claim_wait())
         .await
         .expect("the burst wakes the claim wait");

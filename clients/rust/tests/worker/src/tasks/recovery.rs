@@ -16,6 +16,11 @@ pub async fn recovery_healthcheck() -> Result<String, TaskError<Infallible>> {
 
 /// Python `e2e_recovery_wf_step`: a workflow step that runs `delay_ms`.
 #[blocking_task("e2e_recovery_wf_step", queue = "default")]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the parameters of a task are its wire contract: the task attribute decodes each \
+              input as an owned value"
+)]
 pub fn recovery_wf_step(step: String, delay_ms: u64) -> Result<String, TaskError<Infallible>> {
     std::thread::sleep(Duration::from_millis(delay_ms));
     Ok(format!("step_{step}_done"))

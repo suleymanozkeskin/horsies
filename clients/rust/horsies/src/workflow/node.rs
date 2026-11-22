@@ -372,11 +372,11 @@ where
     let bytes = encode_read_back(value).map_err(|cause| {
         not_serializable(
             owner,
-            format!("input {}: {cause}", std::any::type_name::<V>()),
+            &format!("input {}: {cause}", std::any::type_name::<V>()),
         )
     })?;
     let text = String::from_utf8(bytes)
-        .map_err(|_| not_serializable(owner, "the encoded input is not UTF-8".to_owned()))?;
+        .map_err(|_| not_serializable(owner, "the encoded input is not UTF-8"))?;
     NodeInput::from_object_text(&text).map_err(|refused| input_refused(owner, &refused))
 }
 
@@ -396,11 +396,14 @@ where
     F: Serialize + DeserializeOwned,
 {
     let bytes = encode_read_back(value)
-        .map_err(|cause| not_serializable(owner, format!("field '{field}': {cause}")))?;
+        .map_err(|cause| not_serializable(owner, &format!("field '{field}': {cause}")))?;
     let text = String::from_utf8(bytes)
-        .map_err(|_| not_serializable(owner, format!("field '{field}': the text is not UTF-8")))?;
+        .map_err(|_| not_serializable(owner, &format!("field '{field}': the text is not UTF-8")))?;
     let raw = RawValue::from_string(text).map_err(|error| {
-        not_serializable(owner, format!("field '{field}': {}", error.classify_text()))
+        not_serializable(
+            owner,
+            &format!("field '{field}': {}", error.classify_text()),
+        )
     })?;
     input
         .set_member(field, raw)
@@ -427,7 +430,7 @@ pub(crate) fn input_refused(owner: &str, refused: &InputRefused) -> HorsiesError
             "a workflow node takes its input as named members: give the task a struct input or \
              several parameters",
         ),
-        InputRefused::Unreadable(cause) => not_serializable(owner, cause.clone()),
+        InputRefused::Unreadable(cause) => not_serializable(owner, cause),
         InputRefused::EngineKey(name) => HorsiesError::new(format!(
             "the input of node {owner} has the member '{name}', a name that only the engine \
              writes"
@@ -437,7 +440,7 @@ pub(crate) fn input_refused(owner: &str, refused: &InputRefused) -> HorsiesError
     }
 }
 
-fn not_serializable(owner: &str, cause: String) -> HorsiesError {
+fn not_serializable(owner: &str, cause: &str) -> HorsiesError {
     HorsiesError::new(format!(
         "the input of node {owner} does not serialize: {cause}"
     ))
@@ -549,6 +552,11 @@ impl<T, I> TaskNode<T, I> {
     /// does not encode or read back as `I` (a non-finite float, a key that
     /// only the engine writes); `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED`
     /// (HRS-026) for an input type that does not encode as a JSON object.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "a public builder method takes the input by value, as a send does; a \
+                  reference would change every caller"
+    )]
     pub fn set_input(mut self, value: I) -> Result<Self, HorsiesError>
     where
         I: Serialize + DeserializeOwned,
@@ -561,6 +569,11 @@ impl<T, I> TaskNode<T, I> {
     ///
     /// Errors: `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (HRS-031) for a value that
     /// does not encode or read back as `F`, a non-finite float included.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "a public builder method takes the field value by value, as a send does; a \
+                  reference would change every caller"
+    )]
     pub fn set<F>(mut self, field: InputField<I, F>, value: F) -> Result<Self, HorsiesError>
     where
         F: Serialize + DeserializeOwned,

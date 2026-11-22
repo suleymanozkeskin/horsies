@@ -261,28 +261,18 @@ pub fn decode_rerun_input(
             Ok(DecodedRerunInput::Unavailable { reason })
         }
         RerunInputDisposition::Inline => {
-            let (version, codec, content_type, digest, payload) = match (
+            let (Some(version), Some(codec), Some(content_type), Some(digest), Some(payload), None) = (
                 version,
                 codec,
                 content_type,
                 digest,
                 inline_payload,
                 reference,
-            ) {
-                (
-                    Some(version),
-                    Some(codec),
-                    Some(content_type),
-                    Some(digest),
-                    Some(payload),
-                    None,
-                ) => (version, codec, content_type, digest, payload),
-                _ => {
-                    return Err(corrupt(
-                        ArchiveDomain::RerunInput,
-                        "invalid_inline_envelope",
-                    ));
-                }
+            ) else {
+                return Err(corrupt(
+                    ArchiveDomain::RerunInput,
+                    "invalid_inline_envelope",
+                ));
             };
             validate_envelope_contract(ArchiveDomain::RerunInput, version, codec, content_type)?;
             if payload.len() > RERUN_INPUT_INLINE_MAX_BYTES {

@@ -317,6 +317,7 @@ impl FlusherBound {
         }
     }
 
+    #[cfg(test)]
     pub fn get(self) -> NonZeroUsize {
         self.0
     }
@@ -766,15 +767,18 @@ impl<W: SuccessBatchWrite> FinalizeBatcher<W> {
         }
     }
 
+    #[cfg(test)]
     pub fn state(&self) -> BatcherState {
         self.shared.lock_state().phase
     }
 
     /// The most flushers of both roles that run at once.
+    #[cfg(test)]
     pub fn max_flushers(&self) -> usize {
         self.shared.bounds.steady + self.shared.bounds.surge
     }
 
+    #[cfg(test)]
     pub fn running_flushers(&self) -> RunningFlushers {
         self.shared.lock_state().running
     }

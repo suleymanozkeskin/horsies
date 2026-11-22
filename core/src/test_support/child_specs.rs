@@ -94,14 +94,14 @@ impl TestChildSpecs {
             .definition_key
             .clone()
             .unwrap_or_else(|| panic!("test child '{}' has no definition key", spec.name));
-        self.with_child(key, TestChild::Spec(spec))
+        self.with_child(&key, TestChild::Spec(spec))
     }
 
     /// These children with `build` under `definition_key`.
     ///
     /// Panics: a key that another child has.
     pub(crate) fn with_build(self, definition_key: &str, build: TestChildBuild) -> Self {
-        self.with_child(definition_key.to_owned(), TestChild::Build(build))
+        self.with_child(definition_key, TestChild::Build(build))
     }
 
     /// These children with the task queues classed by `retention`.
@@ -117,8 +117,8 @@ impl TestChildSpecs {
         }
     }
 
-    fn with_child(mut self, definition_key: String, child: TestChild) -> Self {
-        match self.children.insert(definition_key.clone(), child) {
+    fn with_child(mut self, definition_key: &str, child: TestChild) -> Self {
+        match self.children.insert(definition_key.to_owned(), child) {
             None => self,
             Some(_) => panic!("two test children under definition key '{definition_key}'"),
         }

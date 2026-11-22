@@ -96,24 +96,22 @@ mod timeout_order_tests;
 #[cfg(test)]
 mod worker_children_tests;
 
-pub use board::{
-    ChildBaseline, ChildLayout, ChildRss, DownState, PoolBoard, PoolFailure, PoolHealth,
-    ReadyChild, SlotPhase, StartEnd,
-};
-pub use budgets::{
-    isolated_capacity, shared_capacity, BudgetCapacity, FreeCapacity, PoolService,
-    SharedSlotService, SlotService,
-};
+#[cfg(test)]
+pub use board::{ChildBaseline, ReadyChild, StartEnd};
+pub use board::{ChildLayout, ChildRss, DownState, PoolBoard, PoolFailure, PoolHealth, SlotPhase};
+#[cfg(test)]
+pub use budgets::{isolated_capacity, shared_capacity, BudgetCapacity, SlotService};
+pub use budgets::{FreeCapacity, PoolService, SharedSlotService};
 // Whether the stop before start of a workflow task cancels the task when no
 // node links it live (the app's `auto_terminate_orphaned_workflow_tasks`).
 // Each run frame of a pool carries it.
 pub use crate::broker::OrphanSelfHeal;
-pub use defects::{SlotDefect, SLOT_DEFECT_LIMIT};
 pub use dispatch::{
-    AttemptEnd, AttemptLog, CancelEnd, Claimed, ClaimedTask, ExecutionClass, LoopKillCode,
-    NotRunCause, RetryFacts, Settlement, TaskKind, TerminalState, TimeoutCancel, TimeoutSeen,
-    WrittenEnd,
+    AttemptEnd, AttemptLog, Claimed, ClaimedTask, ExecutionClass, LoopKillCode, NotRunCause,
+    RetryFacts, Settlement, TaskKind, TerminalState, TimeoutSeen, WrittenEnd,
 };
+#[cfg(test)]
+pub use dispatch::{CancelEnd, TimeoutCancel};
 #[cfg(test)]
 pub(crate) use outcome::test_successes;
 pub use outcome::OutcomeWriter;
@@ -122,11 +120,14 @@ pub use pool::{
     Placed, PlacementReceipt, PlacementWatch, PoolStopReport, Submitted, TaskLimit,
 };
 pub use route::{
-    describe_claim_plan, dispatch_route, unserved_classes_line, ClaimPlan, ClaimRoute,
-    DispatchRoute, IsolatedDeadline, UnservedClass,
+    describe_claim_plan, dispatch_route, unserved_classes_line, ClaimRoute, DispatchRoute,
 };
+#[cfg(test)]
+pub use route::{ClaimPlan, IsolatedDeadline, UnservedClass};
 pub use shared::{SharedPool, SharedPoolConfig};
+#[cfg(test)]
+pub use start::check_memory_baselines;
 pub use start::{
-    check_memory_baselines, guard_new_kind_baselines, start_children, BaselineLimits,
-    BaselineOverLimit, ChildrenStart, ChildrenStartFailed,
+    guard_new_kind_baselines, start_children, BaselineLimits, BaselineOverLimit, ChildrenStart,
+    ChildrenStartFailed,
 };

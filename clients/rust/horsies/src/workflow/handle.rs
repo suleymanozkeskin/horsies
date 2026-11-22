@@ -235,7 +235,7 @@ impl<T> WorkflowHandle<T> {
             self.workflow_id
         ));
         self.reads.initialized_broker().await.map_err(|error| {
-            HandleOperationError::connect_failed(operation, self.workflow_id, error)
+            HandleOperationError::connect_failed(&operation, self.workflow_id, error)
         })
     }
 

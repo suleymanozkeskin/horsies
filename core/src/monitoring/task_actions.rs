@@ -124,7 +124,7 @@ pub enum TaskActionError {
         /// The failed connect, client family check or statement.
         #[error_slot(cause)]
         #[source]
-        cause: BrokerError,
+        cause: Box<BrokerError>,
     },
     /// Stored task data does not parse. Nothing changed: the cancel refused the task.
     ///
@@ -159,7 +159,7 @@ impl TaskActionError {
             message: format!("Task cancel failed: {cause}"),
             retryable: cause.is_retryable(),
             task_id,
-            cause,
+            cause: Box::new(cause),
         }
     }
 
@@ -329,11 +329,9 @@ mod tests {
         assert!(failed.retryable());
         assert_eq!(failed.failure_cause(), FailureCause::Connection);
         assert!(matches!(
-            failed,
-            TaskActionError::DbOperationFailed {
-                cause: BrokerError::ConnectionFailed(_),
-                ..
-            }
+            &failed,
+            TaskActionError::DbOperationFailed { cause, .. }
+                if matches!(**cause, BrokerError::ConnectionFailed(_))
         ));
 
         let invalid = stored_data_invalid(

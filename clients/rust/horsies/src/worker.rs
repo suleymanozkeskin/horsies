@@ -165,7 +165,7 @@ impl Horsies {
         let stop = WorkerStop::new();
         let signal_stop = stop.clone();
         let signals = runtime.handle().spawn(stop_on_signals("worker", move || {
-            signal_stop.request_stop()
+            signal_stop.request_stop();
         }));
         let end = runtime
             .handle()

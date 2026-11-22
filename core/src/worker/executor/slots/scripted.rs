@@ -35,8 +35,8 @@ use crate::worker::executor::protocol::{
     LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit, NoLeftWork, ParentFrame, PoolMaxSize,
     PoolMinSize, ProcessId, ReadyFrame, ReportedBootCause, ResultEnvelopeText, ResultFrame,
     RssReading, RunEnd, RunFrame, RunRef, RunStuckFrame, SeatEnd, SharedAsyncChild,
-    SharedResultFrame, SharedRunFrame, SharedThreadChild, SharedWork, ShortageErrno, StuckWork,
-    TaskInputText, TaskSendPool, TaskTimeoutMs, ThreadSeats, HEADER_BYTES,
+    SharedResultFrame, SharedThreadChild, SharedWork, ShortageErrno, StuckWork, TaskInputText,
+    TaskSendPool, TaskTimeoutMs, ThreadSeats, HEADER_BYTES,
 };
 use crate::worker::executor::supervisor::{ChildCommand, Spawner, CHILD_KILL_WAIT};
 use crate::worker::retry::read_stored_options;
@@ -166,23 +166,6 @@ pub(super) fn run_frame(task: &ClaimedTask) -> ParentFrame {
         claimed_at: task.claimed_at,
         orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
         work: IsolatedWork::Run,
-        input: input(),
-        trace: crate::events::RunTrace::NoCarrier,
-    })
-}
-
-/// The run frame that a shared pool sends for `task` as its run `dispatch`.
-pub(super) fn shared_run_frame(task: &ClaimedTask, dispatch: u64, work: SharedWork) -> ParentFrame {
-    ParentFrame::SharedRun(SharedRunFrame {
-        dispatch: DispatchNumber::new(dispatch).unwrap(),
-        task_id: task.task_id,
-        task_name: task.task_name.clone(),
-        queue_name: crate::events::QueueName::cut(&task.queue_name),
-        attempt: task.retry.attempt(),
-        worker_id: WORKER_ID.to_owned(),
-        claimed_at: task.claimed_at,
-        orphan_self_heal: crate::broker::OrphanSelfHeal::Off,
-        work,
         input: input(),
         trace: crate::events::RunTrace::NoCarrier,
     })
@@ -737,16 +720,6 @@ pub(super) fn process_ended(pid: libc::pid_t) -> bool {
 /// Wait until `pid` has ended.
 pub(super) async fn ended(pid: libc::pid_t) {
     until("the process ended", STATE_WAIT, || process_ended(pid)).await;
-}
-
-/// The execution class of each kind of scripted shared child.
-pub(super) fn shared_class(init: &InitFrame) -> ExecutionClass {
-    match init.child_kind {
-        ChildKind::SharedAsync(_) => ExecutionClass::SharedAsync,
-        ChildKind::SharedThread(_) => ExecutionClass::SharedThread,
-        ChildKind::Isolated(_) => ExecutionClass::Isolated,
-        ChildKind::Handler(_) => panic!("a scripted slot child is a task child"),
-    }
 }
 
 // ---------------------------------------------------------------------------

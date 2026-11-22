@@ -213,12 +213,16 @@ where
     }
 }
 
+/// A workflow builder that the check runs on each case: it builds the spec
+/// of one case.
+type CaseSpecBuilder<P> = Arc<dyn Fn(&P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync>;
+
 /// The check cases of one workflow builder, registered with
 /// [`Self::register`] (Python `@app.workflow_builder(cases=...)`).
 pub struct WorkflowCheckBuilderRegistration<'a, P> {
     app: &'a Horsies,
     name: String,
-    builder: Arc<dyn Fn(&P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync>,
+    builder: CaseSpecBuilder<P>,
     cases: Vec<P>,
 }
 

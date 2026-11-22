@@ -38,6 +38,15 @@ struct HistoryRow {
     rerun_input: RerunInput,
 }
 
+/// The rerun input columns of a history row: disposition, version, digest,
+/// inline payload.
+type RerunInputColumns = (
+    &'static str,
+    Option<i16>,
+    Option<Vec<u8>>,
+    Option<&'static [u8]>,
+);
+
 /// Insert `row` into the static forever leaf on `connection`. Returns the
 /// database's answer, so a test can assert a refusal.
 async fn insert_history_row(
@@ -45,12 +54,7 @@ async fn insert_history_row(
     row: HistoryRow,
 ) -> Result<u64, sql::Error> {
     let snapshot = encode_attempt_snapshot(&[]).expect("encode the empty attempt snapshot");
-    let (disposition, version, digest, inline): (
-        &str,
-        Option<i16>,
-        Option<Vec<u8>>,
-        Option<&[u8]>,
-    ) = match row.rerun_input {
+    let (disposition, version, digest, inline): RerunInputColumns = match row.rerun_input {
         RerunInput::NeverEligible => ("NEVER_ELIGIBLE", None, None, None),
         RerunInput::Inline => (
             "INLINE",
@@ -156,7 +160,7 @@ async fn completed_and_workflow_history_rows_refuse_rerun_input() {
         ("FAILED", "FAIL_RUNNING", true),
     ] {
         let refused = insert_history_row(
-            &mut *connection,
+            &mut connection,
             HistoryRow {
                 status,
                 kind,
@@ -175,7 +179,7 @@ async fn completed_and_workflow_history_rows_refuse_rerun_input() {
 
     let mut transaction = pool.begin().await.expect("begin the control insert");
     let accepted = insert_history_row(
-        &mut *transaction,
+        &mut transaction,
         HistoryRow {
             status: "FAILED",
             kind: "FAIL_RUNNING",
@@ -201,7 +205,7 @@ async fn an_administrative_cancel_refuses_a_stored_result() {
     let pool = pool().await;
     let mut connection = pool.acquire().await.expect("acquire");
     let refused = insert_history_row(
-        &mut *connection,
+        &mut connection,
         HistoryRow {
             status: "CANCELLED",
             kind: "CANCEL_ADMIN",

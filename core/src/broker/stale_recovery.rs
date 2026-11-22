@@ -585,6 +585,17 @@ fn stale_candidate(
     })
 }
 
+/// The evidence parameters of `horsies_finish_stale_attempt`: evidence kind,
+/// stale threshold (ms), finalizing threshold (ms), owner, claim generation
+/// of the owner.
+type EvidenceParameters<'command> = (
+    &'static str,
+    Option<i32>,
+    Option<i32>,
+    Option<&'command str>,
+    Option<DateTime<Utc>>,
+);
+
 /// Recover one stale RUNNING candidate.
 ///
 /// One statement on `pool`, checked out as reserved work. Under the task
@@ -616,13 +627,7 @@ pub(crate) async fn finish_stale_attempt(
             delay_seconds,
         } => ("RETRY", Some(expected_retry_count), Some(delay_seconds)),
     };
-    let (evidence, stale_after, finalizing_stale_after, owner, owner_claimed_at): (
-        &str,
-        Option<i32>,
-        Option<i32>,
-        Option<&str>,
-        Option<DateTime<Utc>>,
-    ) = match &command.evidence {
+    let parameters: EvidenceParameters<'_> = match &command.evidence {
         StaleEvidence::BeatAge(thresholds) => (
             BEAT_AGE,
             Some(thresholds.stale_after.get()),
@@ -638,6 +643,7 @@ pub(crate) async fn finish_stale_attempt(
             Some(claim.claimed_at),
         ),
     };
+    let (evidence, stale_after, finalizing_stale_after, owner, owner_claimed_at) = parameters;
     let bound = statement
         .bind()
         .value(&command.task_id)

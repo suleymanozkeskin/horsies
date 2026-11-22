@@ -1593,8 +1593,8 @@ fn sized_frame(meta_bytes: usize, body_bytes: usize) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&u32::try_from(meta_bytes).unwrap().to_be_bytes());
     bytes.extend_from_slice(&u64::try_from(body_bytes).unwrap().to_be_bytes());
-    bytes.extend(std::iter::repeat(b'm').take(meta_bytes));
-    bytes.extend(std::iter::repeat(b'b').take(body_bytes));
+    bytes.extend(std::iter::repeat_n(b'm', meta_bytes));
+    bytes.extend(std::iter::repeat_n(b'b', body_bytes));
     bytes
 }
 

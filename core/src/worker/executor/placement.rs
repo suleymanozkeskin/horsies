@@ -351,23 +351,36 @@ pub fn place_worker_threads(
             // No thread has an id above the largest pid.
             continue;
         };
-        match os::set_thread_cpus(target, cpus) {
-            ThreadPlaced::Placed => placed += 1,
-            ThreadPlaced::Gone => {}
-            ThreadPlaced::Refused(cause) => {
-                return Err(WorkerNotPlaced::ThreadRefused { thread_id, cause })
-            }
-        }
+        placed += os::set_thread_cpus(target, cpus)
+            .placed_threads()
+            .map_err(|cause| WorkerNotPlaced::ThreadRefused { thread_id, cause })?;
     }
     Ok(placed)
 }
 
-/// What one placement of a thread did.
+/// What one placement of a thread did. Only Linux places a thread; another
+/// platform refuses every placement.
 enum ThreadPlaced {
+    #[cfg(target_os = "linux")]
     Placed,
     /// The thread ended before the call.
+    #[cfg(target_os = "linux")]
     Gone,
     Refused(String),
+}
+
+impl ThreadPlaced {
+    /// The threads this placement adds to the count: one for a placed
+    /// thread, none for a thread that ended. A refusal returns its cause.
+    fn placed_threads(self) -> Result<usize, String> {
+        match self {
+            #[cfg(target_os = "linux")]
+            ThreadPlaced::Placed => Ok(1),
+            #[cfg(target_os = "linux")]
+            ThreadPlaced::Gone => Ok(0),
+            ThreadPlaced::Refused(cause) => Err(cause),
+        }
+    }
 }
 
 /// The CPUs that this thread may use.

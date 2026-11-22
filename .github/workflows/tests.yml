@@ -532,6 +532,11 @@ jobs:
       - name: Check the workspace
         run: cargo check --workspace --all-targets --exclude horsies-test-worker --exclude horsies-docs-check --exclude horsies-arbitrary-precision-tests
 
+      # Clippy on every crate, every target and every feature; a finding
+      # fails the job. The lint levels: [workspace.lints] of Cargo.toml.
+      - name: Lint the workspace with clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
       # Every `rust` block of website/src/content/docs/rust/ and of the Rust
       # skill files, as a module of the crate; the error names the page.
       # The block markers: clients/rust/tests/docs-check/src/lib.rs.

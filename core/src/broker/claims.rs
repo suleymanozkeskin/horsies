@@ -512,9 +512,8 @@ fn decode_claimed_row(row: ClaimWireRow, read: ClaimRead) -> Result<ClaimedRow, 
 /// characters was not written by a send. A trace never fails a claim: the
 /// row runs with no carrier, and a warning names the task and the length.
 fn stored_trace_of(task_id: Uuid, trace_carrier: Option<String>) -> RunTrace {
-    let text = match trace_carrier {
-        None => return RunTrace::NoCarrier,
-        Some(text) => text,
+    let Some(text) = trace_carrier else {
+        return RunTrace::NoCarrier;
     };
     match TraceCarrierText::new(text) {
         Ok(text) => RunTrace::Carrier { text },
@@ -539,9 +538,8 @@ fn stored_trace_of(task_id: Uuid, trace_carrier: Option<String>) -> RunTrace {
 /// the row reads with no trace id, and a warning names the task and the
 /// length.
 pub(crate) fn stored_trace_id_of(task_id: Uuid, trace_id: Option<Vec<u8>>) -> StoredTraceId {
-    let bytes = match trace_id {
-        None => return StoredTraceId::NoTraceId,
-        Some(bytes) => bytes,
+    let Some(bytes) = trace_id else {
+        return StoredTraceId::NoTraceId;
     };
     match <[u8; TRACE_ID_BYTES]>::try_from(bytes.as_slice()) {
         Ok(id) => StoredTraceId::TraceId(id),

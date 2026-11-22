@@ -24,7 +24,7 @@ pub enum Weekday {
 ///
 /// At least one time unit must be specified.
 /// Total interval is the sum of all specified units.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IntervalSchedule {
     /// Seconds component (1–86400).
@@ -39,17 +39,6 @@ pub struct IntervalSchedule {
     /// Days component (1–365).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub days: Option<u32>,
-}
-
-impl Default for IntervalSchedule {
-    fn default() -> Self {
-        Self {
-            seconds: None,
-            minutes: None,
-            hours: None,
-            days: None,
-        }
-    }
 }
 
 impl IntervalSchedule {

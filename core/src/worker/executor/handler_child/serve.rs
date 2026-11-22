@@ -212,7 +212,7 @@ async fn gather(
 /// carries.
 enum FrameOfEvents {
     Frame {
-        frame: ParentFrame,
+        frame: Box<ParentFrame>,
         events: usize,
     },
     /// No event of the batch has a wire form.
@@ -243,7 +243,7 @@ fn frame_of(events: &[Event]) -> FrameOfEvents {
                 "the writer takes at most EVENT_BATCH_MAX events, the bound of an events frame",
             );
             FrameOfEvents::Frame {
-                frame: ParentFrame::Events(EventsFrame { events: batch }),
+                frame: Box::new(ParentFrame::Events(EventsFrame { events: batch })),
                 events: count,
             }
         }

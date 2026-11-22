@@ -104,6 +104,11 @@ impl RunWork {
 
 /// What the child reported about the stop of a run.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "each variant is a report of the child, not the event itself: `DeadlineReported` \
+              is not the deadline; the rename would touch every shared-slot test"
+)]
 pub enum RunStopReport {
     NotReported,
     /// The deadline fired; an async child cancelled the run.
@@ -263,10 +268,6 @@ impl<P> SeatRuns<P> {
             runs: BTreeMap::new(),
             kill: ChildKill::NoNamedKill,
         }
-    }
-
-    pub fn seats(&self) -> NonZeroUsize {
-        self.seats
     }
 
     pub fn count(&self) -> usize {
@@ -616,10 +617,6 @@ impl LossSight {
 }
 
 impl SeenLoss {
-    pub fn lost(self) -> ChildLost {
-        self.0
-    }
-
     fn crashed(self) -> AttemptEnd {
         AttemptEnd::of_lost_child(&self.0)
     }

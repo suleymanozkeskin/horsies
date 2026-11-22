@@ -217,13 +217,10 @@ pub(crate) fn decode_reservation_row(
     task_id: Option<Uuid>,
     observed_fingerprint_version: Option<i16>,
 ) -> Result<ReservationClaim, HistoryError> {
-    let (outcome, task_id) = match (outcome, task_id) {
-        (Some(outcome), Some(task_id)) => (outcome, task_id),
-        _ => {
-            return Err(HistoryError::contract(
-                "reservation outcome row did not decode",
-            ));
-        }
+    let (Some(outcome), Some(task_id)) = (outcome, task_id) else {
+        return Err(HistoryError::contract(
+            "reservation outcome row did not decode",
+        ));
     };
     match (outcome, observed_fingerprint_version) {
         ("APPLIED", None) => Ok(ReservationClaim::Applied { task_id }),
