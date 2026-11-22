@@ -499,6 +499,88 @@ async fn the_child_gets_its_socket_end_and_the_buffer_sizes() {
     stop(spawner);
 }
 
+/// One descriptor of a process: its number and the target of its
+/// `/proc/<pid>/fd` entry, for example `pipe:[4026]`.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct HeldDescriptor {
+    number: std::os::fd::RawFd,
+    target: std::path::PathBuf,
+}
+
+/// The descriptors of `pid`, from `/proc/<pid>/fd`. A descriptor that
+/// closes between the listing and the read of its entry is left out: the
+/// process does not hold it any more.
+#[cfg(target_os = "linux")]
+fn held_descriptors(pid: ProcessId) -> Vec<HeldDescriptor> {
+    let folder = format!("/proc/{}/fd", pid.get());
+    let entries =
+        std::fs::read_dir(&folder).unwrap_or_else(|error| panic!("list {folder}: {error}"));
+    let mut held = Vec::new();
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| panic!("list {folder}: {error}"));
+        let number: std::os::fd::RawFd = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse().ok())
+            .unwrap_or_else(|| panic!("{folder} has the entry {:?}", entry.file_name()));
+        match std::fs::read_link(entry.path()) {
+            Ok(target) => held.push(HeldDescriptor { number, target }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("read {}: {error}", entry.path().display()),
+        }
+    }
+    held
+}
+
+/// The waker pipe of the spawner is close-on-exec, so a child does not
+/// hold it. The child keeps its socket end across `exec` on purpose; that
+/// end in the listing shows that the listing has the descriptors a child
+/// kept.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_child_does_not_hold_the_waker_pipe_of_the_spawner() {
+    let spawner = Spawner::start().unwrap();
+    let waker: Vec<std::path::PathBuf> = spawner
+        .waker_descriptors()
+        .iter()
+        .map(|fd| std::fs::read_link(format!("/proc/self/fd/{fd}")).unwrap())
+        .collect();
+    let child = spawner
+        .handle()
+        .spawn(shell(
+            r#"echo "$0" >&"$0"; dd bs=1 count=1 <&"$0" >/dev/null 2>&1; exit 8"#,
+        ))
+        .await
+        .unwrap();
+    child.socket.set_read_timeout(Some(TEST_WAIT)).unwrap();
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(&child.socket), &mut line).unwrap();
+    let socket_end: std::os::fd::RawFd = line.trim().parse().unwrap();
+
+    let held = held_descriptors(child.pid);
+
+    assert!(
+        held.iter().any(|descriptor| descriptor.number == socket_end
+            && descriptor.target.to_string_lossy().starts_with("socket:[")),
+        "the child does not hold its socket end {socket_end}: {held:?}"
+    );
+    let waker_held: Vec<&HeldDescriptor> = held
+        .iter()
+        .filter(|descriptor| waker.contains(&descriptor.target))
+        .collect();
+    assert!(
+        waker_held.is_empty(),
+        "the child holds the waker pipe {waker:?}: {waker_held:?}"
+    );
+    let SpawnedChild {
+        socket, mut exit, ..
+    } = child;
+    drop(socket);
+    assert_eq!(wait_for_exit(&mut exit, TEST_WAIT).await, exited(8));
+    stop(spawner);
+}
+
 #[tokio::test]
 async fn a_program_that_does_not_exist_is_a_spawn_failure() {
     let spawner = Spawner::start().unwrap();
