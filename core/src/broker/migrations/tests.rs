@@ -1633,7 +1633,7 @@ async fn install_through_a_new_broker(database: &MigrationTestDatabase) {
 
 /// A second install, by another broker, leaves the structure of the history
 /// parent, the forever history relation and the key reservation table
-/// unchanged, and the stored version stays the baseline version.
+/// unchanged, and the stored version stays the newest version of the chain.
 #[tokio::test]
 async fn a_second_install_leaves_the_history_relations_unchanged() {
     let database = MigrationTestDatabase::create().await;
@@ -1649,7 +1649,7 @@ async fn a_second_install_leaves_the_history_relations_unchanged() {
         .await
         .expect("read the stored version")
         .get(0);
-    assert_eq!(version, BASELINE_MIGRATION_VERSION);
+    assert_eq!(version, expected_schema_version());
     database.drop().await;
 }
 

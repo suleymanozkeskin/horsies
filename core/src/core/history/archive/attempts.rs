@@ -992,7 +992,7 @@ mod tests {
     }
 
     /// The 21 values of a version-2 attempt with the phase values `phase`.
-    fn v2_row(phase: serde_json::Value) -> serde_json::Value {
+    fn v2_row(phase: &serde_json::Value) -> serde_json::Value {
         let mut row = serde_json::json!([
             1, "FAILED", true, 1000, 2000, "E", null, null, "w1", "host", 7, "proc"
         ]);
@@ -1157,6 +1157,11 @@ mod tests {
         let recovery = |placed: serde_json::Value| {
             serde_json::json!([1, 100, 300, null, null, placed, null, "RECOVERY", 900])
         };
+        let second_v2_row = {
+            let mut second = v2_row(&none);
+            second[0] = serde_json::json!(3);
+            second
+        };
         let cases = [
             (serde_json::json!({}), "expected_array"),
             (serde_json::json!([[]]), "wrong_item_count"),
@@ -1170,19 +1175,12 @@ mod tests {
                 "wrong_field_count",
             ),
             (
-                serde_json::json!([
-                    [v2_row(none.clone()), {
-                        let mut second = v2_row(none.clone());
-                        second[0] = serde_json::json!(3);
-                        second
-                    }],
-                    null
-                ]),
+                serde_json::json!([[v2_row(&none), second_v2_row.clone()], null]),
                 "non_contiguous_attempts",
             ),
             (
                 serde_json::json!([
-                    [v2_row(serde_json::json!([
+                    [v2_row(&serde_json::json!([
                         null, 100, null, null, null, null, null, null, null
                     ]))],
                     null
@@ -1191,7 +1189,7 @@ mod tests {
             ),
             (
                 serde_json::json!([
-                    [v2_row(serde_json::json!([
+                    [v2_row(&serde_json::json!([
                         2, 100, 300, null, null, null, null, "WORKER", null
                     ]))],
                     null
@@ -1200,7 +1198,7 @@ mod tests {
             ),
             (
                 serde_json::json!([
-                    [v2_row(worker(
+                    [v2_row(&worker(
                         serde_json::json!(null),
                         serde_json::json!(5)
                     ))],
@@ -1209,12 +1207,12 @@ mod tests {
                 "recorded_by_shape",
             ),
             (
-                serde_json::json!([[v2_row(recovery(serde_json::json!(350)))], null]),
+                serde_json::json!([[v2_row(&recovery(serde_json::json!(350)))], null]),
                 "recorded_by_shape",
             ),
             (
                 serde_json::json!([
-                    [v2_row(serde_json::json!([
+                    [v2_row(&serde_json::json!([
                         1, 100, 300, null, null, null, null, "CANCEL", null
                     ]))],
                     null
@@ -1223,7 +1221,7 @@ mod tests {
             ),
             (
                 serde_json::json!([
-                    [v2_row(serde_json::json!([
+                    [v2_row(&serde_json::json!([
                         1, 100, 300, 0, 200, null, null, "WORKER", null
                     ]))],
                     null
@@ -1232,7 +1230,7 @@ mod tests {
             ),
             (
                 serde_json::json!([
-                    [v2_row(serde_json::json!([
+                    [v2_row(&serde_json::json!([
                         1, 100, 300, 2, null, null, null, "WORKER", null
                     ]))],
                     null
@@ -1241,7 +1239,7 @@ mod tests {
             ),
             (
                 serde_json::json!([
-                    [v2_row(serde_json::json!([
+                    [v2_row(&serde_json::json!([
                         1, null, 300, null, null, null, null, "WORKER", null
                     ]))],
                     null

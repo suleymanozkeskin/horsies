@@ -105,19 +105,14 @@ pub struct Placed {
     pub wall: DateTime<Utc>,
 }
 
-/// Whether the submitter of a task is told when a child takes it.
+/// Where the submitter of a task is told that a child took it: the
+/// placement goes to this sender, at most once.
 #[derive(Debug)]
-pub enum PlacementWatch {
-    /// No one is told.
-    Unwatched,
-    /// The placement goes to this sender, at most once.
-    Watched(oneshot::Sender<Placed>),
-}
+pub struct PlacementWatch(oneshot::Sender<Placed>);
 
 /// The submitter's end of a watched placement ([`watched_placement`]): the
 /// placement comes on this receiver; the sender drops when the task ends
-/// before a child takes it. A submitter that does not follow the placement
-/// submits with [`PlacementWatch::Unwatched`] and holds no receipt.
+/// before a child takes it.
 #[derive(Debug)]
 pub struct PlacementReceipt(oneshot::Receiver<Placed>);
 
@@ -160,7 +155,7 @@ impl ChildPlacement {
 /// its submitter waits on.
 pub fn watched_placement() -> (PlacementWatch, PlacementReceipt) {
     let (sender, receiver) = oneshot::channel();
-    (PlacementWatch::Watched(sender), PlacementReceipt(receiver))
+    (PlacementWatch(sender), PlacementReceipt(receiver))
 }
 
 /// Where the placement of one task goes, once its pool knows the kind of
@@ -185,7 +180,8 @@ pub(super) struct Answer {
 impl Answer {
     #[cfg(test)]
     pub(super) fn new(sender: oneshot::Sender<AttemptEnd>) -> Self {
-        Self::watched(sender, PlacementWatch::Unwatched, ExecutionClass::Isolated)
+        let (watch, _receipt) = watched_placement();
+        Self::watched(sender, watch, ExecutionClass::Isolated)
     }
 
     /// The answer of a task of a pool whose children are of `child_kind`,
@@ -195,9 +191,9 @@ impl Answer {
         watch: PlacementWatch,
         child_kind: ExecutionClass,
     ) -> Self {
-        let placement = match watch {
-            PlacementWatch::Unwatched => PlacementNotice::Unwatched,
-            PlacementWatch::Watched(to) => PlacementNotice::Watched { to, child_kind },
+        let placement = PlacementNotice::Watched {
+            to: watch.0,
+            child_kind,
         };
         Self {
             sender: Some(sender),
@@ -512,7 +508,8 @@ impl IsolatedPool {
         work: IsolatedWork,
         deadline: IsolatedDeadline,
     ) -> Submitted {
-        self.submit_watched(task, input, work, deadline, PlacementWatch::Unwatched)
+        let (watch, _receipt) = watched_placement();
+        self.submit_watched(task, input, work, deadline, watch)
     }
 
     /// As `IsolatedPool::submit`; `watch` is told when a child takes the

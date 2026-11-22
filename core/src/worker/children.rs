@@ -593,7 +593,8 @@ impl WorkerChildren {
     /// `NotDispatched(NoChildOfItsKind)`; its claim goes back to the queue.
     #[cfg(test)]
     pub fn submit(&self, claimed: Claimed) -> Submitted {
-        self.submit_watched(claimed, PlacementWatch::Unwatched)
+        let (watch, _receipt) = crate::worker::executor::slots::watched_placement();
+        self.submit_watched(claimed, watch)
     }
 
     /// As `WorkerChildren::submit`; `watch` is told when a child takes the

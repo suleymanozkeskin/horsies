@@ -2104,8 +2104,8 @@ $$;
 -- - LIVE and HISTORY: trace_id, the trace id of the producer span (NULL for a task sent with no trace).
 -- Raises 22004 for a NULL argument, and data_corrupted (XX001) when the published reader reports the task live
 -- after the live miss of the same snapshot, or answers a location it does not define.
--- Replaces: horsies/monitoring/queries.py:1404-1499 (get_task_detail) and :1516-1548 (_history_detail), which read
--- in REPEATABLE READ with 5 or 6 round trips; horsies/core/brokers/postgres.py:4768-4978 (get_task_info_async) and
+-- Replaces: clients/python/horsies/monitoring/queries.py:1404-1499 (get_task_detail) and :1516-1548 (_history_detail), which read
+-- in REPEATABLE READ with 5 or 6 round trips; clients/python/horsies/core/brokers/postgres.py:4768-4978 (get_task_info_async) and
 -- :4625-4766 (_history_task_info), 4 or 5 round trips with a snapshot per statement.
 CREATE OR REPLACE FUNCTION horsies_monitoring_task_detail(
     p_task_id uuid,

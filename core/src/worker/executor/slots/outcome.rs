@@ -181,7 +181,7 @@ pub struct ReadResult {
 pub enum ReadEnd {
     NotDispatched(NotRunCause),
     Result {
-        result: ReadResult,
+        result: Box<ReadResult>,
         start: AttemptStart,
     },
     StoppedBeforeRunning(StopReason),
@@ -641,7 +641,7 @@ pub fn read_attempt_end(
         AttemptEnd::NotDispatched(cause) => ReadEnd::NotDispatched(cause),
         AttemptEnd::StoppedBeforeRunning(reason) => ReadEnd::StoppedBeforeRunning(reason),
         AttemptEnd::Result { envelope, start } => ReadEnd::Result {
-            result: read_result(task, envelope, payload_policy),
+            result: Box::new(read_result(task, envelope, payload_policy)),
             start,
         },
         AttemptEnd::WorkerFailure { detail, start } => ReadEnd::WorkerFailure { detail, start },
