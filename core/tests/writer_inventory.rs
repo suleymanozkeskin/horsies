@@ -426,10 +426,14 @@ async fn v35_catalog_has_only_move_program_terminal_writers_and_a_live_only_chec
         );
     }
 
-    let status_checks: Vec<String> = database
+    // Every check of the live table that reads `status`, by name. The
+    // status domain is the check horsies_tasks_status_live; other checks
+    // may read `status` (for example the claim-count shape), but none may
+    // admit a terminal status.
+    let status_checks: Vec<(String, String)> = database
         .client()
         .query(
-            "SELECT pg_get_constraintdef(con.oid)
+            "SELECT con.conname::text, pg_get_constraintdef(con.oid)
              FROM pg_constraint con
              JOIN pg_attribute att
                ON att.attrelid = con.conrelid AND att.attname = 'status'
@@ -441,15 +445,23 @@ async fn v35_catalog_has_only_move_program_terminal_writers_and_a_live_only_chec
         .await
         .expect("live status checks")
         .iter()
-        .map(|row| row.get(0))
+        .map(|row| (row.get(0), row.get(1)))
         .collect();
-    assert_eq!(status_checks.len(), 1);
-    let live_only = &status_checks[0];
+    let live_only = status_checks
+        .iter()
+        .find(|(name, _)| name == "horsies_tasks_status_live")
+        .map(|(_, definition)| definition)
+        .expect("the live table keeps its status domain check");
     for live in ["PENDING", "CLAIMED", "RUNNING"] {
-        assert!(live_only.contains(live));
+        assert!(live_only.contains(live), "{live_only}");
     }
-    for terminal in ["COMPLETED", "FAILED", "CANCELLED", "EXPIRED"] {
-        assert!(!live_only.contains(terminal));
+    for (name, definition) in &status_checks {
+        for terminal in ["COMPLETED", "FAILED", "CANCELLED", "EXPIRED"] {
+            assert!(
+                !definition.contains(terminal),
+                "{name} admits {terminal}: {definition}"
+            );
+        }
     }
 
     database.drop().await;

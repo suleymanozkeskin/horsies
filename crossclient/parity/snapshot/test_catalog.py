@@ -111,12 +111,32 @@ def test_baseline_catalog_has_no_shape_defects() -> None:
     assert catalog_defects(BASELINE_CATALOG) == ()
 
 
-def test_baseline_catalog_has_a_rule_for_each_of_277_columns_in_21_tables() -> None:
-    # 263 table columns of migration 1000, 11 columns of migration 1001 (2 of
-    # horsies_tasks, 9 of horsies_task_attempts), plus tableoid of the two
-    # partitioned parents.
-    assert len(BASELINE_CATALOG.tables) == 21
-    assert sum(len(table.columns) for table in BASELINE_CATALOG.tables) == 277
+def test_baseline_catalog_has_a_rule_for_each_of_286_columns_in_22_tables() -> None:
+    # 263 table columns of migration 1000, 20 columns of migration 1001 (2 of
+    # horsies_tasks, 9 of horsies_task_attempts, 9 of the new table
+    # horsies_workflow_events), plus tableoid of the two partitioned parents.
+    assert len(BASELINE_CATALOG.tables) == 22
+    assert sum(len(table.columns) for table in BASELINE_CATALOG.tables) == 286
+
+
+def test_the_catalog_reads_the_workflow_events_of_migration_1001() -> None:
+    """The ids of an event are labelled ids, its time is a run clock value,
+    and its sequence value is ignored."""
+    events = next(
+        table for table in BASELINE_CATALOG.tables if table.name == 'horsies_workflow_events'
+    )
+    rules = {spec.name: spec.rule for spec in events.columns}
+
+    assert rules['workflow_id'] == NormalisedId(family=IdFamily.WORKFLOW)
+    assert rules['run_workflow_id'] == NormalisedId(family=IdFamily.WORKFLOW)
+    assert rules['workflow_node_row_id'] == NormalisedId(family=IdFamily.WORKFLOW_NODE)
+    assert rules['task_id'] == NormalisedId(family=IdFamily.TASK)
+    assert rules['occurred_at'] == CATALOG_RUN_CLOCK
+    for column in ('event_kind', 'history_class', 'terminalization_kind'):
+        assert rules[column] == Exact(), column
+    assert isinstance(rules['event_id'], Ignored)
+    assert 'event_id' not in events.identity
+    assert 'event_id' not in events.order_by
 
 
 def test_the_catalog_reads_the_phase_record_of_migration_1001() -> None:
@@ -162,6 +182,7 @@ def test_baseline_catalog_ignores_exactly_these_columns_with_a_reason() -> None:
         ('horsies_worker_states', 'children_memory_mb'),
         ('horsies_worker_liveness', 'generation'),
         ('horsies_workflow_phase2_pending', 'result_digest'),
+        ('horsies_workflow_events', 'event_id'),
     }
     assert all(len(reason) > 20 for reason in ignored.values())
 

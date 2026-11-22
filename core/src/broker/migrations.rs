@@ -16,7 +16,8 @@
 //! - Each later version is one file of `core/migrations/`
 //!   ([`LATER_MIGRATION_FILES`]), with the SHA-384 checksum of its text. It
 //!   writes no family row and does not publish the history readers. Version
-//!   1001 (`1001_lifecycle_record.sql`) adds the phase record of each attempt.
+//!   1001 (`1001_lifecycle_record.sql`) adds the phase record of each attempt
+//!   and the event table of the workflow runs (`horsies_workflow_events`).
 //!
 //! The released text of a migration never changes: a database that applied
 //! another text of it is refused ([`SchemaRefusal::MigrationEdited`]), so a
@@ -120,7 +121,8 @@ baseline_sql_files!(
     "0008_history_maintenance_functions.sql",
 );
 
-/// Version of the migration that adds the phase record of each attempt
+/// Version of the migration that adds the phase record of each attempt and
+/// the events of each workflow run
 /// (`core/migrations/1001_lifecycle_record.sql`).
 pub(crate) const LIFECYCLE_RECORD_MIGRATION_VERSION: i64 = 1001;
 
@@ -217,8 +219,10 @@ const MIGRATION_SOURCES: [MigrationSource; 2] = [
         exact_indexes: &[],
         retired_indexes: &[],
     },
-    // The new columns are nullable and the new constraints are CHECKs, so the
-    // migration builds no index: no exact or retired index step.
+    // The new columns are nullable and the new constraints on the existing
+    // tables are CHECKs. The indexes that the migration builds are on its new
+    // table, which no other session can write before the commit, so they are
+    // built in the migration transaction: no exact or retired index step.
     MigrationSource {
         version: LATER_MIGRATION_FILES[0].0,
         description: "lifecycle record",

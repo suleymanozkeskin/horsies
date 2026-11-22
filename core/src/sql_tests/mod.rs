@@ -20,3 +20,4 @@ mod history_functions_sql;
 mod history_maintenance_sql;
 mod lifecycle_record_sql;
 mod terminalization_functions;
+mod workflow_events_sql;
