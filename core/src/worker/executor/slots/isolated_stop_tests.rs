@@ -9,7 +9,7 @@ use super::scripted::{
     act_on_runs, answer_of, answer_runs, boot, ended, idle_child, input, isolated_config,
     isolated_init, printf_bytes, process_ended, read_frame, reported, result_frame, send, serving,
     shell, start_isolated, submit_isolated, take_init, task, ticket, tickets, timeout_ms, until,
-    TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
+    Shown, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
@@ -33,9 +33,12 @@ fn crash_reason(end: AttemptEnd) -> String {
 
 /// Wait until the pools fail, and give the failure.
 async fn failure_of(board: &PoolBoard) -> PoolFailure {
-    until("the pool failed", STATE_WAIT, || {
-        matches!(board.health(), PoolHealth::Failed(_))
-    })
+    until(
+        "the pool failed",
+        STATE_WAIT,
+        &[Shown::Board(board)],
+        || matches!(board.health(), PoolHealth::Failed(_)),
+    )
     .await;
     match board.health() {
         PoolHealth::Failed(failure) => failure,
@@ -234,6 +237,7 @@ async fn outside_kills_of_a_replacement_do_not_stop_the_pool() {
     until(
         "the slot boots after the kills",
         Duration::from_secs(60),
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
         || {
             tickets(&dir) == all_boots
                 && board
@@ -354,9 +358,12 @@ async fn the_stop_ends_a_booting_child_and_starts_no_other() {
     );
     let spawner = Spawner::start().unwrap();
     let (pool, board) = start_isolated(&spawner, 1, isolated_config(shell(&script)));
-    until("a child boots", STATE_WAIT, || {
-        !dir.lines("booting.pid").is_empty()
-    })
+    until(
+        "a child boots",
+        STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
+        || !dir.lines("booting.pid").is_empty(),
+    )
     .await;
     let booting: libc::pid_t = dir.lines("booting.pid")[0].trim().parse().unwrap();
     assert_eq!(board.phase(0), SlotPhase::Booting);

@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use super::scripted::{
     answer_of, async_work, boot, ended, layout, read_frame, serving, shared_async_init,
-    shared_config, shell, start_shared, submit_shared, task, ticket, tickets, until, TestDir,
-    SPAWNER_STOP_WAIT, STATE_WAIT,
+    shared_config, shell, start_shared, submit_shared, task, ticket, tickets, until, Shown,
+    TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::*;
 use crate::worker::executor::supervisor::Spawner;
@@ -31,9 +31,12 @@ fn crash_reason(end: AttemptEnd) -> String {
 }
 
 async fn failure_of(board: &PoolBoard) -> PoolFailure {
-    until("the pool failed", STATE_WAIT, || {
-        matches!(board.health(), PoolHealth::Failed(_))
-    })
+    until(
+        "the pool failed",
+        STATE_WAIT,
+        &[Shown::Board(board)],
+        || matches!(board.health(), PoolHealth::Failed(_)),
+    )
     .await;
     match board.health() {
         PoolHealth::Failed(failure) => failure,
@@ -78,9 +81,12 @@ async fn a_shared_frame_that_cannot_be_encoded_costs_the_runs_of_its_child() {
         "{defect_reason}"
     );
     ended(first_child.as_pid_t()).await;
-    until("the slot boots a new child", STATE_WAIT, || {
-        tickets(&dir) == 2
-    })
+    until(
+        "the slot boots a new child",
+        STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
+        || tickets(&dir) == 2,
+    )
     .await;
     assert_eq!(board.health(), PoolHealth::Serving);
     let _ = pool.stop(Duration::from_secs(5)).await;

@@ -10,7 +10,7 @@ use super::isolated::ISOLATED_LEFTOVER_BACKSTOP;
 use super::scripted::{
     answer_of, answer_runs, boot, ended, idle_child, isolated_config, isolated_init, ok_envelope,
     queued, read_frame, reported, result_frame, send, serving, shell, start_isolated, started_at,
-    submit_isolated, take, task, ticket, tickets, timeout_ms, until, TestDir, ANSWER_WAIT,
+    submit_isolated, take, task, ticket, tickets, timeout_ms, until, Shown, TestDir, ANSWER_WAIT,
     SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::*;
@@ -118,6 +118,7 @@ async fn the_rss_of_a_result_frame_is_the_last_reading_of_the_slot() {
     until(
         "the slot holds the RSS of the result frame",
         STATE_WAIT,
+        &[Shown::Board(&board)],
         || board.child_rss() == slot_reading(rss),
     )
     .await;
@@ -584,9 +585,12 @@ async fn the_deadline_does_not_apply_after_the_body_returned() {
 
     assert!(started.elapsed() >= Duration::from_millis(1_500));
     assert_eq!(answer, reported(1));
-    until("the child read its stop frame", STATE_WAIT, || {
-        dir.path().join("stopped").exists()
-    })
+    until(
+        "the child read its stop frame",
+        STATE_WAIT,
+        &[Shown::Board(&board)],
+        || dir.path().join("stopped").exists(),
+    )
     .await;
     stop_pool(pool, spawner).await;
 }

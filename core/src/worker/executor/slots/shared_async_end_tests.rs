@@ -15,7 +15,7 @@ use super::scripted::{
     process_ended, read_frame, reported, result_frame, run_ref, run_stuck, send, serving,
     shared_async_init, shared_config, shared_result, shell, short_of_descriptors, start_shared,
     started_at, submit_isolated, submit_shared, take_init, task, ticket, tickets, timeout_ms,
-    until, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
+    until, Shown, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::seat_runs::{
     due_step_reported, end_at_loss, stuck_step_reported, CloseCulprit, LossSight, OutOfTurn,
@@ -93,9 +93,12 @@ fn not_answered(receiver: &mut tokio::sync::oneshot::Receiver<AttemptEnd>) -> bo
 }
 
 async fn failure_of(board: &PoolBoard) -> PoolFailure {
-    until("the pool failed", STATE_WAIT, || {
-        matches!(board.health(), PoolHealth::Failed(_))
-    })
+    until(
+        "the pool failed",
+        STATE_WAIT,
+        &[Shown::Board(board)],
+        || matches!(board.health(), PoolHealth::Failed(_)),
+    )
     .await;
     match board.health() {
         PoolHealth::Failed(failure) => failure,
@@ -445,9 +448,12 @@ async fn a_down_shared_child_counts_nothing() {
     );
     let shared = start_shared(&spawner, &board, shared_config(shell(&script), init));
 
-    until("a shared slot is down", STATE_WAIT, || {
-        board.down_slots().len() == 1
-    })
+    until(
+        "a shared slot is down",
+        STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
+        || board.down_slots().len() == 1,
+    )
     .await;
 
     let down = board.down_slots();

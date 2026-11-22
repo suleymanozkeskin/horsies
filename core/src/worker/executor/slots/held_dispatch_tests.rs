@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use super::scripted::{
     act_on_runs, answer_of, boot, fail_boot, isolated_config, isolated_init, serving_pid, shell,
-    short_of_descriptors, submit_isolated, task, ticket, until, TestDir, SPAWNER_STOP_WAIT,
+    short_of_descriptors, submit_isolated, task, ticket, until, Shown, TestDir, SPAWNER_STOP_WAIT,
     STATE_WAIT,
 };
 use super::*;
@@ -53,21 +53,33 @@ async fn a_slot_that_goes_down_holds_no_task() {
         spawner.handle(),
         live.clone(),
     );
-    until("both slots serve", STATE_WAIT, || pool.free_slots() == 2).await;
+    until(
+        "both slots serve",
+        STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
+        || pool.free_slots() == 2,
+    )
+    .await;
 
     let lost_end = answer_of(submit_isolated(&pool, &lost, IsolatedDeadline::NoDeadline)).await;
     assert!(
         matches!(lost_end, AttemptEnd::Crashed { .. }),
         "{lost_end:?}"
     );
-    until("one slot is down", STATE_WAIT, || {
-        board.down_slots().len() == 1
-    })
+    until(
+        "one slot is down",
+        STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
+        || board.down_slots().len() == 1,
+    )
     .await;
     let _running_end = submit_isolated(&pool, &running, IsolatedDeadline::NoDeadline);
-    until("the running task is held", STATE_WAIT, || {
-        live.held_task_ids() == vec![running.task_id]
-    })
+    until(
+        "the running task is held",
+        STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
+        || live.held_task_ids() == vec![running.task_id],
+    )
     .await;
 
     let serving_pids: Vec<ProcessId> = (0..board.slot_count())

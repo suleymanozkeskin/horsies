@@ -13,7 +13,7 @@ use uuid::Uuid;
 use super::scripted::{
     answer_of, boot, ended, exit_at_stop, input, isolated_config, isolated_init, reported,
     result_frame, run_frame, send, serving, shell, start_isolated, submit_isolated, take,
-    take_init, task, until, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT, WORKER_ID,
+    take_init, task, until, Shown, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT, WORKER_ID,
 };
 use super::seat_runs::{LossSight, RunStopReport, RunWork, SeatRun, SeatRuns};
 use super::*;
@@ -324,9 +324,12 @@ async fn a_failed_start_hook_of_a_replacement_fails_the_pool_with_no_restart_loo
     let answer = answer_of(submit_isolated(&pool, &first, IsolatedDeadline::NoDeadline)).await;
 
     assert_eq!(answer, reported(1));
-    until("the pool failed", STATE_WAIT, || {
-        board.health() == PoolHealth::Failed(PoolFailure::ChildHookFailed)
-    })
+    until(
+        "the pool failed",
+        STATE_WAIT,
+        &[Shown::Board(&board)],
+        || board.health() == PoolHealth::Failed(PoolFailure::ChildHookFailed),
+    )
     .await;
     // A restart loop would boot more children while the test waits.
     tokio::time::sleep(Duration::from_secs(2)).await;
