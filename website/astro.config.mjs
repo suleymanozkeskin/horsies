@@ -170,6 +170,7 @@ export default defineConfig({
 						{
 							label: 'Operations',
 							items: [
+								{ label: 'Deployment Topology', slug: 'operations/deployment-topology' },
 								{ label: 'Atomic Enqueue & Topology', slug: 'operations/atomic-enqueue-and-topology' },
 								{ label: 'Deploying Code Changes', slug: 'operations/deploying-code-changes' },
 								{ label: 'Autovacuum Tuning', slug: 'operations/autovacuum-tuning' },

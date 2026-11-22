@@ -803,7 +803,7 @@ Each entry: Title -- summary -> URL
 - Broker Connections -- PostgresConfig in Python: examples (transaction pooling, connection checks at checkout, keepalives), field types, refusals, psycopg and libpq, event loops, sync calls in async code (ASYNC_CONTEXT), the connection ceiling -> /horsies/configuration/broker-connections/
 - Remote PostgreSQL -- remote or managed PostgreSQL, connection budget, pooled multi-worker setups, health-check tuning -> /horsies/configuration/remote-postgres/
 - Recovery Config -- stale task detection -> /horsies/configuration/recovery-config/
-- Retention Config -- record lifetime, retention classes, per-queue retention, partition upkeep -> /horsies/configuration/retention-config/
+- Retention Config -- record lifetime, retention classes, per-queue retention, partition upkeep, the guarantees that end with retention (key reservation, workflow start once, task history, heartbeats) -> /horsies/configuration/retention-config/
 
 ### Workers
 - Worker Architecture -- worker-owned child processes -> /horsies/workers/worker-architecture/
@@ -840,6 +840,7 @@ Each entry: Title -- summary -> URL
 - Observability Deployment -- Kubernetes and docker compose: workers with probes, one fleet collector, Prometheus, the Collector -> /horsies/observability/deployment/
 
 ### Operations
+- Deployment Topology -- a dedicated PostgreSQL instance and why, the transaction boundary with the application, the connections of each URL and the pooler mode, what a failover under asynchronous replication can lose (a send, a workflow start, a claim, the end of a task, workflow progress, the liveness lock), the settings that lose no commit -> /horsies/operations/deployment-topology/
 - Atomic Enqueue and Topology -- send after commit, resend_on_transient_err, idempotency_key window and limits, no send API joins a caller transaction -> /horsies/operations/atomic-enqueue-and-topology/
 - Deploying Code Changes -- renamed or removed tasks and parameters, in-flight rows, old and new workers, error codes per change -> /horsies/operations/deploying-code-changes/
 - Code Change Examples -- the Python code of the deploy steps: a parameter with a default, two names for one task, a model field with a default, a renamed field with AliasChoices -> /horsies/operations/code-change-examples/
@@ -944,7 +945,7 @@ slugify, NodeKey -> /horsies/concepts/workflows/workflow-examples/
 node_id, NODE_ID_PATTERN -> /horsies/concepts/workflows/workflow-semantics/
 showcase, demo app, example application -> /horsies/quick-start/06-showcase/
 remote PostgreSQL, managed PostgreSQL, connection budget, PgBouncer pooling, health checks -> /horsies/configuration/remote-postgres/
-retention class, retention_class_key, queue_retention, retention_periods, partitions -> /horsies/configuration/retention-config/
+retention class, retention_class_key, queue_retention, retention_periods, partitions, dedupe horizon, audit horizon, heartbeat_leaf_horizon_hours -> /horsies/configuration/retention-config/
 RetentionConfig -> /horsies/configuration/app-config/#retention-configuration
 on_child_process_start, child-process hook, per-child setup -> /horsies/workers/child-process-hooks/
 on_event, on_handler_child_start, event handler, handler child, horsies.telemetry, AttemptEnded -> /horsies/workers/event-handlers/
@@ -958,6 +959,7 @@ cancel task, rerun task, pause workflow, resume workflow, cancel workflow, actio
 rerun_task, RerunTask, RerunEnqueuePolicy, RerunOutcome, RerunEnqueued -> /horsies/operations/rerun-in-your-transaction/
 AliasChoices, renamed model field, task alias, deploy -> /horsies/operations/code-change-examples/
 autovacuum, vacuum, high-churn tables -> /horsies/operations/autovacuum-tuning/
+deployment topology, dedicated instance, failover, asynchronous replication, synchronous replication, synchronous_commit, synchronous_standby_names, standby, lost commit -> /horsies/operations/deployment-topology/
 atomic enqueue, send after commit, transaction, topology, separate database, idempotency_key, idempotency window, IDEMPOTENCY_KEY_CONFLICT, resend_on_transient_err -> /horsies/operations/atomic-enqueue-and-topology/
 deploy, rolling deploy, rename task, remove task, rename parameter, in-flight rows, WORKER_SERIALIZATION_ERROR, WORKER_RESOLUTION_ERROR, SUBWORKFLOW_LOAD_FAILED, RESULT_DESERIALIZATION_ERROR, definition_key -> /horsies/operations/deploying-code-changes/
 testing, pytest, unit test, direct call, WorkflowContext.from_serialized, HORSIES_SUPPRESS_SENDS, TaskSendSuppressed, SEND_SUPPRESSED -> /horsies/operations/testing/

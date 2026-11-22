@@ -265,7 +265,7 @@ ahead of writes. A deployment that withholds it must run an external coverage jo
 | Data | Mechanism | Config |
 |------|-----------|--------|
 | Terminal task records | Partition drop by retention class (assigned at enqueue; default 30-day class, explicit `None` = forever) | none — per-task class |
-| Heartbeats | Hourly partition drop | none |
+| Heartbeats | Hourly partition drop, `heartbeat_leaf_horizon_hours` after the hour ends | `heartbeat_leaf_horizon_hours` |
 | Terminal workflow records (`horsies_workflows`, `horsies_workflow_tasks`) | Batched row delete by the reaper sweep | `terminal_record_retention_hours` |
 | Worker states | Batched row delete, same sweep | `worker_state_retention_hours` |
 | Worker liveness generations (`horsies_worker_liveness`) | Batched row delete, same sweep: rows of workers that own no CLAIMED or RUNNING row and whose lock no session holds | none |
