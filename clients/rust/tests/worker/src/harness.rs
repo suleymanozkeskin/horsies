@@ -49,6 +49,11 @@ pub fn within(duration: Duration) -> WaitLimit {
         .unwrap_or_else(|refused| panic!("a test wait limit of {duration:?}: {refused}"))
 }
 
+/// The `handle` function that the task attribute generates for a task: the
+/// typed function of the task in a runtime, or why it is not there.
+pub type GeneratedHandle<A, T, E> =
+    fn(&TaskRuntime) -> Result<TaskFunction<A, T, E>, TaskFunctionNotFound>;
+
 /// The resources of one test. Dropped in field order: the app, the marker
 /// directory, then the database.
 pub struct Suite {
@@ -112,10 +117,7 @@ impl Suite {
 
     /// The typed function of a task of the app, through its generated
     /// `handle`: `suite.function(basic::simple::handle)`.
-    pub fn function<A, T, E>(
-        &self,
-        handle: fn(&TaskRuntime) -> Result<TaskFunction<A, T, E>, TaskFunctionNotFound>,
-    ) -> TaskFunction<A, T, E> {
+    pub fn function<A, T, E>(&self, handle: GeneratedHandle<A, T, E>) -> TaskFunction<A, T, E> {
         handle(&self.runtime).unwrap_or_else(|missing| panic!("{missing}"))
     }
 

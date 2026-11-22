@@ -858,7 +858,7 @@ struct UpState {
 
 enum Link {
     Down(DownState),
-    Up(UpState),
+    Up(Box<UpState>),
 }
 
 /// The listener task. Runs until the listener closes; each turn handles one
@@ -946,7 +946,7 @@ async fn step_down(
                 }
                 History::NeverConnected => {}
             }
-            Link::Up(up)
+            Link::Up(Box::new(up))
         }
         Err(failure) => {
             tracing::warn!(target: LOG_TARGET, %failure, "the listener could not connect");
@@ -990,7 +990,7 @@ async fn bring_up(
     }
 }
 
-async fn step_up(shared: &Arc<Shared>, mut up: UpState, snapshot: &Snapshot) -> Link {
+async fn step_up(shared: &Arc<Shared>, mut up: Box<UpState>, snapshot: &Snapshot) -> Link {
     if let Err(failure) = reconcile(&mut up, &snapshot.desired).await {
         tracing::warn!(target: LOG_TARGET, %failure, "the listener lost its connection");
         up.driver.abort();
@@ -1079,7 +1079,7 @@ fn probe_due(activity: ActivitySinceProbe, since_probe: Duration) -> ProbeDue {
     }
 }
 
-async fn probe_if_due(shared: &Arc<Shared>, mut up: UpState) -> Link {
+async fn probe_if_due(shared: &Arc<Shared>, mut up: Box<UpState>) -> Link {
     let notifications = shared.notification_count();
     let activity = match notifications == up.notifications_at_probe {
         true => ActivitySinceProbe::NotSeen,

@@ -129,7 +129,9 @@ mod tests {
         );
         assert!(!retryable);
         assert_eq!(task_id, task());
-        assert!(matches!(cause, BrokerError::ClaimContract(ref text) if text == "planned failure"));
+        assert!(
+            matches!(*cause, BrokerError::ClaimContract(ref text) if text == "planned failure")
+        );
 
         let refused = cancel_outcome(Err(TaskActionError::NotFound {
             message: format!("Task {} does not exist.", task()),

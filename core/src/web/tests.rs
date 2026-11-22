@@ -167,7 +167,7 @@ fn fixed_probe(schema: SchemaStatus) -> Arc<SchemaProbe> {
 }
 
 fn test_state(
-    pool: TestPool,
+    pool: &TestPool,
     auth_policy: Arc<dyn MonitoringAuthPolicy>,
     schema_probe: Arc<SchemaProbe>,
     actions_enabled: bool,
@@ -204,7 +204,7 @@ fn test_router(
     actions_enabled: bool,
 ) -> Router {
     build_router(test_state(
-        lazy_pool(),
+        &lazy_pool(),
         auth_policy,
         fixed_probe(schema),
         actions_enabled,
@@ -521,7 +521,7 @@ async fn the_meta_reports_the_trace_link_template_or_null() {
     const TEMPLATE: &str = "https://grafana.example.com/explore?traceId={trace_id}";
     let schema = status(SchemaState::Match, Some(crate::expected_schema_version()));
     let mut linked = test_state(
-        lazy_pool(),
+        &lazy_pool(),
         Arc::new(AllowAll),
         fixed_probe(schema),
         true,
@@ -645,7 +645,11 @@ async fn schema_probe_caches_successes_and_never_caches_a_cold_failure() {
         ReaderAnswer::Status(status(SchemaState::Mismatch, Some(expected - 1))),
         ReaderAnswer::Failure,
     ]);
-    let probe = SchemaProbe::with_reader(reader.clone(), expected, Duration::ZERO);
+    let probe = SchemaProbe::with_reader(
+        Arc::<SequenceReader>::clone(&reader),
+        expected,
+        Duration::ZERO,
+    );
 
     assert_eq!(probe.status().await.state, SchemaState::Unknown);
     assert_eq!(probe.status().await.state, SchemaState::Mismatch);
@@ -656,7 +660,11 @@ async fn schema_probe_caches_successes_and_never_caches_a_cold_failure() {
         SchemaState::Match,
         Some(expected),
     ))]);
-    let cached = SchemaProbe::with_reader(cached_reader.clone(), expected, Duration::from_secs(60));
+    let cached = SchemaProbe::with_reader(
+        Arc::<SequenceReader>::clone(&cached_reader),
+        expected,
+        Duration::from_secs(60),
+    );
     for _ in 0..5 {
         assert_eq!(cached.status().await.state, SchemaState::Match);
     }
@@ -721,7 +729,7 @@ async fn failed_listener_sends_one_degraded_frame_and_closes() {
     let pool = lazy_pool();
     pool.close().await;
     let state = test_state(
-        pool,
+        &pool,
         Arc::new(AllowAll),
         fixed_probe(status(
             SchemaState::Match,
@@ -751,7 +759,7 @@ async fn failed_listener_sends_one_degraded_frame_and_closes() {
 #[tokio::test]
 async fn spa_is_public_mountable_injected_and_traversal_safe() {
     let mut state = test_state(
-        lazy_pool(),
+        &lazy_pool(),
         Arc::new(TrustedHeader::new("X-Forwarded-User", false).unwrap()),
         fixed_probe(status(SchemaState::Unknown, None)),
         false,
@@ -986,7 +994,7 @@ async fn embedded_spa_and_each_primary_view_api_roundtrip_against_postgres() {
 #[tokio::test]
 async fn missing_embedded_index_is_a_factual_503_while_api_still_answers() {
     let state = test_state(
-        lazy_pool(),
+        &lazy_pool(),
         Arc::new(AllowAll),
         fixed_probe(status(SchemaState::Unknown, None)),
         true,
@@ -1881,7 +1889,7 @@ fn each_absence_reason_has_the_not_found_text_of_python() {
 async fn a_task_detail_read_that_fails_is_not_a_not_found() {
     let contract = super::common::query_failed(
         "Task detail",
-        crate::monitoring::MonitoringQueryError::HistoryContractViolation {
+        &crate::monitoring::MonitoringQueryError::HistoryContractViolation {
             message: "task detail history read failed: bad row".to_owned(),
             source: crate::monitoring::HistoryContractSource(
                 crate::monitoring::MonitoringQueryErrorSource::History(
@@ -2261,7 +2269,7 @@ async fn seed_paused_parent_of_a_ready_child(pool: &TestPool, prefix: &str) -> U
 async fn a_resume_whose_child_build_raised_is_python_s_internal_server_error() {
     let mut state = migrated_state().await;
     let build = Arc::new(RaisingChildBuild::default());
-    let source: Arc<dyn crate::ChildSpecSource> = build.clone();
+    let source: Arc<dyn crate::ChildSpecSource> = Arc::<RaisingChildBuild>::clone(&build);
     state.children = source;
     let pool = migrated_pool().await;
     let prefix = format!("web_resume_raised_{}__", Uuid::new_v4().simple());
@@ -2386,7 +2394,7 @@ async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_n
 
 fn granted_handler(actions_enabled: bool) -> MonitoringHandler {
     let mut state = test_state(
-        lazy_pool(),
+        &lazy_pool(),
         Arc::new(GrantedAccess),
         fixed_probe(status(
             SchemaState::Match,

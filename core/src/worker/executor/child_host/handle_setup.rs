@@ -197,7 +197,7 @@ mod tests {
         assert!(database.pgbouncer_transaction_mode);
         match &database.session_database {
             SessionDatabase::Separate { url } => {
-                assert_eq!(url.expose(), "postgresql://user:secret@direct/app")
+                assert_eq!(url.expose(), "postgresql://user:secret@direct/app");
             }
             SessionDatabase::SameAsDatabaseUrl => panic!("transaction mode names its session URL"),
         }

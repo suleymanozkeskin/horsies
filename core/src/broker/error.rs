@@ -394,7 +394,7 @@ mod tests {
     fn refused(error: DbError) -> BrokerError {
         BrokerError::Statement(StatementFailure::StatementRefused {
             statement: "test_statement",
-            cause: RefusalCause::Server(error),
+            cause: RefusalCause::Server(Box::new(error)),
         })
     }
 

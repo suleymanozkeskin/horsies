@@ -7,6 +7,7 @@
 //! row at it. A refusal keeps the history locator. The function stores no
 //! reason: the recovery loop logs why it quarantines.
 
+#[cfg(test)]
 use uuid::Uuid;
 
 use crate::core::history::errors::HistoryError;

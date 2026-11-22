@@ -39,7 +39,7 @@ pub use horsies_core::{
 };
 
 use crate::child::named_start_hook;
-use crate::{ErrorCode, Horsies, HorsiesError};
+use crate::{Horsies, HorsiesError};
 
 impl Horsies {
     /// Run `handler` on each event of type `E` in the worker's handler
@@ -75,10 +75,13 @@ impl Horsies {
     /// builds the same app.
     ///
     /// Errors: a [`HorsiesError`] with the code of the same refusal of the
-    /// Python registration: `HRS-225` ([`ErrorCode::EventHandlerInvalidName`])
+    /// Python registration: `HRS-225`
+    /// ([`ErrorCode::EventHandlerInvalidName`](crate::ErrorCode::EventHandlerInvalidName))
     /// for a name that is empty, longer than 255 characters or `(unknown)`,
-    /// `HRS-224` ([`ErrorCode::EventHandlerDuplicateName`]) for a name that
-    /// another handler has, and `HRS-226` ([`ErrorCode::EventHandlerLimit`])
+    /// `HRS-224`
+    /// ([`ErrorCode::EventHandlerDuplicateName`](crate::ErrorCode::EventHandlerDuplicateName))
+    /// for a name that another handler has, and `HRS-226`
+    /// ([`ErrorCode::EventHandlerLimit`](crate::ErrorCode::EventHandlerLimit))
     /// for a 33rd handler. Nothing is registered then.
     pub fn on_event<E>(
         &mut self,
@@ -90,7 +93,7 @@ impl Horsies {
     {
         self.event_handlers_mut()
             .add_async::<E>(name.into(), handler)
-            .map_err(handler_refusal)
+            .map_err(|refused| handler_refusal(&refused))
     }
 
     /// Run the blocking `handler` on each event of type `E` in the worker's
@@ -109,7 +112,7 @@ impl Horsies {
     {
         self.event_handlers_mut()
             .add_blocking::<E>(name.into(), handler)
-            .map_err(handler_refusal)
+            .map_err(|refused| handler_refusal(&refused))
     }
 
     /// Run `hook` once in each handler child, a replacement child included
@@ -139,7 +142,7 @@ impl Horsies {
 /// The error of a refused handler registration, with the code of the same
 /// refusal of the Python registration ([`EventHandlerRefused::code`]).
 /// Pure.
-fn handler_refusal(refused: EventHandlerRefused) -> HorsiesError {
+fn handler_refusal(refused: &EventHandlerRefused) -> HorsiesError {
     let help = match refused {
         EventHandlerRefused::InvalidName { .. } => {
             "name the handler with 1 to 255 characters, other than (unknown)"
@@ -162,7 +165,7 @@ mod tests {
     use horsies_core::ChildStartHook;
 
     use super::*;
-    use crate::AppConfig;
+    use crate::{AppConfig, ErrorCode};
 
     fn app() -> Horsies {
         Horsies::new(AppConfig::for_database_url(

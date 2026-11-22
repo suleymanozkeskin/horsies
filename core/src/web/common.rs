@@ -101,15 +101,6 @@ impl ApiError {
         }])
     }
 
-    pub(crate) fn path_validation(
-        field: &'static str,
-        error_type: &'static str,
-        message: impl Into<String>,
-        input: impl Into<serde_json::Value>,
-    ) -> Self {
-        Self::Validation(vec![Self::path_issue(field, error_type, message, input)])
-    }
-
     /// One refused path parameter, for a 422 body that lists several.
     pub(crate) fn path_issue(
         field: &'static str,
@@ -389,7 +380,7 @@ pub(crate) fn parse_group_by(value: &str) -> Result<TaskGroupBy, ApiError> {
 /// dependency failed and the state can clear; stored history data that does
 /// not decode is 500, the request was valid and a repeat gives the same
 /// answer until the stored row changes.
-pub(crate) fn query_failed(surface: &str, error: MonitoringQueryError) -> ApiError {
+pub(crate) fn query_failed(surface: &str, error: &MonitoringQueryError) -> ApiError {
     let detail = format!("{surface} query failed: {}", error.message());
     match error {
         MonitoringQueryError::DbOperationFailed { .. } => ApiError::unavailable(detail),
@@ -579,7 +570,7 @@ mod tests {
 
     #[test]
     fn a_query_failure_maps_to_python_s_status() {
-        let status = |error| match query_failed("Task list", error) {
+        let status = |error: MonitoringQueryError| match query_failed("Task list", &error) {
             ApiError::Detail(status, _) => status,
             ApiError::InvalidInput(_) | ApiError::Validation(_) => {
                 panic!("a query failure is always a detail body")

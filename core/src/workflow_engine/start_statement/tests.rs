@@ -472,7 +472,7 @@ const CLIENT_FAILURE_RESULT: &str =
 
 /// The spec data of a workflow `name` with the nodes `nodes` (JSON values)
 /// and the queue classes `classes`.
-fn client_spec(name: &str, nodes: serde_json::Value, classes: serde_json::Value) -> ClientSpec {
+fn client_spec(name: &str, nodes: &serde_json::Value, classes: &serde_json::Value) -> ClientSpec {
     let document = serde_json::json!({
         "data_version": 1,
         "name": name,
@@ -489,7 +489,7 @@ fn client_spec(name: &str, nodes: serde_json::Value, classes: serde_json::Value)
 
 /// A root node of spec data: a task on `queue`, or a sub-workflow node of the
 /// child under `definition_key`.
-fn client_node(index: u32, body: serde_json::Value) -> serde_json::Value {
+fn client_node(index: u32, body: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "index": index,
         "node_id": format!("node_{index}"),
@@ -538,8 +538,8 @@ impl ChildSpecSource for ScriptedClient {
         let answer = match request.definition_key.as_deref() {
             Some(CLIENT_CHILD_KEY) => Ok(ClientChildSpec::Built(client_spec(
                 "client_child",
-                serde_json::json!([client_node(0, task_body("bulk"))]),
-                serde_json::json!({"bulk": "forever"}),
+                &serde_json::json!([client_node(0, &task_body("bulk"))]),
+                &serde_json::json!({"bulk": "forever"}),
             ))),
             Some(CLIENT_MISSING_KEY) => Ok(ClientChildSpec::NodeFails {
                 message: "scripted load failure".to_owned(),
@@ -568,12 +568,12 @@ fn a_client_spec_takes_its_children_and_queue_classes_from_the_client() {
     let workflow_id = Uuid::new_v4();
     let spec = client_spec(
         "client_parent",
-        serde_json::json!([
-            client_node(0, sub_body(CLIENT_CHILD_KEY)),
-            client_node(1, sub_body(CLIENT_MISSING_KEY)),
-            client_node(2, task_body("default")),
+        &serde_json::json!([
+            client_node(0, &sub_body(CLIENT_CHILD_KEY)),
+            client_node(1, &sub_body(CLIENT_MISSING_KEY)),
+            client_node(2, &task_body("default")),
         ]),
-        serde_json::json!({"default": "standard_7d"}),
+        &serde_json::json!({"default": "standard_7d"}),
     );
     let client = ScriptedClient::default();
 
@@ -628,8 +628,11 @@ fn a_client_spec_takes_its_children_and_queue_classes_from_the_client() {
 fn a_build_that_the_client_did_not_run_refuses_the_start() {
     let spec = client_spec(
         "client_refused",
-        serde_json::json!([client_node(0, sub_body("tests.start_statement.unknown.v1"))]),
-        serde_json::json!({}),
+        &serde_json::json!([client_node(
+            0,
+            &sub_body("tests.start_statement.unknown.v1")
+        )]),
+        &serde_json::json!({}),
     );
 
     let refused = futures::executor::block_on(client_start_arguments(

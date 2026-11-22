@@ -9,7 +9,6 @@
 //! ([`horsies_core::handle::CoreHandle`]), with the client family
 //! `PYTHON`.
 
-use std::future::Future;
 use std::sync::{Arc, OnceLock};
 
 use horsies_core::handle::{CoreHandle as LazyHandle, HandleConnection};
@@ -1869,27 +1868,21 @@ async fn close_operation(broker: Arc<PostgresBroker>) -> HandleClosed {
     HandleClosed {}
 }
 
-fn ping_database_operation(
-    connection: BrokerConnection,
-) -> impl Future<Output = Outcome<DatabasePingRecord>> + Send + 'static {
-    async move {
-        let broker = match connection.broker().await {
-            Ok(broker) => broker,
-            Err(error) => {
-                return Outcome::Failed(BrokerFailure::of_operation_error(
-                    "ping_database",
-                    BrokerOperationError::db_ping_failed(error),
-                ))
-            }
-        };
-        match broker.ping_database().await {
-            Ok(ping) => Outcome::Done(DatabasePingRecord {
-                latency_ms: ping.latency_ms,
-            }),
-            Err(error) => {
-                Outcome::Failed(BrokerFailure::of_operation_error("ping_database", error))
-            }
+async fn ping_database_operation(connection: BrokerConnection) -> Outcome<DatabasePingRecord> {
+    let broker = match connection.broker().await {
+        Ok(broker) => broker,
+        Err(error) => {
+            return Outcome::Failed(BrokerFailure::of_operation_error(
+                "ping_database",
+                BrokerOperationError::db_ping_failed(error),
+            ))
         }
+    };
+    match broker.ping_database().await {
+        Ok(ping) => Outcome::Done(DatabasePingRecord {
+            latency_ms: ping.latency_ms,
+        }),
+        Err(error) => Outcome::Failed(BrokerFailure::of_operation_error("ping_database", error)),
     }
 }
 

@@ -128,6 +128,7 @@ pub(crate) const TELEMETRY_PART_DOWN: &str = "down";
 ///   "bind_failed" | "thread_refused" | "runtime_refused", "detail": ..},
 ///   "down_since": RFC 3339}}`; a `bind_failed` cause also has
 ///   `failed_binds`, the failed binds in a row.
+#[cfg(test)]
 pub(crate) fn telemetry_json(
     endpoint: &WorkerEndpoint,
     handler_child: &HandlerChildState,
@@ -135,7 +136,7 @@ pub(crate) fn telemetry_json(
     serde_json::Value::Object(telemetry_members(endpoint, handler_child))
 }
 
-/// The members `endpoint` and `handler_child` of [`telemetry_json`]. Pure.
+/// The members `endpoint` and `handler_child` of `telemetry_json`. Pure.
 pub(crate) fn telemetry_members(
     endpoint: &WorkerEndpoint,
     handler_child: &HandlerChildState,

@@ -284,7 +284,7 @@ impl KeptRaises {
                 cause,
                 exception,
             } => {
-                self.keep_interrupt(exception);
+                self.keep_interrupt(*exception);
                 ChildSpecUnavailable::Interrupted {
                     subject,
                     cause: cause.to_string(),
@@ -295,7 +295,7 @@ impl KeptRaises {
                 cause,
                 exception,
             } => {
-                self.keep_exception(exception);
+                self.keep_exception(*exception);
                 ChildSpecUnavailable::Raised {
                     subject,
                     cause: cause.to_string(),
@@ -439,7 +439,9 @@ mod tests {
                 exception_type: "SerializationError".to_owned(),
                 message: "Corrupt task_options for root node".to_owned(),
             },
-            exception: pyo3::exceptions::PyValueError::new_err("Corrupt task_options"),
+            exception: Box::new(pyo3::exceptions::PyValueError::new_err(
+                "Corrupt task_options",
+            )),
         }
     }
 
@@ -492,7 +494,7 @@ mod tests {
                 exception_type: "KeyboardInterrupt".to_owned(),
                 message: String::new(),
             },
-            exception: pyo3::exceptions::PyKeyboardInterrupt::new_err(()),
+            exception: Box::new(pyo3::exceptions::PyKeyboardInterrupt::new_err(())),
         });
 
         assert!(matches!(answer, ChildSpecUnavailable::Interrupted { .. }));
@@ -517,9 +519,8 @@ mod tests {
                 Ok(PythonAnswer::Refused(_))
             ));
             let text = "spec".into_pyobject(py).expect("a str");
-            let error = match python_answer(text.as_any()) {
-                Err(error) => error,
-                Ok(_) => panic!("a str is no answer"),
+            let Err(error) = python_answer(text.as_any()) else {
+                panic!("a str is no answer");
             };
             assert!(error.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
         });

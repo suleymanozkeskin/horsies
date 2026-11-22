@@ -41,7 +41,7 @@ fn unreachable_scheduler(plan: ActivePlan, stop: &SchedulerStop) -> ActiveSchedu
 /// statement. The pool cannot connect, so a statement would fail the tick.
 #[tokio::test]
 async fn a_tick_with_no_enabled_schedule_sends_no_statement() {
-    let plan = active_plan(manifest_of_entries(vec![disabled_entry("paused_only")]));
+    let plan = active_plan(manifest_of_entries(&[disabled_entry("paused_only")]));
     assert!(plan.schedules.is_empty());
     let core = crate::broker::pools::core_pool_for_test_url(unreachable_pool().url());
     let mut cadence = ExistenceCheckCadence::new(plan.check_interval_seconds);

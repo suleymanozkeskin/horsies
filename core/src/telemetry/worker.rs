@@ -48,6 +48,7 @@ mod snapshot_points;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
 pub(crate) use end_points::EndNoted;
 
 /// The most events that wait in the event queue of a worker. An offer to a

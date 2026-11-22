@@ -52,7 +52,7 @@ fn held(status: HeldStatus, queue: &str, execution: Execution, count: u64) -> He
 
 /// One entry of the workers statement's `live` part, on queue `a`, with 4
 /// processes.
-fn live_entry(worker_id: &str, class_capacity: Value, slots_down: Value) -> Value {
+fn live_entry(worker_id: &str, class_capacity: &Value, slots_down: &Value) -> Value {
     json!({
         "worker_id": worker_id,
         "snapshot_at": "2026-11-19T11:59:50+00:00",
@@ -263,8 +263,8 @@ fn workers_count_by_slot_health_and_sum_seats_per_budget_class() {
     let w2_budgets = json!({"ISOLATED": {"capacity": 2, "serves": ["ISOLATED"]}});
     let row = workers_part(
         vec![
-            live_entry("w1", w1_budgets, json!([])),
-            live_entry("w2", w2_budgets, one_slot_down()),
+            live_entry("w1", &w1_budgets, &json!([])),
+            live_entry("w2", &w2_budgets, &one_slot_down()),
         ],
         json!([
             ["w1", "ISOLATED", 3],
@@ -311,9 +311,9 @@ fn the_workers_part_holds_the_live_workers_whose_telemetry_part_is_down() {
         handler_child_down: 1,
         ..workers_part(
             vec![
-                live_entry("w1", budgets.clone(), json!([])),
-                live_entry("w2", budgets.clone(), json!([])),
-                live_entry("w3", budgets, json!([])),
+                live_entry("w1", &budgets, &json!([])),
+                live_entry("w2", &budgets, &json!([])),
+                live_entry("w3", &budgets, &json!([])),
             ],
             json!([]),
         )
@@ -357,7 +357,7 @@ fn no_live_worker_gives_zero_workers_and_zero_seats() {
 fn an_unreadable_slots_down_refuses_the_workers_part_and_names_the_worker() {
     let budgets = json!({"ISOLATED": {"capacity": 4, "serves": ["ISOLATED"]}});
     let row = workers_part(
-        vec![live_entry("w-odd", budgets, json!({"slot": 1}))],
+        vec![live_entry("w-odd", &budgets, &json!({"slot": 1}))],
         json!([]),
     );
 
@@ -372,7 +372,7 @@ fn an_unreadable_slots_down_refuses_the_workers_part_and_names_the_worker() {
 #[test]
 fn an_unreadable_class_capacity_refuses_the_workers_part_and_names_the_worker() {
     let odd = json!({"EXCLUSIVE": {"capacity": 1, "serves": []}});
-    let row = workers_part(vec![live_entry("w-odd", odd, json!([]))], json!([]));
+    let row = workers_part(vec![live_entry("w-odd", &odd, &json!([]))], json!([]));
 
     let refusal = fleet_workers(row).expect_err("an unknown budget class");
 
@@ -405,7 +405,7 @@ fn snapshots_past_the_bound_refuse_the_workers_part() {
 fn held_rows_of_a_class_no_budget_serves_refuse_the_workers_part() {
     let budgets = json!({"SHARED_ASYNC": {"capacity": 40, "serves": ["SHARED_ASYNC"]}});
     let row = workers_part(
-        vec![live_entry("w1", budgets, json!([]))],
+        vec![live_entry("w1", &budgets, &json!([]))],
         json!([["w1", "ISOLATED", 1]]),
     );
 
@@ -421,9 +421,9 @@ fn seats_that_do_not_fit_in_64_bits_refuse_the_workers_part() {
     let huge = json!({"ISOLATED": {"capacity": i64::MAX, "serves": ["ISOLATED"]}});
     let row = workers_part(
         vec![
-            live_entry("w1", huge.clone(), json!([])),
-            live_entry("w2", huge.clone(), json!([])),
-            live_entry("w3", huge, json!([])),
+            live_entry("w1", &huge, &json!([])),
+            live_entry("w2", &huge, &json!([])),
+            live_entry("w3", &huge, &json!([])),
         ],
         json!([]),
     );

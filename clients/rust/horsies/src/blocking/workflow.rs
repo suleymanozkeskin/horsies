@@ -81,12 +81,12 @@ fn block_start<H>(
             retryable: true,
             workflow_name: names.workflow_name.to_owned(),
             workflow_id,
-            cause: WorkflowError::Broker(BrokerError::ProcessRuntime(
+            cause: Box::new(WorkflowError::Broker(BrokerError::ProcessRuntime(
                 ProcessRuntimeRefusal::StartFailed {
                     cause: failed.cause,
                     os_error: failed.os_error,
                 },
-            )),
+            ))),
         }),
     }
 }
@@ -322,32 +322,36 @@ impl<T> WorkflowHandle<T> {
 impl<T> WorkflowHandleView<'_, T> {
     /// `WorkflowHandle::status`, blocking.
     pub fn status(&self) -> HandleResult<WorkflowStatus> {
-        self.block_handle(self.handle.status(), "status()", HandleOperation::Status)
+        self.block_handle(self.handle.status(), "status()", &HandleOperation::Status)
     }
 
     /// `WorkflowHandle::results`, blocking.
     pub fn results(&self) -> HandleResult<BTreeMap<String, NodeResult>> {
-        self.block_handle(self.handle.results(), "results()", HandleOperation::Results)
+        self.block_handle(
+            self.handle.results(),
+            "results()",
+            &HandleOperation::Results,
+        )
     }
 
     /// `WorkflowHandle::tasks`, blocking.
     pub fn tasks(&self) -> HandleResult<Vec<WorkflowNodeInfo>> {
-        self.block_handle(self.handle.tasks(), "tasks()", HandleOperation::Tasks)
+        self.block_handle(self.handle.tasks(), "tasks()", &HandleOperation::Tasks)
     }
 
     /// `WorkflowHandle::cancel`, blocking.
     pub fn cancel(&self) -> HandleResult<()> {
-        self.block_handle(self.handle.cancel(), "cancel()", HandleOperation::Cancel)
+        self.block_handle(self.handle.cancel(), "cancel()", &HandleOperation::Cancel)
     }
 
     /// `WorkflowHandle::pause`, blocking.
     pub fn pause(&self) -> HandleResult<bool> {
-        self.block_handle(self.handle.pause(), "pause()", HandleOperation::Pause)
+        self.block_handle(self.handle.pause(), "pause()", &HandleOperation::Pause)
     }
 
     /// `WorkflowHandle::resume`, blocking.
     pub fn resume(&self) -> HandleResult<bool> {
-        self.block_handle(self.handle.resume(), "resume()", HandleOperation::Resume)
+        self.block_handle(self.handle.resume(), "resume()", &HandleOperation::Resume)
     }
 
     /// `WorkflowHandle::result_for`, blocking. Not a wait: it runs in a
@@ -375,7 +379,7 @@ impl<T> WorkflowHandleView<'_, T> {
         &self,
         call: impl Future<Output = HandleResult<V>>,
         method: &str,
-        operation: HandleOperation,
+        operation: &HandleOperation,
     ) -> HandleResult<V> {
         let workflow_id = self.handle.workflow_id();
         match place(format_args!(

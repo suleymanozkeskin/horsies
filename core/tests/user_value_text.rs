@@ -1081,9 +1081,10 @@ impl<'k> FileScan<'k> {
         let statement = &tokens[start + 1..end];
         let colon = (0..statement.len()).find(|index| is_single_colon(statement, *index));
         let equals = (0..statement.len()).find(|index| {
+            let after_joint_punct =
+                *index > 0 && matches!(&statement[*index - 1], Token::Punct { joint: true, .. });
             is_punct(statement.get(*index), '=')
-                && !(*index > 0
-                    && matches!(&statement[*index - 1], Token::Punct { joint: true, .. }))
+                && !after_joint_punct
                 && !is_punct(statement.get(index + 1), '=')
                 && !is_punct(statement.get(index + 1), '>')
         });

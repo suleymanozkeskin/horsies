@@ -781,7 +781,10 @@ impl CorePool {
                     waited: started.elapsed(),
                 }
             }
-            PoolError::Backend(cause) => CheckoutFailure::ConnectFailed { role, cause },
+            PoolError::Backend(cause) => CheckoutFailure::ConnectFailed {
+                role,
+                cause: Box::new(cause),
+            },
             PoolError::Closed => CheckoutFailure::PoolClosed { role },
             PoolError::NoRuntimeSpecified => {
                 unreachable!("the {role} pool was built with the tokio runtime")
@@ -1014,10 +1017,13 @@ impl PooledConnection {
             (Stage::Prepare | Stage::Run, Some(error), Some(ErrorScope::Statement)) => {
                 let cause = match (cancel, error.code() == &SqlState::QUERY_CANCELED) {
                     (CancelContext::CancelledAfter(bound), true) => {
-                        RefusalCause::CancelledAfterBound { bound, error }
+                        RefusalCause::CancelledAfterBound {
+                            bound,
+                            error: Box::new(error),
+                        }
                     }
                     (CancelContext::CancelledAfter(_) | CancelContext::NotCancelled, _) => {
-                        RefusalCause::Server(error)
+                        RefusalCause::Server(Box::new(error))
                     }
                 };
                 StatementFailure::StatementRefused { statement, cause }
@@ -1033,7 +1039,7 @@ impl PooledConnection {
                 self.discard();
                 StatementFailure::OutcomeUnknown {
                     statement,
-                    cause: UnknownOutcomeCause::SessionTerminated(error),
+                    cause: UnknownOutcomeCause::SessionTerminated(Box::new(error)),
                 }
             }
             (Stage::Run, _, _) => {

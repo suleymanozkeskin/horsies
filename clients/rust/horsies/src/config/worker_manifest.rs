@@ -929,14 +929,14 @@ mod tests {
             ),
             (
                 Box::new(|config: &mut AppConfig| {
-                    config.recovery.check_interval_ms = 4_000_000_000_000
+                    config.recovery.check_interval_ms = 4_000_000_000_000;
                 }),
                 "recovery.check_interval_ms",
                 Some("4000000000000"),
             ),
             (
                 Box::new(|config: &mut AppConfig| {
-                    config.retention.retention_delete_batch_size = 4_000_000
+                    config.retention.retention_delete_batch_size = 4_000_000;
                 }),
                 "retention.retention_delete_batch_size",
                 Some("4000000"),
@@ -950,7 +950,7 @@ mod tests {
             ),
             (
                 Box::new(|config: &mut AppConfig| {
-                    config.resilience.notify_poll_interval_ms = 4_000_000_000_000
+                    config.resilience.notify_poll_interval_ms = 4_000_000_000_000;
                 }),
                 "resilience.notify_poll_interval_ms",
                 Some("4000000000000"),

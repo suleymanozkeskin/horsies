@@ -28,7 +28,7 @@ const WORKER_ID: &str = "w1";
 const TASK_NAME: &str = "p1_task";
 
 /// A child context on `pool`; its frames go to a socket no one reads.
-fn context(pool: TestPool) -> (HostContext, UnixStream) {
+fn context(pool: &TestPool) -> (HostContext, UnixStream) {
     let (ours, theirs) = UnixStream::pair().expect("a socket pair");
     let writer = FrameWriter::start(ours, 16).expect("the frame writer starts");
     let context = HostContext {
@@ -196,7 +196,7 @@ async fn workflow_task_still_transitions_node_to_running() {
     )
     .await;
     let claimed_at = seed_claimed(&pool, task_id, true).await;
-    let (context, _peer) = context(pool.clone());
+    let (context, _peer) = context(&pool);
 
     let started = start_attempt(&context, &facts(task_id, claimed_at)).await;
 
@@ -256,7 +256,7 @@ async fn running_replay_preserves_the_first_node_start() {
             .fetch_one(&pool)
             .await
             .expect("read the node tuple");
-    let (context, _peer) = context(pool.clone());
+    let (context, _peer) = context(&pool);
 
     let started = start_attempt(&context, &facts(task_id, claimed_at)).await;
 
@@ -287,7 +287,7 @@ async fn plain_task_starts_running_without_workflow_update() {
     let pool = crate::test_support::migrated_pool().await;
     let task_id = Uuid::new_v4();
     let claimed_at = seed_claimed(&pool, task_id, false).await;
-    let (context, _peer) = context(pool.clone());
+    let (context, _peer) = context(&pool);
 
     let started = start_attempt(&context, &facts(task_id, claimed_at)).await;
 
@@ -329,7 +329,7 @@ async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
             seed_node(&pool, node_id, workflow_id, task_id, status, started_at).await;
         }
         let claimed_at = seed_claimed(&pool, task_id, true).await;
-        let (context, _peer) = context(pool.clone());
+        let (context, _peer) = context(&pool);
 
         let started = start_attempt(&context, &facts(task_id, claimed_at)).await;
         let outcome = match started {
@@ -385,7 +385,7 @@ async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
         .execute(&mut *held)
         .await
         .expect("update the node");
-    let (context, _peer) = context(pool.clone());
+    let (context, _peer) = context(&pool);
     let handoff =
         tokio::spawn(async move { start_attempt(&context, &facts(task_id, claimed_at)).await });
     let mut waited = false;
@@ -429,7 +429,7 @@ async fn an_unlinked_task_is_cancelled_in_the_child_when_the_self_heal_is_on() {
     let pool = crate::test_support::migrated_pool().await;
     let task_id = Uuid::new_v4();
     let claimed_at = seed_claimed(&pool, task_id, true).await;
-    let (context, _peer) = context(pool.clone());
+    let (context, _peer) = context(&pool);
 
     let started = start_attempt(
         &context,
@@ -461,7 +461,7 @@ async fn an_unlinked_task_stays_claimed_when_the_self_heal_is_off() {
     let pool = crate::test_support::migrated_pool().await;
     let task_id = Uuid::new_v4();
     let claimed_at = seed_claimed(&pool, task_id, true).await;
-    let (context, _peer) = context(pool.clone());
+    let (context, _peer) = context(&pool);
 
     let started = start_attempt(
         &context,

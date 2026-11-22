@@ -36,7 +36,7 @@ use tokio_util::task::{task_tracker::TaskTrackerToken, TaskTracker};
 use crate::core::PostgresConfig;
 use crate::db::{
     parse_connection_url, ConnectPlan, ConnectPlanError, ConnectionAge, ConnectionEnvironment,
-    CorePool, EnvironmentError, IdlePing, KeptOpen, MaskedUrl, PoolPlan, PoolRole, PoolSizing,
+    CorePool, EnvironmentError, IdlePing, KeptOpen, PoolPlan, PoolRole, PoolSizing,
     PoolSizingError, Reserve, SocketSettings, StatementProtocol, UrlError, DEFAULT_IDLE_PING_AFTER,
     WORKER_RESERVED_CONNECTIONS,
 };
@@ -69,16 +69,12 @@ pub(crate) enum SessionPool {
     /// work uses the main pool.
     SameAsMain,
     /// A pool of its own on `session_database_url`.
-    Separate {
-        pool: CorePool,
-        masked_url: MaskedUrl,
-    },
+    Separate { pool: CorePool },
 }
 
 /// The core pools of one broker.
 pub(crate) struct BrokerPools {
     main: CorePool,
-    main_url: MaskedUrl,
     session: SessionPool,
 }
 
@@ -125,7 +121,7 @@ impl BrokerPools {
     ) -> Result<BrokerPools, PoolSettingsError> {
         let socket = config.socket_settings();
         let main_shape = main_pool_shape(profile);
-        let (main, main_url) = open_pool(
+        let main = open_pool(
             &config.database_url,
             main_pool_plan(config, profile).map_err(|cause| PoolSettingsError::Sizing {
                 role: main_shape.role,
@@ -138,7 +134,7 @@ impl BrokerPools {
         let session = match session_url == config.database_url {
             true => SessionPool::SameAsMain,
             false => {
-                let (pool, masked_url) = open_pool(
+                let pool = open_pool(
                     session_url,
                     pool_plan(
                         config,
@@ -153,14 +149,10 @@ impl BrokerPools {
                     environment,
                     &socket,
                 )?;
-                SessionPool::Separate { pool, masked_url }
+                SessionPool::Separate { pool }
             }
         };
-        Ok(BrokerPools {
-            main,
-            main_url,
-            session,
-        })
+        Ok(BrokerPools { main, session })
     }
 
     /// The pool on `database_url`.
@@ -185,12 +177,10 @@ impl BrokerPools {
     }
 
     /// The session URL with its password masked (the main URL when both are
-    /// the same).
-    pub(crate) fn session_masked_url(&self) -> &MaskedUrl {
-        match &self.session {
-            SessionPool::SameAsMain => &self.main_url,
-            SessionPool::Separate { masked_url, .. } => masked_url,
-        }
+    /// the same), from the connection plan of the session work pool.
+    #[cfg(test)]
+    pub(crate) fn session_masked_url(&self) -> &crate::db::MaskedUrl {
+        self.session_work().connect_plan().masked_url()
     }
 
     /// Closes every pool: later checkouts fail with `PoolClosed`. Checked-out
@@ -300,7 +290,7 @@ impl CoreHandle {
     /// reopen; the handle stays `Idle`.
     pub(crate) fn pools(&self) -> Result<Arc<OpenPools>, PoolSettingsError> {
         let mut state = self.lock_state();
-        self.open_in(&mut *state)
+        self.open_in(&mut state)
     }
 
     /// The open pools for a write, and the token that keeps the write in
@@ -311,7 +301,7 @@ impl CoreHandle {
         &self,
     ) -> Result<(Arc<OpenPools>, WriteInFlight), PoolSettingsError> {
         let mut state = self.lock_state();
-        let open = self.open_in(&mut *state)?;
+        let open = self.open_in(&mut state)?;
         let write = WriteInFlight {
             _token: open.writes.token(),
         };
@@ -463,22 +453,19 @@ fn connection_age(recycle: PoolRecycle) -> ConnectionAge {
 }
 
 /// Parses one URL, loads its connection plan with `socket` and builds the
-/// pool. Returns the pool and its URL with the password masked.
+/// pool.
 fn open_pool(
     url: &str,
     plan: PoolPlan,
     environment: &ConnectionEnvironment,
     socket: &SocketSettings,
-) -> Result<(CorePool, MaskedUrl), PoolSettingsError> {
+) -> Result<CorePool, PoolSettingsError> {
     let role = plan.role;
     let settings = parse_connection_url(url, environment)
         .map_err(|cause| PoolSettingsError::Url { role, cause })?;
     let connect = ConnectPlan::load(&settings, environment, socket)
         .map_err(|cause| PoolSettingsError::Plan { role, cause })?;
-    Ok((
-        CorePool::new(plan, Arc::new(connect)),
-        settings.masked_url().clone(),
-    ))
+    Ok(CorePool::new(plan, Arc::new(connect)))
 }
 
 /// The core handle (producer pools) on the test database of `url`, for
@@ -508,14 +495,13 @@ pub(crate) fn core_pool_for_test_url(url: &str) -> CorePool {
         runtime_protocol(&config),
     )
     .expect("the size of a test pool is accepted by the statement layer");
-    let (core_pool, _masked_url) = open_pool(
+    open_pool(
         &config.database_url,
         plan,
         &ConnectionEnvironment::isolated(),
         &config.socket_settings(),
     )
-    .expect("the URL of a test pool is accepted by the statement layer");
-    core_pool
+    .expect("the URL of a test pool is accepted by the statement layer")
 }
 
 /// A worker profile core pool of `size` connections on the test database of
@@ -534,14 +520,13 @@ pub(crate) fn worker_core_pool_for_test_url(url: &str, size: u32) -> CorePool {
         runtime_protocol(&config),
     )
     .expect("a test worker pool is larger than its reserve");
-    let (core_pool, _masked_url) = open_pool(
+    open_pool(
         &config.database_url,
         plan,
         &ConnectionEnvironment::isolated(),
         &config.socket_settings(),
     )
-    .expect("the URL of a test pool is accepted by the statement layer");
-    core_pool
+    .expect("the URL of a test pool is accepted by the statement layer")
 }
 
 /// A session pool of `size` connections on the test database of `url`: no
@@ -559,14 +544,13 @@ pub(crate) fn session_core_pool_for_test_url(url: &str, size: u32) -> CorePool {
         StatementProtocol::PreparedPerConnection,
     )
     .expect("a test session pool has at least one connection");
-    let (core_pool, _masked_url) = open_pool(
+    open_pool(
         &config.database_url,
         plan,
         &ConnectionEnvironment::isolated(),
         &config.socket_settings(),
     )
-    .expect("the URL of a test pool is accepted by the statement layer");
-    core_pool
+    .expect("the URL of a test pool is accepted by the statement layer")
 }
 
 /// The checkout wait of [`unpinged_single_connection_core_pool_for_url`].
@@ -589,14 +573,13 @@ pub(crate) fn unpinged_single_connection_core_pool_for_url(url: &str) -> CorePoo
         max_age: ConnectionAge::Unlimited,
         protocol: StatementProtocol::PreparedPerConnection,
     };
-    let (core_pool, _masked_url) = open_pool(
+    open_pool(
         url,
         plan,
         &ConnectionEnvironment::isolated(),
         &crate::db::DEFAULT_SOCKET_SETTINGS,
     )
-    .expect("the URL of a test pool is accepted by the statement layer");
-    core_pool
+    .expect("the URL of a test pool is accepted by the statement layer")
 }
 
 #[cfg(test)]

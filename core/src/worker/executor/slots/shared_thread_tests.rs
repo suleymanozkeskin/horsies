@@ -59,7 +59,7 @@ fn children(dir: &TestDir, seats: u64, actions: &[(&ClaimedTask, String)], runs:
     )
 }
 
-fn logged(dir: &TestDir, task: &ClaimedTask, action: String) -> String {
+fn logged(dir: &TestDir, task: &ClaimedTask, action: &str) -> String {
     format!(
         r#"echo "$n {}" >> "{}"; {action}"#,
         task.task_id,
@@ -207,7 +207,7 @@ async fn thread_tasks_spread_over_the_open_children_by_their_runs() {
                 "sleep 0.3; {}",
                 send(&[shared_result(run_ref(task, u64::from(value)), value)])
             );
-            (task, logged(&dir, task, answer))
+            (task, logged(&dir, task, &answer))
         })
         .collect();
     let script = children(&dir, 3, &actions, 2);
@@ -322,7 +322,7 @@ async fn a_thread_child_closes_after_its_tasks_per_seat() {
         .zip(1_u32..)
         .map(|(task, value)| {
             let answer = send(&[shared_result(run_ref(task, u64::from(value)), value)]);
-            (task, logged(&dir, task, answer))
+            (task, logged(&dir, task, &answer))
         })
         .collect();
     let script = children(&dir, 2, &actions, 2);
@@ -365,7 +365,7 @@ async fn a_thread_child_above_its_memory_limit_is_replaced() {
                 value,
                 rss,
             )]);
-            (task, logged(&dir, task, answer))
+            (task, logged(&dir, task, &answer))
         })
         .collect();
     let script = children(&dir, 2, &actions, 1);

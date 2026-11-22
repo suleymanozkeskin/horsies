@@ -149,12 +149,12 @@ fn tag_constant(schema: &Value) -> Option<&str> {
     }
 }
 
+/// The tag of a tagged enum schema and its variants, by tag value.
+type UnionVariants = (String, BTreeMap<String, (String, Value)>);
+
 /// The tag and the variants of a tagged enum schema (`oneOf` of objects
 /// that share one property with a constant). `None` for another schema.
-fn union_variants(
-    owner: &str,
-    schema: &Value,
-) -> Option<(String, BTreeMap<String, (String, Value)>)> {
+fn union_variants(owner: &str, schema: &Value) -> Option<UnionVariants> {
     let members = schema.get("oneOf")?.as_array()?;
     let mut tag: Option<String> = None;
     let mut variants = BTreeMap::new();
@@ -211,7 +211,7 @@ impl Comparison {
         }
     }
 
-    fn mismatch(&mut self, owner: &str, field: &str, cause: String) {
+    fn mismatch(&mut self, owner: &str, field: &str, cause: &str) {
         self.mismatches.push(format!("{owner}.{field}: {cause}"));
     }
 
@@ -334,7 +334,7 @@ impl Comparison {
             return self.mismatch(
                 owner,
                 "*",
-                format!("the contract is not an object: {contract}"),
+                &format!("the contract is not an object: {contract}"),
             );
         };
         let actual: BTreeMap<String, Value> = self
@@ -345,10 +345,10 @@ impl Comparison {
         let actual_names: BTreeSet<&str> = actual.keys().map(String::as_str).collect();
         let expected_names: BTreeSet<&str> = expected.keys().map(String::as_str).collect();
         for missing in expected_names.difference(&actual_names) {
-            self.mismatch(owner, missing, "in Pydantic, not in Rust".to_owned());
+            self.mismatch(owner, missing, "in Pydantic, not in Rust");
         }
         for extra in actual_names.difference(&expected_names) {
-            self.mismatch(owner, extra, "in Rust, not in Pydantic".to_owned());
+            self.mismatch(owner, extra, "in Rust, not in Pydantic");
         }
         for (name, field) in &actual {
             if let Some(kind) = expected.get(name) {
@@ -366,17 +366,17 @@ impl Comparison {
         if let Some(inner) = contract.get("nullable") {
             return match actual {
                 RustKind::Nullable(rust_inner) => {
-                    self.kind(owner, field, &rust_inner, inner, depth + 1)
+                    self.kind(owner, field, &rust_inner, inner, depth + 1);
                 }
                 _ if self.allows(owner, field, CompatibleDifference::RequiredIntoOptional) => {
-                    self.kind(owner, field, schema, inner, depth + 1)
+                    self.kind(owner, field, schema, inner, depth + 1);
                 }
-                _ => self.mismatch(owner, field, "nullable in Pydantic, not in Rust".to_owned()),
+                _ => self.mismatch(owner, field, "nullable in Pydantic, not in Rust"),
             };
         }
         match (actual, contract) {
             (RustKind::Nullable(_), _) => {
-                self.mismatch(owner, field, "nullable in Rust, not in Pydantic".to_owned());
+                self.mismatch(owner, field, "nullable in Rust, not in Pydantic");
             }
             (RustKind::Text, Value::String(kind)) if kind == "string" => {}
             (RustKind::DateTime, Value::String(kind)) if kind == "date-time" => {}
@@ -407,7 +407,7 @@ impl Comparison {
                     self.mismatch(
                         owner,
                         field,
-                        format!("enum {values:?} in Rust, {} in Pydantic", object["enum"]),
+                        &format!("enum {values:?} in Rust, {} in Pydantic", object["enum"]),
                     );
                 }
             }
@@ -425,7 +425,7 @@ impl Comparison {
                 self.mismatch(
                     owner,
                     field,
-                    format!("{actual:?} in Rust, {expected} in Pydantic"),
+                    &format!("{actual:?} in Rust, {expected} in Pydantic"),
                 );
             }
         }
@@ -444,11 +444,15 @@ impl Comparison {
             return self.mismatch(
                 owner,
                 field,
-                format!("tag {tag} in Rust, {contract} in Pydantic"),
+                &format!("tag {tag} in Rust, {contract} in Pydantic"),
             );
         }
         let Some(expected) = contract.get("variants").and_then(Value::as_object) else {
-            return self.mismatch(owner, field, format!("no variants in Pydantic: {contract}"));
+            return self.mismatch(
+                owner,
+                field,
+                &format!("no variants in Pydantic: {contract}"),
+            );
         };
         let actual_values: BTreeSet<&str> = variants.keys().map(String::as_str).collect();
         let expected_values: BTreeSet<&str> = expected.keys().map(String::as_str).collect();
@@ -456,7 +460,7 @@ impl Comparison {
             return self.mismatch(
                 owner,
                 field,
-                format!("variants {actual_values:?} in Rust, {expected_values:?} in Pydantic"),
+                &format!("variants {actual_values:?} in Rust, {expected_values:?} in Pydantic"),
             );
         }
         for (value, (variant_owner, variant)) in variants {

@@ -436,10 +436,9 @@ impl StartedSpans {
             StartedSpans::Off => return EndedSpanStep::SpansOff,
             StartedSpans::On(reader) => reader,
         };
-        let ended = match event {
-            Event::AttemptEnded(ended) => ended,
-            // Every other event type of the union.
-            _ => return EndedSpanStep::NotEndedByWorker,
+        // Every other event type of the union is not an end by the worker.
+        let Event::AttemptEnded(ended) = event else {
+            return EndedSpanStep::NotEndedByWorker;
         };
         let Some(facts) = DecidedFacts::of(&ended.end) else {
             return EndedSpanStep::NotEndedByWorker;

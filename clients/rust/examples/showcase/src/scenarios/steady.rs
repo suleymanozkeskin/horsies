@@ -253,10 +253,10 @@ pub async fn run(max_orders: Option<usize>, cover_errors: bool, pace: f64) -> Sc
         }
         let order = place_and_start(&store, &catalog, &showcase.tasks, &showcase.workflows).await?;
         placed += 1;
-        if placed % tuning::RETURN_SPAWN_EVERY == 0 {
+        if placed.is_multiple_of(tuning::RETURN_SPAWN_EVERY) {
             spawn_return(&store, &showcase.workflows, &order).await?;
         }
-        if placed % tuning::RESTOCK_SPAWN_EVERY == 0 {
+        if placed.is_multiple_of(tuning::RESTOCK_SPAWN_EVERY) {
             spawn_restock(&showcase.workflows).await?;
         }
         if max_orders.is_none() {

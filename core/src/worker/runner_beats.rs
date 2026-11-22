@@ -139,6 +139,14 @@ pub enum DispatchRunner {
     Child(HeldChild),
     /// The worker process itself: the in-process runner of the worker loop.
     /// Only the end of the process stops its task code.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no production runner holds a dispatch in the worker process; the \
+                      fail-closed tests hold one, and the fail-closed exit keeps its arm"
+        )
+    )]
     WorkerProcess,
 }
 
@@ -1036,7 +1044,7 @@ fn read_kill_answers(mut pending: Vec<(ChildToKill, oneshot::Receiver<KillOutcom
             match answer.try_recv() {
                 Ok(outcome) => log_kill(&to_kill, outcome),
                 Err(oneshot::error::TryRecvError::Closed) => {
-                    log_kill(&to_kill, KillOutcome::SpawnerStopped)
+                    log_kill(&to_kill, KillOutcome::SpawnerStopped);
                 }
                 Err(oneshot::error::TryRecvError::Empty) => waiting.push((to_kill, answer)),
             }

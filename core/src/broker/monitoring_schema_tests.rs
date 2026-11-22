@@ -371,7 +371,7 @@ async fn a_start_sends_no_status_event() {
         .expect("change status");
         match sends_event {
             true => {
-                assert_notification(&mut listener, TASK_STATUS_CHANNEL, &task_id.to_string()).await
+                assert_notification(&mut listener, TASK_STATUS_CHANNEL, &task_id.to_string()).await;
             }
             false => assert!(
                 timeout(Duration::from_millis(250), listener.recv())

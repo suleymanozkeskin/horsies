@@ -533,14 +533,14 @@ impl MonitoringHandler {
         handle: &Bound<'_, CoreHandle>,
         actions_enabled: bool,
         custom_css_url: Option<String>,
-        trace_link_template: Option<String>,
+        trace_link_template: Option<&str>,
         client_version: String,
         heartbeat_ms: u64,
         queue_names: Vec<String>,
         schedule_names: Vec<String>,
     ) -> PyResult<Self> {
         let heartbeat = heartbeat_of(heartbeat_ms).map_err(PyValueError::new_err)?;
-        let trace_link = trace_link_of(trace_link_template.as_deref())
+        let trace_link = trace_link_of(trace_link_template)
             .map_err(|refused| PyValueError::new_err(refused.to_string()))?;
         let Folded {
             declared: fleet_labels,

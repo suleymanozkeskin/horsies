@@ -161,13 +161,6 @@ pub struct ReadResult {
     write: PhaseOneWrite,
 }
 
-impl ReadResult {
-    /// How the result envelope reads.
-    pub fn read(&self) -> &ResultRead {
-        &self.read
-    }
-}
-
 /// One attempt end whose result envelope, when the child reported one, is
 /// read once ([`OutcomeWriter::read_end`]). Each variant is the end of
 /// [`AttemptEnd`] of the same name; `start` is the start that the child

@@ -46,6 +46,11 @@ pub fn sub_int_ok(value: i64) -> Result<i64, TaskError<WfCode>> {
 
 /// Python `e2e_sub_int_fail`: fails with the code named `error_code`.
 #[blocking_task("e2e_sub_int_fail")]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the parameters of a task are its wire contract: the task attribute decodes each \
+              input as an owned value"
+)]
 pub fn sub_int_fail(error_code: String) -> Result<i64, TaskError<WfCode>> {
     node_run();
     Err(TaskError::user(
@@ -56,6 +61,11 @@ pub fn sub_int_fail(error_code: String) -> Result<i64, TaskError<WfCode>> {
 
 /// Python `e2e_sub_report_input`: what `build_with` saw of its input.
 #[blocking_task("e2e_sub_report_input")]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the parameters of a task are its wire contract: the task attribute decodes each \
+              input as an owned value"
+)]
 pub fn sub_report_input(
     input_is_err: bool,
     input_error_code: Option<String>,
@@ -71,6 +81,11 @@ pub fn sub_report_input(
 
 /// Python `e2e_sub_pet_report`: what `build_with` saw of its typed param.
 #[blocking_task("e2e_sub_pet_report")]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the parameters of a task are its wire contract: the task attribute decodes each \
+              input as an owned value"
+)]
 pub fn sub_pet_report(
     saw_dog_at_build: bool,
     type_name_at_build: String,

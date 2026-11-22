@@ -70,7 +70,10 @@ fn running_workflow_task() -> TaskSeed {
 fn database_error(result: Result<Vec<TerminalizationOutcome>, InTransactionError>) -> sql::Error {
     match result {
         Err(InTransactionError::Database(error)) => error,
-        other => panic!("expected a database error, got {other:?}"),
+        Err(InTransactionError::Contract(error)) => {
+            panic!("expected a database error, got Err(Contract({error:?}))")
+        }
+        Ok(outcomes) => panic!("expected a database error, got Ok({outcomes:?})"),
     }
 }
 

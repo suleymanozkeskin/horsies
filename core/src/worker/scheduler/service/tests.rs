@@ -377,7 +377,7 @@ fn disabled_entry(name: &str) -> serde_json::Value {
 
 /// A manifest with the master switch on, a tick of one second and
 /// `entries` in order.
-fn manifest_of_entries(entries: Vec<serde_json::Value>) -> SchedulerManifest {
+fn manifest_of_entries(entries: &[serde_json::Value]) -> SchedulerManifest {
     let document = json!({
         "manifest_version": 1,
         "enabled": true,
@@ -390,7 +390,12 @@ fn manifest_of_entries(entries: Vec<serde_json::Value>) -> SchedulerManifest {
 
 /// The manifest of the enabled `schedules`.
 fn manifest_for(schedules: &[TestSchedule]) -> SchedulerManifest {
-    manifest_of_entries(schedules.iter().map(TestSchedule::entry).collect())
+    manifest_of_entries(
+        &schedules
+            .iter()
+            .map(TestSchedule::entry)
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// The start plan of `manifest`, as the start builds it before any
@@ -947,7 +952,7 @@ async fn ensure_states_exist_heals_missing_and_preserves_existing() {
     let missing = format!("qw123_missing_{}", Uuid::new_v4());
     let disabled = format!("qw123_disabled_{}", Uuid::new_v4());
 
-    let schedules = active_plan(manifest_of_entries(vec![
+    let schedules = active_plan(manifest_of_entries(&[
         interval_schedule_secs(&missing, 60).entry(),
         disabled_entry(&disabled),
     ]))

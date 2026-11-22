@@ -221,7 +221,7 @@ impl FleetMetricsServer {
             py,
             core,
             RUN_SUBJECT,
-            StopSignal::new(move || {
+            &StopSignal::new(move || {
                 let _was = signal.send_replace(true);
             }),
             run_operation(

@@ -183,7 +183,7 @@ pub(super) fn panic_error(task_name: &str, module: TaskModule, record: PanicReco
     error.data = Some(crate::core::codec::JsonText::of_engine_value(
         &serde_json::json!({ "exception_type": PANIC_TYPE_NAME }),
     ));
-    error.exception = Some(ExceptionRecord {
+    error.exception = Some(Box::new(ExceptionRecord {
         type_name: PANIC_TYPE_NAME.to_owned(),
         module: match module {
             TaskModule::Path(path) => path.to_owned(),
@@ -195,7 +195,7 @@ pub(super) fn panic_error(task_name: &str, module: TaskModule, record: PanicReco
             PanicBacktrace::Captured(text) => text,
             PanicBacktrace::NotCaptured => String::new(),
         },
-    });
+    }));
     error
 }
 
@@ -259,13 +259,13 @@ mod tests {
         );
         assert_eq!(
             error.exception,
-            Some(ExceptionRecord {
+            Some(Box::new(ExceptionRecord {
                 type_name: "panic".to_owned(),
                 module: "app::tasks".to_owned(),
                 message: "index out of bounds".to_owned(),
                 repr: "index out of bounds".to_owned(),
                 traceback: String::new(),
-            })
+            }))
         );
     }
 

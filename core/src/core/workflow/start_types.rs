@@ -127,7 +127,7 @@ pub enum WorkflowStartError {
         /// The failed connect, schema install, client family check,
         /// statement or child build.
         #[error_slot(cause)]
-        cause: WorkflowError,
+        cause: Box<WorkflowError>,
     },
     /// Sync ``start()`` or ``retry_start()`` was called on a thread that runs an event loop.
     ///
@@ -159,10 +159,16 @@ pub enum WorkflowStartError {
 pub enum StartRefusalCause {
     /// The error that refused the start.
     #[error(transparent)]
-    Error(#[from] WorkflowError),
+    Error(Box<WorkflowError>),
     /// A check refused the start; no error was raised.
     #[error("a check refused the start")]
     Check,
+}
+
+impl From<WorkflowError> for StartRefusalCause {
+    fn from(error: WorkflowError) -> Self {
+        Self::Error(Box::new(error))
+    }
 }
 
 impl StartRefusalCause {
@@ -206,7 +212,7 @@ impl WorkflowStartError {
             retryable: error.is_retryable(),
             workflow_name: workflow_name.to_owned(),
             workflow_id,
-            cause: error.into_workflow_error(),
+            cause: Box::new(error.into_workflow_error()),
         }
     }
 
@@ -382,7 +388,7 @@ mod tests {
             retryable: true,
             workflow_name: "my_pipeline".to_owned(),
             workflow_id,
-            cause: connection_lost(),
+            cause: Box::new(connection_lost()),
         };
         let s = format!("{}", err);
         assert!(s.contains("ENQUEUE_FAILED"));
@@ -403,9 +409,9 @@ mod tests {
                     message: "m".to_owned(),
                     workflow_name: name(),
                     workflow_id,
-                    cause: StartRefusalCause::Error(WorkflowError::InvalidStatus(
+                    cause: StartRefusalCause::Error(Box::new(WorkflowError::InvalidStatus(
                         "BOGUS".to_owned(),
-                    )),
+                    ))),
                 },
                 WorkflowStartErrorCode::ValidationFailed,
                 FailureCause::ContractViolation,
@@ -426,7 +432,7 @@ mod tests {
                     retryable: false,
                     workflow_name: name(),
                     workflow_id,
-                    cause: connection_lost(),
+                    cause: Box::new(connection_lost()),
                 },
                 WorkflowStartErrorCode::EnqueueFailed,
                 FailureCause::Connection,
@@ -461,7 +467,7 @@ mod tests {
             retryable: true,
             workflow_name: "test-wf".to_owned(),
             workflow_id,
-            cause: connection_lost(),
+            cause: Box::new(connection_lost()),
         };
         let result = validate_start_retry(&error, "test-wf");
         assert!(result.is_ok());
@@ -533,7 +539,7 @@ mod tests {
             retryable: true,
             workflow_name: "other-workflow".to_owned(),
             workflow_id: Uuid::new_v4(),
-            cause: connection_lost(),
+            cause: Box::new(connection_lost()),
         };
         let result = validate_start_retry(&error, "my-workflow");
         assert!(result.is_err());
@@ -725,8 +731,8 @@ mod tests {
             Some(SlotData::Exception(ExceptionValue::NoCause))
         );
         assert_eq!(by_check.failure_cause(), FailureCause::PreconditionFailed);
-        let by_error = refused(StartRefusalCause::Error(WorkflowError::Validation(
-            "unresolved queue".to_owned(),
+        let by_error = refused(StartRefusalCause::Error(Box::new(
+            WorkflowError::Validation("unresolved queue".to_owned()),
         )));
         assert_eq!(
             exception_of(&by_error),

@@ -108,7 +108,7 @@ fn paused_expiry_outcome(rows: Vec<Row>) -> Result<PausedExpiry, StepContractErr
 ///   `args_from` merge refuses, a built child spec that the tree arguments refuse); Python's resume lets
 ///   every exception other than a database error propagate.
 pub(crate) fn handle_operation_error(
-    operation: HandleOperation,
+    operation: &HandleOperation,
     error: WorkflowError,
     workflow_id: Uuid,
 ) -> HandleOperationError {
@@ -155,7 +155,7 @@ async fn admit_workflow_write(
         .ensure_client_family_for_write()
         .await
         .map_err(|error| {
-            handle_operation_error(operation, WorkflowError::Broker(error), workflow_id)
+            handle_operation_error(&operation, WorkflowError::Broker(error), workflow_id)
         })
 }
 
@@ -200,7 +200,7 @@ pub async fn cancel_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> Hand
         Ok(CancelOutcome::NotCancellable) => Ok(false),
         Ok(CancelOutcome::NotFound) => Err(HandleOperationError::not_found(workflow_id)),
         Err(error) => Err(handle_operation_error(
-            HandleOperation::Cancel,
+            &HandleOperation::Cancel,
             error,
             workflow_id,
         )),
@@ -373,7 +373,7 @@ pub async fn pause_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> Handl
         Ok(PauseOutcome::NotRunning) => Ok(false),
         Ok(PauseOutcome::NotFound) => Err(HandleOperationError::not_found(workflow_id)),
         Err(error) => Err(handle_operation_error(
-            HandleOperation::Pause,
+            &HandleOperation::Pause,
             error,
             workflow_id,
         )),
@@ -440,7 +440,7 @@ impl ResumeFailure {
     pub(crate) fn into_handle_error(self, workflow_id: Uuid) -> HandleOperationError {
         match self {
             Self::Step(error) => {
-                handle_operation_error(HandleOperation::Resume, error, workflow_id)
+                handle_operation_error(&HandleOperation::Resume, error, workflow_id)
             }
             Self::Handle(error) => error,
         }
@@ -482,10 +482,10 @@ pub(crate) async fn resume_with(
     .map_err(|failure| {
         ResumeFailure::Handle(resume_recovery_failed(
             workflow_id,
-            AfterResumeCommit::ParentAdvance {
+            &AfterResumeCommit::ParentAdvance {
                 child_workflow_id: failure.failed_child_workflow_id,
             },
-            failure.error,
+            *failure.error,
         ))
     })?;
     // Recovery completion pass: a child workflow may have COMPLETED while the parent was paused, leaving the
@@ -500,7 +500,7 @@ pub(crate) async fn resume_with(
     .map_err(|error| {
         ResumeFailure::Handle(resume_recovery_failed(
             workflow_id,
-            AfterResumeCommit::TreeRecovery,
+            &AfterResumeCommit::TreeRecovery,
             error,
         ))
     })?;
@@ -521,7 +521,7 @@ enum AfterResumeCommit {
 /// the exception of the client has the error's own text. Pure.
 fn resume_recovery_failed(
     workflow_id: Uuid,
-    failed: AfterResumeCommit,
+    failed: &AfterResumeCommit,
     error: WorkflowError,
 ) -> HandleOperationError {
     let message = match failed {
@@ -1679,7 +1679,7 @@ mod cancel_tree_tests {
     fn handle_errors_follow_the_python_catalog() {
         let workflow_id = Uuid::new_v4();
         let transient = handle_operation_error(
-            HandleOperation::Status,
+            &HandleOperation::Status,
             WorkflowError::Broker(crate::broker::BrokerError::Statement(
                 crate::db::StatementFailure::NotSent {
                     statement: "workflow_status",
@@ -1696,7 +1696,7 @@ mod cancel_tree_tests {
         assert_eq!(transient.code(), HandleErrorCode::DbOperationFailed);
         assert!(transient.retryable());
         let persistent = handle_operation_error(
-            HandleOperation::Status,
+            &HandleOperation::Status,
             WorkflowError::Broker(crate::broker::BrokerError::RowDecode(
                 crate::broker::RowDecodeError::NoRow {
                     statement: "workflow_status",
@@ -1707,14 +1707,14 @@ mod cancel_tree_tests {
         assert_eq!(persistent.code(), HandleErrorCode::DbOperationFailed);
         assert!(!persistent.retryable());
         let stored = handle_operation_error(
-            HandleOperation::Status,
+            &HandleOperation::Status,
             WorkflowError::InvalidStatus("CORRUPT".to_owned()),
             workflow_id,
         );
         assert_eq!(stored.code(), HandleErrorCode::StoredDataInvalid);
         assert!(!stored.retryable());
         let missing = handle_operation_error(
-            HandleOperation::Status,
+            &HandleOperation::Status,
             WorkflowError::WorkflowNotFound { workflow_id },
             workflow_id,
         );
@@ -1729,7 +1729,7 @@ mod cancel_tree_tests {
     fn each_handle_error_has_python_s_message_and_keeps_its_cause() {
         let workflow_id = Uuid::from_u128(0x3f9c_1a2b_4d5e_4f60_8a71_b2c3_d4e5_f607);
         let failed = handle_operation_error(
-            HandleOperation::Pause,
+            &HandleOperation::Pause,
             WorkflowError::Broker(crate::broker::BrokerError::ConnectionFailed(
                 "refused".to_owned(),
             )),
@@ -1750,7 +1750,7 @@ mod cancel_tree_tests {
         ));
 
         let stored = handle_operation_error(
-            HandleOperation::Status,
+            &HandleOperation::Status,
             WorkflowError::InvalidStatus("CORRUPT".to_owned()),
             workflow_id,
         );
@@ -1768,7 +1768,7 @@ mod cancel_tree_tests {
         ));
 
         let missing = handle_operation_error(
-            HandleOperation::Cancel,
+            &HandleOperation::Cancel,
             WorkflowError::WorkflowNotFound { workflow_id },
             workflow_id,
         );
@@ -1785,7 +1785,7 @@ mod cancel_tree_tests {
         let workflow_id = Uuid::from_u128(0x3f9c_1a2b_4d5e_4f60_8a71_b2c3_d4e5_f607);
         let failed = resume_recovery_failed(
             workflow_id,
-            AfterResumeCommit::TreeRecovery,
+            &AfterResumeCommit::TreeRecovery,
             WorkflowError::Broker(crate::broker::BrokerError::ConnectionFailed(
                 "refused".to_owned(),
             )),

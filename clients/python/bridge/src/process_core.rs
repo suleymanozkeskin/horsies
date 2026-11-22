@@ -356,7 +356,7 @@ fn start_core() -> Result<&'static Core, CallRefusal> {
     let _rule_in_force = PANIC_RULE.get_or_init(|| PanicRule::StopCore);
     let (log, records) = LogBridge::new();
     let runtime = start_runtime(log.dispatch().clone()).map_err(CallRefusal::StartFailed)?;
-    logging::start_forwarder(records, log.sink()).map_err(|error| {
+    logging::start_forwarder(records, &log.sink()).map_err(|error| {
         CallRefusal::StartFailed(StartFailure::LogForwarderStartFailed {
             cause: error.to_string(),
         })
@@ -386,7 +386,7 @@ fn start_runtime(dispatch: tracing::Dispatch) -> Result<&'static ProcessRuntime,
             .expect("the producer runtime has a blocking pool"),
         thread_name: RUNTIME_THREAD_NAME,
         on_thread_start: ThreadStart::Run(Arc::new(move || {
-            logging::make_thread_default(&dispatch)
+            logging::make_thread_default(&dispatch);
         })),
     };
     match shape_process_runtime(shape) {

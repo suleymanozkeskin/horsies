@@ -108,7 +108,7 @@ pub(crate) async fn read_task_result(
 ) -> Result<TaskResultRead, BrokerError> {
     let seen = reader.is_seen();
     let first_statement: &TypedStatement = match seen {
-        true => &*TASK_RESULT,
+        true => &TASK_RESULT,
         false => &FUNCTION_PUBLISHED,
     };
     let mut connection = checkout_batch(pool, first_statement).await?;
@@ -128,9 +128,8 @@ pub(crate) async fn read_task_result(
     match read {
         Ok(rows) => match first_row(rows) {
             None => Ok(TaskResultRead::Absent),
-            Some(row) => {
-                decode_result_row(task_id, result_wire_row(&row)?).map_err(history_contract)
-            }
+            Some(row) => decode_result_row(task_id, result_wire_row(&row)?)
+                .map_err(|error| history_contract(&error)),
         },
         Err(failure) if is_undefined_function(&failure) => {
             reader.forget();
@@ -174,9 +173,9 @@ pub(crate) async fn read_history_detail(
     match location.as_str() {
         "LIVE" => Ok(TaskDetailResult::Live { task_id }),
         "HISTORY" => history_detail_from_wire(history_detail_wire_row(&row)?)
-            .map(TaskDetailResult::History)
-            .map_err(history_contract),
-        other => Err(history_contract(HistoryError::contract(format!(
+            .map(|detail| TaskDetailResult::History(Box::new(detail)))
+            .map_err(|error| history_contract(&error)),
+        other => Err(history_contract(&HistoryError::contract(format!(
             "staged detail returned unknown location {other:?}"
         )))),
     }
@@ -211,7 +210,7 @@ async fn absence_reason(
     .await?;
     let row = one_row(rows, &TASK_ABSENCE_REASON)?;
     let reason: String = scalar(&row, &TASK_ABSENCE_REASON)?;
-    TaskAbsenceReason::parse(&reason).map_err(history_contract)
+    TaskAbsenceReason::parse(&reason).map_err(|error| history_contract(&error))
 }
 
 /// A refusal with SQLSTATE `42883` (`undefined_function`).
@@ -226,7 +225,7 @@ fn is_undefined_function(failure: &StatementFailure) -> bool {
 
 /// A history read that breaks its contract (an unknown location, a missing
 /// column of a live row, an attempt snapshot that does not decode).
-fn history_contract(error: HistoryError) -> BrokerError {
+fn history_contract(error: &HistoryError) -> BrokerError {
     BrokerError::HistoryReadContract(error.to_string())
 }
 

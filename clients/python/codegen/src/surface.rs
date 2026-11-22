@@ -3751,7 +3751,7 @@ const CLASS_COUNT: usize = HANDLE_CLASSES.len()
     + WORKER_CLASSES.len()
     + FLEET_METRICS_CLASSES.len();
 
-const CLASSES: [StubClass; CLASS_COUNT] = {
+static CLASSES: [StubClass; CLASS_COUNT] = {
     let mut classes = [HANDLE_CLASSES[0]; CLASS_COUNT];
     let mut handle_position = 0;
     while handle_position < HANDLE_CLASSES.len() {

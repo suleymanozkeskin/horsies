@@ -66,7 +66,7 @@ impl WorkflowStartRequest {
     fn new(
         spec_json: &str,
         workflow_id: Uuid,
-        sent_at: Bound<'_, PyAny>,
+        sent_at: &Bound<'_, PyAny>,
         resend_on_transient_err: bool,
         trace: TraceArgument<'_>,
     ) -> PyResult<Self> {
@@ -76,7 +76,7 @@ impl WorkflowStartRequest {
             parts: Arc::new(StartParts {
                 spec,
                 workflow_id,
-                sent_at: utc_instant(&sent_at)?,
+                sent_at: utc_instant(sent_at)?,
                 resend_on_transient_err,
                 trace: trace.send_trace(),
             }),
@@ -245,7 +245,7 @@ fn connect_failed(
         retryable: error.is_retryable(),
         workflow_name: workflow_name.to_owned(),
         workflow_id,
-        cause: WorkflowError::Broker(error),
+        cause: Box::new(WorkflowError::Broker(error)),
     })
 }
 

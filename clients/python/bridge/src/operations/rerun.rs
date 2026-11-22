@@ -551,8 +551,8 @@ fn preparation_record(preparation: RerunPreparation) -> PreparationRecord {
 }
 
 /// The record of a write outcome. Pure.
-fn write_outcome_record(outcome: RerunWriteOutcome) -> WriteOutcomeRecord {
-    match outcome {
+fn write_outcome_record(outcome: &RerunWriteOutcome) -> WriteOutcomeRecord {
+    match *outcome {
         RerunWriteOutcome::Enqueued {
             new_task_id,
             source_task_id,
@@ -642,7 +642,7 @@ pub fn decode_rerun_write_function(
     let caller_row = caller_row(write.statement(), row)?;
     let outcome = decode_rerun_write(write, &caller_row)
         .map_err(|defect| CoreDefect::new_err(defect.to_string()))?;
-    Ok(write_outcome_record(outcome))
+    Ok(write_outcome_record(&outcome))
 }
 
 #[cfg(test)]
@@ -796,14 +796,14 @@ mod tests {
     #[test]
     fn each_write_outcome_has_its_record() {
         assert!(matches!(
-            write_outcome_record(RerunWriteOutcome::KeyReplay {
+            write_outcome_record(&RerunWriteOutcome::KeyReplay {
                 existing_task_id: SOURCE
             }),
             WriteOutcomeRecord::KeyReplay(RerunKeyReplayRecord { existing_task_id })
                 if existing_task_id == SOURCE
         ));
         assert!(matches!(
-            write_outcome_record(RerunWriteOutcome::KeyConflict {
+            write_outcome_record(&RerunWriteOutcome::KeyConflict {
                 task_id: SOURCE,
                 reserved_by_task_id: SOURCE,
             }),

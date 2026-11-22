@@ -19,12 +19,8 @@ use crate::{ErrorCode, HorsiesError};
 mod scheduler_manifest;
 mod worker_manifest;
 
-pub(crate) use scheduler_manifest::{
-    schedule_input_text, scheduler_manifest, ScheduleManifestRefused,
-};
-pub(crate) use worker_manifest::{
-    rust_child_launch, task_records, worker_manifest, ChildLaunchRefused, ManifestBoundRefused,
-};
+pub(crate) use scheduler_manifest::{schedule_input_text, scheduler_manifest};
+pub(crate) use worker_manifest::{rust_child_launch, worker_manifest};
 
 pub use horsies_core::core::config::bounded::{BoundedU32, OutOfBounds};
 pub use horsies_core::core::config::worker_profile::{

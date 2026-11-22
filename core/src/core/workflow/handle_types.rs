@@ -243,7 +243,7 @@ impl HandleOperationError {
     /// The message holds the broker error's own text after the operation's
     /// label; the cause is the broker error. Nothing ran. Pure.
     pub fn connect_failed(
-        operation: HandleOperation,
+        operation: &HandleOperation,
         workflow_id: Uuid,
         error: BrokerError,
     ) -> Self {
@@ -504,7 +504,7 @@ mod tests {
     fn a_failed_connect_names_the_operation_and_keeps_the_broker_error() {
         let workflow_id = uuid::Uuid::from_u128(9);
         let failed = HandleOperationError::connect_failed(
-            HandleOperation::Status,
+            &HandleOperation::Status,
             workflow_id,
             BrokerError::ConnectionFailed("refused".to_owned()),
         );

@@ -38,22 +38,18 @@ const RUNNING_ROWS: &str = "SELECT task_name FROM horsies_tasks WHERE status = '
 /// The polls of the wait for older transactions: at most 60 s.
 const OLDER_HOLDER_POLLS: u32 = 300;
 const OLDER_HOLDER_POLL_INTERVAL: Duration = Duration::from_millis(200);
-/// Each holder of an xid or a snapshot xmin at or before the xid `$1` that
-/// holds back the removal horizon of the tables of this database: the
-/// backends and the prepared transactions of this database, and every
-/// replication slot.
-/// From PostgreSQL 14, the removal horizon of a table that is not shared
-/// counts only the backends and prepared transactions of its own database;
-/// the xmin of a slot counts for every database. `age` compares the two
-/// xids: the older one has the larger age.
+/// Each holder of an xid or a snapshot xmin at or before the xid `$1`, in
+/// any database of the server. The wait covers the whole server: with a
+/// wait on the backends of this database only, the claim can run while the
+/// deleted entries cannot yet be marked dead, and the test fails. `age`
+/// compares the two xids: the older one has the larger age.
 const OLDER_HOLDERS: &str = "
     SELECT format(
         'backend pid %s (database %s, state %s, transaction start %s, query %L)',
         pid, datname, state, xact_start, left(query, 200)
     )
     FROM pg_stat_activity
-    WHERE datname = current_database()
-      AND pid <> pg_backend_pid()
+    WHERE pid <> pg_backend_pid()
       AND (
           age(backend_xid) >= age($1::text::xid)
           OR age(backend_xmin) >= age($1::text::xid)
@@ -61,8 +57,7 @@ const OLDER_HOLDERS: &str = "
     UNION ALL
     SELECT format('prepared transaction %L (database %s, prepared %s)', gid, database, prepared)
     FROM pg_prepared_xacts
-    WHERE database = current_database()
-      AND age(transaction) >= age($1::text::xid)
+    WHERE age(transaction) >= age($1::text::xid)
     UNION ALL
     SELECT format('replication slot %L (database %s)', slot_name, database)
     FROM pg_replication_slots
@@ -191,7 +186,7 @@ async fn bitmap_running_entries(client: &tokio_postgres::Client) -> f64 {
     panic!("no bitmap index scan in {plan}");
 }
 
-/// Wait until no holder of `OLDER_HOLDERS` is as old as `delete_xid`.
+/// Wait until no transaction on the server is as old as `delete_xid`.
 /// Fails the test with the holders when they remain: then no scan can mark
 /// the deleted entries.
 async fn wait_for_older_transactions(client: &tokio_postgres::Client, delete_xid: &str) {
@@ -395,7 +390,7 @@ enum Lease {
     /// The lease ended a minute ago.
     Expired,
     /// No lease: a RUNNING or PENDING row.
-    NoLease,
+    Absent,
 }
 
 /// The values of one task row of `status` on `queue`, held by `worker`
@@ -408,7 +403,7 @@ fn row_values(status: &str, queue: &str, worker: Option<&str>, lease: Lease) -> 
     let expires = match lease {
         Lease::Live => "NOW() + interval '5 minutes'",
         Lease::Expired => "NOW() - interval '1 minute'",
-        Lease::NoLease => "NULL",
+        Lease::Absent => "NULL",
     };
     let started_at = match status {
         "RUNNING" => "NOW()",
@@ -460,11 +455,11 @@ async fn the_in_flight_counts_of_a_claim_pass() {
         row_values("CLAIMED", "q_a", Some(WORKER_ID), Lease::Live),
         row_values("CLAIMED", "q_a", Some(WORKER_ID), Lease::Expired),
         row_values("CLAIMED", "q_b", Some(WORKER_ID), Lease::Live),
-        row_values("RUNNING", "q_b", Some(WORKER_ID), Lease::NoLease),
+        row_values("RUNNING", "q_b", Some(WORKER_ID), Lease::Absent),
         row_values("CLAIMED", "q_a", Some(OTHER_WORKER), Lease::Live),
         row_values("CLAIMED", "q_b", Some(OTHER_WORKER), Lease::Expired),
-        row_values("RUNNING", "q_a", Some(OTHER_WORKER), Lease::NoLease),
-        row_values("PENDING", "q_a", None, Lease::NoLease),
+        row_values("RUNNING", "q_a", Some(OTHER_WORKER), Lease::Absent),
+        row_values("PENDING", "q_a", None, Lease::Absent),
     ];
     client
         .batch_execute(&format!(

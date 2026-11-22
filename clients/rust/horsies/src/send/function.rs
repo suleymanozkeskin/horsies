@@ -324,17 +324,18 @@ where
             &self.queue_name,
             options.chosen_retention(),
         )
-        .map_err(|refused| self.validation_failed(format!("Invalid retention: {refused}")))?;
+        .map_err(|refused| self.validation_failed(&format!("Invalid retention: {refused}")))?;
         let input_json = self.encoded_input(input)?;
         self.check_payload_size(&input_json)?;
         let priority = i32::try_from(self.priority).map_err(|_| {
-            self.validation_failed(format!(
+            self.validation_failed(&format!(
                 "the priority of queue '{}' does not fit a Postgres integer",
                 self.queue_name
             ))
         })?;
-        let task_id = mint_task_id()
-            .map_err(|refused| self.validation_failed(format!("task id mint failed: {refused}")))?;
+        let task_id = mint_task_id().map_err(|refused| {
+            self.validation_failed(&format!("task id mint failed: {refused}"))
+        })?;
         let task_options = send_options_text(
             &self.task_name,
             self.task_options.as_ref(),
@@ -363,14 +364,14 @@ where
     /// and the failure, never the value.
     fn encoded_input(&self, input: &A) -> Result<String, TaskSendError> {
         let bytes = encode_send_input(input).map_err(|cause| {
-            self.validation_failed(format!(
+            self.validation_failed(&format!(
                 "Failed to encode the input of {} as {}: {cause}",
                 self.task_name,
                 std::any::type_name::<A>()
             ))
         })?;
         String::from_utf8(bytes).map_err(|_| {
-            self.validation_failed(format!(
+            self.validation_failed(&format!(
                 "the encoded input of {} is not UTF-8",
                 self.task_name
             ))
@@ -415,25 +416,25 @@ where
         retry: RetryOf,
     ) -> Result<(Uuid, TaskSendPayload), TaskSendError> {
         let Some(target) = error.resend_target() else {
-            return Err(self.validation_failed(format!(
+            return Err(self.validation_failed(&format!(
                 "cannot retry a send that failed with {}: only ASYNC_CONTEXT, \
                  ENQUEUE_FAILED and IDEMPOTENCY_KEY_CONFLICT carry a payload to send again",
                 error.code()
             )));
         };
         if target.payload.task_name != self.task_name {
-            return Err(self.validation_failed(format!(
+            return Err(self.validation_failed(&format!(
                 "cross-task retry: error is for '{}' but this task is '{}'",
                 target.payload.task_name, self.task_name
             )));
         }
         match (retry, target.payload.enqueue_delay_seconds) {
             (RetryOf::Send, Some(_)) => Err(self.validation_failed(
-                "cannot retry scheduled task via retry_send; use retry_schedule instead".to_owned(),
+                "cannot retry scheduled task via retry_send; use retry_schedule instead",
             )),
-            (RetryOf::Schedule, None) => Err(self.validation_failed(
-                "cannot retry schedule: missing enqueue_delay_seconds".to_owned(),
-            )),
+            (RetryOf::Schedule, None) => {
+                Err(self.validation_failed("cannot retry schedule: missing enqueue_delay_seconds"))
+            }
             (RetryOf::Send, None) | (RetryOf::Schedule, Some(_)) => {
                 Ok((target.task_id, target.payload.clone()))
             }
@@ -482,7 +483,7 @@ where
         Ok(TaskHandle::new(sent?, Arc::clone(&handle)))
     }
 
-    fn validation_failed(&self, message: String) -> TaskSendError {
+    fn validation_failed(&self, message: &str) -> TaskSendError {
         TaskSendError::ValidationFailed {
             message: format!("{message} (task {})", self.task_name),
             cause: FailureCause::PreconditionFailed,

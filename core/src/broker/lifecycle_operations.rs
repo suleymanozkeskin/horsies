@@ -11,7 +11,7 @@
 //! - [`PostgresBroker::finish_failed_attempt`] and
 //!   [`PostgresBroker::finish_ended_attempt`]: `horsies_finish_failed_attempt`
 //!   under the claimed-row rules `REFUSE` and `RELEASE`.
-//! - [`PostgresBroker::complete_successes`]: `horsies_complete_tasks_fused`,
+//! - [`PostgresBroker::complete_successes`][]: `horsies_complete_tasks_fused`,
 //!   the plain successes of one worker (1 to 64 rows) in one statement.
 //! - [`PostgresBroker::finish_workflow_success`]:
 //!   `horsies_finish_workflow_success`, phase 1 of a workflow task's success.
@@ -31,9 +31,9 @@
 //!   `horsies_expire_pending_tasks` in bounded batches.
 //! - [`PostgresBroker::audit_orphaned_workflow_tasks`]: one page of the
 //!   orphan sweep, `horsies_cancel_orphaned_tasks` with its cursor counts.
-//! - [`PostgresBroker::expire_owned_claim`]: `horsies_expire_owned_claim`,
+//! - [`PostgresBroker::expire_owned_claim`][]: `horsies_expire_owned_claim`,
 //!   the expiry of a claimed row whose deadline passed before its start.
-//! - [`PostgresBroker::cancel_owned_orphan`]: `horsies_cancel_owned_orphan`,
+//! - [`PostgresBroker::cancel_owned_orphan`][]: `horsies_cancel_owned_orphan`,
 //!   the cancel of a claimed workflow task that no node links.
 //!
 //! These are the entry points of the Python client while its own worker

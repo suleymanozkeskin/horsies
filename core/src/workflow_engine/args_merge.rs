@@ -281,6 +281,8 @@ pub(crate) struct ArgsFromConflict {
 /// conflict message, as Python does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MergedNodeKind {
+    /// Only the stored-form vectors and the tests build it.
+    #[cfg(test)]
     Task,
     SubWorkflow,
 }
@@ -295,6 +297,7 @@ impl ArgsFromConflict {
         kind: MergedNodeKind,
     ) -> TaskError {
         let node = match kind {
+            #[cfg(test)]
             MergedNodeKind::Task => format!("task {task_index}"),
             MergedNodeKind::SubWorkflow => format!("subworkflow task {task_index}"),
         };

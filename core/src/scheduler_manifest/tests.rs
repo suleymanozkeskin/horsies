@@ -34,7 +34,7 @@ fn enabled_schedule(name: &str) -> Value {
     })
 }
 
-fn manifest(schedules: Value) -> Value {
+fn manifest(schedules: &Value) -> Value {
     json!({
         "manifest_version": 1,
         "enabled": true,
@@ -64,7 +64,7 @@ fn assert_refused_in_first_activation(document: &Value) {
 
 #[test]
 fn a_manifest_of_an_enabled_and_a_disabled_schedule_parses() {
-    let document = manifest(json!([
+    let document = manifest(&json!([
         enabled_schedule("nightly"),
         {"name": "paused", "activation": {"kind": "DISABLED"}}
     ]));
@@ -122,7 +122,7 @@ fn a_task_without_options_and_a_forever_class_parse() {
     schedule["activation"]["send"]["task_options"] = json!({"kind": "NO_OPTIONS"});
     schedule["activation"]["send"]["retention_class_key"] = json!("forever");
 
-    let manifest = parsed(&manifest(json!([schedule])));
+    let manifest = parsed(&manifest(&json!([schedule])));
 
     let ScheduleActivation::Enabled { send, .. } = &manifest.schedules[0].activation else {
         panic!("the schedule is enabled");
@@ -136,7 +136,7 @@ fn a_task_without_options_and_a_forever_class_parse() {
 
 #[test]
 fn a_manifest_without_schedules_parses() {
-    let mut document = manifest(json!([]));
+    let mut document = manifest(&json!([]));
     document["enabled"] = json!(false);
     let manifest = parsed(&document);
     assert!(!manifest.enabled);
@@ -145,7 +145,7 @@ fn a_manifest_without_schedules_parses() {
 
 #[test]
 fn a_repeated_schedule_name_is_refused_at_the_repeat() {
-    let document = manifest(json!([
+    let document = manifest(&json!([
         enabled_schedule("nightly"),
         {"name": "other", "activation": {"kind": "DISABLED"}},
         {"name": "nightly", "activation": {"kind": "DISABLED"}}
@@ -155,7 +155,7 @@ fn a_repeated_schedule_name_is_refused_at_the_repeat() {
 
 #[test]
 fn another_manifest_version_is_refused() {
-    let mut document = manifest(json!([]));
+    let mut document = manifest(&json!([]));
     document["manifest_version"] = json!(2);
     assert_eq!(refused_path(&document), "manifest_version");
 }
@@ -164,13 +164,13 @@ fn another_manifest_version_is_refused() {
 fn an_unknown_field_is_refused_with_its_path() {
     let mut schedule = enabled_schedule("nightly");
     schedule["activation"]["send"]["args_json"] = json!("[]");
-    assert_refused_in_first_activation(&manifest(json!([schedule])));
+    assert_refused_in_first_activation(&manifest(&json!([schedule])));
 }
 
 #[test]
 fn a_check_interval_outside_one_to_sixty_seconds_is_refused() {
     for seconds in [0, 61] {
-        let mut document = manifest(json!([]));
+        let mut document = manifest(&json!([]));
         document["check_interval_seconds"] = json!(seconds);
         assert_eq!(refused_path(&document), "check_interval_seconds");
     }
@@ -181,7 +181,7 @@ fn a_catch_up_bound_outside_one_to_ten_thousand_is_refused() {
     for runs in [0, 10_001] {
         let mut schedule = enabled_schedule("nightly");
         schedule["activation"]["max_catch_up_runs"] = json!(runs);
-        assert_refused_in_first_activation(&manifest(json!([schedule])));
+        assert_refused_in_first_activation(&manifest(&json!([schedule])));
     }
 }
 
@@ -190,7 +190,7 @@ fn a_priority_outside_one_to_one_hundred_is_refused() {
     for priority in [0, 101] {
         let mut schedule = enabled_schedule("nightly");
         schedule["activation"]["send"]["priority"] = json!(priority);
-        assert_refused_in_first_activation(&manifest(json!([schedule])));
+        assert_refused_in_first_activation(&manifest(&json!([schedule])));
     }
 }
 
@@ -208,7 +208,7 @@ fn a_pattern_text_that_is_not_a_valid_pattern_is_refused() {
     ] {
         let mut schedule = enabled_schedule("nightly");
         schedule["activation"]["pattern_json"] = json!(text);
-        let path = refused_path(&manifest(json!([schedule])));
+        let path = refused_path(&manifest(&json!([schedule])));
         assert!(
             path.starts_with("schedules[0].activation"),
             "{text}: {path}"
@@ -234,7 +234,7 @@ fn a_time_of_day_with_an_offset_is_refused() {
     for text in timed_patterns("09:00:00+02:00") {
         let mut schedule = enabled_schedule("nightly");
         schedule["activation"]["pattern_json"] = json!(text);
-        let refused = parse_scheduler_manifest(&manifest(json!([schedule])).to_string())
+        let refused = parse_scheduler_manifest(&manifest(&json!([schedule])).to_string())
             .expect_err("a time with an offset is refused");
         assert!(
             refused.field_path.starts_with("schedules[0].activation"),
@@ -260,7 +260,7 @@ fn a_time_of_day_with_a_fraction_of_a_second_is_refused() {
     for text in timed_patterns("09:00:00.000500") {
         let mut schedule = enabled_schedule("nightly");
         schedule["activation"]["pattern_json"] = json!(text);
-        let refused = parse_scheduler_manifest(&manifest(json!([schedule])).to_string())
+        let refused = parse_scheduler_manifest(&manifest(&json!([schedule])).to_string())
             .expect_err("a time with microseconds is refused");
         assert!(
             refused.field_path.starts_with("schedules[0].activation"),
@@ -281,7 +281,7 @@ fn a_time_of_day_in_whole_seconds_parses() {
     for text in timed_patterns("09:00:00") {
         let mut schedule = enabled_schedule("nightly");
         schedule["activation"]["pattern_json"] = json!(text);
-        let manifest = parsed(&manifest(json!([schedule])));
+        let manifest = parsed(&manifest(&json!([schedule])));
         assert_eq!(manifest.schedules.len(), 1, "{text}");
     }
 }
@@ -296,7 +296,7 @@ fn a_retention_key_outside_the_class_key_rule_is_refused_without_its_text() {
     ] {
         let mut schedule = enabled_schedule("nightly");
         schedule["activation"]["send"]["retention_class_key"] = json!(key);
-        let refused = parse_scheduler_manifest(&manifest(json!([schedule])).to_string())
+        let refused = parse_scheduler_manifest(&manifest(&json!([schedule])).to_string())
             .expect_err("the key is refused");
         assert!(
             refused.field_path.starts_with("schedules[0].activation"),

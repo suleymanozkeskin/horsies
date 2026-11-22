@@ -27,7 +27,9 @@ const JOINED_WRITE_BODY_BYTES: usize = 1 << 16;
 #[derive(Debug)]
 pub(super) enum ReadEnd {
     Eof,
-    Failed(io::Error),
+    /// The read failed. Every caller treats it as the end of the parent, so
+    /// the I/O error is not kept.
+    Failed,
     OverBound(FrameOverBound),
 }
 
@@ -47,7 +49,7 @@ pub(super) fn read_frame<R: Read>(
             Ok(0) => return Err(ReadEnd::Eof),
             Ok(count) => reader.arrived(count),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(ReadEnd::Failed(error)),
+            Err(_error) => return Err(ReadEnd::Failed),
         }
     }
 }
@@ -83,7 +85,7 @@ pub(super) fn start_control_thread(
             loop {
                 let raw = match read_frame(&mut stream, &mut reader) {
                     Ok(raw) => raw,
-                    Err(ReadEnd::Eof | ReadEnd::Failed(_)) => {
+                    Err(ReadEnd::Eof | ReadEnd::Failed) => {
                         std::process::exit(PARENT_GONE_EXIT_CODE)
                     }
                     Err(ReadEnd::OverBound(over)) => {
