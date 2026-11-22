@@ -34,8 +34,7 @@ use crate::worker::executor::slots::{
 };
 use crate::worker::executor::supervisor::channel::KillMark;
 use crate::worker::executor::supervisor::{
-    wait_for_exit, ChildCommand, ChildExit, ExitState, ReapedExit, SpawnedChild, Spawner,
-    CHILD_KILL_WAIT,
+    wait_for_exit, ChildCommand, ChildExit, ExitState, ReapedExit, Spawner, CHILD_KILL_WAIT,
 };
 use crate::worker::retry::read_stored_options;
 
@@ -215,32 +214,6 @@ impl Launched {
     }
 }
 
-/// A child that sleeps: what a held dispatch runs on.
-async fn sleeping_child(spawner: &Spawner) -> (SpawnedChild, HeldChild) {
-    let spawned = spawner
-        .handle()
-        .spawn(ChildCommand {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exec sleep 60".into()],
-        })
-        .await
-        .expect("spawn a sleeping child");
-    let child = HeldChild {
-        id: spawned.id,
-        pid: spawned.pid,
-        spawner: spawner.handle(),
-        kill_mark: WorkerKillMark::default(),
-    };
-    (spawned, child)
-}
-
-/// Kill the child if it still runs, then stop the spawner.
-async fn end_child(spawner: Spawner, mut spawned: SpawnedChild) {
-    let _outcome = spawner.handle().kill_session(spawned.id).await;
-    let _exit = wait_for_exit(&mut spawned.exit, WAIT).await;
-    let _report = spawner.stop(WAIT);
-}
-
 fn killed_by_sigkill() -> ChildExit {
     ChildExit::Reaped(ReapedExit::KilledBySignal(libc::SIGKILL))
 }
@@ -280,7 +253,7 @@ async fn writes_failing_past_the_window_stop_the_worker() {
     let live = LiveDispatches::default();
     let claimed_at = Utc::now();
     let _held = live
-        .hold(Uuid::new_v4(), claimed_at, DispatchRunner::Child(child))
+        .hold(Uuid::new_v4(), claimed_at, child.clone())
         .expect("the registry is open");
 
     let launched = launch(refusing_pool(), &live, recovery_on(SHORT_WINDOW));
@@ -298,7 +271,7 @@ async fn writes_failing_past_the_window_stop_the_worker() {
     );
     assert_eq!(kill_mark.read(), KillMark::KilledByParent);
     assert!(matches!(
-        live.hold(Uuid::new_v4(), claimed_at, DispatchRunner::WorkerProcess),
+        live.hold(Uuid::new_v4(), claimed_at, child),
         Err(RegistryClosed)
     ));
     launched.stop().await;
@@ -314,7 +287,7 @@ async fn a_write_that_never_returns_stops_the_worker() {
     let (mut spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
     let _held = live
-        .hold(Uuid::new_v4(), Utc::now(), DispatchRunner::Child(child))
+        .hold(Uuid::new_v4(), Utc::now(), child)
         .expect("the registry is open");
 
     let launched = launch(silent_pool(&silent), &live, recovery_on(SHORT_WINDOW));
@@ -341,7 +314,7 @@ async fn a_dead_writer_stops_the_worker() {
     let (mut spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
     let _held = live
-        .hold(Uuid::new_v4(), Utc::now(), DispatchRunner::Child(child))
+        .hold(Uuid::new_v4(), Utc::now(), child)
         .expect("the registry is open");
 
     let launched = launch(refusing_pool(), &live, recovery_on(SHORT_WINDOW));
@@ -379,7 +352,7 @@ async fn a_failed_write_inside_the_window_recovers() {
     let (spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
     let _held = live
-        .hold(Uuid::new_v4(), Utc::now(), DispatchRunner::Child(child))
+        .hold(Uuid::new_v4(), Utc::now(), child)
         .expect("the registry is open");
 
     let launched = launch(pool, &live, recovery_on(Duration::from_secs(2)));
@@ -460,56 +433,6 @@ async fn stop_ends_the_writer_and_the_watchdog() {
 }
 
 // ---------------------------------------------------------------------------
-// Exit of the process
-// ---------------------------------------------------------------------------
-
-/// Set only in the process that [`task_code_in_the_worker_process_ends_the_process_at_once`]
-/// starts.
-const EXIT_PROBE_ENV: &str = "HORSIES_TEST_RUNNER_BEATS_EXIT_PROBE";
-const EXIT_PROBE_TEST: &str =
-    "worker::runner_beats::fail_closed_tests::exit_probe_task_code_in_the_worker_process";
-
-/// The body of the probe process: a dispatch held by the worker process
-/// itself, and writes that fail. The watchdog ends the process; without the
-/// probe variable this test returns at once.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn exit_probe_task_code_in_the_worker_process() {
-    let Some(_probe) = std::env::var_os(EXIT_PROBE_ENV) else {
-        return;
-    };
-    let live = LiveDispatches::default();
-    let _held = live
-        .hold(Uuid::new_v4(), Utc::now(), DispatchRunner::WorkerProcess)
-        .expect("the registry is open");
-    let launched = launch(refusing_pool(), &live, recovery_on(SHORT_WINDOW));
-    tokio::time::sleep(WAIT).await;
-    // Reached only when the watchdog did not end the process.
-    launched.stop().await;
-}
-
-/// Python `test_a_closed_loop_exits_without_the_grace`: task code that runs
-/// in the worker process stops only with the process, so the watchdog exits
-/// with code 77 at once, without the grace for the worker's stop.
-#[test]
-fn task_code_in_the_worker_process_ends_the_process_at_once() {
-    let started = Instant::now();
-    let status = std::process::Command::new(std::env::current_exe().expect("the test binary"))
-        .args([
-            "--exact",
-            EXIT_PROBE_TEST,
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env(EXIT_PROBE_ENV, "1")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .expect("the probe process runs");
-    assert_eq!(status.code(), Some(RUNNER_HEARTBEAT_LOST_EXIT_CODE));
-    assert!(started.elapsed() < WAIT, "{:?}", started.elapsed());
-}
-
-// ---------------------------------------------------------------------------
 // Stale running recovery off: the worker runs on
 // ---------------------------------------------------------------------------
 
@@ -528,7 +451,7 @@ async fn with_recovery_off_failing_writes_never_stop_the_worker() {
     let (spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
     let _held = live
-        .hold(Uuid::new_v4(), Utc::now(), DispatchRunner::Child(child))
+        .hold(Uuid::new_v4(), Utc::now(), child.clone())
         .expect("the registry is open");
 
     let launched = launch(refusing_pool(), &live, StaleRunningRecovery::Off);
@@ -549,9 +472,7 @@ async fn with_recovery_off_failing_writes_never_stop_the_worker() {
     assert!(cause.contains("last error: "), "{cause}");
     launched.still_watching();
     assert_eq!(*spawned.exit.borrow(), ExitState::Running);
-    assert!(live
-        .hold(Uuid::new_v4(), Utc::now(), DispatchRunner::WorkerProcess)
-        .is_ok());
+    assert!(live.hold(Uuid::new_v4(), Utc::now(), child).is_ok());
     launched.stop().await;
     end_child(spawner, spawned).await;
 }
@@ -616,7 +537,7 @@ async fn with_recovery_off_a_dead_writer_is_logged_once_and_the_worker_runs() {
     let (spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
     let _held = live
-        .hold(Uuid::new_v4(), Utc::now(), DispatchRunner::Child(child))
+        .hold(Uuid::new_v4(), Utc::now(), child.clone())
         .expect("the registry is open");
 
     let Launched {
@@ -669,9 +590,7 @@ async fn with_recovery_off_a_dead_writer_is_logged_once_and_the_worker_runs() {
         "no service death is reported"
     );
     assert_eq!(*spawned.exit.borrow(), ExitState::Running);
-    assert!(live
-        .hold(Uuid::new_v4(), Utc::now(), DispatchRunner::WorkerProcess)
-        .is_ok());
+    assert!(live.hold(Uuid::new_v4(), Utc::now(), child).is_ok());
 
     // The stop of the worker: its token, then the beats after the drain.
     worker_stop.cancel();
@@ -761,7 +680,7 @@ async fn with_recovery_off_a_late_beat_names_the_unreturned_write() {
     let (spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
     let _held = live
-        .hold(Uuid::new_v4(), Utc::now(), DispatchRunner::Child(child))
+        .hold(Uuid::new_v4(), Utc::now(), child)
         .expect("the registry is open");
     let capture = LogCapture::new();
     let _default = capture.set_default();
@@ -864,7 +783,7 @@ async fn grace_probe_a_worker_that_does_not_stop() {
     let (_spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
     let _held = live
-        .hold(Uuid::new_v4(), Utc::now(), DispatchRunner::Child(child))
+        .hold(Uuid::new_v4(), Utc::now(), child)
         .expect("the registry is open");
     let launched = launch(refusing_pool(), &live, recovery_on(SHORT_WINDOW));
     tokio::time::sleep(FAIL_CLOSED_EXIT_GRACE + WAIT).await;

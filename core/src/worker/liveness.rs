@@ -52,7 +52,7 @@ use crate::db::{
     LockSession, LockTake, SessionLockFailure, Transience, UrlError, SESSION_LOCK_RECONNECT_FIRST,
     SESSION_LOCK_RECONNECT_LIMIT, SESSION_LOCK_STATEMENT_BOUND,
 };
-use crate::worker::runner_beats::{kill_held_children, LiveDispatches, TaskCodeInWorker};
+use crate::worker::runner_beats::{kill_held_children, LiveDispatches};
 use crate::worker::thread_dispatch::with_starter_dispatch;
 
 /// The longest a worker process runs a task without a confirmed hold of its
@@ -727,7 +727,7 @@ fn fail_closed(context: &WatchContext, unconfirmed: Duration, hold: &Hold) -> ! 
          still runs",
     );
     match std::panic::catch_unwind(AssertUnwindSafe(|| kill_held_children(&context.live))) {
-        Ok(TaskCodeInWorker::Held | TaskCodeInWorker::NoneHeld) => {}
+        Ok(()) => {}
         Err(_panic) => {
             tracing::error!("killing the children panicked; ending the process");
         }

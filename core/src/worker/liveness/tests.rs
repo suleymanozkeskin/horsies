@@ -3,8 +3,8 @@
 //! - A worker process is a probe process: this test binary started again
 //!   with the probe variables, which runs only [`liveness_probe_process`].
 //!   It takes the liveness lock of its worker id with the production holder
-//!   and watchdog ([`start_liveness_lock`]), holds one task in its own
-//!   process, and sleeps. A test kills it, stops it, cuts its connection, or
+//!   and watchdog ([`start_liveness_lock`]), holds one task that a sleeping
+//!   child runs, and sleeps. A test kills it, stops it, cuts its connection, or
 //!   waits for it to fail closed.
 //! - The reaper is [`owner_gone_step`] on the test database, called every
 //!   [`PASS_INTERVAL`] with a span that fits the probe's regain bound, or at
@@ -31,9 +31,10 @@ use crate::test_support::migrated_database_url;
 use crate::test_support::migrated_pool;
 use crate::test_support::sql::{self, TestPool};
 use crate::test_support::telemetry::WatchedTelemetry;
+use crate::worker::executor::supervisor::Spawner;
 use crate::worker::recovery::owner_gone::OwnerGoneStep;
 use crate::worker::recovery::{owner_gone_step, UnheldOwners};
-use crate::worker::runner_beats::DispatchRunner;
+use crate::worker::runner_beats::{end_child, sleeping_child};
 
 /// The longest wait for an event that a test expects.
 const WAIT: Duration = Duration::from_secs(20);
@@ -250,8 +251,8 @@ fn test_plan(url: &str) -> ConnectPlan {
 
 /// The body of a probe process: the liveness lock of the worker id that the
 /// test names, with its regain bound and the probe interval of the tests,
-/// stale running recovery on, and one task held in the process. Without the
-/// probe variables this test returns at once.
+/// stale running recovery on, and one task held, which a sleeping child
+/// runs. Without the probe variables this test returns at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn liveness_probe_process() {
     let Some(url) = std::env::var_os(PROBE_URL_ENV) else {
@@ -263,9 +264,11 @@ async fn liveness_probe_process() {
         .expect("the probe names its bound")
         .parse()
         .expect("the bound is whole milliseconds");
+    let spawner = Spawner::start().expect("the spawner starts");
+    let (spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
     let _held = live
-        .hold(Uuid::new_v4(), Utc::now(), DispatchRunner::WorkerProcess)
+        .hold(Uuid::new_v4(), Utc::now(), child)
         .expect("the registry is open");
     let probe_rule = LivenessRule {
         regain_bound: Duration::from_millis(bound_ms),
@@ -279,6 +282,7 @@ async fn liveness_probe_process() {
     // Reached only when no test ended the process.
     started.running.stop().await;
     drop(started.holder);
+    end_child(spawner, spawned).await;
 }
 
 /// A probe process that the test owns: killed and reaped when dropped.

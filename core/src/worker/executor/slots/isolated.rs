@@ -54,7 +54,7 @@ use crate::worker::executor::supervisor::{
     log_core_stopped_child, ChildChannel, ChildExit, ChildLost, EndWithoutTask, ExitState,
     FrameWait, LossCause, MailboxBound, SendFailure, CHANNEL_LOST_GRACE,
 };
-use crate::worker::runner_beats::{DispatchRunner, HeldChild, HeldDispatch, RegistryClosed};
+use crate::worker::runner_beats::{HeldChild, HeldDispatch, RegistryClosed};
 
 /// The longest wait of the finalizing marker of a version-1 Python isolated
 /// child (the reference copy of the whole-run pairs) after a body returned
@@ -561,13 +561,13 @@ async fn run_one(
     answer: &mut TaskAnswer,
 ) -> AfterRun {
     let task_id = frame.task_id;
-    let runner = DispatchRunner::Child(HeldChild {
+    let child = HeldChild {
         id: channel.id(),
         pid: channel.pid(),
         spawner: shared.spawner.clone(),
         kill_mark: channel.kill_mark(),
-    });
-    let held = match shared.live.hold(task_id, frame.claimed_at, runner) {
+    };
+    let held = match shared.live.hold(task_id, frame.claimed_at, child) {
         Ok(held) => held,
         Err(RegistryClosed) => {
             // No beat would cover the task: it is not sent, and the child
