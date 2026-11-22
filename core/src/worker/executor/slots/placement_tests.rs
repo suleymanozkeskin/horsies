@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use super::scripted::{
     idle_child, isolated_config, isolated_init, process_ended, read_frame, send, serving, shell,
-    start_isolated, take_init, until, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
+    start_isolated, take_init, until, Shown, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::*;
 use crate::worker::executor::placement::{
@@ -37,9 +37,12 @@ fn allowed_list(status_path: &str) -> CpuIds {
 }
 
 async fn failure_of(board: &PoolBoard) -> PoolFailure {
-    until("the pool failed", STATE_WAIT, || {
-        matches!(board.health(), PoolHealth::Failed(_))
-    })
+    until(
+        "the pool failed",
+        STATE_WAIT,
+        &[Shown::Board(board)],
+        || matches!(board.health(), PoolHealth::Failed(_)),
+    )
     .await;
     match board.health() {
         PoolHealth::Failed(failure) => failure,

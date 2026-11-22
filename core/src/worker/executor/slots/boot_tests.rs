@@ -13,7 +13,7 @@ use super::scripted::{
     answer_of, answer_runs, boot, boot_failed, ended, fail_boot, idle_child, input,
     isolated_config, isolated_init, reported, result_frame, serving, shared_async_init,
     shared_thread_init, shell, short_of_descriptors, start_isolated, submit_isolated, take_init,
-    task, ticket, tickets, until, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
+    task, ticket, tickets, until, Shown, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::*;
 use crate::worker::children::CHILD_PROCESS_NAME;
@@ -27,9 +27,12 @@ use crate::worker::executor::supervisor::{
 
 /// Wait until the pools fail, and give the failure.
 async fn failure_of(board: &PoolBoard) -> PoolFailure {
-    until("the pool failed", STATE_WAIT, || {
-        matches!(board.health(), PoolHealth::Failed(_))
-    })
+    until(
+        "the pool failed",
+        STATE_WAIT,
+        &[Shown::Board(board)],
+        || matches!(board.health(), PoolHealth::Failed(_)),
+    )
     .await;
     match board.health() {
         PoolHealth::Failed(failure) => failure,
@@ -205,9 +208,12 @@ async fn a_shortage_that_clears_boots_the_slot_and_it_serves() {
     let spawner = Spawner::start().unwrap();
     let (pool, board) = start_isolated(&spawner, 1, isolated_config(shell(&script)));
 
-    until("the slot is down", STATE_WAIT, || {
-        matches!(board.phase(0), SlotPhase::Down(_))
-    })
+    until(
+        "the slot is down",
+        STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
+        || matches!(board.phase(0), SlotPhase::Down(_)),
+    )
     .await;
     let answer = answer_of(submit_isolated(&pool, &first, IsolatedDeadline::NoDeadline)).await;
 
@@ -362,15 +368,20 @@ async fn one_slot_short_of_resources_is_down_while_the_other_serves() {
     let spawner = Spawner::start().unwrap();
     let (pool, board) = start_isolated(&spawner, 2, isolated_config(shell(&script)));
 
-    until("one slot is down and the other serves", STATE_WAIT, || {
-        let phases = board.phases_of(ExecutionClass::Isolated);
-        phases
-            .iter()
-            .any(|phase| matches!(phase, SlotPhase::Down(_)))
-            && phases
+    until(
+        "one slot is down and the other serves",
+        STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
+        || {
+            let phases = board.phases_of(ExecutionClass::Isolated);
+            phases
                 .iter()
-                .any(|phase| matches!(phase, SlotPhase::Serving { .. }))
-    })
+                .any(|phase| matches!(phase, SlotPhase::Down(_)))
+                && phases
+                    .iter()
+                    .any(|phase| matches!(phase, SlotPhase::Serving { .. }))
+        },
+    )
     .await;
 
     let down = board.down_slots();
@@ -432,6 +443,7 @@ async fn a_down_slot_returns_to_service_and_its_failed_boots_do_not_count() {
     until(
         "both slots serve after two failed boots",
         STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
         || {
             tickets(&dir) == 5
                 && board
@@ -507,9 +519,12 @@ async fn the_stop_ends_the_booting_child_of_a_down_slot() {
     );
     let spawner = Spawner::start().unwrap();
     let (pool, board) = start_isolated(&spawner, 2, isolated_config(shell(&script)));
-    until("the down slot boots its next child", STATE_WAIT, || {
-        !dir.lines("booting.pid").is_empty()
-    })
+    until(
+        "the down slot boots its next child",
+        STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
+        || !dir.lines("booting.pid").is_empty(),
+    )
     .await;
     let booting: libc::pid_t = dir.lines("booting.pid")[0].trim().parse().unwrap();
     assert_eq!(board.down_slots().len(), 1);
@@ -537,9 +552,12 @@ async fn the_stop_does_not_wait_for_a_down_slot() {
     );
     let spawner = Spawner::start().unwrap();
     let (pool, board) = start_isolated(&spawner, 2, isolated_config(shell(&script)));
-    until("a slot is down", STATE_WAIT, || {
-        board.down_slots().len() == 1
-    })
+    until(
+        "a slot is down",
+        STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
+        || board.down_slots().len() == 1,
+    )
     .await;
     let started = Instant::now();
 

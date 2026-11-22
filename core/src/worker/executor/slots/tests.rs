@@ -12,7 +12,7 @@ use super::outcome::{
     timeout_recovery_writes, timeout_write, worker_failure_write, WriteStage,
 };
 use super::pool::Answer;
-use super::scripted::{drop_bytes, exit_at_stop, take_init, ScriptCount};
+use super::scripted::{drop_bytes, exit_at_stop, take_init, ScriptCount, Shown};
 use super::*;
 use crate::broker::attempt_writes::{AttemptFailureKind, RetryPlacement, RetryRequest};
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
@@ -1057,6 +1057,7 @@ async fn an_idle_child_is_a_free_slot_until_a_task_takes_it() {
     super::scripted::until(
         "the child waits for a task",
         Duration::from_secs(30),
+        &[Shown::Board(&board)],
         || pool.free_slots() == 1,
     )
     .await;
@@ -1073,9 +1074,12 @@ async fn an_idle_child_is_a_free_slot_until_a_task_takes_it() {
         0,
         "the submitted task holds the idle slot"
     );
-    super::scripted::until("the child holds the task", Duration::from_secs(30), || {
-        live.held_task_ids() == vec![claimed.task_id]
-    })
+    super::scripted::until(
+        "the child holds the task",
+        Duration::from_secs(30),
+        &[Shown::Board(&board)],
+        || live.held_task_ids() == vec![claimed.task_id],
+    )
     .await;
     assert_eq!(pool.free_slots(), 0, "the busy child is no free slot");
 

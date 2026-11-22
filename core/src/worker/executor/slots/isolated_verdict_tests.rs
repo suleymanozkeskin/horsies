@@ -15,8 +15,8 @@ use uuid::Uuid;
 use super::scripted::{
     act_on_runs, answer_of, answer_runs, boot, idle_child, isolated_config, isolated_init,
     printf_bytes, process_ended, read_frame, reported, result_frame, send, serving, serving_pid,
-    shell, start_isolated, submit_isolated, task, ticket, tickets, timeout_ms, until, TestDir,
-    SPAWNER_STOP_WAIT, STATE_WAIT,
+    shell, start_isolated, submit_isolated, task, ticket, tickets, timeout_ms, until, Shown,
+    TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
@@ -41,7 +41,7 @@ fn crash_reason(end: AttemptEnd) -> String {
 
 /// Wait until `name` in `dir` holds a pid, and give it.
 async fn pid_in(dir: &TestDir, name: &str) -> libc::pid_t {
-    until("the child wrote a pid", STATE_WAIT, || {
+    until("the child wrote a pid", STATE_WAIT, &[], || {
         dir.lines(name)
             .first()
             .is_some_and(|line| line.trim().parse::<libc::pid_t>().is_ok())
@@ -395,9 +395,12 @@ async fn a_crash_ends_the_subprocesses_of_the_child() {
     sigkill(child);
 
     let _ = crash_reason(answer_of(receiver).await);
-    until("the subprocess ended", STATE_WAIT, || {
-        process_ended(subprocess)
-    })
+    until(
+        "the subprocess ended",
+        STATE_WAIT,
+        &[Shown::Child(subprocess)],
+        || process_ended(subprocess),
+    )
     .await;
     stop_pool(pool, spawner).await;
 }
@@ -705,9 +708,12 @@ async fn a_lost_idle_child_is_replaced() {
     let lost = serving(&board, 0).await;
 
     sigkill(lost.as_pid_t());
-    until("a new child serves", STATE_WAIT, || {
-        serving_pid(&board, 0).is_some_and(|pid| pid != lost)
-    })
+    until(
+        "a new child serves",
+        STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
+        || serving_pid(&board, 0).is_some_and(|pid| pid != lost),
+    )
     .await;
     let answer = answer_of(submit_isolated(&pool, &first, IsolatedDeadline::NoDeadline)).await;
 

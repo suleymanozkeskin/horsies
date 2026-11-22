@@ -25,7 +25,7 @@ use crate::worker::executor::protocol::{
     ParentFrame, ProcessId, ReadyFrame, RssMb, SpanReadCounts, TaskSendPool, HEADER_BYTES,
 };
 use crate::worker::executor::slots::scripted::{
-    boot_any_kind, read_bytes, send, shell, take_init, ticket, tickets, until, ScriptCount,
+    boot_any_kind, read_bytes, send, shell, take_init, ticket, tickets, until, ScriptCount, Shown,
     TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use crate::worker::executor::supervisor::{
@@ -213,7 +213,7 @@ fn recording_child(dir: &TestDir) -> ChildCommand {
 
 /// Wait until the child kept `count` events in `dir`.
 async fn until_recorded(dir: &TestDir, count: usize) {
-    until("the child kept the events", STATE_WAIT, || {
+    until("the child kept the events", STATE_WAIT, &[], || {
         recorded(dir).len() >= count
     })
     .await;
@@ -325,9 +325,12 @@ async fn a_child_lost_after_its_ready_frame_boots_again_after_the_backoff() {
     );
     let child = Harness::start(shell(&script), bounds(), SentEventTypes::all(), 64);
 
-    until("the first child is lost", STATE_WAIT, || {
-        matches!(child.state(), HandlerChildState::Down(_))
-    })
+    until(
+        "the first child is lost",
+        STATE_WAIT,
+        &[Shown::Tickets(&dir)],
+        || matches!(child.state(), HandlerChildState::Down(_)),
+    )
     .await;
     let HandlerChildState::Down(down) = child.state() else {
         panic!("the child is down");
@@ -337,9 +340,12 @@ async fn a_child_lost_after_its_ready_frame_boots_again_after_the_backoff() {
         down.next,
         AfterDown::BootsAgainAfter(Duration::from_secs(1))
     );
-    until("the second child is up", STATE_WAIT, || {
-        matches!(child.state(), HandlerChildState::Up { .. })
-    })
+    until(
+        "the second child is up",
+        STATE_WAIT,
+        &[Shown::Tickets(&dir)],
+        || matches!(child.state(), HandlerChildState::Up { .. }),
+    )
     .await;
     assert_eq!(tickets(&dir), 2);
     assert_eq!(child.offer(7), Emitted::Offered(Offer::Queued));
@@ -516,13 +522,18 @@ async fn handler_stats_frames_give_the_handler_counters_and_the_rss() {
     let child = Harness::start(shell(&script), bounds(), SentEventTypes::all(), 64);
 
     let registry = Arc::clone(&child.registry);
-    until("the second stats frame is recorded", STATE_WAIT, || {
-        series_of(&registry, MetricId::HandlerErrors)
-            == vec![
-                (vec!["(unknown)".to_owned()], SampleValue::Counter(1)),
-                (vec![ON_END.to_owned()], SampleValue::Counter(5)),
-            ]
-    })
+    until(
+        "the second stats frame is recorded",
+        STATE_WAIT,
+        &[],
+        || {
+            series_of(&registry, MetricId::HandlerErrors)
+                == vec![
+                    (vec!["(unknown)".to_owned()], SampleValue::Counter(1)),
+                    (vec![ON_END.to_owned()], SampleValue::Counter(5)),
+                ]
+        },
+    )
     .await;
 
     assert_eq!(
@@ -573,13 +584,18 @@ async fn handler_stats_frames_give_the_span_read_failures() {
     let child = Harness::start(shell(&script), bounds(), SentEventTypes::all(), 64);
 
     let registry = Arc::clone(&child.registry);
-    until("the second stats frame is recorded", STATE_WAIT, || {
-        series_of(&registry, MetricId::SpanReadFailures)
-            == vec![
-                (vec!["not_read".to_owned()], SampleValue::Counter(4)),
-                (vec!["read_failed".to_owned()], SampleValue::Counter(3)),
-            ]
-    })
+    until(
+        "the second stats frame is recorded",
+        STATE_WAIT,
+        &[],
+        || {
+            series_of(&registry, MetricId::SpanReadFailures)
+                == vec![
+                    (vec!["not_read".to_owned()], SampleValue::Counter(4)),
+                    (vec!["read_failed".to_owned()], SampleValue::Counter(3)),
+                ]
+        },
+    )
     .await;
 
     let (stopped, _took) = child.stop().await;

@@ -11,8 +11,8 @@ use super::scripted::{
     act_on_runs, answer_of, answer_runs, async_work, boot, fail_boot, idle_child, isolated_config,
     isolated_init, layout, loop_blocked, read_frame, reported, result_frame, run_ref, send,
     serving, shared_async_init, shared_config, shell, short_of_descriptors, start_shared,
-    submit_isolated, submit_shared, task, ticket, tickets, until, TestDir, SPAWNER_STOP_WAIT,
-    STATE_WAIT,
+    submit_isolated, submit_shared, task, ticket, tickets, until, Shown, TestDir,
+    SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::*;
 use crate::core::boot_failure::ShortageErrno;
@@ -353,7 +353,13 @@ async fn with_telemetry_off_a_replacement_tells_nothing() {
         LiveDispatches::default(),
     );
 
-    until("a second child booted", STATE_WAIT, || tickets(&dir) >= 2).await;
+    until(
+        "a second child booted",
+        STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
+        || tickets(&dir) >= 2,
+    )
+    .await;
     let _pid = serving(&board, 0).await;
 
     assert!(watched.events().is_empty());

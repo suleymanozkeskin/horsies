@@ -11,7 +11,7 @@ use super::scripted::{
     answer_of, answer_runs, boot, fail_boot, idle_child, isolated_config, isolated_init, layout,
     reported, result_frame, serving, serving_pid, shared_config, shared_thread_init, shell,
     short_of_descriptors, start_isolated, start_shared, submit_isolated, task, ticket, until,
-    TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
+    Shown, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::*;
 use crate::worker::executor::placement::{CpuPlacement, WorkerThreads};
@@ -274,12 +274,17 @@ async fn the_first_ready_child_of_a_kind_down_at_the_first_start_reports_its_bas
         // reaped.
         unsafe { libc::kill(child.as_pid_t(), libc::SIGKILL) };
     }
-    until("both slots serve a replacement", STATE_WAIT, || {
-        let thread_child = serving_pid(&board, 1);
-        let isolated_child = serving_pid(&board, 0);
-        thread_child.is_some_and(|child| child != first_thread)
-            && isolated_child.is_some_and(|child| child != first_isolated)
-    })
+    until(
+        "both slots serve a replacement",
+        STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
+        || {
+            let thread_child = serving_pid(&board, 1);
+            let isolated_child = serving_pid(&board, 0);
+            thread_child.is_some_and(|child| child != first_thread)
+                && isolated_child.is_some_and(|child| child != first_isolated)
+        },
+    )
     .await;
     let more =
         tokio::time::timeout(Duration::from_millis(500), board.wait_new_kind_baseline()).await;

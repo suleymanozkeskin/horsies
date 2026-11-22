@@ -22,7 +22,7 @@ use super::scripted::{
     leftover_cancel, ok_envelope, printf_bytes, read_frame, reported, result_frame, run_ref, send,
     serving, serving_pid, shared_async_init, shared_config, shared_result, shared_thread_init,
     shell, start_isolated_from, start_shared_from, submit_shared, task, thread_work, timeout_ms,
-    until, TestDir, ANSWER_WAIT, SPAWNER_STOP_WAIT, STATE_WAIT,
+    until, Shown, TestDir, ANSWER_WAIT, SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
@@ -315,9 +315,12 @@ async fn a_result_that_reaches_the_socket_after_the_deadline_is_not_read() {
     let mut answer = held.submit(&first, deadline(SHORT_DEADLINE_MS));
 
     ended(child.as_pid_t()).await;
-    until("the late writer sent the result", STATE_WAIT, || {
-        dir.path().join("sent").exists()
-    })
+    until(
+        "the late writer sent the result",
+        STATE_WAIT,
+        &[Shown::Board(&held.board)],
+        || dir.path().join("sent").exists(),
+    )
     .await;
     still_waiting(&mut answer);
     held.source.release();
@@ -487,19 +490,24 @@ async fn a_parent_short_of_descriptors_takes_only_the_replacing_slot_down() {
     // The down slot boots again after its wait, so the view is taken in the
     // poll that sees it down.
     let mut seen = Vec::new();
-    until("the replacing slot is down", STATE_WAIT, || {
-        let down = board.down_slots();
-        let other_serves = down
-            .first()
-            .is_some_and(|(slot, _)| matches!(board.phase(1 - *slot), SlotPhase::Serving { .. }));
-        match (down.len(), other_serves) {
-            (1, true) => {
-                seen = down;
-                true
+    until(
+        "the replacing slot is down",
+        STATE_WAIT,
+        &[Shown::Board(&board)],
+        || {
+            let down = board.down_slots();
+            let other_serves = down.first().is_some_and(|(slot, _)| {
+                matches!(board.phase(1 - *slot), SlotPhase::Serving { .. })
+            });
+            match (down.len(), other_serves) {
+                (1, true) => {
+                    seen = down;
+                    true
+                }
+                _ => false,
             }
-            _ => false,
-        }
-    })
+        },
+    )
     .await;
 
     assert_eq!(answer, reported(1));
@@ -638,6 +646,7 @@ async fn a_late_exit_after_the_backstop_kill_gives_the_timeout_with_recovery_off
     until(
         "the backstop killed the child",
         Duration::from_secs(40),
+        &[Shown::Board(&held.board)],
         || serving_pid(&held.board, 0).is_some_and(|child| child != first_child),
     )
     .await;
@@ -699,9 +708,12 @@ async fn every_run_of_a_shared_child_is_held_while_it_runs() {
         let first_answer = submit_shared(&held.pool, &first, work.clone());
         let second_answer = submit_shared(&held.pool, &second, work);
 
-        until("both runs are held", STATE_WAIT, || {
-            live.held_task_ids() == vec![first.task_id, second.task_id]
-        })
+        until(
+            "both runs are held",
+            STATE_WAIT,
+            &[Shown::Board(&held.board)],
+            || live.held_task_ids() == vec![first.task_id, second.task_id],
+        )
         .await;
         std::fs::write(&go, b"").unwrap();
         let answers = (
@@ -710,9 +722,12 @@ async fn every_run_of_a_shared_child_is_held_while_it_runs() {
         );
 
         assert_eq!(answers, (reported(1), reported(2)), "{class}");
-        until("both runs are released", STATE_WAIT, || {
-            live.held_task_ids().is_empty()
-        })
+        until(
+            "both runs are released",
+            STATE_WAIT,
+            &[Shown::Board(&held.board)],
+            || live.held_task_ids().is_empty(),
+        )
         .await;
         held.stop().await;
     }

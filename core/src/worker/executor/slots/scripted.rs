@@ -50,6 +50,18 @@ pub(super) const ANSWER_WAIT: Duration = Duration::from_secs(60);
 pub(crate) const STATE_WAIT: Duration = Duration::from_secs(30);
 /// The bound of the spawner stop at the end of a test.
 pub(crate) const SPAWNER_STOP_WAIT: Duration = Duration::from_secs(10);
+/// The most `mkdir` calls that one child makes for its ticket (see
+/// [`ticket`]). Every call counts: a ticket that exists and a failed call.
+/// No test boots this many children, so only a child whose `mkdir` keeps
+/// failing reaches it.
+const TICKET_ATTEMPTS: u32 = 64;
+/// The exit code of a child that took no ticket in [`TICKET_ATTEMPTS`]
+/// calls. No other scripted child and no exit code of the child protocol
+/// uses it.
+const NO_TICKET_EXIT_CODE: i32 = 97;
+/// The file in a ticket folder that holds the pid of the child that took
+/// the ticket.
+const TICKET_PID_FILE: &str = "pid";
 
 /// The claim generation of every scripted task.
 pub(super) fn claimed_at() -> DateTime<Utc> {
@@ -497,8 +509,8 @@ pub(crate) fn idle_children_reporting_rss(dir: &Path, readings: &[RssReading]) -
         .map(|(rss, boot)| format!("{boot}) {};; ", ready(*rss)))
         .collect();
     shell(&format!(
-        r#"n=1; while ! mkdir "{}/ticket-$n" 2>/dev/null; do n=$((n + 1)); done; {}case $n in {cases}*) {};; esac; {}exit 3"#,
-        dir.display(),
+        "{}{}case $n in {cases}*) {};; esac; {}exit 3",
+        ticket_step(dir),
         read_frame(),
         ready(last),
         read_frame(),
@@ -517,11 +529,31 @@ pub(super) fn idle_child(init: &InitFrame) -> String {
 }
 
 /// Take a unique number from 1 up in `dir` as `$n`: the boot count of the
-/// children of a test.
+/// children of a test. The child writes its pid into the ticket, for the
+/// report of a wait that times out ([`Shown::Tickets`]). The steps are
+/// those of [`ticket_step`].
 pub(crate) fn ticket(dir: &TestDir) -> String {
+    ticket_step(dir.path())
+}
+
+/// Shell step that takes the lowest free ticket number from 1 up in
+/// `folder` as `$n`, then writes `$$` into [`TICKET_PID_FILE`] of the
+/// ticket.
+///
+/// - A `mkdir` that fails because the ticket exists moves to the next
+///   number.
+/// - A `mkdir` that fails for any other cause writes its error to standard
+///   error (the test log), and the next call tries the same number.
+/// - After [`TICKET_ATTEMPTS`] calls with no ticket, the child writes why to
+///   standard error and exits with [`NO_TICKET_EXIT_CODE`]. The slot then
+///   sees a child that ended before its first frame.
+///
+/// Sets `$n`, `$ticket_attempt` and `$ticket_error`.
+fn ticket_step(folder: &Path) -> String {
+    let ticket = format!("{}/ticket-$n", folder.display());
     format!(
-        r#"n=1; while ! mkdir "{}/ticket-$n" 2>/dev/null; do n=$((n + 1)); done; "#,
-        dir.path().display()
+        r#"n=1; ticket_attempt=1; while ! ticket_error=$(mkdir "{ticket}" 2>&1); do if [ -d "{ticket}" ]; then n=$((n + 1)); else echo "scripted child $$: mkdir {ticket} failed: $ticket_error" >&2; fi; if [ "$ticket_attempt" -ge {TICKET_ATTEMPTS} ]; then echo "scripted child $$: no ticket in {folder} after {TICKET_ATTEMPTS} mkdir calls, exit {NO_TICKET_EXIT_CODE}" >&2; exit {NO_TICKET_EXIT_CODE}; fi; ticket_attempt=$((ticket_attempt + 1)); done; echo $$ > "{ticket}/{TICKET_PID_FILE}"; "#,
+        folder = folder.display(),
     )
 }
 
@@ -673,14 +705,151 @@ pub(super) async fn answer_of(receiver: oneshot::Receiver<AttemptEnd>) -> Attemp
 }
 
 /// Poll `reached` every 10 ms until it holds; fail the test after `bound`.
-pub(crate) async fn until(what: &str, bound: Duration, mut reached: impl FnMut() -> bool) {
+/// The first line of the panic message names the wait. The next lines show
+/// each item of `shown`, read at the timeout.
+pub(crate) async fn until(
+    what: &str,
+    bound: Duration,
+    shown: &[Shown<'_>],
+    mut reached: impl FnMut() -> bool,
+) {
     let deadline = tokio::time::Instant::now() + bound;
     while !reached() {
         assert!(
             tokio::time::Instant::now() < deadline,
-            "not reached within {bound:?}: {what}"
+            "not reached within {bound:?}: {what}{}",
+            shown_text(shown)
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// One item that [`until`] shows in its panic message when its wait times
+/// out.
+pub(crate) enum Shown<'a> {
+    /// The health of the board, the phase of each slot, and the process
+    /// state of each child that a phase names.
+    Board(&'a PoolBoard),
+    /// The tickets in the folder (see [`ticket`]), and the process state of
+    /// the child that took each ticket.
+    Tickets(&'a TestDir),
+    /// The process state of one child.
+    Child(libc::pid_t),
+}
+
+/// The lines that [`until`] adds to its panic message: one block per item
+/// of `shown`, each line after a line break. Empty when `shown` is empty.
+/// It does not panic: a read that fails shows its error.
+fn shown_text(shown: &[Shown<'_>]) -> String {
+    shown
+        .iter()
+        .flat_map(|item| match item {
+            Shown::Board(board) => board_lines(board),
+            Shown::Tickets(dir) => ticket_lines(dir),
+            Shown::Child(pid) => vec![process_line(*pid)],
+        })
+        .map(|line| format!("\n{line}"))
+        .collect()
+}
+
+/// The health of `board`, the phase of each slot, and the process state of
+/// the child that a serving or closing slot names.
+fn board_lines(board: &PoolBoard) -> Vec<String> {
+    let slots = board.slot_count();
+    let mut lines = vec![format!("board: {slots} slots, health {:?}", board.health())];
+    for index in 0..slots {
+        let phase = board.phase(index);
+        lines.push(format!("  slot {index}: {phase:?}"));
+        match phase {
+            SlotPhase::Serving { pid } | SlotPhase::Closing { pid, .. } => {
+                lines.push(format!("    {}", process_line(pid.as_pid_t())));
+            }
+            SlotPhase::Booting | SlotPhase::Retiring | SlotPhase::Down(_) => {}
+        }
+    }
+    lines
+}
+
+/// The ticket count of `dir`, and for each ticket the pid that its child
+/// wrote and the process state of that child.
+fn ticket_lines(dir: &TestDir) -> Vec<String> {
+    let folder = dir.path();
+    match ticket_names(folder) {
+        Ok(names) => std::iter::once(format!("tickets in {}: {}", folder.display(), names.len()))
+            .chain(names.iter().map(|name| {
+                format!(
+                    "  {name}: {}",
+                    ticket_child_line(&folder.join(name).join(TICKET_PID_FILE))
+                )
+            }))
+            .collect(),
+        Err(error) => vec![format!(
+            "tickets in {}: the folder was not read: {error}",
+            folder.display()
+        )],
+    }
+}
+
+/// The names of the ticket folders in `folder`, in ticket order.
+fn ticket_names(folder: &Path) -> std::io::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(folder)? {
+        names.push(entry?.file_name().to_string_lossy().into_owned());
+    }
+    names.retain(|name| name.starts_with("ticket-"));
+    // Every name is `ticket-<n>`: a shorter name has a smaller number.
+    names.sort_by(|left, right| left.len().cmp(&right.len()).then_with(|| left.cmp(right)));
+    Ok(names)
+}
+
+/// The pid in `pid_file` of a ticket and the process state of that child,
+/// or why there is no pid.
+fn ticket_child_line(pid_file: &Path) -> String {
+    match std::fs::read_to_string(pid_file) {
+        Ok(text) => match text.trim().parse::<libc::pid_t>() {
+            Ok(pid) => process_line(pid),
+            Err(error) => format!("the pid file holds {text:?}: {error}"),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            "no pid file: the child did not write its pid".to_owned()
+        }
+        Err(error) => format!("the pid file was not read: {error}"),
+    }
+}
+
+/// The command, the state and the kernel wait of process `pid`, from
+/// `/proc/<pid>/stat` and `/proc/<pid>/wchan`.
+#[cfg(target_os = "linux")]
+fn process_line(pid: libc::pid_t) -> String {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat_fields(&stat),
+        Err(error) => format!("stat not read: {error}"),
+    };
+    let wchan = match std::fs::read_to_string(format!("/proc/{pid}/wchan")) {
+        Ok(wchan) => wchan.trim().to_owned(),
+        Err(error) => format!("not read: {error}"),
+    };
+    format!("process {pid}: {stat}, wchan {wchan}")
+}
+
+/// The process state is in `/proc`, which this platform does not have.
+#[cfg(not(target_os = "linux"))]
+fn process_line(pid: libc::pid_t) -> String {
+    format!("process {pid}: state not read, this platform has no /proc")
+}
+
+/// The command and the state letter of one `/proc/<pid>/stat` text:
+/// `<pid> (<command>) <state> ...`. The command can hold `) `, so the last
+/// `) ` ends it.
+#[cfg(target_os = "linux")]
+fn stat_fields(stat: &str) -> String {
+    let fields = stat
+        .split_once(" (")
+        .and_then(|(_, rest)| rest.rsplit_once(") "))
+        .and_then(|(command, rest)| rest.split_whitespace().next().map(|state| (command, state)));
+    match fields {
+        Some((command, state)) => format!("command {command}, state {state}"),
+        None => format!("stat not parsed: {stat:?}"),
     }
 }
 
@@ -694,9 +863,12 @@ pub(super) fn serving_pid(board: &PoolBoard, index: usize) -> Option<ProcessId> 
 
 /// Wait until slot `index` serves a child, and give its pid.
 pub(super) async fn serving(board: &PoolBoard, index: usize) -> ProcessId {
-    until("the slot serves a child", STATE_WAIT, || {
-        serving_pid(board, index).is_some()
-    })
+    until(
+        "the slot serves a child",
+        STATE_WAIT,
+        &[Shown::Board(board)],
+        || serving_pid(board, index).is_some(),
+    )
     .await;
     serving_pid(board, index).expect("the slot serves a child")
 }
@@ -719,7 +891,13 @@ pub(super) fn process_ended(pid: libc::pid_t) -> bool {
 
 /// Wait until `pid` has ended.
 pub(super) async fn ended(pid: libc::pid_t) {
-    until("the process ended", STATE_WAIT, || process_ended(pid)).await;
+    until(
+        "the process ended",
+        STATE_WAIT,
+        &[Shown::Child(pid)],
+        || process_ended(pid),
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------

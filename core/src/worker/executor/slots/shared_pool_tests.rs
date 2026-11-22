@@ -8,7 +8,7 @@ use std::time::Duration;
 use chrono::{TimeZone, Utc};
 use uuid::Uuid;
 
-use super::scripted::{drop_bytes, take_init, ScriptCount};
+use super::scripted::{drop_bytes, take_init, ScriptCount, Shown};
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::worker::executor::placement::ChildCpus;
@@ -482,6 +482,7 @@ async fn the_free_seats_of_an_open_child_less_the_submitted_tasks() {
     super::scripted::until(
         "the child opens its 2 seats",
         Duration::from_secs(30),
+        &[Shown::Board(&board)],
         || pool.free_seats() == 2,
     )
     .await;

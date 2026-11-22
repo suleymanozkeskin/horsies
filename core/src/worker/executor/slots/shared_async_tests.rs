@@ -17,8 +17,8 @@ use super::scripted::{
     act_on_runs, answer_of, boot, ended, layout, leftover_cancel, leftover_stuck, loop_blocked,
     process_ended, read_frame, reported, run_ref, run_stuck, send, send_later, serving,
     shared_async_init, shared_config, shared_result, shared_result_with_rss, shared_timed_out,
-    shell, start_shared, submit_shared, task, ticket, tickets, until, TestDir, SPAWNER_STOP_WAIT,
-    STATE_WAIT,
+    shell, start_shared, submit_shared, task, ticket, tickets, until, Shown, TestDir,
+    SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::seat_runs::{
     backstop_step, end_at_loss, place_on_shared_child, shared_recycle, Backstop, BackstopStep,
@@ -424,9 +424,12 @@ async fn a_closing_child_finishes_its_runs_before_it_retires() {
         .iter()
         .map(|task| submit_shared(&pool, task, long_work()))
         .collect();
-    until("the child closes", STATE_WAIT, || {
-        matches!(board.phase(0), SlotPhase::Closing { .. })
-    })
+    until(
+        "the child closes",
+        STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
+        || matches!(board.phase(0), SlotPhase::Closing { .. }),
+    )
     .await;
 
     assert_eq!(shared_capacity(&pool.service()), 1);
@@ -723,9 +726,12 @@ async fn a_child_that_reported_a_run_stuck_survives_the_backstops_and_the_drain_
     let mut stuck_answer = submit_shared(&pool, &stuck, short_work());
     let mut neighbour_answer = submit_shared(&pool, &neighbour, long_work());
 
-    until("the child closes", STATE_WAIT, || {
-        matches!(board.phase(0), SlotPhase::Closing { .. })
-    })
+    until(
+        "the child closes",
+        STATE_WAIT,
+        &[Shown::Board(&board)],
+        || matches!(board.phase(0), SlotPhase::Closing { .. }),
+    )
     .await;
     tokio::time::sleep_until((started + Duration::from_secs(12)).into()).await;
     assert!(!process_ended(pid.as_pid_t()));
@@ -861,9 +867,12 @@ async fn a_stuck_run_waits_for_its_neighbour_then_the_child_is_killed() {
     let neighbour_answer = submit_shared(&pool, &neighbour, long_work());
     let mut stuck_answer = submit_shared(&pool, &stuck, short_work());
 
-    until("the child closes at the stuck run", STATE_WAIT, || {
-        matches!(board.phase(0), SlotPhase::Closing { .. })
-    })
+    until(
+        "the child closes at the stuck run",
+        STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
+        || matches!(board.phase(0), SlotPhase::Closing { .. }),
+    )
     .await;
 
     assert_eq!(shared_capacity(&pool.service()), 2);

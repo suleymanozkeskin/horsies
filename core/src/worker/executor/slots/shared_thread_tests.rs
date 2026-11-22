@@ -16,7 +16,7 @@ use super::scripted::{
     send, send_later, serving, shared_async_init, shared_config, shared_result,
     shared_result_with_rss, shared_thread_init, shared_timed_out, shell, short_of_descriptors,
     start_shared, submit_shared, take, task, thread_work, ticket, tickets, timeout_ms, until,
-    TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
+    Shown, TestDir, SPAWNER_STOP_WAIT, STATE_WAIT,
 };
 use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
@@ -421,9 +421,12 @@ async fn a_deadline_closes_the_thread_child_and_its_neighbour_finishes_first() {
     let late_answer = submit_shared(&pool, &late, short_work());
     let neighbour_answer = submit_shared(&pool, &neighbour, long_work());
 
-    until("the child closes at the deadline", STATE_WAIT, || {
-        matches!(board.phase(0), SlotPhase::Closing { .. })
-    })
+    until(
+        "the child closes at the deadline",
+        STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
+        || matches!(board.phase(0), SlotPhase::Closing { .. }),
+    )
     .await;
     let mut later_answer = submit_shared(&pool, &later, long_work());
 
@@ -540,9 +543,12 @@ async fn a_thread_run_that_ends_after_its_deadline_times_out_and_the_child_retir
         answer_of(submit_shared(&pool, &next, long_work())).await,
         reported(3)
     );
-    until("the first child read its stop frame", STATE_WAIT, || {
-        dir.path().join("stopped").exists()
-    })
+    until(
+        "the first child read its stop frame",
+        STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
+        || dir.path().join("stopped").exists(),
+    )
     .await;
     stop_shared(pool, spawner).await;
 }
@@ -748,9 +754,12 @@ async fn a_down_thread_child_counts_nothing() {
     );
     let threads = start_shared(&spawner, &board, shared_config(shell(&thread_script), init));
 
-    until("a thread slot is down", STATE_WAIT, || {
-        board.down_slots().len() == 1
-    })
+    until(
+        "a thread slot is down",
+        STATE_WAIT,
+        &[Shown::Board(&board), Shown::Tickets(&dir)],
+        || board.down_slots().len() == 1,
+    )
     .await;
     let _ = serving(&board, 0).await;
     let _ = serving(&board, 1).await;
