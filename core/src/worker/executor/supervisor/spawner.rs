@@ -221,12 +221,50 @@ impl Shared {
     }
 }
 
-/// The self-pipe that wakes the spawner thread.
+/// The self-pipe that wakes the spawner thread. Both ends are non-blocking
+/// and close-on-exec, so no child holds them.
 struct Waker {
     read: OwnedFd,
     write: OwnedFd,
 }
 
+/// The two ends of the waker pipe, read end first. Linux: one `pipe2` call
+/// makes both ends close-on-exec and non-blocking, so a child that another
+/// thread of this process starts during the call does not get them.
+#[cfg(target_os = "linux")]
+fn waker_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds: [libc::c_int; 2] = [-1, -1];
+    // SAFETY: `fds` has room for the two descriptors pipe2 writes.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: pipe2 returned two new descriptors that nothing else owns.
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// The two ends of the waker pipe, read end first. Other platforms have no
+/// `pipe2`: `pipe`, then the close-on-exec flag on both ends, then
+/// non-blocking. A child that another thread of this process starts
+/// between `pipe` and the close-on-exec flag gets both ends.
+#[cfg(not(target_os = "linux"))]
+fn waker_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds: [libc::c_int; 2] = [-1, -1];
+    // SAFETY: `fds` has room for the two descriptors pipe writes.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: pipe returned two new descriptors that nothing else owns.
+    let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    for fd in [read.as_raw_fd(), write.as_raw_fd()] {
+        set_fd_flag(fd, libc::F_GETFD, libc::F_SETFD, libc::FD_CLOEXEC)?;
+    }
+    for fd in [read.as_raw_fd(), write.as_raw_fd()] {
+        set_fd_flag(fd, libc::F_GETFL, libc::F_SETFL, libc::O_NONBLOCK)?;
+    }
+    Ok((read, write))
+}
+
+#[cfg(not(target_os = "linux"))]
 fn set_fd_flag(fd: RawFd, get: libc::c_int, set: libc::c_int, flag: libc::c_int) -> io::Result<()> {
     // SAFETY: fcntl on an open descriptor with integer arguments.
     let flags = unsafe { libc::fcntl(fd, get) };
@@ -242,17 +280,7 @@ fn set_fd_flag(fd: RawFd, get: libc::c_int, set: libc::c_int, flag: libc::c_int)
 
 impl Waker {
     fn new() -> io::Result<Self> {
-        let mut fds: [libc::c_int; 2] = [-1, -1];
-        // SAFETY: `fds` has room for the two descriptors pipe writes.
-        if unsafe { libc::pipe(fds.as_mut_ptr()) } == -1 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: pipe returned two new descriptors that nothing else owns.
-        let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-        for fd in [read.as_raw_fd(), write.as_raw_fd()] {
-            set_fd_flag(fd, libc::F_GETFL, libc::F_SETFL, libc::O_NONBLOCK)?;
-            set_fd_flag(fd, libc::F_GETFD, libc::F_SETFD, libc::FD_CLOEXEC)?;
-        }
+        let (read, write) = waker_pipe()?;
         Ok(Self { read, write })
     }
 
@@ -452,6 +480,14 @@ impl Spawner {
 
     pub fn handle(&self) -> SpawnerHandle {
         self.handle.clone()
+    }
+
+    /// The read end and the write end of the waker pipe, for a test that
+    /// looks for them in a child.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn waker_descriptors(&self) -> [RawFd; 2] {
+        let waker = &self.handle.shared.waker;
+        [waker.read.as_raw_fd(), waker.write.as_raw_fd()]
     }
 
     /// Stop taking spawns, and wait up to `bound` for every child to be
