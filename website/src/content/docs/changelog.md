@@ -44,6 +44,18 @@ there is no migration contract between pre-1.0 versions.
   `HandleOperationError::connect_failed` take their first argument by
   reference.
 
+- **Rust client: the general broker pool default is `pool_size` 5 and
+  `max_overflow` 10, the same as the Python client.** It was 30 and 30.
+  `AppConfig::for_database_url`, `PostgresConfig::from_url` and a config
+  text that does not name the two fields give the new values. Since 0.8.0
+  both clients do their database I/O in the same core, so the core now has
+  the defaults of the Python client. The two values size only the general
+  broker: producers, web processes, schedulers and app-level APIs. They do
+  not size the pools of a worker (`WorkerProfile.pool`, `task_send_pool`).
+  A Rust app that relied on 30 and 30 sets `pool_size: 30` and
+  `max_overflow: 30` in its `PostgresConfig` to keep them. The Python
+  client does not change.
+
 ### Documentation
 
 - **New page: Deployment Topology** (`operations/deployment-topology`). It

@@ -58,11 +58,16 @@ pub struct PostgresConfig {
     #[serde(default)]
     pub worker_pool_pre_ping: bool,
 
-    /// Connection pool size.
+    /// The persistent connections of the general broker pool: the pool of
+    /// a producer, a web process, a scheduler or an app API. Default 5 in
+    /// both clients. It does not size the pools of a worker: the worker
+    /// process opens `WorkerProfile.pool`, and task code in a worker child
+    /// opens the `task_send_pool` of its child kind.
     #[serde(default = "default_pool_size")]
     pub pool_size: u32,
 
-    /// Maximum overflow connections beyond pool_size.
+    /// The connections past `pool_size` that the general broker pool opens
+    /// under load. Default 10 in both clients.
     #[serde(default = "default_max_overflow")]
     pub max_overflow: u32,
 
@@ -142,11 +147,13 @@ impl std::fmt::Debug for PostgresConfig {
 fn default_true() -> bool {
     true
 }
+/// The general broker pool of both clients: 5 persistent connections and
+/// 10 more under load, the defaults of the Python client's `PostgresConfig`.
 fn default_pool_size() -> u32 {
-    30
+    5
 }
 fn default_max_overflow() -> u32 {
-    30
+    10
 }
 fn default_pool_timeout() -> u32 {
     30
@@ -591,13 +598,24 @@ mod tests {
     fn defaults_from_json() {
         let json = r#"{"database_url": "postgresql://localhost/db"}"#;
         let config: PostgresConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.pool_size, 30);
-        assert_eq!(config.max_overflow, 30);
         assert!(config.pool_pre_ping);
         assert!(!config.echo);
         assert!(config.session_database_url.is_none());
         assert!(!config.pgbouncer_transaction_mode);
         assert!(!config.retain_rerun_input_default);
+    }
+
+    /// A config that names no pool gets the general broker pool of 5
+    /// connections and 10 more under load, by serde and by `from_url`.
+    #[test]
+    fn the_general_broker_pool_default_is_5_and_10() {
+        let parsed: PostgresConfig =
+            serde_json::from_str(r#"{"database_url": "postgresql://localhost/db"}"#)
+                .expect("a config with only a URL is valid");
+        let built = PostgresConfig::from_url("postgresql://localhost/db");
+
+        assert_eq!((parsed.pool_size, parsed.max_overflow), (5, 10));
+        assert_eq!((built.pool_size, built.max_overflow), (5, 10));
     }
 
     #[test]
