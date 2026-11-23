@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
@@ -12,8 +12,11 @@ import { TIMING_EXAMPLES } from '@/test/timing-examples';
  * type checker holds against types/timing.ts: a field, a variant or a tag that
  * the core renames fails this test or the type check.
  */
-const SHARED_EXAMPLES_PATH = fileURLToPath(
-  new URL('../../../core/src/monitoring/timing_examples.json', import.meta.url)
+// The test environment gives import.meta.url an http URL, so the path is
+// built from the working folder of the test run (webui/).
+const SHARED_EXAMPLES_PATH = resolve(
+  process.cwd(),
+  '../core/src/monitoring/timing_examples.json'
 );
 
 describe('the timing types of the web UI', () => {
