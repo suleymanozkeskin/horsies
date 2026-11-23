@@ -224,6 +224,7 @@ export default defineConfig({
 								{ label: 'Subworkflows', slug: 'concepts/workflows/subworkflows' },
 								{ label: 'Typed Node Builder', slug: 'concepts/workflows/typed-node-builder' },
 								{ label: 'Start a Workflow Once', slug: 'guides/start-workflow-once' },
+								{ label: 'Crash-Safe Multi-Step Work', slug: 'guides/crash-safe-multi-step-work' },
 							],
 						},
 						{
@@ -302,6 +303,7 @@ export default defineConfig({
 								{ label: 'Workflow API', slug: 'rust/concepts/workflows/workflow-api' },
 								{ label: 'Typed Node Builder', slug: 'rust/concepts/workflows/typed-node-builder' },
 								{ label: 'Subworkflows', slug: 'rust/concepts/workflows/subworkflows' },
+								{ label: 'Crash-Safe Multi-Step Work', slug: 'rust/guides/crash-safe-multi-step-work' },
 							],
 						},
 						{

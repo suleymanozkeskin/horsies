@@ -795,6 +795,7 @@ Each entry: Title -- summary -> URL
 ### Guides
 - Start a Workflow Once per Entity -- deterministic workflow_id (uuid5) from an entity key, same-id behavior, retention limit -> /horsies/guides/start-workflow-once/
 - Async Frameworks -- FastAPI lifespan, broker close, async vs sync calls, event-loop limit -> /horsies/guides/async-frameworks/
+- Crash-Safe Multi-Step Work -- one workflow node per step with effects, so a retry or a worker crash runs only the failed step; a retry policy per step, from_node and args_from, what runs again, when one task fits better, idempotency keys for external effects -> /horsies/guides/crash-safe-multi-step-work/
 
 ### Configuration
 - Queue Modes -- DEFAULT vs CUSTOM, priorities -> /horsies/concepts/queue-modes/
@@ -978,5 +979,6 @@ SharedThreadChildren, seat thread, SharedPool, thread pool sizing -> /horsies/wo
 psycopg, libpq, cancel request, pg-binary -> /horsies/configuration/broker-config/
 start once, idempotent start, deterministic workflow_id, uuid5, WORKFLOW_ID_CONFLICT, WorkflowStartIdConflict -> /horsies/guides/start-workflow-once/
 FastAPI, lifespan, ASGI, async framework, close_async, ASYNC_CONTEXT -> /horsies/guides/async-frameworks/
+multi-step task, durable steps, crash-safe, checkout, partial effects, WORKER_CRASHED retry, at-least-once node, external idempotency key -> /horsies/guides/crash-safe-multi-step-work/
 dynamic fan-out, runtime-built child, build_with, args_from, SubWorkflowNode -> /horsies/concepts/workflows/subworkflows/
 changelog, release notes, breaking changes -> /horsies/changelog/
