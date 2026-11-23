@@ -24,7 +24,7 @@ import pytest
 from pydantic import BaseModel, SecretStr
 
 import horsies._core as core
-from horsies import FencingToken, TaskRuntime
+from horsies import AttemptNumber, AttemptNumberRefused, FencingToken, TaskRuntime
 from horsies.core.app import Horsies
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.json_value import StrictJsonError
@@ -46,7 +46,8 @@ from horsies.core.models.schedule import IntervalSchedule, TaskSchedule
 from horsies.core.models.tasks import Execution, TaskError, TaskResult
 from horsies.core.models.workflow import TaskNode, WorkflowSpec
 from horsies.core.scheduler.validation import _signature_error
-from horsies.core.task_runtime import MAX_ATTEMPT
+from horsies.core.task_runtime import FIRST_ATTEMPT, MAX_ATTEMPT
+from horsies.core.types.result import Err, Ok
 from horsies.core.worker import child_runner, shared_runner, thread_runner
 from horsies.core.worker.child_frames import NoTraceCarrier
 from horsies.core.worker.child_runner import RunTheTask
@@ -125,13 +126,46 @@ def task_loop() -> Iterator[TaskLoop]:
 
 
 # =============================================================================
-# TaskRuntime.for_test
+# AttemptNumber and TaskRuntime.for_test
 # =============================================================================
+
+
+def _attempt(number: int) -> AttemptNumber:
+    """The attempt number `number`, which the test states is in bounds."""
+    match AttemptNumber.parse(number):
+        case Ok(ok_value=attempt):
+            return attempt
+        case Err(err_value=refused):
+            raise AssertionError(f'the test passes an attempt in bounds: {refused.reason}')
+
+
+class TestAttemptNumber:
+    @pytest.mark.parametrize('number', [1, 2, MAX_ATTEMPT])
+    def test_a_number_in_the_bound_parses(self, number: int) -> None:
+        assert AttemptNumber.parse(number) == Ok(AttemptNumber(value=number))
+
+    @pytest.mark.parametrize('number', [0, -1, MAX_ATTEMPT + 1])
+    def test_a_number_outside_the_bound_is_refused(self, number: int) -> None:
+        refused = AttemptNumberRefused(number=number)
+
+        assert AttemptNumber.parse(number) == Err(refused)
+        assert refused.reason == (
+            f'attempt number {number} is not in 1 to {MAX_ATTEMPT}; '
+            'the first attempt of a task is 1'
+        )
+
+    @pytest.mark.parametrize('number', [0, MAX_ATTEMPT + 1])
+    def test_a_direct_construction_outside_the_bound_is_a_defect(self, number: int) -> None:
+        with pytest.raises(AssertionError, match=f'illegal attempt number {number}'):
+            AttemptNumber(value=number)
+
+    def test_the_first_attempt_is_1(self) -> None:
+        assert FIRST_ATTEMPT == AttemptNumber(value=1)
 
 
 class TestForTest:
     def test_the_runtime_holds_the_token_of_the_attempt(self) -> None:
-        runtime = TaskRuntime.for_test(task_id=TASK_ID, attempt=3)
+        runtime = TaskRuntime.for_test(task_id=TASK_ID, attempt=_attempt(3))
 
         assert runtime.fencing_token == FencingToken(task_id=TASK_ID, value=3)
 
@@ -140,30 +174,27 @@ class TestForTest:
 
         assert runtime.fencing_token.value == 1
 
-    @pytest.mark.parametrize('attempt', [0, -1, MAX_ATTEMPT + 1])
-    def test_an_attempt_outside_the_bound_is_refused(self, attempt: int) -> None:
-        with pytest.raises(ValueError, match=f'attempt {attempt} is not in 1 to'):
-            TaskRuntime.for_test(task_id=TASK_ID, attempt=attempt)
-
     def test_the_largest_attempt_is_accepted(self) -> None:
-        runtime = TaskRuntime.for_test(task_id=TASK_ID, attempt=MAX_ATTEMPT)
+        runtime = TaskRuntime.for_test(task_id=TASK_ID, attempt=_attempt(MAX_ATTEMPT))
 
         assert runtime.fencing_token.value == MAX_ATTEMPT
 
     def test_a_direct_call_reads_the_runtime_that_the_test_passes(self) -> None:
-        runtime = TaskRuntime.for_test(task_id=TASK_ID, attempt=2)
+        runtime = TaskRuntime.for_test(task_id=TASK_ID, attempt=_attempt(2))
 
         result = token_task(runtime, order_id='o-1')
 
         assert result.unwrap() == FencingToken(task_id=TASK_ID, value=2)
 
-    def test_the_runtime_and_the_token_are_frozen(self) -> None:
+    def test_the_runtime_the_token_and_the_attempt_are_frozen(self) -> None:
         runtime = TaskRuntime.for_test(task_id=TASK_ID)
 
         with pytest.raises(AttributeError):
             setattr(runtime, 'fencing_token', FencingToken(task_id=TASK_ID, value=2))
         with pytest.raises(AttributeError):
             setattr(runtime.fencing_token, 'value', 2)
+        with pytest.raises(AttributeError):
+            setattr(_attempt(1), 'value', 2)
 
 
 # =============================================================================
