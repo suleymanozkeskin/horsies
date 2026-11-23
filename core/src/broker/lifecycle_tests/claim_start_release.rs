@@ -8,12 +8,13 @@ use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::claims::{
-    claim_pass, release_claims, start_attempt, start_attempt_within, ClaimClasses, ClaimTake,
-    ReleaseBatch, ReleaseClaims, ReleaseOutcome, ReleasePlacement, StartAttempt, StartMiss,
-    StartOutcome, StartWindow, WindowedStart,
+    claim_pass, release_claims, start_attempt, start_attempt_within, ClaimClasses,
+    ClaimPassRequest, ClaimTake, ClaimedRow, ReleaseBatch, ReleaseClaims, ReleaseOutcome,
+    ReleasePlacement, StartAttempt, StartMiss, StartOutcome, StartWindow, WindowedStart,
 };
 use crate::broker::core_rows::StatementLog;
 use crate::broker::pools::core_pool_for_test_url;
+use crate::core::lifecycle::OwnedClaim;
 use crate::core::task::Execution;
 use crate::events::{RunTrace, TraceCarrierText};
 use crate::test_support::sql::{self, TestPool};
@@ -250,6 +251,100 @@ mod start {
             assert_eq!(runner_beats(&pool, task_id).await, 0, "{task_id}");
         }
         cleanup_tasks(&pool, &[other_generation, lease_expired, deadline_passed]).await;
+    }
+
+    /// The row of `task_id` that one claim pass of `request` takes.
+    async fn claim_of(pool: &TestPool, request: &ClaimPassRequest, task_id: Uuid) -> ClaimedRow {
+        claim_pass(
+            &core_pool_for_test_url(pool.url()),
+            StatementLog::Off,
+            request,
+        )
+        .await
+        .expect("claim pass")
+        .claimed
+        .into_iter()
+        .find(|row| row.id == task_id)
+        .expect("the pass claimed the seeded row")
+    }
+
+    /// A claim whose lease expired before its start is taken again at the
+    /// same retry count: the first claim ran no body, so the attempt number
+    /// of the task does not change. The start of the first claim is then not
+    /// held and writes nothing, and the second claim starts at that count,
+    /// so the body that runs has the attempt number that the first claim had.
+    #[tokio::test]
+    async fn a_reclaim_of_a_claim_that_never_started_keeps_the_retry_count() {
+        let pool = pool().await;
+        ensure_recent_heartbeat_leaves(&pool).await;
+        let task_id = seed_task(
+            &pool,
+            &TaskSeed {
+                retry_count: 1,
+                ..pending("ISOLATED")
+            },
+        )
+        .await;
+
+        let first = claim_of(&pool, &claim_request(QUEUE), task_id).await;
+        sql::query(
+            "UPDATE horsies_tasks SET claim_expires_at = NOW() - interval '1 second'
+             WHERE id = $1",
+        )
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .expect("expire the lease of the first claim");
+        let second_request = ClaimPassRequest {
+            worker_id: OTHER_WORKER.to_owned(),
+            ..claim_request(QUEUE)
+        };
+        let second = claim_of(&pool, &second_request, task_id).await;
+        assert_eq!((first.retry_count, second.retry_count), (1, 1));
+
+        let before = live_row(&pool, task_id).await;
+        let first_start = StartAttempt {
+            fence: OwnedClaim {
+                worker_id: WORKER.to_owned(),
+                claimed_at: first.claimed_at,
+            },
+            ..start(task_id)
+        };
+        let outcome = start_attempt(
+            &core_pool_for_test_url(pool.url()),
+            StatementLog::Off,
+            &first_start,
+            crate::broker::child_writes::WriteDeadline::start_attempt(),
+        )
+        .await
+        .expect("start of the first claim");
+        assert_eq!(outcome, StartOutcome::Missed(StartMiss::NotHeld));
+        assert_eq!(live_row(&pool, task_id).await, before);
+        assert_eq!(runner_beats(&pool, task_id).await, 0);
+
+        let second_start = StartAttempt {
+            fence: OwnedClaim {
+                worker_id: OTHER_WORKER.to_owned(),
+                claimed_at: second.claimed_at,
+            },
+            ..start(task_id)
+        };
+        let outcome = start_attempt(
+            &core_pool_for_test_url(pool.url()),
+            StatementLog::Off,
+            &second_start,
+            crate::broker::child_writes::WriteDeadline::start_attempt(),
+        )
+        .await
+        .expect("start of the second claim");
+        assert!(
+            matches!(outcome, StartOutcome::Started { .. }),
+            "{outcome:?}"
+        );
+        let row = live_row(&pool, task_id).await.expect("live row");
+        assert_eq!(row["status"], "RUNNING");
+        assert_eq!(row["retry_count"], 1);
+        cleanup_tasks(&pool, &[task_id]).await;
     }
 
     /// A window that closed before the pool gave the connection sends no

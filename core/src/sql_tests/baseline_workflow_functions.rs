@@ -16,8 +16,8 @@ use tokio_postgres::Row;
 
 use super::harness::{describe, BaselineDatabase, Session};
 
-const FIXTURES_SQL: &str = include_str!("cases/baseline_workflow_fixtures.sql");
-const CASES_SQL: &str = include_str!("cases/baseline_workflow_functions.sql");
+pub(super) const FIXTURES_SQL: &str = include_str!("cases/baseline_workflow_fixtures.sql");
+pub(super) const CASES_SQL: &str = include_str!("cases/baseline_workflow_functions.sql");
 
 /// Polls of the waiting session's wait event before the case fails.
 const LOCK_WAIT_POLLS: u32 = 200;
