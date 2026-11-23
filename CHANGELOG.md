@@ -37,6 +37,27 @@ and there is no migration contract between pre-1.0 versions.
   workflow: the workflow retention deletes them, and the foreign keys
   delete them with a deleted node or workflow. The migration writes no
   event for a run that began before it.
+- **The monitoring API shows the phase timing of a workflow run and the
+  phase record of each attempt.** Each `TaskAttemptInfo` (task detail, node
+  detail, `GET /api/tasks/{id}`, `GET /api/workflows/{id}/tasks/{index}`)
+  has `phases`: the phase record of its attempt row, or `not_captured` for a
+  row written before migration 1001. The run read (`get_workflow_run`,
+  `GET /api/workflows/{id}`) has `timing` on the run and on each node. The
+  core composes the timing of each node from the attempt rows and the run
+  events: segments in order (`pending`, `ready`, `enqueued`, `retry_wait`,
+  `claimed`, `running`, `finalizing`, `advancing`, `unknown`), each with its
+  start, its end or `open`, and its node, task or attempt; a coverage label
+  (`exact`, `partial` with the reasons of its `unknown` segments,
+  `unavailable`, or `inconsistent` with the conflict that it names); and an
+  endpoint marker. The run timing holds the read time, the capture start,
+  the range of the run, its pauses and its coverage. A run that began before
+  migration 1001, or that has more than 100,000 events, is `unavailable`.
+  Times that the record holds in the wrong order make the node
+  `inconsistent`; the core does not reorder or guess them. One statement
+  reads the run, the events and the task rows (live, or in history at the
+  locator of each `TASK_MOVED` event); no statement runs per node or per
+  task. The Python models and the Rust types are in `horsies.monitoring`
+  and `horsies::monitoring`.
 
 ### Changed
 

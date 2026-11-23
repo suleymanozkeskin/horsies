@@ -2102,6 +2102,103 @@ async fn the_run_route_answers_the_run_its_failed_indices_and_its_edges() {
     assert_eq!(body["run"]["id"], run_id.to_string());
     assert_eq!(body["failed_indices"], serde_json::json!([0]));
     assert_eq!(body["edges"], serde_json::json!([]));
+    // The run and each node carry their timing. The run began 120 s before
+    // the read, so it is before or after the start of the lifecycle record
+    // (the install of the shared database). After it, the FAILED node with
+    // no completion time contradicts itself.
+    match body["timing"]["kind"].as_str() {
+        Some("unavailable") => assert_eq!(
+            body["nodes"][0]["timing"],
+            serde_json::json!({"kind": "unavailable", "reason": "RUN_BEFORE_CAPTURE"})
+        ),
+        Some("composed") => assert_eq!(
+            body["nodes"][0]["timing"],
+            serde_json::json!({
+                "kind": "inconsistent",
+                "conflict": {"kind": "missing_record", "record": "COMPLETION_TIME"}
+            })
+        ),
+        other => panic!("the run carries its timing, not {other:?}: {body}"),
+    }
+}
+
+/// The task route answers the phase record of each attempt: a task that
+/// failed through the terminal write of a run, whose row counted no claim
+/// and whose writer observed no placement.
+#[tokio::test]
+async fn the_task_route_answers_the_phase_record_of_each_attempt() {
+    let state = migrated_state().await;
+    let pool = migrated_pool().await;
+    let task_id = Uuid::new_v4();
+    sql::query(
+        "INSERT INTO horsies_tasks (
+            id, task_name, queue_name, priority, input, task_options, execution,
+            retention_class_key, sent_at, created_at,
+            command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+            status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+            started_at, finalizing_at, finalizing_by_worker_id,
+            worker_pid, worker_hostname, worker_process_name,
+            retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+            updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+        ) VALUES (
+            $1, 'web_phases_task', 'default', 100, '{}', NULL, 'ISOLATED',
+            'forever', NOW(), NOW(),
+            1, decode(repeat('0f', 32), 'hex'), NULL,
+            'RUNNING', NOW() - interval '60 seconds', NOW(), 'web-phases-worker', NULL,
+            NOW() - interval '30 seconds', NULL, NULL,
+            4242, 'web-phases-host', 'web-phases-process',
+            0, 0, NULL, NULL, FALSE,
+            NOW(), FALSE, NULL, NULL
+        )",
+    )
+    .bind(task_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let failed = crate::test_support::terminal_writes::fail_running_task(
+        &pool,
+        task_id,
+        "web-phases-worker",
+        &crate::test_support::terminal_writes::TerminalFailure::of_task(
+            r#"{"err": {"error_code": "TASK_EXCEPTION"}}"#,
+            Some("TASK_EXCEPTION"),
+            None,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            failed.as_slice(),
+            [crate::core::lifecycle::TerminalizationOutcome::Applied { .. }]
+        ),
+        "{failed:?}"
+    );
+
+    let response = build_router(state)
+        .oneshot(request(Method::GET, &format!("/api/tasks/{task_id}")))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json(response).await;
+    sql::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    let phases = &body["attempts"][0]["phases"];
+    assert_eq!(phases["kind"], "captured", "{body}");
+    assert_eq!(phases["claims"], serde_json::json!({"kind": "not_counted"}));
+    assert_eq!(
+        phases["finalizing"],
+        serde_json::json!({"kind": "not_marked"})
+    );
+    assert_eq!(
+        phases["recorded_by"],
+        serde_json::json!({"kind": "worker", "placement": {"kind": "not_observed"}})
+    );
 }
 
 /// Python `test_web_api.py::TestTaskActionMapping::test_stored_data_that_does_not_parse_is_a_server_error`,

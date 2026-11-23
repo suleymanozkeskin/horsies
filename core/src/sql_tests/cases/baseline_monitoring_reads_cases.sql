@@ -619,6 +619,24 @@ WHERE id = '00000000-0000-4000-8000-00000000f001';
 UPDATE horsies_tasks SET trace_carrier = '{"traceparent":"a1"}', trace_id = decode(repeat('a1', 16), 'hex')
 WHERE id = '00000000-0000-4000-8000-0000000000a1';
 
+-- The runner applies the migration texts with no bookkeeping row. The run read takes the start of the lifecycle
+-- record from the row of migration 1001, so a database with none is refused.
+SELECT test_raises('workflow run: an existing run with no bookkeeping row of migration 1001 is data_corrupted',
+    $q$SELECT * FROM horsies_monitoring_workflow_run('00000000-0000-4000-8000-00000000f001')$q$, 'XX001');
+-- The record starts at the seed time, after every seeded run: each run read below is BEFORE_CAPTURE, with its RUN and
+-- NODE rows only. core/src/sql_tests/cases/monitoring_timing_cases.sql holds the cases of the timing rows.
+INSERT INTO horsies_migrations (version, description, installed_on, success, checksum, execution_time)
+VALUES (1001, 'lifecycle record', test_base(), TRUE, '\x00'::bytea, 0);
+SELECT test_check(
+    'workflow run: a run created before the capture start has the RUN and NODE rows only, BEFORE_CAPTURE',
+    bool_and(r.row_kind IN ('RUN', 'NODE'))
+    AND bool_and(r.row_kind <> 'RUN' OR (
+        r.timing_rows = 'BEFORE_CAPTURE' AND r.captured_since = test_base() AND r.as_of >= now()
+    )),
+    array_agg(r.row_kind || ':' || COALESCE(r.timing_rows, '-') ORDER BY r.row_position)::text
+)
+FROM horsies_monitoring_workflow_run('00000000-0000-4000-8000-00000000f001') AS r;
+
 SELECT test_check(
     'workflow run: the RUN row, then the nodes in task_index order',
     array_agg(r.row_kind || '@' || r.row_position || ':' || COALESCE(r.task_index::text, '-') ORDER BY r.row_position)

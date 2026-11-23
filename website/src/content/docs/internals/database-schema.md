@@ -221,6 +221,7 @@ statement that changes the state writes the event in the same transaction. No tr
 
 The kinds and the statements that write them:
 
+<!-- members: WorkflowEventKind -->
 | Kind | Written by |
 | ---- | ---------- |
 | `WORKFLOW_PAUSED` | `horsies_workflow_pause` and the failure policy `pause` (`horsies_workflow_record_failure`): one event for the workflow, then one for each descendant that it paused |

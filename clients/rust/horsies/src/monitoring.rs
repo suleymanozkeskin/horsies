@@ -48,6 +48,13 @@ pub use horsies_core::monitoring::{
     MAX_TASK_PAGE_REACH, MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
     RESUME_RECOVERY_WARNING, STATE_CONFLICT,
 };
+pub use horsies_core::monitoring::{
+    AttemptClaimsInfo, AttemptFinalizingInfo, AttemptPhasesInfo, AttemptPlacementInfo,
+    AttemptRecordedByInfo, MissingRecord, NodeEndpointInfo, NodeTimingInfo, PauseEndInfo,
+    PauseIntervalInfo, RunConflictInfo, RunCoverageInfo, RunTimingInfo, SegmentClaimInfo,
+    SegmentEndInfo, SegmentPhaseInfo, SegmentSourceInfo, TerminalNodeStatus, TimingBoundary,
+    TimingConflictInfo, TimingSegmentInfo, UnavailableReason, UnknownReason, WorkflowEventKind,
+};
 
 /// The count of each task status over the live table and the history
 /// window, all seven statuses in their fixed order.
@@ -119,10 +126,12 @@ pub async fn list_workflow_runs(
     core_monitoring::list_workflow_runs(&broker, query).await
 }
 
-/// The run `workflow_id` with its nodes and edges, or `None` when no run
-/// has the id.
+/// The run `workflow_id` with its nodes, edges and phase timing
+/// ([`RunTimingInfo`] on the run, [`NodeTimingInfo`] on each node), or
+/// `None` when no run has the id. One statement reads the run.
 ///
-/// Errors: `DB_OPERATION_FAILED`.
+/// Errors: `DB_OPERATION_FAILED`; `HISTORY_CONTRACT_VIOLATION` for an
+/// attempt archive that does not decode.
 pub async fn get_workflow_run(
     app: &Horsies,
     workflow_id: Uuid,

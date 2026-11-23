@@ -97,9 +97,30 @@ async fn failed_tasks_of_last_day(app: &Horsies) -> Result<(), Box<dyn std::erro
 | `get_task_detail(&app, task_id)` | `TaskDetailRead`: `Found(Box<TaskDetail>)` or `NotFound(TaskDetailNotFound { task_id, reason })` |
 | `list_workflow_names(&app)` | `Vec<String>`, at most `LIST_ROW_BOUND` (10,000) |
 | `list_workflow_runs(&app, &WorkflowRunsQuery)` | `Vec<WorkflowRunSummary>`, newest first |
-| `get_workflow_run(&app, workflow_id)` | `Option<WorkflowRunDetail>`: nodes and edges; `None` when no run has the id |
+| `get_workflow_run(&app, workflow_id)` | `Option<WorkflowRunDetail>`: nodes, edges and phase timing; `None` when no run has the id |
 | `get_workflow_node(&app, workflow_id, task_index)` | `Option<WorkflowTaskDetail>` |
 | `list_schedules(&app)` | `Vec<ScheduleStateInfo>`, soonest next run first, at most `LIST_ROW_BOUND` (10,000) |
+
+Phase timing (the lifecycle record of migration 1001; one statement reads a run, none per node):
+
+- `TaskAttemptInfo.phases`: `AttemptPhasesInfo::NotCaptured` (a row written before the record) or
+  `Captured { enqueued_at, claimed_at, claims, finalizing, recorded_by }`. `claims`: `Counted { count,
+  first_claimed_at }` or `NotCounted`; `finalizing`: `Marked { finalizing_at }` or `NotMarked`;
+  `recorded_by`: `Worker { placement: Placed { placed_at } | NotObserved }` or `Recovery { last_seen_at }`.
+- `WorkflowNodeInfo.timing`: `NodeTimingInfo::Exact { segments, endpoint }`, `Partial { reasons, segments,
+  endpoint }`, `Unavailable { reason }` or `Inconsistent { conflict }`. A segment is `TimingSegmentInfo {
+  phase, started_at, end: Ended { at } | Open, source: Node | Task { generation, task_id } | Attempt {
+  generation, task_id, attempt } }`. Phases: `Pending`, `Ready`, `Enqueued`, `RetryWait`, `Claimed { claim:
+  Earlier { count } | Recorded { placement } | NotRecorded }`, `Running`, `Finalizing`, `Advancing`,
+  `Unknown { reason }`. `endpoint` is `Terminal { status, at }` or `NotTerminal`; it can come before the end
+  of a task that ran on after a cancel or a failure.
+- `WorkflowRunDetail.timing`: `RunTimingInfo::Unavailable { as_of, captured_since, reason }`
+  (`RunBeforeCapture`, `TimingBoundExceeded`: more than 100,000 events) or `Composed { as_of, captured_since,
+  coverage: Exact | Partial { reasons } | Inconsistent { conflicts }, range_started_at, range_ended_at,
+  open_segments, pauses }`. A pause ends `Resumed { at }`, `RunEnded { at }` or `Open`.
+- Models hold times, not durations. An open segment ends at `as_of` for drawing. A conflict
+  (`ClockOrder`, `MissingRecord`, `UnexpectedEvent`) makes the node `Inconsistent`: the core does not
+  reorder or guess times.
 
 Query builders:
 
@@ -465,6 +486,12 @@ use horsies::monitoring::{
     MonitoringResult, MonitoringQueryError, MonitoringQueryErrorCode, StatusCount, Facets,
     Breakdown, TaskListPage, TaskSummary, TaskDetailRead, TaskDetail, TaskDetailNotFound,
     WorkflowRunSummary, WorkflowRunDetail, WorkflowTaskDetail, ScheduleStateInfo,
+    // Phase timing
+    AttemptPhasesInfo, AttemptClaimsInfo, AttemptFinalizingInfo, AttemptPlacementInfo,
+    AttemptRecordedByInfo, NodeTimingInfo, TimingSegmentInfo, SegmentPhaseInfo, SegmentClaimInfo,
+    SegmentEndInfo, SegmentSourceInfo, NodeEndpointInfo, TerminalNodeStatus, UnknownReason,
+    UnavailableReason, TimingConflictInfo, TimingBoundary, MissingRecord, WorkflowEventKind,
+    RunTimingInfo, RunCoverageInfo, RunConflictInfo, PauseIntervalInfo, PauseEndInfo,
     // Actions
     cancel_task, cancel_task_action, pause_workflow_action, resume_workflow_action,
     cancel_workflow_action, TaskCancelled, TaskActionError, TaskActionErrorCode,

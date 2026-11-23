@@ -17,7 +17,7 @@ const CASE_FILES: [(&str, &str, i64); 2] = [
     (
         "baseline_monitoring_reads_cases.sql",
         include_str!("cases/baseline_monitoring_reads_cases.sql"),
-        83,
+        85,
     ),
     (
         "baseline_scheduler_monitoring_cases.sql",

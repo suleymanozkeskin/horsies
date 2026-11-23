@@ -831,10 +831,19 @@ pub async fn list_workflow_runs(
     workflow_runs(&rows, statement).map_err(|error| row_failure(operation, error))
 }
 
-/// A run, root or child, with its nodes, edges and failed nodes, read by
-/// `horsies_monitoring_workflow_run` in one statement (one snapshot), or
-/// `None` when no run has the id. An edge to an index that the run does not
-/// have is dropped.
+/// A run, root or child, with its nodes, edges, failed nodes and phase
+/// timing, read by `horsies_monitoring_workflow_run` in one statement (one
+/// snapshot), or `None` when no run has the id. An edge to an index that the
+/// run does not have is dropped.
+///
+/// The timing of the run and of each node is composed in the core from the
+/// rows of that statement: the events of the run and the attempt archive of
+/// each task of a node, live or in history at the locator of its
+/// `TASK_MOVED` event. No statement runs per node or per task.
+///
+/// Errors: `DB_OPERATION_FAILED`; `HISTORY_CONTRACT_VIOLATION` for an
+/// attempt archive that does not decode, a run of more than 10,000 nodes, or
+/// a database with no bookkeeping row of migration 1001.
 pub async fn get_workflow_run(
     broker: &PostgresBroker,
     workflow_id: Uuid,
@@ -845,9 +854,10 @@ pub async fn get_workflow_run(
         .query_main(&statement.bind().value(&workflow_id).finish())
         .await
         .map_err(|error| function_failure(operation, error))?;
-    match workflow_run(&rows, statement).map_err(|error| row_failure(operation, error))? {
-        RunRead::Found(detail) => Ok(Some(*detail)),
-        RunRead::Absent => Ok(None),
+    match workflow_run(&rows, statement) {
+        Ok(RunRead::Found(detail)) => Ok(Some(*detail)),
+        Ok(RunRead::Absent) => Ok(None),
+        Err(error) => Err(detail_row_failure(operation, error)),
     }
 }
 

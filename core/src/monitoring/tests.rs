@@ -256,6 +256,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
         worker_hostname: None,
         started_at: Some(now),
         finished_at: Some(now),
+        phases: AttemptPhasesInfo::NotCaptured,
     };
     let leaf = LeafTaskInfo {
         task_id,
@@ -334,6 +335,27 @@ fn every_w2_model_serializes_the_contract_field_set() {
         exec_s: None,
         child_total: None,
         child_failed: None,
+        timing: NodeTimingInfo::Unavailable {
+            reason: UnavailableReason::RunBeforeCapture,
+        },
+    };
+    let segment = TimingSegmentInfo {
+        phase: SegmentPhaseInfo::Claimed {
+            claim: SegmentClaimInfo::Recorded {
+                placement: AttemptPlacementInfo::Placed { placed_at: now },
+            },
+        },
+        started_at: now,
+        end: SegmentEndInfo::Ended { at: now },
+        source: SegmentSourceInfo::Attempt {
+            generation: 1,
+            task_id,
+            attempt: 1,
+        },
+    };
+    let pause = PauseIntervalInfo {
+        started_at: now,
+        end: PauseEndInfo::Resumed { at: now },
     };
     let cases = [
         (
@@ -348,8 +370,79 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 "worker_hostname",
                 "started_at",
                 "finished_at",
+                "phases",
             ],
         ),
+        (
+            keys(AttemptPhasesInfo::Captured {
+                enqueued_at: now,
+                claimed_at: now,
+                claims: AttemptClaimsInfo::Counted {
+                    count: 1,
+                    first_claimed_at: now,
+                },
+                finalizing: AttemptFinalizingInfo::NotMarked,
+                recorded_by: AttemptRecordedByInfo::Recovery { last_seen_at: now },
+            }),
+            vec![
+                "kind",
+                "enqueued_at",
+                "claimed_at",
+                "claims",
+                "finalizing",
+                "recorded_by",
+            ],
+        ),
+        (
+            keys(segment.clone()),
+            vec!["phase", "started_at", "end", "source"],
+        ),
+        (
+            keys(segment.source),
+            vec!["kind", "generation", "task_id", "attempt"],
+        ),
+        (
+            keys(NodeTimingInfo::Partial {
+                reasons: vec![UnknownReason::WorkerLost],
+                segments: vec![segment.clone()],
+                endpoint: NodeEndpointInfo::Terminal {
+                    status: TerminalNodeStatus::Failed,
+                    at: now,
+                },
+            }),
+            vec!["kind", "reasons", "segments", "endpoint"],
+        ),
+        (
+            keys(TimingConflictInfo::ClockOrder {
+                earlier: TimingBoundary::Claim,
+                earlier_at: now,
+                later: TimingBoundary::Start,
+                later_at: now,
+            }),
+            vec!["kind", "earlier", "earlier_at", "later", "later_at"],
+        ),
+        (
+            keys(RunTimingInfo::Composed {
+                as_of: now,
+                captured_since: now,
+                coverage: RunCoverageInfo::Exact,
+                range_started_at: now,
+                range_ended_at: now,
+                open_segments: false,
+                pauses: vec![pause],
+            }),
+            vec![
+                "kind",
+                "as_of",
+                "captured_since",
+                "coverage",
+                "range_started_at",
+                "range_ended_at",
+                "open_segments",
+                "pauses",
+            ],
+        ),
+        (keys(pause), vec!["started_at", "end"]),
         (
             keys(leaf.clone()),
             vec![
@@ -530,6 +623,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 "exec_s",
                 "child_total",
                 "child_failed",
+                "timing",
             ],
         ),
         (
@@ -547,6 +641,11 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 failed_count: 0,
                 failed_indices: vec![],
                 trace_id: None,
+                timing: RunTimingInfo::Unavailable {
+                    as_of: now,
+                    captured_since: now,
+                    reason: UnavailableReason::RunBeforeCapture,
+                },
             }),
             vec![
                 "run",
@@ -555,6 +654,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 "failed_count",
                 "failed_indices",
                 "trace_id",
+                "timing",
             ],
         ),
         (
@@ -711,6 +811,37 @@ fn every_w2_model_serializes_the_contract_field_set() {
     assert_eq!(
         serde_json::to_value(task_id).unwrap(),
         json!(task_id.to_string())
+    );
+    // The tagged unions and the closed enums of the phase timing.
+    assert_eq!(
+        serde_json::to_value(SegmentPhaseInfo::RetryWait).unwrap(),
+        json!({"kind": "retry_wait"})
+    );
+    assert_eq!(
+        serde_json::to_value(SegmentEndInfo::Open).unwrap(),
+        json!({"kind": "open"})
+    );
+    assert_eq!(
+        serde_json::to_value(NodeTimingInfo::Unavailable {
+            reason: UnavailableReason::TimingBoundExceeded,
+        })
+        .unwrap(),
+        json!({"kind": "unavailable", "reason": "TIMING_BOUND_EXCEEDED"})
+    );
+    assert_eq!(
+        serde_json::to_value(TimingConflictInfo::MissingRecord {
+            record: MissingRecord::CompletionTime,
+        })
+        .unwrap(),
+        json!({"kind": "missing_record", "record": "COMPLETION_TIME"})
+    );
+    assert_eq!(
+        serde_json::to_value(RunConflictInfo::Node { task_index: 3 }).unwrap(),
+        json!({"kind": "node", "task_index": 3})
+    );
+    assert_eq!(
+        serde_json::to_value(PauseEndInfo::RunEnded { at: now }).unwrap(),
+        json!({"kind": "run_ended", "at": "2026-08-08T12:00:00Z"})
     );
 }
 
