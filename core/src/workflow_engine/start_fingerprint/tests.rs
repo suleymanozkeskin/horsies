@@ -115,7 +115,7 @@ fn each_element_of_the_command_changes_the_fingerprint() {
         ("on_error", |c| c.on_error = "pause"),
         ("output_task_index", |c| c.output_task_index = None),
         ("success_policy", |c| {
-            c.success_policy = Some(r#"{"cases":[{"required_indices":[0]}]}"#)
+            c.success_policy = Some(r#"{"cases":[{"required_indices":[0]}]}"#);
         }),
         ("a node less", |c| {
             let _removed = c.nodes.pop();
@@ -134,14 +134,14 @@ fn each_element_of_the_command_changes_the_fingerprint() {
         ("min_success", |c| c.nodes[1].min_success = Some(1)),
         ("task_options", |c| c.nodes[0].task_options = None),
         ("retention_class_key", |c| {
-            c.nodes[0].retention_class_key = Some("standard_7d")
+            c.nodes[0].retention_class_key = Some("standard_7d");
         }),
         ("is_subworkflow", |c| c.nodes[0].is_subworkflow = true),
         ("sub_definition_key", |c| {
-            c.nodes[0].sub_definition_key = Some("tests.start_once.child.v1")
+            c.nodes[0].sub_definition_key = Some("tests.start_once.child.v1");
         }),
         ("sub_workflow_params", |c| {
-            c.nodes[0].sub_workflow_params = Some("GIVEN")
+            c.nodes[0].sub_workflow_params = Some("GIVEN");
         }),
     ];
     let original = command().fingerprint();
