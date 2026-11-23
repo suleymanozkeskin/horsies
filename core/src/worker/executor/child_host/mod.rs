@@ -76,6 +76,6 @@ pub use host::{
 pub use producer::{child_producer, ChildProducer};
 pub use role::{process_role, thread_role, wait_inside_task_message, ProcessRole, ThreadRole};
 pub use run_work::{
-    run_cancel_signal, spawn_in_run, RunCancelSignal, RunSignalRefused, RunSpawnRefused,
-    MAX_RUN_WORK,
+    run_cancel_signal, run_fencing_token, spawn_in_run, RunCancelSignal, RunSignalRefused,
+    RunSpawnRefused, MAX_RUN_WORK,
 };

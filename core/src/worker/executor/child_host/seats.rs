@@ -173,7 +173,7 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
             return;
         }
     };
-    let scope = RunScope::new();
+    let scope = RunScope::new(facts.fencing_token());
     let end = match work {
         IsolatedWork::Refusal(refusal) => refusal_end(&refusal),
         IsolatedWork::Run => match prepare(&context.app, &facts.task_name, &input) {
@@ -209,9 +209,9 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
 /// `body`, which it closes with what the body returned. An async body runs
 /// inside the run, so the work it starts with `spawn_in_run` belongs to the
 /// run. A blocking body runs on a blocking thread of the runtime. A panic
-/// of either is `UNHANDLED_EXCEPTION` with its record. The parent ends a
-/// run past its timeout by killing the child, so the scope never sees a
-/// timeout here.
+/// of either is `UNHANDLED_EXCEPTION` with its record. Both read the
+/// fencing token of `scope`. The parent ends a run past its timeout by
+/// killing the child, so the scope never sees a timeout here.
 pub(super) async fn isolated_body(
     scope: &RunScope,
     task_name: &str,
@@ -230,8 +230,9 @@ pub(super) async fn isolated_body(
         ),
         RegisteredTask::Blocking { task, meta } => {
             let name = task_name.to_owned();
+            let token = scope.fencing_token();
             let thread = tokio::task::spawn_blocking(move || {
-                run_blocking_body(&task, &input, &name, meta.module, &span)
+                run_blocking_body(&task, &input, &name, meta.module, &span, token)
             });
             match thread.await {
                 Ok(result) => result,
@@ -509,7 +510,7 @@ async fn async_body(
                 }
             },
         };
-    let scope = RunScope::timed(watch.register(run_ref));
+    let scope = RunScope::timed(watch.register(run_ref), facts.fencing_token());
     let open = context
         .app
         .body_scope
@@ -906,7 +907,14 @@ fn thread_body(
         .app
         .body_scope
         .open(facts, Execution::SharedThread, span);
-    let result = run_blocking_body(&task, &input, &facts.task_name, module, &open.span());
+    let result = run_blocking_body(
+        &task,
+        &input,
+        &facts.task_name,
+        module,
+        &open.span(),
+        facts.fencing_token(),
+    );
     match gate.finish() {
         GateEnd::Returned => {
             timer.abort();

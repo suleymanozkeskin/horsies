@@ -1,14 +1,18 @@
 //! `TaskRuntime`: what a task body reads while it runs.
 //!
 //! A body that takes `TaskRuntime` as its first parameter gets the app's
-//! state, the cancel signal of its run, and a way to start work that belongs
-//! to its run. The app builds the runtime when the task registers, so every
-//! worker child, which runs `main` again, has its own.
+//! state, the cancel signal and the fencing token of its run, and a way to
+//! start work that belongs to its run. The app builds the runtime when the
+//! task registers, so every worker child, which runs `main` again, has its
+//! own.
 
 use std::future::Future;
 use std::sync::Arc;
 
-use horsies_core::{run_cancel_signal, spawn_in_run, RunSignalRefused, RunSpawnRefused};
+use horsies_core::{
+    run_cancel_signal, run_fencing_token, spawn_in_run, FencingToken, FencingTokenRefused,
+    RunSignalRefused, RunSpawnRefused,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::task::JoinHandle;
@@ -146,6 +150,43 @@ impl TaskRuntime {
         }
     }
 
+    /// The fencing token of the current run: the task id and a value. Write
+    /// it with each write to another system, and make the system refuse a
+    /// write whose token is lower than the one it holds for the task id.
+    ///
+    /// - Two reads in one attempt give the same token.
+    /// - An attempt that runs after another attempt of the same task gives a
+    ///   greater value.
+    /// - The value depends on no clock.
+    /// - Today the value is the attempt number, from 1
+    ///   (`token.value().get()`). Compare the values of one task id; do not
+    ///   depend on the number itself.
+    ///
+    /// A rerun, and a workflow node that a resume starts again, get a new
+    /// task id, and their value starts again at 1. A stale attempt with no
+    /// later attempt (the task failed, was cancelled or expired) is not
+    /// refused.
+    ///
+    /// ```ignore
+    /// #[horsies::task("charge", timeout_ms = 30_000)]
+    /// async fn charge(rt: TaskRuntime, order: Order) -> Result<(), TaskError<ChargeCode>> {
+    ///     let token = rt
+    ///         .fencing_token()
+    ///         .map_err(|refused| TaskError::user(ChargeCode::NoRun, refused.to_string()))?;
+    ///     // UPDATE payments SET state = 'charged', fence = $2
+    ///     //  WHERE task_id = $1 AND fence <= $2
+    ///     store.charge(token.task_id(), i64::from(token.value().get()), &order).await
+    /// }
+    /// ```
+    ///
+    /// Errors: [`FencingTokenRefused::NotInARun`] outside a run: a direct
+    /// call of the function in a test, work started with plain
+    /// `tokio::spawn` or `spawn_blocking`, or a thread that a blocking body
+    /// starts. Work started with [`Self::spawn`] reads the token of its run.
+    pub fn fencing_token(&self) -> Result<FencingToken, FencingTokenRefused> {
+        run_fencing_token()
+    }
+
     /// Start `future` as work of the current run, named `name` in the
     /// reports of the run. The child waits for such work when the body
     /// returns, cancels it after the grace, and reports work that does not
@@ -208,6 +249,12 @@ mod tests {
         let waited =
             tokio::time::timeout(std::time::Duration::from_millis(20), runtime.cancelled()).await;
         assert!(waited.is_err(), "cancelled() completed outside a run");
+    }
+
+    #[tokio::test]
+    async fn outside_a_run_the_fencing_token_is_refused() {
+        let runtime = app().task_runtime();
+        assert_eq!(runtime.fencing_token(), Err(FencingTokenRefused::NotInARun));
     }
 
     #[tokio::test]

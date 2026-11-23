@@ -19,7 +19,13 @@
 //! of the task at its deadline, then the second cancel after the grace). In
 //! an isolated child it never fires: the parent holds the deadline and kills
 //! the child.
+//!
+//! Each run has one fencing token ([`run_fencing_token`]): the task id and
+//! the attempt number of its run frame. The async body and the work it
+//! starts with [`spawn_in_run`] read it from the run; a blocking body reads
+//! it from its thread, which [`in_blocking_run`] marks while the body runs.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
@@ -34,6 +40,7 @@ use tokio::sync::Notify;
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
 
+use crate::core::task::fencing::{FencingToken, FencingTokenRefused};
 pub(super) use crate::worker::executor::protocol::ISOLATED_LEFTOVER_GRACE;
 use crate::worker::executor::protocol::{
     BlockedWhere, LeftoverName, LoopHoldsTasks, StuckWork, MAX_LEFTOVER_TASK_NAMES,
@@ -52,6 +59,56 @@ pub(super) const CANCEL_ROUND_INTERVAL: Duration = Duration::from_millis(100);
 
 tokio::task_local! {
     static RUN_SCOPE: RunScope;
+}
+
+/// Whether the calling thread runs a blocking body, and the fencing token of
+/// its run.
+#[derive(Debug, Clone, Copy)]
+enum BlockingRun {
+    NoRun,
+    Run(FencingToken),
+}
+
+thread_local! {
+    /// Set while this thread runs the body of a blocking task.
+    static BLOCKING_RUN: Cell<BlockingRun> = const { Cell::new(BlockingRun::NoRun) };
+}
+
+/// Run `body` with `token` as the fencing token of the calling thread. The
+/// earlier value of the thread comes back when `body` ends, also when it
+/// panics.
+pub(super) fn in_blocking_run<R>(token: FencingToken, body: impl FnOnce() -> R) -> R {
+    struct Restore(BlockingRun);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            BLOCKING_RUN.with(|run| run.set(self.0));
+        }
+    }
+    let _restore = Restore(BLOCKING_RUN.with(|run| run.replace(BlockingRun::Run(token))));
+    body()
+}
+
+/// The fencing token of the current run, read by its async body, by work
+/// that the body started with [`spawn_in_run`], or on the thread of its
+/// blocking body. Every read in one run gives the same token. Pure read.
+///
+/// Work started with plain `tokio::spawn`, `spawn_blocking` from an async
+/// body, and a thread that a blocking body starts have no run: read the
+/// token in the body and pass it on.
+///
+/// Errors: [`FencingTokenRefused::NotInARun`].
+pub fn run_fencing_token() -> Result<FencingToken, FencingTokenRefused> {
+    RUN_SCOPE
+        .try_with(|scope| scope.token)
+        .or_else(|_outside_async_run| blocking_run_token())
+}
+
+/// The fencing token of the blocking body that runs on the calling thread.
+fn blocking_run_token() -> Result<FencingToken, FencingTokenRefused> {
+    match BLOCKING_RUN.with(Cell::get) {
+        BlockingRun::Run(token) => Ok(token),
+        BlockingRun::NoRun => Err(FencingTokenRefused::NotInARun),
+    }
 }
 
 /// Why [`spawn_in_run`] started no work.
@@ -397,27 +454,29 @@ pub(super) enum RoundsEnd {
     Stuck,
 }
 
-/// The work of one run.
+/// The work of one run, and its fencing token.
 #[derive(Clone)]
 pub(super) struct RunScope {
     shared: Arc<ScopeShared>,
     timing: PollTiming,
     cancel: RunCancelSignal,
+    token: FencingToken,
 }
 
 impl RunScope {
-    /// A run whose polls are not timed (an isolated child).
-    pub(super) fn new() -> Self {
-        Self::with_timing(PollTiming::Untimed)
+    /// A run with the fencing token `token` whose polls are not timed (an
+    /// isolated child).
+    pub(super) fn new(token: FencingToken) -> Self {
+        Self::with_timing(PollTiming::Untimed, token)
     }
 
-    /// A run whose body and work are timed in `polls` (a shared async
-    /// child).
-    pub(super) fn timed(polls: RunPolls) -> Self {
-        Self::with_timing(PollTiming::Timed(polls))
+    /// A run with the fencing token `token` whose body and work are timed in
+    /// `polls` (a shared async child).
+    pub(super) fn timed(polls: RunPolls, token: FencingToken) -> Self {
+        Self::with_timing(PollTiming::Timed(polls), token)
     }
 
-    fn with_timing(timing: PollTiming) -> Self {
+    fn with_timing(timing: PollTiming, token: FencingToken) -> Self {
         Self {
             shared: Arc::new(ScopeShared {
                 work: Mutex::new(ScopeWork {
@@ -429,7 +488,13 @@ impl RunScope {
             }),
             timing,
             cancel: RunCancelSignal::new(),
+            token,
         }
+    }
+
+    /// The fencing token of the run.
+    pub(super) fn fencing_token(&self) -> FencingToken {
+        self.token
     }
 
     /// Fire the run's cancel signal: its body and its work see it.
@@ -606,6 +671,12 @@ impl RunScope {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::AttemptNumber;
+
+    /// The token of a run of attempt 1 of a new task.
+    fn test_token() -> FencingToken {
+        FencingToken::new(uuid::Uuid::new_v4(), AttemptNumber::SMALLEST)
+    }
 
     #[tokio::test]
     async fn a_spawn_outside_a_run_is_refused() {
@@ -619,7 +690,7 @@ mod tests {
     /// work starts, carries the run; it is left work when the body returns.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn work_a_body_starts_belongs_to_its_run_and_ends_in_rounds() {
-        let scope = RunScope::new();
+        let scope = RunScope::new(test_token());
         #[expect(
             clippy::async_yields_async,
             reason = "the body returns the handle of the work it started; that work is left work"
@@ -664,7 +735,7 @@ mod tests {
     /// body started; a run that ends within its grace leaves nothing alive.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_cancel_signal_reaches_the_body_and_its_work() {
-        let scope = RunScope::new();
+        let scope = RunScope::new(test_token());
         let body = scope.spawn_body("app.tasks.body", async {
             let signal = run_cancel_signal().expect("a body reads the signal of its run");
             let work = spawn_in_run("watcher", async {
@@ -692,7 +763,7 @@ mod tests {
     /// second fire changes nothing.
     #[tokio::test]
     async fn a_fired_signal_completes_at_once() {
-        let scope = RunScope::new();
+        let scope = RunScope::new(test_token());
         scope.fire_cancel();
         scope.fire_cancel();
         let body = scope.spawn_body("app.tasks.body", async {
@@ -707,7 +778,7 @@ mod tests {
     /// dropped by the cancel rounds.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_body_that_ignores_the_signal_is_dropped_after_the_grace() {
-        let scope = RunScope::new();
+        let scope = RunScope::new(test_token());
         let _body = scope.spawn_body(
             "app.tasks.body",
             tokio::time::sleep(Duration::from_secs(60)),
@@ -724,14 +795,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_closed_run_takes_no_new_work() {
-        let scope = RunScope::new();
+        let scope = RunScope::new(test_token());
         scope.close();
         assert_eq!(scope.register("late"), Err(RunSpawnRefused::RunEnded));
     }
 
     #[tokio::test]
     async fn a_run_holds_a_bounded_amount_of_work() {
-        let scope = RunScope::new();
+        let scope = RunScope::new(test_token());
         for _ in 0..MAX_RUN_WORK {
             scope.register("work").expect("under the bound");
         }
@@ -747,7 +818,7 @@ mod tests {
     /// is stuck after the rounds, and the run waits for its end.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn work_that_holds_its_thread_is_stuck_after_the_rounds() {
-        let scope = RunScope::new();
+        let scope = RunScope::new(test_token());
         let started = Instant::now();
         #[expect(
             clippy::async_yields_async,
@@ -780,7 +851,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn work_of_a_timed_run_is_timed_under_the_run_until_it_ends() {
         let polls = RunPolls::new(std::time::Instant::now());
-        let scope = RunScope::timed(polls.clone());
+        let scope = RunScope::timed(polls.clone(), test_token());
         #[expect(
             clippy::async_yields_async,
             reason = "the body returns the handle of the work it started; that work is left work"
@@ -821,7 +892,7 @@ mod tests {
     /// An untimed run (an isolated child) keeps no poll starts.
     #[tokio::test]
     async fn an_untimed_run_times_nothing() {
-        let scope = RunScope::new();
+        let scope = RunScope::new(test_token());
         assert!(matches!(scope.timing, PollTiming::Untimed));
         let body = scope.spawn_body("app.tasks.body", async { 1 });
         assert_eq!(body.await.expect("the body ends"), 1);
@@ -839,5 +910,89 @@ mod tests {
             stuck_report(NonZeroU64::new(25).unwrap(), names).tasks(),
             25
         );
+    }
+
+    #[tokio::test]
+    async fn a_token_read_outside_a_run_is_refused() {
+        assert_eq!(run_fencing_token(), Err(FencingTokenRefused::NotInARun));
+    }
+
+    /// Two reads in one run give the token of the run, and so does work
+    /// that the body started with `spawn_in_run`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_body_and_its_work_read_the_token_of_the_run() {
+        let token = FencingToken::new(
+            uuid::Uuid::new_v4(),
+            AttemptNumber::try_from(2).expect("2 is an attempt"),
+        );
+        let scope = RunScope::new(token);
+        let body = scope.spawn_body("app.tasks.body", async {
+            let first = run_fencing_token();
+            let second = run_fencing_token();
+            let work = spawn_in_run("reader", async { run_fencing_token() })
+                .expect("a body may start work");
+            let from_work = work.await.expect("the work ends");
+            (first, second, from_work)
+        });
+        let (first, second, from_work) = body.await.expect("the body ends");
+        assert_eq!(first, Ok(token));
+        assert_eq!(second, Ok(token));
+        assert_eq!(from_work, Ok(token));
+        assert_eq!(scope.fencing_token(), token);
+    }
+
+    /// Work that the body starts with plain `tokio::spawn` is not in the run,
+    /// so it reads no token.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn work_started_with_plain_tokio_spawn_reads_no_token() {
+        let scope = RunScope::new(test_token());
+        let body = scope.spawn_body("app.tasks.body", async {
+            tokio::spawn(async { run_fencing_token() })
+                .await
+                .expect("the work ends")
+        });
+        assert_eq!(
+            body.await.expect("the body ends"),
+            Err(FencingTokenRefused::NotInARun)
+        );
+    }
+
+    /// Two runs at once read their own tokens.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_runs_at_once_read_their_own_tokens() {
+        let first = RunScope::new(test_token());
+        let second = RunScope::new(test_token());
+        let first_body = first.spawn_body("app.tasks.first", async { run_fencing_token() });
+        let second_body = second.spawn_body("app.tasks.second", async { run_fencing_token() });
+        assert_eq!(
+            first_body.await.expect("the body ends"),
+            Ok(first.fencing_token())
+        );
+        assert_eq!(
+            second_body.await.expect("the body ends"),
+            Ok(second.fencing_token())
+        );
+        assert_ne!(first.fencing_token(), second.fencing_token());
+    }
+
+    /// The thread of a blocking body has the token while the body runs; the
+    /// token goes with the end of the body, also with a panic, and never
+    /// reaches a thread that the body starts.
+    #[test]
+    fn a_blocking_body_has_the_token_on_its_thread_while_it_runs() {
+        let token = test_token();
+        assert_eq!(run_fencing_token(), Err(FencingTokenRefused::NotInARun));
+        let inside = in_blocking_run(token, || (run_fencing_token(), run_fencing_token()));
+        assert_eq!(inside, (Ok(token), Ok(token)));
+        assert_eq!(run_fencing_token(), Err(FencingTokenRefused::NotInARun));
+        let other_thread = in_blocking_run(token, || {
+            std::thread::spawn(run_fencing_token)
+                .join()
+                .expect("the thread ends")
+        });
+        assert_eq!(other_thread, Err(FencingTokenRefused::NotInARun));
+        let panicked = std::panic::catch_unwind(|| in_blocking_run(token, || panic!("body panic")));
+        assert!(panicked.is_err());
+        assert_eq!(run_fencing_token(), Err(FencingTokenRefused::NotInARun));
     }
 }

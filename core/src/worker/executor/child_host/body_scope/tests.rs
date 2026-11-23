@@ -23,6 +23,7 @@ use crate::broker::claims::WorkflowNodeIndex;
 use crate::broker::{OrphanSelfHeal, PostgresBroker};
 use crate::core::registry::task::TaskRegistry;
 use crate::core::task::error::{OperationalErrorCode, TaskError};
+use crate::core::task::fencing::FencingToken;
 use crate::core::task::fn_trait::{
     AsyncTaskFn, BlockingTaskFn, RegisteredTask, TaskMeta, TaskModule,
 };
@@ -411,7 +412,7 @@ async fn isolated_run_of(
     let open = scope.open(&facts, Execution::Isolated, source(&RunTrace::NoCarrier));
     let task = make_task(&seen_inside, result);
     let result = isolated_body(
-        &RunScope::new(),
+        &RunScope::new(facts.fencing_token()),
         &facts.task_name,
         task,
         b"{}".to_vec(),
@@ -508,8 +509,9 @@ fn a_thread_seat_body_runs_inside_the_span_on_the_seat_thread() {
         result: returns_one,
     });
     let carrier = BodyCarrier::NoCarrier;
+    let task_id = Uuid::new_v4();
     let span = spans.open(&BodyRun {
-        task_id: Uuid::new_v4(),
+        task_id,
         task_name: "app.tasks.scoped",
         queue_name: SCOPE_QUEUE,
         attempt: AttemptNumber::SMALLEST,
@@ -524,6 +526,7 @@ fn a_thread_seat_body_runs_inside_the_span_on_the_seat_thread() {
         "app.tasks.scoped",
         TaskModule::default(),
         &span,
+        FencingToken::new(task_id, AttemptNumber::SMALLEST),
     );
     assert!(matches!(result, TaskResult::Ok(_)));
     assert_eq!(seen(&seen_inside), vec![Some(span_number(&span))]);
