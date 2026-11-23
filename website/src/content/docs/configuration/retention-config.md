@@ -289,6 +289,10 @@ A workflow batch counts the node rows and the event rows
 first workflow of a batch always goes, so a workflow with more rows than
 the batch size is deleted alone.
 
+Deleting a terminal workflow row frees its `workflow_id`. A later start with
+that id starts a new workflow, with no compare of the start command. See
+[Start a Workflow Once per Entity](/horsies/guides/start-workflow-once/).
+
 The events of a run live as long as its workflow record, and the history
 record of each task lives as long as its retention class. When a class is
 shorter than `terminal_record_retention_hours`, the history record of a

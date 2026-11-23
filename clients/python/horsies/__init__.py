@@ -67,6 +67,7 @@ from .core.workflows.engine import (
 from .core.workflows.start_types import (
     WorkflowStartAsyncContext,
     WorkflowStartBrokerNotConfigured,
+    WorkflowStartCommandConflict,
     WorkflowStartEnqueueFailed,
     WorkflowStartError,
     WorkflowStartErrorCode,
@@ -323,6 +324,7 @@ __all__ = [
     'resume_workflow_sync',
     'WorkflowStartAsyncContext',
     'WorkflowStartBrokerNotConfigured',
+    'WorkflowStartCommandConflict',
     'WorkflowStartEnqueueFailed',
     'WorkflowStartError',
     'WorkflowStartErrorCode',

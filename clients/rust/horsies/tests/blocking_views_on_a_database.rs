@@ -263,12 +263,18 @@ fn thread_runtime() -> tokio::runtime::Runtime {
 /// The spec of a workflow `name` of one node, the task `answer`, which is
 /// its output. `answer` is registered in this process before the call.
 fn one_node_spec(name: &str) -> WorkflowSpec {
+    one_node_spec_with_node_id(name, ANSWER_NODE)
+}
+
+/// [`one_node_spec`] whose node has the id `node_id`: with another id, a
+/// start command of the same name that differs from [`one_node_spec`].
+fn one_node_spec_with_node_id(name: &str, node_id: &str) -> WorkflowSpec {
     let mut builder = WorkflowSpecBuilder::new(name);
     builder.definition_key(format!("tests.blocking_views.{name}.v1"));
     let output = builder.task(
         answer::node()
             .expect("answer is registered in this process")
-            .node_id(ANSWER_NODE),
+            .node_id(node_id),
     );
     builder.output(output);
     builder.build().expect("the spec builds")
@@ -431,6 +437,21 @@ async fn end_the_node(database: &TestDatabase, worker: &PostgresBroker, workflow
         .await
         .expect("phase 2 of the task");
     assert_eq!(phase_two, WorkflowTaskCompletion::Applied);
+}
+
+/// The node ids of the workflow `workflow_id`, in node index order.
+async fn node_ids(database: &TestDatabase, workflow_id: Uuid) -> Vec<String> {
+    database
+        .client()
+        .query(
+            "SELECT node_id FROM horsies_workflow_tasks WHERE workflow_id = $1 ORDER BY task_index",
+            &[&workflow_id],
+        )
+        .await
+        .expect("read the node ids")
+        .iter()
+        .map(|row| -> String { row.get(0) })
+        .collect()
 }
 
 /// The id, name and status of each workflow of the database, by name.
@@ -788,9 +809,10 @@ async fn blocking_health_reads_and_the_live_check_answer_from_the_database() {
 }
 
 /// `Horsies::start` and `start_with_id`: a start writes a RUNNING workflow;
-/// a start again with its id and its name answers the same workflow and
-/// writes nothing; a start with its id and another name is
-/// `WORKFLOW_ID_CONFLICT` and writes nothing.
+/// a start again with its id and its start command answers the same
+/// workflow and writes nothing; a start with its id and another name is
+/// `WORKFLOW_ID_CONFLICT`, and one with its id, its name and another start
+/// command is `WORKFLOW_COMMAND_CONFLICT`; neither writes.
 #[tokio::test]
 async fn blocking_app_starts_write_find_or_refuse_by_the_workflow_id() {
     let (database, worker) = covered_database().await;
@@ -824,6 +846,22 @@ async fn blocking_app_starts_write_find_or_refuse_by_the_workflow_id() {
                 handle.workflow_id()
             ),
         }
+        let other_command = one_node_spec_with_node_id("blocking_views_app_start", "other_node");
+        match app.blocking().start_with_id::<u32>(&other_command, started) {
+            Err(refused) => {
+                assert_eq!(
+                    refused.code(),
+                    WorkflowStartErrorCode::WorkflowCommandConflict,
+                    "{refused}"
+                );
+                assert_eq!(refused.workflow_id(), started);
+                assert!(!refused.retryable());
+            }
+            Ok(handle) => panic!(
+                "the start with another command answered workflow {}",
+                handle.workflow_id()
+            ),
+        }
         started
     })
     .await;
@@ -836,6 +874,82 @@ async fn blocking_app_starts_write_find_or_refuse_by_the_workflow_id() {
             "RUNNING".to_owned()
         )]
     );
+    assert_eq!(
+        node_ids(&database, started).await,
+        vec![ANSWER_NODE.to_owned()]
+    );
+    worker.close().await;
+    database.drop().await;
+}
+
+/// Two concurrent starts with one id, one name and two start commands: one
+/// start writes the workflow, and the other waits for its commit on the id
+/// and is `WORKFLOW_COMMAND_CONFLICT`. The workflow holds the node of the
+/// winner only.
+#[tokio::test]
+async fn two_concurrent_starts_with_one_id_and_two_commands_write_one_workflow() {
+    let (database, worker) = covered_database().await;
+    let (app, _echo_function) = app_on(database.url());
+    let workflow_id = Uuid::new_v4();
+    let first = one_node_spec("start_once_race");
+    let second = one_node_spec_with_node_id("start_once_race", "other_node");
+
+    let (first_start, second_start) = tokio::join!(
+        app.start_with_id::<u32>(&first, workflow_id),
+        app.start_with_id::<u32>(&second, workflow_id),
+    );
+
+    let winner_node = match (first_start, second_start) {
+        (Ok(_), Err(refused)) | (Err(refused), Ok(_))
+            if refused.code() == WorkflowStartErrorCode::WorkflowCommandConflict =>
+        {
+            assert_eq!(refused.workflow_id(), workflow_id);
+            node_ids(&database, workflow_id).await
+        }
+        (first_start, second_start) => panic!(
+            "one start wins and the other is a command conflict, got {:?} and {:?}",
+            first_start.map(|handle| handle.workflow_id()),
+            second_start.map(|handle| handle.workflow_id()),
+        ),
+    };
+    assert!(
+        winner_node == vec![ANSWER_NODE.to_owned()] || winner_node == vec!["other_node".to_owned()],
+        "{winner_node:?}"
+    );
+    assert_eq!(workflow_rows(&database).await.len(), 1);
+    worker.close().await;
+    database.drop().await;
+}
+
+/// A top-level run with no stored start command (an earlier horsies version
+/// started it; here a direct insert) is returned to a start with its id and
+/// its name, with no compare, and nothing is written.
+#[tokio::test]
+async fn a_run_with_no_stored_start_command_is_returned_to_a_start_with_its_id() {
+    let (database, worker) = covered_database().await;
+    let (app, _echo_function) = app_on(database.url());
+    let workflow_id = Uuid::new_v4();
+    database
+        .client()
+        .execute(
+            "INSERT INTO horsies_workflows (
+                 id, name, definition_key, status, on_error, depth, root_workflow_id, sent_at,
+                 created_at, started_at, updated_at
+             ) VALUES ($1, 'start_once_unrecorded', NULL, 'RUNNING', 'fail', 0, $1, NOW(), NOW(),
+                       NOW(), NOW())",
+            &[&workflow_id],
+        )
+        .await
+        .expect("insert a run with no stored start command");
+
+    let found = app
+        .start_with_id::<u32>(&one_node_spec("start_once_unrecorded"), workflow_id)
+        .await
+        .expect("the start returns the run")
+        .workflow_id();
+
+    assert_eq!(found, workflow_id);
+    assert!(node_ids(&database, workflow_id).await.is_empty());
     worker.close().await;
     database.drop().await;
 }

@@ -242,7 +242,9 @@ pub use crate::core::history::rerun::{
 // The child spec source of a client that keeps its workflow DSL in its own
 // language, and the spec data it sends.
 pub use crate::broker::workflow_phase2::{NodeFinishForm, NodeFinished, ParentAdvanceStopped};
-pub use crate::broker::workflow_start::{ClientStartError, ClientStartOutcome};
+pub use crate::broker::workflow_start::{
+    ClientStartError, ClientStartOutcome, ExistingRun, IdHolder,
+};
 pub use crate::workflow_engine::child_spec::{
     ChildSpecFuture, ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ChildStartSource,
     ClientChildSpec, ClientSpec,

@@ -77,12 +77,16 @@ impl WorkflowStarter {
     /// Start `spec` as the workflow `workflow_id`, with the result type `T`.
     ///
     /// Outcomes: the handle of the new workflow, or of the workflow that
-    /// already has this id and this name (nothing written).
+    /// already has this id and this start command (nothing written). A run
+    /// that an earlier horsies version started has no stored start command:
+    /// its handle comes back with no compare.
     ///
     /// Errors: `VALIDATION_FAILED` for a spec without a definition key, an
     /// output type that is not `T`, and a spec that the registry or the
     /// conversion refuses, before any I/O; `WORKFLOW_ID_CONFLICT` when the
-    /// id belongs to another workflow name (nothing written);
+    /// id belongs to another workflow name, and `WORKFLOW_COMMAND_CONFLICT`
+    /// when it belongs to a run of this name with another start command or to
+    /// a sub-workflow (nothing written; neither is retryable);
     /// `ENQUEUE_FAILED` with `retryable` for a connect, a schema install or
     /// a start that failed (nothing committed, or the commit reply was
     /// lost: a start again with the same id finds the workflow).
@@ -163,12 +167,14 @@ impl WorkflowStarter {
             )
             .await;
         match started {
-            Ok(ClientStartOutcome::Started | ClientStartOutcome::Exists) => Ok(
+            Ok(ClientStartOutcome::Started | ClientStartOutcome::Exists(_)) => Ok(
                 WorkflowHandle::new(workflow_id, handle, Arc::clone(&self.workflows)),
             ),
-            Ok(ClientStartOutcome::IdTaken { existing_name }) => Err(
-                WorkflowStartError::id_conflict(workflow_name, workflow_id, existing_name),
-            ),
+            Ok(ClientStartOutcome::IdHeld(holder)) => Err(WorkflowStartError::id_held(
+                workflow_name,
+                workflow_id,
+                holder,
+            )),
             Err(error) => Err(start_error(error, workflow_name, workflow_id)),
         }
     }
@@ -177,9 +183,12 @@ impl WorkflowStarter {
     /// `retry_start`).
     ///
     /// Errors: `VALIDATION_FAILED` for an error that is not
-    /// `ENQUEUE_FAILED` or `ASYNC_CONTEXT`, an error of another workflow
+    /// `ENQUEUE_FAILED` or `ASYNC_CONTEXT` (`WORKFLOW_ID_CONFLICT` and
+    /// `WORKFLOW_COMMAND_CONFLICT` included), an error of another workflow
     /// name, and an error without a workflow id; else the errors of
-    /// [`Self::start`].
+    /// [`Self::start`]. The retry builds the spec again, so a spec that
+    /// changed since the failed start meets the stored command as another
+    /// command.
     pub(crate) async fn retry_start<T: 'static>(
         &self,
         spec: &WorkflowSpec,

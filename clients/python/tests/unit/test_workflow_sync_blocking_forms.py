@@ -47,6 +47,7 @@ from horsies.core.workflows.lifecycle import (
     start_workflow_async,
 )
 from horsies.core.workflows.start_types import (
+    WorkflowStartCommandConflict,
     WorkflowStartEnqueueFailed,
     WorkflowStartIdConflict,
 )
@@ -480,6 +481,15 @@ START_ANSWERS: Final[dict[str, object]] = {
         workflow_name='blocking_forms.flow',
         workflow_id=WORKFLOW_ID,
         existing_workflow_name='other.flow',
+    ),
+    'command_differs': WorkflowStartCommandConflict(
+        message=(
+            f"workflow_id '{WORKFLOW_ID}' already exists for workflow name "
+            "'blocking_forms.flow' with another start command; a start with this id must "
+            'send the same command'
+        ),
+        workflow_name='blocking_forms.flow',
+        workflow_id=WORKFLOW_ID,
     ),
     'start_failed': WorkflowStartEnqueueFailed(
         message='connection refused',

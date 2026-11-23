@@ -468,7 +468,8 @@ const TASK_ROW_END_OUTCOME: &str = "TaskRowEnded | AttemptAlreadyApplied | Attem
 /// A refused or failed start is a generated class of
 /// `horsies._catalog.workflow_start_errors`, built in Rust.
 const START_WORKFLOW_OUTCOME: &str =
-    "WorkflowStarted | WorkflowExists | WorkflowStartIdConflict | WorkflowStartEnqueueFailed";
+    "WorkflowStarted | WorkflowExists | WorkflowStartIdConflict | \
+     WorkflowStartCommandConflict | WorkflowStartEnqueueFailed";
 const START_WORKFLOW_PARAMETERS: &[StubParameter] =
     &[positional("request", "WorkflowStartRequest")];
 const REGISTER_CHILD_SPEC_SOURCE_PARAMETERS: &[StubParameter] = &[positional(
@@ -2889,7 +2890,7 @@ const WORKFLOW_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "WorkflowExists",
-        doc: "A workflow with this id and this name exists, or the row with the id was gone by the\nread of its name. Nothing was written.",
+        doc: "A workflow run with this id exists, and the start returns it: the run holds the start\ncommand of this start, or it has no stored start command (an earlier horsies version\nstarted it; the core logs a warning). Nothing was written.",
         constructor: Constructor::NoConstructor,
         properties: &[property("workflow_id", "uuid.UUID")],
         methods: &[],
@@ -3957,7 +3958,11 @@ const IMPORTS: &[StubImport] = &[
     },
     StubImport {
         module: "horsies._catalog.workflow_start_errors",
-        names: &["WorkflowStartEnqueueFailed", "WorkflowStartIdConflict"],
+        names: &[
+            "WorkflowStartCommandConflict",
+            "WorkflowStartEnqueueFailed",
+            "WorkflowStartIdConflict",
+        ],
     },
 ];
 

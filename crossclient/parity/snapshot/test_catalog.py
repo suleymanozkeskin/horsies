@@ -111,12 +111,28 @@ def test_baseline_catalog_has_no_shape_defects() -> None:
     assert catalog_defects(BASELINE_CATALOG) == ()
 
 
-def test_baseline_catalog_has_a_rule_for_each_of_286_columns_in_22_tables() -> None:
+def test_baseline_catalog_has_a_rule_for_each_of_288_columns_in_22_tables() -> None:
     # 263 table columns of migration 1000, 20 columns of migration 1001 (2 of
     # horsies_tasks, 9 of horsies_task_attempts, 9 of the new table
-    # horsies_workflow_events), plus tableoid of the two partitioned parents.
+    # horsies_workflow_events), 2 columns of migration 1002 (of
+    # horsies_workflows), plus tableoid of the two partitioned parents.
     assert len(BASELINE_CATALOG.tables) == 22
-    assert sum(len(table.columns) for table in BASELINE_CATALOG.tables) == 286
+    assert sum(len(table.columns) for table in BASELINE_CATALOG.tables) == 288
+
+
+def test_the_catalog_reads_the_start_command_of_migration_1002() -> None:
+    """The start command pair of a top-level workflow row: the version
+    compares exactly, and the digest is a labelled value, as on a task row."""
+    rules = {
+        (table.name, spec.name): spec.rule
+        for table in BASELINE_CATALOG.tables
+        for spec in table.columns
+    }
+
+    assert rules[('horsies_workflows', 'command_fingerprint_version')] == Exact()
+    assert rules[('horsies_workflows', 'command_fingerprint')] == NormalisedId(
+        family=IdFamily.COMMAND_FINGERPRINT,
+    )
 
 
 def test_the_catalog_reads_the_workflow_events_of_migration_1001() -> None:

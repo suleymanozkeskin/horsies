@@ -54,6 +54,13 @@ impl MigrationTestDatabase {
     /// Applies migration 1000 alone, with `own` as the family, as Python's
     /// install leaves a database.
     async fn install_baseline_only(&self, own: ClientFamily) {
+        self.install_first_migrations(own, 1).await;
+    }
+
+    /// Applies the first `count` migrations of the embedded chain, in order,
+    /// with `own` as the family: the database that a build whose chain ends
+    /// there leaves.
+    async fn install_first_migrations(&self, own: ClientFamily, count: usize) {
         let handle = core_handle(self.database.url());
         let open = handle
             .pools()
@@ -64,14 +71,11 @@ impl MigrationTestDatabase {
             .checkout(CheckoutClass::Batch)
             .await
             .expect("check out a connection");
-        apply_migration(
-            &mut connection,
-            &embedded_migrations()[0],
-            own,
-            StatementLog::Off,
-        )
-        .await
-        .expect("apply migration 1000");
+        for migration in &embedded_migrations()[..count] {
+            apply_migration(&mut connection, migration, own, StatementLog::Off)
+                .await
+                .unwrap_or_else(|error| panic!("apply migration {}: {error}", migration.version));
+        }
         drop(connection);
         drop(open);
         let _closed = handle.close().await;
@@ -2358,17 +2362,16 @@ fn later_migration_list_is_the_whole_folder() {
     }
 }
 
-/// Migration 1001 is the second link of the chain and the newest: it writes
-/// no family row, publishes no reader, declares no index step, and its
-/// checksum is SHA-384 of its file. Its text names no schema and holds no
-/// transaction control, as the baseline's. The file list of the harnesses
-/// is the baseline files at version 1000, then this file.
+/// Migration 1001 is the second link of the chain: it writes no family row,
+/// publishes no reader, declares no index step, and its checksum is SHA-384
+/// of its file. Its text names no schema and holds no transaction control,
+/// as the baseline's. The file list of the harnesses is the baseline files at
+/// version 1000, then this file.
 #[test]
 fn the_lifecycle_record_is_the_second_migration_of_the_chain() {
     let chain = embedded_migrations();
     let (version, name, text) = LATER_MIGRATION_FILES[0];
     let migration = &chain[1];
-    assert_eq!(chain.len(), 2);
     assert_eq!(version, LIFECYCLE_RECORD_MIGRATION_VERSION);
     assert_eq!(migration.version, 1001);
     assert_eq!(migration.description, "lifecycle record");
@@ -2381,7 +2384,6 @@ fn the_lifecycle_record_is_the_second_migration_of_the_chain() {
         migration.checksum.as_slice(),
         Sha384::digest(text.as_bytes()).as_slice()
     );
-    assert_eq!(expected_schema_version(), 1001);
     assert!(
         !text.contains("public."),
         "the migration names the public schema"
@@ -2394,7 +2396,6 @@ fn the_lifecycle_record_is_the_second_migration_of_the_chain() {
         );
     }
     let files = migration_sql_file_texts();
-    assert_eq!(files.len(), BASELINE_SQL_FILE_TEXTS.len() + 1);
     for ((file_version, file_name, file_text), (baseline_name, baseline_text)) in
         files.iter().zip(BASELINE_SQL_FILE_TEXTS)
     {
@@ -2402,7 +2403,65 @@ fn the_lifecycle_record_is_the_second_migration_of_the_chain() {
         assert_eq!(file_name, baseline_name);
         assert_eq!(file_text, baseline_text);
     }
+    assert_eq!(
+        files.get(BASELINE_SQL_FILE_TEXTS.len()),
+        Some(&(version, name, text))
+    );
+}
+
+/// Migration 1002 is the third link of the chain and the newest: it writes no
+/// family row, publishes no reader, declares no index step, and its checksum
+/// is SHA-384 of its file. Its text names no schema and holds no transaction
+/// control. The file list of the harnesses ends with this file.
+#[test]
+fn the_start_command_fingerprint_is_the_third_migration_and_the_newest() {
+    let chain = embedded_migrations();
+    let (version, name, text) = LATER_MIGRATION_FILES[1];
+    let migration = &chain[2];
+    assert_eq!(chain.len(), 3);
+    assert_eq!(version, START_COMMAND_FINGERPRINT_MIGRATION_VERSION);
+    assert_eq!(migration.version, 1002);
+    assert_eq!(migration.description, "workflow start command fingerprint");
+    assert_eq!(migration.family_row, FamilyRow::NotWritten);
+    assert_eq!(migration.readers, ReaderPublication::NotPublished);
+    assert!(migration.exact_indexes.is_empty());
+    assert!(migration.retired_indexes.is_empty());
+    assert_eq!(migration.script.sql(), text);
+    assert_eq!(
+        migration.checksum.as_slice(),
+        Sha384::digest(text.as_bytes()).as_slice()
+    );
+    assert_eq!(expected_schema_version(), 1002);
+    assert!(
+        !text.contains("public."),
+        "the migration names the public schema"
+    );
+    for line in text.lines() {
+        let statement = line.trim().to_uppercase();
+        assert!(
+            !["BEGIN;", "COMMIT;", "ROLLBACK;", "START TRANSACTION;"].contains(&statement.as_str()),
+            "the migration holds transaction control: {line}"
+        );
+    }
+    let files = migration_sql_file_texts();
+    assert_eq!(files.len(), BASELINE_SQL_FILE_TEXTS.len() + 2);
     assert_eq!(files.last(), Some(&(version, name, text)));
+}
+
+/// A build whose chain ends at migration 1001 meets a database that applied
+/// migration 1002: the classification refuses it as newer.
+#[test]
+fn a_chain_without_the_start_command_fingerprint_refuses_a_database_that_has_it() {
+    let chain = embedded_migrations();
+    let applied: Vec<AppliedMigration> = chain.iter().map(succeeded).collect();
+
+    assert_eq!(
+        classify(ledger(applied, RUST), &chain[..2]),
+        Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::SchemaNewer {
+            stored: 1002,
+            own: LIFECYCLE_RECORD_MIGRATION_VERSION,
+        })),
+    );
 }
 
 /// A build whose chain ends at the baseline meets a database that applied
@@ -2410,7 +2469,7 @@ fn the_lifecycle_record_is_the_second_migration_of_the_chain() {
 #[test]
 fn a_chain_without_the_lifecycle_record_refuses_a_database_that_has_it() {
     let chain = embedded_migrations();
-    let applied: Vec<AppliedMigration> = chain.iter().map(succeeded).collect();
+    let applied: Vec<AppliedMigration> = chain[..2].iter().map(succeeded).collect();
 
     assert_eq!(
         classify(ledger(applied, RUST), &chain[..1]),
@@ -2701,9 +2760,68 @@ async fn a_0_8_0_database_with_workflows_gets_the_event_table_with_no_event() {
     database.drop().await;
 }
 
-/// A fresh install and an upgrade from migration 1000 with live rows and
-/// workflow rows end in the same schema: the same columns, constraints,
-/// indexes, sequences and functions, and the same bookkeeping.
+/// A database at migration 1001 that holds a RUNNING workflow with a RUNNING
+/// child gets migration 1002 from the install: both rows keep NULL in the two
+/// new columns (the migration writes no start command), the new CHECK is
+/// validated, and an install again changes nothing.
+#[tokio::test]
+async fn a_1001_database_with_workflows_gets_the_start_command_columns_with_no_value() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install_first_migrations(ClientFamily::Rust, 2)
+        .await;
+    database.execute(WORKFLOWS_OF_A_0_8_0_DATABASE).await;
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migration 1002 over the workflow rows");
+
+    let installed = bookkeeping_rows(&database).await;
+    assert_eq!(installed, chain_rows(embedded_migrations().len()));
+    let workflows: Vec<(String, i32)> = database
+        .client()
+        .query(
+            "SELECT name::text, num_nonnulls(command_fingerprint_version, command_fingerprint)
+             FROM horsies_workflows ORDER BY name",
+            &[],
+        )
+        .await
+        .expect("read the workflow rows")
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(
+        workflows,
+        vec![
+            ("upgrade.child".to_owned(), 0),
+            ("upgrade.parent".to_owned(), 0),
+        ]
+    );
+    let validated: bool = database
+        .client()
+        .query_one(
+            "SELECT convalidated FROM pg_constraint
+             WHERE conname = 'horsies_workflows_command_fingerprint_by_origin'",
+            &[],
+        )
+        .await
+        .expect("read the new check")
+        .get(0);
+    assert!(validated);
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install again");
+    assert_eq!(bookkeeping_rows(&database).await, installed);
+    database.drop().await;
+}
+
+/// A fresh install, an upgrade from migration 1000 with live rows and
+/// workflow rows, and an upgrade from migration 1001 with workflow rows end in
+/// the same schema: the same columns, constraints, indexes, sequences and
+/// functions, and the same bookkeeping.
 #[tokio::test]
 async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     let fresh = MigrationTestDatabase::create().await;
@@ -2718,15 +2836,26 @@ async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     upgraded
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migration 1001 over the live rows");
+        .expect("apply migrations 1001 and 1002 over the live rows");
+    let from_1001 = MigrationTestDatabase::create().await;
+    from_1001
+        .install_first_migrations(ClientFamily::Rust, 2)
+        .await;
+    from_1001.execute(WORKFLOWS_OF_A_0_8_0_DATABASE).await;
+    from_1001
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migration 1002 over the workflow rows");
 
-    assert_eq!(schema_shape(&fresh).await, schema_shape(&upgraded).await);
-    assert_eq!(
-        bookkeeping_rows(&fresh).await,
-        bookkeeping_rows(&upgraded).await
-    );
+    let fresh_shape = schema_shape(&fresh).await;
+    assert_eq!(fresh_shape, schema_shape(&upgraded).await);
+    assert_eq!(fresh_shape, schema_shape(&from_1001).await);
+    let fresh_rows = bookkeeping_rows(&fresh).await;
+    assert_eq!(fresh_rows, bookkeeping_rows(&upgraded).await);
+    assert_eq!(fresh_rows, bookkeeping_rows(&from_1001).await);
     fresh.drop().await;
     upgraded.drop().await;
+    from_1001.drop().await;
 }
 
 /// A database that applied another text of migration 1001 (its stored
