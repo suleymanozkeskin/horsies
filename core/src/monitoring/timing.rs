@@ -828,9 +828,7 @@ fn task_node(
         )?;
     }
     let count = plan.generations.len();
-    let mut number: i32 = 0;
-    for (index, generation) in plan.generations.iter().enumerate() {
-        number += 1;
+    for (number, (index, generation)) in (1_i32..).zip(plan.generations.iter().enumerate()) {
         let ids = TaskIds {
             generation: number,
             task_id: generation.task_id,
