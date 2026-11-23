@@ -22,11 +22,13 @@ from horsies.core.models.workflow import (
     OnError,
 )
 from horsies.core.task_decorator import from_node
+from horsies.core.workflows.lifecycle import start_workflow_async
 from horsies.core.workflows.start_types import (
+    WorkflowStartCommandConflict,
     WorkflowStartErrorCode,
     WorkflowStartIdConflict,
 )
-from horsies.core.types.result import is_err
+from horsies.core.types.result import is_err, is_ok
 
 from .conftest import (
     finish_task,
@@ -514,7 +516,7 @@ class TestWorkflowStart:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """Same workflow + custom ID started twice returns existing handle."""
+        """Same workflow, same start command and custom ID started twice returns the existing handle."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'idempotent_a')
 
@@ -526,29 +528,128 @@ class TestWorkflowStart:
         custom_id = '21111111-2222-4333-8444-555555555555'
         handle_1 = await start_ok(spec, broker, custom_id)
 
-        # Second call with same ID — must reuse existing workflow
-        task_b = make_simple_task(app, 'idempotent_b')
-        node_b = TaskNode(fn=task_b, kwargs={'value': 2})
-        spec_2 = make_workflow_spec(
-            broker=broker, name='idempotent_wf', tasks=[node_b],
-        )
-        handle_2 = await start_ok(spec_2, broker, custom_id)
+        # Second call with the same ID and the same start command: the existing workflow
+        handle_2 = await start_ok(spec, broker, custom_id)
 
         assert handle_1.workflow_id == handle_2.workflow_id
 
-        # Only one workflow row exists
+        # Only one workflow row exists, with the start command of the first start
         result = await session.execute(
-            text('SELECT COUNT(*) FROM horsies_workflows WHERE id = :wf_id'),
+            text("""
+                SELECT count(*), min(command_fingerprint_version),
+                       min(octet_length(command_fingerprint))
+                FROM horsies_workflows WHERE id = :wf_id
+            """),
             {'wf_id': custom_id},
         )
-        assert result.scalar() == 1
+        assert result.one() == (1, 1, 32)
 
-        # Task count matches the first spec, not the second
         task_count = await session.execute(
             text('SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = :wf_id'),
             {'wf_id': custom_id},
         )
         assert task_count.scalar() == 1
+
+    async def test_duplicate_workflow_id_with_another_start_command_is_a_command_conflict(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """Same workflow name and ID with other nodes or kwargs is refused; nothing is written."""
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'idempotent_command_a')
+        task_b = make_simple_task(app, 'idempotent_command_b')
+
+        first = make_workflow_spec(
+            broker=broker,
+            name='idempotent_command_wf',
+            tasks=[TaskNode(fn=task_a, kwargs={'value': 1})],
+        )
+        other_kwargs = make_workflow_spec(
+            broker=broker,
+            name='idempotent_command_wf',
+            tasks=[TaskNode(fn=task_a, kwargs={'value': 2})],
+        )
+        other_nodes = make_workflow_spec(
+            broker=broker,
+            name='idempotent_command_wf',
+            tasks=[TaskNode(fn=task_b, kwargs={'value': 1})],
+        )
+
+        custom_id = '51111111-2222-4333-8444-555555555555'
+        await start_ok(first, broker, custom_id)
+        stored_sql = text("""
+            SELECT command_fingerprint, updated_at FROM horsies_workflows WHERE id = :wf_id
+        """)
+        stored_before = (await session.execute(stored_sql, {'wf_id': custom_id})).one()
+
+        for second in (other_kwargs, other_nodes):
+            second_start = await start_workflow_async(second, broker, custom_id)
+
+            assert is_err(second_start)
+            error = second_start.err_value
+            assert isinstance(error, WorkflowStartCommandConflict)
+            assert error.code == WorkflowStartErrorCode.WORKFLOW_COMMAND_CONFLICT
+            assert error.retryable is False
+            assert error.workflow_id == custom_id
+            assert error.workflow_name == 'idempotent_command_wf'
+
+        task_count = await session.execute(
+            text('SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = :wf_id'),
+            {'wf_id': custom_id},
+        )
+        assert task_count.scalar() == 1
+        task_name = await session.execute(
+            text('SELECT task_name FROM horsies_workflow_tasks WHERE workflow_id = :wf_id'),
+            {'wf_id': custom_id},
+        )
+        assert task_name.scalar() == 'idempotent_command_a'
+        stored_after = (await session.execute(stored_sql, {'wf_id': custom_id})).one()
+        assert stored_after == stored_before
+
+    async def test_a_run_with_no_stored_start_command_returns_its_handle(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """A run that an earlier horsies version started has no stored start command.
+
+        A start with its ID and its name returns its handle with no compare and
+        writes nothing.
+        """
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'unrecorded_command_a')
+        spec = make_workflow_spec(
+            broker=broker,
+            name='unrecorded_command_wf',
+            tasks=[TaskNode(fn=task_a, kwargs={'value': 1})],
+        )
+        custom_id = '61111111-2222-4333-8444-555555555555'
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflows (
+                    id, name, definition_key, status, on_error, depth, root_workflow_id,
+                    sent_at, created_at, started_at, updated_at
+                ) VALUES (
+                    :wf_id, 'unrecorded_command_wf', NULL, 'RUNNING', 'fail', 0, :wf_id,
+                    now(), now(), now(), now()
+                )
+            """),
+            {'wf_id': custom_id},
+        )
+        await session.commit()
+
+        started = await start_workflow_async(spec, broker, custom_id)
+
+        assert is_ok(started)
+        assert started.ok_value.workflow_id == uuid.UUID(custom_id)
+        stored = await session.execute(
+            text("""
+                SELECT command_fingerprint IS NULL,
+                       (SELECT count(*) FROM horsies_workflow_tasks WHERE workflow_id = :wf_id)
+                FROM horsies_workflows WHERE id = :wf_id
+            """),
+            {'wf_id': custom_id},
+        )
+        assert stored.one() == (True, 0)
 
     async def test_duplicate_workflow_id_with_different_name_is_an_id_conflict(
         self,
@@ -613,6 +714,51 @@ class TestWorkflowStart:
             {'wf_id': custom_id},
         )
         assert task_count.scalar() == 1
+
+    async def test_concurrent_starts_with_one_id_and_two_commands_write_one_workflow(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """Concurrent starts with one ID and two start commands: one wins, the other is refused."""
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'command_race_a')
+
+        one_node = make_workflow_spec(
+            broker=broker,
+            name='command_race_wf',
+            tasks=[TaskNode(fn=task_a, kwargs={'value': 1})],
+        )
+        two_nodes = make_workflow_spec(
+            broker=broker,
+            name='command_race_wf',
+            tasks=[
+                TaskNode(fn=task_a, kwargs={'value': 1}),
+                TaskNode(fn=task_a, kwargs={'value': 2}),
+            ],
+        )
+
+        custom_id = '71111111-2222-4333-8444-555555555555'
+        first, second = await asyncio.gather(
+            start_workflow_async(one_node, broker, custom_id),
+            start_workflow_async(two_nodes, broker, custom_id),
+        )
+
+        match (is_ok(first), is_ok(second)):
+            case (True, False):
+                refused, winner_nodes = second, 1
+            case (False, True):
+                refused, winner_nodes = first, 2
+            case outcome:
+                pytest.fail(f'one start wins and the other is refused, got {outcome}')
+        assert is_err(refused)
+        assert isinstance(refused.err_value, WorkflowStartCommandConflict)
+        assert refused.err_value.workflow_id == custom_id
+
+        task_count = await session.execute(
+            text('SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = :wf_id'),
+            {'wf_id': custom_id},
+        )
+        assert task_count.scalar() == winner_nodes
 
     async def test_concurrent_auto_id_creates_distinct_workflows(
         self,

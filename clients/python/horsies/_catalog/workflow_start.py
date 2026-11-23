@@ -24,6 +24,11 @@ class WorkflowStartErrorCode(str, Enum):
     WORKFLOW_ID_CONFLICT = 'WORKFLOW_ID_CONFLICT'
     """The workflow id exists for another workflow name; nothing was written. Not retryable."""
 
+    WORKFLOW_COMMAND_CONFLICT = 'WORKFLOW_COMMAND_CONFLICT'
+    """The workflow id holds a run of this workflow name that another start command started, or a
+    sub-workflow; nothing was written. Not retryable.
+    """
+
     ENQUEUE_FAILED = 'ENQUEUE_FAILED'
     """Infrastructure error: schema init, DB transaction. Conditionally retryable."""
 

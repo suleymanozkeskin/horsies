@@ -19,9 +19,8 @@ use crate::db::CheckoutClass;
 use crate::telemetry::trace_carrier::{SendTrace, StoredTrace};
 use crate::workflow_engine::child_spec::{ChildSpecSource, ClientSpec};
 use crate::workflow_engine::error::WorkflowError;
-use crate::workflow_engine::start_statement::{
-    client_start_arguments, start_tree, StartArguments, StartOutcome,
-};
+use crate::workflow_engine::start_fingerprint::StartFingerprint;
+use crate::workflow_engine::start_statement::{client_start_arguments, start_tree, StartArguments};
 use crate::workflow_engine::steps::advance_parents;
 
 /// Retries of a start with `resend_on_transient_err` after a retryable
@@ -40,12 +39,36 @@ pub const START_RETRY_MAX: Duration = Duration::from_millis(2_000);
 pub enum ClientStartOutcome {
     /// The tree was written.
     Started,
-    /// A workflow with this id and this name exists, or the row with the id
-    /// was gone by the read of its name. Nothing was written.
-    Exists,
-    /// A workflow with this id exists under `existing_name`. Nothing was
-    /// written.
-    IdTaken { existing_name: String },
+    /// A workflow run with this id exists, and the start returns it. Nothing
+    /// was written.
+    Exists(ExistingRun),
+    /// The id belongs to a run that this start cannot return. Nothing was
+    /// written. [`WorkflowStartError::id_held`](crate::WorkflowStartError::id_held)
+    /// is the start error of each holder.
+    IdHeld(IdHolder),
+}
+
+/// Why a start returns the run that holds its id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExistingRun {
+    /// The run holds the start command of this start: the same version and
+    /// fingerprint (the name is part of the command).
+    SameCommand,
+    /// A top-level run of this name with no stored start command: a build
+    /// before schema migration 1002 started it. Its command is not compared.
+    FingerprintNotStored,
+}
+
+/// The run that holds the id of a start, when the start cannot return it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdHolder {
+    /// A run of another workflow name, `existing_name`.
+    OtherWorkflowName { existing_name: String },
+    /// A top-level run of this name that another start command started.
+    OtherCommand,
+    /// A sub-workflow of this name that a parent workflow started: it has no
+    /// start command.
+    SubWorkflow,
 }
 
 /// Why a start of a client spec failed.
@@ -89,14 +112,22 @@ impl PostgresBroker {
     /// 1. The tree, once: the workflow row, every node row, a pre-built
     ///    child for every sub-workflow root from `source` (recursively), and a
     ///    failed-node record for each root whose child cannot start. A build
-    ///    runs once per start, also when the id exists and on a retry.
+    ///    runs once per start, also when the id exists and on a retry. Then
+    ///    the start command fingerprint of the top-level row and its nodes
+    ///    (`StartCommandV1`, `workflow_engine/start_fingerprint.rs`), once:
+    ///    every attempt sends the same fingerprint.
     /// 2. Each attempt: the schema install (once per handle), the client
     ///    family check (once per handle), then `horsies_workflow_start` with
     ///    `sent_at` as the start call time and the trace carrier of `trace`:
     ///    one statement in autocommit, or a transaction with the child starts
     ///    it owes when the tree has a failed-node record. Every workflow row
     ///    of the tree and every task row of its nodes stores the carrier; a
-    ///    child that a later step starts copies it from its parent.
+    ///    child that a later step starts copies it from its parent. An id
+    ///    that exists is answered from the stored run, and nothing is written:
+    ///    [`ClientStartOutcome::Exists`] for the same start command and for a
+    ///    run with no stored start command (logged at WARNING),
+    ///    [`ClientStartOutcome::IdHeld`] for another name, another start
+    ///    command and a sub-workflow.
     /// 3. After the commit, the parent advances that those child starts owe,
     ///    one transaction per level. A failed advance is logged and left to
     ///    workflow recovery; the start returns its outcome.
@@ -124,12 +155,21 @@ impl PostgresBroker {
         let arguments = client_start_arguments(spec, workflow_id, source)
             .await
             .map_err(ClientStartError::Start)?;
+        let command = arguments.top_start_command().fingerprint();
         let trace = StoredTrace::of_send(trace);
+        let attempt = StartAttempt {
+            spec,
+            workflow_id,
+            arguments: &arguments,
+            sent_at,
+            trace: &trace,
+            command: &command,
+        };
         resend_while_transient(
             spec.name(),
             workflow_id,
             resend_on_transient_err,
-            || self.client_start_attempt(spec, workflow_id, &arguments, sent_at, &trace, source),
+            || self.client_start_attempt(&attempt, source),
             tokio::time::sleep,
         )
         .await
@@ -138,34 +178,27 @@ impl PostgresBroker {
     /// One attempt of step 2 and step 3 of [`Self::start_client_workflow`].
     async fn client_start_attempt(
         &self,
-        spec: &ClientSpec,
-        workflow_id: Uuid,
-        arguments: &StartArguments,
-        sent_at: DateTime<Utc>,
-        trace: &StoredTrace,
+        attempt: &StartAttempt<'_>,
         source: &dyn ChildSpecSource,
     ) -> Result<ClientStartOutcome, ClientStartError> {
+        let workflow_id = attempt.workflow_id;
         self.ensure_schema_initialized()
             .await
             .map_err(ClientStartError::SchemaInstall)?;
         self.ensure_client_family_for_write()
             .await
             .map_err(|error| ClientStartError::Start(WorkflowError::Broker(error)))?;
-        let started = start_tree(self, arguments, sent_at, trace, source)
-            .await
-            .map_err(ClientStartError::Start)?;
-        let outcome = match started.outcome {
-            StartOutcome::Started => {
-                tracing::debug!(workflow_id = %workflow_id, name = %spec.name(), "workflow created");
-                ClientStartOutcome::Started
-            }
-            StartOutcome::Exists { stored_name } => match stored_name {
-                Some(existing_name) if existing_name != spec.name() => {
-                    ClientStartOutcome::IdTaken { existing_name }
-                }
-                Some(_) | None => ClientStartOutcome::Exists,
-            },
-        };
+        let started = start_tree(
+            self,
+            attempt.arguments,
+            attempt.sent_at,
+            attempt.trace,
+            attempt.command,
+            source,
+        )
+        .await
+        .map_err(ClientStartError::Start)?;
+        log_start_outcome(attempt.spec.name(), workflow_id, &started.outcome);
         if let Err(failure) =
             advance_parents(self, CheckoutClass::Batch, started.parent_advances, source).await
         {
@@ -179,7 +212,38 @@ impl PostgresBroker {
                 failure.error,
             );
         }
-        Ok(outcome)
+        Ok(started.outcome)
+    }
+}
+
+/// The values of one start that every attempt sends: the spec, the id, the
+/// built tree, the call time, the trace and the start command fingerprint of
+/// the top-level row.
+struct StartAttempt<'a> {
+    spec: &'a ClientSpec,
+    workflow_id: Uuid,
+    arguments: &'a StartArguments,
+    sent_at: DateTime<Utc>,
+    trace: &'a StoredTrace,
+    command: &'a StartFingerprint,
+}
+
+/// Logs the outcome of the start `workflow_id` of `workflow_name`: a new
+/// workflow at DEBUG; a run with no stored start command at WARNING, because
+/// the start returns it with no compare; nothing for the other outcomes, which
+/// the caller receives.
+fn log_start_outcome(workflow_name: &str, workflow_id: Uuid, outcome: &ClientStartOutcome) {
+    match outcome {
+        ClientStartOutcome::Started => {
+            tracing::debug!(workflow_id = %workflow_id, name = %workflow_name, "workflow created");
+        }
+        ClientStartOutcome::Exists(ExistingRun::FingerprintNotStored) => tracing::warn!(
+            workflow_id = %workflow_id,
+            name = %workflow_name,
+            "workflow {workflow_id} has no stored start command (an earlier horsies version \
+             started it); the start returns it with no compare of the command",
+        ),
+        ClientStartOutcome::Exists(ExistingRun::SameCommand) | ClientStartOutcome::IdHeld(_) => {}
     }
 }
 

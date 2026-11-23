@@ -3,7 +3,7 @@
 /// Mirrors Python's `clients/python/horsies/core/workflows/start_types.py`.
 use uuid::Uuid;
 
-use crate::broker::workflow_start::ClientStartError;
+use crate::broker::workflow_start::{ClientStartError, IdHolder};
 use crate::error_catalog::ErrorEnum;
 use crate::workflow_engine::error::WorkflowError;
 use crate::FailureCause;
@@ -21,6 +21,9 @@ pub enum WorkflowStartErrorCode {
     ValidationFailed,
     /// The workflow id exists for another workflow name; nothing was written. Not retryable.
     WorkflowIdConflict,
+    /// The workflow id holds a run of this workflow name that another start command started, or a
+    /// sub-workflow; nothing was written. Not retryable.
+    WorkflowCommandConflict,
     /// Infrastructure error: schema init, DB transaction. Conditionally retryable.
     EnqueueFailed,
     /// A sync or blocking start was called on a thread that runs an event loop or a tokio
@@ -34,6 +37,7 @@ impl std::fmt::Display for WorkflowStartErrorCode {
             Self::BrokerNotConfigured => write!(f, "BROKER_NOT_CONFIGURED"),
             Self::ValidationFailed => write!(f, "VALIDATION_FAILED"),
             Self::WorkflowIdConflict => write!(f, "WORKFLOW_ID_CONFLICT"),
+            Self::WorkflowCommandConflict => write!(f, "WORKFLOW_COMMAND_CONFLICT"),
             Self::EnqueueFailed => write!(f, "ENQUEUE_FAILED"),
             Self::AsyncContext => write!(f, "ASYNC_CONTEXT"),
         }
@@ -102,6 +106,28 @@ pub enum WorkflowStartError {
         workflow_id: Uuid,
         #[error_slot(python = "Str")]
         existing_workflow_name: String,
+    },
+    /// The workflow id holds a run that another start command started. Nothing was written.
+    ///
+    /// The run has the name of this start. Its stored start command (the
+    /// nodes, their inputs and options, and the workflow settings) differs
+    /// from the command of this start, or the run is a sub-workflow, which has
+    /// no start command. ``workflow_id`` is the id of that run. A start with
+    /// this id must send the same command; another command is refused again,
+    /// so send the same command or use another id. The retry methods refuse
+    /// this error.
+    #[error_class(
+        class = "WorkflowStartCommandConflict",
+        code = "WorkflowCommandConflict",
+        never_retryable
+    )]
+    CommandConflict {
+        #[error_slot(python = "Str", hidden)]
+        message: String,
+        #[error_slot(python = "Str")]
+        workflow_name: String,
+        #[error_slot(python = "UuidText")]
+        workflow_id: Uuid,
     },
     /// Schema initialization or the start transaction failed with a database or driver error.
     ///
@@ -202,6 +228,37 @@ impl WorkflowStartError {
         }
     }
 
+    /// The start `workflow_id` of `workflow_name` met the run `holder`, which
+    /// it cannot return. Nothing was written. Pure.
+    ///
+    /// | Holder | Error |
+    /// |---|---|
+    /// | [`IdHolder::OtherWorkflowName`] | `IdConflict` ([`Self::id_conflict`]) |
+    /// | [`IdHolder::OtherCommand`] | `CommandConflict`: the run of this name has another start command |
+    /// | [`IdHolder::SubWorkflow`] | `CommandConflict`: the run is a sub-workflow, with no start command |
+    ///
+    /// The messages hold no input value.
+    pub fn id_held(workflow_name: &str, workflow_id: Uuid, holder: IdHolder) -> Self {
+        let command_conflict = |message: String| Self::CommandConflict {
+            message,
+            workflow_name: workflow_name.to_owned(),
+            workflow_id,
+        };
+        match holder {
+            IdHolder::OtherWorkflowName { existing_name } => {
+                Self::id_conflict(workflow_name, workflow_id, existing_name)
+            }
+            IdHolder::OtherCommand => command_conflict(format!(
+                "workflow_id '{workflow_id}' already exists for workflow name '{workflow_name}' \
+                 with another start command; a start with this id must send the same command"
+            )),
+            IdHolder::SubWorkflow => command_conflict(format!(
+                "workflow_id '{workflow_id}' belongs to a sub-workflow that another workflow \
+                 started; it has no start command"
+            )),
+        }
+    }
+
     /// The start `workflow_id` of `workflow_name` failed with `error`: its
     /// text is the message, its rule the retry flag, and the error itself
     /// (the broker error of a failed install) the cause. Nothing committed,
@@ -227,6 +284,7 @@ impl WorkflowStartError {
         match self {
             Self::ValidationFailed { message, .. }
             | Self::IdConflict { message, .. }
+            | Self::CommandConflict { message, .. }
             | Self::EnqueueFailed { message, .. }
             | Self::AsyncContext { message, .. } => message,
         }
@@ -237,9 +295,10 @@ impl WorkflowStartError {
     pub fn retryable(&self) -> bool {
         match self {
             Self::EnqueueFailed { retryable, .. } => *retryable,
-            Self::ValidationFailed { .. } | Self::IdConflict { .. } | Self::AsyncContext { .. } => {
-                false
-            }
+            Self::ValidationFailed { .. }
+            | Self::IdConflict { .. }
+            | Self::CommandConflict { .. }
+            | Self::AsyncContext { .. } => false,
         }
     }
 
@@ -248,6 +307,7 @@ impl WorkflowStartError {
         match self {
             Self::ValidationFailed { workflow_name, .. }
             | Self::IdConflict { workflow_name, .. }
+            | Self::CommandConflict { workflow_name, .. }
             | Self::EnqueueFailed { workflow_name, .. }
             | Self::AsyncContext { workflow_name, .. } => workflow_name,
         }
@@ -258,19 +318,22 @@ impl WorkflowStartError {
         match self {
             Self::ValidationFailed { workflow_id, .. }
             | Self::IdConflict { workflow_id, .. }
+            | Self::CommandConflict { workflow_id, .. }
             | Self::EnqueueFailed { workflow_id, .. }
             | Self::AsyncContext { workflow_id, .. } => *workflow_id,
         }
     }
 
     /// What the start met. A variant without `cause` has the cause of its
-    /// state: an id that another workflow holds, or a blocking start on a
-    /// runtime thread, is a failed precondition. Pure.
+    /// state: an id that another workflow or another start command holds, or
+    /// a blocking start on a runtime thread, is a failed precondition. Pure.
     pub fn failure_cause(&self) -> FailureCause {
         match self {
             Self::ValidationFailed { cause, .. } => cause.failure_cause(),
             Self::EnqueueFailed { cause, .. } => cause.failure_cause(),
-            Self::IdConflict { .. } | Self::AsyncContext { .. } => FailureCause::PreconditionFailed,
+            Self::IdConflict { .. } | Self::CommandConflict { .. } | Self::AsyncContext { .. } => {
+                FailureCause::PreconditionFailed
+            }
         }
     }
 }
@@ -323,7 +386,9 @@ pub fn validate_start_retry(
             workflow_id,
             ..
         } => (workflow_name, *workflow_id),
-        WorkflowStartError::ValidationFailed { .. } | WorkflowStartError::IdConflict { .. } => {
+        WorkflowStartError::ValidationFailed { .. }
+        | WorkflowStartError::IdConflict { .. }
+        | WorkflowStartError::CommandConflict { .. } => {
             return Err(WorkflowStartError::ValidationFailed {
                 message: format!(
                     "retry_start only accepts ENQUEUE_FAILED and ASYNC_CONTEXT errors, got {}",
@@ -378,6 +443,10 @@ mod tests {
             WorkflowStartErrorCode::WorkflowIdConflict.to_string(),
             "WORKFLOW_ID_CONFLICT",
         );
+        assert_eq!(
+            WorkflowStartErrorCode::WorkflowCommandConflict.to_string(),
+            "WORKFLOW_COMMAND_CONFLICT",
+        );
     }
 
     #[test]
@@ -424,6 +493,15 @@ mod tests {
                     existing_workflow_name: "other".to_owned(),
                 },
                 WorkflowStartErrorCode::WorkflowIdConflict,
+                FailureCause::PreconditionFailed,
+            ),
+            (
+                WorkflowStartError::CommandConflict {
+                    message: "m".to_owned(),
+                    workflow_name: name(),
+                    workflow_id,
+                },
+                WorkflowStartErrorCode::WorkflowCommandConflict,
                 FailureCause::PreconditionFailed,
             ),
             (
@@ -532,6 +610,21 @@ mod tests {
         );
     }
 
+    /// A start that met another start command of the same id is refused
+    /// again with the same id, so the retry refuses it.
+    #[test]
+    fn validate_retry_rejects_a_command_conflict() {
+        let error = WorkflowStartError::id_held("test-wf", Uuid::new_v4(), IdHolder::OtherCommand);
+        let refused = validate_start_retry(&error, "test-wf").unwrap_err();
+        assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);
+        assert_eq!(
+            refused.message(),
+            "retry_start only accepts ENQUEUE_FAILED and ASYNC_CONTEXT errors, got \
+             WORKFLOW_COMMAND_CONFLICT"
+        );
+        assert_eq!(refused.workflow_id(), error.workflow_id());
+    }
+
     #[test]
     fn validate_retry_rejects_cross_workflow_name() {
         let error = WorkflowStartError::EnqueueFailed {
@@ -565,6 +658,7 @@ mod tests {
             [
                 "WorkflowStartValidationFailed",
                 "WorkflowStartIdConflict",
+                "WorkflowStartCommandConflict",
                 "WorkflowStartEnqueueFailed",
                 "WorkflowStartAsyncContext",
             ]
@@ -611,6 +705,18 @@ mod tests {
             catalog.classes[2].slots,
             [
                 ErrorSlot::CodeMember {
+                    member: "WORKFLOW_COMMAND_CONFLICT"
+                },
+                ErrorSlot::NeverRetryable,
+                field("message", SlotRepr::Hidden),
+                field("workflow_name", SlotRepr::Shown),
+                workflow_id,
+            ]
+        );
+        assert_eq!(
+            catalog.classes[3].slots,
+            [
+                ErrorSlot::CodeMember {
                     member: "ENQUEUE_FAILED"
                 },
                 field("message", SlotRepr::Hidden),
@@ -627,7 +733,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            catalog.classes[3].slots,
+            catalog.classes[4].slots,
             [
                 ErrorSlot::CodeMember {
                     member: "ASYNC_CONTEXT"
@@ -638,7 +744,7 @@ mod tests {
                 workflow_id,
             ]
         );
-        assert!(catalog.classes[2]
+        assert!(catalog.classes[3]
             .doc
             .starts_with("Schema initialization or the start transaction failed"));
     }
@@ -669,6 +775,67 @@ mod tests {
                 ("workflow_name", SlotData::Str("nightly")),
                 ("workflow_id", SlotData::UuidText(workflow_id)),
                 ("existing_workflow_name", SlotData::Str("weekly")),
+            ]
+        );
+    }
+
+    /// Each holder of an id that a start cannot return has its class and its
+    /// message: another name is `IdConflict` with Python's message; another
+    /// start command and a sub-workflow are `CommandConflict`, whose
+    /// `workflow_id` names the run that holds the id. No message holds an
+    /// input value.
+    #[test]
+    fn each_holder_of_the_id_has_its_class_and_its_message() {
+        let workflow_id = Uuid::from_u128(0x0193_0000_0000_7000_8000_0000_0000_0002);
+        let cases = [
+            (
+                IdHolder::OtherWorkflowName {
+                    existing_name: "weekly".to_owned(),
+                },
+                WorkflowStartErrorCode::WorkflowIdConflict,
+                format!(
+                    "workflow_id '{workflow_id}' already exists for workflow name 'weekly', \
+                     cannot start workflow name 'nightly' with the same id"
+                ),
+            ),
+            (
+                IdHolder::OtherCommand,
+                WorkflowStartErrorCode::WorkflowCommandConflict,
+                format!(
+                    "workflow_id '{workflow_id}' already exists for workflow name 'nightly' with \
+                     another start command; a start with this id must send the same command"
+                ),
+            ),
+            (
+                IdHolder::SubWorkflow,
+                WorkflowStartErrorCode::WorkflowCommandConflict,
+                format!(
+                    "workflow_id '{workflow_id}' belongs to a sub-workflow that another workflow \
+                     started; it has no start command"
+                ),
+            ),
+        ];
+        for (holder, code, message) in cases {
+            let error = WorkflowStartError::id_held("nightly", workflow_id, holder);
+            assert_eq!(error.code(), code);
+            assert_eq!(error.message(), message);
+            assert_eq!(error.workflow_name(), "nightly");
+            assert_eq!(error.workflow_id(), workflow_id);
+            assert!(!error.retryable());
+            assert_eq!(error.failure_cause(), FailureCause::PreconditionFailed);
+        }
+        let conflict = WorkflowStartError::id_held("nightly", workflow_id, IdHolder::OtherCommand);
+        let named: Vec<(&str, SlotData<'_>)> = conflict
+            .slot_values()
+            .into_iter()
+            .map(|slot| (slot.name, slot.value))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("message", SlotData::Str(conflict.message())),
+                ("workflow_name", SlotData::Str("nightly")),
+                ("workflow_id", SlotData::UuidText(workflow_id)),
             ]
         );
     }

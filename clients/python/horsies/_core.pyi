@@ -10,7 +10,7 @@ from typing import Literal, final
 from horsies._catalog.broker_errors import BrokerCoreEnqueueError, BrokerInvalidInput, BrokerInvalidJsonPayload, BrokerListenerDisabled, BrokerOperationFailed
 from horsies._catalog.monitoring_errors import MonitoringQueryCoreError, TaskActionCoreError
 from horsies._catalog.workflow_handle_errors import HandleDbOperationFailed, HandleResumeRecoveryFailed, HandleStoredDataInvalid
-from horsies._catalog.workflow_start_errors import WorkflowStartEnqueueFailed, WorkflowStartIdConflict
+from horsies._catalog.workflow_start_errors import WorkflowStartCommandConflict, WorkflowStartEnqueueFailed, WorkflowStartIdConflict
 
 
 class CoreError(Exception):
@@ -226,13 +226,13 @@ class CoreHandle:
         on the callback thread for each sub-workflow child that an operation builds. A second
         registration raises RuntimeError. Starts nothing.
         """
-    def start_workflow(self, request: WorkflowStartRequest) -> WorkflowStarted | WorkflowExists | WorkflowStartIdConflict | WorkflowStartEnqueueFailed:
+    def start_workflow(self, request: WorkflowStartRequest) -> WorkflowStarted | WorkflowExists | WorkflowStartIdConflict | WorkflowStartCommandConflict | WorkflowStartEnqueueFailed:
         """Start one workflow. Writes; a caller that leaves does not stop it. The children of its
         sub-workflow roots come from the child spec source. A build that raised (KeyboardInterrupt,
         SystemExit, or an Exception such as SerializationError) rolls the start back and raises it
         again. With no child spec source it raises RuntimeError.
         """
-    def start_workflow_async(self, request: WorkflowStartRequest) -> asyncio.Future[WorkflowStarted | WorkflowExists | WorkflowStartIdConflict | WorkflowStartEnqueueFailed]:
+    def start_workflow_async(self, request: WorkflowStartRequest) -> asyncio.Future[WorkflowStarted | WorkflowExists | WorkflowStartIdConflict | WorkflowStartCommandConflict | WorkflowStartEnqueueFailed]:
         """The awaitable form of the method above."""
     def resume_workflow(self, workflow_id: uuid.UUID) -> WorkflowResumed | WorkflowNotPaused | WorkflowAbsent | HandleDbOperationFailed | HandleStoredDataInvalid | HandleResumeRecoveryFailed:
         """Resume one workflow tree. Writes; a caller that leaves does not stop it. The child starts
@@ -2193,8 +2193,9 @@ class WorkflowStarted:
 
 @final
 class WorkflowExists:
-    """A workflow with this id and this name exists, or the row with the id was gone by the
-    read of its name. Nothing was written.
+    """A workflow run with this id exists, and the start returns it: the run holds the start
+    command of this start, or it has no stored start command (an earlier horsies version
+    started it; the core logs a warning). Nothing was written.
     """
     @property
     def workflow_id(self) -> uuid.UUID: ...

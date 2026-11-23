@@ -79,6 +79,40 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **A workflow start with a known `workflow_id` must carry the same start
+  command.** When the id exists, the start compares its start command with
+  the stored one, in the same statement:
+  - same workflow name, same start command: the existing handle, as before;
+    nothing is written;
+  - same workflow name, another start command: the new error
+    `WorkflowStartCommandConflict` (Python) or
+    `WorkflowStartError::CommandConflict` (Rust), code
+    `WORKFLOW_COMMAND_CONFLICT`; nothing is written;
+  - the id holds a sub-workflow: `WORKFLOW_COMMAND_CONFLICT`;
+  - another workflow name: `WORKFLOW_ID_CONFLICT`, as before.
+
+  The new error has `message`, `workflow_name` and `workflow_id`. It is
+  never retryable, and `retry_start` / `retry_start_async` refuse it. The
+  start command is the workflow name, definition key, `on_error`, output
+  node, success policy, and each node of the top-level workflow: index,
+  node id, task name, input (as the client encoded it), queue, priority,
+  dependencies, `args_from`, `workflow_ctx_from`, `allow_failed_deps`, join
+  rule, `min_success`, task options (with `good_until`), retention class
+  and the sub-workflow facts. The workflow id, the call time, the trace and
+  the pre-built child workflows are not in it. The core computes the
+  SHA-256 of the start command (version 1); no client computes it. This is
+  a breaking change for a repeat start with other inputs: it returned the
+  first workflow and dropped the new inputs; now it is refused. Runs
+  started before this release have no stored start command and are not
+  checked: a start with their id and their name returns their handle, and
+  the core logs one warning. In `horsies-core`, `ClientStartOutcome` is
+  `Started | Exists(ExistingRun) | IdHeld(IdHolder)`, with
+  `ExistingRun::{SameCommand, FingerprintNotStored}` and
+  `IdHolder::{OtherWorkflowName { existing_name }, OtherCommand,
+  SubWorkflow}`; `WorkflowStartError::id_held(workflow_name, workflow_id,
+  holder)` builds the error of a held id. `WorkflowStartErrorCode` gains
+  `WorkflowCommandConflict` after `WorkflowIdConflict`; the crate `horsies`
+  re-exports both enums with the new members.
 - **Schema migration 1001: stop every 0.8.0 process before the upgrade.**
   The first start of this build applies migration 1001
   (`core/migrations/1001_lifecycle_record.sql`) after migration 1000. A
@@ -88,8 +122,21 @@ and there is no migration contract between pre-1.0 versions.
   does not go back to 0.8.0. The migration rewrites no table; it holds
   `ACCESS EXCLUSIVE` on `horsies_tasks` and `horsies_task_attempts`, and
   `SHARE ROW EXCLUSIVE` on `horsies_workflows` and `horsies_workflow_tasks`
-  (the foreign keys of the new event table), until it commits. The web
-  monitoring schema check expects version 1001.
+  (the foreign keys of the new event table), until it commits.
+- **Schema migration 1002: stop every process before the upgrade.** The
+  first start of this build applies migration 1002
+  (`core/migrations/1002_workflow_start_command_fingerprint.sql`) after
+  migration 1001. It adds `command_fingerprint_version` and
+  `command_fingerprint` to `horsies_workflows`, with the CHECK
+  `horsies_workflows_command_fingerprint_by_origin`, and replaces
+  `horsies_workflow_start` (40 arguments), `horsies_workflow_start_top_row`,
+  `horsies_workflow_start_child_row` and `horsies_workflow_child_start`. Upgrade every process together. A
+  process of an earlier build that runs on after the migration fails every
+  workflow start (SQLSTATE 42883); one that starts after it is refused,
+  because the database holds a newer version. A database at 1002 does not
+  go back to an earlier build. The migration rewrites no table and writes
+  no value into old rows; the new CHECK reads `horsies_workflows` once. The
+  web monitoring schema check expects version 1002.
 - **Task history: attempt archive version 2.** Each move to history from
   migration 1001 stores the attempts of the task with their phase records,
   and the open attempt of a task that ended with no attempt row (a cancel,
@@ -137,6 +184,17 @@ and there is no migration contract between pre-1.0 versions.
   `core::lifecycle::outcomes::decode_raw` and
   `HandleOperationError::connect_failed` take their first argument by
   reference.
+
+### Fixed
+
+- **A repeat workflow start no longer returns a handle to a deleted
+  workflow.** A start whose id existed inserted with `ON CONFLICT DO
+  NOTHING` and then read the stored name in a second statement. When
+  retention deleted the row between the two statements, the start returned
+  a handle to a workflow that no longer existed. The conflict now locks the
+  existing row (`ON CONFLICT (id) DO UPDATE ... WHERE false`), so the read
+  finds it. After retention deleted and committed the row, a start with the
+  same id starts a new workflow.
 
 ## [0.8.0] - 2026-11-21
 

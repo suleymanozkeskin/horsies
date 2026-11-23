@@ -18,6 +18,9 @@
 //!   writes no family row and does not publish the history readers. Version
 //!   1001 (`1001_lifecycle_record.sql`) adds the phase record of each attempt
 //!   and the event table of the workflow runs (`horsies_workflow_events`).
+//!   Version 1002 (`1002_workflow_start_command_fingerprint.sql`) adds the
+//!   start command fingerprint of each top-level workflow run, which a start
+//!   with an existing id compares.
 //!
 //! The released text of a migration never changes: a database that applied
 //! another text of it is refused ([`SchemaRefusal::MigrationEdited`]), so a
@@ -126,16 +129,28 @@ baseline_sql_files!(
 /// (`core/migrations/1001_lifecycle_record.sql`).
 pub(crate) const LIFECYCLE_RECORD_MIGRATION_VERSION: i64 = 1001;
 
+/// Version of the migration that adds the start command fingerprint of each
+/// top-level workflow run
+/// (`core/migrations/1002_workflow_start_command_fingerprint.sql`).
+pub(crate) const START_COMMAND_FINGERPRINT_MIGRATION_VERSION: i64 = 1002;
+
 /// The files of `core/migrations/`, one per migration after the baseline,
 /// in apply order: the version of the migration, the file name and the text.
 /// The core includes them by relative path and keeps no copy. A file added to
 /// the folder without a line here fails
 /// `later_migration_list_is_the_whole_folder`.
-pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 1] = [(
-    LIFECYCLE_RECORD_MIGRATION_VERSION,
-    "1001_lifecycle_record.sql",
-    include_str!("../../migrations/1001_lifecycle_record.sql"),
-)];
+pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 2] = [
+    (
+        LIFECYCLE_RECORD_MIGRATION_VERSION,
+        "1001_lifecycle_record.sql",
+        include_str!("../../migrations/1001_lifecycle_record.sql"),
+    ),
+    (
+        START_COMMAND_FINGERPRINT_MIGRATION_VERSION,
+        "1002_workflow_start_command_fingerprint.sql",
+        include_str!("../../migrations/1002_workflow_start_command_fingerprint.sql"),
+    ),
+];
 
 /// Every SQL file of the embedded chain, in run order, with the version of
 /// its migration: the files of migration 1000
@@ -209,7 +224,7 @@ struct MigrationSource {
 /// The embedded chain, in apply order: the baseline, then the migrations of
 /// [`LATER_MIGRATION_FILES`]. The Python client installs through the core,
 /// so both clients apply the same chain.
-const MIGRATION_SOURCES: [MigrationSource; 2] = [
+const MIGRATION_SOURCES: [MigrationSource; 3] = [
     MigrationSource {
         version: BASELINE_MIGRATION_VERSION,
         description: "baseline",
@@ -229,6 +244,21 @@ const MIGRATION_SOURCES: [MigrationSource; 2] = [
         script: SqlScript::new(
             "migration_1001_lifecycle_record",
             LATER_MIGRATION_FILES[0].2,
+        ),
+        family_row: FamilyRow::NotWritten,
+        readers: ReaderPublication::NotPublished,
+        exact_indexes: &[],
+        retired_indexes: &[],
+    },
+    // The new columns are nullable and the new constraint is a CHECK. The
+    // migration builds no index: the start reads the workflow row by its
+    // primary key.
+    MigrationSource {
+        version: LATER_MIGRATION_FILES[1].0,
+        description: "workflow start command fingerprint",
+        script: SqlScript::new(
+            "migration_1002_workflow_start_command_fingerprint",
+            LATER_MIGRATION_FILES[1].2,
         ),
         family_row: FamilyRow::NotWritten,
         readers: ReaderPublication::NotPublished,

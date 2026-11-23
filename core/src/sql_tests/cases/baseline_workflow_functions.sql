@@ -52,16 +52,101 @@ DECLARE
     v_row horsies_workflow_step_row;
     v_nodes bigint := (SELECT count(*) FROM horsies_workflow_tasks);
     v_tasks bigint := (SELECT count(*) FROM horsies_tasks);
+    v_stored horsies_workflows := wft_workflow('00000000-0000-7000-8000-000000000101');
 BEGIN
+    PERFORM wft_check(v_stored.command_fingerprint_version = 1 AND octet_length(v_stored.command_fingerprint) = 32,
+                      'start: the top-level row stores the start command pair');
+    SELECT * INTO v_row FROM wft_start1(v_wf, 'fail', '[
+        {"idx":0,"input":"{\"x\":1}"},
+        {"idx":1,"deps":[0],"args_from":{"a":0}},
+        {"idx":2,"good_until":"2031-01-01T00:00:00Z"}
+    ]') WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'EXISTS' AND v_row.detail = 'wf',
+                      'start: repeated id with the same start command returns EXISTS');
     SELECT * INTO v_row FROM wft_start1(v_wf, 'fail', '[{"idx":0}]') WHERE row_kind = 'OUTCOME';
-    PERFORM wft_check(v_row.disposition = 'EXISTS' AND v_row.detail = 'wf', 'start: repeated id returns EXISTS');
-    PERFORM wft_check((SELECT count(*) FROM horsies_workflow_tasks) = v_nodes
-                      AND (SELECT count(*) FROM horsies_tasks) = v_tasks, 'start: repeated id writes nothing');
+    PERFORM wft_check(v_row.disposition = 'OTHER_COMMAND' AND v_row.detail = 'wf',
+                      'start: repeated id with another start command returns OTHER_COMMAND');
     SELECT * INTO v_row FROM wft_start(
         jsonb_build_array(jsonb_build_object('id', v_wf, 'name', 'other', 'on_error', 'fail')), '[{"idx":0}]'
     ) WHERE row_kind = 'OUTCOME';
-    PERFORM wft_check(v_row.disposition = 'EXISTS' AND v_row.detail = 'wf',
-                      'start: repeated id with another name returns the stored name');
+    PERFORM wft_check(v_row.disposition = 'OTHER_NAME' AND v_row.detail = 'wf',
+                      'start: repeated id with another name returns OTHER_NAME and the stored name');
+    PERFORM wft_check((SELECT count(*) FROM horsies_workflow_tasks) = v_nodes
+                      AND (SELECT count(*) FROM horsies_tasks) = v_tasks, 'start: repeated id writes nothing');
+    PERFORM wft_check((wft_workflow(v_wf)).command_fingerprint = v_stored.command_fingerprint
+                      AND (wft_workflow(v_wf)).updated_at = v_stored.updated_at,
+                      'start: repeated id keeps the stored start command and updated_at');
+END $$;
+
+DO $$
+DECLARE
+    v_parent uuid := '00000000-0000-7000-8000-000000000105';
+    v_child uuid := '00000000-0000-7000-8000-000000000106';
+    v_row horsies_workflow_step_row;
+    v_nodes bigint;
+BEGIN
+    -- A top-level row with no start command pair: a run that a build before migration 1002 started.
+    INSERT INTO horsies_workflows (
+        id, name, definition_key, status, on_error, output_task_index, success_policy, result, error,
+        parent_workflow_id, parent_task_index, root_workflow_id, depth, sent_at, created_at, started_at,
+        completed_at, updated_at, trace_carrier, trace_id, command_fingerprint_version, command_fingerprint
+    ) VALUES
+        (v_parent, 'wf', NULL, 'RUNNING', 'fail', NULL, NULL, NULL, NULL, NULL, NULL, v_parent, 0, now(), now(),
+         now(), NULL, now(), NULL, NULL, NULL, NULL),
+        (v_child, 'wf', NULL, 'RUNNING', 'fail', NULL, NULL, NULL, NULL, v_parent, 0, v_parent, 1, now(), now(),
+         now(), NULL, now(), NULL, NULL, NULL, NULL);
+    v_nodes := (SELECT count(*) FROM horsies_workflow_tasks);
+    SELECT * INTO v_row FROM wft_start1(v_parent, 'fail', '[{"idx":0}]') WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'FINGERPRINT_NOT_STORED' AND v_row.detail = 'wf',
+                      'start: a top-level row with no start command returns FINGERPRINT_NOT_STORED');
+    PERFORM wft_check((wft_workflow(v_parent)).command_fingerprint IS NULL,
+                      'start: FINGERPRINT_NOT_STORED writes no start command');
+    SELECT * INTO v_row FROM wft_start1(v_child, 'fail', '[{"idx":0}]') WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'SUB_WORKFLOW' AND v_row.detail = 'wf',
+                      'start: the id of a sub-workflow of the same name returns SUB_WORKFLOW');
+    SELECT * INTO v_row FROM wft_start(
+        jsonb_build_array(jsonb_build_object('id', v_child, 'name', 'other', 'on_error', 'fail')), '[{"idx":0}]'
+    ) WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'OTHER_NAME' AND v_row.detail = 'wf',
+                      'start: the id of a sub-workflow of another name returns OTHER_NAME');
+    PERFORM wft_check((SELECT count(*) FROM horsies_workflow_tasks) = v_nodes,
+                      'start: an id with no start command or of a sub-workflow writes nothing');
+END $$;
+
+DO $$
+BEGIN
+    PERFORM wft_refused($q$
+        SELECT * FROM wft_start_commanded('00000000-0000-7000-8000-000000000107', NULL, sha256('x'::bytea))
+    $q$, '22023', 'start refuses a NULL start command version');
+    PERFORM wft_refused($q$
+        SELECT * FROM wft_start_commanded('00000000-0000-7000-8000-000000000107', 0::smallint, sha256('x'::bytea))
+    $q$, '22023', 'start refuses a start command version that is not above 0');
+    PERFORM wft_refused($q$
+        SELECT * FROM wft_start_commanded('00000000-0000-7000-8000-000000000107', 1::smallint, NULL)
+    $q$, '22023', 'start refuses a NULL start command fingerprint');
+    PERFORM wft_refused($q$
+        SELECT * FROM wft_start_commanded('00000000-0000-7000-8000-000000000107', 1::smallint,
+                                          substring(sha256('x'::bytea) FROM 1 FOR 31))
+    $q$, '22023', 'start refuses a start command fingerprint that is not 32 bytes');
+    PERFORM wft_check(NOT EXISTS (SELECT 1 FROM horsies_workflows WHERE id = '00000000-0000-7000-8000-000000000107'),
+                      'start command refusals write nothing');
+    -- The table CHECK: a child row has no start command pair, and a pair is whole and 32 bytes.
+    PERFORM wft_refused($q$
+        UPDATE horsies_workflows SET command_fingerprint_version = 1, command_fingerprint = sha256('x'::bytea)
+        WHERE id = '00000000-0000-7000-8000-000000000106'
+    $q$, '23514', 'the CHECK refuses a start command pair on a child row');
+    PERFORM wft_refused($q$
+        UPDATE horsies_workflows SET command_fingerprint_version = 1
+        WHERE id = '00000000-0000-7000-8000-000000000105'
+    $q$, '23514', 'the CHECK refuses half a start command pair');
+    PERFORM wft_refused($q$
+        UPDATE horsies_workflows
+        SET command_fingerprint_version = 1, command_fingerprint = substring(sha256('x'::bytea) FROM 1 FOR 31)
+        WHERE id = '00000000-0000-7000-8000-000000000105'
+    $q$, '23514', 'the CHECK refuses a start command fingerprint that is not 32 bytes');
+    -- The two rows have no nodes; the later cases do not see them.
+    DELETE FROM horsies_workflows
+    WHERE id IN ('00000000-0000-7000-8000-000000000106', '00000000-0000-7000-8000-000000000105');
 END $$;
 
 DO $$
@@ -74,7 +159,8 @@ BEGIN
             ARRAY['default'], ARRAY[50], ARRAY['[]'], ARRAY[NULL::text], ARRAY[NULL::text], ARRAY[FALSE],
             ARRAY['all'], ARRAY[NULL::integer], ARRAY[NULL::text], ARRAY[0], ARRAY['ISOLATED'],
             ARRAY[NULL::timestamptz], ARRAY['forever'], ARRAY[FALSE], ARRAY[NULL::text], ARRAY[NULL::text],
-            ARRAY[NULL::text], ARRAY[]::uuid[], ARRAY[]::integer[], ARRAY[]::text[], 'NO_CARRIER', NULL, NULL)
+            ARRAY[NULL::text], ARRAY[]::uuid[], ARRAY[]::integer[], ARRAY[]::text[], 'NO_CARRIER', NULL, NULL,
+            1::smallint, sha256('arrays'::bytea))
     $q$, '22023', 'start refuses node arrays of different lengths');
     PERFORM wft_refused($q$
         SELECT * FROM wft_start1('00000000-0000-7000-8000-000000000102', 'fail', '[{"idx":0},{"idx":0}]')
@@ -1753,7 +1839,8 @@ BEGIN
             ARRAY['default'], ARRAY[50], ARRAY['[]'], ARRAY[NULL::text], ARRAY[NULL::text], ARRAY[FALSE],
             ARRAY['all'], ARRAY[NULL::integer], ARRAY[NULL::text], ARRAY[NULL::integer], ARRAY[NULL::text],
             ARRAY[NULL::timestamptz], ARRAY[NULL::text], ARRAY[TRUE], ARRAY['child.wf'], ARRAY['child.key'],
-            ARRAY[NULL::text], ARRAY[]::uuid[], ARRAY[]::integer[], ARRAY[]::text[], 'NO_CARRIER', NULL, NULL)
+            ARRAY[NULL::text], ARRAY[]::uuid[], ARRAY[]::integer[], ARRAY[]::text[], 'NO_CARRIER', NULL, NULL,
+            1::smallint, sha256('params'::bytea))
     $q$, '23514', 'start refuses a sub-workflow node with no params choice (table CHECK)');
 END $$;
 

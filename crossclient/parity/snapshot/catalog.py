@@ -521,6 +521,8 @@ _WORKFLOWS: Final = TableRules(
         ('updated_at', RUN_CLOCK),
         ('trace_carrier', TRACE),
         ('trace_id', TRACE),
+        ('command_fingerprint_version', EXACT),
+        ('command_fingerprint', COMMAND_FINGERPRINT),
     ),
     order_by=(
         'id',

@@ -11,6 +11,7 @@ from horsies.core.workflows.engine import (
 from horsies.core.workflows.start_types import (
     WorkflowStartAsyncContext,
     WorkflowStartBrokerNotConfigured,
+    WorkflowStartCommandConflict,
     WorkflowStartEnqueueFailed,
     WorkflowStartError,
     WorkflowStartErrorCode,
@@ -30,6 +31,7 @@ __all__ = [
     # Workflow start result types
     'WorkflowStartAsyncContext',
     'WorkflowStartBrokerNotConfigured',
+    'WorkflowStartCommandConflict',
     'WorkflowStartEnqueueFailed',
     'WorkflowStartError',
     'WorkflowStartErrorCode',

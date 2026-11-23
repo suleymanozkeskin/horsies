@@ -1,7 +1,7 @@
 ---
 title: Database Schema
 section: shared
-summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (migration chain 1000 and 1001).
+summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (migration chain 1000, 1001 and 1002).
 related: [../../configuration/broker-config]
 tags: [internals, database, schema, PostgreSQL, task-history]
 ---
@@ -14,6 +14,7 @@ The schema is a chain of migrations. Each migration runs in its own transaction,
 | ------- | ----- | ----- |
 | 1000 | `core/baseline/*.sql`, run in name order as one text | The baseline schema (the files below) |
 | 1001 | `core/migrations/1001_lifecycle_record.sql` | The phase record of each attempt: two columns on `horsies_tasks`, nine columns on `horsies_task_attempts`, the attempt writers that fill them, and attempt archive version 2. The events of each workflow run: the table `horsies_workflow_events` and the moves and workflow steps that write it |
+| 1002 | `core/migrations/1002_workflow_start_command_fingerprint.sql` | The start command fingerprint of each top-level workflow: two columns and one `CHECK` on `horsies_workflows`, and the workflow start functions that write and compare it (`horsies_workflow_start`, `horsies_workflow_start_top_row`, `horsies_workflow_start_child_row`, `horsies_workflow_child_start`) |
 
 The files of migration 1000:
 
@@ -68,6 +69,18 @@ Upgrade from 0.8.0 (version 1000) to version 1001:
   `attempt_claims` NULL (claims not counted); an attempt row written before it has `phase_record_version` NULL
   (no phase record). It writes no workflow event: a run that began before it has the events of the steps after
   it only.
+
+Upgrade from version 1001 to version 1002 (also from 0.8.0, after migration 1001):
+
+- Stop every process of an earlier build before the first start of this build, and upgrade every process
+  together. The first start applies migration 1002. A process of an earlier build that runs on after it fails
+  every workflow start: the 38-argument `horsies_workflow_start` no longer exists (SQLSTATE 42883). A process
+  of an earlier build that starts after it is refused, because the database holds a newer version.
+- A database at version 1002 does not go back to an earlier build.
+- The migration adds two nullable columns with no default to `horsies_workflows`, so it rewrites no table. The
+  new `CHECK` reads the table once.
+- The migration writes no value into old rows. A workflow row written before it has no start command
+  fingerprint: a start with its id and its name returns that workflow with no compare.
 
 `horsies_migrations` has the sqlx form: `version`, `description`, `installed_on`, `success`, `checksum`
 (SHA-384 of the migration text) and `execution_time` (nanoseconds). The text of a released migration never
@@ -169,6 +182,19 @@ probe), `horsies_key_reservations` (the scoped idempotency-key registry) and
 `CANCELLED`, `EXPIRED`), `on_error` (`fail` or `pause`), the result or error, and the parent link of a
 sub-workflow (depth 0-32; a root has depth 0 and no parent). `trace_carrier` and `trace_id` hold the pair of the start
 span: every workflow row of a started tree holds it, and a sub-workflow that starts later copies the pair of its parent.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `command_fingerprint_version` | `smallint` | The version of the start command form; 1 from migration 1002 |
+| `command_fingerprint` | `bytea` | SHA-256 of the start command, 32 bytes. The start compares it on a start with the same id ([Start a Workflow Once per Entity](/horsies/guides/start-workflow-once/)) |
+
+The `CHECK` `horsies_workflows_command_fingerprint_by_origin` allows two forms:
+
+- Both columns NULL: a sub-workflow row, or a top-level row written before migration 1002.
+- Both columns set: a top-level row (no parent), a 32-byte digest, a version above 0.
+
+`horsies_workflow_start` refuses a NULL or malformed fingerprint (SQLSTATE 22023) before any write. A conflict on
+the id locks the existing row (`ON CONFLICT (id) DO UPDATE ... WHERE false`) and reads it in the same statement.
 
 `horsies_workflow_tasks` holds one row per node: `input`, the dependencies and join (`all`, `any`, or `quorum`
 with `min_success`), status, the linked task id, the sub-workflow fields of a sub-workflow node, and the typed
