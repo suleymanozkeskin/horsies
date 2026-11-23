@@ -87,6 +87,37 @@
   --chart-4: var(--warning);
   --chart-5: var(--muted-foreground);
 
+  /* Lifecycle phases (timeline segments, graph phase strip, legend).
+     `enqueued`, `claimed` and `running` use the color of the status with the
+     same name. `unknown` is a hatch, so it never reads as a measured phase.
+     The pause band and the two row placeholders are tints and hatches of the
+     base tokens. */
+  --phase-pending: color-mix(in oklab, var(--muted-foreground) 45%, var(--background));
+  --phase-ready: color-mix(in oklab, var(--info) 30%, var(--background));
+  --phase-enqueued: var(--info-light);
+  --phase-retry-wait: var(--error-light);
+  --phase-claimed: var(--warning);
+  --phase-running: var(--info);
+  --phase-finalizing: color-mix(in oklab, var(--success) 55%, var(--info));
+  --phase-advancing: var(--success-light);
+  --phase-unknown: var(--muted-foreground);
+  --phase-unknown-hatch: repeating-linear-gradient(
+    135deg,
+    var(--phase-unknown) 0 3px,
+    transparent 3px 6px
+  );
+  --pause-band: color-mix(in oklab, var(--warning) 16%, transparent);
+  --timing-unavailable-hatch: repeating-linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--muted-foreground) 22%, transparent) 0 4px,
+    transparent 4px 8px
+  );
+  --timing-inconsistent-hatch: repeating-linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--error) 30%, transparent) 0 4px,
+    transparent 4px 8px
+  );
+
   /* Glass tiers */
   --glass-blur-sm: 8px;
   --glass-surface: color-mix(in oklab, var(--card) 72%, transparent);
@@ -158,6 +189,32 @@
   --chart-3: var(--info);
   --chart-4: var(--warning);
   --chart-5: var(--muted-foreground);
+
+  --phase-pending: color-mix(in oklab, var(--muted-foreground) 45%, var(--background));
+  --phase-ready: color-mix(in oklab, var(--info) 30%, var(--background));
+  --phase-enqueued: var(--info-light);
+  --phase-retry-wait: var(--error-light);
+  --phase-claimed: var(--warning);
+  --phase-running: var(--info);
+  --phase-finalizing: color-mix(in oklab, var(--success) 55%, var(--info));
+  --phase-advancing: var(--success-light);
+  --phase-unknown: var(--muted-foreground);
+  --phase-unknown-hatch: repeating-linear-gradient(
+    135deg,
+    var(--phase-unknown) 0 3px,
+    transparent 3px 6px
+  );
+  --pause-band: color-mix(in oklab, var(--warning) 16%, transparent);
+  --timing-unavailable-hatch: repeating-linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--muted-foreground) 22%, transparent) 0 4px,
+    transparent 4px 8px
+  );
+  --timing-inconsistent-hatch: repeating-linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--error) 30%, transparent) 0 4px,
+    transparent 4px 8px
+  );
 
   --glass-blur-sm: 8px;
   --glass-surface: color-mix(in oklab, var(--card) 72%, transparent);

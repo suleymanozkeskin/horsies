@@ -7,6 +7,7 @@ export const LEGEND_STATUSES: WorkflowStatus[] = [
   'FAILED',
   'PENDING',
   'READY',
+  'ENQUEUED',
   'SKIPPED',
   'PAUSED',
   'CANCELLED',

@@ -43,6 +43,11 @@ Server-paginated, server-sorted, server-filtered task list, plus:
   failure count.
 - A grouping pivot by worker, task name, or queue, with a `TOTAL` rollup row.
 - A per-task detail panel with timings, worker, and full attempt history.
+  Each attempt shows its phase times in record order (due, first claim,
+  claim, placement on a child, start, finalizing marker, last sign of life,
+  recorded), the time from each to the next, its claim count and its writer
+  (the worker or stale recovery). An attempt recorded before schema migration
+  1001 says that its phase times were not captured.
 
 Filters, sort, pagination, and the open task are held in the URL, so a filtered
 view is shareable and survives a reload.
@@ -53,11 +58,73 @@ Run picker plus two views of the selected run:
 
 - **Graph** — the run's DAG. Click a node for its detail, double-click a
   subworkflow node to open the child run inside the same panel. Failure
-  navigation steps through failed nodes; node search jumps by name.
-- **Timeline** — each node's execution span on a shared axis from the run's
-  start, which shows serialization and stragglers the DAG cannot.
+  navigation steps through failed nodes; node search jumps by name. Each node
+  card keeps its status color and adds its wall time and a thin phase strip:
+  the time of each phase as a part of the node total, summed over retries and
+  tasks, in lifecycle order.
+- **Timeline** — one row per node, in task-index order, on one time axis from
+  the creation of the run. It shows where each node spent its time, which
+  shows queue waits, serialization and stragglers that the DAG cannot.
+
+The node detail panel adds a phase timing section: the coverage label, the
+wall time, the end of the node, the time of each phase, and the segments
+grouped by task and attempt.
 
 The selected run and open node are URL search parameters (`?run=&node=`).
+
+#### Phase timing
+
+The run read `GET /api/workflows/{id}` holds the phase timing of the run and
+of each node (the `timing` field). The core composes it from the lifecycle
+record; the UI draws it and does not compute phases of its own. A read-only
+legend under the toolbar names each phase and its meaning.
+
+The timeline draws, on each row:
+
+- One segment per phase interval of the node, in time order:
+  `pending`, `ready`, `enqueued`, `retry_wait`, `claimed`, `running`,
+  `finalizing`, `advancing` and `unknown` (hatched). A retry repeats the
+  segments of an attempt, and a new task of the node after a pause abandon
+  repeats them again. A segment shorter than one pixel stays visible; its
+  times do not change.
+- The terminal status of the node as a marker at its completion time. The
+  marker is not a duration: a task that runs on after a workflow cancel keeps
+  its segments past the marker.
+- The wall time of the node in the right column: from its first segment to
+  the latest of its segment ends and its marker.
+
+A pause of the run is a band over every row, from the pause to the resume,
+to the end of the run (a cancel or a paused expiry), or to now.
+
+Each node has a coverage label:
+
+| Label | Row on the timeline | Graph phase strip |
+|---|---|---|
+| `exact` | Segments, marker and wall time | Phase shares |
+| `partial` | The same; the `unknown` segments are hatched, and a banner names their reasons | Phase shares with hatched `unknown` time |
+| `unavailable` | A hatched row with the text "Timing unavailable"; its tooltip gives the reason | A hatched strip; the card shows the execution time |
+| `inconsistent` | A hatched error row with the text "Timing inconsistent"; its tooltip names the two times in the wrong order, the missing record or the unexpected event | A hatched error strip; the card shows the execution time |
+
+A run that began before schema migration 1001, or that has more than 100,000
+events, is unavailable as a whole: a banner gives the reason and the start of
+the lifecycle record, and every row is hatched. A run with an inconsistent
+node or pause record shows a banner that names each conflict.
+
+Hover a segment for its phase, its task and attempt, its claim (earlier
+claims, the recorded claim with its placement, or a claim with no attempt
+row), its start, its end and its duration. The tooltip is shared by all rows.
+With the keyboard, the up and down arrows (and Home, End) move between rows,
+the left and right arrows step through the segments of the focused row in the
+same tooltip, and Escape closes it. The accessible name of each row and each
+graph card holds its status, coverage, time per phase, wall time and end.
+
+An open segment or pause grows on a local clock of one second, from the read
+time of the database (`as_of`) plus the browser time since the response
+arrived. The clock runs only while a segment or a pause is open, and it sends
+no request: the next read replaces the timing.
+
+The timeline renders only the rows in view and 8 rows above and below them,
+so a run of 10,000 nodes renders the same number of rows as a short run.
 
 ### Workers
 
@@ -126,7 +193,7 @@ takes over for the event-driven queries at these cadences until it reconnects:
 | Workers | 5 s | always |
 | Worker history | 10 s | while a worker is focused |
 | Workflow runs | 5 s | only while a listed run is PENDING or RUNNING |
-| Workflow run detail | 4 s | only while the run is PENDING, RUNNING, READY, or ENQUEUED |
+| Workflow run detail | 4 s | only while the run is PENDING, RUNNING, READY, or ENQUEUED, or its timing has an open segment or pause |
 | Node detail | 4 s | only while the node is PENDING, RUNNING, READY, or ENQUEUED |
 
 On reconnect the client invalidates every event-covered query once — and the

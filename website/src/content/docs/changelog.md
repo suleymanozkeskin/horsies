@@ -63,6 +63,24 @@ there is no migration contract between pre-1.0 versions.
   locator of each `TASK_MOVED` event); no statement runs per node or per
   task. The Python models and the Rust types are in `horsies.monitoring`
   and `horsies::monitoring`.
+- **The web UI draws the phase timing of a workflow run.** The Timeline
+  view replaces its execution-time bars with one row per node, in
+  task-index order, on one time axis: the
+  phase segments of the node in time order (a retry and a new task of the
+  node repeat them), the terminal status as a marker, and the wall time of
+  the node. A pause is a band over every row. A shared tooltip gives the
+  phase, task, attempt, claim, start, end and duration of a segment; the
+  arrow keys move between rows and through the segments of a row. A node
+  with `unavailable` or `inconsistent` timing shows a hatched row with its
+  label and reason. An open segment grows on a local one-second clock with
+  no request per second. The timeline renders only the rows in view and 8
+  rows above and below them, whatever the node count. Each Graph card adds
+  its wall time and a
+  thin phase strip (the time of each phase as a part of the node total);
+  the node detail adds the time of each phase and the segments by task and
+  attempt; each attempt in a task or node detail shows its phase times, its
+  claim count and its writer. A read-only legend names each phase. The run
+  detail polls in fallback mode also while a segment or a pause is open.
 
 ### Changed
 
