@@ -2,6 +2,10 @@ from collections.abc import Mapping
 from typing import Any, ClassVar, Final, assert_never, cast
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from horsies._catalog.broker_pool_defaults import (
+    BROKER_MAX_OVERFLOW_DEFAULT,
+    BROKER_POOL_SIZE_DEFAULT,
+)
 from horsies._catalog.manifest import (
     KEEPALIVE_PROBES_MAX,
     KEEPALIVE_PROBES_MIN,
@@ -149,22 +153,25 @@ class PostgresConfig(BaseModel):
             'pool_pre_ping applies to other engines'
         ),
     )
-    # The producer defaults match SQLAlchemy's (5 + 10) for each pool. A
-    # producer's broker holds one core pool of this size on database_url for
-    # every thread and event loop that calls it, and one more on
-    # session_database_url when that URL differs. See Connection Ceiling in
-    # the broker config docs. Raise them for producers that send at a high
-    # rate. A worker process sizes its own pool in its worker
-    # profile (WorkerProfile.pool), and task code in a worker child opens
-    # the task_send_pool of its child kind.
+    # The producer defaults (5 + 10, as SQLAlchemy's) are the core's
+    # (horsies._catalog.broker_pool_defaults): both clients have the same
+    # general broker pool. A producer's broker holds one core pool of this
+    # size on database_url for every thread and event loop that calls it,
+    # and one more on session_database_url when that URL differs. See
+    # Connection Ceiling in the broker config docs. Raise them for producers
+    # that send at a high rate. A worker process sizes its own pool in its
+    # worker profile (WorkerProfile.pool), and task code in a worker child
+    # opens the task_send_pool of its child kind.
     # The pool values keep each SQLAlchemy meaning that the core can honor,
     # with the core's bounds (horsies._catalog.manifest): a config that
     # Pydantic accepts is one that the core accepts. See the validators below.
     pool_size: int = Field(
-        default=5, description='The size of the database connection pool'
+        default=BROKER_POOL_SIZE_DEFAULT,
+        description='The size of the database connection pool',
     )
     max_overflow: int = Field(
-        default=10, description='The maximum number of connections to allow in the pool'
+        default=BROKER_MAX_OVERFLOW_DEFAULT,
+        description='The maximum number of connections to allow in the pool',
     )
     retain_rerun_input_default: bool = Field(
         default=False,

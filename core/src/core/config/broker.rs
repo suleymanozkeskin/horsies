@@ -7,6 +7,17 @@ use crate::core::error::{ErrorCode, HorsiesError, ValidationReport};
 use crate::core::config::socket::{socket_settings, TcpKeepalivesConfig, TcpUserTimeoutConfig};
 use crate::db::SocketSettings;
 
+/// The persistent connections of the general broker pool of a config that
+/// names no `pool_size`. It is the one source of the default of both
+/// clients: `horsies-codegen` writes it into the Python client
+/// (`horsies._catalog.broker_pool_defaults`).
+pub const BROKER_POOL_SIZE_DEFAULT: u32 = 5;
+
+/// The connections past the pool size that the general broker pool of a
+/// config that names no `max_overflow` opens under load. It is the one
+/// source of the default of both clients, as [`BROKER_POOL_SIZE_DEFAULT`].
+pub const BROKER_MAX_OVERFLOW_DEFAULT: u32 = 10;
+
 /// PostgreSQL broker configuration.
 ///
 /// `Debug` is implemented manually to redact the password in the connection
@@ -58,11 +69,16 @@ pub struct PostgresConfig {
     #[serde(default)]
     pub worker_pool_pre_ping: bool,
 
-    /// Connection pool size.
+    /// The persistent connections of the general broker pool: the pool of
+    /// a producer, a web process, a scheduler or an app API. Default
+    /// [`BROKER_POOL_SIZE_DEFAULT`]. It does not size the pools of a
+    /// worker: the worker process opens `WorkerProfile.pool`, and task code
+    /// in a worker child opens the `task_send_pool` of its child kind.
     #[serde(default = "default_pool_size")]
     pub pool_size: u32,
 
-    /// Maximum overflow connections beyond pool_size.
+    /// The connections past `pool_size` that the general broker pool opens
+    /// under load. Default [`BROKER_MAX_OVERFLOW_DEFAULT`].
     #[serde(default = "default_max_overflow")]
     pub max_overflow: u32,
 
@@ -143,10 +159,10 @@ fn default_true() -> bool {
     true
 }
 fn default_pool_size() -> u32 {
-    30
+    BROKER_POOL_SIZE_DEFAULT
 }
 fn default_max_overflow() -> u32 {
-    30
+    BROKER_MAX_OVERFLOW_DEFAULT
 }
 fn default_pool_timeout() -> u32 {
     30
@@ -591,13 +607,24 @@ mod tests {
     fn defaults_from_json() {
         let json = r#"{"database_url": "postgresql://localhost/db"}"#;
         let config: PostgresConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.pool_size, 30);
-        assert_eq!(config.max_overflow, 30);
         assert!(config.pool_pre_ping);
         assert!(!config.echo);
         assert!(config.session_database_url.is_none());
         assert!(!config.pgbouncer_transaction_mode);
         assert!(!config.retain_rerun_input_default);
+    }
+
+    /// A config that names no pool gets the general broker pool of 5
+    /// connections and 10 more under load, by serde and by `from_url`.
+    #[test]
+    fn the_general_broker_pool_default_is_5_and_10() {
+        let parsed: PostgresConfig =
+            serde_json::from_str(r#"{"database_url": "postgresql://localhost/db"}"#)
+                .expect("a config with only a URL is valid");
+        let built = PostgresConfig::from_url("postgresql://localhost/db");
+
+        assert_eq!((parsed.pool_size, parsed.max_overflow), (5, 10));
+        assert_eq!((built.pool_size, built.max_overflow), (5, 10));
     }
 
     #[test]
