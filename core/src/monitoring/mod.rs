@@ -15,6 +15,8 @@ mod models;
 mod queries;
 mod task_actions;
 mod time_text;
+mod timing;
+mod timing_models;
 
 pub use actions::{
     cancel_task_action, cancel_workflow_action, connect_failed_action, pause_workflow_action,
@@ -56,6 +58,13 @@ pub use queries::{
 pub use task_actions::{
     cancel_task, TaskActionError, TaskActionErrorCode, TaskActionResult, TaskCancelled,
 };
+pub use timing_models::{
+    AttemptClaimsInfo, AttemptFinalizingInfo, AttemptPhasesInfo, AttemptPlacementInfo,
+    AttemptRecordedByInfo, MissingRecord, NodeEndpointInfo, NodeTimingInfo, PauseEndInfo,
+    PauseIntervalInfo, RunConflictInfo, RunCoverageInfo, RunTimingInfo, SegmentClaimInfo,
+    SegmentEndInfo, SegmentPhaseInfo, SegmentSourceInfo, TerminalNodeStatus, TimingBoundary,
+    TimingConflictInfo, TimingSegmentInfo, UnavailableReason, UnknownReason, WorkflowEventKind,
+};
 
 #[cfg(test)]
 mod action_tests;
@@ -71,5 +80,9 @@ mod model_contract_tests;
 mod spec_support;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod timing_spec_tests;
+#[cfg(test)]
+mod timing_tests;
 #[cfg(test)]
 mod workflow_schedule_spec_tests;

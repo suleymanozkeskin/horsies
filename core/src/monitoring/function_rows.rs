@@ -9,7 +9,7 @@
 //! caps, the list bounds, the snapshot and the absence rule. The client
 //! passes typed values and reads plain rows.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -17,11 +17,13 @@ use uuid::Uuid;
 use crate::broker::core_rows::{column, RowDecodeError};
 use crate::broker::task_lists::{ListEnd, ListRow};
 use crate::core::history::archive::attempts::{
-    decode_attempt_snapshot, decode_live_attempt_snapshot, AttemptRecord,
+    decode_attempt_archive, decode_attempt_snapshot, decode_live_attempt_archive,
+    decode_live_attempt_snapshot, AttemptArchive, AttemptRecord,
 };
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
 use crate::core::history::reads::aggregates::plan_rows_from_explain_text;
 use crate::core::history::reads::detail::TaskAbsenceReason;
+use crate::core::lifecycle::TerminalizationKind;
 use crate::core::task::error::{ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode};
 use crate::core::task::result::TaskResult;
 use crate::core::task::Execution;
@@ -36,6 +38,13 @@ use super::models::{
     WorkflowRunSummary, WorkflowTaskDetail,
 };
 use super::queries::{elapsed_s, normalize_optional_text, span_s, TaskGroupBy};
+use super::timing::{
+    attempt_phases_info, compose_run, ChildRun, LiveStatus, LiveTask, MovedRecord, MovedTask,
+    NodeEntry, NodeEventKind, NodeFacts, NodeStatus, NodeWork, RunEvent, RunEventKind, RunFacts,
+    TaskAttempts, TaskMove, TaskTimes, TimingRecords, MAX_RUN_EVENTS, MAX_RUN_NODES,
+    MAX_TASK_ATTEMPTS,
+};
+use super::timing_models::{NodeTimingInfo, RunTimingInfo};
 
 /// One page of the task list. Parameters in order: window lower and upper
 /// bound, statuses, task names, queue names, worker ids, error codes, error
@@ -182,14 +191,20 @@ pub(super) static MONITORING_WORKFLOW_RUNS: TypedStatement = TypedStatement::new
     ],
 );
 
-/// One run: the `RUN` row, then its `NODE` rows in task index order; or one
-/// `ABSENT` row. Parameter: the run id.
+/// One run: the `RUN` row, its `NODE` rows in task index order, then (when
+/// the run row says `INCLUDED`) its `EVENT` rows in event order and its
+/// `TASK` rows; or one `ABSENT` row. Parameter: the run id. One statement:
+/// the function reads every row with a fixed number of statements, none per
+/// node or per task.
 pub(super) static MONITORING_WORKFLOW_RUN: TypedStatement = TypedStatement::new(
     "monitoring_workflow_run",
     "SELECT row_kind, row_position, workflow_id, workflow_name, definition_key, status,
             created_at, started_at, completed_at, task_index, node_id, task_name, dependencies,
             allow_failed_deps, is_subworkflow, sub_workflow_id, child_total, child_failed,
-            trace_id
+            trace_id, as_of, captured_since, timing_rows, node_created_at, node_task_id,
+            child_created_at, child_completed_at, event_id, event_kind, occurred_at,
+            terminalization_kind, location, task_id, enqueued_at, claimed_at,
+            attempt_archive_version, attempt_snapshot, attempt_snapshot_digest
      FROM horsies_monitoring_workflow_run($1)
      ORDER BY row_position NULLS FIRST",
     &[ParameterType::Uuid],
@@ -634,6 +649,7 @@ fn attempt_info(record: &AttemptRecord) -> TaskAttemptInfo {
         worker_hostname: record.worker_hostname().map(str::to_owned),
         started_at: Some(record.started_at()),
         finished_at: Some(record.finished_at()),
+        phases: attempt_phases_info(record.phases()),
     }
 }
 
@@ -871,35 +887,103 @@ fn node_exec_s(
     }
 }
 
-/// One `NODE` row of the run function, and the indexes the node depends on.
+/// One node of a run with the indexes it depends on.
 struct RunNode {
     info: WorkflowNodeInfo,
     dependencies: Vec<i32>,
 }
 
-fn run_node(row: &Row, statement: &TypedStatement) -> Result<RunNode, RowDecodeError> {
-    let kind: String = column(row, statement, "row_kind")?;
-    match kind.as_str() {
-        "NODE" => {}
-        other => {
-            return Err(shape(
-                statement,
-                format!("a row of kind {other:?} follows the RUN row"),
-            ))
+/// One `NODE` row of the run function: the node columns, the indexes the
+/// node depends on, and the facts of its timing.
+struct NodeRow {
+    columns: NodeColumns,
+    dependencies: Vec<i32>,
+    facts: NodeFacts,
+}
+
+/// The fields of [`WorkflowNodeInfo`] that the `NODE` row holds, before the
+/// timing of the node is composed.
+struct NodeColumns {
+    task_index: i32,
+    node_id: Option<String>,
+    task_name: String,
+    node_status: String,
+    is_subworkflow: bool,
+    sub_workflow_id: Option<Uuid>,
+    allow_failed_deps: bool,
+    started_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
+    exec_s: Option<i64>,
+    child_total: Option<i64>,
+    child_failed: Option<i64>,
+}
+
+impl NodeRow {
+    fn into_run_node(self, timing: NodeTimingInfo) -> RunNode {
+        let columns = self.columns;
+        RunNode {
+            info: WorkflowNodeInfo {
+                task_index: columns.task_index,
+                node_id: columns.node_id,
+                task_name: columns.task_name,
+                node_status: columns.node_status,
+                is_subworkflow: columns.is_subworkflow,
+                sub_workflow_id: columns.sub_workflow_id,
+                allow_failed_deps: columns.allow_failed_deps,
+                started_at: columns.started_at,
+                completed_at: columns.completed_at,
+                exec_s: columns.exec_s,
+                child_total: columns.child_total,
+                child_failed: columns.child_failed,
+                timing,
+            },
+            dependencies: self.dependencies,
         }
     }
+}
+
+fn node_row(row: &Row, statement: &TypedStatement) -> Result<NodeRow, RowDecodeError> {
     let node_status: String = column(row, statement, "status")?;
+    let status = NodeStatus::parse(&node_status).ok_or_else(|| {
+        shape(
+            statement,
+            format!("node status {node_status:?} is not a node status"),
+        )
+    })?;
+    let task_index: i32 = column(row, statement, "task_index")?;
     let started_at: Option<DateTime<Utc>> = column(row, statement, "started_at")?;
     let completed_at: Option<DateTime<Utc>> = column(row, statement, "completed_at")?;
+    let is_subworkflow: bool = column(row, statement, "is_subworkflow")?;
+    let sub_workflow_id: Option<Uuid> = column(row, statement, "sub_workflow_id")?;
+    let dependencies: Vec<i32> = column(row, statement, "dependencies")?;
+    let work = match is_subworkflow {
+        false => NodeWork::Task {
+            linked: column(row, statement, "node_task_id")?,
+        },
+        true => NodeWork::SubWorkflow {
+            child: child_run(row, statement, sub_workflow_id)?,
+        },
+    };
+    let facts = NodeFacts {
+        task_index,
+        status,
+        created_at: column(row, statement, "node_created_at")?,
+        completed_at,
+        entry: match dependencies.is_empty() {
+            true => NodeEntry::Ready,
+            false => NodeEntry::Pending,
+        },
+        work,
+    };
     let exec_s = node_exec_s(&node_status, started_at, completed_at);
-    Ok(RunNode {
-        info: WorkflowNodeInfo {
-            task_index: column(row, statement, "task_index")?,
+    Ok(NodeRow {
+        columns: NodeColumns {
+            task_index,
             node_id: column(row, statement, "node_id")?,
             task_name: column(row, statement, "task_name")?,
             node_status,
-            is_subworkflow: column(row, statement, "is_subworkflow")?,
-            sub_workflow_id: column(row, statement, "sub_workflow_id")?,
+            is_subworkflow,
+            sub_workflow_id,
             allow_failed_deps: column(row, statement, "allow_failed_deps")?,
             started_at,
             completed_at,
@@ -907,18 +991,43 @@ fn run_node(row: &Row, statement: &TypedStatement) -> Result<RunNode, RowDecodeE
             child_total: column(row, statement, "child_total")?,
             child_failed: column(row, statement, "child_failed")?,
         },
-        dependencies: column(row, statement, "dependencies")?,
+        dependencies,
+        facts,
     })
 }
 
-/// The run, its nodes in task index order, its edges, its failed nodes and
-/// the trace id of its start. An edge joins a dependency to the node that
-/// names it; a dependency on an index that the run does not have makes no
-/// edge. Pure.
+/// The child run of a sub-workflow node: none named, the row of the child,
+/// or a name that no row holds (the child times are NULL).
+fn child_run(
+    row: &Row,
+    statement: &TypedStatement,
+    sub_workflow_id: Option<Uuid>,
+) -> Result<ChildRun, RowDecodeError> {
+    let created_at: Option<DateTime<Utc>> = column(row, statement, "child_created_at")?;
+    let completed_at: Option<DateTime<Utc>> = column(row, statement, "child_completed_at")?;
+    match (sub_workflow_id, created_at, completed_at) {
+        (None, None, None) => Ok(ChildRun::NotLinked),
+        (Some(_), Some(created_at), completed_at) => Ok(ChildRun::Found {
+            created_at,
+            completed_at,
+        }),
+        (Some(_), None, None) => Ok(ChildRun::NotFound),
+        (None, _, _) | (Some(_), None, Some(_)) => Err(shape(
+            statement,
+            "a node has child run times that its child link does not give".to_owned(),
+        )),
+    }
+}
+
+/// The run, its nodes in task index order, its edges, its failed nodes, the
+/// trace id of its start and its timing. An edge joins a dependency to the
+/// node that names it; a dependency on an index that the run does not have
+/// makes no edge. Pure.
 fn run_detail(
     run: WorkflowRunSummary,
     nodes: Vec<RunNode>,
     trace_id: Option<String>,
+    timing: RunTimingInfo,
 ) -> WorkflowRunDetail {
     let known: HashSet<i32> = nodes.iter().map(|node| node.info.task_index).collect();
     let mut edges = Vec::new();
@@ -947,6 +1056,7 @@ fn run_detail(
         failed_count: i64::try_from(failed_indices.len()).unwrap_or(i64::MAX),
         failed_indices,
         trace_id,
+        timing,
     }
 }
 
@@ -958,35 +1068,375 @@ pub(super) enum RunRead {
     Absent,
 }
 
-/// Reads the rows of the run function: the `RUN` row and its `NODE` rows,
-/// or the one `ABSENT` row.
+/// Reads the rows of the run function: the `RUN` row and the rows that
+/// follow it, or the one `ABSENT` row. A row of the wrong shape is a
+/// [`DetailRowError::Row`]; an attempt archive that does not decode is
+/// [`DetailRowError::StoredData`].
 pub(super) fn workflow_run(
     rows: &[Row],
     statement: &TypedStatement,
-) -> Result<RunRead, RowDecodeError> {
-    let Some((first, node_rows)) = rows.split_first() else {
-        return Err(shape(
+) -> Result<RunRead, DetailRowError> {
+    let Some((first, rest)) = rows.split_first() else {
+        return Err(DetailRowError::Row(shape(
             statement,
             "the run function answered no row".to_owned(),
-        ));
+        )));
     };
     let kind: String = column(first, statement, "row_kind")?;
-    match (kind.as_str(), node_rows.is_empty()) {
+    match (kind.as_str(), rest.is_empty()) {
         ("ABSENT", true) => Ok(RunRead::Absent),
-        ("ABSENT", false) => Err(shape(statement, "a row follows the ABSENT row".to_owned())),
+        ("ABSENT", false) => Err(DetailRowError::Row(shape(
+            statement,
+            "a row follows the ABSENT row".to_owned(),
+        ))),
         ("RUN", _) => {
-            let run = run_summary(first, statement)?;
-            let stored_trace_id: Option<Vec<u8>> = column(first, statement, "trace_id")?;
-            let trace_id = stored_trace_id_text(stored_trace_id.as_deref()).map_err(|refused| {
-                shape(statement, format!("workflow run {}: {refused}", run.id))
-            })?;
-            let nodes = node_rows
-                .iter()
-                .map(|row| run_node(row, statement))
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(RunRead::Found(Box::new(run_detail(run, nodes, trace_id))))
+            found_run(first, rest, statement).map(|detail| RunRead::Found(Box::new(detail)))
         }
-        (other, _) => Err(shape(statement, format!("unknown row_kind {other:?}"))),
+        (other, _) => Err(DetailRowError::Row(shape(
+            statement,
+            format!("unknown row_kind {other:?}"),
+        ))),
+    }
+}
+
+/// What the `RUN` row says about the timing rows that follow it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimingRows {
+    Included,
+    BeforeCapture,
+    BoundExceeded,
+}
+
+/// The rows that follow the `RUN` row, by kind.
+#[derive(Default)]
+struct RunRows {
+    nodes: Vec<NodeRow>,
+    events: Vec<EventRow>,
+    tasks: Vec<TaskRow>,
+}
+
+fn found_run(
+    first: &Row,
+    rest: &[Row],
+    statement: &TypedStatement,
+) -> Result<WorkflowRunDetail, DetailRowError> {
+    let run = run_summary(first, statement)?;
+    let stored_trace_id: Option<Vec<u8>> = column(first, statement, "trace_id")?;
+    let trace_id = stored_trace_id_text(stored_trace_id.as_deref())
+        .map_err(|refused| shape(statement, format!("workflow run {}: {refused}", run.id)))?;
+    let timing_rows: String = column(first, statement, "timing_rows")?;
+    let timing_rows = match timing_rows.as_str() {
+        "INCLUDED" => TimingRows::Included,
+        "BEFORE_CAPTURE" => TimingRows::BeforeCapture,
+        "BOUND_EXCEEDED" => TimingRows::BoundExceeded,
+        other => {
+            return Err(DetailRowError::Row(shape(
+                statement,
+                format!("unknown timing_rows {other:?}"),
+            )))
+        }
+    };
+    let rows = run_rows(rest, statement)?;
+    let facts = RunFacts {
+        as_of: column(first, statement, "as_of")?,
+        captured_since: column(first, statement, "captured_since")?,
+        created_at: column(first, statement, "created_at")?,
+        completed_at: column(first, statement, "completed_at")?,
+        records: timing_records(timing_rows, rows.events, rows.tasks, statement)?,
+    };
+    let node_facts: Vec<NodeFacts> = rows.nodes.iter().map(|node| node.facts).collect();
+    let composed = compose_run(&facts, &node_facts);
+    let nodes = rows
+        .nodes
+        .into_iter()
+        .zip(composed.nodes)
+        .map(|(node, timing)| node.into_run_node(timing))
+        .collect();
+    Ok(run_detail(run, nodes, trace_id, composed.run))
+}
+
+/// The `NODE`, `EVENT` and `TASK` rows, each kind in row order, at most
+/// [`MAX_RUN_NODES`] nodes and [`MAX_RUN_EVENTS`] events.
+fn run_rows(rows: &[Row], statement: &TypedStatement) -> Result<RunRows, DetailRowError> {
+    let mut parts = RunRows::default();
+    for row in rows {
+        let kind: String = column(row, statement, "row_kind")?;
+        match kind.as_str() {
+            "NODE" => parts.nodes.push(node_row(row, statement)?),
+            "EVENT" => parts.events.push(event_row(row, statement)?),
+            "TASK" => parts.tasks.push(task_row(row, statement)?),
+            other => {
+                return Err(DetailRowError::Row(shape(
+                    statement,
+                    format!("a row of kind {other:?} follows the RUN row"),
+                )))
+            }
+        }
+    }
+    match (
+        parts.nodes.len() > MAX_RUN_NODES,
+        parts.events.len() > MAX_RUN_EVENTS,
+    ) {
+        (false, false) => Ok(parts),
+        (true, _) | (_, true) => Err(DetailRowError::Row(shape(
+            statement,
+            format!(
+                "the run function answered {} nodes and {} events, more than its bounds {MAX_RUN_NODES} \
+                 and {MAX_RUN_EVENTS}",
+                parts.nodes.len(),
+                parts.events.len()
+            ),
+        ))),
+    }
+}
+
+/// One `EVENT` row, before the task row of a `TASK_MOVED` event is joined to
+/// it.
+struct EventRow {
+    event_id: i64,
+    occurred_at: DateTime<Utc>,
+    kind: EventRowKind,
+}
+
+enum EventRowKind {
+    WorkflowPaused,
+    WorkflowResumed,
+    NodeReady {
+        task_index: i32,
+    },
+    NodeEnqueued {
+        task_index: i32,
+    },
+    TaskMoved {
+        task_index: i32,
+        task_id: Uuid,
+        move_kind: TerminalizationKind,
+    },
+}
+
+fn event_row(row: &Row, statement: &TypedStatement) -> Result<EventRow, RowDecodeError> {
+    let event_id: i64 = column(row, statement, "event_id")?;
+    let event_kind: String = column(row, statement, "event_kind")?;
+    let task_index: Option<i32> = column(row, statement, "task_index")?;
+    let task_id: Option<Uuid> = column(row, statement, "task_id")?;
+    let move_kind: Option<String> = column(row, statement, "terminalization_kind")?;
+    let kind = match (event_kind.as_str(), task_index, task_id, move_kind) {
+        ("WORKFLOW_PAUSED", None, None, None) => EventRowKind::WorkflowPaused,
+        ("WORKFLOW_RESUMED", None, None, None) => EventRowKind::WorkflowResumed,
+        ("NODE_READY", Some(task_index), None, None) => EventRowKind::NodeReady { task_index },
+        ("NODE_ENQUEUED", Some(task_index), None, None) => {
+            EventRowKind::NodeEnqueued { task_index }
+        }
+        ("TASK_MOVED", Some(task_index), Some(task_id), Some(stored)) => EventRowKind::TaskMoved {
+            task_index,
+            task_id,
+            move_kind: TerminalizationKind::parse(&stored).ok_or_else(|| {
+                shape(
+                    statement,
+                    format!("event {event_id} has the move kind {stored:?}"),
+                )
+            })?,
+        },
+        (other, _, _, _) => {
+            return Err(shape(
+                statement,
+                format!(
+                    "event {event_id} of kind {other:?} has columns that its kind does not take"
+                ),
+            ))
+        }
+    };
+    Ok(EventRow {
+        event_id,
+        occurred_at: column(row, statement, "occurred_at")?,
+        kind,
+    })
+}
+
+/// One `TASK` row: a live task that a node links, the history row of a
+/// moved task, or a moved task whose history row retention removed.
+enum TaskRow {
+    Live { task_id: Uuid, task: Box<LiveTask> },
+    Moved { task_id: Uuid, record: MovedRecord },
+}
+
+fn task_times(row: &Row, statement: &TypedStatement) -> Result<TaskTimes, RowDecodeError> {
+    Ok(TaskTimes {
+        created_at: column(row, statement, "created_at")?,
+        enqueued_at: column(row, statement, "enqueued_at")?,
+        claimed_at: column(row, statement, "claimed_at")?,
+        started_at: column(row, statement, "started_at")?,
+    })
+}
+
+/// The attempts of a decoded archive, at most [`MAX_TASK_ATTEMPTS`].
+fn task_attempts(task_id: Uuid, archive: AttemptArchive) -> Result<TaskAttempts, DetailRowError> {
+    let open = archive.open();
+    let records = archive.into_attempts();
+    match records.len() > MAX_TASK_ATTEMPTS {
+        true => Err(DetailRowError::StoredData(format!(
+            "the attempt archive of task {task_id} holds {} attempts, more than {MAX_TASK_ATTEMPTS}",
+            records.len()
+        ))),
+        false => Ok(TaskAttempts { records, open }),
+    }
+}
+
+fn task_row(row: &Row, statement: &TypedStatement) -> Result<TaskRow, DetailRowError> {
+    let place: String = column(row, statement, "location")?;
+    let task_id: Uuid = column(row, statement, "task_id")?;
+    match place.as_str() {
+        "LIVE" => {
+            let stored_status: String = column(row, statement, "status")?;
+            let status = match stored_status.as_str() {
+                "PENDING" => LiveStatus::Pending,
+                "CLAIMED" => LiveStatus::Claimed,
+                "RUNNING" => LiveStatus::Running,
+                other => {
+                    return Err(DetailRowError::Row(shape(
+                        statement,
+                        format!("live task {task_id} has the status {other:?}"),
+                    )))
+                }
+            };
+            let version: i16 = column(row, statement, "attempt_archive_version")?;
+            let payload: Vec<u8> = column(row, statement, "attempt_snapshot")?;
+            let archive = decode_live_attempt_archive(version, &payload)
+                .map_err(|error| DetailRowError::StoredData(format!("task {task_id}: {error}")))?;
+            Ok(TaskRow::Live {
+                task_id,
+                task: Box::new(LiveTask {
+                    times: task_times(row, statement)?,
+                    status,
+                    attempts: task_attempts(task_id, archive)?,
+                }),
+            })
+        }
+        "HISTORY" => {
+            let version: i16 = column(row, statement, "attempt_archive_version")?;
+            let payload: Vec<u8> = column(row, statement, "attempt_snapshot")?;
+            let digest: Vec<u8> = column(row, statement, "attempt_snapshot_digest")?;
+            let archive = decode_attempt_archive(
+                version,
+                JSON_UTF8_CODEC,
+                JSON_CONTENT_TYPE,
+                &payload,
+                &digest,
+            )
+            .map_err(|error| DetailRowError::StoredData(format!("task {task_id}: {error}")))?;
+            Ok(TaskRow::Moved {
+                task_id,
+                record: MovedRecord::History(MovedTask {
+                    times: task_times(row, statement)?,
+                    attempts: task_attempts(task_id, archive)?,
+                }),
+            })
+        }
+        "PRUNED" => Ok(TaskRow::Moved {
+            task_id,
+            record: MovedRecord::Pruned,
+        }),
+        other => Err(DetailRowError::Row(shape(
+            statement,
+            format!("unknown task location {other:?}"),
+        ))),
+    }
+}
+
+/// The timing records of the run: none unless the `RUN` row says
+/// `INCLUDED`. Each `TASK_MOVED` event takes the one moved task row of its
+/// task; every moved task row belongs to one event, and no task id repeats.
+/// Events come in strictly increasing `event_id` order.
+fn timing_records(
+    timing_rows: TimingRows,
+    events: Vec<EventRow>,
+    tasks: Vec<TaskRow>,
+    statement: &TypedStatement,
+) -> Result<TimingRecords, RowDecodeError> {
+    let refused = |reason: String| shape(statement, reason);
+    match (timing_rows, events.is_empty() && tasks.is_empty()) {
+        (TimingRows::BeforeCapture, true) => return Ok(TimingRecords::BeforeCapture),
+        (TimingRows::BoundExceeded, true) => return Ok(TimingRecords::BoundExceeded),
+        (TimingRows::BeforeCapture | TimingRows::BoundExceeded, false) => {
+            return Err(refused(format!(
+                "timing rows {timing_rows:?} came with {} events and {} tasks",
+                events.len(),
+                tasks.len()
+            )))
+        }
+        (TimingRows::Included, _) => {}
+    }
+    let mut live_tasks: HashMap<Uuid, LiveTask> = HashMap::new();
+    let mut moved: HashMap<Uuid, MovedRecord> = HashMap::new();
+    for task in tasks {
+        let (task_id, repeated) = match task {
+            TaskRow::Live { task_id, task } => {
+                (task_id, live_tasks.insert(task_id, *task).is_some())
+            }
+            TaskRow::Moved { task_id, record } => {
+                (task_id, moved.insert(task_id, record).is_some())
+            }
+        };
+        if repeated || (live_tasks.contains_key(&task_id) && moved.contains_key(&task_id)) {
+            return Err(refused(format!("task {task_id} has two task rows")));
+        }
+    }
+    let mut run_events = Vec::with_capacity(events.len());
+    let mut previous: Option<i64> = None;
+    for event in events {
+        if previous.is_some_and(|id| id >= event.event_id) {
+            return Err(refused(format!(
+                "event {} is out of event order",
+                event.event_id
+            )));
+        }
+        previous = Some(event.event_id);
+        let kind = match event.kind {
+            EventRowKind::WorkflowPaused => RunEventKind::WorkflowPaused,
+            EventRowKind::WorkflowResumed => RunEventKind::WorkflowResumed,
+            EventRowKind::NodeReady { task_index } => RunEventKind::Node {
+                task_index,
+                event: NodeEventKind::Ready,
+            },
+            EventRowKind::NodeEnqueued { task_index } => RunEventKind::Node {
+                task_index,
+                event: NodeEventKind::Enqueued,
+            },
+            EventRowKind::TaskMoved {
+                task_index,
+                task_id,
+                move_kind,
+            } => {
+                let record = moved.remove(&task_id).ok_or_else(|| {
+                    refused(format!(
+                        "TASK_MOVED event {} has no task row",
+                        event.event_id
+                    ))
+                })?;
+                RunEventKind::Node {
+                    task_index,
+                    event: NodeEventKind::TaskMoved(Box::new(TaskMove {
+                        task_id,
+                        move_kind,
+                        record,
+                    })),
+                }
+            }
+        };
+        run_events.push(RunEvent {
+            event_id: event.event_id,
+            occurred_at: event.occurred_at,
+            kind,
+        });
+    }
+    match moved.keys().next() {
+        Some(task_id) => Err(refused(format!(
+            "moved task {task_id} has no TASK_MOVED event"
+        ))),
+        None => Ok(TimingRecords::Included {
+            events: run_events,
+            live_tasks,
+        }),
     }
 }
 
@@ -1087,6 +1537,7 @@ fn node_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::monitoring::timing_models::UnavailableReason;
 
     fn fields(
         location: Location,
@@ -1307,8 +1758,20 @@ mod tests {
                 exec_s: None,
                 child_total: None,
                 child_failed: None,
+                timing: NodeTimingInfo::Unavailable {
+                    reason: UnavailableReason::RunBeforeCapture,
+                },
             },
             dependencies,
+        }
+    }
+
+    fn unavailable_run() -> RunTimingInfo {
+        let at = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).expect("valid time");
+        RunTimingInfo::Unavailable {
+            as_of: at,
+            captured_since: at,
+            reason: UnavailableReason::RunBeforeCapture,
         }
     }
 
@@ -1324,6 +1787,7 @@ mod tests {
                 node(2, "FAILED", vec![0, 1, 99]),
             ],
             None,
+            unavailable_run(),
         );
 
         assert_eq!(

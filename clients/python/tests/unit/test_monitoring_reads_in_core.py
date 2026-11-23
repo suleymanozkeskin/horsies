@@ -349,7 +349,9 @@ RUN_JSON: Final = (
     '{"run": {"id": "0190a1b2-c3d4-7e5f-8a6b-000000000001", "name": "alpha.flow", '
     '"definition_key": null, "status": "RUNNING", "created_at": "2026-11-17T11:00:00Z", '
     '"completed_at": null, "wall_s": 60}, "nodes": [], "edges": [], "failed_count": 0, '
-    '"failed_indices": [], "trace_id": null}'
+    '"failed_indices": [], "trace_id": null, "timing": {"kind": "unavailable", '
+    '"as_of": "2026-11-17T11:01:00Z", "captured_since": "2026-11-17T12:00:00Z", '
+    '"reason": "RUN_BEFORE_CAPTURE"}}'
 )
 SCHEDULES_JSON: Final = (
     '[{"schedule_name": "nightly", "last_run_at": null, "next_run_at": "2026-11-18T00:00:00Z", '

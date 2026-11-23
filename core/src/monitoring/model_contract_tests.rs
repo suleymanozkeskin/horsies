@@ -28,9 +28,10 @@ use crate::monitoring::models::{
 /// The contract of the Pydantic models, by model name.
 const PYDANTIC_CONTRACT: &str = include_str!("model_contract.json");
 
-/// The deepest nesting of kinds that a model reaches is 4; a deeper schema
-/// is a defect of the reduction.
-const MAX_DEPTH: usize = 16;
+/// The deepest call of the comparison is at depth 19: the placement of the
+/// claim of a segment of the timing of a node of a run
+/// (`WorkflowRunDetail`). A deeper schema is a defect of the reduction.
+const MAX_DEPTH: usize = 24;
 
 /// A difference between a Rust field and its Pydantic field where every
 /// value that the Rust model writes validates into the Pydantic field.
@@ -93,6 +94,14 @@ const COMPATIBLE_DIFFERENCES: &[(&str, CompatibleDifference)] = &[
     ),
     (
         "ClassReportInfo.live_window_s",
+        CompatibleDifference::UnsignedIntoInteger,
+    ),
+    (
+        "AttemptClaimsInfo::counted.count",
+        CompatibleDifference::UnsignedIntoInteger,
+    ),
+    (
+        "SegmentClaimInfo::earlier.count",
         CompatibleDifference::UnsignedIntoInteger,
     ),
 ];

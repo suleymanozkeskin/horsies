@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::time_text;
+use super::timing_models::{AttemptPhasesInfo, NodeTimingInfo, RunTimingInfo};
 use crate::core::history::reads::detail::TaskAbsenceReason;
 use crate::core::task::Execution;
 
@@ -46,6 +47,8 @@ impl std::fmt::Display for ErrorCategory {
     }
 }
 
+/// One recorded attempt of a task (Python `TaskAttemptInfo`). `phases` is
+/// the phase record of the attempt row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct TaskAttemptInfo {
@@ -60,6 +63,7 @@ pub struct TaskAttemptInfo {
     pub started_at: Option<DateTime<Utc>>,
     #[serde(serialize_with = "time_text::optional_utc")]
     pub finished_at: Option<DateTime<Utc>>,
+    pub phases: AttemptPhasesInfo,
 }
 
 /// The task row behind a task detail or a workflow node (Python
@@ -262,6 +266,8 @@ pub struct WorkflowRunSummary {
     pub wall_s: Option<i64>,
 }
 
+/// One node of a run (Python `WorkflowNodeInfo`). `timing` is the phase
+/// timing of the node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkflowNodeInfo {
@@ -279,6 +285,7 @@ pub struct WorkflowNodeInfo {
     pub exec_s: Option<i64>,
     pub child_total: Option<i64>,
     pub child_failed: Option<i64>,
+    pub timing: NodeTimingInfo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,7 +297,8 @@ pub struct WorkflowEdge {
 
 /// One run with its nodes and edges (Python `WorkflowRunDetail`).
 /// `trace_id` is the trace id of the span that started the run, as 32
-/// lowercase hex digits; `None` for a start with no trace.
+/// lowercase hex digits; `None` for a start with no trace. `timing` is the
+/// phase timing of the run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkflowRunDetail {
@@ -300,6 +308,7 @@ pub struct WorkflowRunDetail {
     pub failed_count: i64,
     pub failed_indices: Vec<i32>,
     pub trace_id: Option<String>,
+    pub timing: RunTimingInfo,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

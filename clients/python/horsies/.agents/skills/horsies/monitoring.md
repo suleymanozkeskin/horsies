@@ -159,7 +159,7 @@ error changes stored data. HTTP is the status of the web read routes.
 | Code | Variant | Fields | `retryable` | HTTP | When |
 |---|---|---|---|---|---|
 | `DB_OPERATION_FAILED` | `MonitoringQueryDbOperationFailed` | `exception` (the core's class of the cause: `CoreServerError`, `CoreConnectionError`, ...; or `TooManyPendingCalls`, `CoreCallTimedOut`, `CoreStartFailed`) | the core's classification | 503 | The database operation failed |
-| `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `exception` (the `HistoryContractError`) | `False` | 500 | `task_stats`, `list_tasks`, `get_task_detail` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; or the detail read found the task live inside its own snapshot, where the live read had missed it (the staged function and the live read disagree); a repeat gives the same result until the stored row or the server changes |
+| `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `exception` (the `HistoryContractError`) | `False` | 500 | `task_stats`, `list_tasks`, `get_task_detail`, `get_workflow_run` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; or the detail read found the task live inside its own snapshot, where the live read had missed it (the staged function and the live read disagree); a repeat gives the same result until the stored row or the server changes |
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
@@ -170,7 +170,7 @@ list_tasks(broker, *, window, statuses, ..., sort_by, sort_dir, page)  # page: T
 get_task_detail(broker, task_id)                        # task_id: uuid.UUID; Ok(TaskDetailNotFound) when absent; leaf.trace_id: 32 hex digits or None
 list_workflow_names(broker)                             # at most 10,000 names; a cut is logged as a warning
 list_workflow_runs(broker, *, name, status, limit)      # limit: WorkflowRunsLimit
-get_workflow_run(broker, workflow_id)                   # full DAG: nodes, edges, failed_indices, trace_id of the start
+get_workflow_run(broker, workflow_id)                   # full DAG: nodes, edges, failed_indices, trace_id of the start, timing
 get_workflow_node(broker, workflow_id, task_index)
 list_schedules(broker)                                  # next run, then name; at most 10,000; a cut is logged
 ```
@@ -272,6 +272,80 @@ last in both directions), then a live task before an ended task with the
 same value, then the task id ascending. The order is total, so a page does
 not reorder between polls.
 
+### Phase timing (the lifecycle record)
+
+The lifecycle record keeps the phase times of each attempt row and the
+events of each workflow run (migration 1001). `get_workflow_run` composes the
+timing in the core from the rows of one statement; no statement runs per
+node or per task. Each model holds times, not durations: subtract the two
+times of a segment. Every union is told apart by `kind`.
+
+- `TaskAttemptInfo.phases`: `PhasesNotCapturedInfo()` (a row written before
+  the record, or a version-1 archive in history) or
+  `PhasesCapturedInfo(enqueued_at, claimed_at, claims, finalizing,
+  recorded_by)`. `claims` is `ClaimsCountedInfo(count, first_claimed_at)` or
+  `ClaimsNotCountedInfo()`; a count above 1 holds lost leases and released
+  claims. `finalizing` is `FinalizingMarkedInfo(finalizing_at)` or
+  `FinalizingNotMarkedInfo()`. `recorded_by` is
+  `RecordedByWorkerInfo(placement)` (`PlacementPlacedInfo(placed_at)`: the
+  claim time plus the measured slot wait, or `PlacementNotObservedInfo()`) or
+  `RecordedByRecoveryInfo(last_seen_at)` (stale RUNNING recovery wrote the
+  row).
+- `WorkflowNodeInfo.timing` is tagged by its coverage label:
+  `NodeTimingExactInfo(segments, endpoint)` (every boundary is a recorded
+  time), `NodeTimingPartialInfo(reasons, segments, endpoint)` (at least one
+  `unknown` segment), `NodeTimingUnavailableInfo(reason)` or
+  `NodeTimingInconsistentInfo(conflict)` (the record of the node contradicts
+  itself; no segment).
+- A `TimingSegmentInfo` has `phase`, `started_at`, `end`
+  (`SegmentEndedInfo(at)` or `SegmentOpenInfo()`) and `source`
+  (`SourceNodeInfo()`, `SourceTaskInfo(generation, task_id)` or
+  `SourceAttemptInfo(generation, task_id, attempt)`). `generation` counts the
+  tasks of the node from 1: a pause abandon and a resume give it a new task.
+- Phases: `pending`, `ready`, `enqueued`, `retry_wait`,
+  `claimed` (`PhaseClaimedInfo(claim)`: `ClaimEarlierInfo(count)` for the
+  claims before the claim that holds the attempt, `ClaimRecordedInfo(placement)`
+  for the claim of the attempt row, `ClaimNotRecordedInfo()` for an attempt
+  with no row), `running`, `finalizing`, `advancing` (the task is in history
+  and the workflow has not applied the node), `unknown`
+  (`PhaseUnknownInfo(reason)`).
+- `endpoint` is `EndpointTerminalInfo(status, at)` or
+  `EndpointNotTerminalInfo()`. It is a marker, not a segment: a node that a
+  workflow cancel, a failure or the recovery limit ended while its task went
+  on keeps the segments of that task.
+- A conflict is `ConflictClockOrderInfo(earlier, earlier_at, later,
+  later_at)` (two `TimingBoundary` values in the wrong order: a step of the
+  database clock), `ConflictMissingRecordInfo(record)` or
+  `ConflictUnexpectedEventInfo(event_id, event)`. The core does not reorder
+  times and does not guess a duration.
+- `WorkflowRunDetail.timing`: `RunTimingUnavailableInfo(as_of,
+  captured_since, reason)` (every node is unavailable with the same reason)
+  or `RunTimingComposedInfo(as_of, captured_since, coverage,
+  range_started_at, range_ended_at, open_segments, pauses)`. `as_of` is the
+  database time of the read (an open segment ends there for drawing);
+  `captured_since` is the install time of migration 1001. `coverage` is
+  `RunCoverageExactInfo()`, `RunCoveragePartialInfo(reasons)` or
+  `RunCoverageInconsistentInfo(conflicts)` (`RunConflictNodeInfo(task_index)`,
+  `RunConflictPauseInfo(conflict)`). A pause ends `PauseResumedInfo(at)`,
+  `PauseRunEndedInfo(at)` or `PauseOpenInfo()`.
+
+<!-- members: UnknownReason -->
+| Reason | The `unknown` segment |
+|---|---|
+| `ATTEMPT_NOT_CAPTURED` | Is an attempt row with no phase record |
+| `CLAIMS_NOT_COUNTED` | Is the queue wait of an attempt whose claims were not counted |
+| `HISTORY_PRUNED` | Runs to the move of a task whose history row retention removed |
+| `WORKER_LOST` | Runs from the last sign of life of a recovered attempt to its recovery |
+
+<!-- members: UnavailableReason -->
+| Reason | The run is unavailable because |
+|---|---|
+| `RUN_BEFORE_CAPTURE` | It began before `captured_since` |
+| `TIMING_BOUND_EXCEEDED` | It has more than 100,000 events |
+
+A history class shorter than the workflow retention removes task rows first:
+the node then shows `HISTORY_PRUNED`.
+
 ## Task Actions — `cancel_task`
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
@@ -361,6 +435,28 @@ from horsies.monitoring import (
     PendingStreamInfo, WorkerClassLoadInfo, BudgetLoadInfo, StreamServedInfo,
     StreamNoCapacityInfo, StreamUnservedInfo, StreamWaitingInfo,
     StreamNoneDueInfo,
+    # Phase timing (the lifecycle record)
+    AttemptPhasesInfo, PhasesCapturedInfo, PhasesNotCapturedInfo,
+    AttemptClaimsInfo, ClaimsCountedInfo, ClaimsNotCountedInfo,
+    AttemptPlacementInfo, PlacementPlacedInfo, PlacementNotObservedInfo,
+    AttemptFinalizingInfo, FinalizingMarkedInfo, FinalizingNotMarkedInfo,
+    AttemptRecordedByInfo, RecordedByWorkerInfo, RecordedByRecoveryInfo,
+    NodeTimingInfo, NodeTimingExactInfo, NodeTimingPartialInfo,
+    NodeTimingUnavailableInfo, NodeTimingInconsistentInfo, TimingSegmentInfo,
+    SegmentPhaseInfo, PhasePendingInfo, PhaseReadyInfo, PhaseEnqueuedInfo,
+    PhaseRetryWaitInfo, PhaseClaimedInfo, PhaseRunningInfo, PhaseFinalizingInfo,
+    PhaseAdvancingInfo, PhaseUnknownInfo, SegmentClaimInfo, ClaimEarlierInfo,
+    ClaimRecordedInfo, ClaimNotRecordedInfo, SegmentEndInfo, SegmentEndedInfo,
+    SegmentOpenInfo, SegmentSourceInfo, SourceNodeInfo, SourceTaskInfo,
+    SourceAttemptInfo, NodeEndpointInfo, EndpointTerminalInfo,
+    EndpointNotTerminalInfo, TimingConflictInfo, ConflictClockOrderInfo,
+    ConflictMissingRecordInfo, ConflictUnexpectedEventInfo, RunTimingInfo,
+    RunTimingUnavailableInfo, RunTimingComposedInfo, RunCoverageInfo,
+    RunCoverageExactInfo, RunCoveragePartialInfo, RunCoverageInconsistentInfo,
+    RunConflictInfo, RunConflictNodeInfo, RunConflictPauseInfo,
+    PauseIntervalInfo, PauseEndInfo, PauseResumedInfo, PauseRunEndedInfo,
+    PauseOpenInfo, UnknownReason, UnavailableReason, TimingBoundary,
+    MissingRecord, WorkflowEventKind,
     # Page, limit and absence types
     TaskPage, BreakdownLimit, WorkflowRunsLimit,
     TaskDetailNotFound, TaskAbsenceReason, PageRefused,

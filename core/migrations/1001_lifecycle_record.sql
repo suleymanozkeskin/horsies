@@ -15,6 +15,9 @@
 --   READY, a sub-workflow node that went ENQUEUED, a task of a node that moved to history (with its history
 --   locator), a run that was paused or resumed. The two moves and eight workflow steps write the events in the
 --   statements that change those states.
+-- - horsies_monitoring_workflow_run returns, beside the run and its nodes, the capture start, the events of the run
+--   and the task rows of its nodes (live, or in history at the locator of each TASK_MOVED event), from which the
+--   core composes the phase timing of the run and of each node.
 --
 -- Rows written before this migration keep NULL in every new column, and the migration writes no value into them:
 -- - horsies_tasks.attempt_claims NULL: the claims of the current attempt are not counted. A claim keeps it NULL; the
@@ -3250,5 +3253,231 @@ BEGIN
         p_task_id, 'EXPIRE_CLAIMED', 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
     ) AS o;
     RETURN QUERY SELECT 'NOT_HELD'::text, v_move;
+END;
+$$;
+
+------------------------------------------------------------------------------------------------------------------------
+-- Monitoring read of a run with its timing records
+------------------------------------------------------------------------------------------------------------------------
+
+-- The result columns change, so the function of migration 1000 is dropped and created again.
+DROP FUNCTION horsies_monitoring_workflow_run(uuid);
+
+-- horsies_monitoring_workflow_run: one workflow run with its nodes, and the records that compose the phase timing of
+-- the run and of each node (core/src/monitoring/timing.rs composes them).
+--
+-- Guarantee: for any run id, root or child, the rows below, read in one snapshot (the function is STABLE, so every
+-- statement reads the snapshot of the calling statement). It changes nothing. The number of statements does not
+-- depend on the number of nodes, events or tasks: no statement runs per node or per task.
+-- Returns, in row_position order:
+-- - No run: one row_kind 'ABSENT' row with workflow_id.
+-- - row_kind 'RUN' (row_position 0): workflow_id, workflow_name, definition_key, status, created_at, completed_at,
+--   trace_id (the trace id of the start, NULL for a start with no trace), and:
+--   - as_of: clock_timestamp() after the snapshot was taken. Every time that a visible row holds was written before it.
+--   - captured_since: installed_on of the bookkeeping row of migration 1001, the start of the lifecycle record.
+--   - timing_rows: BEFORE_CAPTURE (created_at is before captured_since: the run began before the record, so no
+--     EVENT or TASK row follows), BOUND_EXCEEDED (the run has more than c_max_events events: no EVENT or TASK row
+--     follows, and no history row is read), or INCLUDED (the EVENT and TASK rows follow).
+-- - row_kind 'NODE' (row_position 1..n), one per node in task_index order: status, started_at, completed_at,
+--   task_index, node_id, task_name, dependencies, allow_failed_deps, is_subworkflow, sub_workflow_id, child_total,
+--   child_failed (as migration 1000: both count the nodes of the child run of a sub-workflow node and the FAILED ones
+--   among them; NULL for a task node, for a node with no child run, and for a child run with no node), and:
+--   - node_created_at: the created_at of the node; node_task_id: the task that the node links (NULL for none).
+--   - child_created_at, child_completed_at: the created_at and completed_at of the child run that sub_workflow_id
+--     names; both NULL when the node names no child or no row holds the child.
+-- - Only with timing_rows INCLUDED:
+--   - row_kind 'EVENT', one per row of horsies_workflow_events of the run, in event_id order: event_id, event_kind,
+--     occurred_at; task_index of the node of a node event (NULL for a run event); task_id and terminalization_kind of
+--     a TASK_MOVED event (NULL for the other kinds).
+--   - row_kind 'TASK', one per task of a node:
+--     - location LIVE: the live task row that a node links (node_task_id): task_id, status, created_at, enqueued_at,
+--       claimed_at, started_at, attempt_archive_version 2 and attempt_snapshot (horsies_encode_attempt_archive of
+--       the live row, which holds the open attempt); attempt_snapshot_digest NULL.
+--     - location HISTORY: the history row of a TASK_MOVED event, read at its locator (history_class, occurred_at,
+--       task_id), so the probe prunes to one leaf, as the phase-2 source read does: task_id, created_at,
+--       enqueued_at, claimed_at, started_at, attempt_archive_version, attempt_snapshot, attempt_snapshot_digest;
+--       status NULL. Its terminal_at is the occurred_at of the event (the locator).
+--     - location PRUNED: a TASK_MOVED event whose history row retention removed: task_id only.
+-- Bounds: at most c_max_nodes (10,000) nodes, the bound of the workflow start; more nodes break that invariant and
+-- raise data_corrupted (XX001). At most c_max_events (100,000) events are read; above it, BOUND_EXCEEDED. Each task
+-- holds at most 21 attempts (horsies_task_attempts_attempt_range).
+-- Raises 22004 for a NULL id; XX001 when no bookkeeping row of migration 1001 exists for an existing run (the capture
+-- start is part of the answer, and an install writes the row in the transaction of the migration).
+-- Lock order: none (a plain read).
+CREATE FUNCTION horsies_monitoring_workflow_run(p_workflow_id uuid)
+RETURNS TABLE (
+    row_kind text,
+    row_position integer,
+    workflow_id uuid,
+    workflow_name character varying,
+    definition_key character varying,
+    status text,
+    created_at timestamp with time zone,
+    started_at timestamp with time zone,
+    completed_at timestamp with time zone,
+    task_index integer,
+    node_id character varying,
+    task_name character varying,
+    dependencies integer[],
+    allow_failed_deps boolean,
+    is_subworkflow boolean,
+    sub_workflow_id uuid,
+    child_total bigint,
+    child_failed bigint,
+    trace_id bytea,
+    as_of timestamp with time zone,
+    captured_since timestamp with time zone,
+    timing_rows text,
+    node_created_at timestamp with time zone,
+    node_task_id uuid,
+    child_created_at timestamp with time zone,
+    child_completed_at timestamp with time zone,
+    event_id bigint,
+    event_kind text,
+    occurred_at timestamp with time zone,
+    terminalization_kind text,
+    location text,
+    task_id uuid,
+    enqueued_at timestamp with time zone,
+    claimed_at timestamp with time zone,
+    attempt_archive_version smallint,
+    attempt_snapshot bytea,
+    attempt_snapshot_digest bytea
+)
+    LANGUAGE plpgsql STABLE
+AS $$
+#variable_conflict use_column
+DECLARE
+    c_max_nodes CONSTANT integer := 10000;
+    c_max_events CONSTANT integer := 100000;
+    c_capture_version CONSTANT bigint := 1001;
+    v_as_of timestamp with time zone;
+    v_created_at timestamp with time zone;
+    v_captured_since timestamp with time zone;
+    v_event_rows bigint;
+    v_timing_rows text;
+    v_node_rows bigint;
+BEGIN
+    IF p_workflow_id IS NULL THEN
+        RAISE EXCEPTION 'horsies_monitoring_workflow_run: the workflow id is required'
+            USING ERRCODE = 'null_value_not_allowed';
+    END IF;
+    v_as_of := clock_timestamp();
+    SELECT w.created_at INTO v_created_at FROM horsies_workflows AS w WHERE w.id = p_workflow_id;
+    IF NOT FOUND THEN
+        RETURN QUERY
+        SELECT 'ABSENT'::text, NULL::integer, p_workflow_id, NULL::character varying, NULL::character varying,
+               NULL::text, NULL::timestamptz, NULL::timestamptz, NULL::timestamptz, NULL::integer,
+               NULL::character varying, NULL::character varying, NULL::integer[], NULL::boolean, NULL::boolean,
+               NULL::uuid, NULL::bigint, NULL::bigint, NULL::bytea,
+               NULL::timestamptz, NULL::timestamptz, NULL::text, NULL::timestamptz, NULL::uuid, NULL::timestamptz,
+               NULL::timestamptz, NULL::bigint, NULL::text, NULL::timestamptz, NULL::text, NULL::text, NULL::uuid,
+               NULL::timestamptz, NULL::timestamptz, NULL::smallint, NULL::bytea, NULL::bytea;
+        RETURN;
+    END IF;
+    SELECT m.installed_on INTO v_captured_since FROM horsies_migrations AS m WHERE m.version = c_capture_version;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'horsies_monitoring_workflow_run: no bookkeeping row of migration % records the start of '
+            'the lifecycle record', c_capture_version
+            USING ERRCODE = 'data_corrupted';
+    END IF;
+    IF v_created_at < v_captured_since THEN
+        v_timing_rows := 'BEFORE_CAPTURE';
+    ELSE
+        SELECT count(*) INTO v_event_rows
+        FROM (
+            SELECT 1 FROM horsies_workflow_events AS e WHERE e.workflow_id = p_workflow_id LIMIT c_max_events + 1
+        ) AS bounded;
+        v_timing_rows := CASE WHEN v_event_rows > c_max_events THEN 'BOUND_EXCEEDED' ELSE 'INCLUDED' END;
+    END IF;
+
+    RETURN QUERY
+    SELECT 'RUN'::text, 0, w.id, w.name, w.definition_key, w.status::text, w.created_at, NULL::timestamptz,
+           w.completed_at, NULL::integer, NULL::character varying, NULL::character varying, NULL::integer[],
+           NULL::boolean, NULL::boolean, NULL::uuid, NULL::bigint, NULL::bigint, w.trace_id,
+           v_as_of, v_captured_since, v_timing_rows, NULL::timestamptz, NULL::uuid, NULL::timestamptz,
+           NULL::timestamptz, NULL::bigint, NULL::text, NULL::timestamptz, NULL::text, NULL::text, NULL::uuid,
+           NULL::timestamptz, NULL::timestamptz, NULL::smallint, NULL::bytea, NULL::bytea
+    FROM horsies_workflows AS w
+    WHERE w.id = p_workflow_id;
+
+    RETURN QUERY
+    SELECT 'NODE'::text, (row_number() OVER (ORDER BY n.task_index))::integer, NULL::uuid,
+           NULL::character varying, NULL::character varying, n.status::text, NULL::timestamptz, n.started_at,
+           n.completed_at, n.task_index, n.node_id, n.task_name, n.dependencies, n.allow_failed_deps,
+           n.is_subworkflow, n.sub_workflow_id, child.node_total, child.failed_total, NULL::bytea,
+           NULL::timestamptz, NULL::timestamptz, NULL::text, n.created_at, n.task_id, child_run.created_at,
+           child_run.completed_at, NULL::bigint, NULL::text, NULL::timestamptz, NULL::text, NULL::text, NULL::uuid,
+           NULL::timestamptz, NULL::timestamptz, NULL::smallint, NULL::bytea, NULL::bytea
+    FROM horsies_workflow_tasks AS n
+    LEFT JOIN LATERAL (
+        SELECT count(*) AS node_total, count(*) FILTER (WHERE c.status = 'FAILED') AS failed_total
+        FROM horsies_workflow_tasks AS c
+        WHERE n.is_subworkflow AND c.workflow_id = n.sub_workflow_id
+        HAVING count(*) > 0
+    ) AS child ON TRUE
+    LEFT JOIN horsies_workflows AS child_run ON child_run.id = n.sub_workflow_id
+    WHERE n.workflow_id = p_workflow_id
+    ORDER BY n.task_index
+    LIMIT c_max_nodes + 1;
+    GET DIAGNOSTICS v_node_rows = ROW_COUNT;
+    IF v_node_rows > c_max_nodes THEN
+        RAISE EXCEPTION 'horsies_monitoring_workflow_run: run % has more than % nodes', p_workflow_id, c_max_nodes
+            USING ERRCODE = 'data_corrupted';
+    END IF;
+    IF v_timing_rows <> 'INCLUDED' THEN
+        RETURN;
+    END IF;
+
+    RETURN QUERY
+    SELECT 'EVENT'::text, (v_node_rows + row_number() OVER (ORDER BY e.event_id))::integer, NULL::uuid,
+           NULL::character varying, NULL::character varying, NULL::text, NULL::timestamptz, NULL::timestamptz,
+           NULL::timestamptz, event_node.task_index, NULL::character varying, NULL::character varying, NULL::integer[],
+           NULL::boolean, NULL::boolean, NULL::uuid, NULL::bigint, NULL::bigint, NULL::bytea,
+           NULL::timestamptz, NULL::timestamptz, NULL::text, NULL::timestamptz, NULL::uuid, NULL::timestamptz,
+           NULL::timestamptz, e.event_id, e.event_kind::text, e.occurred_at, e.terminalization_kind::text,
+           NULL::text, e.task_id, NULL::timestamptz, NULL::timestamptz, NULL::smallint, NULL::bytea, NULL::bytea
+    FROM horsies_workflow_events AS e
+    LEFT JOIN horsies_workflow_tasks AS event_node ON event_node.id = e.workflow_node_row_id
+    WHERE e.workflow_id = p_workflow_id
+    ORDER BY e.event_id;
+    GET DIAGNOSTICS v_event_rows = ROW_COUNT;
+
+    -- The live tasks in node order, then the moved tasks in event order. The live row and its attempt rows are read
+    -- in this snapshot, so a task is LIVE here or has its TASK_MOVED event, never both.
+    RETURN QUERY
+    SELECT 'TASK'::text,
+           (v_node_rows + v_event_rows + row_number() OVER (ORDER BY t.source_order, t.item_order))::integer,
+           NULL::uuid, NULL::character varying, NULL::character varying, t.task_status, t.task_created_at,
+           t.task_started_at, NULL::timestamptz, NULL::integer, NULL::character varying, NULL::character varying,
+           NULL::integer[], NULL::boolean, NULL::boolean, NULL::uuid, NULL::bigint, NULL::bigint, NULL::bytea,
+           NULL::timestamptz, NULL::timestamptz, NULL::text, NULL::timestamptz, NULL::uuid, NULL::timestamptz,
+           NULL::timestamptz, NULL::bigint, NULL::text, NULL::timestamptz, NULL::text, t.task_location, t.item_task_id,
+           t.task_enqueued_at, t.task_claimed_at, t.archive_version, t.archive_payload, t.archive_digest
+    FROM (
+        SELECT 1 AS source_order, n.task_index::bigint AS item_order, 'LIVE'::text AS task_location,
+               live.id AS item_task_id, live.status::text AS task_status, live.created_at AS task_created_at,
+               live.enqueued_at AS task_enqueued_at, live.claimed_at AS task_claimed_at,
+               live.started_at AS task_started_at, 2::smallint AS archive_version,
+               horsies_encode_attempt_archive(live) AS archive_payload, NULL::bytea AS archive_digest
+        FROM horsies_workflow_tasks AS n
+        JOIN horsies_tasks AS live ON live.id = n.task_id
+        WHERE n.workflow_id = p_workflow_id
+        UNION ALL
+        SELECT 2, moved.event_id, CASE WHEN h.task_id IS NULL THEN 'PRUNED' ELSE 'HISTORY' END, moved.task_id,
+               NULL::text, h.created_at, h.enqueued_at, h.claimed_at, h.started_at, h.attempt_archive_version,
+               h.attempt_snapshot, h.attempt_snapshot_digest
+        FROM horsies_workflow_events AS moved
+        LEFT JOIN LATERAL (
+            SELECT hr.task_id, hr.created_at, hr.enqueued_at, hr.claimed_at, hr.started_at,
+                   hr.attempt_archive_version, hr.attempt_snapshot, hr.attempt_snapshot_digest
+            FROM horsies_task_history AS hr
+            WHERE hr.retention_class_key = moved.history_class
+              AND hr.terminal_at = moved.occurred_at
+              AND hr.task_id = moved.task_id
+        ) AS h ON TRUE
+        WHERE moved.workflow_id = p_workflow_id AND moved.event_kind = 'TASK_MOVED'
+    ) AS t
+    ORDER BY t.source_order, t.item_order;
 END;
 $$;
