@@ -7,6 +7,17 @@ use crate::core::error::{ErrorCode, HorsiesError, ValidationReport};
 use crate::core::config::socket::{socket_settings, TcpKeepalivesConfig, TcpUserTimeoutConfig};
 use crate::db::SocketSettings;
 
+/// The persistent connections of the general broker pool of a config that
+/// names no `pool_size`. It is the one source of the default of both
+/// clients: `horsies-codegen` writes it into the Python client
+/// (`horsies._catalog.broker_pool_defaults`).
+pub const BROKER_POOL_SIZE_DEFAULT: u32 = 5;
+
+/// The connections past the pool size that the general broker pool of a
+/// config that names no `max_overflow` opens under load. It is the one
+/// source of the default of both clients, as [`BROKER_POOL_SIZE_DEFAULT`].
+pub const BROKER_MAX_OVERFLOW_DEFAULT: u32 = 10;
+
 /// PostgreSQL broker configuration.
 ///
 /// `Debug` is implemented manually to redact the password in the connection
@@ -59,15 +70,15 @@ pub struct PostgresConfig {
     pub worker_pool_pre_ping: bool,
 
     /// The persistent connections of the general broker pool: the pool of
-    /// a producer, a web process, a scheduler or an app API. Default 5 in
-    /// both clients. It does not size the pools of a worker: the worker
-    /// process opens `WorkerProfile.pool`, and task code in a worker child
-    /// opens the `task_send_pool` of its child kind.
+    /// a producer, a web process, a scheduler or an app API. Default
+    /// [`BROKER_POOL_SIZE_DEFAULT`]. It does not size the pools of a
+    /// worker: the worker process opens `WorkerProfile.pool`, and task code
+    /// in a worker child opens the `task_send_pool` of its child kind.
     #[serde(default = "default_pool_size")]
     pub pool_size: u32,
 
     /// The connections past `pool_size` that the general broker pool opens
-    /// under load. Default 10 in both clients.
+    /// under load. Default [`BROKER_MAX_OVERFLOW_DEFAULT`].
     #[serde(default = "default_max_overflow")]
     pub max_overflow: u32,
 
@@ -147,13 +158,11 @@ impl std::fmt::Debug for PostgresConfig {
 fn default_true() -> bool {
     true
 }
-/// The general broker pool of both clients: 5 persistent connections and
-/// 10 more under load, the defaults of the Python client's `PostgresConfig`.
 fn default_pool_size() -> u32 {
-    5
+    BROKER_POOL_SIZE_DEFAULT
 }
 fn default_max_overflow() -> u32 {
-    10
+    BROKER_MAX_OVERFLOW_DEFAULT
 }
 fn default_pool_timeout() -> u32 {
     30

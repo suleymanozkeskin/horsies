@@ -12,8 +12,8 @@
 //! - `_catalog/workflow_spec.py`: the workflow spec data
 //!   (`horsies_core::manifest_schema::WORKFLOW_SPEC_DATA`) in the same form.
 //! - `_catalog/monitoring_bounds.py`, `_catalog/broker_bounds.py`,
-//!   `_catalog/exit_codes.py` and `_catalog/child_bounds.py`: integer
-//!   constants of horsies-core
+//!   `_catalog/broker_pool_defaults.py`, `_catalog/exit_codes.py` and
+//!   `_catalog/child_bounds.py`: integer constants of horsies-core
 //!   (`constants::CONSTANT_MODULES`).
 //! - `_catalog/broker_errors.py`, `_catalog/workflow_handle_errors.py`,
 //!   `_catalog/monitoring_errors.py`, `_catalog/task_send_errors.py` and

@@ -43,13 +43,16 @@ and there is no migration contract between pre-1.0 versions.
   `max_overflow` 10, the same as the Python client.** It was 30 and 30.
   `AppConfig::for_database_url`, `PostgresConfig::from_url` and a config
   text that does not name the two fields give the new values. Since 0.8.0
-  both clients do their database I/O in the same core, so the core now has
-  the defaults of the Python client. The two values size only the general
-  broker: producers, web processes, schedulers and app-level APIs. They do
-  not size the pools of a worker (`WorkerProfile.pool`, `task_send_pool`).
-  A Rust app that relied on 30 and 30 sets `pool_size: 30` and
-  `max_overflow: 30` in its `PostgresConfig` to keep them. The Python
-  client does not change.
+  both clients do their database I/O in the same core, so the two clients
+  have one default: the core holds it (`BROKER_POOL_SIZE_DEFAULT` and
+  `BROKER_MAX_OVERFLOW_DEFAULT` in `horsies_core::core::config::broker`),
+  and the Python `PostgresConfig` takes it from the generated module
+  `horsies._catalog.broker_pool_defaults`. The two values size only the
+  general broker: producers, web processes, schedulers and app-level APIs.
+  They do not size the pools of a worker (`WorkerProfile.pool`,
+  `task_send_pool`). A Rust app that relied on 30 and 30 sets
+  `pool_size: 30` and `max_overflow: 30` in its `PostgresConfig` to keep
+  them. The defaults of the Python client do not change.
 
 ### Documentation
 

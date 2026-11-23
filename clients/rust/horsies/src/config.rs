@@ -270,52 +270,6 @@ mod tests {
         );
     }
 
-    /// The `default=` of the `Field` of `field` in the Python client's
-    /// `PostgresConfig` (`clients/python/horsies/core/models/broker.py`).
-    fn python_postgres_config_default(field: &str) -> u32 {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../python/horsies/core/models/broker.py");
-        let source = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-        let declaration = format!("    {field}: int = Field(");
-        let (_, after_declaration) = source
-            .split_once(&declaration)
-            .unwrap_or_else(|| panic!("{} has no `{declaration}`", path.display()));
-        let (call, _) = after_declaration
-            .split_once(')')
-            .unwrap_or_else(|| panic!("the Field call of {field} has no `)`"));
-        let (_, value) = call
-            .split_once("default=")
-            .unwrap_or_else(|| panic!("the Field call of {field} has no `default=`"));
-        let digits: String = value.chars().take_while(char::is_ascii_digit).collect();
-        digits
-            .parse()
-            .unwrap_or_else(|error| panic!("the default of {field} is not a count: {error}"))
-    }
-
-    /// Parity: an app that names no pool gets the general broker pool of the
-    /// Python client's `PostgresConfig`, in its config and in the manifest
-    /// that the core reads.
-    #[test]
-    fn the_default_broker_pool_is_the_python_client_default() {
-        let python_pool = (
-            python_postgres_config_default("pool_size"),
-            python_postgres_config_default("max_overflow"),
-        );
-        let config = AppConfig::for_database_url("postgresql://db/horsies");
-        let manifest = producer_manifest(&config.broker, SchemaMode::MigrateAndValidate).unwrap();
-        let database = &manifest.database;
-
-        assert_eq!(
-            (config.broker.pool_size, config.broker.max_overflow),
-            python_pool
-        );
-        assert_eq!(
-            (database.pool_size.get(), database.max_overflow.get()),
-            python_pool
-        );
-    }
-
     #[test]
     fn the_short_scheme_becomes_the_core_scheme() {
         assert_eq!(

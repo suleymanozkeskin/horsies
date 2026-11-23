@@ -1,10 +1,11 @@
 //! Render integer constants of horsies-core as modules of `_catalog`
-//! (`monitoring_bounds.py`, `broker_bounds.py`, `exit_codes.py`,
-//! `child_bounds.py`). Each
+//! (`monitoring_bounds.py`, `broker_bounds.py`, `broker_pool_defaults.py`,
+//! `exit_codes.py`, `child_bounds.py`). Each
 //! constant is a `Final` integer whose value is the core's constant, so a
 //! Python bound cannot differ from the bound that the core enforces: `check`
 //! fails when a core value changes and the module is not written again.
 
+use horsies_core::core::config::broker::{BROKER_MAX_OVERFLOW_DEFAULT, BROKER_POOL_SIZE_DEFAULT};
 use horsies_core::frame_protocol::{
     BAD_ARGUMENTS_EXIT_CODE, BAD_PARENT_FRAME_EXIT_CODE, BOOT_FAILED_EXIT_CODE,
     CHILD_HOOK_FAILED_EXIT_CODE, CORE_STOPPED_EXIT_CODE, PARENT_GONE_EXIT_CODE,
@@ -106,6 +107,30 @@ pub const BROKER_BOUNDS: ConstantModule = ConstantModule {
     constants: &BROKER_CONSTANTS,
 };
 
+const BROKER_POOL_DEFAULT_CONSTANTS: [CoreConstant; 2] = [
+    CoreConstant {
+        name: "BROKER_POOL_SIZE_DEFAULT",
+        doc: "The persistent connections of the general broker pool of a config that\n\
+              names no `pool_size`: the default of `PostgresConfig.pool_size`.",
+        value: BROKER_POOL_SIZE_DEFAULT as i64,
+    },
+    CoreConstant {
+        name: "BROKER_MAX_OVERFLOW_DEFAULT",
+        doc: "The connections past the pool size that the general broker pool of a\n\
+              config that names no `max_overflow` opens under load: the default of\n\
+              `PostgresConfig.max_overflow`.",
+        value: BROKER_MAX_OVERFLOW_DEFAULT as i64,
+    },
+];
+
+/// The defaults of the general broker pool, the same in both clients.
+pub const BROKER_POOL_DEFAULTS: ConstantModule = ConstantModule {
+    file: "broker_pool_defaults.py",
+    doc: "The defaults of the general broker pool of horsies-core, generated from its\n\
+          Rust constants. Both clients have these defaults.",
+    constants: &BROKER_POOL_DEFAULT_CONSTANTS,
+};
+
 const EXIT_CODE_CONSTANTS: [CoreConstant; 11] = [
     CoreConstant {
         name: "PARENT_GONE_EXIT_CODE",
@@ -195,8 +220,13 @@ pub const CHILD_BOUNDS: ConstantModule = ConstantModule {
 };
 
 /// Every generated module of core constants, in file order.
-pub const CONSTANT_MODULES: [ConstantModule; 4] =
-    [MONITORING_BOUNDS, BROKER_BOUNDS, EXIT_CODES, CHILD_BOUNDS];
+pub const CONSTANT_MODULES: [ConstantModule; 5] = [
+    MONITORING_BOUNDS,
+    BROKER_BOUNDS,
+    BROKER_POOL_DEFAULTS,
+    EXIT_CODES,
+    CHILD_BOUNDS,
+];
 
 /// The text of one module of core constants.
 pub fn render_constant_module(module: &ConstantModule) -> String {
@@ -284,6 +314,16 @@ mod tests {
         assert!(rendered.contains(&format!(
             "\nTASK_LIST_ROW_BOUND: Final = {TASK_LIST_BOUND}\n"
         )));
+        let rendered = render_constant_module(&BROKER_POOL_DEFAULTS);
+        for (name, value) in [
+            ("BROKER_POOL_SIZE_DEFAULT", BROKER_POOL_SIZE_DEFAULT),
+            ("BROKER_MAX_OVERFLOW_DEFAULT", BROKER_MAX_OVERFLOW_DEFAULT),
+        ] {
+            assert!(
+                rendered.contains(&format!("\n{name}: Final = {value}\n")),
+                "{name}"
+            );
+        }
         let rendered = render_constant_module(&EXIT_CODES);
         for (name, value) in [
             ("PARENT_GONE_EXIT_CODE", PARENT_GONE_EXIT_CODE),
