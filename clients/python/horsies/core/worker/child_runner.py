@@ -35,11 +35,15 @@ from horsies._core import (
 from horsies.core.app import Horsies
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
+    NoRuntimeParameter,
+    TakesRuntime,
     declared_taskresult_ok_type,
     decode_kwargs,
     fill_omitted_defaults,
+    task_runtime_parameter,
     underlying_task_fn,
 )
+from horsies.core.task_runtime import FencingToken, TaskRuntime
 from horsies.core.codec.json_io import (
     loads_json,
     dumps_json,
@@ -1253,15 +1257,25 @@ def _task_call_result(
             )
 
 
+def run_runtime(task_id: uuid.UUID, attempt: int) -> TaskRuntime:
+    """The ``TaskRuntime`` of attempt ``attempt`` of task ``task_id``, from
+    the run frame. The core holds the attempt of a frame to 1 to
+    ``MAX_ATTEMPT``. Pure."""
+    return TaskRuntime(fencing_token=FencingToken(task_id=task_id, value=attempt))
+
+
 def _prepare_task_call(
     task_name: str,
     input_json: str,
     place: RunPlace,
+    runtime: TaskRuntime,
 ) -> _PreparedCall | EncodedResult:
     """Resolve a task from the registry and decode the arguments of its call.
 
     ``input_json`` is the stored input of the row, the body of the run
-    frame: the keyword arguments as one JSON object. Returns the task and
+    frame: the keyword arguments as one JSON object. A task whose first
+    parameter takes the ``TaskRuntime`` gets ``runtime`` as its one
+    positional argument. Returns the task and
     its arguments, or the result that ends the run before user code: a task
     that cannot be resolved or cannot run in ``place``
     (``WORKER_RESOLUTION_ERROR``), or an input that does not decode
@@ -1291,8 +1305,8 @@ def _prepare_task_call(
             )
 
     # Deserialize the task input: the keyword arguments as one JSON object.
-    # Strict-serde: a task takes no positional arguments.
-    args: tuple[Any, ...] = ()
+    # Strict-serde: the input holds no positional arguments; the one
+    # positional argument is the runtime, which the worker passes.
     input_result = loads_json(input_json)
     if is_err(input_result):
         return _serialization_error_response(task_name, input_result.err_value)
@@ -1557,6 +1571,14 @@ def _prepare_task_call(
             ),
         )
 
+    args: tuple[TaskRuntime, ...]
+    match task_runtime_parameter(underlying_fn):
+        case TakesRuntime():
+            args = (runtime,)
+        case NoRuntimeParameter():
+            args = ()
+        case _ as unreachable:
+            assert_never(unreachable)
     return _PreparedCall(task=task, app=app, args=args, kwargs=kwargs)
 
 
@@ -1640,7 +1662,7 @@ def shared_attempt_subject(
 def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
     task_name: str,
     input_json: str,
-    task_id: str,
+    task_id: uuid.UUID,
     master_worker_id: str,
     work: IsolatedWork,
     *,
@@ -1674,6 +1696,9 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
     stop of a workflow task whose node is not linked cancels the task
     (ORPHAN_CANCELLED).
 
+    A task whose first parameter takes the ``TaskRuntime`` gets the runtime
+    of ``task_id`` and ``attempt`` (``run_runtime``).
+
     The envelope holds the task's success or its task error; the task's own
     outcome is in its ``ok`` and ``err`` members.
 
@@ -1689,7 +1714,8 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
     while this child holds the task; until the first one, the stale RUNNING
     rule judges the attempt from its ``started_at``.
     """
-    logger.info(f'Starting task execution: {task_name} ({task_id})')
+    task_id_text = str(task_id)
+    logger.info(f'Starting task execution: {task_name} ({task_id_text})')
 
     # Mark as RUNNING in DB at the actual start of execution (child process).
     # CRITICAL: Include ownership check to prevent double-execution when claim
@@ -1697,7 +1723,7 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
     # paused/cancelled workflows; its miss path diagnoses which one fired —
     # there is deliberately no separate pre-flight round trip.
     ownership_result = _confirm_until_not_resumed(
-        task_id,
+        task_id_text,
         master_worker_id,
         claimed_at,
         orphan_self_heal=orphan_self_heal,
@@ -1714,14 +1740,14 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
         case _ as unreachable:
             assert_never(unreachable)
     return set_running_or_end_child(
-        task_id,
+        task_id_text,
         started,
         _run_isolated_after_running(
             input_json,
             work,
             task_loop,
             AttemptSubject(
-                task_id=task_id,
+                task_id=task_id_text,
                 task_name=task_name,
                 queue_name=queue_name,
                 attempt=attempt,
@@ -1730,6 +1756,7 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
                 workflow=started.workflow,
                 trace=trace,
             ),
+            run_runtime(task_id, attempt),
         ),
     )
 
@@ -1739,6 +1766,7 @@ def _run_isolated_after_running(
     work: IsolatedWork,
     task_loop: TaskLoop,
     attempt: AttemptSubject,
+    runtime: TaskRuntime,
 ) -> ResultEnvelope | BodyInterrupted:
     """The steps of an isolated run after its RUNNING update, inside the
     span and the log context of ``attempt`` (``run_in_attempt_span``). The
@@ -1754,6 +1782,7 @@ def _run_isolated_after_running(
             attempt.task_id,
             work,
             task_loop,
+            runtime,
         ),
         isolated_body_end,
     )
@@ -1765,11 +1794,13 @@ def _isolated_steps(
     task_id: str,
     work: IsolatedWork,
     task_loop: TaskLoop,
+    runtime: TaskRuntime,
 ) -> EncodedResult | BodyInterrupted:
     """The steps of an isolated run after its RUNNING update: the stored
     options refusal, the resolve, the call and the result encode. Any
     exception becomes ``TASK_EXCEPTION``. A body that a refusal of the core
-    ended gives ``BodyInterrupted`` (``encoded_body_end``)."""
+    ended gives ``BodyInterrupted`` (``encoded_body_end``). A task that takes
+    its ``TaskRuntime`` gets ``runtime``."""
     try:
         # Stored options that the worker cannot use fail the task before it
         # resolves the task, so no user code runs.
@@ -1785,6 +1816,7 @@ def _isolated_steps(
             task_name,
             input_json,
             OnIsolatedChild(task_loop),
+            runtime,
         )
         match prepared:
             case _PreparedCall(task=task, args=args, kwargs=kwargs):

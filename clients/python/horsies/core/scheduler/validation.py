@@ -26,7 +26,9 @@ from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
     encode_kwargs_read_back,
     fill_omitted_defaults,
+    task_runtime_parameter,
     underlying_task_fn,
+    without_runtime_parameter,
 )
 from horsies.core.codec.payload_guard import (
     PayloadOverLimit,
@@ -194,13 +196,20 @@ def _signature_error(
     app: Horsies,
     schedule: TaskSchedule,
 ) -> HorsiesError | None:
-    """Ensure schedule args/kwargs bind cleanly to the task signature."""
+    """Ensure schedule args/kwargs bind cleanly to the task signature.
+
+    The parameter that takes the `TaskRuntime` is left out: the worker passes
+    the runtime on each run, so a schedule does not supply it, and a schedule
+    kwarg with its name does not bind."""
     task = app.tasks.get(schedule.task_name)
     original_fn = getattr(task, '_original_fn', None) if task else None
     if original_fn is None:
         return None  # Cannot validate without original function signature
 
-    sig = inspect.signature(original_fn)
+    sig = without_runtime_parameter(
+        inspect.signature(original_fn),
+        task_runtime_parameter(original_fn),
+    )
     try:
         sig.bind(**schedule.kwargs)
     except TypeError as exc:

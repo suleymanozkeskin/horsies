@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import (
     Callable,
+    Concatenate,
     Final,
     get_origin,
     get_type_hints,
@@ -46,6 +47,7 @@ from horsies.core.codec.payload_guard import (
     warn_if_payload_large,
 )
 from horsies.core.codec.task_options import serialize_task_options
+from horsies.core.task_runtime import TaskRuntime
 from horsies.core.process_role import (
     ProcessRole,
     process_role,
@@ -942,7 +944,7 @@ class NodeFactory(Generic[P, T]):
         # Type checker validates 'value' against my_task's signature
     """
 
-    _fn: 'TaskFunction[P, T] | AsyncTaskFunction[P, T]'
+    _fn: 'TaskFunction[P, T] | AsyncTaskFunction[P, T] | RuntimeTaskFunction[P, T] | AsyncRuntimeTaskFunction[P, T]'
     _waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None
     _workflow_ctx_from: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None
     _args_from: dict[str, 'TaskNode[Any] | SubWorkflowNode[Any]'] | None
@@ -956,7 +958,7 @@ class NodeFactory(Generic[P, T]):
 
     def __init__(
         self,
-        fn: 'TaskFunction[P, T] | AsyncTaskFunction[P, T]',
+        fn: 'TaskFunction[P, T] | AsyncTaskFunction[P, T] | RuntimeTaskFunction[P, T] | AsyncRuntimeTaskFunction[P, T]',
         *,
         waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None,
         workflow_ctx_from: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None,
@@ -1183,12 +1185,70 @@ class AsyncTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
     ) -> Coroutine[Any, Any, TaskResult[T, TaskError]]: ...
 
 
+class RuntimeTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
+    """A `def` task function whose first parameter takes its `TaskRuntime`.
+
+    `P` is the parameters after the runtime: the sends, the schedules and
+    `node()` take these, and the worker passes the runtime on each run. A
+    direct call takes the runtime first, for example
+    `charge(TaskRuntime.for_test(task_id=...), order_id='o-1')`.
+    """
+
+    @abstractmethod
+    def __call__(
+        self,
+        runtime: TaskRuntime,
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> TaskResult[T, TaskError]: ...
+
+
+class AsyncRuntimeTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
+    """An `async def` task function whose first parameter takes its
+    `TaskRuntime`.
+
+    As `RuntimeTaskFunction`; a direct call returns a coroutine.
+    """
+
+    @abstractmethod
+    def __call__(
+        self,
+        runtime: TaskRuntime,
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> Coroutine[Any, Any, TaskResult[T, TaskError]]: ...
+
+
+# The runtime overloads come first. A function whose first parameter takes a
+# `TaskRuntime` also fits the overloads after them, with the runtime in `P`;
+# the first match wins, so the sends of such a task do not take the runtime.
+# A type checker reports that overlap; it is the intended order.
+
+
 class TaskDecorator(Protocol):
     """What `app.task(task_name, **options)` returns.
 
     It registers one task function: a `def` function gives a
     `TaskFunction`, and an `async def` function gives an `AsyncTaskFunction`.
+    A function whose first parameter is `runtime: TaskRuntime` gives a
+    `RuntimeTaskFunction` or an `AsyncRuntimeTaskFunction`.
     """
+
+    @overload
+    def __call__(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, TaskResult[T, TaskError]]],
+        /,
+    ) -> AsyncRuntimeTaskFunction[P, T]: ...
+
+    @overload
+    def __call__(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        fn: Callable[Concatenate[TaskRuntime, P], TaskResult[T, TaskError]],
+        /,
+    ) -> RuntimeTaskFunction[P, T]: ...
 
     @overload
     def __call__(
@@ -1212,6 +1272,14 @@ class SharedAsyncTaskDecorator(Protocol):
     `def` function. The decorator refuses it at run time too (HRS-107).
     """
 
+    @overload
+    def __call__(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, TaskResult[T, TaskError]]],
+        /,
+    ) -> AsyncRuntimeTaskFunction[P, T]: ...
+
+    @overload
     def __call__(
         self,
         fn: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
@@ -1226,6 +1294,14 @@ class SharedThreadTaskDecorator(Protocol):
     `async def` function. The decorator refuses it at run time too (HRS-108).
     """
 
+    @overload
+    def __call__(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        fn: Callable[Concatenate[TaskRuntime, P], TaskResult[T, TaskError]],
+        /,
+    ) -> RuntimeTaskFunction[P, T]: ...
+
+    @overload
     def __call__(
         self,
         fn: Callable[P, TaskResult[T, TaskError]],
@@ -1720,6 +1796,32 @@ def _cancel_requested() -> bool:
 
 
 @overload
+def create_task_wrapper(  # pyright: ignore[reportOverlappingOverload]
+    fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, TaskResult[T, TaskError]]],
+    app: 'Horsies',
+    task_name: str,
+    task_options: Optional['TaskOptions'] = None,
+    *,
+    exception_mapper: ExceptionMapper | None = None,
+    default_unhandled_error_code: str | None = None,
+    error_codes: tuple[str, ...] = (),
+) -> 'AsyncRuntimeTaskFunction[P, T]': ...
+
+
+@overload
+def create_task_wrapper(  # pyright: ignore[reportOverlappingOverload]
+    fn: Callable[Concatenate[TaskRuntime, P], TaskResult[T, TaskError]],
+    app: 'Horsies',
+    task_name: str,
+    task_options: Optional['TaskOptions'] = None,
+    *,
+    exception_mapper: ExceptionMapper | None = None,
+    default_unhandled_error_code: str | None = None,
+    error_codes: tuple[str, ...] = (),
+) -> 'RuntimeTaskFunction[P, T]': ...
+
+
+@overload
 def create_task_wrapper(
     fn: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
     app: 'Horsies',
@@ -1755,13 +1857,16 @@ def create_task_wrapper(
     exception_mapper: ExceptionMapper | None = None,
     default_unhandled_error_code: str | None = None,
     error_codes: tuple[str, ...] = (),
-) -> 'TaskFunction[P, T] | AsyncTaskFunction[P, T]':
+) -> 'TaskFunction[P, T] | AsyncTaskFunction[P, T] | RuntimeTaskFunction[Any, T] | AsyncRuntimeTaskFunction[Any, T]':
     """
     Create a task wrapper for a specific app instance.
     Called by app.task() decorator.
 
     A `def` function gives a `TaskFunction`. An `async def` function gives
-    an `AsyncTaskFunction`, whose direct call returns a coroutine.
+    an `AsyncTaskFunction`, whose direct call returns a coroutine. A
+    function whose first parameter takes the `TaskRuntime` gives the runtime
+    form of each (`RuntimeTaskFunction`, `AsyncRuntimeTaskFunction`): the
+    same wrapper, whose sends do not take the runtime.
 
     `error_codes` are the codes that the task declares, which the decorator
     checked (`parse_declared_error_codes`), with the codes of its exception

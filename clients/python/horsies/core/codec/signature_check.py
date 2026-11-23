@@ -39,12 +39,19 @@ from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 
 from horsies.core.codec.json_value import JsonValue
-from horsies.core.codec.kwargs import is_engine_filled, resolve_build_with_hints
+from horsies.core.codec.kwargs import (
+    NoRuntimeParameter,
+    TakesRuntime,
+    is_engine_filled,
+    resolve_build_with_hints,
+    runtime_parameter_of,
+)
 from horsies.core.codec.wire_shape import (
     parameter_default_refusal,
     shape_refusals,
 )
 from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.task_runtime import TaskRuntime
 from horsies.core.models.workflow.context import (
     SubWorkflowSummary,
     WorkflowContext,
@@ -147,6 +154,11 @@ def check_task_signature(
             here — `create_task_wrapper` already rejects pre-decorated fns.
         task_name: Registered name; used in error messages.
 
+    The first parameter may take the `TaskRuntime` of the run: positional,
+    annotated exactly `TaskRuntime`, with no default. The worker passes it on
+    each run, so it is not part of the wire contract and the keyword-only
+    rule does not apply to it. `TaskRuntime` in any other place is refused.
+
     Raises:
         SignatureValidationError: with task, position, banned type, fix,
             docs URL. Fails fast — one error per call; further positions
@@ -154,8 +166,17 @@ def check_task_signature(
     """
     hints = get_type_hints(fn, include_extras=True)
     sig = inspect.signature(fn)
+    runtime = runtime_parameter_of(sig, hints)
 
     for param_name, param in sig.parameters.items():
+        match runtime:
+            case TakesRuntime(name=runtime_name) if runtime_name == param_name:
+                _check_runtime_default(param, task_name=task_name)
+                continue
+            case TakesRuntime() | NoRuntimeParameter():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
         # Variadic and positional-only params rejected for v1.
         # Strict-serde rejects positional args at every producer; only
         # kwargs reach the wire. A positional-only param (`def f(x, /)`)
@@ -180,13 +201,26 @@ def check_task_signature(
                 reason='catch-all kwargs defeat producer-side signature binding',
                 fix='declare each accepted kwarg as a named parameter',
             ))
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ) and _mentions_task_runtime(hints.get(param_name)):
+            raise SignatureValidationError(_runtime_place_refusal(
+                task_name=task_name,
+                param_name=param_name,
+                annot=hints.get(param_name),
+            ))
         if param.kind is inspect.Parameter.POSITIONAL_ONLY:
             raise SignatureValidationError(_refusal(
                 task_name=task_name,
                 position=f"parameter '{param_name}' (positional-only)",
                 banned='positional-only parameter (`def f(x, /)`)',
                 reason='strict-serde rejects positional args; positional-only params cannot be bound by keyword',
-                fix='remove the `/` from the signature so the parameter is keyword-bindable',
+                fix=(
+                    'remove the `/` from the signature so the parameter is '
+                    'keyword-bindable; only a first parameter '
+                    '`runtime: TaskRuntime` comes before the `*`'
+                ),
             ))
         if param.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD:
             raise SignatureValidationError(_refusal(
@@ -197,7 +231,8 @@ def check_task_signature(
                 fix=(
                     "add a bare `*,` before the first parameter so every "
                     "parameter is keyword-only: "
-                    "`def f(*, x: YourType) -> ...`"
+                    "`def f(*, x: YourType) -> ...`; only a first parameter "
+                    "`runtime: TaskRuntime` comes before the `*`"
                 ),
             ))
 
@@ -295,6 +330,70 @@ def check_build_with_signature(workflow_def: Any, *, workflow_name: str) -> None
                     )) from None
         case _ as unreachable:
             assert_never(unreachable)
+
+
+_RUNTIME_FIX: str = (
+    'declare it as the first parameter, before the `*`, annotated exactly '
+    '`TaskRuntime` and with no default: '
+    '`def f(runtime: TaskRuntime, *, x: YourType) -> ...`'
+)
+"""The one form of the runtime parameter, for each refusal of another form."""
+
+_RUNTIME_HINT_DEPTH_BOUND: int = 32
+"""The deepest nesting of a hint that the runtime search walks. A deeper hint
+is not searched further; the allow-list walk refuses it on its own terms."""
+
+
+def _check_runtime_default(param: inspect.Parameter, *, task_name: str) -> None:
+    """Refuse a default on the parameter that takes the `TaskRuntime`.
+
+    The worker passes the runtime on each run, so a default is never used by
+    a worker, and a direct call with no runtime would run with no fencing
+    token.
+
+    Raises:
+        SignatureValidationError: the parameter has a default.
+    """
+    if param.default is inspect.Parameter.empty:
+        return
+    raise SignatureValidationError(_refusal(
+        task_name=task_name,
+        position=f"parameter '{param.name}'",
+        banned=f'TaskRuntime with a default of type {type(param.default).__name__}',
+        reason='the worker passes the TaskRuntime on each run; the parameter takes no default',
+        fix=f'remove the default; a test passes `TaskRuntime.for_test(...)`. {_RUNTIME_FIX}',
+    ))
+
+
+def _mentions_task_runtime(annot: object, depth: int = 0) -> bool:
+    """Whether `annot` is `TaskRuntime` or holds it in its type arguments
+    (for example `TaskRuntime | None`). Pure."""
+    if annot is TaskRuntime:
+        return True
+    if depth >= _RUNTIME_HINT_DEPTH_BOUND:
+        return False
+    return any(_mentions_task_runtime(arg, depth + 1) for arg in get_args(annot))
+
+
+def _runtime_place_refusal(
+    *,
+    task_name: str,
+    param_name: str,
+    annot: object,
+) -> SignatureRefusal:
+    """The refusal of a positional parameter that names `TaskRuntime` in a
+    form other than the first parameter annotated exactly `TaskRuntime`."""
+    return _refusal(
+        task_name=task_name,
+        position=f"parameter '{param_name}'",
+        banned=f'TaskRuntime parameter of the form {annot!r}',
+        reason=(
+            'the worker passes the TaskRuntime to the first parameter only, '
+            'and a run always has one, so the annotation is exactly '
+            '`TaskRuntime`'
+        ),
+        fix=_RUNTIME_FIX,
+    )
 
 
 def _check_parameter(name: str, annot: object, default: object) -> None:
@@ -520,6 +619,16 @@ def _classify(
             banned=f'TypeVar {annot!r}',
             reason='TypeVar has no concrete type for the decoder',
             fix='define a wrapper task per concrete instantiation',
+        ))
+
+    if annot is TaskRuntime:
+        raise _RejectedError(_Rejection(
+            banned='TaskRuntime',
+            reason=(
+                'TaskRuntime is not a wire type: the worker passes it to the '
+                'first parameter of a task on each run'
+            ),
+            fix=_RUNTIME_FIX,
         ))
 
     # Class-based checks (use isinstance for issubclass safety).

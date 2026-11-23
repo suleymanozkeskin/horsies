@@ -1188,7 +1188,7 @@ def run_child_task(
     return _run_task_entry(
         frame.task_name,
         frame.input,
-        str(frame.task_id),
+        frame.task_id,
         frame.worker_id,
         isolated_work_of(frame.work),
         claimed_at=frame.claimed_at,

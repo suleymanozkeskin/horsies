@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Any, ForwardRef, Literal, Optional
 from unittest.mock import MagicMock, patch
@@ -470,7 +471,7 @@ def _run_child(
             child_runner._run_task_entry(
                 task_name=task_name,
                 input_json=json.dumps(kwargs),
-                task_id='task-id',
+                task_id=uuid.UUID(int=1),
                 master_worker_id='worker',
                 work=RunTheTask(),
                 claimed_at=CLAIMED_AT,

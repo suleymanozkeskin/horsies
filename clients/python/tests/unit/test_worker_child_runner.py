@@ -872,7 +872,7 @@ def _run_entry_defaults() -> dict[str, Any]:
     return {
         'task_name': 'my_task',
         'input_json': '{}',
-        'task_id': TASK_ID,
+        'task_id': uuid.UUID(TASK_ID),
         'master_worker_id': 'w-1',
         'work': RunTheTask(),
         'claimed_at': CLAIMED_AT,
