@@ -58,6 +58,11 @@ pub async fn fence_isolated_async(rt: TaskRuntime) -> Result<Fence, TaskError<Fe
 
 /// The token of an isolated blocking run.
 #[blocking_task("e2e_fence_isolated_blocking")]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the parameters of a task are its wire contract: the task attribute decodes each \
+              input as an owned value"
+)]
 pub fn fence_isolated_blocking(rt: TaskRuntime) -> Result<Fence, TaskError<FenceCode>> {
     fence_of(&rt)
 }
@@ -70,6 +75,11 @@ pub async fn fence_shared_async(rt: TaskRuntime) -> Result<Fence, TaskError<Fenc
 
 /// The token of a shared thread run.
 #[blocking_task("e2e_fence_shared_thread", execution = shared_thread, timeout_ms = 30_000)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the parameters of a task are its wire contract: the task attribute decodes each \
+              input as an owned value"
+)]
 pub fn fence_shared_thread(rt: TaskRuntime) -> Result<Fence, TaskError<FenceCode>> {
     fence_of(&rt)
 }
