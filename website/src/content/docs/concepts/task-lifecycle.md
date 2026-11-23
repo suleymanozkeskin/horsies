@@ -2,7 +2,7 @@
 title: Task Lifecycle
 section: shared
 summary: Task states and transitions from submission to completion.
-related: [result-handling, ../../workers/heartbeats-recovery, ../../tasks/retry-policy]
+related: [result-handling, fencing-token, ../../workers/heartbeats-recovery, ../../tasks/retry-policy]
 tags: [concepts, tasks, states]
 ---
 
@@ -111,6 +111,7 @@ The Python client checks a status with `is_terminal` and holds the terminal stat
 - Only if retry policy configured and retries remaining
 - Sets `status=PENDING`, increments `retry_count`
 - Sets `next_retry_at` based on retry policy intervals
+- A RUNNING row goes back to PENDING only with `retry_count + 1`, so the next attempt that runs has a greater [fencing token](/horsies/concepts/fencing-token/)
 
 ### PENDING → EXPIRED
 

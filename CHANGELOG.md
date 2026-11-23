@@ -18,10 +18,12 @@ and there is no migration contract between pre-1.0 versions.
   values of one task id and does not depend on the number. No schema
   change and no change of the child protocol. Task code writes the token
   with each write to another system, and the system refuses a write whose
-  token is lower than the token that it holds for the task id. Limits: a
-  rerun, and a workflow node that a resume starts again, get a new task
-  id, and their value starts again at 1; a stale attempt with no later
-  attempt (the task failed, was cancelled or expired) is not refused.
+  token is lower than the token that it holds for the task id. The page
+  [Fencing Token](https://suleymanozkeskin.github.io/horsies/concepts/fencing-token/)
+  gives the pattern and the limits: a rerun, and a workflow node that a
+  resume starts again, get a new task id, and their value starts again
+  at 1; a stale attempt with no later attempt (the task failed, was
+  cancelled or expired) is not refused.
   - Python: a task whose first parameter is `runtime: TaskRuntime` gets
     the `TaskRuntime` of each run from the worker, and reads
     `runtime.fencing_token`, a frozen `FencingToken` (`task_id`, `value`).
