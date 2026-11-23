@@ -109,7 +109,6 @@ export default defineConfig({
 							items: [
 								{ label: 'Errors Reference', slug: 'tasks/errors' },
 								{ label: 'Retry Policy', slug: 'tasks/retry-policy' },
-								{ label: 'Fencing Token', slug: 'concepts/fencing-token' },
 							],
 						},
 						{

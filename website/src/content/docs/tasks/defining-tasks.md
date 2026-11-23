@@ -1,9 +1,9 @@
 ---
 title: Defining Tasks
 section: python
-summary: How to define tasks with the @app.task decorator, and how a task reads the fencing token of its run through the runtime parameter.
-related: [sending-tasks, retrieving-results, ../../concepts/result-handling, ../../concepts/fencing-token]
-tags: [tasks, decorator, definition, TaskRuntime, FencingToken, fencing token]
+summary: How to define tasks with the @app.task decorator.
+related: [sending-tasks, retrieving-results, ../../concepts/result-handling]
+tags: [tasks, decorator, definition]
 ---
 
 # Defining Tasks
@@ -118,93 +118,6 @@ def send_email(*, to: str, subject: str) -> TaskResult[None, TaskError]:
 ```
 
 The queue transmits arguments by name only — the signature is the wire contract. A positionally-bindable parameter (`def f(order_id: int)`) is rejected at registration, so the error surfaces when the app loads, not at send time. With keyword-only parameters, a positional call (`process_order.send(1)`) also fails the type checker at the call site rather than at runtime.
-
-One parameter comes before the `*`: `runtime: TaskRuntime`, which the worker passes. See [Task Runtime](#task-runtime).
-
-### Task Runtime
-
-A task whose first parameter is `runtime: TaskRuntime` gets the runtime of its run. The worker builds one runtime for each run and passes it as the first argument.
-
-```python
-from horsies import FencingToken, TaskRuntime
-
-
-@app.task('reserve_stock')
-def reserve_stock(runtime: TaskRuntime, *, sku: str) -> TaskResult[FencingToken, TaskError]:
-    return TaskResult(ok=runtime.fencing_token)
-```
-
-The rules of the parameter:
-
-- It is the first parameter, before the `*`. Its name is free; the pages use `runtime`.
-- Its annotation is exactly `TaskRuntime`. A run always has a runtime, so `TaskRuntime | None` is refused.
-- It has no default.
-- It is not part of the wire contract. `.send()`, `.schedule()`, a workflow node and a schedule do not supply it, and a kwarg with its name is refused.
-
-`TaskRuntime` in any other place (a keyword-only parameter, a second positional parameter, a field of a model, the ok type of the result) is refused at registration with `HRS-105` (`TASK_STRICT_SIGNATURE_VIOLATION`).
-
-The decorator gives a `RuntimeTaskFunction` for a `def` function and an `AsyncRuntimeTaskFunction` for an `async def` function. Their sends and `node()` take the parameters after the runtime. A direct call takes the runtime first: in a test, pass `TaskRuntime.for_test(...)` ([Testing](/horsies/operations/testing/#pass-a-task-runtime)).
-
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `fencing_token` | `FencingToken` | The fencing token of this attempt. See [Fencing Token](#fencing-token) |
-
-### Fencing Token
-
-An attempt can run on after the worker retried its task, for example when the worker process is paused. horsies refuses the late writes of that attempt to its own tables. It cannot refuse its writes to your systems. Write the fencing token with each such write, and make the store refuse a write whose token is lower than the token that it holds for the task id. The pattern and its limits are on [Fencing Token](/horsies/concepts/fencing-token/).
-
-`runtime.fencing_token` is a frozen `FencingToken`:
-
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `task_id` | `uuid.UUID` | The id of the task. The token orders the attempts of this task only |
-| `value` | `int` | From 1. Strictly greater for each attempt that runs after another attempt of the task |
-
-- Two reads in one attempt give the same token.
-- The value depends on no clock.
-- Today the value is the attempt number, 1 to 21. Compare the values of one task id; do not depend on the number itself.
-
-The task below writes a payment with one conditional statement. The row changes only when no later attempt of the task wrote it.
-
-<!-- check: skip partial -- uses a database connection that the page does not define -->
-```python
-from horsies import FencingToken, TaskRuntime
-
-UPSERT_PAYMENT = """
-INSERT INTO payments (task_id, fence, order_id, cents)
-VALUES (%(task_id)s, %(fence)s, %(order_id)s, %(cents)s)
-ON CONFLICT (task_id) DO UPDATE
-SET fence = EXCLUDED.fence, order_id = EXCLUDED.order_id, cents = EXCLUDED.cents
-WHERE payments.fence <= EXCLUDED.fence
-"""
-
-
-@app.task('record_payment')
-def record_payment(runtime: TaskRuntime, *, order_id: str, cents: int) -> TaskResult[str, TaskError]:
-    token = runtime.fencing_token
-    with connection.cursor() as cursor:
-        cursor.execute(
-            UPSERT_PAYMENT,
-            {'task_id': token.task_id, 'fence': token.value, 'order_id': order_id, 'cents': cents},
-        )
-        written = cursor.rowcount
-    connection.commit()
-    match written:
-        case 0:
-            return TaskResult(err=TaskError(
-                error_code='LATER_ATTEMPT',
-                message='a later attempt of this task holds the fence',
-            ))
-        case _:
-            return TaskResult(ok=order_id)
-```
-
-Limits:
-
-- A rerun, and a workflow node that a resume starts again, get a new task id. Their value starts again at 1.
-- A stale attempt with no later attempt (the task failed, was cancelled or expired) is not refused.
-- A stale attempt that writes before the later attempt took the fence is not refused. Take the fence at the start of the body.
-- The runtime is a plain value. Work that the body starts (a thread, an asyncio task, an executor call) reads the token only when the body passes `runtime` or the token on as an argument.
 
 ### Return Success
 
@@ -644,6 +557,6 @@ def task_two() -> TaskResult[str, TaskError]:
 | `execution` | `Execution` | No | How a worker runs the task: `ISOLATED` (default), `SHARED_ASYNC` or `SHARED_THREAD`. See [Choose the Execution Class](#choose-the-execution-class) |
 | `cancel_grace_ms` | `int` | No | `SHARED_ASYNC` only. The time to stop after a cancel, from 100 to 10,000 ms. Default 1,000 ms |
 
-**Returns:** For a `def` function, a `TaskFunction`: a direct call returns the `TaskResult`. For an `async def` function, an `AsyncTaskFunction`: a direct call returns a coroutine, and `await` gives the `TaskResult`. Both send with `.send()` / `.send_async()`. A function whose first parameter is `runtime: TaskRuntime` gives a `RuntimeTaskFunction` or an `AsyncRuntimeTaskFunction`: the sends do not take the runtime, and a direct call takes it first. See [Task Runtime](#task-runtime).
+**Returns:** For a `def` function, a `TaskFunction`: a direct call returns the `TaskResult`. For an `async def` function, an `AsyncTaskFunction`: a direct call returns a coroutine, and `await` gives the `TaskResult`. Both send with `.send()` / `.send_async()`.
 
 `good_until` is not accepted here — task expiry deadlines are a per-send concern. See [Sending Tasks — Set a Task Deadline](/horsies/tasks/sending-tasks/#set-a-task-deadline).

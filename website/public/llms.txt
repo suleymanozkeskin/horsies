@@ -204,15 +204,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - execution: Execution.ISOLATED (default; def or async def, timeout_ms optional), Execution.SHARED_ASYNC (async def, timeout_ms required), Execution.SHARED_THREAD (def, timeout_ms required); every task row stores the class
 - cancel_grace_ms: SHARED_ASYNC only, 100 to 10000 ms, default 1000 ms; the stored options hold the value in effect at send
 - good_until is NOT accepted at definition time (raises HRS-102) — use .with_options(good_until=...) at send time
-- Returns TaskFunction[P, T] for a def function, AsyncTaskFunction[P, T] for an async def function; with a first parameter runtime: TaskRuntime, RuntimeTaskFunction[P, T] / AsyncRuntimeTaskFunction[P, T] (P = the parameters after the runtime)
-
-### TaskRuntime (first task parameter) and FencingToken
-- def f(runtime: TaskRuntime, *, x: int) -> TaskResult[T, TaskError]: the worker passes the runtime of each run as the first argument
-- Rules: first parameter, before the *; annotation exactly TaskRuntime (not | None); no default; any name; TaskRuntime in any other place raises HRS-105 at definition
-- Not part of the wire contract: .send(), .schedule(), .node()(), schedules and workflow nodes do not supply it; a kwarg with its name is refused
-- runtime.fencing_token -> FencingToken(task_id: uuid.UUID, value: int), frozen; same token for two reads in one attempt; strictly greater value for each later attempt of the task; no clock; today value = attempt number (1 to 21)
-- Direct call in a test: f(TaskRuntime.for_test(task_id=uuid.uuid4(), attempt=2), x=1); for_test raises ValueError outside 1 to 2**31
-- Limits: a rerun or a workflow node started again after a pause gets a new task id (value from 1); a stale attempt with no later attempt is not refused
+- Returns TaskFunction[P, T] for a def function, AsyncTaskFunction[P, T] for an async def function
 
 ### TaskFunction[P, T] (decorated task)
 - .__call__(*args, **kwargs) -> TaskResult[T, TaskError] (sync direct call)
@@ -921,9 +913,6 @@ fan-out, fan-in, parallel, diamond -> /horsies/quick-start/05-workflow-patterns/
 NodeFactory, .node(), typed node builder, type-safe -> /horsies/concepts/workflows/typed-node-builder/
 SubWorkflowSummary, summary_for, has_summary -> /horsies/concepts/workflows/subworkflows/
 WorkflowMeta, workflow_meta, metadata injection -> /horsies/concepts/workflows/workflow-examples/
-TaskRuntime, runtime parameter, RuntimeTaskFunction -> /horsies/tasks/defining-tasks/#task-runtime
-FencingToken, fencing token, stale attempt, conditional write -> /horsies/concepts/fencing-token/
-TaskRuntime.for_test, direct call with a runtime -> /horsies/operations/testing/#pass-a-task-runtime
 WorkflowDefinition, class-based workflow, build, build_with -> /horsies/concepts/workflows/subworkflows/
 ExceptionMapper, exception_mapper, error code mapping -> /horsies/tasks/error-handling/
 good_until, task expiry, deadline, with_options, TaskSendOptions -> /horsies/tasks/sending-tasks/

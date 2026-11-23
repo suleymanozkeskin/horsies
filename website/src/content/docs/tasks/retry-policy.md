@@ -2,7 +2,7 @@
 title: Retry Policy
 section: shared
 summary: When a failed task retries, how the retry delay is computed, the limits of a policy, and how a retry differs from a rerun.
-related: [defining-tasks, ../rust/tasks/defining-tasks, ../concepts/task-lifecycle, ../concepts/fencing-token, ../monitoring/action-semantics]
+related: [defining-tasks, ../rust/tasks/defining-tasks, ../concepts/task-lifecycle, ../monitoring/action-semantics]
 tags: [tasks, retry, backoff]
 ---
 
@@ -80,8 +80,6 @@ The task row holds the retry counters:
 | `max_retries` | The number of retries the policy allows |
 | `next_retry_at` | When the task can be claimed again |
 
-Each retry runs the body with a greater [fencing token](/horsies/concepts/fencing-token/): the token of an attempt is the task id and a value that rises with each attempt.
-
 ## Retry vs Rerun
 
 A retry policy controls the **automatic retry of the same request**: the task row stays live, `retry_count` increases, and each attempt is recorded against one task id.
@@ -95,6 +93,5 @@ A retry policy controls the **automatic retry of the same request**: the task ro
 | Started by | `auto_retry_for` matches the error code | An explicit call |
 | Attempt history | Added to the same task | Belongs to the new task |
 | Requires | A retry policy with retries remaining | A retained enqueue input |
-| Fencing token | Same task id, a greater value | New task id, the value starts again at 1 |
 
 Whether a task can be rerun is decided at enqueue by `retain_rerun_input_default` (with a per-task override), not at rerun time. See [Action Semantics](/horsies/monitoring/action-semantics/#task-rerun).
