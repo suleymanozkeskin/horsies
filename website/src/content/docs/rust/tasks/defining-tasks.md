@@ -1,8 +1,8 @@
 ---
 title: Defining Tasks
-summary: Define a task with #[horsies::task] or #[horsies::blocking_task], choose its execution class and retry codes, and read the app's state with TaskRuntime.
-related: [errors, sending-tasks, ../configuration/app-config, ../../workers/execution-modes, ../../tasks/retry-policy]
-tags: [rust, task, macro, execution, retry, TaskRuntime]
+summary: Define a task with #[horsies::task] or #[horsies::blocking_task], choose its execution class and retry codes, and read the app's state and the fencing token of the run with TaskRuntime.
+related: [errors, sending-tasks, ../configuration/app-config, ../../workers/execution-modes, ../../tasks/retry-policy, ../../concepts/fencing-token]
+tags: [rust, task, macro, execution, retry, TaskRuntime, FencingToken, fencing token]
 ---
 
 # Defining Tasks
@@ -122,7 +122,7 @@ A send before `register` in the process returns `TaskSendError::ValidationFailed
 
 ## Task Runtime
 
-A body whose first parameter is `horsies::TaskRuntime` reads the app's state, the cancel signal of its run, and starts work that belongs to its run.
+A body whose first parameter is `horsies::TaskRuntime` reads the app's state, the cancel signal and the fencing token of its run, and starts work that belongs to its run.
 
 ```rust
 use horsies::{task, TaskError, TaskRuntime, UserErrorCode};
@@ -159,11 +159,94 @@ async fn sync_feed(rt: TaskRuntime, feed_url: String) -> Result<u32, TaskError<F
 | `cancelled()` | A future that completes when the run is cancelled at its deadline |
 | `is_cancelled()` | Whether the run is cancelled; `false` outside the async body of a run |
 | `spawn(name, future)` | `Result<JoinHandle<_>, RunSpawnRefused>`: starts `future` as work of the run |
+| `fencing_token()` | `Result<FencingToken, FencingTokenRefused>`: the task id and the value of the run. See [Fencing Token](#fencing-token) |
 | `task_handle::<A, T, E>(task_name)` | `Result<TaskFunction<A, T, E>, TaskFunctionNotFound>` (`NotRegistered`, `OtherTypes`) |
 
 The cancel signal fires only for a `SHARED_ASYNC` run, at its `timeout_ms`. The run then ends as `TASK_TIMEOUT` whatever the body returns. The body and the work it started with `spawn` have `cancel_grace_ms` to end before the child drops them. In an `ISOLATED` run the worker kills the child at the deadline, so the signal never fires. Outside the async body of a run (a blocking body, a direct call in a test) there is no deadline, and `cancelled()` never completes. The timeout behaviour is on [Shared Async Tasks](/horsies/workers/shared-async-tasks/#the-timeout).
 
 Work started with `spawn` belongs to the run: the child waits for it when the body returns, cancels it after the grace, and reports work that does not stop. Work started with plain `tokio::spawn` is not tracked. `spawn` refuses with `RunSpawnRefused` outside the async body of a run in a worker child, after the run ended, and past `MAX_RUN_WORK` pieces of live work; nothing starts then.
+
+### Fencing Token
+
+A stalled attempt can run on after the worker retries its task. horsies refuses the late writes of that attempt to its own tables. It cannot refuse its writes to your systems. Write the fencing token of the run with each such write, and make the store refuse a write whose token is lower than the token that it holds for the task id. The pattern and its limits are on [Fencing Token](/horsies/concepts/fencing-token/).
+
+`rt.fencing_token()` returns a `FencingToken`:
+
+| Method | Returns |
+|--------|---------|
+| `task_id()` | `Uuid`: the id of the task. The token orders the attempts of this task only |
+| `value()` | `AttemptNumber` (`horsies::events::AttemptNumber`); `value().get()` gives a `u32` |
+
+- Two reads in one attempt give the same token.
+- An attempt that runs after another attempt of the same task gives a greater value.
+- The value depends on no clock.
+- Today the value is the attempt number, 1 to 21. Compare the values of one task id; do not depend on the number itself.
+
+<!-- rust-check: alone -->
+```rust
+use horsies::{task, TaskError, TaskRuntime, UserErrorCode};
+use sqlx::PgPool;
+
+#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+enum PaymentCode {
+    NotConfigured,
+    NotInARun,
+    LaterAttempt,
+    StoreFailed,
+}
+
+// CREATE TABLE payments (task_id uuid PRIMARY KEY, fence bigint NOT NULL,
+//                        order_id text NOT NULL, cents bigint NOT NULL);
+#[task("record_payment")]
+async fn record_payment(
+    rt: TaskRuntime,
+    order_id: String,
+    cents: i64,
+) -> Result<String, TaskError<PaymentCode>> {
+    let pool = rt
+        .state::<PgPool>()
+        .map_err(|missing| TaskError::user(PaymentCode::NotConfigured, missing.to_string()))?;
+    let token = rt
+        .fencing_token()
+        .map_err(|refused| TaskError::user(PaymentCode::NotInARun, refused.to_string()))?;
+    // One conditional write: the row changes only when no later attempt of
+    // this task wrote it.
+    let written = sqlx::query(
+        "INSERT INTO payments (task_id, fence, order_id, cents) VALUES ($1, $2, $3, $4) \
+         ON CONFLICT (task_id) DO UPDATE \
+         SET fence = EXCLUDED.fence, order_id = EXCLUDED.order_id, cents = EXCLUDED.cents \
+         WHERE payments.fence <= EXCLUDED.fence",
+    )
+    .bind(token.task_id())
+    .bind(i64::from(token.value().get()))
+    .bind(&order_id)
+    .bind(cents)
+    .execute(&*pool)
+    .await
+    .map_err(|error| TaskError::user(PaymentCode::StoreFailed, error.to_string()))?;
+    match written.rows_affected() {
+        0 => Err(TaskError::user(
+            PaymentCode::LaterAttempt,
+            "a later attempt of this task holds the fence",
+        )),
+        _ => Ok(order_id),
+    }
+}
+```
+
+`fencing_token()` returns `Err(FencingTokenRefused::NotInARun)` outside a run:
+
+- a direct call of the function in a test;
+- work started with plain `tokio::spawn`, or with `spawn_blocking` from an async body;
+- a thread that a blocking body starts.
+
+The body of a run, work that an async body started with `rt.spawn`, and the thread of a blocking body read the token of the run. In other places, read the token in the body and pass it on.
+
+Limits:
+
+- A rerun, and a workflow node that a resume starts again, get a new task id. Their value starts again at 1.
+- A stale attempt with no later attempt (the task failed, was cancelled or expired) is not refused.
+- A stale attempt that writes before the later attempt took the fence is not refused. Take the fence at the start of the body.
 
 ## Register by Hand
 

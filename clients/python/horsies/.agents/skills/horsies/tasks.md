@@ -48,7 +48,7 @@ def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 - `execution` rules, one code each, checked in this order (the first broken rule is reported): `SHARED_ASYNC` on a `def` function — `HRS-107`; `SHARED_THREAD` on an `async def` function — `HRS-108`; `SHARED_ASYNC` or `SHARED_THREAD` without `timeout_ms` — `HRS-109`; `cancel_grace_ms` with a class other than `SHARED_ASYNC` — `HRS-110`; `cancel_grace_ms` outside 100 to 10,000 — `HRS-111`. A value that is not an `Execution` member raises `HRS-102`.
 - With `execution` written as a member, a type checker refuses the same declarations: the overloads require `timeout_ms` for a shared class and take `cancel_grace_ms` only with `SHARED_ASYNC`, and the decorator they return accepts only the function kind of the class. A class known only at run time requires `timeout_ms`.
 
-Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]` for an `async def` function.
+Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]` for an `async def` function. A function whose first parameter is `runtime: TaskRuntime` gives `RuntimeTaskFunction[P, T]` or `AsyncRuntimeTaskFunction[P, T]`; `P` is the parameters after the runtime. See `TaskRuntime` below.
 
 ### Shared async tasks
 
@@ -83,6 +83,27 @@ Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]`
 - A thread of `asyncio.to_thread()` that outlives its task is not waited for and does not cause a replacement. At the stop, the child does not wait for it past the close (at most 7 seconds): it exits, and `atexit` handlers do not run. An idle executor does not count: its shutdown gets at least 1 second, and so does the close of the async generators.
 - In an `async def` task, send with `.send_async()` / `.schedule_async()`. The sync `.send()` / `.schedule()` return `Err(TaskSendAsyncContext)` there and enqueue nothing.
 - An exception, a wrong return, and the exception mappers give the same `TaskResult` as in a `def` task.
+
+## `TaskRuntime` and the fencing token
+
+A task whose first parameter is `runtime: TaskRuntime` gets the runtime of its run. The worker builds one for each run and passes it as the first argument.
+
+```python
+from horsies import FencingToken, TaskRuntime
+
+
+@app.task('read_fence')
+def read_fence(runtime: TaskRuntime, *, order_id: str) -> TaskResult[FencingToken, TaskError]:
+    return TaskResult(ok=runtime.fencing_token)
+```
+
+- Rules: the first parameter, before the `*`; the annotation is exactly `TaskRuntime` (not `TaskRuntime | None`); no default; any name. `TaskRuntime` in any other place (keyword-only, a second positional parameter, a model field, the ok type) raises `HRS-105`.
+- Not part of the wire contract: `.send()`, `.schedule()`, `.node()()`, a schedule and a workflow node do not supply it. A kwarg with its name is refused (`TaskSendValidationFailed`, `HRS-205` for a schedule, `WORKFLOW_KWARGS_NOT_SERIALIZABLE` for a node).
+- Direct call (tests): `read_fence(TaskRuntime.for_test(task_id=uuid.uuid4(), attempt=2), order_id='o-1')`. `for_test` raises `ValueError` for an attempt outside 1 to `2**31`.
+- `runtime.fencing_token` is a frozen `FencingToken(task_id: uuid.UUID, value: int)`. Two reads in one attempt give the same token. An attempt that runs after another attempt of the same task gives a strictly greater `value`. No clock. Today `value` is the attempt number (1 to 21); compare values of one task id, do not depend on the number.
+- Pattern: use the task id in the fence key; at the start of the body take the fence (write the token when the stored value is lower or equal; no row changed means a later attempt holds it: stop); make each later write conditional on the stored value (one conditional statement, or a transaction that locks the fence row `FOR SHARE`). A read with no lock, then a write, is not enough.
+- Limits: a rerun and a workflow node that a resume starts again get a new task id, value from 1; a stale attempt with no later attempt (failed, cancelled, expired) is not refused; a write before the later attempt took the fence is not refused; two writes in one attempt have the same token (use an idempotency key); not exactly-once; work that the body starts reads the token only when the body passes it on.
+- Docs: `concepts/fencing-token`, `tasks/defining-tasks` (Task Runtime, Fencing Token), `operations/testing` (Pass a Task Runtime).
 
 ## `TaskResult[T, TaskError]`
 
@@ -251,6 +272,8 @@ task_name: str
 def __call__(*args: P.args, **kwargs: P.kwargs) -> TaskResult[T, TaskError]
 # AsyncTaskFunction[P, T] (an async def task) differs only here:
 # def __call__(*args: P.args, **kwargs: P.kwargs) -> Coroutine[Any, Any, TaskResult[T, TaskError]]
+# RuntimeTaskFunction[P, T] / AsyncRuntimeTaskFunction[P, T] take the runtime first:
+# def __call__(runtime: TaskRuntime, /, *args: P.args, **kwargs: P.kwargs) -> ...
 
 # Enqueue for background execution
 def send(*args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHandle[T]]

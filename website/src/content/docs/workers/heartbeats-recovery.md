@@ -2,7 +2,7 @@
 title: Heartbeats & Recovery
 section: shared
 summary: Detecting and recovering from worker crashes via heartbeats and the worker liveness lock.
-related: [../../configuration/recovery-config, worker-architecture]
+related: [../../configuration/recovery-config, worker-architecture, ../../concepts/fencing-token]
 tags: [workers, heartbeats, recovery, crash-detection]
 ---
 
@@ -75,7 +75,7 @@ The worker confirms the lock every 5 seconds. After a lost connection, it opens 
 - With no task held, no task is at risk. The worker logs it, runs on, and keeps taking the lock again. A task that it starts before the lock is held again makes it fail closed.
 - With `auto_fail_stale_running=False`, no reaper recovers a RUNNING row, so the worker logs it and runs on.
 
-A worker that is alive but stalled, for example a process paused by `SIGSTOP`, keeps its connection and so keeps its lock.
+A worker that is alive but stalled, for example a process paused by `SIGSTOP`, keeps its connection and so keeps its lock. Its children run on, and the task of such a child can be retried while it runs. The late writes of that attempt to horsies tables are refused; for its writes to other systems, use the [fencing token](/horsies/concepts/fencing-token/).
 
 Each reaper pass reads the owners of CLAIMED and RUNNING rows whose lock no session holds, each with the generation of its last acquisition. The read takes no lock. An owner is gone when all of these are true:
 
@@ -311,7 +311,7 @@ With `auto_fail_stale_running` on, a worker that cannot write runner heartbeats 
 
 Raise `running_stale_threshold_ms`, for example to 600,000 (10 minutes).
 
-The [liveness lock](#worker-liveness-lock) does not recover the tasks of a paused worker: it keeps its lock. With `auto_fail_stale_running=True`, it does not recover the tasks of a live worker either. A worker whose lock is not held for 60 seconds ends before a reaper can judge it gone. A worker that takes its lock again writes a new generation, so two losses of its lock do not count as one.
+The [liveness lock](#worker-liveness-lock) does not recover the tasks of a paused worker: it keeps its lock. When the reaper retries such a task while the first attempt still runs, the [fencing token](/horsies/concepts/fencing-token/) lets your store refuse the late writes of the first attempt. With `auto_fail_stale_running=True`, it does not recover the tasks of a live worker either. A worker whose lock is not held for 60 seconds ends before a reaper can judge it gone. A worker that takes its lock again writes a new generation, so two losses of its lock do not count as one.
 
 ### Worker Exits With Code 79
 

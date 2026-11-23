@@ -13,6 +13,42 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
+### Added
+
+- **A fencing token for task code, in both clients.** A task reads the
+  fencing token of its run: the task id and a value. Two reads in one
+  attempt give the same token. An attempt that runs after another attempt
+  of the same task gives a strictly greater value. The value depends on no
+  clock. Today the value is the attempt number, from 1; code compares the
+  values of one task id and does not depend on the number. No schema
+  change and no change of the child protocol. Task code writes the token
+  with each write to another system, and the system refuses a write whose
+  token is lower than the token that it holds for the task id. The page
+  [Fencing Token](https://suleymanozkeskin.github.io/horsies/concepts/fencing-token/)
+  gives the pattern and the limits: a rerun, and a workflow node that a
+  resume starts again, get a new task id, and their value starts again
+  at 1; a stale attempt with no later attempt (the task failed, was
+  cancelled or expired) is not refused.
+  - Python: a task whose first parameter is `runtime: TaskRuntime` gets
+    the `TaskRuntime` of each run from the worker, and reads
+    `runtime.fencing_token`, a frozen `FencingToken` (`task_id`, `value`).
+    The parameter comes before the `*`, is annotated exactly `TaskRuntime`
+    and has no default. It is not part of the wire contract: a send, a
+    schedule and a workflow node do not supply it, and a kwarg with its
+    name is refused. `TaskRuntime` in any other place of a task signature
+    raises `HRS-105`. The decorator gives a `RuntimeTaskFunction` or an
+    `AsyncRuntimeTaskFunction`, whose sends do not take the runtime. A test
+    that calls the task directly passes `TaskRuntime.for_test(task_id=...,
+    attempt=...)`. `horsies` exports `TaskRuntime` and `FencingToken`.
+  - Rust: `TaskRuntime::fencing_token()` returns `Result<FencingToken,
+    FencingTokenRefused>`. `FencingToken::task_id()` gives the task id and
+    `FencingToken::value()` an `AttemptNumber`. The async body, work that
+    it starts with `TaskRuntime::spawn`, and the thread of a blocking body
+    read the token of the run; a direct call in a test, plain
+    `tokio::spawn` and a thread that the body starts get
+    `FencingTokenRefused::NotInARun`. `horsies-core` exports
+    `run_fencing_token`, `FencingToken` and `FencingTokenRefused`.
+
 ### Changed
 
 - **Rust crates: a large payload of an error or read type is boxed.** The

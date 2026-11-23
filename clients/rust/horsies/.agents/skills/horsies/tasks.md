@@ -171,7 +171,8 @@ What the library records:
 ## `TaskRuntime`
 
 A first parameter of type `horsies::TaskRuntime` gives the body the app's
-state, the cancel signal of its run, and work that belongs to its run.
+state, the cancel signal and the fencing token of its run, and work that
+belongs to its run.
 
 ```rust
 use horsies::{task, Horsies, HorsiesError, TaskError, TaskRuntime, UserErrorCode};
@@ -206,12 +207,55 @@ fn register_mail(app: &mut Horsies) -> Result<(), HorsiesError> {
 | `cancelled()` | A future that completes when the run is cancelled at its deadline |
 | `is_cancelled()` | Whether the run is cancelled; `false` outside the async body of a run |
 | `spawn(name, future)` | `Result<tokio::task::JoinHandle<_>, RunSpawnRefused>`: starts `future` as work of the run |
+| `fencing_token()` | `Result<FencingToken, FencingTokenRefused>`: the task id (`task_id()`) and the value (`value().get()`) of the run |
 | `task_handle::<A, T, E>(task_name)` | `Result<TaskFunction<A, T, E>, TaskFunctionNotFound>` |
 | `start::<T>(&spec)`, `start_with_id::<T>(&spec, workflow_id)` | Starts a workflow that the task built (see `workflows.md`) |
 
 - Each process builds its own state: every worker child runs `main` again.
 - `provide` refuses a second value of one type (wrap it in a newtype) and a
   value provided after a body read the state.
+
+### Fencing Token
+
+A stalled attempt can run on after the worker retries its task. Write the
+fencing token with each write to another system, and make that write
+conditional: the store refuses a token lower than the one it holds for the
+task id. Two reads in one attempt give the same token; a later attempt of
+the same task gives a greater value; the value depends on no clock. Today
+the value is the attempt number: compare values of one task id, and do not
+depend on the number.
+
+```rust
+use horsies::{task, TaskError, TaskRuntime, UserErrorCode};
+
+#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+enum ExportCode {
+    NotInARun,
+}
+
+#[task("export_report")]
+async fn export_report(
+    rt: TaskRuntime,
+    report_id: String,
+) -> Result<String, TaskError<ExportCode>> {
+    let token = rt
+        .fencing_token()
+        .map_err(|refused| TaskError::user(ExportCode::NotInARun, refused.to_string()))?;
+    // UPDATE exports SET fence = $2, ... WHERE task_id = $1 AND fence <= $2
+    // Zero rows changed: a later attempt holds the fence, so stop.
+    Ok(format!("{report_id}:{}:{}", token.task_id(), token.value().get()))
+}
+```
+
+- Outside a run (a direct call in a test, plain `tokio::spawn`,
+  `spawn_blocking` from an async body, a thread that a blocking body
+  starts) `fencing_token()` is `Err(FencingTokenRefused::NotInARun)`: read
+  the token in the body and pass it on. `rt.spawn` work reads the token of
+  its run.
+- Limits: a rerun or a workflow node that a resume starts again gets a new
+  task id and starts again at 1; a stale attempt with no later attempt, or
+  one that writes before the later attempt took the fence, is not refused.
+  Shared docs page `concepts/fencing-token`.
 
 ## The Cancel at the Deadline
 
@@ -696,6 +740,7 @@ no codes of its own.
 use horsies::{
     // Task definition
     blocking_task, task, UserErrorCode, TaskError, TaskErrorCode, TaskRuntime,
+    FencingToken, FencingTokenRefused,
     StoredDateTime, RetryPolicy, RetryPolicyError, Execution, TaskOptions,
     RegisteredTask, async_task_fn, blocking_task_fn,
     // Library codes
