@@ -429,7 +429,7 @@ async fn an_isolated_child_gets_the_cancel_and_ends_the_run_cancelled() {
         route_cancel_when_held(&live, &first).await;
 
         assert_eq!(answer_of(receiver).await, cancelled(end), "{body:?}");
-        assert_eq!(live.held_task_ids(), Vec::new());
+        assert!(live.held_task_ids().is_empty());
         assert_eq!(
             live.request_cancel(first.task_id, claimed_at()),
             CancelRouting::NotHeld
@@ -701,7 +701,7 @@ async fn a_shared_child_gets_the_cancel_and_ends_the_run_cancelled() {
             route_cancel_when_held(&live, &first).await;
 
             assert_eq!(answer_of(receiver).await, cancelled(end), "{kind} {body:?}");
-            assert_eq!(live.held_task_ids(), Vec::new());
+            assert!(live.held_task_ids().is_empty());
             stop_shared(pool, spawner).await;
         }
     }
