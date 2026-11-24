@@ -124,71 +124,75 @@ export function endpointMark(endpoint: NodeEndpoint, axis: TimeAxis): EndpointMa
   }
 }
 
-/** The wall time of a node: from its first segment start to the latest of
- * its segment ends and its endpoint. A task that runs on after a workflow
- * cancel ends after the endpoint, and the wall time includes it. */
-export type NodeWallTime =
-  | { kind: 'measured'; ms: number }
-  | { kind: 'no_segments' };
-
-export function nodeWallTime(
-  segments: readonly TimingSegment[],
-  endpoint: NodeEndpoint,
-  drawAtMs: number
-): NodeWallTime {
-  if (segments.length === 0) {
-    return { kind: 'no_segments' };
-  }
-  let firstMs = Number.POSITIVE_INFINITY;
-  let lastMs = Number.NEGATIVE_INFINITY;
-  for (const segment of segments) {
-    const span = segmentSpan(segment, drawAtMs);
-    firstMs = Math.min(firstMs, span.startMs);
-    lastMs = Math.max(lastMs, span.endMs);
-  }
-  switch (endpoint.kind) {
-    case 'terminal':
-      lastMs = Math.max(lastMs, instantMs(endpoint.at));
-      break;
-    case 'not_terminal':
-      break;
-    default:
-      return assertNever(endpoint, 'node endpoint');
-  }
-  return { kind: 'measured', ms: Math.max(lastMs - firstMs, 0) };
+/** One interval of a phase, for a total: its phase, its time span, and
+ * whether it has no end yet. */
+export interface PhaseInterval {
+  key: PhaseKey;
+  startMs: number;
+  endMs: number;
+  open: boolean;
 }
 
-/** The time of one phase in a node, and its part of the node total. */
-export interface PhaseShare {
+/** The time of one phase over a set of intervals. */
+export interface PhaseTotal {
   key: PhaseKey;
+  /** The time of the phase, summed over its intervals. */
   ms: number;
-  fraction: number;
+  /** The time of its longest interval: a sum of short intervals is not one
+   * long step. */
+  longestMs: number;
+  /** True when an interval of the phase has no end yet. */
+  open: boolean;
+}
+
+/**
+ * The time of each phase in the intervals, in lifecycle order. An interval
+ * whose times are in the wrong order counts as no time. A phase with no time
+ * is left out; with no time at all the list is empty.
+ */
+export function phaseTotals(intervals: readonly PhaseInterval[]): PhaseTotal[] {
+  const totals = new Map<PhaseKey, PhaseTotal>();
+  for (const interval of intervals) {
+    const ms = Math.max(interval.endMs - interval.startMs, 0);
+    const total = totals.get(interval.key) ?? {
+      key: interval.key,
+      ms: 0,
+      longestMs: 0,
+      open: false,
+    };
+    totals.set(interval.key, {
+      key: interval.key,
+      ms: total.ms + ms,
+      longestMs: Math.max(total.longestMs, ms),
+      open: total.open || interval.open,
+    });
+  }
+  return PHASE_ORDER.flatMap(key => {
+    const total = totals.get(key);
+    return total !== undefined && total.ms > 0 ? [total] : [];
+  });
+}
+
+/** One segment as an interval; an open segment ends at the draw time. */
+export function segmentInterval(segment: TimingSegment, drawAtMs: number): PhaseInterval {
+  const span = segmentSpan(segment, drawAtMs);
+  return {
+    key: segment.phase.kind,
+    startMs: span.startMs,
+    endMs: span.endMs,
+    open: segment.end.kind === 'open',
+  };
 }
 
 /**
  * The time of each phase in the segments, summed over retries and
- * generations, in lifecycle order. A phase with no time is left out; with
- * no time at all the list is empty.
+ * generations, in lifecycle order.
  */
 export function phaseComposition(
   segments: readonly TimingSegment[],
   drawAtMs: number
-): PhaseShare[] {
-  const totals = new Map<PhaseKey, number>();
-  let totalMs = 0;
-  for (const segment of segments) {
-    const span = segmentSpan(segment, drawAtMs);
-    const ms = Math.max(span.endMs - span.startMs, 0);
-    totals.set(segment.phase.kind, (totals.get(segment.phase.kind) ?? 0) + ms);
-    totalMs += ms;
-  }
-  if (totalMs === 0) {
-    return [];
-  }
-  return PHASE_ORDER.flatMap(key => {
-    const ms = totals.get(key) ?? 0;
-    return ms > 0 ? [{ key, ms, fraction: ms / totalMs }] : [];
-  });
+): PhaseTotal[] {
+  return phaseTotals(segments.map(segment => segmentInterval(segment, drawAtMs)));
 }
 
 /** True when a segment of the node has no end yet. */

@@ -8,9 +8,9 @@ import { useLocalStorage } from '@/hooks/use-local-storage';
 import type { WorkflowSearch, WorkflowSearchPatch } from '@/routes/search';
 import type { WorkflowNode, WorkflowStatus } from '@/types/workflows';
 
-import { Legend, PhaseLegend } from './legend';
 import { NodeDetailContent } from './node-detail';
 import { RunList } from './run-list';
+import { RunTimingSummary } from './run-summary';
 import { WorkflowGraph } from './workflow-graph';
 import { WorkflowTimeline } from './workflow-timeline';
 
@@ -65,7 +65,7 @@ export function WorkflowExplorer({
   const workflow = useWorkflowActions(runId);
   const runDetail = workflow.detail;
 
-  // Legend-driven status filter: toggling a status fades nodes of other
+  // Status filter of the run summary: toggling a status fades nodes of other
   // statuses (empty set = show everything).
   const toggleStatusFilter = (status: WorkflowStatus): void =>
     setStatusFilter(previous => {
@@ -241,9 +241,6 @@ export function WorkflowExplorer({
                   Timeline
                 </button>
               </div>
-              <div className="hidden shrink-0 lg:block">
-                <Legend active={statusFilter} onToggle={toggleStatusFilter} />
-              </div>
             </>
           ) : (
             <span className="text-muted-foreground">
@@ -252,9 +249,11 @@ export function WorkflowExplorer({
           )}
         </div>
         {runId !== null && runDetail !== undefined && (
-          <div className="hidden border-b border-border px-3 py-1 md:block">
-            <PhaseLegend />
-          </div>
+          <RunTimingSummary
+            workflowId={runId}
+            statusFilter={statusFilter}
+            onToggleStatus={toggleStatusFilter}
+          />
         )}
         <div className="min-h-0 flex-1">
           {runId !== null && viewMode === 'graph' ? (
@@ -265,6 +264,7 @@ export function WorkflowExplorer({
               onDrillInto={(subId, label) => pushGraph(subId, label)}
               onFocusNode={node => focusDetail(runId, node)}
               statusFilter={statusFilter}
+              countsPlacement="in_run_summary"
             />
           ) : runId !== null && viewMode === 'timeline' ? (
             <WorkflowTimeline
@@ -348,6 +348,7 @@ export function WorkflowExplorer({
                   onSelectNode={node => pushDetail(top.workflowId, node)}
                   onDrillInto={(subId, label) => pushGraph(subId, label)}
                   statusFilter={statusFilter}
+                  countsPlacement="in_graph"
                 />
               )}
             </div>
