@@ -264,7 +264,7 @@ export function RunTimingSummaryView({
   switch (timing.kind) {
     case 'unavailable':
       return (
-        <section aria-label="Run summary" className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b border-border px-3 py-2">
+        <section aria-label="Run summary" className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b border-hairline pb-3">
           <span className="text-xs text-muted-foreground">
             Timing unavailable. {unavailableReasonText(timing.reason)}
           </span>
@@ -278,7 +278,7 @@ export function RunTimingSummaryView({
       return (
         <section
           aria-label="Run summary"
-          className="flex flex-wrap items-baseline gap-x-5 gap-y-1 border-b border-border px-3 py-2"
+          className="flex flex-wrap items-baseline gap-x-5 gap-y-1 border-b border-hairline pb-3"
         >
           <Hint
             text="The duration of the run: from its start to its last recorded time."

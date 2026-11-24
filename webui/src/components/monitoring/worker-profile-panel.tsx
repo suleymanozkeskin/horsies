@@ -294,9 +294,10 @@ function groupCounts(group: WorkerGroup): string {
 }
 
 /**
- * The live workers of one profile as a panel: the profile name and the
- * counts in the header, then what the profile gives a worker and the load of
- * each budget summed over the workers, then the workers (`children`).
+ * The live workers of one profile as a flat group below a hairline: the
+ * profile name and the counts in the header, then what the profile gives a
+ * worker and the load of each budget summed over the workers, then the
+ * workers (`children`). Only the worker cards are boxes.
  */
 export function WorkerProfilePanel({
   group,
@@ -313,9 +314,9 @@ export function WorkerProfilePanel({
     <div
       role="group"
       aria-label={profileLabel(group.profile)}
-      className="glass overflow-hidden rounded-xl border border-border"
+      className="flex flex-col gap-3 border-t border-hairline pt-3"
     >
-      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-border px-4 py-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <ProfileTitle profile={group.profile} />
         <span className="text-11 tabular-nums text-muted-foreground">
           {groupCounts(group)}
@@ -327,11 +328,11 @@ export function WorkerProfilePanel({
           )}
         </span>
       </div>
-      <div className="flex flex-col gap-3 px-4 py-3">
+      <div className="flex flex-col gap-3">
         <ProfileNote profile={group.profile} />
         <GroupBody group={group} reportRead={reportRead} />
       </div>
-      <div className="border-t border-border p-3">{children}</div>
+      {children}
     </div>
   );
 }

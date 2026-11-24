@@ -492,7 +492,7 @@ function TimelineKey({
         ...(hasCriticalPath ? (['critical_row'] as const) : []),
       ];
       return (
-        <div className="border-b border-border px-3 py-1.5">
+        <div className="border-b border-hairline px-3 py-1.5">
           <TimingLegend phases={phases} marks={marks} />
         </div>
       );
@@ -506,7 +506,7 @@ function RunTimingBanner({ frame }: { frame: TimelineFrame }) {
   switch (frame.kind) {
     case 'unavailable':
       return (
-        <p className="border-b border-border px-3 py-1.5 text-xs text-muted-foreground">
+        <p className="border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground">
           Timing unavailable. {unavailableReasonText(frame.reason)} The lifecycle
           record starts at {formatInstant(frame.capturedSinceMs)}.
         </p>
@@ -515,7 +515,7 @@ function RunTimingBanner({ frame }: { frame: TimelineFrame }) {
       const text = runCoverageText(frame.coverage);
       return text === null ? null : (
         <p
-          className="border-b border-border px-3 py-1.5 text-xs"
+          className="border-b border-hairline px-3 py-1.5 text-xs"
           style={{
             color:
               frame.coverage.kind === 'inconsistent'
@@ -567,7 +567,7 @@ function TimelineHeader({
   trackRef: RefObject<HTMLSpanElement | null>;
 }) {
   return (
-    <div className="flex items-center gap-2 border-b border-border px-3 py-1.5 text-xs text-muted-foreground">
+    <div className="flex items-center gap-2 border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground">
       <span className="w-40 shrink-0">node</span>
       <span ref={trackRef} className="relative h-4 min-w-0 flex-1" aria-hidden>
         {frame.kind === 'composed' &&
@@ -937,8 +937,8 @@ function TimelineRow({
         style={{ opacity: dimmed ? 0.35 : 1 }}
         className={
           selected
-            ? 'flex h-full w-full items-center gap-2 border-b border-border bg-accent-surface px-3 text-left focus-visible:outline-2 focus-visible:outline-ring'
-            : 'flex h-full w-full items-center gap-2 border-b border-border px-3 text-left hover:bg-glass-surface-strong focus-visible:outline-2 focus-visible:outline-ring'
+            ? 'flex h-full w-full items-center gap-2 border-b border-hairline bg-accent-surface px-3 text-left focus-visible:outline-2 focus-visible:outline-ring'
+            : 'flex h-full w-full items-center gap-2 border-b border-hairline px-3 text-left hover:bg-surface-hover focus-visible:outline-2 focus-visible:outline-ring'
         }
       >
         <span className="w-40 shrink-0 truncate text-xs font-medium" title={nodeLabel(node)}>

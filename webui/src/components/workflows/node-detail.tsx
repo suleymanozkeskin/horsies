@@ -20,9 +20,9 @@ interface NodeDetailContentProps {
 
 /** Detail body for one node: status and task, the one node timing summary,
  * the node error, and the attempts. Chrome-less — the surrounding panel owns
- * the header/close/resize. A node error that an attempt shows as its message
- * is not shown twice, and a skipped node, which never has an attempt, has no
- * attempts section. */
+ * the header/close/resize and the inline padding. A node error that an
+ * attempt shows as its message is not shown twice, and a skipped node, which
+ * never has an attempt, has no attempts section. */
 export function NodeDetailContent({
   workflowId,
   runStatus,
@@ -44,18 +44,18 @@ export function NodeDetailContent({
     node.node_status === 'SKIPPED' && (detail?.attempts.length ?? 0) === 0;
 
   return (
-    <div className="flex flex-col gap-4 p-4">
+    <div className="flex flex-col gap-4 py-4">
       <div className="flex flex-col gap-1.5">
         <span className="inline-flex flex-wrap items-center gap-2">
           <StatusChip status={node.node_status} />
           {residual !== null && (
-            <span className="rounded-full border border-border px-2 py-0.5 text-10 uppercase text-muted-foreground">
+            <span className="rounded-full border border-hairline-strong px-2 py-0.5 text-10 uppercase text-muted-foreground">
               {RESIDUAL_COPY[residual].badge}
             </span>
           )}
           {node.allow_failed_deps && (
             <Hint text="Tolerant join: the node runs even when a dependency failed. The graph draws it with a dashed border.">
-              <span className="rounded-full border border-dashed border-border px-2 py-0.5 text-10 text-muted-foreground">
+              <span className="rounded-full border border-dashed border-hairline-strong px-2 py-0.5 text-10 text-muted-foreground">
                 tolerant join
               </span>
             </Hint>
@@ -89,7 +89,7 @@ export function NodeDetailContent({
           <span className="text-xs uppercase tracking-wide text-muted-foreground">
             Node error
           </span>
-          <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-glass-field p-2 font-mono text-11 leading-snug">
+          <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-glass-inset p-2 font-mono text-11 leading-snug">
             {nodeError}
           </pre>
         </div>

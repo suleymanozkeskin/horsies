@@ -186,17 +186,15 @@ export function schedulePanelState(read: {
   return read.isLoading ? { kind: 'loading' } : { kind: 'none_registered' };
 }
 
-/** The schedule panel: each registered schedule with its last run, its next
+/** The schedule section: each registered schedule with its last run, its next
  * run and its run count. A click on a column header sorts by that column.
  * The sort stays while the table polls. */
 export function SchedulesTable() {
   const state = schedulePanelState(useSchedules());
   const [sort, setSort] = useState<ScheduleSort>(DEFAULT_SCHEDULE_SORT);
   return (
-    <div className="glass overflow-hidden rounded-xl border border-border">
-      <div className="border-b border-border px-4 py-3 text-sm font-medium">
-        Schedules
-      </div>
+    <div className="flex flex-col">
+      <div className="pb-1 text-sm font-semibold">Schedules</div>
       <SchedulePanelBody
         state={state}
         sort={sort}
@@ -218,17 +216,17 @@ function SchedulePanelBody({
   switch (state.kind) {
     case 'failed':
       return (
-        <div className="p-4">
+        <div className="py-2">
           <ErrorState compact message="Could not load schedules." />
         </div>
       );
     case 'loading':
       return (
-        <p className="p-4 text-sm text-muted-foreground">Loading schedules…</p>
+        <p className="py-2 text-sm text-muted-foreground">Loading schedules…</p>
       );
     case 'none_registered':
       return (
-        <p className="p-4 text-sm text-muted-foreground">
+        <p className="py-2 text-sm text-muted-foreground">
           No schedules registered.
         </p>
       );

@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 
-import { ChevronLeft, ChevronRight, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, RotateCcw, X } from 'lucide-react';
 import {
   ShadStackTable,
   useShadStackTable,
@@ -13,6 +13,8 @@ import { TaskActionBar } from '@/actions/action-bar';
 import { useTaskActions } from '@/actions/use-task-actions';
 import { StatusChip } from '@/components/ui/status-chip';
 import { Button } from '@/components/ui/button';
+import { Capsule, CapsuleSeparator } from '@/components/ui/capsule';
+import { PageHeader } from '@/components/ui/page-header';
 import { Toggle } from '@/components/ui/toggle';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { useMeta } from '@/hooks/use-meta';
@@ -59,6 +61,11 @@ export interface TaskExplorerProps {
   onSearchChange: (patch: TaskSearchPatch) => void;
 }
 
+/** The page header count: `1 task`, `12,345 tasks`. */
+function taskCountText(count: number): string {
+  return `${count.toLocaleString()} ${count === 1 ? 'task' : 'tasks'}`;
+}
+
 function TaskDetailPanel({
   taskId,
   onClose,
@@ -71,21 +78,24 @@ function TaskDetailPanel({
   const { detail, isLoading, isError } = view;
   const leaf = detail?.leaf;
   return (
-    <aside className="glass flex w-full shrink-0 flex-col overflow-hidden rounded-lg border border-border lg:w-[420px]">
-      <div className="flex items-center justify-between border-b border-border px-4 py-3">
-        <span className="truncate font-mono text-sm" title={detail?.task_name}>
+    <aside className="flex w-full shrink-0 flex-col border-hairline max-lg:border-t max-lg:pt-4 lg:sticky lg:top-[calc(var(--capsule-height)_+_1.5rem)] lg:max-h-[calc(100dvh_-_var(--shell-block)_-_var(--capsule-height)_-_1.5rem)] lg:w-[420px] lg:border-l lg:pl-6">
+      <div className="flex items-center justify-between gap-3 border-b border-hairline pb-3">
+        <span
+          className="truncate font-mono text-sm font-semibold"
+          title={detail?.task_name}
+        >
           {detail?.task_name ?? 'Task'}
         </span>
         <button
           type="button"
           onClick={onClose}
-          className="rounded p-1 text-muted-foreground hover:bg-muted"
+          className="shrink-0 rounded-full p-1.5 text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
           aria-label="Close detail"
         >
           <X className="size-4" />
         </button>
       </div>
-      <div className="flex flex-col gap-4 overflow-y-auto p-4">
+      <div className="-mx-1 flex flex-col gap-4 overflow-y-auto px-1 pt-4 pb-1">
         {isError && detail === undefined ? (
           <ErrorState compact message="Could not load this task." />
         ) : !detail && isLoading ? (
@@ -133,7 +143,7 @@ function TaskDetailPanel({
                   <span className="text-xs uppercase tracking-wide text-muted-foreground">
                     Failure
                   </span>
-                  <pre className="glass mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded p-2 font-mono text-11 leading-snug">
+                  <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-glass-inset p-2 font-mono text-11 leading-snug">
                     {leaf.failed_reason}
                   </pre>
                 </div>
@@ -188,6 +198,8 @@ export function TaskExplorer({ search, onSearchChange }: TaskExplorerProps) {
   const rows = useMemo(() => page?.rows ?? [], [page]);
   const total = page?.total ?? 0;
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  // The task count of the current filter, from whichever query the view runs.
+  const filterTotal = view === 'flat' ? page?.total : breakdown?.total.total;
 
   // Any filter or grouping change resets to the first page: the old offset
   // would point into a different result set.
@@ -360,8 +372,11 @@ export function TaskExplorer({ search, onSearchChange }: TaskExplorerProps) {
     enableColumnActions: false,
     enableTopToolbar: false,
     enableBottomToolbar: false,
-    enableStickyHeader: true,
+    // The window is the scroll container. A sticky header makes the grid cap
+    // its own height near the viewport and scroll inside the window.
+    enableStickyHeader: false,
     enableMultiSort: false,
+    initialState: { density: 'compact' },
     pageCount,
     // Drive the loading state from the initial load only. `isFetching` is true
     // on every background poll; folding it in would flash the whole grid each
@@ -389,16 +404,26 @@ export function TaskExplorer({ search, onSearchChange }: TaskExplorerProps) {
       });
     },
     theme: { baseBackgroundColor: 'var(--glass-table)' },
+    // The grid sits flat on the window: the paper's border, radius and shadow,
+    // the head's card fill and the head row's shadow are switched off. The
+    // grid paints an inline background on every row and `inherit` on every
+    // cell, so the row states take the important modifier to win over it, and
+    // the hover paints the cells only, so the translucent token is painted
+    // once.
     slotProps: {
-      tableContainer: {
-        className: 'max-h-[calc(100vh-26rem)] overscroll-contain',
+      tablePaper: { className: 'rounded-none border-0 shadow-none' },
+      tableHead: { className: 'bg-transparent' },
+      tableHeadRow: { style: { boxShadow: 'none' } },
+      tableHeadCell: {
+        className: 'border-hairline text-xs font-semibold text-muted-foreground',
       },
-      tablePaper: { className: 'glass rounded-lg overflow-hidden' },
       tableBodyRow: ({ row }) => ({
         onClick: () => onSearchChange({ task: row.original.id }),
         className: cn(
-          'cursor-pointer',
-          row.original.id === selectedId && 'bg-accent-surface'
+          'cursor-pointer border-hairline',
+          row.original.id === selectedId
+            ? 'bg-accent-surface!'
+            : '[&:hover>td]:bg-surface-hover!'
         ),
       }),
     },
@@ -409,6 +434,9 @@ export function TaskExplorer({ search, onSearchChange }: TaskExplorerProps) {
 
   return (
     <div className="flex flex-col gap-4">
+      <PageHeader title="Tasks">
+        {filterTotal === undefined ? undefined : taskCountText(filterTotal)}
+      </PageHeader>
       <StatsBar
         filters={filters}
         onToggle={status => toggleValue('status', status)}
@@ -419,9 +447,11 @@ export function TaskExplorer({ search, onSearchChange }: TaskExplorerProps) {
         onToggle={category => toggleValue('error_category', category)}
       />
 
-      <div className="glass flex flex-wrap items-end gap-3 rounded-lg border border-border px-3 py-2">
-        <div className="flex flex-col gap-1">
-          <span className="text-xs font-medium text-muted-foreground">View</span>
+      {/* Sticks to the top of the window, which is the scroll container. The
+          wrapper reaches the window edges, so its fade covers the rows that
+          pass under the capsule. */}
+      <div className="sticky top-0 z-20 -my-2.5 py-2.5">
+        <Capsule className="max-w-full overflow-x-auto whitespace-nowrap [scrollbar-width:none]">
           <ToggleGroup
             type="single"
             value={view}
@@ -432,42 +462,42 @@ export function TaskExplorer({ search, onSearchChange }: TaskExplorerProps) {
                 page: undefined,
               })
             }
-            variant="outline"
-            size="sm"
+            variant="segment"
+            size="capsule"
+            className="gap-0.5"
+            aria-label="View"
           >
             <ToggleGroupItem value="flat">Flat</ToggleGroupItem>
             <ToggleGroupItem value="worker">By worker</ToggleGroupItem>
             <ToggleGroupItem value="task_name">By task</ToggleGroupItem>
             <ToggleGroupItem value="queue">By queue</ToggleGroupItem>
           </ToggleGroup>
-        </div>
-
-        <FacetCombobox
-          label="Worker"
-          options={toOptions(facets?.workers)}
-          value={search.worker ?? []}
-          onChange={values => setDimension('worker', values)}
-        />
-        <FacetCombobox
-          label="Task"
-          options={toOptions(facets?.task_names)}
-          value={search.task_name ?? []}
-          onChange={values => setDimension('task_name', values)}
-        />
-        <FacetCombobox
-          label="Queue"
-          options={toOptions(facets?.queues)}
-          value={search.queue ?? []}
-          onChange={values => setDimension('queue', values)}
-        />
-        <FacetCombobox
-          label="Error code"
-          options={errorOptions}
-          value={search.error_code ?? []}
-          onChange={values => setDimension('error_code', values)}
-        />
-        <div className="flex flex-col gap-1">
-          <span className="text-xs font-medium text-muted-foreground">Retried</span>
+          <CapsuleSeparator />
+          <FacetCombobox
+            label="Worker"
+            options={toOptions(facets?.workers)}
+            value={search.worker ?? []}
+            onChange={values => setDimension('worker', values)}
+          />
+          <FacetCombobox
+            label="Task"
+            options={toOptions(facets?.task_names)}
+            value={search.task_name ?? []}
+            onChange={values => setDimension('task_name', values)}
+          />
+          <FacetCombobox
+            label="Queue"
+            options={toOptions(facets?.queues)}
+            value={search.queue ?? []}
+            onChange={values => setDimension('queue', values)}
+          />
+          <FacetCombobox
+            label="Error code"
+            options={errorOptions}
+            value={search.error_code ?? []}
+            onChange={values => setDimension('error_code', values)}
+          />
+          <CapsuleSeparator />
           <Toggle
             pressed={search.retried === true}
             onPressedChange={pressed =>
@@ -476,27 +506,30 @@ export function TaskExplorer({ search, onSearchChange }: TaskExplorerProps) {
                 page: undefined,
               })
             }
-            variant="outline"
-            size="sm"
-            className="h-8"
+            variant="segment"
+            size="capsule"
           >
+            <RotateCcw />
             retried only
           </Toggle>
-        </div>
-        {hasActiveFilters(search) && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 text-muted-foreground"
-            onClick={clearFilters}
-          >
-            <X className="size-3.5" />
-            Clear filters
-          </Button>
-        )}
+          {hasActiveFilters(search) && (
+            <>
+              <CapsuleSeparator />
+              <Button
+                variant="capsule"
+                size="capsule"
+                className="text-muted-foreground"
+                onClick={clearFilters}
+              >
+                <X />
+                Clear filters
+              </Button>
+            </>
+          )}
+        </Capsule>
       </div>
 
-      <div className="flex flex-col gap-4 lg:flex-row">
+      <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
         <div className="min-w-0 flex-1">
           {view === 'flat' ? (
             isError ? (
@@ -504,7 +537,7 @@ export function TaskExplorer({ search, onSearchChange }: TaskExplorerProps) {
             ) : (
               <>
                 <ShadStackTable table={table} />
-                <div className="glass mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground">
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
                   <span className="flex items-center gap-2">
                     <span className="tabular-nums">
                       {startRow}–{endRow} of {total}
@@ -524,8 +557,9 @@ export function TaskExplorer({ search, onSearchChange }: TaskExplorerProps) {
                               : Number(next),
                         })
                       }
-                      variant="outline"
-                      size="sm"
+                      variant="segment"
+                      size="segment"
+                      className="segment-track gap-0.5 rounded-full p-0.75"
                     >
                       {PAGE_SIZES.map(size => (
                         <ToggleGroupItem key={size} value={String(size)}>
@@ -538,6 +572,7 @@ export function TaskExplorer({ search, onSearchChange }: TaskExplorerProps) {
                     <Button
                       variant="outline"
                       size="sm"
+                      className="h-8 rounded-full"
                       disabled={pageIndex === 0}
                       onClick={() =>
                         onSearchChange({
@@ -553,6 +588,7 @@ export function TaskExplorer({ search, onSearchChange }: TaskExplorerProps) {
                     <Button
                       variant="outline"
                       size="sm"
+                      className="h-8 rounded-full"
                       disabled={pageIndex + 1 >= pageCount}
                       onClick={() => onSearchChange({ page: pageIndex + 2 })}
                     >

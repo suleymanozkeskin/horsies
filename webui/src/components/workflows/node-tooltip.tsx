@@ -100,7 +100,7 @@ export function FloatingTooltip({
     <div
       id={id}
       role="tooltip"
-      className="pointer-events-none fixed z-50 flex flex-col gap-1.5 rounded-md border border-border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md"
+      className="pointer-events-none fixed z-50 flex flex-col gap-1.5 rounded-md border border-hairline-strong bg-popover px-3 py-2 text-xs text-popover-foreground shadow-(--menu-shadow)"
       style={{
         left,
         maxWidth: TOOLTIP_MAX_WIDTH_PX,

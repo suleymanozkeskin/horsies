@@ -14,6 +14,8 @@ import { ChevronLeft, ChevronRight, Search, TriangleAlert } from 'lucide-react';
 import '@xyflow/react/dist/style.css';
 
 import { RESIDUAL_COPY } from '@/actions/copy';
+import { Button } from '@/components/ui/button';
+import { Capsule } from '@/components/ui/capsule';
 import { Hint } from '@/components/ui/hint';
 import { useDrawTime, type ReadClock } from '@/hooks/use-draw-time';
 import { useWorkflowRun } from '@/hooks/use-workflow-run';
@@ -416,93 +418,102 @@ export function WorkflowGraph({
       minZoom={0.1}
       proOptions={{ hideAttribution: true }}
     >
-      {metrics && metrics.total > 0 && (
-        <Panel position="top-left">
-          <div className="glass flex flex-col gap-1.5 rounded-lg px-2.5 py-1.5 text-xs">
-            <GraphCounts metrics={metrics} placement={countsPlacement} />
-            <LongestNodeLine longest={metrics.longest} />
-            <TimingLegend phases={[]} marks={metrics.marks} />
-          </div>
-        </Panel>
-      )}
-      <Panel position="top-right">
-        <div className="glass flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs">
-          <Search className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-          <input
-            type="text"
-            value={search}
-            onChange={event => setSearch(event.target.value)}
-            onKeyDown={event => {
-              if (event.key === 'Enter') {
-                jumpToMatch(searchCursor + (event.shiftKey ? -1 : 1));
-              }
-            }}
-            placeholder="Find node…"
-            aria-label="Find node"
-            className="w-32 bg-transparent text-foreground placeholder:text-muted-foreground focus:outline-none"
-          />
-          {search.trim() !== '' && (
-            <>
-              <span className="tabular-nums text-muted-foreground">
-                {matchIndices.length === 0
-                  ? '0/0'
-                  : `${Math.min(searchCursor, matchIndices.length - 1) + 1}/${matchIndices.length}`}
-              </span>
-              <button
-                type="button"
-                onClick={() => jumpToMatch(searchCursor - 1)}
-                aria-label="Previous match"
-                disabled={matchIndices.length === 0}
-                className="rounded p-0.5 text-muted-foreground hover:text-foreground disabled:opacity-40"
-              >
-                <ChevronLeft className="size-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => jumpToMatch(searchCursor + 1)}
-                aria-label="Next match"
-                disabled={matchIndices.length === 0}
-                className="rounded p-0.5 text-muted-foreground hover:text-foreground disabled:opacity-40"
-              >
-                <ChevronRight className="size-4" />
-              </button>
-            </>
+      {/* One row across the canvas top, so the overlays wrap instead of
+          overlapping on a narrow canvas. The row itself lets pointer events
+          through to the canvas; only the overlays take them. */}
+      <Panel position="top-left" style={{ right: 0, pointerEvents: 'none' }}>
+        <div className="flex flex-wrap items-start gap-2">
+          {metrics && metrics.total > 0 && (
+            <div className="liquid-glass pointer-events-auto flex min-h-(--capsule-height) flex-col justify-center gap-1.5 rounded-2xl px-4 py-1.5 text-xs">
+              <GraphCounts metrics={metrics} placement={countsPlacement} />
+              <LongestNodeLine longest={metrics.longest} />
+              <TimingLegend phases={[]} marks={metrics.marks} />
+            </div>
           )}
+          {failedIndices.length > 0 && (
+            <Capsule className="pointer-events-auto gap-1 pl-3 text-xs">
+              <span
+                className="inline-flex items-center gap-1.5 font-medium"
+                style={{ color: 'var(--error)' }}
+              >
+                <TriangleAlert className="size-3.5" aria-hidden />
+                {failedIndices.length} failed
+              </span>
+              <Button
+                type="button"
+                variant="capsule"
+                size="capsule-icon"
+                onClick={() => jumpToFailure(cursor - 1)}
+                aria-label="Previous failure"
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <ChevronLeft />
+              </Button>
+              <span className="tabular-nums text-muted-foreground">
+                {Math.min(cursor, failedIndices.length - 1) + 1}/
+                {failedIndices.length}
+              </span>
+              <Button
+                type="button"
+                variant="capsule"
+                size="capsule-icon"
+                onClick={() => jumpToFailure(cursor + 1)}
+                aria-label="Next failure"
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <ChevronRight />
+              </Button>
+            </Capsule>
+          )}
+          <Capsule className="pointer-events-auto ml-auto gap-1.5 pl-3 text-xs">
+            <Search className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+            <input
+              type="text"
+              value={search}
+              onChange={event => setSearch(event.target.value)}
+              onKeyDown={event => {
+                if (event.key === 'Enter') {
+                  jumpToMatch(searchCursor + (event.shiftKey ? -1 : 1));
+                }
+              }}
+              placeholder="Find node…"
+              aria-label="Find node"
+              className="w-32 bg-transparent pr-2 text-foreground placeholder:text-muted-foreground focus:outline-none"
+            />
+            {search.trim() !== '' && (
+              <>
+                <span className="tabular-nums text-muted-foreground">
+                  {matchIndices.length === 0
+                    ? '0/0'
+                    : `${Math.min(searchCursor, matchIndices.length - 1) + 1}/${matchIndices.length}`}
+                </span>
+                <Button
+                  type="button"
+                  variant="capsule"
+                  size="capsule-icon"
+                  onClick={() => jumpToMatch(searchCursor - 1)}
+                  aria-label="Previous match"
+                  disabled={matchIndices.length === 0}
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  <ChevronLeft />
+                </Button>
+                <Button
+                  type="button"
+                  variant="capsule"
+                  size="capsule-icon"
+                  onClick={() => jumpToMatch(searchCursor + 1)}
+                  aria-label="Next match"
+                  disabled={matchIndices.length === 0}
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  <ChevronRight />
+                </Button>
+              </>
+            )}
+          </Capsule>
         </div>
       </Panel>
-      {failedIndices.length > 0 && (
-        <Panel position="top-center">
-          <div className="glass flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs">
-            <span
-              className="inline-flex items-center gap-1.5 font-medium"
-              style={{ color: 'var(--error)' }}
-            >
-              <TriangleAlert className="size-3.5" aria-hidden />
-              {failedIndices.length} failed
-            </span>
-            <button
-              type="button"
-              onClick={() => jumpToFailure(cursor - 1)}
-              aria-label="Previous failure"
-              className="rounded p-0.5 text-muted-foreground hover:text-foreground"
-            >
-              <ChevronLeft className="size-4" />
-            </button>
-            <span className="tabular-nums text-muted-foreground">
-              {Math.min(cursor, failedIndices.length - 1) + 1}/
-              {failedIndices.length}
-            </span>
-            <button
-              type="button"
-              onClick={() => jumpToFailure(cursor + 1)}
-              aria-label="Next failure"
-              className="rounded p-0.5 text-muted-foreground hover:text-foreground"
-            >
-              <ChevronRight className="size-4" />
-            </button>
-          </div>
-        </Panel>
-      )}
       <Background color="var(--border)" gap={26} />
       <Controls showInteractive={false} />
       {detail !== undefined && readClock !== undefined && (

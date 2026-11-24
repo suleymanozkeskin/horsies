@@ -98,7 +98,7 @@ export function ToastProvider({ children }: { children: ReactNode }): ReactNode 
             key={toast.id}
             role="status"
             className={cn(
-              'glass pointer-events-auto flex items-start gap-3 rounded-lg border border-border p-3 text-sm shadow-lg'
+              'glass-menu pointer-events-auto flex items-start gap-3 rounded-xl p-3 text-sm'
             )}
             style={{ borderLeftColor: TONE_COLOR[toast.tone], borderLeftWidth: 3 }}
           >
@@ -110,7 +110,7 @@ export function ToastProvider({ children }: { children: ReactNode }): ReactNode 
                   dismiss(toast.id);
                   toast.action?.onSelect();
                 }}
-                className="shrink-0 rounded border border-border px-2 py-0.5 text-xs font-medium hover:bg-muted"
+                className="shrink-0 rounded border border-hairline-strong px-2 py-0.5 text-xs font-medium hover:bg-surface-hover"
               >
                 {toast.action.label}
               </button>

@@ -31,13 +31,13 @@ const CHART_MARGIN = { top: 8, right: 8, bottom: 0, left: -12 };
 
 const axisStyle = { fontSize: 10, fill: 'var(--muted-foreground)' };
 /** The axis lines, the tick marks and the line that follows the pointer. */
-const AXIS_STROKE = 'var(--border)';
+const AXIS_STROKE = 'var(--hairline-strong)';
 /** The grid: solid hairlines that are weaker than the axis in the two themes,
  * so the series stay the strongest marks of a chart. */
-const GRID_STROKE = 'color-mix(in oklab, var(--border) 45%, transparent)';
+const GRID_STROKE = 'var(--hairline)';
 /** The dot of the snapshot under the pointer, with a ring in the color of the
- * surface so it stays clear where it is on a line. */
-const ACTIVE_DOT = { r: 4, stroke: 'var(--card)', strokeWidth: 2 };
+ * window that the chart sits on, so it stays clear where it is on a line. */
+const ACTIVE_DOT = { r: 4, stroke: 'var(--background)', strokeWidth: 2 };
 
 /** The series of the load chart. `running` and `claimed` are task statuses,
  * so they have the status colors of the task views. Each series is drawn from
@@ -159,7 +159,7 @@ function SnapshotTooltip<Key extends ChartSeriesKey>({
     return null;
   }
   return (
-    <div className="rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs">
+    <div className="glass-menu rounded-lg px-2.5 py-1.5 text-xs text-popover-foreground">
       <div className="pb-1 text-11 text-muted-foreground">
         {new Date(point.snapshotAt).toLocaleTimeString()}
       </div>
