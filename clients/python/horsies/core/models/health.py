@@ -1,8 +1,9 @@
 """Typed models for the worker/database health API.
 
 The result models (`DatabasePing`, `WorkerPong`, `WorkerStateSnapshot` with
-its slot health and class capacity) are frozen dataclasses returned to
-callers inside ``BrokerResult``. They carry no behaviour, only observed data.
+its slot health, class capacity and profile) are frozen dataclasses returned
+to callers inside ``BrokerResult``. They carry no behaviour, only observed
+data.
 The core encodes and decodes the ping-pong payloads.
 
 The worker-state snapshot mirrors ``WorkerStateModel`` (the timeseries row
@@ -107,6 +108,27 @@ ClassCapacity: TypeAlias = ClassBudgets
 
 
 @dataclass(slots=True, frozen=True)
+class ProfileNamed:
+    """The worker ran the profile ``name`` of ``AppConfig.worker_profiles``.
+
+    ``name`` has 1 to 64 characters: letters, digits, ``_``, ``.`` and
+    ``-``, and the first character is not ``.`` or ``-``.
+    """
+
+    name: str
+
+
+@dataclass(slots=True, frozen=True)
+class ProfileNotRecorded:
+    """The snapshot holds no profile name: the worker that wrote it did not
+    record one. A worker of a build before schema migration 1004 wrote it;
+    every worker of this build records its profile name."""
+
+
+SnapshotProfile: TypeAlias = ProfileNamed | ProfileNotRecorded
+
+
+@dataclass(slots=True, frozen=True)
 class WorkerStateSnapshot:
     """One ``horsies_worker_states`` row — a worker's state at a point in time.
 
@@ -118,6 +140,8 @@ class WorkerStateSnapshot:
     ``class_capacity`` holds the claim budget of each execution class that
     the worker runs children for: its capacity in service and the classes
     whose rows it claims.
+    ``profile`` names the worker profile that the worker ran:
+    ``ProfileNamed(name)`` or ``ProfileNotRecorded()``.
     """
 
     worker_id: str
@@ -141,3 +165,4 @@ class WorkerStateSnapshot:
     worker_started_at: datetime
     slot_health: SlotHealth
     class_capacity: ClassCapacity
+    profile: SnapshotProfile

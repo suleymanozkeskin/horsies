@@ -1045,6 +1045,31 @@ class DownSlotInfo(BaseModel):
     failed_boots: int
 
 
+class ProfileNamedInfo(BaseModel):
+    """The worker ran the profile ``name`` of ``AppConfig.worker_profiles``."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
+
+    kind: Literal['named'] = 'named'
+    name: str
+
+
+class ProfileNotRecordedInfo(BaseModel):
+    """The snapshot holds no profile name: a worker of a build before schema
+    migration 1004 wrote it."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
+
+    kind: Literal['not_recorded'] = 'not_recorded'
+
+
+SnapshotProfileInfo = Annotated[
+    ProfileNamedInfo | ProfileNotRecordedInfo,
+    Field(discriminator='kind'),
+]
+"""The worker profile that a snapshot names."""
+
+
 class WorkerStateInfo(BaseModel):
     """Latest state snapshot for one worker (from horsies_worker_states).
 
@@ -1055,6 +1080,9 @@ class WorkerStateInfo(BaseModel):
     ``slot_health`` is ``all_serving`` or ``slots_down`` (``down_slots`` lists
     them, in slot order). ``down_slots`` is empty unless ``slot_health`` is
     ``slots_down``.
+
+    ``profile`` names the worker profile that the worker ran:
+    ``ProfileNamedInfo`` or ``ProfileNotRecordedInfo``.
     """
 
     worker_id: str
@@ -1076,6 +1104,7 @@ class WorkerStateInfo(BaseModel):
     cpu_percent: float | None
     slot_health: Literal['all_serving', 'slots_down']
     down_slots: list[DownSlotInfo]
+    profile: SnapshotProfileInfo
 
 
 class BudgetLoadInfo(BaseModel):

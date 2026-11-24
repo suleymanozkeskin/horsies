@@ -53,6 +53,10 @@ async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
   gets `LISTENER_DISABLED`.
 - `BoundedTaskList` is `Complete(rows)` or `Truncated { rows, bound }`, at
   most `TASK_LIST_BOUND` (10,000) rows.
+- `WorkerStateSnapshot::profile` is `SnapshotProfile::Named { name }` (the
+  worker profile that the worker runs) or `SnapshotProfile::NotRecorded` (a
+  worker of a build before schema migration 1004 wrote the snapshot). The web
+  model `WorkerStateInfo::profile` is `SnapshotProfileInfo`.
 - `app.blocking()` has the same reads, except `get_stale_tasks` and
   `get_expired_tasks`.
 - The meaning of each read is on the shared docs page
@@ -477,9 +481,9 @@ allows every read and every action.
 use horsies::{
     // Health reads
     PingTarget, WorkerHistoryLimit, DatabasePing, WorkerPong, WorkerStateSnapshot,
-    StaleMinutes, StaleThresholdRefusal, StaleTaskRow, ExpiredTaskRow, BoundedTaskList,
-    ClassCoverage, ClassReport, BrokerOperationError, BrokerErrorCode, TASK_LIST_BOUND,
-    MAX_STALE_THRESHOLD_MINUTES,
+    SnapshotProfile, StaleMinutes, StaleThresholdRefusal, StaleTaskRow, ExpiredTaskRow,
+    BoundedTaskList, ClassCoverage, ClassReport, BrokerOperationError, BrokerErrorCode,
+    TASK_LIST_BOUND, MAX_STALE_THRESHOLD_MINUTES,
 };
 use horsies::monitoring::{
     // Queries

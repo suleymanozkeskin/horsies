@@ -196,6 +196,11 @@ list_schedules(broker)                                  # next run, then name; a
   `ClassBudget` has `budget` (an `Execution`), `capacity` (children or seats
   in service) and `serves` (the classes whose rows it claims). Empty
   `budgets`: the worker serves no class.
+- A snapshot's `profile` is `ProfileNamed(name)` (the worker profile that
+  the worker runs) or `ProfileNotRecorded()` (a worker of a build before
+  schema migration 1004 wrote the snapshot). Match both variants. Web:
+  `GET /api/workers` gives `profile` as `{"kind": "named", "name": ...}` or
+  `{"kind": "not_recorded"}`.
 - A snapshot's `queue_priorities`, `queue_max_concurrency` and
   `recovery_config` are `dict`, empty when the worker had none set.
 - Fleet check: `app.get_class_coverage_async()` →

@@ -1025,8 +1025,11 @@ impl Worker {
     /// steps are built by `child_specs`, the child spec source of the client.
     ///
     /// Errors: [`WorkerError::Config`] for a worker config that does not
-    /// validate, or a profile that starts no child (AppConfig validation
-    /// refuses such a profile; Python `execution_settings`).
+    /// validate, a profile that starts no child (AppConfig validation
+    /// refuses such a profile; Python `execution_settings`), or a profile
+    /// name that breaks the profile name rule (the profile selection refuses
+    /// it; each worker snapshot stores the name, and the table refuses such
+    /// a name).
     pub(crate) fn of_child_specs(
         broker: Arc<PostgresBroker>,
         child_specs: Arc<dyn ChildSpecSource>,
@@ -1037,6 +1040,17 @@ impl Worker {
         registered: RegisteredClasses,
     ) -> Result<Self, WorkerError> {
         worker_config.validate().map_err(WorkerError::Config)?;
+        match crate::core::config::worker_profile::is_valid_profile_name(&profile.name) {
+            true => {}
+            false => {
+                return Err(WorkerError::Config(format!(
+                    "{}: the profile name is not valid; a name has 1 to {} characters: letters, \
+                     digits, '_', '.' and '-', and the first character is not '.' or '-'",
+                    crate::core::config::worker_profile::profile_path(&profile.name),
+                    crate::core::config::worker_profile::PROFILE_NAME_MAX_LENGTH,
+                )));
+            }
+        }
         if profile.profile.child_count() == 0 {
             return Err(WorkerError::Config(format!(
                 "{}: the profile starts no children; a worker needs at least one child to run \
@@ -2080,6 +2094,7 @@ impl Worker {
             reaper_health,
             children.view(),
             ClaimColumns::of_profile(&self.profile.profile),
+            self.profile.name.clone(),
             Utc::now(),
             self.endpoint.clone(),
             handler_child,
@@ -3230,6 +3245,56 @@ mod tests {
             }
             Err(other) => panic!("another error: {other}"),
             Ok(_) => panic!("a worker with no child must be refused"),
+        }
+    }
+
+    /// A profile name that breaks the profile name rule is refused before
+    /// any work: each snapshot stores the name, and the table refuses it. A
+    /// plan built by hand can carry such a name; the profile selection never
+    /// gives one.
+    #[tokio::test]
+    async fn a_worker_whose_profile_name_breaks_the_rule_is_refused() {
+        use crate::worker::executor::protocol::{
+            ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
+        };
+        let url = "postgresql://horsies@127.0.0.1:1/horsies";
+        let pool = TestPoolOptions::new().connect_lazy(url);
+        for name in ["", "-flag", "has space"] {
+            let refused = Worker::of_child_specs(
+                Arc::new(PostgresBroker::from_test_url(
+                    pool.url(),
+                    crate::ClientFamily::Rust,
+                )),
+                crate::test_support::child_specs::no_child_specs(),
+                AppConfig::for_database_url(url),
+                WorkerConfig::default(),
+                SelectedProfile {
+                    name: name.to_owned(),
+                    profile: serde_json::from_value(serde_json::json!({
+                        "isolated": {"kind": "isolated_children", "count": 1}
+                    }))
+                    .expect("a valid test profile"),
+                },
+                ChildLaunch {
+                    command: crate::worker::executor::slots::scripted::idle_child_of_any_kind(),
+                    preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
+                    program: ChildProgram::Rust,
+                    log_level: ChildLogLevel::Info,
+                    database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+                    connection: ChildConnection::default(),
+                },
+                RegisteredClasses::default(),
+            );
+            match refused {
+                Err(WorkerError::Config(message)) => {
+                    assert!(
+                        message.contains("the profile name is not valid"),
+                        "{name:?}: {message}"
+                    );
+                }
+                Err(other) => panic!("{name:?}: another error: {other}"),
+                Ok(_) => panic!("{name:?}: a worker with this name must be refused"),
+            }
         }
     }
 

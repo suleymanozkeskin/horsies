@@ -166,6 +166,47 @@ and there is no migration contract between pre-1.0 versions.
   attempt; each attempt in a task or node detail shows its phase times, its
   claim count and its writer. A read-only legend names each phase. The run
   detail polls in fallback mode also while a segment or a pause is open.
+- **Each worker snapshot records the name of its worker profile.** Schema
+  migration 1004 adds `profile_name` to `horsies_worker_states`. The worker
+  writes the name of the profile that it runs (the `--profile` value of
+  `horsies worker`, the profile of `WorkerStart` in the Rust client) with
+  each snapshot, and the worker state reads return it:
+  - Python: `WorkerStateSnapshot.profile` is `ProfileNamed(name)` or
+    `ProfileNotRecorded()` (`SnapshotProfile`); `horsies` exports the three
+    names.
+  - Rust: `WorkerStateSnapshot::profile` is `SnapshotProfile::Named { name }`
+    or `SnapshotProfile::NotRecorded`; `horsies` and `horsies-core` export
+    `SnapshotProfile`.
+  - Web: each entry of `GET /api/workers` has `profile`, `{"kind": "named",
+    "name": ...}` or `{"kind": "not_recorded"}`: Python `ProfileNamedInfo`
+    and `ProfileNotRecordedInfo` (`SnapshotProfileInfo`) in
+    `horsies.monitoring`, Rust `horsies::monitoring::SnapshotProfileInfo`.
+    The web UI type `WorkerState` has `profile`.
+
+  A snapshot written before the migration holds no name: its profile is not
+  recorded. The worker history (`GET /api/workers/{id}/history`) does not
+  change.
+- **The Workers page of the web UI groups the live workers by worker
+  profile.** The page has one panel for each profile name of
+  `GET /api/workers`, in name order; the live workers whose snapshot holds no
+  profile name are one last panel. A panel shows the number of workers, the
+  seats in service and the down slots, the number of children per worker
+  and the budget classes of the profile, and for each budget a meter with
+  the rows in flight and the free capacity, summed over the workers of the
+  profile. It lists each shape when the workers of one profile do not have
+  the same number of children and the same budget classes. The focused
+  worker and the card of a stale worker name the profile. On the same page:
+  - Each column header of the schedule table sorts the table, on a click
+    and on Enter or Space with the keyboard focus. The header shows the
+    sorted column and its direction (`aria-sort`). A schedule that has not
+    run shows `never` and is last in a sort by last run.
+  - Each legend item of the two history charts is a button. A click draws
+    that series alone, and a click on a series that is alone draws the two
+    series again. The value axis fits the series that are drawn: the
+    percent axis of the second chart is no longer fixed at 0 to 100.
+  - The load chart draws `running` and `claimed` in the colors of the task
+    statuses. The second chart has the title "Worker process" and states
+    that the task children of the worker are not in its numbers.
 
 ### Changed
 
@@ -214,6 +255,25 @@ and there is no migration contract between pre-1.0 versions.
   `run_cancelled`, the seat end `cancelled`); a parent and a child of one
   build always match, and a mismatch is refused at the child start. The web
   monitoring schema check expects version 1003.
+- **Schema migration 1004: stop every process and upgrade together.** The
+  first start of this build applies migration 1004
+  (`core/migrations/1004_worker_profile_name.sql`) after migration 1003. It
+  adds the nullable column `profile_name` (`varchar(64)`) and the CHECK
+  `horsies_worker_states_profile_name_shape` to `horsies_worker_states`,
+  under `ACCESS EXCLUSIVE` until it commits; no table is rewritten and no
+  old row changes. A process of an earlier build that starts after it is
+  refused, because the database holds a newer version; a worker of an
+  earlier build that runs on writes its snapshots with no profile name. A
+  database at 1004 does not go back to an earlier build. The web monitoring
+  schema check expects version 1004.
+- **`WorkerStateSnapshot` has the field `profile`.** Code that builds a
+  Python `WorkerStateSnapshot` passes `profile`; a Rust struct literal of
+  `WorkerStateSnapshot` sets `profile`.
+- **A worker refuses a profile name that breaks the name rule.** In
+  `horsies-core`, `Worker::from_plan` refuses a `WorkerPlan` whose profile
+  name is not 1 to 64 characters of letters, digits, `_`, `.` and `-` (the
+  first not `.` or `-`), with a config error, before any work. The profile
+  selection of both clients never gives such a name.
 - **A workflow start with a known `workflow_id` must carry the same start
   command.** When the id exists, the start compares its start command with
   the stored one, in the same statement:

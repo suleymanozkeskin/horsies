@@ -2368,6 +2368,22 @@ const MONITORING_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
+        name: "ProfileNamedRecord",
+        doc: "The worker ran the profile name of AppConfig.worker_profiles.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("name", "str"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ProfileNotRecordedRecord",
+        doc: "The snapshot holds no profile name: a worker of a build before schema migration 1004 wrote it.",
+        constructor: Constructor::NoConstructor,
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
         name: "WorkerStateRecord",
         doc: "One horsies_worker_states row. recovery_config_json is the JSON text of the stored object.",
         constructor: Constructor::NoConstructor,
@@ -2393,6 +2409,7 @@ const MONITORING_CLASSES: &[StubClass] = &[
             property("worker_started_at", "datetime.datetime"),
             property("slot_health", "AllSlotsServingRecord | SlotsDownRecord"),
             property("class_capacity", "list[ClassBudgetRecord]"),
+            property("profile", "ProfileNamedRecord | ProfileNotRecordedRecord"),
         ],
         methods: &[],
     },

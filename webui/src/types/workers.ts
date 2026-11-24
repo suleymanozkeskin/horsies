@@ -12,6 +12,13 @@ export interface DownSlot {
 
 export type SlotHealthKind = 'all_serving' | 'slots_down';
 
+/** The worker profile that a snapshot names. `not_recorded`: the snapshot
+ * holds no profile name, because a worker of a build before schema migration
+ * 1004 wrote it. */
+export type SnapshotProfile =
+  | { kind: 'named'; name: string }
+  | { kind: 'not_recorded' };
+
 /** Latest state snapshot for one worker. */
 export interface WorkerState {
   worker_id: string;
@@ -34,6 +41,8 @@ export interface WorkerState {
   slot_health: SlotHealthKind;
   /** Empty unless `slot_health` is `slots_down`; in slot order. */
   down_slots: DownSlot[];
+  /** The worker profile that the worker ran. */
+  profile: SnapshotProfile;
 }
 
 /** One worker's reply to an active liveness ping. */
