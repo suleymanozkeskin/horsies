@@ -17,7 +17,7 @@ use horsies_test_support::process::StopEnd;
 use horsies_test_support::rows;
 use horsies_test_worker::harness::{failed_code, outcome, succeeded, Suite};
 use horsies_test_worker::instance::{Instance, Profile, TEST_DRAIN_TIMEOUT};
-use horsies_test_worker::tasks::{basic, classes};
+use horsies_test_worker::tasks::{basic, classes, fencing};
 use serde::de::DeserializeOwned;
 use serial_test::serial;
 use uuid::Uuid;
@@ -464,4 +464,46 @@ async fn an_isolated_child_is_replaced_after_its_task_limit() {
         "six tasks ran in {} children: {pids:?}",
         pids.len()
     );
+}
+
+/// The fencing token of a shared async run: two runs on one shared child
+/// each read the task id of their own run and the value 1.
+#[tokio::test]
+#[serial]
+async fn shared_async_runs_read_their_own_fencing_tokens() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::SharedOnly1x4).await;
+    let fence = suite.function(fencing::fence_shared_async::handle);
+    let first = fence.send(()).await.expect("send e2e_fence_shared_async");
+    let second = fence.send(()).await.expect("send e2e_fence_shared_async");
+    for handle in [&first, &second] {
+        assert_eq!(
+            succeeded(handle, RESULT_WAIT).await,
+            fencing::Fence {
+                task_id: handle.task_id().to_string(),
+                value: 1,
+            }
+        );
+    }
+}
+
+/// The fencing token of a shared thread run: two runs on one shared thread
+/// child each read the task id of their own run and the value 1.
+#[tokio::test]
+#[serial]
+async fn shared_thread_runs_read_their_own_fencing_tokens() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::ThreadOnly1x4).await;
+    let fence = suite.function(fencing::fence_shared_thread::handle);
+    let first = fence.send(()).await.expect("send e2e_fence_shared_thread");
+    let second = fence.send(()).await.expect("send e2e_fence_shared_thread");
+    for handle in [&first, &second] {
+        assert_eq!(
+            succeeded(handle, RESULT_WAIT).await,
+            fencing::Fence {
+                task_id: handle.task_id().to_string(),
+                value: 1,
+            }
+        );
+    }
 }

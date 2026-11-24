@@ -2,7 +2,7 @@
 title: Atomic Enqueue and Topology
 section: shared
 summary: Why a send cannot join the caller's database transaction, and the pattern that replaces it - send after commit, automatic resend, and an idempotency key.
-related: [../tasks/sending-tasks, ../rust/tasks/sending-tasks, ../tasks/errors, ../monitoring/action-semantics]
+related: [deployment-topology, ../tasks/sending-tasks, ../rust/tasks/sending-tasks, ../tasks/errors, ../monitoring/action-semantics]
 tags: [operations, topology, enqueue, idempotency, idempotency_key, resend_on_transient_err, transaction]
 ---
 
@@ -11,6 +11,8 @@ tags: [operations, topology, enqueue, idempotency, idempotency_key, resend_on_tr
 No send and no workflow start takes the caller's database connection. A send opens its own connection from the broker pool and commits on its own. The application write and the enqueue are always two transactions, also when both use the same PostgreSQL database.
 
 The API is on the client pages: [Sending Tasks](/horsies/tasks/sending-tasks/#send-after-a-commit) (Python) and [Sending Tasks](/horsies/rust/tasks/sending-tasks/) (Rust).
+
+The recommended instance for the horsies database, its connections and its failover limits are on [Deployment Topology](/horsies/operations/deployment-topology/).
 
 ## Why and When
 

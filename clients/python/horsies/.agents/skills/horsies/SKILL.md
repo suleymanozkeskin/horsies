@@ -27,6 +27,7 @@ or read `llms.txt` on the docs site:
 ## Deployment facts
 
 - Use a dedicated Postgres instance for the broker. Ownership, finalization, and workflow transitions are transactional state changes in that database.
+- A failover under asynchronous replication can lose committed sends, claims, task ends and workflow progress, so a task body can run again. Use synchronous replication for the horsies instance, or make each effect outside horsies idempotent. The reasons, the connections of each URL and the failover limits are on the docs page `operations/deployment-topology`.
 - Pre-1.0 is an API-contract statement: breaking API changes may land in minor releases (see CHANGELOG).
 - The Q&A page of the docs explains how to describe the library: `questions-and-answers`.
 - Changing a model that a task takes or returns: add a field with a default; rename with `Field(validation_alias=AliasChoices('new_name', 'old_name'))`, the new name first; never rename a field and give it a default with no alias, because old rows then read the default with no error. Stored data is read strictly. Unknown keys are ignored on read and refused at send.

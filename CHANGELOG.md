@@ -10,6 +10,41 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Added
 
+- **A fencing token for task code, in both clients.** A task reads the
+  fencing token of its run: the task id and a value. Two reads in one
+  attempt give the same token. An attempt that runs after another attempt
+  of the same task gives a strictly greater value. The value depends on no
+  clock. Today the value is the attempt number, from 1; code compares the
+  values of one task id and does not depend on the number. No schema
+  change and no change of the child protocol. Task code writes the token
+  with each write to another system, and the system refuses a write whose
+  token is lower than the token that it holds for the task id. Limits: a
+  rerun, and a workflow node that a resume starts again, get a new task
+  id, and their value starts again at 1; a stale attempt with no later
+  attempt (the task failed, was cancelled or expired) is not refused.
+  - Python: a task whose first parameter is `runtime: TaskRuntime` gets
+    the `TaskRuntime` of each run from the worker, and reads
+    `runtime.fencing_token`, a frozen `FencingToken` (`task_id`, `value`).
+    The parameter comes before the `*`, is annotated exactly `TaskRuntime`
+    and has no default. It is not part of the wire contract: a send, a
+    schedule and a workflow node do not supply it, and a kwarg with its
+    name is refused. `TaskRuntime` in any other place of a task signature
+    raises `HRS-105`. The decorator gives a `RuntimeTaskFunction` or an
+    `AsyncRuntimeTaskFunction`, whose sends do not take the runtime. A test
+    that calls the task directly passes `TaskRuntime.for_test(task_id=...,
+    attempt=...)`. Its `attempt` is an `AttemptNumber` (default the first
+    attempt): `AttemptNumber.parse` returns `Err(AttemptNumberRefused)` for
+    a number outside 1 to 2^31, so `for_test` cannot fail. `horsies`
+    exports `TaskRuntime`, `FencingToken`, `AttemptNumber` and
+    `AttemptNumberRefused`.
+  - Rust: `TaskRuntime::fencing_token()` returns `Result<FencingToken,
+    FencingTokenRefused>`. `FencingToken::task_id()` gives the task id and
+    `FencingToken::value()` an `AttemptNumber`. The async body, work that
+    it starts with `TaskRuntime::spawn`, and the thread of a blocking body
+    read the token of the run; a direct call in a test, plain
+    `tokio::spawn` and a thread that the body starts get
+    `FencingTokenRefused::NotInARun`. `horsies-core` exports
+    `run_fencing_token`, `FencingToken` and `FencingTokenRefused`.
 - **Each attempt row keeps the phase times of its attempt.** Schema
   migration 1001 adds a phase record to `horsies_task_attempts`: the due
   time (`enqueued_at`), the claim that ran the attempt (`claimed_at`), the
@@ -185,6 +220,32 @@ and there is no migration contract between pre-1.0 versions.
   `HandleOperationError::connect_failed` take their first argument by
   reference.
 
+### Documentation
+
+- **New page: Deployment Topology** (`operations/deployment-topology`). It
+  recommends a dedicated PostgreSQL instance for horsies and gives the
+  reasons: connections, writes and vacuum, commit durability, access. It
+  states the transaction boundary between the application write and the
+  send, and the connections of each URL with the pooler mode that each
+  URL accepts. It states what a failover under asynchronous replication
+  can lose and what follows for each loss: a send with its key
+  reservation, a workflow start, a claim or an attempt start, the end of a
+  task, the workflow progress of a finished task, and the worker liveness
+  lock. It names the settings that lose no commit
+  (`synchronous_standby_names`, `synchronous_commit`) and the design for
+  asynchronous replication.
+- **Retention Config: the guarantees that end with retention.** A table
+  gives each guarantee that reads a record, and when the record ends: the
+  key reservation (the reservation window after the end of the task, 24
+  hours by default, at most 30 days), the workflow row of a start with the
+  same workflow id (`terminal_record_retention_hours`, 720 hours by
+  default), the task history record with its attempts (the period of its
+  retention class), and the heartbeat partitions
+  (`heartbeat_leaf_horizon_hours`).
+- **Retention Config and Database Schema: `heartbeat_leaf_horizon_hours`
+  is also the heartbeat window.** A heartbeat partition is dropped
+  `heartbeat_leaf_horizon_hours` after its hour ends. The pages said that
+  the setting controls only the partitions kept ahead.
 ### Fixed
 
 - **A repeat workflow start no longer returns a handle to a deleted

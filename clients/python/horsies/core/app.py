@@ -4,6 +4,7 @@ from typing import (
     Literal,
     Optional,
     Callable,
+    Concatenate,
     TypeVar,
     overload,
     TYPE_CHECKING,
@@ -148,13 +149,16 @@ from horsies.core.event_handlers import (
 
 if TYPE_CHECKING:
     from horsies.core.task_decorator import (
+        AsyncRuntimeTaskFunction,
         AsyncTaskFunction,
         CancelGraceRefusedDecorator,
+        RuntimeTaskFunction,
         SharedAsyncTaskDecorator,
         SharedThreadTaskDecorator,
         TaskDecorator,
         TaskFunction,
     )
+    from horsies.core.task_runtime import TaskRuntime
     from horsies.core.models.tasks import TaskInfo, TaskResult, TaskError
     from horsies.core.brokers.result_types import BrokerResult, RawResultRecord
     from horsies.core.models.class_coverage import ClassCoverage, ClassReport
@@ -459,7 +463,7 @@ class Horsies:
         # The pool that get_broker() opens. A worker child sets its
         # task-send pool before it imports task modules.
         self._broker_pool: _ConfigBrokerPool | _TaskSendBrokerPool = _ConfigBrokerPool()
-        self.tasks: 'TaskRegistry[TaskFunction[Any, Any] | AsyncTaskFunction[Any, Any]]' = (
+        self.tasks: 'TaskRegistry[TaskFunction[Any, Any] | AsyncTaskFunction[Any, Any] | RuntimeTaskFunction[Any, Any] | AsyncRuntimeTaskFunction[Any, Any]]' = (
             TaskRegistry()
         )
         self.logger: logging.Logger = get_logger('app')
@@ -755,6 +759,25 @@ class Horsies:
                 )
             return queue_name
 
+    # The runtime forms come first: a function whose first parameter takes a
+    # TaskRuntime also fits the plain forms, with the runtime in P.
+    @overload
+    def task(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        task_name: str,
+        func: Callable[
+            Concatenate['TaskRuntime', P],
+            Coroutine[Any, Any, 'TaskResult[T, TaskError]'],
+        ],
+    ) -> 'AsyncRuntimeTaskFunction[P, T]': ...
+
+    @overload
+    def task(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        task_name: str,
+        func: Callable[Concatenate['TaskRuntime', P], 'TaskResult[T, TaskError]'],
+    ) -> 'RuntimeTaskFunction[P, T]': ...
+
     @overload
     def task(
         self,
@@ -880,6 +903,8 @@ class Horsies:
     ) -> Union[
         'TaskFunction[Any, Any]',
         'AsyncTaskFunction[Any, Any]',
+        'RuntimeTaskFunction[Any, Any]',
+        'AsyncRuntimeTaskFunction[Any, Any]',
         'TaskDecorator',
         'SharedAsyncTaskDecorator',
         'SharedThreadTaskDecorator',
@@ -891,6 +916,9 @@ class Horsies:
 
         A `def` function gives a `TaskFunction`. An `async def` function
         gives an `AsyncTaskFunction`, whose direct call returns a coroutine.
+        A function whose first parameter is `runtime: TaskRuntime` gives a
+        `RuntimeTaskFunction` or an `AsyncRuntimeTaskFunction`: the worker
+        passes the runtime of each run, and the sends do not take it.
 
         `execution` (an `Execution`, default `ISOLATED`) declares how a
         worker runs the task. `SHARED_ASYNC` needs an `async def` function
@@ -921,6 +949,19 @@ class Horsies:
         """
 
         @overload
+        def decorator(  # pyright: ignore[reportOverlappingOverload]
+            fn: Callable[
+                Concatenate['TaskRuntime', P],
+                Coroutine[Any, Any, 'TaskResult[T, TaskError]'],
+            ],
+        ) -> 'AsyncRuntimeTaskFunction[P, T]': ...
+
+        @overload
+        def decorator(  # pyright: ignore[reportOverlappingOverload]
+            fn: Callable[Concatenate['TaskRuntime', P], 'TaskResult[T, TaskError]'],
+        ) -> 'RuntimeTaskFunction[P, T]': ...
+
+        @overload
         def decorator(
             fn: Callable[P, Coroutine[Any, Any, 'TaskResult[T, TaskError]']],
         ) -> 'AsyncTaskFunction[P, T]': ...
@@ -933,7 +974,7 @@ class Horsies:
         def decorator(
             fn: Callable[P, 'TaskResult[T, TaskError]']
             | Callable[P, Coroutine[Any, Any, 'TaskResult[T, TaskError]']],
-        ) -> 'TaskFunction[P, T] | AsyncTaskFunction[P, T]':
+        ) -> 'TaskFunction[P, T] | AsyncTaskFunction[P, T] | RuntimeTaskFunction[Any, T] | AsyncRuntimeTaskFunction[Any, T]':
             fn_location = SourceLocation.from_function(fn)
 
             if task_name == '':

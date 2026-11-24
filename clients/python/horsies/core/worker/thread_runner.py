@@ -40,6 +40,7 @@ from horsies.core.worker.child_runner import (
     _confirm_until_not_resumed,
     _prepare_task_call,
     _PreparedCall,
+    run_runtime,
     _stored_timeout_refusal_response,
     _task_exception_response,
     encoded_body_end,
@@ -191,7 +192,12 @@ def _thread_steps(
                 pass
             case _ as unreachable:
                 assert_never(unreachable)
-        prepared = _prepare_task_call(frame.task_name, frame.input, OnSharedThreadSeat())
+        prepared = _prepare_task_call(
+            frame.task_name,
+            frame.input,
+            OnSharedThreadSeat(),
+            run_runtime(frame.task_id, frame.attempt),
+        )
         match prepared:
             case _PreparedCall(task=task, args=args, kwargs=kwargs):
                 pass

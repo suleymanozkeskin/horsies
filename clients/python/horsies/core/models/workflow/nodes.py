@@ -19,7 +19,12 @@ from .enums import (
 )
 
 if TYPE_CHECKING:
-    from horsies.core.task_decorator import AsyncTaskFunction, TaskFunction
+    from horsies.core.task_decorator import (
+        AsyncRuntimeTaskFunction,
+        AsyncTaskFunction,
+        RuntimeTaskFunction,
+        TaskFunction,
+    )
     from horsies.core.models.tasks import TaskResult, TaskError
     from .definition import WorkflowDefinition
 
@@ -61,9 +66,15 @@ class TaskNode(Generic[OkT_co]):
         ```
     """
 
-    fn: TaskFunction[Any, OkT_co] | AsyncTaskFunction[Any, OkT_co]
+    fn: (
+        TaskFunction[Any, OkT_co]
+        | AsyncTaskFunction[Any, OkT_co]
+        | RuntimeTaskFunction[Any, OkT_co]
+        | AsyncRuntimeTaskFunction[Any, OkT_co]
+    )
     """
-    - The task to run: a `def` task or an `async def` task
+    - The task to run: a `def` task or an `async def` task, with or without a
+      first `runtime: TaskRuntime` parameter
     """
     args: tuple[Any, ...] = field(default_factory=tuple, init=False)
     """

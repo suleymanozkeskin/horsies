@@ -1,5 +1,6 @@
 pub mod error;
 pub mod execution;
+pub mod fencing;
 pub mod fn_trait;
 pub mod info;
 pub mod options;
@@ -13,6 +14,7 @@ pub use error::{
     TaskErrorKind, UserCode, UserCodeRefused, UNDECLARED_LABEL,
 };
 pub use execution::{Execution, ExecutionClass, InvalidExecution};
+pub use fencing::{FencingToken, FencingTokenRefused};
 pub use fn_trait::{AsyncTaskFn, BlockingTaskFn, RawTaskResult, RegisteredTask};
 pub use info::{TaskAttemptInfo, TaskInfo};
 pub use options::{

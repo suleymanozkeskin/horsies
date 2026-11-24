@@ -64,6 +64,7 @@ The Python client and the Rust client run on one core (horsies-core). Behaviour 
 - Logs -> /horsies/observability/logs/
 - Lifecycle Events -> /horsies/observability/events/
 - Dashboards and Alerts -> /horsies/observability/dashboards-and-alerts/
+- Deployment Topology (dedicated instance, connections, failover limits) -> /horsies/operations/deployment-topology/
 - Database Schema -> /horsies/internals/database-schema/
 - Operational Indexes -> /horsies/internals/operational-indexes/
 - Performance -> /horsies/internals/performance/

@@ -12,6 +12,7 @@ import decimal
 import enum
 import json
 import types
+import uuid
 from typing import Annotated, Any, ClassVar, Generic, Literal, Optional, TypeVar
 from unittest.mock import MagicMock, patch
 
@@ -1175,7 +1176,7 @@ def _run_child(app: Horsies, task_name: str) -> tuple[bool, str, str | None]:
             child_runner._run_task_entry(
                 task_name=task_name,
                 input_json='{}',
-                task_id='task-id',
+                task_id=uuid.UUID(int=1),
                 master_worker_id='worker',
                 work=RunTheTask(),
                 claimed_at=CLAIMED_AT,

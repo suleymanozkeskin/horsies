@@ -23,10 +23,13 @@ from typing import (
 
 
 from horsies.core.codec.kwargs import (
+    NoRuntimeParameter,
+    TakesRuntime,
     build_with_engine_parameters,
     resolve_build_with_hints,
     resolve_hints_and_sig,
     resolve_producer_kwarg_binding,
+    task_runtime_parameter,
     underlying_task_fn,
 )
 from horsies.core.codec.typed import (
@@ -1383,7 +1386,15 @@ class WorkflowSpec(Generic[OutT]):
             # Get the function to inspect (TaskNode vs SubWorkflowNode)
             if isinstance(node, TaskNode):
                 fn = node.fn
-                args_provided: list[object] = []
+                # The worker passes the TaskRuntime to the first parameter of
+                # a task that takes it, on each run.
+                match task_runtime_parameter(fn):
+                    case TakesRuntime():
+                        args_provided: list[object] = [object()]
+                    case NoRuntimeParameter():
+                        args_provided = []
+                    case _ as unreachable:
+                        assert_never(unreachable)
                 injected_kwargs: set[str] = set()
             else:
                 fn = getattr(

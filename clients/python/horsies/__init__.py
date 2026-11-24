@@ -115,6 +115,12 @@ from .core.models.tracing import (
 )
 from .core.models.log_format import JsonLogs, TextLogs
 from .core.logging import JsonLogsFormatter, TaskContextFilter
+from .core.task_runtime import (
+    AttemptNumber,
+    AttemptNumberRefused,
+    FencingToken,
+    TaskRuntime,
+)
 from .core.models.worker_profile import (
     ClaimLimits,
     ExecutorThreads,
@@ -276,6 +282,10 @@ __all__ = [
     'Execution',
     'TaskInfo',
     'TaskAttemptInfo',
+    'TaskRuntime',
+    'FencingToken',
+    'AttemptNumber',
+    'AttemptNumberRefused',
     'QueueMode',
     'CustomQueueConfig',
     'TaskStatus',

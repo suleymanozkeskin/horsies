@@ -12,6 +12,12 @@ function. A class known only at run time needs ``timeout_ms`` and may take
 Each wrong use below has an ignore comment,
 and the config makes an unneeded ignore comment an error. So an overload set
 that accepts one of these uses fails the check.
+
+A shared decorator has two overloads: the runtime form (first parameter
+``TaskRuntime``) and the plain form. A function of the wrong kind matches
+neither, so pyright reports three rules on that line: the argument against
+the closest overload (``reportArgumentType``), no matching overload
+(``reportCallIssue``), and the untyped result (``reportUntypedFunctionDecorator``).
 """
 
 from __future__ import annotations
@@ -72,13 +78,13 @@ def register(app: Horsies, chosen: Execution) -> None:
 
     @app.task(
         'pin_bad_async_on_def', execution=Execution.SHARED_ASYNC, timeout_ms=5_000
-    )  # pyright: ignore[reportArgumentType]
+    )  # pyright: ignore[reportArgumentType, reportCallIssue, reportUntypedFunctionDecorator]
     def async_class_on_def(*, value: int) -> TaskResult[int, TaskError]:
         return TaskResult(ok=value)
 
     @app.task(
         'pin_bad_thread_on_async', execution=Execution.SHARED_THREAD, timeout_ms=5_000
-    )  # pyright: ignore[reportArgumentType]
+    )  # pyright: ignore[reportArgumentType, reportCallIssue, reportUntypedFunctionDecorator]
     async def thread_class_on_async(*, value: int) -> TaskResult[int, TaskError]:
         return TaskResult(ok=value)
 

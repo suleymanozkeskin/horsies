@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use super::harness::{describe, BaselineDatabase, Session};
 
-const CASES_SQL: &str = include_str!("cases/baseline_lifecycle_functions.sql");
+pub(super) const CASES_SQL: &str = include_str!("cases/baseline_lifecycle_functions.sql");
 
 /// Time between two reads of the waiting session's state.
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -85,7 +85,7 @@ const SESSION_QUEUE: &str = "q_sessions";
 
 /// One committed plain task of worker w1. Parameters: `$1` id, `$2` queue,
 /// `$3` status.
-const INSERT_TASK_SQL: &str = r#"
+pub(super) const INSERT_TASK_SQL: &str = r#"
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, input, task_options, execution, retention_class_key, sent_at,
     created_at, command_fingerprint_version, command_fingerprint, idempotency_key_digest, status, enqueued_at,

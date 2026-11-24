@@ -12,6 +12,7 @@ use crate::instance::Instance;
 pub mod basic;
 pub mod classes;
 pub mod custom;
+pub mod fencing;
 pub mod recovery;
 pub mod retry;
 pub mod scheduled;
@@ -35,7 +36,8 @@ pub fn register(app: &mut Horsies, instance: Instance) -> Result<(), HorsiesErro
     }
 }
 
-/// The tasks of the default queue: basic, retry and the execution classes.
+/// The tasks of the default queue: basic, retry, the execution classes and
+/// the fencing tasks.
 fn register_default(app: &mut Horsies) -> Result<(), HorsiesError> {
     let _healthcheck = basic::healthcheck::register(app)?;
     let _simple = basic::simple::register(app)?;
@@ -75,6 +77,13 @@ fn register_default(app: &mut Horsies) -> Result<(), HorsiesError> {
     let _thread_hang = classes::thread_hang::register(app)?;
     let _thread_overrun = classes::thread_overrun::register(app)?;
     let _outlives_drain = classes::outlives_drain::register(app)?;
+
+    let _fence_isolated_async = fencing::fence_isolated_async::register(app)?;
+    let _fence_isolated_blocking = fencing::fence_isolated_blocking::register(app)?;
+    let _fence_shared_async = fencing::fence_shared_async::register(app)?;
+    let _fence_shared_thread = fencing::fence_shared_thread::register(app)?;
+    let _fence_reads_twice = fencing::fence_reads_twice::register(app)?;
+    let _fence_retry = fencing::fence_retry::register(app)?;
     register_workflow(app)
 }
 
