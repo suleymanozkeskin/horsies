@@ -2,8 +2,8 @@
 //
 // Centralised because the wording is part of the contract: each message states
 // what horsies actually does, including the parts that are eventually
-// consistent (a cancelled task's process keeps running; cancelled workflow
-// nodes drain).
+// consistent (a cancelled running task stops only when its code reads the
+// cancel; cancelled workflow nodes drain).
 
 import type { ActionKind, ActionResponse } from '@/types/actions';
 
@@ -23,7 +23,8 @@ export interface TaskConfirmContext {
 
 const DISMISS = 'Keep';
 
-const RUNNING_ACKNOWLEDGEMENT = 'I understand the process keeps running';
+const RUNNING_ACKNOWLEDGEMENT =
+  'I understand the code keeps running until it reads the cancel';
 
 export function taskCancelConfirm(context: TaskConfirmContext): ConfirmCopy {
   if (context.status === 'RUNNING') {
@@ -31,10 +32,13 @@ export function taskCancelConfirm(context: TaskConfirmContext): ConfirmCopy {
     return {
       title: 'Cancel running task?',
       body:
-        'Horsies does not kill running processes. The task’s code KEEPS ' +
-        `EXECUTING on ${host} until it finishes and its side effects still ` +
-        'happen, but its result will be discarded and the task row is marked ' +
-        'CANCELLED now. No attempt record will be written for this run.',
+        'The task is marked CANCELLED now, and this run is recorded as a ' +
+        `CANCELLED attempt. The worker on ${host} gives the cancel to the ` +
+        'task’s code, which stops when it reads the cancel. Side effects ' +
+        'made before then still happen, and its result will be discarded. ' +
+        'Code that does not read the cancel keeps running until it returns, ' +
+        'or until its timeout (or the cancel grace of an isolated task) ' +
+        'ends it.',
       confirmLabel: 'Cancel task',
       dismissLabel: DISMISS,
       acknowledgement: RUNNING_ACKNOWLEDGEMENT,
@@ -112,8 +116,8 @@ export function successMessage(
       }
       const host = context.workerHostname ?? 'its worker';
       return (
-        'Task cancelled. The running process on ' +
-        `${host} will keep executing until it finishes.`
+        'Task cancelled. The task code on ' +
+        `${host} gets the cancel and stops when it reads it.`
       );
     }
     case 'workflow-pause':

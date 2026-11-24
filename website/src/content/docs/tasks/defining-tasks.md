@@ -419,7 +419,91 @@ The worker writes the timeout only after the child has exited. So a retry never 
 
 A task with `Execution.SHARED_ASYNC` on a shared async child is different. On expiry its child cancels it: the task gets `asyncio.CancelledError` at its next `await`. The task fails with `TASK_TIMEOUT` when it has stopped, with the work that it started, also when it returns a value after the cancel. If it has not stopped `cancel_grace_ms` after the cancel (default 1 second), the child cancels it a second time, and takes no new task. A task that still has not stopped is stuck: the worker kills the child when every task left in it is stuck, so no other task in that child loses time that it still had. Each of those tasks then fails with `TASK_TIMEOUT`. A task that blocks the event loop of its child for 5 seconds makes the worker kill the child at once: that task fails with `TASK_BLOCKED_LOOP`, each other task before its deadline with `NEIGHBOUR_BLOCKED_LOOP`. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/#the-timeout).
 
-A `SHARED_THREAD` task on a shared thread child cannot be cancelled. On expiry its child closes: it takes no new task. When no task in the child has time left, the worker kills the child, and each task that was still in it fails with `TASK_TIMEOUT`. A task alone in its child is killed at its deadline. See [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/#the-timeout).
+A `SHARED_THREAD` task on a shared thread child cannot be stopped from outside. On expiry the cancel state of its run gets the cause `DEADLINE` (see [Cancellation](#cancellation)), and its child closes: it takes no new task. When no task in the child has time left, the worker kills the child, and each task that was still in it fails with `TASK_TIMEOUT`. A task alone in its child is killed at its deadline. See [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/#the-timeout).
+
+### Cancellation
+
+An operator can cancel a running task: `cancel_task(broker, task_id, include_running=True)`, or the web UI. The cancel moves the task to history as `CANCELLED` at once, and records its attempt as `CANCELLED`. Then the worker gives the cancel to the task code, and the code decides when to stop. What the task returns after the cancel is dropped. The rules of each task status are on [Action Semantics](/horsies/monitoring/action-semantics/#cancelling-a-running-task).
+
+An `async def` task gets `asyncio.CancelledError` at its next `await`, in an isolated child and in a shared async child. Let it propagate. Catch it only to clean up, then raise it again:
+
+```python
+import asyncio
+
+
+async def write_rows(rows: list[str]) -> None:
+    await asyncio.sleep(0.1)  # stands in for an awaited database write
+
+
+async def close_writer() -> None:
+    await asyncio.sleep(0)  # stands in for closing the writer
+
+
+@app.task('copy_rows', timeout_ms=600_000)
+async def copy_rows(*, rows: list[str]) -> TaskResult[int, TaskError]:
+    try:
+        await write_rows(rows)
+    except asyncio.CancelledError:
+        await close_writer()
+        raise
+    return TaskResult(ok=len(rows))
+```
+
+A `def` task reads the cancel state of its run. Its first parameter takes the `TaskRuntime` of the run, before the `*`, and `runtime.cancel_state()` returns `CancelNotRequested()` or `CancelRequested(cause)`. Read it between the steps of the work:
+
+```python
+from horsies import CancelNotRequested, CancelRequested, TaskRuntime
+
+
+def import_batch(batch_id: str) -> None:
+    ...  # stands in for one step of the work
+
+
+@app.task('import_batches', timeout_ms=600_000, cancel_grace_ms=5_000)
+def import_batches(runtime: TaskRuntime, *, batch_ids: list[str]) -> TaskResult[int, TaskError]:
+    done = 0
+    for batch_id in batch_ids:
+        match runtime.cancel_state():
+            case CancelRequested():
+                break  # what the task returns after a cancel is dropped
+            case CancelNotRequested():
+                import_batch(batch_id)
+                done += 1
+    return TaskResult(ok=done)
+```
+
+`CancelRequested.cause` is a `CancelCause`:
+
+<!-- members: CancelCause -->
+| `CancelCause` | The cancel came from |
+| ------------- | -------------------- |
+| `OPERATOR` | An operator cancel of the task: `cancel_task` with `include_running=True`, or the web UI |
+| `DEADLINE` | The deadline of the run: a `SHARED_ASYNC` task or a `SHARED_THREAD` task at its `timeout_ms` |
+
+The first cause stays: a deadline after an operator cancel does not change it. An `async def` task can read `cancel_state()` too, for example to tell the two causes apart while it cleans up.
+
+When the task code does not stop:
+
+<!-- members: Execution -->
+- `ISOLATED`: the code runs until it returns, or until its `timeout_ms` kill. For a hard stop, set `cancel_grace_ms` on the task: the worker kills the child `cancel_grace_ms` after the cancel when the task has not stopped, with the subprocesses in its session. The task stays `CANCELLED`.
+- `SHARED_ASYNC`: after `cancel_grace_ms`, the child cancels the task a second time, as at the deadline, and takes no new task. A task that still does not stop keeps its seat; the worker kills the child only when no task in it has time left.
+- `SHARED_THREAD`: the thread runs until it returns. A thread cannot be stopped.
+
+When an `async def` task in an isolated child leaves asyncio tasks on the loop after a cancel, the child does not wait for them, and the worker replaces the child.
+
+A test that calls a task function directly passes a runtime with a fixed cancel state:
+
+```python
+import uuid
+
+from horsies import CancelCause
+
+cancelled_run = TaskRuntime.for_test(
+    task_id=uuid.uuid4(),
+    cancel_state=CancelRequested(cause=CancelCause.OPERATOR),
+)
+assert import_batches(cancelled_run, batch_ids=['b-1', 'b-2']).ok == 0
+```
 
 ### Choose the Execution Class
 
@@ -427,7 +511,7 @@ A `SHARED_THREAD` task on a shared thread child cannot be cancelled. On expiry i
 
 | `execution` | Runs | Function | `timeout_ms` | `cancel_grace_ms` |
 | ----------- | ---- | -------- | ------------ | ----------------- |
-| `Execution.ISOLATED` (default) | one task at a time in its own child process | `def` or `async def` | optional | not allowed |
+| `Execution.ISOLATED` (default) | one task at a time in its own child process | `def` or `async def` | optional | optional: the kill after an operator cancel |
 | `Execution.SHARED_ASYNC` | many tasks as coroutines in one child process | `async def` | required | optional |
 | `Execution.SHARED_THREAD` | many tasks on threads in one child process | `def` | required | not allowed |
 
@@ -466,7 +550,14 @@ def mark_seen(*, key: str) -> TaskResult[bool, TaskError]:
 
 A `SHARED_ASYNC` task runs on a seat of a shared async child when the worker profile has `shared_async=SharedAsyncChildren(...)`, and in an isolated child otherwise. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/). A `SHARED_THREAD` task runs on a seat thread of a shared thread child when the profile has `shared_thread=SharedThreadChildren(...)`, and in an isolated child otherwise. See [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/).
 
-`cancel_grace_ms` is the time that a `SHARED_ASYNC` task gets to stop after its cancel. After it, the child cancels the task a second time. A thread cannot be cancelled, so only `SHARED_ASYNC` takes it. The value is from `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (10,000). A `SHARED_ASYNC` task that sets none gets `DEFAULT_CANCEL_GRACE_MS` (1,000). The stored options of the task hold the value in effect when the task is sent, so a later change of the default does not change a queued task.
+`cancel_grace_ms` is the time that a task gets to stop after a cancel. The value is from `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (10,000).
+
+<!-- members: Execution -->
+- `SHARED_ASYNC`: after the grace, the child cancels the task a second time, after the cancel at the deadline and after an operator cancel. A task that sets none gets `DEFAULT_CANCEL_GRACE_MS` (1,000).
+- `ISOLATED`: after the grace, the worker kills the child of a task that an operator cancelled and that has not stopped. A task that sets none gets no such kill: the cancel is cooperative only. The deadline kills the child at `timeout_ms` with no grace, as before.
+- `SHARED_THREAD`: not allowed. A thread cannot be stopped.
+
+The stored options of the task hold the value in effect when the task is sent, so a later change of the default does not change a queued task.
 
 `@app.task` refuses a declaration that breaks a rule with a `TaskDefinitionError`, one code per rule:
 
@@ -476,10 +567,10 @@ A `SHARED_ASYNC` task runs on a seat of a shared async child when the worker pro
 | HRS-107 | `TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF` | `SHARED_ASYNC` needs an `async def` function |
 | HRS-108 | `TASK_SHARED_THREAD_REQUIRES_DEF` | `SHARED_THREAD` needs a `def` function |
 | HRS-109 | `TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT` | `SHARED_ASYNC` and `SHARED_THREAD` need `timeout_ms` |
-| HRS-110 | `TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC` | only `SHARED_ASYNC` takes `cancel_grace_ms` |
+| HRS-110 | `TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC` | `SHARED_THREAD` does not take `cancel_grace_ms` |
 | HRS-111 | `TASK_CANCEL_GRACE_OUT_OF_RANGE` | `cancel_grace_ms` is from 100 to 10,000 |
 
-When a declaration breaks more than one rule, the first rule in this order is reported. A type checker refuses the same declarations when `execution` is written as a member: the overloads require `timeout_ms` for a shared class, and the decorator that they return accepts only the function kind of the class. With `cancel_grace_ms` and a member other than `SHARED_ASYNC`, the decorator accepts no function. A class that is known only at run time requires `timeout_ms` and takes `cancel_grace_ms`, and the decorator checks the other rules at run time.
+When a declaration breaks more than one rule, the first rule in this order is reported. A type checker refuses the same declarations when `execution` is written as a member: the overloads require `timeout_ms` for a shared class, and the decorator that they return accepts only the function kind of the class. With `cancel_grace_ms` and `Execution.SHARED_THREAD`, the decorator accepts no function. A class that is known only at run time requires `timeout_ms` and takes `cancel_grace_ms`, and the decorator checks the other rules at run time.
 
 ### Register Tasks for Workers
 
@@ -555,7 +646,7 @@ def task_two() -> TaskResult[str, TaskError]:
 | `error_codes` | `type[Enum] \| tuple[str, ...]` | No | The task's own error codes: an `Enum` class (its member values) or a tuple of strings. Default `()`. See [Declare Error Codes](#declare-error-codes) |
 | `timeout_ms` | `int` | No | Execution time limit in milliseconds, from 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295), measured from the moment a child takes the task. On expiry the child process is killed and the task fails with `TASK_TIMEOUT` |
 | `execution` | `Execution` | No | How a worker runs the task: `ISOLATED` (default), `SHARED_ASYNC` or `SHARED_THREAD`. See [Choose the Execution Class](#choose-the-execution-class) |
-| `cancel_grace_ms` | `int` | No | `SHARED_ASYNC` only. The time to stop after a cancel, from 100 to 10,000 ms. Default 1,000 ms |
+| `cancel_grace_ms` | `int` | No | `ISOLATED` and `SHARED_ASYNC`. The time to stop after a cancel, from 100 to 10,000 ms. `SHARED_ASYNC`: default 1,000 ms, then a second cancel. `ISOLATED`: no default; when set, the worker kills the child of a cancelled task that has not stopped by then. See [Cancellation](#cancellation) |
 
 **Returns:** For a `def` function, a `TaskFunction`: a direct call returns the `TaskResult`. For an `async def` function, an `AsyncTaskFunction`: a direct call returns a coroutine, and `await` gives the `TaskResult`. Both send with `.send()` / `.send_async()`.
 

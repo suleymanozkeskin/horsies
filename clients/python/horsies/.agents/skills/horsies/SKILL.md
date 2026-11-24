@@ -13,7 +13,7 @@ reference files in this skill folder (open one only when the task needs it):
 
 | File | When to open |
 |---|---|
-| `tasks.md` | `@app.task`, `TaskResult`, `send()`, `with_options()`, `RetryPolicy`, `ExceptionMapper`, serialization |
+| `tasks.md` | `@app.task`, `TaskResult`, `send()`, `with_options()`, `RetryPolicy`, `ExceptionMapper`, serialization, the cancel of a running task (`TaskRuntime.cancel_state()`) |
 | `workflows.md` | `WorkflowSpec`, `TaskNode`, `WorkflowHandle`, DAG construction, failure semantics |
 | `configs.md` | `AppConfig`, `PostgresConfig`, queues, recovery, recurring scheduling including `CronSchedule`, child hooks, event handlers (`@app.on_event`), CLI commands |
 | `monitoring.md` | `horsies.monitoring` query API, `cancel_task`, the `horsies[web]` dashboard, `create_monitoring_app`, `horsies web`, auth policies, schema states |

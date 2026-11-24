@@ -1,7 +1,7 @@
 ---
 title: Database Schema
 section: shared
-summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (migration chain 1000, 1001 and 1002).
+summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (migration chain 1000, 1001, 1002 and 1003).
 related: [../../configuration/broker-config]
 tags: [internals, database, schema, PostgreSQL, task-history]
 ---
@@ -15,6 +15,7 @@ The schema is a chain of migrations. Each migration runs in its own transaction,
 | 1000 | `core/baseline/*.sql`, run in name order as one text | The baseline schema (the files below) |
 | 1001 | `core/migrations/1001_lifecycle_record.sql` | The phase record of each attempt: two columns on `horsies_tasks`, nine columns on `horsies_task_attempts`, the attempt writers that fill them, and attempt archive version 2. The events of each workflow run: the table `horsies_workflow_events` and the moves and workflow steps that write it |
 | 1002 | `core/migrations/1002_workflow_start_command_fingerprint.sql` | The start command fingerprint of each top-level workflow: two columns and one `CHECK` on `horsies_workflows`, and the workflow start functions that write and compare it (`horsies_workflow_start`, `horsies_workflow_start_top_row`, `horsies_workflow_start_child_row`, `horsies_workflow_child_start`) |
+| 1003 | `core/migrations/1003_attempt_cancelled.sql` | The cancel of a running task: the attempt outcome `CANCELLED` and the writer `CANCEL` in the two `CHECK`s of `horsies_task_attempts`, `horsies_cancel_task` (it writes the `CANCELLED` attempt of a `RUNNING` task and sends the cancel notice), and `horsies_cancelled_runs` (the read of a worker after a lost notice) |
 
 The files of migration 1000:
 
@@ -81,6 +82,17 @@ Upgrade from version 1001 to version 1002 (also from 0.8.0, after migration 1001
   new `CHECK` reads the table once.
 - The migration writes no value into old rows. A workflow row written before it has no start command
   fingerprint: a start with its id and its name returns that workflow with no compare.
+
+Upgrade from version 1002 to version 1003 (also from an earlier version, after the migrations before it):
+
+- Stop every process of an earlier build before the first start of this build, and upgrade every process
+  together. The first start applies migration 1003. A process of an earlier build that starts after it is
+  refused, because the database holds a newer version. A process of an earlier build that runs on after it fails
+  when it reads an attempt with the outcome `CANCELLED`, and its workers do not get the cancel of a running task.
+- A database at version 1003 does not go back to an earlier build.
+- The migration replaces two `CHECK`s of `horsies_task_attempts`; each new `CHECK` reads the table once, under
+  `ACCESS EXCLUSIVE` until the migration commits. The table holds the attempts of live tasks only. It rewrites
+  no table and writes no value into old rows.
 
 `horsies_migrations` has the sqlx form: `version`, `description`, `installed_on`, `success`, `checksum`
 (SHA-384 of the migration text) and `execution_time` (nanoseconds). The text of a released migration never
@@ -164,8 +176,8 @@ The attempt archive has two versions; the core reads both:
   is an array of 21 values: the 12 values of version 1, then the phase record (`phase_record_version`,
   `enqueued_at`, `claimed_at`, `attempt_claims`, `first_claimed_at`, `placed_at`, `finalizing_at`, `recorded_by`,
   `last_seen_at`). `open` is `null` when the last attempt ended with its row, else `[attempt_claims,
-  first_claimed_at, finalizing_at]` of the attempt that has no row: a cancel, an expiry or a pause abandon ended
-  it. Times are epoch microseconds; a missing value is `null`.
+  first_claimed_at, finalizing_at]` of the attempt that has no row: a cancel of a task that did not run, an expiry
+  or a pause abandon ended it. A cancel of a `RUNNING` task writes its attempt row first, so its `open` is `null`. Times are epoch microseconds; a missing value is `null`.
 
 Every leaf carries two indexes: `(task_id)` for point lookups and `(enqueued_at)` for the monitoring list's
 default sort.
@@ -286,7 +298,7 @@ are deleted.
 | ------ | ---- | ----------- |
 | `task_id` | `uuid` | References `horsies_tasks(id)` with no delete action: the move deletes the attempts first |
 | `attempt` | `integer` | 1-based attempt number, 1-21 |
-| `outcome` | `varchar(14)` | `COMPLETED`, `FAILED` or `WORKER_FAILURE`; a `COMPLETED` attempt never retries |
+| `outcome` | `varchar(14)` | `COMPLETED`, `FAILED`, `WORKER_FAILURE` or `CANCELLED` (an operator cancelled the running task, migration 1003); a `COMPLETED` or `CANCELLED` attempt never retries |
 | `will_retry` | `boolean` | Whether a retry was scheduled after this attempt |
 | `started_at`, `finished_at` | `timestamptz` | Attempt window |
 | `error_code`, `error_message`, `failed_reason` | `text` | Per-attempt failure detail |
@@ -295,18 +307,22 @@ are deleted.
 | `enqueued_at` | `timestamptz` | Due time of the attempt (the send's due time, or `next_retry_at` after a retry) |
 | `claimed_at` | `timestamptz` | The claim generation that ran the attempt |
 | `attempt_claims`, `first_claimed_at` | `integer`, `timestamptz` | Claims of the attempt (1 or more) and the time of its first claim. Both NULL: the claims were not counted (the attempt began before migration 1001) |
-| `placed_at` | `timestamptz` | When a child of the worker took the task: `claimed_at` plus the slot wait that the worker measured on its monotonic clock. NULL: no placement observed (always for `RECOVERY`) |
+| `placed_at` | `timestamptz` | When a child of the worker took the task: `claimed_at` plus the slot wait that the worker measured on its monotonic clock. NULL: no placement observed (always for `RECOVERY` and `CANCEL`) |
 | `finalizing_at` | `timestamptz` | The finalizing marker of the claim. NULL: no marker |
-| `recorded_by` | `varchar(8)` | `WORKER` (the worker wrote the end) or `RECOVERY` (stale `RUNNING` recovery wrote it) |
+| `recorded_by` | `varchar(8)` | `WORKER` (the worker wrote the end), `RECOVERY` (stale `RUNNING` recovery wrote it) or `CANCEL` (the cancel of the running task wrote it, migration 1003) |
 | `last_seen_at` | `timestamptz` | `RECOVERY` only: the last time the attempt was known alive, the greatest of `started_at`, `finalizing_at` and the newest runner heartbeat of the attempt |
 
 The statement that writes the attempt row writes the phase record from the locked live row:
 `horsies_complete_task_fused`, `horsies_finish_workflow_success` and `horsies_finish_failed_attempt` (each with the
 placement pair `p_placement_kind` `PLACED` or `NOT_OBSERVED` and `p_slot_wait_us`), and
-`horsies_finish_stale_attempt`. `finished_at` is the time the attempt was recorded. The `CHECK`
-`horsies_task_attempts_phase_record_shape` admits a row with no phase record, or a version-1 record with
-`enqueued_at` and `claimed_at` set, both claim columns set or both NULL, `recorded_by` `WORKER` with no
-`last_seen_at`, or `recorded_by` `RECOVERY` with `last_seen_at` and no `placed_at`. No `CHECK` orders the times:
+`horsies_finish_stale_attempt`, and `horsies_cancel_task` for a `RUNNING` task (outcome `CANCELLED`, `will_retry`
+false, error code `TASK_CANCELLED`, `recorded_by` `CANCEL`). `finished_at` is the time the attempt was recorded;
+for a `CANCELLED` attempt, the time of the cancel, not the time when the task code stopped. The `CHECK`
+`horsies_task_attempts_outcome_known` admits `FAILED` and `WORKER_FAILURE`, and `COMPLETED` and `CANCELLED` with
+`will_retry` false. The `CHECK` `horsies_task_attempts_phase_record_shape` admits a row with no phase record, or a
+version-1 record with `enqueued_at` and `claimed_at` set, both claim columns set or both NULL, `recorded_by`
+`WORKER` with no `last_seen_at`, `recorded_by` `RECOVERY` with `last_seen_at` and no `placed_at`, or
+`recorded_by` `CANCEL` with no `last_seen_at` and no `placed_at`. No `CHECK` orders the times:
 a step of the database clock can break the order, and a write is never refused for it.
 
 Primary key: `(task_id, attempt)`. Pre-execution aborts (`CLAIM_LOST`, `OWNERSHIP_UNCONFIRMED`,
@@ -379,7 +395,9 @@ A task insert sends `task_new` (the task id), `task_queue_<queue>` (the payload 
 `horsies_task_status`. The terminalization move sends `task_done` and `horsies_task_status` itself, because the
 move deletes the live row. A workflow insert and each workflow status change send `horsies_workflow_status`; a
 change to a terminal status or `PAUSED` also sends `workflow_done` first. A worker snapshot sends
-`horsies_worker_state`. Notifications are internal wake-up signals, not a public schema.
+`horsies_worker_state`. The cancel of a `RUNNING` task sends `horsies_task_cancel` (the task id and the claim
+generation); a worker that holds that run gives the cancel to its child. Notifications are internal wake-up
+signals, not a public schema.
 
 ## Trust Boundary
 

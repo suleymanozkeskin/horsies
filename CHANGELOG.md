@@ -10,6 +10,61 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Added
 
+- **The cancel of a RUNNING task reaches its code, in both clients.**
+  `cancel_task` with `include_running` (and `POST /api/tasks/{id}/cancel`
+  with `{"include_running": true}`) keeps its signature, its answers and
+  its errors. The statement that moves the task to history as `CANCELLED`
+  now also writes the attempt row of the run and sends a notice on the
+  channel `horsies_task_cancel`. The worker that holds the run sends the
+  cancel to the child, and the child gives it to the task code:
+  - An async body (Python `async def`, isolated or shared async) gets
+    `asyncio.CancelledError` at its next `await`. A Rust async body sees
+    `TaskRuntime::cancelled()` complete.
+  - A sync body (Python `def`, Rust `#[blocking_task]`; isolated or shared
+    thread) reads the cancel state of its `TaskRuntime`.
+  - A cancel that comes after the start of the run and before the body
+    starts: the body does not run.
+  - What the body returns after the cancel is dropped; the task stays
+    `CANCELLED`. Side effects made before the code stopped stay.
+  - Code that does not stop: an isolated body runs until it returns or until
+    its `timeout_ms` kill, unless the task sets `cancel_grace_ms`; a shared
+    async body gets the second cancel and the cancel rounds after
+    `cancel_grace_ms`, as at the deadline, and a run that still does not stop
+    keeps its seat until no task in its child has time left; a shared thread
+    body runs until it returns.
+  - A lost notice (a listener reconnect, a full notice queue) is found by
+    one read of the cancels of the runs that the worker holds, after the
+    reconnect and when a runner heartbeat of a held run does not land: at
+    most one `runner_heartbeat_interval_ms` (default 30 s) later while the
+    heartbeat connection works.
+  - Workflow cancel and workflow pause do not change: the task of a node
+    that started runs on.
+- **The cancel state of a run, in both clients.**
+  - Python: `TaskRuntime.cancel_state()` returns `CancelNotRequested()` or
+    `CancelRequested(cause)`, with `CancelCause.OPERATOR` (an operator
+    cancel) or `CancelCause.DEADLINE` (the deadline of a `SHARED_ASYNC` or a
+    `SHARED_THREAD` run). The first cause stays. `TaskRuntime.for_test`
+    takes `cancel_state` (default `CancelNotRequested()`). `horsies` exports
+    `CancelCause`, `CancelNotRequested`, `CancelRequested` and
+    `RunCancelState`.
+  - Rust: `TaskRuntime::cancel_state()` returns `RunCancelState`:
+    `NotRequested`, `Requested { cause: CancelCause }` (`Operator`,
+    `Deadline`) or `NotInARun`. `TaskRuntime::cancelled()` and
+    `is_cancelled()` also fire at an operator cancel, in every execution
+    class, and at the deadline of a `shared_thread` run; `is_cancelled()`
+    and `cancel_state()` work in a blocking body. `horsies` and
+    `horsies::task` re-export `RunCancelState` and `CancelCause`;
+    `horsies-core` exports them with `run_cancel_state`.
+- **`cancel_grace_ms` on `ISOLATED` tasks: the kill after a cancel.** An
+  `ISOLATED` task can set `cancel_grace_ms` (100 to 10,000 ms). The worker
+  then kills the child, with the subprocesses in its session,
+  `cancel_grace_ms` after it sent an operator cancel, when the run has not
+  ended. With no value there is no such kill, and the stored options hold
+  no value. The deadline of an `ISOLATED` task still kills its child with no
+  grace. A `SHARED_ASYNC` row that runs in an isolated child uses its own
+  grace for the same kill. `SHARED_THREAD` keeps the refusal `HRS-110`; the
+  Python overloads and the Rust attribute accept `cancel_grace_ms` with
+  `ISOLATED`.
 - **A fencing token for task code, in both clients.** A task reads the
   fencing token of its run: the task id and a value. Two reads in one
   attempt give the same token. An attempt that runs after another attempt
@@ -114,6 +169,51 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **A cancel of a RUNNING task records its attempt.** The new attempt
+  outcome `CANCELLED` (`TaskAttemptOutcome.CANCELLED`,
+  `TaskAttemptOutcome::Cancelled`) has `will_retry` false, error code
+  `TASK_CANCELLED`, the start of the run, and `finished_at` at the time of
+  the cancel: from then on no write of the run lands. Its phase record has
+  the writer `CANCEL` (`recorded_by`), with no placement and no
+  `last_seen_at`; the monitoring models add `RecordedByCancelInfo()`
+  (Python) and `AttemptRecordedByInfo::Cancel` (Rust), and the web UI names
+  the cancel as the writer. A cancel of a `PENDING` or `CLAIMED` task writes
+  no attempt, as before. A Rust `match` on `TaskAttemptOutcome` needs the
+  new arm.
+- **Metrics and alerts: the outcome `CANCELLED`.** `horsies.task.attempts`
+  and `horsies.task.run.duration` take the `outcome` value `CANCELLED`
+  (`error_code` `TASK_CANCELLED`) when the worker sees the end of a
+  cancelled run; the run duration ends when the task code stopped. The
+  alert `HorsiesTaskFailureRatioHigh` and the dashboard panels of attempts
+  that did not complete count `FAILED` and `WORKER_FAILURE` only
+  (`outcome=~"FAILED|WORKER_FAILURE"`), so a cancel is not a failure.
+- **Lifecycle events: contract version 7.** `ChildResult::Cancelled { end }`
+  (Python `ChildResultCancelled`) with `end` `RETURNED_AFTER_SIGNAL`,
+  `DROPPED_AFTER_GRACE` or `BEFORE_BODY`; `WorkerDecision` gains
+  `KILLED_AFTER_CANCEL` and `LOST_AFTER_CANCEL` (error code
+  `TASK_CANCELLED`); `AttemptRecord::RecordedByCancel` (Python
+  `AttemptRecordRecordedByCancel`): the cancel statement wrote the attempt,
+  and the worker wrote nothing. A result that reached the worker before its
+  child got the cancel keeps `Completed` or `Failed` with the record
+  `NotHeld`. The snapshot is `core/tests/fixtures/event_contract/v7.txt`. A
+  Rust `match` on these enums needs the new arms.
+- **Schema migration 1003 and child protocol 4: stop every process and
+  upgrade together.** The first start of this build applies migration 1003
+  (`core/migrations/1003_attempt_cancelled.sql`) after migration 1002. It
+  replaces the CHECKs `horsies_task_attempts_outcome_known` and
+  `horsies_task_attempts_phase_record_shape`, replaces
+  `horsies_cancel_task` (same arguments and columns), and adds
+  `horsies_cancelled_runs`. Each CHECK reads `horsies_task_attempts`, which
+  holds the attempts of live tasks only, under `ACCESS EXCLUSIVE` until the
+  migration commits; no table is rewritten and no old row changes. A
+  process of an earlier build that starts after it is refused, because the
+  database holds a newer version; one that runs on fails when it reads a
+  `CANCELLED` attempt, and its workers do not get the cancel of a running
+  task. A database at 1003 does not go back to an earlier build. The child
+  protocol goes from version 3 to 4 (`cancel_run`, `cancel_fired`,
+  `run_cancelled`, the seat end `cancelled`); a parent and a child of one
+  build always match, and a mismatch is refused at the child start. The web
+  monitoring schema check expects version 1003.
 - **A workflow start with a known `workflow_id` must carry the same start
   command.** When the id exists, the start compares its start command with
   the stored one, in the same statement:

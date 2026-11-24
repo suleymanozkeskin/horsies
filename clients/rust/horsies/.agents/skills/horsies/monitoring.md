@@ -106,7 +106,8 @@ Phase timing (the lifecycle record of migration 1001; one statement reads a run,
 - `TaskAttemptInfo.phases`: `AttemptPhasesInfo::NotCaptured` (a row written before the record) or
   `Captured { enqueued_at, claimed_at, claims, finalizing, recorded_by }`. `claims`: `Counted { count,
   first_claimed_at }` or `NotCounted`; `finalizing`: `Marked { finalizing_at }` or `NotMarked`;
-  `recorded_by`: `Worker { placement: Placed { placed_at } | NotObserved }` or `Recovery { last_seen_at }`.
+  `recorded_by`: `Worker { placement: Placed { placed_at } | NotObserved }`, `Recovery { last_seen_at }` or
+  `Cancel` (the cancel of a RUNNING task wrote the row, outcome `Cancelled`, `finished_at` = the cancel time).
 - `WorkflowNodeInfo.timing`: `NodeTimingInfo::Exact { segments, endpoint }`, `Partial { reasons, segments,
   endpoint }`, `Unavailable { reason }` or `Inconsistent { conflict }`. A segment is `TimingSegmentInfo {
   phase, started_at, end: Ended { at } | Open, source: Node | Task { generation, task_id } | Attempt {
@@ -182,9 +183,14 @@ async fn cancel_pending(app: &Horsies, task_id: Uuid) -> Result<bool, String> {
 - One compare-and-set in one transaction. A committed `CANCELLED` is final:
   claim, finalize, retry and recovery cannot overwrite it.
 - PENDING and CLAIMED are cancelled. RUNNING is cancelled only with
-  `include_running = true`: the row becomes `CANCELLED`, but the task code
-  keeps running until it returns, its side effects still happen, and no
-  attempt row is recorded for that run.
+  `include_running = true`: one statement writes the attempt row with
+  outcome `Cancelled` (`recorded_by` `Cancel`), moves the task to history,
+  and sends a notice to the worker that holds the run. The worker gives the
+  cancel to the task code (`TaskRuntime::cancelled()`, `is_cancelled()`,
+  `cancel_state()`; see `tasks.md`). The code stops when it reads the cancel;
+  side effects made before then stay, and what it returns is dropped. No
+  kill by default: an `isolated` task with `cancel_grace_ms` is killed when
+  it has not stopped `cancel_grace_ms` after the cancel.
 - A waiting `TaskHandle::get` returns `Failed` with `TASK_CANCELLED`.
 - A workflow task is refused: use `WorkflowHandle::cancel`, `pause` and
   `resume`.
@@ -458,8 +464,9 @@ blocking call.
 **Do not treat an unfiltered `TaskListPage.total` as an exact count.** It
 is an estimate.
 
-**Do not cancel a RUNNING task to stop its side effects.** The cancel
-changes the row; the task code runs on.
+**Do not cancel a RUNNING task to undo its side effects.** The cancel stops
+the task code when the code reads it; effects made before then stay. Code
+that does not read the cancel runs on until it returns, or until a kill.
 
 **Do not expose `AllowAll` without the host's own authentication.** It
 allows every read and every action.

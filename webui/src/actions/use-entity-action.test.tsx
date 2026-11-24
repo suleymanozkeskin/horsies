@@ -88,7 +88,7 @@ afterEach(() => {
 });
 
 describe('successful action', () => {
-  it('enters settling and reports what happens to the running process', async () => {
+  it('enters settling and reports what happens to the running task code', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
@@ -102,7 +102,7 @@ describe('successful action', () => {
     expect(result.current.state.phase).toBe('settling');
     expect(
       await screen.findByText(
-        'Task cancelled. The running process on box-1 will keep executing until it finishes.'
+        'Task cancelled. The task code on box-1 gets the cancel and stops when it reads it.'
       )
     ).toBeTruthy();
   });

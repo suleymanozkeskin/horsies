@@ -44,7 +44,7 @@ rule_files:
 | Alert | Fires when | For | Severity |
 |-------|------------|-----|----------|
 | `HorsiesOldestPendingTaskTooOld` | The oldest due `PENDING` task of a queue and execution class waits more than 300 s | 5m | warning |
-| `HorsiesTaskFailureRatioHigh` | More than 10% of the attempts of a task did not complete in 10 minutes, with at least 10 attempts | 5m | warning |
+| `HorsiesTaskFailureRatioHigh` | More than 10% of the attempts of a task failed in 10 minutes, with at least 10 attempts | 5m | warning |
 | `HorsiesNoLiveWorker` | No worker has a snapshot inside the live window | 5m | critical |
 | `HorsiesUnservedClass` | A queue and execution class has `PENDING` tasks, and no live worker serves it | 5m | critical |
 | `HorsiesEventsDropped` | A worker dropped lifecycle events in the last 10 minutes | none | warning |
@@ -55,7 +55,7 @@ rule_files:
 
 **`HorsiesOldestPendingTaskTooOld`**: a task of this queue and class is due, and no worker claimed it for more than 5 minutes. The workers that serve the class are full, too slow, or gone. Check their seats in use, and `HorsiesUnservedClass`. The expression is `max by (queue, execution) (horsies_queue_oldest_pending_age_seconds) > 300`.
 
-**`HorsiesTaskFailureRatioHigh`**: more than 10% of at least 10 attempts of a task ended `FAILED` or `WORKER_FAILURE` in 10 minutes. `horsies_task_attempts_total{outcome!="COMPLETED"}` by `error_code` shows the causes.
+**`HorsiesTaskFailureRatioHigh`**: more than 10% of at least 10 attempts of a task ended `FAILED` or `WORKER_FAILURE` in 10 minutes. An attempt that an operator cancelled (`CANCELLED`) does not count as a failure. `horsies_task_attempts_total{outcome=~"FAILED|WORKER_FAILURE"}` by `error_code` shows the causes.
 
 **`HorsiesNoLiveWorker`**: no worker wrote a snapshot inside the live window (120 seconds). No task is claimed until a worker starts. The fleet collector still answers, so the database is reachable.
 
