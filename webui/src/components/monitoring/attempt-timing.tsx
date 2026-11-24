@@ -1,7 +1,7 @@
-import { Info, TriangleAlert } from 'lucide-react';
-
-import { phaseFill, phaseLabel } from '@/components/workflows/phase';
-import { PhaseBar, type PhaseBarPart } from '@/components/workflows/phase-bar';
+import { Hint } from '@/components/ui/hint';
+import { NoteLine, type NoteView } from '@/components/ui/note-line';
+import { phaseLabel, phaseMeaning, phaseWeight } from '@/components/workflows/phase';
+import { phaseFigure, TimeFigures, type TimeFigure } from '@/components/workflows/time-figures';
 import { useNow } from '@/hooks/use-now';
 import { clockText, clockTextFrom, dateLineText } from '@/lib/clock-text';
 import { assertNever } from '@/lib/exhaustive';
@@ -15,7 +15,7 @@ import {
   type AllowedAttempts,
   type AttemptNote,
   type AttemptPhase,
-  type AttemptPhaseDetail,
+  type ChildTook,
   type LiveAttempt,
   type RecordedAttempt,
   type StoryItem,
@@ -24,42 +24,91 @@ import {
 /** The live clock of a task in progress, for its "so far" times. */
 const LIVE_TICK_MS = 1_000;
 
-/** What a phase of an attempt holds beyond its name: `placed +1ms`, `1
- * earlier claim`, or nothing. */
-export function attemptPhaseDetailText(phase: AttemptPhase): string | null {
-  const detail: AttemptPhaseDetail = phase.detail;
-  switch (detail.kind) {
-    case 'none':
-      return null;
+/** The label of a phase of an attempt. The time from the first claim to the
+ * claim that ran the attempt is `earlier claims`, so the two parts of a slot
+ * wait have two names. The time after the last sign of life of a lost worker
+ * is `worker lost`, the words of its note. */
+export function attemptPhaseLabel(phase: AttemptPhase): string {
+  switch (phase.detail.kind) {
     case 'earlier_claims':
-      return detail.count === 1 ? '1 earlier claim' : `${detail.count} earlier claims`;
-    case 'placed':
-      return `placed +${formatMilliseconds(detail.placedAtMs - phase.startMs)}`;
-    case 'placement_not_observed':
-      return 'placement not observed';
-    case 'claims_not_counted':
-      return 'claims not counted';
+      return 'earlier claims';
     case 'worker_lost':
       return 'worker lost';
+    case 'none':
+    case 'placed':
+    case 'placement_not_observed':
+    case 'claims_not_counted':
+      return phaseLabel(phase.key);
     default:
-      return assertNever(detail, 'attempt phase detail');
+      return assertNever(phase.detail, 'attempt phase detail');
   }
 }
 
-/** The phase name with what it holds: `slot wait · placed +1ms`. */
-export function attemptPhaseText(phase: AttemptPhase): string {
-  const detail = attemptPhaseDetailText(phase);
-  return detail === null ? phaseLabel(phase.key) : `${phaseLabel(phase.key)} · ${detail}`;
+/** What a phase of an attempt is, for its hint. */
+function attemptPhaseMeaning(phase: AttemptPhase): string {
+  switch (phase.detail.kind) {
+    case 'earlier_claims':
+      return 'From the first claim of the attempt to the claim that ran it: claims that lost their lease or were released.';
+    case 'claims_not_counted':
+      return 'The claims of this attempt were not counted, so earlier claims can hide in this queue wait.';
+    case 'worker_lost':
+      return 'From the last sign of life of the worker to the record that recovery wrote.';
+    case 'none':
+    case 'placed':
+    case 'placement_not_observed':
+      return phaseMeaning(phase.key);
+    default:
+      return assertNever(phase.detail, 'attempt phase detail');
+  }
 }
 
-/** What a note says, and how loud it is. */
-export interface NoteView {
-  tone: 'warning' | 'info';
-  text: string;
+/** The figures of an attempt: one for each of its phases, in record order. */
+export function attemptFigures(attempt: RecordedAttempt): TimeFigure[] {
+  return attempt.phases.map((phase, index) => {
+    const ms = phase.endMs - phase.startMs;
+    return {
+      id: `${index}:${phase.key}`,
+      label: attemptPhaseLabel(phase),
+      ms,
+      open: false,
+      weight: phaseWeight(phase.key, ms),
+      meaning: attemptPhaseMeaning(phase),
+    };
+  });
+}
+
+const sentenceCase = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
+
+/** The two parts of a long slot wait: the wait for a child, then the start
+ * on the child. */
+function childTookText(childTook: ChildTook, waitMs: number): string {
+  switch (childTook.kind) {
+    case 'after':
+      return (
+        `A child took the task after ${formatMilliseconds(childTook.ms)}; ` +
+        `the start on the child took ${formatMilliseconds(waitMs - childTook.ms)}.`
+      );
+    case 'not_recorded':
+      return 'The record does not show when a child took the task.';
+    default:
+      return assertNever(childTook, 'child took');
+  }
 }
 
 export function attemptNoteView(note: AttemptNote, base: StoryBase): NoteView {
   switch (note.kind) {
+    case 'long_step':
+      return {
+        tone: 'warning',
+        text: `${sentenceCase(phaseLabel(note.key))} ${formatMilliseconds(note.ms)}. ${note.tells}`,
+      };
+    case 'long_slot_wait':
+      return {
+        tone: 'warning',
+        text:
+          `${sentenceCase(phaseLabel('claimed'))} ${formatMilliseconds(note.ms)}. ${note.tells} ` +
+          childTookText(note.childTook, note.ms),
+      };
     case 'claimed_more_than_once':
       return {
         tone: 'warning',
@@ -73,14 +122,12 @@ export function attemptNoteView(note: AttemptNote, base: StoryBase): NoteView {
     case 'worker_lost':
       return {
         tone: 'warning',
-        text: `Worker lost: stale recovery recorded the attempt. The last sign of life was at ${clockIn(base, note.lastSeenMs)}.`,
+        text: `Worker lost: recovery recorded the attempt. The last sign of life was at ${clockIn(base, note.lastSeenMs)}; the time after it is the time recovery needed to find the loss.`,
       };
     case 'cancelled':
-      return { tone: 'info', text: 'Cancelled: an operator cancelled the task while this attempt ran.' };
-    case 'placement_not_observed':
       return {
         tone: 'info',
-        text: 'Placement not observed: the worker did not report when a child took the task.',
+        text: 'Cancelled: an operator cancelled the task while this attempt ran. The end of the attempt is the time of the cancel.',
       };
     case 'not_captured':
       return {
@@ -160,52 +207,17 @@ function clockIn(base: StoryBase, epochMs: number): string {
 const spanText = (base: StoryBase, startMs: number, endMs: number): string =>
   `${clockIn(base, startMs)} → ${clockIn(base, endMs)}`;
 
-/** The tooltip of a bar part: `running 4.9s (09:14:26.248 → 09:14:31.148)`. */
-const partTitle = (base: StoryBase, text: string, startMs: number, endMs: number): string =>
-  `${text} ${formatMilliseconds(endMs - startMs)} (${spanText(base, startMs, endMs)})`;
-
-/** The parts of the story bar: every phase of every attempt, and each retry
- * wait, in time order. */
-function storyParts(items: readonly StoryItem[], base: StoryBase): PhaseBarPart[] {
-  return items.flatMap((item): PhaseBarPart[] => {
-    switch (item.kind) {
-      case 'attempt':
-        return item.attempt.phases.map(phase => ({
-          key: phase.key,
-          ms: phase.endMs - phase.startMs,
-          title: partTitle(
-            base,
-            `Attempt ${item.attempt.number} · ${attemptPhaseText(phase)}`,
-            phase.startMs,
-            phase.endMs
-          ),
-        }));
-      case 'retry_wait':
-        return [
-          {
-            key: 'retry_wait',
-            ms: item.endMs - item.startMs,
-            title: partTitle(base, 'retry wait', item.startMs, item.endMs),
-          },
-        ];
-      case 'live':
-        return [];
-      default:
-        return assertNever(item, 'story item');
-    }
-  });
-}
-
 function SectionLabel({ text }: { text: string }) {
   return <span className="text-xs uppercase tracking-wide text-muted-foreground">{text}</span>;
 }
 
 /**
- * The attempts of one task as one story: a date line, a bar over every
- * attempt and retry wait (with more than one attempt), then each attempt with
- * its answer, its phase bar, its phase table, its unusual facts and its error,
- * a retry wait between two attempts, and the attempt in progress of a live
- * task. Used by the workflow node panel and the task detail.
+ * The attempts of one task as one story: a date line, the time of all
+ * attempts by phase (with more than one attempt), then each attempt with its
+ * outcome, its time, the time of each of its phases as a number, its unusual
+ * facts, its error, and where and when it ran. A retry wait is between two
+ * attempts, and a live task ends with its attempt in progress. Used by the
+ * workflow node panel and the task detail.
  */
 export function AttemptTiming({
   attempts,
@@ -233,7 +245,7 @@ export function AttemptTiming({
       {isLoading && story.items.length === 0 ? (
         <p className="text-xs text-muted-foreground">Loading…</p>
       ) : story.items.length === 0 ? (
-        <p className="text-xs text-muted-foreground">No attempts recorded yet.</p>
+        <p className="text-xs text-muted-foreground">No attempt is recorded.</p>
       ) : (
         <StoryBody items={story.items} base={base} />
       )}
@@ -245,7 +257,7 @@ function StoryBody({ items, base }: { items: readonly StoryItem[]; base: StoryBa
   const recordedCount = items.filter(item => item.kind === 'attempt').length;
   return (
     <>
-      {recordedCount > 1 && <StorySummary items={items} base={base} />}
+      {recordedCount > 1 && <StoryTotalsBox items={items} recordedCount={recordedCount} />}
       <ol className="flex flex-col divide-y divide-hairline">
         {items.map((item, index) => (
           <li key={index} className="py-2">
@@ -257,28 +269,41 @@ function StoryBody({ items, base }: { items: readonly StoryItem[]; base: StoryBa
   );
 }
 
-/** The whole story in one line and one bar: its time, the running time and
- * the retry wait of every attempt. */
-function StorySummary({ items, base }: { items: readonly StoryItem[]; base: StoryBase }) {
+/** All recorded attempts as one total: the time from the first due time to
+ * the last record, and the time of each phase over the attempts and the
+ * retry waits. */
+function StoryTotalsBox({
+  items,
+  recordedCount,
+}: {
+  items: readonly StoryItem[];
+  recordedCount: number;
+}) {
   const totals = storyTotals(items);
   switch (totals.kind) {
     case 'no_times':
       return null;
-    case 'measured': {
-      const runningMs = totals.byPhase.get('running') ?? 0;
-      const retryMs = totals.byPhase.get('retry_wait') ?? 0;
-      const text =
-        `${formatMilliseconds(totals.spanMs)} in all · running ${formatMilliseconds(runningMs)} · ` +
-        `retry wait ${formatMilliseconds(retryMs)}`;
+    case 'measured':
       return (
-        <div className="flex flex-col gap-1">
-          <span className="text-xs" title="From the first due time to the last record">
-            {text}
-          </span>
-          <PhaseBar parts={storyParts(items, base)} label={`All attempts: ${text}`} size="regular" />
+        <div
+          data-story="totals"
+          className="flex flex-col gap-1.5"
+        >
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="text-xs font-semibold">{recordedCount} attempts</span>
+            <Hint text="From the due time of the first attempt to the record of the last attempt.">
+              <span className="font-mono text-sm font-semibold tabular-nums">
+                {formatMilliseconds(totals.spanMs)}
+              </span>
+            </Hint>
+          </div>
+          <TimeFigures
+            figures={totals.totals.map(phaseFigure)}
+            layout="stacked"
+            label={`Time of ${recordedCount} attempts by phase`}
+          />
         </div>
       );
-    }
     default:
       return assertNever(totals, 'story totals');
   }
@@ -297,17 +322,17 @@ function StoryEntry({ item, base }: { item: StoryItem; base: StoryBase }) {
   }
 }
 
-/** The retry delay between two attempts: a striped gap with its time. */
+/** The retry delay between two attempts: a planned wait, with its time. */
 function RetryGap({ startMs, endMs, base }: { startMs: number; endMs: number; base: StoryBase }) {
   return (
-    <div className="flex items-center gap-2 pl-3 text-xs" data-story="retry_wait">
-      <span
-        className="h-4 w-1.5 shrink-0 rounded-sm"
-        style={{ background: phaseFill('retry_wait') }}
-        aria-hidden
-      />
-      <span className="font-mono font-semibold tabular-nums">{formatMilliseconds(endMs - startMs)}</span>
-      <span className="text-muted-foreground">retry wait</span>
+    <div
+      className="flex flex-wrap items-baseline gap-x-2 py-0.5 text-xs"
+      data-story="retry_wait"
+    >
+      <Hint text={phaseMeaning('retry_wait')} className="inline-flex items-baseline gap-2">
+        <span className="text-muted-foreground">{phaseLabel('retry_wait')}</span>
+        <span className="font-mono tabular-nums">{formatMilliseconds(endMs - startMs)}</span>
+      </Hint>
       <span className="ml-auto font-mono text-10 text-muted-foreground">
         {spanText(base, startMs, endMs)}
       </span>
@@ -324,9 +349,11 @@ function OutcomeChip({ outcome }: { outcome: string }) {
   );
 }
 
-/** One recorded attempt: the answer first (outcome, error code, run time,
- * when), then where its time went. */
+/** One recorded attempt, in the order of the reader's questions: how it
+ * ended and how long it took, where its time went, what was unusual, why it
+ * failed, then when and where it ran. */
 function AttemptBlock({ attempt, base }: { attempt: RecordedAttempt; base: StoryBase }) {
+  const figures = attemptFigures(attempt);
   return (
     <article aria-label={`Attempt ${attempt.number}`} className="flex flex-col gap-2">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -335,10 +362,11 @@ function AttemptBlock({ attempt, base }: { attempt: RecordedAttempt; base: Story
         {attempt.errorCode !== null && (
           <span className="font-mono text-11 text-muted-foreground">{attempt.errorCode}</span>
         )}
-        <RunTimeText attempt={attempt} />
+        <AttemptTime attempt={attempt} />
       </div>
-      <AttemptWhen attempt={attempt} base={base} />
-      {attempt.phases.length > 0 && <AttemptPhases attempt={attempt} base={base} />}
+      {figures.length > 0 && (
+        <TimeFigures figures={figures} layout="stacked" label={`Phases of attempt ${attempt.number}`} />
+      )}
       {attempt.notes.map((note, index) => (
         <NoteLine key={index} view={attemptNoteView(note, base)} />
       ))}
@@ -347,125 +375,55 @@ function AttemptBlock({ attempt, base }: { attempt: RecordedAttempt; base: Story
           {attempt.message}
         </pre>
       )}
+      <AttemptWhere attempt={attempt} base={base} />
     </article>
   );
 }
 
-function RunTimeText({ attempt }: { attempt: RecordedAttempt }) {
-  switch (attempt.runTime.kind) {
-    case 'measured':
-      return (
-        <span className="ml-auto text-xs" title="The time the task code ran">
-          ran <span className="font-mono font-semibold">{formatMilliseconds(attempt.runTime.ms)}</span>
-        </span>
-      );
-    case 'not_started':
-      return null;
-    default:
-      return assertNever(attempt.runTime, 'run time');
-  }
-}
-
-function AttemptWhen({ attempt, base }: { attempt: RecordedAttempt; base: StoryBase }) {
+/** The time of the attempt: from its first recorded time to its record. */
+function AttemptTime({ attempt }: { attempt: RecordedAttempt }) {
   const span = attempt.span;
   switch (span.kind) {
     case 'no_times':
       return null;
     case 'span':
       return (
-        <div className="flex min-w-0 items-baseline gap-2 text-10 text-muted-foreground">
-          <span className="shrink-0 whitespace-nowrap font-mono">
-            {spanText(base, span.startMs, span.endMs)}
+        <Hint
+          text={
+            attempt.phases.length > 0
+              ? 'The time of the attempt: from its due time to its record.'
+              : 'The time of the attempt: from its start to its record.'
+          }
+          className="ml-auto"
+        >
+          <span data-attempt-time className="font-mono text-sm font-semibold tabular-nums">
+            {formatMilliseconds(span.endMs - span.startMs)}
           </span>
-          <span className="shrink-0 whitespace-nowrap font-mono">
-            {formatMilliseconds(span.endMs - span.startMs)} in all
-          </span>
-          {attempt.host !== null && (
-            <span className="ml-auto min-w-0 truncate font-mono" title={attempt.host}>
-              {attempt.host}
-            </span>
-          )}
-        </div>
+        </Hint>
       );
     default:
       return assertNever(span, 'attempt span');
   }
 }
 
-/** The phase bar of an attempt and its table: duration first, then the
- * phase, then its time span. */
-function AttemptPhases({ attempt, base }: { attempt: RecordedAttempt; base: StoryBase }) {
-  const parts: PhaseBarPart[] = attempt.phases.map(phase => ({
-    key: phase.key,
-    ms: phase.endMs - phase.startMs,
-    title: partTitle(base, attemptPhaseText(phase), phase.startMs, phase.endMs),
-  }));
-  return (
-    <>
-      <PhaseBar
-        parts={parts}
-        label={`Attempt ${attempt.number}: ${parts
-          .map(part => `${phaseLabel(part.key)} ${formatMilliseconds(part.ms)}`)
-          .join(', ')}`}
-        size="regular"
-      />
-      <table className="w-full text-xs">
-        <tbody>
-          {attempt.phases.map((phase, index) => (
-            <tr key={index} data-phase={phase.key}>
-              <td className="w-16 py-px pr-2 text-right align-top font-mono font-semibold tabular-nums">
-                {formatMilliseconds(phase.endMs - phase.startMs)}
-              </td>
-              <td className="py-px pr-2 align-top">
-                <span className="inline-flex flex-wrap items-center gap-x-1.5">
-                  <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
-                    <span
-                      className="inline-block h-2.5 w-3 shrink-0 rounded-sm"
-                      style={{ background: phaseFill(phase.key) }}
-                      aria-hidden
-                    />
-                    {phaseLabel(phase.key)}
-                  </span>
-                  <PhaseDetail phase={phase} />
-                </span>
-              </td>
-              <td className="py-px text-right align-top font-mono text-10 whitespace-nowrap text-muted-foreground">
-                {spanText(base, phase.startMs, phase.endMs)}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </>
-  );
-}
-
-function PhaseDetail({ phase }: { phase: AttemptPhase }) {
-  const text = attemptPhaseDetailText(phase);
-  return text === null ? null : (
-    <span className="whitespace-nowrap text-10 text-muted-foreground">{text}</span>
-  );
-}
-
-function NoteLine({ view }: { view: NoteView }) {
-  switch (view.tone) {
-    case 'warning':
-      return (
-        <p className="flex items-start gap-1.5 text-xs" role="note">
-          <TriangleAlert className="mt-px size-3.5 shrink-0" style={{ color: 'var(--warning-dark)' }} aria-hidden />
-          <span>{view.text}</span>
-        </p>
-      );
-    case 'info':
-      return (
-        <p className="flex items-start gap-1.5 text-xs text-muted-foreground" role="note">
-          <Info className="mt-px size-3.5 shrink-0" aria-hidden />
-          <span>{view.text}</span>
-        </p>
-      );
-    default:
-      return assertNever(view.tone, 'note tone');
+/** When and where the attempt ran: its time span and its worker host, for a
+ * search in the logs. The host wraps; it is never cut. */
+function AttemptWhere({ attempt, base }: { attempt: RecordedAttempt; base: StoryBase }) {
+  const span = attempt.span;
+  if (span.kind === 'no_times' && attempt.host === null) {
+    return null;
   }
+  return (
+    <div
+      data-attempt-where
+      className="flex flex-wrap gap-x-2 gap-y-0.5 font-mono text-10 text-muted-foreground"
+    >
+      {span.kind === 'span' && (
+        <span className="whitespace-nowrap">{spanText(base, span.startMs, span.endMs)}</span>
+      )}
+      {attempt.host !== null && <span className="break-all">on {attempt.host}</span>}
+    </div>
+  );
 }
 
 /** What the attempt in progress does at `nowMs`, in words. */

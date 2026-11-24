@@ -5,7 +5,8 @@
 // so an attempt here and its segments on the run timeline have the same
 // boundaries.
 
-import type { PhaseKey } from '@/components/workflows/phase';
+import { phaseWeight, type PhaseKey } from '@/components/workflows/phase';
+import { phaseTotals, type PhaseInterval, type PhaseTotal } from '@/components/workflows/timeline-geometry';
 import { assertNever } from '@/lib/exhaustive';
 import { instantMs } from '@/lib/time-text';
 import type { AttemptClaims, AttemptPhases, AttemptRecordedBy } from '@/types/timing';
@@ -36,17 +37,21 @@ export interface AttemptPhase {
   endMs: number;
 }
 
-/** A fact of an attempt that the normal case does not have. */
+/** When a child of the worker took the task of a long slot wait: the time
+ * after the claim, or not recorded. It tells which part of the wait was long:
+ * the wait for a child, or the start on the child. */
+export type ChildTook = { kind: 'after'; ms: number } | { kind: 'not_recorded' };
+
+/** A fact of an attempt that the normal case does not have. A long step
+ * holds what its time tells (see `phaseWeight`). */
 export type AttemptNote =
+  | { kind: 'long_step'; key: 'enqueued' | 'finalizing'; ms: number; tells: string }
+  | { kind: 'long_slot_wait'; ms: number; tells: string; childTook: ChildTook }
   | { kind: 'claimed_more_than_once'; count: number }
   | { kind: 'claims_not_counted' }
   | { kind: 'worker_lost'; lastSeenMs: number }
   | { kind: 'cancelled' }
-  | { kind: 'placement_not_observed' }
   | { kind: 'not_captured' };
-
-/** The time the task code ran in an attempt. */
-export type RunTime = { kind: 'measured'; ms: number } | { kind: 'not_started' };
 
 /** The interval of an attempt: its first recorded time to its last. */
 export type AttemptSpan =
@@ -63,7 +68,6 @@ export interface RecordedAttempt {
   /** In lifecycle order; empty for an attempt with no phase record. */
   phases: AttemptPhase[];
   span: AttemptSpan;
-  runTime: RunTime;
   notes: AttemptNote[];
 }
 
@@ -154,17 +158,14 @@ function claimDetail(recordedBy: AttemptRecordedBy): AttemptPhaseDetail {
   }
 }
 
+/** The note of the writer of the attempt row. A worker is the normal case.
+ * A placement that the worker did not observe has no note of its own: the
+ * placement matters only for a long slot wait, and the note of that wait
+ * says that the record does not show it. */
 function writerNotes(recordedBy: AttemptRecordedBy): AttemptNote[] {
   switch (recordedBy.kind) {
     case 'worker':
-      switch (recordedBy.placement.kind) {
-        case 'placed':
-          return [];
-        case 'not_observed':
-          return [{ kind: 'placement_not_observed' }];
-        default:
-          return assertNever(recordedBy.placement, 'attempt placement');
-      }
+      return [];
     case 'recovery':
       return [{ kind: 'worker_lost', lastSeenMs: instantMs(recordedBy.last_seen_at) }];
     case 'cancel':
@@ -240,11 +241,60 @@ function phasesFromStarts(starts: readonly PhaseStart[], endMs: number | null): 
   });
 }
 
-function runTimeOf(phases: readonly AttemptPhase[]): RunTime {
-  const running = phases.find(phase => phase.key === 'running');
-  return running === undefined
-    ? { kind: 'not_started' }
-    : { kind: 'measured', ms: running.endMs - running.startMs };
+/** The note of a long queue wait, slot wait or finalizing time. A long time
+ * of earlier claims or of a record gap has its own note (more than one claim,
+ * claims not counted, worker lost), so it gets none here. */
+function longStepNotes(phase: AttemptPhase): AttemptNote[] {
+  const ms = phase.endMs - phase.startMs;
+  const weight = phaseWeight(phase.key, ms);
+  switch (weight.kind) {
+    case 'main':
+    case 'plain':
+    case 'quiet':
+      return [];
+    case 'marked':
+      break;
+    default:
+      return assertNever(weight, 'phase weight');
+  }
+  const detail = phase.detail;
+  switch (phase.key) {
+    case 'enqueued':
+    case 'finalizing':
+      return [{ kind: 'long_step', key: phase.key, ms, tells: weight.tells }];
+    case 'claimed':
+      switch (detail.kind) {
+        case 'placed':
+          return [
+            {
+              kind: 'long_slot_wait',
+              ms,
+              tells: weight.tells,
+              childTook: { kind: 'after', ms: detail.placedAtMs - phase.startMs },
+            },
+          ];
+        case 'placement_not_observed':
+          return [
+            { kind: 'long_slot_wait', ms, tells: weight.tells, childTook: { kind: 'not_recorded' } },
+          ];
+        case 'none':
+        case 'earlier_claims':
+        case 'claims_not_counted':
+        case 'worker_lost':
+          return [];
+        default:
+          return assertNever(detail, 'attempt phase detail');
+      }
+    case 'pending':
+    case 'ready':
+    case 'retry_wait':
+    case 'running':
+    case 'advancing':
+    case 'unknown':
+      return [];
+    default:
+      return assertNever(phase.key, 'phase');
+  }
 }
 
 function spanOf(phases: readonly AttemptPhase[], attempt: TaskAttempt): AttemptSpan {
@@ -260,7 +310,7 @@ function spanOf(phases: readonly AttemptPhase[], attempt: TaskAttempt): AttemptS
     : { kind: 'span', startMs: startedMs, endMs: finishedMs };
 }
 
-/** One attempt row as phases, span, run time and notes. */
+/** One attempt row as phases, span and notes. */
 export function recordedAttempt(attempt: TaskAttempt): RecordedAttempt {
   const base = {
     number: attempt.attempt,
@@ -276,7 +326,6 @@ export function recordedAttempt(attempt: TaskAttempt): RecordedAttempt {
         ...base,
         phases: [],
         span: spanOf([], attempt),
-        runTime: { kind: 'not_started' },
         notes: [{ kind: 'not_captured' }],
       };
     case 'captured': {
@@ -285,8 +334,11 @@ export function recordedAttempt(attempt: TaskAttempt): RecordedAttempt {
         ...base,
         phases,
         span: spanOf(phases, attempt),
-        runTime: runTimeOf(phases),
-        notes: [...claimNotes(record.claims), ...writerNotes(record.recorded_by)],
+        notes: [
+          ...phases.flatMap(longStepNotes),
+          ...claimNotes(record.claims),
+          ...writerNotes(record.recorded_by),
+        ],
       };
     }
     default:
@@ -425,37 +477,44 @@ export function attemptStory(attempts: readonly TaskAttempt[], leaf: LeafTask | 
 }
 
 /** The time from the first recorded time of the story to its last, with the
- * time of each phase summed over the attempts and the retry waits. */
+ * time of each phase over the attempts and the retry waits, in lifecycle
+ * order. */
 export type StoryTotals =
-  | { kind: 'measured'; spanMs: number; byPhase: ReadonlyMap<PhaseKey, number> }
+  | { kind: 'measured'; spanMs: number; totals: PhaseTotal[] }
   | { kind: 'no_times' };
 
-export function storyTotals(items: readonly StoryItem[]): StoryTotals {
-  const byPhase = new Map<PhaseKey, number>();
-  let firstMs = Number.POSITIVE_INFINITY;
-  let lastMs = Number.NEGATIVE_INFINITY;
-  const add = (key: PhaseKey, startMs: number, endMs: number): void => {
-    byPhase.set(key, (byPhase.get(key) ?? 0) + Math.max(endMs - startMs, 0));
-    firstMs = Math.min(firstMs, startMs);
-    lastMs = Math.max(lastMs, endMs);
-  };
-  for (const item of items) {
+/** The phase intervals of the story: each phase of each recorded attempt,
+ * and each retry wait. */
+function storyIntervals(items: readonly StoryItem[]): PhaseInterval[] {
+  return items.flatMap((item): PhaseInterval[] => {
     switch (item.kind) {
       case 'attempt':
-        for (const phase of item.attempt.phases) {
-          add(phase.key, phase.startMs, phase.endMs);
-        }
-        break;
+        return item.attempt.phases.map(phase => ({
+          key: phase.key,
+          startMs: phase.startMs,
+          endMs: phase.endMs,
+          open: false,
+        }));
       case 'retry_wait':
-        add('retry_wait', item.startMs, item.endMs);
-        break;
+        return [{ key: 'retry_wait', startMs: item.startMs, endMs: item.endMs, open: false }];
       case 'live':
-        break;
+        return [];
       default:
-        assertNever(item, 'story item');
+        return assertNever(item, 'story item');
     }
+  });
+}
+
+export function storyTotals(items: readonly StoryItem[]): StoryTotals {
+  const intervals = storyIntervals(items);
+  if (intervals.length === 0) {
+    return { kind: 'no_times' };
   }
-  return Number.isFinite(firstMs)
-    ? { kind: 'measured', spanMs: Math.max(lastMs - firstMs, 0), byPhase }
-    : { kind: 'no_times' };
+  let firstMs = Number.POSITIVE_INFINITY;
+  let lastMs = Number.NEGATIVE_INFINITY;
+  for (const interval of intervals) {
+    firstMs = Math.min(firstMs, interval.startMs);
+    lastMs = Math.max(lastMs, interval.endMs);
+  }
+  return { kind: 'measured', spanMs: Math.max(lastMs - firstMs, 0), totals: phaseTotals(intervals) };
 }

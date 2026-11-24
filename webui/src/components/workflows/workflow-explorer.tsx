@@ -257,7 +257,6 @@ export function WorkflowExplorer({
           {runId !== null && runDetail !== undefined && (
             <RunTimingSummary
               workflowId={runId}
-              view={viewMode}
               statusFilter={statusFilter}
               onToggleStatus={toggleStatusFilter}
             />

@@ -121,6 +121,9 @@
   --phase-ink: #1a1a14;
   --phase-running-ink: white;
   --critical-path: var(--foreground);
+  /* Ink of a marked time (a long engine step, a gap of the record): 5.4:1 on
+     the card. */
+  --marked-ink: #7a5600;
   --phase-pending-fill: var(--phase-pending);
   --phase-ready-fill: repeating-linear-gradient(
     135deg,
@@ -315,6 +318,7 @@
   --phase-ink: #050505;
   --phase-running-ink: var(--phase-ink);
   --critical-path: var(--foreground);
+  --marked-ink: #ffc94a;
   --phase-pending-fill: var(--phase-pending);
   --phase-ready-fill: repeating-linear-gradient(
     135deg,
