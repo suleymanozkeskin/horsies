@@ -3,24 +3,21 @@ import { useMemo, useState } from 'react';
 import { Activity, Cpu, Database, MemoryStick, RefreshCw } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
 import { useNow } from '@/hooks/use-now';
 import {
   useClassReport,
-  useSchedules,
   useWorkerLiveness,
   useWorkers,
 } from '@/hooks/use-workers';
-import { formatElapsed, formatRelative, formatTime } from '@/lib/format-duration';
+import { assertNever } from '@/lib/exhaustive';
+import { formatElapsed, formatTime } from '@/lib/format-duration';
 import { cn } from '@/lib/utils';
-import type { BudgetLoad, WorkerState } from '@/types/workers';
+import type {
+  BudgetLoad,
+  ClassReport,
+  SnapshotProfile,
+  WorkerState,
+} from '@/types/workers';
 
 import { budgetsOf } from './class-coverage';
 import {
@@ -29,8 +26,14 @@ import {
   ClassCoveragePanel,
   DownSlotList,
 } from './class-coverage-panel';
+import { SchedulesTable } from './schedules-table';
 import { ErrorState } from './states';
 import { WorkerHistoryChart } from './worker-history-chart';
+import {
+  WorkerProfilePanel,
+  type ClassReportRead,
+} from './worker-profile-panel';
+import { groupByProfile } from './worker-profiles';
 
 interface WorkerStatus {
   label: string;
@@ -48,6 +51,18 @@ function workerStatus(worker: WorkerState, responsive: boolean): WorkerStatus {
     return { label: 'stale', color: 'var(--muted-foreground)' };
   }
   return { label: 'no ping', color: 'var(--warning-dark)' };
+}
+
+/** The worker profile of a snapshot in a line of worker facts. */
+function profileText(profile: SnapshotProfile): string {
+  switch (profile.kind) {
+    case 'named':
+      return `profile ${profile.name}`;
+    case 'not_recorded':
+      return 'profile not recorded';
+    default:
+      return assertNever(profile, 'snapshot profile');
+  }
 }
 
 /** A thin labelled bar for a 0–100 percentage metric. */
@@ -99,6 +114,7 @@ function WorkerCard({
   budgets,
   responsive,
   focused,
+  showsProfile,
   onSelect,
 }: {
   worker: WorkerState;
@@ -106,6 +122,9 @@ function WorkerCard({
   budgets: BudgetLoad[] | undefined;
   responsive: boolean;
   focused: boolean;
+  /** Whether the card names the worker profile. A card inside the panel of
+   * its profile does not: the panel names it. */
+  showsProfile: boolean;
   onSelect: () => void;
 }) {
   const status = workerStatus(worker, responsive);
@@ -133,6 +152,7 @@ function WorkerCard({
           </div>
           <span className="font-mono text-11 text-muted-foreground">
             pid {worker.pid} · {worker.processes} proc
+            {showsProfile && ` · ${profileText(worker.profile)}`}
           </span>
         </div>
         <span
@@ -218,8 +238,8 @@ function WorkerFocus({
             </span>
           </div>
           <span className="font-mono text-xs text-muted-foreground">
-            pid {worker.pid} · {worker.processes} proc · up{' '}
-            {formatElapsed(worker.uptime_s)}
+            {profileText(worker.profile)} · pid {worker.pid} ·{' '}
+            {worker.processes} proc · up {formatElapsed(worker.uptime_s)}
           </span>
         </div>
         <span
@@ -367,62 +387,21 @@ function LivenessBanner({
   );
 }
 
-function SchedulesTable() {
-  const { schedules, isLoading, isError } = useSchedules();
-  return (
-    <div className="glass overflow-hidden rounded-xl border border-border">
-      <div className="border-b border-border px-4 py-3 text-sm font-medium">
-        Schedules
-      </div>
-      {isError ? (
-        <div className="p-4">
-          <ErrorState compact message="Could not load schedules." />
-        </div>
-      ) : isLoading && schedules.length === 0 ? (
-        <p className="p-4 text-sm text-muted-foreground">Loading schedules…</p>
-      ) : schedules.length === 0 ? (
-        <p className="p-4 text-sm text-muted-foreground">
-          No schedules registered.
-        </p>
-      ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Schedule</TableHead>
-              <TableHead>Last run</TableHead>
-              <TableHead>Next run</TableHead>
-              <TableHead className="text-right">Runs</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {schedules.map(schedule => (
-              <TableRow key={schedule.schedule_name}>
-                <TableCell className="font-mono text-xs">
-                  {schedule.schedule_name}
-                </TableCell>
-                <TableCell
-                  className="text-muted-foreground"
-                  title={formatTime(schedule.last_run_at)}
-                >
-                  {formatRelative(schedule.last_run_at)}
-                </TableCell>
-                <TableCell title={formatTime(schedule.next_run_at)}>
-                  {formatRelative(schedule.next_run_at)}
-                </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {schedule.run_count}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      )}
-    </div>
-  );
+/** Whether the class report was read. A report from an earlier read counts
+ * as read when a later read failed: its budgets stay on the page. */
+function classReportRead(
+  report: ClassReport | undefined,
+  isError: boolean
+): ClassReportRead {
+  if (report !== undefined) {
+    return 'loaded';
+  }
+  return isError ? 'failed' : 'loading';
 }
 
 /** Worker + scheduler overview: liveness banner, the pending rows per
- * execution class with fleet warnings, a worker list, a focused active worker
+ * execution class with fleet warnings, the live workers in groups of one
+ * worker profile with the budget load of each group, a focused active worker
  * with its budgets, down slots and history charts on the right, and the
  * schedules table. */
 export function WorkerOverview() {
@@ -534,18 +513,40 @@ export function WorkerOverview() {
               focusWorker ? 'lg:flex-1' : 'w-full'
             )}
           >
-            <div className={cn('grid gap-3', gridClass)}>
-              {liveWorkers.map(worker => (
-                <WorkerCard
-                  key={worker.worker_id}
-                  worker={worker}
-                  budgets={budgetsOf(report, worker.worker_id)}
-                  responsive={isResponsive(worker)}
-                  focused={focusWorker?.worker_id === worker.worker_id}
-                  onSelect={() => setFocusId(worker.worker_id)}
-                />
+            <section
+              aria-label="Workers by profile"
+              className="flex flex-col gap-3"
+            >
+              <span className="px-1 text-sm font-medium">
+                Workers by profile
+              </span>
+              {liveWorkers.length === 0 && (
+                <p className="glass rounded-xl border border-border p-4 text-sm text-muted-foreground">
+                  No live worker.
+                </p>
+              )}
+              {groupByProfile(liveWorkers, report).map(group => (
+                <WorkerProfilePanel
+                  key={group.key}
+                  group={group}
+                  reportRead={classReportRead(report, reportError)}
+                >
+                  <div className={cn('grid gap-3', gridClass)}>
+                    {group.workers.map(worker => (
+                      <WorkerCard
+                        key={worker.worker_id}
+                        worker={worker}
+                        budgets={budgetsOf(report, worker.worker_id)}
+                        responsive={isResponsive(worker)}
+                        focused={focusWorker?.worker_id === worker.worker_id}
+                        showsProfile={false}
+                        onSelect={() => setFocusId(worker.worker_id)}
+                      />
+                    ))}
+                  </div>
+                </WorkerProfilePanel>
               ))}
-            </div>
+            </section>
 
             {staleWorkers.length > 0 && (
               <div className="flex flex-col gap-3">
@@ -567,6 +568,7 @@ export function WorkerOverview() {
                         budgets={budgetsOf(report, worker.worker_id)}
                         responsive={false}
                         focused={focusWorker?.worker_id === worker.worker_id}
+                        showsProfile
                         onSelect={() => setFocusId(worker.worker_id)}
                       />
                     ))}

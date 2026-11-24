@@ -139,15 +139,55 @@ so a run of 10,000 nodes renders the same number of rows as a short run.
   serves (red) or whose serving workers have no child in service (amber), and
   what to start or check. See
   [Does a live worker serve every pending class?](/horsies/monitoring/worker-health/#does-a-live-worker-serve-every-pending-class)
-- Per-worker cards with running/claimed counts, queues, CPU and memory, and
+- Workers by profile: one panel for each
+  [worker profile](/horsies/monitoring/worker-health/#which-profile-does-a-worker-run)
+  that a live worker runs, in name order. Live workers whose snapshot holds
+  no profile name are one last panel, "Profile not recorded".
+  - The header of a panel shows the profile name, the number of workers, the
+    seats in service and the down slots.
+  - A line states what the profile gives a worker: its number of children
+    and its budget classes (`12 children per worker · ISOLATED budget`). These
+    two facts do not change while a worker runs. When the workers of one
+    profile do not have the same two facts, the panel lists each shape with
+    its number of workers: these workers do not run the same definition of
+    the profile (for example, the profile changed and only a part of the
+    workers started again).
+  - Each budget of a profile has a meter of the capacity in service that
+    holds a row, the rows in flight and the free capacity (summed over the
+    workers of the profile), the capacity in service (children for
+    `ISOLATED`, seats for a shared class) and the classes that the budget
+    serves. A budget shows the rows above its capacity when a worker holds
+    more rows than its capacity in service.
+  - A line names the classes that the workers of the profile do not claim.
+  - The budgets come from the class report. A panel counts the workers that
+    the report does not hold, and its sums leave them out. A panel with no
+    worker in the report says why its budgets are not known.
+- Per-worker cards, inside the panel of the worker's profile, with
+  running/claimed counts, the CPU and the memory of the worker process, and
   uptime. A worker whose snapshot is older than 120 seconds is marked stale.
-  Stale workers collapse into a separate group. A live worker's card shows
-  each claim budget with its free capacity (`ISOLATED 3/8 free`), and a card
-  shows the number of down slots.
-- For the focused worker: each budget with its capacity in service, rows in
-  flight, free capacity and the classes it serves; each down slot with its
-  cause, failed starts and error text; and load and resource timeseries.
-- The schedule table: last run, next run, and run count per registered schedule.
+  Stale workers collapse into a separate list, outside the panels; the card
+  of a stale worker names its profile. A live worker's card shows each claim
+  budget with its free capacity (`ISOLATED 3/8 free`), and a card shows the
+  number of down slots.
+- For the focused worker: its profile and its queues; each budget with its
+  capacity in service, rows in flight, free capacity and the classes it
+  serves; each down slot with its cause, failed starts and error text; and
+  two charts of its snapshots.
+  - Load: the `RUNNING` and the `CLAIMED` tasks that the worker held.
+  - Worker process: the CPU and the memory of the worker process, in percent.
+    The task children of the worker are not in these numbers. See
+    [Snapshot Fields](/horsies/monitoring/worker-health/#snapshot-fields).
+  - Each legend item is a button. A click draws that series alone, and the
+    value axis then fits that series. A click on a series that is alone draws
+    the two series again. An item of a series that is not drawn has an empty
+    key and struck-through text.
+- The schedule table: last run, next run, and run count per registered
+  schedule. A click on a column header sorts the table by that column, and a
+  second click reverses the order; Enter and Space do the same when the
+  header has the keyboard focus. The header shows the sorted column and its
+  direction. The first order is the soonest next run. Schedules with equal
+  values are in name order. A schedule that has not run shows `never` and is
+  last in a sort by last run, in the two directions.
 
 ## Freshness
 
