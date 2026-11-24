@@ -13,6 +13,7 @@ import {
 import { useDrawTime, type ReadClock } from '@/hooks/use-draw-time';
 import { useWorkflowRun } from '@/hooks/use-workflow-run';
 import { assertNever } from '@/lib/exhaustive';
+import { clockText } from '@/lib/clock-text';
 import { formatInstant, formatMilliseconds } from '@/lib/format-duration';
 import { statusColorVar, statusLabel } from '@/lib/status-utils';
 import { instantMs } from '@/lib/time-text';
@@ -24,8 +25,14 @@ import type {
 } from '@/types/timing';
 import type { WorkflowNode, WorkflowRunDetail } from '@/types/workflows';
 
-import { phaseFill } from './phase';
+import { phaseFill, phaseInk, phaseTrack, type PhaseKey } from './phase';
 import { phaseStripText } from './phase-strip';
+import {
+  activeSpan,
+  criticalMembership,
+  criticalPath,
+  type CriticalMembership,
+} from './run-timing';
 import {
   axisTicks,
   boxOf,
@@ -73,12 +80,51 @@ const NO_STATUS_FILTER: ReadonlySet<string> = new Set();
 const AXIS_TICK_COUNT = 5;
 /** A segment shorter than one pixel still shows; its times do not change. */
 const MIN_SEGMENT_WIDTH_PX = 1;
+/** Estimated width of one character of a segment label (9px type), and the
+ * padding around the label: a label shows only when it fits its segment. */
+const LABEL_CHAR_WIDTH_PX = 5.6;
+const LABEL_PADDING_PX = 6;
 /** Offset of the shared tooltip from the pointer, and its widest box. */
 const TOOLTIP_OFFSET_PX = 12;
 const TOOLTIP_MAX_WIDTH_PX = 288;
 
 const nodeLabel = (node: WorkflowNode): string =>
   node.node_id ?? node.task_name ?? `#${node.task_index}`;
+
+/** The width of the track column in pixels, once the layout measured it. */
+export type TrackWidth = { kind: 'measured'; px: number } | { kind: 'unmeasured' };
+
+/** The inline label of a segment: its duration, when the phase is drawn at
+ * full height and the text fits the width of the segment. */
+export type SegmentLabel = { kind: 'label'; text: string } | { kind: 'no_label' };
+
+export function segmentLabel(
+  key: PhaseKey,
+  durationMs: number,
+  widthPct: number,
+  track: TrackWidth
+): SegmentLabel {
+  switch (track.kind) {
+    case 'unmeasured':
+      return { kind: 'no_label' };
+    case 'measured':
+      break;
+    default:
+      return assertNever(track, 'track width');
+  }
+  const drawing = phaseTrack(key);
+  switch (drawing) {
+    case 'thin':
+      return { kind: 'no_label' };
+    case 'full': {
+      const text = formatMilliseconds(durationMs);
+      const neededPx = text.length * LABEL_CHAR_WIDTH_PX + LABEL_PADDING_PX;
+      return (widthPct / 100) * track.px >= neededPx ? { kind: 'label', text } : { kind: 'no_label' };
+    }
+    default:
+      return assertNever(drawing, 'phase track');
+  }
+}
 
 /** What the rows are drawn against: the axis of a composed run, or the
  * reason that every node of the run is unavailable. */
@@ -135,9 +181,10 @@ function wallText(timing: NodeTiming, drawAtMs: number): string {
 function rowAccessibleName(
   node: WorkflowNode,
   frame: TimelineFrame,
-  drawAtMs: number
+  drawAtMs: number,
+  membership: CriticalMembership
 ): string {
-  const head = `${nodeLabel(node)}, ${statusLabel(node.node_status)}`;
+  const head = `${nodeLabel(node)}, ${statusLabel(node.node_status)}${criticalSuffix(membership)}`;
   switch (frame.kind) {
     case 'unavailable':
       return `${head}, timing unavailable: ${unavailableReasonText(frame.reason)}`;
@@ -159,6 +206,17 @@ function rowAccessibleName(
       return `${head}, ${phaseStripText(timing, drawAtMs)}`;
     default:
       return assertNever(timing, 'node timing');
+  }
+}
+
+function criticalSuffix(membership: CriticalMembership): string {
+  switch (membership) {
+    case 'on_path':
+      return ', on the critical path';
+    case 'off_path':
+      return '';
+    default:
+      return assertNever(membership, 'critical membership');
   }
 }
 
@@ -261,18 +319,25 @@ export function TimelineView({
     [detail.nodes]
   );
   const frame = timelineFrame(detail, drawAtMs);
+  const path = useMemo(
+    () => criticalPath(detail.nodes, detail.edges, drawAtMs),
+    [detail.nodes, detail.edges, drawAtMs]
+  );
   const tooltipId = useId();
   const [inspection, setInspection] = useState<Inspection>({ kind: 'none' });
   const hide = useCallback(() => setInspection({ kind: 'none' }), []);
+  const { trackRef, trackWidth } = useTrackWidth();
 
   return (
     <div className="flex h-full flex-col" onPointerLeave={hide}>
       <RunTimingBanner frame={frame} />
-      <TimelineHeader frame={frame} />
+      <TimelineHeader frame={frame} trackRef={trackRef} />
       <TimelineRows
         nodes={nodes}
         frame={frame}
         drawAtMs={drawAtMs}
+        trackWidth={trackWidth}
+        membershipOf={taskIndex => criticalMembership(path, taskIndex)}
         selectedIndex={selectedIndex}
         onSelectNode={onSelectNode}
         statusFilter={statusFilter}
@@ -320,11 +385,44 @@ function RunTimingBanner({ frame }: { frame: TimelineFrame }) {
   }
 }
 
-function TimelineHeader({ frame }: { frame: TimelineFrame }) {
+/** The measured width of the track column, from the header track. */
+function useTrackWidth(): { trackRef: RefObject<HTMLSpanElement | null>; trackWidth: TrackWidth } {
+  const trackRef = useRef<HTMLSpanElement>(null);
+  const [trackWidth, setTrackWidth] = useState<TrackWidth>({ kind: 'unmeasured' });
+  useLayoutEffect(() => {
+    const element = trackRef.current;
+    if (element === null) {
+      return undefined;
+    }
+    const measure = (): void => {
+      const px = element.getBoundingClientRect().width;
+      setTrackWidth(previous =>
+        px <= 0
+          ? { kind: 'unmeasured' }
+          : previous.kind === 'measured' && previous.px === px
+            ? previous
+            : { kind: 'measured', px }
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  return { trackRef, trackWidth };
+}
+
+function TimelineHeader({
+  frame,
+  trackRef,
+}: {
+  frame: TimelineFrame;
+  trackRef: RefObject<HTMLSpanElement | null>;
+}) {
   return (
     <div className="flex items-center gap-2 border-b border-border px-3 py-1.5 text-xs text-muted-foreground">
       <span className="w-40 shrink-0">node</span>
-      <span className="relative h-4 min-w-0 flex-1" aria-hidden>
+      <span ref={trackRef} className="relative h-4 min-w-0 flex-1" aria-hidden>
         {frame.kind === 'composed' &&
           frame.ticks.map((tick, index) => (
             <span
@@ -490,6 +588,8 @@ interface TimelineRowsProps {
   nodes: readonly WorkflowNode[];
   frame: TimelineFrame;
   drawAtMs: number;
+  trackWidth: TrackWidth;
+  membershipOf: (taskIndex: number) => CriticalMembership;
   selectedIndex: number | null;
   onSelectNode: (node: WorkflowNode) => void;
   statusFilter: ReadonlySet<string>;
@@ -548,6 +648,8 @@ function TimelineRows(props: TimelineRowsProps) {
               rowCount={rowCount}
               frame={frame}
               drawAtMs={drawAtMs}
+              trackWidth={props.trackWidth}
+              membership={props.membershipOf(node.task_index)}
               selected={node.task_index === props.selectedIndex}
               dimmed={statusFilter.size > 0 && !statusFilter.has(node.node_status)}
               described={
@@ -572,6 +674,8 @@ interface TimelineRowProps {
   rowCount: number;
   frame: TimelineFrame;
   drawAtMs: number;
+  trackWidth: TrackWidth;
+  membership: CriticalMembership;
   selected: boolean;
   dimmed: boolean;
   /** The shared tooltip shows a segment of this row. */
@@ -589,6 +693,8 @@ function TimelineRow({
   rowCount,
   frame,
   drawAtMs,
+  trackWidth,
+  membership,
   selected,
   dimmed,
   described,
@@ -607,7 +713,7 @@ function TimelineRow({
       <button
         type="button"
         data-row-index={index}
-        aria-label={rowAccessibleName(node, frame, drawAtMs)}
+        aria-label={rowAccessibleName(node, frame, drawAtMs, membership)}
         aria-describedby={described ? tooltipId : undefined}
         onClick={onSelect}
         onKeyDown={onKeyDown}
@@ -619,11 +725,16 @@ function TimelineRow({
             : 'flex h-full w-full items-center gap-2 border-b border-border px-3 text-left hover:bg-glass-surface-strong focus-visible:outline-2 focus-visible:outline-ring'
         }
       >
-        <span className="w-40 shrink-0 truncate text-xs font-medium" title={nodeLabel(node)}>
-          {nodeLabel(node)}
-        </span>
-        <span className="relative h-3 min-w-0 flex-1">
-          <RowTrack node={node} frame={frame} drawAtMs={drawAtMs} onInspect={onInspect} />
+        <RowLabel node={node} membership={membership} />
+        <span className="relative h-4 min-w-0 flex-1">
+          <RowTrack
+            node={node}
+            frame={frame}
+            drawAtMs={drawAtMs}
+            trackWidth={trackWidth}
+            membership={membership}
+            onInspect={onInspect}
+          />
         </span>
         <span className="w-16 shrink-0 text-right font-mono text-10 text-muted-foreground">
           {frame.kind === 'composed' ? wallText(node.timing, drawAtMs) : '—'}
@@ -690,11 +801,15 @@ function RowTrack({
   node,
   frame,
   drawAtMs,
+  trackWidth,
+  membership,
   onInspect,
 }: {
   node: WorkflowNode;
   frame: TimelineFrame;
   drawAtMs: number;
+  trackWidth: TrackWidth;
+  membership: CriticalMembership;
   onInspect: (inspection: Inspection) => void;
 }) {
   switch (frame.kind) {
@@ -713,6 +828,8 @@ function RowTrack({
           timing={node.timing}
           axis={frame.axis}
           drawAtMs={drawAtMs}
+          trackWidth={trackWidth}
+          membership={membership}
           onInspect={onInspect}
         />
       );
@@ -726,12 +843,16 @@ function NodeTrack({
   timing,
   axis,
   drawAtMs,
+  trackWidth,
+  membership,
   onInspect,
 }: {
   taskIndex: number;
   timing: NodeTiming;
   axis: TimeAxis;
   drawAtMs: number;
+  trackWidth: TrackWidth;
+  membership: CriticalMembership;
   onInspect: (inspection: Inspection) => void;
 }) {
   switch (timing.kind) {
@@ -757,7 +878,8 @@ function NodeTrack({
       return (
         <>
           {timing.segments.map((segment, segmentIndex) => {
-            const box = boxOf(segmentSpan(segment, drawAtMs), axis);
+            const span = segmentSpan(segment, drawAtMs);
+            const box = boxOf(span, axis);
             return (
               <span
                 key={segmentIndex}
@@ -769,7 +891,6 @@ function NodeTrack({
                   left: `${box.leftPct}%`,
                   width: `${box.widthPct}%`,
                   minWidth: MIN_SEGMENT_WIDTH_PX,
-                  background: phaseFill(segment.phase.kind),
                 }}
                 onPointerMove={event =>
                   onInspect({
@@ -781,15 +902,143 @@ function NodeTrack({
                   })
                 }
                 onPointerLeave={() => onInspect({ kind: 'none' })}
-              />
+              >
+                <SegmentFill
+                  phase={segment.phase.kind}
+                  label={segmentLabel(
+                    segment.phase.kind,
+                    span.endMs - span.startMs,
+                    box.widthPct,
+                    trackWidth
+                  )}
+                />
+              </span>
             );
           })}
+          <CriticalLine timing={timing} axis={axis} drawAtMs={drawAtMs} membership={membership} />
           <EndpointMarker mark={mark} />
         </>
       );
     }
     default:
       return assertNever(timing, 'node timing');
+  }
+}
+
+/** The fill of one segment: dependency wait as a thin track, every other
+ * phase at full height, with its duration when the label fits. */
+function SegmentFill({ phase, label }: { phase: PhaseKey; label: SegmentLabel }) {
+  const drawing = phaseTrack(phase);
+  switch (drawing) {
+    case 'thin':
+      return (
+        <span
+          className="absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 rounded-full"
+          style={{ background: phaseFill(phase) }}
+        />
+      );
+    case 'full':
+      return (
+        <span
+          className="absolute inset-0 flex items-center justify-center overflow-hidden rounded-xs"
+          style={{ background: phaseFill(phase) }}
+        >
+          <SegmentLabelText phase={phase} label={label} />
+        </span>
+      );
+    default:
+      return assertNever(drawing, 'phase track');
+  }
+}
+
+function SegmentLabelText({ phase, label }: { phase: PhaseKey; label: SegmentLabel }) {
+  switch (label.kind) {
+    case 'no_label':
+      return null;
+    case 'label':
+      return (
+        <span
+          data-segment-label
+          className="whitespace-nowrap px-0.5 text-9 font-semibold leading-none tabular-nums"
+          style={{ color: phaseInk(phase) }}
+          aria-hidden
+        >
+          {label.text}
+        </span>
+      );
+    default:
+      return assertNever(label, 'segment label');
+  }
+}
+
+/** The line under the active span of a node on the critical path: from the
+ * end of its dependency wait to its end. The lines of the path form a chain
+ * of steps across the rows. */
+function CriticalLine({
+  timing,
+  axis,
+  drawAtMs,
+  membership,
+}: {
+  timing: NodeTiming;
+  axis: TimeAxis;
+  drawAtMs: number;
+  membership: CriticalMembership;
+}) {
+  switch (membership) {
+    case 'off_path':
+      return null;
+    case 'on_path':
+      break;
+    default:
+      return assertNever(membership, 'critical membership');
+  }
+  const span = activeSpan(timing, drawAtMs);
+  switch (span.kind) {
+    case 'no_active_time':
+      return null;
+    case 'span': {
+      const box = boxOf(span, axis);
+      return (
+        <span
+          data-critical-line
+          className="pointer-events-none absolute -bottom-1 h-0.5 rounded-full"
+          style={{
+            left: `${box.leftPct}%`,
+            width: `${box.widthPct}%`,
+            minWidth: MIN_SEGMENT_WIDTH_PX,
+            background: 'var(--critical-path)',
+          }}
+        />
+      );
+    }
+    default:
+      return assertNever(span, 'active span');
+  }
+}
+
+/** The node name; a node on the critical path has a mark before it. */
+function RowLabel({ node, membership }: { node: WorkflowNode; membership: CriticalMembership }) {
+  switch (membership) {
+    case 'on_path':
+      return (
+        <span
+          className="flex w-40 shrink-0 items-center gap-1.5 text-xs font-semibold"
+          title={`${nodeLabel(node)}: on the critical path, the chain of nodes whose end times decided the end of the run`}
+        >
+          <span className="h-3 w-0.5 shrink-0 rounded-full" style={{ background: 'var(--critical-path)' }} aria-hidden />
+          <span className="min-w-0 truncate">{nodeLabel(node)}</span>
+        </span>
+      );
+    case 'off_path':
+      return (
+        <span className="flex w-40 shrink-0 items-center gap-1.5 text-xs font-medium" title={nodeLabel(node)}>
+          <span className="h-3 w-0.5 shrink-0" aria-hidden />
+          <span className="min-w-0 truncate">{nodeLabel(node)}</span>
+        </span>
+      );
+    default:
+      return assertNever(membership, 'critical membership');
   }
 }
 
@@ -812,7 +1061,8 @@ function EndpointMarker({ mark }: { mark: EndpointMark }) {
   }
 }
 
-/** The shared tooltip: phase, source, start, end, duration of one segment. */
+/** The shared tooltip of one segment: its phase and duration, then its
+ * source, start and end (times of day). */
 function SegmentTooltip({
   id,
   inspection,
@@ -847,22 +1097,23 @@ function SegmentTooltip({
     >
       <div className="flex items-center gap-1.5 font-medium">
         <span
-          className="inline-block h-2 w-3 shrink-0 rounded-sm"
+          className="inline-block h-2.5 w-3 shrink-0 rounded-sm"
           style={{ background: phaseFill(segment.phase.kind) }}
           aria-hidden
         />
-        {segmentPhaseText(segment.phase)}
+        {segmentPhaseText(segment)}
+        <span className="ml-auto pl-3 font-mono">
+          {segmentDurationText(segment.end, span.endMs - span.startMs)}
+        </span>
       </div>
       <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-muted-foreground">
         <dt>source</dt>
         <dd className="text-popover-foreground">{segmentSourceText(segment.source)}</dd>
         <dt>start</dt>
-        <dd className="font-mono text-popover-foreground">{formatInstant(span.startMs)}</dd>
+        <dd className="font-mono text-popover-foreground">{clockText(span.startMs)}</dd>
         <dt>end</dt>
-        <dd className="font-mono text-popover-foreground">{segmentEndText(segment.end)}</dd>
-        <dt>duration</dt>
         <dd className="font-mono text-popover-foreground">
-          {segmentDurationText(segment.end, span.endMs - span.startMs)}
+          {segment.end.kind === 'open' ? segmentEndText(segment.end) : clockText(span.endMs)}
         </dd>
       </dl>
     </div>

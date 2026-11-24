@@ -1,8 +1,14 @@
 // Runs and nodes for the timing tests, built from the shared examples of the
 // core (test/timing-examples.ts), so the tests draw the JSON the API writes.
 
-import type { NodeTiming, RunTiming } from '@/types/timing';
-import type { WorkflowNode, WorkflowRunDetail } from '@/types/workflows';
+import type {
+  NodeTiming,
+  RunTiming,
+  SegmentPhase,
+  TerminalNodeStatus,
+  TimingSegment,
+} from '@/types/timing';
+import type { WorkflowEdge, WorkflowNode, WorkflowRunDetail } from '@/types/workflows';
 
 import { TIMING_EXAMPLES } from './timing-examples';
 
@@ -78,3 +84,53 @@ export function workflowRun(
     timing,
   };
 }
+
+/** The UTC time text `seconds` after 12:00:00 on the day of the examples. */
+export const at = (seconds: number): string =>
+  new Date(Date.UTC(2026, 10, 22, 12, 0, 0) + seconds * 1_000).toISOString();
+
+/** An exact node timing from `[phase, start, end]` rows (seconds after
+ * 12:00:00) that ended with `status` at `endAt`. Dependency wait and
+ * advancing belong to the node; every other phase to attempt 1. */
+export function exactTiming(
+  rows: readonly [SegmentPhase['kind'], number, number][],
+  status: TerminalNodeStatus,
+  endAt: number
+): NodeTiming {
+  const segments: TimingSegment[] = rows.map(([kind, start, end]) => ({
+    phase:
+      kind === 'claimed'
+        ? { kind, claim: { kind: 'not_recorded' } }
+        : kind === 'unknown'
+          ? { kind, reason: 'WORKER_LOST' }
+          : { kind },
+    started_at: at(start),
+    end: { kind: 'ended', at: at(end) },
+    source:
+      kind === 'pending' || kind === 'advancing'
+        ? { kind: 'node' }
+        : { kind: 'attempt', generation: 1, task_id: 't', attempt: 1 },
+  }));
+  return { kind: 'exact', segments, endpoint: { kind: 'terminal', status, at: at(endAt) } };
+}
+
+/** A run where `b` fails and skips `d`; `e` joins `d` and `b` with a
+ * tolerant join and ends last. `x` has no timing. The critical path is
+ * a → b → e: d and b end at one instant (the skip cascade), and b ran. */
+export const CASCADE_NODES: WorkflowNode[] = [
+  workflowNode(0, 'a', 'COMPLETED', exactTiming([['enqueued', 0, 1], ['running', 1, 3], ['advancing', 3, 3.5]], 'COMPLETED', 3.5)),
+  workflowNode(1, 'b', 'FAILED', exactTiming([['pending', 0, 3.5], ['running', 3.5, 5]], 'FAILED', 5)),
+  workflowNode(2, 'c', 'COMPLETED', exactTiming([['pending', 0, 3.5], ['running', 3.5, 4]], 'COMPLETED', 4)),
+  workflowNode(3, 'd', 'SKIPPED', exactTiming([['pending', 0, 5]], 'SKIPPED', 5)),
+  { ...workflowNode(4, 'e', 'COMPLETED', exactTiming([['pending', 0, 5], ['enqueued', 5, 6], ['running', 6, 8]], 'COMPLETED', 8)), allow_failed_deps: true },
+  workflowNode(5, 'x', 'COMPLETED', UNAVAILABLE_NODE),
+];
+
+export const CASCADE_EDGES: WorkflowEdge[] = [
+  { from_index: 0, to_index: 1 },
+  { from_index: 0, to_index: 2 },
+  { from_index: 1, to_index: 3 },
+  { from_index: 2, to_index: 3 },
+  { from_index: 3, to_index: 4 },
+  { from_index: 1, to_index: 4 },
+];

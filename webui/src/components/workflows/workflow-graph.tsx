@@ -14,13 +14,15 @@ import { ChevronLeft, ChevronRight, Search, TriangleAlert } from 'lucide-react';
 import '@xyflow/react/dist/style.css';
 
 import { useWorkflowRun } from '@/hooks/use-workflow-run';
-import { formatElapsed } from '@/lib/format-duration';
+import { assertNever } from '@/lib/exhaustive';
+import { formatMilliseconds } from '@/lib/format-duration';
 import { statusLabel } from '@/lib/status-utils';
 import type { WorkflowNode } from '@/types/workflows';
 
 import { layoutWorkflow, NODE_H, NODE_W, type NodePosition } from './layout';
 import { phaseStripText } from './phase-strip';
 import { residualState } from './residual';
+import { criticalPath, longestWall, type LongestWall } from './run-timing';
 import {
   WorkflowNodeCard,
   type WorkflowFlowNode,
@@ -32,13 +34,28 @@ const nodeTypes = { workflow: WorkflowNodeCard };
 /** Stable empty default so an absent statusFilter prop keeps a constant reference. */
 const NO_STATUS_FILTER: ReadonlySet<string> = new Set();
 
-/** Aggregate run metrics shown over the canvas. */
+/** Aggregate run metrics shown over the canvas. `longest` is the node with
+ * the longest wall time, the time the timeline draws for it. */
 interface RunMetrics {
   total: number;
   completed: number;
   running: number;
   failed: number;
-  slowest: WorkflowNode | null;
+  longest: LongestWall;
+}
+
+/** Where the status counts of the graph show: on the graph card (a
+ * sub-workflow graph in the side panel), or in the run summary over the
+ * graph (the main graph), which then needs no copy on the card. */
+export type CountsPlacement = 'in_graph' | 'in_run_summary';
+
+/** The edges of the critical path: each joins two consecutive nodes of it. */
+function criticalEdgeIds(taskIndices: readonly number[]): Set<string> {
+  const ids = new Set<string>();
+  for (let index = 1; index < taskIndices.length; index += 1) {
+    ids.add(`${taskIndices[index - 1]}-${taskIndices[index]}`);
+  }
+  return ids;
 }
 
 const nodeLabel = (node: WorkflowNode): string =>
@@ -56,6 +73,7 @@ interface WorkflowGraphProps {
   onFocusNode?: (node: WorkflowNode) => void;
   /** Statuses to keep visible; nodes of other statuses are faded (empty = all). */
   statusFilter?: ReadonlySet<string>;
+  countsPlacement: CountsPlacement;
 }
 
 /** Renders one run's DAG. Click selects a node; double-click drills into a
@@ -67,6 +85,7 @@ export function WorkflowGraph({
   onDrillInto,
   onFocusNode,
   statusFilter = NO_STATUS_FILTER,
+  countsPlacement,
 }: WorkflowGraphProps) {
   const { detail, readClock, isLoading, isError } = useWorkflowRun(workflowId);
 
@@ -103,7 +122,6 @@ export function WorkflowGraph({
     const statusByIndex = new Map<number, string>();
     let completed = 0;
     let running = 0;
-    let slowest: WorkflowNode | null = null;
     for (const node of detail.nodes) {
       index.set(node.task_index, node);
       statusByIndex.set(node.task_index, node.node_status);
@@ -112,12 +130,6 @@ export function WorkflowGraph({
       }
       if (node.node_status === 'RUNNING') {
         running += 1;
-      }
-      if (
-        node.exec_s !== null &&
-        (slowest === null || node.exec_s > (slowest.exec_s ?? 0))
-      ) {
-        slowest = node;
       }
       if (
         query &&
@@ -164,13 +176,22 @@ export function WorkflowGraph({
       };
     });
 
-    const edges: Edge[] = detail.edges.map(edge => ({
-      id: `${edge.from_index}-${edge.to_index}`,
-      source: String(edge.from_index),
-      target: String(edge.to_index),
-      animated: statusByIndex.get(edge.to_index) === 'RUNNING',
-      style: { stroke: 'var(--border)', strokeWidth: 1.5 },
-    }));
+    const path = criticalPath(detail.nodes, detail.edges, readClock.asOfMs);
+    const critical = path.kind === 'path' ? criticalEdgeIds(path.taskIndices) : new Set<string>();
+    const edges: Edge[] = detail.edges.map(edge => {
+      const id = `${edge.from_index}-${edge.to_index}`;
+      const onPath = critical.has(id);
+      return {
+        id,
+        source: String(edge.from_index),
+        target: String(edge.to_index),
+        animated: statusByIndex.get(edge.to_index) === 'RUNNING',
+        style: onPath
+          ? { stroke: 'var(--critical-path)', strokeWidth: 2.5 }
+          : { stroke: 'var(--border)', strokeWidth: 1.5 },
+        ...(onPath ? { ariaLabel: 'critical path' } : {}),
+      };
+    });
 
     return {
       rfNodes: nodes,
@@ -182,7 +203,7 @@ export function WorkflowGraph({
         completed,
         running,
         failed: detail.failed_count,
-        slowest,
+        longest: longestWall(detail.nodes, readClock.asOfMs),
       } satisfies RunMetrics,
       matchIndices: matches,
     };
@@ -314,31 +335,8 @@ export function WorkflowGraph({
       {metrics && metrics.total > 0 && (
         <Panel position="top-left">
           <div className="glass flex flex-col gap-1.5 rounded-lg px-2.5 py-1.5 text-xs">
-            <div className="flex items-center gap-2">
-              <span className="font-medium">{metrics.total} nodes</span>
-              <span style={{ color: 'var(--success)' }}>
-                {metrics.completed} done
-              </span>
-              {metrics.running > 0 && (
-                <span style={{ color: 'var(--info)' }}>
-                  {metrics.running} running
-                </span>
-              )}
-              {metrics.failed > 0 && (
-                <span style={{ color: 'var(--error)' }}>
-                  {metrics.failed} failed
-                </span>
-              )}
-            </div>
-            {metrics.slowest && metrics.slowest.exec_s !== null && (
-              <div className="text-muted-foreground">
-                slowest{' '}
-                <span className="font-mono" title={metrics.slowest.task_name}>
-                  {metrics.slowest.node_id ?? metrics.slowest.task_name}
-                </span>{' '}
-                {formatElapsed(metrics.slowest.exec_s)}
-              </div>
-            )}
+            <GraphCounts metrics={metrics} placement={countsPlacement} />
+            <LongestWallLine longest={metrics.longest} />
           </div>
         </Panel>
       )}
@@ -424,4 +422,46 @@ export function WorkflowGraph({
       <Controls showInteractive={false} />
     </ReactFlow>
   );
+}
+
+function GraphCounts({ metrics, placement }: { metrics: RunMetrics; placement: CountsPlacement }) {
+  switch (placement) {
+    case 'in_run_summary':
+      return <span className="font-medium">{metrics.total} nodes</span>;
+    case 'in_graph':
+      return (
+        <div className="flex items-center gap-2">
+          <span className="font-medium">{metrics.total} nodes</span>
+          <span style={{ color: 'var(--success)' }}>{metrics.completed} done</span>
+          {metrics.running > 0 && (
+            <span style={{ color: 'var(--info)' }}>{metrics.running} running</span>
+          )}
+          {metrics.failed > 0 && (
+            <span style={{ color: 'var(--error)' }}>{metrics.failed} failed</span>
+          )}
+        </div>
+      );
+    default:
+      return assertNever(placement, 'counts placement');
+  }
+}
+
+/** The node with the longest wall time: the same time as its timeline row. */
+function LongestWallLine({ longest }: { longest: LongestWall }) {
+  switch (longest.kind) {
+    case 'no_timing':
+      return null;
+    case 'node':
+      return (
+        <div className="text-muted-foreground" title="The node with the longest wall time: from its first segment to its end">
+          longest wall{' '}
+          <span className="font-mono text-foreground" title={longest.node.task_name}>
+            {nodeLabel(longest.node)}
+          </span>{' '}
+          <span className="font-mono">{formatMilliseconds(longest.ms)}</span>
+        </div>
+      );
+    default:
+      return assertNever(longest, 'longest wall');
+  }
 }

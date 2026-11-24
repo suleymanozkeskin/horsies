@@ -14,10 +14,10 @@ import type {
   RunCoverage,
   SegmentClaim,
   SegmentEnd,
-  SegmentPhase,
   SegmentSource,
   TimingBoundary,
   TimingConflict,
+  TimingSegment,
   UnavailableReason,
   UnknownReason,
   WorkflowEventKind,
@@ -145,8 +145,10 @@ export function runCoverageText(coverage: RunCoverage): string | null {
   }
 }
 
-/** The phase of a segment with what it holds: `claimed · 2 earlier claims`. */
-export function segmentPhaseText(phase: SegmentPhase): string {
+/** The phase of a segment with what it holds: `slot wait · 2 earlier
+ * claims`, `slot wait · placed +1ms` (from the start of the segment). */
+export function segmentPhaseText(segment: TimingSegment): string {
+  const phase = segment.phase;
   switch (phase.kind) {
     case 'pending':
     case 'ready':
@@ -157,7 +159,7 @@ export function segmentPhaseText(phase: SegmentPhase): string {
     case 'advancing':
       return phaseLabel(phase.kind);
     case 'claimed':
-      return `${phaseLabel(phase.kind)} · ${claimText(phase.claim)}`;
+      return `${phaseLabel(phase.kind)} · ${claimText(phase.claim, instantMs(segment.started_at))}`;
     case 'unknown':
       return `${phaseLabel(phase.kind)} · ${unknownReasonText(phase.reason)}`;
     default:
@@ -165,14 +167,14 @@ export function segmentPhaseText(phase: SegmentPhase): string {
   }
 }
 
-function claimText(claim: SegmentClaim): string {
+function claimText(claim: SegmentClaim, claimedAtMs: number): string {
   switch (claim.kind) {
     case 'earlier':
       return claim.count === 1 ? '1 earlier claim' : `${claim.count} earlier claims`;
     case 'recorded':
       switch (claim.placement.kind) {
         case 'placed':
-          return `placed at ${formatInstant(instantMs(claim.placement.placed_at))}`;
+          return `placed +${formatMilliseconds(instantMs(claim.placement.placed_at) - claimedAtMs)}`;
         case 'not_observed':
           return 'placement not observed';
         default:

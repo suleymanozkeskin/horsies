@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
-import { groupSegments, NodeTimingView } from '@/components/workflows/node-timing';
+import { NodeTimingView, nodeTimePartText } from '@/components/workflows/node-timing';
 import { readClockOf } from '@/hooks/use-draw-time';
 import { instantMs } from '@/lib/time-text';
 import { TIMING_EXAMPLES } from '@/test/timing-examples';
@@ -9,6 +9,7 @@ import {
   CLOCK_ORDER_NODE,
   EXACT_RETRIED_NODE,
   nth,
+  PARTIAL_OPEN_NODE,
   UNAVAILABLE_NODE,
 } from '@/test/workflow-fixtures';
 
@@ -18,56 +19,57 @@ const CLOSED_READ = readClockOf(
   instantMs('2026-11-22T12:01:40Z')
 );
 
-describe('groupSegments', () => {
-  it('groups the segments of a retried node by node, task and attempt, in time order', () => {
-    if (EXACT_RETRIED_NODE.kind !== 'exact') {
-      throw new Error('the example node is exact');
-    }
+const section = (): HTMLElement => screen.getByRole('region', { name: 'Node timing' });
 
-    const groups = groupSegments(EXACT_RETRIED_NODE.segments);
-
-    expect(groups.map(group => [group.title, group.segments.length])).toEqual([
-      ['node', 2],
-      ['task 1 · attempt 1', 5],
-      ['task 1 · attempt 2', 2],
-      ['node', 1],
-    ]);
-  });
-
-  it('is empty for no segment', () => {
-    expect(groupSegments([])).toEqual([]);
+describe('nodeTimePartText', () => {
+  it('names the phases of the node, and its task by its attempt or task count', () => {
+    expect(nodeTimePartText({ kind: 'phase', key: 'pending', ms: 5_200 })).toBe('dependency wait 5.2s');
+    expect(nodeTimePartText({ kind: 'task', ms: 2_400, tasks: 1, attempts: 1 })).toBe('task 2.4s');
+    expect(nodeTimePartText({ kind: 'task', ms: 32_100, tasks: 1, attempts: 3 })).toBe('3 attempts 32.1s');
+    expect(nodeTimePartText({ kind: 'task', ms: 4_000, tasks: 2, attempts: 2 })).toBe('2 tasks 4.0s');
   });
 });
 
 describe('NodeTimingView', () => {
-  it('shows the coverage, the wall time, the endpoint and the time of each phase', () => {
-    render(<NodeTimingView timing={EXACT_RETRIED_NODE} readClock={CLOSED_READ} />);
+  it('shows one summary: the wall time, the end, a bar of the segments and the split of the time', () => {
+    render(<NodeTimingView timing={EXACT_RETRIED_NODE} readClock={CLOSED_READ} membership="off_path" />);
 
-    const section = screen.getByRole('region', { name: 'Phase timing' });
+    const text = section().textContent ?? '';
+    expect(text).toContain('12.0s');
+    expect(text).toContain('completed at');
+    expect(text).toContain('dependency wait 1.0s · ready 1.0s · 2 attempts 8.0s · advancing 1.0s');
+    // One bar part per segment, in time order.
+    const bar = screen.getByRole('img');
+    expect(bar.querySelectorAll('[data-phase]')).toHaveLength(10);
+    // No per-attempt list: the attempts section holds the task detail.
+    expect(text).not.toContain('task 1 · attempt 1');
+  });
 
-    expect(section.textContent).toContain('exact timing');
-    expect(section.textContent).toContain('wall time12.0s');
-    expect(section.textContent).toContain('completed at');
-    expect(section.textContent).toContain('claimed4.0s');
-    expect(section.textContent).toContain('task 1 · attempt 2');
+  it('marks a node on the critical path and explains the mark', () => {
+    render(<NodeTimingView timing={EXACT_RETRIED_NODE} readClock={CLOSED_READ} membership="on_path" />);
+
+    const badge = screen.getByText('critical path');
+    expect(badge.getAttribute('title')).toContain('decided the end of the run');
+  });
+
+  it('names the reasons of a partial node', () => {
+    render(<NodeTimingView timing={PARTIAL_OPEN_NODE} readClock={CLOSED_READ} membership="off_path" />);
+
+    expect(section().textContent).toContain('partial timing: history row removed by retention, worker lost');
   });
 
   it('shows only the coverage of a node with no segments', () => {
-    render(<NodeTimingView timing={UNAVAILABLE_NODE} readClock={CLOSED_READ} />);
+    render(<NodeTimingView timing={UNAVAILABLE_NODE} readClock={CLOSED_READ} membership="off_path" />);
 
-    const section = screen.getByRole('region', { name: 'Phase timing' });
-
-    expect(section.textContent).toContain(
+    expect(section().textContent).toContain(
       'timing unavailable: The run began before the lifecycle record.'
     );
-    expect(section.textContent).not.toContain('wall time');
+    expect(section().textContent).not.toContain('wall');
   });
 
   it('names the conflict of an inconsistent node', () => {
-    render(<NodeTimingView timing={CLOCK_ORDER_NODE} readClock={CLOSED_READ} />);
+    render(<NodeTimingView timing={CLOCK_ORDER_NODE} readClock={CLOSED_READ} membership="off_path" />);
 
-    expect(screen.getByRole('region', { name: 'Phase timing' }).textContent).toContain(
-      'timing inconsistent: Clock order: claim'
-    );
+    expect(section().textContent).toContain('timing inconsistent: Clock order: claim');
   });
 });

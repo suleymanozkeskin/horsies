@@ -1,11 +1,13 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { TimelineView } from '@/components/workflows/workflow-timeline';
+import { segmentLabel, TimelineView } from '@/components/workflows/workflow-timeline';
 import { readClockOf } from '@/hooks/use-draw-time';
 import { instantMs } from '@/lib/time-text';
 import { TIMING_EXAMPLES } from '@/test/timing-examples';
 import {
+  CASCADE_EDGES,
+  CASCADE_NODES,
   CLOCK_ORDER_NODE,
   EXACT_RETRIED_NODE,
   nth,
@@ -157,8 +159,8 @@ describe('TimelineView rows', () => {
 
     const name = rowOf('extract').getAttribute('aria-label') ?? '';
 
-    expect(name).toContain('extract, completed, exact timing; pending 1.0s');
-    expect(name).toContain('claimed 4.0s');
+    expect(name).toContain('extract, completed, exact timing; dependency wait 1.0s');
+    expect(name).toContain('slot wait 4.0s');
     expect(name).toContain('wall 12.0s');
     expect(name).toContain('completed at');
     expect(rowOf('broken').getAttribute('aria-label')).toContain('timing inconsistent');
@@ -249,7 +251,7 @@ describe('TimelineView tooltip', () => {
     fireEvent.pointerMove(segmentOf(rowOf('extract'), 3));
     const tooltip = screen.getByRole('tooltip');
 
-    expect(tooltip.textContent).toContain('claimed · 1 earlier claim');
+    expect(tooltip.textContent).toContain('slot wait · 1 earlier claim');
     expect(tooltip.textContent).toContain('task 1 · attempt 1');
     expect(tooltip.textContent).toContain('1.0s');
     expect(rowOf('extract').getAttribute('aria-describedby')).toBe(tooltip.id);
@@ -264,7 +266,7 @@ describe('TimelineView tooltip', () => {
     extract.focus();
 
     fireEvent.keyDown(extract, { key: 'ArrowRight' });
-    expect(screen.getByRole('tooltip').textContent).toContain('pending');
+    expect(screen.getByRole('tooltip').textContent).toContain('dependency wait');
     fireEvent.keyDown(extract, { key: 'ArrowRight' });
     expect(screen.getByRole('tooltip').textContent).toContain('ready');
     fireEvent.keyDown(extract, { key: 'Escape' });
@@ -283,5 +285,54 @@ describe('TimelineView tooltip', () => {
     expect(tooltip.textContent).toContain('unknown · worker lost');
     expect(tooltip.textContent).toContain('open');
     expect(tooltip.textContent).toContain('1m 35s so far');
+  });
+});
+
+describe('TimelineView emphasis', () => {
+  it('draws dependency wait as a thin track and the other phases at full height', () => {
+    renderTimeline(openRun());
+
+    const pending = segmentOf(rowOf('extract'), 0);
+    const enqueued = segmentOf(rowOf('extract'), 2);
+
+    expect(pending.getAttribute('data-phase')).toBe('pending');
+    expect(pending.firstElementChild?.className).toContain('h-1');
+    expect(enqueued.firstElementChild?.className).toContain('inset-0');
+  });
+
+  it('marks the nodes of the critical path: a line under the active span, and the name of the row', () => {
+    const run = {
+      ...workflowRun('FAILED', CASCADE_NODES, nth(TIMING_EXAMPLES.run_timings, 2)),
+      edges: CASCADE_EDGES,
+    };
+    renderTimeline(run);
+
+    const onPath = ['a', 'b', 'e'].map(rowOf);
+    const offPath = ['c', 'd'].map(rowOf);
+
+    for (const row of onPath) {
+      expect(row.getAttribute('aria-label')).toContain('on the critical path');
+      expect(row.querySelector('[data-critical-line]')).not.toBeNull();
+    }
+    for (const row of offPath) {
+      expect(row.getAttribute('aria-label')).not.toContain('on the critical path');
+      expect(row.querySelector('[data-critical-line]')).toBeNull();
+    }
+    // e waits 5 s for its dependencies: its line starts at 5 s of the 50 s axis.
+    expect(rowOf('e').querySelector<HTMLElement>('[data-critical-line]')?.style.left).toBe('10%');
+  });
+});
+
+describe('segmentLabel', () => {
+  const wide = { kind: 'measured', px: 1_000 } as const;
+
+  it('labels a full-height segment with its duration when the text fits', () => {
+    expect(segmentLabel('running', 4_500, 10, wide)).toEqual({ kind: 'label', text: '4.5s' });
+  });
+
+  it('leaves a narrow segment, dependency wait and an unmeasured track without a label', () => {
+    expect(segmentLabel('running', 4_500, 1, wide)).toEqual({ kind: 'no_label' });
+    expect(segmentLabel('pending', 60_000, 90, wide)).toEqual({ kind: 'no_label' });
+    expect(segmentLabel('running', 4_500, 50, { kind: 'unmeasured' })).toEqual({ kind: 'no_label' });
   });
 });

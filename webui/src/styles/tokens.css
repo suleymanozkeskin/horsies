@@ -87,20 +87,52 @@
   --chart-4: var(--warning);
   --chart-5: var(--muted-foreground);
 
-  /* Lifecycle phases (timeline segments, graph phase strip, legend).
-     `enqueued`, `claimed` and `running` use the color of the status with the
-     same name. `unknown` is a hatch, so it never reads as a measured phase.
-     The pause band and the two row placeholders are tints and hatches of the
-     base tokens. */
-  --phase-pending: color-mix(in oklab, var(--muted-foreground) 45%, var(--background));
-  --phase-ready: color-mix(in oklab, var(--info) 30%, var(--background));
-  --phase-enqueued: var(--info-light);
-  --phase-retry-wait: var(--error-light);
-  --phase-claimed: var(--warning);
-  --phase-running: var(--info);
-  --phase-finalizing: color-mix(in oklab, var(--success) 55%, var(--info));
-  --phase-advancing: var(--success-light);
+  /* Lifecycle phases (timeline segments, phase bars, graph phase strip,
+     legend). Each phase has a base color and a fill; components use the fill.
+     Phases that touch on a timeline differ in hue AND in lightness (OKLab L
+     steps of 11 or more in both themes, also under protan, deutan and tritan
+     simulation), so a reader who does not see the hues still sees the
+     boundary. Waits are striped and work is solid; dependency wait is drawn
+     as a thin track. `unknown` is a hatch, so it never reads as a measured
+     phase. `--phase-ink` is the text on a fill; the running fill has its own
+     ink. The pause band and the two row placeholders are tints and hatches of
+     the base tokens. */
+  --phase-pending: #c8c0ae;
+  --phase-ready: #8f887a;
+  --phase-enqueued: #f0ad4e;
+  --phase-retry-wait: #e0675c;
+  --phase-claimed: #a87300;
+  --phase-running: #1d5fa8;
+  --phase-finalizing: #7cd0e2;
+  --phase-advancing: #3a9f6e;
   --phase-unknown: var(--muted-foreground);
+  --phase-ink: #1a1a14;
+  --phase-running-ink: white;
+  --critical-path: var(--foreground);
+  --phase-pending-fill: var(--phase-pending);
+  --phase-ready-fill: repeating-linear-gradient(
+    135deg,
+    var(--phase-ready) 0 3px,
+    color-mix(in oklab, var(--phase-ready) 62%, var(--background)) 3px 6px
+  );
+  --phase-enqueued-fill: repeating-linear-gradient(
+    135deg,
+    var(--phase-enqueued) 0 3px,
+    color-mix(in oklab, var(--phase-enqueued) 62%, var(--background)) 3px 6px
+  );
+  --phase-retry-wait-fill: repeating-linear-gradient(
+    135deg,
+    var(--phase-retry-wait) 0 3px,
+    color-mix(in oklab, var(--phase-retry-wait) 62%, var(--background)) 3px 6px
+  );
+  --phase-claimed-fill: repeating-linear-gradient(
+    135deg,
+    var(--phase-claimed) 0 3px,
+    color-mix(in oklab, var(--phase-claimed) 62%, var(--background)) 3px 6px
+  );
+  --phase-running-fill: var(--phase-running);
+  --phase-finalizing-fill: var(--phase-finalizing);
+  --phase-advancing-fill: var(--phase-advancing);
   --phase-unknown-hatch: repeating-linear-gradient(
     135deg,
     var(--phase-unknown) 0 3px,
@@ -190,15 +222,42 @@
   --chart-4: var(--warning);
   --chart-5: var(--muted-foreground);
 
-  --phase-pending: color-mix(in oklab, var(--muted-foreground) 45%, var(--background));
-  --phase-ready: color-mix(in oklab, var(--info) 30%, var(--background));
-  --phase-enqueued: var(--info-light);
-  --phase-retry-wait: var(--error-light);
-  --phase-claimed: var(--warning);
-  --phase-running: var(--info);
-  --phase-finalizing: color-mix(in oklab, var(--success) 55%, var(--info));
-  --phase-advancing: var(--success-light);
+  --phase-pending: #3a382f;
+  --phase-ready: #8f8b7b;
+  --phase-enqueued: #ffb54a;
+  --phase-retry-wait: #f47067;
+  --phase-claimed: #a87a10;
+  --phase-running: #62b4fa;
+  --phase-finalizing: #b5f3fa;
+  --phase-advancing: #16a06c;
   --phase-unknown: var(--muted-foreground);
+  --phase-ink: #050505;
+  --phase-running-ink: var(--phase-ink);
+  --critical-path: var(--foreground);
+  --phase-pending-fill: var(--phase-pending);
+  --phase-ready-fill: repeating-linear-gradient(
+    135deg,
+    var(--phase-ready) 0 3px,
+    color-mix(in oklab, var(--phase-ready) 62%, var(--background)) 3px 6px
+  );
+  --phase-enqueued-fill: repeating-linear-gradient(
+    135deg,
+    var(--phase-enqueued) 0 3px,
+    color-mix(in oklab, var(--phase-enqueued) 62%, var(--background)) 3px 6px
+  );
+  --phase-retry-wait-fill: repeating-linear-gradient(
+    135deg,
+    var(--phase-retry-wait) 0 3px,
+    color-mix(in oklab, var(--phase-retry-wait) 62%, var(--background)) 3px 6px
+  );
+  --phase-claimed-fill: repeating-linear-gradient(
+    135deg,
+    var(--phase-claimed) 0 3px,
+    color-mix(in oklab, var(--phase-claimed) 62%, var(--background)) 3px 6px
+  );
+  --phase-running-fill: var(--phase-running);
+  --phase-finalizing-fill: var(--phase-finalizing);
+  --phase-advancing-fill: var(--phase-advancing);
   --phase-unknown-hatch: repeating-linear-gradient(
     135deg,
     var(--phase-unknown) 0 3px,

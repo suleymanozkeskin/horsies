@@ -68,8 +68,8 @@ describe('PhaseStrip', () => {
     render(<PhaseStrip timing={EXACT_RETRIED_NODE} drawAtMs={READ_MS} />);
 
     expect(screen.getByRole('img').getAttribute('aria-label')).toBe(
-      'exact timing; pending 1.0s, ready 1.0s, enqueued 1.0s, retry wait 1.0s, ' +
-        'claimed 4.0s, running 1.0s, finalizing 1.0s, advancing 1.0s'
+      'exact timing; dependency wait 1.0s, ready 1.0s, queue wait 1.0s, retry wait 1.0s, ' +
+        'slot wait 4.0s, running 1.0s, finalizing 1.0s, advancing 1.0s'
     );
   });
 });
