@@ -1310,8 +1310,8 @@ class SharedThreadTaskDecorator(Protocol):
 
 
 class CancelGraceRefusedDecorator(Protocol):
-    """What `app.task(task_name, cancel_grace_ms=..., ...)` returns for a
-    literal class other than `SHARED_ASYNC`.
+    """What `app.task(task_name, cancel_grace_ms=..., ...)` returns for the
+    literal class `SHARED_THREAD`.
 
     It accepts no function, so a type checker refuses the decoration. The
     decorator refuses it at run time too (HRS-110).
@@ -1503,22 +1503,24 @@ class SharedWithoutTimeout:
 
 
 @dataclass(frozen=True, slots=True)
-class CancelGraceWithoutSharedAsync:
-    """`cancel_grace_ms` with a class other than `SHARED_ASYNC`."""
-
-    execution: Execution
+class CancelGraceOnSharedThread:
+    """`cancel_grace_ms` with `SHARED_THREAD`: a thread cannot be stopped,
+    so the class has no cancel grace."""
 
 
 @dataclass(frozen=True, slots=True)
 class CancelGraceOutOfRange:
-    """`cancel_grace_ms` outside MIN_CANCEL_GRACE_MS to MAX_CANCEL_GRACE_MS."""
+    """`cancel_grace_ms` outside MIN_CANCEL_GRACE_MS to MAX_CANCEL_GRACE_MS,
+    for `execution` (`SHARED_ASYNC` or `ISOLATED`)."""
+
+    execution: Literal[Execution.SHARED_ASYNC, Execution.ISOLATED]
 
 
 type ExecutionRuleViolation = (
     SharedAsyncOnDef
     | SharedThreadOnAsyncDef
     | SharedWithoutTimeout
-    | CancelGraceWithoutSharedAsync
+    | CancelGraceOnSharedThread
     | CancelGraceOutOfRange
 )
 """A task declaration that breaks one of the execution rules."""
@@ -1532,10 +1534,12 @@ def check_execution_rules(
 
     The rules, checked in this order, give the first violation:
     `SHARED_ASYNC` needs an `async def` function and `SHARED_THREAD` a `def`
-    function; a shared class needs `timeout_ms`; only `SHARED_ASYNC` takes
-    `cancel_grace_ms`; and a `cancel_grace_ms` is from MIN_CANCEL_GRACE_MS
-    to MAX_CANCEL_GRACE_MS. `ISOLATED` takes both kinds and no timeout.
-    Pure: it does not read or change any state.
+    function; a shared class needs `timeout_ms`; `SHARED_THREAD` takes no
+    `cancel_grace_ms`; and a `cancel_grace_ms` of `SHARED_ASYNC` or
+    `ISOLATED` is from MIN_CANCEL_GRACE_MS to MAX_CANCEL_GRACE_MS.
+    `ISOLATED` takes both kinds, no timeout, and a grace or none (the hard
+    stop after an operator cancel). Pure: it does not read or change any
+    state.
     """
     match options.execution:
         case Execution.ISOLATED:
@@ -1568,20 +1572,21 @@ def _check_function_kind(
 def _check_cancel_grace(
     execution: Execution,
     cancel_grace_ms: int | None,
-) -> Result[None, CancelGraceWithoutSharedAsync | CancelGraceOutOfRange]:
-    """Only `SHARED_ASYNC` takes a grace, and the grace is in its bounds."""
+) -> Result[None, CancelGraceOnSharedThread | CancelGraceOutOfRange]:
+    """`SHARED_THREAD` takes no grace; the grace of `SHARED_ASYNC` and of
+    `ISOLATED` is in its bounds."""
     match cancel_grace_ms:
         case None:
             return Ok(None)
         case int():
             pass
     match execution:
-        case Execution.SHARED_ASYNC:
+        case Execution.SHARED_ASYNC | Execution.ISOLATED:
             if MIN_CANCEL_GRACE_MS <= cancel_grace_ms <= MAX_CANCEL_GRACE_MS:
                 return Ok(None)
-            return Err(CancelGraceOutOfRange())
-        case Execution.ISOLATED | Execution.SHARED_THREAD:
-            return Err(CancelGraceWithoutSharedAsync(execution=execution))
+            return Err(CancelGraceOutOfRange(execution=execution))
+        case Execution.SHARED_THREAD:
+            return Err(CancelGraceOnSharedThread())
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -1610,7 +1615,7 @@ def execution_rule_error(
     match violation:
         case SharedAsyncOnDef() | SharedThreadOnAsyncDef() | SharedWithoutTimeout():
             rule = _function_rule_text(violation)
-        case CancelGraceWithoutSharedAsync() | CancelGraceOutOfRange():
+        case CancelGraceOnSharedThread() | CancelGraceOutOfRange():
             rule = _grace_rule_text(violation)
         case _ as unreachable:
             assert_never(unreachable)
@@ -1669,36 +1674,54 @@ def _function_rule_text(
 
 
 def _grace_rule_text(
-    violation: CancelGraceWithoutSharedAsync | CancelGraceOutOfRange,
+    violation: CancelGraceOnSharedThread | CancelGraceOutOfRange,
 ) -> _RuleText:
     """The text of a rule about `cancel_grace_ms`."""
     match violation:
-        case CancelGraceWithoutSharedAsync(execution=execution):
+        case CancelGraceOnSharedThread():
             return _RuleText(
                 code=ErrorCode.TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC,
-                message='cancel_grace_ms requires execution=SHARED_ASYNC',
+                message='cancel_grace_ms is not valid with execution=SHARED_THREAD',
                 notes=(
-                    f'execution is {execution.value}',
-                    'only a SHARED_ASYNC task is cancelled and gets a grace '
-                    'to stop; a thread cannot be cancelled',
+                    'execution is SHARED_THREAD',
+                    'a thread cannot be cancelled or stopped, so a SHARED_THREAD '
+                    'task has no cancel grace',
                 ),
                 help_text=(
-                    'remove cancel_grace_ms, or use '
-                    'Execution.SHARED_ASYNC with an `async def` function'
+                    'remove cancel_grace_ms, or use Execution.SHARED_ASYNC with an '
+                    '`async def` function, or Execution.ISOLATED'
                 ),
             )
-        case CancelGraceOutOfRange():
+        case CancelGraceOutOfRange(execution=execution):
             return _RuleText(
                 code=ErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE,
                 message='cancel_grace_ms is out of range',
                 notes=(
                     f'cancel_grace_ms must be from {MIN_CANCEL_GRACE_MS} to '
                     f'{MAX_CANCEL_GRACE_MS} ms',
+                    f'execution is {execution.value}',
                 ),
-                help_text=(
-                    'set a value in the range, or remove cancel_grace_ms to '
-                    f'use the default of {DEFAULT_CANCEL_GRACE_MS} ms'
-                ),
+                help_text=_grace_range_help(execution),
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _grace_range_help(
+    execution: Literal[Execution.SHARED_ASYNC, Execution.ISOLATED],
+) -> str:
+    """The fix of a grace out of range: the default of the class when the
+    grace is removed."""
+    match execution:
+        case Execution.SHARED_ASYNC:
+            return (
+                'set a value in the range, or remove cancel_grace_ms to '
+                f'use the default of {DEFAULT_CANCEL_GRACE_MS} ms'
+            )
+        case Execution.ISOLATED:
+            return (
+                'set a value in the range, or remove cancel_grace_ms: an '
+                'ISOLATED task then has no hard stop after an operator cancel'
             )
         case _ as unreachable:
             assert_never(unreachable)

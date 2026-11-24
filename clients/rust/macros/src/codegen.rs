@@ -268,7 +268,16 @@ fn task_options(attrs: &TaskAttrs) -> TokenStream {
         None => quote! { ::std::option::Option::None },
     };
     let (execution, cancel_grace_ms) = match (attrs.execution.class, &attrs.cancel_grace_ms) {
-        (ExecutionClass::Isolated, _) => (
+        (ExecutionClass::Isolated, Some(grace)) => {
+            let value = proc_macro2::Literal::u32_suffixed(grace.value);
+            (
+                quote! { ::horsies::Execution::Isolated },
+                quote! {
+                    ::std::option::Option::Some(::horsies::__private::cancel_grace(#value))
+                },
+            )
+        }
+        (ExecutionClass::Isolated, None) => (
             quote! { ::horsies::Execution::Isolated },
             quote! { ::std::option::Option::None },
         ),
