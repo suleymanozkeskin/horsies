@@ -17,7 +17,9 @@ import { Toggle } from '@/components/ui/toggle';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { useMeta } from '@/hooks/use-meta';
 import { useBreakdown, useFacets, useTasks } from '@/hooks/use-tasks';
-import { formatDuration, formatRelative, formatTime } from '@/lib/format-duration';
+import { zoneText } from '@/lib/clock-text';
+import { formatDuration, formatInstant, formatRelative, formatTime } from '@/lib/format-duration';
+import { instantMs } from '@/lib/time-text';
 import { cn } from '@/lib/utils';
 import {
   DEFAULT_DIR,
@@ -32,7 +34,8 @@ import {
 } from '@/routes/search';
 import type { TaskSummary } from '@/types/tasks';
 
-import { AttemptHistory, DetailRow, TraceRow } from './detail';
+import { AttemptTiming } from './attempt-timing';
+import { DetailRow, TraceRow } from './detail';
 import { ErrorChip } from './error-chip';
 import { errorCategoryColorVar } from './error-taxonomy';
 import { FacetCombobox, type FacetOption } from './facet-combobox';
@@ -108,54 +111,34 @@ function TaskDetailPanel({
               <DetailRow label="Queue" value={detail.queue_name} />
               <DetailRow label="Priority" value={detail.priority} />
             </div>
-            <div className="flex gap-8">
-              <DetailRow label="Execution" value={formatDuration(leaf.exec_s)} />
+            {leaf.good_until && (
               <DetailRow
-                label="Queued"
+                label="Good until"
                 value={
-                  <span title="Time waiting in the queue after dispatch">
-                    {formatDuration(leaf.queue_s)}
+                  <span className="font-mono text-xs">
+                    {formatInstant(instantMs(leaf.good_until))} {zoneText(instantMs(leaf.good_until))}
                   </span>
                 }
               />
-            </div>
-            <DetailRow
-              label="Attempts"
-              value={`${leaf.retry_count + 1} of ${leaf.max_retries + 1}`}
-            />
-            <DetailRow
-              label="Worker"
-              value={
-                <span className="font-mono text-xs">
-                  {leaf.worker_hostname ?? '—'}
-                </span>
-              }
-            />
-            <div className="flex gap-8">
-              <DetailRow label="Enqueued" value={formatTime(leaf.enqueued_at)} />
-              <DetailRow
-                label={leaf.failed_at ? 'Failed' : 'Completed'}
-                value={formatTime(leaf.failed_at ?? leaf.completed_at)}
-              />
-            </div>
-            {leaf.good_until && (
-              <DetailRow label="Good until" value={formatTime(leaf.good_until)} />
             )}
             <TraceRow
               traceId={leaf.trace_id}
               template={meta?.trace_link_template ?? null}
             />
-            {leaf.failed_reason && (
-              <div>
-                <span className="text-xs uppercase tracking-wide text-muted-foreground">
-                  Failure
-                </span>
-                <pre className="glass mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded p-2 font-mono text-11 leading-snug">
-                  {leaf.failed_reason}
-                </pre>
-              </div>
-            )}
-            <AttemptHistory attempts={detail.attempts} isLoading={isLoading} />
+            {leaf.failed_reason !== null &&
+              !detail.attempts.some(
+                attempt => (attempt.error_message ?? attempt.failed_reason) === leaf.failed_reason
+              ) && (
+                <div>
+                  <span className="text-xs uppercase tracking-wide text-muted-foreground">
+                    Failure
+                  </span>
+                  <pre className="glass mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded p-2 font-mono text-11 leading-snug">
+                    {leaf.failed_reason}
+                  </pre>
+                </div>
+              )}
+            <AttemptTiming attempts={detail.attempts} leaf={leaf} isLoading={isLoading} />
             <span className="font-mono text-10 text-muted-foreground">
               {leaf.task_id}
             </span>

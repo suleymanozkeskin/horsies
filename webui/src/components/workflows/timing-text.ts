@@ -4,27 +4,25 @@
 
 import { assertNever } from '@/lib/exhaustive';
 import { formatInstant, formatMilliseconds } from '@/lib/format-duration';
-import { statusLabel } from '@/lib/status-utils';
 import { instantMs } from '@/lib/time-text';
 import type {
   MissingRecord,
-  NodeEndpoint,
   NodeTiming,
   RunConflict,
   RunCoverage,
   SegmentClaim,
-  SegmentEnd,
-  SegmentPhase,
   SegmentSource,
   TimingBoundary,
   TimingConflict,
+  TimingSegment,
   UnavailableReason,
   UnknownReason,
   WorkflowEventKind,
 } from '@/types/timing';
 
-import { phaseLabel } from './phase';
-import type { NodeWallTime } from './timeline-geometry';
+import { LONG_ENGINE_STEP_MS, phaseLabel } from './phase';
+import type { NodeTime } from './run-timing';
+import { phaseComposition, type PhaseTotal } from './timeline-geometry';
 
 const UNKNOWN_REASON_TEXT: Record<UnknownReason, string> = {
   ATTEMPT_NOT_CAPTURED: 'attempt row with no phase record',
@@ -145,8 +143,10 @@ export function runCoverageText(coverage: RunCoverage): string | null {
   }
 }
 
-/** The phase of a segment with what it holds: `claimed · 2 earlier claims`. */
-export function segmentPhaseText(phase: SegmentPhase): string {
+/** The phase of a segment with what it holds: `slot wait · 2 earlier
+ * claims`, `unknown · worker lost`. */
+export function segmentPhaseText(segment: TimingSegment): string {
+  const phase = segment.phase;
   switch (phase.kind) {
     case 'pending':
     case 'ready':
@@ -156,8 +156,10 @@ export function segmentPhaseText(phase: SegmentPhase): string {
     case 'finalizing':
     case 'advancing':
       return phaseLabel(phase.kind);
-    case 'claimed':
-      return `${phaseLabel(phase.kind)} · ${claimText(phase.claim)}`;
+    case 'claimed': {
+      const detail = claimDetailText(phase.claim, segment);
+      return detail === null ? phaseLabel(phase.kind) : `${phaseLabel(phase.kind)} · ${detail}`;
+    }
     case 'unknown':
       return `${phaseLabel(phase.kind)} · ${unknownReasonText(phase.reason)}`;
     default:
@@ -165,24 +167,54 @@ export function segmentPhaseText(phase: SegmentPhase): string {
   }
 }
 
-function claimText(claim: SegmentClaim): string {
+/** What a claim holds beyond its phase. The placement on a child is a few
+ * hundred microseconds after the claim in the normal case, so it shows only
+ * for a long slot wait: it tells which part of the wait was long. */
+function claimDetailText(claim: SegmentClaim, segment: TimingSegment): string | null {
   switch (claim.kind) {
     case 'earlier':
       return claim.count === 1 ? '1 earlier claim' : `${claim.count} earlier claims`;
     case 'recorded':
       switch (claim.placement.kind) {
         case 'placed':
-          return `placed at ${formatInstant(instantMs(claim.placement.placed_at))}`;
+          return placedClaimText(segment, instantMs(claim.placement.placed_at));
         case 'not_observed':
-          return 'placement not observed';
+          return null;
         default:
           return assertNever(claim.placement, 'placement');
       }
     case 'not_recorded':
-      return 'claim with no attempt row';
+      return null;
     default:
       return assertNever(claim, 'segment claim');
   }
+}
+
+/** The placement of a claim whose slot wait ended. A claim with no end yet
+ * has no placement text: its wait is not over. */
+function placedClaimText(segment: TimingSegment, placedAtMs: number): string | null {
+  switch (segment.end.kind) {
+    case 'open':
+      return null;
+    case 'ended':
+      return placementText(instantMs(segment.started_at), placedAtMs, instantMs(segment.end.at));
+    default:
+      return assertNever(segment.end, 'segment end');
+  }
+}
+
+/** The placement of a long slot wait in words: `a child took the task after
+ * 273ms`. Null for a slot wait below the long step limit: there the
+ * placement is a few hundred microseconds after the claim, and it tells
+ * nothing. */
+export function placementText(
+  claimedAtMs: number,
+  placedAtMs: number,
+  startedAtMs: number
+): string | null {
+  return startedAtMs - claimedAtMs < LONG_ENGINE_STEP_MS
+    ? null
+    : `a child took the task after ${formatMilliseconds(placedAtMs - claimedAtMs)}`;
 }
 
 /** What the segment describes: `node`, `task 2`, `task 1 · attempt 3`. */
@@ -199,50 +231,42 @@ export function segmentSourceText(source: SegmentSource): string {
   }
 }
 
-/** The wall time of a node, or a dash when it has no segment. */
-export function wallTimeText(wall: NodeWallTime): string {
-  switch (wall.kind) {
+/** A duration; one with no end yet is a time so far. */
+export const durationText = (ms: number, open: boolean): string =>
+  open ? `${formatMilliseconds(ms)} so far` : formatMilliseconds(ms);
+
+/** The time of a node without its dependency wait, or a dash for a node
+ * that did not start or has no timing. */
+export function nodeTimeText(time: NodeTime): string {
+  switch (time.kind) {
     case 'measured':
-      return formatMilliseconds(wall.ms);
-    case 'no_segments':
+      return formatMilliseconds(time.ms);
+    case 'not_started':
+    case 'no_timing':
       return '—';
     default:
-      return assertNever(wall, 'node wall time');
+      return assertNever(time, 'node time');
   }
 }
 
-/** The end of a segment: its time, or `open`. */
-export function segmentEndText(end: SegmentEnd): string {
-  switch (end.kind) {
-    case 'ended':
-      return formatInstant(instantMs(end.at));
-    case 'open':
-      return 'open';
-    default:
-      return assertNever(end, 'segment end');
-  }
+/** The time of each phase in words: `queue wait 1.0s, running 4.2s`. */
+export function compositionText(totals: readonly PhaseTotal[]): string {
+  return totals.length === 0
+    ? 'no measured time'
+    : totals.map(total => `${phaseLabel(total.key)} ${formatMilliseconds(total.ms)}`).join(', ');
 }
 
-/** The duration of a segment from its span; an open one is a time so far. */
-export function segmentDurationText(end: SegmentEnd, durationMs: number): string {
-  switch (end.kind) {
-    case 'ended':
-      return formatMilliseconds(durationMs);
-    case 'open':
-      return `${formatMilliseconds(durationMs)} so far`;
+/** The timing of a node in words, for an accessible name: its coverage and
+ * its phase times. */
+export function nodeTimingText(timing: NodeTiming, drawAtMs: number): string {
+  switch (timing.kind) {
+    case 'exact':
+    case 'partial':
+      return `${nodeCoverageText(timing)}; ${compositionText(phaseComposition(timing.segments, drawAtMs))}`;
+    case 'unavailable':
+    case 'inconsistent':
+      return nodeCoverageText(timing);
     default:
-      return assertNever(end, 'segment end');
-  }
-}
-
-/** The end of a node: `completed at <time>`, or `not terminal`. */
-export function endpointText(endpoint: NodeEndpoint): string {
-  switch (endpoint.kind) {
-    case 'terminal':
-      return `${statusLabel(endpoint.status)} at ${formatInstant(instantMs(endpoint.at))}`;
-    case 'not_terminal':
-      return 'not terminal';
-    default:
-      return assertNever(endpoint, 'node endpoint');
+      return assertNever(timing, 'node timing');
   }
 }

@@ -1,7 +1,7 @@
 import { memo } from 'react';
 
 import { Handle, type Node, type NodeProps, Position } from '@xyflow/react';
-import { Layers } from 'lucide-react';
+import { Layers, TriangleAlert } from 'lucide-react';
 
 import { RESIDUAL_COPY } from '@/actions/copy';
 import { useDrawTime, type ReadClock } from '@/hooks/use-draw-time';
@@ -12,9 +12,10 @@ import type { NodeTiming } from '@/types/timing';
 import type { WorkflowStatus } from '@/types/workflows';
 
 import { NODE_H, NODE_W } from './layout';
-import { PhaseStrip } from './phase-strip';
+import { phaseLabel } from './phase';
 import type { ResidualState } from './residual';
-import { nodeTimingIsOpen, nodeWallTime } from './timeline-geometry';
+import { nodeFacts, nodeTime, type NodeFact } from './run-timing';
+import { nodeTimingIsOpen } from './timeline-geometry';
 
 export interface WorkflowNodeData extends Record<string, unknown> {
   label: string;
@@ -35,7 +36,7 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   dimmed: boolean;
   /** Executing under a cancelled/paused run — informational, never a failure. */
   residual: ResidualState;
-  /** Phase timing of the node, drawn as the phase strip. */
+  /** Phase timing of the node: its time and its facts on the card. */
   timing: NodeTiming;
   /** Clock of the run read that holds `timing`. */
   readClock: ReadClock;
@@ -72,11 +73,11 @@ export function childRollupBadge(
     : { text: String(childTotal), title, failed: false };
 }
 
-/** The duration a card shows: the wall time of the node when its timing has
- * segments, else the execution time of a node with no phase timing (a run
- * from before the lifecycle record), else none. */
+/** The duration a card shows: the time of the node without its dependency
+ * wait when its timing has it, else the execution time of a node with no
+ * phase timing (a run from before the lifecycle record), else none. */
 export type CardDuration =
-  | { kind: 'wall'; ms: number }
+  | { kind: 'node_time'; ms: number }
   | { kind: 'execution'; seconds: number }
   | { kind: 'none' };
 
@@ -85,36 +86,26 @@ export function cardDuration(
   execS: number | null,
   drawAtMs: number
 ): CardDuration {
-  const execution: CardDuration =
-    execS === null ? { kind: 'none' } : { kind: 'execution', seconds: execS };
-  switch (timing.kind) {
-    case 'exact':
-    case 'partial': {
-      const wall = nodeWallTime(timing.segments, timing.endpoint, drawAtMs);
-      switch (wall.kind) {
-        case 'measured':
-          return { kind: 'wall', ms: wall.ms };
-        case 'no_segments':
-          return execution;
-        default:
-          return assertNever(wall, 'node wall time');
-      }
-    }
-    case 'unavailable':
-    case 'inconsistent':
-      return execution;
+  const time = nodeTime(timing, drawAtMs);
+  switch (time.kind) {
+    case 'measured':
+      return { kind: 'node_time', ms: time.ms };
+    case 'not_started':
+      return { kind: 'none' };
+    case 'no_timing':
+      return execS === null ? { kind: 'none' } : { kind: 'execution', seconds: execS };
     default:
-      return assertNever(timing, 'node timing');
+      return assertNever(time, 'node time');
   }
 }
 
-/** The text and the meaning of a card duration, or null for none. */
-function cardDurationLabel(duration: CardDuration): { text: string; title: string } | null {
+/** The text of a card duration, or null for none. */
+function cardDurationText(duration: CardDuration): string | null {
   switch (duration.kind) {
-    case 'wall':
-      return { text: formatMilliseconds(duration.ms), title: 'Wall time of the node' };
+    case 'node_time':
+      return formatMilliseconds(duration.ms);
     case 'execution':
-      return { text: formatDuration(duration.seconds), title: 'Execution time' };
+      return formatDuration(duration.seconds);
     case 'none':
       return null;
     default:
@@ -122,6 +113,87 @@ function cardDurationLabel(duration: CardDuration): { text: string; title: strin
   }
 }
 
+/** One fact on a card, in words. `marked`: the reader must see it. */
+export interface CardFact {
+  tone: 'marked' | 'plain';
+  text: string;
+}
+
+function nodeFactText(fact: NodeFact): CardFact {
+  switch (fact.kind) {
+    case 'long_step':
+      return { tone: 'marked', text: `${phaseLabel(fact.key)} ${formatMilliseconds(fact.ms)}` };
+    case 'attempts':
+      return { tone: 'plain', text: `${fact.count} attempts` };
+    case 'tasks':
+      return { tone: 'plain', text: `${fact.count} tasks` };
+    default:
+      return assertNever(fact, 'node fact');
+  }
+}
+
+/**
+ * The facts a card states in words: what the normal case does not have. A
+ * node that ran once with no long engine step has none, so its card stays
+ * quiet. The marked facts come first.
+ */
+export function cardFacts(timing: NodeTiming, drawAtMs: number): CardFact[] {
+  switch (timing.kind) {
+    case 'unavailable':
+      return [{ tone: 'plain', text: 'timing unavailable' }];
+    case 'inconsistent':
+      return [{ tone: 'marked', text: 'timing inconsistent' }];
+    case 'exact':
+      return nodeFacts(timing.segments, drawAtMs).map(nodeFactText);
+    case 'partial':
+      return [
+        ...nodeFacts(timing.segments, drawAtMs).map(nodeFactText),
+        { tone: 'plain', text: 'partial timing' },
+      ];
+    default:
+      return assertNever(timing, 'node timing');
+  }
+}
+
+function FactsLine({ facts }: { facts: readonly CardFact[] }) {
+  if (facts.length === 0) {
+    return null;
+  }
+  const marked = facts.some(fact => fact.tone === 'marked');
+  return (
+    <div data-card-facts className="flex min-w-0 items-center gap-1 pl-1.5 text-10 leading-tight">
+      {marked && (
+        <TriangleAlert className="size-3 shrink-0" style={{ color: 'var(--marked-ink)' }} aria-hidden />
+      )}
+      <span className="min-w-0 truncate">
+        {facts.map((fact, index) => (
+          <span key={fact.text}>
+            {index > 0 && <span className="text-muted-foreground"> · </span>}
+            <FactText fact={fact} />
+          </span>
+        ))}
+      </span>
+    </div>
+  );
+}
+
+function FactText({ fact }: { fact: CardFact }) {
+  switch (fact.tone) {
+    case 'marked':
+      return (
+        <span className="font-semibold" style={{ color: 'var(--marked-ink)' }}>
+          {fact.text}
+        </span>
+      );
+    case 'plain':
+      return <span className="text-muted-foreground">{fact.text}</span>;
+    default:
+      return assertNever(fact.tone, 'card fact tone');
+  }
+}
+
+/** One node of the graph. The card holds text and the status color; the
+ * tooltip of the graph says what each of its marks is. */
 function WorkflowNodeCardImpl({ data, selected }: NodeProps<WorkflowFlowNode>) {
   const color = statusColorVar(data.status);
   // Only a card with an open segment follows the one-second clock.
@@ -129,14 +201,13 @@ function WorkflowNodeCardImpl({ data, selected }: NodeProps<WorkflowFlowNode>) {
     data.readClock,
     data.readClock.open && nodeTimingIsOpen(data.timing)
   );
-  const duration = cardDurationLabel(cardDuration(data.timing, data.execS, drawAtMs));
+  const duration = cardDurationText(cardDuration(data.timing, data.execS, drawAtMs));
   const residual = data.residual === null ? null : RESIDUAL_COPY[data.residual];
   const rollup = childRollupBadge(data.childTotal, data.childFailed);
 
   return (
     <div
       className="relative flex flex-col justify-center gap-0.5 overflow-hidden rounded-xl border bg-card px-3 py-1.5 text-card-foreground shadow-xs transition-colors"
-      title={data.drillable ? 'Double-click to open subworkflow' : undefined}
       style={{
         width: NODE_W,
         height: NODE_H,
@@ -162,19 +233,13 @@ function WorkflowNodeCardImpl({ data, selected }: NodeProps<WorkflowFlowNode>) {
         {data.isSubworkflow && (
           <Layers className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
         )}
-        <span
-          className="min-w-0 flex-1 truncate text-13 font-medium"
-          title={data.label}
-        >
-          {data.label}
-        </span>
+        <span className="min-w-0 flex-1 truncate text-13 font-medium">{data.label}</span>
         {rollup !== null && (
           <span
             className="shrink-0 rounded px-1 font-mono text-9 font-medium"
             style={{
               color: rollup.failed ? 'var(--error)' : 'var(--muted-foreground)',
             }}
-            title={rollup.title}
           >
             {rollup.text}
           </span>
@@ -187,32 +252,17 @@ function WorkflowNodeCardImpl({ data, selected }: NodeProps<WorkflowFlowNode>) {
       </div>
       <div className="flex items-center gap-1.5 pl-1.5">
         {residual === null ? (
-          <span
-            className="truncate font-mono text-10 text-muted-foreground"
-            title={data.taskName}
-          >
-            {data.taskName}
-          </span>
+          <span className="truncate font-mono text-10 text-muted-foreground">{data.taskName}</span>
         ) : (
-          <span
-            className="shrink-0 rounded border border-border px-1 text-9 uppercase text-muted-foreground"
-            title={residual.tooltip}
-          >
+          <span className="shrink-0 rounded border border-border px-1 text-9 uppercase text-muted-foreground">
             {residual.badge}
           </span>
         )}
         {duration !== null && (
-          <span
-            className="ml-auto shrink-0 font-mono text-10 text-muted-foreground"
-            title={duration.title}
-          >
-            {duration.text}
-          </span>
+          <span className="ml-auto shrink-0 font-mono text-10 text-muted-foreground">{duration}</span>
         )}
       </div>
-      <div className="pl-1.5">
-        <PhaseStrip timing={data.timing} drawAtMs={drawAtMs} />
-      </div>
+      <FactsLine facts={cardFacts(data.timing, drawAtMs)} />
       <Handle
         type="source"
         position={Position.Right}

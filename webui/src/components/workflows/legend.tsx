@@ -1,97 +1,142 @@
-import { statusColorVar, statusLabel } from '@/lib/status-utils';
-import type { WorkflowStatus } from '@/types/workflows';
+import { Hint } from '@/components/ui/hint';
+import { assertNever } from '@/lib/exhaustive';
 
-import { PHASE_ORDER, phaseFill, phaseLabel, phaseMeaning } from './phase';
-import { LEGEND_STATUSES } from './status';
+import { phaseFill, phaseLabel, phaseMeaning, phaseTrack, type PhaseKey } from './phase';
 
-interface LegendProps {
-  /** Statuses currently used as a visibility filter (empty = show all). */
-  active: ReadonlySet<string>;
-  onToggle: (status: WorkflowStatus) => void;
-}
+/** A mark of a view that is not a phase. */
+export type LegendMark = 'paused' | 'end' | 'critical_row' | 'critical_edge' | 'tolerant_join';
 
-/** Clickable status key: each chip toggles a filter that fades nodes whose
- * status is not selected. Also documents the dashed-border convention. */
-export function Legend({ active, onToggle }: LegendProps) {
-  const filtering = active.size > 0;
-  return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-      {LEGEND_STATUSES.map(status => {
-        const on = active.has(status);
-        return (
-          <button
-            key={status}
-            type="button"
-            onClick={() => onToggle(status)}
-            aria-pressed={on}
-            title={
-              on
-                ? `Showing ${statusLabel(status)} — click to clear`
-                : `Show only ${statusLabel(status)}`
-            }
-            className="inline-flex items-center gap-1.5 rounded px-1 hover:text-foreground"
-            style={{ opacity: filtering && !on ? 0.4 : 1 }}
-          >
-            <span
-              className="size-2 rounded-full"
-              style={{ background: statusColorVar(status) }}
-              aria-hidden
-            />
-            {statusLabel(status)}
-          </button>
-        );
-      })}
-      <span className="border-l border-border pl-3">dashed = tolerant join</span>
-    </div>
-  );
-}
-
-/** Read-only phase key of the timeline and the graph phase strip. Each
- * swatch states what its phase means; a pause is a band, not a phase. */
-export function PhaseLegend() {
-  return (
-    <ul
-      aria-label="Phase legend"
-      className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
-    >
-      {PHASE_ORDER.map(key => (
-        <li
-          key={key}
-          className="inline-flex items-center gap-1.5"
-          title={phaseMeaning(key)}
-        >
-          <span
-            className="inline-block h-2 w-3 rounded-sm"
-            style={{ background: phaseFill(key) }}
-            aria-hidden
-          />
-          <span>{phaseLabel(key)}</span>
-          <span className="sr-only">: {phaseMeaning(key)}</span>
-        </li>
-      ))}
-      <li className="inline-flex items-center gap-1.5" title="The run was paused.">
+function PhaseSwatch({ phase }: { phase: PhaseKey }) {
+  const track = phaseTrack(phase);
+  switch (track) {
+    case 'thin':
+      return (
         <span
-          className="inline-block h-2 w-3 rounded-sm border border-border"
+          className="inline-block h-1 w-3 rounded-full"
+          style={{ background: phaseFill(phase) }}
+          aria-hidden
+        />
+      );
+    case 'full':
+      return (
+        <span
+          className="inline-block h-2.5 w-3 rounded-sm"
+          style={{ background: phaseFill(phase) }}
+          aria-hidden
+        />
+      );
+    default:
+      return assertNever(track, 'phase track');
+  }
+}
+
+function MarkSwatch({ mark }: { mark: LegendMark }) {
+  switch (mark) {
+    case 'paused':
+      return (
+        <span
+          className="inline-block h-2.5 w-3 rounded-sm border border-border"
           style={{ background: 'var(--pause-band)' }}
           aria-hidden
         />
-        <span>paused</span>
-        <span className="sr-only">: the run was paused (a band over every row).</span>
-      </li>
-      <li
-        className="inline-flex items-center gap-1.5"
-        title="The node reached its terminal status: a marker, not a duration."
-      >
+      );
+    case 'end':
+      return (
         <span
           className="inline-block size-2 rotate-45 border border-foreground"
           style={{ background: 'var(--card)' }}
           aria-hidden
         />
-        <span>end</span>
-        <span className="sr-only">
-          : the node reached its terminal status (a marker, not a duration).
-        </span>
-      </li>
+      );
+    case 'critical_row':
+    case 'critical_edge':
+      return (
+        <span
+          className="inline-block h-0.5 w-3 rounded-full"
+          style={{ background: 'var(--critical-path)' }}
+          aria-hidden
+        />
+      );
+    case 'tolerant_join':
+      return <span className="inline-block h-2.5 w-3 rounded-sm border border-dashed border-foreground" aria-hidden />;
+    default:
+      return assertNever(mark, 'legend mark');
+  }
+}
+
+export function markText(mark: LegendMark): { label: string; meaning: string } {
+  switch (mark) {
+    case 'paused':
+      return {
+        label: 'run paused',
+        meaning: 'The run was paused: a band over every row, from the pause to the resume, to the end of the run, or to now.',
+      };
+    case 'end':
+      return {
+        label: 'end of a node',
+        meaning: 'The time at which a node got its terminal status, in the color of that status. It is a point in time, not a duration.',
+      };
+    case 'critical_row':
+      return {
+        label: 'critical path',
+        meaning:
+          'The line under a row marks a node of the critical path: the chain of nodes whose end times decided the end of the run.',
+      };
+    case 'critical_edge':
+      return {
+        label: 'critical path',
+        meaning:
+          'The bold edges join the nodes of the critical path: the chain of nodes whose end times decided the end of the run.',
+      };
+    case 'tolerant_join':
+      return {
+        label: 'tolerant join',
+        meaning: 'A node with a dashed border runs even when a dependency failed.',
+      };
+    default:
+      return assertNever(mark, 'legend mark');
+  }
+}
+
+/**
+ * The key to the drawing of a run view: the fill of each phase that the view
+ * draws, then the marks of the view. It wraps instead of clipping. Each item
+ * gives its meaning on hover and to a screen reader.
+ */
+export function TimingLegend({
+  phases,
+  marks,
+}: {
+  phases: readonly PhaseKey[];
+  marks: readonly LegendMark[];
+}) {
+  if (phases.length === 0 && marks.length === 0) {
+    return null;
+  }
+  return (
+    <ul
+      aria-label="Legend"
+      className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
+    >
+      {phases.map(phase => (
+        <li key={phase} data-legend-phase={phase}>
+          <Hint text={phaseMeaning(phase)} className="inline-flex items-center gap-1.5">
+            <PhaseSwatch phase={phase} />
+            <span>{phaseLabel(phase)}</span>
+          </Hint>
+        </li>
+      ))}
+      {marks.map(mark => {
+        const text = markText(mark);
+        return (
+          <li key={mark} data-legend-mark={mark}>
+            <Hint text={text.meaning} className="inline-flex items-center gap-1.5">
+              <MarkSwatch mark={mark} />
+              <span>{text.label}</span>
+            </Hint>
+          </li>
+        );
+      })}
     </ul>
   );
 }
