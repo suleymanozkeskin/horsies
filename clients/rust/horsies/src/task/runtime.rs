@@ -78,11 +78,12 @@ impl TaskRuntime {
     }
 
     /// Start `spec` with the id `workflow_id`, as [`Self::start`]. A start
-    /// again with the same id, after a retry of the task, finds the
-    /// workflow and starts nothing.
+    /// again with the same id and the same start command, after a retry of
+    /// the task, finds the workflow and starts nothing.
     ///
     /// Errors: as [`Self::start`]; `WORKFLOW_ID_CONFLICT` for an id of
-    /// another workflow name.
+    /// another workflow name; `WORKFLOW_COMMAND_CONFLICT` for an id of a run
+    /// of this name with another start command, or of a sub-workflow.
     pub async fn start_with_id<T>(
         &self,
         spec: &WorkflowSpec,

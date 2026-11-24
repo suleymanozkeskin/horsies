@@ -54,6 +54,7 @@ fn command(task_id: Uuid, failure: Failure) -> FinishFailedAttempt {
             error_message: Some("flaky".to_owned()),
             failed_reason: None,
         },
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     }
 }
 

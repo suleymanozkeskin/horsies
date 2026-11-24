@@ -83,8 +83,9 @@ CONTRACT_MODELS: Final[tuple[type[BaseModel], ...]] = (
 )
 
 _MAX_DEPTH: Final = 16
-"""The deepest nesting of kinds that a contract model reaches is 4; a deeper
-schema is a defect of the reduction."""
+"""The deepest kind that a contract model reaches is at depth 9: the placement
+of the claim of a segment of the timing of a node of a run
+(``WorkflowRunDetail``). A deeper schema is a defect of the reduction."""
 
 _PRIMITIVES: Final[dict[str, str]] = {
     'integer': 'integer',

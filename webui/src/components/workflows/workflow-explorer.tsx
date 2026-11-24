@@ -8,7 +8,7 @@ import { useLocalStorage } from '@/hooks/use-local-storage';
 import type { WorkflowSearch, WorkflowSearchPatch } from '@/routes/search';
 import type { WorkflowNode, WorkflowStatus } from '@/types/workflows';
 
-import { Legend } from './legend';
+import { Legend, PhaseLegend } from './legend';
 import { NodeDetailContent } from './node-detail';
 import { RunList } from './run-list';
 import { WorkflowGraph } from './workflow-graph';
@@ -251,6 +251,11 @@ export function WorkflowExplorer({
             </span>
           )}
         </div>
+        {runId !== null && runDetail !== undefined && (
+          <div className="hidden border-b border-border px-3 py-1 md:block">
+            <PhaseLegend />
+          </div>
+        )}
         <div className="min-h-0 flex-1">
           {runId !== null && viewMode === 'graph' ? (
             <WorkflowGraph

@@ -39,6 +39,7 @@ fn complete(task_id: Uuid, fence: OwnedClaim) -> TerminalizationCommand {
         task_id,
         fence,
         result_json: r#"{"ok": 1}"#.to_owned(),
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     }
 }
 

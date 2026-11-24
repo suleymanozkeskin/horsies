@@ -50,6 +50,7 @@ fn failure(task_id: Uuid, retry: RetryRequest) -> FinishFailedAttempt {
             error_message: Some("boom message".to_owned()),
             failed_reason: Some("attempt reason".to_owned()),
         },
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     }
 }
 
@@ -710,7 +711,7 @@ mod arguments {
             let refused = sql::query(
                 "SELECT * FROM horsies_finish_failed_attempt(
                     $1, $2, $3, $4, $5::integer, $6::double precision, $7,
-                    $8, 'BOOM', NULL, $9, 'message', NULL, 'REFUSE', TRUE
+                    $8, 'BOOM', NULL, $9, 'message', NULL, 'REFUSE', TRUE, 'NOT_OBSERVED', NULL
                 )",
             )
             .bind(task_id)

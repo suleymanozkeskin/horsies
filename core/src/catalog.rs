@@ -218,6 +218,7 @@ mod tests {
             "BROKER_NOT_CONFIGURED",
             "VALIDATION_FAILED",
             "WORKFLOW_ID_CONFLICT",
+            "WORKFLOW_COMMAND_CONFLICT",
             "ENQUEUE_FAILED",
             "ASYNC_CONTEXT",
         ]);

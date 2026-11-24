@@ -9,6 +9,7 @@ import { useWorkflowTask } from '@/hooks/use-workflow-task';
 import { formatDuration } from '@/lib/format-duration';
 import type { WorkflowNode } from '@/types/workflows';
 
+import { NodeTimingSection } from './node-timing';
 import { residualState } from './residual';
 
 interface NodeDetailContentProps {
@@ -30,8 +31,8 @@ function Row({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-/** Detail body for one node: fields, failure, and attempt history. Chrome-less —
- * the surrounding panel owns the header/close/resize. */
+/** Detail body for one node: fields, phase timing, failure, and attempt
+ * history. Chrome-less — the surrounding panel owns the header/close/resize. */
 export function NodeDetailContent({
   workflowId,
   runStatus,
@@ -94,6 +95,8 @@ export function NodeDetailContent({
         )}
       </div>
       <Row label="Tolerant join" value={node.allow_failed_deps ? 'yes' : 'no'} />
+
+      <NodeTimingSection workflowId={workflowId} taskIndex={node.task_index} />
 
       {drillId && (
         <button

@@ -150,6 +150,7 @@ The codes of the client calls. The error types that carry them are on the client
 | `BROKER_NOT_CONFIGURED` | No | `spec.start()` called without broker |
 | `VALIDATION_FAILED` | No | A start check (`WorkflowValidationError`) refused the start, or a retry of another workflow's error. Any other exception in the start checks is a defect and propagates. In the start transaction, an exception that is not a database or driver error is a defect and propagates, also a `SerializationError` |
 | `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written. Use another id |
+| `WORKFLOW_COMMAND_CONFLICT` | No | The workflow id holds a workflow of the same name that another start command started, or a sub-workflow; nothing was written. Send the same start command, or use another id. See [Start a Workflow Once per Entity](/horsies/guides/start-workflow-once/) |
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error. Any other exception in the start transaction propagates |
 | `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` was called on a thread that runs an event loop; nothing was written. Call `await spec.retry_start_async(err)` to complete the start with the error's id |
 

@@ -12,7 +12,8 @@ use crate::broker::core_rows::StatementLog;
 use crate::broker::error::BrokerError;
 use crate::broker::pools::core_pool_for_test_url;
 use crate::core::history::archive::attempts::{
-    encode_attempt_snapshot, AttemptRecord, StoredAttemptSnapshot,
+    encode_attempt_archive, encode_attempt_snapshot, AttemptPhases, AttemptRecord, ClaimRecord,
+    Finalizing, OpenAttempt, PhaseRecord, Placement, RecordedBy, StoredAttemptSnapshot,
 };
 use crate::core::history::archive::versions::{archive_digest, ArchiveDecodeError, ArchiveDomain};
 use crate::core::history::commands::{
@@ -33,6 +34,7 @@ use crate::core::history::periods::RetentionDays;
 use crate::db::StatementFailure;
 
 use super::aggregates::plan_rows_from_explain_text;
+use super::detail::{history_detail_from_wire, HistoryDetailWireRow};
 use super::pages::HistoryWindow;
 use super::publisher::{published_manifest_absent_leaves, StagedLoaderPublisher};
 use super::result::{
@@ -1289,4 +1291,91 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
     ));
     drop(connection);
     database.drop().await;
+}
+
+/// The stored detail row of a FAILED history task whose attempts are
+/// `archive`.
+fn detail_wire_row(archive: &StoredAttemptSnapshot) -> HistoryDetailWireRow {
+    let anchor = DateTime::from_timestamp(1_790_000_000, 0).expect("an instant");
+    HistoryDetailWireRow {
+        task_id: Uuid::nil(),
+        task_name: "p4.history".to_owned(),
+        queue_name: "default".to_owned(),
+        priority: 100,
+        status: "FAILED".to_owned(),
+        terminalization_kind: "FAIL_RUNNING".to_owned(),
+        terminal_at: anchor,
+        retention_class_key: "forever".to_owned(),
+        enqueued_at: anchor,
+        created_at: anchor,
+        sent_at: Some(anchor),
+        claimed_at: Some(anchor),
+        started_at: Some(anchor),
+        good_until: None,
+        retry_count: 0,
+        max_retries: 0,
+        last_claimed_worker_id: Some("worker-p4".to_owned()),
+        last_worker_hostname: Some("host-p4".to_owned()),
+        last_worker_pid: Some(42),
+        result_envelope_version: 1,
+        result_payload: None,
+        result_digest: None,
+        error_code: Some("BOOM".to_owned()),
+        final_failed_reason: None,
+        rerun_of_task_id: None,
+        rerun_root_task_id: None,
+        workflow_id: None,
+        is_workflow_task: false,
+        rerun_input_disposition: "NEVER_ELIGIBLE".to_owned(),
+        rerun_input_version: None,
+        rerun_input_digest: None,
+        rerun_input_inline: None,
+        attempt_archive_version: archive.version,
+        attempt_snapshot: archive.payload.clone(),
+        attempt_snapshot_digest: archive.digest.to_vec(),
+    }
+}
+
+/// The history detail reads an attempt archive of version 1 (no phase
+/// record) and of version 2 (the phase record of migration 1001) from the
+/// stored row, with the attempts of each.
+#[test]
+fn the_history_detail_reads_attempt_archives_of_version_one_and_two() {
+    let anchor = DateTime::from_timestamp(1_790_000_000, 0).expect("an instant");
+    let version_one = attempt_snapshot(anchor);
+    let detail = history_detail_from_wire(detail_wire_row(&version_one)).expect("version 1");
+    assert_eq!(detail.attempts.len(), 1);
+    assert_eq!(detail.attempts[0].phases(), PhaseRecord::NotCaptured);
+
+    let phases = PhaseRecord::Captured(AttemptPhases::new(
+        anchor - Duration::minutes(3),
+        anchor - Duration::minutes(2),
+        ClaimRecord::NotCounted,
+        Finalizing::NotMarked,
+        RecordedBy::Worker {
+            placement: Placement::Placed {
+                at: anchor - Duration::minutes(2) + Duration::milliseconds(5),
+            },
+        },
+    ));
+    let record = AttemptRecord::new(
+        1,
+        "FAILED",
+        false,
+        anchor - Duration::minutes(2),
+        anchor - Duration::minutes(1),
+        Some("BOOM".to_owned()),
+        None,
+        None,
+        Some("worker-p4".to_owned()),
+        Some("host-p4".to_owned()),
+        Some(42),
+        Some("process-p4".to_owned()),
+    )
+    .expect("attempt record")
+    .with_phases(phases);
+    let version_two = encode_attempt_archive(std::slice::from_ref(&record), &OpenAttempt::Ended)
+        .expect("encode version 2");
+    let detail = history_detail_from_wire(detail_wire_row(&version_two)).expect("version 2");
+    assert_eq!(detail.attempts, vec![record]);
 }

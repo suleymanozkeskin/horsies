@@ -366,6 +366,64 @@
       "nullable": "date-time"
     },
     "outcome": "string",
+    "phases": {
+      "union": {
+        "tag": "kind",
+        "variants": {
+          "captured": {
+            "claimed_at": "date-time",
+            "claims": {
+              "union": {
+                "tag": "kind",
+                "variants": {
+                  "counted": {
+                    "count": "integer",
+                    "first_claimed_at": "date-time"
+                  },
+                  "not_counted": {}
+                }
+              }
+            },
+            "enqueued_at": "date-time",
+            "finalizing": {
+              "union": {
+                "tag": "kind",
+                "variants": {
+                  "marked": {
+                    "finalizing_at": "date-time"
+                  },
+                  "not_marked": {}
+                }
+              }
+            },
+            "recorded_by": {
+              "union": {
+                "tag": "kind",
+                "variants": {
+                  "recovery": {
+                    "last_seen_at": "date-time"
+                  },
+                  "worker": {
+                    "placement": {
+                      "union": {
+                        "tag": "kind",
+                        "variants": {
+                          "not_observed": {},
+                          "placed": {
+                            "placed_at": "date-time"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "not_captured": {}
+        }
+      }
+    },
     "started_at": {
       "nullable": "date-time"
     },
@@ -392,6 +450,64 @@
             "nullable": "date-time"
           },
           "outcome": "string",
+          "phases": {
+            "union": {
+              "tag": "kind",
+              "variants": {
+                "captured": {
+                  "claimed_at": "date-time",
+                  "claims": {
+                    "union": {
+                      "tag": "kind",
+                      "variants": {
+                        "counted": {
+                          "count": "integer",
+                          "first_claimed_at": "date-time"
+                        },
+                        "not_counted": {}
+                      }
+                    }
+                  },
+                  "enqueued_at": "date-time",
+                  "finalizing": {
+                    "union": {
+                      "tag": "kind",
+                      "variants": {
+                        "marked": {
+                          "finalizing_at": "date-time"
+                        },
+                        "not_marked": {}
+                      }
+                    }
+                  },
+                  "recorded_by": {
+                    "union": {
+                      "tag": "kind",
+                      "variants": {
+                        "recovery": {
+                          "last_seen_at": "date-time"
+                        },
+                        "worker": {
+                          "placement": {
+                            "union": {
+                              "tag": "kind",
+                              "variants": {
+                                "not_observed": {},
+                                "placed": {
+                                  "placed_at": "date-time"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "not_captured": {}
+              }
+            }
+          },
           "started_at": {
             "nullable": "date-time"
           },
@@ -684,7 +800,328 @@
       "nullable": "string"
     },
     "task_index": "integer",
-    "task_name": "string"
+    "task_name": "string",
+    "timing": {
+      "union": {
+        "tag": "kind",
+        "variants": {
+          "exact": {
+            "endpoint": {
+              "union": {
+                "tag": "kind",
+                "variants": {
+                  "not_terminal": {},
+                  "terminal": {
+                    "at": "date-time",
+                    "status": {
+                      "enum": [
+                        "COMPLETED",
+                        "FAILED",
+                        "SKIPPED"
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            "segments": {
+              "list": {
+                "model": {
+                  "end": {
+                    "union": {
+                      "tag": "kind",
+                      "variants": {
+                        "ended": {
+                          "at": "date-time"
+                        },
+                        "open": {}
+                      }
+                    }
+                  },
+                  "phase": {
+                    "union": {
+                      "tag": "kind",
+                      "variants": {
+                        "advancing": {},
+                        "claimed": {
+                          "claim": {
+                            "union": {
+                              "tag": "kind",
+                              "variants": {
+                                "earlier": {
+                                  "count": "integer"
+                                },
+                                "not_recorded": {},
+                                "recorded": {
+                                  "placement": {
+                                    "union": {
+                                      "tag": "kind",
+                                      "variants": {
+                                        "not_observed": {},
+                                        "placed": {
+                                          "placed_at": "date-time"
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "enqueued": {},
+                        "finalizing": {},
+                        "pending": {},
+                        "ready": {},
+                        "retry_wait": {},
+                        "running": {},
+                        "unknown": {
+                          "reason": {
+                            "enum": [
+                              "ATTEMPT_NOT_CAPTURED",
+                              "CLAIMS_NOT_COUNTED",
+                              "HISTORY_PRUNED",
+                              "WORKER_LOST"
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "source": {
+                    "union": {
+                      "tag": "kind",
+                      "variants": {
+                        "attempt": {
+                          "attempt": "integer",
+                          "generation": "integer",
+                          "task_id": "uuid"
+                        },
+                        "node": {},
+                        "task": {
+                          "generation": "integer",
+                          "task_id": "uuid"
+                        }
+                      }
+                    }
+                  },
+                  "started_at": "date-time"
+                }
+              }
+            }
+          },
+          "inconsistent": {
+            "conflict": {
+              "union": {
+                "tag": "kind",
+                "variants": {
+                  "clock_order": {
+                    "earlier": {
+                      "enum": [
+                        "ATTEMPT_ENQUEUED",
+                        "ATTEMPT_RECORDED",
+                        "CHILD_COMPLETED",
+                        "CHILD_CREATED",
+                        "CLAIM",
+                        "FINALIZING",
+                        "FIRST_CLAIM",
+                        "LAST_SEEN",
+                        "NODE_COMPLETED",
+                        "NODE_CREATED",
+                        "NODE_ENQUEUED",
+                        "NODE_READY",
+                        "PLACEMENT",
+                        "READ_TIME",
+                        "RUN_COMPLETED",
+                        "RUN_PAUSED",
+                        "RUN_RESUMED",
+                        "START",
+                        "TASK_CREATED",
+                        "TASK_MOVED"
+                      ]
+                    },
+                    "earlier_at": "date-time",
+                    "later": {
+                      "enum": [
+                        "ATTEMPT_ENQUEUED",
+                        "ATTEMPT_RECORDED",
+                        "CHILD_COMPLETED",
+                        "CHILD_CREATED",
+                        "CLAIM",
+                        "FINALIZING",
+                        "FIRST_CLAIM",
+                        "LAST_SEEN",
+                        "NODE_COMPLETED",
+                        "NODE_CREATED",
+                        "NODE_ENQUEUED",
+                        "NODE_READY",
+                        "PLACEMENT",
+                        "READ_TIME",
+                        "RUN_COMPLETED",
+                        "RUN_PAUSED",
+                        "RUN_RESUMED",
+                        "START",
+                        "TASK_CREATED",
+                        "TASK_MOVED"
+                      ]
+                    },
+                    "later_at": "date-time"
+                  },
+                  "missing_record": {
+                    "record": {
+                      "enum": [
+                        "ATTEMPT_ROW",
+                        "CHILD_RUN",
+                        "COMPLETION_TIME",
+                        "LINKED_TASK",
+                        "LINKED_WORK",
+                        "OPEN_ATTEMPT",
+                        "TASK_TIMES"
+                      ]
+                    }
+                  },
+                  "unexpected_event": {
+                    "event": {
+                      "enum": [
+                        "NODE_ENQUEUED",
+                        "NODE_READY",
+                        "TASK_MOVED",
+                        "WORKFLOW_PAUSED",
+                        "WORKFLOW_RESUMED"
+                      ]
+                    },
+                    "event_id": "integer"
+                  }
+                }
+              }
+            }
+          },
+          "partial": {
+            "endpoint": {
+              "union": {
+                "tag": "kind",
+                "variants": {
+                  "not_terminal": {},
+                  "terminal": {
+                    "at": "date-time",
+                    "status": {
+                      "enum": [
+                        "COMPLETED",
+                        "FAILED",
+                        "SKIPPED"
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            "reasons": {
+              "list": {
+                "enum": [
+                  "ATTEMPT_NOT_CAPTURED",
+                  "CLAIMS_NOT_COUNTED",
+                  "HISTORY_PRUNED",
+                  "WORKER_LOST"
+                ]
+              }
+            },
+            "segments": {
+              "list": {
+                "model": {
+                  "end": {
+                    "union": {
+                      "tag": "kind",
+                      "variants": {
+                        "ended": {
+                          "at": "date-time"
+                        },
+                        "open": {}
+                      }
+                    }
+                  },
+                  "phase": {
+                    "union": {
+                      "tag": "kind",
+                      "variants": {
+                        "advancing": {},
+                        "claimed": {
+                          "claim": {
+                            "union": {
+                              "tag": "kind",
+                              "variants": {
+                                "earlier": {
+                                  "count": "integer"
+                                },
+                                "not_recorded": {},
+                                "recorded": {
+                                  "placement": {
+                                    "union": {
+                                      "tag": "kind",
+                                      "variants": {
+                                        "not_observed": {},
+                                        "placed": {
+                                          "placed_at": "date-time"
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "enqueued": {},
+                        "finalizing": {},
+                        "pending": {},
+                        "ready": {},
+                        "retry_wait": {},
+                        "running": {},
+                        "unknown": {
+                          "reason": {
+                            "enum": [
+                              "ATTEMPT_NOT_CAPTURED",
+                              "CLAIMS_NOT_COUNTED",
+                              "HISTORY_PRUNED",
+                              "WORKER_LOST"
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "source": {
+                    "union": {
+                      "tag": "kind",
+                      "variants": {
+                        "attempt": {
+                          "attempt": "integer",
+                          "generation": "integer",
+                          "task_id": "uuid"
+                        },
+                        "node": {},
+                        "task": {
+                          "generation": "integer",
+                          "task_id": "uuid"
+                        }
+                      }
+                    }
+                  },
+                  "started_at": "date-time"
+                }
+              }
+            }
+          },
+          "unavailable": {
+            "reason": {
+              "enum": [
+                "RUN_BEFORE_CAPTURE",
+                "TIMING_BOUND_EXCEEDED"
+              ]
+            }
+          }
+        }
+      }
+    }
   },
   "WorkflowRunDetail": {
     "edges": {
@@ -727,7 +1164,328 @@
             "nullable": "string"
           },
           "task_index": "integer",
-          "task_name": "string"
+          "task_name": "string",
+          "timing": {
+            "union": {
+              "tag": "kind",
+              "variants": {
+                "exact": {
+                  "endpoint": {
+                    "union": {
+                      "tag": "kind",
+                      "variants": {
+                        "not_terminal": {},
+                        "terminal": {
+                          "at": "date-time",
+                          "status": {
+                            "enum": [
+                              "COMPLETED",
+                              "FAILED",
+                              "SKIPPED"
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "segments": {
+                    "list": {
+                      "model": {
+                        "end": {
+                          "union": {
+                            "tag": "kind",
+                            "variants": {
+                              "ended": {
+                                "at": "date-time"
+                              },
+                              "open": {}
+                            }
+                          }
+                        },
+                        "phase": {
+                          "union": {
+                            "tag": "kind",
+                            "variants": {
+                              "advancing": {},
+                              "claimed": {
+                                "claim": {
+                                  "union": {
+                                    "tag": "kind",
+                                    "variants": {
+                                      "earlier": {
+                                        "count": "integer"
+                                      },
+                                      "not_recorded": {},
+                                      "recorded": {
+                                        "placement": {
+                                          "union": {
+                                            "tag": "kind",
+                                            "variants": {
+                                              "not_observed": {},
+                                              "placed": {
+                                                "placed_at": "date-time"
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              },
+                              "enqueued": {},
+                              "finalizing": {},
+                              "pending": {},
+                              "ready": {},
+                              "retry_wait": {},
+                              "running": {},
+                              "unknown": {
+                                "reason": {
+                                  "enum": [
+                                    "ATTEMPT_NOT_CAPTURED",
+                                    "CLAIMS_NOT_COUNTED",
+                                    "HISTORY_PRUNED",
+                                    "WORKER_LOST"
+                                  ]
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "source": {
+                          "union": {
+                            "tag": "kind",
+                            "variants": {
+                              "attempt": {
+                                "attempt": "integer",
+                                "generation": "integer",
+                                "task_id": "uuid"
+                              },
+                              "node": {},
+                              "task": {
+                                "generation": "integer",
+                                "task_id": "uuid"
+                              }
+                            }
+                          }
+                        },
+                        "started_at": "date-time"
+                      }
+                    }
+                  }
+                },
+                "inconsistent": {
+                  "conflict": {
+                    "union": {
+                      "tag": "kind",
+                      "variants": {
+                        "clock_order": {
+                          "earlier": {
+                            "enum": [
+                              "ATTEMPT_ENQUEUED",
+                              "ATTEMPT_RECORDED",
+                              "CHILD_COMPLETED",
+                              "CHILD_CREATED",
+                              "CLAIM",
+                              "FINALIZING",
+                              "FIRST_CLAIM",
+                              "LAST_SEEN",
+                              "NODE_COMPLETED",
+                              "NODE_CREATED",
+                              "NODE_ENQUEUED",
+                              "NODE_READY",
+                              "PLACEMENT",
+                              "READ_TIME",
+                              "RUN_COMPLETED",
+                              "RUN_PAUSED",
+                              "RUN_RESUMED",
+                              "START",
+                              "TASK_CREATED",
+                              "TASK_MOVED"
+                            ]
+                          },
+                          "earlier_at": "date-time",
+                          "later": {
+                            "enum": [
+                              "ATTEMPT_ENQUEUED",
+                              "ATTEMPT_RECORDED",
+                              "CHILD_COMPLETED",
+                              "CHILD_CREATED",
+                              "CLAIM",
+                              "FINALIZING",
+                              "FIRST_CLAIM",
+                              "LAST_SEEN",
+                              "NODE_COMPLETED",
+                              "NODE_CREATED",
+                              "NODE_ENQUEUED",
+                              "NODE_READY",
+                              "PLACEMENT",
+                              "READ_TIME",
+                              "RUN_COMPLETED",
+                              "RUN_PAUSED",
+                              "RUN_RESUMED",
+                              "START",
+                              "TASK_CREATED",
+                              "TASK_MOVED"
+                            ]
+                          },
+                          "later_at": "date-time"
+                        },
+                        "missing_record": {
+                          "record": {
+                            "enum": [
+                              "ATTEMPT_ROW",
+                              "CHILD_RUN",
+                              "COMPLETION_TIME",
+                              "LINKED_TASK",
+                              "LINKED_WORK",
+                              "OPEN_ATTEMPT",
+                              "TASK_TIMES"
+                            ]
+                          }
+                        },
+                        "unexpected_event": {
+                          "event": {
+                            "enum": [
+                              "NODE_ENQUEUED",
+                              "NODE_READY",
+                              "TASK_MOVED",
+                              "WORKFLOW_PAUSED",
+                              "WORKFLOW_RESUMED"
+                            ]
+                          },
+                          "event_id": "integer"
+                        }
+                      }
+                    }
+                  }
+                },
+                "partial": {
+                  "endpoint": {
+                    "union": {
+                      "tag": "kind",
+                      "variants": {
+                        "not_terminal": {},
+                        "terminal": {
+                          "at": "date-time",
+                          "status": {
+                            "enum": [
+                              "COMPLETED",
+                              "FAILED",
+                              "SKIPPED"
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "reasons": {
+                    "list": {
+                      "enum": [
+                        "ATTEMPT_NOT_CAPTURED",
+                        "CLAIMS_NOT_COUNTED",
+                        "HISTORY_PRUNED",
+                        "WORKER_LOST"
+                      ]
+                    }
+                  },
+                  "segments": {
+                    "list": {
+                      "model": {
+                        "end": {
+                          "union": {
+                            "tag": "kind",
+                            "variants": {
+                              "ended": {
+                                "at": "date-time"
+                              },
+                              "open": {}
+                            }
+                          }
+                        },
+                        "phase": {
+                          "union": {
+                            "tag": "kind",
+                            "variants": {
+                              "advancing": {},
+                              "claimed": {
+                                "claim": {
+                                  "union": {
+                                    "tag": "kind",
+                                    "variants": {
+                                      "earlier": {
+                                        "count": "integer"
+                                      },
+                                      "not_recorded": {},
+                                      "recorded": {
+                                        "placement": {
+                                          "union": {
+                                            "tag": "kind",
+                                            "variants": {
+                                              "not_observed": {},
+                                              "placed": {
+                                                "placed_at": "date-time"
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              },
+                              "enqueued": {},
+                              "finalizing": {},
+                              "pending": {},
+                              "ready": {},
+                              "retry_wait": {},
+                              "running": {},
+                              "unknown": {
+                                "reason": {
+                                  "enum": [
+                                    "ATTEMPT_NOT_CAPTURED",
+                                    "CLAIMS_NOT_COUNTED",
+                                    "HISTORY_PRUNED",
+                                    "WORKER_LOST"
+                                  ]
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "source": {
+                          "union": {
+                            "tag": "kind",
+                            "variants": {
+                              "attempt": {
+                                "attempt": "integer",
+                                "generation": "integer",
+                                "task_id": "uuid"
+                              },
+                              "node": {},
+                              "task": {
+                                "generation": "integer",
+                                "task_id": "uuid"
+                              }
+                            }
+                          }
+                        },
+                        "started_at": "date-time"
+                      }
+                    }
+                  }
+                },
+                "unavailable": {
+                  "reason": {
+                    "enum": [
+                      "RUN_BEFORE_CAPTURE",
+                      "TIMING_BOUND_EXCEEDED"
+                    ]
+                  }
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -747,6 +1505,171 @@
         "status": "string",
         "wall_s": {
           "nullable": "integer"
+        }
+      }
+    },
+    "timing": {
+      "union": {
+        "tag": "kind",
+        "variants": {
+          "composed": {
+            "as_of": "date-time",
+            "captured_since": "date-time",
+            "coverage": {
+              "union": {
+                "tag": "kind",
+                "variants": {
+                  "exact": {},
+                  "inconsistent": {
+                    "conflicts": {
+                      "list": {
+                        "union": {
+                          "tag": "kind",
+                          "variants": {
+                            "node": {
+                              "task_index": "integer"
+                            },
+                            "pause": {
+                              "conflict": {
+                                "union": {
+                                  "tag": "kind",
+                                  "variants": {
+                                    "clock_order": {
+                                      "earlier": {
+                                        "enum": [
+                                          "ATTEMPT_ENQUEUED",
+                                          "ATTEMPT_RECORDED",
+                                          "CHILD_COMPLETED",
+                                          "CHILD_CREATED",
+                                          "CLAIM",
+                                          "FINALIZING",
+                                          "FIRST_CLAIM",
+                                          "LAST_SEEN",
+                                          "NODE_COMPLETED",
+                                          "NODE_CREATED",
+                                          "NODE_ENQUEUED",
+                                          "NODE_READY",
+                                          "PLACEMENT",
+                                          "READ_TIME",
+                                          "RUN_COMPLETED",
+                                          "RUN_PAUSED",
+                                          "RUN_RESUMED",
+                                          "START",
+                                          "TASK_CREATED",
+                                          "TASK_MOVED"
+                                        ]
+                                      },
+                                      "earlier_at": "date-time",
+                                      "later": {
+                                        "enum": [
+                                          "ATTEMPT_ENQUEUED",
+                                          "ATTEMPT_RECORDED",
+                                          "CHILD_COMPLETED",
+                                          "CHILD_CREATED",
+                                          "CLAIM",
+                                          "FINALIZING",
+                                          "FIRST_CLAIM",
+                                          "LAST_SEEN",
+                                          "NODE_COMPLETED",
+                                          "NODE_CREATED",
+                                          "NODE_ENQUEUED",
+                                          "NODE_READY",
+                                          "PLACEMENT",
+                                          "READ_TIME",
+                                          "RUN_COMPLETED",
+                                          "RUN_PAUSED",
+                                          "RUN_RESUMED",
+                                          "START",
+                                          "TASK_CREATED",
+                                          "TASK_MOVED"
+                                        ]
+                                      },
+                                      "later_at": "date-time"
+                                    },
+                                    "missing_record": {
+                                      "record": {
+                                        "enum": [
+                                          "ATTEMPT_ROW",
+                                          "CHILD_RUN",
+                                          "COMPLETION_TIME",
+                                          "LINKED_TASK",
+                                          "LINKED_WORK",
+                                          "OPEN_ATTEMPT",
+                                          "TASK_TIMES"
+                                        ]
+                                      }
+                                    },
+                                    "unexpected_event": {
+                                      "event": {
+                                        "enum": [
+                                          "NODE_ENQUEUED",
+                                          "NODE_READY",
+                                          "TASK_MOVED",
+                                          "WORKFLOW_PAUSED",
+                                          "WORKFLOW_RESUMED"
+                                        ]
+                                      },
+                                      "event_id": "integer"
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "partial": {
+                    "reasons": {
+                      "list": {
+                        "enum": [
+                          "ATTEMPT_NOT_CAPTURED",
+                          "CLAIMS_NOT_COUNTED",
+                          "HISTORY_PRUNED",
+                          "WORKER_LOST"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "open_segments": "boolean",
+            "pauses": {
+              "list": {
+                "model": {
+                  "end": {
+                    "union": {
+                      "tag": "kind",
+                      "variants": {
+                        "open": {},
+                        "resumed": {
+                          "at": "date-time"
+                        },
+                        "run_ended": {
+                          "at": "date-time"
+                        }
+                      }
+                    }
+                  },
+                  "started_at": "date-time"
+                }
+              }
+            },
+            "range_ended_at": "date-time",
+            "range_started_at": "date-time"
+          },
+          "unavailable": {
+            "as_of": "date-time",
+            "captured_since": "date-time",
+            "reason": {
+              "enum": [
+                "RUN_BEFORE_CAPTURE",
+                "TIMING_BOUND_EXCEEDED"
+              ]
+            }
+          }
         }
       }
     },
@@ -789,6 +1712,64 @@
             "nullable": "date-time"
           },
           "outcome": "string",
+          "phases": {
+            "union": {
+              "tag": "kind",
+              "variants": {
+                "captured": {
+                  "claimed_at": "date-time",
+                  "claims": {
+                    "union": {
+                      "tag": "kind",
+                      "variants": {
+                        "counted": {
+                          "count": "integer",
+                          "first_claimed_at": "date-time"
+                        },
+                        "not_counted": {}
+                      }
+                    }
+                  },
+                  "enqueued_at": "date-time",
+                  "finalizing": {
+                    "union": {
+                      "tag": "kind",
+                      "variants": {
+                        "marked": {
+                          "finalizing_at": "date-time"
+                        },
+                        "not_marked": {}
+                      }
+                    }
+                  },
+                  "recorded_by": {
+                    "union": {
+                      "tag": "kind",
+                      "variants": {
+                        "recovery": {
+                          "last_seen_at": "date-time"
+                        },
+                        "worker": {
+                          "placement": {
+                            "union": {
+                              "tag": "kind",
+                              "variants": {
+                                "not_observed": {},
+                                "placed": {
+                                  "placed_at": "date-time"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "not_captured": {}
+              }
+            }
+          },
           "started_at": {
             "nullable": "date-time"
           },

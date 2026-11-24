@@ -4,12 +4,17 @@ import { Handle, type Node, type NodeProps, Position } from '@xyflow/react';
 import { Layers } from 'lucide-react';
 
 import { RESIDUAL_COPY } from '@/actions/copy';
-import { formatDuration } from '@/lib/format-duration';
+import { useDrawTime, type ReadClock } from '@/hooks/use-draw-time';
+import { assertNever } from '@/lib/exhaustive';
+import { formatDuration, formatMilliseconds } from '@/lib/format-duration';
 import { statusColorVar } from '@/lib/status-utils';
+import type { NodeTiming } from '@/types/timing';
 import type { WorkflowStatus } from '@/types/workflows';
 
 import { NODE_H, NODE_W } from './layout';
+import { PhaseStrip } from './phase-strip';
 import type { ResidualState } from './residual';
+import { nodeTimingIsOpen, nodeWallTime } from './timeline-geometry';
 
 export interface WorkflowNodeData extends Record<string, unknown> {
   label: string;
@@ -30,6 +35,10 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   dimmed: boolean;
   /** Executing under a cancelled/paused run — informational, never a failure. */
   residual: ResidualState;
+  /** Phase timing of the node, drawn as the phase strip. */
+  timing: NodeTiming;
+  /** Clock of the run read that holds `timing`. */
+  readClock: ReadClock;
 }
 
 export type WorkflowFlowNode = Node<WorkflowNodeData, 'workflow'>;
@@ -63,17 +72,70 @@ export function childRollupBadge(
     : { text: String(childTotal), title, failed: false };
 }
 
+/** The duration a card shows: the wall time of the node when its timing has
+ * segments, else the execution time of a node with no phase timing (a run
+ * from before the lifecycle record), else none. */
+export type CardDuration =
+  | { kind: 'wall'; ms: number }
+  | { kind: 'execution'; seconds: number }
+  | { kind: 'none' };
+
+export function cardDuration(
+  timing: NodeTiming,
+  execS: number | null,
+  drawAtMs: number
+): CardDuration {
+  const execution: CardDuration =
+    execS === null ? { kind: 'none' } : { kind: 'execution', seconds: execS };
+  switch (timing.kind) {
+    case 'exact':
+    case 'partial': {
+      const wall = nodeWallTime(timing.segments, timing.endpoint, drawAtMs);
+      switch (wall.kind) {
+        case 'measured':
+          return { kind: 'wall', ms: wall.ms };
+        case 'no_segments':
+          return execution;
+        default:
+          return assertNever(wall, 'node wall time');
+      }
+    }
+    case 'unavailable':
+    case 'inconsistent':
+      return execution;
+    default:
+      return assertNever(timing, 'node timing');
+  }
+}
+
+/** The text and the meaning of a card duration, or null for none. */
+function cardDurationLabel(duration: CardDuration): { text: string; title: string } | null {
+  switch (duration.kind) {
+    case 'wall':
+      return { text: formatMilliseconds(duration.ms), title: 'Wall time of the node' };
+    case 'execution':
+      return { text: formatDuration(duration.seconds), title: 'Execution time' };
+    case 'none':
+      return null;
+    default:
+      return assertNever(duration, 'card duration');
+  }
+}
+
 function WorkflowNodeCardImpl({ data, selected }: NodeProps<WorkflowFlowNode>) {
   const color = statusColorVar(data.status);
-  // Null while queued — keep it null (not the shared '—') so the badge below
-  // stays hidden rather than rendering a dash.
-  const duration = data.execS === null ? null : formatDuration(data.execS);
+  // Only a card with an open segment follows the one-second clock.
+  const drawAtMs = useDrawTime(
+    data.readClock,
+    data.readClock.open && nodeTimingIsOpen(data.timing)
+  );
+  const duration = cardDurationLabel(cardDuration(data.timing, data.execS, drawAtMs));
   const residual = data.residual === null ? null : RESIDUAL_COPY[data.residual];
   const rollup = childRollupBadge(data.childTotal, data.childFailed);
 
   return (
     <div
-      className="relative flex flex-col justify-center overflow-hidden rounded-xl border bg-card px-3 py-2 text-card-foreground shadow-xs transition-colors"
+      className="relative flex flex-col justify-center gap-0.5 overflow-hidden rounded-xl border bg-card px-3 py-1.5 text-card-foreground shadow-xs transition-colors"
       title={data.drillable ? 'Double-click to open subworkflow' : undefined}
       style={{
         width: NODE_W,
@@ -139,11 +201,17 @@ function WorkflowNodeCardImpl({ data, selected }: NodeProps<WorkflowFlowNode>) {
             {residual.badge}
           </span>
         )}
-        {duration && (
-          <span className="ml-auto shrink-0 font-mono text-10 text-muted-foreground">
-            {duration}
+        {duration !== null && (
+          <span
+            className="ml-auto shrink-0 font-mono text-10 text-muted-foreground"
+            title={duration.title}
+          >
+            {duration.text}
           </span>
         )}
+      </div>
+      <div className="pl-1.5">
+        <PhaseStrip timing={data.timing} drawAtMs={drawAtMs} />
       </div>
       <Handle
         type="source"

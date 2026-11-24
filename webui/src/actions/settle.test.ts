@@ -52,6 +52,7 @@ const node = (taskIndex: number, nodeStatus: string): WorkflowNode => ({
   exec_s: null,
   child_total: null,
   child_failed: null,
+  timing: { kind: 'unavailable', reason: 'RUN_BEFORE_CAPTURE' },
 });
 
 const runDetail = (
@@ -72,6 +73,12 @@ const runDetail = (
   failed_count: 0,
   failed_indices: [],
   trace_id: null,
+  timing: {
+    kind: 'unavailable',
+    as_of: '2026-11-22T12:00:00.000000Z',
+    captured_since: '2026-11-22T12:00:00.000000Z',
+    reason: 'RUN_BEFORE_CAPTURE',
+  },
 });
 
 describe('task cancel settling', () => {

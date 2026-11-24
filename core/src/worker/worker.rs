@@ -55,9 +55,9 @@ use crate::worker::executor::protocol::TaskInputText;
 use crate::worker::executor::slots::outcome::EndWrites;
 use crate::worker::executor::slots::{
     describe_claim_plan, guard_new_kind_baselines, start_children, unserved_classes_line,
-    AttemptEnd, BaselineOverLimit, ChildrenStart, ChildrenStartFailed, ClaimRoute, Claimed,
-    ClaimedTask, NotRunCause, OrphanSelfHeal, OutcomeWriter, PlacementReceipt, PoolBoard,
-    PoolFailure, PoolStopReport, RetryFacts, Settlement, Submitted, TaskKind,
+    watched_placement, AttemptEnd, BaselineOverLimit, ChildrenStart, ChildrenStartFailed,
+    ClaimRoute, Claimed, ClaimedTask, NotRunCause, OrphanSelfHeal, OutcomeWriter, PlacementReceipt,
+    PoolBoard, PoolFailure, PoolStopReport, RetryFacts, Settlement, Submitted, TaskKind,
 };
 use crate::worker::executor::supervisor::{
     PreloadMode, PreloadStart, PreloadUnsupported, Spawner, SpawnerHandle, SpawnerStopReport,
@@ -811,7 +811,9 @@ fn claimed_of(row: ClaimedRow) -> Claimed {
 /// `AttemptNotStarted`, or `ClaimReleased` for a task that reached no
 /// child), then `AttemptRecorded`. The result envelope of a reported end is
 /// read once, by `writer`. `read` is when the worker read the claim result
-/// of the task. Returns how the write settled.
+/// of the task; the attempt row of the end keeps the slot wait from `read`
+/// to the placement (`ChildPlacement::attempt_placement`). Returns how the
+/// write settled.
 pub(crate) async fn follow_attempt<W: EndWrites>(
     writer: &W,
     telemetry: &WorkerTelemetry,
@@ -825,7 +827,9 @@ pub(crate) async fn follow_attempt<W: EndWrites>(
     let end = attempt_end(submitted).await;
     let read_end = writer.read_end(task, end);
     let noted = telemetry.attempt_ended(task, &placement, W::view(&read_end));
-    let settled = writer.write_end(task, read_end).await;
+    let settled = writer
+        .write_end(task, read_end, placement.attempt_placement(read))
+        .await;
     telemetry.attempt_recorded(task, noted, settled);
     settled
 }
@@ -1657,8 +1661,9 @@ impl Worker {
     /// `_capacity_released`). An admitted row of a capped queue counts in
     /// its queue's start check until the write ends (`count`). Never fails
     /// for a task: a task that reaches no child ends `NotDispatched`, and its
-    /// claim goes back to the queue. With telemetry on, the placement of the
-    /// task on a child is watched and is the `AttemptPlaced` point.
+    /// claim goes back to the queue. The placement of the task on a child is
+    /// always watched: the attempt row keeps it, and with telemetry on it is
+    /// the `AttemptPlaced` point.
     fn dispatch(
         &self,
         children: &WorkerChildren,
@@ -1671,7 +1676,7 @@ impl Worker {
         let claimed = claimed_of(row);
         let task = claimed.task.clone();
         let telemetry = self.telemetry.clone();
-        let (watch, receipt) = telemetry.placement_watch();
+        let (watch, receipt) = watched_placement();
         let submitted = children.submit_watched(claimed, watch);
         let writer = Arc::clone(writer);
         let released = Arc::clone(&self.capacity_released);
@@ -4233,7 +4238,17 @@ mod tests {
         };
         let is_workflow_task = task.kind.is_workflow_task();
         let log = task.log();
-        match persist_ok_result(broker, task_id, log, &value, fence, is_workflow_task).await {
+        match persist_ok_result(
+            broker,
+            task_id,
+            log,
+            &value,
+            fence,
+            is_workflow_task,
+            crate::core::lifecycle::AttemptPlacement::NotObserved,
+        )
+        .await
+        {
             Ok(FinalizeOutcome::Terminal {
                 capacity_notified,
                 phase_two,

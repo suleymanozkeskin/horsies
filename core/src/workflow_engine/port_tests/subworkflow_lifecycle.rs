@@ -437,7 +437,7 @@ enum FailedAttempt {
 async fn fail_attempt(pool: &TestPool, task_id: Uuid) -> FailedAttempt {
     let (claimed_at, retry_count, max_retries): (DateTime<Utc>, i32, i32) = sql::query_as(
         "UPDATE horsies_tasks
-         SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $2,
+         SET status = 'RUNNING', attempt_claims = 1, first_claimed_at = NOW(), claimed_at = NOW(), claimed_by_worker_id = $2,
              claim_expires_at = NULL, started_at = NOW(), finalizing_at = NOW(),
              finalizing_by_worker_id = $2, worker_pid = 4242, worker_hostname = 'port-host',
              worker_process_name = 'port-process', next_retry_at = NULL, updated_at = NOW()
@@ -477,6 +477,7 @@ async fn fail_attempt(pool: &TestPool, task_id: Uuid) -> FailedAttempt {
                 error_message: Some("attempt failed".to_owned()),
                 failed_reason: None,
             },
+            placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
         },
     )
     .await

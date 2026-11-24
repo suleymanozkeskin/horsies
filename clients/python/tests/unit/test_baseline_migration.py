@@ -1,4 +1,4 @@
-"""The docs page of the schema lists the baseline SQL files of horsies._core."""
+"""The docs page of the schema lists the SQL files of the migration chain of horsies._core."""
 
 from __future__ import annotations
 
@@ -32,3 +32,25 @@ def test_the_schema_page_lists_every_file() -> None:
         re.findall(r'^\| `(\d{4}_[a-z_]+\.sql)` \|', page, flags=re.MULTILINE)
     )
     assert listed == _file_names()
+
+
+_BASELINE_VERSION: Final = 1000
+"""The version of the baseline migration, whose files the table above lists."""
+
+
+def test_the_schema_page_names_every_later_migration_file() -> None:
+    """Each migration after the baseline is one file of ``core/migrations/``;
+    the page names its path in the row of its version."""
+    page = _SCHEMA_PAGE.read_text(encoding='utf-8')
+    later = [
+        (version, name)
+        for version, name, _ in _core.migration_sql_files()
+        if version != _BASELINE_VERSION
+    ]
+    assert later
+    for version, name in later:
+        assert re.search(
+            rf'^\| {version} \| `core/migrations/{re.escape(name)}` \|',
+            page,
+            flags=re.MULTILINE,
+        ), (version, name)

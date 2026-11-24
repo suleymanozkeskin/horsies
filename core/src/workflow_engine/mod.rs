@@ -12,6 +12,7 @@ pub mod recovery;
 pub(crate) mod recovery_limit;
 pub mod spec_data;
 pub mod start;
+pub(crate) mod start_fingerprint;
 pub(crate) mod start_statement;
 pub(crate) mod steps;
 

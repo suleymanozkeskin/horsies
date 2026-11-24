@@ -132,6 +132,11 @@ cleared. Those nodes get fresh task rows on resume.
 - Only `status` and `updated_at` change on the run row. `completed_at`,
   `result`, and `error` stay as they were.
 
+On the timeline, the pause is a band over every row, from the pause to the
+resume or to the end of the run. A node whose claimed task the pause cancelled
+shows `ready` from the move of that task to history until the resume; the
+task of the resume is a new task of the node (`task 2` in the tooltip).
+
 **Settled when:** the run reads `PAUSED` and no node is still executing with a
 claimed or running backing task. The status flip is immediate; the drain is not.
 
@@ -173,8 +178,9 @@ through every descendant workflow, in a single commit.
 Per node:
 
 - `PENDING` and `READY` nodes are **skipped**. The node vocabulary has no
-  cancelled state; cancel expresses as `SKIPPED`. Those nodes keep
-  `completed_at` null, so they show no duration.
+  cancelled state; cancel expresses as `SKIPPED`. The cancel sets their
+  `completed_at`: the timeline shows their `pending` or `ready` time up to
+  the cancel, then the `skipped` marker.
 - Backing tasks of enqueued nodes are cancelled, whether `PENDING`, `CLAIMED`,
   or `RUNNING`.
 - **Executing nodes keep running to completion.** As with task cancel, no
@@ -185,6 +191,8 @@ Per node:
 A node that was executing when its run was cancelled is *draining*: it finishes,
 its side effects happen, and its result does not advance the workflow. The UI
 badges it `draining` rather than treating it as an error, because it is not one.
+On the timeline, the task of a draining node keeps its segments after the end
+of the run, and the time axis grows with them.
 
 A draining node can persist indefinitely if the worker executing it crashed: the
 reaper ignores nodes under non-running workflows, so nothing reclaims it. That

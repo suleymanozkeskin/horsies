@@ -15,9 +15,11 @@ import '@xyflow/react/dist/style.css';
 
 import { useWorkflowRun } from '@/hooks/use-workflow-run';
 import { formatElapsed } from '@/lib/format-duration';
+import { statusLabel } from '@/lib/status-utils';
 import type { WorkflowNode } from '@/types/workflows';
 
 import { layoutWorkflow, NODE_H, NODE_W, type NodePosition } from './layout';
+import { phaseStripText } from './phase-strip';
 import { residualState } from './residual';
 import {
   WorkflowNodeCard,
@@ -66,7 +68,7 @@ export function WorkflowGraph({
   onFocusNode,
   statusFilter = NO_STATUS_FILTER,
 }: WorkflowGraphProps) {
-  const { detail, isLoading, isError } = useWorkflowRun(workflowId);
+  const { detail, readClock, isLoading, isError } = useWorkflowRun(workflowId);
 
   // Failure navigation: a cursor into detail.failed_indices. `focusedIndex` is
   // the node the cursor last centered on, highlighted like a selection without
@@ -82,7 +84,7 @@ export function WorkflowGraph({
   );
 
   const { rfNodes, rfEdges, byIndex, positions, metrics, matchIndices } = useMemo(() => {
-    if (!detail) {
+    if (!detail || !readClock) {
       return {
         rfNodes: [] as WorkflowFlowNode[],
         rfEdges: [] as Edge[],
@@ -145,12 +147,17 @@ export function WorkflowGraph({
         // "draining" case is detectable here; "finishing" surfaces in the node
         // detail, which loads the leaf.
         residual: residualState(detail.run.status, node.node_status, null),
+        timing: node.timing,
+        readClock,
       };
       return {
         id: String(node.task_index),
         type: 'workflow',
         position: layout.positions.get(node.task_index) ?? { x: 0, y: 0 },
         data,
+        // The phase times in the name are those of the read, without the
+        // one-second clock of the card.
+        ariaLabel: `${nodeLabel(node)}, ${statusLabel(node.node_status)}, ${phaseStripText(node.timing, readClock.asOfMs)}`,
         selected:
           node.task_index === selectedIndex || node.task_index === focusedIndex,
         draggable: false,
@@ -179,7 +186,7 @@ export function WorkflowGraph({
       } satisfies RunMetrics,
       matchIndices: matches,
     };
-  }, [detail, selectedIndex, focusedIndex, search, statusFilter]);
+  }, [detail, readClock, selectedIndex, focusedIndex, search, statusFilter]);
 
   // Reset failure/search navigation when switching runs, and clamp cursors when
   // their target sets shrink while a run is live or the query changes.

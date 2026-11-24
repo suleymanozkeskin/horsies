@@ -425,10 +425,11 @@ pub enum PrestartExpiry {
 // ownership CAS makes the claim-time snapshot provably equal to the row, so
 // self-incrementing removes the snapshot from the written value entirely.
 //
-// The written row is the retry row of the baseline retry write
-// (`core/baseline/0004_lifecycle_functions.sql:1479-1496`):
-// PENDING, retry_count + 1, enqueued_at = next_retry_at, and every claim and
-// run field cleared. The retry time is `$2`, or the database clock when `$2`
+// The written row is the retry row of the retry writes
+// (`horsies_finish_failed_attempt`, `core/migrations/1001_lifecycle_record.sql`):
+// PENDING, retry_count + 1, enqueued_at = next_retry_at, every claim and run
+// field cleared, and the claim count of the next attempt at 0 (attempt_claims
+// 0, first_claimed_at NULL). The retry time is `$2`, or the database clock when `$2`
 // is NULL (no delay): `enqueued_at` is NOT NULL in the baseline
 // (`0001_tables.sql:79`). A retry time at or after `good_until` is refused.
 const REQUEUE_SQL: &str = "\
@@ -449,6 +450,8 @@ SET status = 'PENDING',
     worker_process_name = NULL,
     finalizing_at = NULL,
     finalizing_by_worker_id = NULL,
+    attempt_claims = 0,
+    first_claimed_at = NULL,
     updated_at = NOW()
 FROM retry
 WHERE t.id = $1
@@ -3349,6 +3352,7 @@ mod fused_finalize_tests {
                     claimed_at,
                 },
                 result_json: result_json.to_owned(),
+                placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
             },
         )
         .await
@@ -3441,10 +3445,14 @@ mod fused_finalize_tests {
         assert_eq!(status, "COMPLETED");
         assert_eq!(result.as_deref(), Some("{\"Ok\":7}"));
 
-        let attempt: serde_json::Value = serde_json::from_slice(&attempt_snapshot).unwrap();
+        // Archive version 2: `[attempts, open]`; the attempt ended with its
+        // row, so no attempt is open.
+        let archive: serde_json::Value = serde_json::from_slice(&attempt_snapshot).unwrap();
+        let attempt = &archive[0];
         assert_eq!(attempt[0][0], 2, "attempt = retry_count(1) + 1");
         assert_eq!(attempt[0][1], "COMPLETED");
         assert_eq!(attempt[0][2], false);
+        assert_eq!(archive[1], serde_json::Value::Null);
 
         cleanup(&pool, &id).await;
     }
@@ -4107,6 +4115,7 @@ mod terminal_at_stamp_tests {
                     claimed_at: generation,
                 },
                 result_json: "{\"Ok\":1}".to_owned(),
+                placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
             },
         )
         .await
@@ -4195,8 +4204,7 @@ mod terminal_at_stamp_tests {
 
     /// A requeue is a live transition: the row stays live as PENDING, writes
     /// no history row, counts the retry, and clears every claim and run
-    /// field, as the baseline retry write
-    /// (`core/baseline/0004_lifecycle_functions.sql:1479-1496`).
+    /// field, as the retry write of `horsies_finish_failed_attempt`.
     #[tokio::test]
     async fn requeue_keeps_the_row_live_and_writes_no_history_row() {
         let (broker, pool) = connect().await;
@@ -4271,6 +4279,43 @@ mod terminal_at_stamp_tests {
             before <= enqueued_at && enqueued_at <= after,
             "enqueued_at {enqueued_at} must be the requeue time, from {before} to {after}"
         );
+
+        cleanup(&pool, &id).await;
+    }
+
+    /// A requeue begins the next attempt with no claim: it sets
+    /// `attempt_claims` to 0 and `first_claimed_at` to NULL, from a counted
+    /// claim of the ended attempt.
+    #[tokio::test]
+    async fn requeue_resets_the_claim_count_of_the_next_attempt() {
+        let (broker, pool) = connect().await;
+        let id = Uuid::new_v4().to_string();
+        seed(&pool, &id, "RUNNING", Some("w1"), None).await;
+        sql::query(
+            "UPDATE horsies_tasks SET attempt_claims = 2, first_claimed_at = claimed_at
+             WHERE id = $1",
+        )
+        .bind(test_uuid(&id))
+        .execute(&pool)
+        .await
+        .expect("count two claims of the attempt");
+
+        let applied = broker
+            .requeue(Uuid::parse_str(&id).unwrap(), Some(Utc::now()), "w1")
+            .await
+            .expect("requeue");
+        assert!(applied);
+
+        let (attempt_claims, first_claimed_at): (Option<i32>, Option<DateTime<Utc>>) =
+            sql::query_as(
+                "SELECT attempt_claims, first_claimed_at FROM horsies_tasks WHERE id = $1",
+            )
+            .bind(test_uuid(&id))
+            .fetch_one(&pool)
+            .await
+            .expect("requeued row");
+        assert_eq!(attempt_claims, Some(0));
+        assert_eq!(first_claimed_at, None);
 
         cleanup(&pool, &id).await;
     }

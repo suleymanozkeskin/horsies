@@ -767,6 +767,8 @@ INSERT INTO horsies_workflow_tasks (
 UPDATE horsies_tasks SET trace_carrier = '{"traceparent":"c1"}', trace_id = decode(repeat('c1', 16), 'hex')
 WHERE id = '00000000-0000-4000-8000-0000000000c1';
 
+-- The archive is version 2, [attempts, open]: attempt 2 (retry_count + 1) has its row, so no attempt is open; the
+-- attempt rows were written with no phase record, so each phase value is null.
 SELECT test_check(
     'detail: LIVE carries the live columns, the node link, the trace id and the attempts in ascending order',
     d.location = 'LIVE' AND d.task_name = 'app.live' AND d.status = 'RUNNING' AND d.execution = 'SHARED_ASYNC'
@@ -774,11 +776,15 @@ SELECT test_check(
     AND d.worker_pid = 4242 AND d.good_until IS NOT NULL
     AND d.workflow_id = '00000000-0000-4000-8000-0000000000f1' AND d.workflow_task_index = 3
     AND d.terminal_at IS NULL AND d.error_code IS NULL AND d.result_payload IS NULL AND d.absence_reason IS NULL
-    AND d.attempt_archive_version = 1 AND d.attempt_snapshot_digest IS NULL
-    AND (convert_from(d.attempt_snapshot, 'UTF8')::jsonb -> 0 ->> 0) = '1'
-    AND (convert_from(d.attempt_snapshot, 'UTF8')::jsonb -> 1 ->> 0) = '2'
-    AND (convert_from(d.attempt_snapshot, 'UTF8')::jsonb -> 1 ->> 1) = 'FAILED'
-    AND d.attempt_snapshot = horsies_encode_task_attempts('00000000-0000-4000-8000-0000000000c1')
+    AND d.attempt_archive_version = 2 AND d.attempt_snapshot_digest IS NULL
+    AND (convert_from(d.attempt_snapshot, 'UTF8')::jsonb -> 0 -> 0 ->> 0) = '1'
+    AND (convert_from(d.attempt_snapshot, 'UTF8')::jsonb -> 0 -> 1 ->> 0) = '2'
+    AND (convert_from(d.attempt_snapshot, 'UTF8')::jsonb -> 0 -> 1 ->> 1) = 'FAILED'
+    AND jsonb_array_length(convert_from(d.attempt_snapshot, 'UTF8')::jsonb -> 0 -> 1) = 21
+    AND (convert_from(d.attempt_snapshot, 'UTF8')::jsonb -> 0 -> 1 -> 12) = 'null'::jsonb
+    AND (convert_from(d.attempt_snapshot, 'UTF8')::jsonb -> 1) = 'null'::jsonb
+    AND d.attempt_snapshot = horsies_encode_attempt_archive(
+        (SELECT t FROM horsies_tasks AS t WHERE t.id = '00000000-0000-4000-8000-0000000000c1'))
     AND d.trace_id = decode(repeat('c1', 16), 'hex'),
     row_to_json(d)::text
 )

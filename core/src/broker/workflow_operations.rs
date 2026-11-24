@@ -35,9 +35,9 @@ use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::lifecycle;
 
 /// The workflow retention delete: one batch of terminal workflows older than
-/// `$1` hours (text) with no live backing task, at most `$2` rows by node
-/// count (the first candidate always), with their node rows. Its row count
-/// counts workflows.
+/// `$1` hours (text) with no live backing task, at most `$2` owned rows (node
+/// rows plus event rows; the first candidate always), with their node rows
+/// and their event rows. Its row count counts workflows.
 static DELETE_EXPIRED_WORKFLOWS: TypedStatement = TypedStatement::new(
     "delete_expired_workflows",
     DELETE_EXPIRED_WORKFLOWS_SQL,
@@ -49,8 +49,8 @@ static DELETE_EXPIRED_WORKFLOWS: TypedStatement = TypedStatement::new(
 pub struct WorkflowRetentionPass {
     /// A terminal workflow older than this many hours is deleted.
     pub retention_hours: NonZeroU32,
-    /// The most rows of one batch, counted by nodes (the first candidate of a
-    /// batch always goes).
+    /// The most rows of one batch, counted by the node rows and the event rows
+    /// of its workflows (the first candidate of a batch always goes).
     pub batch_size: NonZeroU32,
     /// After this time no further batch starts; the first batch always runs.
     pub budget: Duration,
@@ -164,7 +164,7 @@ impl PostgresBroker {
 
     /// One workflow retention pass (the workflow part of the retention
     /// cleanup):
-    /// batches of `pass.batch_size` until a batch deletes no workflow (the node
+    /// batches of `pass.batch_size` until a batch deletes no workflow (the row
     /// budget keeps batches short while a backlog remains, so only an empty
     /// batch means drained), or until `pass.budget` has passed after a batch.
     /// The first batch always runs.

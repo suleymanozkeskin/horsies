@@ -1,11 +1,12 @@
-//! Database tests of the baseline SQL (`core/baseline/`).
+//! Database tests of the SQL of the migration chain (`core/baseline/`,
+//! `core/migrations/`).
 //!
 //! - The case files are in `cases/`. The tests compile them in with
 //!   `include_str!`, so the files ship with the crate.
 //! - Each test creates the databases it uses ([`harness::BaselineDatabase`]):
-//!   the baseline migration text applied to an empty database in one
-//!   transaction, with no reader publication and no client family row unless
-//!   the test applies them.
+//!   the text of every migration of the chain applied to an empty database in
+//!   one transaction, with no reader publication and no client family row
+//!   unless the test applies them.
 //! - A case file runs as one simple-query message. A failed case raises, and
 //!   the server error fails the test with the case name in it.
 
@@ -17,5 +18,8 @@ mod baseline_workflow_functions;
 mod harness;
 mod history_functions_sql;
 mod history_maintenance_sql;
+mod lifecycle_record_sql;
+mod monitoring_timing_sql;
 mod retry_count_rule;
 mod terminalization_functions;
+mod workflow_events_sql;

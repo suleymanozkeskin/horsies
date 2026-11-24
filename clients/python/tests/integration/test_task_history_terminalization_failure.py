@@ -55,7 +55,7 @@ async def fail_running(
                 '(SELECT claimed_at FROM horsies_tasks '
                 'WHERE id = CAST(:task_id AS uuid)), '
                 "'NONE', NULL, NULL, NULL, :result, :error_code, :failed_reason, "
-                "'FAILED', NULL, :failed_reason, 'REFUSE', TRUE)"
+                "'FAILED', NULL, :failed_reason, 'REFUSE', TRUE, 'NOT_OBSERVED', NULL)"
             ),
             {
                 'task_id': task_id,

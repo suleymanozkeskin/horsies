@@ -49,6 +49,7 @@ async fn worker_failure_writes_worker_failure_attempt() {
                 error_message: Some("Segfault in child".to_owned()),
                 failed_reason: Some("Segfault in child".to_owned()),
             },
+            placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
         },
     )
     .await

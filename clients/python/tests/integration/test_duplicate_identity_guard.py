@@ -51,7 +51,7 @@ async def complete_fused(connection: AsyncConnection, task_id: str) -> str:
             'SELECT outcome FROM horsies_complete_task_fused('
             'CAST(:task_id AS uuid), :worker, '
             'COALESCE((SELECT claimed_at FROM horsies_tasks WHERE id = CAST(:task_id AS uuid)), NOW()), '
-            ':result, TRUE)'
+            ":result, TRUE, 'NOT_OBSERVED', NULL)"
         ),
         {'task_id': task_id, 'worker': WORKER, 'result': '{"ok":true}'},
     )).scalar_one())

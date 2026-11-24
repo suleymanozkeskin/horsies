@@ -299,7 +299,7 @@ mod claim_function {
         let expired_urgent = seed(&pool, "bounds_high", 10, 5.0).await;
         sql::query(
             "UPDATE horsies_tasks
-             SET status = 'CLAIMED', claimed_at = now() - interval '10 minutes',
+             SET status = 'CLAIMED', attempt_claims = 1, first_claimed_at = now() - interval '10 minutes', claimed_at = now() - interval '10 minutes',
                  claimed_by_worker_id = 'dead-worker',
                  claim_expires_at = now() - interval '5 minutes', updated_at = now()
              WHERE id = $1",
@@ -543,7 +543,7 @@ mod claim_cap_expired {
         ] {
             sql::query(&format!(
                 "UPDATE horsies_tasks
-                 SET status = 'CLAIMED', claimed_at = now() - interval '10 minutes',
+                 SET status = 'CLAIMED', attempt_claims = 1, first_claimed_at = now() - interval '10 minutes', claimed_at = now() - interval '10 minutes',
                      claimed_by_worker_id = $2, claim_expires_at = now() {lease},
                      updated_at = now()
                  WHERE id = $1"
@@ -578,7 +578,7 @@ mod claim_cap_expired {
         let expired = seed(&pool, "default", 100, 20.0 * 60.0).await;
         sql::query(
             "UPDATE horsies_tasks
-             SET status = 'CLAIMED', claimed_at = now() - interval '10 minutes',
+             SET status = 'CLAIMED', attempt_claims = 1, first_claimed_at = now() - interval '10 minutes', claimed_at = now() - interval '10 minutes',
                  claimed_by_worker_id = 'dead-worker',
                  claim_expires_at = now() - interval '5 minutes', updated_at = now()
              WHERE id = $1",

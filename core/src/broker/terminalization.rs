@@ -43,10 +43,11 @@ use crate::log_targets::TERMINALIZATION_OUTCOME;
 
 use super::error::BrokerError;
 
-/// The last argument (wake) is TRUE: the function sends the capacity wake of
-/// the locked row's queue (as Python).
+/// The wake argument is TRUE: the function sends the capacity wake of the
+/// locked row's queue (as Python). `$5` and `$6` are the placement kind and
+/// the slot wait in microseconds of the attempt.
 const COMPLETE_TASK_FUSED_SQL: &str =
-    "SELECT * FROM horsies_complete_task_fused($1, $2, $3::timestamptz, $4, TRUE)";
+    "SELECT * FROM horsies_complete_task_fused($1, $2, $3::timestamptz, $4, TRUE, $5, $6)";
 const EXPIRE_OWNED_CLAIM_SQL: &str = "SELECT * FROM horsies_expire_owned_claim($1, $2, $3, $4)";
 const EXPIRE_PENDING_TASKS_SQL: &str =
     "SELECT * FROM horsies_expire_pending_tasks($1::integer, $2, $3)";
@@ -88,6 +89,8 @@ static COMPLETE_TASK_FUSED: TypedStatement = TypedStatement::new(
         ParameterType::Text,
         ParameterType::Timestamptz,
         ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Int8,
     ],
 );
 static EXPIRE_OWNED_CLAIM: TypedStatement = TypedStatement::new(
@@ -259,9 +262,12 @@ async fn run_command(
             task_id,
             fence,
             result_json,
+            placement,
         } => {
+            let (placement_kind, slot_wait_us) = (placement.kind_sql(), placement.slot_wait_us());
             let bound = statement.bind().value(task_id).value(&fence.worker_id);
             let bound = bound.value(&fence.claimed_at).value(result_json);
+            let bound = bound.value(&placement_kind).value(&slot_wait_us);
             run_bound(target, log, bound.finish()).await
         }
         TerminalizationCommand::ExpireOwnedClaim {
@@ -724,11 +730,14 @@ pub(crate) mod on_test_pool {
                 task_id,
                 fence,
                 result_json,
+                placement,
             } => query
                 .bind(task_id)
                 .bind(&fence.worker_id)
                 .bind(fence.claimed_at)
-                .bind(result_json),
+                .bind(result_json)
+                .bind(placement.kind_sql())
+                .bind(placement.slot_wait_us()),
             TerminalizationCommand::ExpireOwnedClaim {
                 task_id,
                 fence,
@@ -829,8 +838,8 @@ mod catalog_tests {
     /// encoder and the shared move.
     pub(super) const EXPECTED_SIGNATURES: [(&str, &str, &str, &str); 14] = [
         (
-            "horsies_encode_task_attempts",
-            "p_task_id uuid",
+            "horsies_encode_attempt_archive",
+            "p_task horsies_tasks",
             "bytea",
             "sql",
         ),
@@ -848,7 +857,7 @@ mod catalog_tests {
         ),
         (
             "horsies_complete_task_fused",
-            "p_task_id uuid, p_worker_id text, p_claimed_at timestamp with time zone, p_result text, p_wake boolean",
+            "p_task_id uuid, p_worker_id text, p_claimed_at timestamp with time zone, p_result text, p_wake boolean, p_placement_kind text, p_slot_wait_us bigint",
             "TABLE(task_id uuid, ordinality bigint, outcome text, terminal_at timestamp with time zone, terminalization_kind text, observed_status text, observed_worker_id text, observed_claimed_at timestamp with time zone, guard_kind text, observed_guard jsonb)",
             "plpgsql",
         ),
@@ -994,7 +1003,7 @@ mod catalog_tests {
         let pool = migrated_pool().await;
         let fused: String = sql::query_scalar(
             "SELECT pg_get_functiondef(
-                'horsies_complete_task_fused(uuid, text, timestamptz, text, boolean)'::regprocedure
+                'horsies_complete_task_fused(uuid, text, timestamptz, text, boolean, text, bigint)'::regprocedure
              )",
         )
         .fetch_one(&pool)
@@ -1262,13 +1271,13 @@ mod anchor_tests {
             "wire operations + miss classifier + attempt encoder + shared move"
         );
         assert!(expected.contains(&"horsies_terminalization_miss"));
-        assert!(expected.contains(&"horsies_encode_task_attempts"));
+        assert!(expected.contains(&"horsies_encode_attempt_archive"));
         assert!(expected.contains(&"horsies_move_task_to_history"));
         expected.retain(|name| {
             !matches!(
                 *name,
                 "horsies_terminalization_miss"
-                    | "horsies_encode_task_attempts"
+                    | "horsies_encode_attempt_archive"
                     | "horsies_move_task_to_history"
             )
         });

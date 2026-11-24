@@ -1,9 +1,9 @@
-//! The baseline migration text on a fresh database: the tables, the
+//! The text of the migration chain on a fresh database: the tables, the
 //! functions, the seed rows, the checks of the leaf catalog, the manifest
 //! and the workflow nodes, and the wakes of a task insert.
 //!
 //! Each test creates its own database ([`BaselineDatabase::create`]), with
-//! the baseline migration and nothing else. A case that writes runs in a
+//! the migration chain and nothing else. A case that writes runs in a
 //! transaction that is rolled back, except the wake cases: a notification
 //! needs a commit, so each wake case has a database of its own.
 
@@ -19,7 +19,7 @@ use super::harness::{describe, BaselineDatabase};
 
 const FUNCTION_CALLS_SQL: &str = include_str!("cases/baseline_function_calls.sql");
 
-const EXPECTED_TABLES: [&str; 23] = [
+const EXPECTED_TABLES: [&str; 24] = [
     "horsies_client_family",
     "horsies_heartbeats",
     "horsies_key_reservations",
@@ -38,6 +38,8 @@ const EXPECTED_TABLES: [&str; 23] = [
     "horsies_tasks",
     "horsies_worker_liveness",
     "horsies_worker_states",
+    // core/migrations/1001_lifecycle_record.sql.
+    "horsies_workflow_events",
     "horsies_workflow_phase2_pending",
     "horsies_workflow_phase2_quarantine",
     "horsies_workflow_recovery_failures",
@@ -45,7 +47,7 @@ const EXPECTED_TABLES: [&str; 23] = [
     "horsies_workflows",
 ];
 
-const EXPECTED_FUNCTIONS: [&str; 168] = [
+const EXPECTED_FUNCTIONS: [&str; 169] = [
     // 0001_tables.sql: the UUIDv7 helper and the trigger functions.
     "horsies_uuidv7",
     "horsies_notify_task_changes",
@@ -61,7 +63,6 @@ const EXPECTED_FUNCTIONS: [&str; 168] = [
     "horsies_cancel_owned_nodes",
     "horsies_claim_plan",
     "horsies_encode_rerun_input",
-    "horsies_encode_task_attempts",
     "horsies_find_non_runnable_workflow_tasks",
     "horsies_key_reservation_claim",
     "horsies_key_reservation_cleanup",
@@ -222,6 +223,10 @@ const EXPECTED_FUNCTIONS: [&str; 168] = [
     "horsies_render_history_reader",
     "horsies_retention_period_days",
     "horsies_terminalization_family",
+    // core/migrations/1001_lifecycle_record.sql: the version-2 attempt
+    // archive replaces horsies_encode_task_attempts of 0003.
+    "horsies_encode_attempt_archive",
+    "horsies_require_attempt_placement",
 ];
 
 const TABLES_SQL: &str = r"

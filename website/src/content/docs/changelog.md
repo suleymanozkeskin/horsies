@@ -50,9 +50,152 @@ there is no migration contract between pre-1.0 versions.
     `tokio::spawn` and a thread that the body starts get
     `FencingTokenRefused::NotInARun`. `horsies-core` exports
     `run_fencing_token`, `FencingToken` and `FencingTokenRefused`.
+- **Each attempt row keeps the phase times of its attempt.** Schema
+  migration 1001 adds a phase record to `horsies_task_attempts`: the due
+  time (`enqueued_at`), the claim that ran the attempt (`claimed_at`), the
+  claim count and the first claim of the attempt (`attempt_claims`,
+  `first_claimed_at`), the time a child of the worker took the task
+  (`placed_at`, the claim time plus the slot wait that the worker
+  measured), the finalizing marker (`finalizing_at`), the writer
+  (`recorded_by`: `WORKER` or `RECOVERY`) and, for a stale recovery, the
+  last time the attempt was known alive (`last_seen_at`). `horsies_tasks`
+  counts the claims of the current attempt (`attempt_claims`,
+  `first_claimed_at`). The statements that already write these rows write
+  the new values: no statement is added per task. A row written before the
+  migration keeps NULL in each new column. The Python worker records no
+  placement (`placed_at` NULL).
+- **Each workflow run keeps a record of its node and pause events.**
+  Migration 1001 adds the table `horsies_workflow_events`. The statement
+  that changes the state writes the event: `NODE_READY` (a node goes back
+  to `READY` with no work), `NODE_ENQUEUED` (a sub-workflow node waits for
+  its child start), `TASK_MOVED` (a task of a node moves to history; the
+  event holds the locator of the history row: retention class, terminal
+  time and task id), `WORKFLOW_PAUSED` and `WORKFLOW_RESUMED` (one for
+  each workflow of the tree that the pause or the resume moves). No
+  statement is added: a plain task writes no event, and a workflow task
+  writes its event in the statement of its move. The events go with their
+  workflow: the workflow retention deletes them, and the foreign keys
+  delete them with a deleted node or workflow. The migration writes no
+  event for a run that began before it.
+- **The monitoring API shows the phase timing of a workflow run and the
+  phase record of each attempt.** Each `TaskAttemptInfo` (task detail, node
+  detail, `GET /api/tasks/{id}`, `GET /api/workflows/{id}/tasks/{index}`)
+  has `phases`: the phase record of its attempt row, or `not_captured` for a
+  row written before migration 1001. The run read (`get_workflow_run`,
+  `GET /api/workflows/{id}`) has `timing` on the run and on each node. The
+  core composes the timing of each node from the attempt rows and the run
+  events: segments in order (`pending`, `ready`, `enqueued`, `retry_wait`,
+  `claimed`, `running`, `finalizing`, `advancing`, `unknown`), each with its
+  start, its end or `open`, and its node, task or attempt; a coverage label
+  (`exact`, `partial` with the reasons of its `unknown` segments,
+  `unavailable`, or `inconsistent` with the conflict that it names); and an
+  endpoint marker. The run timing holds the read time, the capture start,
+  the range of the run, its pauses and its coverage. A run that began before
+  migration 1001, or that has more than 100,000 events, is `unavailable`.
+  Times that the record holds in the wrong order make the node
+  `inconsistent`; the core does not reorder or guess them. One statement
+  reads the run, the events and the task rows (live, or in history at the
+  locator of each `TASK_MOVED` event); no statement runs per node or per
+  task. The Python models and the Rust types are in `horsies.monitoring`
+  and `horsies::monitoring`.
+- **The web UI draws the phase timing of a workflow run.** The Timeline
+  view replaces its execution-time bars with one row per node, in
+  task-index order, on one time axis: the
+  phase segments of the node in time order (a retry and a new task of the
+  node repeat them), the terminal status as a marker, and the wall time of
+  the node. A pause is a band over every row. A shared tooltip gives the
+  phase, task, attempt, claim, start, end and duration of a segment; the
+  arrow keys move between rows and through the segments of a row. A node
+  with `unavailable` or `inconsistent` timing shows a hatched row with its
+  label and reason. An open segment grows on a local one-second clock with
+  no request per second. The timeline renders only the rows in view and 8
+  rows above and below them, whatever the node count. Each Graph card adds
+  its wall time and a
+  thin phase strip (the time of each phase as a part of the node total);
+  the node detail adds the time of each phase and the segments by task and
+  attempt; each attempt in a task or node detail shows its phase times, its
+  claim count and its writer. A read-only legend names each phase. The run
+  detail polls in fallback mode also while a segment or a pause is open.
 
 ### Changed
 
+- **A workflow start with a known `workflow_id` must carry the same start
+  command.** When the id exists, the start compares its start command with
+  the stored one, in the same statement:
+  - same workflow name, same start command: the existing handle, as before;
+    nothing is written;
+  - same workflow name, another start command: the new error
+    `WorkflowStartCommandConflict` (Python) or
+    `WorkflowStartError::CommandConflict` (Rust), code
+    `WORKFLOW_COMMAND_CONFLICT`; nothing is written;
+  - the id holds a sub-workflow: `WORKFLOW_COMMAND_CONFLICT`;
+  - another workflow name: `WORKFLOW_ID_CONFLICT`, as before.
+
+  The new error has `message`, `workflow_name` and `workflow_id`. It is
+  never retryable, and `retry_start` / `retry_start_async` refuse it. The
+  start command is the workflow name, definition key, `on_error`, output
+  node, success policy, and each node of the top-level workflow: index,
+  node id, task name, input (as the client encoded it), queue, priority,
+  dependencies, `args_from`, `workflow_ctx_from`, `allow_failed_deps`, join
+  rule, `min_success`, task options (with `good_until`), retention class
+  and the sub-workflow facts. The workflow id, the call time, the trace and
+  the pre-built child workflows are not in it. The core computes the
+  SHA-256 of the start command (version 1); no client computes it. This is
+  a breaking change for a repeat start with other inputs: it returned the
+  first workflow and dropped the new inputs; now it is refused. Runs
+  started before this release have no stored start command and are not
+  checked: a start with their id and their name returns their handle, and
+  the core logs one warning. In `horsies-core`, `ClientStartOutcome` is
+  `Started | Exists(ExistingRun) | IdHeld(IdHolder)`, with
+  `ExistingRun::{SameCommand, FingerprintNotStored}` and
+  `IdHolder::{OtherWorkflowName { existing_name }, OtherCommand,
+  SubWorkflow}`; `WorkflowStartError::id_held(workflow_name, workflow_id,
+  holder)` builds the error of a held id. `WorkflowStartErrorCode` gains
+  `WorkflowCommandConflict` after `WorkflowIdConflict`; the crate `horsies`
+  re-exports both enums with the new members.
+- **Schema migration 1001: stop every 0.8.0 process before the upgrade.**
+  The first start of this build applies migration 1001
+  (`core/migrations/1001_lifecycle_record.sql`) after migration 1000. A
+  0.8.0 process that runs on after it calls functions whose argument list
+  changed (SQLSTATE 42883); a 0.8.0 process that starts after it is
+  refused, because the database holds a newer version. A database at 1001
+  does not go back to 0.8.0. The migration rewrites no table; it holds
+  `ACCESS EXCLUSIVE` on `horsies_tasks` and `horsies_task_attempts`, and
+  `SHARE ROW EXCLUSIVE` on `horsies_workflows` and `horsies_workflow_tasks`
+  (the foreign keys of the new event table), until it commits.
+- **Schema migration 1002: stop every process before the upgrade.** The
+  first start of this build applies migration 1002
+  (`core/migrations/1002_workflow_start_command_fingerprint.sql`) after
+  migration 1001. It adds `command_fingerprint_version` and
+  `command_fingerprint` to `horsies_workflows`, with the CHECK
+  `horsies_workflows_command_fingerprint_by_origin`, and replaces
+  `horsies_workflow_start` (40 arguments), `horsies_workflow_start_top_row`,
+  `horsies_workflow_start_child_row` and `horsies_workflow_child_start`. Upgrade every process together. A
+  process of an earlier build that runs on after the migration fails every
+  workflow start (SQLSTATE 42883); one that starts after it is refused,
+  because the database holds a newer version. A database at 1002 does not
+  go back to an earlier build. The migration rewrites no table and writes
+  no value into old rows; the new CHECK reads `horsies_workflows` once. The
+  web monitoring schema check expects version 1002.
+- **Task history: attempt archive version 2.** Each move to history from
+  migration 1001 stores the attempts of the task with their phase records,
+  and the open attempt of a task that ended with no attempt row (a cancel,
+  an expiry or a pause abandon): its claim count, its first claim and its
+  finalizing marker. The live branch of the monitoring task detail reads
+  the same form. History rows of version 1 stay as they are; the core reads
+  both versions.
+- **Workflow retention: a batch counts the event rows.** A batch of the
+  workflow retention counts the node rows and the event rows of its
+  workflows against `retention_delete_batch_size` (it counted the node rows
+  only), and deletes the events with their workflows.
+- **Rust crates: the attempt writes carry the placement of the attempt.**
+  In `horsies-core`, `PlainSuccess`, `FinishFailedAttempt`,
+  `FinishWorkflowSuccess` and `core::lifecycle::TerminalizationCommand::CompleteTaskFused`
+  gain the field `placement: core::lifecycle::AttemptPlacement`
+  (`Placed { slot_wait }` or `NotObserved`). Code that builds one of these
+  values sets it; a caller with no placement passes
+  `AttemptPlacement::NotObserved`. `migration_sql_file_texts()` lists every
+  SQL file of the migration chain, in run order.
 - **Rust crates: a large payload of an error or read type is boxed.** The
   field or variant holds the value in a `Box`, so the types that hold it
   are small. `Display`, `Debug`, the serde form, the error codes and the
@@ -108,6 +251,16 @@ there is no migration contract between pre-1.0 versions.
   is also the heartbeat window.** A heartbeat partition is dropped
   `heartbeat_leaf_horizon_hours` after its hour ends. The pages said that
   the setting controls only the partitions kept ahead.
+### Fixed
+
+- **A repeat workflow start no longer returns a handle to a deleted
+  workflow.** A start whose id existed inserted with `ON CONFLICT DO
+  NOTHING` and then read the stored name in a second statement. When
+  retention deleted the row between the two statements, the start returned
+  a handle to a workflow that no longer existed. The conflict now locks the
+  existing row (`ON CONFLICT (id) DO UPDATE ... WHERE false`), so the read
+  finds it. After retention deleted and committed the row, a start with the
+  same id starts a new workflow.
 
 ## 0.8.0 — 2026-11-21
 

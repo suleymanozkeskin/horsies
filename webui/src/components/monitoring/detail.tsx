@@ -5,6 +5,8 @@ import { formatTime } from '@/lib/format-duration';
 import { traceLinkOf } from '@/lib/trace-link';
 import type { TaskAttempt } from '@/types/workflows';
 
+import { AttemptPhases } from './attempt-phases';
+
 /** Label-over-value field used across the monitoring detail panels. */
 export function DetailRow({
   label,
@@ -57,7 +59,7 @@ export function TraceRow({
   );
 }
 
-/** One attempt: outcome chip, error message, timing, worker. */
+/** One attempt: outcome chip, error message, phase times, worker. */
 export function AttemptCard({ attempt }: { attempt: TaskAttempt }) {
   const color = statusColorVar(attempt.outcome);
   const message = attempt.error_message ?? attempt.failed_reason;
@@ -94,6 +96,7 @@ export function AttemptCard({ attempt }: { attempt: TaskAttempt }) {
           {message}
         </pre>
       )}
+      <AttemptPhases attempt={attempt} />
       <div className="mt-2 flex items-center justify-between gap-2 text-10 text-muted-foreground">
         <span>{formatTime(attempt.finished_at ?? attempt.started_at)}</span>
         {attempt.worker_hostname && (

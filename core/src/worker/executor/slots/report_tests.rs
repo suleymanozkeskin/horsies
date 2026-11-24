@@ -26,9 +26,11 @@ use crate::broker::attempt_writes::{
 };
 use crate::broker::{PostgresBroker, PrestartExpiry};
 use crate::core::config::payload::PayloadPolicy;
-use crate::core::history::archive::attempts::{decode_attempt_snapshot, AttemptRecord};
+use crate::core::history::archive::attempts::{
+    decode_attempt_snapshot, AttemptRecord, PhaseRecord, Placement, RecordedBy,
+};
 use crate::core::history::archive::versions::{JSON_CONTENT_TYPE, JSON_UTF8_CODEC};
-use crate::core::lifecycle::OwnedClaim;
+use crate::core::lifecycle::{AttemptPlacement, OwnedClaim, SlotWait};
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::result::{read_task_result_text, TaskResult, TaskResultText};
 use crate::events::AttemptStart;
@@ -76,7 +78,12 @@ fn error_envelope(error: &TaskError) -> ResultEnvelopeText {
 fn a_worker_failure_records_its_detail_as_the_result_and_the_reason() {
     let claimed = claimed_plain();
 
-    let write = worker_failure_write(&claimed, WORKER, "pool died");
+    let write = worker_failure_write(
+        &claimed,
+        WORKER,
+        "pool died",
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
+    );
 
     assert_eq!(write.error_code.as_deref(), Some("BROKER_ERROR"));
     assert_eq!(write.failed_reason.as_deref(), Some("pool died"));
@@ -106,7 +113,12 @@ fn a_worker_failure_records_its_detail_as_the_result_and_the_reason() {
 /// the task, and as the message and the reason of its attempt.
 #[test]
 fn a_worker_failure_without_detail_records_the_fallback_text() {
-    let write = worker_failure_write(&claimed_plain(), WORKER, "");
+    let write = worker_failure_write(
+        &claimed_plain(),
+        WORKER,
+        "",
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
+    );
 
     assert_eq!(write.failed_reason.as_deref(), Some("Worker failure"));
     assert_eq!(
@@ -178,6 +190,7 @@ fn a_killed_or_lost_child_records_its_message_as_the_attempt_reason() {
             code.into(),
             text.to_owned(),
             RetryPlacement::SameClass,
+            crate::core::lifecycle::AttemptPlacement::NotObserved,
         );
 
         assert_eq!(write.failed_reason, None, "{code_text}");
@@ -212,6 +225,7 @@ fn a_timeout_records_its_text_as_the_attempt_reason() {
             timeout,
             RetryPlacement::SameClass,
             cancel,
+            crate::core::lifecycle::AttemptPlacement::NotObserved,
         );
 
         assert_eq!(write.failed_reason, None, "{cancel:?}");
@@ -235,7 +249,13 @@ fn a_task_error_keeps_its_own_code_payload_and_message() {
     let error = TaskError::new("MY_OWN_CODE", "boom").expect("a code of the task's own");
     let envelope = error_envelope(&error);
 
-    let write = task_error_write(&claimed_plain(), WORKER, &error, &envelope);
+    let write = task_error_write(
+        &claimed_plain(),
+        WORKER,
+        &error,
+        &envelope,
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
+    );
 
     assert_eq!(write.error_code.as_deref(), Some("MY_OWN_CODE"));
     assert_eq!(write.result_json, envelope.as_str());
@@ -263,6 +283,7 @@ fn each_failure_stores_the_spelling_of_its_code() {
         OutcomeCode::TaskTimeout.into(),
         "m".to_owned(),
         RetryPlacement::SameClass,
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
     );
     let crashed = killed_child_write(
         &claimed,
@@ -270,8 +291,15 @@ fn each_failure_stores_the_spelling_of_its_code() {
         OperationalErrorCode::WorkerCrashed.into(),
         "m".to_owned(),
         RetryPlacement::SameClass,
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
     );
-    let returned = task_error_write(&claimed, WORKER, &own, &error_envelope(&own));
+    let returned = task_error_write(
+        &claimed,
+        WORKER,
+        &own,
+        &error_envelope(&own),
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
+    );
 
     assert_eq!(timed_out.error_code.as_deref(), Some("TASK_TIMEOUT"));
     assert_eq!(crashed.error_code.as_deref(), Some("WORKER_CRASHED"));
@@ -295,16 +323,39 @@ fn the_write_of_a_report_is_the_same_for_the_same_report() {
             OperationalErrorCode::WorkerCrashed.into(),
             "lost".to_owned(),
             RetryPlacement::SameClass,
+            crate::core::lifecycle::AttemptPlacement::NotObserved,
         )
     };
 
     assert_eq!(
-        worker_failure_write(&claimed, WORKER, "x"),
-        worker_failure_write(&claimed, WORKER, "x")
+        worker_failure_write(
+            &claimed,
+            WORKER,
+            "x",
+            crate::core::lifecycle::AttemptPlacement::NotObserved
+        ),
+        worker_failure_write(
+            &claimed,
+            WORKER,
+            "x",
+            crate::core::lifecycle::AttemptPlacement::NotObserved
+        )
     );
     assert_eq!(
-        task_error_write(&claimed, WORKER, &error, &envelope),
-        task_error_write(&claimed, WORKER, &error, &envelope)
+        task_error_write(
+            &claimed,
+            WORKER,
+            &error,
+            &envelope,
+            crate::core::lifecycle::AttemptPlacement::NotObserved
+        ),
+        task_error_write(
+            &claimed,
+            WORKER,
+            &error,
+            &envelope,
+            crate::core::lifecycle::AttemptPlacement::NotObserved
+        )
     );
     assert_eq!(crash(), crash());
     assert_eq!(
@@ -313,14 +364,16 @@ fn the_write_of_a_report_is_the_same_for_the_same_report() {
             WORKER,
             timeout,
             RetryPlacement::Isolated,
-            TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace)
+            TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace),
+            crate::core::lifecycle::AttemptPlacement::NotObserved,
         ),
         timeout_write(
             &claimed,
             WORKER,
             timeout,
             RetryPlacement::Isolated,
-            TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace)
+            TimeoutCancel::Ended(CancelEnd::DroppedAfterGrace),
+            crate::core::lifecycle::AttemptPlacement::NotObserved,
         )
     );
 }
@@ -343,11 +396,24 @@ fn each_failure_write_carries_the_claim_of_its_dispatch() {
     let error = TaskError::new("MY_OWN_CODE", "x").expect("a code of the task's own");
 
     assert_eq!(
-        worker_failure_write(&claimed, WORKER, "pool died").fence,
+        worker_failure_write(
+            &claimed,
+            WORKER,
+            "pool died",
+            crate::core::lifecycle::AttemptPlacement::NotObserved
+        )
+        .fence,
         dispatched
     );
     assert_eq!(
-        task_error_write(&claimed, WORKER, &error, &error_envelope(&error)).fence,
+        task_error_write(
+            &claimed,
+            WORKER,
+            &error,
+            &error_envelope(&error),
+            crate::core::lifecycle::AttemptPlacement::NotObserved
+        )
+        .fence,
         dispatched
     );
 }
@@ -1292,4 +1358,122 @@ async fn a_run_beside_a_blocked_loop_stores_its_reason_on_the_attempt() {
     let (facts, attempts) = settle_on_a_running_row(end).await;
 
     assert_attempt_failed_with_reason(&facts, &attempts, "NEIGHBOUR_BLOCKED_LOOP", text);
+}
+
+/// The slot wait of the placed ends of these tests: 1.25 ms from the read of
+/// the claim result to the placement.
+const SLOT_WAIT: Duration = Duration::from_micros(1_250);
+
+/// A placement [`SLOT_WAIT`] after the read of the claim result.
+fn placed_after_the_slot_wait() -> AttemptPlacement {
+    let read_at = tokio::time::Instant::now();
+    AttemptPlacement::Placed {
+        slot_wait: SlotWait::between(read_at, read_at + SLOT_WAIT),
+    }
+}
+
+/// The claim generation and the recorder of the one attempt that the
+/// history row of `task_id` archived.
+async fn archived_recorder(pool: &TestPool, task_id: Uuid) -> (DateTime<Utc>, RecordedBy) {
+    let attempts = archived_attempts(pool, task_id).await;
+    match attempts
+        .iter()
+        .map(AttemptRecord::phases)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        [PhaseRecord::Captured(phases)] => (phases.claimed_at(), phases.recorded_by()),
+        other => panic!("one attempt with a phase record, not {other:?}"),
+    }
+}
+
+/// The write of an end that a child took keeps its placement on the
+/// attempt row: `placed_at` is the claim generation plus the slot wait, for
+/// a plain success (through the finalize batcher), a workflow success and a
+/// task error.
+#[tokio::test]
+async fn a_placed_end_records_the_claim_generation_plus_the_slot_wait() {
+    let pool = migrated_pool().await;
+    let error = TaskError::new("MY_OWN_CODE", "x").expect("a code of the task's own");
+    let slot_wait = chrono::Duration::from_std(SLOT_WAIT).expect("a short wait");
+    for (name, seed, end) in [
+        (
+            "plain-success",
+            RUNNING_PLAIN,
+            reported_result(ok_envelope(42)),
+        ),
+        (
+            "workflow-success",
+            RUNNING_WORKFLOW_TASK,
+            reported_result(ok_envelope(42)),
+        ),
+        (
+            "task-error",
+            RUNNING_PLAIN,
+            reported_result(error_envelope(&error)),
+        ),
+    ] {
+        let queue = test_queue();
+        let (task_id, generation) = seed_task(&pool, &queue, seed).await;
+        let workflow_id = match seed.kind {
+            TaskKind::WorkflowTask => Some(seed_workflow(&pool, task_id, &queue, "RUNNING").await),
+            TaskKind::Plain => None,
+        };
+        let claimed_task = claimed(task_id, &queue, generation, seed.kind);
+        let writer = writer(&pool);
+        let read = writer.read_end(&claimed_task, end);
+
+        let settled = writer
+            .write_end(&claimed_task, read, placed_after_the_slot_wait())
+            .await;
+
+        assert!(
+            matches!(settled, Settlement::Written(_)),
+            "{name}: {settled:?}"
+        );
+        assert_eq!(
+            archived_recorder(&pool, task_id).await,
+            (
+                generation,
+                RecordedBy::Worker {
+                    placement: Placement::Placed {
+                        at: generation + slot_wait,
+                    },
+                },
+            ),
+            "{name}"
+        );
+        remove_task(&pool, task_id).await;
+        if let Some(workflow_id) = workflow_id {
+            remove_workflow(&pool, workflow_id).await;
+        }
+    }
+}
+
+/// `settle` follows no placement: the attempt row of the plain success that
+/// it writes records none.
+#[tokio::test]
+async fn a_settled_end_records_no_placement() {
+    let pool = migrated_pool().await;
+    let queue = test_queue();
+    let (task_id, generation) = seed_task(&pool, &queue, RUNNING_PLAIN).await;
+
+    let settled = writer(&pool)
+        .settle(
+            &claimed(task_id, &queue, generation, TaskKind::Plain),
+            reported_result(ok_envelope(42)),
+        )
+        .await;
+
+    assert!(matches!(settled, Settlement::Written(_)), "{settled:?}");
+    assert_eq!(
+        archived_recorder(&pool, task_id).await,
+        (
+            generation,
+            RecordedBy::Worker {
+                placement: Placement::NotObserved,
+            },
+        )
+    );
+    remove_task(&pool, task_id).await;
 }

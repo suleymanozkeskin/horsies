@@ -2,9 +2,10 @@
 //! ([`crate::worker::worker::follow_attempt`]), on a scripted isolated or
 //! shared child and a writer that settles every end as its script says:
 //! each event once per step, in order; none with telemetry off; the start
-//! that the child reported in the `AttemptEnded` of a reported end.
+//! that the child reported in the `AttemptEnded` of a reported end; the
+//! placement that the write of the end gets.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -18,6 +19,7 @@ use super::scripted::{
 use super::*;
 use crate::broker::claims::ClaimRead;
 use crate::core::config::payload::PayloadPolicy;
+use crate::core::lifecycle::AttemptPlacement;
 use crate::core::task::error::TaskError;
 use crate::core::task::result::TaskResult;
 use crate::events::{AttemptRecord, AttemptStart, ChildResult, Event, WorkerDecision};
@@ -37,23 +39,50 @@ use crate::worker::worker::follow_attempt;
 const ATTEMPT_WAIT: Duration = Duration::from_secs(60);
 
 /// A writer that reads each end as the outcome writer does and settles it
-/// as `settlement`, with no database.
+/// as `settlement`, with no database. It keeps the placement of each write.
 struct ScriptedWrites {
     settlement: Settlement,
+    placements: Mutex<Vec<AttemptPlacement>>,
+}
+
+impl ScriptedWrites {
+    fn settling(settlement: Settlement) -> Self {
+        Self {
+            settlement,
+            placements: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The placement of each write, in order.
+    fn placements(&self) -> Vec<AttemptPlacement> {
+        self.placements
+            .lock()
+            .expect("the placements lock is not poisoned")
+            .clone()
+    }
 }
 
 impl EndWrites for ScriptedWrites {
     type Read = ReadEnd;
 
     fn read_end(&self, task: &ClaimedTask, end: AttemptEnd) -> ReadEnd {
-        read_attempt_end(task, end, "worker-1", &PayloadPolicy::default())
+        read_attempt_end(task, end, &PayloadPolicy::default())
     }
 
     fn view(read: &ReadEnd) -> EndView<'_> {
         read.view()
     }
 
-    async fn write_end(&self, _task: &ClaimedTask, _read: ReadEnd) -> Settlement {
+    async fn write_end(
+        &self,
+        _task: &ClaimedTask,
+        _read: ReadEnd,
+        placement: AttemptPlacement,
+    ) -> Settlement {
+        self.placements
+            .lock()
+            .expect("the placements lock is not poisoned")
+            .push(placement);
         self.settlement
     }
 }
@@ -130,7 +159,7 @@ async fn run_scripted_attempt(
     let spawner = Spawner::start().unwrap();
     let (pool, _board) = start_isolated(&spawner, 1, isolated_config(shell(script)));
     let read = ClaimRead::now();
-    let (watch, receipt) = telemetry.placement_watch();
+    let (watch, receipt) = watched_placement();
     let submitted = pool.submit_watched(
         task,
         input(),
@@ -138,7 +167,7 @@ async fn run_scripted_attempt(
         IsolatedDeadline::NoDeadline,
         watch,
     );
-    let writer = ScriptedWrites { settlement };
+    let writer = ScriptedWrites::settling(settlement);
     let settled = tokio::time::timeout(
         ATTEMPT_WAIT,
         follow_attempt(&writer, telemetry, task, read, receipt, submitted),
@@ -308,7 +337,7 @@ async fn a_task_that_reaches_no_child_is_released_once_and_not_placed() {
         isolated_config(shell(&idle_child(&isolated_init()))),
     );
     board.begin_stop();
-    let (watch, receipt) = watched.telemetry.placement_watch();
+    let (watch, receipt) = watched_placement();
     let submitted = pool.submit_watched(
         &refused,
         input(),
@@ -316,9 +345,7 @@ async fn a_task_that_reaches_no_child_is_released_once_and_not_placed() {
         IsolatedDeadline::NoDeadline,
         watch,
     );
-    let writer = ScriptedWrites {
-        settlement: Settlement::Written(WrittenEnd::ClaimReleased),
-    };
+    let writer = ScriptedWrites::settling(Settlement::Written(WrittenEnd::ClaimReleased));
 
     let _settled = follow_attempt(
         &writer,
@@ -330,6 +357,7 @@ async fn a_task_that_reaches_no_child_is_released_once_and_not_placed() {
     )
     .await;
 
+    assert_eq!(writer.placements(), vec![AttemptPlacement::NotObserved]);
     let events = watched.events();
     assert_eq!(names(&events), vec!["ClaimReleased"]);
     match &events[0] {
@@ -437,11 +465,11 @@ async fn a_start_reported_by_a_shared_child_reaches_attempt_ended_with_its_time(
     let spawner = Spawner::start().unwrap();
     let board = Arc::new(PoolBoard::new(layout(0, 1, 0)));
     let pool = start_shared(&spawner, &board, shared_config(shell(&script), init));
-    let (watch, receipt) = watched.telemetry.placement_watch();
+    let (watch, receipt) = watched_placement();
     let submitted = pool.submit_watched(&completed, input(), async_work(60_000, 1_000), watch);
-    let writer = ScriptedWrites {
-        settlement: Settlement::Written(WrittenEnd::Terminal(TerminalState::Completed)),
-    };
+    let writer = ScriptedWrites::settling(Settlement::Written(WrittenEnd::Terminal(
+        TerminalState::Completed,
+    )));
 
     let _settled = tokio::time::timeout(
         ATTEMPT_WAIT,
@@ -559,11 +587,11 @@ async fn a_timeout_that_a_shared_child_ended_is_reported_by_the_child() {
     let spawner = Spawner::start().unwrap();
     let board = Arc::new(PoolBoard::new(layout(0, 1, 0)));
     let pool = start_shared(&spawner, &board, shared_config(shell(&script), init));
-    let (watch, receipt) = watched.telemetry.placement_watch();
+    let (watch, receipt) = watched_placement();
     let submitted = pool.submit_watched(&late, input(), async_work(1_000, 100), watch);
-    let writer = ScriptedWrites {
-        settlement: Settlement::Written(WrittenEnd::Terminal(TerminalState::Failed)),
-    };
+    let writer = ScriptedWrites::settling(Settlement::Written(WrittenEnd::Terminal(
+        TerminalState::Failed,
+    )));
 
     let _settled = tokio::time::timeout(
         ATTEMPT_WAIT,
@@ -590,4 +618,55 @@ async fn a_timeout_that_a_shared_child_ended_is_reported_by_the_child() {
             start,
         }
     );
+}
+
+/// With telemetry off the worker still follows the placement: the write of
+/// the end of an attempt that a child took gets `Placed`, with the slot wait
+/// from the read of the claim result to the placement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_write_of_a_placed_attempt_gets_its_slot_wait_with_telemetry_off() {
+    let completed = task(9, ExecutionClass::Isolated);
+    let script = format!(
+        "{}{}",
+        boot(&isolated_init()),
+        answer_runs(&[(&completed, vec![result_frame(&completed, 1)])], 1)
+    );
+    let spawner = Spawner::start().unwrap();
+    let (pool, _board) = start_isolated(&spawner, 1, isolated_config(shell(&script)));
+    let read = ClaimRead::now();
+    let (watch, receipt) = watched_placement();
+    let submitted = pool.submit_watched(
+        &completed,
+        input(),
+        IsolatedWork::Run,
+        IsolatedDeadline::NoDeadline,
+        watch,
+    );
+    let writer = ScriptedWrites::settling(Settlement::Written(WrittenEnd::Terminal(
+        TerminalState::Completed,
+    )));
+
+    let _settled = tokio::time::timeout(
+        ATTEMPT_WAIT,
+        follow_attempt(
+            &writer,
+            &WorkerTelemetry::Off,
+            &completed,
+            read,
+            receipt,
+            submitted,
+        ),
+    )
+    .await
+    .expect("the attempt ends within the test wait");
+    let waited_at_most = read.at.elapsed();
+    let _report = pool.stop(Duration::from_secs(5)).await;
+    let _stopped = spawner.stop(SPAWNER_STOP_WAIT);
+
+    match writer.placements().as_slice() {
+        [AttemptPlacement::Placed { slot_wait }] => {
+            assert!(slot_wait.duration() <= waited_at_most, "{slot_wait:?}");
+        }
+        other => panic!("one Placed write, not {other:?}"),
+    }
 }

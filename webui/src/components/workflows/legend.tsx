@@ -1,6 +1,7 @@
 import { statusColorVar, statusLabel } from '@/lib/status-utils';
 import type { WorkflowStatus } from '@/types/workflows';
 
+import { PHASE_ORDER, phaseFill, phaseLabel, phaseMeaning } from './phase';
 import { LEGEND_STATUSES } from './status';
 
 interface LegendProps {
@@ -42,5 +43,55 @@ export function Legend({ active, onToggle }: LegendProps) {
       })}
       <span className="border-l border-border pl-3">dashed = tolerant join</span>
     </div>
+  );
+}
+
+/** Read-only phase key of the timeline and the graph phase strip. Each
+ * swatch states what its phase means; a pause is a band, not a phase. */
+export function PhaseLegend() {
+  return (
+    <ul
+      aria-label="Phase legend"
+      className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
+    >
+      {PHASE_ORDER.map(key => (
+        <li
+          key={key}
+          className="inline-flex items-center gap-1.5"
+          title={phaseMeaning(key)}
+        >
+          <span
+            className="inline-block h-2 w-3 rounded-sm"
+            style={{ background: phaseFill(key) }}
+            aria-hidden
+          />
+          <span>{phaseLabel(key)}</span>
+          <span className="sr-only">: {phaseMeaning(key)}</span>
+        </li>
+      ))}
+      <li className="inline-flex items-center gap-1.5" title="The run was paused.">
+        <span
+          className="inline-block h-2 w-3 rounded-sm border border-border"
+          style={{ background: 'var(--pause-band)' }}
+          aria-hidden
+        />
+        <span>paused</span>
+        <span className="sr-only">: the run was paused (a band over every row).</span>
+      </li>
+      <li
+        className="inline-flex items-center gap-1.5"
+        title="The node reached its terminal status: a marker, not a duration."
+      >
+        <span
+          className="inline-block size-2 rotate-45 border border-foreground"
+          style={{ background: 'var(--card)' }}
+          aria-hidden
+        />
+        <span>end</span>
+        <span className="sr-only">
+          : the node reached its terminal status (a marker, not a duration).
+        </span>
+      </li>
+    </ul>
   );
 }

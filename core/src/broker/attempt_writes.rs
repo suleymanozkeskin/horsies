@@ -28,8 +28,8 @@ use uuid::Uuid;
 
 use crate::broker::core_rows::StatementLog;
 use crate::core::lifecycle::{
-    decode_failed_attempt_row, decode_workflow_success_row, FailedAttemptOutcome, OwnedClaim,
-    RetryRefusal, UnreportedAttemptOutcome, WorkflowSuccessOutcome,
+    decode_failed_attempt_row, decode_workflow_success_row, AttemptPlacement, FailedAttemptOutcome,
+    OwnedClaim, RetryRefusal, UnreportedAttemptOutcome, WorkflowSuccessOutcome,
 };
 use crate::db::{CheckoutClass, CorePool, ParameterType, Row, StatementBound, TypedStatement};
 use crate::log_targets::{FAILED_ATTEMPT, WORKFLOW_SUCCESS};
@@ -39,13 +39,14 @@ use super::error::BrokerError;
 /// `horsies_finish_failed_attempt`. Parameters in order: task id, worker id,
 /// claim generation, retry kind, expected retry count, retry delay in
 /// seconds, retry placement, result, error code, failed reason, attempt
-/// outcome, attempt message, attempt reason, claimed-row rule. The wake
-/// argument is the constant TRUE: the function sends the capacity wake of a
-/// plain task's queue after its terminal move (as Python).
+/// outcome, attempt message, attempt reason, claimed-row rule, attempt
+/// placement kind, slot wait in microseconds. The wake argument is the
+/// constant TRUE: the function sends the capacity wake of a plain task's
+/// queue after its terminal move (as Python).
 static FINISH_FAILED_ATTEMPT: TypedStatement = TypedStatement::new(
     "finish_failed_attempt",
     "SELECT * FROM horsies_finish_failed_attempt(\
-     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, TRUE)",
+     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, TRUE, $15, $16)",
     &[
         ParameterType::Uuid,
         ParameterType::Text,
@@ -61,19 +62,24 @@ static FINISH_FAILED_ATTEMPT: TypedStatement = TypedStatement::new(
         ParameterType::Text,
         ParameterType::Text,
         ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Int8,
     ],
 );
 
 /// `horsies_finish_workflow_success`. Parameters in order: task id, worker
-/// id, claim generation, result.
+/// id, claim generation, result, attempt placement kind, slot wait in
+/// microseconds.
 static FINISH_WORKFLOW_SUCCESS: TypedStatement = TypedStatement::new(
     "finish_workflow_success",
-    "SELECT * FROM horsies_finish_workflow_success($1, $2, $3, $4)",
+    "SELECT * FROM horsies_finish_workflow_success($1, $2, $3, $4, $5, $6)",
     &[
         ParameterType::Uuid,
         ParameterType::Text,
         ParameterType::Timestamptz,
         ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Int8,
     ],
 );
 
@@ -141,6 +147,8 @@ pub struct AttemptFailure {
 ///
 /// `result_json`, `error_code` and `failed_reason` are the terminal failure
 /// of the task; `error_code` is also the code of the attempt row.
+/// `placement` is the placement of the attempt that the phase record of
+/// the attempt row keeps; a release writes no attempt row and ignores it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FinishFailedAttempt {
     pub task_id: Uuid,
@@ -150,6 +158,7 @@ pub struct FinishFailedAttempt {
     pub error_code: Option<String>,
     pub failed_reason: Option<String>,
     pub attempt: AttemptFailure,
+    pub placement: AttemptPlacement,
 }
 
 /// What the statement does with a row that is still CLAIMED by this worker
@@ -173,12 +182,15 @@ impl ClaimedRowRule {
     }
 }
 
-/// The success of a RUNNING workflow task, for one statement.
+/// The success of a RUNNING workflow task, for one statement. `placement`
+/// is the placement of the attempt that the phase record of the attempt row
+/// keeps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinishWorkflowSuccess {
     pub task_id: Uuid,
     pub fence: OwnedClaim,
     pub result_json: String,
+    pub placement: AttemptPlacement,
 }
 
 /// Write the failed attempt of a task whose child reported a result
@@ -268,6 +280,8 @@ async fn run_failed_attempt(
     let attempt_message = command.attempt.error_message.as_deref();
     let attempt_reason = command.attempt.failed_reason.as_deref();
     let claimed_row_rule = rule.as_sql();
+    let placement_kind = command.placement.kind_sql();
+    let slot_wait_us = command.placement.slot_wait_us();
     let statement = &FINISH_FAILED_ATTEMPT;
     let bound = statement
         .bind()
@@ -285,6 +299,8 @@ async fn run_failed_attempt(
         .value(&attempt_message)
         .value(&attempt_reason)
         .value(&claimed_row_rule)
+        .value(&placement_kind)
+        .value(&slot_wait_us)
         .finish();
     log.log(statement);
     let rows = pool
@@ -311,6 +327,8 @@ pub(crate) async fn finish_workflow_success(
     log: StatementLog,
     command: &FinishWorkflowSuccess,
 ) -> Result<WorkflowSuccessOutcome, BrokerError> {
+    let placement_kind = command.placement.kind_sql();
+    let slot_wait_us = command.placement.slot_wait_us();
     let statement = &FINISH_WORKFLOW_SUCCESS;
     let bound = statement
         .bind()
@@ -318,6 +336,8 @@ pub(crate) async fn finish_workflow_success(
         .value(&command.fence.worker_id)
         .value(&command.fence.claimed_at)
         .value(&command.result_json)
+        .value(&placement_kind)
+        .value(&slot_wait_us)
         .finish();
     log.log(statement);
     let rows = pool

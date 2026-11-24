@@ -93,6 +93,7 @@ fn failure(seeded: &Seeded, retry: RetryRequest) -> FinishFailedAttempt {
             error_message: Some("boom".to_owned()),
             failed_reason: None,
         },
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     }
 }
 
@@ -360,6 +361,7 @@ async fn a_stale_claim_generation_writes_no_workflow_success() {
                 claimed_at: seeded.claimed_at - Duration::seconds(1),
             },
             result_json: r#"{"__h_task_result__":true,"ok":1,"err":null}"#.to_owned(),
+            placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
         },
     )
     .await
@@ -388,6 +390,7 @@ async fn a_plain_task_success_through_the_workflow_writer_is_refused() {
                 claimed_at: seeded.claimed_at,
             },
             result_json: r#"{"__h_task_result__":true,"ok":1,"err":null}"#.to_owned(),
+            placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
         },
     )
     .await;

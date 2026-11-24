@@ -251,10 +251,10 @@ const KNOWN_SITES: &[Known] = &[
     },
     Known {
         file: "core/src/core/history/archive/attempts.rs",
-        item: "decode_attempt_rows",
+        item: "decode_payload",
         kind: SiteKind::TypedLetParse,
         count: 1,
-        allowed: Allowed::NotUserValue("the attempt records of a history row"),
+        allowed: Allowed::NotUserValue("the attempt archive of a history row, before its version decodes"),
     },
     Known {
         file: "core/src/core/history/enqueue.rs",

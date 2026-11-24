@@ -1,5 +1,7 @@
 //! The workflow start on the core statement layer: the whole tree in one call
-//! of `horsies_workflow_start` (`0005_workflow_functions.sql`).
+//! of `horsies_workflow_start` (`0005_workflow_functions.sql`; the form of
+//! migration 1002, `1002_workflow_start_command_fingerprint.sql`, takes the
+//! start command fingerprint of the top-level row).
 //!
 //! The core builds the tree in memory: the top-level workflow, a pre-built
 //! child workflow for every sub-workflow root (recursively, to the depth
@@ -18,6 +20,8 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use crate::broker::core_rows::RowDecodeError;
+use crate::broker::workflow_start::{ClientStartOutcome, ExistingRun, IdHolder};
 use crate::broker::PostgresBroker;
 use crate::core::workflow::node::SubWorkflowParams;
 use crate::core::{AnyNode, OnError, OperationalErrorCode, TaskError, TaskResult, WorkflowSpec};
@@ -36,20 +40,23 @@ use crate::workflow_engine::start::{
     child_workflow_depth, node_task_facts, require_subworkflow_node_keys,
     stored_queue_and_priority, stored_workflow_ctx_from, ChildSpecError,
 };
+use crate::workflow_engine::start_fingerprint::{StartCommandV1, StartFingerprint, StartNodeV1};
 use crate::workflow_engine::steps::{
     run_alone, run_in_transaction, step_row_select, step_rows, ChildStartSource,
     OwedParentAdvances, StepContractError, StepDisposition,
 };
 
 /// `horsies_workflow_start`: the workflow rows of the tree (top-level first),
-/// the start call time, the node rows, the failed-node records, and the
-/// trace kind, carrier text and trace id (`StoredTrace::columns`).
+/// the start call time, the node rows, the failed-node records, the trace
+/// kind, carrier text and trace id (`StoredTrace::columns`), and the version
+/// and digest of the start command fingerprint of the top-level row
+/// ([`StartFingerprint`]).
 pub(crate) static START: TypedStatement = TypedStatement::new(
     "horsies_workflow_start",
     step_row_select!(
         "horsies_workflow_start($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, \
          $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, \
-         $33, $34, $35, $36, $37, $38)"
+         $33, $34, $35, $36, $37, $38, $39, $40)"
     ),
     &[
         // Workflow rows.
@@ -95,17 +102,31 @@ pub(crate) static START: TypedStatement = TypedStatement::new(
         ParameterType::Text,
         ParameterType::Text,
         ParameterType::Bytea,
+        // Start command fingerprint.
+        ParameterType::Int2,
+        ParameterType::Bytea,
     ],
 );
 
-/// The disposition of `horsies_workflow_start`.
+/// The disposition of `horsies_workflow_start`. Each disposition but
+/// `Started` wrote nothing; `detail` holds the stored name of the row with the
+/// top-level id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StartDisposition {
     /// The tree was written.
     Started,
-    /// A workflow with the top-level id exists; nothing was written. `detail`
-    /// holds its stored name (NULL when the row is gone by the read).
+    /// The row with the top-level id holds the start command of this start.
     Exists,
+    /// The row with the top-level id is a top-level row with no stored start
+    /// command: a run that a build before migration 1002 started.
+    FingerprintNotStored,
+    /// The row with the top-level id has another name.
+    OtherName,
+    /// The row with the top-level id is a sub-workflow of the same name.
+    SubWorkflow,
+    /// The row with the top-level id is a top-level row of the same name with
+    /// another start command.
+    OtherCommand,
 }
 
 impl StepDisposition for StartDisposition {
@@ -113,26 +134,50 @@ impl StepDisposition for StartDisposition {
         match text {
             "STARTED" => Some(Self::Started),
             "EXISTS" => Some(Self::Exists),
+            "FINGERPRINT_NOT_STORED" => Some(Self::FingerprintNotStored),
+            "OTHER_NAME" => Some(Self::OtherName),
+            "SUB_WORKFLOW" => Some(Self::SubWorkflow),
+            "OTHER_COMMAND" => Some(Self::OtherCommand),
             _ => None,
         }
     }
 }
 
-/// What the start call found.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum StartOutcome {
-    /// The tree was written.
-    Started,
-    /// A workflow with the top-level id exists; nothing was written.
-    /// `stored_name` is its name, or `None` when the row was gone by the read.
-    Exists { stored_name: Option<String> },
+/// The outcome of a start for its disposition and the `detail` of its
+/// OUTCOME row: the stored name, which `OtherName` requires. Pure.
+///
+/// Errors: [`StepContractError::Row`] for an `OTHER_NAME` row with no stored
+/// name: the function reads the name of a row that its conflict locked.
+fn start_outcome(
+    disposition: StartDisposition,
+    detail: Option<String>,
+) -> Result<ClientStartOutcome, StepContractError> {
+    match disposition {
+        StartDisposition::Started => Ok(ClientStartOutcome::Started),
+        StartDisposition::Exists => Ok(ClientStartOutcome::Exists(ExistingRun::SameCommand)),
+        StartDisposition::FingerprintNotStored => Ok(ClientStartOutcome::Exists(
+            ExistingRun::FingerprintNotStored,
+        )),
+        StartDisposition::OtherName => detail
+            .map(|existing_name| {
+                ClientStartOutcome::IdHeld(IdHolder::OtherWorkflowName { existing_name })
+            })
+            .ok_or_else(|| {
+                StepContractError::Row(RowDecodeError::Shape {
+                    statement: START.name(),
+                    reason: "an OTHER_NAME outcome has no stored name in its detail".to_owned(),
+                })
+            }),
+        StartDisposition::SubWorkflow => Ok(ClientStartOutcome::IdHeld(IdHolder::SubWorkflow)),
+        StartDisposition::OtherCommand => Ok(ClientStartOutcome::IdHeld(IdHolder::OtherCommand)),
+    }
 }
 
 /// What a committed start did, and the parent advances it owes after its
 /// commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StartedTree {
-    pub(crate) outcome: StartOutcome,
+    pub(crate) outcome: ClientStartOutcome,
     /// The workflows that the owed child starts of a transaction-form start
     /// ended and that have a parent. Empty for the one-statement form.
     pub(crate) parent_advances: OwedParentAdvances,
@@ -767,6 +812,64 @@ impl StartArguments {
         self.workflow_ids.first().copied()
     }
 
+    /// The start command of the top row of the tree ([`StartCommandV1`]):
+    /// the values of the first workflow row and of the node rows of that
+    /// workflow, in node index order, as the arrays hold them. The rows of
+    /// pre-built children and their nodes, and the failed-node records, are
+    /// not in it. Pure.
+    ///
+    /// # Panics
+    ///
+    /// When the arrays hold no workflow row: [`client_start_arguments`]
+    /// pushes the top row before any other row (a defect otherwise).
+    pub(crate) fn top_start_command(&self) -> StartCommandV1<'_> {
+        let top = self
+            .workflow_ids
+            .first()
+            .copied()
+            .expect("the start arguments hold the top row first");
+        let mut nodes: Vec<StartNodeV1<'_>> = self
+            .node_workflow_ids
+            .iter()
+            .enumerate()
+            .filter(|(_, workflow_id)| **workflow_id == top)
+            .map(|(position, _)| self.start_node(position))
+            .collect();
+        nodes.sort_by_key(|node| node.task_index);
+        StartCommandV1 {
+            name: &self.names[0],
+            definition_key: self.definition_keys[0].as_deref(),
+            on_error: &self.on_errors[0],
+            output_task_index: self.output_task_indexes[0],
+            success_policy: self.success_policies[0].as_deref(),
+            nodes,
+        }
+    }
+
+    /// The node row at `position` of the node arrays, as a node of a start
+    /// command. Pure.
+    fn start_node(&self, position: usize) -> StartNodeV1<'_> {
+        StartNodeV1 {
+            task_index: self.node_task_indexes[position],
+            node_id: self.node_ids[position].as_deref(),
+            task_name: &self.node_task_names[position],
+            input: &self.node_inputs[position],
+            queue_name: &self.node_queue_names[position],
+            priority: self.node_priorities[position],
+            dependencies: &self.node_dependencies[position],
+            args_from: self.node_args_from[position].as_deref(),
+            workflow_ctx_from: self.node_workflow_ctx_from[position].as_deref(),
+            allow_failed_deps: self.node_allow_failed_deps[position],
+            join_type: &self.node_join_types[position],
+            min_success: self.node_min_successes[position],
+            task_options: self.node_task_options[position].as_deref(),
+            retention_class_key: self.node_retention_class_keys[position].as_deref(),
+            is_subworkflow: self.node_is_subworkflow[position],
+            sub_definition_key: self.node_sub_definition_keys[position].as_deref(),
+            sub_workflow_params: self.node_sub_workflow_params[position].as_deref(),
+        }
+    }
+
     fn push_workflow(&mut self, workflow: &TreeWorkflow<'_>) -> Result<(), WorkflowError> {
         let spec = &workflow.spec;
         let output_task_index = spec.output_index.map(node_index).transpose()?;
@@ -834,9 +937,13 @@ impl StartArguments {
             .iter()
             .map(|&dependency| node_index(dependency))
             .collect::<Result<Vec<i32>, WorkflowError>>()?;
+        // In key order: the map has no order of its own, and the start command
+        // fingerprint takes this text byte for byte.
         let args_from = match node.args_from.is_empty() {
             true => None,
-            false => Some(serde_json::to_string(&node.args_from)?),
+            false => Some(serde_json::to_string(
+                &node.args_from.iter().collect::<BTreeMap<&String, &usize>>(),
+            )?),
         };
         // NULL for no list and for an empty list: the node takes no context.
         let workflow_ctx_from = stored_workflow_ctx_from(node)
@@ -978,12 +1085,29 @@ impl<'a> TraceColumns<'a> {
     }
 }
 
-/// The bound start statement, with `sent_at` as the start call time and the
-/// trace parameters of `trace`.
+/// The start command parameters of the start statement
+/// ([`StartFingerprint`]).
+struct CommandColumns<'a> {
+    version: i16,
+    digest: &'a [u8],
+}
+
+impl<'a> CommandColumns<'a> {
+    fn of(command: &'a StartFingerprint) -> CommandColumns<'a> {
+        CommandColumns {
+            version: command.version(),
+            digest: command.digest(),
+        }
+    }
+}
+
+/// The bound start statement, with `sent_at` as the start call time, the
+/// trace parameters of `trace` and the start command fingerprint `command`.
 fn start_statement<'a>(
     arguments: &'a StartArguments,
     sent_at: &'a DateTime<Utc>,
     trace: &'a TraceColumns<'a>,
+    command: &'a CommandColumns<'a>,
 ) -> BoundStatement<'a> {
     let binder = arguments.bind_workflows(START.bind()).value(sent_at);
     arguments
@@ -991,12 +1115,15 @@ fn start_statement<'a>(
         .value(&trace.kind)
         .value(&trace.carrier)
         .value(&trace.trace_id)
+        .value(&command.version)
+        .value(&command.digest)
         .finish()
 }
 
 /// Starts the tree as producer work ([`CheckoutClass::Batch`]), with
-/// `sent_at` as the start call time and `trace` as the trace of every
-/// workflow and task row of the tree.
+/// `sent_at` as the start call time, `trace` as the trace of every workflow
+/// and task row of the tree, and `command` as the start command fingerprint
+/// of the top row ([`StartArguments::top_start_command`]).
 ///
 /// | Arguments | Statements |
 /// |---|---|
@@ -1008,20 +1135,28 @@ fn start_statement<'a>(
 /// failure policy and promotion of its node, which can promote a
 /// sub-workflow node, so that form runs in a transaction.
 ///
+/// An id that exists is answered from the stored row, and nothing is
+/// written ([`StartDisposition`]): the same start command or a run with no
+/// stored fingerprint is [`ClientStartOutcome::Exists`]; another name, a
+/// sub-workflow and another start command are [`ClientStartOutcome::IdHeld`].
+///
 /// Errors: [`WorkflowError::Broker`] when a statement failed (nothing
-/// committed, or `OutcomeUnknown`: a resend with the same id meets `EXISTS`);
-/// [`WorkflowError::StepContract`] for a row outside the contract (owed child
-/// starts of the one-statement form included); the refusal of the host build
-/// of an owed child (nothing committed).
+/// committed, or `OutcomeUnknown`: a resend with the same id and the same
+/// command meets `EXISTS`); [`WorkflowError::StepContract`] for a row outside
+/// the contract (owed child starts of the one-statement form included, and an
+/// `OTHER_NAME` row with no stored name); the refusal of the host build of an
+/// owed child (nothing committed).
 pub(crate) async fn start_tree(
     broker: &PostgresBroker,
     arguments: &StartArguments,
     sent_at: DateTime<Utc>,
     trace: &StoredTrace,
+    command: &StartFingerprint,
     build: &dyn ChildSpecSource,
 ) -> Result<StartedTree, WorkflowError> {
     let trace = TraceColumns::of(trace);
-    let statement = start_statement(arguments, &sent_at, &trace);
+    let command = CommandColumns::of(command);
+    let statement = start_statement(arguments, &sent_at, &trace, &command);
     let (disposition, detail, parent_advances) = match arguments.has_failed_records() {
         false => {
             let rows = run_alone(broker, CheckoutClass::Batch, &statement).await?;
@@ -1058,12 +1193,7 @@ pub(crate) async fn start_tree(
         }
     };
     Ok(StartedTree {
-        outcome: match disposition {
-            StartDisposition::Started => StartOutcome::Started,
-            StartDisposition::Exists => StartOutcome::Exists {
-                stored_name: detail,
-            },
-        },
+        outcome: start_outcome(disposition, detail)?,
         parent_advances,
     })
 }

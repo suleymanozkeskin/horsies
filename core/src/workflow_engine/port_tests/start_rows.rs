@@ -11,9 +11,9 @@ use uuid::Uuid;
 use super::support::{
     broker, child_of, child_specs_of, claim_once, claim_pass, finish_node, node, node_status,
     node_task_input, ok, seed_node, seed_workflow, shared_pool, spec, start, sub_workflow_node,
-    task_node, try_start, workflow_status, IsolatedDatabase, NodeSeed, WorkflowSeed,
+    task_node, try_start, workflow_status, IsolatedDatabase, NodeSeed, ParentLink, WorkflowSeed,
 };
-use crate::broker::workflow_start::{ClientStartError, ClientStartOutcome};
+use crate::broker::workflow_start::{ClientStartError, ClientStartOutcome, ExistingRun, IdHolder};
 use crate::core::{HorsiesError, OnError, WorkflowSpec};
 use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
 use crate::test_support::sql::{self, TestPool};
@@ -340,9 +340,71 @@ async fn a_promoted_node_task_gets_its_max_retries() {
     assert!(task_options.is_some());
 }
 
-/// `TestWorkflowStart.test_duplicate_workflow_id_returns_existing_handle`
+/// The stored start command pair of the workflow row `workflow_id`:
+/// (version, fingerprint).
+async fn stored_command(pool: &TestPool, workflow_id: Uuid) -> (Option<i16>, Option<Vec<u8>>) {
+    sql::query_as(
+        "SELECT command_fingerprint_version, command_fingerprint
+         FROM horsies_workflows WHERE id = $1",
+    )
+    .bind(workflow_id)
+    .fetch_one(pool)
+    .await
+    .expect("read the stored start command")
+}
+
+/// The start command fingerprint that the core computes for `spec` as the
+/// start `workflow_id` with the children of `child_specs`.
+fn command_of(spec: &WorkflowSpec, workflow_id: Uuid, child_specs: &TestChildSpecs) -> Vec<u8> {
+    let arguments = futures::executor::block_on(
+        crate::workflow_engine::start_statement::client_start_arguments(
+            &child_specs.client_spec(spec),
+            workflow_id,
+            child_specs,
+        ),
+    )
+    .expect("the start arguments of the spec");
+    arguments
+        .top_start_command()
+        .fingerprint()
+        .digest()
+        .to_vec()
+}
+
+/// `TestWorkflowStart.test_duplicate_workflow_id_returns_existing_handle`:
+/// a start again with the same id and the same start command returns the
+/// workflow and writes nothing. The row keeps the fingerprint of the first
+/// start: version 1, the core's digest of the command.
 #[tokio::test]
-async fn a_second_start_with_the_same_id_and_name_returns_the_existing_workflow() {
+async fn a_second_start_with_the_same_id_and_command_returns_the_existing_workflow() {
+    let pool = shared_pool().await;
+    let child_specs = TestChildSpecs::empty();
+    let workflow_id = Uuid::new_v4();
+    let first = spec("idempotent_wf", vec![task_node(0, "idempotent_a")]);
+
+    let (_, first_start) = try_start(&pool, &first, Some(workflow_id), &child_specs).await;
+    let (_, second_start) = try_start(&pool, &first, Some(workflow_id), &child_specs).await;
+
+    assert_eq!(
+        first_start.expect("first start"),
+        ClientStartOutcome::Started
+    );
+    assert_eq!(
+        second_start.expect("second start"),
+        ClientStartOutcome::Exists(ExistingRun::SameCommand)
+    );
+    assert_eq!(node_count(&pool, workflow_id).await, 1);
+    assert_eq!(
+        stored_command(&pool, workflow_id).await,
+        (Some(1), Some(command_of(&first, workflow_id, &child_specs)))
+    );
+}
+
+/// A start again with the same id and the same name but another start
+/// command (another node list) is refused, and writes nothing: the row keeps
+/// the first spec's nodes and fingerprint.
+#[tokio::test]
+async fn a_second_start_with_the_same_id_and_another_command_is_refused() {
     let pool = shared_pool().await;
     let child_specs = TestChildSpecs::empty();
     let workflow_id = Uuid::new_v4();
@@ -352,22 +414,54 @@ async fn a_second_start_with_the_same_id_and_name_returns_the_existing_workflow(
         vec![task_node(0, "idempotent_b"), task_node(1, "idempotent_c")],
     );
     second.definition_key = first.definition_key.clone();
-
     let (_, first_start) = try_start(&pool, &first, Some(workflow_id), &child_specs).await;
-    let (_, second_start) = try_start(&pool, &second, Some(workflow_id), &child_specs).await;
-
     assert_eq!(
         first_start.expect("first start"),
         ClientStartOutcome::Started
     );
+    let stored = stored_command(&pool, workflow_id).await;
+
+    let (_, second_start) = try_start(&pool, &second, Some(workflow_id), &child_specs).await;
+
     assert_eq!(
-        second_start.expect("second start"),
-        ClientStartOutcome::Exists
+        second_start.expect("the second start writes nothing"),
+        ClientStartOutcome::IdHeld(IdHolder::OtherCommand)
     );
     assert_eq!(
         node_count(&pool, workflow_id).await,
         1,
         "the first spec's nodes only"
+    );
+    assert_eq!(stored_command(&pool, workflow_id).await, stored);
+}
+
+/// Another input of one node is another start command.
+#[tokio::test]
+async fn another_input_of_a_node_is_another_start_command() {
+    let pool = shared_pool().await;
+    let child_specs = TestChildSpecs::empty();
+    let workflow_id = Uuid::new_v4();
+    let mut first_node = task_node(0, "idempotent_input");
+    first_node.input_json = r#"{"value":1}"#.to_owned();
+    let mut second_node = first_node.clone();
+    second_node.input_json = r#"{"value":2}"#.to_owned();
+    let first = spec("idempotent_input_wf", vec![first_node]);
+    let second = spec("idempotent_input_wf", vec![second_node]);
+    let (_, first_start) = try_start(&pool, &first, Some(workflow_id), &child_specs).await;
+    assert_eq!(
+        first_start.expect("first start"),
+        ClientStartOutcome::Started
+    );
+
+    let (_, second_start) = try_start(&pool, &second, Some(workflow_id), &child_specs).await;
+
+    assert_eq!(
+        second_start.expect("the second start writes nothing"),
+        ClientStartOutcome::IdHeld(IdHolder::OtherCommand)
+    );
+    assert_eq!(
+        node_task_input(&pool, workflow_id, 0).await["value"],
+        serde_json::json!(1)
     );
 }
 
@@ -392,11 +486,97 @@ async fn a_start_with_an_id_of_another_workflow_name_is_an_id_conflict() {
 
     assert_eq!(
         second_start.expect("the second start writes nothing"),
-        ClientStartOutcome::IdTaken {
+        ClientStartOutcome::IdHeld(IdHolder::OtherWorkflowName {
             existing_name: "idempotent_name_guard_first".to_owned(),
-        }
+        })
     );
     assert_eq!(node_count(&pool, workflow_id).await, 1);
+}
+
+/// A top-level run with no stored start command (a build before migration
+/// 1002 wrote it; here a direct insert) is returned to a start with its id
+/// and its name, with no compare. Nothing is written: the row keeps no
+/// fingerprint and gets no node.
+#[tokio::test]
+async fn a_run_with_no_stored_start_command_is_returned_with_no_compare() {
+    let pool = shared_pool().await;
+    let child_specs = TestChildSpecs::empty();
+    let seed = WorkflowSeed::running();
+    let workflow_id = seed_workflow(&pool, &seed).await;
+    let mut repeat = spec(&seed.name, vec![task_node(0, "no_stored_command")]);
+    repeat.definition_key = seed.definition_key.clone();
+
+    let (_, started) = try_start(&pool, &repeat, Some(workflow_id), &child_specs).await;
+
+    assert_eq!(
+        started.expect("the start writes nothing"),
+        ClientStartOutcome::Exists(ExistingRun::FingerprintNotStored)
+    );
+    assert_eq!(node_count(&pool, workflow_id).await, 0);
+    assert_eq!(stored_command(&pool, workflow_id).await, (None, None));
+}
+
+/// A start with the id and the name of a sub-workflow is refused: the
+/// sub-workflow has no start command. Nothing is written.
+#[tokio::test]
+async fn a_start_with_the_id_of_a_sub_workflow_is_refused() {
+    let pool = shared_pool().await;
+    let child_specs = TestChildSpecs::empty();
+    let parent = seed_workflow(&pool, &WorkflowSeed::running()).await;
+    let child_seed = WorkflowSeed::child(ParentLink::of_root(parent, 0));
+    let child_id = seed_workflow(&pool, &child_seed).await;
+    let mut repeat = spec(&child_seed.name, vec![task_node(0, "sub_workflow_id")]);
+    repeat.definition_key = child_seed.definition_key.clone();
+
+    let (_, started) = try_start(&pool, &repeat, Some(child_id), &child_specs).await;
+
+    assert_eq!(
+        started.expect("the start writes nothing"),
+        ClientStartOutcome::IdHeld(IdHolder::SubWorkflow)
+    );
+    assert_eq!(node_count(&pool, child_id).await, 0);
+    assert_eq!(stored_command(&pool, child_id).await, (None, None));
+}
+
+/// The pre-built child of a sub-workflow root is not part of the start
+/// command: a start again whose child build gives another child spec finds
+/// the same command.
+#[tokio::test]
+async fn another_child_build_on_a_repeat_is_the_same_start_command() {
+    let pool = shared_pool().await;
+    let workflow_id = Uuid::new_v4();
+    let child = spec("start_once_child", vec![task_node(0, "child_a")]);
+    let other_child = spec(
+        "start_once_child",
+        vec![task_node(0, "child_a"), task_node(1, "child_b")],
+    );
+    let parent = spec("start_once_parent", vec![sub_workflow_node(0, &child)]);
+    let (_, first_start) =
+        try_start(&pool, &parent, Some(workflow_id), &child_specs_of(&[child])).await;
+    assert_eq!(
+        first_start.expect("first start"),
+        ClientStartOutcome::Started
+    );
+
+    let (_, repeat) = try_start(
+        &pool,
+        &parent,
+        Some(workflow_id),
+        &child_specs_of(&[other_child]),
+    )
+    .await;
+
+    assert_eq!(
+        repeat.expect("the repeat writes nothing"),
+        ClientStartOutcome::Exists(ExistingRun::SameCommand)
+    );
+    let child_rows: i64 =
+        sql::query_scalar("SELECT count(*) FROM horsies_workflows WHERE parent_workflow_id = $1")
+            .bind(workflow_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count the child rows");
+    assert_eq!(child_rows, 1);
 }
 
 /// `TestWorkflowStart.test_concurrent_duplicate_workflow_id_returns_existing_handle`
@@ -416,10 +596,13 @@ async fn two_concurrent_starts_with_one_id_make_one_workflow() {
     );
 
     let mut outcomes = vec![first.expect("first start"), second.expect("second start")];
-    outcomes.sort_by_key(|outcome| matches!(outcome, ClientStartOutcome::Exists));
+    outcomes.sort_by_key(|outcome| matches!(outcome, ClientStartOutcome::Exists(_)));
     assert_eq!(
         outcomes,
-        vec![ClientStartOutcome::Started, ClientStartOutcome::Exists]
+        vec![
+            ClientStartOutcome::Started,
+            ClientStartOutcome::Exists(ExistingRun::SameCommand)
+        ]
     );
     let rows: i64 = sql::query_scalar("SELECT count(*) FROM horsies_workflows WHERE id = $1")
         .bind(workflow_id)
@@ -428,6 +611,42 @@ async fn two_concurrent_starts_with_one_id_make_one_workflow() {
         .expect("count the workflow rows");
     assert_eq!(rows, 1);
     assert_eq!(node_count(&pool, workflow_id).await, 1);
+}
+
+/// Two concurrent starts with one id, one name and two start commands: the
+/// first commit wins, and the other start waits for it on the id, then is
+/// refused. The row holds the nodes and the fingerprint of the winner only.
+#[tokio::test]
+async fn two_concurrent_starts_with_one_id_and_two_commands_make_one_workflow() {
+    let pool = shared_pool().await;
+    let child_specs = TestChildSpecs::empty();
+    let workflow_id = Uuid::new_v4();
+    let one_node = spec("start_once_race", vec![task_node(0, "race_a")]);
+    let mut two_nodes = spec(
+        "start_once_race",
+        vec![task_node(0, "race_a"), task_node(1, "race_b")],
+    );
+    two_nodes.definition_key = one_node.definition_key.clone();
+
+    let ((_, first), (_, second)) = tokio::join!(
+        try_start(&pool, &one_node, Some(workflow_id), &child_specs),
+        try_start(&pool, &two_nodes, Some(workflow_id), &child_specs),
+    );
+
+    let (winner, nodes) = match (first.expect("first start"), second.expect("second start")) {
+        (ClientStartOutcome::Started, ClientStartOutcome::IdHeld(IdHolder::OtherCommand)) => {
+            (&one_node, 1)
+        }
+        (ClientStartOutcome::IdHeld(IdHolder::OtherCommand), ClientStartOutcome::Started) => {
+            (&two_nodes, 2)
+        }
+        other => panic!("one start wins and the other is refused, got {other:?}"),
+    };
+    assert_eq!(node_count(&pool, workflow_id).await, nodes);
+    assert_eq!(
+        stored_command(&pool, workflow_id).await,
+        (Some(1), Some(command_of(winner, workflow_id, &child_specs)))
+    );
 }
 
 /// `TestWorkflowStart.test_concurrent_auto_id_creates_distinct_workflows`
@@ -517,7 +736,10 @@ async fn a_restart_with_the_same_id_writes_nothing_more() {
 
     let (_, again) = try_start(&pool, &workflow_spec, Some(workflow_id), &child_specs).await;
 
-    assert_eq!(again.expect("restart"), ClientStartOutcome::Exists);
+    assert_eq!(
+        again.expect("restart"),
+        ClientStartOutcome::Exists(ExistingRun::SameCommand)
+    );
     assert_eq!(node_count(&pool, workflow_id).await, 4);
     let tasks: i64 = sql::query_scalar(
         "SELECT count(*) FROM horsies_tasks t

@@ -1151,6 +1151,8 @@ class TestWorkflowHandleCancel:
                     claimed_at = NOW(),
                     claimed_by_worker_id = 'test-worker',
                     claim_expires_at = NOW() + INTERVAL '5 minutes',
+                    attempt_claims = 1,
+                    first_claimed_at = NOW(),
                     updated_at = NOW()
                 WHERE id = :task_id
             """),
