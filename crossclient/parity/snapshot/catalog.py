@@ -770,6 +770,7 @@ _WORKER_STATES: Final = TableRules(
         ('slots_down', SLOTS_DOWN),
         ('class_capacity', JSON),
         ('telemetry', WORKER_TELEMETRY),
+        ('profile_name', EXACT),
     ),
     order_by=('worker_id', 'hostname', 'pid', 'snapshot_at'),
     identity=('worker_id', 'snapshot_at'),

@@ -36,7 +36,8 @@ pub use gauge_facts::{
 };
 
 /// One worker snapshot. Every NOT NULL column of the baseline table is named
-/// (the baseline has no column defaults). `children_memory_mb` is the sum
+/// (the baseline has no column defaults), and `profile_name` (migration
+/// 1004), which this build always writes. `children_memory_mb` is the sum
 /// of the last RSS readings of the task children, NULL when no child read
 /// its size ([`ChildrenRss`]).
 const INSERT_WORKER_STATE_SQL: &str = "\
@@ -45,11 +46,11 @@ INSERT INTO horsies_worker_states (
     cluster_wide_cap, queues, queue_priorities, queue_max_concurrency,
     recovery_config, tasks_running, tasks_claimed, memory_usage_mb,
     memory_percent, cpu_percent, worker_started_at, slots_down, class_capacity, telemetry,
-    children_memory_mb
+    children_memory_mb, profile_name
 ) VALUES (
     $1, NOW(), $2, $3, $4, $5, $6, $7, $8::text[], $9::jsonb, $10::jsonb,
     $11::jsonb, $12, $13, $14, $15, $16, $17, $18::jsonb, $19::jsonb, $20::jsonb,
-    $21
+    $21, $22
 )";
 
 /// The JSON of the cause of a down slot (Python `boot_cause_json`). A slot
@@ -336,6 +337,7 @@ static INSERT_WORKER_STATE: TypedStatement = TypedStatement::new(
         ParameterType::Jsonb,
         ParameterType::Jsonb,
         ParameterType::Float8,
+        ParameterType::Text,
     ],
 );
 
@@ -388,6 +390,11 @@ pub(crate) struct SnapshotSource {
     pub reaper_health: ReaperHealth,
     pub children: ChildrenView,
     pub claim_columns: ClaimColumns,
+    /// The name of the profile that the worker runs: the `profile_name`
+    /// column. The worker refuses a name that breaks the profile name rule
+    /// before it starts (`Worker::of_child_specs`), so the table CHECK
+    /// accepts it.
+    pub profile_name: String,
     pub worker_started_at: DateTime<Utc>,
     /// The metrics endpoint of the worker, for the `telemetry` column.
     pub endpoint: WorkerEndpoint,
@@ -427,6 +434,7 @@ impl SnapshotSource {
         reaper_health: ReaperHealth,
         children: ChildrenView,
         claim_columns: ClaimColumns,
+        profile_name: String,
         worker_started_at: DateTime<Utc>,
         endpoint: WorkerEndpoint,
         handler_child: HandlerChildView,
@@ -449,6 +457,7 @@ impl SnapshotSource {
             reaper_health,
             children,
             claim_columns,
+            profile_name,
             worker_started_at,
             endpoint,
             handler_child,
@@ -630,6 +639,7 @@ pub(crate) async fn write_snapshot(
         .value(&class_capacity)
         .value(&telemetry)
         .value(&children_memory_mb)
+        .value(&source.profile_name)
         .finish();
     log.log(&INSERT_WORKER_STATE);
     let _inserted = connection
@@ -651,7 +661,8 @@ pub(crate) async fn write_snapshot(
 /// `children` gives the slots of the worker at each snapshot: the down
 /// slots (`slots_down`) and the capacity in service of each budget
 /// (`class_capacity`). `claim_columns` are the profile's
-/// ([`ClaimColumns::of_profile`]). `endpoint` and `handler_child` give the
+/// ([`ClaimColumns::of_profile`]); `profile_name` is its name
+/// (`profile_name`). `endpoint` and `handler_child` give the
 /// state of the metrics endpoint and of the handler child (`telemetry`).
 /// Each snapshot sets the worker gauges of `telemetry` from the values it
 /// writes ([`write_snapshot`]); a tick with no pool sets none, so the gauges
@@ -667,6 +678,7 @@ pub(crate) fn spawn_worker_state_loop(
     reaper_health: ReaperHealth,
     children: ChildrenView,
     claim_columns: ClaimColumns,
+    profile_name: String,
     worker_started_at: DateTime<Utc>,
     endpoint: WorkerEndpoint,
     handler_child: HandlerChildView,
@@ -685,6 +697,7 @@ pub(crate) fn spawn_worker_state_loop(
             reaper_health,
             children,
             claim_columns,
+            profile_name,
             worker_started_at,
             endpoint,
             handler_child,
@@ -749,6 +762,9 @@ mod tests {
         )
     }
 
+    /// The profile name of the test snapshots.
+    const TEST_PROFILE_NAME: &str = "default";
+
     /// The claim columns of a worker of `isolated` isolated children with no
     /// claim limit.
     fn isolated_claim_columns(isolated: u32) -> ClaimColumns {
@@ -787,6 +803,7 @@ mod tests {
             Arc::clone(&health),
             isolated_children(1),
             isolated_claim_columns(1),
+            TEST_PROFILE_NAME.to_owned(),
             Utc::now(),
             WorkerEndpoint::NoMetricsEndpoint,
             HandlerChildView::off(),
@@ -1223,6 +1240,7 @@ mod tests {
             new_reaper_health(),
             isolated_children(2),
             isolated_claim_columns(2),
+            TEST_PROFILE_NAME.to_owned(),
             Utc::now(),
             WorkerEndpoint::NoMetricsEndpoint,
             HandlerChildView::off(),
@@ -1317,6 +1335,7 @@ mod tests {
             new_reaper_health(),
             children,
             isolated_claim_columns(isolated),
+            TEST_PROFILE_NAME.to_owned(),
             Utc::now(),
             WorkerEndpoint::NoMetricsEndpoint,
             HandlerChildView::off(),
@@ -1709,6 +1728,82 @@ mod tests {
         assert!(metrics.cpu_percent.is_some());
     }
 
+    /// Each snapshot stores the name of the profile that the worker runs,
+    /// and the worker state reads return it as `SnapshotProfile::Named`.
+    #[tokio::test]
+    async fn a_snapshot_records_the_profile_name_and_the_reads_return_it() {
+        use crate::broker::SnapshotProfile;
+        use crate::worker::recovery::new_reaper_health;
+        use std::time::Duration;
+
+        let pool = crate::test_support::migrated_pool().await;
+        let broker = Arc::new(crate::broker::PostgresBroker::from_test_url(
+            pool.url(),
+            crate::ClientFamily::Rust,
+        ));
+        let worker_id = uuid::Uuid::new_v4().to_string();
+        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        app_config.recovery.worker_state_snapshot_interval_ms = 60_000;
+        let cancel = CancellationToken::new();
+        let task = spawn_worker_state_loop(
+            Arc::clone(&broker),
+            worker_id.clone(),
+            "profile-name-test".to_owned(),
+            std::process::id() as i32,
+            WorkerConfig::default(),
+            app_config,
+            new_reaper_health(),
+            isolated_children(1),
+            isolated_claim_columns(1),
+            "batch-high-memory".to_owned(),
+            Utc::now(),
+            WorkerEndpoint::NoMetricsEndpoint,
+            HandlerChildView::off(),
+            WorkerTelemetry::Off,
+            cancel.clone(),
+        );
+        let stored = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let row: Option<Option<String>> = sql::query_scalar(
+                    "SELECT profile_name FROM horsies_worker_states WHERE worker_id = $1",
+                )
+                .bind(&worker_id)
+                .fetch_optional(&pool)
+                .await
+                .expect("read the snapshot");
+                if let Some(profile_name) = row {
+                    break profile_name;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        cancel.cancel();
+        task.await.expect("the snapshot loop joins");
+        let latest = broker.get_worker_state(&worker_id).await;
+        let history = broker.get_worker_state_history(&worker_id, None).await;
+        sql::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&pool)
+            .await
+            .expect("delete the snapshots");
+
+        let named = SnapshotProfile::Named {
+            name: "batch-high-memory".to_owned(),
+        };
+        assert_eq!(
+            stored.expect("the first snapshot lands"),
+            Some("batch-high-memory".to_owned())
+        );
+        let latest = latest
+            .expect("the worker state read answers")
+            .expect("the worker reported");
+        assert_eq!(latest.profile, named);
+        let history = history.expect("the history read answers");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].profile, named);
+    }
+
     /// The first snapshot is written at start, not after one interval
     /// (Python `_worker_state_heartbeat_loop`), so the fleet check sees a
     /// starting worker at once.
@@ -1736,6 +1831,7 @@ mod tests {
             new_reaper_health(),
             isolated_children(1),
             isolated_claim_columns(1),
+            TEST_PROFILE_NAME.to_owned(),
             Utc::now(),
             WorkerEndpoint::NoMetricsEndpoint,
             HandlerChildView::off(),

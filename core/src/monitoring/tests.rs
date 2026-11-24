@@ -706,6 +706,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
                     down_since: now,
                     failed_boots: 2,
                 }],
+                profile: SnapshotProfileInfo::NotRecorded,
             }),
             vec![
                 "worker_id",
@@ -727,6 +728,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 "cpu_percent",
                 "slot_health",
                 "down_slots",
+                "profile",
             ],
         ),
         (

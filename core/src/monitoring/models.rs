@@ -349,11 +349,25 @@ pub enum SlotHealthKind {
     SlotsDown,
 }
 
+/// The worker profile that a snapshot names, tagged by `kind`: `named` or
+/// `not_recorded` (Python `ProfileNamedInfo`, `ProfileNotRecordedInfo`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SnapshotProfileInfo {
+    /// The worker ran the profile `name` of `AppConfig.worker_profiles`.
+    Named { name: String },
+    /// The snapshot holds no profile name: a worker of a build before
+    /// schema migration 1004 wrote it.
+    NotRecorded,
+}
+
 /// Latest state snapshot for one worker (Python `WorkerStateInfo`,
-/// `clients/python/horsies/monitoring/models.py:321-351`).
+/// `clients/python/horsies/monitoring/models.py`).
 ///
 /// `down_slots` lists the down slots in slot order; it is empty unless
-/// `slot_health` is `slots_down`.
+/// `slot_health` is `slots_down`. `profile` names the worker profile that
+/// the worker ran.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkerStateInfo {
@@ -378,6 +392,7 @@ pub struct WorkerStateInfo {
     pub cpu_percent: Option<f64>,
     pub slot_health: SlotHealthKind,
     pub down_slots: Vec<DownSlotInfo>,
+    pub profile: SnapshotProfileInfo,
 }
 
 /// One claim budget of a live worker (Python `BudgetLoadInfo`,

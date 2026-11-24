@@ -22,7 +22,9 @@
 //!   start command fingerprint of each top-level workflow run, which a start
 //!   with an existing id compares. Version 1003 (`1003_attempt_cancelled.sql`)
 //!   adds the attempt outcome `CANCELLED`: the cancel of a RUNNING task
-//!   records its attempt and sends the cancel notice to its worker.
+//!   records its attempt and sends the cancel notice to its worker. Version
+//!   1004 (`1004_worker_profile_name.sql`) adds the name of the worker
+//!   profile to each worker snapshot.
 //!
 //! The released text of a migration never changes: a database that applied
 //! another text of it is refused ([`SchemaRefusal::MigrationEdited`]), so a
@@ -141,12 +143,16 @@ pub(crate) const START_COMMAND_FINGERPRINT_MIGRATION_VERSION: i64 = 1002;
 /// (`core/migrations/1003_attempt_cancelled.sql`).
 pub(crate) const ATTEMPT_CANCELLED_MIGRATION_VERSION: i64 = 1003;
 
+/// Version of the migration that adds the name of the worker profile to
+/// each worker snapshot (`core/migrations/1004_worker_profile_name.sql`).
+pub(crate) const WORKER_PROFILE_NAME_MIGRATION_VERSION: i64 = 1004;
+
 /// The files of `core/migrations/`, one per migration after the baseline,
 /// in apply order: the version of the migration, the file name and the text.
 /// The core includes them by relative path and keeps no copy. A file added to
 /// the folder without a line here fails
 /// `later_migration_list_is_the_whole_folder`.
-pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 3] = [
+pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 4] = [
     (
         LIFECYCLE_RECORD_MIGRATION_VERSION,
         "1001_lifecycle_record.sql",
@@ -161,6 +167,11 @@ pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 3] = [
         ATTEMPT_CANCELLED_MIGRATION_VERSION,
         "1003_attempt_cancelled.sql",
         include_str!("../../migrations/1003_attempt_cancelled.sql"),
+    ),
+    (
+        WORKER_PROFILE_NAME_MIGRATION_VERSION,
+        "1004_worker_profile_name.sql",
+        include_str!("../../migrations/1004_worker_profile_name.sql"),
     ),
 ];
 
@@ -236,7 +247,7 @@ struct MigrationSource {
 /// The embedded chain, in apply order: the baseline, then the migrations of
 /// [`LATER_MIGRATION_FILES`]. The Python client installs through the core,
 /// so both clients apply the same chain.
-const MIGRATION_SOURCES: [MigrationSource; 4] = [
+const MIGRATION_SOURCES: [MigrationSource; 5] = [
     MigrationSource {
         version: BASELINE_MIGRATION_VERSION,
         description: "baseline",
@@ -286,6 +297,21 @@ const MIGRATION_SOURCES: [MigrationSource; 4] = [
         script: SqlScript::new(
             "migration_1003_attempt_cancelled",
             LATER_MIGRATION_FILES[2].2,
+        ),
+        family_row: FamilyRow::NotWritten,
+        readers: ReaderPublication::NotPublished,
+        exact_indexes: &[],
+        retired_indexes: &[],
+    },
+    // The new column is nullable and the new constraint is a CHECK. The
+    // migration builds no index: the reads take a snapshot by its worker and
+    // its time.
+    MigrationSource {
+        version: LATER_MIGRATION_FILES[3].0,
+        description: "worker profile name",
+        script: SqlScript::new(
+            "migration_1004_worker_profile_name",
+            LATER_MIGRATION_FILES[3].2,
         ),
         family_row: FamilyRow::NotWritten,
         readers: ReaderPublication::NotPublished,

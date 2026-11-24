@@ -1093,11 +1093,13 @@ async fn worker_list_carries_the_slot_health() {
 }
 
 /// A listed state of a worker that started at `worker_started_at`, whose
-/// snapshot is at `snapshot_at`, read by a list statement at `read_at`.
+/// snapshot is at `snapshot_at` with the stored `profile_name`, read by a
+/// list statement at `read_at`.
 fn listed_worker(
     snapshot_at: chrono::DateTime<chrono::Utc>,
     worker_started_at: chrono::DateTime<chrono::Utc>,
     read_at: chrono::DateTime<chrono::Utc>,
+    profile_name: Option<String>,
 ) -> crate::broker::health::ListedWorkerState {
     let stored = crate::broker::health::StoredWorkerState {
         worker_id: "w-clock".to_owned(),
@@ -1121,6 +1123,7 @@ fn listed_worker(
         worker_started_at,
         slots_down: serde_json::json!([]),
         class_capacity: serde_json::json!({}),
+        profile_name,
     };
     crate::broker::health::ListedWorkerState {
         snapshot: stored.into_snapshot().expect("a readable stored row"),
@@ -1144,16 +1147,19 @@ fn worker_list_ages_are_measured_to_the_read_time() {
         snapshot_at,
         started_at,
         snapshot_at + chrono::TimeDelta::seconds(30),
+        Some("default".to_owned()),
     ));
     let at_threshold = super::routes::worker_state(listed_worker(
         snapshot_at,
         started_at,
         snapshot_at + chrono::TimeDelta::seconds(threshold),
+        Some("default".to_owned()),
     ));
     let past_threshold = super::routes::worker_state(listed_worker(
         snapshot_at,
         started_at,
         snapshot_at + chrono::TimeDelta::seconds(threshold + 1),
+        Some("default".to_owned()),
     ));
 
     assert_eq!(fresh.snapshot_age_s, Some(30));
@@ -1163,6 +1169,90 @@ fn worker_list_ages_are_measured_to_the_read_time() {
     assert!(!at_threshold.stale, "stale only past the live window");
     assert_eq!(past_threshold.snapshot_age_s, Some(threshold + 1));
     assert!(past_threshold.stale);
+}
+
+/// The `profile` of a worker state is an object tagged by `kind`: a stored
+/// profile name is `named` with the name, and a row with no name (written by
+/// a worker of a build before migration 1004) is `not_recorded`.
+#[test]
+fn the_profile_of_a_worker_state_is_tagged_by_kind() {
+    let at = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 11, 10, 12, 0, 0)
+        .single()
+        .expect("a valid instant");
+
+    let named = super::routes::worker_state(listed_worker(at, at, at, Some("batch".to_owned())));
+    let not_recorded = super::routes::worker_state(listed_worker(at, at, at, None));
+
+    assert_eq!(
+        serde_json::to_value(&named).expect("serialize the worker state")["profile"],
+        serde_json::json!({"kind": "named", "name": "batch"})
+    );
+    assert_eq!(
+        serde_json::to_value(&not_recorded).expect("serialize the worker state")["profile"],
+        serde_json::json!({"kind": "not_recorded"})
+    );
+}
+
+/// `GET /api/workers` returns the profile of the latest snapshot of each
+/// worker: the stored name, or `not_recorded` for a row with no name.
+#[tokio::test]
+async fn worker_list_carries_the_profile_of_each_worker() {
+    let state = migrated_state().await;
+    let pool = migrated_pool().await;
+    let named_id = format!("itest-{}", Uuid::new_v4().simple());
+    let unnamed_id = format!("itest-{}", Uuid::new_v4().simple());
+    for (worker_id, profile_name) in [(&named_id, Some("batch")), (&unnamed_id, None)] {
+        sql::query(
+            "INSERT INTO horsies_worker_states (
+                worker_id, snapshot_at, hostname, pid, processes,
+                max_claim_batch, max_claim_per_worker, queues,
+                queue_priorities, queue_max_concurrency, recovery_config,
+                tasks_running, tasks_claimed, worker_started_at,
+                slots_down, class_capacity, telemetry, profile_name
+            ) VALUES (
+                $1, now(), 'itest-host', 4242, 2, 0, 2,
+                ARRAY['default'], '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+                0, 0, now(),
+                '[]'::jsonb, '{}'::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off')),
+                $2
+            )",
+        )
+        .bind(worker_id)
+        .bind(profile_name)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let response = build_router(state)
+        .oneshot(request(Method::GET, "/api/workers"))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json(response).await;
+    sql::query("DELETE FROM horsies_worker_states WHERE worker_id = ANY($1)")
+        .bind(vec![named_id.clone(), unnamed_id.clone()])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    let listed = body.as_array().expect("the worker list is a JSON array");
+    let profile_of = |worker_id: &str| -> serde_json::Value {
+        let entry = listed
+            .iter()
+            .find(|entry| entry["worker_id"] == worker_id)
+            .unwrap_or_else(|| panic!("{worker_id} is listed"));
+        entry["profile"].clone()
+    };
+    assert_eq!(
+        profile_of(named_id.as_str()),
+        serde_json::json!({"kind": "named", "name": "batch"})
+    );
+    assert_eq!(
+        profile_of(unnamed_id.as_str()),
+        serde_json::json!({"kind": "not_recorded"})
+    );
 }
 
 /// A snapshot written ten minutes before the read in database time is stale,

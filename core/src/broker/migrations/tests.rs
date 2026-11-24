@@ -33,6 +33,10 @@ impl MigrationTestDatabase {
         self.database.client()
     }
 
+    fn url(&self) -> &str {
+        self.database.url()
+    }
+
     /// Runs the install for `own` with `lock` through a new core handle, and
     /// closes the handle.
     async fn install(
@@ -2448,16 +2452,15 @@ fn the_start_command_fingerprint_is_the_third_migration_of_the_chain() {
     );
 }
 
-/// Migration 1003 is the fourth link of the chain and the newest: it writes
-/// no family row, publishes no reader, declares no index step, and its
-/// checksum is SHA-384 of its file. Its text names no schema and holds no
-/// transaction control. The file list of the harnesses ends with this file.
+/// Migration 1003 is the fourth link of the chain: it writes no family row,
+/// publishes no reader, declares no index step, and its checksum is SHA-384
+/// of its file. Its text names no schema and holds no transaction control.
+/// The file list of the harnesses holds this file after the file of 1002.
 #[test]
-fn the_attempt_cancelled_is_the_fourth_migration_and_the_newest() {
+fn the_attempt_cancelled_is_the_fourth_migration_of_the_chain() {
     let chain = embedded_migrations();
     let (version, name, text) = LATER_MIGRATION_FILES[2];
     let migration = &chain[3];
-    assert_eq!(chain.len(), 4);
     assert_eq!(version, ATTEMPT_CANCELLED_MIGRATION_VERSION);
     assert_eq!(migration.version, 1003);
     assert_eq!(migration.description, "attempt cancelled");
@@ -2469,10 +2472,6 @@ fn the_attempt_cancelled_is_the_fourth_migration_and_the_newest() {
     assert_eq!(
         migration.checksum.as_slice(),
         Sha384::digest(text.as_bytes()).as_slice()
-    );
-    assert_eq!(
-        expected_schema_version(),
-        ATTEMPT_CANCELLED_MIGRATION_VERSION
     );
     assert!(
         !text.contains("public."),
@@ -2486,8 +2485,68 @@ fn the_attempt_cancelled_is_the_fourth_migration_and_the_newest() {
         );
     }
     let files = migration_sql_file_texts();
-    assert_eq!(files.len(), BASELINE_SQL_FILE_TEXTS.len() + 3);
+    assert_eq!(
+        files.get(BASELINE_SQL_FILE_TEXTS.len() + 2),
+        Some(&(version, name, text))
+    );
+}
+
+/// Migration 1004 is the fifth link of the chain and the newest: it writes
+/// no family row, publishes no reader, declares no index step, and its
+/// checksum is SHA-384 of its file. Its text names no schema and holds no
+/// transaction control. The file list of the harnesses ends with this file.
+#[test]
+fn the_worker_profile_name_is_the_fifth_migration_and_the_newest() {
+    let chain = embedded_migrations();
+    let (version, name, text) = LATER_MIGRATION_FILES[3];
+    let migration = &chain[4];
+    assert_eq!(chain.len(), 5);
+    assert_eq!(version, WORKER_PROFILE_NAME_MIGRATION_VERSION);
+    assert_eq!(migration.version, 1004);
+    assert_eq!(migration.description, "worker profile name");
+    assert_eq!(migration.family_row, FamilyRow::NotWritten);
+    assert_eq!(migration.readers, ReaderPublication::NotPublished);
+    assert!(migration.exact_indexes.is_empty());
+    assert!(migration.retired_indexes.is_empty());
+    assert_eq!(migration.script.sql(), text);
+    assert_eq!(
+        migration.checksum.as_slice(),
+        Sha384::digest(text.as_bytes()).as_slice()
+    );
+    assert_eq!(
+        expected_schema_version(),
+        WORKER_PROFILE_NAME_MIGRATION_VERSION
+    );
+    assert!(
+        !text.contains("public."),
+        "the migration names the public schema"
+    );
+    for line in text.lines() {
+        let statement = line.trim().to_uppercase();
+        assert!(
+            !["BEGIN;", "COMMIT;", "ROLLBACK;", "START TRANSACTION;"].contains(&statement.as_str()),
+            "the migration holds transaction control: {line}"
+        );
+    }
+    let files = migration_sql_file_texts();
+    assert_eq!(files.len(), BASELINE_SQL_FILE_TEXTS.len() + 4);
     assert_eq!(files.last(), Some(&(version, name, text)));
+}
+
+/// A build whose chain ends at migration 1003 meets a database that applied
+/// migration 1004: the classification refuses it as newer.
+#[test]
+fn a_chain_without_the_worker_profile_name_refuses_a_database_that_has_it() {
+    let chain = embedded_migrations();
+    let applied: Vec<AppliedMigration> = chain.iter().map(succeeded).collect();
+
+    assert_eq!(
+        classify(ledger(applied, RUST), &chain[..4]),
+        Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::SchemaNewer {
+            stored: 1004,
+            own: ATTEMPT_CANCELLED_MIGRATION_VERSION,
+        })),
+    );
 }
 
 /// A build whose chain ends at migration 1002 meets a database that applied
@@ -2495,7 +2554,7 @@ fn the_attempt_cancelled_is_the_fourth_migration_and_the_newest() {
 #[test]
 fn a_chain_without_the_attempt_cancelled_refuses_a_database_that_has_it() {
     let chain = embedded_migrations();
-    let applied: Vec<AppliedMigration> = chain.iter().map(succeeded).collect();
+    let applied: Vec<AppliedMigration> = chain[..4].iter().map(succeeded).collect();
 
     assert_eq!(
         classify(ledger(applied, RUST), &chain[..3]),
@@ -2833,7 +2892,7 @@ async fn a_1001_database_with_workflows_gets_the_start_command_columns_with_no_v
     database
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migrations 1002 and 1003 over the workflow rows");
+        .expect("apply migrations 1002, 1003 and 1004 over the workflow rows");
 
     let installed = bookkeeping_rows(&database).await;
     assert_eq!(installed, chain_rows(embedded_migrations().len()));
@@ -2877,10 +2936,10 @@ async fn a_1001_database_with_workflows_gets_the_start_command_columns_with_no_v
 }
 
 /// A fresh install, an upgrade from migration 1000 with live rows and
-/// workflow rows, an upgrade from migration 1001 with workflow rows, and an
-/// upgrade from migration 1002 with live rows end in the same schema: the
-/// same columns, constraints, indexes, sequences and functions, and the same
-/// bookkeeping.
+/// workflow rows, an upgrade from migration 1001 with workflow rows, an
+/// upgrade from migration 1002 with live rows, and an upgrade from migration
+/// 1003 with a worker snapshot end in the same schema: the same columns,
+/// constraints, indexes, sequences and functions, and the same bookkeeping.
 #[tokio::test]
 async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     let fresh = MigrationTestDatabase::create().await;
@@ -2895,7 +2954,7 @@ async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     upgraded
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migrations 1001, 1002 and 1003 over the live rows");
+        .expect("apply migrations 1001 to 1004 over the live rows");
     let from_1001 = MigrationTestDatabase::create().await;
     from_1001
         .install_first_migrations(ClientFamily::Rust, 2)
@@ -2904,7 +2963,7 @@ async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     from_1001
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migrations 1002 and 1003 over the workflow rows");
+        .expect("apply migrations 1002, 1003 and 1004 over the workflow rows");
     let from_1002 = MigrationTestDatabase::create().await;
     from_1002
         .install_first_migrations(ClientFamily::Rust, 3)
@@ -2913,20 +2972,32 @@ async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     from_1002
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migration 1003 over the live rows");
+        .expect("apply migrations 1003 and 1004 over the live rows");
+    let from_1003 = MigrationTestDatabase::create().await;
+    from_1003
+        .install_first_migrations(ClientFamily::Rust, 4)
+        .await;
+    from_1003.execute(WORKER_STATE_OF_A_1003_DATABASE).await;
+    from_1003
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migration 1004 over the worker snapshot");
 
     let fresh_shape = schema_shape(&fresh).await;
     assert_eq!(fresh_shape, schema_shape(&upgraded).await);
     assert_eq!(fresh_shape, schema_shape(&from_1001).await);
     assert_eq!(fresh_shape, schema_shape(&from_1002).await);
+    assert_eq!(fresh_shape, schema_shape(&from_1003).await);
     let fresh_rows = bookkeeping_rows(&fresh).await;
     assert_eq!(fresh_rows, bookkeeping_rows(&upgraded).await);
     assert_eq!(fresh_rows, bookkeeping_rows(&from_1001).await);
     assert_eq!(fresh_rows, bookkeeping_rows(&from_1002).await);
+    assert_eq!(fresh_rows, bookkeeping_rows(&from_1003).await);
     fresh.drop().await;
     upgraded.drop().await;
     from_1001.drop().await;
     from_1002.drop().await;
+    from_1003.drop().await;
 }
 
 /// A database at migration 1002 that holds live PENDING, CLAIMED and RUNNING
@@ -2946,7 +3017,7 @@ async fn a_1002_database_with_live_rows_gets_the_cancelled_attempt() {
     database
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("apply migration 1003 over the live rows");
+        .expect("apply migrations 1003 and 1004 over the live rows");
 
     let installed = bookkeeping_rows(&database).await;
     assert_eq!(installed, chain_rows(embedded_migrations().len()));
@@ -3011,6 +3082,163 @@ async fn a_1002_database_with_live_rows_gets_the_cancelled_attempt() {
                 .to_owned(),
         ]
     );
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install again");
+    assert_eq!(bookkeeping_rows(&database).await, installed);
+    database.drop().await;
+}
+
+/// A worker snapshot that a worker of a build before migration 1004 leaves,
+/// with every column of migration 1000 named: it names no profile.
+const WORKER_STATE_OF_A_1003_DATABASE: &str = r#"
+INSERT INTO horsies_worker_states (
+    worker_id, snapshot_at, hostname, pid, processes, max_claim_batch, max_claim_per_worker,
+    cluster_wide_cap, queues, queue_priorities, queue_max_concurrency, recovery_config,
+    tasks_running, tasks_claimed, memory_usage_mb, memory_percent, cpu_percent,
+    children_memory_mb, worker_started_at, slots_down, class_capacity, telemetry
+) VALUES (
+    'worker-1003', now(), 'host-1003', 4242, 2, 0, 2,
+    NULL, ARRAY['default'], '{}', '{}', '{}',
+    0, 0, NULL, NULL, NULL,
+    NULL, now(), '[]', '{}', jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
+);
+"#;
+
+/// The names that the profile name rule and the CHECK of migration 1004 are
+/// compared on: each arm of the rule (the first character, the other
+/// characters, the length), a trailing newline and a non-ASCII letter.
+fn profile_name_samples() -> Vec<String> {
+    use crate::core::config::worker_profile::PROFILE_NAME_MAX_LENGTH;
+
+    let mut samples: Vec<String> = [
+        "default",
+        "batch-high-memory",
+        "v1.2",
+        "_internal",
+        "9lives",
+        "A",
+        "",
+        "-flag",
+        ".hidden",
+        "has space",
+        "a/b",
+        "a\n",
+        "caf\u{e9}",
+    ]
+    .iter()
+    .map(|name| (*name).to_owned())
+    .collect();
+    samples.push("x".repeat(PROFILE_NAME_MAX_LENGTH));
+    samples.push("x".repeat(PROFILE_NAME_MAX_LENGTH + 1));
+    samples
+}
+
+/// A database at migration 1003 that holds a worker snapshot gets migration
+/// 1004 from the install:
+/// - `profile_name` is `character varying(64)`, nullable, with no default;
+/// - the old row keeps NULL (the migration writes no name) and the worker
+///   state read gives it as `SnapshotProfile::NotRecorded`;
+/// - the CHECK `horsies_worker_states_profile_name_shape` is validated and
+///   accepts exactly the names that the profile name rule accepts
+///   (`is_valid_profile_name`): a refused name fails with 23514, or with
+///   22001 above the column length;
+/// - an install again changes nothing.
+#[tokio::test]
+async fn a_1003_database_with_a_worker_snapshot_gets_the_profile_name_with_no_value() {
+    use crate::broker::{PostgresBroker, SnapshotProfile};
+    use crate::core::config::worker_profile::is_valid_profile_name;
+
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install_first_migrations(ClientFamily::Rust, 4)
+        .await;
+    database.execute(WORKER_STATE_OF_A_1003_DATABASE).await;
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migration 1004 over the worker snapshot");
+
+    let installed = bookkeeping_rows(&database).await;
+    assert_eq!(installed, chain_rows(embedded_migrations().len()));
+    let column = database
+        .client()
+        .query_one(
+            "SELECT format_type(atttypid, atttypmod), attnotnull, atthasdef FROM pg_attribute
+             WHERE attrelid = 'horsies_worker_states'::regclass
+               AND attname = 'profile_name' AND NOT attisdropped",
+            &[],
+        )
+        .await
+        .expect("read the new column");
+    let (column_type, not_null, has_default): (String, bool, bool) =
+        (column.get(0), column.get(1), column.get(2));
+    assert_eq!(column_type, "character varying(64)");
+    assert!(!not_null, "a row of an earlier build holds no name");
+    assert!(!has_default, "the migration sets no default");
+    let stored: Option<String> = database
+        .client()
+        .query_one(
+            "SELECT profile_name FROM horsies_worker_states WHERE worker_id = 'worker-1003'",
+            &[],
+        )
+        .await
+        .expect("read the old row")
+        .get(0);
+    assert_eq!(stored, None, "the migration writes no name");
+    let check = database
+        .client()
+        .query_one(
+            "SELECT convalidated, pg_get_constraintdef(oid) FROM pg_constraint
+             WHERE conrelid = 'horsies_worker_states'::regclass
+               AND conname = 'horsies_worker_states_profile_name_shape'",
+            &[],
+        )
+        .await
+        .expect("read the new check");
+    let (validated, definition): (bool, String) = (check.get(0), check.get(1));
+    assert!(validated);
+    assert!(
+        definition.contains("'^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$'"),
+        "{definition}"
+    );
+
+    let broker = PostgresBroker::from_test_url(database.url(), ClientFamily::Rust);
+    let read = broker.get_worker_state("worker-1003").await;
+    broker.close().await;
+    let snapshot = read
+        .expect("the worker state read answers")
+        .expect("the worker reported");
+    assert_eq!(snapshot.profile, SnapshotProfile::NotRecorded);
+
+    let refused_codes = [
+        SqlState::CHECK_VIOLATION,
+        SqlState::STRING_DATA_RIGHT_TRUNCATION,
+    ];
+    for name in profile_name_samples() {
+        let written = database
+            .client()
+            .execute(
+                "UPDATE horsies_worker_states SET profile_name = $1
+                 WHERE worker_id = 'worker-1003'",
+                &[&name],
+            )
+            .await;
+        let accepted = match written {
+            Ok(rows) => {
+                assert_eq!(rows, 1, "{name:?}");
+                true
+            }
+            Err(error) => match error.code() {
+                Some(code) if refused_codes.contains(code) => false,
+                _ => panic!("{name:?}: {error}"),
+            },
+        };
+        assert_eq!(accepted, is_valid_profile_name(&name), "{name:?}");
+    }
 
     database
         .install(ClientFamily::Rust, InstallLockPlan::fleet())

@@ -747,6 +747,17 @@
     },
     "pid": "integer",
     "processes": "integer",
+    "profile": {
+      "union": {
+        "tag": "kind",
+        "variants": {
+          "named": {
+            "name": "string"
+          },
+          "not_recorded": {}
+        }
+      }
+    },
     "queue_max_concurrency": {
       "map": "integer"
     },

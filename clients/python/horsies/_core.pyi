@@ -1635,6 +1635,18 @@ class ClassBudgetRecord:
 
 
 @final
+class ProfileNamedRecord:
+    """The worker ran the profile name of AppConfig.worker_profiles."""
+    @property
+    def name(self) -> str: ...
+
+
+@final
+class ProfileNotRecordedRecord:
+    """The snapshot holds no profile name: a worker of a build before schema migration 1004 wrote it."""
+
+
+@final
 class WorkerStateRecord:
     """One horsies_worker_states row. recovery_config_json is the JSON text of the stored object."""
     @property
@@ -1679,6 +1691,8 @@ class WorkerStateRecord:
     def slot_health(self) -> AllSlotsServingRecord | SlotsDownRecord: ...
     @property
     def class_capacity(self) -> list[ClassBudgetRecord]: ...
+    @property
+    def profile(self) -> ProfileNamedRecord | ProfileNotRecordedRecord: ...
 
 
 @final

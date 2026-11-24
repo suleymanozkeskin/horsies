@@ -562,7 +562,7 @@ WITH RECURSIVE latest AS (
             max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
             queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
             memory_usage_mb, memory_percent, cpu_percent, children_memory_mb,
-            worker_started_at, slots_down, class_capacity
+            worker_started_at, slots_down, class_capacity, profile_name
         FROM horsies_worker_states
         ORDER BY worker_id, snapshot_at DESC
         LIMIT 1
@@ -575,7 +575,7 @@ WITH RECURSIVE latest AS (
             w.max_claim_per_worker, w.cluster_wide_cap, w.queues, w.queue_priorities,
             w.queue_max_concurrency, w.recovery_config, w.tasks_running, w.tasks_claimed,
             w.memory_usage_mb, w.memory_percent, w.cpu_percent, w.children_memory_mb,
-            w.worker_started_at, w.slots_down, w.class_capacity
+            w.worker_started_at, w.slots_down, w.class_capacity, w.profile_name
         FROM horsies_worker_states w
         WHERE w.worker_id > l.worker_id
         ORDER BY w.worker_id, w.snapshot_at DESC
@@ -591,7 +591,7 @@ SELECT
     max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
     queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
     memory_usage_mb, memory_percent, cpu_percent, children_memory_mb,
-    worker_started_at, slots_down, class_capacity
+    worker_started_at, slots_down, class_capacity, profile_name
 FROM horsies_worker_states
 WHERE worker_id = $1
 ORDER BY snapshot_at DESC
@@ -605,7 +605,7 @@ SELECT
     max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
     queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
     memory_usage_mb, memory_percent, cpu_percent, children_memory_mb,
-    worker_started_at, slots_down, class_capacity
+    worker_started_at, slots_down, class_capacity, profile_name
 FROM horsies_worker_states
 WHERE worker_id = $1
 ORDER BY snapshot_at DESC
