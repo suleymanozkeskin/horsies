@@ -27,6 +27,40 @@ import {
 import type { ActionKind } from '@/types/actions';
 import type { TaskDetail } from '@/types/tasks';
 
+/**
+ * Where an action bar renders. `panel`: in a detail panel on the window, as
+ * outline buttons. `toolbar`: inside a toolbar `Capsule`, as capsule buttons.
+ */
+type ActionPlacement = 'panel' | 'toolbar';
+
+interface ActionButtonLook {
+  variant: 'destructive' | 'outline' | 'capsule';
+  size: 'sm' | 'capsule';
+  className: string;
+}
+
+/** The button variant for a placement. A destructive action keeps its fill
+ * in both placements. */
+function actionButtonLook(
+  placement: ActionPlacement,
+  destructive: boolean
+): ActionButtonLook {
+  switch (placement) {
+    case 'panel':
+      return {
+        variant: destructive ? 'destructive' : 'outline',
+        size: 'sm',
+        className: 'h-8',
+      };
+    case 'toolbar':
+      return {
+        variant: destructive ? 'destructive' : 'capsule',
+        size: 'capsule',
+        className: '',
+      };
+  }
+}
+
 interface ActionButtonProps {
   action: ActionKind;
   label: string;
@@ -35,6 +69,7 @@ interface ActionButtonProps {
   /** True while ANY action for this entity is in flight. */
   busy: boolean;
   destructive?: boolean;
+  placement: ActionPlacement;
   onSelect: (action: ActionKind) => void;
 }
 
@@ -45,17 +80,19 @@ function ActionButton({
   availability,
   busy,
   destructive = false,
+  placement,
   onSelect,
 }: ActionButtonProps) {
   if (!availability.shown) {
     return null;
   }
   const disabled = busy || !availability.enabled;
+  const look = actionButtonLook(placement, destructive);
   const button = (
     <Button
-      variant={destructive ? 'destructive' : 'outline'}
-      size="sm"
-      className="h-8"
+      variant={look.variant}
+      size={look.size}
+      className={look.className}
       disabled={disabled}
       onClick={() => onSelect(action)}
     >
@@ -150,6 +187,7 @@ export function TaskActionBar({ view }: { view: TaskActionsView }) {
         availability={cancel}
         busy={controls.busy}
         destructive
+        placement="panel"
         onSelect={controls.begin}
       />
       {copy !== null && availability !== null && (
@@ -196,13 +234,14 @@ export function WorkflowActionBar({ view }: { view: WorkflowActionsView }) {
       : null;
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <div className="flex items-center gap-0.5">
       <ActionButton
         action="workflow-pause"
         label="Pause"
         icon={Pause}
         availability={availability['workflow-pause']}
         busy={controls.busy}
+        placement="toolbar"
         onSelect={controls.begin}
       />
       <ActionButton
@@ -211,6 +250,7 @@ export function WorkflowActionBar({ view }: { view: WorkflowActionsView }) {
         icon={Play}
         availability={availability['workflow-resume']}
         busy={controls.busy}
+        placement="toolbar"
         onSelect={controls.begin}
       />
       <ActionButton
@@ -220,6 +260,7 @@ export function WorkflowActionBar({ view }: { view: WorkflowActionsView }) {
         availability={availability['workflow-cancel']}
         busy={controls.busy}
         destructive
+        placement="toolbar"
         onSelect={controls.begin}
       />
       {copy !== null && pendingAvailability !== null && (

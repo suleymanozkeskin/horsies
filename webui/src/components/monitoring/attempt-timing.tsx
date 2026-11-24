@@ -246,9 +246,9 @@ function StoryBody({ items, base }: { items: readonly StoryItem[]; base: StoryBa
   return (
     <>
       {recordedCount > 1 && <StorySummary items={items} base={base} />}
-      <ol className="flex flex-col gap-1.5">
+      <ol className="flex flex-col divide-y divide-hairline">
         {items.map((item, index) => (
-          <li key={index}>
+          <li key={index} className="py-2">
             <StoryEntry item={item} base={base} />
           </li>
         ))}
@@ -271,7 +271,7 @@ function StorySummary({ items, base }: { items: readonly StoryItem[]; base: Stor
         `${formatMilliseconds(totals.spanMs)} in all · running ${formatMilliseconds(runningMs)} · ` +
         `retry wait ${formatMilliseconds(retryMs)}`;
       return (
-        <div className="flex flex-col gap-1 rounded-md border border-border p-2">
+        <div className="flex flex-col gap-1">
           <span className="text-xs" title="From the first due time to the last record">
             {text}
           </span>
@@ -300,7 +300,7 @@ function StoryEntry({ item, base }: { item: StoryItem; base: StoryBase }) {
 /** The retry delay between two attempts: a striped gap with its time. */
 function RetryGap({ startMs, endMs, base }: { startMs: number; endMs: number; base: StoryBase }) {
   return (
-    <div className="flex items-center gap-2 py-0.5 pl-3 text-xs" data-story="retry_wait">
+    <div className="flex items-center gap-2 pl-3 text-xs" data-story="retry_wait">
       <span
         className="h-4 w-1.5 shrink-0 rounded-sm"
         style={{ background: phaseFill('retry_wait') }}
@@ -317,7 +317,7 @@ function RetryGap({ startMs, endMs, base }: { startMs: number; endMs: number; ba
 
 function OutcomeChip({ outcome }: { outcome: string }) {
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-border px-2 py-0.5 text-xs font-medium">
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-hairline-strong px-2 py-0.5 text-xs font-medium">
       <span className="size-2 rounded-full" style={{ background: statusColorVar(outcome) }} aria-hidden />
       {statusLabel(outcome)}
     </span>
@@ -327,13 +327,8 @@ function OutcomeChip({ outcome }: { outcome: string }) {
 /** One recorded attempt: the answer first (outcome, error code, run time,
  * when), then where its time went. */
 function AttemptBlock({ attempt, base }: { attempt: RecordedAttempt; base: StoryBase }) {
-  const color = statusColorVar(attempt.outcome);
   return (
-    <article
-      aria-label={`Attempt ${attempt.number}`}
-      className="flex flex-col gap-2 rounded-md border border-border p-2.5"
-      style={{ background: `color-mix(in oklab, ${color} 5%, var(--card))` }}
-    >
+    <article aria-label={`Attempt ${attempt.number}`} className="flex flex-col gap-2">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <span className="text-xs font-semibold">Attempt {attempt.number}</span>
         <OutcomeChip outcome={attempt.outcome} />
@@ -348,7 +343,7 @@ function AttemptBlock({ attempt, base }: { attempt: RecordedAttempt; base: Story
         <NoteLine key={index} view={attemptNoteView(note, base)} />
       ))}
       {attempt.message !== null && (
-        <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-glass-field p-2 font-mono text-11 leading-snug text-foreground">
+        <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-glass-inset p-2 font-mono text-11 leading-snug text-foreground">
           {attempt.message}
         </pre>
       )}
@@ -495,10 +490,7 @@ export function liveText(live: LiveAttempt, nowMs: number, base: StoryBase): str
 function LiveBlock({ attempt, base }: { attempt: LiveAttempt; base: StoryBase }) {
   const nowMs = useNow(LIVE_TICK_MS);
   return (
-    <article
-      aria-label={`Attempt ${attempt.number} in progress`}
-      className="flex flex-col gap-1 rounded-md border border-dashed border-border p-2.5"
-    >
+    <article aria-label={`Attempt ${attempt.number} in progress`} className="flex flex-col gap-1">
       <span className="text-xs font-semibold">Attempt {attempt.number} · in progress</span>
       <span className="text-xs text-muted-foreground">{liveText(attempt, nowMs, base)}</span>
     </article>

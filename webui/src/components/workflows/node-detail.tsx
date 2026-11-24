@@ -19,7 +19,7 @@ interface NodeDetailContentProps {
 
 /** Detail body for one node: status and task, the one node timing summary,
  * the node error, and the attempts. Chrome-less — the surrounding panel owns
- * the header/close/resize. */
+ * the header/close/resize and the inline padding. */
 export function NodeDetailContent({
   workflowId,
   runStatus,
@@ -35,7 +35,7 @@ export function NodeDetailContent({
   const residual = residualState(runStatus, node.node_status, leaf?.status ?? null);
 
   return (
-    <div className="flex flex-col gap-4 p-4">
+    <div className="flex flex-col gap-4 py-4">
       <div className="flex flex-col gap-1.5">
         <span className="inline-flex flex-wrap items-center gap-2">
           <StatusChip status={node.node_status} />
@@ -82,7 +82,7 @@ export function NodeDetailContent({
           <span className="text-xs uppercase tracking-wide text-muted-foreground">
             Node error
           </span>
-          <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-glass-field p-2 font-mono text-11 leading-snug">
+          <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-glass-inset p-2 font-mono text-11 leading-snug">
             {nodeError}
           </pre>
         </div>

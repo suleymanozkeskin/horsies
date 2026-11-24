@@ -108,7 +108,7 @@ function Row({
   return (
     <TableRow
       className={cn(
-        isTotal && 'border-t-2 font-medium',
+        isTotal && 'border-t-2 border-hairline-strong font-medium',
         onClick !== undefined && 'cursor-pointer'
       )}
       onClick={onClick}
@@ -144,33 +144,27 @@ export function TaskBreakdown({
 }) {
   if (isLoading && !breakdown) {
     return (
-      <p className="glass rounded-xl border border-border p-4 text-sm text-muted-foreground">
-        Loading breakdown…
-      </p>
+      <p className="p-4 text-sm text-muted-foreground">Loading breakdown…</p>
     );
   }
   if (!breakdown || breakdown.groups.length === 0) {
-    return (
-      <p className="glass rounded-xl border border-border p-4 text-sm text-muted-foreground">
-        No tasks found.
-      </p>
-    );
+    return <p className="p-4 text-sm text-muted-foreground">No tasks found.</p>;
   }
 
   const heading = GROUP_HEADING[breakdown.group_by];
   const truncated = breakdown.group_count > breakdown.groups.length;
 
   return (
-    <div className="glass overflow-hidden rounded-xl border border-border">
+    <div>
       {truncated && (
-        <div className="border-b border-border px-3 py-2 text-xs text-muted-foreground">
+        <div className="px-4 pb-2 text-xs text-muted-foreground">
           Showing top {breakdown.groups.length} of {breakdown.group_count} groups
           by task count.
         </div>
       )}
       <Table>
         <TableHeader>
-          <TableRow>
+          <TableRow className="hover:bg-transparent">
             <TableHead>{heading}</TableHead>
             <TableHead className="text-right">total</TableHead>
             {STATUS_COLS.map(col => (

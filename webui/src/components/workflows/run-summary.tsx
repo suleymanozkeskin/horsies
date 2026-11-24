@@ -224,7 +224,7 @@ export function RunTimingSummaryView({
   switch (timing.kind) {
     case 'unavailable':
       return (
-        <section aria-label="Run summary" className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b border-border px-3 py-2">
+        <section aria-label="Run summary" className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b border-hairline pb-3">
           <span className="text-xs text-muted-foreground">
             Timing unavailable. {unavailableReasonText(timing.reason)}
           </span>
@@ -237,7 +237,7 @@ export function RunTimingSummaryView({
       const shares = runPhaseTotals(detail.nodes, drawAtMs);
       const path = criticalPath(detail.nodes, detail.edges, drawAtMs);
       return (
-        <section aria-label="Run summary" className="flex flex-col gap-1.5 border-b border-border px-3 py-2">
+        <section aria-label="Run summary" className="flex flex-col gap-1.5 border-b border-hairline pb-3">
           <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
             <Stat
               label="wall"

@@ -133,15 +133,17 @@ function WorkflowNodeCardImpl({ data, selected }: NodeProps<WorkflowFlowNode>) {
   const residual = data.residual === null ? null : RESIDUAL_COPY[data.residual];
   const rollup = childRollupBadge(data.childTotal, data.childFailed);
 
+  // The surface draws the edge of a plain card. A border shows only for the
+  // selection ring and for the dashed edge of a tolerant join.
   return (
     <div
-      className="relative flex flex-col justify-center gap-0.5 overflow-hidden rounded-xl border bg-card px-3 py-1.5 text-card-foreground shadow-xs transition-colors"
+      className="content-surface relative flex flex-col justify-center gap-0.5 overflow-hidden rounded-xl px-3 py-1.5 text-card-foreground transition-colors"
       title={data.drillable ? 'Double-click to open subworkflow' : undefined}
       style={{
         width: NODE_W,
         height: NODE_H,
         borderColor: selected ? 'var(--ring)' : 'var(--border)',
-        borderWidth: selected ? 2 : 1,
+        borderWidth: selected ? 2 : data.allowFailedDeps ? 1 : 0,
         borderStyle: data.allowFailedDeps ? 'dashed' : 'solid',
         background: `color-mix(in oklab, ${color} 8%, var(--card))`,
         cursor: data.drillable ? 'pointer' : 'default',

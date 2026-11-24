@@ -69,9 +69,9 @@ export function ClassCoveragePanel({
   return (
     <div className="flex flex-col gap-3">
       {report !== undefined && <FleetWarnings report={report} />}
-      <div className="glass overflow-hidden rounded-xl border border-border">
-        <div className="flex items-baseline justify-between border-b border-border px-4 py-3">
-          <span className="text-sm font-medium">Pending by execution class</span>
+      <div className="flex flex-col">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 pb-1">
+          <span className="text-sm font-semibold">Pending by execution class</span>
           {report !== undefined && (
             <span className="text-11 text-muted-foreground">
               live window {report.live_window_s}s · checked{' '}
@@ -82,7 +82,7 @@ export function ClassCoveragePanel({
         {/* A failed poll never blanks the table: the last report stays
             visible below the error so the operator is not left blind. */}
         {isError && (
-          <div className="p-4">
+          <div className="py-2">
             <ErrorState
               compact
               message="Could not load the execution class report."
@@ -92,12 +92,12 @@ export function ClassCoveragePanel({
         )}
         {report === undefined ? (
           isError ? null : (
-            <p className="p-4 text-sm text-muted-foreground">
+            <p className="py-2 text-sm text-muted-foreground">
               {isLoading ? 'Loading execution classes…' : 'No report yet.'}
             </p>
           )
         ) : report.streams.length === 0 ? (
-          <p className="p-4 text-sm text-muted-foreground">No pending rows.</p>
+          <p className="py-2 text-sm text-muted-foreground">No pending rows.</p>
         ) : (
           <Table>
             <TableHeader>
@@ -151,7 +151,7 @@ export function BudgetChips({ budgets }: { budgets: BudgetLoad[] }) {
       {budgets.map(budget => (
         <span
           key={budget.budget}
-          className="rounded bg-muted px-1.5 py-0.5 font-mono text-10 text-muted-foreground"
+          className="rounded bg-glass-inset px-1.5 py-0.5 font-mono text-10 text-muted-foreground"
           title={`serves ${budget.serves.join(', ')} · ${budget.in_flight} in flight`}
         >
           {budget.budget} {budgetFreeText(budget)}

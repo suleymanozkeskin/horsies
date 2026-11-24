@@ -47,8 +47,8 @@ export function RunList({ selectedRunId, onSelect }: RunListProps) {
   );
 
   return (
-    <div className="flex h-full flex-col border-r border-border">
-      <div className="flex flex-col gap-3 border-b border-border p-3">
+    <div className="flex h-full flex-col border-r border-hairline">
+      <div className="flex flex-col gap-3 border-b border-hairline pr-4 pb-3">
         <SelectCombobox
           id="workflow-name-filter"
           label="Workflow"
@@ -69,25 +69,27 @@ export function RunList({ selectedRunId, onSelect }: RunListProps) {
         />
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto pt-2 pr-4">
         {isError && runs.length === 0 ? (
-          <div className="p-3">
+          <div className="py-1">
             <ErrorState compact message="Could not load runs." />
           </div>
         ) : isLoading && runs.length === 0 ? (
-          <p className="p-4 text-sm text-muted-foreground">Loading runs…</p>
+          <p className="px-3 py-2 text-sm text-muted-foreground">Loading runs…</p>
         ) : runs.length === 0 ? (
-          <p className="p-4 text-sm text-muted-foreground">No runs found.</p>
+          <p className="px-3 py-2 text-sm text-muted-foreground">No runs found.</p>
         ) : (
-          <ul>
+          <ul className="flex flex-col gap-0.5 pb-2">
             {runs.map(run => (
               <li key={run.id}>
                 <button
                   type="button"
                   onClick={() => onSelect(run)}
                   className={cn(
-                    'flex w-full flex-col gap-1.5 border-b border-border px-3 py-2.5 text-left transition-colors hover:bg-glass-surface-strong',
-                    run.id === selectedRunId && 'bg-accent-surface'
+                    'flex w-full flex-col gap-1.5 rounded-lg px-3 py-2.5 text-left transition-colors',
+                    run.id === selectedRunId
+                      ? 'bg-accent-surface'
+                      : 'hover:bg-surface-hover'
                   )}
                 >
                   <span className="truncate text-sm font-medium" title={run.name}>

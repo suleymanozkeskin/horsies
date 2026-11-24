@@ -1,4 +1,4 @@
-import { useMemo, type ReactNode } from 'react';
+import { useMemo, type CSSProperties, type ReactNode } from 'react';
 
 import {
   Area,
@@ -17,10 +17,22 @@ import { useWorkerHistory } from '@/hooks/use-workers';
 
 const axisStyle = { fontSize: 10, fill: 'var(--muted-foreground)' };
 
-const tooltipStyle = {
-  background: 'var(--card)',
-  border: '1px solid var(--border)',
-  borderRadius: 8,
+/** Axis line, tick marks and the hover cursor line; recharts draws them in a
+ * literal grey otherwise. */
+const AXIS_STROKE = 'var(--hairline-strong)';
+
+const cursorStyle = { stroke: AXIS_STROKE };
+
+const GRID_STROKE = 'var(--hairline)';
+
+/** `glass-menu` paints the tooltip surface. Recharts sets a literal white fill
+ * and grey border inline on its default tooltip, which would cover the
+ * utility, so both are cleared here. */
+const TOOLTIP_CLASS = 'glass-menu rounded-lg text-popover-foreground';
+
+const tooltipStyle: CSSProperties = {
+  backgroundColor: undefined,
+  border: 'none',
   fontSize: 12,
 };
 
@@ -95,10 +107,19 @@ export function WorkerHistoryChart({ workerId }: { workerId: string }) {
               data={points}
               margin={{ top: 8, right: 8, bottom: 0, left: -20 }}
             >
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-              <XAxis dataKey="t" tick={axisStyle} minTickGap={32} />
-              <YAxis allowDecimals={false} tick={axisStyle} />
-              <Tooltip contentStyle={tooltipStyle} />
+              <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} />
+              <XAxis
+                dataKey="t"
+                tick={axisStyle}
+                stroke={AXIS_STROKE}
+                minTickGap={32}
+              />
+              <YAxis allowDecimals={false} tick={axisStyle} stroke={AXIS_STROKE} />
+              <Tooltip
+                wrapperClassName={TOOLTIP_CLASS}
+                contentStyle={tooltipStyle}
+                cursor={cursorStyle}
+              />
               <Legend wrapperStyle={{ fontSize: 11 }} />
               <Area
                 type="monotone"
@@ -129,10 +150,19 @@ export function WorkerHistoryChart({ workerId }: { workerId: string }) {
               data={points}
               margin={{ top: 8, right: 8, bottom: 0, left: -20 }}
             >
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-              <XAxis dataKey="t" tick={axisStyle} minTickGap={32} />
-              <YAxis domain={[0, 100]} tick={axisStyle} />
-              <Tooltip contentStyle={tooltipStyle} />
+              <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} />
+              <XAxis
+                dataKey="t"
+                tick={axisStyle}
+                stroke={AXIS_STROKE}
+                minTickGap={32}
+              />
+              <YAxis domain={[0, 100]} tick={axisStyle} stroke={AXIS_STROKE} />
+              <Tooltip
+                wrapperClassName={TOOLTIP_CLASS}
+                contentStyle={tooltipStyle}
+                cursor={cursorStyle}
+              />
               <Legend wrapperStyle={{ fontSize: 11 }} />
               <Line
                 type="monotone"

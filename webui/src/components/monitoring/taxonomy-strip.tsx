@@ -34,6 +34,8 @@ interface TaxonomyStripProps {
  * Error-code counts rolled up by taxonomy family, each chip a filter toggle.
  * Counts every task carrying an error code (including completed tasks that
  * returned a domain error), so it is deliberately NOT labelled "failures".
+ * A chip rests on the `--glass-inset` fill, so its hover steps up to the
+ * stronger `--hairline` ink: `--surface-hover` is lighter than the fill.
  */
 export function TaxonomyStrip({
   totals,
@@ -46,9 +48,9 @@ export function TaxonomyStrip({
   }
   const engaged = new Set(active);
   return (
-    <div className="glass flex flex-wrap items-center gap-2 rounded-lg border border-border px-3 py-2">
+    <div className="flex flex-wrap items-center gap-1.5">
       <span
-        className="mr-2 text-xs font-medium uppercase tracking-wide text-foreground"
+        className="mr-1.5 text-xs font-semibold text-muted-foreground"
         title="Tasks carrying an error code, grouped by family. Includes domain errors returned by completed tasks, so this is not the same as the failed count."
       >
         Error codes by category
@@ -62,10 +64,10 @@ export function TaxonomyStrip({
             aria-pressed={isActive}
             onClick={() => onToggle(category)}
             className={cn(
-              'flex items-center gap-1.5 rounded-md border px-2 py-1 transition-colors',
+              'flex h-6.5 items-center gap-1.5 rounded-full px-2.5 transition-colors',
               isActive
-                ? 'border-primary ring-1 ring-primary'
-                : 'border-border hover:bg-muted'
+                ? 'bg-accent-surface ring-1 ring-primary'
+                : 'bg-glass-inset hover:bg-hairline'
             )}
           >
             <CategoryTag category={category} />
