@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use super::super::in_process::run_isolated_in_process_scoped;
 use super::super::run::{run_blocking_body, RunFacts};
-use super::super::run_work::RunScope;
+use super::super::run_work::{CancelCause, RunCancelSignal, RunScope};
 use super::super::seats::isolated_body;
 use super::super::start_tests::{remove_task, seed_claimed, WORKER_ID};
 use super::*;
@@ -106,6 +106,7 @@ enum ClosedEnd {
     Returned,
     Failed(TaskErrorCode),
     TimedOut,
+    Cancelled,
 }
 
 /// One call of a client scope.
@@ -173,6 +174,7 @@ impl BodySpans for RecordingSpans {
             BodyOutcome::Returned => ClosedEnd::Returned,
             BodyOutcome::Failed { error_code } => ClosedEnd::Failed((*error_code).clone()),
             BodyOutcome::TimedOut => ClosedEnd::TimedOut,
+            BodyOutcome::Cancelled => ClosedEnd::Cancelled,
         };
         self.keep(ScopeCall::Closed {
             span: span_number(span),
@@ -405,20 +407,38 @@ async fn isolated_run_of(
     make_task: fn(&SeenInside, fn() -> RawTaskResult) -> RegisteredTask,
     result: fn() -> RawTaskResult,
 ) -> (RawTaskResult, Vec<ScopeCall>, Vec<Option<u64>>) {
+    isolated_run_with(CancelBeforeBody::NoCancel, make_task, result).await
+}
+
+/// Whether the run of [`isolated_run_with`] has an operator cancel before
+/// its body starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancelBeforeBody {
+    NoCancel,
+    OperatorCancel,
+}
+
+/// [`isolated_run_of`], with an operator cancel fired on the run before the
+/// body starts when `cancel` says so.
+async fn isolated_run_with(
+    cancel: CancelBeforeBody,
+    make_task: fn(&SeenInside, fn() -> RawTaskResult) -> RegisteredTask,
+    result: fn() -> RawTaskResult,
+) -> (RawTaskResult, Vec<ScopeCall>, Vec<Option<u64>>) {
     let spans = Arc::new(RecordingSpans::new());
     let scope = BodyScope::Spans(Arc::clone(&spans) as Arc<dyn BodySpans>);
     let seen_inside: SeenInside = Arc::new(Mutex::new(Vec::new()));
     let facts = facts(Uuid::new_v4());
     let open = scope.open(&facts, Execution::Isolated, source(&RunTrace::NoCarrier));
     let task = make_task(&seen_inside, result);
-    let result = isolated_body(
-        &RunScope::new(facts.fencing_token()),
-        &facts.task_name,
-        task,
-        b"{}".to_vec(),
-        open,
-    )
-    .await;
+    let run_scope = RunScope::new(facts.fencing_token());
+    match cancel {
+        CancelBeforeBody::NoCancel => {}
+        CancelBeforeBody::OperatorCancel => {
+            let _fired = run_scope.fire_cancel(CancelCause::Operator);
+        }
+    }
+    let result = isolated_body(&run_scope, &facts.task_name, task, b"{}".to_vec(), open).await;
     (result, spans.calls(), seen(&seen_inside))
 }
 
@@ -498,6 +518,24 @@ async fn a_panicking_body_closes_its_scope_with_unhandled_exception() {
     }
 }
 
+/// A body whose task an operator cancelled closes its scope as cancelled,
+/// whatever it returned: the task is `CANCELLED`.
+#[tokio::test]
+async fn a_cancelled_body_closes_its_scope_as_cancelled() {
+    for make_task in [async_task, blocking_task] {
+        let (_result, calls, _seen) =
+            isolated_run_with(CancelBeforeBody::OperatorCancel, make_task, returns_one).await;
+        let span = opened_span(&calls);
+        assert_eq!(
+            calls.last(),
+            Some(&ScopeCall::Closed {
+                span,
+                end: ClosedEnd::Cancelled
+            })
+        );
+    }
+}
+
 /// The body of a thread seat runs inside the span on the calling thread,
 /// and leaves it when it returns.
 #[test]
@@ -527,6 +565,7 @@ fn a_thread_seat_body_runs_inside_the_span_on_the_seat_thread() {
         TaskModule::default(),
         &span,
         FencingToken::new(task_id, AttemptNumber::SMALLEST),
+        RunCancelSignal::new(),
     );
     assert!(matches!(result, TaskResult::Ok(_)));
     assert_eq!(seen(&seen_inside), vec![Some(span_number(&span))]);

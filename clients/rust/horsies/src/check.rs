@@ -349,8 +349,9 @@ fn retry_code_refusals(name: &str, options: &TaskOptions) -> Vec<HorsiesError> {
 }
 
 /// The refusal of a class without its settings: a shared class needs
-/// `timeout_ms`; only `SHARED_ASYNC` carries `cancel_grace_ms`, and it
-/// must. Pure.
+/// `timeout_ms`; `SHARED_ASYNC` carries `cancel_grace_ms`, and it must; an
+/// `ISOLATED` task may carry one (the kill after an operator cancel);
+/// `SHARED_THREAD` carries none, since a thread cannot be stopped. Pure.
 fn class_refusal(name: &str, options: &TaskOptions) -> Option<HorsiesError> {
     let class = options.execution.as_str();
     match (
@@ -368,13 +369,16 @@ fn class_refusal(name: &str, options: &TaskOptions) -> Option<HorsiesError> {
             format!("a {class} task needs cancel_grace_ms"),
             "set cancel_grace_ms, 100 to 10,000 ms (the task attribute sets 1,000)",
         )),
-        (Execution::Isolated | Execution::SharedThread, _, Some(_)) => Some(option_error(
+        (Execution::SharedThread, Some(_), Some(_)) => Some(option_error(
             name,
-            format!("cancel_grace_ms is for SHARED_ASYNC tasks; this task is {class}"),
-            "remove cancel_grace_ms, or run the task as SHARED_ASYNC",
+            format!(
+                "cancel_grace_ms is for SHARED_ASYNC and ISOLATED tasks; this task is {class}, \
+                 whose thread cannot be stopped"
+            ),
+            "remove cancel_grace_ms, or run the task as SHARED_ASYNC or ISOLATED",
         )),
         (Execution::SharedAsync, Some(_), Some(_))
-        | (Execution::Isolated, _, None)
+        | (Execution::Isolated, _, _)
         | (Execution::SharedThread, Some(_), None) => None,
     }
 }
@@ -555,10 +559,10 @@ mod tests {
                 "needs cancel_grace_ms",
             ),
             (
-                Execution::Isolated,
-                None,
+                Execution::SharedThread,
+                Some(1_000),
                 Some(CancelGraceMs::DEFAULT),
-                "is for SHARED_ASYNC tasks",
+                "is for SHARED_ASYNC and ISOLATED tasks",
             ),
         ];
         for (execution, timeout_ms, cancel_grace_ms, expected) in cases {
@@ -571,6 +575,24 @@ mod tests {
             let texts = refusal_texts("echo", &refused);
             assert_eq!(texts.len(), 1, "{execution:?}");
             assert!(texts[0].contains(expected), "{}", texts[0]);
+        }
+    }
+
+    /// An `ISOLATED` task takes a cancel grace (the kill after an operator
+    /// cancel), or none.
+    #[test]
+    fn an_isolated_task_takes_a_cancel_grace_or_none() {
+        for cancel_grace_ms in [Some(CancelGraceMs::DEFAULT), None] {
+            let accepted = TaskOptions {
+                execution: Execution::Isolated,
+                timeout_ms: None,
+                cancel_grace_ms,
+                ..options("echo")
+            };
+            assert!(
+                refusal_texts("echo", &accepted).is_empty(),
+                "{cancel_grace_ms:?}"
+            );
         }
     }
 
