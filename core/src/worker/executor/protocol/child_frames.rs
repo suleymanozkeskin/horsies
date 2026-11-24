@@ -118,6 +118,33 @@ impl From<BodyEnd> for RunEnd {
     }
 }
 
+/// Whether the body of a run that an operator cancelled ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelledBody {
+    /// The body ran and has ended; what it returned is dropped.
+    Ran,
+    /// The cancel came after the start write and before the body started:
+    /// the child did not start the body.
+    NotStarted,
+}
+
+impl CancelledBody {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ran => "ran",
+            Self::NotStarted => "not_started",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "ran" => Some(Self::Ran),
+            "not_started" => Some(Self::NotStarted),
+            _ => None,
+        }
+    }
+}
+
 /// How a run of a shared child ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeatEnd {
@@ -126,6 +153,11 @@ pub enum SeatEnd {
     /// The deadline fired and the task has ended; what it returned is
     /// dropped.
     TimedOut,
+    /// An operator cancel reached the run before it ended, and the run has
+    /// ended; what the body returned is dropped. The child sent
+    /// `cancel_fired` for the run first. The start write had returned, so
+    /// the frame reports the start.
+    Cancelled(CancelledBody),
 }
 
 /// The task loop of an isolated child after a task that left no work.
@@ -280,6 +312,31 @@ pub struct SharedResultFrame {
     pub child: ChildAfterFrame,
 }
 
+/// The task loop of an isolated child after a run that an operator
+/// cancelled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CancelledLoop {
+    /// No work that the body started is left.
+    NoLeftWork(NoLeftWork),
+    /// Work that the body started is still on the loop. The child does not
+    /// wait for it; the parent replaces the child.
+    WorkLeft(LoopHoldsTasks),
+}
+
+/// An isolated run that an operator cancelled has ended. The child sends it
+/// in place of `result`, once a `cancel_run` for the run came and the body
+/// ended or was not started. The start write had returned, so the attempt
+/// started at `started_at`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunCancelledFrame {
+    pub task_id: Uuid,
+    pub body: CancelledBody,
+    pub started_at: DateTime<Utc>,
+    pub rss: RssReading,
+    pub task_loop: CancelledLoop,
+    pub child: ChildAfterFrame,
+}
+
 /// A run did not stop after its second cancel and its cancel rounds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunStuckFrame {
@@ -423,6 +480,12 @@ pub enum ChildFrame {
     /// The cancel grace of a run ran out while it was alive; the child sent
     /// the second cancel.
     SecondCancel(RunRef),
+    /// A shared child applied the operator cancel of `cancel_run` to the
+    /// run: it gave the cancel to the task, or it will not start the body.
+    /// Sent once per run, before its `shared_result` with `cancelled`.
+    CancelFired(RunRef),
+    /// An isolated run that an operator cancelled has ended.
+    RunCancelled(RunCancelledFrame),
     RunStuck(RunStuckFrame),
     LeftoverCancel(LeftoverCancelFrame),
     LeftoverStuck(LeftoverStuckFrame),
@@ -503,6 +566,18 @@ enum ChildWire<'a> {
         dispatch: u64,
         task_id: Uuid,
     },
+    CancelFired {
+        dispatch: u64,
+        task_id: Uuid,
+    },
+    RunCancelled {
+        task_id: Uuid,
+        body: &'static str,
+        started_at: String,
+        rss_mb: Option<f64>,
+        task_loop: CancelledLoopWire<'a>,
+        child: &'static str,
+    },
     RunStuck {
         dispatch: u64,
         task_id: Uuid,
@@ -572,6 +647,7 @@ enum EndWire<'a> {
     StoppedBeforeRunning { reason: &'static str },
     WorkerFailure { detail: &'a str },
     TimedOut,
+    Cancelled { body: &'static str },
 }
 
 #[derive(Serialize)]
@@ -581,6 +657,20 @@ enum TaskLoopWire {
     NoTaskLoop,
     #[serde(rename = "empty")]
     LoopHoldsNoTask,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind")]
+enum CancelledLoopWire<'a> {
+    #[serde(rename = "none")]
+    NoTaskLoop,
+    #[serde(rename = "empty")]
+    LoopHoldsNoTask,
+    #[serde(rename = "held")]
+    WorkLeft {
+        count: u64,
+        names: &'a [LeftoverName],
+    },
 }
 
 #[derive(Serialize)]
@@ -643,6 +733,25 @@ fn seat_end_wire(end: &SeatEnd) -> (EndWire<'_>, &[u8]) {
     match end {
         SeatEnd::Finished(run_end) => run_end_wire(run_end),
         SeatEnd::TimedOut => (EndWire::TimedOut, NO_BODY),
+        SeatEnd::Cancelled(body) => (
+            EndWire::Cancelled {
+                body: body.as_str(),
+            },
+            NO_BODY,
+        ),
+    }
+}
+
+fn cancelled_loop_wire(task_loop: &CancelledLoop) -> CancelledLoopWire<'_> {
+    match task_loop {
+        CancelledLoop::NoLeftWork(NoLeftWork::NoTaskLoop) => CancelledLoopWire::NoTaskLoop,
+        CancelledLoop::NoLeftWork(NoLeftWork::LoopHoldsNoTask) => {
+            CancelledLoopWire::LoopHoldsNoTask
+        }
+        CancelledLoop::WorkLeft(held) => CancelledLoopWire::WorkLeft {
+            count: held.count().get(),
+            names: held.names(),
+        },
     }
 }
 
@@ -780,6 +889,24 @@ pub fn encode_child_frame(frame: &ChildFrame) -> Result<EncodedFrame<'_>, FrameE
             },
             NO_BODY,
         ),
+        ChildFrame::CancelFired(run) => pack(
+            &ChildWire::CancelFired {
+                dispatch: run.dispatch.get(),
+                task_id: run.task_id,
+            },
+            NO_BODY,
+        ),
+        ChildFrame::RunCancelled(cancelled) => pack(
+            &ChildWire::RunCancelled {
+                task_id: cancelled.task_id,
+                body: cancelled.body.as_str(),
+                started_at: time_text(&cancelled.started_at),
+                rss_mb: cancelled.rss.wire(),
+                task_loop: cancelled_loop_wire(&cancelled.task_loop),
+                child: cancelled.child.as_str(),
+            },
+            NO_BODY,
+        ),
         ChildFrame::RunStuck(stuck) => pack(
             &ChildWire::RunStuck {
                 dispatch: stuck.run.dispatch.get(),
@@ -862,6 +989,8 @@ pub fn decode_child_frame(meta: &[u8], body: Vec<u8>) -> Result<ChildFrame, Chil
         "shared_result" => ChildFrame::SharedResult(decode_shared_result(&fields, body)?),
         "deadline_fired" => ChildFrame::DeadlineFired(decode_run_report(&fields, &body)?),
         "second_cancel" => ChildFrame::SecondCancel(decode_run_report(&fields, &body)?),
+        "cancel_fired" => ChildFrame::CancelFired(decode_run_report(&fields, &body)?),
+        "run_cancelled" => ChildFrame::RunCancelled(decode_run_cancelled(&fields, &body)?),
         "run_stuck" => ChildFrame::RunStuck(decode_run_stuck(&fields, &body)?),
         "leftover_cancel" => ChildFrame::LeftoverCancel(decode_leftover_cancel(&fields, body)?),
         "leftover_stuck" => ChildFrame::LeftoverStuck(decode_leftover_stuck(&fields, body)?),
@@ -975,8 +1104,67 @@ fn decode_seat_end(end: &Fields<'_>, body: Vec<u8>) -> Result<SeatEnd, Malformed
             no_body("timed_out", &body)?;
             Ok(SeatEnd::TimedOut)
         }
+        "cancelled" => {
+            end.only(&["kind", "body"])?;
+            no_body("cancelled", &body)?;
+            Ok(SeatEnd::Cancelled(decode_cancelled_body(end)?))
+        }
         _ => decode_run_end(end, body).map(SeatEnd::Finished),
     }
+}
+
+fn decode_cancelled_body(fields: &Fields<'_>) -> Result<CancelledBody, MalformedFrame> {
+    CancelledBody::parse(fields.text("body")?)
+        .ok_or_else(|| fields.broken_rule("body", "is not one of ran, not_started"))
+}
+
+/// The task loop after a cancelled isolated run: `none`, `empty`, or `held`
+/// with the count and the names of the work left.
+fn decode_cancelled_loop(task_loop: &Fields<'_>) -> Result<CancelledLoop, MalformedFrame> {
+    match task_loop.kind()? {
+        "none" => {
+            task_loop.only(&["kind"])?;
+            Ok(CancelledLoop::NoLeftWork(NoLeftWork::NoTaskLoop))
+        }
+        "empty" => {
+            task_loop.only(&["kind"])?;
+            Ok(CancelledLoop::NoLeftWork(NoLeftWork::LoopHoldsNoTask))
+        }
+        "held" => {
+            task_loop.only(&["kind", "count", "names"])?;
+            let count = NonZeroU64::new(task_loop.whole("count")?)
+                .ok_or_else(|| task_loop.out_of_bounds("count"))?;
+            let names = task_loop.bounded_text_list("names")?;
+            LoopHoldsTasks::new(count, names)
+                .map(CancelledLoop::WorkLeft)
+                .map_err(|_| task_loop.broken_rule("names", "must name min(count, 10) tasks"))
+        }
+        other => Err(task_loop.unknown_kind(other)),
+    }
+}
+
+fn decode_run_cancelled(
+    fields: &Fields<'_>,
+    body: &[u8],
+) -> Result<RunCancelledFrame, MalformedFrame> {
+    fields.only(&[
+        "kind",
+        "task_id",
+        "body",
+        "started_at",
+        "rss_mb",
+        "task_loop",
+        "child",
+    ])?;
+    no_body("run_cancelled", body)?;
+    Ok(RunCancelledFrame {
+        task_id: fields.task_id("task_id")?,
+        body: decode_cancelled_body(fields)?,
+        started_at: fields.time("started_at")?,
+        rss: fields.rss("rss_mb")?,
+        task_loop: decode_cancelled_loop(&fields.object("task_loop")?)?,
+        child: decode_child_after(fields)?,
+    })
 }
 
 fn decode_task_loop(task_loop: &Fields<'_>) -> Result<NoLeftWork, MalformedFrame> {
@@ -1127,6 +1315,15 @@ fn decode_shared_result(
     let started_at = match &end {
         SeatEnd::Finished(run_end) => decode_start_of(fields, run_end)?,
         SeatEnd::TimedOut => decode_start(&fields.object("started_at")?)?,
+        SeatEnd::Cancelled(_) => match decode_start(&fields.object("started_at")?)? {
+            reported @ AttemptStart::Reported { .. } => reported,
+            AttemptStart::NotReported => {
+                return Err(fields.broken_rule(
+                    "started_at",
+                    "a cancelled run had its start write returned, so it reports its start",
+                ))
+            }
+        },
     };
     Ok(SharedResultFrame {
         run: decode_run_ref(fields)?,
@@ -1137,8 +1334,8 @@ fn decode_shared_result(
     })
 }
 
-/// A report about one run with no other field: `deadline_fired` or
-/// `second_cancel`.
+/// A report about one run with no other field: `deadline_fired`,
+/// `second_cancel` or `cancel_fired`.
 fn decode_run_report(fields: &Fields<'_>, body: &[u8]) -> Result<RunRef, MalformedFrame> {
     fields.only(&["kind", "dispatch", "task_id"])?;
     no_body("run report", body)?;
