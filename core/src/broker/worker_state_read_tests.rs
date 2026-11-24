@@ -10,9 +10,9 @@ use chrono::TimeZone;
 use chrono::Utc;
 use serde_json::{json, Value};
 
+use crate::broker::health::SnapshotProfile;
 use crate::broker::monitoring_test_database::MonitoringTestDatabase;
 use crate::broker::result_types::BrokerErrorCode;
-use crate::broker::health::SnapshotProfile;
 use crate::broker::slot_health::{ClearableBootCause, DownSlot, ShortageErrno, SlotHealth};
 use crate::core::config::worker_profile::WorkerProfile;
 use crate::core::task::Execution;
