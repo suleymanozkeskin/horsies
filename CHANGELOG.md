@@ -186,6 +186,27 @@ and there is no migration contract between pre-1.0 versions.
   A snapshot written before the migration holds no name: its profile is not
   recorded. The worker history (`GET /api/workers/{id}/history`) does not
   change.
+- **The Workers page of the web UI groups the live workers by worker
+  profile.** The page has one panel for each profile name of
+  `GET /api/workers`, in name order; the live workers whose snapshot holds no
+  profile name are one last panel. A panel shows the number of workers, the
+  seats in service and the down slots, the number of children per worker
+  and the budget classes of the profile, and for each budget a meter with
+  the rows in flight and the free capacity, summed over the workers of the
+  profile. It lists each shape when the workers of one profile do not have
+  the same number of children and the same budget classes. The focused
+  worker and the card of a stale worker name the profile. On the same page:
+  - Each column header of the schedule table sorts the table, on a click
+    and on Enter or Space with the keyboard focus. The header shows the
+    sorted column and its direction (`aria-sort`). A schedule that has not
+    run shows `never` and is last in a sort by last run.
+  - Each legend item of the two history charts is a button. A click draws
+    that series alone, and a click on a series that is alone draws the two
+    series again. The value axis fits the series that are drawn: the
+    percent axis of the second chart is no longer fixed at 0 to 100.
+  - The load chart draws `running` and `claimed` in the colors of the task
+    statuses. The second chart has the title "Worker process" and states
+    that the task children of the worker are not in its numbers.
 
 ### Changed
 
