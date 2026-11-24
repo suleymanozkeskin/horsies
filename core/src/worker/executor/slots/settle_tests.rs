@@ -135,6 +135,7 @@ fn a_worker_with_only_isolated_children_refuses_an_unusable_shared_row_in_an_iso
             Ok(DispatchRoute::Isolated {
                 work: IsolatedWork::Refusal(refusal),
                 deadline: IsolatedDeadline::NoDeadline,
+                cancel_stop: IsolatedCancelStop::CooperativeOnly,
             }) => assert!((row.refusal)(&refusal), "{}: {refusal:?}", row.options),
             other => panic!(
                 "{}: expected a refusal in an isolated child, got {other:?}",
@@ -1183,6 +1184,7 @@ fn a_shared_thread_row_runs_on_a_thread_seat_or_is_refused_there() {
         Ok(DispatchRoute::Isolated {
             work: IsolatedWork::Run,
             deadline: IsolatedDeadline::After(timeout_ms(2_000)),
+            cancel_stop: IsolatedCancelStop::CooperativeOnly,
         })
     );
     assert_eq!(

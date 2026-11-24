@@ -160,6 +160,23 @@ impl From<&TaskErrorCode> for AttemptErrorCode {
     }
 }
 
+/// How a run ended after an operator cancelled its task (`cancel_task` with
+/// `include_running`). The cancel statement recorded the attempt as
+/// `CANCELLED` and moved the task to history; what the body returned is
+/// dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::EventSchema)]
+pub enum OperatorCancelEnd {
+    /// The body and its work ended after the cancel signal, within the
+    /// cancel grace.
+    ReturnedAfterSignal,
+    /// A shared async run was alive after the cancel grace: its child sent
+    /// the second cancel and stopped it.
+    DroppedAfterGrace,
+    /// The cancel came after the start write and before the body started:
+    /// the body did not run.
+    BeforeBody,
+}
+
 /// How the task ended a run that its child reported.
 #[derive(Debug, Clone, PartialEq, Eq, horsies_core_derive::EventSchema)]
 pub enum ChildResult {
@@ -175,6 +192,10 @@ pub enum ChildResult {
     /// ended, and the child ended the run at the deadline. The attempt
     /// outcome is `FAILED`, with the code `TASK_TIMEOUT`.
     TimedOut,
+    /// An operator cancelled the task while it ran, and the child ended the
+    /// run as `end` says. The attempt outcome is `CANCELLED`, with the code
+    /// `TASK_CANCELLED`.
+    Cancelled { end: OperatorCancelEnd },
 }
 
 /// When the attempt started: the time of the start write that set the task
@@ -188,7 +209,8 @@ pub enum AttemptStart {
     NotReported,
 }
 
-/// Why the worker ended an attempt itself. The attempt outcome is `FAILED`.
+/// Why the worker ended an attempt itself. The attempt outcome is `FAILED`,
+/// except after an operator cancel: `CANCELLED`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::EventSchema)]
 pub enum WorkerDecision {
     /// The task reached its timeout, and the worker killed its child. The
@@ -204,6 +226,15 @@ pub enum WorkerDecision {
     /// The child was lost before it reported the end, and its exit was
     /// seen. The code is `WORKER_CRASHED`.
     ChildLost,
+    /// An operator cancelled the task while it ran, and the worker killed
+    /// the child before it reported the end: the hard stop after the cancel
+    /// grace of an isolated task, its deadline, or the drain deadline. The
+    /// attempt outcome is `CANCELLED`, with the code `TASK_CANCELLED`.
+    KilledAfterCancel,
+    /// An operator cancelled the task while it ran, and the child was lost
+    /// before it reported the end. The attempt outcome is `CANCELLED`, with
+    /// the code `TASK_CANCELLED`.
+    LostAfterCancel,
 }
 
 impl WorkerDecision {
@@ -214,6 +245,7 @@ impl WorkerDecision {
             Self::TaskBlockedLoop => OperationalErrorCode::TaskBlockedLoop.into(),
             Self::NeighbourBlockedLoop => OperationalErrorCode::NeighbourBlockedLoop.into(),
             Self::ChildLost => OperationalErrorCode::WorkerCrashed.into(),
+            Self::KilledAfterCancel | Self::LostAfterCancel => OutcomeCode::TaskCancelled.into(),
         }
     }
 }
@@ -303,6 +335,10 @@ pub enum AttemptRecord {
     NothingOwed,
     /// The task is no longer held by this claim; nothing was written.
     NotHeld,
+    /// An operator cancelled the task while it ran: the cancel statement
+    /// recorded the attempt as `CANCELLED` and moved the task to history.
+    /// The worker owed no write.
+    RecordedByCancel,
     /// Nothing was written: stale recovery or the claim lease decides the
     /// task.
     LeftToRecovery,

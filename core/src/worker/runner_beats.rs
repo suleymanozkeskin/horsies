@@ -16,6 +16,12 @@
 //! - With it off, no reaper fails a RUNNING row: late beats are logged and
 //!   the worker runs on. A writer that dies is logged once, and the worker
 //!   runs on without runner beats.
+//! - The registry of held dispatches also routes an operator cancel to the
+//!   slot that holds the run ([`LiveDispatches::request_cancel`]). A
+//!   dispatch whose task was cancelled gets no beat: the cancel moved its
+//!   row to history. A held dispatch whose beat did not land is a beat miss
+//!   ([`LiveDispatches::next_beat_misses`]): the cancel router reads whether
+//!   an operator cancelled it, for a cancel notice that the listener lost.
 
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
@@ -24,19 +30,21 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Notify};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument::WithSubscriber;
 use uuid::Uuid;
 
+use crate::broker::cancelled_runs::RunClaim;
+use crate::broker::core_rows::column;
 use crate::broker::pools::PoolSettingsError;
 use crate::core::config::recovery::{RecoveryConfig, FAIL_CLOSED_WINDOW_DIVISOR};
 use crate::core::PostgresConfig;
 use crate::db::{
     parse_connection_url, CheckoutClass, ConnectPlan, ConnectionAge, ConnectionEnvironment,
-    CorePool, IdlePing, ParameterType, PoolPlan, PoolRole, PoolSizing, Reserve, SocketSettings,
-    StatementBound, StatementFailure, StatementProtocol, TypedStatement,
+    CorePool, IdlePing, ParameterType, PoolPlan, PoolRole, PoolSizing, Reserve, Row,
+    SocketSettings, StatementBound, StatementFailure, StatementProtocol, TypedStatement,
 };
 use crate::worker::executor::protocol::ProcessId;
 use crate::worker::executor::supervisor::{ChildId, KillOutcome, SpawnerHandle, WorkerKillMark};
@@ -91,15 +99,26 @@ const DEAD_WRITER_LINE: &str = "the runner heartbeat writer died";
 /// like every other write of a dispatch: this worker, and the claim
 /// generation of the dispatch. A row with the finalizing marker gets no beat:
 /// its attempt has ended, and the reaper reads the marker for that row.
+/// Returns the task id and the claim generation of each dispatch whose beat
+/// landed; the insert runs to its end whatever the outer select reads.
 const INSERT_RUNNER_HEARTBEATS_SQL: &str = "\
-INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid)
-SELECT t.id, $1::varchar, 'runner', NOW(), $2::varchar, $3::integer
-FROM unnest($4::uuid[], $5::timestamptz[]) AS d(task_id, claimed_at)
-JOIN horsies_tasks t ON t.id = d.task_id
-WHERE t.status = 'RUNNING'
-  AND t.claimed_by_worker_id = $1::varchar
-  AND t.claimed_at = d.claimed_at
-  AND t.finalizing_at IS NULL";
+WITH due AS (
+    SELECT t.id, d.claimed_at
+    FROM unnest($4::uuid[], $5::timestamptz[]) AS d(task_id, claimed_at)
+    JOIN horsies_tasks t ON t.id = d.task_id
+    WHERE t.status = 'RUNNING'
+      AND t.claimed_by_worker_id = $1::varchar
+      AND t.claimed_at = d.claimed_at
+      AND t.finalizing_at IS NULL
+), landed AS (
+    INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid)
+    SELECT due.id, $1::varchar, 'runner', NOW(), $2::varchar, $3::integer
+    FROM due
+    RETURNING task_id
+)
+SELECT due.id AS task_id, due.claimed_at AS claimed_at
+FROM due
+JOIN landed ON landed.task_id = due.id";
 
 /// [`INSERT_RUNNER_HEARTBEATS_SQL`] with its parameter types: worker id,
 /// hostname, pid, task ids, claim generations.
@@ -122,13 +141,45 @@ static INSERT_RUNNER_HEARTBEATS: TypedStatement = TypedStatement::new(
 pub const BEAT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The child process of the executor that runs a held dispatch: what the
-/// fail-closed watchdog needs to mark it and kill its session.
+/// fail-closed watchdog needs to mark it and kill its session, and the bell
+/// of the slot that serves it, which an operator cancel of the dispatch
+/// rings.
 #[derive(Clone)]
 pub struct HeldChild {
     pub id: ChildId,
     pub pid: ProcessId,
     pub spawner: SpawnerHandle,
     pub kill_mark: WorkerKillMark,
+    pub cancel_bell: CancelBell,
+}
+
+/// Wakes the slot of a held dispatch when an operator cancel is routed to
+/// the dispatch. A ring while the slot does not wait is kept: the next
+/// [`CancelBell::rung`] completes at once. A slot that wakes reads which of
+/// its dispatches have a cancel with [`HeldDispatch::take_cancel`].
+#[derive(Clone, Default)]
+pub struct CancelBell(Arc<Notify>);
+
+impl CancelBell {
+    fn ring(&self) {
+        self.0.notify_one();
+    }
+
+    /// Complete at the next ring, or at once when a ring came since the
+    /// last wait completed.
+    pub async fn rung(&self) {
+        self.0.notified().await;
+    }
+}
+
+/// Whether an operator cancel was routed to a held dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancelMark {
+    NotRequested,
+    /// The router routed a cancel; the slot has not taken it.
+    Requested,
+    /// The slot took the cancel.
+    Taken,
 }
 
 /// One dispatch the registry holds.
@@ -138,6 +189,29 @@ struct LiveDispatch {
     /// The claim generation; the beat fences on it.
     claimed_at: DateTime<Utc>,
     child: HeldChild,
+    cancel: CancelMark,
+}
+
+/// What [`LiveDispatches::request_cancel`] did with a cancel of a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelRouting {
+    /// The dispatch of the run is held: its slot was told.
+    Routed,
+    /// No dispatch of this task at this claim generation is held: it ended,
+    /// it runs on another worker, or the registry was closed.
+    NotHeld,
+    /// A cancel of the run was routed already.
+    AlreadyRequested,
+}
+
+/// Whether a held dispatch has an operator cancel that its slot has not
+/// taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelTake {
+    /// A cancel was routed to the dispatch; this read took it. Later reads
+    /// give `NoRequest`.
+    Requested,
+    NoRequest,
 }
 
 /// Whether the registry takes new dispatches (Python executor design,
@@ -155,6 +229,10 @@ struct Registry {
     /// dispatch cannot remove a later dispatch of the same task.
     held: BTreeMap<u64, LiveDispatch>,
     next_ticket: u64,
+    /// The held dispatches with no cancel whose beat did not land in the
+    /// last beat pass, until the cancel router takes them. At most the held
+    /// dispatches.
+    beat_misses: Vec<RunClaim>,
 }
 
 /// The runner heartbeats failed closed: no beat covers a new dispatch. The
@@ -164,7 +242,7 @@ struct Registry {
 pub struct RegistryClosed;
 
 /// The dispatches this worker holds: task id, claim generation and the
-/// child that runs each.
+/// child that runs each, with the operator cancel of each.
 ///
 /// A dispatch is held from its send until its end is read, a kill is sent
 /// to its child, or its child's exit is seen; the [`HeldDispatch`] guard
@@ -173,6 +251,8 @@ pub struct RegistryClosed;
 #[derive(Clone)]
 pub struct LiveDispatches {
     registry: Arc<Mutex<Registry>>,
+    /// Rung when a beat pass noted misses.
+    beat_misses_noted: Arc<Notify>,
 }
 
 impl Default for LiveDispatches {
@@ -182,7 +262,9 @@ impl Default for LiveDispatches {
                 state: RegistryState::Open,
                 held: BTreeMap::new(),
                 next_ticket: 1,
+                beat_misses: Vec::new(),
             })),
+            beat_misses_noted: Arc::new(Notify::new()),
         }
     }
 }
@@ -224,6 +306,7 @@ impl LiveDispatches {
                 task_id,
                 claimed_at,
                 child,
+                cancel: CancelMark::NotRequested,
             },
         );
         Ok(HeldDispatch {
@@ -232,14 +315,91 @@ impl LiveDispatches {
         })
     }
 
-    /// The held task ids and their claim generations, in matching order.
-    /// Empty after [`LiveDispatches::close`].
+    /// The held task ids and their claim generations, in matching order:
+    /// the dispatches that the beats cover. A dispatch with an operator
+    /// cancel is left out: the cancel moved its row to history. Empty after
+    /// [`LiveDispatches::close`].
     fn snapshot(&self) -> (Vec<Uuid>, Vec<DateTime<Utc>>) {
         self.lock()
             .held
             .values()
+            .filter(|dispatch| dispatch.cancel == CancelMark::NotRequested)
             .map(|dispatch| (dispatch.task_id, dispatch.claimed_at))
             .unzip()
+    }
+
+    /// Route an operator cancel of the run of `task_id` at the claim
+    /// generation `claimed_at` to the slot that holds its dispatch: mark the
+    /// dispatch and ring the bell of its slot. A dispatch of the same task
+    /// at another claim generation is another run, and is not marked.
+    pub fn request_cancel(&self, task_id: Uuid, claimed_at: DateTime<Utc>) -> CancelRouting {
+        let mut registry = self.lock();
+        let Some(dispatch) = registry
+            .held
+            .values_mut()
+            .find(|dispatch| dispatch.task_id == task_id && dispatch.claimed_at == claimed_at)
+        else {
+            return CancelRouting::NotHeld;
+        };
+        match dispatch.cancel {
+            CancelMark::NotRequested => {
+                dispatch.cancel = CancelMark::Requested;
+                dispatch.child.cancel_bell.ring();
+                CancelRouting::Routed
+            }
+            CancelMark::Requested | CancelMark::Taken => CancelRouting::AlreadyRequested,
+        }
+    }
+
+    /// The runs of the held dispatches with no cancel: the runs whose cancel
+    /// the cancel router reads after the listener lost notices. At most the
+    /// held dispatches.
+    pub fn cancel_candidates(&self) -> Vec<RunClaim> {
+        self.lock()
+            .held
+            .values()
+            .filter(|dispatch| dispatch.cancel == CancelMark::NotRequested)
+            .map(|dispatch| RunClaim {
+                task_id: dispatch.task_id,
+                claimed_at: dispatch.claimed_at,
+            })
+            .collect()
+    }
+
+    /// Note the beat pass that sent `sent` and landed `landed`: the runs of
+    /// `sent` that are still held with no cancel and did not land are its
+    /// misses. They replace the misses of the last pass that the router did
+    /// not take; when there are any, the router is woken.
+    fn note_beat_misses(&self, sent: &[RunClaim], landed: &[RunClaim]) {
+        let mut registry = self.lock();
+        let misses: Vec<RunClaim> = sent
+            .iter()
+            .filter(|run| !landed.contains(*run))
+            .filter(|run| {
+                registry.held.values().any(|dispatch| {
+                    dispatch.task_id == run.task_id
+                        && dispatch.claimed_at == run.claimed_at
+                        && dispatch.cancel == CancelMark::NotRequested
+                })
+            })
+            .copied()
+            .collect();
+        let noted = !misses.is_empty();
+        registry.beat_misses = misses;
+        drop(registry);
+        match noted {
+            true => self.beat_misses_noted.notify_one(),
+            false => {}
+        }
+    }
+
+    /// Wait for the misses of a beat pass, and take them: the held runs
+    /// with no cancel whose beat did not land. A pass whose misses were
+    /// replaced by a later pass before this read gives the later misses;
+    /// empty when every miss ended or was cancelled since.
+    pub async fn next_beat_misses(&self) -> Vec<RunClaim> {
+        self.beat_misses_noted.notified().await;
+        std::mem::take(&mut self.lock().beat_misses)
     }
 
     /// Whether a task is held now: a task whose row a peer must not recover
@@ -272,6 +432,25 @@ impl LiveDispatches {
         let mut registry = self.lock();
         registry.state = RegistryState::Closed;
         std::mem::take(&mut registry.held).into_values().collect()
+    }
+}
+
+impl HeldDispatch {
+    /// Take the operator cancel that the router routed to this dispatch,
+    /// once: `Requested` for the first read after the route, `NoRequest`
+    /// for every other read, and after the registry was closed.
+    pub fn take_cancel(&self) -> CancelTake {
+        let mut registry = self.live.lock();
+        let Some(dispatch) = registry.held.get_mut(&self.ticket) else {
+            return CancelTake::NoRequest;
+        };
+        match dispatch.cancel {
+            CancelMark::Requested => {
+                dispatch.cancel = CancelMark::Taken;
+                CancelTake::Requested
+            }
+            CancelMark::NotRequested | CancelMark::Taken => CancelTake::NoRequest,
+        }
     }
 }
 
@@ -442,9 +621,18 @@ pub struct BeatSender {
     pub pid: i32,
 }
 
+/// The outcome of one runner-beat statement.
+#[derive(Debug)]
+enum BeatWrite {
+    /// The statement ran; these runs passed the fence and got their beat.
+    Landed(Vec<RunClaim>),
+    /// The statement ran, and a returned row did not decode: the beats
+    /// landed, and which runs they covered is not known.
+    LandedNotRead,
+}
+
 /// Write one runner-beat statement for the given dispatches, in autocommit
-/// on `pool`; returns the number of rows that passed the fence. It does not
-/// retry.
+/// on `pool`. It does not retry.
 ///
 /// Errors: the failed checkout or statement; nothing was written, or the
 /// outcome is unknown.
@@ -453,7 +641,7 @@ async fn write_beats(
     sender: &BeatSender,
     task_ids: &[Uuid],
     claim_generations: &[DateTime<Utc>],
-) -> Result<u64, StatementFailure> {
+) -> Result<BeatWrite, StatementFailure> {
     let bound = INSERT_RUNNER_HEARTBEATS
         .bind()
         .value(&sender.worker_id)
@@ -462,12 +650,40 @@ async fn write_beats(
         .value(&task_ids)
         .value(&claim_generations)
         .finish();
-    pool.execute(
-        CheckoutClass::Reserved,
-        &bound,
-        StatementBound::ConnectionTimeouts,
-    )
-    .await
+    let rows = pool
+        .query(
+            CheckoutClass::Reserved,
+            &bound,
+            StatementBound::ConnectionTimeouts,
+        )
+        .await?;
+    let landed: Option<Vec<RunClaim>> = rows.iter().map(landed_run).collect();
+    Ok(match landed {
+        Some(landed) => BeatWrite::Landed(landed),
+        None => BeatWrite::LandedNotRead,
+    })
+}
+
+/// The run of one row of the beat statement, or `None` when a column does
+/// not decode (logged).
+fn landed_run(row: &Row) -> Option<RunClaim> {
+    let statement = &INSERT_RUNNER_HEARTBEATS;
+    let read = column::<Uuid>(row, statement, "task_id").and_then(|task_id| {
+        column::<DateTime<Utc>>(row, statement, "claimed_at").map(|claimed_at| RunClaim {
+            task_id,
+            claimed_at,
+        })
+    });
+    match read {
+        Ok(run) => Some(run),
+        Err(error) => {
+            tracing::error!(
+                %error,
+                "a row of the runner heartbeat statement did not decode: {error}",
+            );
+            None
+        }
+    }
 }
 
 /// The pool of the runner beats: one connection of its own
@@ -566,6 +782,7 @@ pub(crate) async fn sleeping_child(
         pid: spawned.pid,
         spawner: spawner.handle(),
         kill_mark: WorkerKillMark::default(),
+        cancel_bell: CancelBell::default(),
     };
     (spawned, child)
 }
@@ -807,8 +1024,22 @@ async fn beat_once(
         return interval;
     }
     match write_beats(pool, sender, &task_ids, &claim_generations).await {
-        Ok(_rows) => {
+        Ok(written) => {
             let landed_at = Instant::now();
+            match written {
+                BeatWrite::Landed(landed) => {
+                    let sent: Vec<RunClaim> = task_ids
+                        .iter()
+                        .zip(&claim_generations)
+                        .map(|(task_id, claimed_at)| RunClaim {
+                            task_id: *task_id,
+                            claimed_at: *claimed_at,
+                        })
+                        .collect();
+                    live.note_beat_misses(&sent, &landed);
+                }
+                BeatWrite::LandedNotRead => {}
+            }
             let counts_from = match stale_running {
                 StaleRunningRecovery::On { threshold } => {
                     window_start(threshold, started_at, landed_at)
@@ -1244,6 +1475,7 @@ mod tests {
             pid: spawned.pid,
             spawner: spawner.handle(),
             kill_mark: kill_mark.clone(),
+            cancel_bell: CancelBell::default(),
         };
         let live = LiveDispatches::default();
         let claimed_at = Utc::now();
@@ -1499,10 +1731,13 @@ mod tests {
         };
         let generations = vec![claimed_at; ids.len()];
         let core_pool = crate::broker::pools::core_pool_for_test_url(pool.url());
-        let rows = write_beats(&core_pool, &sender, &ids, &generations)
+        let written = write_beats(&core_pool, &sender, &ids, &generations)
             .await
             .unwrap();
-        assert_eq!(rows, 1);
+        assert!(
+            matches!(&written, BeatWrite::Landed(landed) if landed.len() == 1),
+            "{written:?}"
+        );
         let beaten: Vec<Uuid> = sql::query_scalar(
             "SELECT task_id FROM horsies_heartbeats
              WHERE role = 'runner' AND sender_id = 'beat-worker' AND task_id = ANY($1)",

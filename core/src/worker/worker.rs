@@ -38,6 +38,7 @@ use crate::db::{
 use crate::telemetry::labels::{ClaimPassResult, ReleaseReason};
 use crate::telemetry::worker::{EventQueue, TelemetryOn, WorkerTelemetry};
 use crate::worker::backoff::RetryBackoff;
+use crate::worker::cancel_router::{spawn_cancel_router, CANCEL_CHANNEL};
 use crate::worker::children::{
     attempt_end, baseline_limits, exit_not_seen, handler_child_config, pending_task_limit,
     plan_placement, preload_plan, ChildLaunch, ChildrenStopped, PoolFacts, WorkerChildren,
@@ -922,10 +923,21 @@ fn spawn_ping_responder(
     })
 }
 
+/// The tasks and subscriptions of the broker's listener that the service
+/// loops take: the running ping responder, and the cancel notices for the
+/// cancel router.
+struct ServiceListeners {
+    ping_responder: JoinHandle<()>,
+    cancel_notices: PayloadSubscription,
+}
+
 /// The listener subscriptions of a running worker.
 struct WorkerSubscriptions {
     claim_wakes: ClaimWakes,
     pings: PayloadSubscription,
+    /// The cancel notices of RUNNING tasks ([`CANCEL_CHANNEL`]), for the
+    /// cancel router.
+    cancel_notices: PayloadSubscription,
 }
 
 /// The claim wake channel of a queue: `task_queue_<queue>`. A queue name
@@ -1818,23 +1830,26 @@ impl Worker {
         );
         self.log_claim_settings(&children);
 
-        // Check the session URL, then subscribe the claim wakes and the pings
-        // on the broker's listener, with resilience.
-        let WorkerSubscriptions { claim_wakes, pings } =
-            match self.connect_listener_with_resilience().await {
-                Ok(subscriptions) => subscriptions,
-                Err(error) => {
-                    RunningChildren {
-                        children,
-                        spawner,
-                        live,
-                        handler,
-                    }
-                    .stop_after_failed_start()
-                    .await;
-                    return Err(error);
+        // Check the session URL, then subscribe the claim wakes, the pings
+        // and the cancel notices on the broker's listener, with resilience.
+        let WorkerSubscriptions {
+            claim_wakes,
+            pings,
+            cancel_notices,
+        } = match self.connect_listener_with_resilience().await {
+            Ok(subscriptions) => subscriptions,
+            Err(error) => {
+                RunningChildren {
+                    children,
+                    spawner,
+                    live,
+                    handler,
                 }
-            };
+                .stop_after_failed_start()
+                .await;
+                return Err(error);
+            }
+        };
 
         // The liveness lock is held before the first claim, until every task
         // of the stop ended: a peer that finds it free in two passes far
@@ -1896,7 +1911,10 @@ impl Worker {
             &children,
             &live,
             &stops,
-            ping_responder,
+            ServiceListeners {
+                ping_responder,
+                cancel_notices,
+            },
             liveness_holder,
             handler.view(),
         ) {
@@ -2012,13 +2030,16 @@ impl Worker {
 
     /// Start the service loops: the claimer heartbeat, the reaper, the
     /// worker snapshot, the runner heartbeats of the tasks that children
-    /// hold, the watch of the pool failure and the new-kind baseline guard.
-    /// Each of them, `ping_responder` and `liveness_holder` (the holder of
-    /// the liveness lock) runs under a watchdog: one that ends
+    /// hold, the cancel router of the operator cancels of those tasks, the
+    /// watch of the pool failure and the new-kind baseline guard. Each of
+    /// them, the ping responder of `listeners` and `liveness_holder` (the
+    /// holder of the liveness lock) runs under a watchdog: one that ends
     /// with no stop request stops the worker with `ServiceLoopDied`
     /// (C11-inverse). With stale running recovery off, no task depends on a
     /// runner beat: a beat writer that dies is logged once and the worker
-    /// runs on ([`launch_runner_beats`]).
+    /// runs on ([`launch_runner_beats`]). The cancel router runs until the
+    /// runner beats stop, so a cancel reaches a task that runs while the
+    /// pools drain.
     ///
     /// Errors: [`WorkerError::Config`] when the runner heartbeat pool is
     /// refused, or its watchdog thread does not start.
@@ -2027,10 +2048,14 @@ impl Worker {
         children: &WorkerChildren,
         live: &LiveDispatches,
         stops: &ChildrenStopCell,
-        ping_responder: JoinHandle<()>,
+        listeners: ServiceListeners,
         liveness_holder: JoinHandle<()>,
         handler_child: HandlerChildView,
     ) -> Result<Services, WorkerError> {
+        let ServiceListeners {
+            ping_responder,
+            cancel_notices,
+        } = listeners;
         let claimer_interval =
             Duration::from_millis(self.app_config.recovery.claimer_heartbeat_interval_ms);
         let claimer_hb = spawn_claimer_heartbeat(
@@ -2090,6 +2115,12 @@ impl Worker {
                 "the runner heartbeat watchdog thread did not start: {error}"
             ))
         })?;
+        let cancel_router = spawn_cancel_router(
+            cancel_notices,
+            live.clone(),
+            Arc::clone(&self.broker),
+            beats_cancel.clone(),
+        );
         let pool_failure = tokio::spawn(watch_pool_failure(
             Arc::clone(children.board()),
             stops.clone(),
@@ -2109,9 +2140,10 @@ impl Worker {
         // stopped listener ends it.
         let (fatal_tx, fatal_rx) =
             mpsc::unbounded_channel::<crate::worker::supervision::ServiceExit>();
-        let watched: [(&'static str, tokio::task::JoinHandle<()>); 8] = [
+        let watched: [(&'static str, tokio::task::JoinHandle<()>); 9] = [
             ("claimer-heartbeat", claimer_hb),
             ("runner-heartbeat", runner_beats),
+            ("cancel-router", cancel_router),
             ("reaper", reaper),
             ("worker-state", state_loop),
             ("ping-responder", ping_responder),
@@ -2188,8 +2220,9 @@ impl Worker {
         // can act on, while task_new wakes every worker for every insert
         // cluster-wide (thundering herd). The trigger still emits task_new for
         // external observers. Parity with horsies PR #101 cafc9200.
-        // Subscribe to the shared liveness-ping channel BEFORE any background
-        // loop is spawned, so a subscription failure cannot orphan running loops.
+        // Subscribe to the shared liveness-ping channel and to the cancel
+        // notices BEFORE any background loop is spawned, so a subscription
+        // failure cannot orphan running loops.
         let pings = listener
             .subscribe_payloads(
                 fixed_channel(WORKER_PING_CHANNEL),
@@ -2197,9 +2230,14 @@ impl Worker {
             )
             .await
             .map_err(WorkerError::Listener)?;
+        let cancel_notices = listener
+            .subscribe_payloads(fixed_channel(CANCEL_CHANNEL), default_payload_capacity())
+            .await
+            .map_err(WorkerError::Listener)?;
         Ok(WorkerSubscriptions {
             claim_wakes: ClaimWakes { subscriptions },
             pings,
+            cancel_notices,
         })
     }
 
@@ -2473,8 +2511,9 @@ mod tests {
         assert!(!refused.is_retryable());
     }
 
-    /// The boot check passes on a direct URL, and the claim wakes and the
-    /// ping replies both travel over the broker's one listener.
+    /// The boot check passes on a direct URL, and the claim wakes, the ping
+    /// replies and the cancel notices travel over the broker's one
+    /// listener.
     #[tokio::test]
     async fn a_booted_worker_wakes_on_its_queue_and_answers_pings() {
         let broker = Arc::new(PostgresBroker::from_test_url_and_session_url(
@@ -2490,10 +2529,26 @@ mod tests {
                 ..WorkerConfig::default()
             },
         );
-        let WorkerSubscriptions { claim_wakes, pings } = worker
+        let WorkerSubscriptions {
+            claim_wakes,
+            pings,
+            cancel_notices,
+        } = worker
             .try_connect_listener()
             .await
             .expect("the session check passes and the subscriptions start");
+
+        sql::query("SELECT pg_notify('horsies_task_cancel', 'listener-boot-notice')")
+            .execute(&test_pool().await)
+            .await
+            .expect("notify a cancel");
+        let notice = tokio::time::timeout(Duration::from_secs(5), cancel_notices.recv())
+            .await
+            .expect("the cancel notice reaches its subscription");
+        assert_eq!(
+            notice,
+            PayloadEvent::Payload("listener-boot-notice".to_owned())
+        );
 
         sql::query("SELECT pg_notify('task_queue_listener_boot_q', 'wake')")
             .execute(&test_pool().await)

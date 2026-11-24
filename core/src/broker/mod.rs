@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod attempt_writes;
+pub mod cancelled_runs;
 pub mod child_writes;
 pub mod claims;
 pub mod class_budgets;

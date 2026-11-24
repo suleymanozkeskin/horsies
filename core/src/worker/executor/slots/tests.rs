@@ -125,6 +125,7 @@ fn an_isolated_row_runs_with_its_stored_deadline_or_none() {
         Ok(DispatchRoute::Isolated {
             work: IsolatedWork::Run,
             deadline: IsolatedDeadline::After(TaskTimeoutMs::new(2000).unwrap()),
+            cancel_stop: IsolatedCancelStop::CooperativeOnly,
         })
     );
     assert_eq!(
@@ -132,6 +133,7 @@ fn an_isolated_row_runs_with_its_stored_deadline_or_none() {
         Ok(DispatchRoute::Isolated {
             work: IsolatedWork::Run,
             deadline: IsolatedDeadline::NoDeadline,
+            cancel_stop: IsolatedCancelStop::CooperativeOnly,
         })
     );
     assert!(matches!(
@@ -139,6 +141,7 @@ fn an_isolated_row_runs_with_its_stored_deadline_or_none() {
         Ok(DispatchRoute::Isolated {
             work: IsolatedWork::Refusal(StoredOptionsRefusal::OptionsUnreadable(_)),
             deadline: IsolatedDeadline::NoDeadline,
+            cancel_stop: IsolatedCancelStop::CooperativeOnly,
         })
     ));
     assert!(matches!(
@@ -206,6 +209,7 @@ fn a_shared_row_on_the_isolated_budget_keeps_its_seat_rules() {
         Ok(DispatchRoute::Isolated {
             work: IsolatedWork::Run,
             deadline: IsolatedDeadline::After(TaskTimeoutMs::new(3000).unwrap()),
+            cancel_stop: IsolatedCancelStop::KillAfterGrace(CancelGraceMs::new(500).unwrap()),
         })
     );
     assert!(matches!(
@@ -213,6 +217,74 @@ fn a_shared_row_on_the_isolated_budget_keeps_its_seat_rules() {
         Ok(DispatchRoute::Isolated {
             work: IsolatedWork::Refusal(StoredOptionsRefusal::TimeoutValueInvalid(_)),
             deadline: IsolatedDeadline::NoDeadline,
+            cancel_stop: IsolatedCancelStop::CooperativeOnly,
+        })
+    ));
+    assert_eq!(
+        dispatch_route(
+            ExecutionClass::SharedThread,
+            plan,
+            &options(r#"{"timeout_ms": 3000}"#)
+        ),
+        Ok(DispatchRoute::Isolated {
+            work: IsolatedWork::Run,
+            deadline: IsolatedDeadline::After(TaskTimeoutMs::new(3000).unwrap()),
+            cancel_stop: IsolatedCancelStop::CooperativeOnly,
+        })
+    );
+}
+
+/// An `ISOLATED` row with a stored cancel grace is killed that long after
+/// an operator cancel; with none it is cooperative only; a grace outside
+/// its bounds refuses the run, after the timeout.
+#[test]
+fn an_isolated_row_takes_its_stored_cancel_grace_as_its_hard_stop() {
+    let plan = ClaimPlan::for_children(1, 0, 0);
+    assert_eq!(
+        dispatch_route(
+            ExecutionClass::Isolated,
+            plan,
+            &options(r#"{"timeout_ms": 2000, "cancel_grace_ms": 750}"#)
+        ),
+        Ok(DispatchRoute::Isolated {
+            work: IsolatedWork::Run,
+            deadline: IsolatedDeadline::After(TaskTimeoutMs::new(2000).unwrap()),
+            cancel_stop: IsolatedCancelStop::KillAfterGrace(CancelGraceMs::new(750).unwrap()),
+        })
+    );
+    assert_eq!(
+        dispatch_route(
+            ExecutionClass::Isolated,
+            plan,
+            &options(r#"{"cancel_grace_ms": null}"#)
+        ),
+        Ok(DispatchRoute::Isolated {
+            work: IsolatedWork::Run,
+            deadline: IsolatedDeadline::NoDeadline,
+            cancel_stop: IsolatedCancelStop::CooperativeOnly,
+        })
+    );
+    assert!(matches!(
+        dispatch_route(
+            ExecutionClass::Isolated,
+            plan,
+            &options(r#"{"cancel_grace_ms": 5}"#)
+        ),
+        Ok(DispatchRoute::Isolated {
+            work: IsolatedWork::Refusal(StoredOptionsRefusal::CancelGraceInvalid(_)),
+            deadline: IsolatedDeadline::NoDeadline,
+            cancel_stop: IsolatedCancelStop::CooperativeOnly,
+        })
+    ));
+    assert!(matches!(
+        dispatch_route(
+            ExecutionClass::Isolated,
+            plan,
+            &options(r#"{"timeout_ms": 5, "cancel_grace_ms": 5}"#)
+        ),
+        Ok(DispatchRoute::Isolated {
+            work: IsolatedWork::Refusal(StoredOptionsRefusal::TimeoutValueInvalid(_)),
+            ..
         })
     ));
 }

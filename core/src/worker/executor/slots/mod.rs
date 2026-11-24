@@ -38,6 +38,8 @@ mod attempt_points_tests;
 #[cfg(test)]
 mod boot_tests;
 #[cfg(test)]
+mod cancel_tests;
+#[cfg(test)]
 mod child_rss_tests;
 #[cfg(test)]
 mod claim_plan_tests;
@@ -107,8 +109,8 @@ pub use budgets::{FreeCapacity, PoolService, SharedSlotService};
 // Each run frame of a pool carries it.
 pub use crate::broker::OrphanSelfHeal;
 pub use dispatch::{
-    AttemptEnd, AttemptLog, Claimed, ClaimedTask, ExecutionClass, LoopKillCode, NotRunCause,
-    RetryFacts, Settlement, TaskKind, TerminalState, TimeoutSeen, WrittenEnd,
+    AttemptEnd, AttemptLog, CancelledEnd, Claimed, ClaimedTask, ExecutionClass, LoopKillCode,
+    NotRunCause, RetryFacts, Settlement, TaskKind, TerminalState, TimeoutSeen, WrittenEnd,
 };
 #[cfg(test)]
 pub use dispatch::{CancelEnd, TimeoutCancel};
@@ -123,7 +125,7 @@ pub use route::{
     describe_claim_plan, dispatch_route, unserved_classes_line, ClaimRoute, DispatchRoute,
 };
 #[cfg(test)]
-pub use route::{ClaimPlan, IsolatedDeadline, UnservedClass};
+pub use route::{ClaimPlan, IsolatedCancelStop, IsolatedDeadline, UnservedClass};
 pub use shared::{SharedPool, SharedPoolConfig};
 #[cfg(test)]
 pub use start::check_memory_baselines;

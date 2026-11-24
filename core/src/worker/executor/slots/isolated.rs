@@ -22,6 +22,17 @@
 //!   task) kills the child; its task takes the crash path once the exit is
 //!   seen (what the body returned, after a return). Repeated defects fail
 //!   the pools ([`super::defects`]).
+//! - An operator cancel routed to the run ([`CancelBell`]) sends
+//!   `cancel_run` to the child. The child ends the run as cancelled
+//!   (`run_cancelled`), and the end is `Cancelled`: the cancel statement
+//!   recorded the attempt, and nothing is written. The deadline stays a
+//!   bound; with [`IsolatedCancelStop::KillAfterGrace`] the slot also kills
+//!   the child once the grace after the cancel passed. A child killed or
+//!   lost after the cancel ends the run as `Cancelled` too, whether its exit
+//!   was seen or not: no write depends on it. Work that a cancelled body
+//!   left on its loop retires the child. A result that the child sent before
+//!   it read the cancel is the end, as without a cancel; its write finds the
+//!   row moved.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -36,25 +47,30 @@ use super::defects::{
     TasksFinished,
 };
 use super::dispatch::{
-    AttemptEnd, AttemptLog, BodyReturn, NotRunCause, TimeoutCancel, TimeoutSeen,
+    AttemptEnd, AttemptLog, BodyReturn, CancelledEnd, NotRunCause, SecondCancelAfterSignal,
+    TimeoutCancel, TimeoutSeen,
 };
 use super::pool::{Answer, ExitNotSeen, MemoryLimit, PoolShared, QueuedRun, TaskLimit};
 use super::replacement::{reason_of_loss, tell_replaced, ChildLeave, GenerationChild};
-use super::route::IsolatedDeadline;
+use super::route::{IsolatedCancelStop, IsolatedDeadline};
 use super::seat_runs::SHARED_BACKSTOP_MARGIN;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::child_writes::{longer, FINALIZING_MARKER_END};
 use crate::db::CANCEL_REQUEST_BOUND;
+use crate::events::AttemptStart;
 use crate::telemetry::labels::ReplaceReason;
 use crate::worker::executor::protocol::{
-    ChildAfterFrame, ChildFrame, ParentFrame, ProcessId, RssReading, RunFrame, TaskTimeoutMs,
-    ISOLATED_LEFTOVER_GRACE, STUCK_REPORT_DELAY,
+    CancelTarget, CancelledLoop, ChildAfterFrame, ChildFrame, IsolatedWork, ParentFrame, ProcessId,
+    RssReading, RunCancelledFrame, RunFrame, TaskTimeoutMs, ISOLATED_LEFTOVER_GRACE,
+    STUCK_REPORT_DELAY,
 };
 use crate::worker::executor::supervisor::{
     log_core_stopped_child, ChildChannel, ChildExit, ChildLost, EndWithoutTask, ExitState,
     FrameWait, LossCause, MailboxBound, SendFailure, CHANNEL_LOST_GRACE,
 };
-use crate::worker::runner_beats::{HeldChild, HeldDispatch, RegistryClosed};
+use crate::worker::runner_beats::{
+    CancelBell, CancelTake, HeldChild, HeldDispatch, RegistryClosed,
+};
 
 /// The longest wait of the finalizing marker of a version-1 Python isolated
 /// child (the reference copy of the whole-run pairs) after a body returned
@@ -139,12 +155,20 @@ enum IsolatedReturn {
     Seen(AttemptEnd),
 }
 
+/// Whether the slot sent `cancel_run` for the task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancelSent {
+    NotSent,
+    Sent,
+}
+
 /// The answer of the task on the child, kept by the slot outside the code
 /// that runs the task, so that a defect in that code still answers it
 /// (Python `SlotHandle.finish`, `loss_outcome`).
 struct TaskAnswer {
     answer: Option<Answer>,
     returned: IsolatedReturn,
+    cancel: CancelSent,
 }
 
 impl TaskAnswer {
@@ -152,7 +176,14 @@ impl TaskAnswer {
         Self {
             answer: Some(answer),
             returned: IsolatedReturn::NotSeen,
+            cancel: CancelSent::NotSent,
         }
+    }
+
+    /// The slot sent `cancel_run` for the task: an end at a loss or a
+    /// defect is `Cancelled`, unless the body returned first.
+    fn cancel_sent(&mut self) {
+        self.cancel = CancelSent::Sent;
     }
 
     fn child_took_it(&mut self, pid: ProcessId) {
@@ -180,12 +211,17 @@ impl TaskAnswer {
     }
 
     /// The answer, when it is still open, and the end of the task once the
-    /// exit of its child, lost by `lost`, is seen.
+    /// exit of its child, lost by `lost`, is seen: what the body returned,
+    /// else the end of a cancelled run killed by the worker, else the crash
+    /// path.
     fn open_at_loss(&mut self, lost: &ChildLost) -> Option<(Answer, AttemptEnd)> {
         let answer = self.answer.take()?;
-        let seen_end = match &self.returned {
-            IsolatedReturn::Seen(returned) => returned.clone(),
-            IsolatedReturn::NotSeen => AttemptEnd::of_lost_child(lost),
+        let seen_end = match (&self.returned, self.cancel) {
+            (IsolatedReturn::Seen(returned), _) => returned.clone(),
+            (IsolatedReturn::NotSeen, CancelSent::Sent) => {
+                AttemptEnd::Cancelled(CancelledEnd::ChildKilled)
+            }
+            (IsolatedReturn::NotSeen, CancelSent::NotSent) => AttemptEnd::of_lost_child(lost),
         };
         Some((answer, seen_end))
     }
@@ -207,6 +243,69 @@ enum ReadyNotice {
 enum FirstAnswer {
     Wait(FrameWait),
     DrainDeadline,
+}
+
+/// What came first for a task in flight whose slot watches for an operator
+/// cancel.
+enum RunWait {
+    Answer(FirstAnswer),
+    /// An operator cancel was routed to the run, and the slot took it.
+    CancelRequested,
+}
+
+/// Whether the slot watches for an operator cancel of the run: only a run
+/// of task code; a refusal of the stored options runs none.
+#[derive(Clone, Copy)]
+enum CancelWatch<'a> {
+    Watching(&'a CancelBell, &'a HeldDispatch),
+    NotWatching,
+}
+
+/// The bound of the wait after `cancel_run`: the deadline of the run, or
+/// the end of the grace of its cancel stop, whichever comes first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancelBound {
+    /// Neither bound: the run has no deadline and no kill for the cancel.
+    Unbounded,
+    Deadline(Instant),
+    GraceEnd(Instant),
+}
+
+impl CancelBound {
+    /// The earlier of `deadline` and the end of the grace of `cancel_stop`
+    /// counted from `sent_at`. Pure.
+    fn of(deadline: Option<Instant>, cancel_stop: IsolatedCancelStop, sent_at: Instant) -> Self {
+        let grace_end = match cancel_stop {
+            IsolatedCancelStop::CooperativeOnly => None,
+            IsolatedCancelStop::KillAfterGrace(grace) => {
+                Some(sent_at + Duration::from_millis(grace.get()))
+            }
+        };
+        match (deadline, grace_end) {
+            (None, None) => Self::Unbounded,
+            (Some(deadline), None) => Self::Deadline(deadline),
+            (None, Some(grace_end)) => Self::GraceEnd(grace_end),
+            (Some(deadline), Some(grace_end)) => match grace_end < deadline {
+                true => Self::GraceEnd(grace_end),
+                false => Self::Deadline(deadline),
+            },
+        }
+    }
+
+    fn until(self) -> Option<Instant> {
+        match self {
+            Self::Unbounded => None,
+            Self::Deadline(at) | Self::GraceEnd(at) => Some(at),
+        }
+    }
+
+    /// The replace reason of the kill at this bound.
+    fn replace_reason(self) -> ReplaceReason {
+        match self {
+            Self::Deadline(_) | Self::Unbounded => ReplaceReason::AtDeadline,
+            Self::GraceEnd(_) => ReplaceReason::KilledByParent,
+        }
+    }
 }
 
 /// The slot task: boot a child, serve it, replace it, until the pools stop
@@ -341,6 +440,7 @@ async fn serve_generation(
         let QueuedRun {
             frame,
             deadline,
+            cancel_stop,
             answer,
             log,
         } = run;
@@ -350,7 +450,10 @@ async fn serve_generation(
             &mut channel,
             frame,
             log,
-            deadline,
+            RunBounds {
+                deadline,
+                cancel_stop,
+            },
             &mut answer,
         ))
         .await;
@@ -551,21 +654,62 @@ async fn first_answer(
     }
 }
 
+/// As [`first_answer`], and an operator cancel of the run when `watch` names
+/// its bell: a ring whose cancel the slot takes ends the wait. A ring with no
+/// cancel to take (the registry closed since) waits again.
+async fn first_answer_or_cancel(
+    shared: &PoolShared,
+    channel: &mut ChildChannel,
+    until: Option<Instant>,
+    watch: CancelWatch<'_>,
+) -> RunWait {
+    let (bell, held) = match watch {
+        CancelWatch::Watching(bell, held) => (bell, held),
+        CancelWatch::NotWatching => {
+            return RunWait::Answer(first_answer(shared, channel, until).await)
+        }
+    };
+    loop {
+        let bound = until.map(|until| until.saturating_duration_since(Instant::now()));
+        let rung = tokio::select! {
+            wait = channel.await_frame(bound) => return RunWait::Answer(FirstAnswer::Wait(wait)),
+            () = shared.board.drain_deadline.cancelled() => {
+                return RunWait::Answer(FirstAnswer::DrainDeadline)
+            }
+            () = bell.rung() => held.take_cancel(),
+        };
+        match rung {
+            CancelTake::Requested => return RunWait::CancelRequested,
+            CancelTake::NoRequest => {}
+        }
+    }
+}
+
+/// The bounds that the parent holds for one isolated run: its deadline, and
+/// the stop of an operator cancel.
+#[derive(Debug, Clone, Copy)]
+struct RunBounds {
+    deadline: IsolatedDeadline,
+    cancel_stop: IsolatedCancelStop,
+}
+
 /// Run one task on the child and answer it.
 async fn run_one(
     shared: &PoolShared,
     channel: &mut ChildChannel,
     frame: RunFrame,
     log: AttemptLog,
-    deadline: IsolatedDeadline,
+    bounds: RunBounds,
     answer: &mut TaskAnswer,
 ) -> AfterRun {
     let task_id = frame.task_id;
+    let bell = CancelBell::default();
     let child = HeldChild {
         id: channel.id(),
         pid: channel.pid(),
         spawner: shared.spawner.clone(),
         kill_mark: channel.kill_mark(),
+        cancel_bell: bell.clone(),
     };
     let held = match shared.live.hold(task_id, frame.claimed_at, child) {
         Ok(held) => held,
@@ -587,11 +731,17 @@ async fn run_one(
         }
     };
     answer.child_took_it(channel.pid());
+    // A refusal of the stored options runs no task code: a cancel of it
+    // has nothing to stop, and its writes find the row moved.
+    let watch = match &frame.work {
+        IsolatedWork::Run => CancelWatch::Watching(&bell, &held),
+        IsolatedWork::Refusal(_) => CancelWatch::NotWatching,
+    };
     let parent_frame = ParentFrame::Run(frame);
     let sent = channel.send(&parent_frame).await;
     // The input is not kept once the frame is written.
     drop(parent_frame);
-    let timeout = match deadline {
+    let timeout = match bounds.deadline {
         IsolatedDeadline::NoDeadline => None,
         IsolatedDeadline::After(timeout) => Some(timeout),
     };
@@ -599,7 +749,18 @@ async fn run_one(
         Ok(()) => {
             let until =
                 timeout.map(|timeout| Instant::now() + Duration::from_millis(timeout.get()));
-            first_answer(shared, channel, until).await
+            match first_answer_or_cancel(shared, channel, until, watch).await {
+                RunWait::Answer(first) => first,
+                RunWait::CancelRequested => {
+                    let cancel = CancelPhase {
+                        task_id,
+                        log,
+                        until,
+                        cancel_stop: bounds.cancel_stop,
+                    };
+                    return end_after_cancel(shared, channel, cancel, held, answer).await;
+                }
+            }
         }
         Err(SendFailure::Encode(error)) => {
             // Nothing reached the child: the frame failed in the slot's
@@ -707,6 +868,186 @@ fn timeout_end(timeout: Option<TaskTimeoutMs>) -> AttemptEnd {
     }
 }
 
+/// What the wait after `cancel_run` needs to know of the run.
+struct CancelPhase {
+    task_id: uuid::Uuid,
+    log: AttemptLog,
+    /// The deadline of the run, if it has one.
+    until: Option<Instant>,
+    cancel_stop: IsolatedCancelStop,
+}
+
+/// An operator cancel was routed to the run: send `cancel_run`, then wait
+/// for the end of the run, bounded by its deadline, by the end of the grace
+/// of its cancel stop, and by the drain deadline of the pool. The end is
+/// `Cancelled` unless the child ended the run before it read the cancel.
+async fn end_after_cancel(
+    shared: &PoolShared,
+    channel: &mut ChildChannel,
+    cancel: CancelPhase,
+    held: HeldDispatch,
+    answer: &mut TaskAnswer,
+) -> AfterRun {
+    let CancelPhase {
+        task_id,
+        log,
+        until,
+        cancel_stop,
+    } = cancel;
+    tracing::info!(
+        task_id = %task_id, attempt = log.attempt.get(), trace_id = log.trace_id.log_field(),
+        pid = channel.pid().get(), cancel_stop = ?cancel_stop,
+        "an operator cancelled the task; sending the cancel to its child",
+    );
+    answer.cancel_sent();
+    let sent_at = Instant::now();
+    let sent = channel
+        .send(&ParentFrame::CancelRun(CancelTarget::Isolated { task_id }))
+        .await;
+    match sent {
+        Ok(()) => {}
+        Err(SendFailure::Encode(error)) => {
+            tracing::error!(
+                task_id = %task_id, attempt = log.attempt.get(), trace_id = log.trace_id.log_field(),
+                error = %error,
+                "the cancel frame could not be encoded: {error}",
+            );
+            drop(held);
+            let _lost = defect_kill(channel).await;
+            answer.send(AttemptEnd::Cancelled(CancelledEnd::ChildKilled));
+            return AfterRun::Defect(SlotDefect::frame_not_encoded(&error));
+        }
+        Err(failure @ (SendFailure::Write(_) | SendFailure::TimedOut)) => {
+            tracing::warn!(
+                task_id = %task_id, attempt = log.attempt.get(), trace_id = log.trace_id.log_field(),
+                failure = %failure,
+                "the cancel frame could not be sent; killing the child",
+            );
+            drop(held);
+            let lost = lost_after_kill(channel).await;
+            answer.send(AttemptEnd::Cancelled(CancelledEnd::ChildKilled));
+            return AfterRun::ChildGone {
+                finished: TasksFinished::NoTask,
+                reason: reason_of_loss(&lost),
+            };
+        }
+    }
+    let bound = CancelBound::of(until, cancel_stop, sent_at);
+    match first_answer(shared, channel, bound.until()).await {
+        FirstAnswer::Wait(FrameWait::Frame(ChildFrame::RunCancelled(cancelled)))
+            if cancelled.task_id == task_id =>
+        {
+            drop(held);
+            answer.send(cancelled_end(&cancelled));
+            after_cancelled_run(&cancelled)
+        }
+        FirstAnswer::Wait(FrameWait::Frame(ChildFrame::Result(result)))
+            if result.task_id == task_id =>
+        {
+            // The run ended before the child read the cancel: its end is
+            // written as without a cancel, and finds the row moved.
+            drop(held);
+            answer.send(AttemptEnd::reported(result.end, result.started_at));
+            match result.child {
+                ChildAfterFrame::ServesOn => AfterRun::Serve { rss: result.rss },
+                ChildAfterFrame::EndsItself => AfterRun::EndsItself,
+            }
+        }
+        FirstAnswer::Wait(FrameWait::Frame(ChildFrame::BodyReturned(returned)))
+            if returned.task_id == task_id =>
+        {
+            // The body returned with work left before the child read the
+            // cancel: as without a cancel.
+            let body_return = BodyReturn {
+                end: returned.returned,
+                started_at: returned.started_at,
+            };
+            end_after_return(shared, channel, task_id, log, body_return, held, answer).await
+        }
+        FirstAnswer::Wait(FrameWait::Frame(other)) => {
+            tracing::error!(task_id = %task_id, attempt = log.attempt.get(), trace_id = log.trace_id.log_field(), frame = ?other, "an isolated child sent a frame out of turn after a cancel");
+            drop(held);
+            let lost = channel.discard_violating_child().await;
+            answer.send(AttemptEnd::Cancelled(CancelledEnd::ChildKilled));
+            AfterRun::ChildGone {
+                finished: TasksFinished::NoTask,
+                reason: reason_of_loss(&lost),
+            }
+        }
+        FirstAnswer::Wait(FrameWait::Lost(lost)) => {
+            drop(held);
+            answer.send(AttemptEnd::Cancelled(CancelledEnd::ChildLost));
+            AfterRun::ChildGone {
+                finished: TasksFinished::NoTask,
+                reason: reason_of_loss(&lost),
+            }
+        }
+        FirstAnswer::Wait(FrameWait::Expired) => {
+            tracing::warn!(
+                task_id = %task_id, attempt = log.attempt.get(), trace_id = log.trace_id.log_field(),
+                bound = ?bound,
+                "a cancelled task did not end by its deadline or its cancel grace; killing its child",
+            );
+            drop(held);
+            answer.send(end_after_cancel_kill(channel).await);
+            AfterRun::ChildGone {
+                finished: TasksFinished::AtLeastOne,
+                reason: bound.replace_reason(),
+            }
+        }
+        FirstAnswer::DrainDeadline => {
+            drop(held);
+            shared.drain_kills.note([task_id]);
+            let lost = lost_after_kill(channel).await;
+            answer.send(AttemptEnd::Cancelled(CancelledEnd::ChildKilled));
+            AfterRun::ChildGone {
+                finished: TasksFinished::NoTask,
+                reason: reason_of_loss(&lost),
+            }
+        }
+    }
+}
+
+/// The end of a cancelled run that the child reported: before the body, or
+/// after the signal. An isolated child sends no second cancel. Pure.
+fn cancelled_end(cancelled: &RunCancelledFrame) -> AttemptEnd {
+    AttemptEnd::Cancelled(CancelledEnd::reported(
+        cancelled.body,
+        SecondCancelAfterSignal::NotSent,
+        AttemptStart::Reported {
+            started_at: cancelled.started_at,
+        },
+    ))
+}
+
+/// What the slot does after a cancelled run that the child reported: a child
+/// that ends itself is not served; work that the body left retires the
+/// child; else the child serves on. Pure.
+fn after_cancelled_run(cancelled: &RunCancelledFrame) -> AfterRun {
+    match (&cancelled.task_loop, cancelled.child) {
+        (_, ChildAfterFrame::EndsItself) => AfterRun::EndsItself,
+        (CancelledLoop::WorkLeft(_), ChildAfterFrame::ServesOn) => AfterRun::Retire,
+        (CancelledLoop::NoLeftWork(_), ChildAfterFrame::ServesOn) => {
+            AfterRun::Serve { rss: cancelled.rss }
+        }
+    }
+}
+
+/// Kill the child of a cancelled run that did not end by its bound, and
+/// wait for its exit. The cancel recorded the attempt, so the end does not
+/// wait for an exit that is not seen: the child is disposed of by the slot.
+async fn end_after_cancel_kill(channel: &mut ChildChannel) -> AttemptEnd {
+    let _ = channel.kill_for_caller().await;
+    match channel.wait_exit(channel.kill_wait()).await {
+        ChildExit::Reaped(_) | ChildExit::ReapedElsewhere => {}
+        ChildExit::ExitUnknown => tracing::warn!(
+            pid = channel.pid().get(),
+            "the exit of the killed child of a cancelled task was not seen",
+        ),
+    }
+    AttemptEnd::Cancelled(CancelledEnd::ChildKilled)
+}
+
 /// Kill the child, wait for its exit, and end the task with `seen_end`
 /// once the exit is seen.
 async fn end_after_kill(
@@ -757,7 +1098,12 @@ async fn end_at_defect(shared: &PoolShared, channel: &mut ChildChannel, answer: 
     let Some((open, seen_end)) = answer.open_at_loss(&lost) else {
         return;
     };
-    open.send(end_once_seen(shared, channel, lost, seen_end).await);
+    let end = match seen_end {
+        // The cancel recorded the attempt; no write waits for the exit.
+        cancelled @ AttemptEnd::Cancelled(_) => cancelled,
+        other => end_once_seen(shared, channel, lost, other).await,
+    };
+    open.send(end);
 }
 
 /// The exit of a killed child was not seen: leave the row to recovery, or

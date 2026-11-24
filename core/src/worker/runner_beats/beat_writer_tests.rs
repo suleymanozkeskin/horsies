@@ -15,8 +15,9 @@ use uuid::Uuid;
 
 use super::{
     end_child, launch_runner_beats, sleeping_child, test_beat_pool, write_beats, BeatSender,
-    FailClosedStop, LiveDispatches, StaleRunningRecovery, INSERT_RUNNER_HEARTBEATS_SQL,
+    BeatWrite, FailClosedStop, LiveDispatches, StaleRunningRecovery, INSERT_RUNNER_HEARTBEATS_SQL,
 };
+use crate::broker::cancelled_runs::RunClaim;
 use crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool;
 use crate::test_support::sql::{self, TestPool};
 use crate::worker::executor::supervisor::Spawner;
@@ -149,6 +150,14 @@ async fn seed_task(pool: &TestPool, task_id: Uuid, seed: &RowSeed<'_>) {
     .expect("seed task row");
 }
 
+/// The runs whose beat landed, of a write whose rows decoded.
+fn landed(written: &BeatWrite) -> Vec<RunClaim> {
+    match written {
+        BeatWrite::Landed(landed) => landed.clone(),
+        BeatWrite::LandedNotRead => panic!("the rows of the beat statement did not decode"),
+    }
+}
+
 fn sender() -> BeatSender {
     BeatSender {
         worker_id: WORKER_ID.to_owned(),
@@ -225,7 +234,13 @@ async fn a_running_row_of_this_claim_gets_a_beat() {
     .await
     .expect("beat write");
 
-    assert_eq!(rows, 1);
+    assert_eq!(
+        landed(&rows),
+        vec![RunClaim {
+            task_id,
+            claimed_at
+        }]
+    );
     assert_eq!(
         beats(&pool, task_id).await,
         vec![(WORKER_ID.to_owned(), "runner".to_owned(), BEAT_PID)],
@@ -303,7 +318,7 @@ async fn a_row_outside_the_fence_gets_no_beat() {
         .await
         .expect("beat write");
 
-        assert_eq!(rows, 0, "{case}");
+        assert_eq!(landed(&rows), Vec::new(), "{case}");
         assert_eq!(beats(&pool, task_id).await, Vec::new(), "{case}");
         cleanup(&pool, &[task_id]).await;
     }
@@ -384,7 +399,7 @@ async fn one_statement_beats_every_fenced_row() {
     .await
     .expect("beat write");
 
-    assert_eq!(rows, 3);
+    assert_eq!(landed(&rows).len(), 3);
     for task_id in &task_ids {
         assert_eq!(beats(&pool, *task_id).await.len(), 1, "{task_id}");
     }
@@ -422,7 +437,7 @@ async fn the_reaper_leaves_a_beaten_row_and_fails_an_unbeaten_one() {
     )
     .await
     .expect("beat write");
-    assert_eq!(rows, 1);
+    assert_eq!(landed(&rows).len(), 1);
 
     let _processed = mark_stale_running_as_failed(
         &pool,

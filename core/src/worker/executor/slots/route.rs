@@ -14,6 +14,13 @@
 //! before it resolves the task. A shared row on the `ISOLATED` budget gets
 //! the refusal or the timeout of its seat work, so its outcome does not
 //! depend on the child kind.
+//!
+//! An isolated run also gets the stop of an operator cancel
+//! ([`IsolatedCancelStop`]): an `ISOLATED` row with a stored
+//! `cancel_grace_ms` is killed that long after the cancel when it has not
+//! ended; with none, the cancel is cooperative only. A `SHARED_ASYNC` row on
+//! the `ISOLATED` budget is killed after its grace, where its seat would
+//! drop it; a `SHARED_THREAD` row is cooperative only, as on its seat.
 
 use std::time::Duration;
 
@@ -151,14 +158,29 @@ pub enum IsolatedDeadline {
     After(TaskTimeoutMs),
 }
 
+/// What an isolated parent does when the run of its child has not ended
+/// after the operator cancel that it sent. The deadline of the run stays a
+/// bound: the parent kills at the earlier of the deadline and the end of
+/// the grace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolatedCancelStop {
+    /// No kill for the cancel: the run ends when its code returns, or at
+    /// its deadline.
+    CooperativeOnly,
+    /// Kill the child this long after the cancel was sent, when the run has
+    /// not ended.
+    KillAfterGrace(CancelGraceMs),
+}
+
 /// The kind of child that runs a claimed row, and what it does with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchRoute {
     /// An isolated child runs the task, or its refusal; the parent holds
-    /// the deadline.
+    /// the deadline and the stop of an operator cancel.
     Isolated {
         work: IsolatedWork,
         deadline: IsolatedDeadline,
+        cancel_stop: IsolatedCancelStop,
     },
     /// A seat of a shared async child: `AsyncTask` or `Refusal`.
     SharedAsync(SharedWork),
@@ -278,6 +300,21 @@ fn shared_async_work(
     }
 }
 
+/// The cancel stop of an `ISOLATED` row: the kill after its stored grace,
+/// none when it stores no grace, or the refusal of a grace the worker cannot
+/// use.
+fn isolated_cancel_stop(
+    options: &StoredOptions,
+) -> Result<IsolatedCancelStop, StoredOptionsRefusal> {
+    match options.cancel_grace() {
+        StoredCancelGrace::NotStored => Ok(IsolatedCancelStop::CooperativeOnly),
+        StoredCancelGrace::Grace(grace) => Ok(IsolatedCancelStop::KillAfterGrace(grace_ms(grace))),
+        StoredCancelGrace::Invalid(refusal) => Err(StoredOptionsRefusal::CancelGraceInvalid(
+            refusal_reason(&grace_refusal_message(refusal)),
+        )),
+    }
+}
+
 /// The work of a `SHARED_THREAD` row: the task with its stored timeout, or
 /// the refusal of a timeout the worker cannot use.
 fn shared_thread_work(options: &StoredOptions) -> Result<TaskTimeoutMs, StoredOptionsRefusal> {
@@ -287,27 +324,47 @@ fn shared_thread_work(options: &StoredOptions) -> Result<TaskTimeoutMs, StoredOp
     }
 }
 
+/// The deadline and the cancel stop of an `ISOLATED` row, or the refusal of
+/// the first stored value the worker cannot use: the timeout, then the
+/// grace.
+fn isolated_bounds(
+    options: &StoredOptions,
+) -> Result<(IsolatedDeadline, IsolatedCancelStop), StoredOptionsRefusal> {
+    let deadline = match usable_timeout(options)? {
+        Some(timeout) => IsolatedDeadline::After(timeout),
+        None => IsolatedDeadline::NoDeadline,
+    };
+    Ok((deadline, isolated_cancel_stop(options)?))
+}
+
 /// The route of a row on the `ISOLATED` budget. A shared row gets the
 /// timeout or the refusal of its seat work.
 fn isolated_route(class: ExecutionClass, options: &StoredOptions) -> DispatchRoute {
-    let deadline = match class {
-        ExecutionClass::Isolated => usable_timeout(options).map(|timeout| match timeout {
-            Some(timeout) => IsolatedDeadline::After(timeout),
-            None => IsolatedDeadline::NoDeadline,
+    let bounds = match class {
+        ExecutionClass::Isolated => isolated_bounds(options),
+        ExecutionClass::SharedAsync => shared_async_work(options).map(|(timeout, grace)| {
+            (
+                IsolatedDeadline::After(timeout),
+                IsolatedCancelStop::KillAfterGrace(grace),
+            )
         }),
-        ExecutionClass::SharedAsync => {
-            shared_async_work(options).map(|(timeout, _)| IsolatedDeadline::After(timeout))
-        }
-        ExecutionClass::SharedThread => shared_thread_work(options).map(IsolatedDeadline::After),
+        ExecutionClass::SharedThread => shared_thread_work(options).map(|timeout| {
+            (
+                IsolatedDeadline::After(timeout),
+                IsolatedCancelStop::CooperativeOnly,
+            )
+        }),
     };
-    match deadline {
-        Ok(deadline) => DispatchRoute::Isolated {
+    match bounds {
+        Ok((deadline, cancel_stop)) => DispatchRoute::Isolated {
             work: IsolatedWork::Run,
             deadline,
+            cancel_stop,
         },
         Err(refusal) => DispatchRoute::Isolated {
             work: IsolatedWork::Refusal(refusal),
             deadline: IsolatedDeadline::NoDeadline,
+            cancel_stop: IsolatedCancelStop::CooperativeOnly,
         },
     }
 }

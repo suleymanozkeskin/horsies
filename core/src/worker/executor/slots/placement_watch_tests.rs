@@ -39,6 +39,7 @@ async fn a_watched_task_is_placed_once_on_the_child_that_took_it() {
         input(),
         IsolatedWork::Run,
         IsolatedDeadline::NoDeadline,
+        IsolatedCancelStop::CooperativeOnly,
         watch,
     ));
     let placement = tokio::time::timeout(ANSWER_WAIT, receipt.placement())
@@ -76,6 +77,7 @@ async fn a_task_that_reaches_no_child_is_not_placed() {
         input(),
         IsolatedWork::Run,
         IsolatedDeadline::NoDeadline,
+        IsolatedCancelStop::CooperativeOnly,
         watch,
     );
     let placement = tokio::time::timeout(ANSWER_WAIT, receipt.placement())

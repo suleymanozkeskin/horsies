@@ -614,9 +614,16 @@ impl WorkerChildren {
             &self.shared_async,
             &self.shared_thread,
         ) {
-            (DispatchRoute::Isolated { work, deadline }, Some(pool), _, _) => {
-                pool.submit_watched(&task, input, work, deadline, watch)
-            }
+            (
+                DispatchRoute::Isolated {
+                    work,
+                    deadline,
+                    cancel_stop,
+                },
+                Some(pool),
+                _,
+                _,
+            ) => pool.submit_watched(&task, input, work, deadline, cancel_stop, watch),
             (DispatchRoute::SharedAsync(work), _, Some(pool), _) => {
                 pool.submit_watched(&task, input, work, watch)
             }
