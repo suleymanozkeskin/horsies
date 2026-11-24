@@ -16,6 +16,7 @@ use super::{
 use crate::broker::cancelled_runs::{read_cancelled_runs, CancelledRunsReadError, RunClaim};
 use crate::broker::core_rows::StatementLog;
 use crate::db::{CorePool, PayloadEvent};
+use crate::worker::executor::slots::dispatch::AttemptLog;
 use crate::worker::executor::supervisor::Spawner;
 use crate::worker::runner_beats::{
     end_child, launch_runner_beats, sleeping_child, test_beat_pool, BeatSender, CancelRouting,
@@ -107,8 +108,13 @@ async fn hold(runs: &[RunClaim]) -> Held {
     let guards = runs
         .iter()
         .map(|run| {
-            live.hold(run.task_id, run.claimed_at, child.clone())
-                .unwrap()
+            live.hold(
+                run.task_id,
+                run.claimed_at,
+                AttemptLog::FIRST_UNTRACED,
+                child.clone(),
+            )
+            .unwrap()
         })
         .collect();
     Held {
@@ -188,8 +194,18 @@ async fn a_notice_for_a_held_run_is_routed_once() {
     let first = route_cancel(&held.live, target);
     let second = route_cancel(&held.live, target);
 
-    assert_eq!(first.routing, CancelRouting::Routed);
-    assert_eq!(second.routing, CancelRouting::AlreadyRequested);
+    assert_eq!(
+        first.routing,
+        CancelRouting::Routed {
+            log: AttemptLog::FIRST_UNTRACED,
+        }
+    );
+    assert_eq!(
+        second.routing,
+        CancelRouting::AlreadyRequested {
+            log: AttemptLog::FIRST_UNTRACED,
+        }
+    );
     tokio::time::timeout(EVENT_BOUND, held.bell.rung())
         .await
         .expect("the bell of the slot rings");
@@ -245,7 +261,9 @@ async fn a_payload_that_does_not_parse_reads_the_held_runs() {
         routed,
         vec![Routed {
             run: cancelled,
-            routing: CancelRouting::Routed,
+            routing: CancelRouting::Routed {
+                log: AttemptLog::FIRST_UNTRACED,
+            },
         }]
     );
     assert_eq!(held.live.held_task_ids(), vec![running.task_id]);
@@ -268,7 +286,9 @@ async fn a_listener_gap_or_overflow_finds_a_lost_notice() {
             routed,
             vec![Routed {
                 run: lost,
-                routing: CancelRouting::Routed,
+                routing: CancelRouting::Routed {
+                    log: AttemptLog::FIRST_UNTRACED,
+                },
             }]
         );
         assert_eq!(held.guards[0].take_cancel(), CancelTake::Requested);
@@ -294,7 +314,12 @@ async fn a_routed_run_is_not_read_again_and_its_late_notice_changes_nothing() {
     .await;
     let (_, second_gap) = on_step(RouterStep::Notice(PayloadEvent::Gap), &held.live, &reader).await;
 
-    assert_eq!(late[0].routing, CancelRouting::AlreadyRequested);
+    assert_eq!(
+        late[0].routing,
+        CancelRouting::AlreadyRequested {
+            log: AttemptLog::FIRST_UNTRACED,
+        }
+    );
     assert_eq!(second_gap, Vec::new());
     assert_eq!(reader.reads(), vec![vec![lost]]);
     held.end().await;
@@ -325,7 +350,9 @@ async fn beat_misses_are_read_and_routed() {
         routed,
         vec![Routed {
             run: cancelled,
-            routing: CancelRouting::Routed,
+            routing: CancelRouting::Routed {
+                log: AttemptLog::FIRST_UNTRACED,
+            },
         }]
     );
     assert_eq!(held.guards[1].take_cancel(), CancelTake::NoRequest);
@@ -488,7 +515,9 @@ async fn a_lost_notice_is_found_by_the_beat_miss_read() {
         routed,
         vec![Routed {
             run: cancelled,
-            routing: CancelRouting::Routed,
+            routing: CancelRouting::Routed {
+                log: AttemptLog::FIRST_UNTRACED,
+            },
         }]
     );
     assert_eq!(held.guards[0].take_cancel(), CancelTake::Requested);

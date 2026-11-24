@@ -549,7 +549,7 @@ async fn send_run(pool: &SharedPoolShared, generation: &mut Generation, queued: 
         kill_mark: channel.kill_mark(),
         cancel_bell: generation.cancel_bell.clone(),
     };
-    let held = match pool.live.hold(frame.task_id, frame.claimed_at, child) {
+    let held = match pool.live.hold(frame.task_id, frame.claimed_at, log, child) {
         Ok(held) => held,
         Err(RegistryClosed) => {
             tracing::error!(
@@ -633,37 +633,35 @@ async fn send_kill(generation: &mut Generation, reason: KillReason) {
 /// A frame that cannot be encoded is a defect, and a send that fails kills
 /// the child, as for a run frame.
 async fn send_cancels(generation: &mut Generation) {
-    let requested: Vec<RunRef> = generation
+    let requested: Vec<(RunRef, AttemptLog)> = generation
         .runs
         .iter()
         .filter_map(|seat| match &seat.attached.beats {
             Beats::Held { dispatch } => match dispatch.take_cancel() {
-                CancelTake::Requested => Some(seat.run),
+                CancelTake::Requested => Some((seat.run, seat.attached.log)),
                 CancelTake::NoRequest => None,
             },
             Beats::Ended => None,
         })
         .collect();
-    for requested_run in requested {
+    for (requested_run, log) in requested {
         let run = match generation.runs.note_cancel_sent(requested_run.dispatch) {
             CancelSend::Send(run) => run,
             CancelSend::Skip => {
                 tracing::debug!(
                     task_id = %requested_run.task_id,
+                    attempt = log.attempt.get(),
+                    trace_id = log.trace_id.log_field(),
                     pid = generation.channel.pid().get(),
                     "a cancelled run is a refusal or is stopping already; no cancel is sent",
                 );
                 continue;
             }
         };
-        let log = generation
-            .runs
-            .get(run.dispatch)
-            .map(|seat| seat.attached.log);
         tracing::info!(
             task_id = %run.task_id,
-            attempt = log.map(|log| log.attempt.get()),
-            trace_id = log.and_then(|log| log.trace_id.log_field()),
+            attempt = log.attempt.get(),
+            trace_id = log.trace_id.log_field(),
             pid = generation.channel.pid().get(),
             "an operator cancelled the task; sending the cancel to its child",
         );
@@ -676,6 +674,8 @@ async fn send_cancels(generation: &mut Generation) {
             Err(SendFailure::Encode(error)) => {
                 tracing::error!(
                     task_id = %run.task_id,
+                    attempt = log.attempt.get(),
+                    trace_id = log.trace_id.log_field(),
                     error = %error,
                     "a cancel frame could not be encoded: {error}",
                 );
@@ -686,6 +686,8 @@ async fn send_cancels(generation: &mut Generation) {
             Err(failure @ (SendFailure::Write(_) | SendFailure::TimedOut)) => {
                 tracing::warn!(
                     task_id = %run.task_id,
+                    attempt = log.attempt.get(),
+                    trace_id = log.trace_id.log_field(),
                     failure = %failure,
                     "a cancel frame could not be sent; killing the child",
                 );
@@ -793,8 +795,14 @@ async fn on_frame(
                 .runs
                 .note_cancel_fired(run)
                 .map_err(BadFrame::OutOfTurn)?;
+            let log = generation
+                .runs
+                .get(run.dispatch)
+                .map(|seat| seat.attached.log);
             tracing::debug!(
                 task_id = %run.task_id,
+                attempt = log.map(|log| log.attempt.get()),
+                trace_id = log.and_then(|log| log.trace_id.log_field()),
                 pid,
                 "the child gave the operator cancel to the task",
             );

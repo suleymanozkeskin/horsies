@@ -36,6 +36,7 @@ use crate::worker::executor::protocol::{
 use crate::worker::executor::supervisor::{
     ChildExit, ChildLost, LossCause, PartialFrame, ReapedExit, Spawner,
 };
+use crate::worker::retry::MIN_TASK_TIMEOUT_MS;
 use crate::worker::runner_beats::{CancelRouting, LiveDispatches};
 
 /// A long deadline: no deadline or backstop of such a run comes due in a
@@ -76,7 +77,7 @@ async fn route_cancel_when_held(live: &LiveDispatches, task: &ClaimedTask) {
     .await;
     assert_eq!(
         live.request_cancel(task.task_id, claimed_at()),
-        CancelRouting::Routed
+        CancelRouting::Routed { log: task.log() }
     );
 }
 
@@ -555,7 +556,7 @@ async fn a_deadline_before_the_cancel_is_a_timeout() {
     let end = answer_of(submit_isolated(
         &pool,
         &first,
-        IsolatedDeadline::After(timeout_ms(500)),
+        IsolatedDeadline::After(timeout_ms(MIN_TASK_TIMEOUT_MS)),
     ))
     .await;
 
@@ -819,7 +820,9 @@ async fn a_neighbour_of_a_stuck_cancelled_run_ends_in_its_own_time() {
     .await;
     assert_eq!(
         live.request_cancel(stuck_task.task_id, claimed_at()),
-        CancelRouting::Routed
+        CancelRouting::Routed {
+            log: stuck_task.log()
+        }
     );
 
     assert_eq!(answer_of(neighbour_answer).await, reported(2));

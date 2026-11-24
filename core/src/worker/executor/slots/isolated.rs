@@ -711,7 +711,7 @@ async fn run_one(
         kill_mark: channel.kill_mark(),
         cancel_bell: bell.clone(),
     };
-    let held = match shared.live.hold(task_id, frame.claimed_at, child) {
+    let held = match shared.live.hold(task_id, frame.claimed_at, log, child) {
         Ok(held) => held,
         Err(RegistryClosed) => {
             // No beat would cover the task: it is not sent, and the child

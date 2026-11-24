@@ -1084,7 +1084,8 @@ mod tests {
             Finalizing::NotMarked,
             RecordedBy::Cancel,
         )));
-        let encoded = encode_attempt_archive(&[cancelled.clone()], &OpenAttempt::Ended).unwrap();
+        let encoded =
+            encode_attempt_archive(std::slice::from_ref(&cancelled), &OpenAttempt::Ended).unwrap();
         assert_eq!(
             String::from_utf8(encoded.payload.clone()).unwrap(),
             r#"[[[1,"CANCELLED",false,1000,2000,"TASK_CANCELLED","Cancelled via monitoring API",null,"w1","host",7,"proc",1,100,300,1,300,null,null,"CANCEL",null]],null]"#

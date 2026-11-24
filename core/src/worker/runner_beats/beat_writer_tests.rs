@@ -20,6 +20,7 @@ use super::{
 use crate::broker::cancelled_runs::RunClaim;
 use crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool;
 use crate::test_support::sql::{self, TestPool};
+use crate::worker::executor::slots::dispatch::AttemptLog;
 use crate::worker::executor::supervisor::Spawner;
 use crate::worker::recovery::on_test_pool::mark_stale_running_as_failed;
 
@@ -484,7 +485,7 @@ async fn the_beat_loop_keeps_a_held_row_out_of_stale_recovery() {
     let (spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
     let dispatch = live
-        .hold(held, held_claim, child)
+        .hold(held, held_claim, AttemptLog::FIRST_UNTRACED, child)
         .expect("an open registry holds the dispatch");
     let cancel = CancellationToken::new();
     let (watch, writer) = launch_runner_beats(

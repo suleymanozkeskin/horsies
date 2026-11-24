@@ -97,7 +97,27 @@ APP = Horsies(
     ),
 )
 RAN: list[str] = []
-STARTED = asyncio.Event()
+
+
+class _StartMark:
+    """The start of a body in one test. An ``asyncio.Event`` binds to the
+    loop of its first wait that blocks, and each test runs its own loop, so
+    ``renew`` gives each test a new event."""
+
+    def __init__(self) -> None:
+        self._event = asyncio.Event()
+
+    def renew(self) -> None:
+        self._event = asyncio.Event()
+
+    def set(self) -> None:
+        self._event.set()
+
+    async def wait(self) -> None:
+        _ = await self._event.wait()
+
+
+STARTED = _StartMark()
 
 
 @APP.task(task_name='seat_double', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
@@ -359,7 +379,7 @@ def _result(envelope: ResultEnvelope, ok_type: Any) -> TaskResult[Any, TaskError
 @pytest.fixture(autouse=True)
 def fresh_marks() -> Iterator[None]:
     RAN.clear()
-    STARTED.clear()
+    STARTED.renew()
     RELEASE.clear()
     CANCEL_STATES.clear()
     STARTS.clear()

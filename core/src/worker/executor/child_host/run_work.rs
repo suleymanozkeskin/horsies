@@ -1187,7 +1187,7 @@ mod tests {
         });
         assert_eq!(other_thread, Err(FencingTokenRefused::NotInARun));
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            in_blocking_run(token, signal.clone(), || panic!("body panic"))
+            in_blocking_run(token, signal.clone(), || panic!("body panic"));
         }));
         assert!(panicked.is_err());
         assert_eq!(run_fencing_token(), Err(FencingTokenRefused::NotInARun));

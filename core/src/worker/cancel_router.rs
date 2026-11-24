@@ -140,21 +140,30 @@ pub struct Routed {
 }
 
 /// Route the cancel of `run` to the slot that holds it.
+///
+/// A run that this worker holds is logged with its attempt. A notice of a
+/// run that it does not hold names no attempt of this worker: every worker
+/// gets every notice, so its event names the run as the notice does
+/// (`notice_task_id`, `notice_claimed_at`), not as an attempt (`task_id`).
 pub fn route_cancel(live: &LiveDispatches, run: RunClaim) -> Routed {
     let routing = live.request_cancel(run.task_id, run.claimed_at);
     match routing {
-        CancelRouting::Routed => tracing::info!(
+        CancelRouting::Routed { log } => tracing::info!(
             task_id = %run.task_id,
+            attempt = log.attempt.get(),
+            trace_id = log.trace_id.log_field(),
             claimed_at = %run.claimed_at,
             "an operator cancelled a task that this worker runs; telling its child",
         ),
         CancelRouting::NotHeld => tracing::debug!(
-            task_id = %run.task_id,
-            claimed_at = %run.claimed_at,
+            notice_task_id = %run.task_id,
+            notice_claimed_at = %run.claimed_at,
             "a cancel notice names a run that this worker does not hold",
         ),
-        CancelRouting::AlreadyRequested => tracing::debug!(
+        CancelRouting::AlreadyRequested { log } => tracing::debug!(
             task_id = %run.task_id,
+            attempt = log.attempt.get(),
+            trace_id = log.trace_id.log_field(),
             claimed_at = %run.claimed_at,
             "the cancel of this run was routed already",
         ),

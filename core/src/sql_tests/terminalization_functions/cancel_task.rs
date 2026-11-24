@@ -38,8 +38,9 @@ const DUE_AND_START_SQL: &str = "SELECT enqueued_at, started_at FROM horsies_tas
 /// marker.
 const CLAIMS_AND_MARKER_SQL: &str = "
     UPDATE horsies_tasks
-    SET attempt_claims = $2, first_claimed_at = $3, finalizing_at = $4,
-        finalizing_by_worker_id = CASE WHEN $4 IS NULL THEN NULL ELSE claimed_by_worker_id END
+    SET attempt_claims = $2, first_claimed_at = $3, finalizing_at = CAST($4 AS timestamptz),
+        finalizing_by_worker_id =
+            CASE WHEN CAST($4 AS timestamptz) IS NULL THEN NULL ELSE claimed_by_worker_id END
     WHERE id = $1
 ";
 
@@ -439,6 +440,16 @@ async fn a_refused_or_replayed_cancel_sends_no_notice() {
     );
 }
 
+/// One case of the attempt checks: its name, `will_retry`, `placed_at`,
+/// `last_seen_at`, and the constraint that refuses the row.
+type AttemptCheckCase = (
+    &'static str,
+    bool,
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+    &'static str,
+);
+
 /// The attempt outcome CANCELLED never retries, and the writer CANCEL holds
 /// no placement and no last sign of life
 /// (`horsies_task_attempts_outcome_known`,
@@ -447,13 +458,7 @@ async fn a_refused_or_replayed_cancel_sends_no_notice() {
 async fn the_attempt_checks_refuse_a_retried_cancel_and_a_cancel_with_worker_facts() {
     let session = covered().await;
     let no_time: Option<DateTime<Utc>> = None;
-    let cases: [(
-        &str,
-        bool,
-        Option<DateTime<Utc>>,
-        Option<DateTime<Utc>>,
-        &str,
-    ); 3] = [
+    let cases: [AttemptCheckCase; 3] = [
         (
             "a cancelled attempt that retries",
             true,

@@ -47,6 +47,7 @@ use crate::db::{
     SocketSettings, StatementBound, StatementFailure, StatementProtocol, TypedStatement,
 };
 use crate::worker::executor::protocol::ProcessId;
+use crate::worker::executor::slots::dispatch::AttemptLog;
 use crate::worker::executor::supervisor::{ChildId, KillOutcome, SpawnerHandle, WorkerKillMark};
 use crate::worker::thread_dispatch::with_starter_dispatch;
 
@@ -188,20 +189,23 @@ struct LiveDispatch {
     task_id: Uuid,
     /// The claim generation; the beat fences on it.
     claimed_at: DateTime<Utc>,
+    /// The log fields of the attempt that the dispatch runs.
+    log: AttemptLog,
     child: HeldChild,
     cancel: CancelMark,
 }
 
-/// What [`LiveDispatches::request_cancel`] did with a cancel of a run.
+/// What [`LiveDispatches::request_cancel`] did with a cancel of a run. A
+/// held run names the log fields of its attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelRouting {
     /// The dispatch of the run is held: its slot was told.
-    Routed,
+    Routed { log: AttemptLog },
     /// No dispatch of this task at this claim generation is held: it ended,
     /// it runs on another worker, or the registry was closed.
     NotHeld,
     /// A cancel of the run was routed already.
-    AlreadyRequested,
+    AlreadyRequested { log: AttemptLog },
 }
 
 /// Whether a held dispatch has an operator cancel that its slot has not
@@ -282,8 +286,8 @@ impl LiveDispatches {
         self.registry.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Start beating `task_id` at the claim generation `claimed_at`, run by
-    /// `child`.
+    /// Start beating `task_id` at the claim generation `claimed_at`, the
+    /// attempt that `log` names, run by `child`.
     ///
     /// `Err(RegistryClosed)` after the watchdog failed closed: the caller
     /// must not start the task, because no beat would cover it.
@@ -291,6 +295,7 @@ impl LiveDispatches {
         &self,
         task_id: Uuid,
         claimed_at: DateTime<Utc>,
+        log: AttemptLog,
         child: HeldChild,
     ) -> Result<HeldDispatch, RegistryClosed> {
         let mut registry = self.lock();
@@ -305,6 +310,7 @@ impl LiveDispatches {
             LiveDispatch {
                 task_id,
                 claimed_at,
+                log,
                 child,
                 cancel: CancelMark::NotRequested,
             },
@@ -341,13 +347,14 @@ impl LiveDispatches {
         else {
             return CancelRouting::NotHeld;
         };
+        let log = dispatch.log;
         match dispatch.cancel {
             CancelMark::NotRequested => {
                 dispatch.cancel = CancelMark::Requested;
                 dispatch.child.cancel_bell.ring();
-                CancelRouting::Routed
+                CancelRouting::Routed { log }
             }
-            CancelMark::Requested | CancelMark::Taken => CancelRouting::AlreadyRequested,
+            CancelMark::Requested | CancelMark::Taken => CancelRouting::AlreadyRequested { log },
         }
     }
 
@@ -1401,7 +1408,9 @@ mod tests {
         let live = LiveDispatches::default();
         let task_id = Uuid::new_v4();
         let claimed_at = Utc::now();
-        let held = live.hold(task_id, claimed_at, child).unwrap();
+        let held = live
+            .hold(task_id, claimed_at, AttemptLog::FIRST_UNTRACED, child)
+            .unwrap();
         assert_eq!(live.snapshot(), (vec![task_id], vec![claimed_at]));
         drop(held);
         assert_eq!(live.snapshot(), (Vec::new(), Vec::new()));
@@ -1418,8 +1427,12 @@ mod tests {
         let task_id = Uuid::new_v4();
         let first = Utc::now();
         let second = first + chrono::Duration::seconds(1);
-        let old = live.hold(task_id, first, child.clone()).unwrap();
-        let new = live.hold(task_id, second, child).unwrap();
+        let old = live
+            .hold(task_id, first, AttemptLog::FIRST_UNTRACED, child.clone())
+            .unwrap();
+        let new = live
+            .hold(task_id, second, AttemptLog::FIRST_UNTRACED, child)
+            .unwrap();
         drop(old);
         assert_eq!(live.snapshot(), (vec![task_id], vec![second]));
         drop(new);
@@ -1439,13 +1452,21 @@ mod tests {
         let claimed_at = Utc::now();
         let guards: Vec<HeldDispatch> = ids
             .iter()
-            .map(|id| live.hold(*id, claimed_at, child.clone()).unwrap())
+            .map(|id| {
+                live.hold(*id, claimed_at, AttemptLog::FIRST_UNTRACED, child.clone())
+                    .unwrap()
+            })
             .collect();
         let closed: Vec<Uuid> = live.close().iter().map(|held| held.task_id).collect();
         assert_eq!(closed, ids.to_vec());
         assert_eq!(live.snapshot(), (Vec::new(), Vec::new()));
         assert!(matches!(
-            live.hold(Uuid::new_v4(), claimed_at, child),
+            live.hold(
+                Uuid::new_v4(),
+                claimed_at,
+                AttemptLog::FIRST_UNTRACED,
+                child
+            ),
             Err(RegistryClosed)
         ));
         drop(guards);
@@ -1480,10 +1501,20 @@ mod tests {
         let live = LiveDispatches::default();
         let claimed_at = Utc::now();
         let _first = live
-            .hold(Uuid::new_v4(), claimed_at, child.clone())
+            .hold(
+                Uuid::new_v4(),
+                claimed_at,
+                AttemptLog::FIRST_UNTRACED,
+                child.clone(),
+            )
             .unwrap();
         let _second = live
-            .hold(Uuid::new_v4(), claimed_at, child.clone())
+            .hold(
+                Uuid::new_v4(),
+                claimed_at,
+                AttemptLog::FIRST_UNTRACED,
+                child.clone(),
+            )
             .unwrap();
         let closing = live.clone();
         tokio::task::spawn_blocking(move || kill_held_children(&closing))
@@ -1495,7 +1526,12 @@ mod tests {
         );
         assert_ne!(*spawned.exit.borrow(), ExitState::Running);
         assert!(matches!(
-            live.hold(Uuid::new_v4(), claimed_at, child),
+            live.hold(
+                Uuid::new_v4(),
+                claimed_at,
+                AttemptLog::FIRST_UNTRACED,
+                child
+            ),
             Err(RegistryClosed)
         ));
         assert_eq!(

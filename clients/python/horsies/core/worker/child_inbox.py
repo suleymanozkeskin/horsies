@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import assert_never
 
-from horsies import _core as core
+from horsies._core import CancelRunFrame
 from horsies.core.worker.child_frames import WorkFrame
 
 
@@ -35,7 +35,7 @@ class _RouteCancels:
     """A cancel frame goes to ``on_cancel`` on the control thread: the main
     thread of an isolated child runs the task and reads no frame then."""
 
-    on_cancel: Callable[[core.CancelRunFrame], None]
+    on_cancel: Callable[[CancelRunFrame], None]
 
 
 def _nothing_to_wake() -> None:
@@ -64,7 +64,7 @@ class ParentFrameInbox:
             on_put = self._on_put
         on_put()
 
-    def put_cancel(self, frame: core.CancelRunFrame) -> None:
+    def put_cancel(self, frame: CancelRunFrame) -> None:
         """Control thread: hand over one cancel frame. It goes to the route
         that ``route_cancels`` set, on this thread; with none, it goes in
         the queue as ``put`` does."""
@@ -78,7 +78,7 @@ class ParentFrameInbox:
             case _ as unreachable:
                 assert_never(unreachable)
 
-    def route_cancels(self, on_cancel: Callable[[core.CancelRunFrame], None]) -> None:
+    def route_cancels(self, on_cancel: Callable[[CancelRunFrame], None]) -> None:
         """Run ``on_cancel`` for each later cancel frame, on the control
         thread, in place of the queue. An isolated child sets it before its
         ready frame: its main thread reads no frame while a task runs."""
