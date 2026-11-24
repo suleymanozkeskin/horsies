@@ -35,10 +35,12 @@ export type AttemptFinalizing =
   | { kind: 'marked'; finalizing_at: string }
   | { kind: 'not_marked' };
 
-/** Who wrote the attempt row. */
+/** Who wrote the attempt row. `cancel`: an operator cancelled the task while
+ * the attempt ran; the attempt ended at the cancel. */
 export type AttemptRecordedBy =
   | { kind: 'worker'; placement: AttemptPlacement }
-  | { kind: 'recovery'; last_seen_at: string };
+  | { kind: 'recovery'; last_seen_at: string }
+  | { kind: 'cancel' };
 
 /** The phase timing of one workflow node, tagged by its coverage label. */
 export type NodeTiming =

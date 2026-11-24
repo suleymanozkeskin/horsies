@@ -46,6 +46,8 @@ pub const PHASE_RECORD_VERSION_1: i64 = 1;
 const RECORDED_BY_WORKER: &str = "WORKER";
 /// The stored text of [`RecordedBy::Recovery`].
 const RECORDED_BY_RECOVERY: &str = "RECOVERY";
+/// The stored text of [`RecordedBy::Cancel`] (migration 1003).
+const RECORDED_BY_CANCEL: &str = "CANCEL";
 
 /// Whether an attempt row has a phase record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +152,11 @@ pub enum RecordedBy {
     /// finalizing marker and its newest runner beat. Recovery observes no
     /// placement.
     Recovery { last_seen_at: DateTime<Utc> },
+    /// The cancel statement wrote the attempt row (`horsies_cancel_task`
+    /// with `include_running`, from migration 1003): an operator cancelled
+    /// the task while the attempt ran. The attempt ended at the cancel, its
+    /// `finished_at`. The cancel observes no placement.
+    Cancel,
 }
 
 /// The attempt of a task that has no attempt row, as the archive keeps it.
@@ -592,6 +599,7 @@ fn phase_fields(phases: &PhaseRecord) -> [Value; PHASE_FIELD_COUNT] {
         RecordedBy::Recovery { last_seen_at } => {
             (Value::Null, RECORDED_BY_RECOVERY, micros(last_seen_at))
         }
+        RecordedBy::Cancel => (Value::Null, RECORDED_BY_CANCEL, Value::Null),
     };
     [
         Value::from(PHASE_RECORD_VERSION_1),
@@ -731,7 +739,8 @@ fn decode_phase_record(fields: &[Value]) -> Result<PhaseRecord, ArchiveDecodeErr
                 last_seen_at: decode_epoch_us(last_seen_at, "invalid_last_seen_at")?,
             }
         }
-        (Some(RECORDED_BY_WORKER | RECORDED_BY_RECOVERY), _, _) => {
+        (Some(RECORDED_BY_CANCEL), Placement::NotObserved, Value::Null) => RecordedBy::Cancel,
+        (Some(RECORDED_BY_WORKER | RECORDED_BY_RECOVERY | RECORDED_BY_CANCEL), _, _) => {
             return Err(corrupt(ArchiveDomain::Attempts, "recorded_by_shape"))
         }
         (Some(_) | None, _, _) => {
@@ -1045,6 +1054,46 @@ mod tests {
         assert_eq!(encoded.digest, archive_digest(&encoded.payload));
     }
 
+    /// A cancelled attempt (migration 1003): outcome `CANCELLED`, recorded by
+    /// `CANCEL` with no placement and no last sign of life, and no open
+    /// attempt, in the bytes that `horsies_encode_attempt_archive` writes.
+    #[test]
+    fn version_two_encodes_a_cancelled_attempt_as_pinned_bytes() {
+        let cancelled = AttemptRecord::new(
+            1,
+            "CANCELLED",
+            false,
+            at(1_000),
+            at(2_000),
+            Some("TASK_CANCELLED".to_owned()),
+            Some("Cancelled via monitoring API".to_owned()),
+            None,
+            Some("w1".to_owned()),
+            Some("host".to_owned()),
+            Some(7),
+            Some("proc".to_owned()),
+        )
+        .unwrap()
+        .with_phases(PhaseRecord::Captured(AttemptPhases::new(
+            at(100),
+            at(300),
+            ClaimRecord::Counted {
+                count: count(1),
+                first_claimed_at: at(300),
+            },
+            Finalizing::NotMarked,
+            RecordedBy::Cancel,
+        )));
+        let encoded = encode_attempt_archive(&[cancelled.clone()], &OpenAttempt::Ended).unwrap();
+        assert_eq!(
+            String::from_utf8(encoded.payload.clone()).unwrap(),
+            r#"[[[1,"CANCELLED",false,1000,2000,"TASK_CANCELLED","Cancelled via monitoring API",null,"w1","host",7,"proc",1,100,300,1,300,null,null,"CANCEL",null]],null]"#
+        );
+        let decoded = decode_v2(&encoded.payload).unwrap();
+        assert_eq!(decoded.attempts(), [cancelled].as_slice());
+        assert_eq!(decoded.open(), OpenAttempt::Ended);
+    }
+
     /// Each named state of each phase value and of the open attempt
     /// survives an encode and a decode of version 2.
     #[test]
@@ -1061,6 +1110,16 @@ mod tests {
                 RecordedBy::Recovery {
                     last_seen_at: at(900),
                 },
+            )),
+            PhaseRecord::Captured(AttemptPhases::new(
+                at(100),
+                at(300),
+                ClaimRecord::Counted {
+                    count: count(1),
+                    first_claimed_at: at(300),
+                },
+                Finalizing::Marked { at: at(800) },
+                RecordedBy::Cancel,
             )),
         ];
         let opens = [
@@ -1213,11 +1272,29 @@ mod tests {
             (
                 serde_json::json!([
                     [v2_row(&serde_json::json!([
-                        1, 100, 300, null, null, null, null, "CANCEL", null
+                        1, 100, 300, null, null, null, null, "OPERATOR", null
                     ]))],
                     null
                 ]),
                 "invalid_recorded_by",
+            ),
+            (
+                serde_json::json!([
+                    [v2_row(&serde_json::json!([
+                        1, 100, 300, null, null, 350, null, "CANCEL", null
+                    ]))],
+                    null
+                ]),
+                "recorded_by_shape",
+            ),
+            (
+                serde_json::json!([
+                    [v2_row(&serde_json::json!([
+                        1, 100, 300, null, null, null, null, "CANCEL", 900
+                    ]))],
+                    null
+                ]),
+                "recorded_by_shape",
             ),
             (
                 serde_json::json!([

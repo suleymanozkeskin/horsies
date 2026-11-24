@@ -287,6 +287,7 @@ pub(super) fn attempt_phases_info(phases: PhaseRecord) -> AttemptPhasesInfo {
                 RecordedBy::Recovery { last_seen_at } => {
                     AttemptRecordedByInfo::Recovery { last_seen_at }
                 }
+                RecordedBy::Cancel => AttemptRecordedByInfo::Cancel,
             },
         },
     }
@@ -1156,7 +1157,7 @@ fn recorded_attempt(
     queue_wait(timeline, previous, enqueued, queue_phase, order, source)?;
     let placement = match phases.recorded_by() {
         RecordedBy::Worker { placement } => placement_info(placement),
-        RecordedBy::Recovery { .. } => AttemptPlacementInfo::NotObserved,
+        RecordedBy::Recovery { .. } | RecordedBy::Cancel => AttemptPlacementInfo::NotObserved,
     };
     let claim = Bound::new(phases.claimed_at(), TimingBoundary::Claim);
     claim_segments(

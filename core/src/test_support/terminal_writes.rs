@@ -18,8 +18,8 @@
 //! fence test. A test of the generation fence of the plain success passes
 //! its own generation through `broker::terminalization`.
 //!
-//! Every end except the cancel writes an attempt row from the process facts
-//! of the live row (`worker_pid`, `worker_hostname`, `worker_process_name`,
+//! Every end except the cancel of a PENDING or CLAIMED row writes an attempt
+//! row from the process facts of the live row (`worker_pid`, `worker_hostname`, `worker_process_name`,
 //! NOT NULL in `horsies_task_attempts`), so a RUNNING seed row carries the
 //! facts that `horsies_start_attempt` writes. The attempt is
 //! `retry_count + 1`; an attempt row of that number that the seed wrote

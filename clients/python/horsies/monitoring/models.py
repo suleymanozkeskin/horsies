@@ -215,8 +215,19 @@ class RecordedByRecoveryInfo(BaseModel):
     last_seen_at: datetime
 
 
+class RecordedByCancelInfo(BaseModel):
+    """The cancel statement wrote the attempt row: an operator cancelled the task while the attempt ran.
+
+    The attempt ended at the cancel (``finished_at``). The cancel observes no placement.
+    """
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
+
+    kind: Literal['cancel'] = 'cancel'
+
+
 AttemptRecordedByInfo = Annotated[
-    RecordedByWorkerInfo | RecordedByRecoveryInfo,
+    RecordedByWorkerInfo | RecordedByRecoveryInfo | RecordedByCancelInfo,
     Field(discriminator='kind'),
 ]
 """Who wrote the attempt row."""

@@ -3005,6 +3005,7 @@ fn parse_task_attempt_outcome(value: &str) -> Result<crate::core::TaskAttemptOut
         "COMPLETED" => Ok(crate::core::TaskAttemptOutcome::Completed),
         "FAILED" => Ok(crate::core::TaskAttemptOutcome::Failed),
         "WORKER_FAILURE" => Ok(crate::core::TaskAttemptOutcome::WorkerFailure),
+        "CANCELLED" => Ok(crate::core::TaskAttemptOutcome::Cancelled),
         other => Err(BrokerError::HistoryReadContract(format!(
             "unknown task-attempt outcome {other:?}"
         ))),

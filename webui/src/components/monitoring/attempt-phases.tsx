@@ -49,6 +49,8 @@ function recordedByText(recordedBy: AttemptRecordedBy): string {
       }
     case 'recovery':
       return 'recorded by stale recovery; the worker was lost after the last sign of life';
+    case 'cancel':
+      return 'recorded by the cancel; an operator cancelled the task while it ran';
     default:
       return assertNever(recordedBy, 'attempt writer');
   }
@@ -80,6 +82,7 @@ function placementTimes(recordedBy: AttemptRecordedBy): AttemptBoundary[] {
           return assertNever(recordedBy.placement, 'attempt placement');
       }
     case 'recovery':
+    case 'cancel':
       return [];
     default:
       return assertNever(recordedBy, 'attempt writer');
@@ -102,6 +105,7 @@ function lastSeenTimes(recordedBy: AttemptRecordedBy): AttemptBoundary[] {
     case 'recovery':
       return [{ label: 'last seen', atMs: instantMs(recordedBy.last_seen_at) }];
     case 'worker':
+    case 'cancel':
       return [];
     default:
       return assertNever(recordedBy, 'attempt writer');

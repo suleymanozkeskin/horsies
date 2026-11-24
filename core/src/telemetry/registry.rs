@@ -46,9 +46,9 @@
 //!
 //! | Metric | Series |
 //! |---|---|
-//! | `horsies.task.attempts` | `P × (1 + F + W)`: one `COMPLETED` series with no code, and one per error code that ended an attempt `FAILED` (`F`) or `WORKER_FAILURE` (`W`) |
+//! | `horsies.task.attempts` | `P × (2 + F + W)`: one `COMPLETED` series with no code, one `CANCELLED` series with the code `TASK_CANCELLED`, and one per error code that ended an attempt `FAILED` (`F`) or `WORKER_FAILURE` (`W`) |
 //! | `horsies.task.attempts.end_not_known` | `P` |
-//! | `horsies.task.run.duration` | `P × 3` (one per outcome) |
+//! | `horsies.task.run.duration` | `P × 4` (one per outcome) |
 //! | `horsies.task.retries` | `P × R`, `R` the error codes that scheduled a retry |
 //! | `horsies.task.queue.duration` | queues × 3 |
 //!

@@ -328,7 +328,12 @@ mod tests {
             "CANCELLED",
             "EXPIRED",
         ]);
-        assert_python_members::<TaskAttemptOutcome>(&["COMPLETED", "FAILED", "WORKER_FAILURE"]);
+        assert_python_members::<TaskAttemptOutcome>(&[
+            "COMPLETED",
+            "FAILED",
+            "WORKER_FAILURE",
+            "CANCELLED",
+        ]);
         // clients/python/horsies/core/models/workflow/enums.py
         assert_python_members::<WorkflowStatus>(&[
             "PENDING",

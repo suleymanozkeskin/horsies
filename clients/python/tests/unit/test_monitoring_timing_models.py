@@ -32,6 +32,7 @@ from horsies.monitoring import (
     PhaseClaimedInfo,
     PhasesCapturedInfo,
     PhasesNotCapturedInfo,
+    RecordedByCancelInfo,
     RecordedByRecoveryInfo,
     RunCoverageInconsistentInfo,
     RunTimingComposedInfo,
@@ -67,7 +68,7 @@ class TestAttemptPhases:
 
             assert _ATTEMPT_PHASES.dump_python(model, mode='json') == example
 
-    def test_the_examples_cover_the_captured_and_the_recovery_forms(self) -> None:
+    def test_the_examples_cover_the_captured_recovery_and_cancel_forms(self) -> None:
         models = [_ATTEMPT_PHASES.validate_python(item) for item in _examples('attempt_phases')]
 
         match models:
@@ -76,6 +77,7 @@ class TestAttemptPhases:
                 PhasesCapturedInfo(),
                 PhasesCapturedInfo(recorded_by=RecordedByRecoveryInfo()),
                 PhasesCapturedInfo(),
+                PhasesCapturedInfo(recorded_by=RecordedByCancelInfo()),
             ]:
                 pass
             case _:

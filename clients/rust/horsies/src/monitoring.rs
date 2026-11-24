@@ -166,6 +166,15 @@ pub async fn list_schedules(app: &Horsies) -> MonitoringResult<Vec<ScheduleState
 /// `horsies.monitoring.cancel_task`). PENDING and CLAIMED are eligible;
 /// RUNNING only with `include_running`. Writes.
 ///
+/// A RUNNING task moves at once, and the same statement records its running
+/// attempt with the outcome `CANCELLED`. The worker that runs it gets the
+/// cancel notice and gives the cancel to the task code:
+/// `TaskRuntime::cancelled()` completes, `TaskRuntime::is_cancelled()` is
+/// `true`, and `TaskRuntime::cancel_state()` is `Requested` with the cause
+/// `Operator`. Code that does not stop runs on until it returns; what it
+/// returns is dropped. An `ISOLATED` task with `cancel_grace_ms` is killed
+/// with its child that long after the cancel reached it.
+///
 /// Errors: `TASK_NOT_FOUND`, `TASK_IS_WORKFLOW_TASK`,
 /// `TASK_NOT_CANCELLABLE` (with the current status), `STORED_DATA_INVALID`,
 /// and `DB_OPERATION_FAILED`, also for a failed connect (nothing written).

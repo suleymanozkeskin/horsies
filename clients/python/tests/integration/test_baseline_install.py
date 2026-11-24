@@ -47,6 +47,7 @@ _MIGRATION_DESCRIPTIONS: Final[dict[int, str]] = {
     1000: 'baseline',
     1001: 'lifecycle record',
     1002: 'workflow start command fingerprint',
+    1003: 'attempt cancelled',
 }
 """The description that the bookkeeping row of each migration of the chain
 stores (``MIGRATION_SOURCES``, ``core/src/broker/migrations.rs``)."""

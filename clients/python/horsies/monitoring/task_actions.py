@@ -11,9 +11,16 @@ Two boundaries are deliberate:
 
 * Workflow-bound rows are refused. They are managed exclusively by the
   workflow primitives; resetting one would orphan or hang its node.
-* Cancelling a RUNNING task flips the row durably, but the task's code keeps
-  executing on its worker until it returns, and its side effects still happen.
-  There is no safe cross-process kill, and this module does not attempt one.
+* Cancelling a RUNNING task (``include_running=True``) moves the row to
+  history at once and records the running attempt with the outcome
+  ``CANCELLED`` in the same statement. The worker that runs it gets the
+  cancel notice at commit and gives the cancel to the task code: an async
+  body gets ``asyncio.CancelledError`` at its next ``await``, and
+  ``TaskRuntime.cancel_state()`` reads ``CancelRequested(OPERATOR)``. Code
+  that does not stop runs on until it returns; its side effects still
+  happen, and what it returns is dropped. An ``ISOLATED`` task with
+  ``cancel_grace_ms`` is killed with its child that long after the cancel
+  reached it.
 
 The manual retry action that reset a terminal row to PENDING in place is
 removed: a terminal record is immutable, and re-execution is a new
@@ -117,8 +124,10 @@ async def cancel_task(
     PENDING and CLAIMED tasks are always eligible: neither has begun user
     code, and a claimed task's worker aborts before starting when its
     pre-start ownership check fails. RUNNING requires ``include_running``,
-    because the row flips while the process keeps executing — its side
-    effects still happen and no attempt record is written for that run.
+    because the code of the run may already have side effects: the same
+    statement records the running attempt with the outcome ``CANCELLED``,
+    and the worker gives the cancel to the task code (cooperative; a hard
+    stop only for an ``ISOLATED`` task with ``cancel_grace_ms``).
 
     Waiting result handles unblock on commit: the move fires ``task_done``
     and a CANCELLED row is reported as TASK_CANCELLED, so no result payload

@@ -20,7 +20,9 @@
 //!   and the event table of the workflow runs (`horsies_workflow_events`).
 //!   Version 1002 (`1002_workflow_start_command_fingerprint.sql`) adds the
 //!   start command fingerprint of each top-level workflow run, which a start
-//!   with an existing id compares.
+//!   with an existing id compares. Version 1003 (`1003_attempt_cancelled.sql`)
+//!   adds the attempt outcome `CANCELLED`: the cancel of a RUNNING task
+//!   records its attempt and sends the cancel notice to its worker.
 //!
 //! The released text of a migration never changes: a database that applied
 //! another text of it is refused ([`SchemaRefusal::MigrationEdited`]), so a
@@ -134,12 +136,17 @@ pub(crate) const LIFECYCLE_RECORD_MIGRATION_VERSION: i64 = 1001;
 /// (`core/migrations/1002_workflow_start_command_fingerprint.sql`).
 pub(crate) const START_COMMAND_FINGERPRINT_MIGRATION_VERSION: i64 = 1002;
 
+/// Version of the migration that adds the cancelled attempt of a running task
+/// and the cancel notice to its worker
+/// (`core/migrations/1003_attempt_cancelled.sql`).
+pub(crate) const ATTEMPT_CANCELLED_MIGRATION_VERSION: i64 = 1003;
+
 /// The files of `core/migrations/`, one per migration after the baseline,
 /// in apply order: the version of the migration, the file name and the text.
 /// The core includes them by relative path and keeps no copy. A file added to
 /// the folder without a line here fails
 /// `later_migration_list_is_the_whole_folder`.
-pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 2] = [
+pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 3] = [
     (
         LIFECYCLE_RECORD_MIGRATION_VERSION,
         "1001_lifecycle_record.sql",
@@ -149,6 +156,11 @@ pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 2] = [
         START_COMMAND_FINGERPRINT_MIGRATION_VERSION,
         "1002_workflow_start_command_fingerprint.sql",
         include_str!("../../migrations/1002_workflow_start_command_fingerprint.sql"),
+    ),
+    (
+        ATTEMPT_CANCELLED_MIGRATION_VERSION,
+        "1003_attempt_cancelled.sql",
+        include_str!("../../migrations/1003_attempt_cancelled.sql"),
     ),
 ];
 
@@ -224,7 +236,7 @@ struct MigrationSource {
 /// The embedded chain, in apply order: the baseline, then the migrations of
 /// [`LATER_MIGRATION_FILES`]. The Python client installs through the core,
 /// so both clients apply the same chain.
-const MIGRATION_SOURCES: [MigrationSource; 3] = [
+const MIGRATION_SOURCES: [MigrationSource; 4] = [
     MigrationSource {
         version: BASELINE_MIGRATION_VERSION,
         description: "baseline",
@@ -259,6 +271,21 @@ const MIGRATION_SOURCES: [MigrationSource; 3] = [
         script: SqlScript::new(
             "migration_1002_workflow_start_command_fingerprint",
             LATER_MIGRATION_FILES[1].2,
+        ),
+        family_row: FamilyRow::NotWritten,
+        readers: ReaderPublication::NotPublished,
+        exact_indexes: &[],
+        retired_indexes: &[],
+    },
+    // The migration adds no column and builds no index: it replaces two CHECKs
+    // of horsies_task_attempts and the function horsies_cancel_task, and adds
+    // the read horsies_cancelled_runs.
+    MigrationSource {
+        version: LATER_MIGRATION_FILES[2].0,
+        description: "attempt cancelled",
+        script: SqlScript::new(
+            "migration_1003_attempt_cancelled",
+            LATER_MIGRATION_FILES[2].2,
         ),
         family_row: FamilyRow::NotWritten,
         readers: ReaderPublication::NotPublished,

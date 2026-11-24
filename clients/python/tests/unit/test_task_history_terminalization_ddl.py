@@ -691,6 +691,18 @@ class TestAttemptPhaseRecord:
         assert "v_ctx.finalizing_at, 'WORKER', NULL" in body
         assert body.index('horsies_require_attempt_placement') < body.index('pg_advisory_xact_lock')
 
+    def test_the_cancel_records_a_running_attempt_before_the_move_and_the_notice(self) -> None:
+        """The cancel of a RUNNING task writes the CANCELLED attempt with the
+        writer CANCEL, no placement and no last sign of life, then moves the
+        row, then sends the cancel notice."""
+        body = ' '.join(installed_function('horsies_cancel_task').split())
+        assert self._PHASE_COLUMNS in body
+        assert "v_row.finalizing_at, 'CANCEL', NULL" in body
+        insert = body.index("'CANCELLED', FALSE")
+        move = body.index('horsies_move_task_to_history(')
+        notice = body.index("pg_notify( 'horsies_task_cancel'")
+        assert insert < move < notice
+
     def test_recovery_records_the_last_sign_of_life_and_no_placement(self) -> None:
         body = installed_function(FINISH_STALE_ATTEMPT_FUNCTION)
         assert "'RECOVERY', GREATEST(v_ctx.started_at, v_ctx.finalizing_at, v_ctx.newest_runner_beat)" in body

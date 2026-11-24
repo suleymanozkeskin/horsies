@@ -178,7 +178,7 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
     (
         status.TaskAttemptOutcome,
         horsies._catalog.status.TaskAttemptOutcome,
-        ('COMPLETED', 'FAILED', 'WORKER_FAILURE'),
+        ('COMPLETED', 'FAILED', 'WORKER_FAILURE', 'CANCELLED'),
     ),
     (
         enums.WorkflowStatus,

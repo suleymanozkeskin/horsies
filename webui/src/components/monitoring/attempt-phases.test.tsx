@@ -29,6 +29,7 @@ const NOT_CAPTURED = nth(TIMING_EXAMPLES.attempt_phases, 0);
 const PLACED_TWO_CLAIMS = nth(TIMING_EXAMPLES.attempt_phases, 1);
 const RECOVERED = nth(TIMING_EXAMPLES.attempt_phases, 2);
 const ONE_CLAIM_NOT_OBSERVED = nth(TIMING_EXAMPLES.attempt_phases, 3);
+const CANCELLED = nth(TIMING_EXAMPLES.attempt_phases, 4);
 
 const labelsOf = (phases: AttemptPhases): string[] => {
   const times = attemptPhaseTimes(attempt(phases));
@@ -65,6 +66,10 @@ describe('attemptPhaseTimes', () => {
     expect(labelsOf(ONE_CLAIM_NOT_OBSERVED)).toEqual(['due', 'claimed', 'started', 'recorded']);
   });
 
+  it('lists the finalizing marker of a cancelled attempt and no placement or last sign of life', () => {
+    expect(labelsOf(CANCELLED)).toEqual(['due', 'claimed', 'started', 'finalizing', 'recorded']);
+  });
+
   it('leaves out a start and a record time that the attempt row does not hold', () => {
     const times = attemptPhaseTimes({
       ...attempt(ONE_CLAIM_NOT_OBSERVED),
@@ -87,6 +92,11 @@ describe('attemptPhaseTimes', () => {
       'recorded by the worker',
     ]);
     expect(recovered.kind === 'captured' && recovered.claims).toBe('claims not counted');
+    const cancelled = attemptPhaseTimes(attempt(CANCELLED));
+    expect(cancelled.kind === 'captured' && [cancelled.claims, cancelled.recordedBy]).toEqual([
+      '1 claim',
+      'recorded by the cancel; an operator cancelled the task while it ran',
+    ]);
   });
 });
 

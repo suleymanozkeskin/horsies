@@ -72,6 +72,23 @@ export const TIMING_EXAMPLES: TimingExamples = {
         },
       },
     },
+    {
+      kind: 'captured',
+      enqueued_at: '2026-11-22T12:00:00Z',
+      claimed_at: '2026-11-22T12:00:02Z',
+      claims: {
+        kind: 'counted',
+        count: 1,
+        first_claimed_at: '2026-11-22T12:00:02Z',
+      },
+      finalizing: {
+        kind: 'marked',
+        finalizing_at: '2026-11-22T12:00:07Z',
+      },
+      recorded_by: {
+        kind: 'cancel',
+      },
+    },
   ],
   node_timings: [
     {
