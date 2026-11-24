@@ -1,7 +1,7 @@
 ---
 title: Database Schema
 section: shared
-summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (migration chain 1000, 1001, 1002 and 1003).
+summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (migration chain 1000, 1001, 1002, 1003 and 1004).
 related: [../../configuration/broker-config]
 tags: [internals, database, schema, PostgreSQL, task-history]
 ---
@@ -16,6 +16,7 @@ The schema is a chain of migrations. Each migration runs in its own transaction,
 | 1001 | `core/migrations/1001_lifecycle_record.sql` | The phase record of each attempt: two columns on `horsies_tasks`, nine columns on `horsies_task_attempts`, the attempt writers that fill them, and attempt archive version 2. The events of each workflow run: the table `horsies_workflow_events` and the moves and workflow steps that write it |
 | 1002 | `core/migrations/1002_workflow_start_command_fingerprint.sql` | The start command fingerprint of each top-level workflow: two columns and one `CHECK` on `horsies_workflows`, and the workflow start functions that write and compare it (`horsies_workflow_start`, `horsies_workflow_start_top_row`, `horsies_workflow_start_child_row`, `horsies_workflow_child_start`) |
 | 1003 | `core/migrations/1003_attempt_cancelled.sql` | The cancel of a running task: the attempt outcome `CANCELLED` and the writer `CANCEL` in the two `CHECK`s of `horsies_task_attempts`, `horsies_cancel_task` (it writes the `CANCELLED` attempt of a `RUNNING` task and sends the cancel notice), and `horsies_cancelled_runs` (the read of a worker after a lost notice) |
+| 1004 | `core/migrations/1004_worker_profile_name.sql` | The name of the worker profile in each worker snapshot: the column `profile_name` and one `CHECK` on `horsies_worker_states` |
 
 The files of migration 1000:
 
@@ -93,6 +94,18 @@ Upgrade from version 1002 to version 1003 (also from an earlier version, after t
 - The migration replaces two `CHECK`s of `horsies_task_attempts`; each new `CHECK` reads the table once, under
   `ACCESS EXCLUSIVE` until the migration commits. The table holds the attempts of live tasks only. It rewrites
   no table and writes no value into old rows.
+
+Upgrade from version 1003 to version 1004 (also from an earlier version, after the migrations before it):
+
+- Stop every process of an earlier build before the first start of this build, and upgrade every process
+  together. The first start applies migration 1004. A process of an earlier build that starts after it is
+  refused, because the database holds a newer version. A worker of an earlier build that runs on after it writes
+  its snapshots with no profile name.
+- A database at version 1004 does not go back to an earlier build.
+- The migration adds one nullable column with no default to `horsies_worker_states`, so it rewrites no table. The
+  new `CHECK` reads the table once, under `ACCESS EXCLUSIVE` until the migration commits.
+- The migration writes no value into old rows. A snapshot written before it has `profile_name` NULL: the reads
+  give its profile as not recorded.
 
 `horsies_migrations` has the sqlx form: `version`, `description`, `installed_on`, `success`, `checksum`
 (SHA-384 of the migration text) and `execution_time` (nanoseconds). The text of a released migration never
@@ -361,6 +374,7 @@ Worker monitoring snapshots (timeseries). Each worker inserts one row per `worke
 | `slots_down` | `jsonb` | Each slot that is down for a cause that can clear: `{slot, cause, detail, down_since, failed_boots}`; an empty array when none is |
 | `class_capacity` | `jsonb` | Each claim budget class to `{"capacity": N, "serves": [classes]}` |
 | `telemetry` | `jsonb` | The state of the telemetry parts of the worker: `{"endpoint": {"state": ...}, "handler_child": {"state": ...}}`. The endpoint state is `off`, `binding`, `serving` (with the bound address) or `down` (with the cause and `down_since`); the handler child state is `off`, `starting`, `up` (with its pid) or `down` (with the cause, `down_since` and what follows). The fleet collector counts the live workers whose latest snapshot has a part `down` |
+| `profile_name` | `varchar(64)` | The name of the worker profile that the worker runs (migration 1004). NULL in a row that a worker of an earlier build wrote. The `CHECK` `horsies_worker_states_profile_name_shape` holds the name rule: 1 to 64 characters, letters, digits, `_`, `.` and `-`, and the first character is not `.` or `-` |
 
 ## horsies_worker_liveness
 

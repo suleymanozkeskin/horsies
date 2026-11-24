@@ -17,8 +17,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 use horsies_core::{
     checked_history_limit, worker_history_limit_refused, BrokerOperationError,
     BrokerOperationSource, BudgetLoad, ClassBudget, ClassCoverage, ClassReport, ClearableBootCause,
-    DownSlot, Execution, PendingStream, SlotHealth, StreamCoverage, StreamCoverageState,
-    StreamWait, WorkerClassLoad, WorkerStateSnapshot,
+    DownSlot, Execution, PendingStream, SlotHealth, SnapshotProfile, StreamCoverage,
+    StreamCoverageState, StreamWait, WorkerClassLoad, WorkerStateSnapshot,
 };
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
@@ -79,6 +79,19 @@ pub struct ClassBudgetRecord {
     pub serves: Vec<String>,
 }
 
+/// The worker ran the profile `name` of `AppConfig.worker_profiles`.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+#[derive(Clone, Debug)]
+pub struct ProfileNamedRecord {
+    pub name: String,
+}
+
+/// The snapshot holds no profile name: a worker of a build before schema
+/// migration 1004 wrote it.
+#[pyclass(module = "horsies._core", frozen)]
+#[derive(Clone, Debug)]
+pub struct ProfileNotRecordedRecord {}
+
 /// One `horsies_worker_states` row: a worker's state at a point in time.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Debug)]
@@ -107,6 +120,8 @@ pub struct WorkerStateRecord {
     pub slot_health: Py<PyAny>,
     /// One `ClassBudgetRecord` per budget, in `Execution` order.
     pub class_capacity: Py<PyList>,
+    /// `ProfileNamedRecord` or `ProfileNotRecordedRecord`.
+    pub profile: Py<PyAny>,
 }
 
 /// The snapshots of a worker state read: the latest per worker, or the
@@ -303,6 +318,15 @@ fn slot_health_record(py: Python<'_>, health: &SlotHealth) -> PyResult<Py<PyAny>
     }
 }
 
+fn snapshot_profile_record(py: Python<'_>, profile: &SnapshotProfile) -> PyResult<Py<PyAny>> {
+    match profile {
+        SnapshotProfile::Named { name } => {
+            ProfileNamedRecord { name: name.clone() }.into_py_any(py)
+        }
+        SnapshotProfile::NotRecorded => ProfileNotRecordedRecord {}.into_py_any(py),
+    }
+}
+
 fn class_budget_record<'py>(py: Python<'py>, budget: &ClassBudget) -> PyResult<Bound<'py, PyAny>> {
     ClassBudgetRecord {
         budget: budget.budget.as_str().to_owned(),
@@ -339,6 +363,7 @@ fn worker_state_record<'py>(
         worker_started_at: snapshot.worker_started_at,
         slot_health: slot_health_record(py, &snapshot.slot_health)?,
         class_capacity: record_list(py, snapshot.class_capacity.as_slice(), class_budget_record)?,
+        profile: snapshot_profile_record(py, &snapshot.profile)?,
     }
     .into_bound_py_any(py)
 }

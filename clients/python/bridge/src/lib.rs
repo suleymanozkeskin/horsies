@@ -329,6 +329,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::worker_reads::AllSlotsServingRecord>()?;
     module.add_class::<operations::worker_reads::SlotsDownRecord>()?;
     module.add_class::<operations::worker_reads::ClassBudgetRecord>()?;
+    module.add_class::<operations::worker_reads::ProfileNamedRecord>()?;
+    module.add_class::<operations::worker_reads::ProfileNotRecordedRecord>()?;
     module.add_class::<operations::worker_reads::WorkerStateRecord>()?;
     module.add_class::<operations::worker_reads::WorkerStatesRecord>()?;
     module.add_class::<operations::worker_reads::WorkerStateAbsent>()?;

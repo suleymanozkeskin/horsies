@@ -59,6 +59,15 @@ A down slot has its slot index, its cause (a resource shortage with its errno na
 
 `class_capacity` holds the claim budget of each execution class that the worker runs children for. A budget's capacity counts its children (`ISOLATED`) or seats (a shared class) in service, and the budget lists the classes whose rows it claims. A class that no budget serves is not claimed by the worker. See [Budgets per Execution Class](/horsies/workers/concurrency/#budgets-per-execution-class).
 
+### Which profile does a worker run?
+
+`profile` names the worker profile that the worker runs: the `--profile` value of `horsies worker`, or the profile of `WorkerStart` in the Rust client.
+
+| `profile` | Meaning |
+| --------- | ------- |
+| Named | The name of the profile in `AppConfig.worker_profiles` |
+| Not recorded | The snapshot holds no profile name. A worker of a build before schema migration 1004 wrote it |
+
 ## Does a live worker serve every pending class?
 
 A pending stream is the `PENDING` rows of one queue and one execution class. A worker is live while its latest snapshot is at most `WORKER_STATE_LIVE_WINDOW_S` (120) seconds old. `RecoveryConfig.worker_state_snapshot_interval_ms` is at most half of that window (60,000 ms), so a running worker stays live when a snapshot write is late by up to half the window. A live worker serves a stream when the queue is one of its `queues` and one of its budgets serves the class.
@@ -128,6 +137,7 @@ Both reads use the claim index. The coverage read takes one index probe per pend
 | `worker_started_at` | Worker process start time |
 | `slot_health` | See [Which slots are down?](#which-slots-are-down) |
 | `class_capacity` | See [Which classes does a worker serve?](#which-classes-does-a-worker-serve) |
+| `profile` | See [Which profile does a worker run?](#which-profile-does-a-worker-run) |
 
 ### Embedded health payloads
 

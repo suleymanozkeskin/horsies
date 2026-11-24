@@ -203,7 +203,7 @@ pub use crate::worker::{
 pub use crate::broker::{
     checked_history_limit, ping_listener_disabled, ping_min_responses_refused,
     ping_timeout_refused, worker_history_limit_refused, ClassBudget, ClassBudgets,
-    ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
+    ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth, SnapshotProfile,
     MAX_BOOT_FAILURE_DETAIL_CHARS,
 };
 

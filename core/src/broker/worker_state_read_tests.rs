@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 
 use crate::broker::monitoring_test_database::MonitoringTestDatabase;
 use crate::broker::result_types::BrokerErrorCode;
+use crate::broker::health::SnapshotProfile;
 use crate::broker::slot_health::{ClearableBootCause, DownSlot, ShortageErrno, SlotHealth};
 use crate::core::config::worker_profile::WorkerProfile;
 use crate::core::task::Execution;
@@ -279,6 +280,76 @@ async fn the_list_holds_the_latest_snapshot_of_each_worker() {
             ("w2", 1, default_queue.as_slice(), "itest-host", 4242),
         ]
     );
+    database.drop().await;
+}
+
+/// One snapshot of `worker_id` written now with the stored `profile_name`;
+/// every other column as [`insert_snapshot_at`] writes it.
+async fn insert_snapshot_of_profile(pool: &TestPool, worker_id: &str, profile_name: Option<&str>) {
+    sql::query(
+        "INSERT INTO horsies_worker_states (
+            worker_id, snapshot_at, hostname, pid, processes,
+            max_claim_batch, max_claim_per_worker, queues,
+            queue_priorities, queue_max_concurrency, recovery_config,
+            tasks_running, tasks_claimed, children_memory_mb, worker_started_at,
+            slots_down, class_capacity, telemetry, profile_name
+        ) VALUES (
+            $1, now(), 'itest-host', 4242, 2,
+            2, 2, ARRAY['default'],
+            '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+            0, 0, 96.5, now() - interval '1 hour',
+            '[]'::jsonb, '{}'::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off')),
+            $2
+        )",
+    )
+    .bind(worker_id)
+    .bind(profile_name)
+    .execute(pool)
+    .await
+    .expect("insert a worker snapshot");
+}
+
+/// Each worker state read returns the profile of the snapshot: a stored
+/// name is `SnapshotProfile::Named`, and a row with no name (written by a
+/// worker of a build before migration 1004) is `SnapshotProfile::NotRecorded`.
+#[tokio::test]
+async fn each_worker_state_read_returns_the_profile_of_the_snapshot() {
+    let database = MonitoringTestDatabase::create().await;
+    insert_snapshot_of_profile(&database.pool, "w-named", Some("batch")).await;
+    insert_snapshot_of_profile(&database.pool, "w-unnamed", None).await;
+    let broker = database.broker();
+
+    let listed = broker
+        .list_worker_states()
+        .await
+        .expect("the list read answers");
+    let named = broker
+        .get_worker_state("w-named")
+        .await
+        .expect("the read answers")
+        .expect("the worker reported");
+    let unnamed_history = broker
+        .get_worker_state_history("w-unnamed", None)
+        .await
+        .expect("the history read answers");
+
+    let batch = SnapshotProfile::Named {
+        name: "batch".to_owned(),
+    };
+    let profiles: Vec<(&str, &SnapshotProfile)> = listed
+        .iter()
+        .map(|snapshot| (snapshot.worker_id.as_str(), &snapshot.profile))
+        .collect();
+    assert_eq!(
+        profiles,
+        [
+            ("w-named", &batch),
+            ("w-unnamed", &SnapshotProfile::NotRecorded),
+        ]
+    );
+    assert_eq!(named.profile, batch);
+    assert_eq!(unnamed_history.len(), 1);
+    assert_eq!(unnamed_history[0].profile, SnapshotProfile::NotRecorded);
     database.drop().await;
 }
 

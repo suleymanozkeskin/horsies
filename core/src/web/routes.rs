@@ -24,7 +24,9 @@ use crate::monitoring::{
     TaskDetailNotFound, TaskDetailRead, TaskFacetsQuery, TaskFilters, TaskListQuery,
     TaskStatsQuery, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo, WorkflowRunsQuery,
 };
-use crate::monitoring::{class_report_info, slot_health_info, ClassReportInfo};
+use crate::monitoring::{
+    class_report_info, slot_health_info, snapshot_profile_info, ClassReportInfo,
+};
 use crate::monitoring::{ActionBody, ActionOutcome, INTERNAL_SERVER_ERROR_TEXT};
 
 use super::app::WebState;
@@ -578,6 +580,7 @@ pub(super) fn worker_state(listed: ListedWorkerState) -> WorkerStateInfo {
     let ListedWorkerState { snapshot, read_at } = listed;
     let age = elapsed_s(Some(snapshot.snapshot_at), Some(read_at));
     let (slot_health, down_slots) = slot_health_info(&snapshot.slot_health);
+    let profile = snapshot_profile_info(&snapshot.profile);
     WorkerStateInfo {
         worker_id: snapshot.worker_id,
         hostname: snapshot.hostname,
@@ -598,6 +601,7 @@ pub(super) fn worker_state(listed: ListedWorkerState) -> WorkerStateInfo {
         cpu_percent: snapshot.cpu_percent,
         slot_health,
         down_slots,
+        profile,
     }
 }
 

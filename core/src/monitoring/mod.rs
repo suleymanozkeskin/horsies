@@ -32,7 +32,7 @@ pub use errors::{
     HistoryContractSource, MonitoringQueryError, MonitoringQueryErrorCode,
     MonitoringQueryErrorSource, MonitoringResult,
 };
-pub use execution_classes::{class_report_info, slot_health_info};
+pub use execution_classes::{class_report_info, slot_health_info, snapshot_profile_info};
 pub use history_window::{
     resolve_monitoring_window, WindowRefused, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
 };
@@ -45,7 +45,7 @@ pub use models::{
 };
 pub use models::{
     BudgetLoadInfo, ClassReportInfo, DownSlotInfo, PendingStreamInfo, SlotHealthKind,
-    StreamCoverageInfo, StreamWaitInfo, WorkerClassLoadInfo,
+    SnapshotProfileInfo, StreamCoverageInfo, StreamWaitInfo, WorkerClassLoadInfo,
 };
 pub use queries::{
     categorize_error_code, elapsed_s, get_task_detail, get_workflow_node, get_workflow_run,
