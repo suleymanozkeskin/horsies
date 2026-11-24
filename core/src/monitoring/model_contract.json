@@ -400,6 +400,7 @@
               "union": {
                 "tag": "kind",
                 "variants": {
+                  "cancel": {},
                   "recovery": {
                     "last_seen_at": "date-time"
                   },
@@ -484,6 +485,7 @@
                     "union": {
                       "tag": "kind",
                       "variants": {
+                        "cancel": {},
                         "recovery": {
                           "last_seen_at": "date-time"
                         },
@@ -1746,6 +1748,7 @@
                     "union": {
                       "tag": "kind",
                       "variants": {
+                        "cancel": {},
                         "recovery": {
                           "last_seen_at": "date-time"
                         },

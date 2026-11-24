@@ -33,9 +33,11 @@ mod workflow_input;
 /// - `execution = isolated | shared_async`: the class of the task; the
 ///   default is `isolated`. `shared_async` needs `timeout_ms`.
 /// - `timeout_ms = 1000..=4294967295`: the deadline of a run.
-/// - `cancel_grace_ms = 100..=10000`: `shared_async` only; the time from
-///   the cancel signal at the deadline to the drop of the body. Default
-///   1,000.
+/// - `cancel_grace_ms = 100..=10000`: `shared_async`: the time from the
+///   cancel signal (at the deadline, or at an operator cancel) to the drop
+///   of the body; default 1,000. `isolated`: the time from an operator
+///   cancel to the kill of the child when the run has not ended; with none,
+///   an operator cancel kills nothing.
 /// - `retry_policy = <RetryPolicy>` with `auto_retry_for = ["CODE", ...]`:
 ///   both or neither. A code is a built-in code (`TASK_TIMEOUT`,
 ///   `WORKER_CRASHED`, ...) or a code of `E`; any other is a compile
@@ -67,8 +69,9 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// The same attributes and generated module as `#[horsies::task]`, with
 /// `execution = isolated | shared_thread`. `shared_thread` needs
-/// `timeout_ms` and takes no `cancel_grace_ms`: a thread cannot be
-/// cancelled.
+/// `timeout_ms` and takes no `cancel_grace_ms`: a thread cannot be stopped.
+/// An `isolated` blocking task takes `cancel_grace_ms` as an async one
+/// does.
 ///
 /// ```ignore
 /// #[horsies::blocking_task("resize", execution = shared_thread, timeout_ms = 60_000)]

@@ -44,15 +44,15 @@ Enqueue stores a `timeout_ms` on every `SHARED_THREAD` row. A row without a usab
 
 ## How To
 
-Declare the task with the `SHARED_THREAD` class and a `timeout_ms`. A thread cannot be cancelled, so a thread task takes no `cancel_grace_ms`. Start a worker whose profile has shared thread children. A profile with 2 isolated children and 2 shared thread children of 4 seats runs `ISOLATED` tasks in the 2 isolated children and `SHARED_THREAD` tasks on 2 × 4 = 8 seats.
+Declare the task with the `SHARED_THREAD` class and a `timeout_ms`. A thread cannot be stopped from outside, so a thread task takes no `cancel_grace_ms`. Start a worker whose profile has shared thread children. A profile with 2 isolated children and 2 shared thread children of 4 seats runs `ISOLATED` tasks in the 2 isolated children and `SHARED_THREAD` tasks on 2 × 4 = 8 seats.
 
 The API is on the client pages: [Choose the Execution Class](/horsies/tasks/defining-tasks/#choose-the-execution-class) and [Run Shared Tasks](/horsies/workers/worker-profiles/#run-shared-tasks) (Python), and [Attributes](/horsies/rust/tasks/defining-tasks/#attributes) and [Worker Setup](/horsies/rust/workers/worker-setup/) (Rust).
 
 ## The Timeout
 
-The shared thread child holds the deadline of each of its tasks. It starts the deadline when it takes the task. A thread cannot be cancelled, so a deadline cannot stop the task:
+The shared thread child holds the deadline of each of its tasks. It starts the deadline when it takes the task. A thread cannot be stopped from outside, so a deadline cannot stop the task:
 
-1. At `timeout_ms`, the child reports the deadline, and the task runs on. The child closes: it takes no new task, and a new child starts when it has ended.
+1. At `timeout_ms`, the child reports the deadline, and the task runs on. The child sets the cancel state of the `TaskRuntime` of the task to the cause `DEADLINE`, when no operator cancel came first, so code that reads it can stop. The child closes: it takes no new task, and a new child starts when it has ended.
 2. When no task in the child has time left, that is, when every task still in it is past its own deadline, the worker kills the child with its session, so the subprocesses of its tasks go with it. After the exit, the worker writes `TASK_TIMEOUT`, the retry of the retry policy, and the next workflow step for each of those tasks. The task whose deadline closed the child is the culprit: its retry runs in an isolated child, where its own timeout kills only it. A task that is alone in its child is killed at its deadline.
 3. A task in the child that still has time left runs on, to its end or to its own deadline.
 4. A task that ends by itself after its deadline fails with `TASK_TIMEOUT`, also when it returns a value.
@@ -62,6 +62,15 @@ The outcome of a task is fixed when it returns: what it returned before its dead
 The attempt ends before its row moves, so a retry never runs next to the attempt that it replaces. A timeout is terminal by default; add `"TASK_TIMEOUT"` to `auto_retry_for` for a retry.
 
 The worker keeps one more timer per task, at `timeout_ms + 10 seconds`. A child reports each deadline at once, so a child that has not reported the deadline by then is frozen: C code holds the GIL, and no thread of the child runs. The worker kills that child. Each task in it that is past its deadline fails with `TASK_TIMEOUT`, and every other task takes the crash path (`WORKER_CRASHED`, or a retry when its policy names that code). The worker cannot tell which thread held the GIL, so it names no new culprit. A task whose deadline already closed the child keeps its retry in an isolated child at this kill, and at the drain deadline of a stop.
+
+## An Operator Cancel
+
+An operator can cancel a running task (`cancel_task` with `include_running`, or the web UI). The cancel moves the task to history as `CANCELLED` and records its attempt as `CANCELLED` in one statement. Then the worker sends the cancel to the shared thread child of the run:
+
+1. The child sets the cancel state of the `TaskRuntime` of the task to the cause `OPERATOR`. A task whose code has not started yet does not start.
+2. The thread runs on. Code that reads the cancel state (Python `runtime.cancel_state()`, Rust `rt.is_cancelled()` or `rt.cancel_state()`) can stop at its next read.
+3. What the task returns after the cancel is dropped: the task stays `CANCELLED`. The seat stays in use until the thread returns.
+4. The deadline rules above still apply to the child: a task past its deadline closes the child, and the worker kills the child when no task in it has time left.
 
 ## Rules for Task Authors
 
@@ -76,6 +85,8 @@ The Python example is in [Choose the Execution Class](/horsies/tasks/defining-ta
 **Expect to share the process.** A crash of the child, an out-of-memory kill, or a kill by the worker ends every task in it. Such a task takes the crash path, or `TASK_TIMEOUT` after the kill of a closed child. A task that must not share a process stays `ISOLATED`.
 
 **Do not start threads that outlive the task.** A thread that a task starts and does not join keeps running beside the next tasks of the child.
+
+**Read the cancel state between the steps of long work.** The deadline and an operator cancel set it. A task that reads it stops in time and frees its seat; a task that does not read it runs to its end or to the kill of its child.
 
 ## Recycling
 

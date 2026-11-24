@@ -8,10 +8,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-/// Least cancel grace of a `SHARED_ASYNC` task, in milliseconds.
+/// Least cancel grace of a `SHARED_ASYNC` or an `ISOLATED` task, in
+/// milliseconds.
 pub const MIN_CANCEL_GRACE_MS: i64 = 100;
 
-/// Greatest cancel grace of a `SHARED_ASYNC` task, in milliseconds.
+/// Greatest cancel grace of a `SHARED_ASYNC` or an `ISOLATED` task, in
+/// milliseconds.
 pub const MAX_CANCEL_GRACE_MS: i64 = 10_000;
 
 /// How a worker runs a task. The column `execution` holds one of these values.
@@ -154,7 +156,9 @@ pub struct InvalidExecution {
 /// - A present `execution` must be one of the three class names.
 /// - `cancel_grace_ms` must fit the class: an integer from
 ///   [`MIN_CANCEL_GRACE_MS`] to [`MAX_CANCEL_GRACE_MS`] for `SHARED_ASYNC`;
-///   absent or `null` for the other classes.
+///   absent, `null`, or such an integer for `ISOLATED` (the time from an
+///   operator cancel to the kill of the child; none means no kill); absent
+///   or `null` for `SHARED_THREAD`, whose thread cannot be stopped.
 ///
 /// Other option fields are not checked. Does no I/O.
 pub fn stored_execution(
@@ -186,25 +190,27 @@ fn stored_execution_class(options: &Map<String, Value>) -> Result<Execution, Inv
 }
 
 fn grace_error(execution: Execution, raw: Option<&Value>) -> Option<String> {
-    match execution {
-        Execution::SharedAsync => shared_async_grace_error(raw),
-        Execution::Isolated | Execution::SharedThread => match raw {
-            None | Some(Value::Null) => None,
-            Some(_) => Some(format!(
-                "cancel_grace_ms is set for execution {}; only SHARED_ASYNC has one",
-                execution.as_str(),
-            )),
-        },
+    match (execution, raw) {
+        (Execution::SharedAsync, None | Some(Value::Null)) => {
+            Some("cancel_grace_ms is absent for execution SHARED_ASYNC".to_owned())
+        }
+        (Execution::SharedAsync | Execution::Isolated, Some(value)) => bounded_grace_error(value),
+        (Execution::Isolated | Execution::SharedThread, None | Some(Value::Null)) => None,
+        (Execution::SharedThread, Some(_)) => Some(
+            "cancel_grace_ms is set for execution SHARED_THREAD; only SHARED_ASYNC and \
+             ISOLATED have one"
+                .to_owned(),
+        ),
     }
 }
 
-fn shared_async_grace_error(raw: Option<&Value>) -> Option<String> {
+/// The rule of a present `cancel_grace_ms` that is not `null`: an integer
+/// from [`MIN_CANCEL_GRACE_MS`] to [`MAX_CANCEL_GRACE_MS`].
+fn bounded_grace_error(raw: &Value) -> Option<String> {
     match raw {
-        None | Some(Value::Null) => {
-            Some("cancel_grace_ms is absent for execution SHARED_ASYNC".to_owned())
-        }
-        Some(Value::Bool(_)) => Some("cancel_grace_ms is a bool, not an int".to_owned()),
-        Some(Value::Number(number)) => match number.as_i64() {
+        Value::Null => None,
+        Value::Bool(_) => Some("cancel_grace_ms is a bool, not an int".to_owned()),
+        Value::Number(number) => match number.as_i64() {
             Some(ms) if ms < MIN_CANCEL_GRACE_MS => {
                 Some(format!("cancel_grace_ms is below {MIN_CANCEL_GRACE_MS} ms"))
             }
@@ -217,7 +223,7 @@ fn shared_async_grace_error(raw: Option<&Value>) -> Option<String> {
             }
             None => Some("cancel_grace_ms is a JSON float, not an int".to_owned()),
         },
-        Some(other) => Some(format!(
+        other @ (Value::String(_) | Value::Array(_) | Value::Object(_)) => Some(format!(
             "cancel_grace_ms is a JSON {}, not an int",
             json_type_name(other)
         )),
@@ -287,8 +293,7 @@ mod tests {
             serde_json::json!({"execution": "SHARED_ASYNC", "cancel_grace_ms": 10_001}),
             serde_json::json!({"execution": "SHARED_ASYNC", "cancel_grace_ms": 1.5}),
             serde_json::json!({"execution": "SHARED_ASYNC", "cancel_grace_ms": true}),
-            serde_json::json!({"execution": "ISOLATED", "cancel_grace_ms": 1000}),
-            serde_json::json!({"cancel_grace_ms": 1000}),
+            serde_json::json!({"execution": "SHARED_THREAD", "cancel_grace_ms": 1000}),
         ] {
             let refused = options(value);
             assert!(stored_execution(Some(&refused)).is_err());
@@ -298,6 +303,60 @@ mod tests {
         assert_eq!(
             stored_execution(Some(&thread_null)),
             Ok(Execution::SharedThread)
+        );
+    }
+
+    /// An `ISOLATED` task takes a cancel grace inside the bounds (the time
+    /// from an operator cancel to the kill of its child), or none.
+    #[test]
+    fn an_isolated_task_takes_a_bounded_cancel_grace_or_none() {
+        for value in [
+            serde_json::json!({"execution": "ISOLATED", "cancel_grace_ms": 100}),
+            serde_json::json!({"execution": "ISOLATED", "cancel_grace_ms": 10_000}),
+            serde_json::json!({"execution": "ISOLATED", "cancel_grace_ms": null}),
+            serde_json::json!({"execution": "ISOLATED"}),
+            serde_json::json!({"cancel_grace_ms": 1000}),
+        ] {
+            let accepted = options(value);
+            assert_eq!(stored_execution(Some(&accepted)), Ok(Execution::Isolated));
+        }
+        for (value, detail) in [
+            (
+                serde_json::json!({"execution": "ISOLATED", "cancel_grace_ms": 99}),
+                "cancel_grace_ms is below 100 ms",
+            ),
+            (
+                serde_json::json!({"execution": "ISOLATED", "cancel_grace_ms": 10_001}),
+                "cancel_grace_ms is above 10000 ms",
+            ),
+            (
+                serde_json::json!({"execution": "ISOLATED", "cancel_grace_ms": "500"}),
+                "cancel_grace_ms is a JSON str, not an int",
+            ),
+        ] {
+            let refused = options(value);
+            assert_eq!(
+                stored_execution(Some(&refused)),
+                Err(InvalidExecution {
+                    detail: detail.to_owned()
+                })
+            );
+        }
+    }
+
+    /// A `SHARED_THREAD` task takes no cancel grace: its thread cannot be
+    /// stopped.
+    #[test]
+    fn a_shared_thread_task_takes_no_cancel_grace() {
+        let refused =
+            options(serde_json::json!({"execution": "SHARED_THREAD", "cancel_grace_ms": 1000}));
+        assert_eq!(
+            stored_execution(Some(&refused)),
+            Err(InvalidExecution {
+                detail: "cancel_grace_ms is set for execution SHARED_THREAD; only SHARED_ASYNC \
+                         and ISOLATED have one"
+                    .to_owned()
+            })
         );
     }
 

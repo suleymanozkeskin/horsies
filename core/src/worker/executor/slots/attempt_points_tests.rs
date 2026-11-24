@@ -165,6 +165,7 @@ async fn run_scripted_attempt(
         input(),
         IsolatedWork::Run,
         IsolatedDeadline::NoDeadline,
+        IsolatedCancelStop::CooperativeOnly,
         watch,
     );
     let writer = ScriptedWrites::settling(settlement);
@@ -343,6 +344,7 @@ async fn a_task_that_reaches_no_child_is_released_once_and_not_placed() {
         input(),
         IsolatedWork::Run,
         IsolatedDeadline::NoDeadline,
+        IsolatedCancelStop::CooperativeOnly,
         watch,
     );
     let writer = ScriptedWrites::settling(Settlement::Written(WrittenEnd::ClaimReleased));
@@ -640,6 +642,7 @@ async fn the_write_of_a_placed_attempt_gets_its_slot_wait_with_telemetry_off() {
         input(),
         IsolatedWork::Run,
         IsolatedDeadline::NoDeadline,
+        IsolatedCancelStop::CooperativeOnly,
         watch,
     );
     let writer = ScriptedWrites::settling(Settlement::Written(WrittenEnd::Terminal(

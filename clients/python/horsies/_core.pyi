@@ -696,7 +696,7 @@ class TaskAttemptRecord:
     @property
     def attempt(self) -> int: ...
     @property
-    def outcome(self) -> Literal['COMPLETED', 'FAILED', 'WORKER_FAILURE']: ...
+    def outcome(self) -> Literal['COMPLETED', 'FAILED', 'WORKER_FAILURE', 'CANCELLED']: ...
     @property
     def will_retry(self) -> bool: ...
     @property
@@ -2869,6 +2869,34 @@ class SharedRunFrame:
 
 
 @final
+class IsolatedCancelTarget:
+    """The run of an isolated child that a CancelRunFrame names, by its task."""
+    @property
+    def task_id(self) -> uuid.UUID: ...
+
+
+@final
+class SharedCancelTarget:
+    """The run on a seat of a shared child that a CancelRunFrame names, by its dispatch
+    number and its task.
+    """
+    @property
+    def dispatch(self) -> int: ...
+    @property
+    def task_id(self) -> uuid.UUID: ...
+
+
+@final
+class CancelRunFrame:
+    """An operator cancelled the task of a run: the cancel statement moved its row to
+    history and recorded the attempt as CANCELLED. A cancel of a run that the child does
+    not run now is ignored.
+    """
+    @property
+    def target(self) -> IsolatedCancelTarget | SharedCancelTarget: ...
+
+
+@final
 class EventsFrame:
     """Lifecycle events for a handler child, in the order that the core emitted them; events
     holds the JSON text of each event.
@@ -2968,7 +2996,7 @@ class FrameReader:
     reader.
     """
     def __init__(self) -> None: ...
-    def feed(self, data: bytes) -> list[InitFrame | RunFrame | SharedRunFrame | EventsFrame | StopFrame] | FrameOverBound | FrameRefused | ParentProtocolMismatch:
+    def feed(self, data: bytes) -> list[InitFrame | RunFrame | SharedRunFrame | CancelRunFrame | EventsFrame | StopFrame] | FrameOverBound | FrameRefused | ParentProtocolMismatch:
         """Take the bytes that arrived and give the whole parent frames they complete, in
         order. A refusal means the channel cannot be read on.
         """
@@ -2990,6 +3018,15 @@ class StoppedBeforeRunning:
 class WorkerFailure:
     """The worker code of the child failed, not the task. The detail is cut to its bound."""
     def __init__(self, *, detail: str) -> None: ...
+
+
+@final
+class SeatCancelled:
+    """An operator cancel reached the run of a shared child before it ended, and the run has
+    ended; what the body returned is dropped. body is NOT_STARTED when the child did not
+    start the body.
+    """
+    def __init__(self, *, body: Literal['RAN', 'NOT_STARTED']) -> None: ...
 
 
 @final
@@ -3067,7 +3104,7 @@ class SharedResultFrame:
     """A run of a shared child ended; its seat is free. started_at is the start time that the
     start write returned, or NOT_REPORTED for a run that stopped before running.
     """
-    def __init__(self, *, dispatch: int, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure | Literal['TIMED_OUT'], started_at: datetime.datetime | Literal['NOT_REPORTED'], rss_mb: float | Literal['UNREADABLE'], child: Literal['SERVES_ON', 'ENDS_ITSELF']) -> None: ...
+    def __init__(self, *, dispatch: int, task_id: uuid.UUID, end: TaskResult | StoppedBeforeRunning | WorkerFailure | SeatCancelled | Literal['TIMED_OUT'], started_at: datetime.datetime | Literal['NOT_REPORTED'], rss_mb: float | Literal['UNREADABLE'], child: Literal['SERVES_ON', 'ENDS_ITSELF']) -> None: ...
 
 
 @final
@@ -3080,6 +3117,23 @@ class DeadlineFiredFrame:
 class SecondCancelFrame:
     """The cancel grace of a run ran out while it was alive."""
     def __init__(self, *, dispatch: int, task_id: uuid.UUID) -> None: ...
+
+
+@final
+class CancelFiredFrame:
+    """A shared child applied the operator cancel of a run: it gave the cancel to the task,
+    or it will not start the body.
+    """
+    def __init__(self, *, dispatch: int, task_id: uuid.UUID) -> None: ...
+
+
+@final
+class RunCancelledFrame:
+    """An isolated run that an operator cancelled has ended, in place of ResultFrame.
+    started_at is the start time that the start write returned; task_loop names the work
+    that the body left, if any.
+    """
+    def __init__(self, *, task_id: uuid.UUID, body: Literal['RAN', 'NOT_STARTED'], started_at: datetime.datetime, rss_mb: float | Literal['UNREADABLE'], task_loop: LoopHoldsTasks | Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK'], child: Literal['SERVES_ON', 'ENDS_ITSELF']) -> None: ...
 
 
 @final
@@ -3266,7 +3320,7 @@ def core_state() -> Literal['not_started', 'running', 'stopped', 'inherited']:
     """The state of the core in this process. Starts nothing."""
 
 
-def decode_parent_frame(meta: bytes, body: bytes) -> InitFrame | RunFrame | SharedRunFrame | EventsFrame | StopFrame | FrameRefused | ParentProtocolMismatch:
+def decode_parent_frame(meta: bytes, body: bytes) -> InitFrame | RunFrame | SharedRunFrame | CancelRunFrame | EventsFrame | StopFrame | FrameRefused | ParentProtocolMismatch:
     """Decode one parent frame from its metadata and its body. Pure."""
 
 
@@ -3277,7 +3331,7 @@ def decode_rerun_write(write: RerunWriteRecord, row: tuple[object, ...]) -> Reru
     """
 
 
-def encode_child_frame(frame: ReadyFrame | BootFailedFrame | ResultFrame | BodyReturnedFrame | LeftWorkEndedFrame | LeftWorkStuckFrame | SharedResultFrame | DeadlineFiredFrame | SecondCancelFrame | RunStuckFrame | LeftoverCancelFrame | LeftoverStuckFrame | LoopBlockedFrame | HandlerStatsFrame) -> bytes | FrameTooLarge:
+def encode_child_frame(frame: ReadyFrame | BootFailedFrame | ResultFrame | BodyReturnedFrame | LeftWorkEndedFrame | LeftWorkStuckFrame | SharedResultFrame | DeadlineFiredFrame | SecondCancelFrame | CancelFiredFrame | RunCancelledFrame | RunStuckFrame | LeftoverCancelFrame | LeftoverStuckFrame | LoopBlockedFrame | HandlerStatsFrame) -> bytes | FrameTooLarge:
     """Encode a child frame: its bytes, or FrameTooLarge when it is over a bound of the
     header. Pure.
     """

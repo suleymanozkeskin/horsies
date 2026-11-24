@@ -1109,6 +1109,26 @@ class TestControlThread:
 
         assert stopped.is_set()
 
+    def test_a_cancel_frame_is_ignored(self) -> None:
+        """The handler child runs no task: a cancel of a run is ignored, and
+        the frames after it are read."""
+        cancel = framed(
+            {
+                'kind': 'cancel_run',
+                'target': {'kind': 'shared', 'dispatch': 1, 'task_id': str(uuid.UUID(int=1))},
+            },
+        )
+        stopped = threading.Event()
+        reader = ParentFrameReader(
+            cast('socket.socket', _ScriptedSocket(cancel + _stop_bytes()))
+        )
+
+        handler_child._read_handler_frames(
+            reader, EventDispatch((), NO_ENDED_ATTEMPT_SPANS), stopped
+        )
+
+        assert stopped.is_set()
+
 
 class _Served(Exception):
     def __init__(self, program: str) -> None:

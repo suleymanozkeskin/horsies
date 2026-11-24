@@ -31,7 +31,8 @@ class TimeoutValueInvalid:
 @dataclass(frozen=True, slots=True)
 class CancelGraceInvalid:
     """The stored `cancel_grace_ms` of a `SHARED_ASYNC` row is not an int
-    from `MIN_CANCEL_GRACE_MS` to `MAX_CANCEL_GRACE_MS`."""
+    from `MIN_CANCEL_GRACE_MS` to `MAX_CANCEL_GRACE_MS`, or the stored grace
+    of an `ISOLATED` row is set and outside those bounds."""
 
     reason: str
 

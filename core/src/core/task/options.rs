@@ -4,11 +4,15 @@ use super::error::TaskErrorCode;
 use super::execution::{Execution, MAX_CANCEL_GRACE_MS, MIN_CANCEL_GRACE_MS};
 use crate::core::python_text::python_isoformat_utc;
 
-/// The cancel grace of a `SHARED_ASYNC` task: the time from the cancel at
-/// its deadline to the second cancel (Rust: the drop of its future), from
-/// [`MIN_CANCEL_GRACE_MS`] to [`MAX_CANCEL_GRACE_MS`] milliseconds (Python
-/// `cancel_grace_ms`). Only [`CancelGraceMs::new`] builds one, and serde
-/// reads one through it.
+/// The cancel grace of a task, from [`MIN_CANCEL_GRACE_MS`] to
+/// [`MAX_CANCEL_GRACE_MS`] milliseconds (Python `cancel_grace_ms`):
+///
+/// - `SHARED_ASYNC`: the time from the cancel (at the deadline, or at an
+///   operator cancel) to the second cancel (Rust: the drop of its future).
+/// - `ISOLATED`: the time from an operator cancel to the kill of the child
+///   when the run has not ended.
+///
+/// Only [`CancelGraceMs::new`] builds one, and serde reads one through it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "u32", into = "u32")]
 pub struct CancelGraceMs(u32);
@@ -259,9 +263,11 @@ pub struct TaskOptions {
     #[serde(default = "isolated")]
     pub execution: Execution,
 
-    /// The cancel grace of a `SHARED_ASYNC` task. Only `SHARED_ASYNC`
-    /// carries one, and it must: enqueue refuses a grace on another class
-    /// and a `SHARED_ASYNC` task without one (`stored_execution`).
+    /// The cancel grace of the task. A `SHARED_ASYNC` task carries one, and
+    /// it must; an `ISOLATED` task may carry one (none: an operator cancel
+    /// kills nothing); a `SHARED_THREAD` task carries none. Enqueue refuses
+    /// a grace on `SHARED_THREAD` and a `SHARED_ASYNC` task without one
+    /// (`stored_execution`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_grace_ms: Option<CancelGraceMs>,
 }
@@ -287,8 +293,8 @@ impl TaskOptions {
     ///   node merges its deadline into this text.
     /// - `execution` is the class of the task, and `cancel_grace_ms` its
     ///   grace, `null` when it has none. The text holds what the options say:
-    ///   a grace on another class than `SHARED_ASYNC`, or a `SHARED_ASYNC`
-    ///   task without one, is refused at enqueue (`stored_execution`).
+    ///   a grace on `SHARED_THREAD`, or a `SHARED_ASYNC` task without one, is
+    ///   refused at enqueue (`stored_execution`).
     ///
     /// Every task gets the text, as every Python task does: an `ISOLATED`
     /// task with no grace, no retry policy and no timeout stores the text
@@ -489,8 +495,8 @@ mod tests {
     }
 
     /// The core writes the layout its worker reads: the dispatch reader takes
-    /// the stored text as a policy and a timeout, not as a refusal. The
-    /// options of an `ISOLATED` task store no cancel grace.
+    /// the stored text as a policy and a timeout, not as a refusal. An
+    /// `ISOLATED` task with no grace stores none.
     #[test]
     fn the_stored_text_is_what_the_dispatch_reader_accepts() {
         use super::super::error::{TaskErrorCode, UserCode};
@@ -590,7 +596,7 @@ mod tests {
     }
 
     /// The text holds what the options say; enqueue refuses a grace on
-    /// another class and a `SHARED_ASYNC` task with no grace.
+    /// `SHARED_THREAD` and a `SHARED_ASYNC` task with no grace.
     #[test]
     fn enqueue_refuses_a_grace_that_does_not_fit_the_class() {
         use crate::core::task::execution::stored_execution;
@@ -598,10 +604,32 @@ mod tests {
         let grace = CancelGraceMs::DEFAULT;
         let on_thread = stored_object(&options_of(Execution::SharedThread, Some(grace), None));
         assert!(stored_execution(Some(&on_thread)).is_err());
-        let on_isolated = stored_object(&options_of(Execution::Isolated, Some(grace), None));
-        assert!(stored_execution(Some(&on_isolated)).is_err());
         let without = stored_object(&options_of(Execution::SharedAsync, None, Some(1_000)));
         assert!(stored_execution(Some(&without)).is_err());
+    }
+
+    /// An `ISOLATED` task stores its grace, and enqueue and dispatch read it
+    /// back: the worker kills the child that long after an operator cancel.
+    #[test]
+    fn an_isolated_task_stores_its_grace() {
+        use crate::core::task::execution::stored_execution;
+        use crate::worker::retry::{read_stored_options, StoredCancelGrace, StoredOptions};
+
+        let grace = CancelGraceMs::new(2_000).expect("2000 ms is a grace");
+        let options = options_of(Execution::Isolated, Some(grace), Some(30_000));
+        let stored = stored_object(&options);
+        assert_eq!(stored["execution"], "ISOLATED");
+        assert_eq!(stored["cancel_grace_ms"], 2_000);
+        assert_eq!(stored_execution(Some(&stored)), Ok(Execution::Isolated));
+
+        let text = options.stored_options_text();
+        match read_stored_options(Some(&text)) {
+            StoredOptions::Readable {
+                cancel_grace: StoredCancelGrace::Grace(grace),
+                ..
+            } => assert_eq!(grace, std::time::Duration::from_millis(2_000)),
+            other => panic!("the dispatch reader refused the stored options: {other:?}"),
+        }
     }
 
     #[test]

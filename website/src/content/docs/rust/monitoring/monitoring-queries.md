@@ -68,9 +68,9 @@ The lifecycle record keeps the phase times of each attempt and the events of eac
 | Variant | Fields |
 |---------|--------|
 | `NotCaptured` | The attempt row was written before the lifecycle record (migration 1001), or the history row holds a version-1 attempt archive |
-| `Captured` | `enqueued_at` (the due time), `claimed_at` (the claim that ran the attempt), `claims` (`Counted { count, first_claimed_at }` or `NotCounted`), `finalizing` (`Marked { finalizing_at }` or `NotMarked`), `recorded_by` (`Worker { placement }` with `Placed { placed_at }` or `NotObserved`; or `Recovery { last_seen_at }`) |
+| `Captured` | `enqueued_at` (the due time), `claimed_at` (the claim that ran the attempt), `claims` (`Counted { count, first_claimed_at }` or `NotCounted`), `finalizing` (`Marked { finalizing_at }` or `NotMarked`), `recorded_by` (`Worker { placement }` with `Placed { placed_at }` or `NotObserved`; `Recovery { last_seen_at }`; or `Cancel`) |
 
-A count above 1 holds lost leases and released claims. `placed_at` is the claim time plus the slot wait that the worker measured. `Recovery` means that stale RUNNING recovery wrote the attempt row; `last_seen_at` is the last time the attempt was known alive.
+A count above 1 holds lost leases and released claims. `placed_at` is the claim time plus the slot wait that the worker measured. `Recovery` means that stale RUNNING recovery wrote the attempt row; `last_seen_at` is the last time the attempt was known alive. `Cancel` means that the cancel of a RUNNING task wrote the attempt row, with the outcome `Cancelled`; its `finished_at` is the time of the cancel.
 
 ### Node Timing
 
@@ -192,7 +192,7 @@ async fn cancel_pending(app: &Horsies, task_id: Uuid) -> Result<bool, String> {
 
 `cancel_task(&app, task_id, include_running)` moves a task that is not a workflow task to CANCELLED. It returns `TaskActionResult<TaskCancelled>`: `Result<TaskCancelled, TaskActionError>`. `TaskCancelled` has `task_id` and `was_status`.
 
-- PENDING and CLAIMED tasks are cancelled. A RUNNING task is cancelled only with `include_running = true`: the row becomes CANCELLED, and the task code runs on until it returns.
+- PENDING and CLAIMED tasks are cancelled. A RUNNING task is cancelled only with `include_running = true`: the row becomes CANCELLED with an attempt of outcome `Cancelled`, and the worker gives the cancel to the task code (`TaskRuntime::cancelled()`, `is_cancelled()` and `cancel_state()`; Python `asyncio.CancelledError` and `runtime.cancel_state()`). The code stops when it reads the cancel. An `isolated` task with `cancel_grace_ms` is killed when it has not stopped `cancel_grace_ms` later.
 - A workflow task is refused: use `WorkflowHandle::cancel`, `pause` and `resume`. See [Workflow API](/horsies/rust/concepts/workflows/workflow-api/#workflowhandle).
 
 The rules are on [Action Semantics](/horsies/monitoring/action-semantics/#task-cancel).
@@ -229,6 +229,6 @@ The rules of each action are on [Action Semantics](/horsies/monitoring/action-se
 
 **Do not read an unfiltered `TaskListPage.total` as an exact count.** It is an estimate.
 
-**Do not cancel a RUNNING task to stop its side effects.** The cancel changes the row; the task code runs on until it returns.
+**Do not cancel a RUNNING task to undo its side effects.** The cancel stops the task code when the code reads it; the effects that the code made before then stay. Code that does not read the cancel runs on until it returns, or until a kill.
 
 **Do not build the reads of a monitoring tool on an app that installs the schema.** Build it with `Horsies::with_schema_mode(config, SchemaMode::ObserveOnly)`: see [App Config](/horsies/rust/configuration/app-config/#schema-modes).

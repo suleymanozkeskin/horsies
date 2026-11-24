@@ -39,8 +39,8 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.task_decorator import (
+    CancelGraceOnSharedThread,
     CancelGraceOutOfRange,
-    CancelGraceWithoutSharedAsync,
     ExecutionRuleViolation,
     SharedAsyncOnDef,
     SharedThreadOnAsyncDef,
@@ -153,6 +153,24 @@ class TestDeclarationsThatRegister:
 
         assert _stored(sa_grace.task_options_json)['cancel_grace_ms'] == grace
 
+    @pytest.mark.parametrize('grace', [MIN_CANCEL_GRACE_MS, MAX_CANCEL_GRACE_MS])
+    def test_isolated_stores_a_declared_grace_at_the_bounds(self, grace: int) -> None:
+        """An isolated grace is the hard stop after an operator cancel."""
+        app = _app()
+
+        @app.task('iso_grace', cancel_grace_ms=grace)
+        def iso_grace(*, n: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=n)
+
+        @app.task('iso_grace_async', execution=Execution.ISOLATED, cancel_grace_ms=grace)
+        async def iso_grace_async(*, n: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=n)
+
+        for task in (iso_grace, iso_grace_async):
+            stored = _stored(task.task_options_json)
+            assert stored['execution'] == 'ISOLATED'
+            assert stored['cancel_grace_ms'] == grace
+
     def test_shared_thread_stores_no_grace(self) -> None:
         app = _app()
 
@@ -205,15 +223,23 @@ class TestDeclarationsThatAreRefused:
         assert error.code is ErrorCode.TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT
         assert 'SHARED_THREAD' in error.message
 
-    def test_a_grace_on_an_isolated_task(self) -> None:
+    @pytest.mark.parametrize(
+        'grace',
+        [
+            pytest.param(MIN_CANCEL_GRACE_MS - 1, id='min-1'),
+            pytest.param(MAX_CANCEL_GRACE_MS + 1, id='max+1'),
+        ],
+    )
+    def test_an_isolated_grace_out_of_range(self, grace: int) -> None:
         def declare(app: Horsies) -> None:
-            @app.task('bad', cancel_grace_ms=1_000)  # pyright: ignore[reportCallIssue, reportUntypedFunctionDecorator, reportArgumentType]
+            @app.task('bad', cancel_grace_ms=grace)
             def bad(*, n: int) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedFunction]
                 return TaskResult(ok=n)
 
         error = _definition_error(declare)
-        assert error.code is ErrorCode.TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC
+        assert error.code is ErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE
         assert 'execution is ISOLATED' in error.notes
+        assert 'no hard stop' in error.help_text
 
     def test_a_grace_on_a_shared_thread_task(self) -> None:
         def declare(app: Horsies) -> None:
@@ -337,11 +363,11 @@ VIOLATION_CODES: list[tuple[ExecutionRuleViolation, ErrorCode]] = [
         SharedWithoutTimeout(execution=Execution.SHARED_ASYNC),
         ErrorCode.TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT,
     ),
+    (CancelGraceOnSharedThread(), ErrorCode.TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC),
     (
-        CancelGraceWithoutSharedAsync(execution=Execution.ISOLATED),
-        ErrorCode.TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC,
+        CancelGraceOutOfRange(execution=Execution.SHARED_ASYNC),
+        ErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE,
     ),
-    (CancelGraceOutOfRange(), ErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE),
 ]
 
 
@@ -392,7 +418,7 @@ class TestRuleCatalog:
                     timeout_ms=1_000,
                     cancel_grace_ms=MAX_CANCEL_GRACE_MS + 1,
                 ),
-                Err(CancelGraceOutOfRange()),
+                Err(CancelGraceOutOfRange(execution=Execution.SHARED_ASYNC)),
             ),
             (
                 TaskBodyKind.DEF,
@@ -427,6 +453,7 @@ class TestSerializedOptions:
         ('options', 'execution', 'grace'),
         [
             (TaskOptions(task_name='t'), 'ISOLATED', None),
+            (TaskOptions(task_name='t', cancel_grace_ms=500), 'ISOLATED', 500),
             (
                 TaskOptions(
                     task_name='t',
@@ -456,7 +483,7 @@ class TestSerializedOptions:
                 None,
             ),
         ],
-        ids=['isolated', 'async_default', 'async_declared', 'thread'],
+        ids=['isolated', 'isolated_grace', 'async_default', 'async_declared', 'thread'],
     )
     def test_the_class_and_the_resolved_grace_are_written(
         self,
@@ -501,6 +528,8 @@ class TestStoredExecution:
         ('options', 'expected'),
         [
             ({'execution': 'ISOLATED', 'cancel_grace_ms': None}, Execution.ISOLATED),
+            ({'execution': 'ISOLATED', 'cancel_grace_ms': 1_000}, Execution.ISOLATED),
+            ({'cancel_grace_ms': MIN_CANCEL_GRACE_MS}, Execution.ISOLATED),
             ({'execution': 'SHARED_THREAD'}, Execution.SHARED_THREAD),
             (
                 {'execution': 'SHARED_ASYNC', 'cancel_grace_ms': MIN_CANCEL_GRACE_MS},
@@ -511,7 +540,14 @@ class TestStoredExecution:
                 Execution.SHARED_ASYNC,
             ),
         ],
-        ids=['isolated', 'thread_without_grace_key', 'async_min', 'async_max'],
+        ids=[
+            'isolated',
+            'isolated_grace',
+            'no_class_key_grace',
+            'thread_without_grace_key',
+            'async_min',
+            'async_max',
+        ],
     )
     def test_a_valid_class_is_stored(
         self,
@@ -553,17 +589,27 @@ class TestStoredExecution:
     def test_a_shared_async_row_without_the_grace_key_is_refused(self) -> None:
         assert 'absent' in _refused_detail({'execution': 'SHARED_ASYNC'})
 
-    @pytest.mark.parametrize(
-        'options',
-        [
-            {'execution': 'ISOLATED', 'cancel_grace_ms': 1_000},
+    def test_a_grace_on_a_shared_thread_row_is_refused(self) -> None:
+        assert 'only SHARED_ASYNC and ISOLATED have one' in _refused_detail(
             {'execution': 'SHARED_THREAD', 'cancel_grace_ms': 1_000},
-            {'cancel_grace_ms': 1_000},
+        )
+
+    @pytest.mark.parametrize(
+        ('grace', 'detail'),
+        [
+            (True, 'a bool'),
+            (MIN_CANCEL_GRACE_MS - 1, f'below {MIN_CANCEL_GRACE_MS}'),
+            (MAX_CANCEL_GRACE_MS + 1, f'above {MAX_CANCEL_GRACE_MS}'),
+            (250.0, 'a JSON float'),
         ],
-        ids=['isolated', 'thread', 'no_class_key'],
+        ids=['bool', 'below', 'above', 'float'],
     )
-    def test_a_grace_on_another_class_is_refused(self, options: Json) -> None:
-        assert 'only SHARED_ASYNC has one' in _refused_detail(options)
+    def test_an_isolated_grace_that_does_not_fit_is_refused(
+        self,
+        grace: Json,
+        detail: str,
+    ) -> None:
+        assert detail in _refused_detail({'execution': 'ISOLATED', 'cancel_grace_ms': grace})
 
 
 class TestPerSendOptions:

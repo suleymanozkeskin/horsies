@@ -290,7 +290,8 @@ times of a segment. Every union is told apart by `kind`.
   `RecordedByWorkerInfo(placement)` (`PlacementPlacedInfo(placed_at)`: the
   claim time plus the measured slot wait, or `PlacementNotObservedInfo()`) or
   `RecordedByRecoveryInfo(last_seen_at)` (stale RUNNING recovery wrote the
-  row).
+  row) or `RecordedByCancelInfo()` (the cancel of a RUNNING task wrote the
+  row, with the outcome `CANCELLED`; its `finished_at` is the cancel time).
 - `WorkflowNodeInfo.timing` is tagged by its coverage label:
   `NodeTimingExactInfo(segments, endpoint)` (every boundary is a recorded
   time), `NodeTimingPartialInfo(reasons, segments, endpoint)` (at least one
@@ -356,9 +357,19 @@ cancel_task(broker, task_id: uuid.UUID, *, include_running=False) -> Result[Task
 - Single-transaction compare-and-set. A committed CANCELLED cannot be
   overwritten by claim, finalize, auto-retry, or reaper paths.
 - Cancel eligibility: PENDING, CLAIMED; RUNNING only with
-  `include_running=True` — the row flips durably but **the process keeps
-  executing**: side effects still happen and no attempt row is recorded for
-  that run. There is no cross-process kill.
+  `include_running=True`. For a RUNNING task, one statement writes the
+  attempt row with outcome `CANCELLED` (`recorded_by` `CANCEL`), moves the
+  task to history, and sends a notice to the worker that holds the run. The
+  worker gives the cancel to the task code: `asyncio.CancelledError` at the
+  next `await` of an `async def` body, the cancel state of `TaskRuntime`
+  (`runtime.cancel_state()`) for a `def` body. The code stops when it reads
+  the cancel; side effects made before then stay, and what it returns after
+  the cancel is dropped. No kill by default: an `ISOLATED` task with
+  `cancel_grace_ms` is killed when it has not stopped `cancel_grace_ms` after
+  the cancel; a `SHARED_ASYNC` task gets the second cancel after
+  `cancel_grace_ms`; a `SHARED_THREAD` thread runs until it returns. A lost
+  notice is found by one read after a listener reconnect or a runner
+  heartbeat that does not land.
 - Workflow-bound rows are REFUSED (`TASK_IS_WORKFLOW_TASK`) — workflow rows
   are managed only by the workflow primitives (`handle.pause/resume/cancel`).
 - There is no manual retry action: a terminal record is immutable, and

@@ -32,6 +32,10 @@ pub use horsies_core::{UserCode, UserCodeRefused};
 /// gave none.
 pub use horsies_core::{FencingToken, FencingTokenRefused};
 
+/// The cancel state of a run (`TaskRuntime::cancel_state`), and why a cancel
+/// was requested.
+pub use horsies_core::{CancelCause, RunCancelState};
+
 // The library's code catalogs, with Python's names and wire values.
 pub use horsies_core::core::task::error::ExceptionRecord;
 pub use horsies_core::{

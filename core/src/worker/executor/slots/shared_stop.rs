@@ -25,6 +25,11 @@
 //! A run whose body returned before its deadline, and whose left work the
 //! child reported, ends with what it returned at every end of its child
 //! whose exit was seen; the slot decides that before it asks for a verdict.
+//! A run that the worker sent an operator cancel to ends as cancelled at
+//! every end of its child, with no verdict: the cancel statement recorded
+//! its attempt. A cancelled run counts as having no time left only once its
+//! child reported it stuck after its second cancel, so it never makes the
+//! worker kill a child in which a neighbour run still has time.
 
 use uuid::Uuid;
 

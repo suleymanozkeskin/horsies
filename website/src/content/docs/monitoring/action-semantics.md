@@ -8,8 +8,8 @@ tags: [monitoring, actions, cancel, rerun, pause, resume, workflow]
 
 Four actions are available from the web UI: task cancel, and workflow pause,
 resume and cancel. Each acts on database rows. Task rerun is a client call,
-not a web UI action. Two of them leave a process running afterwards, and this page
-states which and why.
+not a web UI action. Two of them can leave task code running afterwards, and this
+page states when and why.
 
 Every action is a compare-and-swap against the row's current status. Two
 operators acting at once do not corrupt anything: one CAS matches and the other
@@ -27,7 +27,7 @@ timestamp. Waiting result handles unblock and receive `TASK_CANCELLED`.
 |---|---|
 | `PENDING` | Cancelled. The task never runs |
 | `CLAIMED` | Cancelled. The child's pre-start ownership check fails, it aborts with `CLAIM_LOST`, and writes nothing |
-| `RUNNING` | Cancelled **only when the caller opts in**. See below |
+| `RUNNING` | Cancelled **only when the caller opts in**. The attempt is recorded as `CANCELLED`, and the worker gives the cancel to the task code. See below |
 | `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED` | Refused, 409 `TASK_NOT_CANCELLABLE` with the current status |
 | Row is a workflow node | Refused, 400 `TASK_IS_WORKFLOW_TASK` |
 | Stored row does not parse, for example a history status that is not a task status | Refused, 500 with a `detail` message. Nothing changes |
@@ -38,20 +38,60 @@ against a cancelled row and cannot overwrite it.
 
 ### Cancelling a RUNNING task
 
-**horsies does not kill running processes.** Cancelling a `RUNNING` task flips
-the row durably, and:
+With `include_running`, one statement does these steps in one transaction:
 
-- The task's code **keeps executing** on its worker until the function returns.
-- Its **side effects still happen** — writes, HTTP calls, file operations.
-- Its result is discarded. The row stays `CANCELLED`; finalize finds no
-  `RUNNING` row to update.
-- **No attempt row is recorded** for that run. Attempt history will show a gap
-  where this execution would have been.
-- A pool slot stays occupied until the function returns.
+- It writes one attempt row for the run: outcome `CANCELLED`, `will_retry`
+  false, the start time of the run, `finished_at` at the time of the cancel,
+  error code `TASK_CANCELLED`, and `recorded_by` `CANCEL` in its phase record.
+- It moves the task to history as `CANCELLED`, with that attempt in its
+  attempt archive. Waiting result handles receive `TASK_CANCELLED` at once.
+- It sends a notice on the channel `horsies_task_cancel` to the worker that
+  holds the run. PostgreSQL sends the notice only when the cancel commits.
 
-There is no safe cross-process kill, so the API offers none. The
-`include_running` flag exists so this is opted into rather than stumbled into;
-the UI gates it behind a checkbox stating the same facts.
+The worker then gives the cancel to the task code. The task code decides when
+to stop:
+
+| Execution and body | The task code gets | When the code does not stop |
+|---|---|---|
+| `ISOLATED`, async (Python `async def`, Rust `#[task]`) | Python: `asyncio.CancelledError` at its next `await`. Rust: `TaskRuntime::cancelled()` completes. Both: the cancel state of `TaskRuntime` | The code runs until it returns, or until its `timeout_ms` kill. With `cancel_grace_ms` on the task, the worker kills the child `cancel_grace_ms` after the cancel |
+| `ISOLATED`, sync (Python `def`, Rust `#[blocking_task]`) | The cancel state of `TaskRuntime`: the code reads it | As for an async body |
+| `SHARED_ASYNC` | As for an `ISOLATED` async body | After `cancel_grace_ms`, a second cancel and the cancel rounds, as at the deadline. A run that does not stop then keeps its seat; the worker kills the child only when no task in it has time left |
+| `SHARED_THREAD` | The cancel state of `TaskRuntime` | The thread runs until it returns: a thread cannot be stopped |
+
+- A cancel that comes after the start of the run and before the task code
+  starts: the code does not run.
+- What the code returns after the cancel is dropped. The task stays
+  `CANCELLED`, and no result is stored. A result that reached the worker
+  before the child got the cancel is dropped too: the row is in history.
+- The side effects that the code made before it stopped stay.
+- The seat or the child slot stays in use until the code stops.
+- An `ISOLATED` task with no `cancel_grace_ms` is never killed for a cancel:
+  the cancel is cooperative only. Its `timeout_ms` still kills it. A task
+  with no `timeout_ms` and no `cancel_grace_ms` that does not read the cancel
+  runs until it returns.
+- When no worker holds the run (the worker stopped or crashed), nothing
+  gets the notice. The attempt row is recorded in all cases.
+
+How the worker gets the cancel:
+
+- The notice comes on the listener connection of the worker, when the cancel
+  commits.
+- A notice can be lost: at a reconnect of the listener, or when the notice
+  queue of the worker is full. The worker then reads the cancels of the runs
+  that it holds, with one statement. It also does this read when a runner
+  heartbeat of a run that it holds does not land. So a lost notice reaches
+  the task code at most one `runner_heartbeat_interval_ms` (default 30 s)
+  later, while the heartbeat connection of the worker works.
+
+`finished_at` of the `CANCELLED` attempt is the time of the cancel: from then
+on, no write of the run lands. The time when the code stopped, and how it
+stopped, are in the `AttemptEnded` event, in the attempt span and in
+`horsies.task.run.duration`. See
+[Lifecycle Events](/horsies/observability/events/#the-end-of-an-attempt).
+
+The task API is on the client pages:
+[Cancellation](/horsies/tasks/defining-tasks/#cancellation) (Python) and
+[Task Runtime](/horsies/rust/tasks/defining-tasks/#task-runtime) (Rust).
 
 ```bash
 curl -X POST "$BASE/api/tasks/$TASK_ID/cancel" \
@@ -61,11 +101,13 @@ curl -X POST "$BASE/api/tasks/$TASK_ID/cancel" \
 ```
 
 Without `include_running`, a `RUNNING` task is refused with 409 like any other
-ineligible state.
+ineligible state. The flag keeps a cancel of running code deliberate; the UI
+gates it behind a checkbox.
 
-**Settled when:** the task reads `CANCELLED`. That is immediate. A worker
-process that was executing may keep running for arbitrarily long afterwards, and
-that is not a failure of the cancel.
+**Settled when:** the task reads `CANCELLED` with its `CANCELLED` attempt. That
+is immediate. The task code stops when it reads the cancel, or at the kill of an
+`ISOLATED` task with `cancel_grace_ms`. Code that does not read the cancel can
+run on up to its `timeout_ms`, and that is not a failure of the cancel.
 
 ## Task rerun
 

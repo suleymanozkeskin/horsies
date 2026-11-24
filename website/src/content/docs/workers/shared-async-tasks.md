@@ -84,6 +84,17 @@ The worker keeps one timer per task, at `timeout_ms + cancel_grace_ms + 10 secon
 
 A child that reported the second cancel of a task, or the cancel of the work that a task left after its return, reports the task stuck within 0.3 seconds, or its end, unless it froze. The worker checks such a task again 10.3 seconds after the timer above, so at `timeout_ms + cancel_grace_ms + 20.3 seconds` after its placement: a child that has reported neither the task stuck nor its end by then froze after its report, and the worker kills it with the same outcomes. A task that returned before its deadline ends with what it returned.
 
+## An Operator Cancel
+
+An operator can cancel a running task (`cancel_task` with `include_running`, or the web UI). The cancel moves the task to history as `CANCELLED` and records its attempt as `CANCELLED` in one statement. Then the worker sends the cancel to the shared async child of the run. Here C is the time when the child gets the cancel, and G is `cancel_grace_ms`.
+
+1. **At C**, the child cancels the task: the task gets `asyncio.CancelledError` at its next `await` (Rust: `TaskRuntime::cancelled()` completes). The cancel state of its `TaskRuntime` is `OPERATOR`. A task whose code has not started yet does not start.
+2. **The run ends** when its coroutine has ended and no work that the task started is alive, as at the deadline. What the task returns after the cancel is dropped: the task stays `CANCELLED`.
+3. **At C + G**, when anything of the run is still alive, the child sends the second cancel and the cancel rounds of the deadline, and takes no new task.
+4. **0.3 seconds after the second cancel**, a run that is still alive is stuck. It keeps its seat, and the other tasks of the child run to their own end. The worker kills the child when no task in it has time left. The deadline of the cancelled task still counts for this rule, so the kill never comes before the deadline of a task beside it.
+
+A deadline that fires after the cancel adds nothing: the run ends as cancelled. A cancel that comes after the deadline fired is not given to the task again: the child ends the run as timed out (the `AttemptEnded` event says so), and the worker writes nothing, because the cancel already moved the row with its `CANCELLED` attempt.
+
 ## A Return That Leaves Work
 
 A task can return before its deadline while work that it started is still alive: an asyncio task that it created and did not await, or a call that it sent to the default executor. A return is a value, or an exception that the exception mapper of the task turns into a result. Here R is that return and G is `cancel_grace_ms`.
@@ -124,7 +135,7 @@ The block limit is 7.4 times the longest common burst of CPU work measured on on
 
 ## Rules for Task Authors
 
-**Let `CancelledError` propagate.** Catch it only to clean up, then raise it again. A task that catches its cancel to go on working needs the second cancel, and closes its child. A task that ignores every cancel is stuck: its child is killed when every task left in it is stuck. `anyio` shielded scopes (`CancelScope(shield=True)`) protect only against cancels of other `anyio` scopes, not against `Task.cancel()`: the cancel of the worker can cut such a section.
+**Let `CancelledError` propagate.** The deadline and an operator cancel both send it. Catch it only to clean up, then raise it again. A task that catches its cancel to go on working needs the second cancel, and closes its child. A task that ignores every cancel is stuck: its child is killed when every task left in it is stuck. `anyio` shielded scopes (`CancelScope(shield=True)`) protect only against cancels of other `anyio` scopes, not against `Task.cancel()`: the cancel of the worker can cut such a section.
 
 **Give each client call its own timeout, below the task timeout.** A database or HTTP call that waits on a server that stopped answering then ends by itself, and the task can return its own error. For a sync call in `asyncio.to_thread()`, a timeout is the only way the call ends: a cancel does not stop a thread. Set the client timeout so that the call returns before `timeout_ms + cancel_grace_ms`, or the task is stuck.
 

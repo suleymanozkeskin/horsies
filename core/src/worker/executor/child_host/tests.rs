@@ -1,5 +1,5 @@
 //! Tests of the child host: the arguments, the exit codes, the result
-//! envelope, the deadline gate of thread seats, the poll watch, and the
+//! envelope, the run gate of thread seats, the poll watch, and the
 //! blocking frame read.
 
 use std::ffi::OsString;
@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::link::{read_frame, ReadEnd};
 use super::run::{refusal_end, result_end};
-use super::seats::{DeadlineGate, GateEnd, PollWatch};
+use super::seats::{BodyStart, DeadlineFire, GateCancel, GateEnd, PollWatch, RunGate};
 use super::*;
 use crate::core::task::error::{OperationalErrorCode, TaskError};
 use crate::core::task::result::TaskResult;
@@ -142,16 +142,60 @@ fn a_refusal_fails_the_task_with_its_reason() {
     );
 }
 
+/// The body of a thread run returns first: a later deadline and a later
+/// operator cancel change nothing.
 #[test]
-fn the_deadline_gate_lets_exactly_one_side_win() {
-    let returned_first = DeadlineGate::new();
-    assert_eq!(returned_first.finish(), GateEnd::Returned);
-    assert!(!returned_first.fire());
+fn a_thread_run_whose_body_returned_first_ignores_the_deadline_and_a_cancel() {
+    let gate = RunGate::new();
+    assert_eq!(gate.begin_body(), BodyStart::Start);
+    assert_eq!(gate.finish(), GateEnd::Returned);
+    assert_eq!(gate.fire_deadline(), DeadlineFire::Lost);
+    assert_eq!(gate.cancel(), GateCancel::RunEnded);
+}
 
-    let fired_first = DeadlineGate::new();
-    assert!(fired_first.fire());
-    assert_eq!(fired_first.finish(), GateEnd::Fired);
-    assert!(!fired_first.fire());
+/// The deadline of a thread run fires first: the return reads it, and a
+/// later operator cancel is ignored.
+#[test]
+fn a_thread_run_whose_deadline_fired_first_ignores_a_cancel() {
+    let gate = RunGate::new();
+    assert_eq!(gate.begin_body(), BodyStart::Start);
+    assert_eq!(gate.fire_deadline(), DeadlineFire::Won);
+    assert_eq!(gate.cancel(), GateCancel::RunEnded);
+    assert_eq!(gate.fire_deadline(), DeadlineFire::Lost);
+    assert_eq!(gate.finish(), GateEnd::DeadlineFired);
+}
+
+/// An operator cancel of a thread run whose body runs wins over a later
+/// deadline, and the return reads it.
+#[test]
+fn an_operator_cancel_while_the_thread_body_runs_wins_over_the_deadline() {
+    let gate = RunGate::new();
+    assert_eq!(gate.begin_body(), BodyStart::Start);
+    assert_eq!(gate.cancel(), GateCancel::BodyRunning);
+    assert_eq!(gate.cancel(), GateCancel::RunEnded);
+    assert_eq!(gate.fire_deadline(), DeadlineFire::Lost);
+    assert_eq!(gate.finish(), GateEnd::CancelFired);
+}
+
+/// An operator cancel before the body starts keeps the body from starting,
+/// also for a run that ends with no body.
+#[test]
+fn an_operator_cancel_before_the_thread_body_keeps_it_from_starting() {
+    let gate = RunGate::new();
+    assert_eq!(gate.cancel(), GateCancel::BeforeBody);
+    assert_eq!(gate.begin_body(), BodyStart::CancelledBeforeBody);
+
+    let no_body = RunGate::new();
+    assert_eq!(no_body.cancel(), GateCancel::BeforeBody);
+    assert_eq!(no_body.end_without_body(), BodyStart::CancelledBeforeBody);
+}
+
+/// A thread run that ends with no body closes its gate to a later cancel.
+#[test]
+fn a_thread_run_with_no_body_ignores_a_later_cancel() {
+    let gate = RunGate::new();
+    assert_eq!(gate.end_without_body(), BodyStart::Start);
+    assert_eq!(gate.cancel(), GateCancel::RunEnded);
 }
 
 #[test]

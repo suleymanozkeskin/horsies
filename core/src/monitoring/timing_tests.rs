@@ -138,7 +138,7 @@ fn record(
     AttemptRecord::new(
         attempt,
         outcome,
-        outcome != "COMPLETED",
+        !matches!(outcome, "COMPLETED" | "CANCELLED"),
         at(started),
         at(finished),
         None,
@@ -630,6 +630,100 @@ fn a_recovered_attempt_ends_with_an_unknown_tail_after_its_last_sign_of_life() {
     assert!(
         matches!(&timing, NodeTimingInfo::Partial { reasons, .. } if *reasons == [UnknownReason::WorkerLost]),
         "{timing:?}"
+    );
+}
+
+/// The phase record that the cancel statement writes: one counted claim, no
+/// placement, the finalizing marker at `finalizing` (seconds) when marked.
+fn by_cancel(finalizing: Finalizing) -> PhaseRecord {
+    PhaseRecord::Captured(AttemptPhases::new(
+        at(0),
+        at(2),
+        counted(1, 2),
+        finalizing,
+        RecordedBy::Cancel,
+    ))
+}
+
+/// An attempt that the cancel statement recorded: running from its start to
+/// its record (the cancel), as an attempt of the worker, with no placement
+/// and no unknown tail; the move writes no phase-2 record, so no advancing.
+#[test]
+fn a_cancelled_attempt_runs_to_the_cancel_with_no_placement() {
+    let timing = compose_one(
+        &run(
+            vec![moved(
+                1,
+                9,
+                TASK_A,
+                TerminalizationKind::CancelAdmin,
+                history(
+                    times(0, 0, Some(2), Some(4)),
+                    vec![record(
+                        1,
+                        "CANCELLED",
+                        4,
+                        9,
+                        by_cancel(Finalizing::NotMarked),
+                    )],
+                    OpenAttempt::Ended,
+                ),
+            )],
+            vec![],
+        ),
+        node(NodeStatus::Skipped, NodeEntry::Ready, task(TASK_A), Some(9)),
+    );
+
+    assert_eq!(
+        phases(&timing),
+        vec![
+            (SegmentPhaseInfo::Enqueued, 0, Some(2)),
+            (claimed(AttemptPlacementInfo::NotObserved), 2, Some(4)),
+            (SegmentPhaseInfo::Running, 4, Some(9)),
+        ]
+    );
+    assert!(
+        matches!(&timing, NodeTimingInfo::Exact { .. }),
+        "{timing:?}"
+    );
+}
+
+/// A cancel after the body ended (the finalizing marker was written): running
+/// to the marker, finalizing to the cancel.
+#[test]
+fn a_cancelled_attempt_with_its_marker_finalizes_to_the_cancel() {
+    let timing = compose_one(
+        &run(
+            vec![moved(
+                1,
+                9,
+                TASK_A,
+                TerminalizationKind::CancelAdmin,
+                history(
+                    times(0, 0, Some(2), Some(4)),
+                    vec![record(
+                        1,
+                        "CANCELLED",
+                        4,
+                        9,
+                        by_cancel(Finalizing::Marked { at: at(7) }),
+                    )],
+                    OpenAttempt::Ended,
+                ),
+            )],
+            vec![],
+        ),
+        node(NodeStatus::Skipped, NodeEntry::Ready, task(TASK_A), Some(9)),
+    );
+
+    assert_eq!(
+        phases(&timing),
+        vec![
+            (SegmentPhaseInfo::Enqueued, 0, Some(2)),
+            (claimed(AttemptPlacementInfo::NotObserved), 2, Some(4)),
+            (SegmentPhaseInfo::Running, 4, Some(7)),
+            (SegmentPhaseInfo::Finalizing, 7, Some(9)),
+        ]
     );
 }
 
@@ -1612,6 +1706,21 @@ fn the_phase_record_of_an_attempt_row_maps_each_state() {
             },
         }
     );
+    assert_eq!(
+        attempt_phases_info(by_cancel(Finalizing::Marked { at: at(7) })),
+        AttemptPhasesInfo::Captured {
+            enqueued_at: at(0),
+            claimed_at: at(2),
+            claims: AttemptClaimsInfo::Counted {
+                count: 1,
+                first_claimed_at: at(2),
+            },
+            finalizing: AttemptFinalizingInfo::Marked {
+                finalizing_at: at(7),
+            },
+            recorded_by: AttemptRecordedByInfo::Cancel,
+        }
+    );
 }
 
 #[test]
@@ -1685,6 +1794,7 @@ fn example_attempt_phases() -> Vec<AttemptPhasesInfo> {
             Finalizing::NotMarked,
             Placement::NotObserved,
         )),
+        attempt_phases_info(by_cancel(Finalizing::Marked { at: at(7) })),
     ]
 }
 

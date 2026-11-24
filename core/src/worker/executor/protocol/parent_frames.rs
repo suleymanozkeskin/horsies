@@ -1,5 +1,5 @@
 //! Frames from the worker parent to a child: `init`, `run`, `shared_run`,
-//! `events` and `stop`.
+//! `cancel_run`, `events` and `stop`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -12,6 +12,7 @@ use super::bounds::{
     AsyncSeats, CancelGraceMs, ExecutorThreads, PoolMaxSize, PoolMinSize, TaskSendPool,
     TaskTimeoutMs, ThreadSeats,
 };
+use super::child_frames::RunRef;
 use super::event_batch::{decode_event_batch, EventBatch};
 use super::header::{pack, EncodedFrame, FrameEncodeError, NO_BODY};
 use super::metadata::{
@@ -262,7 +263,8 @@ pub enum StoredOptionsRefusal {
     /// The stored `timeout_ms` is not a whole number inside its bounds, or a
     /// shared class has none.
     TimeoutValueInvalid(RefusalReason),
-    /// The stored `cancel_grace_ms` of a `SHARED_ASYNC` row is missing or
+    /// The stored `cancel_grace_ms` of a `SHARED_ASYNC` row is missing, or
+    /// the stored `cancel_grace_ms` of a `SHARED_ASYNC` or `ISOLATED` row is
     /// outside its bounds.
     CancelGraceInvalid(RefusalReason),
 }
@@ -348,12 +350,27 @@ pub struct EventsFrame {
     pub events: EventBatch,
 }
 
+/// The run that a `cancel_run` frame names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelTarget {
+    /// The run of an isolated child, by its task.
+    Isolated { task_id: Uuid },
+    /// A run on a seat of a shared child.
+    Shared(RunRef),
+}
+
 /// A frame from the worker parent to a child.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParentFrame {
     Init(InitFrame),
     Run(RunFrame),
     SharedRun(SharedRunFrame),
+    /// An operator cancelled the task of a run: the cancel statement moved
+    /// its row to history and recorded the attempt as `CANCELLED`. The child
+    /// gives the cancel to the task code and reports the end of the run as
+    /// cancelled. A cancel of a run that the child does not run (it ended
+    /// while the frame was on its way) is ignored. No body.
+    CancelRun(CancelTarget),
     Events(EventsFrame),
     /// Exit normally. Sent only to a child with no task.
     Stop,
@@ -417,8 +434,18 @@ enum ParentWire<'a> {
         work: SharedWorkWire<'a>,
         trace: TraceWire<'a>,
     },
+    CancelRun {
+        target: CancelTargetWire,
+    },
     Events,
     Stop,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum CancelTargetWire {
+    Isolated { task_id: Uuid },
+    Shared { dispatch: u64, task_id: Uuid },
 }
 
 #[derive(Serialize)]
@@ -651,6 +678,16 @@ fn isolated_work_wire(work: &IsolatedWork) -> IsolatedWorkWire<'_> {
     }
 }
 
+fn cancel_target_wire(target: CancelTarget) -> CancelTargetWire {
+    match target {
+        CancelTarget::Isolated { task_id } => CancelTargetWire::Isolated { task_id },
+        CancelTarget::Shared(run) => CancelTargetWire::Shared {
+            dispatch: run.dispatch.get(),
+            task_id: run.task_id,
+        },
+    }
+}
+
 fn shared_work_wire(work: &SharedWork) -> SharedWorkWire<'_> {
     match work {
         SharedWork::AsyncTask {
@@ -716,6 +753,12 @@ pub fn encode_parent_frame(frame: &ParentFrame) -> Result<EncodedFrame<'_>, Fram
             },
             run.input.as_str().as_bytes(),
         ),
+        ParentFrame::CancelRun(target) => pack(
+            &ParentWire::CancelRun {
+                target: cancel_target_wire(*target),
+            },
+            NO_BODY,
+        ),
         ParentFrame::Events(events) => pack(&ParentWire::Events, events.events.body().as_bytes()),
         ParentFrame::Stop => pack(&ParentWire::Stop, NO_BODY),
     }
@@ -741,6 +784,13 @@ pub fn decode_parent_frame(meta: &[u8], body: Vec<u8>) -> Result<ParentFrame, Pa
         }
         "run" => Ok(ParentFrame::Run(decode_run(&fields, body)?)),
         "shared_run" => Ok(ParentFrame::SharedRun(decode_shared_run(&fields, body)?)),
+        "cancel_run" => {
+            fields.only(&["kind", "target"])?;
+            no_body("cancel_run", &body)?;
+            Ok(ParentFrame::CancelRun(decode_cancel_target(
+                &fields.object("target")?,
+            )?))
+        }
         "events" => {
             fields.only(&["kind"])?;
             Ok(ParentFrame::Events(EventsFrame {
@@ -753,6 +803,27 @@ pub fn decode_parent_frame(meta: &[u8], body: Vec<u8>) -> Result<ParentFrame, Pa
             Ok(ParentFrame::Stop)
         }
         other => Err(fields.unknown_kind(other).into()),
+    }
+}
+
+/// The run of a `cancel_run` frame: `isolated` with its task, or `shared`
+/// with its dispatch and task.
+fn decode_cancel_target(target: &Fields<'_>) -> Result<CancelTarget, MalformedFrame> {
+    match target.kind()? {
+        "isolated" => {
+            target.only(&["kind", "task_id"])?;
+            Ok(CancelTarget::Isolated {
+                task_id: target.task_id("task_id")?,
+            })
+        }
+        "shared" => {
+            target.only(&["kind", "dispatch", "task_id"])?;
+            Ok(CancelTarget::Shared(RunRef {
+                dispatch: target.dispatch("dispatch")?,
+                task_id: target.task_id("task_id")?,
+            }))
+        }
+        other => Err(target.unknown_kind(other)),
     }
 }
 

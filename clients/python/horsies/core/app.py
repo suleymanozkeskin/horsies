@@ -826,10 +826,10 @@ class Horsies:
         error_codes: type[Enum] | tuple[str, ...] = (),
     ) -> 'SharedThreadTaskDecorator': ...
 
-    # cancel_grace_ms with a literal class other than SHARED_ASYNC: the
-    # returned decorator takes no function, so the decoration is refused.
-    # The last overload also accepts these arguments, for a class known at
-    # run time; a type checker picks this overload first for the literal.
+    # cancel_grace_ms with a literal SHARED_THREAD: the returned decorator
+    # takes no function, so the decoration is refused. The last overload also
+    # accepts these arguments, for a class known at run time; a type checker
+    # picks this overload first for the literal.
     @overload
     def task(  # pyright: ignore[reportOverlappingOverload]
         self,
@@ -845,6 +845,9 @@ class Horsies:
         error_codes: type[Enum] | tuple[str, ...] = (),
     ) -> 'CancelGraceRefusedDecorator': ...
 
+    # ISOLATED, the default class. cancel_grace_ms is the hard stop after an
+    # operator cancel: the worker kills the child that long after the cancel
+    # when the run has not ended. Without it, nothing is killed.
     @overload
     def task(
         self,
@@ -856,27 +859,14 @@ class Horsies:
         default_unhandled_error_code: Optional[str] = None,
         error_codes: type[Enum] | tuple[str, ...] = (),
         timeout_ms: Optional[int] = None,
+        cancel_grace_ms: Optional[int] = None,
         execution: Literal[Execution.ISOLATED] = Execution.ISOLATED,
     ) -> 'TaskDecorator': ...
 
-    @overload
-    def task(  # pyright: ignore[reportOverlappingOverload]
-        self,
-        task_name: str,
-        *,
-        cancel_grace_ms: int,
-        queue_name: Optional[str] = None,
-        retry_policy: Optional['RetryPolicy'] = None,
-        exception_mapper: Optional['ExceptionMapper'] = None,
-        default_unhandled_error_code: Optional[str] = None,
-        error_codes: type[Enum] | tuple[str, ...] = (),
-        timeout_ms: Optional[int] = None,
-        execution: Literal[Execution.ISOLATED] = Execution.ISOLATED,
-    ) -> 'CancelGraceRefusedDecorator': ...
-
     # A class known only at run time: timeout_ms is required, because a
     # shared class needs it. cancel_grace_ms is accepted, because the class
-    # may be SHARED_ASYNC. The decorator checks the rules at run time.
+    # may be SHARED_ASYNC or ISOLATED. The decorator checks the rules at run
+    # time.
     @overload
     def task(
         self,
@@ -923,7 +913,11 @@ class Horsies:
         `execution` (an `Execution`, default `ISOLATED`) declares how a
         worker runs the task. `SHARED_ASYNC` needs an `async def` function
         and `timeout_ms`; `SHARED_THREAD` needs a `def` function and
-        `timeout_ms`; only `SHARED_ASYNC` takes `cancel_grace_ms`.
+        `timeout_ms`. `cancel_grace_ms` is for `SHARED_ASYNC` (the time to
+        stop after a cancel, default 1000 ms) and `ISOLATED` (the hard stop
+        after an operator cancel: the worker kills the child when the run has
+        not ended that long after the cancel; with none, nothing is killed).
+        `SHARED_THREAD` takes none: a thread cannot be stopped.
 
         `error_codes` (an `Enum` class, whose member values are the codes, or
         a tuple of code texts; default `()`) declares the task's own error

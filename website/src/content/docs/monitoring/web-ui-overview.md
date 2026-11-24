@@ -46,8 +46,9 @@ Server-paginated, server-sorted, server-filtered task list, plus:
   Each attempt shows its phase times in record order (due, first claim,
   claim, placement on a child, start, finalizing marker, last sign of life,
   recorded), the time from each to the next, its claim count and its writer
-  (the worker or stale recovery). An attempt recorded before schema migration
-  1001 says that its phase times were not captured.
+  (the worker, stale recovery, or the cancel of a running task). An attempt
+  recorded before schema migration 1001 says that its phase times were not
+  captured.
 
 Filters, sort, pagination, and the open task are held in the URL, so a filtered
 view is shareable and survives a reload.
@@ -225,8 +226,9 @@ Actions are off by default. When a deployment enables them, four are available:
 | Workflow run | Pause, Resume, Cancel |
 
 Semantics are exact and, in two places, surprising: cancelling a RUNNING task
-does not stop the process, and cancelling a workflow leaves executing nodes
-draining. [Action Semantics](/horsies/monitoring/action-semantics/) states each one as a
+gives the cancel to its code but does not kill its process (an `ISOLATED` task
+with `cancel_grace_ms` is the exception), and cancelling a workflow leaves
+executing nodes draining. [Action Semantics](/horsies/monitoring/action-semantics/) states each one as a
 condition-to-result table. The UI states the same caveats in its confirmation
 dialogs.
 

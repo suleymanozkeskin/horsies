@@ -135,6 +135,10 @@ pub enum TaskAttemptOutcome {
     Failed,
     /// Worker process crashed without producing a `TaskResult`.
     WorkerFailure,
+    /// An operator cancelled the task while the attempt ran
+    /// (`cancel_task` with `include_running`). The cancel statement
+    /// records the attempt; it never retries.
+    Cancelled,
 }
 
 impl std::fmt::Display for TaskAttemptOutcome {
@@ -143,6 +147,7 @@ impl std::fmt::Display for TaskAttemptOutcome {
             Self::Completed => write!(f, "COMPLETED"),
             Self::Failed => write!(f, "FAILED"),
             Self::WorkerFailure => write!(f, "WORKER_FAILURE"),
+            Self::Cancelled => write!(f, "CANCELLED"),
         }
     }
 }

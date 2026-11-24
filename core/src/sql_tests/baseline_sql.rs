@@ -47,7 +47,7 @@ const EXPECTED_TABLES: [&str; 24] = [
     "horsies_workflows",
 ];
 
-const EXPECTED_FUNCTIONS: [&str; 169] = [
+const EXPECTED_FUNCTIONS: [&str; 170] = [
     // 0001_tables.sql: the UUIDv7 helper and the trigger functions.
     "horsies_uuidv7",
     "horsies_notify_task_changes",
@@ -227,6 +227,9 @@ const EXPECTED_FUNCTIONS: [&str; 169] = [
     // archive replaces horsies_encode_task_attempts of 0003.
     "horsies_encode_attempt_archive",
     "horsies_require_attempt_placement",
+    // core/migrations/1003_attempt_cancelled.sql: the read of the cancelled
+    // runs of a worker.
+    "horsies_cancelled_runs",
 ];
 
 const TABLES_SQL: &str = r"

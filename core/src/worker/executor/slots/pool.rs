@@ -21,7 +21,7 @@ use super::board::{PoolBoard, PoolHealth};
 use super::budgets::SlotService;
 use super::dispatch::{AttemptEnd, AttemptLog, ClaimedTask, ExecutionClass, NotRunCause};
 use super::isolated::run_slot;
-use super::route::IsolatedDeadline;
+use super::route::{IsolatedCancelStop, IsolatedDeadline};
 use crate::broker::claims::ClaimRead;
 use crate::broker::OrphanSelfHeal;
 use crate::core::lifecycle::{AttemptPlacement, SlotWait};
@@ -241,6 +241,7 @@ impl Drop for Answer {
 pub(super) struct QueuedRun {
     pub(super) frame: RunFrame,
     pub(super) deadline: IsolatedDeadline,
+    pub(super) cancel_stop: IsolatedCancelStop,
     pub(super) answer: Answer,
     /// The log fields of the attempt.
     pub(super) log: AttemptLog,
@@ -498,8 +499,8 @@ impl IsolatedPool {
         Self { shared, slots }
     }
 
-    /// Queue one task for the next idle slot. The input is dropped once the
-    /// frame is sent.
+    /// Queue one task for the next idle slot, with no kill for an operator
+    /// cancel. The input is dropped once the frame is sent.
     #[cfg(test)]
     pub fn submit(
         &self,
@@ -508,18 +509,40 @@ impl IsolatedPool {
         work: IsolatedWork,
         deadline: IsolatedDeadline,
     ) -> Submitted {
-        let (watch, _receipt) = watched_placement();
-        self.submit_watched(task, input, work, deadline, watch)
+        self.submit_with_cancel_stop(
+            task,
+            input,
+            work,
+            deadline,
+            IsolatedCancelStop::CooperativeOnly,
+        )
     }
 
-    /// As `IsolatedPool::submit`; `watch` is told when a child takes the
-    /// task, with the kind `ISOLATED`.
+    /// As `IsolatedPool::submit`, with the stop of an operator cancel.
+    #[cfg(test)]
+    pub fn submit_with_cancel_stop(
+        &self,
+        task: &ClaimedTask,
+        input: TaskInputText,
+        work: IsolatedWork,
+        deadline: IsolatedDeadline,
+        cancel_stop: IsolatedCancelStop,
+    ) -> Submitted {
+        let (watch, _receipt) = watched_placement();
+        self.submit_watched(task, input, work, deadline, cancel_stop, watch)
+    }
+
+    /// Queue one task for the next idle slot, with its deadline and the
+    /// stop of an operator cancel; `watch` is told when a child takes the
+    /// task, with the kind `ISOLATED`. The input is dropped once the frame
+    /// is sent.
     pub fn submit_watched(
         &self,
         task: &ClaimedTask,
         input: TaskInputText,
         work: IsolatedWork,
         deadline: IsolatedDeadline,
+        cancel_stop: IsolatedCancelStop,
         watch: PlacementWatch,
     ) -> Submitted {
         let (sender, receiver) = oneshot::channel();
@@ -547,6 +570,7 @@ impl IsolatedPool {
                     input,
                 },
                 deadline,
+                cancel_stop,
                 answer: Answer::watched(sender, watch, ExecutionClass::Isolated),
                 log: task.log(),
             });

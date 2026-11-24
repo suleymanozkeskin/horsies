@@ -275,7 +275,9 @@ async fn v35_catalog_has_only_move_program_terminal_writers_and_a_live_only_chec
     // lifecycle writes of 0004_lifecycle_functions.sql and the interim
     // terminal writes of 0003_interim_functions.sql (migration 1001 replaces
     // four of the lifecycle writes with the arguments of the attempt
-    // placement). Any other function with
+    // placement; migration 1003 replaces horsies_cancel_task in place, with
+    // the same arguments, so that it records a cancelled RUNNING attempt; its
+    // read horsies_cancelled_runs writes nothing). Any other function with
     // one of those properties, or any function that updates live storage to a
     // terminal status, is an unreviewed terminal writer and changes the
     // catalog-wide inventory.

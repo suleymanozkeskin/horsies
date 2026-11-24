@@ -19,14 +19,22 @@ import pytest
 
 from horsies import _core as core
 from horsies.core.models.tasks import MIN_TASK_TIMEOUT_MS
-from horsies.core.telemetry.attempt_span import BodyEndOrder, BodyFirst, DeadlineFirst
+from horsies.core.telemetry.attempt_span import (
+    BodyEndOrder,
+    BodyFirst,
+    DeadlineFirst,
+    OperatorCancelFirst,
+)
 from horsies.core.worker import thread_child
+from horsies import CancelCause, CancelNotRequested, CancelRequested
 from horsies.core.worker.child_frames import (
     AttemptStart,
+    CancelFiredFrame,
     ChildFrame,
     DeadlineFiredFrame,
     RssMb,
     RssReading,
+    SeatCancelled,
     SeatEnd,
     SeatTimedOut,
     SharedResultFrame,
@@ -36,12 +44,15 @@ from horsies.core.worker.child_frames import (
     WorkFrame,
 )
 from horsies.core.worker.child_inbox import ParentFrameInbox
+from horsies.core.worker.run_cancel import RunCancel, SkipTheBody
 from horsies.core.worker.child_main import BAD_PARENT_FRAME_EXIT_CODE
 from horsies.core.worker.run_return import (
+    CancelledBody,
     CoreStoppedAfterBody,
     MarkerDone,
     MarkerMetStoppedCore,
     ResultEnvelope,
+    RunCancelled,
 )
 from horsies.core.worker.shared_child import (
     CHILD_DEFECT_EXIT_CODE,
@@ -66,8 +77,10 @@ from horsies.core.worker.thread_child import (
 
 from tests.fixtures.core_frames import (
     async_work,
+    isolated_cancel_frame,
     refusal,
     run_frame,
+    shared_cancel_frame,
     shared_run_frame,
     stop_frame,
     thread_work,
@@ -198,7 +211,7 @@ class TestRunTable:
     def test_a_deadline_fires_at_its_time_and_once(self) -> None:
         table, writer, clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
 
         assert table._fire_due() == pytest.approx(1.0)
         assert writer.frames == []
@@ -211,7 +224,7 @@ class TestRunTable:
     def test_a_run_that_ends_before_its_deadline_reports_its_result(self) -> None:
         table, writer, clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         clock.now += 0.999
         table._fire_due()
 
@@ -236,7 +249,7 @@ class TestRunTable:
         (``test_child_core_refusals``)."""
         table, writer, _clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         stopped = core.CoreStopped('log forwarder', 'planned panic')
 
         assert table.returned(1, set_running(OK_END)) == MarkerDue()
@@ -256,7 +269,7 @@ class TestRunTable:
     def test_a_written_marker_keeps_the_end_at_the_return(self) -> None:
         table, writer, _clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
 
         _ = table.returned(1, set_running(OK_END))
         table.marked(1, MarkerDone())
@@ -271,7 +284,7 @@ class TestRunTable:
         value that the task returned."""
         table, writer, clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         clock.now += 1.0
         table._fire_due()
 
@@ -295,7 +308,7 @@ class TestRunTable:
         longer fires, also when the task returns past it."""
         table, writer, clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         clock.now += 0.999
 
         assert table.body_ended(1) == BodyFirst()
@@ -319,7 +332,7 @@ class TestRunTable:
         and the run ends with the timeout, the end of the attempt span."""
         table, writer, clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         clock.now += 1.0
         table._fire_due()
 
@@ -339,7 +352,7 @@ class TestRunTable:
         what it returned."""
         table, writer, clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         clock.now += 5.0
 
         assert table.body_ended(1) == BodyFirst()
@@ -354,7 +367,7 @@ class TestRunTable:
     def test_a_body_that_ends_twice_is_a_defect(self) -> None:
         table, _writer, _clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         _ = table.body_ended(1)
 
         with pytest.raises(AssertionError, match='ended its body twice'):
@@ -363,7 +376,7 @@ class TestRunTable:
     def test_an_ended_run_has_no_deadline_left(self) -> None:
         table, writer, clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         _ = table.returned(1, set_running(OK_END))
         table.finish(1, RssMb(5.0))
         clock.now += 60.0
@@ -375,7 +388,7 @@ class TestRunTable:
     def test_a_refusal_has_no_deadline(self) -> None:
         table, writer, clock = self._table()
         frame = _frame(1, work=REFUSAL_WORK)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         clock.now += 10**6
 
         assert table._fire_due() == DEADLINE_WAIT_MAX_S
@@ -385,7 +398,7 @@ class TestRunTable:
         table, _writer, _clock = self._table(3)
         for dispatch, timeout_ms in ((1, 60_000), (2, 2_500), (3, 4_000)):
             frame = _frame(dispatch, work=thread_work(timeout_ms))
-            table.add(frame, _thread_work(frame))
+            table.add(frame, _thread_work(frame), RunCancel())
 
         assert table._fire_due() == pytest.approx(2.5)
 
@@ -399,10 +412,10 @@ class TestRunTable:
     ) -> None:
         table, _writer, _clock = self._table(1)
         first, second = _frame(1), _frame(2)
-        table.add(first, _thread_work(first))
+        table.add(first, _thread_work(first), RunCancel())
 
         with pytest.raises(_Exited):
-            table.add(second, _thread_work(second))
+            table.add(second, _thread_work(second), RunCancel())
 
         assert exits == [
             (
@@ -417,10 +430,10 @@ class TestRunTable:
     ) -> None:
         table, _writer, _clock = self._table(2)
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
 
         with pytest.raises(_Exited):
-            table.add(frame, _thread_work(frame))
+            table.add(frame, _thread_work(frame), RunCancel())
 
         assert exits == [('parent sent run 1 twice', BAD_PARENT_FRAME_EXIT_CODE)]
 
@@ -431,7 +444,7 @@ class TestRunTable:
         goes out, and the end stays what the task returned."""
         table, writer, clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         clock.now += 0.9
 
         marker = table.returned(1, set_running(OK_END))
@@ -453,7 +466,7 @@ class TestRunTable:
     def test_a_return_after_the_deadline_writes_no_marker(self) -> None:
         table, _writer, clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         clock.now += 1.0
         table._fire_due()
 
@@ -464,7 +477,7 @@ class TestRunTable:
         returned, but no time is left for a marker."""
         table, writer, clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         clock.now += 1.0
 
         assert table.returned(1, set_running(OK_END)) == NoMarker()
@@ -496,7 +509,7 @@ class TestRunTable:
         so no deadline report goes out, before or after it."""
         table, writer, clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         clock.now += 1.0 + past_deadline_s
 
         assert table.returned(1, returned) == NoMarker()
@@ -513,14 +526,14 @@ class TestRunTable:
     def test_a_run_that_stopped_before_running_writes_no_marker(self) -> None:
         table, _writer, _clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
 
         assert table.returned(1, StoppedBeforeRunning('CLAIM_LOST')) == NoMarker()
 
     def test_a_refusal_writes_its_marker(self) -> None:
         table, _writer, clock = self._table()
         frame = _frame(1, work=REFUSAL_WORK)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         clock.now += 10**6
 
         assert table.returned(1, set_running(OK_END)) == MarkerDue()
@@ -530,7 +543,7 @@ class TestRunTable:
         connection, before the statement."""
         table, writer, clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         clock.now += 0.75
 
         assert table.start_check(1) == StartWithin(milliseconds=250)
@@ -539,7 +552,7 @@ class TestRunTable:
     def test_a_start_just_before_the_deadline_is_allowed(self) -> None:
         table, writer, clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         clock.now += 0.999
 
         check = table.start_check(1)
@@ -550,7 +563,7 @@ class TestRunTable:
     def test_a_refusal_starts_with_no_deadline(self) -> None:
         table, _writer, clock = self._table()
         frame = _frame(1, work=REFUSAL_WORK)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         clock.now += 100.0
 
         assert table.start_check(1) == StartAllowed()
@@ -571,7 +584,7 @@ class TestRunTable:
         timeout."""
         table, writer, clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         assert table.start_check(1) == StartWithin(milliseconds=1000)
         clock.now += 1.0
 
@@ -595,7 +608,7 @@ class TestRunTable:
         deadline report comes first, and the run ends with the timeout."""
         table, writer, clock = self._table()
         frame = _frame(1)
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
         clock.now += 1.0
 
         assert table.start_check(1) == DeadlineBeforeStart()
@@ -620,7 +633,7 @@ class TestRunTable:
         thread.start()
         frame = _frame(1)
         started = time.monotonic()
-        table.add(frame, _thread_work(frame))
+        table.add(frame, _thread_work(frame), RunCancel())
 
         _until(lambda: bool(writer.frames))
         fired_after_s = time.monotonic() - started
@@ -656,8 +669,9 @@ class _Program:
         work: ThreadSeatWork,
         start_check: Callable[[], StartCheck],
         body_end: Callable[[], BodyEndOrder],
+        cancel: RunCancel,
     ) -> ThreadSeatReturn:
-        _ = work
+        _ = work, cancel
         if frame.task_name in self.checks_start:
             match start_check():
                 case DeadlineBeforeStart() as passed:
@@ -706,10 +720,12 @@ def seats_of() -> (
         seat_threads.stop(WAIT_S)
 
 
-def _give(table: ThreadRunTable, seats: ThreadSeats, frame: core.SharedRunFrame) -> None:
+def _give(table: ThreadRunTable, seats: ThreadSeats, frame: core.SharedRunFrame) -> RunCancel:
     work = _thread_work(frame)
-    table.add(frame, work)
-    seats.give(frame, work)
+    cancel = RunCancel()
+    table.add(frame, work, cancel)
+    seats.give(frame, work, cancel)
+    return cancel
 
 
 class TestSeatThreads:
@@ -896,9 +912,11 @@ class _Taker:
 
     def __init__(self) -> None:
         self.given: list[tuple[int, ThreadSeatWork]] = []
+        self.cancels: list[RunCancel] = []
 
-    def give(self, frame: core.SharedRunFrame, work: ThreadSeatWork) -> None:
+    def give(self, frame: core.SharedRunFrame, work: ThreadSeatWork, cancel: RunCancel) -> None:
         self.given.append((frame.dispatch, work))
+        self.cancels.append(cancel)
 
 
 class TestServeRuns:
@@ -992,3 +1010,180 @@ class TestServeRuns:
                 BAD_PARENT_FRAME_EXIT_CODE,
             ),
         ]
+
+
+class TestAnOperatorCancel:
+    """``ThreadRunTable.cancel``: an operator cancel of a run before its
+    deadline and before its body returned. The thread runs on; the body
+    reads the cancel state, and the end is the cancel."""
+
+    def _table(self) -> tuple[ThreadRunTable, _RecordingWriter, _Clock]:
+        writer = _RecordingWriter()
+        clock = _Clock()
+        return ThreadRunTable(2, writer, clock), writer, clock
+
+    def test_a_cancel_while_the_body_runs_is_reported_at_once_and_ends_the_run(
+        self,
+    ) -> None:
+        table, writer, _clock = self._table()
+        frame = _frame(1)
+        cancel = RunCancel()
+        table.add(frame, _thread_work(frame), cancel)
+        _ = cancel.begin_body()
+
+        table.cancel(1, _task_id(1))
+
+        assert writer.frames == [CancelFiredFrame(dispatch=1, task_id=_task_id(1))]
+        assert cancel.cell.state() == CancelRequested(cause=CancelCause.OPERATOR)
+        assert table.body_ended(1) == OperatorCancelFirst()
+        cancel.end_body()
+        assert table.returned(1, set_running(OK_END)) == NoMarker()
+        table.finish(1, RssMb(5.0))
+        assert writer.frames[1] == SharedResultFrame(
+            dispatch=1,
+            task_id=_task_id(1),
+            end=SeatCancelled(body=CancelledBody.RAN),
+            started=StartReported(STARTED_AT),
+            rss=RssMb(5.0),
+        )
+
+    def test_a_cancel_before_the_body_is_reported_with_the_end(self) -> None:
+        table, writer, _clock = self._table()
+        frame = _frame(1)
+        cancel = RunCancel()
+        table.add(frame, _thread_work(frame), cancel)
+
+        table.cancel(1, _task_id(1))
+        assert writer.frames == []
+        assert cancel.begin_body() == SkipTheBody()
+        skipped = RunCancelled(body=CancelledBody.NOT_STARTED, started_at=STARTED_AT)
+        assert table.returned(1, skipped) == NoMarker()
+        table.finish(1, RssMb(5.0))
+
+        assert writer.frames == [
+            CancelFiredFrame(dispatch=1, task_id=_task_id(1)),
+            SharedResultFrame(
+                dispatch=1,
+                task_id=_task_id(1),
+                end=SeatCancelled(body=CancelledBody.NOT_STARTED),
+                started=StartReported(STARTED_AT),
+                rss=RssMb(5.0),
+            ),
+        ]
+
+    def test_the_deadline_after_a_cancel_does_not_fire(self) -> None:
+        table, writer, clock = self._table()
+        frame = _frame(1)
+        cancel = RunCancel()
+        table.add(frame, _thread_work(frame), cancel)
+        _ = cancel.begin_body()
+        table.cancel(1, _task_id(1))
+
+        clock.now += 5.0
+        _ = table._fire_due()
+
+        assert writer.frames == [CancelFiredFrame(dispatch=1, task_id=_task_id(1))]
+        assert cancel.cell.state() == CancelRequested(cause=CancelCause.OPERATOR)
+
+    def test_the_deadline_sets_the_cancel_state_and_a_later_cancel_is_ignored(
+        self,
+    ) -> None:
+        table, writer, clock = self._table()
+        frame = _frame(1)
+        cancel = RunCancel()
+        table.add(frame, _thread_work(frame), cancel)
+        _ = cancel.begin_body()
+        clock.now += 1.0
+        _ = table._fire_due()
+
+        table.cancel(1, _task_id(1))
+        _ = table.returned(1, set_running(OK_END))
+        table.finish(1, RssMb(5.0))
+
+        assert cancel.cell.state() == CancelRequested(cause=CancelCause.DEADLINE)
+        assert [type(frame).__name__ for frame in writer.frames] == [
+            'DeadlineFiredFrame',
+            'SharedResultFrame',
+        ]
+        assert writer.results()[0].end == SeatTimedOut()
+
+    def test_a_cancel_after_the_body_returned_is_ignored(self) -> None:
+        table, writer, _clock = self._table()
+        frame = _frame(1)
+        cancel = RunCancel()
+        table.add(frame, _thread_work(frame), cancel)
+        _ = cancel.begin_body()
+        assert table.body_ended(1) == BodyFirst()
+
+        table.cancel(1, _task_id(1))
+        cancel.end_body()
+        _ = table.returned(1, set_running(OK_END))
+        table.finish(1, RssMb(5.0))
+
+        assert cancel.cell.state() == CancelNotRequested()
+        assert writer.results()[0].end == OK_END
+
+    def test_a_cancel_of_a_run_that_the_child_does_not_run_is_ignored(self) -> None:
+        table, writer, _clock = self._table()
+        frame = _frame(1)
+        cancel = RunCancel()
+        table.add(frame, _thread_work(frame), cancel)
+
+        table.cancel(2, _task_id(2))
+        table.cancel(1, _task_id(3))
+
+        assert writer.frames == []
+        assert cancel.cell.state() == CancelNotRequested()
+
+    def test_serve_runs_gives_the_cancel_to_its_run(self) -> None:
+        taker = _Taker()
+        writer = _RecordingWriter()
+        table = ThreadRunTable(2, writer, _Clock())
+        inbox = ParentFrameInbox()
+        inbox.put(_frame(1))
+        inbox.put(shared_cancel_frame(dispatch=1, task_id=_task_id(1)))
+
+        def end_then_stop() -> None:
+            try:
+                _until(lambda: _kept(table))
+                assert taker.cancels[0].begin_body() == SkipTheBody()
+                _ = table.returned(
+                    1, RunCancelled(body=CancelledBody.NOT_STARTED, started_at=STARTED_AT),
+                )
+                table.finish(1, RssMb(1.0))
+            finally:
+                inbox.put(stop_frame())
+
+        stopper = threading.Thread(target=end_then_stop)
+        stopper.start()
+        serve_runs(inbox, table, taker)
+        stopper.join(WAIT_S)
+
+        assert writer.results()[0].end == SeatCancelled(body=CancelledBody.NOT_STARTED)
+
+    def test_the_cancel_of_an_isolated_run_is_a_parent_defect(
+        self,
+        exits: list[tuple[str, int]],
+    ) -> None:
+        inbox = ParentFrameInbox()
+        inbox.put(isolated_cancel_frame(task_id=_task_id(1)))
+        inbox.put(stop_frame())
+        with pytest.raises(_Exited):
+            serve_runs(inbox, ThreadRunTable(1, _RecordingWriter(), _Clock()), _Taker())
+        assert exits == [
+            (
+                'parent sent the cancel of an isolated run to a shared thread child',
+                BAD_PARENT_FRAME_EXIT_CODE,
+            ),
+        ]
+
+
+def _kept(table: ThreadRunTable) -> bool:
+    """Whether run 1 of ``table`` is held and took an operator cancel."""
+    with table._lock:
+        run = table._runs.get(1)
+        match run:
+            case None:
+                return False
+            case _:
+                return isinstance(run.state, thread_child._CancelledByOperator)

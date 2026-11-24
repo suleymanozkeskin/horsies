@@ -10,6 +10,7 @@ use horsies::{Horsies, HorsiesError};
 use crate::instance::Instance;
 
 pub mod basic;
+pub mod cancel;
 pub mod classes;
 pub mod custom;
 pub mod fencing;
@@ -36,8 +37,8 @@ pub fn register(app: &mut Horsies, instance: Instance) -> Result<(), HorsiesErro
     }
 }
 
-/// The tasks of the default queue: basic, retry, the execution classes and
-/// the fencing tasks.
+/// The tasks of the default queue: basic, retry, the execution classes, the
+/// fencing tasks and the tasks of a running cancel.
 fn register_default(app: &mut Horsies) -> Result<(), HorsiesError> {
     let _healthcheck = basic::healthcheck::register(app)?;
     let _simple = basic::simple::register(app)?;
@@ -84,6 +85,13 @@ fn register_default(app: &mut Horsies) -> Result<(), HorsiesError> {
     let _fence_shared_thread = fencing::fence_shared_thread::register(app)?;
     let _fence_reads_twice = fencing::fence_reads_twice::register(app)?;
     let _fence_retry = fencing::fence_retry::register(app)?;
+
+    let _cancel_isolated_async = cancel::cancel_isolated_async::register(app)?;
+    let _cancel_isolated_blocking = cancel::cancel_isolated_blocking::register(app)?;
+    let _cancel_shared_async = cancel::cancel_shared_async::register(app)?;
+    let _cancel_shared_thread = cancel::cancel_shared_thread::register(app)?;
+    let _cancel_ignored_with_grace = cancel::cancel_ignored_with_grace::register(app)?;
+    let _cancel_ignored_no_grace = cancel::cancel_ignored_no_grace::register(app)?;
     register_workflow(app)
 }
 

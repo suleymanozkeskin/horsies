@@ -8,6 +8,10 @@
 //! | [`WorkerTelemetry::attempt_ended`], a run | `AttemptEnded` | `horsies.task.attempts`, `horsies.task.attempts.end_not_known`, `horsies.task.run.duration` |
 //! | [`WorkerTelemetry::attempt_recorded`] | `AttemptRecorded` | `horsies.task.record.duration`, `horsies.task.retries` |
 //! | [`WorkerTelemetry::finalize_retried`] | none | `horsies.finalize.retries` |
+//!
+//! A run whose task an operator cancelled counts with the outcome
+//! `CANCELLED` and the code `TASK_CANCELLED`, whether its child reported the
+//! end or the worker killed or lost the child after the cancel.
 
 use chrono::Utc;
 use tokio::time::Instant;
@@ -18,15 +22,16 @@ use crate::core::task::error::{
 };
 use crate::events::{
     self, AttemptEnded, AttemptErrorCode, AttemptNotStarted, AttemptRecord, AttemptRecorded,
-    AttemptStart, ChildResult, RetryCount, WorkerDecision, WorkerIdText, WorkflowPlace,
+    AttemptStart, ChildResult, OperatorCancelEnd, RetryCount, WorkerDecision, WorkerIdText,
+    WorkflowPlace,
 };
 use crate::telemetry::declared::ErrorCodeValue;
 use crate::telemetry::labels::ReleaseReason;
 use crate::worker::executor::protocol::{ProcessId, StopReason};
 use crate::worker::executor::slots::outcome::{EndView, ResultRead, WriteStage};
 use crate::worker::executor::slots::{
-    ChildPlacement, ClaimedTask, LoopKillCode, Placed, Settlement, TaskKind, TerminalState,
-    TimeoutSeen, WrittenEnd,
+    CancelledEnd, ChildPlacement, ClaimedTask, LoopKillCode, Placed, Settlement, TaskKind,
+    TerminalState, TimeoutSeen, WrittenEnd,
 };
 use crate::TaskAttemptOutcome;
 
@@ -60,6 +65,13 @@ enum RanEnd<'a> {
     /// A shared child ended the run at its deadline and reported it, with
     /// the start `start`: the span of the child covers the attempt.
     TimedOutInChild { start: AttemptStart },
+    /// An operator cancelled the task, and the child reported how the run
+    /// ended, with the start `start`: the span of the child covers the
+    /// attempt.
+    CancelledInChild {
+        end: OperatorCancelEnd,
+        start: AttemptStart,
+    },
     /// The worker ended the attempt for `reason` with no result frame of
     /// the child: a kill or a lost child. The handler child makes its span.
     Decided { reason: WorkerDecision },
@@ -106,6 +118,15 @@ fn kind_of(end: EndView<'_>) -> EndKind<'_> {
             reason: WorkerDecision::ChildLost,
         }),
         EndView::EndUnknown { pid } => EndKind::Ran(RanEnd::NotKnown(pid)),
+        EndView::Cancelled(CancelledEnd::ReportedByChild { end, start }) => {
+            EndKind::Ran(RanEnd::CancelledInChild { end, start })
+        }
+        EndView::Cancelled(CancelledEnd::ChildKilled) => EndKind::Ran(RanEnd::Decided {
+            reason: WorkerDecision::KilledAfterCancel,
+        }),
+        EndView::Cancelled(CancelledEnd::ChildLost) => EndKind::Ran(RanEnd::Decided {
+            reason: WorkerDecision::LostAfterCancel,
+        }),
     }
 }
 
@@ -150,6 +171,10 @@ fn event_end(
         },
         RanEnd::TimedOutInChild { start } => events::AttemptEnd::ReportedByChild {
             result: ChildResult::TimedOut,
+            start,
+        },
+        RanEnd::CancelledInChild { end, start } => events::AttemptEnd::ReportedByChild {
+            result: ChildResult::Cancelled { end },
             start,
         },
         RanEnd::Decided { reason } => events::AttemptEnd::DecidedByWorker {
@@ -209,6 +234,7 @@ fn record_of(settled: Settlement) -> Result<AttemptRecord, i32> {
         Settlement::Written(WrittenEnd::ClaimReleased) => AttemptRecord::ClaimReleased,
         Settlement::NothingOwed => AttemptRecord::NothingOwed,
         Settlement::NotHeld => AttemptRecord::NotHeld,
+        Settlement::RecordedByCancel => AttemptRecord::RecordedByCancel,
         Settlement::LeftToRecovery => AttemptRecord::LeftToRecovery,
         Settlement::RetriesExhausted => AttemptRecord::RetriesExhausted,
         Settlement::WriteFailed => AttemptRecord::WriteFailed,
@@ -324,6 +350,15 @@ impl TelemetryOn {
         let failed = |code: &TaskErrorCode| {
             RanOutcome::Known(TaskAttemptOutcome::Failed, self.code_label(task_name, code))
         };
+        let cancelled = || {
+            RanOutcome::Known(
+                TaskAttemptOutcome::Cancelled,
+                self.code_label(
+                    task_name,
+                    &TaskErrorCode::BuiltIn(OutcomeCode::TaskCancelled.into()),
+                ),
+            )
+        };
         match ran {
             RanEnd::Result {
                 read: ResultRead::Value,
@@ -344,7 +379,14 @@ impl TelemetryOn {
             RanEnd::TimedOutInChild { .. } => {
                 failed(&TaskErrorCode::BuiltIn(OutcomeCode::TaskTimeout.into()))
             }
-            RanEnd::Decided { reason } => failed(&TaskErrorCode::BuiltIn(reason.error_code())),
+            RanEnd::CancelledInChild { .. } => cancelled(),
+            RanEnd::Decided { reason } => match reason {
+                WorkerDecision::TimedOut
+                | WorkerDecision::TaskBlockedLoop
+                | WorkerDecision::NeighbourBlockedLoop
+                | WorkerDecision::ChildLost => failed(&TaskErrorCode::BuiltIn(reason.error_code())),
+                WorkerDecision::KilledAfterCancel | WorkerDecision::LostAfterCancel => cancelled(),
+            },
             RanEnd::NotKnown(_) => RanOutcome::NotKnown,
         }
     }
@@ -412,6 +454,7 @@ impl TelemetryOn {
             Settlement::Written(WrittenEnd::Terminal(_) | WrittenEnd::ClaimReleased)
             | Settlement::NothingOwed
             | Settlement::NotHeld
+            | Settlement::RecordedByCancel
             | Settlement::LeftToRecovery
             | Settlement::RetriesExhausted
             | Settlement::WriteFailed => {}

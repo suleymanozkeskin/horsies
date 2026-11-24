@@ -267,7 +267,8 @@ fn execution_class(value: &Ident) -> syn::Result<ExecutionAttr> {
 /// The rules between attributes (Python `_check_cancel_grace` and the
 /// timeout rule of a shared class):
 /// - a shared class needs `timeout_ms`;
-/// - `cancel_grace_ms` is for `shared_async` only;
+/// - `cancel_grace_ms` is for `shared_async` and `isolated` only: a thread
+///   cannot be stopped;
 /// - `retry_policy` and `auto_retry_for` go together, with at least one
 ///   code.
 fn resolve(name: LitStr, written: WrittenAttrs) -> syn::Result<TaskAttrs> {
@@ -290,16 +291,17 @@ fn resolve(name: LitStr, written: WrittenAttrs) -> syn::Result<TaskAttrs> {
         | (ExecutionClass::SharedAsync | ExecutionClass::SharedThread, Some(_)) => {}
     }
     match (execution.class, written.cancel_grace_ms) {
-        (ExecutionClass::Isolated | ExecutionClass::SharedThread, Some(grace)) => {
+        (ExecutionClass::SharedThread, Some(grace)) => {
             return Err(syn::Error::new(
                 grace.span,
                 format!(
-                    "`cancel_grace_ms` is for execution = shared_async only; this task is {}",
+                    "`cancel_grace_ms` is for execution = shared_async or isolated; a thread \
+                     cannot be stopped, and this task is {}",
                     execution.class.attribute_value()
                 ),
             ));
         }
-        (ExecutionClass::SharedAsync, _) | (_, None) => {}
+        (ExecutionClass::SharedAsync | ExecutionClass::Isolated, _) | (_, None) => {}
     }
     Ok(TaskAttrs {
         name,

@@ -97,6 +97,10 @@ pub enum AttemptRecordedByInfo {
         #[serde(serialize_with = "time_text::utc")]
         last_seen_at: DateTime<Utc>,
     },
+    /// The cancel statement wrote the attempt row: an operator cancelled the
+    /// task while the attempt ran. The attempt ended at the cancel, its
+    /// `finished_at`. The cancel observes no placement.
+    Cancel,
 }
 
 /// The phase timing of one workflow node, tagged by `kind`: the coverage

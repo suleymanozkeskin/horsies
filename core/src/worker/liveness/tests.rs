@@ -31,6 +31,7 @@ use crate::test_support::migrated_database_url;
 use crate::test_support::migrated_pool;
 use crate::test_support::sql::{self, TestPool};
 use crate::test_support::telemetry::WatchedTelemetry;
+use crate::worker::executor::slots::dispatch::AttemptLog;
 use crate::worker::executor::supervisor::Spawner;
 use crate::worker::recovery::owner_gone::OwnerGoneStep;
 use crate::worker::recovery::{owner_gone_step, UnheldOwners};
@@ -268,7 +269,12 @@ async fn liveness_probe_process() {
     let (spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
     let _held = live
-        .hold(Uuid::new_v4(), Utc::now(), child)
+        .hold(
+            Uuid::new_v4(),
+            Utc::now(),
+            AttemptLog::FIRST_UNTRACED,
+            child,
+        )
         .expect("the registry is open");
     let probe_rule = LivenessRule {
         regain_bound: Duration::from_millis(bound_ms),

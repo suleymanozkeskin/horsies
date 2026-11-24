@@ -34,6 +34,18 @@ Frames leave through the writer thread of ``FrameWriter``. A seat and the
 deadline thread queue the frames of a run while they hold the lock of the
 run table, so the deadline report of a run always comes before its result.
 
+An operator cancel of a run (``core.CancelRunFrame``, ``run_cancel``) before
+its deadline and before its body returned sets the cancel state of the run
+to ``OPERATOR``: the body reads it (``TaskRuntime.cancel_state``) and runs on
+until it returns. The child reports ``CancelFiredFrame`` at once, the
+deadline of the run no longer applies, and the end is ``SeatCancelled`` with
+the body ``RAN``, whatever the task returned, with no marker. A cancel that
+came while the start write ran skips the body: ``CancelFiredFrame`` and
+``SeatCancelled`` with ``NOT_STARTED`` at the end. A cancel after the
+deadline fired, or after the body returned, is ignored. The deadline sets
+the cancel state of a run to ``DEADLINE``, so a ``def`` body can stop at its
+timeout.
+
 C code that holds the GIL stops every thread of the child, the deadline
 thread and the writer too: no report leaves the child, and the backstop
 timer of the parent kills it.
@@ -51,13 +63,20 @@ import queue
 import socket
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Final, NoReturn, Protocol, assert_never
 
+from horsies.core.logging import get_logger
 from horsies.core.models.boot_failure import ThreadStartRefused
-from horsies.core.telemetry.attempt_span import BodyEndOrder, BodyFirst, DeadlineFirst
+from horsies.core.telemetry.attempt_span import (
+    BodyEndOrder,
+    BodyFirst,
+    DeadlineFirst,
+    OperatorCancelFirst,
+)
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_inbox import ParentFrameInbox
 from horsies.core.worker.child_main import (
@@ -71,10 +90,12 @@ from horsies import _core as core
 from horsies.core.worker.child_frames import (
     AttemptStart,
     BootFailedFrame,
+    CancelFiredFrame,
     ChildFrame,
     DeadlineFiredFrame,
     ReadyFrame,
     RssReading,
+    SeatCancelled,
     SeatEnd,
     SeatTimedOut,
     SharedResultFrame,
@@ -84,10 +105,23 @@ from horsies.core.worker.child_frames import (
     boot_failed_frame,
 )
 from horsies.core.worker.run_return import (
+    CancelledBody,
+    CoreStoppedAfterBody,
     CoreStoppedBeforeStart,
     MarkerEnd,
     ResultEnvelope,
+    RunCancelled,
     end_after_marker,
+)
+from horsies.core.worker.run_cancel import (
+    CancelAfterBody,
+    CancelAfterEnd,
+    CancelEarlierCause,
+    CancelKept,
+    CancelToBody,
+    EndCancelled,
+    EndNotCancelled,
+    RunCancel,
 )
 from horsies.core.worker.shared_child import (
     CHILD_DEFECT_EXIT_CODE,
@@ -108,6 +142,8 @@ from horsies.core.worker.child_runner import (
 )
 from horsies.core.worker.task_loop import TaskLoop
 
+logger = get_logger('worker')
+
 DEADLINE_WAIT_MAX_S: Final = 5.0
 """The longest wait of the deadline thread before it reads the run table
 again. A run that is added or that ends wakes it earlier."""
@@ -127,13 +163,19 @@ class FrameSink(Protocol):
 
 
 type ThreadSeatReturn = (
-    SetRunning | StoppedBeforeRunning | DeadlineBeforeStart | CoreStoppedBeforeStart
+    SetRunning
+    | StoppedBeforeRunning
+    | DeadlineBeforeStart
+    | CoreStoppedBeforeStart
+    | RunCancelled
 )
 """What the run of one task on a seat thread returns. ``DeadlineBeforeStart``:
 the deadline of the run fired while it waited for a pooled connection, and
 the run did not start. ``CoreStoppedBeforeStart``: the core of the child
 stopped before the start; the run reports ``OWNERSHIP_UNCONFIRMED``, and the
-child ends itself once that frame is written (``FrameWriter``)."""
+child ends itself once that frame is written (``FrameWriter``).
+``RunCancelled``: an operator cancel came before the body, which did not
+start (``NOT_STARTED``)."""
 
 
 class ThreadSeatProgram(Protocol):
@@ -145,13 +187,17 @@ class ThreadSeatProgram(Protocol):
         work: ThreadSeatWork,
         start_check: Callable[[], StartCheck],
         body_end: Callable[[], BodyEndOrder],
+        cancel: RunCancel,
     ) -> ThreadSeatReturn:
         """Run the task of ``frame``, whose work is ``work``, up to its
         result; write no finalizing marker. ``start_check`` tells, right
         before the RUNNING update, whether the deadline of the run fired.
         ``body_end`` fixes, when the steps of the body return in the attempt
         span, whether the deadline came first (``ThreadRunTable.body_ended``).
-        An exception that escapes is a defect: the child ends at once with
+        ``cancel`` is the cancel of the run: the run marks its body with it,
+        skips the body after an operator cancel that came first
+        (``RunCancelled``), and its runtime reads its cell. An exception
+        that escapes is a defect: the child ends at once with
         ``CHILD_DEFECT_EXIT_CODE``."""
         ...
 
@@ -190,6 +236,13 @@ class _BodyEnded:
 
 
 @dataclass(frozen=True, slots=True)
+class _CancelledByOperator:
+    """An operator cancel reached the run before its deadline and before its
+    body returned: the run has no deadline left, and its end is
+    ``SeatCancelled`` (or the end of a start that ended the run first)."""
+
+
+@dataclass(frozen=True, slots=True)
 class _Returned:
     """The task of the run returned, and ``end`` is the end of the run;
     ``started`` is the start of its attempt. The run has no deadline left; it
@@ -204,7 +257,7 @@ def _start_at_return(returned: ThreadSeatReturn) -> AttemptStart:
     start write when it set its row RUNNING, else none. A run that timed out
     keeps the start of its return. Pure."""
     match returned:
-        case SetRunning(started_at=started_at):
+        case SetRunning(started_at=started_at) | RunCancelled(started_at=started_at):
             return StartReported(started_at)
         case StoppedBeforeRunning() | CoreStoppedBeforeStart() | DeadlineBeforeStart():
             return StartNotReported()
@@ -216,11 +269,14 @@ def _start_at_return(returned: ThreadSeatReturn) -> AttemptStart:
 class _ThreadRun:
     """One run in flight. ``state`` turns ``FIRED`` once, and only for a run
     with a deadline, or ``_BodyEnded`` once, when the steps of its body
-    return first; then ``_Returned`` once, when its task returns."""
+    return first, or ``_CancelledByOperator`` once, at an operator cancel
+    that came first; then ``_Returned`` once, when its task returns.
+    ``cancel`` is the cancel of the run, which its runtime reads."""
 
     frame: core.SharedRunFrame
     deadline_at: _DeadlineAt | _NoDeadline
-    state: _Deadline | _BodyEnded | _Returned
+    state: _Deadline | _BodyEnded | _CancelledByOperator | _Returned
+    cancel: RunCancel
 
 
 class _TableState(Enum):
@@ -250,18 +306,50 @@ def _milliseconds_left(seconds: float) -> int:
 
 
 type _EndAtReturn = (
-    ResultEnvelope | StoppedBeforeRunning | CoreStoppedBeforeStart | SeatTimedOut
+    ResultEnvelope
+    | StoppedBeforeRunning
+    | CoreStoppedBeforeStart
+    | SeatTimedOut
+    | SeatCancelled
 )
 """The end of a run at the return of its task, before its finalizing
 marker."""
 
 
 def _end_at_return(run: _ThreadRun, returned: ThreadSeatReturn) -> _EndAtReturn:
-    """The end of a run whose task returned ``returned``: the timeout after
-    a deadline that fired, also when the task returned a value, else what
-    the task returned. A second return is a defect, and so is a run that did
-    not start for a deadline that has not fired."""
+    """The end of a run whose task returned ``returned``; it fixes the
+    cancel of the run (``RunCancel.fix_end``). ``SeatCancelled`` after an
+    operator cancel that reached the run, also when the task returned a
+    value; the timeout after a deadline that fired, also when the task
+    returned a value; else what the task returned. A second return is a
+    defect, and so is a run that did not start for a deadline that has not
+    fired."""
+    match run.cancel.fix_end(), run.state:
+        case EndCancelled(body=body), _CancelledByOperator():
+            return SeatCancelled(body=body)
+        case EndCancelled(), (_Deadline() | _BodyEnded() | _Returned()):
+            raise AssertionError(
+                f'run {run.frame.dispatch} ended cancelled with no operator cancel step',
+            )
+        case EndNotCancelled(), _:
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
     match run.state, returned:
+        case _CancelledByOperator(), (StoppedBeforeRunning() | CoreStoppedBeforeStart()) as stopped:
+            return stopped
+        case _CancelledByOperator(), DeadlineBeforeStart():
+            # The start did not run before the deadline: the end of a run
+            # whose deadline fired before its start.
+            return SeatTimedOut()
+        case _CancelledByOperator(), (SetRunning() | RunCancelled()):
+            raise AssertionError(
+                f'run {run.frame.dispatch} took an operator cancel and did not end cancelled',
+            )
+        case _, RunCancelled():
+            raise AssertionError(
+                f'run {run.frame.dispatch} skipped its body with no operator cancel step',
+            )
         case _Deadline.FIRED, _:
             return SeatTimedOut()
         case _Deadline.PENDING, DeadlineBeforeStart():
@@ -301,7 +389,7 @@ def _marker_at_return(
     cover the row until then.
     """
     match end, returned, run.deadline_at:
-        case SeatTimedOut(), _, _:
+        case SeatTimedOut() | SeatCancelled(), _, _:
             return NoMarker()
         case (
             ResultEnvelope() | StoppedBeforeRunning() | CoreStoppedBeforeStart(),
@@ -309,6 +397,14 @@ def _marker_at_return(
             _,
         ):
             return NoMarker()
+        case (
+            ResultEnvelope() | StoppedBeforeRunning() | CoreStoppedBeforeStart(),
+            RunCancelled(),
+            _,
+        ):
+            raise AssertionError(
+                f'run {run.frame.dispatch} skipped its body and did not end cancelled',
+            )
         case (
             ResultEnvelope() | StoppedBeforeRunning() | CoreStoppedBeforeStart(),
             SetRunning(),
@@ -356,8 +452,10 @@ class ThreadRunTable:
         self._runs: dict[int, _ThreadRun] = {}
         self._state = _TableState.SERVING
 
-    def add(self, frame: core.SharedRunFrame, work: ThreadSeatWork) -> None:
-        """Hold a new run and start its deadline. ``work`` is ``frame.work``.
+    def add(self, frame: core.SharedRunFrame, work: ThreadSeatWork, cancel: RunCancel) -> None:
+        """Hold a new run and start its deadline. ``work`` is ``frame.work``;
+        ``cancel`` is the cancel of the run, which its seat passes to the
+        run.
 
         A run when every seat is taken, or a dispatch number in use, is a
         parent defect: the process ends with ``BAD_PARENT_FRAME_EXIT_CODE``.
@@ -378,7 +476,57 @@ class ThreadRunTable:
                 frame=frame,
                 deadline_at=_deadline_at(work, self._clock()),
                 state=_Deadline.PENDING,
+                cancel=cancel,
             )
+            self._changed.notify_all()
+
+    def cancel(self, dispatch: int, task_id: uuid.UUID) -> None:
+        """An operator cancelled the task of run ``dispatch``. A run before
+        its deadline and before its body returned takes it
+        (``RunCancel.request_operator``): its deadline no longer applies, and
+        ``CancelFiredFrame`` goes out at once when the body may run, or with
+        the end when the body did not start. Any other run ignores it: a
+        deadline came first, the body returned, or the child does not run
+        it. Called by the main thread."""
+        with self._lock:
+            run = self._runs.get(dispatch)
+            if run is None or run.frame.task_id != task_id:
+                logger.debug('The cancel of run %s (task %s) found no such run', dispatch, task_id)
+                return
+            match run.state:
+                case _Deadline.PENDING:
+                    pass
+                case _Deadline.FIRED | _BodyEnded() | _CancelledByOperator() | _Returned():
+                    logger.debug(
+                        'The cancel of run %s (task %s) came at step %s; it is ignored',
+                        dispatch,
+                        task_id,
+                        run.state,
+                    )
+                    return
+                case _ as unreachable:
+                    assert_never(unreachable)
+            match run.cancel.request_operator():
+                case CancelToBody() | CancelAfterBody():
+                    run.state = _CancelledByOperator()
+                    self._writer.send(CancelFiredFrame(dispatch=dispatch, task_id=task_id))
+                    logger.info(
+                        'Task %s (run %s) was cancelled by an operator; its thread runs on '
+                        'until it returns',
+                        task_id,
+                        dispatch,
+                    )
+                case CancelKept():
+                    run.state = _CancelledByOperator()
+                    logger.info(
+                        'Task %s (run %s) was cancelled before its body started',
+                        task_id,
+                        dispatch,
+                    )
+                case CancelEarlierCause() | CancelAfterEnd():
+                    logger.debug('The cancel of run %s found an earlier cancel', dispatch)
+                case _ as unreachable:
+                    assert_never(unreachable)
             self._changed.notify_all()
 
     def start_check(self, dispatch: int) -> StartCheck:
@@ -396,11 +544,13 @@ class ThreadRunTable:
             _ = self._fire_due()
             run = self._runs[dispatch]
             match run.state, run.deadline_at:
-                case _Deadline.PENDING, _DeadlineAt(seconds=deadline_at):
+                case _Deadline.PENDING | _CancelledByOperator(), _DeadlineAt(
+                    seconds=deadline_at
+                ):
                     return StartWithin(
                         milliseconds=_milliseconds_left(deadline_at - self._clock()),
                     )
-                case _Deadline.PENDING, _NoDeadline():
+                case _Deadline.PENDING | _CancelledByOperator(), _NoDeadline():
                     return StartAllowed()
                 case _Deadline.FIRED, _:
                     return DeadlineBeforeStart()
@@ -428,6 +578,8 @@ class ThreadRunTable:
                 case _Deadline.PENDING:
                     run.state = _BodyEnded()
                     return BodyFirst()
+                case _CancelledByOperator():
+                    return OperatorCancelFirst()
                 case _BodyEnded() | _Returned():
                     raise AssertionError(f'run {dispatch} ended its body twice')
                 case _ as unreachable:
@@ -453,7 +605,9 @@ class ThreadRunTable:
             match returned:
                 case DeadlineBeforeStart():
                     _ = self._fire_due()
-                case SetRunning() | StoppedBeforeRunning() | CoreStoppedBeforeStart():
+                case (
+                    SetRunning() | StoppedBeforeRunning() | CoreStoppedBeforeStart() | RunCancelled()
+                ):
                     pass
                 case _ as unreachable:
                     assert_never(unreachable)
@@ -475,7 +629,13 @@ class ThreadRunTable:
             match run.state:
                 case _Returned(end=ResultEnvelope() as result, started=started):
                     run.state = _Returned(end_after_marker(result, marker), started)
-                case _Returned() | _BodyEnded() | _Deadline.PENDING | _Deadline.FIRED:
+                case (
+                    _Returned()
+                    | _BodyEnded()
+                    | _CancelledByOperator()
+                    | _Deadline.PENDING
+                    | _Deadline.FIRED
+                ):
                     raise AssertionError(
                         f'run {dispatch} wrote a marker with no finished body',
                     )
@@ -491,10 +651,27 @@ class ThreadRunTable:
             match run.state:
                 case _Returned(end=end, started=started):
                     pass
-                case _Deadline.PENDING | _Deadline.FIRED | _BodyEnded():
+                case _Deadline.PENDING | _Deadline.FIRED | _BodyEnded() | _CancelledByOperator():
                     raise AssertionError(
                         f'run {dispatch} ended before its task returned',
                     )
+                case _ as unreachable:
+                    assert_never(unreachable)
+            match end:
+                case SeatCancelled(body=CancelledBody.NOT_STARTED):
+                    # The cancel report comes before every cancelled end.
+                    self._writer.send(
+                        CancelFiredFrame(dispatch=dispatch, task_id=run.frame.task_id),
+                    )
+                case (
+                    SeatCancelled()
+                    | SeatTimedOut()
+                    | ResultEnvelope()
+                    | StoppedBeforeRunning()
+                    | CoreStoppedBeforeStart()
+                    | CoreStoppedAfterBody()
+                ):
+                    pass
                 case _ as unreachable:
                     assert_never(unreachable)
             self._writer.send_result(
@@ -542,10 +719,11 @@ class ThreadRunTable:
                 case _ as unreachable:
                     assert_never(unreachable)
             match run.state:
-                case _Deadline.FIRED | _BodyEnded() | _Returned():
+                case _Deadline.FIRED | _BodyEnded() | _CancelledByOperator() | _Returned():
                     continue
                 case _Deadline.PENDING if deadline_at <= now:
                     run.state = _Deadline.FIRED
+                    _ = run.cancel.request_deadline()
                     self._writer.send(
                         DeadlineFiredFrame(
                             dispatch=dispatch, task_id=run.frame.task_id
@@ -566,10 +744,12 @@ class ThreadRunTable:
 
 @dataclass(frozen=True, slots=True)
 class _SeatJob:
-    """A run for a seat, with its work narrowed to the thread kind."""
+    """A run for a seat, with its work narrowed to the thread kind, and its
+    cancel."""
 
     frame: core.SharedRunFrame
     work: ThreadSeatWork
+    cancel: RunCancel
 
 
 @dataclass(frozen=True, slots=True)
@@ -627,9 +807,9 @@ class ThreadSeats:
                     return refused
         return Ok(None)
 
-    def give(self, frame: core.SharedRunFrame, work: ThreadSeatWork) -> None:
+    def give(self, frame: core.SharedRunFrame, work: ThreadSeatWork, cancel: RunCancel) -> None:
         """Hand a run to the next free seat thread. Never blocks."""
-        self._jobs.put(_SeatJob(frame, work))
+        self._jobs.put(_SeatJob(frame, work, cancel))
 
     def stop(self, timeout_s: float) -> None:
         """End every seat thread. Waits at most ``timeout_s`` for each."""
@@ -643,16 +823,16 @@ class ThreadSeats:
             match self._jobs.get():
                 case _SeatStop():
                     return
-                case _SeatJob(frame=frame, work=work):
-                    self._run(frame, work)
+                case _SeatJob(frame=frame, work=work, cancel=cancel):
+                    self._run(frame, work, cancel)
                 case _ as unreachable:
                     assert_never(unreachable)
 
-    def _run(self, frame: core.SharedRunFrame, work: ThreadSeatWork) -> None:
+    def _run(self, frame: core.SharedRunFrame, work: ThreadSeatWork, cancel: RunCancel) -> None:
         """Run one task, fix its end at its return, write its finalizing
         marker when one is due and fold its end into the end of the run,
         then end the run."""
-        returned = self._run_or_exit(frame, work)
+        returned = self._run_or_exit(frame, work, cancel)
         match self._table.returned(frame.dispatch, returned):
             case NoMarker():
                 pass
@@ -666,6 +846,7 @@ class ThreadSeats:
         self,
         frame: core.SharedRunFrame,
         work: ThreadSeatWork,
+        cancel: RunCancel,
     ) -> ThreadSeatReturn:
         try:
             return self._program.run(
@@ -673,6 +854,7 @@ class ThreadSeats:
                 work,
                 functools.partial(self._table.start_check, frame.dispatch),
                 functools.partial(self._table.body_ended, frame.dispatch),
+                cancel,
             )
         except BaseException as exc:
             _exit_for_defect(
@@ -712,7 +894,9 @@ def _seat_work_of(frame: core.SharedRunFrame) -> ThreadSeatWork:
 class RunTaker(Protocol):
     """Where ``serve_runs`` hands each run: ``ThreadSeats``. Never blocks."""
 
-    def give(self, frame: core.SharedRunFrame, work: ThreadSeatWork) -> None: ...
+    def give(
+        self, frame: core.SharedRunFrame, work: ThreadSeatWork, cancel: RunCancel
+    ) -> None: ...
 
 
 def serve_runs(
@@ -722,17 +906,31 @@ def serve_runs(
 ) -> None:
     """Take frames from ``inbox`` until the stop frame. Returns then.
 
-    A run frame starts its deadline in ``table`` and goes to a seat. A stop
-    frame while runs are in flight, a frame of an isolated child, or a run
-    with the work of a shared async child is a parent defect: the process
-    ends with ``BAD_PARENT_FRAME_EXIT_CODE``.
+    A run frame starts its deadline in ``table`` and goes to a seat, with a
+    new cancel. A cancel frame goes to its run in ``table``
+    (``ThreadRunTable.cancel``). A stop frame while runs are in flight, a
+    frame of an isolated child, or a run with the work of a shared async
+    child is a parent defect: the process ends with
+    ``BAD_PARENT_FRAME_EXIT_CODE``.
     """
     while True:
         match inbox.get():
             case core.SharedRunFrame() as frame:
                 work = _seat_work_of(frame)
-                table.add(frame, work)
-                seats.give(frame, work)
+                cancel = RunCancel()
+                table.add(frame, work, cancel)
+                seats.give(frame, work, cancel)
+            case core.CancelRunFrame(target=target):
+                match target:
+                    case core.SharedCancelTarget(dispatch=dispatch, task_id=task_id):
+                        table.cancel(dispatch, task_id)
+                    case core.IsolatedCancelTarget():
+                        _exit_for_defect(
+                            'parent sent the cancel of an isolated run to a shared thread child',
+                            BAD_PARENT_FRAME_EXIT_CODE,
+                        )
+                    case _ as unreachable:
+                        assert_never(unreachable)
             case core.StopFrame():
                 in_flight = table.count()
                 if in_flight:

@@ -45,5 +45,6 @@ app.discover_tasks(
         'tests.e2e.tasks.shared_async_tasks',
         'tests.e2e.tasks.shared_thread_tasks',
         'tests.e2e.tasks.fencing_tasks',
+        'tests.e2e.tasks.cancel_tasks',
     ]
 )

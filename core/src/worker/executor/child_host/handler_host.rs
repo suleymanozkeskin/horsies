@@ -254,6 +254,13 @@ async fn dispatch_frames(
                     }
                 }
             }
+            Some(ParentFrame::CancelRun(target)) => {
+                // A handler child runs no task: the cancel names no run here.
+                tracing::debug!(
+                    cancel = ?target,
+                    "the handler child got a cancel_run; it runs no task, so the cancel is ignored",
+                );
+            }
             Some(ParentFrame::Init(_) | ParentFrame::Run(_) | ParentFrame::SharedRun(_)) => {
                 tracing::error!(
                     "the handler child got an init or a run frame, which it does not take; it \

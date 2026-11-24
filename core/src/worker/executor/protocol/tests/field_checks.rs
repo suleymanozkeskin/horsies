@@ -629,7 +629,7 @@ fn every_boot_failed_field_is_checked() {
 #[test]
 fn a_number_that_is_not_finite_is_not_json() {
     let decoded = decode_child_frame(
-        br#"{"kind":"ready","protocol":3,"pid":1,"rss_mb":NaN}"#,
+        br#"{"kind":"ready","protocol":4,"pid":1,"rss_mb":NaN}"#,
         Vec::new(),
     );
     assert!(

@@ -23,6 +23,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Literal, assert_never
 
 from horsies._core import CoreStopped, ForkedAfterCoreStart, RunWorkflowNode
@@ -185,7 +186,30 @@ class CoreStoppedBeforeStart:
     stopped: CoreStopped
 
 
-type RunReturn = SetRunning | StoppedBeforeRunning | CoreStoppedBeforeStart
+class CancelledBody(Enum):
+    """Whether the body of a run that an operator cancelled ran."""
+
+    RAN = 'RAN'
+    """The body ran and has ended; what it returned is dropped."""
+
+    NOT_STARTED = 'NOT_STARTED'
+    """The cancel came after the start write and before the body: the child
+    did not start the body."""
+
+
+@dataclass(frozen=True, slots=True)
+class RunCancelled:
+    """An operator cancel reached the run after its start write set the row
+    RUNNING at ``started_at``, and before the end of the run was fixed. The
+    cancel statement moved the row to history and recorded the attempt as
+    ``CANCELLED``, so what the body returned is dropped, and no finalizing
+    marker follows (the row is gone). ``body`` says whether the body ran."""
+
+    body: CancelledBody
+    started_at: datetime
+
+
+type RunReturn = SetRunning | StoppedBeforeRunning | CoreStoppedBeforeStart | RunCancelled
 """What the run of one task returned."""
 
 

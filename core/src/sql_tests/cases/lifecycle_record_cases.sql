@@ -284,9 +284,9 @@ SELECT lr_expect_check('attempts CHECK: no recorded_by',
     $q$SELECT lr_attempt('00000000-0000-7000-8000-0000000e0010', 1, 1, now(), now(), 1, now(), NULL, NULL,
         NULL, NULL)$q$,
     'horsies_task_attempts_phase_record_shape');
-SELECT lr_expect_check('attempts CHECK: a recorded_by outside WORKER and RECOVERY',
+SELECT lr_expect_check('attempts CHECK: a recorded_by outside WORKER, RECOVERY and CANCEL',
     $q$SELECT lr_attempt('00000000-0000-7000-8000-0000000e0010', 1, 1, now(), now(), 1, now(), NULL, NULL,
-        'CANCEL', NULL)$q$,
+        'OPERATOR', NULL)$q$,
     'horsies_task_attempts_phase_record_shape');
 SELECT lr_expect_check('attempts CHECK: WORKER with a last_seen_at',
     $q$SELECT lr_attempt('00000000-0000-7000-8000-0000000e0010', 1, 1, now(), now(), 1, now(), NULL, NULL,
@@ -726,7 +726,8 @@ SELECT lr_check(
       || 'null]],[1,3000,null]]'
 );
 
--- Moves that end an attempt with no row: the open record holds the claim facts of the live row.
+-- The cancel of a RUNNING task writes the attempt row before the move (migration 1003): the archive holds the
+-- CANCELLED attempt with the phase record of the cancel, and no open attempt.
 SELECT lr_task('00000000-0000-7000-8000-0000000e0411', 'RUNNING', 2, now() - interval '3 seconds');
 UPDATE horsies_tasks SET finalizing_at = now() - interval '100 milliseconds', finalizing_by_worker_id = 'w1'
 WHERE id = '00000000-0000-7000-8000-0000000e0411';
@@ -735,12 +736,18 @@ SELECT lr_check(
     (SELECT outcome FROM horsies_cancel_task('00000000-0000-7000-8000-0000000e0411', TRUE)) = 'APPLIED'
 );
 SELECT lr_check(
-    'move by cancel: the open attempt with its claims and its finalizing marker',
+    'move by cancel: the cancelled attempt with its claims and its finalizing marker, recorded by the cancel',
     (SELECT h.attempt_archive_version = 2
-                AND convert_from(h.attempt_snapshot, 'UTF8') = '[[],[2,' || lr_us(now() - interval '3 seconds')
-                    || ',' || lr_us(now() - interval '100 milliseconds') || ']]'
+                AND convert_from(h.attempt_snapshot, 'UTF8') = '[[[1,"CANCELLED",false,'
+                    || lr_us(now() - interval '500 milliseconds') || ',' || lr_us(now())
+                    || ',"TASK_CANCELLED","Cancelled via monitoring API",null,"w1","host-a",7,"worker-7",1,'
+                    || lr_us(now() - interval '1 minute') || ',' || lr_us(now() - interval '1 second') || ',2,'
+                    || lr_us(now() - interval '3 seconds') || ',null,'
+                    || lr_us(now() - interval '100 milliseconds') || ',"CANCEL",null]],null]'
          FROM horsies_task_history AS h WHERE h.task_id = '00000000-0000-7000-8000-0000000e0411')
 );
+
+-- Moves that end an attempt with no row: the open record holds the claim facts of the live row.
 SELECT lr_task('00000000-0000-7000-8000-0000000e0412', 'PENDING', 0, NULL);
 UPDATE horsies_tasks SET good_until = now() - interval '1 second' WHERE id = '00000000-0000-7000-8000-0000000e0412';
 SELECT lr_check(

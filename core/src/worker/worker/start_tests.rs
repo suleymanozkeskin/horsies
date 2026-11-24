@@ -322,6 +322,7 @@ async fn a_notification_wakes_the_claim_wait_and_the_drain_takes_the_burst() {
     let WorkerSubscriptions {
         claim_wakes,
         pings: _pings,
+        cancel_notices: _cancel_notices,
     } = worker
         .try_connect_listener()
         .await

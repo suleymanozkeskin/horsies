@@ -12,6 +12,7 @@
 //! | `WorkerFailure` | the failed attempt, `BROKER_ERROR`, no retry |
 //! | `TimedOut`, `KilledForLoop`, `Crashed` | the failed attempt with `TASK_TIMEOUT`, the loop code or `WORKER_CRASHED`, the retry the policy admits, at the placement of the end, under the claimed-row rule `RELEASE`: a row that is still CLAIMED goes back to the queue in the same statement |
 //! | `EndUnknown` | none: stale recovery or the lease decides the row |
+//! | `Cancelled` | none: the cancel statement (`horsies_cancel_task`) wrote the `CANCELLED` attempt and moved the row ([`Settlement::RecordedByCancel`]) |
 //!
 //! A database error never decides between a retry and a failure: the write
 //! is sent again, at most the retries of its [`WriteStage`]. After the last
@@ -31,8 +32,8 @@ use serde_json::value::RawValue;
 use uuid::Uuid;
 
 use super::dispatch::{
-    AttemptEnd, ClaimedTask, LoopKillCode, NotRunCause, Settlement, TerminalState, TimeoutCancel,
-    TimeoutSeen, WrittenEnd,
+    AttemptEnd, CancelledEnd, ClaimedTask, LoopKillCode, NotRunCause, Settlement, TerminalState,
+    TimeoutCancel, TimeoutSeen, WrittenEnd,
 };
 use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryPlacement, RetryRequest,
@@ -206,6 +207,7 @@ pub enum ReadEnd {
     EndUnknown {
         pid: ProcessId,
     },
+    Cancelled(CancelledEnd),
 }
 
 /// What the lifecycle points read of an attempt end: the end, with a
@@ -233,6 +235,8 @@ pub enum EndView<'a> {
     Crashed,
     /// The child was killed and its exit was not seen.
     EndUnknown { pid: ProcessId },
+    /// An operator cancelled the task while it ran.
+    Cancelled(CancelledEnd),
 }
 
 impl ReadEnd {
@@ -250,6 +254,7 @@ impl ReadEnd {
             Self::KilledForLoop { code, .. } => EndView::KilledForLoop(*code),
             Self::Crashed { .. } => EndView::Crashed,
             Self::EndUnknown { pid } => EndView::EndUnknown { pid: *pid },
+            Self::Cancelled(end) => EndView::Cancelled(*end),
         }
     }
 }
@@ -667,6 +672,7 @@ pub fn read_attempt_end(
         },
         AttemptEnd::Crashed { reason } => ReadEnd::Crashed { reason },
         AttemptEnd::EndUnknown { pid } => ReadEnd::EndUnknown { pid },
+        AttemptEnd::Cancelled(end) => ReadEnd::Cancelled(end),
     }
 }
 
@@ -793,6 +799,16 @@ impl OutcomeWriter {
                 );
                 Settlement::LeftToRecovery
             }
+            ReadEnd::Cancelled(end) => {
+                tracing::debug!(
+                    task_id = %task.task_id,
+                    attempt = task.retry.attempt().get(),
+                    trace_id = task.trace_id.log_field(),
+                    end = ?end,
+                    "an operator cancelled the task while it ran; the cancel recorded its attempt",
+                );
+                Settlement::RecordedByCancel
+            }
             ReadEnd::StoppedBeforeRunning(reason) => self.after_stop(task, reason).await,
             ReadEnd::Result { result, .. } => {
                 self.phase_one(
@@ -888,6 +904,7 @@ impl OutcomeWriter {
             Settlement::Written(_)
             | Settlement::NothingOwed
             | Settlement::NotHeld
+            | Settlement::RecordedByCancel
             | Settlement::LeftToRecovery
             | Settlement::WriteFailed => return settled,
         }
