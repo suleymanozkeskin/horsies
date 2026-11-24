@@ -7,37 +7,53 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type PointerEvent,
   type RefObject,
 } from 'react';
 
+import { Hint } from '@/components/ui/hint';
 import { useDrawTime, type ReadClock } from '@/hooks/use-draw-time';
 import { useWorkflowRun } from '@/hooks/use-workflow-run';
 import { assertNever } from '@/lib/exhaustive';
-import { clockText } from '@/lib/clock-text';
 import { formatInstant, formatMilliseconds } from '@/lib/format-duration';
 import { statusColorVar, statusLabel } from '@/lib/status-utils';
 import { instantMs } from '@/lib/time-text';
 import type {
   NodeTiming,
+  PauseInterval,
   RunCoverage,
   TimingSegment,
   UnavailableReason,
 } from '@/types/timing';
 import type { WorkflowNode, WorkflowRunDetail } from '@/types/workflows';
 
-import { phaseFill, phaseInk, phaseTrack, type PhaseKey } from './phase';
-import { phaseStripText } from './phase-strip';
+import { TimingLegend, type LegendMark } from './legend';
+import {
+  FloatingTooltip,
+  nodeEndText,
+  NodeTooltip,
+  type NodeFocus,
+  type PauseFocus,
+} from './node-tooltip';
+import {
+  PHASE_ORDER,
+  phaseFill,
+  phaseInk,
+  phaseTrack,
+  phaseWeight,
+  type PhaseKey,
+} from './phase';
 import {
   activeSpan,
   criticalMembership,
   criticalPath,
+  nodeTime,
   type CriticalMembership,
 } from './run-timing';
 import {
   axisTicks,
   boxOf,
   endpointMark,
-  nodeWallTime,
   pauseSpan,
   runAxis,
   segmentSpan,
@@ -54,15 +70,10 @@ import {
   type RowWindow,
 } from './timeline-window';
 import {
-  conflictText,
-  endpointText,
+  nodeTimeText,
+  nodeTimingText,
   runCoverageText,
-  segmentDurationText,
-  segmentEndText,
-  segmentPhaseText,
-  segmentSourceText,
   unavailableReasonText,
-  wallTimeText,
 } from './timing-text';
 
 interface WorkflowTimelineProps {
@@ -78,15 +89,18 @@ const NO_STATUS_FILTER: ReadonlySet<string> = new Set();
 
 /** Labels on the time axis, the start and the end included. */
 const AXIS_TICK_COUNT = 5;
-/** A segment shorter than one pixel still shows; its times do not change. */
-const MIN_SEGMENT_WIDTH_PX = 1;
+/** A segment narrower than this is not drawn: at the scale of the run axis
+ * it is less than a pixel. Its time is a number in the tooltip of its row. */
+const MIN_DRAWN_SEGMENT_PX = 1;
+/** A marked segment (a long engine step, a gap of the record) keeps this
+ * width, so a long step on a long run axis stays visible. */
+const MARKED_SEGMENT_MIN_PX = 3;
+/** A pause band keeps one pixel on a long run axis. */
+const MIN_PAUSE_BAND_PX = 1;
 /** Estimated width of one character of a segment label (9px type), and the
  * padding around the label: a label shows only when it fits its segment. */
 const LABEL_CHAR_WIDTH_PX = 5.6;
 const LABEL_PADDING_PX = 6;
-/** Offset of the shared tooltip from the pointer, and its widest box. */
-const TOOLTIP_OFFSET_PX = 12;
-const TOOLTIP_MAX_WIDTH_PX = 288;
 
 const nodeLabel = (node: WorkflowNode): string =>
   node.node_id ?? node.task_name ?? `#${node.task_index}`;
@@ -126,14 +140,84 @@ export function segmentLabel(
   }
 }
 
+/** Whether a segment is drawn on the run axis, and its smallest width. */
+export type SegmentDrawing = { kind: 'drawn'; minWidthPx: number } | { kind: 'not_drawn' };
+
+/**
+ * The drawing of a segment of `durationMs` that covers `widthPct` of the
+ * track. The axis is linear: a segment is as wide as its time. A segment
+ * below one pixel is not drawn; a marked one keeps a small width. Before the
+ * track has a width, every segment is drawn at its own width.
+ */
+export function segmentDrawing(
+  key: PhaseKey,
+  durationMs: number,
+  widthPct: number,
+  track: TrackWidth
+): SegmentDrawing {
+  const weight = phaseWeight(key, durationMs);
+  switch (weight.kind) {
+    case 'marked':
+      return { kind: 'drawn', minWidthPx: MARKED_SEGMENT_MIN_PX };
+    case 'main':
+    case 'plain':
+    case 'quiet':
+      break;
+    default:
+      return assertNever(weight, 'phase weight');
+  }
+  switch (track.kind) {
+    case 'unmeasured':
+      return { kind: 'drawn', minWidthPx: 0 };
+    case 'measured':
+      return (widthPct / 100) * track.px >= MIN_DRAWN_SEGMENT_PX
+        ? { kind: 'drawn', minWidthPx: 0 }
+        : { kind: 'not_drawn' };
+    default:
+      return assertNever(track, 'track width');
+  }
+}
+
+/** The phases that the timeline draws at the width of its track, in
+ * lifecycle order: the fills that its key explains. A phase whose every
+ * segment is below one pixel is not in the key. */
+export function drawnPhases(
+  nodes: readonly WorkflowNode[],
+  axis: TimeAxis,
+  drawAtMs: number,
+  track: TrackWidth
+): PhaseKey[] {
+  const drawn = new Set<PhaseKey>();
+  for (const node of nodes) {
+    for (const segment of segmentsOf(node.timing)) {
+      const key = segment.phase.kind;
+      if (drawn.has(key)) {
+        continue;
+      }
+      const span = segmentSpan(segment, drawAtMs);
+      const drawing = segmentDrawing(key, span.endMs - span.startMs, boxOf(span, axis).widthPct, track);
+      if (drawing.kind === 'drawn') {
+        drawn.add(key);
+      }
+    }
+  }
+  return PHASE_ORDER.filter(key => drawn.has(key));
+}
+
 /** What the rows are drawn against: the axis of a composed run, or the
  * reason that every node of the run is unavailable. */
+/** One pause of the run with its box on the axis. */
+interface PauseBand {
+  pause: PauseInterval;
+  box: AxisBox;
+}
+
 type TimelineFrame =
   | {
       kind: 'composed';
       axis: TimeAxis;
       ticks: AxisTick[];
-      pauses: AxisBox[];
+      pauses: PauseBand[];
       coverage: RunCoverage;
     }
   | { kind: 'unavailable'; reason: UnavailableReason; capturedSinceMs: number };
@@ -147,7 +231,7 @@ function timelineFrame(detail: WorkflowRunDetail, drawAtMs: number): TimelineFra
         kind: 'composed',
         axis,
         ticks: axisTicks(axis, AXIS_TICK_COUNT),
-        pauses: timing.pauses.map(pause => boxOf(pauseSpan(pause, drawAtMs), axis)),
+        pauses: timing.pauses.map(pause => ({ pause, box: boxOf(pauseSpan(pause, drawAtMs), axis) })),
         coverage: timing.coverage,
       };
     }
@@ -162,22 +246,13 @@ function timelineFrame(detail: WorkflowRunDetail, drawAtMs: number): TimelineFra
   }
 }
 
-/** The right-column text of a row: the wall time of the node. */
-function wallText(timing: NodeTiming, drawAtMs: number): string {
-  switch (timing.kind) {
-    case 'exact':
-    case 'partial':
-      return wallTimeText(nodeWallTime(timing.segments, timing.endpoint, drawAtMs));
-    case 'unavailable':
-    case 'inconsistent':
-      return '—';
-    default:
-      return assertNever(timing, 'node timing');
-  }
-}
+/** The right-column text of a row: the time of the node without its
+ * dependency wait. */
+const timeText = (timing: NodeTiming, drawAtMs: number): string =>
+  nodeTimeText(nodeTime(timing, drawAtMs));
 
-/** The accessible name of a row: node, status, coverage, phase times, wall
- * time and endpoint. */
+/** The accessible name of a row: node, status, coverage, phase times, node
+ * time and end. */
 function rowAccessibleName(
   node: WorkflowNode,
   frame: TimelineFrame,
@@ -198,12 +273,12 @@ function rowAccessibleName(
     case 'exact':
     case 'partial':
       return (
-        `${head}, ${phaseStripText(timing, drawAtMs)}, ` +
-        `wall ${wallText(timing, drawAtMs)}, ${endpointText(timing.endpoint)}`
+        `${head}, ${nodeTimingText(timing, drawAtMs)}, ` +
+        `node time ${timeText(timing, drawAtMs)}, ${nodeEndText(timing.endpoint)}`
       );
     case 'unavailable':
     case 'inconsistent':
-      return `${head}, ${phaseStripText(timing, drawAtMs)}`;
+      return `${head}, ${nodeTimingText(timing, drawAtMs)}`;
     default:
       return assertNever(timing, 'node timing');
   }
@@ -220,11 +295,20 @@ function criticalSuffix(membership: CriticalMembership): string {
   }
 }
 
-/** The segment under the pointer or the keyboard cursor, where the shared
- * tooltip shows it. Keyed by task index, which a refetch keeps. */
+/** What the pointer or the keyboard cursor is on, where the shared tooltip
+ * shows it: a mark of a row (a segment, the end marker, the critical path
+ * line, the track) and the pause of the run at that time. Keyed by task
+ * index, which a refetch keeps. */
 type Inspection =
   | { kind: 'none' }
-  | { kind: 'segment'; taskIndex: number; segmentIndex: number; xPx: number; yPx: number };
+  | {
+      kind: 'row';
+      taskIndex: number;
+      focus: NodeFocus;
+      pause: PauseFocus;
+      xPx: number;
+      yPx: number;
+    };
 
 /** A row to focus once it is rendered (a keyboard move can scroll to it). */
 type PendingFocus = { kind: 'none' } | { kind: 'row'; index: number };
@@ -243,12 +327,15 @@ const segmentsOf = (timing: NodeTiming): readonly TimingSegment[] => {
 };
 
 /**
- * Phase timeline of one run: one row per node in task-index order on one run
- * axis. Each row stacks the phase segments of the node in time order (a retry
- * repeats its segments), marks the terminal status as an endpoint, and shows
- * the wall time of the node on the right. Pauses are bands over every row. A
- * node whose timing is unavailable or inconsistent shows a hatched row with
- * its label. Open segments grow on a one-second local clock.
+ * Phase timeline of one run: one row per node in task-index order on one
+ * linear run axis. The axis shows when each node ran: order, overlap and the
+ * waits that are long at the scale of the run. Each row stacks the phase
+ * segments of the node in time order (a retry repeats its segments), marks
+ * the terminal status as an endpoint, and shows the time of the node without
+ * its dependency wait on the right. A segment below one pixel is not drawn:
+ * the tooltip of the row gives each phase as a number. Pauses are bands over
+ * every row. A node whose timing is unavailable or inconsistent shows a
+ * hatched row with its label. Open segments grow on a one-second local clock.
  */
 export function WorkflowTimeline({
   workflowId,
@@ -331,6 +418,13 @@ export function TimelineView({
   return (
     <div className="flex h-full flex-col" onPointerLeave={hide}>
       <RunTimingBanner frame={frame} />
+      <TimelineKey
+        nodes={nodes}
+        frame={frame}
+        drawAtMs={drawAtMs}
+        trackWidth={trackWidth}
+        hasCriticalPath={path.kind === 'path'}
+      />
       <TimelineHeader frame={frame} trackRef={trackRef} />
       <TimelineRows
         nodes={nodes}
@@ -345,14 +439,67 @@ export function TimelineView({
         onInspect={setInspection}
         tooltipId={tooltipId}
       />
-      <SegmentTooltip
+      <RowTooltip
         id={tooltipId}
+        workflowId={detail.run.id}
         inspection={inspection}
         nodes={nodes}
         drawAtMs={drawAtMs}
+        membershipOf={taskIndex => criticalMembership(path, taskIndex)}
       />
     </div>
   );
+}
+
+/** The key to the drawing of the timeline: the fill of each phase that it
+ * draws at this scale, then its marks. */
+function TimelineKey({
+  nodes,
+  frame,
+  drawAtMs,
+  trackWidth,
+  hasCriticalPath,
+}: {
+  nodes: readonly WorkflowNode[];
+  frame: TimelineFrame;
+  drawAtMs: number;
+  trackWidth: TrackWidth;
+  hasCriticalPath: boolean;
+}) {
+  const axis = frame.kind === 'composed' ? frame.axis : null;
+  const startMs = axis === null ? 0 : axis.startMs;
+  const spanMs = axis === null ? 0 : axis.spanMs;
+  const phases = useMemo(
+    () => (spanMs > 0 ? drawnPhases(nodes, { startMs, spanMs }, drawAtMs, trackWidth) : []),
+    [nodes, startMs, spanMs, drawAtMs, trackWidth]
+  );
+  const hasEnd = useMemo(
+    () =>
+      nodes.some(
+        node =>
+          (node.timing.kind === 'exact' || node.timing.kind === 'partial') &&
+          node.timing.endpoint.kind === 'terminal'
+      ),
+    [nodes]
+  );
+  switch (frame.kind) {
+    case 'unavailable':
+      return null;
+    case 'composed': {
+      const marks: LegendMark[] = [
+        ...(frame.pauses.length > 0 ? (['paused'] as const) : []),
+        ...(hasEnd ? (['end'] as const) : []),
+        ...(hasCriticalPath ? (['critical_row'] as const) : []),
+      ];
+      return (
+        <div className="border-b border-border px-3 py-1.5">
+          <TimingLegend phases={phases} marks={marks} />
+        </div>
+      );
+    }
+    default:
+      return assertNever(frame, 'timeline frame');
+  }
 }
 
 function RunTimingBanner({ frame }: { frame: TimelineFrame }) {
@@ -442,7 +589,12 @@ function TimelineHeader({
             </span>
           ))}
       </span>
-      <span className="w-16 shrink-0 text-right">wall</span>
+      <Hint
+        text="The time of each node without its dependency wait: from the time it could start to its end."
+        className="w-16 shrink-0 whitespace-nowrap text-right"
+      >
+        node time
+      </Hint>
     </div>
   );
 }
@@ -522,6 +674,22 @@ function useRowWindow(rowCount: number): RowWindowControls {
   return { scrollRef, rowRange, measure, focusRow };
 }
 
+/** The segment that the inspection is on in the row of `taskIndex`. */
+type SegmentCursor = { kind: 'on_segment'; index: number } | { kind: 'off_segments' };
+
+function segmentCursor(inspection: Inspection, taskIndex: number): SegmentCursor {
+  switch (inspection.kind) {
+    case 'none':
+      return { kind: 'off_segments' };
+    case 'row':
+      return inspection.taskIndex === taskIndex && inspection.focus.kind === 'segment'
+        ? { kind: 'on_segment', index: inspection.focus.segmentIndex }
+        : { kind: 'off_segments' };
+    default:
+      return assertNever(inspection, 'inspection');
+  }
+}
+
 /** The inspection after an arrow key on a row: the next (`step` 1) or the
  * previous (`step` -1) segment of the row, placed under the segment. */
 function keyboardInspection(
@@ -534,22 +702,71 @@ function keyboardInspection(
   if (count === 0) {
     return inspection;
   }
-  const current =
-    inspection.kind === 'segment' && inspection.taskIndex === node.task_index
-      ? inspection.segmentIndex
-      : step > 0
-        ? -1
-        : count;
+  const cursor = segmentCursor(inspection, node.task_index);
+  const current = cursor.kind === 'on_segment' ? cursor.index : step > 0 ? -1 : count;
   const segmentIndex = Math.min(Math.max(current + step, 0), count - 1);
   const box = row
     .querySelector(`[data-segment-index="${segmentIndex}"]`)
     ?.getBoundingClientRect();
   return {
-    kind: 'segment',
+    kind: 'row',
     taskIndex: node.task_index,
-    segmentIndex,
+    focus: { kind: 'segment', segmentIndex },
+    pause: { kind: 'not_in_pause' },
     xPx: box === undefined ? 0 : box.left + box.width / 2,
     yPx: box === undefined ? 0 : box.bottom,
+  };
+}
+
+/** The mark of a row under the pointer, from the element the pointer is on:
+ * the end marker, the critical path line, a segment, else the track. */
+function focusUnder(target: EventTarget): NodeFocus {
+  if (!(target instanceof Element)) {
+    return { kind: 'node' };
+  }
+  if (target.closest('[data-endpoint]') !== null) {
+    return { kind: 'endpoint' };
+  }
+  if (target.closest('[data-critical-line]') !== null) {
+    return { kind: 'critical_line' };
+  }
+  const segment = target.closest('[data-segment-index]');
+  const index = segment === null ? Number.NaN : Number(segment.getAttribute('data-segment-index'));
+  return Number.isInteger(index) ? { kind: 'segment', segmentIndex: index } : { kind: 'node' };
+}
+
+/** The pause of the run at the pointer: the pause whose band holds the
+ * position `pct` of the track. */
+function pauseAt(frame: TimelineFrame, pct: number): PauseFocus {
+  switch (frame.kind) {
+    case 'unavailable':
+      return { kind: 'not_in_pause' };
+    case 'composed': {
+      const band = frame.pauses.find(
+        candidate => pct >= candidate.box.leftPct && pct <= candidate.box.leftPct + candidate.box.widthPct
+      );
+      return band === undefined ? { kind: 'not_in_pause' } : { kind: 'in_pause', pause: band.pause };
+    }
+    default:
+      return assertNever(frame, 'timeline frame');
+  }
+}
+
+/** The inspection of a pointer on the track of a row. */
+function pointerInspection(
+  event: PointerEvent<HTMLElement>,
+  taskIndex: number,
+  frame: TimelineFrame
+): Inspection {
+  const track = event.currentTarget.getBoundingClientRect();
+  const pct = track.width > 0 ? ((event.clientX - track.left) / track.width) * 100 : -1;
+  return {
+    kind: 'row',
+    taskIndex,
+    focus: focusUnder(event.target),
+    pause: pauseAt(frame, pct),
+    xPx: event.clientX,
+    yPx: event.clientY,
   };
 }
 
@@ -652,9 +869,7 @@ function TimelineRows(props: TimelineRowsProps) {
               membership={props.membershipOf(node.task_index)}
               selected={node.task_index === props.selectedIndex}
               dimmed={statusFilter.size > 0 && !statusFilter.has(node.node_status)}
-              described={
-                inspection.kind === 'segment' && inspection.taskIndex === node.task_index
-              }
+              described={inspection.kind === 'row' && inspection.taskIndex === node.task_index}
               tooltipId={props.tooltipId}
               onSelect={() => props.onSelectNode(node)}
               onKeyDown={event => onRowKeyDown(event, node, rowRange.start + offset)}
@@ -678,7 +893,7 @@ interface TimelineRowProps {
   membership: CriticalMembership;
   selected: boolean;
   dimmed: boolean;
-  /** The shared tooltip shows a segment of this row. */
+  /** The shared tooltip shows this row. */
   described: boolean;
   tooltipId: string;
   onSelect: () => void;
@@ -686,7 +901,8 @@ interface TimelineRowProps {
   onInspect: (inspection: Inspection) => void;
 }
 
-/** One node: label, track, wall time. Its accessible name holds its timing. */
+/** One node: label, track, node time. Its accessible name holds its timing.
+ * The pointer on the track shows the tooltip of the row. */
 function TimelineRow({
   node,
   index,
@@ -725,19 +941,25 @@ function TimelineRow({
             : 'flex h-full w-full items-center gap-2 border-b border-border px-3 text-left hover:bg-glass-surface-strong focus-visible:outline-2 focus-visible:outline-ring'
         }
       >
-        <RowLabel node={node} membership={membership} />
-        <span className="relative h-4 min-w-0 flex-1">
+        <span className="w-40 shrink-0 truncate text-xs font-medium" title={nodeLabel(node)}>
+          {nodeLabel(node)}
+        </span>
+        <span
+          data-row-track
+          className="relative h-4 min-w-0 flex-1"
+          onPointerMove={event => onInspect(pointerInspection(event, node.task_index, frame))}
+          onPointerLeave={() => onInspect({ kind: 'none' })}
+        >
           <RowTrack
             node={node}
             frame={frame}
             drawAtMs={drawAtMs}
             trackWidth={trackWidth}
             membership={membership}
-            onInspect={onInspect}
           />
         </span>
         <span className="w-16 shrink-0 text-right font-mono text-10 text-muted-foreground">
-          {frame.kind === 'composed' ? wallText(node.timing, drawAtMs) : '—'}
+          {frame.kind === 'composed' ? timeText(node.timing, drawAtMs) : '—'}
         </span>
       </button>
     </li>
@@ -767,9 +989,9 @@ function TrackOverlay({ frame }: { frame: TimelineFrame }) {
                 data-pause-band
                 className="absolute inset-y-0"
                 style={{
-                  left: `${band.leftPct}%`,
-                  width: `${band.widthPct}%`,
-                  minWidth: MIN_SEGMENT_WIDTH_PX,
+                  left: `${band.box.leftPct}%`,
+                  width: `${band.box.widthPct}%`,
+                  minWidth: MIN_PAUSE_BAND_PX,
                   background: 'var(--pause-band)',
                 }}
               />
@@ -783,12 +1005,14 @@ function TrackOverlay({ frame }: { frame: TimelineFrame }) {
   }
 }
 
-function HatchedRow({ text, title, fill }: { text: string; title: string; fill: string }) {
+/** A row with no segments: the label says why, and the tooltip of the row
+ * gives the reason. */
+function HatchedRow({ text, fill }: { text: string; fill: string }) {
   return (
     <span
-      className="absolute inset-0 flex items-center rounded-sm px-1.5 text-9 uppercase tracking-wide text-muted-foreground"
+      data-hatched-row
+      className="absolute inset-0 flex items-center rounded-sm px-1.5 text-10 text-muted-foreground"
       style={{ background: fill }}
-      title={title}
     >
       {text}
     </span>
@@ -803,34 +1027,24 @@ function RowTrack({
   drawAtMs,
   trackWidth,
   membership,
-  onInspect,
 }: {
   node: WorkflowNode;
   frame: TimelineFrame;
   drawAtMs: number;
   trackWidth: TrackWidth;
   membership: CriticalMembership;
-  onInspect: (inspection: Inspection) => void;
 }) {
   switch (frame.kind) {
     case 'unavailable':
-      return (
-        <HatchedRow
-          text="Timing unavailable"
-          title={unavailableReasonText(frame.reason)}
-          fill="var(--timing-unavailable-hatch)"
-        />
-      );
+      return <HatchedRow text="Timing unavailable" fill="var(--timing-unavailable-hatch)" />;
     case 'composed':
       return (
         <NodeTrack
-          taskIndex={node.task_index}
           timing={node.timing}
           axis={frame.axis}
           drawAtMs={drawAtMs}
           trackWidth={trackWidth}
           membership={membership}
-          onInspect={onInspect}
         />
       );
     default:
@@ -839,82 +1053,38 @@ function RowTrack({
 }
 
 function NodeTrack({
-  taskIndex,
   timing,
   axis,
   drawAtMs,
   trackWidth,
   membership,
-  onInspect,
 }: {
-  taskIndex: number;
   timing: NodeTiming;
   axis: TimeAxis;
   drawAtMs: number;
   trackWidth: TrackWidth;
   membership: CriticalMembership;
-  onInspect: (inspection: Inspection) => void;
 }) {
   switch (timing.kind) {
     case 'unavailable':
-      return (
-        <HatchedRow
-          text="Timing unavailable"
-          title={unavailableReasonText(timing.reason)}
-          fill="var(--timing-unavailable-hatch)"
-        />
-      );
+      return <HatchedRow text="Timing unavailable" fill="var(--timing-unavailable-hatch)" />;
     case 'inconsistent':
-      return (
-        <HatchedRow
-          text="Timing inconsistent"
-          title={conflictText(timing.conflict)}
-          fill="var(--timing-inconsistent-hatch)"
-        />
-      );
+      return <HatchedRow text="Timing inconsistent" fill="var(--timing-inconsistent-hatch)" />;
     case 'exact':
     case 'partial': {
       const mark = endpointMark(timing.endpoint, axis);
       return (
         <>
-          {timing.segments.map((segment, segmentIndex) => {
-            const span = segmentSpan(segment, drawAtMs);
-            const box = boxOf(span, axis);
-            return (
-              <span
-                key={segmentIndex}
-                data-segment-index={segmentIndex}
-                data-phase={segment.phase.kind}
-                data-end={segment.end.kind}
-                className="absolute inset-y-0"
-                style={{
-                  left: `${box.leftPct}%`,
-                  width: `${box.widthPct}%`,
-                  minWidth: MIN_SEGMENT_WIDTH_PX,
-                }}
-                onPointerMove={event =>
-                  onInspect({
-                    kind: 'segment',
-                    taskIndex,
-                    segmentIndex,
-                    xPx: event.clientX,
-                    yPx: event.clientY,
-                  })
-                }
-                onPointerLeave={() => onInspect({ kind: 'none' })}
-              >
-                <SegmentFill
-                  phase={segment.phase.kind}
-                  label={segmentLabel(
-                    segment.phase.kind,
-                    span.endMs - span.startMs,
-                    box.widthPct,
-                    trackWidth
-                  )}
-                />
-              </span>
-            );
-          })}
+          {timing.segments.map((segment, segmentIndex) => (
+            <SegmentBox
+              key={segmentIndex}
+              segment={segment}
+              segmentIndex={segmentIndex}
+              axis={axis}
+              drawAtMs={drawAtMs}
+              trackWidth={trackWidth}
+            />
+          ))}
           <CriticalLine timing={timing} axis={axis} drawAtMs={drawAtMs} membership={membership} />
           <EndpointMarker mark={mark} />
         </>
@@ -922,6 +1092,64 @@ function NodeTrack({
     }
     default:
       return assertNever(timing, 'node timing');
+  }
+}
+
+/** One segment at its time on the axis. The box is always in the row, so the
+ * keyboard cursor finds its place; its fill is drawn only when the segment
+ * is wide enough to see. */
+function SegmentBox({
+  segment,
+  segmentIndex,
+  axis,
+  drawAtMs,
+  trackWidth,
+}: {
+  segment: TimingSegment;
+  segmentIndex: number;
+  axis: TimeAxis;
+  drawAtMs: number;
+  trackWidth: TrackWidth;
+}) {
+  const span = segmentSpan(segment, drawAtMs);
+  const box = boxOf(span, axis);
+  const durationMs = span.endMs - span.startMs;
+  const phase = segment.phase.kind;
+  const drawing = segmentDrawing(phase, durationMs, box.widthPct, trackWidth);
+  switch (drawing.kind) {
+    case 'not_drawn':
+      return (
+        <span
+          data-segment-index={segmentIndex}
+          data-phase={phase}
+          data-end={segment.end.kind}
+          data-drawn="false"
+          className="pointer-events-none absolute inset-y-0"
+          style={{ left: `${box.leftPct}%`, width: `${box.widthPct}%` }}
+        />
+      );
+    case 'drawn':
+      return (
+        <span
+          data-segment-index={segmentIndex}
+          data-phase={phase}
+          data-end={segment.end.kind}
+          data-drawn="true"
+          className="absolute inset-y-0"
+          style={{
+            left: `${box.leftPct}%`,
+            width: `${box.widthPct}%`,
+            minWidth: drawing.minWidthPx,
+          }}
+        >
+          <SegmentFill
+            phase={phase}
+            label={segmentLabel(phase, durationMs, box.widthPct, trackWidth)}
+          />
+        </span>
+      );
+    default:
+      return assertNever(drawing, 'segment drawing');
   }
 }
 
@@ -973,7 +1201,8 @@ function SegmentLabelText({ phase, label }: { phase: PhaseKey; label: SegmentLab
 
 /** The line under the active span of a node on the critical path: from the
  * end of its dependency wait to its end. The lines of the path form a chain
- * of steps across the rows. */
+ * of steps across the rows. The line has a taller box for the pointer, and
+ * the tooltip of the row says what it is. */
 function CriticalLine({
   timing,
   axis,
@@ -1002,14 +1231,14 @@ function CriticalLine({
       return (
         <span
           data-critical-line
-          className="pointer-events-none absolute -bottom-1 h-0.5 rounded-full"
-          style={{
-            left: `${box.leftPct}%`,
-            width: `${box.widthPct}%`,
-            minWidth: MIN_SEGMENT_WIDTH_PX,
-            background: 'var(--critical-path)',
-          }}
-        />
+          className="absolute -bottom-1.5 flex h-2 items-center"
+          style={{ left: `${box.leftPct}%`, width: `${box.widthPct}%`, minWidth: MIN_DRAWN_SEGMENT_PX }}
+        >
+          <span
+            className="h-0.5 w-full rounded-full"
+            style={{ background: 'var(--critical-path)' }}
+          />
+        </span>
       );
     }
     default:
@@ -1017,32 +1246,8 @@ function CriticalLine({
   }
 }
 
-/** The node name; a node on the critical path has a mark before it. */
-function RowLabel({ node, membership }: { node: WorkflowNode; membership: CriticalMembership }) {
-  switch (membership) {
-    case 'on_path':
-      return (
-        <span
-          className="flex w-40 shrink-0 items-center gap-1.5 text-xs font-semibold"
-          title={`${nodeLabel(node)}: on the critical path, the chain of nodes whose end times decided the end of the run`}
-        >
-          <span className="h-3 w-0.5 shrink-0 rounded-full" style={{ background: 'var(--critical-path)' }} aria-hidden />
-          <span className="min-w-0 truncate">{nodeLabel(node)}</span>
-        </span>
-      );
-    case 'off_path':
-      return (
-        <span className="flex w-40 shrink-0 items-center gap-1.5 text-xs font-medium" title={nodeLabel(node)}>
-          <span className="h-3 w-0.5 shrink-0" aria-hidden />
-          <span className="min-w-0 truncate">{nodeLabel(node)}</span>
-        </span>
-      );
-    default:
-      return assertNever(membership, 'critical membership');
-  }
-}
-
-/** The terminal status of a node: a marker at its time, not a duration. */
+/** The terminal status of a node: a marker at its time, not a duration. The
+ * tooltip of the row names the status and the time. */
 function EndpointMarker({ mark }: { mark: EndpointMark }) {
   switch (mark.kind) {
     case 'terminal':
@@ -1051,7 +1256,6 @@ function EndpointMarker({ mark }: { mark: EndpointMark }) {
           data-endpoint={mark.status}
           className="absolute top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rotate-45 border border-card"
           style={{ left: `${mark.pct}%`, background: statusColorVar(mark.status) }}
-          title={`${statusLabel(mark.status)} at ${formatInstant(mark.atMs)}`}
         />
       );
     case 'not_terminal':
@@ -1061,61 +1265,45 @@ function EndpointMarker({ mark }: { mark: EndpointMark }) {
   }
 }
 
-/** The shared tooltip of one segment: its phase and duration, then its
- * source, start and end (times of day). */
-function SegmentTooltip({
+/** The shared tooltip of the row under the pointer or the keyboard cursor:
+ * the node, the mark under the cursor, and each phase of the node as a
+ * number. */
+function RowTooltip({
   id,
+  workflowId,
   inspection,
   nodes,
   drawAtMs,
+  membershipOf,
 }: {
   id: string;
+  workflowId: string;
   inspection: Inspection;
   nodes: readonly WorkflowNode[];
   drawAtMs: number;
+  membershipOf: (taskIndex: number) => CriticalMembership;
 }) {
-  if (inspection.kind === 'none') {
-    return null;
+  switch (inspection.kind) {
+    case 'none':
+      return null;
+    case 'row': {
+      const node = nodes.find(candidate => candidate.task_index === inspection.taskIndex);
+      // A refetch can remove the node under the cursor.
+      return node === undefined ? null : (
+        <FloatingTooltip id={id} xPx={inspection.xPx} yPx={inspection.yPx}>
+          <NodeTooltip
+            workflowId={workflowId}
+            node={node}
+            drawAtMs={drawAtMs}
+            membership={membershipOf(node.task_index)}
+            focus={inspection.focus}
+            pause={inspection.pause}
+            facts={[]}
+          />
+        </FloatingTooltip>
+      );
+    }
+    default:
+      return assertNever(inspection, 'inspection');
   }
-  const node = nodes.find(candidate => candidate.task_index === inspection.taskIndex);
-  const segment =
-    node === undefined ? undefined : segmentsOf(node.timing)[inspection.segmentIndex];
-  if (segment === undefined) {
-    // A refetch removed the segment under the cursor.
-    return null;
-  }
-  const span = segmentSpan(segment, drawAtMs);
-  const maxLeft = window.innerWidth - TOOLTIP_MAX_WIDTH_PX - TOOLTIP_OFFSET_PX;
-  const left = Math.max(Math.min(inspection.xPx + TOOLTIP_OFFSET_PX, maxLeft), 0);
-  const top = inspection.yPx + TOOLTIP_OFFSET_PX;
-  return (
-    <div
-      id={id}
-      role="tooltip"
-      className="pointer-events-none fixed z-50 rounded-md border border-border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md"
-      style={{ left, top, maxWidth: TOOLTIP_MAX_WIDTH_PX }}
-    >
-      <div className="flex items-center gap-1.5 font-medium">
-        <span
-          className="inline-block h-2.5 w-3 shrink-0 rounded-sm"
-          style={{ background: phaseFill(segment.phase.kind) }}
-          aria-hidden
-        />
-        {segmentPhaseText(segment)}
-        <span className="ml-auto pl-3 font-mono">
-          {segmentDurationText(segment.end, span.endMs - span.startMs)}
-        </span>
-      </div>
-      <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-muted-foreground">
-        <dt>source</dt>
-        <dd className="text-popover-foreground">{segmentSourceText(segment.source)}</dd>
-        <dt>start</dt>
-        <dd className="font-mono text-popover-foreground">{clockText(span.startMs)}</dd>
-        <dt>end</dt>
-        <dd className="font-mono text-popover-foreground">
-          {segment.end.kind === 'open' ? segmentEndText(segment.end) : clockText(span.endMs)}
-        </dd>
-      </dl>
-    </div>
-  );
 }

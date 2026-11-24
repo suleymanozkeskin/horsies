@@ -5,10 +5,11 @@ import {
   boxOf,
   endpointMark,
   nodeTimingIsOpen,
-  nodeWallTime,
   pauseSpan,
   phaseComposition,
+  phaseTotals,
   runAxis,
+  segmentInterval,
   segmentSpan,
   type TimeAxis,
 } from '@/components/workflows/timeline-geometry';
@@ -117,7 +118,7 @@ describe('boxOf', () => {
     expect(boxOf({ startMs: at(2), endMs: at(3) }, AXIS)).toEqual({ leftPct: 2, widthPct: 1 });
   });
 
-  it('gives a zero-length span zero width; the view draws its minimum width', () => {
+  it('gives a zero-length span zero width', () => {
     expect(boxOf({ startMs: at(40), endMs: at(40) }, AXIS)).toEqual({ leftPct: 40, widthPct: 0 });
   });
 
@@ -154,69 +155,73 @@ describe('endpointMark', () => {
   });
 });
 
-describe('nodeWallTime', () => {
-  it('runs from the first segment to the endpoint when the endpoint is last', () => {
-    // The segments end at 11 s; the node completes at 12 s.
-    const node = timed(EXACT_RETRIED_NODE);
+describe('phaseTotals', () => {
+  it('sums each phase, keeps its longest interval, and says when one is open', () => {
+    const totals = phaseTotals([
+      { key: 'enqueued', startMs: at(0), endMs: at(0.1), open: false },
+      { key: 'running', startMs: at(0.1), endMs: at(3.1), open: false },
+      { key: 'enqueued', startMs: at(10), endMs: at(10.2), open: false },
+      { key: 'running', startMs: at(10.2), endMs: at(15), open: true },
+    ]);
 
-    expect(nodeWallTime(node.segments, node.endpoint, at(100))).toEqual({
-      kind: 'measured',
-      ms: 12_000,
-    });
+    // Two queue waits of 100 ms and 200 ms: 300 ms in all, and no long step.
+    expect(totals).toEqual([
+      { key: 'enqueued', ms: 300, longestMs: 200, open: false },
+      { key: 'running', ms: 7_800, longestMs: 4_800, open: true },
+    ]);
   });
 
-  it('runs to the last segment end when the node is not terminal', () => {
-    expect(nodeWallTime(segmentsOf(EXACT_RETRIED_NODE), { kind: 'not_terminal' }, at(100))).toEqual({
-      kind: 'measured',
-      ms: 11_000,
-    });
+  it('counts an interval whose times are in the wrong order as no time', () => {
+    expect(phaseTotals([{ key: 'claimed', startMs: at(5), endMs: at(4), open: false }])).toEqual([]);
   });
 
-  it('runs to the end of a task that ran on past the endpoint', () => {
-    const segments = segmentsOf(EXACT_RETRIED_NODE);
-    const cancelledEarly = { kind: 'terminal', status: 'SKIPPED', at: '2026-11-22T12:00:04Z' } as const;
-
-    expect(nodeWallTime(segments, cancelledEarly, at(100))).toEqual({ kind: 'measured', ms: 11_000 });
+  it('is empty with no interval', () => {
+    expect(phaseTotals([])).toEqual([]);
   });
+});
 
-  it('grows with the draw time while a segment is open', () => {
+describe('segmentInterval', () => {
+  it('runs an open segment to the draw time and says that it is open', () => {
     const segments = segmentsOf(PARTIAL_OPEN_NODE);
 
-    expect(nodeWallTime(segments, { kind: 'not_terminal' }, at(100))).toEqual({ kind: 'measured', ms: 100_000 });
-    expect(nodeWallTime(segments, { kind: 'not_terminal' }, at(101))).toEqual({ kind: 'measured', ms: 101_000 });
-  });
-
-  it('has no wall time without a segment', () => {
-    expect(nodeWallTime([], { kind: 'terminal', status: 'SKIPPED', at: '2026-11-22T12:00:04Z' }, at(100))).toEqual({
-      kind: 'no_segments',
+    expect(segmentInterval(nth(segments, 0), at(100))).toEqual({
+      key: 'unknown',
+      startMs: at(0),
+      endMs: at(5),
+      open: false,
+    });
+    expect(segmentInterval(nth(segments, 1), at(100))).toEqual({
+      key: 'unknown',
+      startMs: at(5),
+      endMs: at(100),
+      open: true,
     });
   });
 });
 
 describe('phaseComposition', () => {
   it('sums each phase over retries, every claim kind into claimed, in lifecycle order', () => {
-    const shares = phaseComposition(segmentsOf(EXACT_RETRIED_NODE), at(100));
+    const totals = phaseComposition(segmentsOf(EXACT_RETRIED_NODE), at(100));
 
     // claimed: earlier claims 1 s + the recorded claim 2 s + the second
-    // attempt's claim 1 s.
-    expect(shares.map(share => [share.key, share.ms])).toEqual([
-      ['pending', 1_000],
-      ['ready', 1_000],
-      ['enqueued', 1_000],
-      ['retry_wait', 1_000],
-      ['claimed', 4_000],
-      ['running', 1_000],
-      ['finalizing', 1_000],
-      ['advancing', 1_000],
+    // attempt's claim 1 s; its longest interval is the recorded claim.
+    expect(totals.map(total => [total.key, total.ms, total.longestMs])).toEqual([
+      ['pending', 1_000, 1_000],
+      ['ready', 1_000, 1_000],
+      ['enqueued', 1_000, 1_000],
+      ['retry_wait', 1_000, 1_000],
+      ['claimed', 4_000, 2_000],
+      ['running', 1_000, 1_000],
+      ['finalizing', 1_000, 1_000],
+      ['advancing', 1_000, 1_000],
     ]);
-    expect(shares.reduce((sum, share) => sum + share.fraction, 0)).toBeCloseTo(1);
-    expect(shares.find(share => share.key === 'claimed')?.fraction).toBeCloseTo(4 / 11);
+    expect(totals.every(total => !total.open)).toBe(true);
   });
 
   it('keeps unknown time as its own phase and counts an open segment to the draw time', () => {
-    const shares = phaseComposition(segmentsOf(PARTIAL_OPEN_NODE), at(100));
+    const totals = phaseComposition(segmentsOf(PARTIAL_OPEN_NODE), at(100));
 
-    expect(shares).toEqual([{ key: 'unknown', ms: 100_000, fraction: 1 }]);
+    expect(totals).toEqual([{ key: 'unknown', ms: 100_000, longestMs: 95_000, open: true }]);
   });
 
   it('is empty when no segment has length', () => {

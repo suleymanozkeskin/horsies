@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type MouseEvent } from 'react';
 
 import {
   Background,
@@ -13,17 +13,29 @@ import { ChevronLeft, ChevronRight, Search, TriangleAlert } from 'lucide-react';
 
 import '@xyflow/react/dist/style.css';
 
+import { RESIDUAL_COPY } from '@/actions/copy';
+import { Hint } from '@/components/ui/hint';
+import { useDrawTime, type ReadClock } from '@/hooks/use-draw-time';
 import { useWorkflowRun } from '@/hooks/use-workflow-run';
 import { assertNever } from '@/lib/exhaustive';
 import { formatMilliseconds } from '@/lib/format-duration';
 import { statusLabel } from '@/lib/status-utils';
-import type { WorkflowNode } from '@/types/workflows';
+import type { WorkflowNode, WorkflowRunDetail } from '@/types/workflows';
 
 import { layoutWorkflow, NODE_H, NODE_W, type NodePosition } from './layout';
-import { phaseStripText } from './phase-strip';
+import { TimingLegend, type LegendMark } from './legend';
+import { FloatingTooltip, NodeTooltip } from './node-tooltip';
 import { residualState } from './residual';
-import { criticalPath, longestWall, type LongestWall } from './run-timing';
 import {
+  criticalMembership,
+  criticalPath,
+  longestNodeTime,
+  type CriticalPath,
+  type LongestNodeTime,
+} from './run-timing';
+import { nodeTimingText } from './timing-text';
+import {
+  childRollupBadge,
   WorkflowNodeCard,
   type WorkflowFlowNode,
   type WorkflowNodeData,
@@ -35,14 +47,23 @@ const nodeTypes = { workflow: WorkflowNodeCard };
 const NO_STATUS_FILTER: ReadonlySet<string> = new Set();
 
 /** Aggregate run metrics shown over the canvas. `longest` is the node with
- * the longest wall time, the time the timeline draws for it. */
+ * the longest time without dependency wait. */
 interface RunMetrics {
   total: number;
   completed: number;
   running: number;
   failed: number;
-  longest: LongestWall;
+  longest: LongestNodeTime;
+  /** The marks that the graph draws: the key under the counts. */
+  marks: LegendMark[];
 }
+
+/** What the pointer is on in the graph, where the shared tooltip shows it:
+ * a node card, or the edge from one node to another. */
+type GraphHover =
+  | { kind: 'none' }
+  | { kind: 'node'; taskIndex: number; xPx: number; yPx: number }
+  | { kind: 'edge'; fromIndex: number; toIndex: number; xPx: number; yPx: number };
 
 /** Where the status counts of the graph show: on the graph card (a
  * sub-workflow graph in the side panel), or in the run summary over the
@@ -53,7 +74,11 @@ export type CountsPlacement = 'in_graph' | 'in_run_summary';
 function criticalEdgeIds(taskIndices: readonly number[]): Set<string> {
   const ids = new Set<string>();
   for (let index = 1; index < taskIndices.length; index += 1) {
-    ids.add(`${taskIndices[index - 1]}-${taskIndices[index]}`);
+    const from = taskIndices[index - 1];
+    const to = taskIndices[index];
+    if (from !== undefined && to !== undefined) {
+      ids.add(edgeId(from, to));
+    }
   }
   return ids;
 }
@@ -63,6 +88,45 @@ const nodeLabel = (node: WorkflowNode): string =>
 
 const drillableId = (node: WorkflowNode): string | null =>
   node.is_subworkflow && node.sub_workflow_id ? node.sub_workflow_id : null;
+
+/** The facts of a node that the graph draws with a mark: the dashed border
+ * of a tolerant join, the layers icon and the count of a sub-workflow, and
+ * the badge of a node that runs on under a cancelled run. One line each, for
+ * the tooltip of the card. */
+export function graphNodeFacts(node: WorkflowNode, runStatus: string): string[] {
+  const facts: string[] = [];
+  if (node.node_id !== null && node.node_id !== node.task_name) {
+    facts.push(`Task: ${node.task_name}.`);
+  }
+  if (node.allow_failed_deps) {
+    facts.push('Tolerant join (dashed border): the node runs even when a dependency failed.');
+  }
+  const rollup = childRollupBadge(node.child_total, node.child_failed);
+  if (node.is_subworkflow) {
+    facts.push(
+      `Sub-workflow${rollup === null ? '' : `: ${rollup.title}`}.` +
+        (drillableId(node) === null ? '' : ' Double-click to open it.')
+    );
+  }
+  const residual = residualState(runStatus, node.node_status, null);
+  if (residual !== null) {
+    facts.push(RESIDUAL_COPY[residual].tooltip);
+  }
+  return facts;
+}
+
+/** The id of the edge from one node to another. */
+const edgeId = (fromIndex: number, toIndex: number): string => `${fromIndex}-${toIndex}`;
+
+/** The two task indexes of an edge id; an id of another form is a defect of
+ * this file. */
+function edgeEnds(id: string): { fromIndex: number; toIndex: number } {
+  const [from, to] = id.split('-').map(Number);
+  if (from === undefined || to === undefined || !Number.isInteger(from) || !Number.isInteger(to)) {
+    throw new Error(`edge id is not "<from>-<to>": ${JSON.stringify(id)}`);
+  }
+  return { fromIndex: from, toIndex: to };
+}
 
 interface WorkflowGraphProps {
   workflowId: string;
@@ -97,6 +161,8 @@ export function WorkflowGraph({
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
   const [search, setSearch] = useState('');
   const [searchCursor, setSearchCursor] = useState(0);
+  const [hover, setHover] = useState<GraphHover>({ kind: 'none' });
+  const tooltipId = useId();
   const failedIndices = useMemo(
     () => detail?.failed_indices ?? [],
     [detail?.failed_indices]
@@ -169,7 +235,7 @@ export function WorkflowGraph({
         data,
         // The phase times in the name are those of the read, without the
         // one-second clock of the card.
-        ariaLabel: `${nodeLabel(node)}, ${statusLabel(node.node_status)}, ${phaseStripText(node.timing, readClock.asOfMs)}`,
+        ariaLabel: `${nodeLabel(node)}, ${statusLabel(node.node_status)}, ${nodeTimingText(node.timing, readClock.asOfMs)}`,
         selected:
           node.task_index === selectedIndex || node.task_index === focusedIndex,
         draggable: false,
@@ -179,7 +245,7 @@ export function WorkflowGraph({
     const path = criticalPath(detail.nodes, detail.edges, readClock.asOfMs);
     const critical = path.kind === 'path' ? criticalEdgeIds(path.taskIndices) : new Set<string>();
     const edges: Edge[] = detail.edges.map(edge => {
-      const id = `${edge.from_index}-${edge.to_index}`;
+      const id = edgeId(edge.from_index, edge.to_index);
       const onPath = critical.has(id);
       return {
         id,
@@ -203,7 +269,11 @@ export function WorkflowGraph({
         completed,
         running,
         failed: detail.failed_count,
-        longest: longestWall(detail.nodes, readClock.asOfMs),
+        longest: longestNodeTime(detail.nodes, readClock.asOfMs),
+        marks: [
+          ...(critical.size > 0 ? (['critical_edge'] as const) : []),
+          ...(detail.nodes.some(node => node.allow_failed_deps) ? (['tolerant_join'] as const) : []),
+        ],
       } satisfies RunMetrics,
       matchIndices: matches,
     };
@@ -215,6 +285,7 @@ export function WorkflowGraph({
     setCursor(0);
     setFocusedIndex(null);
     setSearch('');
+    setHover({ kind: 'none' });
   }, [workflowId]);
   useEffect(() => {
     setCursor(current =>
@@ -273,6 +344,12 @@ export function WorkflowGraph({
     centerOn(target);
   };
 
+  const hoverNode: NodeMouseHandler = (event, node) =>
+    setHover({ kind: 'node', taskIndex: Number(node.id), xPx: event.clientX, yPx: event.clientY });
+  const hoverEdge = (event: MouseEvent, edge: Edge): void =>
+    setHover({ kind: 'edge', ...edgeEnds(edge.id), xPx: event.clientX, yPx: event.clientY });
+  const endHover = (): void => setHover({ kind: 'none' });
+
   const handleNodeClick: NodeMouseHandler = (_event, node) => {
     const source = byIndex.get(Number(node.id));
     if (source) {
@@ -324,6 +401,13 @@ export function WorkflowGraph({
       }}
       onNodeClick={handleNodeClick}
       onNodeDoubleClick={handleNodeDoubleClick}
+      onNodeMouseEnter={hoverNode}
+      onNodeMouseMove={hoverNode}
+      onNodeMouseLeave={endHover}
+      onEdgeMouseEnter={hoverEdge}
+      onEdgeMouseMove={hoverEdge}
+      onEdgeMouseLeave={endHover}
+      onMoveStart={endHover}
       nodesDraggable={false}
       nodesConnectable={false}
       edgesFocusable={false}
@@ -336,7 +420,8 @@ export function WorkflowGraph({
         <Panel position="top-left">
           <div className="glass flex flex-col gap-1.5 rounded-lg px-2.5 py-1.5 text-xs">
             <GraphCounts metrics={metrics} placement={countsPlacement} />
-            <LongestWallLine longest={metrics.longest} />
+            <LongestNodeLine longest={metrics.longest} />
+            <TimingLegend phases={[]} marks={metrics.marks} />
           </div>
         </Panel>
       )}
@@ -420,7 +505,104 @@ export function WorkflowGraph({
       )}
       <Background color="var(--border)" gap={26} />
       <Controls showInteractive={false} />
+      {detail !== undefined && readClock !== undefined && (
+        <GraphTooltip id={tooltipId} hover={hover} detail={detail} readClock={readClock} />
+      )}
     </ReactFlow>
+  );
+}
+
+/** The shared tooltip of the graph: the node under the pointer with each of
+ * its phases as a number and the meaning of its marks, or the edge under the
+ * pointer. It follows the one-second clock of an open run only while it
+ * shows. */
+function GraphTooltip({
+  id,
+  hover,
+  detail,
+  readClock,
+}: {
+  id: string;
+  hover: GraphHover;
+  detail: WorkflowRunDetail;
+  readClock: ReadClock;
+}) {
+  const drawAtMs = useDrawTime(readClock, readClock.open && hover.kind !== 'none');
+  switch (hover.kind) {
+    case 'none':
+      return null;
+    case 'node': {
+      const node = detail.nodes.find(candidate => candidate.task_index === hover.taskIndex);
+      // A refetch can remove the node under the pointer.
+      return node === undefined ? null : (
+        <FloatingTooltip id={id} xPx={hover.xPx} yPx={hover.yPx}>
+          <NodeTooltip
+            workflowId={detail.run.id}
+            node={node}
+            drawAtMs={drawAtMs}
+            membership={criticalMembership(
+              criticalPath(detail.nodes, detail.edges, drawAtMs),
+              node.task_index
+            )}
+            focus={{ kind: 'node' }}
+            pause={{ kind: 'not_in_pause' }}
+            facts={graphNodeFacts(node, detail.run.status)}
+          />
+        </FloatingTooltip>
+      );
+    }
+    case 'edge': {
+      const from = detail.nodes.find(candidate => candidate.task_index === hover.fromIndex);
+      const to = detail.nodes.find(candidate => candidate.task_index === hover.toIndex);
+      return from === undefined || to === undefined ? null : (
+        <FloatingTooltip id={id} xPx={hover.xPx} yPx={hover.yPx}>
+          <EdgeText
+            from={nodeLabel(from)}
+            to={nodeLabel(to)}
+            onPath={edgeOnPath(
+              criticalPath(detail.nodes, detail.edges, drawAtMs),
+              hover.fromIndex,
+              hover.toIndex
+            )}
+          />
+        </FloatingTooltip>
+      );
+    }
+    default:
+      return assertNever(hover, 'graph hover');
+  }
+}
+
+/** Whether the edge joins two consecutive nodes of the critical path. */
+function edgeOnPath(path: CriticalPath, fromIndex: number, toIndex: number): boolean {
+  switch (path.kind) {
+    case 'no_timing':
+      return false;
+    case 'path':
+      return criticalEdgeIds(path.taskIndices).has(edgeId(fromIndex, toIndex));
+    default:
+      return assertNever(path, 'critical path');
+  }
+}
+
+/** What an edge is: a dependency, and for a bold edge its part in the
+ * critical path. */
+function EdgeText({ from, to, onPath }: { from: string; to: string; onPath: boolean }) {
+  return (
+    <>
+      <p className="font-semibold">
+        {from} → {to}
+      </p>
+      <p>
+        {to} waits for {from}.
+      </p>
+      {onPath && (
+        <p className="text-muted-foreground">
+          Bold edge: on the critical path. {from} ended last of the dependencies of {to}, so its
+          end decided when {to} could start.
+        </p>
+      )}
+    </>
   );
 }
 
@@ -446,22 +628,23 @@ function GraphCounts({ metrics, placement }: { metrics: RunMetrics; placement: C
   }
 }
 
-/** The node with the longest wall time: the same time as its timeline row. */
-function LongestWallLine({ longest }: { longest: LongestWall }) {
+/** The node with the longest time without dependency wait: the node that
+ * cost the most time. A wall time would name the last node of each run. */
+function LongestNodeLine({ longest }: { longest: LongestNodeTime }) {
   switch (longest.kind) {
     case 'no_timing':
       return null;
     case 'node':
       return (
-        <div className="text-muted-foreground" title="The node with the longest wall time: from its first segment to its end">
-          longest wall{' '}
-          <span className="font-mono text-foreground" title={longest.node.task_name}>
-            {nodeLabel(longest.node)}
-          </span>{' '}
-          <span className="font-mono">{formatMilliseconds(longest.ms)}</span>
-        </div>
+        <Hint text="The node with the longest time without its dependency wait: from the time it could start to its end.">
+          <span className="text-muted-foreground">
+            Longest node:{' '}
+            <span className="font-mono text-foreground">{nodeLabel(longest.node)}</span>{' '}
+            <span className="font-mono">{formatMilliseconds(longest.ms)}</span>
+          </span>
+        </Hint>
       );
     default:
-      return assertNever(longest, 'longest wall');
+      return assertNever(longest, 'longest node time');
   }
 }
