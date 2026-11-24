@@ -3366,6 +3366,27 @@ const FRAME_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
+        name: "IsolatedCancelTarget",
+        doc: "The run of an isolated child that a CancelRunFrame names, by its task.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("task_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "SharedCancelTarget",
+        doc: "The run on a seat of a shared child that a CancelRunFrame names, by its dispatch\nnumber and its task.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("dispatch", "int"), property("task_id", "uuid.UUID")],
+        methods: &[],
+    },
+    StubClass {
+        name: "CancelRunFrame",
+        doc: "An operator cancelled the task of a run: the cancel statement moved its row to\nhistory and recorded the attempt as CANCELLED. A cancel of a run that the child does\nnot run now is ignored.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("target", "IsolatedCancelTarget | SharedCancelTarget")],
+        methods: &[],
+    },
+    StubClass {
         name: "EventsFrame",
         doc: "Lifecycle events for a handler child, in the order that the core emitted them; events\nholds the JSON text of each event.",
         constructor: Constructor::NoConstructor,
@@ -3423,7 +3444,7 @@ const FRAME_CLASSES: &[StubClass] = &[
             StubFunction {
                 name: "feed",
                 parameters: &[positional("data", "bytes")],
-                returns: TypeText::Plain("list[InitFrame | RunFrame | SharedRunFrame | EventsFrame | StopFrame] | FrameOverBound | FrameRefused | ParentProtocolMismatch"),
+                returns: TypeText::Plain("list[InitFrame | RunFrame | SharedRunFrame | CancelRunFrame | EventsFrame | StopFrame] | FrameOverBound | FrameRefused | ParentProtocolMismatch"),
                 doc: "Take the bytes that arrived and give the whole parent frames they complete, in\norder. A refusal means the channel cannot be read on.",
             },
         ],
@@ -3446,6 +3467,13 @@ const FRAME_CLASSES: &[StubClass] = &[
         name: "WorkerFailure",
         doc: "The worker code of the child failed, not the task. The detail is cut to its bound.",
         constructor: Constructor::Parameters(&[keyword("detail", "str")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "SeatCancelled",
+        doc: "An operator cancel reached the run of a shared child before it ended, and the run has\nended; what the body returned is dropped. body is NOT_STARTED when the child did not\nstart the body.",
+        constructor: Constructor::Parameters(&[keyword("body", "Literal['RAN', 'NOT_STARTED']")]),
         properties: &[],
         methods: &[],
     },
@@ -3522,7 +3550,7 @@ const FRAME_CLASSES: &[StubClass] = &[
     StubClass {
         name: "SharedResultFrame",
         doc: "A run of a shared child ended; its seat is free. started_at is the start time that the\nstart write returned, or NOT_REPORTED for a run that stopped before running.",
-        constructor: Constructor::Parameters(&[keyword("dispatch", "int"), keyword("task_id", "uuid.UUID"), keyword("end", "TaskResult | StoppedBeforeRunning | WorkerFailure | Literal['TIMED_OUT']"), keyword("started_at", "datetime.datetime | Literal['NOT_REPORTED']"), keyword("rss_mb", "float | Literal['UNREADABLE']"), keyword("child", "Literal['SERVES_ON', 'ENDS_ITSELF']")]),
+        constructor: Constructor::Parameters(&[keyword("dispatch", "int"), keyword("task_id", "uuid.UUID"), keyword("end", "TaskResult | StoppedBeforeRunning | WorkerFailure | SeatCancelled | Literal['TIMED_OUT']"), keyword("started_at", "datetime.datetime | Literal['NOT_REPORTED']"), keyword("rss_mb", "float | Literal['UNREADABLE']"), keyword("child", "Literal['SERVES_ON', 'ENDS_ITSELF']")]),
         properties: &[],
         methods: &[],
     },
@@ -3537,6 +3565,20 @@ const FRAME_CLASSES: &[StubClass] = &[
         name: "SecondCancelFrame",
         doc: "The cancel grace of a run ran out while it was alive.",
         constructor: Constructor::Parameters(&[keyword("dispatch", "int"), keyword("task_id", "uuid.UUID")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "CancelFiredFrame",
+        doc: "A shared child applied the operator cancel of a run: it gave the cancel to the task,\nor it will not start the body.",
+        constructor: Constructor::Parameters(&[keyword("dispatch", "int"), keyword("task_id", "uuid.UUID")]),
+        properties: &[],
+        methods: &[],
+    },
+    StubClass {
+        name: "RunCancelledFrame",
+        doc: "An isolated run that an operator cancelled has ended, in place of ResultFrame.\nstarted_at is the start time that the start write returned; task_loop names the work\nthat the body left, if any.",
+        constructor: Constructor::Parameters(&[keyword("task_id", "uuid.UUID"), keyword("body", "Literal['RAN', 'NOT_STARTED']"), keyword("started_at", "datetime.datetime"), keyword("rss_mb", "float | Literal['UNREADABLE']"), keyword("task_loop", "LoopHoldsTasks | Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK']"), keyword("child", "Literal['SERVES_ON', 'ENDS_ITSELF']")]),
         properties: &[],
         methods: &[],
     },
@@ -3826,7 +3868,7 @@ const FUNCTIONS: &[StubFunction] = &[
     StubFunction {
         name: "decode_parent_frame",
         parameters: &[positional("meta", "bytes"), positional("body", "bytes")],
-        returns: TypeText::Plain("InitFrame | RunFrame | SharedRunFrame | EventsFrame | StopFrame | FrameRefused | ParentProtocolMismatch"),
+        returns: TypeText::Plain("InitFrame | RunFrame | SharedRunFrame | CancelRunFrame | EventsFrame | StopFrame | FrameRefused | ParentProtocolMismatch"),
         doc: "Decode one parent frame from its metadata and its body. Pure.",
     },
     StubFunction {
@@ -3837,7 +3879,7 @@ const FUNCTIONS: &[StubFunction] = &[
     },
     StubFunction {
         name: "encode_child_frame",
-        parameters: &[positional("frame", "ReadyFrame | BootFailedFrame | ResultFrame | BodyReturnedFrame | LeftWorkEndedFrame | LeftWorkStuckFrame | SharedResultFrame | DeadlineFiredFrame | SecondCancelFrame | RunStuckFrame | LeftoverCancelFrame | LeftoverStuckFrame | LoopBlockedFrame | HandlerStatsFrame")],
+        parameters: &[positional("frame", "ReadyFrame | BootFailedFrame | ResultFrame | BodyReturnedFrame | LeftWorkEndedFrame | LeftWorkStuckFrame | SharedResultFrame | DeadlineFiredFrame | SecondCancelFrame | CancelFiredFrame | RunCancelledFrame | RunStuckFrame | LeftoverCancelFrame | LeftoverStuckFrame | LoopBlockedFrame | HandlerStatsFrame")],
         returns: TypeText::Plain("bytes | FrameTooLarge"),
         doc: "Encode a child frame: its bytes, or FrameTooLarge when it is over a bound of the\nheader. Pure.",
     },

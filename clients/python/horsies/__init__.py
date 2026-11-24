@@ -118,7 +118,11 @@ from .core.logging import JsonLogsFormatter, TaskContextFilter
 from .core.task_runtime import (
     AttemptNumber,
     AttemptNumberRefused,
+    CancelCause,
+    CancelNotRequested,
+    CancelRequested,
     FencingToken,
+    RunCancelState,
     TaskRuntime,
 )
 from .core.models.worker_profile import (
@@ -286,6 +290,10 @@ __all__ = [
     'FencingToken',
     'AttemptNumber',
     'AttemptNumberRefused',
+    'CancelCause',
+    'CancelNotRequested',
+    'CancelRequested',
+    'RunCancelState',
     'QueueMode',
     'CustomQueueConfig',
     'TaskStatus',

@@ -15,12 +15,13 @@ use chrono::{DateTime, Utc};
 use horsies_core::events::AttemptStart;
 use horsies_core::frame_protocol::{
     BlockedWhere, BodyEnd, BodyReturnedFrame, BootDetail, BootErrorName, BootFailedFrame,
-    ChildAfterFrame, ChildFrame, DispatchNumber, FailureDetail, HandlerCounts, HandlerCountsList,
-    HandlerName, HandlerStatsFrame, LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame,
-    LeftoverCancelFrame, LeftoverName, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit,
-    LoopHoldsTasks, NoLeftWork, ProcessId, ReadyFrame, ReportedBootCause, ResultEnvelopeText,
-    ResultFrame, RssMb, RssReading, RunEnd, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame,
-    ShortageErrno, SpanReadCounts, StopReason, StuckWork,
+    CancelledBody, CancelledLoop, ChildAfterFrame, ChildFrame, DispatchNumber, FailureDetail,
+    HandlerCounts, HandlerCountsList, HandlerName, HandlerStatsFrame, LeftWorkEnd,
+    LeftWorkEndedFrame, LeftWorkStuckFrame, LeftoverCancelFrame, LeftoverName, LeftoverStuckFrame,
+    LoopBlockedFrame, LoopCulprit, LoopHoldsTasks, NoLeftWork, ProcessId, ReadyFrame,
+    ReportedBootCause, ResultEnvelopeText, ResultFrame, RssMb, RssReading, RunCancelledFrame,
+    RunEnd, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame, ShortageErrno, SpanReadCounts,
+    StopReason, StuckWork,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -88,6 +89,18 @@ fn child_after_frame(child: &str) -> PyResult<ChildAfterFrame> {
         "ENDS_ITSELF" => Ok(ChildAfterFrame::EndsItself),
         other => Err(PyValueError::new_err(format!(
             "child must be 'SERVES_ON' or 'ENDS_ITSELF', not {other:?}"
+        ))),
+    }
+}
+
+/// Whether the body of a run that an operator cancelled ran: `'RAN'` or
+/// `'NOT_STARTED'`.
+fn cancelled_body(body: &str) -> PyResult<CancelledBody> {
+    match body {
+        "RAN" => Ok(CancelledBody::Ran),
+        "NOT_STARTED" => Ok(CancelledBody::NotStarted),
+        other => Err(PyValueError::new_err(format!(
+            "body must be 'RAN' or 'NOT_STARTED', not {other:?}"
         ))),
     }
 }
@@ -245,10 +258,31 @@ impl BodyEndArgument<'_> {
     }
 }
 
-/// The end of a run of a shared child: a run end, or `'TIMED_OUT'`.
+/// An operator cancel reached the run of a shared child before it ended,
+/// and the run has ended; what the body returned is dropped. `body`:
+/// `'RAN'`, or `'NOT_STARTED'` when the child did not start the body.
+#[pyclass(module = "horsies._core", frozen)]
+pub struct SeatCancelled {
+    body: CancelledBody,
+}
+
+#[pymethods]
+impl SeatCancelled {
+    #[new]
+    #[pyo3(signature = (*, body))]
+    fn new(body: &str) -> PyResult<Self> {
+        Ok(Self {
+            body: cancelled_body(body)?,
+        })
+    }
+}
+
+/// The end of a run of a shared child: a run end, `SeatCancelled`, or
+/// `'TIMED_OUT'`.
 #[derive(FromPyObject)]
 pub enum SeatEndArgument<'py> {
     Finished(RunEndArgument<'py>),
+    Cancelled(Bound<'py, SeatCancelled>),
     Text(String),
 }
 
@@ -256,10 +290,11 @@ impl SeatEndArgument<'_> {
     fn seat_end(self) -> PyResult<SeatEnd> {
         match self {
             Self::Finished(end) => Ok(SeatEnd::Finished(end.run_end()?)),
+            Self::Cancelled(cancelled) => Ok(SeatEnd::Cancelled(cancelled.get().body)),
             Self::Text(text) => match text.as_str() {
                 "TIMED_OUT" => Ok(SeatEnd::TimedOut),
                 other => Err(PyValueError::new_err(format!(
-                    "end must be a run end or 'TIMED_OUT', not {other:?}"
+                    "end must be a run end, a SeatCancelled or 'TIMED_OUT', not {other:?}"
                 ))),
             },
         }
@@ -455,6 +490,14 @@ child_frame_class!(
 child_frame_class!(
     /// The cancel grace of a run ran out while it was alive.
     SecondCancelFrameRecord as "SecondCancelFrame"
+);
+child_frame_class!(
+    /// A shared child applied the operator cancel of a run.
+    CancelFiredFrameRecord as "CancelFiredFrame"
+);
+child_frame_class!(
+    /// An isolated run that an operator cancelled has ended.
+    RunCancelledFrameRecord as "RunCancelledFrame"
 );
 child_frame_class!(
     /// A run did not stop after its second cancel and its cancel rounds.
@@ -658,9 +701,17 @@ impl SharedResultFrameRecord {
     ) -> PyResult<Self> {
         let end = end.seat_end()?;
         let started_at = started_at.attempt_start()?;
-        let started_at = match &end {
-            SeatEnd::Finished(run_end) => start_of_end(run_end, started_at)?,
-            SeatEnd::TimedOut => started_at,
+        let started_at = match (&end, started_at) {
+            (SeatEnd::Finished(run_end), _) => start_of_end(run_end, started_at)?,
+            (SeatEnd::TimedOut, _) | (SeatEnd::Cancelled(_), AttemptStart::Reported { .. }) => {
+                started_at
+            }
+            (SeatEnd::Cancelled(_), AttemptStart::NotReported) => {
+                return Err(PyValueError::new_err(
+                    "started_at of a cancelled run must be its start time: its start write \
+                     returned",
+                ))
+            }
         };
         Ok(Self {
             frame: ChildFrame::SharedResult(SharedResultFrame {
@@ -692,6 +743,74 @@ impl SecondCancelFrameRecord {
     fn new(dispatch: u64, task_id: Uuid) -> PyResult<Self> {
         Ok(Self {
             frame: ChildFrame::SecondCancel(run_ref(dispatch, task_id)?),
+        })
+    }
+}
+
+#[pymethods]
+impl CancelFiredFrameRecord {
+    #[new]
+    #[pyo3(signature = (*, dispatch, task_id))]
+    fn new(dispatch: u64, task_id: Uuid) -> PyResult<Self> {
+        Ok(Self {
+            frame: ChildFrame::CancelFired(run_ref(dispatch, task_id)?),
+        })
+    }
+}
+
+/// The task loop after a cancelled isolated run: `'NO_TASK_LOOP'`,
+/// `'LOOP_HOLDS_NO_TASK'`, or `LoopHoldsTasks` with the work that the body
+/// left.
+#[derive(FromPyObject)]
+pub enum CancelledLoopArgument<'py> {
+    Held(Bound<'py, LoopHoldsTasksRecord>),
+    Text(String),
+}
+
+impl CancelledLoopArgument<'_> {
+    fn cancelled_loop(self) -> PyResult<CancelledLoop> {
+        match self {
+            Self::Held(held) => Ok(CancelledLoop::WorkLeft(held.get().held.clone())),
+            Self::Text(text) => match text.as_str() {
+                "NO_TASK_LOOP" => Ok(CancelledLoop::NoLeftWork(NoLeftWork::NoTaskLoop)),
+                "LOOP_HOLDS_NO_TASK" => Ok(CancelledLoop::NoLeftWork(NoLeftWork::LoopHoldsNoTask)),
+                other => Err(PyValueError::new_err(format!(
+                    "task_loop must be 'NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK' or a \
+                     LoopHoldsTasks, not {other:?}"
+                ))),
+            },
+        }
+    }
+}
+
+#[pymethods]
+impl RunCancelledFrameRecord {
+    /// `body`: `'RAN'`, or `'NOT_STARTED'` when the child did not start the
+    /// body. `started_at`: the aware `datetime` that the start write
+    /// returned. `task_loop`: `'NO_TASK_LOOP'`, `'LOOP_HOLDS_NO_TASK'`, or
+    /// `LoopHoldsTasks` with the work that the body left. `child`:
+    /// `'SERVES_ON'`, or `'ENDS_ITSELF'` when the child ends itself once the
+    /// frame is written.
+    #[new]
+    #[pyo3(signature = (*, task_id, body, started_at, rss_mb, task_loop, child))]
+    fn new(
+        task_id: Uuid,
+        body: &str,
+        started_at: &Bound<'_, PyAny>,
+        rss_mb: RssArgument,
+        task_loop: CancelledLoopArgument<'_>,
+        child: &str,
+    ) -> PyResult<Self> {
+        let started_at: DateTime<Utc> = utc_instant(started_at)?;
+        Ok(Self {
+            frame: ChildFrame::RunCancelled(RunCancelledFrame {
+                task_id,
+                body: cancelled_body(body)?,
+                started_at,
+                rss: rss_mb.reading()?,
+                task_loop: task_loop.cancelled_loop()?,
+                child: child_after_frame(child)?,
+            }),
         })
     }
 }
@@ -806,7 +925,7 @@ impl LoopBlockedFrameRecord {
     }
 }
 
-/// A child frame argument: one of the fourteen frame classes.
+/// A child frame argument: one of the sixteen frame classes.
 #[derive(FromPyObject)]
 pub enum ChildFrameArgument<'py> {
     Ready(Bound<'py, ReadyFrameRecord>),
@@ -818,6 +937,8 @@ pub enum ChildFrameArgument<'py> {
     SharedResult(Bound<'py, SharedResultFrameRecord>),
     DeadlineFired(Bound<'py, DeadlineFiredFrameRecord>),
     SecondCancel(Bound<'py, SecondCancelFrameRecord>),
+    CancelFired(Bound<'py, CancelFiredFrameRecord>),
+    RunCancelled(Bound<'py, RunCancelledFrameRecord>),
     RunStuck(Bound<'py, RunStuckFrameRecord>),
     LeftoverCancel(Bound<'py, LeftoverCancelFrameRecord>),
     LeftoverStuck(Bound<'py, LeftoverStuckFrameRecord>),
@@ -838,6 +959,8 @@ impl ChildFrameArgument<'_> {
             Self::SharedResult(record) => with_frame(record.get().frame()),
             Self::DeadlineFired(record) => with_frame(record.get().frame()),
             Self::SecondCancel(record) => with_frame(record.get().frame()),
+            Self::CancelFired(record) => with_frame(record.get().frame()),
+            Self::RunCancelled(record) => with_frame(record.get().frame()),
             Self::RunStuck(record) => with_frame(record.get().frame()),
             Self::LeftoverCancel(record) => with_frame(record.get().frame()),
             Self::LeftoverStuck(record) => with_frame(record.get().frame()),
@@ -852,6 +975,7 @@ pub fn add_child_frame_classes(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<TaskResult>()?;
     module.add_class::<StoppedBeforeRunning>()?;
     module.add_class::<WorkerFailure>()?;
+    module.add_class::<SeatCancelled>()?;
     module.add_class::<LoopHoldsTasksRecord>()?;
     module.add_class::<StuckWorkRecord>()?;
     module.add_class::<BlockingRun>()?;
@@ -865,6 +989,8 @@ pub fn add_child_frame_classes(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<SharedResultFrameRecord>()?;
     module.add_class::<DeadlineFiredFrameRecord>()?;
     module.add_class::<SecondCancelFrameRecord>()?;
+    module.add_class::<CancelFiredFrameRecord>()?;
+    module.add_class::<RunCancelledFrameRecord>()?;
     module.add_class::<RunStuckFrameRecord>()?;
     module.add_class::<LeftoverCancelFrameRecord>()?;
     module.add_class::<LeftoverStuckFrameRecord>()?;

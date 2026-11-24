@@ -8,8 +8,11 @@ gives a ``RuntimeTaskFunction`` for a ``def`` function and an
 execution class. The direct call takes the runtime first. The sends, the
 schedules and ``node()`` take the parameters of the task after the runtime,
 and only these. ``TaskRuntime.for_test`` takes an ``AttemptNumber``, not an
-``int``. Each wrong use below has an ignore comment, and the config makes an
-unneeded ignore comment an error. So an overload set that puts the runtime in
+``int``, and a ``RunCancelState``. ``cancel_state()`` gives the closed
+``RunCancelState``, which a ``match`` covers with its two variants, and the
+closed ``CancelCause`` of ``CancelRequested`` with its two members. Each wrong
+use below has an ignore comment, and the config makes an unneeded ignore
+comment an error. So an overload set that puts the runtime in
 the send parameters, that drops it from the direct call, or that gives the
 wrong function kind fails the check.
 """
@@ -18,14 +21,18 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Coroutine
-from typing import Any, assert_type
+from typing import Any, assert_never, assert_type
 
 from horsies import (
     AttemptNumber,
     AttemptNumberRefused,
+    CancelCause,
+    CancelNotRequested,
+    CancelRequested,
     Execution,
     FencingToken,
     Horsies,
+    RunCancelState,
     TaskError,
     TaskNode,
     TaskResult,
@@ -150,3 +157,29 @@ def the_test_helper_takes_an_attempt_number(task_id: uuid.UUID, attempt: Attempt
     assert_type(TaskRuntime.for_test(task_id=task_id), TaskRuntime)
     assert_type(TaskRuntime.for_test(task_id=task_id, attempt=attempt), TaskRuntime)
     TaskRuntime.for_test(task_id=task_id, attempt=2)  # pyright: ignore[reportArgumentType]
+
+
+def the_cancel_state_is_closed(task_id: uuid.UUID, runtime: TaskRuntime) -> None:
+    assert_type(runtime.cancel_state(), RunCancelState)
+    match runtime.cancel_state():
+        case CancelNotRequested():
+            pass
+        case CancelRequested(cause=cause):
+            match cause:
+                case CancelCause.OPERATOR:
+                    pass
+                case CancelCause.DEADLINE:
+                    pass
+                case _ as unreachable:
+                    assert_never(unreachable)
+        case _ as unreachable:
+            assert_never(unreachable)
+    assert_type(
+        TaskRuntime.for_test(
+            task_id=task_id,
+            cancel_state=CancelRequested(cause=CancelCause.OPERATOR),
+        ),
+        TaskRuntime,
+    )
+    TaskRuntime.for_test(task_id=task_id, cancel_state=CancelCause.OPERATOR)  # pyright: ignore[reportArgumentType]
+    CancelRequested(cause='OPERATOR')  # pyright: ignore[reportArgumentType]
