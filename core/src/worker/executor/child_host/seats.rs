@@ -10,8 +10,9 @@
 //!   `deadline_fired` is sent; the run ends as a timeout whatever its body
 //!   returns. When anything of the run (the body or its work) is alive after
 //!   the cancel grace, `second_cancel` is sent and everything of the run is
-//!   dropped (aborted) in rounds, then `run_stuck` names what is alive 0.3 s
-//!   later, and the run keeps its seat until it ends or the parent kills the
+//!   stopped in rounds (Rust work is dropped; host-held work gets a stop
+//!   request and stays), then `run_stuck` names what is alive 0.3 s later,
+//!   and the run keeps its seat until it ends or the parent kills the
 //!   child. The parent reads from `second_cancel` which of the two ended the
 //!   run. A body that returns before its deadline with work alive waits
 //!   the cancel grace for it, then sends `leftover_cancel` and aborts it in
@@ -19,13 +20,16 @@
 //!   writes no marker. A body, or work it started with `spawn_in_run`,
 //!   that holds a runtime thread for 5 s in one poll is reported with
 //!   `loop_blocked` and its run as the culprit, and the parent kills the
-//!   child.
+//!   child. A host loop that has not turned for 5 s is reported the same
+//!   way (`event_loop`).
 //! - Shared thread: up to `seats` blocking bodies at once, each on a seat
 //!   thread. A thread cannot be stopped: at the deadline `deadline_fired` is
 //!   sent, the run's cancel state reads the deadline, and the body runs on;
 //!   when it returns, its value is dropped and the run ends timed out. One
 //!   atomic gate decides between the return, the deadline and an operator
-//!   cancel.
+//!   cancel. When the app gives a host loop (the main thread that hands
+//!   each run to the host), a watch thread reports a block of that loop
+//!   with `loop_blocked`, with no named culprit.
 //!
 //! The operator cancel of a run (`cancel_run`, protocol version 4): the
 //! cancel statement has moved the row to history and recorded the attempt
@@ -67,6 +71,7 @@ use tokio::task::JoinError;
 use uuid::Uuid;
 
 use super::body_scope::{BodyOutcome, OpenBody, SpanSource};
+use super::event_loop::{HostCulprit, HostLoopWatched, HostPass};
 use super::link::FrameWriter;
 use super::panic::PanicRecord;
 use super::rss::read_rss;
@@ -84,9 +89,9 @@ use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, Ta
 use crate::core::task::result::TaskResult;
 use crate::events::AttemptStart;
 use crate::worker::executor::protocol::{
-    BodyEnd, BodyReturnedFrame, CancelGraceMs, CancelTarget, CancelledBody, CancelledLoop,
-    ChildAfterFrame, ChildFrame, DispatchNumber, FailureDetail, IsolatedWork, LeftWorkEnd,
-    LeftWorkEndedFrame, LeftWorkStuckFrame, LeftoverCancelFrame, LeftoverStuckFrame,
+    BlockedWhere, BodyEnd, BodyReturnedFrame, CancelGraceMs, CancelTarget, CancelledBody,
+    CancelledLoop, ChildAfterFrame, ChildFrame, DispatchNumber, FailureDetail, IsolatedWork,
+    LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame, LeftoverCancelFrame, LeftoverStuckFrame,
     LoopBlockedFrame, LoopCulprit, NoLeftWork, ParentFrame, ResultFrame, RunCancelledFrame, RunEnd,
     RunFrame, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame, SharedRunFrame, SharedWork,
     StoredOptionsRefusal, TaskInputText, TaskTimeoutMs, LOOP_BLOCK_LIMIT,
@@ -96,6 +101,9 @@ use crate::Execution;
 /// How often the poll watch reads the polls in progress.
 const POLL_WATCH_INTERVAL: Duration = Duration::from_millis(250);
 const POLL_WATCH_THREAD_NAME: &str = "horsies-child-poll-watch";
+/// The location of a `loop_blocked` report of a host loop: the core does
+/// not see the code that the host runs.
+const HOST_LOOP_LOCATION: &str = "the event loop of the host program";
 const SEAT_THREAD_NAME: &str = "horsies-child-seat";
 
 /// The longest wait of a seat thread whose body returned after an operator
@@ -340,9 +348,8 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame, scope: &R
             }
         },
     };
-    match scope.alive() {
+    match scope.close_when_idle() {
         Alive::Nothing => {
-            scope.close();
             mark_finalizing(context, &facts).await;
             let started = AttemptStart::Reported { started_at };
             send_isolated_result(context, task_id, end, started).await;
@@ -478,7 +485,7 @@ async fn end_left_work(
             left,
         }))
         .await;
-    let ended = match scope.wait_done(ISOLATED_LEFTOVER_GRACE).await {
+    let ended = match scope.wait_idle_then_close(ISOLATED_LEFTOVER_GRACE).await {
         WorkWait::Done => LeftWorkEnd::InGrace,
         WorkWait::StillAlive => {
             scope.close();
@@ -958,11 +965,11 @@ async fn after_return(
     grace: CancelGraceMs,
     started_at: DateTime<Utc>,
 ) -> (SeatEnd, Marker) {
-    if let Alive::Nothing = scope.alive() {
+    if let Alive::Nothing = scope.close_when_idle() {
         return (SeatEnd::Finished(end), Marker::Write);
     }
     let grace = Duration::from_millis(grace.get());
-    if scope.wait_done(grace).await == WorkWait::Done {
+    if scope.wait_idle_then_close(grace).await == WorkWait::Done {
         return (SeatEnd::Finished(end), Marker::Write);
     }
     let returned = body_end_of(&end);
@@ -1020,7 +1027,7 @@ async fn stop_after_signal(
     grace: CancelGraceMs,
 ) {
     let grace = Duration::from_millis(grace.get());
-    if scope.wait_done(grace).await == WorkWait::Done {
+    if scope.wait_idle_then_close(grace).await == WorkWait::Done {
         return;
     }
     context.writer.send(ChildFrame::SecondCancel(run_ref)).await;
@@ -1057,7 +1064,9 @@ struct WatchedRun {
 }
 
 /// The poll watch of a shared async child: a thread of its own, so a body
-/// that holds every runtime thread cannot keep it from reporting.
+/// that holds every runtime thread cannot keep it from reporting. The same
+/// thread reads the host loop when the app gives one; in a shared thread
+/// child it reads only that loop, and no run registers polls on it.
 #[derive(Clone)]
 pub(super) struct PollWatch {
     runs: Arc<Mutex<HashMap<DispatchNumber, WatchedRun>>>,
@@ -1081,13 +1090,18 @@ impl PollWatch {
         }
     }
 
-    /// Start the watch thread. Each pass reads every run once.
-    pub(super) fn start(writer: super::link::FrameWriter) -> io::Result<Self> {
+    /// Start the watch thread. Each pass reads every run once, then the
+    /// host loop of `host` once.
+    pub(super) fn start(
+        writer: super::link::FrameWriter,
+        host: HostLoopWatched,
+    ) -> io::Result<Self> {
         let watch = Self {
             runs: Arc::new(Mutex::new(HashMap::new())),
             epoch: Instant::now(),
         };
         let thread_watch = watch.clone();
+        let mut host_watch = host.start();
         thread::Builder::new()
             .name(POLL_WATCH_THREAD_NAME.to_owned())
             .spawn(move || loop {
@@ -1095,8 +1109,35 @@ impl PollWatch {
                 for frame in thread_watch.blocked_reports() {
                     writer.send_blocking(frame);
                 }
+                match host_watch.pass() {
+                    HostPass::NoReport => {}
+                    HostPass::Blocked {
+                        blocked_ms,
+                        culprit,
+                    } => writer.send_blocking(thread_watch.host_loop_frame(blocked_ms, culprit)),
+                }
             })?;
         Ok(watch)
+    }
+
+    /// The `loop_blocked` frame of a host loop that has not turned for
+    /// `blocked_ms`. The culprit is the run of the held task while that run
+    /// is in flight on a seat; else no run is named.
+    pub(super) fn host_loop_frame(&self, blocked_ms: u64, culprit: HostCulprit) -> ChildFrame {
+        let culprit = match culprit {
+            HostCulprit::Unknown => LoopCulprit::Unknown,
+            HostCulprit::Run(task_id) => lock_runs(&self.runs)
+                .values()
+                .find(|watched| watched.run.task_id == task_id)
+                .map_or(LoopCulprit::Unknown, |watched| {
+                    LoopCulprit::Run(watched.run)
+                }),
+        };
+        ChildFrame::LoopBlocked(LoopBlockedFrame {
+            culprit,
+            blocked_ms,
+            location: BlockedWhere::cut(HOST_LOOP_LOCATION),
+        })
     }
 
     /// Watch the polls of `run`: the run's scope times its body and each

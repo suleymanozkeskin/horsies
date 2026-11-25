@@ -106,7 +106,11 @@ pub enum EnqueuePreparationError {
 ///
 /// `input_json` is the encoded input as one JSON value. Any JSON value that
 /// passes the strict read rule is accepted; the text is stored and
-/// fingerprinted byte for byte.
+/// fingerprinted byte for byte. The task options must fit the class rules
+/// (`stored_execution`); a refusal is
+/// [`EnqueuePreparationError::InvalidExecution`]. The `timeout_ms` of a
+/// shared class is not checked here: a schedule and a rerun take options
+/// without one, and only a new send refuses them (`CheckedSend::check`).
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_enqueue_facts(
     task_name: &str,
