@@ -38,18 +38,24 @@ function newFolder(): string {
   return folder.path;
 }
 
-function removeFolder(folder: string): void {
-  expect(removeProjectFolder(folder)).toEqual({ kind: "removed" });
+/** Runs `body` in a new folder, then removes the folder, also when `body` throws. */
+function inNewFolder<T>(body: (folder: string) => T): T {
+  const folder = newFolder();
+
+  try {
+    return body(folder);
+  } finally {
+    expect(removeProjectFolder(folder)).toEqual({ kind: "removed" });
+  }
 }
 
-/** Runs `command` in a new folder that holds `files`, then removes the folder. */
+/** Runs `command` in a new folder that holds `files`. */
 function runInProject(files: ReadonlyMap<string, string>, command: CheckCommand, bound: Temporal.Duration): CheckRun {
-  const folder = newFolder();
-  expect(writeProjectFiles(folder, files)).toEqual({ kind: "written" });
-  const run = runCheckOnce(command, folder, bound);
-  removeFolder(folder);
+  return inNewFolder((folder) => {
+    expect(writeProjectFiles(folder, files)).toEqual({ kind: "written" });
 
-  return run;
+    return runCheckOnce(command, folder, bound);
+  });
 }
 
 describe("runCheckOnce", () => {
@@ -108,10 +114,10 @@ describe("runCheckOnce", () => {
 
 describe("runSession", () => {
   test("measured: the median of the measured runs; the warm-up run is not measured", () => {
-    const folder = newFolder();
-    const session = runSession(shellCommand("echo run >> runs.txt"), folder, 3, checkRunTimeout);
-    const startedRuns = readFileSync(join(folder, "runs.txt"), "utf8").trim().split("\n");
-    removeFolder(folder);
+    const { session, startedRuns } = inNewFolder((folder) => ({
+      session: runSession(shellCommand("echo run >> runs.txt"), folder, 3, checkRunTimeout),
+      startedRuns: readFileSync(join(folder, "runs.txt"), "utf8").trim().split("\n"),
+    }));
 
     if (session.kind !== "measured") {
       throw new Error(`expected measured, got ${session.kind}`);
@@ -123,9 +129,7 @@ describe("runSession", () => {
   });
 
   test("runFailed: the first failed run ends the session", () => {
-    const folder = newFolder();
-    const session = runSession(shellCommand("exit 3"), folder, 3, checkRunTimeout);
-    removeFolder(folder);
+    const session = inNewFolder((folder) => runSession(shellCommand("exit 3"), folder, 3, checkRunTimeout));
 
     expect(session).toMatchObject({ kind: "runFailed", failure: { kind: "failed", exitCode: 3 } });
   });
@@ -145,10 +149,7 @@ describe("statistics", () => {
 
 describe("project folder", () => {
   test("createProjectFolder created: an empty folder", () => {
-    const folder = newFolder();
-
-    expect(readdirSync(folder)).toEqual([]);
-    removeFolder(folder);
+    expect(inNewFolder((folder) => readdirSync(folder))).toEqual([]);
   });
 
   test("createProjectFolder notCreated: the parent folder does not exist", () => {
@@ -156,34 +157,33 @@ describe("project folder", () => {
   });
 
   test("writeProjectFiles written: each file at its path", () => {
-    const folder = newFolder();
-    const write = writeProjectFiles(folder, new Map([["types/t00.ts", "export {};\n"]]));
-    const source = readFileSync(join(folder, "types", "t00.ts"), "utf8");
-    removeFolder(folder);
+    const { write, source } = inNewFolder((folder) => ({
+      write: writeProjectFiles(folder, new Map([["types/t00.ts", "export {};\n"]])),
+      source: readFileSync(join(folder, "types", "t00.ts"), "utf8"),
+    }));
 
     expect(write).toEqual({ kind: "written" });
     expect(source).toBe("export {};\n");
   });
 
   test("writeProjectFiles notWritten: a file is in the place of a folder", () => {
-    const folder = newFolder();
-
     const files = new Map([
       ["blocker", "text\n"],
       ["blocker/inner.ts", "export {};\n"],
     ]);
 
-    const write = writeProjectFiles(folder, files);
-    removeFolder(folder);
+    const write = inNewFolder((folder) => writeProjectFiles(folder, files));
 
     expect(write).toMatchObject({ kind: "notWritten", file: "blocker/inner.ts" });
   });
 
   test("removeProjectFolder removed: the folder and its content are gone", () => {
     const folder = newFolder();
-    expect(writeProjectFiles(folder, new Map([["a/b.ts", "export {};\n"]]))).toEqual({ kind: "written" });
+    const write = writeProjectFiles(folder, new Map([["a/b.ts", "export {};\n"]]));
+    const removal = removeProjectFolder(folder);
 
-    expect(removeProjectFolder(folder)).toEqual({ kind: "removed" });
+    expect(write).toEqual({ kind: "written" });
+    expect(removal).toEqual({ kind: "removed" });
     expect(existsSync(folder)).toBe(false);
   });
 

@@ -142,12 +142,13 @@ describe("recording", () => {
     }
 
     const path = join(folder.path, "baseline.json");
-    const write = writeBaselineFile(path, { entries: [stored] });
-    const text = readFileSync(path, "utf8");
-    expect(removeProjectFolder(folder.path)).toEqual({ kind: "removed" });
 
-    expect(write).toEqual({ kind: "written" });
-    expect(JSON.parse(text)).toEqual({ entries: [stored] });
+    try {
+      expect(writeBaselineFile(path, { entries: [stored] })).toEqual({ kind: "written" });
+      expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ entries: [stored] });
+    } finally {
+      expect(removeProjectFolder(folder.path)).toEqual({ kind: "removed" });
+    }
   });
 
   test("writeBaselineFile notWritten: the folder does not exist", () => {

@@ -24,11 +24,11 @@ describe("controlProjectFiles", () => {
       throw new Error(`test setup: no folder: ${folder.cause}`);
     }
 
-    const write = writeProjectFiles(folder.path, controlProjectFiles());
-    const run = runCheckOnce(bunCheckCommand, folder.path, checkRunTimeout);
-    expect(removeProjectFolder(folder.path)).toEqual({ kind: "removed" });
-
-    expect(write).toEqual({ kind: "written" });
-    expect(run.kind).toBe("passed");
+    try {
+      expect(writeProjectFiles(folder.path, controlProjectFiles())).toEqual({ kind: "written" });
+      expect(runCheckOnce(bunCheckCommand, folder.path, checkRunTimeout).kind).toBe("passed");
+    } finally {
+      expect(removeProjectFolder(folder.path)).toEqual({ kind: "removed" });
+    }
   });
 });
