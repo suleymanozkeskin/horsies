@@ -34,6 +34,14 @@ export default defineConfig({
       },
     },
     {
+      // The generated event decoder parses the wire items of an event: it tells
+      // the members of `WireJson` apart by their runtime type.
+      files: ["horsies/src/_catalog/events.ts"],
+      rules: {
+        "anti-slop/no-runtime-typeof": "off",
+      },
+    },
+    {
       // A test writer of `WireJson` values: it tells the members of the union
       // apart by their runtime type to write each one as JSON text.
       files: ["tests/unit/generated/support/wire-text.ts"],

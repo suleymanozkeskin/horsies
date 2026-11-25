@@ -9,7 +9,7 @@ import {
   schedulePatternToWire,
 } from "../../../horsies/src/_catalog/schedule_pattern.ts";
 import type { SchedulePattern } from "../../../horsies/src/_catalog/schedule_pattern.ts";
-import { wireText } from "../../unit/generated/wire-text.ts";
+import { wireText } from "../../unit/generated/support/wire-text.ts";
 
 /** A pattern and the text of Python's `pattern.model_dump(mode='json')` for it. */
 interface PatternCase {
