@@ -13,6 +13,43 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
+### Added
+
+- **Codegen model: the schema of the schedule pattern.**
+  `horsies_core::manifest_schema::SCHEDULE_PATTERN` lists the types of the
+  `pattern_json` text of the scheduler manifest, in render order: `Weekday`,
+  `Month`, the five pattern records, `CronNumericTerm`,
+  `CronEnumTerm<Weekday>`, `CronEnumTerm<Month>`, `DaySelector`,
+  `CronSchedule` and `SchedulePattern`. `pattern_json` stays text, so the
+  scheduler manifest does not change. The Python package keeps its own
+  pattern models; the Python renderer does not render this module.
+- The bounds of the pattern fields are public constants of
+  `horsies_core::core::config::schedule` (`INTERVAL_SECONDS` to
+  `INTERVAL_DAYS`, `HOURLY_MINUTE`, `HOURLY_SECOND`, `MONTHLY_DAY`,
+  `CRON_MINUTE`, `CRON_HOUR`, `CRON_DAY_OF_MONTH`, `CRON_NUMERIC_VALUE`,
+  `CRON_NUMERIC_STEP`, `CRON_ENUM_STEP`, `CRON_MONTH_SPAN`,
+  `CRON_WEEKDAY_SPAN`). The pattern rules read them; their messages do not
+  change.
+
+### Changed
+
+- **Codegen model: the forms of the pattern types.** `PythonValue` has
+  `Optional(PythonItem)` and `TimeOfDay`, and `PythonItem` has `TimeOfDay`.
+  `ManifestField` has a new field `default: MemberDefault` (`NoDefault` or
+  `Int(value)`, the reader's value for a missing member).
+  `TaggedVariant::fields` is a `VariantFields`: `Own(fields)`, or
+  `OfRecord(name)` for a newtype variant that holds the fields of a record
+  type. `ManifestValue` is implemented for `Option<T>` and `NaiveTime`. The
+  `ManifestSchema` derive reads `rename_all = "snake_case"`, a newtype
+  variant under a tag, a generic type recorded once per use
+  (`#[manifest_schema(uses(...))]`), an integer field that names its bound
+  (`#[manifest_schema(int_bound = ...)]`), and the field serde keys
+  `skip_serializing_if = "Option::is_none"` and `default = "<const fn>"`.
+  Code that builds these model values or matches on these enums sets the
+  new field and takes the new variants. `HourlySchedule.second` reads its
+  default from `default_hourly_second` (0), as before. The generated Python
+  package does not change.
+
 ## 0.8.1 — 2026-11-25
 
 0.8.1 needs a stop-all upgrade: stop every worker, scheduler and producer,
