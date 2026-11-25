@@ -15,7 +15,8 @@
 //! - An integer is a `number` when the `max` of its bound is a safe integer,
 //!   else a `bigint`. Each bound is a pair of constants of the same type,
 //!   `<NAME>_MIN` and `<NAME>_MAX`.
-//! - A list is a `ReadonlyArray`.
+//! - A list is a `ReadonlyArray`. A map is a `ReadonlyMap<string, T>`: its
+//!   keys keep their order, and a key `__proto__` is a plain key.
 //!
 //! A converter writes the members of a value in the model's order, the tag
 //! first for a variant. In the wire value an integer is a `bigint` and an
@@ -23,7 +24,8 @@
 
 use horsies_core::manifest_schema::{
     type_fields, IntBound, ManifestField, ManifestModule, ManifestShape, ManifestType,
-    TaggedVariant, VariantFields, PRODUCER_MANIFEST, SCHEDULER_MANIFEST,
+    TaggedVariant, VariantFields, PRODUCER_MANIFEST, SCHEDULER_MANIFEST, WORKER_MANIFEST,
+    WORKFLOW_SPEC_DATA,
 };
 
 use crate::model::{
@@ -41,6 +43,12 @@ pub const PRODUCER_MANIFEST_MODULE: &str = "manifest";
 
 /// The stem of the scheduler manifest module.
 pub const SCHEDULER_MANIFEST_MODULE: &str = "scheduler_manifest";
+
+/// The stem of the worker manifest module.
+pub const WORKER_MANIFEST_MODULE: &str = "worker_manifest";
+
+/// The stem of the workflow spec data module.
+pub const WORKFLOW_SPEC_MODULE: &str = "workflow_spec";
 
 /// The constant of the version that the core reads.
 const VERSION_CONSTANT: &str = "MANIFEST_VERSION";
@@ -74,6 +82,8 @@ pub fn generated_files() -> Vec<GeneratedFile> {
     [
         (PRODUCER_MANIFEST_MODULE, PRODUCER_MANIFEST),
         (SCHEDULER_MANIFEST_MODULE, SCHEDULER_MANIFEST),
+        (WORKER_MANIFEST_MODULE, WORKER_MANIFEST),
+        (WORKFLOW_SPEC_MODULE, WORKFLOW_SPEC_DATA),
     ]
     .iter()
     .map(|(stem, module)| catalog_file(stem, render_manifest_module(module)))
@@ -178,6 +188,8 @@ enum Container {
     Single,
     /// The field is a list of items.
     List,
+    /// The field maps text keys to items.
+    Map,
 }
 
 /// How a field of type `value` holds its items, and the item type. Pure.
@@ -192,7 +204,7 @@ fn field_parts(value: ValueType, subject: &str) -> (Container, ItemType) {
         ValueType::Named(name) => (Container::Single, ItemType::Named(name)),
         ValueType::TimeOfDay => (Container::Single, ItemType::TimeOfDay),
         ValueType::List(item) => (Container::List, item),
-        ValueType::Map(_) => no_typescript_form("a map", subject),
+        ValueType::Map(item) => (Container::Map, item),
         ValueType::Optional(_) => no_typescript_form("an optional value", subject),
     }
 }
@@ -231,6 +243,7 @@ fn field_type_text(holder: &str, field: &ManifestField) -> String {
     match container {
         Container::Single => item_text,
         Container::List => format!("ReadonlyArray<{item_text}>"),
+        Container::Map => format!("ReadonlyMap<string, {item_text}>"),
     }
 }
 
@@ -399,6 +412,10 @@ fn field_wire_expression(
             Container::Single => conversion_expression(&conversion, access, &subject),
             Container::List => format!(
                 "{access}.map((item) => {})",
+                conversion_expression(&conversion, "item", &subject)
+            ),
+            Container::Map => format!(
+                "new Map(Array.from({access}, ([key, item]) => [key, {}] as const))",
                 conversion_expression(&conversion, "item", &subject)
             ),
         },
@@ -884,12 +901,57 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Root.ages is a map: the manifest renderer has no TypeScript form")]
-    fn a_map_field_has_no_typescript_form_here() {
-        let _refused = field_type_text(
-            "Root",
-            &field("ages", PythonValue::Map(PythonItem::Int(PRIORITY))),
+    fn a_map_field_is_a_readonly_map_from_text_keys() {
+        assert_eq!(
+            field_type_text(
+                "Root",
+                &field("ages", PythonValue::Map(PythonItem::Int(PRIORITY)))
+            ),
+            "ReadonlyMap<string, number>"
         );
+        assert_eq!(
+            field_type_text(
+                "Root",
+                &field("limits", PythonValue::Map(PythonItem::Named("Limit")))
+            ),
+            "ReadonlyMap<string, Limit>"
+        );
+    }
+
+    #[test]
+    fn a_map_member_is_a_new_map_of_the_same_keys_with_each_item_converted() {
+        assert_eq!(
+            member_entry(
+                &SAMPLE,
+                "Root",
+                &field("ages", PythonValue::Map(PythonItem::Int(PRIORITY)))
+            ),
+            "[\"ages\", new Map(Array.from(value.ages, ([key, item]) => \
+             [key, integerToWire(item, \"Root.ages\")] as const))]"
+        );
+        assert_eq!(
+            member_entry(
+                &SAMPLE,
+                "Root",
+                &field("limits", PythonValue::Map(PythonItem::Named("Limit")))
+            ),
+            "[\"limits\", new Map(Array.from(value.limits, ([key, item]) => \
+             [key, limitToWire(item)] as const))]"
+        );
+    }
+
+    #[test]
+    fn a_map_of_items_that_are_their_own_wire_value_is_the_wire_value() {
+        for (name, value) in [
+            ("classes", PythonValue::Map(PythonItem::Str)),
+            ("modes", PythonValue::Map(PythonItem::Named("Mode"))),
+            ("sizes", PythonValue::Map(PythonItem::Int(BYTES))),
+        ] {
+            assert_eq!(
+                member_entry(&SAMPLE, "Root", &field(name, value)),
+                format!("[\"{name}\", value.{name}]")
+            );
+        }
     }
 
     #[test]
@@ -1022,16 +1084,73 @@ mod tests {
     }
 
     #[test]
-    fn every_bound_of_the_producer_and_scheduler_manifests_is_a_number() {
-        for module in [PRODUCER_MANIFEST, SCHEDULER_MANIFEST] {
-            for bound in module.int_bounds() {
-                assert_eq!(integer_type(bound), IntegerType::Number, "{}", bound.name);
-            }
+    fn the_worker_manifest_module_has_every_type_bound_and_converter_once() {
+        let text = render_manifest_module(&WORKER_MANIFEST);
+        assert_module_text(&WORKER_MANIFEST, &text);
+        for part in [
+            "\nexport function workerManifestToWire(value: WorkerManifest): \
+             ReadonlyMap<string, WireJson> {\n",
+            "\n  readonly profiles: ReadonlyMap<string, WorkerProfileManifest>;\n",
+            "\n    [\"profiles\", new Map(Array.from(value.profiles, ([key, item]) => \
+             [key, workerProfileManifestToWire(item)] as const))],\n",
+            "\nexport interface QueuesCustom {\n  readonly kind: \"CUSTOM\";\n  \
+             readonly queues: ReadonlyArray<CustomQueueManifest>;\n}\n",
+            "\nexport type ChildProgram =\n  | ChildProgramPython\n  | ChildProgramRust;\n",
+            "\nexport interface ChildProgramRust {\n  readonly kind: \"RUST\";\n}\n",
+        ] {
+            assert!(text.contains(part), "{part}");
         }
     }
 
     #[test]
-    fn the_files_are_the_producer_and_scheduler_modules() {
+    fn the_workflow_spec_module_has_every_type_bound_and_converter_once() {
+        let text = render_manifest_module(&WORKFLOW_SPEC_DATA);
+        assert_module_text(&WORKFLOW_SPEC_DATA, &text);
+        for part in [
+            "\nexport function workflowSpecDataToWire(value: WorkflowSpecData): \
+             ReadonlyMap<string, WireJson> {\n",
+            "\n  readonly args_from: ReadonlyMap<string, number>;\n",
+            "\n    [\"args_from\", new Map(Array.from(value.args_from, ([key, item]) => \
+             [key, integerToWire(item, \"SpecNode.args_from\")] as const))],\n",
+            "\n    [\"queue_classes\", value.queue_classes],\n",
+            "\nexport type SpecOnError =\n  | \"FAIL\"\n  | \"PAUSE\";\n",
+        ] {
+            assert!(text.contains(part), "{part}");
+        }
+    }
+
+    #[test]
+    fn only_the_paused_age_and_the_payload_bounds_pass_the_safe_range() {
+        let modules = [
+            PRODUCER_MANIFEST,
+            SCHEDULER_MANIFEST,
+            WORKER_MANIFEST,
+            WORKFLOW_SPEC_DATA,
+        ];
+        let bigint_bounds: Vec<&str> = modules
+            .iter()
+            .flat_map(ManifestModule::int_bounds)
+            .filter(|bound| integer_type(*bound) == IntegerType::BigInt)
+            .map(|bound| bound.name)
+            .collect();
+        assert_eq!(bigint_bounds, ["PAUSED_AGE_MICROS", "PAYLOAD_BYTES"]);
+        let text = render_manifest_module(&WORKER_MANIFEST);
+        for part in [
+            "\nexport const PAUSED_AGE_MICROS_MIN = 1n;\n\
+             export const PAUSED_AGE_MICROS_MAX = 31_536_000_000_000_000n;\n",
+            "\nexport const PAYLOAD_BYTES_MIN = 1n;\n\
+             export const PAYLOAD_BYTES_MAX = 18_446_744_073_709_551_615n;\n",
+            "\n  readonly micros: bigint;\n",
+            "\n  readonly bytes: bigint;\n",
+            "\n        [\"micros\", value.micros],\n",
+            "\n        [\"bytes\", value.bytes],\n",
+        ] {
+            assert!(text.contains(part), "{part}");
+        }
+    }
+
+    #[test]
+    fn the_files_are_the_four_manifest_modules() {
         let files = generated_files();
         let paths: Vec<&Path> = files.iter().map(GeneratedFile::relative_path).collect();
         assert_eq!(
@@ -1039,9 +1158,18 @@ mod tests {
             [
                 Path::new("src/_catalog/manifest.ts"),
                 Path::new("src/_catalog/scheduler_manifest.ts"),
+                Path::new("src/_catalog/worker_manifest.ts"),
+                Path::new("src/_catalog/workflow_spec.ts"),
             ]
         );
-        assert_eq!(files[0].text(), render_manifest_module(&PRODUCER_MANIFEST));
-        assert_eq!(files[1].text(), render_manifest_module(&SCHEDULER_MANIFEST));
+        let modules = [
+            PRODUCER_MANIFEST,
+            SCHEDULER_MANIFEST,
+            WORKER_MANIFEST,
+            WORKFLOW_SPEC_DATA,
+        ];
+        for (file, module) in files.iter().zip(modules.iter()) {
+            assert_eq!(file.text(), render_manifest_module(module));
+        }
     }
 }
