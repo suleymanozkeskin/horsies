@@ -39,11 +39,17 @@ pub enum ProcessExit {
 }
 
 /// What runs before an immediate exit, on a thread of its own.
+///
+/// [`EXIT_DRAIN_BOUND`] is one bound for every exit place. A child at the
+/// end of its parent should end at once: with `WithHost`, a host drain that
+/// waits on a busy runtime delays that exit up to the bound. A host whose
+/// child must exit within a shorter time gives its child `OutputOnly`, or a
+/// host drain that does not wait on its runtime.
 #[derive(Clone)]
 pub enum ExitDrain {
     /// The flush of Rust's standard output and standard error.
     OutputOnly,
-    /// That flush, then the host's own drain: for example the hand-over of
+    /// The host's own drain, then the flush: for example the hand-over of
     /// the log records in its channel to the host's runtime. The host's
     /// drain returns when it is done; the exit does not wait for it past
     /// the bound.
@@ -77,7 +83,11 @@ impl ProcessExit {
             Self::Immediate(drain) => {
                 let _drained = drain_within(drain.clone(), EXIT_DRAIN_BOUND);
                 // SAFETY: `_exit` takes an int and ends the process at once;
-                // it runs no exit handler and touches no Rust state.
+                // it runs no exit handler and touches no Rust state. What it
+                // does not do: it flushes no C `stdio` buffer of the host
+                // (the drain flushed only Rust's standard output and
+                // standard error), and every other thread stops where it is,
+                // as with `std::process::exit`.
                 unsafe { libc::_exit(code) }
             }
         }
@@ -85,16 +95,17 @@ impl ProcessExit {
 }
 
 impl ExitDrain {
-    /// Flush Rust's standard output and standard error, then run the host's
-    /// drain. A flush that fails (a closed stream) is no failure: the
-    /// process ends either way.
+    /// Run the host's drain, then flush Rust's standard output and standard
+    /// error, so text that the host drain wrote through them with no final
+    /// new line is written too. A flush that fails (a closed stream) is no
+    /// failure: the process ends either way.
     fn run(&self) {
-        let _stdout_flushed = std::io::stdout().flush();
-        let _stderr_flushed = std::io::stderr().flush();
         match self {
             Self::OutputOnly => {}
             Self::WithHost(drain) => drain(),
         }
+        let _stdout_flushed = std::io::stdout().flush();
+        let _stderr_flushed = std::io::stderr().flush();
     }
 }
 
@@ -199,7 +210,9 @@ mod tests {
         let exit = match form.to_str() {
             Some("standard") => ProcessExit::Standard,
             Some("immediate") => ProcessExit::Immediate(ExitDrain::WithHost(Arc::new(|| {
-                let _written = writeln!(std::io::stdout(), "{DRAIN_LINE}");
+                // No final new line: only the flush after the host drain
+                // writes this text.
+                let _written = write!(std::io::stdout(), "{DRAIN_LINE}");
             }))),
             Some("immediate-hung-drain") => {
                 ProcessExit::Immediate(ExitDrain::WithHost(Arc::new(|| thread::sleep(HUNG_DRAIN))))
@@ -242,7 +255,7 @@ mod tests {
 
     /// An immediate exit from a thread that is not the main thread, while
     /// the main thread is busy: the process ends with the code, after the
-    /// host drain ran.
+    /// host drain ran and the flush after it wrote the drain's text.
     #[test]
     fn an_immediate_exit_ends_the_process_with_its_code_after_the_drain() {
         let (code, stdout, _ran) = run_probe("immediate");

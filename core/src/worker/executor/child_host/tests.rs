@@ -453,11 +453,14 @@ const CHILD_EXIT_PROBE_TEST: &str = "worker::executor::child_host::tests::child_
 /// The longest run of a child exit probe.
 const CHILD_EXIT_PROBE_WAIT: Duration = Duration::from_secs(20);
 
-/// The body of the child exit probe: the control thread and the writer
-/// thread of a child whose exit is immediate, and a body thread that is
-/// blocked. The case of the probe variable ends the parent's side: its end
-/// (EOF), a bad frame, or a write that fails. Without the variable this
-/// test returns at once.
+/// The body of the child exit probe: a body thread that is blocked, and
+/// the one thread of a child whose exit is immediate that the case tests.
+/// The cases `eof` and `bad-frame` start the control thread only, and end
+/// the parent's side or write a bad frame. The case `write-fails` starts the
+/// writer thread only, ends the parent's side, and queues a frame: no
+/// control thread reads the end, so only a writer that ends the process at
+/// the failed write gives the code. Without the variable this test returns
+/// at once.
 #[test]
 fn child_exit_probe() {
     let Some(case) = std::env::var_os(CHILD_EXIT_PROBE_ENV) else {
@@ -466,24 +469,26 @@ fn child_exit_probe() {
     let exit = ProcessExit::Immediate(ExitDrain::OutputOnly);
     let (ours, theirs) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
     let _blocked_body = std::thread::spawn(|| std::thread::sleep(Duration::from_secs(600)));
-    let _frames = start_control_thread(
-        ours.try_clone().expect("a second handle of the socket"),
-        FrameReader::new(),
-        4,
-        exit.clone(),
-    )
-    .expect("the control thread starts");
-    let writer = FrameWriter::start(ours, 4, exit).expect("the writer thread starts");
+    let start_control = |socket| {
+        start_control_thread(socket, FrameReader::new(), 4, exit.clone())
+            .expect("the control thread starts")
+    };
     match case.to_str() {
-        Some("eof") => drop(theirs),
+        Some("eof") => {
+            let _frames = start_control(ours);
+            drop(theirs);
+        }
         Some("bad-frame") => {
             use std::io::Write;
+            let _frames = start_control(ours);
             let mut parent = &theirs;
             parent
                 .write_all(&[0xff; 64])
                 .expect("the parent side writes");
         }
         Some("write-fails") => {
+            let writer =
+                FrameWriter::start(ours, 4, exit.clone()).expect("the writer thread starts");
             drop(theirs);
             writer.send_blocking(ChildFrame::CancelFired(RunRef {
                 dispatch: DispatchNumber::new(1).unwrap(),
@@ -532,7 +537,9 @@ fn an_immediate_child_exit_at_a_bad_parent_frame_gives_the_bad_frame_code() {
 }
 
 /// A frame that the writer thread cannot write (the parent is gone) ends
-/// the child through its immediate exit with 71.
+/// the child through its immediate exit with 71. The probe starts no control
+/// thread, so a writer that does not end the process at the failed write
+/// leaves the probe to its own panic (code 101), and this test fails.
 #[test]
 fn an_immediate_child_exit_at_a_failed_write_gives_71() {
     assert_eq!(child_exit_code("write-fails"), Some(PARENT_GONE_EXIT_CODE));

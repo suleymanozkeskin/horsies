@@ -95,8 +95,8 @@ and there is no migration contract between pre-1.0 versions.
   and writer threads of a child (exit codes 71 and 72) and the fail-closed
   liveness and runner heartbeat watches of a worker (79 and 77).
   `Standard` is `std::process::exit`, as before. `Immediate(ExitDrain)`
-  runs the drain (a flush of Rust's standard output and standard error,
-  and with `ExitDrain::WithHost` the host's own drain) for at most
+  runs the drain (with `ExitDrain::WithHost` the host's own drain, then a
+  flush of Rust's standard output and standard error) for at most
   `EXIT_DRAIN_BOUND` (2 s), then ends the process with `libc::_exit`, so
   no exit handler of the host runtime runs. `ChildApp` has a new field
   `exit`, and `Worker::from_plan` takes the exit as its fourth argument.
