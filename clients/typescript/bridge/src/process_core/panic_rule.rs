@@ -126,6 +126,10 @@ pub fn set_panic_rule_export(rule: PanicRule) -> Envelope<()> {
 /// `STOP_CORE` it returns at once, and the package throws the defect.
 /// Starts nothing.
 #[napi(ts_return_type = "NativeEnvelope<undefined>")]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi-rs passes the arguments of a JavaScript call by value"
+)]
 pub fn report_defect(code: String, message: String) -> Envelope<()> {
     sync_call("report_defect", || match panic_rule() {
         PanicRule::StopCore => Envelope::Value(()),
