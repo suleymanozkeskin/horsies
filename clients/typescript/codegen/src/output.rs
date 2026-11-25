@@ -131,8 +131,8 @@ pub fn write_all(package_dir: &Path, files: &[GeneratedFile]) -> Result<WriteRep
         cause,
     })?;
     for file in files {
-        let path = package_dir.join(&file.relative_path);
-        std::fs::write(&path, &file.text).map_err(|cause| CodegenError::Io {
+        let path = package_dir.join(file.relative_path());
+        std::fs::write(&path, file.text()).map_err(|cause| CodegenError::Io {
             path: path.clone(),
             operation: FileOperation::Write,
             cause,
@@ -158,9 +158,9 @@ pub fn check_all(package_dir: &Path, files: &[GeneratedFile]) -> Result<CheckRep
     let mut differing = Vec::new();
     let mut missing = Vec::new();
     for file in files {
-        let path = package_dir.join(&file.relative_path);
+        let path = package_dir.join(file.relative_path());
         match std::fs::read_to_string(&path) {
-            Ok(text) if text == file.text => {}
+            Ok(text) if text == file.text() => {}
             Ok(_other_text) => differing.push(path),
             Err(cause) if cause.kind() == ErrorKind::NotFound => missing.push(path),
             Err(cause) => {
@@ -203,7 +203,7 @@ fn extra_generated_files(
     };
     let generated: Vec<PathBuf> = files
         .iter()
-        .map(|file| package_dir.join(&file.relative_path))
+        .map(|file| package_dir.join(file.relative_path()))
         .collect();
     let mut extra = Vec::new();
     for (position, entry) in entries.enumerate() {
