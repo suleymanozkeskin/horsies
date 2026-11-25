@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "es2025",
+    "module": "nodenext",
+    // Temporal types ship in TypeScript 6.0 and later, the floor of the published types.
+    "lib": ["es2025", "esnext.temporal"],
+    // Node API types only: the package runs on Node and on Bun through the Node API.
+    "types": ["node"],
+    "strict": true,
+    // Checks that `strict` does not turn on.
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "isolatedDeclarations": true,
+    "declaration": true,
+    "verbatimModuleSyntax": true,
+    "rewriteRelativeImportExtensions": true,
+    "erasableSyntaxOnly": true,
+    "noEmit": true
+  },
+  "include": ["src"]
+}
