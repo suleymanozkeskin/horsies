@@ -138,7 +138,7 @@ fn render_terminal_constant(class: &str, constant: &str, members: &[&str]) -> St
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::catalog::{CatalogMember, CodeEnum, CODE_CATALOGS};
+    use horsies_core::catalog::{CallForms, CatalogMember, CodeEnum, CODE_CATALOGS};
     use horsies_core::ErrorCode;
 
     use super::*;
@@ -148,11 +148,13 @@ mod tests {
             name: "PENDING",
             value: "PENDING",
             doc: "Waits for a worker.",
+            forms: CallForms::AnyForm,
         },
         CatalogMember {
             name: "RUNNING",
             value: "RUNNING",
             doc: "",
+            forms: CallForms::AnyForm,
         },
     ];
 
@@ -212,6 +214,7 @@ mod tests {
                 name: "WORKFLOW_NO_NAME",
                 value: "HRS-001",
                 doc: "The workflow has no name.",
+                forms: CallForms::AnyForm,
             }],
             ..catalog("error_codes", "ErrorCode", PythonEnumBase::StrEnum)
         };

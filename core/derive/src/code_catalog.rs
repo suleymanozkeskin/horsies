@@ -18,9 +18,16 @@
 //! `terminal_states = "..."`, the Python name of the frozenset constant of
 //! those members. One without the other is refused. The constant holds the
 //! Python member names of the terminal variants.
+//!
+//! A member that only a blocking call form gives (a sync call of the Python
+//! client, a blocking call of the Rust client) sets
+//! `#[code_catalog(blocking_form_only)]`; its `forms` is
+//! `CallForms::BlockingFormOnly`. Every other member is `CallForms::AnyForm`.
+//! The key marks a variant; on the enum it is refused.
 
 use proc_macro2::TokenStream;
 use quote::quote;
+use syn::meta::ParseNestedMeta;
 use syn::{Attribute, Data, DataEnum, DeriveInput, Expr, ExprLit, Fields, Lit, LitStr, Meta};
 
 /// The Python base class of a generated enum.
@@ -50,10 +57,18 @@ enum MemberRole {
     NotTerminal,
 }
 
+/// The call forms that give a member's code.
+#[derive(Clone, Copy)]
+enum MemberForms {
+    AnyForm,
+    BlockingFormOnly,
+}
+
 /// The settings of one variant.
 struct VariantSettings {
     value: Option<String>,
     role: MemberRole,
+    forms: MemberForms,
 }
 
 pub fn derive_code_catalog(input: DeriveInput) -> syn::Result<TokenStream> {
@@ -84,6 +99,7 @@ pub fn derive_code_catalog(input: DeriveInput) -> syn::Result<TokenStream> {
         names,
         values,
         docs,
+        forms,
         terminal_names,
     } = read_members(data)?;
     let terminal_states = terminal_states(settings.terminal_states, &terminal_names, ident)?;
@@ -101,6 +117,7 @@ pub fn derive_code_catalog(input: DeriveInput) -> syn::Result<TokenStream> {
                             name: #names,
                             value: #values,
                             doc: #docs,
+                            forms: #forms,
                         },)*
                     ],
                     terminal_states: #terminal_states,
@@ -125,6 +142,8 @@ struct Members<'a> {
     /// The wire values.
     values: Vec<String>,
     docs: Vec<String>,
+    /// The `CallForms` value of each member.
+    forms: Vec<TokenStream>,
     /// The Python member names of the `#[code_catalog(terminal)]` variants.
     terminal_names: Vec<String>,
 }
@@ -135,6 +154,7 @@ fn read_members(data: &DataEnum) -> syn::Result<Members<'_>> {
         names: Vec::with_capacity(data.variants.len()),
         values: Vec::with_capacity(data.variants.len()),
         docs: Vec::with_capacity(data.variants.len()),
+        forms: Vec::with_capacity(data.variants.len()),
         terminal_names: Vec::new(),
     };
     for variant in &data.variants {
@@ -158,6 +178,12 @@ fn read_members(data: &DataEnum) -> syn::Result<Members<'_>> {
         members.names.push(name);
         members.values.push(value);
         members.docs.push(doc_text(&variant.attrs));
+        members.forms.push(match variant_settings.forms {
+            MemberForms::AnyForm => quote!(::horsies_core::catalog::CallForms::AnyForm),
+            MemberForms::BlockingFormOnly => {
+                quote!(::horsies_core::catalog::CallForms::BlockingFormOnly)
+            }
+        });
     }
     Ok(members)
 }
@@ -205,12 +231,14 @@ fn container_settings(attrs: &[Attribute], ident: &syn::Ident) -> syn::Result<Co
                 .get_ident()
                 .map(ToString::to_string)
                 .unwrap_or_default();
-            let value: LitStr = meta.value()?.parse()?;
             match key.as_str() {
-                "module" => module = Some(value.value()),
-                "class" => class = Some(value.value()),
-                "terminal_states" => terminal_states = TerminalConstant::Named(value.value()),
+                "module" => module = Some(text_value(&meta)?.value()),
+                "class" => class = Some(text_value(&meta)?.value()),
+                "terminal_states" => {
+                    terminal_states = TerminalConstant::Named(text_value(&meta)?.value());
+                }
                 "base" => {
+                    let value = text_value(&meta)?;
                     base = Some(match value.value().as_str() {
                         "str_enum" => PythonBase::StrEnum,
                         "enum" => PythonBase::PlainEnum,
@@ -221,6 +249,11 @@ fn container_settings(attrs: &[Attribute], ident: &syn::Ident) -> syn::Result<Co
                             ))
                         }
                     });
+                }
+                "value" | "terminal" | "blocking_form_only" => {
+                    return Err(meta.error(format!(
+                        "{key} is a code_catalog key of a variant, not of the enum"
+                    )))
                 }
                 _ => {
                     return Err(meta.error(
@@ -245,11 +278,17 @@ fn container_settings(attrs: &[Attribute], ident: &syn::Ident) -> syn::Result<Co
     }
 }
 
+/// The text literal after `key =` of a `#[code_catalog(...)]` key.
+fn text_value(meta: &ParseNestedMeta<'_>) -> syn::Result<LitStr> {
+    meta.value()?.parse()
+}
+
 /// The settings of a variant's `#[code_catalog(...)]`: `value = "..."`, when
-/// set, and the `terminal` flag.
+/// set, the `terminal` flag and the `blocking_form_only` flag.
 fn variant_settings(attrs: &[Attribute]) -> syn::Result<VariantSettings> {
     let mut value: Option<String> = None;
     let mut role = MemberRole::NotTerminal;
+    let mut forms = MemberForms::AnyForm;
     for attr in attrs
         .iter()
         .filter(|attr| attr.path().is_ident("code_catalog"))
@@ -262,19 +301,24 @@ fn variant_settings(attrs: &[Attribute]) -> syn::Result<VariantSettings> {
                 .unwrap_or_default();
             match key.as_str() {
                 "value" => {
-                    let literal: LitStr = meta.value()?.parse()?;
-                    value = Some(literal.value());
+                    value = Some(text_value(&meta)?.value());
                     Ok(())
                 }
                 "terminal" => {
                     role = MemberRole::Terminal;
                     Ok(())
                 }
-                _ => Err(meta.error("the code_catalog keys of a variant are value and terminal")),
+                "blocking_form_only" => {
+                    forms = MemberForms::BlockingFormOnly;
+                    Ok(())
+                }
+                _ => Err(meta.error(
+                    "the code_catalog keys of a variant are value, terminal and blocking_form_only",
+                )),
             }
         })?;
     }
-    Ok(VariantSettings { value, role })
+    Ok(VariantSettings { value, role, forms })
 }
 
 /// The `///` lines of an item, one leading space removed, joined by newlines.
@@ -354,10 +398,10 @@ mod tests {
         })
         .expect("the derive accepts the enum");
         assert!(text.contains(
-            "::horsies_core::catalog::CatalogMember{name:\"WORKFLOW_NO_NAME\",value:\"HRS-001\",doc:\"Theworkflowhasnoname.\",}"
+            "::horsies_core::catalog::CatalogMember{name:\"WORKFLOW_NO_NAME\",value:\"HRS-001\",doc:\"Theworkflowhasnoname.\",forms:::horsies_core::catalog::CallForms::AnyForm,}"
         ));
         assert!(text.contains(
-            "::horsies_core::catalog::CatalogMember{name:\"QUEUE_FULL\",value:\"QUEUE_FULL\",doc:\"\",}"
+            "::horsies_core::catalog::CatalogMember{name:\"QUEUE_FULL\",value:\"QUEUE_FULL\",doc:\"\",forms:::horsies_core::catalog::CallForms::AnyForm,}"
         ));
         assert!(text.contains("Self::WorkflowNoName=>\"HRS-001\""));
     }
@@ -412,7 +456,45 @@ mod tests {
             }
         })
         .expect_err("the derive refuses the enum");
-        assert!(error.contains("value and terminal"), "{error}");
+        assert!(
+            error.contains("value, terminal and blocking_form_only"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_blocking_form_only_variant_is_marked_and_every_other_member_is_any_form() {
+        let text = derive_text(syn::parse_quote! {
+            #[code_catalog(module = "task_send", base = "str_enum")]
+            enum SendCode {
+                #[code_catalog(blocking_form_only)]
+                AsyncContext,
+                EnqueueFailed,
+            }
+        })
+        .expect("the derive accepts the enum");
+        assert!(text.contains(
+            "::horsies_core::catalog::CatalogMember{name:\"ASYNC_CONTEXT\",value:\"ASYNC_CONTEXT\",doc:\"\",forms:::horsies_core::catalog::CallForms::BlockingFormOnly,}"
+        ));
+        assert!(text.contains(
+            "::horsies_core::catalog::CatalogMember{name:\"ENQUEUE_FAILED\",value:\"ENQUEUE_FAILED\",doc:\"\",forms:::horsies_core::catalog::CallForms::AnyForm,}"
+        ));
+    }
+
+    #[test]
+    fn blocking_form_only_on_the_enum_is_refused() {
+        let error = derive_text(syn::parse_quote! {
+            #[code_catalog(module = "task_send", base = "str_enum", blocking_form_only)]
+            enum SendCode {
+                AsyncContext,
+            }
+        })
+        .expect_err("the derive refuses the enum");
+        assert!(
+            error
+                .contains("blocking_form_only is a code_catalog key of a variant, not of the enum"),
+            "{error}"
+        );
     }
 
     #[test]

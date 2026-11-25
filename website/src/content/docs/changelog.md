@@ -13,6 +13,21 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
+### Changed
+
+- **Codegen model: the call forms that give a code.**
+  `horsies_core::catalog::CatalogMember` has a new field
+  `forms: CallForms`, `AnyForm` or `BlockingFormOnly`. The `CodeCatalog`
+  derive sets `BlockingFormOnly` for a variant with
+  `#[code_catalog(blocking_form_only)]`, and refuses the key on the enum.
+  The `ASYNC_CONTEXT` members of `BrokerErrorCode`, `TaskSendErrorCode`,
+  `WorkflowStartErrorCode`, `HandleErrorCode` and `RetrievalCode` have it:
+  only a blocking call form (a Python sync call, a Rust blocking call)
+  gives these codes. An error class reads the mark through the member of
+  its `code` slot; `CodeCatalog::member_named` finds that member. Code that
+  builds a `CatalogMember` value sets the new field. The generated Python
+  package does not change.
+
 ## 0.8.1 — 2026-11-25
 
 0.8.1 needs a stop-all upgrade: stop every worker, scheduler and producer,
