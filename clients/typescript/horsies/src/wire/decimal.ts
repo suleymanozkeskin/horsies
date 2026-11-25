@@ -13,9 +13,10 @@ export class Decimal {
   }
 
   /**
-   * The decimal of a text in Python's decimal grammar (a sign, digits with an optional point, an optional
-   * exponent), normalised to Python's `str(Decimal(text))`: `1e3` is `1E+3`, `0.0000001` is `1E-7`, `1.10` stays
-   * `1.10`. Refuses an infinity and a NaN (`NotFinite`) and any other text (`NotADecimal`). Pure.
+   * The decimal of a text that the Python client takes as a decimal, normalised to Python's `str(Decimal(text))`:
+   * `1e3` is `1E+3`, `0.0000001` is `1E-7`, `1.10` stays `1.10`, `1_000` is `1000`. As Python's `Decimal`, it takes
+   * whitespace at both ends, `_` at any place and any Unicode decimal digit, and it refuses an exponent outside
+   * Python's range. Refuses an infinity and a NaN (`NotFinite`) and any other text (`NotADecimal`). Pure.
    */
   static parse(text: string): Result<Decimal, DecimalRefused> {
     const canonical = canonicalDecimalText(text);

@@ -1,8 +1,10 @@
 // One test per outcome of Decimal.parse, h.decimal() and h.uuid(), and the decimal corpus against Python's text.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 
+import { PYTHON_DECIMAL_TABLES } from "../../../horsies/src/codec/decimal-text.ts";
 import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
 import { decodeValue } from "../../../horsies/src/codec/reader.ts";
 import type { DecodeRefused, EncodeRefused } from "../../../horsies/src/codec/refusal.ts";
@@ -12,7 +14,7 @@ import { h } from "../../../horsies/src/wire/builders.ts";
 import { Decimal } from "../../../horsies/src/wire/decimal.ts";
 import type { AnyWire } from "../../../horsies/src/wire/infer.ts";
 import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
-import { corpusLines, runtimeLabel } from "./support/files.ts";
+import { CORPUS_DIR, corpusLines, runtimeLabel } from "./support/files.ts";
 
 function decimal(text: string): Decimal {
   const parsed = Decimal.parse(text);
@@ -68,10 +70,48 @@ describe("Decimal.parse", () => {
   });
 
   test("NotADecimal: any other text", () => {
-    for (const text of ["", "1.2.3", "1e", "abc", " 1", "1_000", "0x10", "١"]) {
+    const texts = ["", "_", "1.2.3", "1e", "e5", "abc", "1 0", "0x10", "1\u0000", "1\u00a02", "infinit", "1\ud800"];
+
+    for (const text of texts) {
       const parsed = Decimal.parse(text);
 
       assert(!parsed.ok && parsed.error.kind === "NotADecimal", JSON.stringify(text));
+    }
+  });
+
+  test("Python's forms: whitespace at both ends, any underscore, Unicode decimal digits", () => {
+    for (const [text, python] of [
+      [" 1 ", "1"],
+      ["\u20281\u3000", "1"],
+      ["1_000", "1000"],
+      ["_1_", "1"],
+      ["1_0.0_1e1_0", "1.001E+11"],
+      ["\u0661\u0662", "12"],
+      ["1e\u0665", "1E+5"],
+      ["\uff11", "1"],
+      ["\ud835\udfd2", "4"],
+    ] as const) {
+      assert.equal(decimal(text).toString(), python, JSON.stringify(text));
+    }
+  });
+
+  test("the exponent bounds of Python's decimal", () => {
+    assert.equal(decimal("12E+999999999999999998").toString(), "1.2E+999999999999999999");
+    assert.equal(decimal("1E-1999999999999999997").toString(), "1E-1999999999999999997");
+    assert.equal(decimal("0.10E+1000000000000000000").toString(), "1.0E+999999999999999999");
+    assert.equal(decimal("1E+0000000000000000000000001").toString(), "1E+1");
+
+    for (const text of [
+      "12E+999999999999999999",
+      "1E+1000000000000000000",
+      "0E+1000000000000000000",
+      "1E-1999999999999999998",
+      "10E-1999999999999999998",
+      "1E+10000000000000000000000000",
+    ]) {
+      const parsed = Decimal.parse(text);
+
+      assert(!parsed.ok && parsed.error.kind === "NotADecimal", text);
     }
   });
 
@@ -81,6 +121,36 @@ describe("Decimal.parse", () => {
     assert(Object.isFrozen(decimal("1")));
     assert(Decimal.isDecimal(decimal("1")));
     assert(!Decimal.isDecimal({ toString: () => "1" }));
+  });
+});
+
+describe("Decimal.parse against the Python client", () => {
+  test("Python's whitespace and digit tables are the tables of the parser", () => {
+    const tables: { readonly spaces: readonly number[]; readonly digit_zeros: readonly number[] } = JSON.parse(
+      readFileSync(`${CORPUS_DIR}decimal-tables.json`, "utf8"),
+    );
+
+    assert.deepEqual([...PYTHON_DECIMAL_TABLES.spaces], tables.spaces);
+    assert.deepEqual([...PYTHON_DECIMAL_TABLES.digitZeros], tables.digit_zeros);
+  });
+
+  test("fuzz: 4,000 texts accepted with the Python client's stored text, or refused as it refuses them", () => {
+    const mismatches: string[] = [];
+    const lines = corpusLines("decimal-fuzz.jsonl");
+
+    assert.equal(lines.length, 4000);
+
+    for (const line of lines) {
+      const [text, stored]: [string, string | null] = JSON.parse(line);
+      const parsed = Decimal.parse(text);
+      const outcome = parsed.ok ? parsed.value.toString() : null;
+
+      if (outcome !== stored) {
+        mismatches.push(line);
+      }
+    }
+
+    assert.deepEqual(mismatches, [], `${runtimeLabel()}: ${mismatches.length} mismatches`);
   });
 });
 

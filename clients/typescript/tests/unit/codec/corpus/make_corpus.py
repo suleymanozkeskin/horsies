@@ -1,6 +1,7 @@
 # pyright: strict
 '''Write the corpus files of the TypeScript codec tests: Python's stored text of floats, decimals, date-times
-and times of day.
+and times of day; the decimal texts that the Python client accepts and refuses; Python's whitespace and digit
+tables of `Decimal`.
 
 Run from the repository root. The command installs only pydantic, in a cached environment; it builds no part
 of the repository:
@@ -25,6 +26,7 @@ import sys
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+import unicodedata
 from typing import Final, Literal, TypedDict
 
 import pydantic
@@ -40,6 +42,12 @@ NEIGHBOUR_STEPS: Final = 20
 DECIMAL_COUNT: Final = 2_000
 DATETIME_COUNT: Final = 2_000
 TIME_COUNT: Final = 1_000
+DECIMAL_FUZZ_COUNT: Final = 4_000
+DECIMAL_FUZZ_SEED: Final = SEED + 1
+CODE_POINT_END: Final = 0x110000
+DIGITS_PER_RUN: Final = 10
+MAX_ADJUSTED_EXPONENT: Final = 999_999_999_999_999_999
+MIN_EXPONENT: Final = -1_999_999_999_999_999_997
 FLOAT_BYTES: Final = 8
 
 FLOAT: Final = TypeAdapter(float)
@@ -86,6 +94,41 @@ NAMED_DECIMALS: Final = [
     '1E+999999999999999999',
     '-1.0E-10',
 ]
+
+SPECIAL_WORDS: Final = [
+    'inf',
+    'Infinity',
+    'INF',
+    'nan',
+    'NaN',
+    'snan',
+    'sNaN',
+    'infinit',
+    'nana',
+    'in',
+    'NaN-1',
+]
+JUNK: Final = [
+    '',
+    '.',
+    '..',
+    'e',
+    'E',
+    '+',
+    '-',
+    'e+',
+    '1e',
+    'x',
+    ' ',
+    '\x00',
+    '\t',
+    '1.2.3',
+    '0x1',
+    '++1',
+    '--1',
+    '1e1e1',
+]
+SURROGATE_TEXTS: Final = ['\ud800', '1\udc00', '\U0001f40e', '1\U0001f40e']
 
 type ZoneLabel = Literal['naive', 'utc'] | int
 
@@ -289,6 +332,112 @@ def decimal_lines(rng: random.Random) -> list[str] | CorpusRefused:
     return lines
 
 
+def python_spaces() -> list[int]:
+    return [code for code in range(CODE_POINT_END) if chr(code).isspace()]
+
+
+def python_digit_zeros() -> list[int] | CorpusRefused:
+    '''The digit zero of each run of Unicode decimal digits. Each run must hold 0 to 9 at the next 10 code points.'''
+    zeros = [
+        code
+        for code in range(CODE_POINT_END)
+        if unicodedata.decimal(chr(code), -1) == 0
+    ]
+    for zero in zeros:
+        for offset in range(DIGITS_PER_RUN):
+            if unicodedata.decimal(chr(zero + offset), -1) != offset:
+                return CorpusRefused(f'the digit run at {zero:#x} is not 0 to 9')
+    return zeros
+
+
+def exponent_near_bound(rng: random.Random) -> str:
+    '''An exponent text near one of the bounds of Python's decimal, with leading zeros at times.'''
+    bound = rng.choice(
+        [
+            MAX_ADJUSTED_EXPONENT,
+            MIN_EXPONENT,
+            MAX_ADJUSTED_EXPONENT + 1,
+            MIN_EXPONENT - 1,
+        ]
+    )
+    value = bound + rng.randint(-30, 30)
+    sign = '-' if value < 0 else rng.choice(['', '+'])
+    return sign + '0' * rng.choice([0, 0, 0, 1, 3]) + str(abs(value))
+
+
+def decorated(
+    rng: random.Random, text: str, digits: list[str], spaces: list[str]
+) -> str:
+    '''`text` with underscores, Unicode digits in place of ASCII digits, and whitespace at the ends.'''
+    out: list[str] = []
+    for character in text:
+        if rng.random() < 0.1:
+            out.append('_')
+        if character.isdigit() and character.isascii() and rng.random() < 0.3:
+            out.append(rng.choice(digits)[int(character)])
+        else:
+            out.append(character)
+    return (
+        rng.choice(['', '', rng.choice(spaces)])
+        + ''.join(out)
+        + rng.choice(['', '', rng.choice(spaces)])
+    )
+
+
+def fuzz_decimal_text(rng: random.Random, digits: list[str], spaces: list[str]) -> str:
+    body = decimal_body(rng)
+    sign = rng.choice(['', '', '-', '+'])
+    match rng.randrange(6):
+        case 0:
+            return sign + body + rng.choice(['e', 'E']) + exponent_near_bound(rng)
+        case 1:
+            return decorated(
+                rng,
+                sign + body + rng.choice(['', 'e' + str(rng.randint(-99, 99))]),
+                digits,
+                spaces,
+            )
+        case 2:
+            at = rng.randint(0, len(body))
+            return sign + body[:at] + rng.choice(JUNK + spaces) + body[at:]
+        case 3:
+            word = rng.choice(SPECIAL_WORDS) + rng.choice(
+                ['', '', str(rng.randint(0, 99))]
+            )
+            return decorated(rng, sign + word, digits, spaces)
+        case 4:
+            at = rng.randint(0, len(body))
+            return body[:at] + rng.choice(SURROGATE_TEXTS) + body[at:]
+        case _:
+            return (
+                sign
+                + body
+                + rng.choice(['e', 'E'])
+                + rng.choice(['', '+', '-'])
+                + '0' * rng.randint(0, 25)
+                + '7'
+            )
+
+
+def decimal_fuzz_lines(digit_zeros: list[int]) -> list[str]:
+    '''Each fuzz text with the Python client's stored text of it, or `null` when Pydantic refuses it.'''
+    rng = random.Random(DECIMAL_FUZZ_SEED)
+    digits = [
+        ''.join(chr(zero + offset) for offset in range(DIGITS_PER_RUN))
+        for zero in digit_zeros
+    ]
+    spaces = [chr(code) for code in python_spaces()]
+    lines: list[str] = []
+    for _ in range(DECIMAL_FUZZ_COUNT):
+        text = fuzz_decimal_text(rng, digits, spaces)
+        try:
+            stored: str | None = json.loads(stored_text(DECIMAL, text))
+        except pydantic.ValidationError:
+            stored = None
+        lines.append(json.dumps([text, stored]))
+    return lines
+
+
 def write_lines(path: Path, lines: list[str]) -> None:
     path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
@@ -302,6 +451,10 @@ def write_corpus(folder: Path) -> CorpusRefused | None:
         return decimals
     datetimes = datetime_rows(rng)
     times = time_rows(rng)
+    digit_zeros = python_digit_zeros()
+    if isinstance(digit_zeros, CorpusRefused):
+        return digit_zeros
+    fuzz = decimal_fuzz_lines(digit_zeros)
     write_lines(
         folder / 'floats.txt',
         [f'{float_bits(value)} {stored_text(FLOAT, value)}' for value in floats],
@@ -309,6 +462,15 @@ def write_corpus(folder: Path) -> CorpusRefused | None:
     write_lines(folder / 'decimals.jsonl', decimals)
     write_lines(folder / 'datetimes.jsonl', [json.dumps(row) for row in datetimes])
     write_lines(folder / 'times.jsonl', [json.dumps(row) for row in times])
+    write_lines(folder / 'decimal-fuzz.jsonl', fuzz)
+    tables = {
+        'unicode': unicodedata.unidata_version,
+        'spaces': python_spaces(),
+        'digit_zeros': digit_zeros,
+    }
+    (folder / 'decimal-tables.json').write_text(
+        json.dumps(tables) + '\n', encoding='utf-8'
+    )
     facts = {
         'python': sys.version.split()[0],
         'pydantic': pydantic.VERSION,
@@ -318,6 +480,8 @@ def write_corpus(folder: Path) -> CorpusRefused | None:
         'decimals': len(decimals),
         'datetimes': len(datetimes),
         'times': len(times),
+        'decimal_fuzz': len(fuzz),
+        'decimal_fuzz_refused': sum(1 for line in fuzz if line.endswith(', null]')),
     }
     (folder / 'corpus.json').write_text(
         json.dumps(facts, indent=1) + '\n', encoding='utf-8'
