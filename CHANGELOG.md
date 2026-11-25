@@ -8,6 +8,27 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-25
+
+0.8.1 needs a stop-all upgrade: stop every worker, scheduler and producer,
+then upgrade them all together. The first start of 0.8.1 moves the schema
+from the 0.8.0 baseline (1000) through migrations 1001 to 1006. A process of
+an earlier build that starts after the migrations is refused, and one that
+runs on fails (for example a workflow start: SQLSTATE 42883). The database
+does not go back to an earlier build. Migration 1005 refuses an existing
+`CLAIMED` or `RUNNING` task row with no `claimed_at`: it stops with
+SQLSTATE 23514 and a message that names the table, the CHECK, the row count
+and the query that finds the rows, and the database stays at 1004. No
+horsies writer makes such a row. The release adds the cancel of a running
+task and a fencing token for task code in both clients, the phase timing of
+each attempt and of each workflow run in the monitoring API and the web UI,
+and the worker profile name in each worker snapshot. Breaking: a workflow
+start with a known `workflow_id` and another start command is refused
+(`WORKFLOW_COMMAND_CONFLICT`), and each monitoring duration is exact
+seconds as a float. Prebuilt wheels are for Linux x86_64 and aarch64
+(`manylinux_2_28`) and macOS arm64; on other platforms, pip and uv build
+horsies from the source distribution.
+
 ### Added
 
 - **The cancel of a RUNNING task reaches its code, in both clients.**
@@ -148,24 +169,46 @@ and there is no migration contract between pre-1.0 versions.
   locator of each `TASK_MOVED` event); no statement runs per node or per
   task. The Python models and the Rust types are in `horsies.monitoring`
   and `horsies::monitoring`.
-- **The web UI draws the phase timing of a workflow run.** The Timeline
-  view replaces its execution-time bars with one row per node, in
-  task-index order, on one time axis: the
-  phase segments of the node in time order (a retry and a new task of the
-  node repeat them), the terminal status as a marker, and the wall time of
-  the node. A pause is a band over every row. A shared tooltip gives the
-  phase, task, attempt, claim, start, end and duration of a segment; the
-  arrow keys move between rows and through the segments of a row. A node
-  with `unavailable` or `inconsistent` timing shows a hatched row with its
-  label and reason. An open segment grows on a local one-second clock with
-  no request per second. The timeline renders only the rows in view and 8
-  rows above and below them, whatever the node count. Each Graph card adds
-  its wall time and a
-  thin phase strip (the time of each phase as a part of the node total);
-  the node detail adds the time of each phase and the segments by task and
-  attempt; each attempt in a task or node detail shows its phase times, its
-  claim count and its writer. A read-only legend names each phase. The run
-  detail polls in fallback mode also while a segment or a pause is open.
+- **The web UI draws the phase timing of a workflow run and of each
+  attempt.** The node time is the time of a node without its dependency
+  wait. The longest chain is the chain of nodes whose ends decided the end
+  of the run. Each mark has a tooltip, and each key entry highlights the
+  marks of its phase.
+  - Run summary, over the graph and the timeline: the status of the run, its
+    start and end, and the status counts, which filter the nodes; then the
+    duration of the run, the time of each phase on the longest chain (for a
+    run with no pause, these times add up to the duration) and the pause
+    time.
+  - Timeline: a first row for the run, with the phases along its longest
+    chain, then one row per node. A row has a linear cell on the time axis
+    of the run (the dependency wait as a thin line, the phase segments in
+    time order, and a diamond in the color of the terminal status at the
+    end of the node), a log cell with one bar for the total of each phase,
+    and the node time. A segment narrower than one pixel is not drawn; its
+    time is in the log cell. A pause is a band over every row. The arrow
+    keys move between rows and through the segments of a row. A node with
+    `unavailable` or `inconsistent` timing shows a hatched row with its
+    label and reason. An open segment grows on a local one-second clock with
+    no request per second. The timeline renders only the rows in view and 8
+    rows above and below them, whatever the node count.
+  - Graph: each card shows the node time, and states in words what a node
+    that ran once does not have: more than one attempt or task, and timing
+    that is partial, unavailable or inconsistent. The edges of the longest
+    chain are bold.
+  - Node detail: the node time, the end of the node, the parts of its time
+    (dependency wait, task or child run, its own engine steps) and the
+    dependency whose end ended the dependency wait.
+  - Attempt panel, in the task detail and in the node detail: the task name,
+    status and error code; the queue, the priority and `attempt n of m`; the
+    errors, with one message for each range of attempts with the same error;
+    a strip on a linear axis with the attempts and the retry waits in time
+    order and a key with the total of each phase; one bar for each phase of
+    each attempt on a log duration axis, grouped by phase or by attempt (the
+    browser keeps the choice); and closed details with the exact times, the
+    worker hosts, the task id and the trace link. An attempt that recovery
+    or a cancel wrote says so.
+  - The run detail polls in fallback mode also while a segment or a pause is
+    open.
 - **Each worker snapshot records the name of its worker profile.** Schema
   migration 1004 adds `profile_name` to `horsies_worker_states`. The worker
   writes the name of the profile that it runs (the `--profile` value of
@@ -238,6 +281,9 @@ and there is no migration contract between pre-1.0 versions.
     `monitoring::span_s` are renamed `monitoring::elapsed` and
     `monitoring::span`, and return `Option<TimeDelta>`. The old names are
     removed.
+  - Web UI: each duration shows 3 significant digits below one minute
+    (`0.821ms`, `7.05ms`, `4.82s`), then minutes and seconds to 0.1 s
+    (`2m 3.9s`, `1h 2m 3.4s`). Relative times (`5m ago`) do not change.
 - **A cancel of a RUNNING task records its attempt.** The new attempt
   outcome `CANCELLED` (`TaskAttemptOutcome.CANCELLED`,
   `TaskAttemptOutcome::Cancelled`) has `will_retry` false, error code
@@ -479,7 +525,16 @@ and there is no migration contract between pre-1.0 versions.
   `monitoring::connect_failed_action(subject, &error)` takes the subject
   and the `BrokerError` in place of the cause text;
   `monitoring::database_failure_status` and `db::Transience::of_retryable`
-  are new.
+  are new. The web UI shows a 500 answer to an action as a failure that a
+  retry does not fix ("A retry gives the same result."), with no Retry
+  action, and reads the task or workflow again; a 503 answer keeps the
+  Retry action.
+- **The web UI is restyled.** Each page is one window over a backdrop. The
+  top bar, the toolbars and the graph controls are capsules. In the light
+  theme, muted text has a contrast of at least 6.1:1. Without
+  `backdrop-filter`, or with `prefers-reduced-transparency: reduce`, each
+  surface is opaque. On the Tasks page, a facet button names its field
+  (`Worker: host-a`). No route, data flow or API call changes.
 
 ### Documentation
 
@@ -517,6 +572,19 @@ and there is no migration contract between pre-1.0 versions.
   existing row (`ON CONFLICT (id) DO UPDATE ... WHERE false`), so the read
   finds it. After retention deleted and committed the row, a start with the
   same id starts a new workflow.
+- **Rust client: a shared child no longer exits when the worker uses a seat
+  at once after the end of its run.** A `shared_async` or `shared_thread`
+  seat sent the end of its run and only then freed the seat. When the
+  worker read that end and at once sent a new run to the seat, or a stop to
+  the child, before the seat was free, the child refused the frame and
+  exited with code 72, and the runs on its other seats ended with it. The
+  seat is now free before the end of its run goes out. The Python shared
+  child freed the seat first already.
+- **Linux: the waker pipe of the child spawner is close-on-exec from its
+  creation.** The worker created the pipe with `pipe` and then set
+  `FD_CLOEXEC` on each end. A process that another thread of the worker
+  process started between these calls kept both ends of the pipe. On Linux,
+  one `pipe2` call now sets both flags. Other platforms keep the two calls.
 
 ## [0.8.0] - 2026-11-21
 

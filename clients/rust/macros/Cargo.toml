@@ -1,6 +1,6 @@
 [package]
 name = "horsies-macros"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 description = "Task and workflow macros of the horsies Rust client"
 license = "MIT"
