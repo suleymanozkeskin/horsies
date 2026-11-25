@@ -128,9 +128,9 @@ pub fn member_name(field: &EventField) -> String {
 pub fn public_fields(fields: &[EventField]) -> Vec<&EventField> {
     fields
         .iter()
-        .filter_map(|field| match field.access {
-            FieldAccess::Public => Some(field),
-            FieldAccess::Internal => None,
+        .filter(|field| match field.access {
+            FieldAccess::Public => true,
+            FieldAccess::Internal => false,
         })
         .collect()
 }
