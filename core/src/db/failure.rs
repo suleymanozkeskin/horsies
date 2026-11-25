@@ -40,6 +40,18 @@ pub enum Transience {
     Permanent,
 }
 
+impl Transience {
+    /// The transience that the `retryable` flag of an error records: the
+    /// error catalogs set the flag from this classification, `true` exactly
+    /// when the cause is transient. Pure.
+    pub const fn of_retryable(retryable: bool) -> Self {
+        match retryable {
+            true => Self::Transient,
+            false => Self::Permanent,
+        }
+    }
+}
+
 /// The transience of a server error, by its SQLSTATE class.
 pub fn sqlstate_transience(code: &SqlState) -> Transience {
     sqlstate_code_transience(code.code())
@@ -610,6 +622,12 @@ mod tests {
                 "{code}"
             );
         }
+    }
+
+    #[test]
+    fn the_retryable_flag_records_the_transience() {
+        assert_eq!(Transience::of_retryable(true), Transience::Transient);
+        assert_eq!(Transience::of_retryable(false), Transience::Permanent);
     }
 
     #[test]

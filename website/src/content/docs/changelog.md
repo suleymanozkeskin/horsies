@@ -412,6 +412,36 @@ there is no migration contract between pre-1.0 versions.
   `core::lifecycle::outcomes::decode_raw` and
   `HandleOperationError::connect_failed` take their first argument by
   reference.
+- **Web API: a database failure that stays answers 500.** A monitoring read
+  or action whose database operation failed answered 503 for every cause.
+  It now answers by the core's classification of the cause, the
+  classification that sets `retryable` on the error types of both clients:
+  - 503 when the cause may clear: a connect that the network refused or
+    that did not answer, a connection that closed, a pool checkout that
+    timed out, a statement whose reply was lost, and SQLSTATE classes 08,
+    40, 53, 55 and 57 (for example 40001, 55P03 and 57014).
+  - 500 when it stays: every other SQLSTATE class, also a class that the
+    core does not name (for example 23514 a CHECK constraint, 42P01 an
+    undefined table, XX000), a connection setting that the core refuses,
+    and a broker with no listener for `GET /api/workers/ping`.
+
+  The body stays `{"detail": ...}` with the same text. The rule applies to
+  the actions `POST /api/tasks/{id}/cancel` and
+  `POST /api/workflows/{id}/pause`, `/resume` and `/cancel` (also to the
+  status read after a workflow pause or cancel); to the reads
+  `GET /api/tasks`, `/api/tasks/{id}`, `/api/tasks/stats`,
+  `/api/tasks/facets`, `/api/tasks/breakdown`, `/api/workflows`,
+  `/api/workflows/names`, `/api/workflows/{id}`,
+  `/api/workflows/{id}/tasks/{index}` and `/api/workers/schedules`; to the
+  worker reads `GET /api/workers`, `/api/workers/{id}/history`,
+  `/api/workers/classes` and `/api/workers/ping`; and to the mount of each
+  client when its broker cannot be built (Python `create_monitoring_app`,
+  Rust `horsies::web::router`) and the workflow actions of
+  `horsies::monitoring` when the connect fails. In `horsies-core`,
+  `monitoring::connect_failed_action(subject, &error)` takes the subject
+  and the `BrokerError` in place of the cause text;
+  `monitoring::database_failure_status` and `db::Transience::of_retryable`
+  are new.
 
 ### Documentation
 

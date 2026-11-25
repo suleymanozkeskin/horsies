@@ -202,7 +202,8 @@ pub async fn cancel_task_action(
 
 /// Pause the workflow `workflow_id`, answered as the web route
 /// `POST /api/workflows/{id}/pause` answers it: 200, 404, 409 with the
-/// current status, or 503 (a failed connect too). Writes.
+/// current status, or a database failure (a failed connect too): 503 when
+/// the cause may clear, 500 when it stays. Writes.
 pub async fn pause_workflow_action(app: &Horsies, workflow_id: Uuid) -> ActionOutcome {
     action(app, "Workflow pause", |broker| async move {
         core_monitoring::pause_workflow_action(&broker, workflow_id).await
@@ -264,7 +265,9 @@ fn connect_failed(operation: &str, error: BrokerError) -> MonitoringQueryError {
 }
 
 /// Run the workflow action `run` on `app`'s broker; a failed connect is
-/// answered 503 with the cause (`<subject> failed: <cause>`).
+/// answered with the cause (`<subject> failed: <cause>`), 503 when the cause
+/// may clear and 500 when it stays
+/// ([`core_monitoring::connect_failed_action`]).
 ///
 /// # Panics
 ///
@@ -278,7 +281,7 @@ where
     refuse_in_a_fork(format_args!("{subject}"));
     match app.reads_handle().broker().await {
         Ok(broker) => run(broker).await,
-        Err(error) => core_monitoring::connect_failed_action(&format!("{subject} failed: {error}")),
+        Err(error) => core_monitoring::connect_failed_action(subject, &error),
     }
 }
 

@@ -8,6 +8,7 @@
 mod actions;
 mod errors;
 mod execution_classes;
+mod failure_status;
 pub mod fleet;
 mod function_rows;
 mod history_window;
@@ -33,6 +34,7 @@ pub use errors::{
     MonitoringQueryErrorSource, MonitoringResult,
 };
 pub use execution_classes::{class_report_info, slot_health_info, snapshot_profile_info};
+pub use failure_status::database_failure_status;
 pub use history_window::{
     resolve_monitoring_window, WindowRefused, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
 };

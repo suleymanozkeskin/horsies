@@ -197,8 +197,9 @@ has still happened: `resume_workflow()` returns `HandleResumeRecoveryFailed`,
 and the response is 200 with `warning: "post_resume_recovery_failed"`. Treat
 that as *resumed, check worker logs* — not as a failed resume. The worker
 reaper runs the same recovery pass over all workflows. A database failure
-before the commit is 503: the resume rolled back, or its commit outcome is
-unknown.
+before the commit is 503 or 500, by its cause (see
+[Conflict handling](#conflict-handling)): the resume rolled back, or, on a
+503 only, its commit outcome is unknown.
 
 Resume does not clear a stale `error` left on the run by an `on_error=OnError.PAUSE`
 policy.
@@ -282,8 +283,19 @@ concurrency control.
 | 400 | A task id in the path of a task route, or a workflow id in the path of a workflow action (`pause`, `resume`, `cancel`), is not a UUID (`INVALID_INPUT`, with a `detail`); nothing was read or changed | Send the id as UUID text |
 | 404 | The row no longer exists. On the workflow read routes also a workflow id that is not a UUID, and a node index outside the 32-bit node index column; nothing was read | Retention may have removed it |
 | 409 | Another change won the race, or the schema does not match this build | Re-read the entity; the body carries `current_status` |
-| 500 | Stored data that does not parse (`STORED_DATA_INVALID`): a stored value of the workflow run, or, on a task cancel, a history status that is not a task status. Or a server defect | Check the server logs and re-read the entity. For `STORED_DATA_INVALID`, nothing was committed, and a repeat gets the same answer until the stored row changes |
-| 503 | Broker or database failure | The action may or may not have committed; re-read before retrying |
+| 500 | Stored data that does not parse (`STORED_DATA_INVALID`): a stored value of the workflow run, or, on a task cancel, a history status that is not a task status. Or a database failure that stays (see below). Or a server defect | Check the server logs and re-read the entity. A repeat gets the same answer until the stored row, the schema or the connection settings change. For `STORED_DATA_INVALID`, nothing was committed |
+| 503 | A database failure that may clear (see below) | The action may or may not have committed; re-read before retrying |
+
+A failed database operation answers by the core's classification of its
+cause: the classification that sets `retryable` on the error types of both
+clients. The read routes answer by the same rule.
+
+| Cause | Status |
+|---|---|
+| A connect that the network refused or that did not answer; a connection that closed; a pool checkout that timed out; a statement whose reply was lost (its outcome is unknown) | 503 |
+| SQLSTATE class 08 (connection exception), 40 (serialization failure, deadlock), 53 (insufficient resources), 55 (object not in prerequisite state, for example 55P03 lock not available) or 57 (operator intervention, for example 57014 statement timeout) | 503 |
+| Every other SQLSTATE class, also a class that this list does not name: for example 22 (data exception), 23 (integrity violation, for example 23514 a CHECK constraint), 28 (a password that the server refuses), 42 (syntax error or undefined object, for example a database with no horsies schema) and XX (internal error) | 500 |
+| A connection setting that the core refuses; a server certificate that the client refuses; a broker with no listener (`/api/workers/ping`) | 500 |
 
 A failed request is not proof that nothing happened. A network error in
 particular leaves the outcome unknown — the request may have committed and the

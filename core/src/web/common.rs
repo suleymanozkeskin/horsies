@@ -5,9 +5,11 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 
+use crate::broker::BrokerOperationError;
+use crate::db::Transience;
 use crate::monitoring::{
-    ErrorCategory, MonitoringQueryError, PaginationRefused, SortDirection, TaskGroupBy,
-    TaskSortField,
+    database_failure_status, ErrorCategory, MonitoringQueryError, PaginationRefused, SortDirection,
+    TaskGroupBy, TaskSortField,
 };
 use crate::TaskStatus;
 
@@ -65,6 +67,14 @@ impl ApiError {
 
     pub(crate) fn unavailable(detail: impl Into<String>) -> Self {
         Self::detail(StatusCode::SERVICE_UNAVAILABLE, detail)
+    }
+
+    /// A read whose database operation failed: the status of the transience
+    /// of its cause ([`database_failure_status`]: 503 or 500), with `detail`.
+    pub(crate) fn database_failed(transience: Transience, detail: impl Into<String>) -> Self {
+        let status = StatusCode::from_u16(database_failure_status(transience))
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        Self::detail(status, detail)
     }
 
     pub(crate) fn query_validation(
@@ -376,18 +386,33 @@ pub(crate) fn parse_group_by(value: &str) -> Result<TaskGroupBy, ApiError> {
     }
 }
 
-/// Map a monitoring read failure to its response: a database failure is 503, the
-/// dependency failed and the state can clear; stored history data that does
-/// not decode is 500, the request was valid and a repeat gives the same
-/// answer until the stored row changes.
+/// Map a monitoring read failure to its response. A database failure answers
+/// by its `retryable` flag ([`database_failure_status`]): 503 when the cause
+/// may clear, 500 when it stays. Stored history data that does not decode is
+/// 500: the request was valid, and a repeat gives the same answer until the
+/// stored row changes.
 pub(crate) fn query_failed(surface: &str, error: &MonitoringQueryError) -> ApiError {
     let detail = format!("{surface} query failed: {}", error.message());
     match error {
-        MonitoringQueryError::DbOperationFailed { .. } => ApiError::unavailable(detail),
+        MonitoringQueryError::DbOperationFailed { retryable, .. } => {
+            ApiError::database_failed(Transience::of_retryable(*retryable), detail)
+        }
         MonitoringQueryError::HistoryContractViolation { .. } => {
             ApiError::detail(StatusCode::INTERNAL_SERVER_ERROR, detail)
         }
     }
+}
+
+/// Map a failed worker read of the broker (`subject`, for example `Worker
+/// state query`) to its response: `<subject> failed: <message>`, with the
+/// status of the error's retry rule ([`BrokerOperationError::retryable`],
+/// [`database_failure_status`]). A stored row that does not read, a refused
+/// argument and a broker with no listener stay, so they are 500.
+pub(crate) fn broker_read_failed(subject: &str, error: &BrokerOperationError) -> ApiError {
+    ApiError::database_failed(
+        Transience::of_retryable(error.retryable()),
+        format!("{subject} failed: {}", error.message()),
+    )
 }
 
 pub(crate) fn pagination_refused(
@@ -569,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn a_query_failure_maps_to_python_s_status() {
+    fn a_query_failure_answers_by_the_retry_rule_of_its_cause() {
         let status = |error: MonitoringQueryError| match query_failed("Task list", &error) {
             ApiError::Detail(status, _) => status,
             ApiError::InvalidInput(_) | ApiError::Validation(_) => {
@@ -579,10 +604,18 @@ mod tests {
         assert_eq!(
             status(MonitoringQueryError::DbOperationFailed {
                 message: "read failed".to_owned(),
-                retryable: false,
+                retryable: true,
                 source: read_source(),
             }),
             StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            status(MonitoringQueryError::DbOperationFailed {
+                message: "read failed".to_owned(),
+                retryable: false,
+                source: read_source(),
+            }),
+            StatusCode::INTERNAL_SERVER_ERROR
         );
         assert_eq!(
             status(MonitoringQueryError::HistoryContractViolation {
@@ -590,6 +623,52 @@ mod tests {
                 source: crate::monitoring::HistoryContractSource(read_source()),
             }),
             StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    /// A worker read of the broker that may clear is 503; one that stays (a
+    /// statement refused by its SQLSTATE class, a broker with no listener)
+    /// is 500. The detail names the read.
+    #[test]
+    fn a_broker_read_failure_answers_by_the_retry_rule_of_its_error() {
+        let answer =
+            |error: BrokerOperationError| match broker_read_failed("Worker state query", &error) {
+                ApiError::Detail(status, detail) => (status, detail),
+                ApiError::InvalidInput(_) | ApiError::Validation(_) => {
+                    panic!("a broker read failure is always a detail body")
+                }
+            };
+
+        let (status, detail) = answer(BrokerOperationError::monitoring_query_failed(
+            "list_worker_states",
+            crate::broker::BrokerOperationSource::Broker(crate::broker::BrokerError::Statement(
+                crate::db::StatementFailure::NotSent {
+                    statement: "list_worker_states",
+                    cause: crate::db::NotSentCause::ConnectionClosed,
+                },
+            )),
+        ));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            detail.starts_with("Worker state query failed: list_worker_states failed: "),
+            "{detail}"
+        );
+
+        let (status, _detail) = answer(BrokerOperationError::monitoring_query_failed(
+            "list_worker_states",
+            crate::broker::BrokerOperationSource::Broker(
+                crate::broker::BrokerError::ClaimContract("row".to_owned()),
+            ),
+        ));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let (status, detail) = answer(BrokerOperationError::ListenerDisabled {
+            message: "ping_workers needs a listener".to_owned(),
+        });
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            detail,
+            "Worker state query failed: ping_workers needs a listener"
         );
     }
 }

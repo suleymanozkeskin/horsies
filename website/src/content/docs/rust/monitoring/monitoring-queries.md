@@ -220,7 +220,7 @@ These functions write, and return the `ActionOutcome` that the web route returns
 
 - `ActionOutcome::status_code()` is the HTTP status; `body()` and `into_body()` return the `ActionBody`.
 - `ActionBody` is `Success(ActionResponse)` (`outcome`, `was_status`, `warning`), `Conflict { code, current_status }`, `Code { code }`, `Detail { detail }` or `InternalServerError`.
-- A failed connect is 503 with the cause.
+- A database failure, and a failed connect, answer with the cause: 503 when the cause may clear (`retryable`), 500 when it stays (for example SQLSTATE 23514, a CHECK constraint, or a connection setting that the core refuses). The rule is on [Action Semantics](/horsies/monitoring/action-semantics/#conflict-handling).
 - `resume_workflow_action` builds the sub-workflow children that the resume owes from the workflow definitions registered on `app`. A resume that committed and whose recovery pass failed answers success with the warning `RESUME_RECOVERY_WARNING`.
 
 The rules of each action are on [Action Semantics](/horsies/monitoring/action-semantics/).
