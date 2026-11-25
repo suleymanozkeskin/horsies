@@ -156,13 +156,16 @@ pub struct LoggerLevelArg {
 /// Later events use them. Starts nothing.
 #[napi(ts_return_type = "NativeEnvelope<undefined>")]
 pub fn set_log_levels(levels: LogLevelsArg) -> Envelope<()> {
-    sync_call("set_log_levels", || {
-        let named: Vec<(LoggerName, LogThreshold)> = levels
-            .loggers
-            .iter()
+    sync_call("set_log_levels", move || {
+        let LogLevelsArg {
+            default_level,
+            loggers,
+        } = levels;
+        let named: Vec<(LoggerName, LogThreshold)> = loggers
+            .into_iter()
             .map(|named| (named.logger, named.level))
             .collect();
-        LEVELS.store_all(levels.default_level, &named);
+        LEVELS.store_all(default_level, &named);
         Envelope::Value(())
     })
 }
