@@ -27,6 +27,7 @@ pub enum TaskSendErrorCode {
     /// (Rust); the blocking enqueue would stall it, so nothing was written.
     /// A blocking retry on the same thread returns this code again; the
     /// async forms complete the dispatch with the same task id.
+    #[code_catalog(blocking_form_only)]
     AsyncContext,
     /// Programmer error (bad args, serialization failure, unresolved queue).
     ValidationFailed,

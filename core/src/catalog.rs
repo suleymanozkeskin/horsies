@@ -11,6 +11,11 @@
 //! variants, and a test pins them to the enum's own terminal rule.
 //! [`ErrorCode`] has no other text form: its `HRS-nnn` text is its catalog
 //! value.
+//!
+//! A member that only a blocking call form gives sets
+//! `#[code_catalog(blocking_form_only)]` ([`CallForms::BlockingFormOnly`]).
+//! An error class reads the mark through the member of its `code` slot
+//! ([`CodeCatalog::member_named`]); the class holds no copy of it.
 
 use crate::monitoring::{MonitoringQueryErrorCode, TaskActionErrorCode};
 use crate::{
@@ -28,6 +33,18 @@ pub enum PythonEnumBase {
     PlainEnum,
 }
 
+/// The call forms of a client that give a code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallForms {
+    /// A call of any form can give the code.
+    AnyForm,
+    /// Only a blocking call form gives the code: a sync call of the Python
+    /// client or a blocking call of the Rust client, on a thread that runs an
+    /// event loop or a tokio runtime. A client whose calls are all async never
+    /// gives it. The variant sets `#[code_catalog(blocking_form_only)]`.
+    BlockingFormOnly,
+}
+
 /// One member of a catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CatalogMember {
@@ -38,6 +55,8 @@ pub struct CatalogMember {
     pub value: &'static str,
     /// The member doc, from the variant's `///` lines.
     pub doc: &'static str,
+    /// The call forms that give this code.
+    pub forms: CallForms,
 }
 
 /// The terminal members of a catalog, from the `#[code_catalog(terminal)]`
@@ -70,6 +89,15 @@ pub struct CodeCatalog {
     /// The members in declaration order.
     pub members: &'static [CatalogMember],
     pub terminal_states: TerminalStates,
+}
+
+impl CodeCatalog {
+    /// The member whose Python member name is `name`, or `None` when the
+    /// catalog has no such member. An error class names its `code` member
+    /// this way (`ErrorSlot::CodeMember`). Pure.
+    pub fn member_named(&self, name: &str) -> Option<&'static CatalogMember> {
+        self.members.iter().find(|member| member.name == name)
+    }
 }
 
 /// A code enum whose catalog the derive recorded.
@@ -107,6 +135,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use crate::error_catalog::{code_subsets, ErrorCatalog, ErrorClass, ErrorSlot, ERROR_CATALOGS};
 
     /// The derive's wire values equal the enum's own text form, member by
     /// member and in order.
@@ -490,5 +519,94 @@ mod tests {
                 TerminalStates::NotALifecycle => {}
             }
         }
+    }
+
+    #[test]
+    fn a_member_is_blocking_form_only_if_and_only_if_it_is_async_context() {
+        let mut marked: Vec<&str> = Vec::new();
+        for catalog in CODE_CATALOGS {
+            for member in catalog.members {
+                let async_context = member.name == "ASYNC_CONTEXT";
+                match member.forms {
+                    CallForms::BlockingFormOnly => {
+                        assert!(async_context, "{}.{}", catalog.python_class, member.name);
+                        marked.push(catalog.python_class);
+                    }
+                    CallForms::AnyForm => {
+                        assert!(!async_context, "{}.{}", catalog.python_class, member.name);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            marked,
+            [
+                "BrokerErrorCode",
+                "TaskSendErrorCode",
+                "WorkflowStartErrorCode",
+                "HandleErrorCode",
+                "RetrievalCode",
+            ],
+        );
+    }
+
+    /// The call forms of the members that the `code` slot of `class` holds:
+    /// its one member, or each member of its code subset.
+    fn code_slot_forms(catalog: &ErrorCatalog, class: &ErrorClass) -> Vec<CallForms> {
+        let codes = catalog.code_catalog;
+        match class.slots.first() {
+            Some(ErrorSlot::CodeMember { member }) => vec![
+                codes
+                    .member_named(member)
+                    .unwrap_or_else(|| panic!("{}: {member} is not a member", class.python_class))
+                    .forms,
+            ],
+            Some(ErrorSlot::CodeSubset { subset }) => code_subsets()
+                .into_iter()
+                .find(|known| known.name == *subset)
+                .unwrap_or_else(|| panic!("{}: {subset} is not a code subset", class.python_class))
+                .members
+                .into_iter()
+                .map(|value| {
+                    codes
+                        .members
+                        .iter()
+                        .find(|member| member.value == value)
+                        .unwrap_or_else(|| {
+                            panic!("{}: {value} is not a member", class.python_class)
+                        })
+                        .forms
+                })
+                .collect(),
+            other => panic!("{} starts with {other:?}, not its code", class.python_class),
+        }
+    }
+
+    #[test]
+    fn the_four_async_context_classes_read_blocking_form_only_through_their_code_member() {
+        let mut marked: Vec<&str> = Vec::new();
+        for catalog in ERROR_CATALOGS {
+            for class in catalog.classes {
+                let forms = code_slot_forms(catalog, class);
+                if forms.contains(&CallForms::BlockingFormOnly) {
+                    assert_eq!(
+                        forms,
+                        [CallForms::BlockingFormOnly],
+                        "{}",
+                        class.python_class
+                    );
+                    marked.push(class.python_class);
+                }
+            }
+        }
+        assert_eq!(
+            marked,
+            [
+                "BrokerAsyncContext",
+                "HandleAsyncContext",
+                "TaskSendAsyncContext",
+                "WorkflowStartAsyncContext",
+            ],
+        );
     }
 }
