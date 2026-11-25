@@ -60,6 +60,7 @@ pub(crate) async fn run_isolated_in_process_scoped(
             family: crate::ClientFamily::Rust,
             body_scope,
             handler_child: super::HandlerChildApp::without_handlers(),
+            event_loop: super::EventLoopWatch::RuntimeOnly,
         }),
         pid: IN_PROCESS_PID,
         writer,

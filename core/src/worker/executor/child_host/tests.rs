@@ -1,6 +1,6 @@
 //! Tests of the child host: the arguments, the exit codes, the result
 //! envelope, the run gate of thread seats, the end of a run on a seat, the
-//! poll watch, and the blocking frame read.
+//! poll watch and the host loop watch, and the blocking frame read.
 
 use std::ffi::OsString;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
+use super::event_loop::{HostCulprit, HostLoopWatched};
 use super::link::{read_frame, FrameWriter, QueuedFrames, ReadEnd};
 use super::run::{refusal_end, result_end};
 use super::seats::{
@@ -22,7 +23,7 @@ use crate::events::AttemptStart;
 use crate::worker::executor::protocol::{
     encode_parent_frame, ChildAfterFrame, ChildFrame, DispatchNumber, FrameReader, LoopCulprit,
     ParentFrame, RefusalReason, RssReading, RunEnd, RunRef, SeatEnd, SharedResultFrame,
-    StoredOptionsRefusal,
+    StoredOptionsRefusal, LOOP_BLOCK_LIMIT,
 };
 
 /// The polls of a wait for a seat to free its run, and the time between two.
@@ -352,6 +353,64 @@ fn a_blocked_poll_of_work_of_a_run_is_reported_with_its_run() {
         other => panic!("expected a loop report, got {other:?}"),
     }
     assert!(watch.blocked_reports().is_empty(), "reported once");
+}
+
+/// The frame of a blocked host loop names the run of the held task while
+/// that run is in flight; a held task with no run in flight, and samples
+/// that named no run, give no named culprit.
+#[test]
+fn a_host_loop_frame_names_the_run_in_flight_of_the_held_task() {
+    let watch = PollWatch::without_thread(Instant::now());
+    let run = RunRef {
+        dispatch: DispatchNumber::new(5).unwrap(),
+        task_id: Uuid::from_u128(5),
+    };
+    let _polls = watch.register(run);
+    let culprit_of = |culprit: HostCulprit| match watch.host_loop_frame(5_000, culprit) {
+        ChildFrame::LoopBlocked(blocked) => {
+            assert_eq!(blocked.blocked_ms, 5_000);
+            assert_eq!(
+                blocked.location.as_str(),
+                "the event loop of the host program"
+            );
+            blocked.culprit
+        }
+        other => panic!("expected a loop report, got {other:?}"),
+    };
+    assert_eq!(
+        culprit_of(HostCulprit::Run(run.task_id)),
+        LoopCulprit::Run(run)
+    );
+    assert_eq!(
+        culprit_of(HostCulprit::Run(Uuid::from_u128(6))),
+        LoopCulprit::Unknown
+    );
+    assert_eq!(culprit_of(HostCulprit::Unknown), LoopCulprit::Unknown);
+}
+
+/// The watch of the main thread of a shared thread child: a host loop that
+/// stops turning gives one `loop_blocked` frame after the block limit, with
+/// no named culprit (the main thread holds no run), and no second frame.
+#[tokio::test]
+async fn the_main_thread_watch_reports_a_host_loop_that_stops_turning() {
+    let (writer, mut queued) = FrameWriter::without_thread(16);
+    let host = Arc::new(HostLoop::new());
+    let started = Instant::now();
+    let _watch = PollWatch::start(writer, HostLoopWatched::Watched(Arc::clone(&host)))
+        .expect("the watch thread starts");
+    let frame = tokio::time::timeout(Duration::from_secs(10), queued.take())
+        .await
+        .expect("one frame within 10 s");
+    assert!(started.elapsed() >= LOOP_BLOCK_LIMIT);
+    match frame {
+        ChildFrame::LoopBlocked(blocked) => {
+            assert_eq!(blocked.culprit, LoopCulprit::Unknown);
+            assert!(blocked.blocked_ms >= 5_000, "{}", blocked.blocked_ms);
+        }
+        other => panic!("expected a loop report, got {other:?}"),
+    }
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(queued.count(), 0, "one report for the block");
 }
 
 #[test]

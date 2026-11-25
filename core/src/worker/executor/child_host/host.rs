@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use super::args::{ChildArgs, CHILD_MODE_ARGUMENT};
 use super::body_scope::BodyScope;
+use super::event_loop::{EventLoopWatch, HostLoopWatched};
 use super::handler_host::boot_and_serve_handlers;
 use super::handlers::HandlerChildApp;
 use super::link::{read_frame, start_control_thread, write_frame, FrameWriter, ReadEnd};
@@ -84,6 +85,12 @@ pub struct ChildApp {
     /// What a handler child runs: the app's event handlers and the start
     /// hooks of the handler child. A task child reads neither.
     pub handler_child: HandlerChildApp,
+    /// The loops whose block a task child reports: the Rust runtime only,
+    /// or also the host program's own event loop. A shared async child
+    /// watches the host loop next to its Rust polls; a shared thread child
+    /// watches it for its main thread; an isolated child and a handler
+    /// child watch no loop.
+    pub event_loop: EventLoopWatch,
 }
 
 /// What a child does with the log level of its init frame (the worker's
@@ -527,12 +534,29 @@ enum Serving {
     SharedThread { seats: usize },
 }
 
-/// Start the writer thread, the poll watch of a shared async child, and the
-/// control thread.
+/// Whether the watch thread of a task child of `kind` reads the host loop
+/// of `event_loop`: in a shared async child, and for the main thread of a
+/// shared thread child. An isolated child has no watch: the parent holds
+/// its deadline. Pure.
+fn host_loop_watched(kind: TaskChild, event_loop: &EventLoopWatch) -> HostLoopWatched {
+    match (kind, event_loop) {
+        (_, EventLoopWatch::RuntimeOnly) | (TaskChild::Isolated(_), EventLoopWatch::Host(_)) => {
+            HostLoopWatched::NotWatched
+        }
+        (TaskChild::SharedAsync(_) | TaskChild::SharedThread(_), EventLoopWatch::Host(host)) => {
+            HostLoopWatched::Watched(Arc::clone(host))
+        }
+    }
+}
+
+/// Start the writer thread, the watch thread (the poll watch of a shared
+/// async child; the host loop watch of a shared thread child whose app
+/// gives a host loop), and the control thread.
 fn start_threads(
     socket: &UnixStream,
     reader: FrameReader,
     kind: TaskChild,
+    event_loop: &EventLoopWatch,
 ) -> io::Result<(
     FrameWriter,
     Serving,
@@ -542,13 +566,21 @@ fn start_threads(
     let bound =
         MailboxBound::for_seats(NonZeroUsize::new(seats).unwrap_or(NonZeroUsize::MIN)).get();
     let writer = FrameWriter::start(socket.try_clone()?, bound)?;
-    let serving = match kind {
-        TaskChild::Isolated(_) => Serving::Isolated,
-        TaskChild::SharedAsync(_) => Serving::SharedAsync {
-            watch: PollWatch::start(writer.clone())?,
+    let serving = match (kind, host_loop_watched(kind, event_loop)) {
+        (TaskChild::Isolated(_), _) => Serving::Isolated,
+        (TaskChild::SharedAsync(_), host) => Serving::SharedAsync {
+            watch: PollWatch::start(writer.clone(), host)?,
             seats,
         },
-        TaskChild::SharedThread(_) => Serving::SharedThread { seats },
+        (TaskChild::SharedThread(_), HostLoopWatched::NotWatched) => {
+            Serving::SharedThread { seats }
+        }
+        (TaskChild::SharedThread(_), host @ HostLoopWatched::Watched(_)) => {
+            // The watch of the main thread runs on its own thread; no run
+            // registers polls on it.
+            let _main_thread_watch = PollWatch::start(writer.clone(), host)?;
+            Serving::SharedThread { seats }
+        }
     };
     let frames = start_control_thread(socket.try_clone()?, reader, bound)?;
     Ok((writer, serving, frames))
@@ -707,7 +739,7 @@ fn boot_and_serve_tasks(
     ) {
         return exit;
     }
-    let (writer, serving, mut frames) = match start_threads(socket, reader, kind) {
+    let (writer, serving, mut frames) = match start_threads(socket, reader, kind, &app.event_loop) {
         Ok(threads) => threads,
         Err(error) => {
             let cause = shortage_or(&error, ReportedBootCause::ThreadStartRefused);
@@ -757,7 +789,7 @@ mod tests {
     use crate::db::{Keepalives, SocketSettings, TcpUserTimeout};
     use crate::worker::executor::protocol::{
         AsyncSeats, DatabaseUrl, ExecutorThreads, HandlerChild, PoolMaxSize, PoolMinSize,
-        TaskSendPool,
+        TaskSendPool, ThreadSeats,
     };
 
     const URL: &str = "postgresql://user:secret@localhost:5432/db";
@@ -1038,6 +1070,47 @@ mod tests {
         assert_eq!(task_pool_of(kind), child_pool(3, true));
         assert_eq!(runtime_threads(TaskChild::Isolated(isolated)).get(), 2);
         assert_eq!(seats_of(TaskChild::Isolated(isolated)), 1);
+    }
+
+    /// The watch thread reads the host loop of the app in a shared async
+    /// child and for the main thread of a shared thread child; an isolated
+    /// child, and an app with no host loop, watch none.
+    #[test]
+    fn the_host_loop_is_watched_in_shared_children_only() {
+        let task_send_pool = TaskSendPool::new(1).expect("1 is a task-send pool");
+        let isolated = TaskChild::Isolated(IsolatedChild {
+            pool: child_pool(2, false),
+            task_send_pool,
+        });
+        let shared_async = TaskChild::SharedAsync(SharedAsyncChild {
+            seats: AsyncSeats::new(50).expect("50 async seats"),
+            pool: child_pool(3, true),
+            executor_threads: ExecutorThreads::new(4).expect("4 executor threads"),
+            task_send_pool,
+        });
+        let shared_thread = TaskChild::SharedThread(SharedThreadChild {
+            seats: ThreadSeats::new(4).expect("4 thread seats"),
+            pool: child_pool(3, true),
+            task_send_pool,
+        });
+        let host = Arc::new(super::super::HostLoop::new());
+        let with_host = EventLoopWatch::Host(Arc::clone(&host));
+        let watched = |kind: TaskChild, event_loop: &EventLoopWatch| -> Option<bool> {
+            match host_loop_watched(kind, event_loop) {
+                HostLoopWatched::NotWatched => None,
+                HostLoopWatched::Watched(watched) => Some(Arc::ptr_eq(&watched, &host)),
+            }
+        };
+        assert_eq!(watched(isolated, &with_host), None);
+        assert_eq!(watched(shared_async, &with_host), Some(true));
+        assert_eq!(watched(shared_thread, &with_host), Some(true));
+        for kind in [isolated, shared_async, shared_thread] {
+            assert_eq!(
+                watched(kind, &EventLoopWatch::RuntimeOnly),
+                None,
+                "{kind:?}"
+            );
+        }
     }
 
     /// Python `min_size=0`: no connection stays open; another `min_size`

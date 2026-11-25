@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use horsies_core::{
     run_child_host, ChildApp, ChildHookFailure, ChildLogSetup, ChildStartFuture, ChildStartHook,
-    ClientFamily, HandlerChildApp, NamedChildStartHook,
+    ClientFamily, EventLoopWatch, HandlerChildApp, NamedChildStartHook,
 };
 
 pub use horsies_core::{
@@ -97,6 +97,9 @@ impl Horsies {
                 start_hook: start_hook_of(parts.handler_child_start_hooks),
                 ended_spans: crate::telemetry::ended_span_scope(parts.worker_ended_spans),
             },
+            // The Rust tasks run on the child's runtime: the poll watch sees
+            // a blocked poll; there is no other loop to watch.
+            event_loop: EventLoopWatch::RuntimeOnly,
         };
         ExitCode::from(exit_byte(run_child_host(app, args).code()))
     }

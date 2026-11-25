@@ -70,6 +70,19 @@ and there is no migration contract between pre-1.0 versions.
   new field and takes the new variants. `HourlySchedule.second` reads its
   default from `default_hourly_second` (0), as before. The generated Python
   package does not change.
+- **Child host: the host loop watch.** `ChildApp` has a new field
+  `event_loop: EventLoopWatch`, `RuntimeOnly` or `Host(Arc<HostLoop>)`. A
+  host program that runs task code on an event loop of its own gives the
+  child a `HostLoop`: its timer calls `HostLoop::turned` every
+  `HOST_LOOP_TURN_TICK` (100 ms), and it marks the run whose code the loop
+  runs with `HostLoop::hold(task_id)` and `HostLoop::release`. The watch
+  thread of a shared async child, and of a shared thread child for its
+  main thread, sends one `loop_blocked` frame when the loop has not turned
+  for `LOOP_BLOCK_LIMIT` (5 s). The culprit is the held run when every
+  sample of the block saw it (a sample counts after 200 ms with no turn);
+  else no run is named. An isolated child watches no host loop. Code that
+  builds a `ChildApp` sets the new field; the Rust client sets
+  `RuntimeOnly`, and its poll watch does not change.
 
 ## [0.8.1] - 2026-11-25
 

@@ -19,7 +19,10 @@
 //! handle of a run in its async body ([`current_run`]) and registers the work
 //! that it runs there as host-held work ([`RunHandle::register_host_work`]):
 //! the cancel rounds ask such work to stop and do not drop it, and the run
-//! keeps its seat until the host ends it.
+//! keeps its seat until the host ends it. A host that runs that code on an
+//! event loop of its own gives the child its [`HostLoop`]
+//! ([`EventLoopWatch::Host`]): a block of that loop is reported with
+//! `loop_blocked`, as a blocked poll of a Rust future is.
 //!
 //! A client that traces its task bodies gives the host a [`BodySpans`]: the
 //! host runs each body inside the `tracing` span that it opens for the run
@@ -36,6 +39,7 @@
 mod args;
 mod body_scope;
 mod ended_spans;
+mod event_loop;
 mod handle_setup;
 mod handler_host;
 mod handlers;
@@ -72,6 +76,7 @@ pub use ended_spans::{
     EndedAttempt, EndedSpanMaker, EndedSpanScope, EndedWorkflow, NODE_READER_STOP_BOUND,
     NODE_READ_QUEUE_SPANS,
 };
+pub use event_loop::{EventLoopWatch, HostLoop, HOST_LOOP_TURN_TICK};
 pub use handle_setup::{child_handle_setup, ChildHandleSetup, HandlerChildHasNoHandle};
 pub use handlers::{
     EventHandlerRefused, EventHandlerSet, HandlerChildApp, HandlerError, HANDLER_DRAIN,

@@ -385,6 +385,7 @@ fn context_with(pool: &TestPool, task: RegisteredTask) -> (HostContext, ChildFra
             family: crate::ClientFamily::Rust,
             body_scope: super::BodyScope::NoScope,
             handler_child: super::HandlerChildApp::without_handlers(),
+            event_loop: super::EventLoopWatch::RuntimeOnly,
         }),
         pid: 4242,
         writer,
