@@ -1,0 +1,13 @@
+{
+  "extends": "../horsies/tsconfig.json",
+  "compilerOptions": {
+    // Tests run on `bun test` and `node --test`: Bun types include the Node types.
+    "types": ["bun"],
+    // Test files publish no declarations.
+    "isolatedDeclarations": false,
+    "declaration": false
+  },
+  "include": ["**/*.ts"],
+  // These files import the addon declarations that a native build writes.
+  "exclude": ["native-declarations", "node_modules"]
+}

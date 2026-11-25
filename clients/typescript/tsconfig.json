@@ -1,0 +1,10 @@
+{
+  // `bun check` in this folder checks each referenced project with its own options.
+  // `horsies` joins this list in the PR that adds its first source file: TypeScript
+  // refuses a project with no input files (TS18003).
+  "files": [],
+  "references": [
+    { "path": "./lint" },
+    { "path": "./tests" }
+  ]
+}

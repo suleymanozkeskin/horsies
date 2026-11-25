@@ -1,0 +1,20 @@
+{
+  "name": "horsies-typescript-workspace",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "horsies",
+    "tests"
+  ],
+  "scripts": {
+    "lint": "oxlint --deny-warnings horsies tests"
+  },
+  "devDependencies": {
+    "@cloudflare/oxlint-config": "0.2.0",
+    "@oxlint/plugins": "1.95.0",
+    "@types/bun": "1.4.4",
+    "@types/node": "26.6.6",
+    "oxlint": "1.95.0",
+    "tsrs": "7.1.0-beta.tsrs5"
+  }
+}
