@@ -219,7 +219,8 @@ async def test_stale_cleanup_writes_failed_attempt_worker_crashed(
     """
     task_id = str(uuid.uuid4())
     sent_at, fingerprint = compute_test_command_fingerprint(task_name='stale_attempt_test')
-    # Insert a RUNNING task with started_at far in the past and no heartbeat
+    # Insert a RUNNING task with started_at far in the past and no heartbeat.
+    # A RUNNING row has the claim generation of the claim that started it.
     stale_started_at = datetime.now(timezone.utc) - timedelta(minutes=30)
     await session.execute(
         text("""
@@ -227,14 +228,14 @@ async def test_stale_cleanup_writes_failed_attempt_worker_crashed(
                 (
                     id, task_name, queue_name, priority, input, status, sent_at,
                     created_at, updated_at, retry_count, max_retries, started_at,
-                    claimed_by_worker_id, worker_hostname, worker_pid,
+                    claimed_by_worker_id, claimed_at, worker_hostname, worker_pid,
                     worker_process_name, retention_class_key,
                     command_fingerprint_version, command_fingerprint,
                     retain_rerun_input, execution, enqueued_at, is_workflow_task
                 ) VALUES (
                     :id, 'stale_attempt_test', 'default', 100, '{}', 'RUNNING',
                     :sent_at, NOW(), NOW(), 0, 0, :stale_started_at, 'w-stale-1',
-                    'stale-host', 1234, 'stale-proc', 'standard_30d', 1,
+                    :claimed_at, 'stale-host', 1234, 'stale-proc', 'standard_30d', 1,
                     :command_fingerprint, FALSE, 'ISOLATED', NOW(), FALSE
                 )
         """),
@@ -243,6 +244,7 @@ async def test_stale_cleanup_writes_failed_attempt_worker_crashed(
             'sent_at': sent_at,
             'command_fingerprint': fingerprint,
             'stale_started_at': stale_started_at,
+            'claimed_at': CLAIMED_AT,
         },
     )
     await session.commit()
@@ -310,15 +312,16 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
                 (
                     id, task_name, queue_name, priority, input, status, sent_at,
                     created_at, updated_at, retry_count, max_retries, started_at,
-                    task_options, claimed_by_worker_id, worker_hostname, worker_pid,
-                    worker_process_name, retention_class_key,
+                    task_options, claimed_by_worker_id, claimed_at, worker_hostname,
+                    worker_pid, worker_process_name, retention_class_key,
                     command_fingerprint_version, command_fingerprint,
                     retain_rerun_input, execution, enqueued_at, is_workflow_task
                 ) VALUES (
                     :id, 'stale_retry_test', 'default', 100, '{}', 'RUNNING', :sent_at,
                     NOW(), NOW(), 0, 3, :stale_started_at, :task_options,
-                    'w-stale-retry', 'stale-host', 9999, 'stale-proc', 'standard_30d',
-                    1, :command_fingerprint, FALSE, 'ISOLATED', NOW(), FALSE
+                    'w-stale-retry', :claimed_at, 'stale-host', 9999, 'stale-proc',
+                    'standard_30d', 1, :command_fingerprint, FALSE, 'ISOLATED', NOW(),
+                    FALSE
                 )
         """),
         {
@@ -327,6 +330,7 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
             'command_fingerprint': fingerprint,
             'stale_started_at': stale_started_at,
             'task_options': task_options,
+            'claimed_at': CLAIMED_AT,
         },
     )
     await session.commit()
@@ -360,6 +364,22 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
     assert att['will_retry'] is True
     assert att['error_code'] == 'WORKER_CRASHED'
     assert att['worker_id'] == 'w-stale-retry'
+
+    # The retried task stays live, so its attempt row keeps the phase record:
+    # recovery wrote it, at the claim generation of the stale run, with no
+    # placement.
+    phase = (
+        await session.execute(
+            text(
+                'SELECT recorded_by, claimed_at, placed_at FROM horsies_task_attempts '
+                'WHERE task_id = CAST(:id AS uuid) AND attempt = 1'
+            ),
+            {'id': task_id},
+        )
+    ).one()
+    assert phase.recorded_by == 'RECOVERY'
+    assert phase.claimed_at == CLAIMED_AT
+    assert phase.placed_at is None
 
 
 # ---------------------------------------------------------------------------
