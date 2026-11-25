@@ -37,6 +37,7 @@ use crate::events::{
     AttemptEnd, AttemptEnded, AttemptStart, ChildResult, Event, RunTrace, SlotRecovered,
     WorkerDecision, WorkflowPlace,
 };
+use crate::process_exit::ProcessExit;
 use crate::worker::executor::protocol::{
     BoundedText, EventBatch, EventsFrame, ParentFrame, ProcessId, SpanReadCounts, WireEvent,
 };
@@ -368,7 +369,7 @@ struct Serving {
 impl Serving {
     fn start(spans: EndedSpans, seen_tx: Sender<Seen>) -> Serving {
         let (ours, peer) = UnixStream::pair().unwrap();
-        let writer = FrameWriter::start(ours, 8).unwrap();
+        let writer = FrameWriter::start(ours, 8, ProcessExit::Standard).unwrap();
         let handler_seen = Mutex::new(seen_tx);
         let mut set = EventHandlerSet::new();
         set.add_blocking::<AttemptEnded>("ends".to_owned(), move |event| {

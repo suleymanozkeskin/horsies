@@ -35,6 +35,7 @@ use crate::db::{
     ChannelName, CheckoutClass, ParameterType, PayloadEvent, PayloadFilter, PayloadSubscription,
     Reserve, StatementBound, TypedStatement, WakeEvent, WakeSubscription,
 };
+use crate::process_exit::ProcessExit;
 use crate::telemetry::labels::{ClaimPassResult, ReleaseReason};
 use crate::telemetry::worker::{EventQueue, TelemetryOn, WorkerTelemetry};
 use crate::worker::backoff::RetryBackoff;
@@ -1014,6 +1015,9 @@ pub struct Worker {
     endpoint: WorkerEndpoint,
     /// The handler child; none unless the host turns it on.
     handler_child: HandlerChildSetup,
+    /// How the liveness and runner heartbeat watches end the process when
+    /// they fail closed (exits 79 and 77).
+    process_exit: ProcessExit,
 }
 
 impl Worker {
@@ -1080,7 +1084,18 @@ impl Worker {
             telemetry: WorkerTelemetry::Off,
             endpoint: WorkerEndpoint::NoMetricsEndpoint,
             handler_child: HandlerChildSetup::NoHandlerChild,
+            process_exit: ProcessExit::Standard,
         })
+    }
+
+    /// This worker with `process_exit` as the way its fail-closed watches
+    /// end the process. A worker built here has [`ProcessExit::Standard`];
+    /// [`Worker::from_plan`] sets the exit of its client.
+    pub(crate) fn with_process_exit(self, process_exit: ProcessExit) -> Self {
+        Self {
+            process_exit,
+            ..self
+        }
     }
 
     /// This worker with `on_started` as its start hook.
@@ -1159,6 +1174,13 @@ impl Worker {
     #[cfg(test)]
     pub(crate) fn telemetry_setup(&self) -> (&WorkerTelemetry, &HandlerChildSetup) {
         (&self.telemetry, &self.handler_child)
+    }
+
+    /// How the fail-closed watches of this worker end the process, for the
+    /// tests of the plan that built it.
+    #[cfg(test)]
+    pub(crate) fn process_exit(&self) -> &ProcessExit {
+        &self.process_exit
     }
 
     /// Start the handler child of this worker on `spawner`, on the CPUs of
@@ -2124,6 +2146,7 @@ impl Worker {
             live.clone(),
             beats_cancel.clone(),
             fail_closed_stop.clone(),
+            self.process_exit.clone(),
         )
         .map_err(|error| {
             WorkerError::Config(format!(
@@ -2273,13 +2296,18 @@ impl Worker {
         let rule = LivenessRule::of_config(&self.app_config.recovery);
         let mut backoff = RetryBackoff::from_config(&self.app_config.resilience);
         loop {
-            let error =
-                match start_liveness_lock(Arc::clone(&plan), &self.worker_id, rule, live.clone())
-                    .await
-                {
-                    Ok(started) => return Ok(Some(started)),
-                    Err(failed) => WorkerError::LivenessLock(failed),
-                };
+            let started = start_liveness_lock(
+                Arc::clone(&plan),
+                &self.worker_id,
+                rule,
+                live.clone(),
+                self.process_exit.clone(),
+            )
+            .await;
+            let error = match started {
+                Ok(started) => return Ok(Some(started)),
+                Err(failed) => WorkerError::LivenessLock(failed),
+            };
             if !error.is_retryable() {
                 tracing::error!(error = %error, "non-retryable liveness lock error: {error}");
                 return Err(error);

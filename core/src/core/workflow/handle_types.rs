@@ -35,6 +35,7 @@ pub enum HandleErrorCode {
     ResumeRecoveryFailed,
     /// A sync or blocking handle method was called on a thread that runs an event loop or a tokio
     /// runtime. Its wait would stall that loop, so nothing ran.
+    #[code_catalog(blocking_form_only)]
     AsyncContext,
 }
 
