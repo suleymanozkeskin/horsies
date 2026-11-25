@@ -111,13 +111,40 @@ def test_baseline_catalog_has_no_shape_defects() -> None:
     assert catalog_defects(BASELINE_CATALOG) == ()
 
 
-def test_baseline_catalog_has_a_rule_for_each_of_288_columns_in_22_tables() -> None:
-    # 263 table columns of migration 1000, 20 columns of migration 1001 (2 of
-    # horsies_tasks, 9 of horsies_task_attempts, 9 of the new table
-    # horsies_workflow_events), 2 columns of migration 1002 (of
-    # horsies_workflows), plus tableoid of the two partitioned parents.
+BASELINE_COLUMNS_BY_SOURCE: Final = (
+    ('migration 1000: the 21 tables of core/baseline/0001_tables.sql', 264),
+    ('migration 1001: horsies_tasks', 2),
+    ('migration 1001: horsies_task_attempts', 9),
+    ('migration 1001: the new table horsies_workflow_events', 9),
+    ('migration 1002: horsies_workflows', 2),
+    ('migration 1004: horsies_worker_states', 1),
+    ('tableoid of the two partitioned parents', 2),
+)
+"""The columns that the baseline catalog has a rule for, by the migration
+that adds them. Migration 1003 adds no column. A migration that adds a
+column adds a line here."""
+
+
+def test_baseline_catalog_has_a_rule_for_each_column_of_the_migration_chain() -> None:
+    # The 21 tables of migration 1000 and horsies_workflow_events of migration 1001.
     assert len(BASELINE_CATALOG.tables) == 22
-    assert sum(len(table.columns) for table in BASELINE_CATALOG.tables) == 288
+    assert sum(len(table.columns) for table in BASELINE_CATALOG.tables) == sum(
+        count for _, count in BASELINE_COLUMNS_BY_SOURCE
+    )
+
+
+def test_the_catalog_reads_the_profile_name_of_migration_1004() -> None:
+    """The profile name of a worker snapshot compares exactly, as the other
+    settings of the worker (processes, queues): both clients of one scenario
+    run the same profile. The values of the row that differ per run have
+    rules of their own (worker_id, snapshot_at, worker_started_at)."""
+    rules = {
+        (table.name, spec.name): spec.rule
+        for table in BASELINE_CATALOG.tables
+        for spec in table.columns
+    }
+
+    assert rules[('horsies_worker_states', 'profile_name')] == Exact()
 
 
 def test_the_catalog_reads_the_start_command_of_migration_1002() -> None:
