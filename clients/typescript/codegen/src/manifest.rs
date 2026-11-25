@@ -97,11 +97,18 @@ pub fn generated_files() -> Vec<GeneratedFile> {
         (SCHEDULER_MANIFEST_MODULE, SCHEDULER_MANIFEST),
         (WORKER_MANIFEST_MODULE, WORKER_MANIFEST),
         (WORKFLOW_SPEC_MODULE, WORKFLOW_SPEC_DATA),
-        (SCHEDULE_PATTERN_MODULE, SCHEDULE_PATTERN),
     ]
     .iter()
     .map(|(stem, module)| catalog_file(stem, render_manifest_module(module)))
     .collect()
+}
+
+/// The file of the schedule pattern module. Pure.
+pub fn schedule_pattern_files() -> Vec<GeneratedFile> {
+    vec![catalog_file(
+        SCHEDULE_PATTERN_MODULE,
+        render_manifest_module(&SCHEDULE_PATTERN),
+    )]
 }
 
 /// The text of the TypeScript module of `module`: the import of the wire
@@ -1501,7 +1508,7 @@ mod tests {
     }
 
     #[test]
-    fn the_files_are_the_five_manifest_modules() {
+    fn the_files_are_the_four_manifest_modules() {
         let files = generated_files();
         let paths: Vec<&Path> = files.iter().map(GeneratedFile::relative_path).collect();
         assert_eq!(
@@ -1511,7 +1518,6 @@ mod tests {
                 Path::new("src/_catalog/scheduler_manifest.ts"),
                 Path::new("src/_catalog/worker_manifest.ts"),
                 Path::new("src/_catalog/workflow_spec.ts"),
-                Path::new("src/_catalog/schedule_pattern.ts"),
             ]
         );
         let modules = [
@@ -1519,10 +1525,17 @@ mod tests {
             SCHEDULER_MANIFEST,
             WORKER_MANIFEST,
             WORKFLOW_SPEC_DATA,
-            SCHEDULE_PATTERN,
         ];
         for (file, module) in files.iter().zip(modules.iter()) {
             assert_eq!(file.text(), render_manifest_module(module));
         }
+    }
+
+    #[test]
+    fn the_schedule_pattern_is_its_own_file() {
+        let files = schedule_pattern_files();
+        let paths: Vec<&Path> = files.iter().map(GeneratedFile::relative_path).collect();
+        assert_eq!(paths, [Path::new("src/_catalog/schedule_pattern.ts")]);
+        assert_eq!(files[0].text(), render_manifest_module(&SCHEDULE_PATTERN));
     }
 }
