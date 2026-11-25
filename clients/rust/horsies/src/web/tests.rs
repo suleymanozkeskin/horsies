@@ -294,3 +294,26 @@ async fn a_long_body_is_cut_one_byte_over_the_bound() {
     let short = read_body(Body::from("{}")).await.unwrap();
     assert_eq!(&short[..], b"{}");
 }
+
+/// A handler whose broker cannot be built answers with the cause: 503 when
+/// the cause may clear, 500 for a connection setting that the core refuses
+/// (a repeat fails until the settings change).
+#[tokio::test]
+async fn a_handler_build_failure_answers_by_the_retry_rule_of_its_error() {
+    let transient = handler_build_failed(&BrokerError::ConnectionFailed("refused".to_owned()));
+    assert_eq!(transient.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let permanent = handler_build_failed(&BrokerError::InvalidConnectionSettings(
+        horsies_core::PostgresConfigError::InvalidUrlScheme("mysql".to_owned()),
+    ));
+    assert_eq!(permanent.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = axum::body::to_bytes(permanent.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        json(&body)["detail"].as_str().is_some_and(|detail| {
+            detail.starts_with("The monitoring handler could not connect its broker: ")
+        }),
+        "{body:?}"
+    );
+}
