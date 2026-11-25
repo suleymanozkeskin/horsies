@@ -15,8 +15,10 @@
 //! `<package-dir>` is the folder of the npm package
 //! (`clients/typescript/horsies`). CI runs `check` and fails on a stale file.
 
+mod catalogs;
 mod model;
 mod output;
+mod task_code;
 mod ts_text;
 
 use std::ffi::OsString;
