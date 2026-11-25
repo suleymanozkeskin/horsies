@@ -62,6 +62,19 @@ there is no migration contract between pre-1.0 versions.
   default from `default_hourly_second` (0), as before. The generated Python
   package does not change.
 
+### Fixed
+
+- **A send refuses a shared task with no `timeout_ms`.** A send, a schedule
+  and a rerun of a `SHARED_ASYNC` or `SHARED_THREAD` task whose task options
+  have no `timeout_ms` (absent or `null`) are refused before any statement,
+  and nothing is written. The send gives `VALIDATION_FAILED`, a broker
+  enqueue gives `INVALID_TASK_OPTIONS`, a scheduler with such a schedule does
+  not start (`CommandRefused`), and a rerun gives `InputCorrupt`. Before, the
+  send wrote the task, and each worker failed its run with
+  `WORKER_SERIALIZATION_ERROR`. The Rust task macro and the Python task
+  decorator refuse such a task at registration, so the tasks that they
+  register do not change.
+
 ## 0.8.1 — 2026-11-25
 
 0.8.1 needs a stop-all upgrade: stop every worker, scheduler and producer,

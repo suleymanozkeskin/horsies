@@ -991,7 +991,12 @@ async fn a_rerun_keeps_the_execution_class_of_the_request() {
     let pool = crate::test_support::migrated_pool().await;
     let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
-    store_inline_input(&pool, source, "{\"execution\":\"SHARED_THREAD\"}").await;
+    store_inline_input(
+        &pool,
+        source,
+        "{\"execution\":\"SHARED_THREAD\",\"timeout_ms\":30000}",
+    )
+    .await;
     let RerunOutcome::Enqueued { new_task_id, .. } = broker
         .rerun_task(
             RerunTask::new(source, None, None),
@@ -1027,6 +1032,33 @@ async fn an_invalid_stored_execution_is_input_corrupt() {
             .unwrap(),
         RerunOutcome::InputCorrupt { task_id, ref detail }
             if task_id == source && detail.starts_with("stored task options: ")
+    ));
+    assert_eq!(rerun_count(&pool, source).await, 0);
+    cleanup(&pool, &[source], &[]).await;
+}
+
+/// A rerun applies the send rules to the stored options: a stored request of
+/// a shared class with no `timeout_ms` is corrupt input, and no row is
+/// written.
+#[tokio::test]
+async fn a_stored_shared_request_without_a_timeout_is_input_corrupt() {
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
+    let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
+    store_inline_input(&pool, source, "{\"execution\":\"SHARED_THREAD\"}").await;
+    assert!(matches!(
+        broker
+            .rerun_task(
+                RerunTask::new(source, None, None),
+                policy(SOURCE_CLASS, true)
+            )
+            .await
+            .unwrap(),
+        RerunOutcome::InputCorrupt { task_id, ref detail }
+            if task_id == source
+                && detail
+                    == "stored task options: timeout_ms is absent for execution \
+                        SHARED_THREAD; a shared class requires timeout_ms"
     ));
     assert_eq!(rerun_count(&pool, source).await, 0);
     cleanup(&pool, &[source], &[]).await;

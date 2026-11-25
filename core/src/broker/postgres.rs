@@ -805,7 +805,8 @@ impl<'a> CheckedSend<'a> {
     /// or whose retry limit does not fit; a `sent_at` with no
     /// whole-microsecond form; and the facts of the row
     /// (`prepare_enqueue_facts`): the strict JSON rule, the execution
-    /// class, the command fingerprint and the scope of the idempotency key.
+    /// class and the timeout of a shared class, the command fingerprint and
+    /// the scope of the idempotency key.
     /// A send with no id mints it here. `retain_rerun_input` is resolved:
     /// the send's choice, or the default of the handle. Touches no
     /// database; reads the clock.
@@ -5001,8 +5002,10 @@ mod enqueue_task_options_tests {
     fn a_send_command_holds_the_values_that_a_send_of_its_texts_binds() {
         let options = policy(4, "")
             .replace("\"ISOLATED\"", "\"SHARED_ASYNC\"")
-            .replace("\"cancel_grace_ms\": null", "\"cancel_grace_ms\": 5000");
+            .replace("\"cancel_grace_ms\": null", "\"cancel_grace_ms\": 5000")
+            .replace("\"timeout_ms\": null", "\"timeout_ms\": 30000");
         assert!(options.contains("\"cancel_grace_ms\": 5000"), "{options}");
+        assert!(options.contains("\"timeout_ms\": 30000"), "{options}");
         for (retention, retain_rerun_input) in [
             (EnqueueRetention::Default, false),
             (EnqueueRetention::Forever, true),
