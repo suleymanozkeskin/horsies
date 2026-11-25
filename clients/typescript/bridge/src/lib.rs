@@ -10,6 +10,17 @@
 //!   per area and the musl allocator, and no other item; an area adds its own
 //!   submodules in its `mod.rs`.
 
+// napi-derive registers an export only outside `cfg(test)`. In a test build,
+// an export that no Rust test calls has no use; the library build checks
+// dead code with the registrations in place.
+#![cfg_attr(
+    test,
+    allow(
+        dead_code,
+        reason = "napi-derive registers the exports only outside cfg(test)"
+    )
+)]
+
 // The Node-API module registration (`napi_register_module_v1`) is an item of
 // the `napi` crate. This line links that crate when no area exports an item.
 extern crate napi as _;

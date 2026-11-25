@@ -160,6 +160,10 @@ fn field_value(value: &FieldValue) -> LogFieldValueOut {
 /// Set the JavaScript sink of the core log records. Later batches go to it.
 /// Starts nothing.
 #[napi(ts_return_type = "NativeEnvelope<undefined>")]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi-rs passes the arguments of a JavaScript call by value"
+)]
 pub fn set_log_sink(sink: Function<Vec<LogRecordOut>, bool>) -> Envelope<()> {
     sync_call("set_log_sink", || {
         let built: napi::Result<JsLogSink> = sink
