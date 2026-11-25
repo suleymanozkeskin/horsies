@@ -21,6 +21,14 @@ export function isBoolean(value: unknown): value is boolean {
   return typeof value === "boolean";
 }
 
+/** A UUID in the lower-case 8-4-4-4-12 form, as Python's `str(UUID)` and `crypto.randomUUID()` write it. */
+const UUID_TEXT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Whether a text is a UUID in the lower-case 8-4-4-4-12 form. Pure. */
+export function isUuidText(text: string): boolean {
+  return UUID_TEXT.test(text);
+}
+
 /** Whether `value` is an array. Pure. */
 export function isArray(value: unknown): value is readonly unknown[] {
   return Array.isArray(value);

@@ -8,7 +8,11 @@ export type {
   EncodeRefused,
 } from "../codec/refusal.ts";
 
+export type { DecimalRefused } from "../codec/decimal-text.ts";
+
 export { h, type WireBuilders } from "./builders.ts";
+
+export { Decimal } from "./decimal.ts";
 
 export type { EmptyObject } from "./infer.ts";
 

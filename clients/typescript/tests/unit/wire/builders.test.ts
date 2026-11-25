@@ -13,6 +13,8 @@ describe("h.* builders", () => {
     assert.equal(kindOf(h.int()).node, "int");
     assert.equal(kindOf(h.bigint()).node, "bigint");
     assert.equal(kindOf(h.float()).node, "float");
+    assert.equal(kindOf(h.uuid()).node, "uuid");
+    assert.equal(kindOf(h.decimal()).node, "decimal");
     assert.equal(kindOf(h.instant()).node, "instant");
     assert.equal(kindOf(h.offsetDateTime()).node, "offsetDateTime");
     assert.equal(kindOf(h.plainDateTime()).node, "plainDateTime");

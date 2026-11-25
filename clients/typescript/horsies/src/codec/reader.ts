@@ -9,6 +9,7 @@
 //   is filled in the worker form and stays absent in the stored form (the form that a read-back writes again).
 // - Records are built with own data properties: a stored key `__proto__` never changes a prototype.
 
+import { Decimal } from "../wire/decimal.ts";
 import type { DefaultText, Kind, Member, MemberPresence, ObjectKind } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
@@ -32,7 +33,7 @@ import {
   readPlainDateTime,
   type TemporalReadRefused,
 } from "./temporal-text.ts";
-import { isBigint, isBoolean, isNumber, isString, setOwn } from "./values.ts";
+import { isBigint, isBoolean, isNumber, isString, isUuidText, setOwn } from "./values.ts";
 
 /**
  * Which value a decode gives:
@@ -83,6 +84,10 @@ export function decodeNode(kind: Kind, node: TreeValue, path: string, depth: num
       return decodeFloat(node, path);
     case "string":
       return isString(node) ? ok(node) : refuse("WrongType", path, "expected a string");
+    case "uuid":
+      return decodeText(node, path, readUuid);
+    case "decimal":
+      return decodeText(node, path, readDecimal);
     case "instant":
       return decodeText(node, path, readInstant);
     case "offsetDateTime":
@@ -106,11 +111,26 @@ export function decodeNode(kind: Kind, node: TreeValue, path: string, depth: num
   }
 }
 
+/** A refusal of a text form: the reader's kind and the rule. */
+type TextRefused = { readonly kind: "BadTemporalText" | "BadDecimalText" | "BadUuidText"; readonly detail: string };
+
+function readUuid(text: string): Result<string, TextRefused> {
+  return isUuidText(text)
+    ? ok(text)
+    : err({ kind: "BadUuidText", detail: "not a UUID in the lower-case 8-4-4-4-12 form" });
+}
+
+function readDecimal(text: string): Result<Decimal, TextRefused> {
+  const parsed = Decimal.parse(text);
+
+  return parsed.ok ? parsed : err({ kind: "BadDecimalText", detail: parsed.error.detail });
+}
+
 /** A value stored as a JSON string with its own text form. */
 function decodeText<T>(
   node: TreeValue,
   path: string,
-  read: (text: string) => Result<T, TemporalReadRefused>,
+  read: (text: string) => Result<T, TextRefused | TemporalReadRefused>,
 ): Decoded {
   if (!isString(node)) {
     return refuse("WrongType", path, "expected a string");

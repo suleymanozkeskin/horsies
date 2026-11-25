@@ -1,5 +1,6 @@
 // The `h.*` builders of the wire types.
 
+import type { Decimal } from "./decimal.ts";
 import type {
   AnyWire,
   ObjectSent,
@@ -14,6 +15,7 @@ import type {
 import {
   BIGINT_KIND,
   BOOLEAN_KIND,
+  DECIMAL_KIND,
   FLOAT_KIND,
   INSTANT_KIND,
   INT_KIND,
@@ -26,6 +28,7 @@ import {
   PLAIN_DATE_KIND,
   PLAIN_DATE_TIME_KIND,
   STRING_KIND,
+  UUID_KIND,
 } from "./kinds.ts";
 import { kindOf, presenceOf, type Wire, wireOf } from "./wire-type.ts";
 
@@ -43,6 +46,10 @@ export interface WireBuilders {
   bigint(): Wire<bigint>;
   /** A finite float, stored in Python's float text: `7.0`, `1e-05`, `1e+16`, `-0.0`. */
   float(): Wire<number>;
+  /** A UUID text in the lower-case 8-4-4-4-12 form (`crypto.randomUUID()` gives it), stored as it is. */
+  uuid(): Wire<string>;
+  /** An exact decimal, stored as a JSON string: Python's `str(Decimal)` text. */
+  decimal(): Wire<Decimal>;
   /** A `Temporal.Instant`, stored in UTC: `2026-08-12T09:10:12.654321Z`. */
   instant(): Wire<Temporal.Instant>;
   /**
@@ -100,6 +107,8 @@ export const h: WireBuilders = Object.freeze({
   int: (): Wire<number> => wireOf(INT_KIND),
   bigint: (): Wire<bigint> => wireOf(BIGINT_KIND),
   float: (): Wire<number> => wireOf(FLOAT_KIND),
+  uuid: (): Wire<string> => wireOf(UUID_KIND),
+  decimal: (): Wire<Decimal> => wireOf(DECIMAL_KIND),
   instant: (): Wire<Temporal.Instant> => wireOf(INSTANT_KIND),
   offsetDateTime: (): Wire<Temporal.ZonedDateTime> => wireOf(OFFSET_DATE_TIME_KIND),
   plainDateTime: (): Wire<Temporal.PlainDateTime> => wireOf(PLAIN_DATE_TIME_KIND),

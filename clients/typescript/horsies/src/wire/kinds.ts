@@ -23,6 +23,12 @@ export type FloatKind = { readonly node: "float" };
 /** A well-formed string. */
 export type StringKind = { readonly node: "string" };
 
+/** A UUID text in the lower-case 8-4-4-4-12 form. */
+export type UuidKind = { readonly node: "uuid" };
+
+/** A `Decimal`, stored as a JSON string: Python's `str(Decimal)`. */
+export type DecimalKind = { readonly node: "decimal" };
+
 /** A `Temporal.Instant`, stored as a UTC date-time: `YYYY-MM-DDTHH:MM:SS[.f]Z`. */
 export type InstantKind = { readonly node: "instant" };
 
@@ -79,6 +85,8 @@ export type Kind =
   | BigintKind
   | FloatKind
   | StringKind
+  | UuidKind
+  | DecimalKind
   | InstantKind
   | OffsetDateTimeKind
   | PlainDateTimeKind
@@ -95,6 +103,8 @@ export const INT_KIND: IntKind = Object.freeze({ node: "int" });
 export const BIGINT_KIND: BigintKind = Object.freeze({ node: "bigint" });
 export const FLOAT_KIND: FloatKind = Object.freeze({ node: "float" });
 export const STRING_KIND: StringKind = Object.freeze({ node: "string" });
+export const UUID_KIND: UuidKind = Object.freeze({ node: "uuid" });
+export const DECIMAL_KIND: DecimalKind = Object.freeze({ node: "decimal" });
 export const INSTANT_KIND: InstantKind = Object.freeze({ node: "instant" });
 export const OFFSET_DATE_TIME_KIND: OffsetDateTimeKind = Object.freeze({ node: "offsetDateTime" });
 export const PLAIN_DATE_TIME_KIND: PlainDateTimeKind = Object.freeze({ node: "plainDateTime" });

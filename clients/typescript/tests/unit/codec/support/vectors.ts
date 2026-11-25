@@ -9,8 +9,16 @@ import {
   isPlainDateTime,
   isZonedDateTime,
 } from "../../../../horsies/src/codec/temporal-text.ts";
-import { isArray, isBigint, isNumber, isPlainObject, isString } from "../../../../horsies/src/codec/values.ts";
+import {
+  isArray,
+  isBigint,
+  isNumber,
+  isObjectLike,
+  isPlainObject,
+  isString,
+} from "../../../../horsies/src/codec/values.ts";
 import { h } from "../../../../horsies/src/wire/builders.ts";
+import { Decimal } from "../../../../horsies/src/wire/decimal.ts";
 import type { AnyWire } from "../../../../horsies/src/wire/infer.ts";
 import { STORED_FORMS_DIR } from "./files.ts";
 
@@ -93,6 +101,10 @@ export function declaredWires(type: string, notation: Notation | undefined): rea
       return [{ label: "float", wire: h.float() }];
     case "str":
       return [{ label: "string", wire: h.string() }];
+    case "uuid":
+      return [{ label: "uuid", wire: h.uuid() }];
+    case "decimal":
+      return [{ label: "decimal", wire: h.decimal() }];
     case "datetime_utc":
       return [{ label: "instant", wire: h.instant() }];
     case "datetime_offset":
@@ -144,7 +156,10 @@ export function valueOf(type: string, declared: Declared, notation: Notation | u
       return null;
     case "bool":
     case "str":
+    case "uuid":
       return notation;
+    case "decimal":
+      return decimalOf(notationText(notation));
     case "i64":
     case "u64":
     case "i128":
@@ -176,6 +191,16 @@ export function valueOf(type: string, declared: Declared, notation: Notation | u
     default:
       throw new TypeError(`no value for the vector type ${type}`);
   }
+}
+
+function decimalOf(text: string): Decimal {
+  const parsed = Decimal.parse(text);
+
+  if (!parsed.ok) {
+    throw new TypeError(`the vector decimal ${text} does not parse: ${parsed.error.kind}`);
+  }
+
+  return parsed.value;
 }
 
 /** A date-time text with a `±HH:MM` offset, as a value whose zone is that fixed offset. */
@@ -257,6 +282,10 @@ export function parameterCases(parameters: readonly Parameter[]): readonly Param
 
 /** Strict equality of decoded values: `-0`, `bigint`, key order, and the class of each value. */
 export function sameValue<A, E>(actual: A, expected: E): boolean {
+  if (isObjectLike(expected) && Decimal.isDecimal(expected)) {
+    return isObjectLike(actual) && Decimal.isDecimal(actual) && actual.equals(expected);
+  }
+
   if (isInstant(expected)) {
     return isInstant(actual) && actual.equals(expected);
   }

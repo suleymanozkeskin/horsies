@@ -36,6 +36,8 @@ function walk(kind: Kind, path: string, level: number, refusals: KindRefused[]):
     case "bigint":
     case "float":
     case "string":
+    case "uuid":
+    case "decimal":
     case "instant":
     case "offsetDateTime":
     case "plainDateTime":

@@ -7,6 +7,7 @@
 //   value is `undefined` is refused. A default is never written by the sender.
 // - An undeclared key, a key that only the engine writes, and a value deeper than the core's bound are refused.
 
+import { Decimal } from "../wire/decimal.ts";
 import type { Kind, Member, ObjectKind } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
@@ -34,7 +35,16 @@ import {
   plainDateTimeText,
   type TemporalWriteRefused,
 } from "./temporal-text.ts";
-import { isArray, isBigint, isBoolean, isNumber, isObjectLike, isPlainObject, isString } from "./values.ts";
+import {
+  isArray,
+  isBigint,
+  isBoolean,
+  isNumber,
+  isObjectLike,
+  isPlainObject,
+  isString,
+  isUuidText,
+} from "./values.ts";
 
 /** The text that one call builds. Never shared between calls. */
 type Sink = { text: string };
@@ -97,6 +107,12 @@ function writeValue(kind: Kind, value: unknown, path: string, depth: number, sin
       return isNumber(value) ? writeFloat(value, path, sink) : refuse("WrongType", path, "expected a number");
     case "string":
       return isString(value) ? writeString(value, path, sink) : refuse("WrongType", path, "expected a string");
+    case "uuid":
+      return writeUuid(value, path, sink);
+    case "decimal":
+      return isObjectLike(value) && Decimal.isDecimal(value)
+        ? append(sink, JSON.stringify(value.toString()))
+        : refuse("WrongType", path, "expected a Decimal");
     case "instant":
       return isInstant(value)
         ? writeTemporal(instantText(value), path, sink)
@@ -171,6 +187,17 @@ function writeString(value: string, path: string, sink: Sink): Written {
   }
 
   return append(sink, JSON.stringify(value));
+}
+
+/** A UUID text in the lower-case 8-4-4-4-12 form, as it is. */
+function writeUuid(value: unknown, path: string, sink: Sink): Written {
+  if (!isString(value)) {
+    return refuse("WrongType", path, "expected a UUID string");
+  }
+
+  return isUuidText(value)
+    ? append(sink, `"${value}"`)
+    : refuse("NotCanonicalUuid", path, "not the lower-case 8-4-4-4-12 form");
 }
 
 /** A date-time text as a JSON string; the text holds no character that JSON escapes. */

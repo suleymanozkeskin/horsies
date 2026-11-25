@@ -30,7 +30,9 @@ export type EncodeRefusalKind =
   /** An `h.offsetDateTime()` value whose zone is named, not a fixed offset. */
   | "NamedTimeZone"
   /** A Temporal value of a calendar other than `iso8601`. */
-  | "NotIsoCalendar";
+  | "NotIsoCalendar"
+  /** An `h.uuid()` value that is not the lower-case 8-4-4-4-12 form. */
+  | "NotCanonicalUuid";
 
 /** Why the reader refuses a stored text under the declared kind. */
 export type DecodeRefusalKind =
@@ -49,7 +51,11 @@ export type DecodeRefusalKind =
   /** The value is nested deeper than the core's bound of a user value. */
   | "TooDeep"
   /** A string that is not the stored text of its date-time kind. */
-  | "BadTemporalText";
+  | "BadTemporalText"
+  /** A string that is not a finite decimal text. */
+  | "BadDecimalText"
+  /** A string that is not a UUID in the lower-case 8-4-4-4-12 form. */
+  | "BadUuidText";
 
 /** The writer refuses a value. */
 export type EncodeRefused = {
