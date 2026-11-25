@@ -4,8 +4,8 @@ From 0.8.0, `horsies-core`, `horsies-core-derive`, `horsies-macros`, the
 `horsies` crate and the Python package carry one version and one
 changelog: the
 [`CHANGELOG.md`](https://github.com/suleymanozkeskin/horsies/blob/main/CHANGELOG.md)
-at the root of the repository. Its section `[0.8.0]` lists the changes of
-0.8.0.
+at the root of the repository. Its section of a release, from `[0.8.0]`
+on, lists the changes of that release.
 
 The entries below are the last releases of horsies-rust, `0.1.0-alpha.26`
 to `0.1.0-alpha.36`, before 0.8.0. They follow

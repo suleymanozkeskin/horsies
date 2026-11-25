@@ -18,6 +18,8 @@ tags: [quickstart, installation, tutorial]
 uv add horsies
 ```
 
+Prebuilt wheels are for Linux x86_64 and aarch64 (`manylinux_2_28`) and macOS arm64. On other platforms, pip and uv build horsies from the source distribution. The build needs a Rust toolchain and a C compiler; see [The native extension](/horsies/migrations/migration-to-0-8-0/#the-native-extension).
+
 ## 1. Create the App Instance
 
 Create `instance.py`:

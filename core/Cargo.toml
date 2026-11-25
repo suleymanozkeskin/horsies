@@ -1,6 +1,6 @@
 [package]
 name = "horsies-core"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 description = "Shared core of the horsies task queue and workflow engine, used by the horsies clients"
 license = "MIT"
@@ -55,7 +55,7 @@ web = [
 [dependencies]
 # The `CodeCatalog` derive of the code enums and the `ManifestSchema` derive
 # of the manifest types.
-horsies-core-derive = { version = "0.8.0", path = "derive" }
+horsies-core-derive = { version = "0.8.1", path = "derive" }
 async-stream = { version = "0.3", optional = true }
 async-trait = { version = "0.1", optional = true }
 axum = { version = "0.8", optional = true }
