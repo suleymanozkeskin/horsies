@@ -82,6 +82,37 @@ fn build_app(database_url: &str) -> Result<Horsies, HorsiesError> {
 
 The other fields have the names and the meanings of the [Broker Config](/horsies/configuration/broker-config/) table.
 
+#### Pool Size
+
+`pool_size` (default 5) and `max_overflow` (default 10) size the general broker pool: `pool_size` persistent connections, and up to `max_overflow` more under load. The Python client has the same defaults.
+
+- The general broker serves producers, web processes, schedulers and app-level APIs.
+- It does not size the pools of a worker. The worker process opens the `pool` of its worker profile, and task code in a worker child opens the `task_send_pool` of its child kind. See [Worker Setup](/horsies/rust/workers/worker-setup/#pools).
+
+| Deployment | pool_size | max_overflow |
+|------------|-----------|--------------|
+| Development | 2-5 | 5 |
+| Small production | 5-10 | 10-20 |
+| High traffic | 10-20 | 20-40 |
+
+Raise both values for a producer that sends at a high rate:
+
+```rust
+use horsies::{AppConfig, Horsies, HorsiesError, PostgresConfig};
+
+fn build_high_traffic_app(database_url: &str) -> Result<Horsies, HorsiesError> {
+    let config = AppConfig {
+        broker: PostgresConfig {
+            pool_size: 20,
+            max_overflow: 40,
+            ..PostgresConfig::from_url(database_url)
+        },
+        ..AppConfig::for_database_url(database_url)
+    };
+    Horsies::new(config)
+}
+```
+
 ## Rules That Only a Rust App Has
 
 `Horsies::new` refuses these configs:
