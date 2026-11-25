@@ -683,7 +683,7 @@ class TestStoredSourceDoesNotDecode:
 async def test_a_family_row_that_holds_no_client_family_raises_a_contract_violation(
     terminalization_schema: HistorySchema,
 ) -> None:
-    """A family value outside PYTHON and RUST is corrupt stored data.
+    """A family value outside PYTHON, RUST and TYPESCRIPT is corrupt stored data.
 
     The test writes it past the CHECK ``horsies_client_family_family_known``,
     which it drops first. The core answers ``RerunUnknownStoredFamily`` with

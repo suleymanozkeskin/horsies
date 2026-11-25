@@ -50,6 +50,7 @@ _MIGRATION_DESCRIPTIONS: Final[dict[int, str]] = {
     1003: 'attempt cancelled',
     1004: 'worker profile name',
     1005: 'claim generation by status',
+    1006: 'typescript client family',
 }
 """The description that the bookkeeping row of each migration of the chain
 stores (``MIGRATION_SOURCES``, ``core/src/broker/migrations.rs``)."""
@@ -445,6 +446,10 @@ async def test_unknown_horsies_tables_are_refused(database_url: str) -> None:
             'versions this build does not ship',
         ),
         ("UPDATE horsies_client_family SET family = 'RUST'", 'installed by the RUST client'),
+        (
+            "UPDATE horsies_client_family SET family = 'TYPESCRIPT'",
+            'installed by the TYPESCRIPT client',
+        ),
     ],
 )
 @pytest.mark.asyncio(loop_scope='function')
@@ -470,7 +475,7 @@ async def test_installed_database_with_another_state_is_refused(
 
 @pytest.mark.asyncio(loop_scope='function')
 async def test_a_family_row_that_holds_no_client_family_fails_closed(database_url: str) -> None:
-    """A family value outside PYTHON and RUST is corrupt stored data.
+    """A family value outside PYTHON, RUST and TYPESCRIPT is corrupt stored data.
 
     The test writes it past the CHECK ``horsies_client_family_family_known``,
     which it drops first. The install fails with the core's contract

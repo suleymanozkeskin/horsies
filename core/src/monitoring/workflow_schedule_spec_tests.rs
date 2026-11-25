@@ -584,7 +584,13 @@ const DEFAULT_SORT_LIST: &str = "SELECT * FROM horsies_monitoring_task_list(
 /// (CHECK `horsies_tasks_claim_generation_by_status`) and no owner.
 async fn seed_plan_population(pool: &TestPool) {
     for (status, task_name, claimed_at, started_at, rows) in [
-        ("RUNNING", "'plan_task_' || (g % 5)", "NOW()", "NOW()", 500_i32),
+        (
+            "RUNNING",
+            "'plan_task_' || (g % 5)",
+            "NOW()",
+            "NOW()",
+            500_i32,
+        ),
         ("PENDING", "'plan_task_pending'", "NULL", "NULL", 2_000_i32),
     ] {
         sql::query(&format!(

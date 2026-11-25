@@ -46,7 +46,7 @@ SCHEMA_TTL_SECONDS = 60.0
 SCHEMA_INCOMPATIBLE = 'SCHEMA_INCOMPATIBLE'
 SCHEMA_UNKNOWN = 'SCHEMA_UNKNOWN'
 
-EXPECTED_SCHEMA_VERSION: Final = 1005
+EXPECTED_SCHEMA_VERSION: Final = 1006
 """The schema version this build writes through: the version of the
 newest migration of the chain (``MIGRATION_SOURCES``,
 ``core/src/broker/migrations.rs``). The core answers an

@@ -314,6 +314,29 @@ and there is no migration contract between pre-1.0 versions.
   after the migration is refused, because the database holds a newer
   version. A database at 1005 does not go back to an earlier build. The web
   monitoring schema check expects version 1005.
+- **Schema migration 1006: the client family `TYPESCRIPT` is reserved.**
+  The first start of this build applies migration 1006
+  (`core/migrations/1006_typescript_client_family.sql`) after migration
+  1005. It replaces the CHECK `horsies_client_family_family_known`: the
+  family row can hold `TYPESCRIPT` in addition to `PYTHON` and `RUST`. No
+  TypeScript client is released yet. The Python and Rust clients never write
+  `TYPESCRIPT`, and the migration does not change the family row. The
+  migration holds `ACCESS EXCLUSIVE` on `horsies_client_family` (one row)
+  until it commits; no table is rewritten. A process of an earlier build
+  that starts after it is refused, because the database holds a newer
+  version; one that runs on keeps writing. A database at 1006 does not go
+  back to an earlier build. The web monitoring schema check expects version
+  1006.
+  - A Python or a Rust client refuses a database whose family row holds
+    `TYPESCRIPT` as it refuses a database of the other client: the install,
+    each write and a rerun fail with the same errors and write nothing. The
+    message names the `TYPESCRIPT` client.
+  - Rust: `ClientFamily` of `horsies-core` gains `TypeScript` (stored as
+    `TYPESCRIPT`). `horsies::rerun::RecordedFamily::Recorded` can carry it
+    in `CallerRerunError::ClientFamilyMismatch`. A `match` on
+    `ClientFamily` needs the new arm.
+  - The message of `UnknownStoredFamily` (a family row that holds no client
+    family) names `PYTHON`, `RUST` and `TYPESCRIPT`.
 - **`WorkerStateSnapshot` has the field `profile`.** Code that builds a
   Python `WorkerStateSnapshot` passes `profile`; a Rust struct literal of
   `WorkerStateSnapshot` sets `profile`.

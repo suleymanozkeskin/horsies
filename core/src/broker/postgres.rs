@@ -1254,7 +1254,7 @@ impl PostgresBroker {
     /// whose install ran in this process has passed it already. Nothing is
     /// written when the check does not pass:
     ///
-    /// - a database of the other family, or with no family row, is
+    /// - a database of another family, or with no family row, is
     ///   `BrokerError::ClientFamilyMismatch`, not retryable;
     /// - a family row whose value is not a client family (corrupt stored
     ///   data) is `BrokerError::UnknownStoredFamily`, not retryable;
@@ -5408,6 +5408,65 @@ mod client_family_tests {
             assert_eq!(rows, 0);
         }
         assert_eq!(family_row(&pool).await.as_deref(), Some("GO"));
+    }
+
+    /// A database whose family row holds `TYPESCRIPT` (the CHECK admits it
+    /// from migration 1006 on) is of the TypeScript client. A Python and a
+    /// Rust handle are refused before the first write, at the install and
+    /// at the check, with the stored family named, not retryable; a
+    /// TypeScript handle passes the check. The family row does not change.
+    #[tokio::test]
+    async fn a_typescript_database_refuses_a_python_and_a_rust_handle_before_any_write() {
+        let pool = crate::test_support::migrated_pool().await;
+        sql::query("UPDATE horsies_client_family SET family = 'TYPESCRIPT'")
+            .execute(&pool)
+            .await
+            .expect("the family CHECK admits TYPESCRIPT");
+        let typescript =
+            crate::broker::client_family::RecordedFamily::Recorded(ClientFamily::TypeScript);
+
+        for family in [ClientFamily::Python, ClientFamily::Rust] {
+            let installing = PostgresBroker::from_test_url(pool.url(), family);
+            let refused = installing
+                .migrate()
+                .await
+                .expect_err("no install into a database of another family");
+            assert!(
+                matches!(
+                    &refused,
+                    BrokerError::ClientFamilyMismatch { stored, own }
+                        if *stored == typescript && *own == family
+                ),
+                "{refused:?}"
+            );
+            assert!(!refused.is_retryable());
+            assert!(
+                refused.to_string().contains("the TYPESCRIPT client"),
+                "{refused}"
+            );
+
+            let broker = PostgresBroker::from_test_url_observe_only(pool.url(), family);
+            let refused = broker
+                .ensure_client_family_for_write()
+                .await
+                .expect_err("no write into a database of another family");
+            assert!(
+                matches!(
+                    &refused,
+                    BrokerError::ClientFamilyMismatch { stored, own }
+                        if *stored == typescript && *own == family
+                ),
+                "{refused:?}"
+            );
+            assert!(!refused.is_retryable());
+        }
+        let broker =
+            PostgresBroker::from_test_url_observe_only(pool.url(), ClientFamily::TypeScript);
+        broker
+            .ensure_client_family_for_write()
+            .await
+            .expect("a TypeScript handle writes into a TypeScript database");
+        assert_eq!(family_row(&pool).await.as_deref(), Some("TYPESCRIPT"));
     }
 }
 

@@ -83,7 +83,7 @@ async def test_an_unregistered_class_raises_before_any_write() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('stored', ['RUST', None])
+@pytest.mark.parametrize('stored', ['RUST', 'TYPESCRIPT', None])
 async def test_a_database_of_another_family_raises_before_any_write(stored: str | None) -> None:
     connection = _connection(class_registered=True, client_family=stored, location='LIVE')
 

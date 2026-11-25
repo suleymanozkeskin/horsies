@@ -2650,11 +2650,11 @@ class RerunClassNotRegistered:
 
 @final
 class RerunClientFamilyMismatch:
-    """The database records the other client family, or none (stored is None). Nothing
+    """The database records another client family, or none (stored is None). Nothing
     written. message names both.
     """
     @property
-    def stored(self) -> Literal['PYTHON', 'RUST'] | None: ...
+    def stored(self) -> Literal['PYTHON', 'RUST', 'TYPESCRIPT'] | None: ...
     @property
     def message(self) -> str: ...
     @property

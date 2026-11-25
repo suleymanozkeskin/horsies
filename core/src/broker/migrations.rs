@@ -26,7 +26,9 @@
 //!   1004 (`1004_worker_profile_name.sql`) adds the name of the worker
 //!   profile to each worker snapshot. Version 1005
 //!   (`1005_claim_generation_by_status.sql`) adds the CHECK that a CLAIMED or
-//!   RUNNING task row holds its claim generation (`claimed_at`).
+//!   RUNNING task row holds its claim generation (`claimed_at`). Version 1006
+//!   (`1006_typescript_client_family.sql`) adds the client family
+//!   `TYPESCRIPT` to the CHECK of the family row.
 //!
 //! The released text of a migration never changes: a database that applied
 //! another text of it is refused ([`SchemaRefusal::MigrationEdited`]), so a
@@ -40,7 +42,7 @@
 //!    readers exist).
 //! 2. Decide. A database that holds this build's chain and this client's
 //!    family gets no lock and no write. A database that this build does not
-//!    know is refused with a [`SchemaRefusal`], and a database of the other
+//!    know is refused with a [`SchemaRefusal`], and a database of another
 //!    client family is refused; neither is changed.
 //! 3. Otherwise take the install lock on a session-work connection, read the
 //!    state again on it (another installer may have finished during the
@@ -154,12 +156,17 @@ pub(crate) const WORKER_PROFILE_NAME_MIGRATION_VERSION: i64 = 1004;
 /// (`core/migrations/1005_claim_generation_by_status.sql`).
 pub(crate) const CLAIM_GENERATION_BY_STATUS_MIGRATION_VERSION: i64 = 1005;
 
+/// Version of the migration that adds the client family `TYPESCRIPT` to the
+/// CHECK of the family row
+/// (`core/migrations/1006_typescript_client_family.sql`).
+pub(crate) const TYPESCRIPT_CLIENT_FAMILY_MIGRATION_VERSION: i64 = 1006;
+
 /// The files of `core/migrations/`, one per migration after the baseline,
 /// in apply order: the version of the migration, the file name and the text.
 /// The core includes them by relative path and keeps no copy. A file added to
 /// the folder without a line here fails
 /// `later_migration_list_is_the_whole_folder`.
-pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 5] = [
+pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 6] = [
     (
         LIFECYCLE_RECORD_MIGRATION_VERSION,
         "1001_lifecycle_record.sql",
@@ -184,6 +191,11 @@ pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 5] = [
         CLAIM_GENERATION_BY_STATUS_MIGRATION_VERSION,
         "1005_claim_generation_by_status.sql",
         include_str!("../../migrations/1005_claim_generation_by_status.sql"),
+    ),
+    (
+        TYPESCRIPT_CLIENT_FAMILY_MIGRATION_VERSION,
+        "1006_typescript_client_family.sql",
+        include_str!("../../migrations/1006_typescript_client_family.sql"),
     ),
 ];
 
@@ -259,7 +271,7 @@ struct MigrationSource {
 /// The embedded chain, in apply order: the baseline, then the migrations of
 /// [`LATER_MIGRATION_FILES`]. The Python client installs through the core,
 /// so both clients apply the same chain.
-const MIGRATION_SOURCES: [MigrationSource; 6] = [
+const MIGRATION_SOURCES: [MigrationSource; 7] = [
     MigrationSource {
         version: BASELINE_MIGRATION_VERSION,
         description: "baseline",
@@ -339,6 +351,21 @@ const MIGRATION_SOURCES: [MigrationSource; 6] = [
         script: SqlScript::new(
             "migration_1005_claim_generation_by_status",
             LATER_MIGRATION_FILES[4].2,
+        ),
+        family_row: FamilyRow::NotWritten,
+        readers: ReaderPublication::NotPublished,
+        exact_indexes: &[],
+        retired_indexes: &[],
+    },
+    // The migration adds no column and builds no index: it replaces the CHECK
+    // of horsies_client_family, and it does not write or change the family
+    // row.
+    MigrationSource {
+        version: LATER_MIGRATION_FILES[5].0,
+        description: "typescript client family",
+        script: SqlScript::new(
+            "migration_1006_typescript_client_family",
+            LATER_MIGRATION_FILES[5].2,
         ),
         family_row: FamilyRow::NotWritten,
         readers: ReaderPublication::NotPublished,
@@ -785,7 +812,7 @@ pub enum SchemaInstallError {
     /// migrations before the refused one stay committed). Not retryable.
     #[error("schema install refused: {0}")]
     Refused(SchemaRefusal),
-    /// The database was installed by the other client family. Nothing was
+    /// The database was installed by another client family. Nothing was
     /// changed. Not retryable.
     #[error(
         "this database was installed by the {} client; this is the {} client, which installs \

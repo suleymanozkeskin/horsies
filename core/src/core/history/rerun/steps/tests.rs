@@ -149,6 +149,18 @@ fn a_database_of_another_family_or_of_none_is_refused_first() {
             own: ClientFamily::Rust,
         }
     );
+    let typescript = with(
+        history_values(),
+        "client_family",
+        StatementValue::Text("TYPESCRIPT".to_owned()),
+    );
+    assert_eq!(
+        prepare_values(typescript, None),
+        RerunPreparation::ClientFamilyMismatch {
+            stored: RecordedFamily::Recorded(ClientFamily::TypeScript),
+            own: ClientFamily::Rust,
+        }
+    );
     let none = with(
         history_values(),
         "client_family",
@@ -163,26 +175,52 @@ fn a_database_of_another_family_or_of_none_is_refused_first() {
     );
 }
 
+/// A rerun of the TypeScript client meets a `RUST` row: the same refusal,
+/// with the family of the caller.
+#[test]
+fn a_typescript_rerun_refuses_a_database_of_another_family() {
+    let command = command(None);
+    let read = rerun_read(&command, &policy());
+    let prepared = prepare_rerun_write(
+        &read,
+        &CallerRow::new(history_values()),
+        &command,
+        &policy(),
+        ClientFamily::TypeScript,
+        sent_at(),
+    )
+    .expect("a row of the read's columns");
+    assert_eq!(
+        prepared,
+        RerunPreparation::ClientFamilyMismatch {
+            stored: RecordedFamily::Recorded(ClientFamily::Rust),
+            own: ClientFamily::TypeScript,
+        }
+    );
+}
+
 /// A family value that is not a client family is corrupt stored data: the
 /// rerun ends with the stored value before the class check, and nothing is
-/// written. No panic.
+/// written. No panic. The stored text is compared with no case folding.
 #[test]
 fn a_family_value_that_is_no_client_family_is_refused_as_corrupt_first() {
-    let corrupt = with(
-        with(
-            history_values(),
-            "class_registered",
-            StatementValue::Bool(false),
-        ),
-        "client_family",
-        StatementValue::Text("GO".to_owned()),
-    );
-    assert_eq!(
-        prepare_values(corrupt, None),
-        RerunPreparation::UnknownStoredFamily(UnknownStoredFamily {
-            stored: "GO".to_owned(),
-        })
-    );
+    for stored in ["GO", "typescript"] {
+        let corrupt = with(
+            with(
+                history_values(),
+                "class_registered",
+                StatementValue::Bool(false),
+            ),
+            "client_family",
+            StatementValue::Text(stored.to_owned()),
+        );
+        assert_eq!(
+            prepare_values(corrupt, None),
+            RerunPreparation::UnknownStoredFamily(UnknownStoredFamily {
+                stored: stored.to_owned(),
+            })
+        );
+    }
 }
 
 #[test]
