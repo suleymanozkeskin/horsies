@@ -30,12 +30,16 @@ async function runCase(name: string | undefined): Promise<string> {
   }
 }
 
+/**
+ * The refusal `PanicRuleFixed` is a defect. Under `STOP_CORE` it is thrown; under `ABORT_PROCESS` a
+ * defect aborts the process (the case `defect-under-abort-process`).
+ */
 function panicRuleFixed(): string {
-  setPanicRule("ABORT_PROCESS");
-  setPanicRule("ABORT_PROCESS");
+  setPanicRule("STOP_CORE");
+  setPanicRule("STOP_CORE");
 
   try {
-    setPanicRule("STOP_CORE");
+    setPanicRule("ABORT_PROCESS");
 
     return "no throw";
   } catch (cause) {

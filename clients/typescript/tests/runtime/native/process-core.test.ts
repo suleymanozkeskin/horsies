@@ -76,7 +76,7 @@ describe("the process core with a built addon", () => {
 
 describe("the process-wide rules, each in a child process", () => {
   test("another panic rule after a set one throws PanicRuleFixed with the rule in force", () => {
-    assert.equal(runChild("panic-rule-fixed").stdout, "PanicRuleFixed ABORT_PROCESS");
+    assert.equal(runChild("panic-rule-fixed").stdout, "PanicRuleFixed STOP_CORE");
   });
 
   test("a defect under STOP_CORE throws its class", () => {
