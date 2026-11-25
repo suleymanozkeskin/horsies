@@ -18,22 +18,10 @@ export type SettleOutcome = "settled" | "unknownCall";
 /** Why a call into JavaScript was not run. */
 export type NotRunCause = "queueFull" | "envClosing";
 
-/** How one call of `probeCallback` ended. */
-export type CallbackProbe =
-  | { readonly kind: "answered"; readonly answer: string }
-  | { readonly kind: "notRun"; readonly cause: NotRunCause }
-  | { readonly kind: "threw"; readonly callId: bigint; readonly name: string; readonly message: string }
-  | { readonly kind: "panicked"; readonly cause: string }
-  | { readonly kind: "answerRefused"; readonly cause: string };
-
 /** The functions of the `call` area. */
 export interface CallAddon {
   settleCallbackReturned<Answer>(callId: bigint, value: Answer): NativeEnvelope<SettleOutcome>;
   settleCallbackThrew(callId: bigint, name: string, message: string): NativeEnvelope<SettleOutcome>;
-  probeCallback(
-    callback: (callId: bigint, argument: string) => void,
-    argument: string,
-  ): Promise<NativeEnvelope<CallbackProbe>>;
 }
 
 /** The `call` functions of the addon. Throws as `requireAddon` does. */

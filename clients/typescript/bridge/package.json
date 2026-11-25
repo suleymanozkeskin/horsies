@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:dev": "napi build --platform --esm",
+    "build:dev": "napi build --platform --esm --features test-probes",
     "test:native": "cd .. && for file in tests/runtime/native/*.test.ts; do bun test --path-ignore-patterns='node_modules/**' \"./$file\" || exit 1; done",
     "test:native:node": "cd .. && node --test 'tests/runtime/native/**/*.test.ts'",
     "check:declarations": "cd ../tests/native-declarations && bun check"

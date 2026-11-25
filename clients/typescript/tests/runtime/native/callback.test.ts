@@ -4,18 +4,14 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import {
-  addonSettlement,
-  callAddon,
-  settlingCallback,
-  takeThrown,
-} from "../../../horsies/src/native/call/callback.ts";
-import type { CallbackProbe } from "../../../horsies/src/native/call/callback.ts";
+import { addonSettlement, settlingCallback, takeThrown } from "../../../horsies/src/native/call/callback.ts";
 import { envelopeValue } from "../../../horsies/src/native/call/envelope.ts";
+import { probeAddon } from "./callback-probe.ts";
+import type { CallbackProbe } from "./callback-probe.ts";
 
 /** Call `callback` once from a core thread through the probe of the addon. */
 async function probe(callback: (argument: string) => unknown, argument: string): Promise<CallbackProbe> {
-  return envelopeValue(await callAddon().probeCallback(settlingCallback(callback, addonSettlement), argument));
+  return envelopeValue(await probeAddon().probeCallback(settlingCallback(callback, addonSettlement), argument));
 }
 
 describe("the callback primitive with a built addon", () => {

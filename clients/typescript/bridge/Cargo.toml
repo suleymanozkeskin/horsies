@@ -38,6 +38,13 @@ chrono = "0.4"
 [build-dependencies]
 napi-build = "=2.7.0"
 
+[features]
+default = []
+# Test code only: the exports that only the native tests call
+# (`probeCallback`, `src/call/callback_probe.rs`). `build:dev` in
+# package.json turns it on; a published addon is built without it.
+test-probes = []
+
 # musl's malloc is slow under allocation from many threads, and the core is
 # multi-threaded. glibc and macOS targets keep the system allocator.
 # `local_dynamic_tls` builds mimalloc with the local-dynamic TLS model: Node

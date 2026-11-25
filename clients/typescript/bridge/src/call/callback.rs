@@ -27,14 +27,13 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, PoisonError};
 
-use napi::bindgen_prelude::{sys, BigInt, FnArgs, FromNapiValue, Function, Object, ToNapiValue};
+use napi::bindgen_prelude::{sys, BigInt, FnArgs, FromNapiValue, Function, ToNapiValue};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
-use napi::{Env, JsValue, Status, Unknown};
+use napi::{JsValue, Status, Unknown};
 use napi_derive::napi;
 use tokio::sync::oneshot;
 
-use crate::call::guard::{sync_call, CallKind};
-use crate::call::operation::spawn_operation;
+use crate::call::guard::sync_call;
 use crate::call::thrown::Envelope;
 use crate::process_core::environment::environment_closing;
 use crate::process_core::panic_rule::take_panic_cause;
@@ -43,9 +42,6 @@ use crate::values::boundary::{bigint_of_u64, u64_of_bigint};
 /// Most calls into JavaScript that wait for their settle call, over every
 /// registration of the process.
 pub const MAX_PENDING_CALLBACKS: usize = 65_536;
-
-/// The queue bound of the registration of `probeCallback`: one call.
-const PROBE_QUEUE_BOUND: usize = 1;
 
 /// Why a call into JavaScript was not run. Both clear: the caller may run
 /// its step again.
@@ -106,7 +102,7 @@ where
     ///
     /// Failure exits: the `napi::Error` of a function that Node-API cannot
     /// turn into a threadsafe function.
-    pub fn register(function: Function<FnArgs<(BigInt, Argument)>, ()>) -> napi::Result<Self> {
+    pub fn register(function: &Function<FnArgs<(BigInt, Argument)>, ()>) -> napi::Result<Self> {
         let function = function
             .build_threadsafe_function::<FnArgs<(BigInt, Argument)>>()
             .callee_handled::<false>()
@@ -324,72 +320,6 @@ pub fn settle_callback_threw(
     })
 }
 
-/// How one call of `probeCallback` ended.
-#[napi(
-    discriminant = "kind",
-    discriminant_case = "camelCase",
-    object_from_js = false
-)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CallbackProbe {
-    Answered {
-        answer: String,
-    },
-    NotRun {
-        cause: NotRunCause,
-    },
-    Threw {
-        call_id: BigInt,
-        name: String,
-        message: String,
-    },
-    Panicked {
-        cause: String,
-    },
-    AnswerRefused {
-        cause: String,
-    },
-}
-
-impl CallbackProbe {
-    /// The record of one call's end. Pure.
-    fn of(ended: Result<String, CallbackFailure>) -> Self {
-        match ended {
-            Ok(answer) => Self::Answered { answer },
-            Err(CallbackFailure::NotRun { cause }) => Self::NotRun { cause },
-            Err(CallbackFailure::Threw {
-                call_id,
-                name,
-                message,
-            }) => Self::Threw {
-                call_id: bigint_of_u64(call_id),
-                name,
-                message,
-            },
-            Err(CallbackFailure::Panicked { cause }) => Self::Panicked { cause },
-            Err(CallbackFailure::AnswerRefused { cause }) => Self::AnswerRefused { cause },
-        }
-    }
-}
-
-/// Register `callback` and call it once from a core thread with `argument`;
-/// resolve with how the call ended. It checks the callback primitive from
-/// JavaScript; the package does not call it. Starts the core.
-#[napi(ts_return_type = "Promise<NativeEnvelope<CallbackProbe>>")]
-pub fn probe_callback<'env>(
-    env: &'env Env,
-    callback: Function<FnArgs<(BigInt, String)>, ()>,
-    argument: String,
-) -> napi::Result<Object<'env>> {
-    let registered = JsCallback::<String, String, PROBE_QUEUE_BOUND>::register(callback)?;
-    spawn_operation(
-        env,
-        "probe_callback",
-        CallKind::Read,
-        move |_core| async move { CallbackProbe::of(registered.call(argument).await) },
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,52 +411,6 @@ mod tests {
                     if subject == "callId"
             ),
             "{envelope:?}"
-        );
-    }
-
-    #[test]
-    fn each_end_of_a_call_has_its_probe_record() {
-        assert_eq!(
-            CallbackProbe::of(Ok("pong".to_owned())),
-            CallbackProbe::Answered {
-                answer: "pong".to_owned()
-            }
-        );
-        assert_eq!(
-            CallbackProbe::of(Err(CallbackFailure::NotRun {
-                cause: NotRunCause::EnvClosing
-            })),
-            CallbackProbe::NotRun {
-                cause: NotRunCause::EnvClosing
-            }
-        );
-        assert_eq!(
-            CallbackProbe::of(Err(CallbackFailure::Threw {
-                call_id: u64::MAX,
-                name: "Error".to_owned(),
-                message: "boom".to_owned(),
-            })),
-            CallbackProbe::Threw {
-                call_id: BigInt::from(u64::MAX),
-                name: "Error".to_owned(),
-                message: "boom".to_owned(),
-            }
-        );
-        assert_eq!(
-            CallbackProbe::of(Err(CallbackFailure::Panicked {
-                cause: "boom".to_owned()
-            })),
-            CallbackProbe::Panicked {
-                cause: "boom".to_owned()
-            }
-        );
-        assert_eq!(
-            CallbackProbe::of(Err(CallbackFailure::AnswerRefused {
-                cause: "not a string".to_owned()
-            })),
-            CallbackProbe::AnswerRefused {
-                cause: "not a string".to_owned()
-            }
         );
     }
 }
