@@ -256,7 +256,7 @@ pub struct TaskOptions {
     ///   inside the process. Use `timeout_ms` on blocking tasks as a
     ///   finalize-deadline, not a guaranteed-stop.
     ///
-    /// A `SHARED_ASYNC` or `SHARED_THREAD` task must carry one: a send
+    /// A `SHARED_ASYNC` or `SHARED_THREAD` task must carry one: a new send
     /// refuses a shared class without it (`check_shared_timeout`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u32>,
@@ -298,7 +298,7 @@ impl TaskOptions {
     ///   grace, `null` when it has none. The text holds what the options say:
     ///   a grace on `SHARED_THREAD`, or a `SHARED_ASYNC` task without one, is
     ///   refused at enqueue (`stored_execution`), and a shared class without
-    ///   `timeout_ms` is refused at a send (`check_shared_timeout`).
+    ///   `timeout_ms` is refused at a new send (`check_shared_timeout`).
     ///
     /// Every task gets the text, as every Python task does: an `ISOLATED`
     /// task with no grace, no retry policy and no timeout stores the text

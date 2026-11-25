@@ -161,8 +161,8 @@ pub struct InvalidExecution {
 ///   operator cancel to the kill of the child; none means no kill); absent
 ///   or `null` for `SHARED_THREAD`, whose thread cannot be stopped.
 ///
-/// Other option fields are not checked: a send checks the `timeout_ms` of a
-/// shared class with `check_shared_timeout`. Does no I/O.
+/// Other option fields are not checked: a new send checks the `timeout_ms`
+/// of a shared class with `check_shared_timeout`. Does no I/O.
 pub fn stored_execution(
     options: Option<&Map<String, Value>>,
 ) -> Result<Execution, InvalidExecution> {
@@ -232,11 +232,13 @@ fn bounded_grace_error(raw: &Value) -> Option<String> {
     }
 }
 
-/// The `timeout_ms` rule of the class `execution` at a send: `SHARED_ASYNC`
-/// and `SHARED_THREAD` need a timeout, because a shared child runs other
-/// tasks next to this one and the timeout ends a task that does not return.
-/// `ISOLATED` runs with or without one. The Rust task macro and the Python
-/// task decorator refuse the same declaration at registration.
+/// The `timeout_ms` rule of the class `execution` at a new send
+/// (`CheckedSend::check`): `SHARED_ASYNC` and `SHARED_THREAD` need a timeout,
+/// because a shared child runs other tasks next to this one and the timeout
+/// ends a task that does not return. `ISOLATED` runs with or without one.
+/// The Rust task macro and the Python task decorator refuse the same
+/// declaration at registration. A schedule and a rerun do not apply this
+/// rule: they write such options, and the worker refuses the run.
 ///
 /// `timeout_ms` is the raw member of the decoded options: absent (`None`)
 /// and `null` are no timeout. A present value is not judged here; the

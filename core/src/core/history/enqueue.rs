@@ -15,9 +15,7 @@ use super::identity::fingerprint::{
 use super::identity::keys::{IdempotencyKeyError, ScopedIdempotencyKey};
 use super::rerun::input_envelope::{end_of_number, end_of_string};
 use crate::core::codec::{check_json_text, JsonReadError, StrictJsonError};
-use crate::core::task::execution::{
-    check_shared_timeout, stored_execution, Execution, InvalidExecution,
-};
+use crate::core::task::execution::{stored_execution, Execution, InvalidExecution};
 
 /// The smallest integer that task options may hold (`i64::MIN`).
 pub const MIN_OPTIONS_INTEGER: i64 = i64::MIN;
@@ -109,9 +107,10 @@ pub enum EnqueuePreparationError {
 /// `input_json` is the encoded input as one JSON value. Any JSON value that
 /// passes the strict read rule is accepted; the text is stored and
 /// fingerprinted byte for byte. The task options must fit the class rules
-/// (`stored_execution`), and a shared class must have a `timeout_ms`
-/// (`check_shared_timeout`); a refusal is
-/// [`EnqueuePreparationError::InvalidExecution`].
+/// (`stored_execution`); a refusal is
+/// [`EnqueuePreparationError::InvalidExecution`]. The `timeout_ms` of a
+/// shared class is not checked here: a schedule and a rerun take options
+/// without one, and only a new send refuses them (`CheckedSend::check`).
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_enqueue_facts(
     task_name: &str,
@@ -160,10 +159,6 @@ pub(crate) fn prepare_enqueue_facts_with_lineage(
     check_input(input_json)?;
     let options = parse_optional_object(task_options_json)?;
     let execution = stored_execution(options.as_ref())?;
-    check_shared_timeout(
-        execution,
-        options.as_ref().and_then(|object| object.get("timeout_ms")),
-    )?;
     let retention_class_key = resolve_retention_class_key(retention_class_key).to_owned();
     // The version-1 command fingerprint keeps Python's field list. The one
     // input text takes the keyword slot and the positional slot is null: the
