@@ -105,6 +105,10 @@ function walk(kind: Kind, path: string, level: number, refusals: KindRefused[]):
       refusals.push({ rule: "ResultOfPlacement", path, detail: "h.resultOf is valid only as a whole task parameter" });
 
       return walk(kind.inner, path, 0, refusals);
+    case "conversion":
+      return walk(kind.stored, path, level, refusals);
+    case "checked":
+      return walk(kind.inner, path, level, refusals);
     case "nullable":
       return walk(kind.inner, path, level, refusals);
     case "array":
@@ -222,6 +226,10 @@ function storedClasses(kind: Kind): readonly StoredClass[] {
       return ["null", ...storedClasses(kind.inner)];
     case "union":
       return kind.members.flatMap(storedClasses);
+    case "conversion":
+      return storedClasses(kind.stored);
+    case "checked":
+      return storedClasses(kind.inner);
     case "array":
     case "tuple":
     case "record":

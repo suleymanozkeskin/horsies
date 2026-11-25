@@ -25,6 +25,11 @@ const MAKERS = ["jsonTextCheckedByCore", "writtenJsonText"] as const;
 
 const READER_PATHS: readonly ReaderPath[] = [
   {
+    module: "codec/error-data.ts",
+    maker: "writtenJsonText",
+    checkInFront: "the JSON writer built the data text, or the text is the fixed data_refused replacement",
+  },
+  {
     module: "codec/writer.ts",
     maker: "writtenJsonText",
     checkInFront: "the writer built the text from the kind tree: finite floats, well-formed strings, bounded depth",

@@ -8,10 +8,19 @@
 // - An undeclared key, a key that only the engine writes, and a value deeper than the core's bound are refused.
 
 import { Decimal } from "../wire/decimal.ts";
-import type { Kind, LiteralMember, Member, ObjectKind, TaggedUnionKind } from "../wire/kinds.ts";
+import type {
+  CheckedKind,
+  ConversionKind,
+  Kind,
+  LiteralMember,
+  Member,
+  ObjectKind,
+  TaggedUnionKind,
+} from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { MAX_VALUE_JSON_DEPTH } from "./bounds.ts";
+import { issuesText } from "./conversion.ts";
 import { isEngineKey } from "./engine-keys.ts";
 import { type JsonText, writtenJsonText } from "./json-text.ts";
 import { jsonValueText } from "./json-value.ts";
@@ -157,6 +166,10 @@ function writeValue(kind: Kind, value: unknown, path: string, depth: number, sin
       return writeJsonText(jsonValueText(value, path, depth, MAX_VALUE_JSON_DEPTH), sink);
     case "resultOf":
       return refuse("WrongType", path, "an upstream outcome: only a workflow node gives it, a sender never does");
+    case "conversion":
+      return writeConverted(kind, value, path, depth, sink);
+    case "checked":
+      return writeChecked(kind, value, path, depth, sink);
     default:
       return unreachable(kind, "writeValue");
   }
@@ -240,6 +253,24 @@ function writeTagged(kind: TaggedUnionKind, value: unknown, path: string, depth:
   return variant === undefined
     ? refuse("NotAMember", memberPath(path, kind.tag), "the tag names no member of the union")
     : writeObject(variant, value, path, depth, sink);
+}
+
+/** The stored value of a user-side conversion, written under its stored kind. */
+function writeConverted(kind: ConversionKind, value: unknown, path: string, depth: number, sink: Sink): Written {
+  const stored = kind.encode(value);
+
+  return stored.ok
+    ? writeValue(kind.stored, stored.value, path, depth, sink)
+    : refuse("CheckFailed", path, `the conversion refused the value: ${issuesText(stored.error)}`);
+}
+
+/** A value that the user-side check accepts, written under its kind. */
+function writeChecked(kind: CheckedKind, value: unknown, path: string, depth: number, sink: Sink): Written {
+  const checked = kind.check(value);
+
+  return checked.ok
+    ? writeValue(kind.inner, value, path, depth, sink)
+    : refuse("CheckFailed", path, `the check refused the value: ${issuesText(checked.error)}`);
 }
 
 /** The refusal of a value that is not the container that `expected` names. */

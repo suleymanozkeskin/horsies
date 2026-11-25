@@ -34,7 +34,9 @@ export type EncodeRefusalKind =
   /** An `h.uuid()` value that is not the lower-case 8-4-4-4-12 form. */
   | "NotCanonicalUuid"
   /** A value that is not a member of a literal, an enum or a union, or a tag that names no union member. */
-  | "NotAMember";
+  | "NotAMember"
+  /** A user-side conversion or check refused the value; `detail` names the issues (paths and codes). */
+  | "CheckFailed";
 
 /** Why the reader refuses a stored text under the declared kind. */
 export type DecodeRefusalKind =
@@ -59,7 +61,9 @@ export type DecodeRefusalKind =
   /** A string that is not a UUID in the lower-case 8-4-4-4-12 form. */
   | "BadUuidText"
   /** A stored value that is not a member of a literal, an enum or a union, or a tag that names no union member. */
-  | "NotAMember";
+  | "NotAMember"
+  /** A user-side conversion or check refused the read value; `detail` names the issues (paths and codes). */
+  | "CheckFailed";
 
 /** The writer refuses a value. */
 export type EncodeRefused = {
@@ -117,8 +121,36 @@ export type EnvelopeRefused = {
 /** The reader refuses a stored text: a value under its kind, or the form of a result envelope. */
 export type DecodeRefused = ValueRefused | EnvelopeRefused;
 
+/** The worker could not read the text that the sender wrote: `cause` is the reader's refusal. */
+export type ReadBackRefused = {
+  readonly side: "readBack";
+  readonly kind: "ReadBackRefused";
+  readonly path: string;
+  readonly detail: string;
+  readonly cause: DecodeRefused;
+};
+
+/**
+ * The value that a reader gives writes another text than the sender's (a conversion whose encode and decode do not
+ * invert). `detail` names the offset of the first difference; it holds no value.
+ */
+export type ReadBackChanged = {
+  readonly side: "readBack";
+  readonly kind: "ReadBackChanged";
+  readonly path: string;
+  readonly detail: string;
+};
+
 /** A refusal of the codec. */
-export type CodecRefused = EncodeRefused | DecodeRefused;
+export type CodecRefused = EncodeRefused | DecodeRefused | ReadBackRefused | ReadBackChanged;
+
+/**
+ * The text of a refusal, as the Python client writes a validation summary: `<path>: <detail> [<kind>]`. A part of
+ * the path that comes from the value is `<input>`; the text holds no value. Pure.
+ */
+export function refusalText(refused: CodecRefused): string {
+  return `${refused.path}: ${refused.detail} [${refused.kind}]`;
+}
 
 /** The path of a whole value. */
 export const ROOT_PATH = "$";

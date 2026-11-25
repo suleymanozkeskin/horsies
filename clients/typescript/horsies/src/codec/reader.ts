@@ -11,6 +11,8 @@
 
 import { Decimal } from "../wire/decimal.ts";
 import type {
+  CheckedKind,
+  ConversionKind,
   DefaultText,
   Kind,
   LiteralMember,
@@ -24,6 +26,7 @@ import type { TaskOutcome } from "../wire/task-error.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { MAX_VALUE_JSON_DEPTH } from "./bounds.ts";
 import { isEngineKey } from "./engine-keys.ts";
+import { issuesText } from "./conversion.ts";
 import { readEnvelopeSlots } from "./envelope.ts";
 import type { JsonText } from "./json-text.ts";
 import { decodeJsonNode } from "./json-value.ts";
@@ -140,6 +143,10 @@ export function decodeNode(kind: Kind, node: TreeValue, path: string, depth: num
       return decodeJsonNode(node, path, depth, MAX_VALUE_JSON_DEPTH);
     case "resultOf":
       return decodeOutcome(kind.inner, node, path, form);
+    case "conversion":
+      return decodeConverted(kind, node, path, depth, form);
+    case "checked":
+      return decodeChecked(kind, node, path, depth, form);
     default:
       return unreachable(kind, "decodeNode");
   }
@@ -202,6 +209,51 @@ function decodeOutcome(
       return ok(Object.freeze({ kind: "failed", error: slots.value.error }));
     default:
       return unreachable(slots.value, "decodeOutcome");
+  }
+}
+
+/** The value that a user-side conversion gives from the stored value; it runs in both forms. */
+function decodeConverted(
+  kind: ConversionKind,
+  node: TreeValue,
+  path: string,
+  depth: number,
+  form: DecodeForm,
+): Decoded {
+  const stored = decodeNode(kind.stored, node, path, depth, form);
+
+  if (!stored.ok) {
+    return stored;
+  }
+
+  const value = kind.decode(stored.value);
+
+  return value.ok
+    ? value
+    : refuse("CheckFailed", path, `the conversion refused the stored value: ${issuesText(value.error)}`);
+}
+
+/** A value of the inner kind; the worker form runs the user-side check, the stored form does not. */
+function decodeChecked(kind: CheckedKind, node: TreeValue, path: string, depth: number, form: DecodeForm): Decoded {
+  const value = decodeNode(kind.inner, node, path, depth, form);
+
+  if (!value.ok) {
+    return value;
+  }
+
+  switch (form) {
+    case "worker": {
+      const checked = kind.check(value.value);
+
+      return checked.ok
+        ? value
+        : refuse("CheckFailed", path, `the check refused the read value: ${issuesText(checked.error)}`);
+    }
+
+    case "stored":
+      return value;
+    default:
+      return unreachable(form, "decodeChecked");
   }
 }
 

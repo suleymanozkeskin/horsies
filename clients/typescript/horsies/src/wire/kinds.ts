@@ -2,6 +2,7 @@
 // node. The writer and the reader walk the tree and the value together, and never look at the JavaScript value to
 // choose a stored form: `7` under `h.float()` is `7.0`, under `h.int()` it is `7`.
 
+import type { DecodeConversion, EncodeConversion, ValueCheck } from "../codec/conversion.ts";
 import type { JsonText } from "../codec/json-text.ts";
 import type { EncodeRefused } from "../codec/refusal.ts";
 import { isString } from "../codec/values.ts";
@@ -68,6 +69,20 @@ export type JsonKind = { readonly node: "json" };
  */
 export type ResultOfKind = { readonly node: "resultOf"; readonly inner: Kind };
 
+/**
+ * A value that a user-side conversion turns into the stored value of `stored` and back (a zod codec). The stored text
+ * is the text of `stored`.
+ */
+export type ConversionKind = {
+  readonly node: "conversion";
+  readonly stored: Kind;
+  readonly decode: DecodeConversion;
+  readonly encode: EncodeConversion;
+};
+
+/** A value of `inner` that a user-side check must accept (a zod refinement). It changes no stored text. */
+export type CheckedKind = { readonly node: "checked"; readonly inner: Kind; readonly check: ValueCheck };
+
 /** `null`, or a value of `inner`. */
 export type NullableKind = { readonly node: "nullable"; readonly inner: Kind };
 
@@ -127,7 +142,9 @@ export type Kind =
   | RecordKind
   | ObjectKind
   | JsonKind
-  | ResultOfKind;
+  | ResultOfKind
+  | ConversionKind
+  | CheckedKind;
 
 export const NULL_KIND: NullKind = Object.freeze({ node: "null" });
 export const BOOLEAN_KIND: BooleanKind = Object.freeze({ node: "boolean" });
@@ -185,4 +202,14 @@ export function taggedUnionKind(tag: string, variants: readonly ObjectKind[]): T
   }
 
   return Object.freeze({ node: "taggedUnion", tag, variants: Object.freeze([...variants]), byTag });
+}
+
+/** A kind whose values a user-side conversion turns into values of `stored` and back. Pure. */
+export function conversionKind(stored: Kind, decode: DecodeConversion, encode: EncodeConversion): ConversionKind {
+  return Object.freeze({ node: "conversion", stored, decode, encode });
+}
+
+/** A kind whose values a user-side check must accept. Pure. */
+export function checkedKind(inner: Kind, check: ValueCheck): CheckedKind {
+  return Object.freeze({ node: "checked", inner, check });
 }
