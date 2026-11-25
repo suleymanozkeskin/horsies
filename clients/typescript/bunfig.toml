@@ -2,3 +2,7 @@
 # `bun test` in this folder runs the files under tests/ only. The vendored
 # RuleTester files in lint/ need Node; tests/lint/ runs them there.
 root = "tests"
+# The tests in tests/runtime/native/ load a built addon. They run only where
+# a build exists, through `bun run --cwd bridge test:native`, which sets its
+# own ignore patterns.
+pathIgnorePatterns = ["**/runtime/native/**"]
