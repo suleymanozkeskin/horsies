@@ -17,8 +17,9 @@ use std::time::Duration;
 use chrono::Utc;
 use uuid::Uuid;
 
-use crate::broker::{BrokerError, PostgresBroker, SendKind};
+use crate::broker::{BrokerError, EnqueueRefusal, EnqueueRefusalCause, PostgresBroker, SendKind};
 use crate::core::config::{EnqueueRetention, PostgresConfig};
+use crate::core::history::enqueue::SendPart;
 use crate::core::history::identity::uuid7::mint_task_id;
 use crate::core::task::send_types::{
     send_error_from_enqueue, TaskSendError, TaskSendErrorCode, TaskSendPayload,
@@ -264,6 +265,139 @@ async fn a_null_retry_policy_stores_zero_retries() {
         .expect("a null policy is enqueued");
 
     assert_eq!(stored_max_retries(&pool, task_id).await, 0);
+    remove_task_name(&pool, &task_name).await;
+}
+
+/// The `execution` column of the task row `task_id`.
+async fn stored_execution_column(pool: &TestPool, task_id: Uuid) -> String {
+    sql::query_scalar("SELECT execution FROM horsies_tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("read the stored execution class")
+}
+
+/// Send the class members `class_members` once with no `timeout_ms` and
+/// once with a `null` `timeout_ms`. Each send is refused before any
+/// statement: the task options refusal of the class `execution`, not
+/// retryable, `VALIDATION_FAILED` on the send path. No row is written.
+async fn assert_refused_without_a_timeout(class_members: &str, execution: &str) {
+    let pool = migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
+    let task_name = unique_task_name("shared_without_timeout");
+    let expected = EnqueueRefusal {
+        part: SendPart::TaskOptions,
+        message: format!(
+            "task_options refused: timeout_ms is absent for execution {execution}; a shared \
+             class requires timeout_ms"
+        ),
+        cause: EnqueueRefusalCause::RuleRefused,
+    };
+
+    for task_options in [
+        format!("{{{class_members}}}"),
+        format!("{{{class_members}, \"timeout_ms\": null}}"),
+    ] {
+        let payload = plain_payload(&task_name, "{}", Some(&task_options));
+        let task_id = new_task_id();
+
+        let refused = enqueue_payload(&broker, task_id, &payload)
+            .await
+            .expect_err(&task_options);
+
+        match &refused {
+            BrokerError::EnqueueContract(refusal) => {
+                assert_eq!(refusal, &expected, "{task_options}");
+            }
+            other => panic!("{task_options}: expected the task options refusal, got {other}"),
+        }
+        assert!(!refused.is_retryable(), "{task_options}");
+        let send_error = send_error_from_enqueue(task_id, payload, &refused);
+        assert_eq!(
+            send_error.code(),
+            TaskSendErrorCode::ValidationFailed,
+            "{task_options}"
+        );
+    }
+
+    assert_eq!(rows_of_task_name(&pool, &task_name).await, 0);
+}
+
+/// A `SHARED_ASYNC` task without a timeout is refused before any row. The
+/// Rust task macro and the Python task decorator refuse it at registration;
+/// the send refuses options that were written without them.
+#[tokio::test]
+async fn a_shared_async_task_without_a_timeout_is_refused_before_any_row() {
+    assert_refused_without_a_timeout(
+        "\"execution\": \"SHARED_ASYNC\", \"cancel_grace_ms\": 1000",
+        "SHARED_ASYNC",
+    )
+    .await;
+}
+
+/// A `SHARED_THREAD` task without a timeout is refused before any row.
+#[tokio::test]
+async fn a_shared_thread_task_without_a_timeout_is_refused_before_any_row() {
+    assert_refused_without_a_timeout("\"execution\": \"SHARED_THREAD\"", "SHARED_THREAD").await;
+}
+
+/// An `ISOLATED` task without a timeout is enqueued: the class runs with or
+/// without one.
+#[tokio::test]
+async fn an_isolated_task_without_a_timeout_is_enqueued() {
+    let pool = migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
+    let task_name = unique_task_name("isolated_without_timeout");
+
+    for task_options in [
+        "{\"execution\": \"ISOLATED\"}",
+        "{\"execution\": \"ISOLATED\", \"timeout_ms\": null}",
+    ] {
+        let payload = plain_payload(&task_name, "{}", Some(task_options));
+        let task_id = enqueue_payload(&broker, new_task_id(), &payload)
+            .await
+            .expect(task_options);
+
+        assert_eq!(
+            stored_execution_column(&pool, task_id).await,
+            "ISOLATED",
+            "{task_options}"
+        );
+    }
+
+    remove_task_name(&pool, &task_name).await;
+}
+
+/// A `SHARED_ASYNC` and a `SHARED_THREAD` task with a timeout are enqueued,
+/// and each row stores its class.
+#[tokio::test]
+async fn a_shared_task_with_a_timeout_is_enqueued() {
+    let pool = migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
+    let task_name = unique_task_name("shared_with_timeout");
+
+    for (task_options, execution) in [
+        (
+            "{\"execution\": \"SHARED_ASYNC\", \"cancel_grace_ms\": 1000, \"timeout_ms\": 30000}",
+            "SHARED_ASYNC",
+        ),
+        (
+            "{\"execution\": \"SHARED_THREAD\", \"timeout_ms\": 30000}",
+            "SHARED_THREAD",
+        ),
+    ] {
+        let payload = plain_payload(&task_name, "{}", Some(task_options));
+        let task_id = enqueue_payload(&broker, new_task_id(), &payload)
+            .await
+            .expect(task_options);
+
+        assert_eq!(
+            stored_execution_column(&pool, task_id).await,
+            execution,
+            "{task_options}"
+        );
+    }
+
     remove_task_name(&pool, &task_name).await;
 }
 

@@ -114,6 +114,7 @@ pub enum RetrievalCode {
     /// A sync get was called on a thread that runs an event loop, so this call site cannot wait for
     /// the value. Never cached: the async form, or a sync call from a thread without a running loop,
     /// reads it.
+    #[code_catalog(blocking_form_only)]
     AsyncContext,
     /// An argument of the get call was refused before anything ran, for
     /// example a wait limit above 2^32 - 1 ms. Never cached: a call with a
