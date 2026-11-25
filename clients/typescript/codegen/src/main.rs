@@ -18,11 +18,13 @@
 mod catalogs;
 mod error_catalogs;
 mod error_detail;
+mod manifest;
 mod model;
 mod output;
 mod retention_class;
 mod task_code;
 mod ts_text;
+mod wire_json;
 
 use std::ffi::OsString;
 use std::io::Write;
