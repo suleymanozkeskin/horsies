@@ -300,9 +300,12 @@ def test_table_over_the_row_limit_fails_the_capture(
     with psycopg.connect(database.url, autocommit=True) as connection:
         outcome = read_raw_snapshot(connection, BASELINE_CATALOG, row_limit=1)
 
-    # The first table of the catalog with more than one row after the install.
+    # The capture fails on the first table of the catalog over the limit.
+    # horsies_migrations is the first table, and the install writes one
+    # bookkeeping row per migration of the chain: more than one row from
+    # migration 1001 on.
     assert outcome == Err(
-        TableRowLimitExceeded(table='horsies_retention_classes', limit=1)
+        TableRowLimitExceeded(table='horsies_migrations', limit=1)
     )
 
 
