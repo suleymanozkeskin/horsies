@@ -6,7 +6,8 @@
 //!   wire values for a choice; one interface per variant and their union
 //!   for a variant type;
 //! - one interface per event type, the union `AnyEvent` and the tuple
-//!   `EVENT_TYPES`.
+//!   `EVENT_TYPES`;
+//! - the refusals of the decoder and `decodeEvent` (see [`decoder`]).
 //!
 //! Every record has the member `kind`. For an event type it is the wire tag
 //! (`"AttemptEnded"`); for a variant it is the wire tag in camelCase
@@ -14,6 +15,7 @@
 //! ([`types::LIBRARY_CODE_VARIANT`]). Field names are in camelCase. A field
 //! with `FieldAccess::Internal` is not a member of its interface.
 
+mod decoder;
 mod types;
 
 use horsies_core::events::{
@@ -25,6 +27,7 @@ use crate::model::code_union_alias_name;
 use crate::output::{catalog_file, GeneratedFile};
 use crate::task_code::TASK_CODE_MODULE;
 use crate::ts_text::{import_types, module_text};
+use crate::wire_json::WIRE_JSON_MODULE;
 
 /// The stem of the events module: `src/_catalog/events.ts`.
 pub const EVENTS_MODULE: &str = "events";
@@ -41,8 +44,8 @@ pub fn generated_files() -> Vec<GeneratedFile> {
     )]
 }
 
-/// The sections of `events.ts` for `contract`: the imports, then the types.
-/// Pure.
+/// The sections of `events.ts` for `contract`: the imports, the types, then
+/// the decoder. Pure.
 fn module_sections(contract: &EventContract) -> Vec<String> {
     let mut sections = Vec::new();
     let imports = import_lines(contract);
@@ -50,15 +53,23 @@ fn module_sections(contract: &EventContract) -> Vec<String> {
         sections.push(imports.join("\n"));
     }
     sections.extend(types::type_sections(contract));
+    sections.extend(decoder::decoder_sections(contract));
     sections
 }
 
-/// The type-only imports: the code union types from `task_code.ts`. Pure.
+/// The type-only imports, in module-stem order: the code union types from
+/// `task_code.ts`, then the JSON value and the result from `wire_json.ts`.
+/// Pure.
 fn import_lines(contract: &EventContract) -> Vec<String> {
-    code_unions(contract)
+    let mut lines: Vec<String> = code_unions(contract)
         .into_iter()
         .map(|union| import_types(&[code_union_type(union)], TASK_CODE_MODULE))
-        .collect()
+        .collect();
+    lines.push(import_types(
+        &["DecodeResult", "WireJson"],
+        WIRE_JSON_MODULE,
+    ));
+    lines
 }
 
 /// Every field of the contract: the fields of the events, then the fields
@@ -170,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn a_contract_with_a_code_field_imports_the_code_union_type() {
+    fn a_contract_with_a_code_field_imports_the_code_union_type_once() {
         const EVENTS: &[EventType] = &[EventType {
             name: "Probe",
             doc: "",
@@ -178,29 +189,47 @@ mod tests {
         }];
         assert_eq!(
             import_lines(&contract(EVENTS, &[])),
-            ["import type { BuiltInTaskCode } from \"./task_code.ts\";"]
+            [
+                "import type { BuiltInTaskCode } from \"./task_code.ts\";",
+                "import type { DecodeResult, WireJson } from \"./wire_json.ts\";",
+            ]
         );
     }
 
     #[test]
-    fn a_contract_without_a_code_field_has_no_import() {
+    fn a_contract_without_a_code_field_imports_only_the_wire_types() {
         const EVENTS: &[EventType] = &[EventType {
             name: "Probe",
             doc: "",
             fields: &[AT_FIELD],
         }];
-        let sample = contract(EVENTS, &[]);
-        assert!(import_lines(&sample).is_empty());
-        assert!(!module_sections(&sample)[0].starts_with("import"));
+        assert_eq!(
+            import_lines(&contract(EVENTS, &[])),
+            ["import type { DecodeResult, WireJson } from \"./wire_json.ts\";"]
+        );
     }
 
     #[test]
-    fn the_real_contract_imports_the_built_in_task_code_type() {
+    fn the_real_module_is_the_imports_the_types_then_the_decoder() {
         assert_eq!(code_unions(&EVENT_CONTRACT), [&BUILT_IN_TASK_CODES]);
+        let sections = module_sections(&EVENT_CONTRACT);
         assert_eq!(
-            module_sections(&EVENT_CONTRACT)[0],
-            "import type { BuiltInTaskCode } from \"./task_code.ts\";"
+            sections[0],
+            "import type { BuiltInTaskCode } from \"./task_code.ts\";\n\
+             import type { DecodeResult, WireJson } from \"./wire_json.ts\";"
         );
+        assert!(sections[1].ends_with(&format!(
+            "export const EVENT_CONTRACT_VERSION = {};",
+            EVENT_CONTRACT.version
+        )));
+        let types_end = sections
+            .iter()
+            .position(|section| section.contains("export const EVENT_TYPES = ["))
+            .expect("the module has EVENT_TYPES");
+        assert!(sections[types_end + 1].contains("export type JsonKind ="));
+        assert!(sections
+            .last()
+            .is_some_and(|section| section.contains("export function decodeEvent(")));
     }
 
     #[test]
