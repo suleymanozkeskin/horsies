@@ -2,3 +2,5 @@
 //! thrown codes, `guard`, the operation spawn and its bound of calls in
 //! flight, the service runs, and the primitive through which the core calls
 //! JavaScript.
+
+pub mod thrown;
