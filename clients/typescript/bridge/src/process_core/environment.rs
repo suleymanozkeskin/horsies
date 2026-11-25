@@ -60,10 +60,6 @@ fn environment_closed() {
 
 /// Whether the main environment ended. A core call into JavaScript after it
 /// is not run.
-#[allow(
-    dead_code,
-    reason = "the callback primitive of the call area reads it before each call into JavaScript"
-)]
 pub fn environment_closing() -> bool {
     ENVIRONMENT_CLOSING.load(Ordering::SeqCst)
 }

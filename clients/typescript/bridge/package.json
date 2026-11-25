@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build:dev": "napi build --platform --esm",
-    "test:native": "cd .. && bun test --path-ignore-patterns='node_modules/**' tests/runtime/native/",
+    "test:native": "cd .. && for file in tests/runtime/native/*.test.ts; do bun test --path-ignore-patterns='node_modules/**' \"./$file\" || exit 1; done",
     "test:native:node": "cd .. && node --test 'tests/runtime/native/**/*.test.ts'"
   },
   "napi": {

@@ -268,3 +268,21 @@ fn start_runtime(dispatch: tracing::Dispatch) -> Result<&'static ProcessRuntime,
         cause: refusal.to_string(),
     })
 }
+
+/// A core of its own for a test: the process runtime and the log bridge of
+/// this process, and its own stop signal, not the core of the process. A
+/// test can stop it without stopping the core of the test binary.
+#[cfg(test)]
+pub fn standalone_core_for_tests() -> &'static Core {
+    let log = started_log().unwrap_or_else(|failure| panic!("the log bridge starts: {failure:?}"));
+    let runtime =
+        process_runtime().unwrap_or_else(|refusal| panic!("the process runtime starts: {refusal}"));
+    let (stop_signal, _first_receiver) = watch::channel(false);
+    Box::leak(Box::new(Core {
+        pid: std::process::id(),
+        runtime,
+        first_panic: OnceLock::new(),
+        stop_signal,
+        log,
+    }))
+}

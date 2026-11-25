@@ -3,5 +3,8 @@
 //! flight, the service runs, and the primitive through which the core calls
 //! JavaScript.
 
+pub mod callback;
 pub mod guard;
+pub mod operation;
+pub mod service_run;
 pub mod thrown;
