@@ -2,7 +2,6 @@
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { threadId } from "node:worker_threads";
 
 import { envelopeValue, thrownError } from "../../../horsies/src/native/call/envelope.ts";
 import type { NativeThrown } from "../../../horsies/src/native/call/envelope.ts";
@@ -128,18 +127,6 @@ describe("thrownError", () => {
         cause: "boom (at lib.rs:1)",
       },
       message: "panic in core operation core_state: boom (at lib.rs:1)",
-      base: "CoreDefect",
-    });
-  });
-
-  test("ADDON_OUTSIDE_MAIN_THREAD is AddonOutsideMainThread with the calling thread", () => {
-    assert.deepEqual(errorFacts({ code: "ADDON_OUTSIDE_MAIN_THREAD", environments: 2 }), {
-      own: {
-        name: "AddonOutsideMainThread",
-        code: "ADDON_OUTSIDE_MAIN_THREAD",
-        threadId,
-      },
-      message: `the native addon of horsies runs on the main thread of a process only; thread ${threadId} called it`,
       base: "CoreDefect",
     });
   });

@@ -3,4 +3,5 @@
 //! flight, the service runs, and the primitive through which the core calls
 //! JavaScript.
 
+pub mod guard;
 pub mod thrown;

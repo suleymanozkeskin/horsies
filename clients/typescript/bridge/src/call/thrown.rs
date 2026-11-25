@@ -15,8 +15,11 @@
 //!   `FORKED_AFTER_CORE_START`).
 //! - Client defects: the package sent a value or made a call that the bridge
 //!   refuses, or the bridge itself panicked (`MANIFEST_REFUSED`,
-//!   `PANIC_RULE_FIXED`, `CORE_PANIC`, `ADDON_OUTSIDE_MAIN_THREAD`,
-//!   `CLIENT_DEFECT`).
+//!   `PANIC_RULE_FIXED`, `CORE_PANIC`, `CLIENT_DEFECT`).
+//!
+//! A `worker_threads` isolate never reaches a call: the package's loader
+//! refuses it, and a registration of the addon in a second environment
+//! throws (`process_core::environment`).
 
 use napi::bindgen_prelude::{sys, ToNapiValue};
 use napi_derive::napi;
@@ -61,10 +64,6 @@ pub enum NativeThrown {
     PanicRuleFixed { current: PanicRule },
     /// The bridge panicked in the call; the core runs on.
     CorePanic { subject: String, cause: String },
-    /// A second Node-API environment of this process (a `worker_threads`
-    /// isolate) called the addon. `environments` is the count of
-    /// environments that loaded it.
-    AddonOutsideMainThread { environments: u32 },
     /// The package passed a value or made a call that it should have refused
     /// first. `rule` is the rule that does not hold.
     ClientDefect { subject: String, rule: String },
