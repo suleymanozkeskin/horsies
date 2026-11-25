@@ -6,9 +6,186 @@ use serde::{Deserialize, Serialize};
 
 use super::no_member_after_the_tag;
 use crate::core::codec::{JsonText, JsonTextRefused};
+use crate::manifest_schema::IntBound;
+
+// The bounds of the pattern fields. The rules of each pattern (`validate`)
+// and the schema of the pattern text (`manifest_schema::SCHEDULE_PATTERN`)
+// read them.
+
+/// The seconds of an interval.
+pub const INTERVAL_SECONDS: IntBound = IntBound {
+    name: "INTERVAL_SECONDS",
+    min: 1,
+    max: 86_400,
+};
+
+/// The minutes of an interval.
+pub const INTERVAL_MINUTES: IntBound = IntBound {
+    name: "INTERVAL_MINUTES",
+    min: 1,
+    max: 1_440,
+};
+
+/// The hours of an interval.
+pub const INTERVAL_HOURS: IntBound = IntBound {
+    name: "INTERVAL_HOURS",
+    min: 1,
+    max: 168,
+};
+
+/// The days of an interval.
+pub const INTERVAL_DAYS: IntBound = IntBound {
+    name: "INTERVAL_DAYS",
+    min: 1,
+    max: 365,
+};
+
+/// The minute of an hourly pattern.
+pub const HOURLY_MINUTE: IntBound = IntBound {
+    name: "HOURLY_MINUTE",
+    min: 0,
+    max: 59,
+};
+
+/// The second of an hourly pattern.
+pub const HOURLY_SECOND: IntBound = IntBound {
+    name: "HOURLY_SECOND",
+    min: 0,
+    max: 59,
+};
+
+/// The day of a monthly pattern.
+pub const MONTHLY_DAY: IntBound = IntBound {
+    name: "MONTHLY_DAY",
+    min: 1,
+    max: 31,
+};
+
+/// The minute field of a cron pattern.
+pub const CRON_MINUTE: IntBound = IntBound {
+    name: "CRON_MINUTE",
+    min: 0,
+    max: 59,
+};
+
+/// The hour field of a cron pattern.
+pub const CRON_HOUR: IntBound = IntBound {
+    name: "CRON_HOUR",
+    min: 0,
+    max: 23,
+};
+
+/// The day-of-month field of a cron pattern.
+pub const CRON_DAY_OF_MONTH: IntBound = IntBound {
+    name: "CRON_DAY_OF_MONTH",
+    min: 1,
+    max: 31,
+};
+
+/// The numeric fields of a cron pattern, which [`CronNumericTerm`] serves.
+const CRON_NUMERIC_FIELDS: [IntBound; 3] = [CRON_MINUTE, CRON_HOUR, CRON_DAY_OF_MONTH];
+
+/// The ordinal span of the month field of a cron pattern (January is 1,
+/// December 12).
+pub const CRON_MONTH_SPAN: i64 = 11;
+
+/// The ordinal span of the day-of-week field of a cron pattern (Monday is 0,
+/// Sunday 6).
+pub const CRON_WEEKDAY_SPAN: i64 = 6;
+
+/// A value, a range start or a range end of a [`CronNumericTerm`]: every
+/// value of a numeric field. [`CronSchedule::validate`] checks the domain of
+/// the field that holds the term.
+pub const CRON_NUMERIC_VALUE: IntBound = widest_domain("CRON_NUMERIC_VALUE", &CRON_NUMERIC_FIELDS);
+
+/// A step of a [`CronNumericTerm`]: 1 to the widest span of a numeric field.
+/// [`CronSchedule::validate`] checks the span of the field that holds the
+/// term.
+pub const CRON_NUMERIC_STEP: IntBound = IntBound {
+    name: "CRON_NUMERIC_STEP",
+    min: 1,
+    max: widest_span(&CRON_NUMERIC_FIELDS),
+};
+
+/// A step of a [`CronEnumTerm`]: 1 to the widest span of an enum field.
+pub const CRON_ENUM_STEP: IntBound = IntBound {
+    name: "CRON_ENUM_STEP",
+    min: 1,
+    max: larger_span(CRON_MONTH_SPAN, CRON_WEEKDAY_SPAN),
+};
+
+/// The bound that holds each of `bounds`: their least `min` and their
+/// greatest `max`. Pure.
+const fn widest_domain(name: &'static str, bounds: &[IntBound]) -> IntBound {
+    let mut min = u64::MAX;
+    let mut max = 0;
+    let mut index = 0;
+    while index < bounds.len() {
+        if bounds[index].min < min {
+            min = bounds[index].min;
+        }
+        if bounds[index].max > max {
+            max = bounds[index].max;
+        }
+        index += 1;
+    }
+    IntBound { name, min, max }
+}
+
+/// The greatest span (`max - min`) of `bounds`. Pure.
+const fn widest_span(bounds: &[IntBound]) -> u64 {
+    let mut widest = 0;
+    let mut index = 0;
+    while index < bounds.len() {
+        let span = bounds[index].max - bounds[index].min;
+        if span > widest {
+            widest = span;
+        }
+        index += 1;
+    }
+    widest
+}
+
+/// The larger of two ordinal spans, each 0 or more. Pure.
+const fn larger_span(first: i64, second: i64) -> u64 {
+    assert!(first >= 0 && second >= 0, "an ordinal span is 0 or more");
+    match first > second {
+        true => first as u64,
+        false => second as u64,
+    }
+}
+
+/// The domain of a cron field, signed as the terms hold their values. Each
+/// cron bound is below 60. Pure.
+const fn signed_domain(bound: IntBound) -> (i64, i64) {
+    (bound.min as i64, bound.max as i64)
+}
+
+/// Check that `value`, the `field` of `pattern`, is inside `bound`. Pure.
+///
+/// Errors: the pattern, the field, the bound and the value, as text.
+fn check_bound(pattern: &str, field: &str, bound: IntBound, value: u32) -> Result<(), String> {
+    match (bound.min..=bound.max).contains(&u64::from(value)) {
+        true => Ok(()),
+        false => Err(format!(
+            "{pattern} {field} must be between {} and {}, got {value}",
+            bound.min, bound.max,
+        )),
+    }
+}
 
 /// Days of the week.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    horsies_core_derive::ManifestSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Weekday {
     Monday,
@@ -24,20 +201,24 @@ pub enum Weekday {
 ///
 /// At least one time unit must be specified.
 /// Total interval is the sum of all specified units.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IntervalSchedule {
     /// Seconds component (1–86400).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[manifest_schema(int_bound = INTERVAL_SECONDS)]
     pub seconds: Option<u32>,
     /// Minutes component (1–1440).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[manifest_schema(int_bound = INTERVAL_MINUTES)]
     pub minutes: Option<u32>,
     /// Hours component (1–168).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[manifest_schema(int_bound = INTERVAL_HOURS)]
     pub hours: Option<u32>,
     /// Days component (1–365).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[manifest_schema(int_bound = INTERVAL_DAYS)]
     pub days: Option<u32>,
 }
 
@@ -77,36 +258,16 @@ impl IntervalSchedule {
             return Err("IntervalSchedule requires at least one time unit".to_owned());
         }
 
-        if let Some(s) = self.seconds {
-            if s == 0 || s > 86400 {
-                return Err(format!(
-                    "IntervalSchedule seconds must be between 1 and 86400, got {}",
-                    s,
-                ));
-            }
-        }
-        if let Some(m) = self.minutes {
-            if m == 0 || m > 1440 {
-                return Err(format!(
-                    "IntervalSchedule minutes must be between 1 and 1440, got {}",
-                    m,
-                ));
-            }
-        }
-        if let Some(h) = self.hours {
-            if h == 0 || h > 168 {
-                return Err(format!(
-                    "IntervalSchedule hours must be between 1 and 168, got {}",
-                    h,
-                ));
-            }
-        }
-        if let Some(d) = self.days {
-            if d == 0 || d > 365 {
-                return Err(format!(
-                    "IntervalSchedule days must be between 1 and 365, got {}",
-                    d,
-                ));
+        let units = [
+            ("seconds", INTERVAL_SECONDS, self.seconds),
+            ("minutes", INTERVAL_MINUTES, self.minutes),
+            ("hours", INTERVAL_HOURS, self.hours),
+            ("days", INTERVAL_DAYS, self.days),
+        ];
+        for (field, bound, value) in units {
+            match value {
+                Some(value) => check_bound("IntervalSchedule", field, bound, value)?,
+                None => {}
             }
         }
 
@@ -114,14 +275,21 @@ impl IntervalSchedule {
     }
 }
 
+/// The second of an hourly pattern that gives none.
+const fn default_hourly_second() -> u32 {
+    0
+}
+
 /// Run task every hour at a specific minute and second.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HourlySchedule {
     /// Minute of the hour (0–59).
+    #[manifest_schema(int_bound = HOURLY_MINUTE)]
     pub minute: u32,
     /// Second of the minute (0–59).
-    #[serde(default)]
+    #[serde(default = "default_hourly_second")]
+    #[manifest_schema(int_bound = HOURLY_SECOND)]
     pub second: u32,
 }
 
@@ -130,19 +298,8 @@ impl HourlySchedule {
     ///
     /// Matches Python's `Field(ge=0, le=59)` constraints.
     pub fn validate(&self) -> Result<(), String> {
-        if self.minute > 59 {
-            return Err(format!(
-                "HourlySchedule minute must be between 0 and 59, got {}",
-                self.minute,
-            ));
-        }
-        if self.second > 59 {
-            return Err(format!(
-                "HourlySchedule second must be between 0 and 59, got {}",
-                self.second,
-            ));
-        }
-        Ok(())
+        check_bound("HourlySchedule", "minute", HOURLY_MINUTE, self.minute)?;
+        check_bound("HourlySchedule", "second", HOURLY_SECOND, self.second)
     }
 }
 
@@ -164,7 +321,7 @@ fn validate_whole_second(pattern: &str, time: NaiveTime) -> Result<(), String> {
 }
 
 /// Run task every day at a specific time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DailySchedule {
     /// Time of day to run (HH:MM:SS), in whole seconds, in the schedule's
@@ -180,7 +337,7 @@ impl DailySchedule {
 }
 
 /// Run task on specific days of the week at a specific time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WeeklySchedule {
     /// Days of week to run (at least one).
@@ -208,10 +365,11 @@ impl WeeklySchedule {
 }
 
 /// Run task on a specific day of the month at a specific time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MonthlySchedule {
     /// Day of month (1–31).
+    #[manifest_schema(int_bound = MONTHLY_DAY)]
     pub day: u32,
     /// Time of day to run, in whole seconds, in the schedule's timezone.
     pub time: NaiveTime,
@@ -222,12 +380,7 @@ impl MonthlySchedule {
     ///
     /// Matches Python's `Field(ge=1, le=31)` constraint.
     pub fn validate(&self) -> Result<(), String> {
-        if self.day == 0 || self.day > 31 {
-            return Err(format!(
-                "MonthlySchedule day must be between 1 and 31, got {}",
-                self.day,
-            ));
-        }
+        check_bound("MonthlySchedule", "day", MONTHLY_DAY, self.day)?;
         validate_whole_second("MonthlySchedule", self.time)
     }
 }
@@ -236,7 +389,17 @@ impl MonthlySchedule {
 ///
 /// Snake-case string values keep the serialized form stable, mirroring
 /// [`Weekday`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    horsies_core_derive::ManifestSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Month {
     January,
@@ -307,7 +470,8 @@ fn month_max_days(month: i64) -> i64 {
     }
 }
 
-fn default_cron_step() -> u32 {
+/// The step of a cron range that gives none.
+const fn default_cron_step() -> u32 {
     1
 }
 
@@ -316,7 +480,9 @@ fn default_cron_step() -> u32 {
 /// Per-field domain bounds are enforced by [`CronSchedule::validate`], which
 /// names the offending field — the variants are domain-agnostic. Wire tags
 /// match the Python implementation (`every`/`step`/`values`/`range`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CronNumericTerm {
     /// `*` — every value in the field's domain.
@@ -324,14 +490,23 @@ pub enum CronNumericTerm {
     Every,
     /// `*/n` — every nth value across the field's full domain (anchored at the
     /// domain start). `step` must be <= the field span.
-    Step { step: u32 },
+    Step {
+        #[manifest_schema(int_bound = CRON_NUMERIC_STEP)]
+        step: u32,
+    },
     /// `a,b,c` — an explicit set of integer values.
-    Values { values: Vec<i64> },
+    Values {
+        #[manifest_schema(int_bound = CRON_NUMERIC_VALUE)]
+        values: Vec<i64>,
+    },
     /// `a-b` or `a-b/n` — an inclusive integer range with an optional step.
     Range {
+        #[manifest_schema(int_bound = CRON_NUMERIC_VALUE)]
         start: i64,
+        #[manifest_schema(int_bound = CRON_NUMERIC_VALUE)]
         end: i64,
         #[serde(default = "default_cron_step")]
+        #[manifest_schema(int_bound = CRON_NUMERIC_STEP)]
         step: u32,
     },
 }
@@ -341,8 +516,11 @@ pub enum CronNumericTerm {
 ///
 /// Wire tags match the Python implementation
 /// (`every`/`enum_values`/`enum_range`/`enum_step`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[manifest_schema(uses(Weekday, Month))]
 pub enum CronEnumTerm<T> {
     /// `*` — every value in the field's domain.
     #[serde(deserialize_with = "no_member_after_the_tag")]
@@ -354,17 +532,23 @@ pub enum CronEnumTerm<T> {
         start: T,
         end: T,
         #[serde(default = "default_cron_step")]
+        #[manifest_schema(int_bound = CRON_ENUM_STEP)]
         step: u32,
     },
     /// `*/n` — every nth value across the field's full domain, by ordinal.
-    EnumStep { step: u32 },
+    EnumStep {
+        #[manifest_schema(int_bound = CRON_ENUM_STEP)]
+        step: u32,
+    },
 }
 
 /// Day dimension selector.
 ///
 /// A single sum type forces an explicit choice when both day-of-month and
 /// day-of-week are restricted, eliminating cron's silent OR ambiguity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DaySelector {
     /// Both day-of-month and day-of-week unrestricted.
@@ -394,7 +578,9 @@ pub enum DaySelector {
 /// can, through typed fields instead of a cron-expression string. Fires at
 /// second :00 (minute granularity). The `day` field collapses day-of-month and
 /// day-of-week into an explicit [`DaySelector`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct CronSchedule {
     /// Minute field terms (0–59).
@@ -412,13 +598,13 @@ fn invalid_cron_field(field: &str, detail: &str) -> String {
     format!("invalid cron '{}' field: {}", field, detail)
 }
 
-/// Validate integer-domain terms against `[lo, hi]`.
+/// Validate integer-domain terms against the field's `domain`.
 fn validate_numeric_terms(
     terms: &[CronNumericTerm],
     field: &str,
-    lo: i64,
-    hi: i64,
+    domain: IntBound,
 ) -> Result<(), String> {
+    let (lo, hi) = signed_domain(domain);
     let span = hi - lo;
     for term in terms {
         match term {
@@ -550,7 +736,7 @@ fn validate_day_selector(day: &DaySelector) -> Result<(), String> {
                     "must have at least one term",
                 ));
             }
-            validate_numeric_terms(day_of_month, "day_of_month", 1, 31)
+            validate_numeric_terms(day_of_month, "day_of_month", CRON_DAY_OF_MONTH)
         }
         DaySelector::ByWeekday { day_of_week } => {
             if day_of_week.is_empty() {
@@ -559,7 +745,7 @@ fn validate_day_selector(day: &DaySelector) -> Result<(), String> {
                     "must have at least one term",
                 ));
             }
-            validate_enum_terms(day_of_week, "day_of_week", 6)
+            validate_enum_terms(day_of_week, "day_of_week", CRON_WEEKDAY_SPAN)
         }
         DaySelector::EitherDay {
             day_of_month,
@@ -581,8 +767,8 @@ fn validate_day_selector(day: &DaySelector) -> Result<(), String> {
                     "must have at least one term",
                 ));
             }
-            validate_numeric_terms(day_of_month, "day_of_month", 1, 31)?;
-            validate_enum_terms(day_of_week, "day_of_week", 6)
+            validate_numeric_terms(day_of_month, "day_of_month", CRON_DAY_OF_MONTH)?;
+            validate_enum_terms(day_of_week, "day_of_week", CRON_WEEKDAY_SPAN)
         }
     }
 }
@@ -602,7 +788,8 @@ fn validate_satisfiable(month: &[CronEnumTerm<Month>], day: &DaySelector) -> Res
         }
     };
     let month_set = expand_enum_field(month, 1, 12);
-    let dom_set = expand_numeric_field(day_of_month, 1, 31);
+    let (day_lo, day_hi) = signed_domain(CRON_DAY_OF_MONTH);
+    let dom_set = expand_numeric_field(day_of_month, day_lo, day_hi);
     let feasible = month_set
         .iter()
         .any(|m| dom_set.iter().any(|d| *d <= month_max_days(*m)));
@@ -714,9 +901,9 @@ impl CronSchedule {
         if self.month.is_empty() {
             return Err(invalid_cron_field("month", "must have at least one term"));
         }
-        validate_numeric_terms(&self.minute, "minute", 0, 59)?;
-        validate_numeric_terms(&self.hour, "hour", 0, 23)?;
-        validate_enum_terms(&self.month, "month", 11)?;
+        validate_numeric_terms(&self.minute, "minute", CRON_MINUTE)?;
+        validate_numeric_terms(&self.hour, "hour", CRON_HOUR)?;
+        validate_enum_terms(&self.month, "month", CRON_MONTH_SPAN)?;
         validate_day_selector(&self.day)?;
         validate_satisfiable(&self.month, &self.day)?;
         Ok(())
@@ -724,7 +911,7 @@ impl CronSchedule {
 }
 
 /// Union of all schedule pattern types.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, horsies_core_derive::ManifestSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SchedulePattern {
     Interval(IntervalSchedule),

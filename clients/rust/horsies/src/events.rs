@@ -302,7 +302,9 @@ mod tests {
         };
         let hook = hooks.next().unwrap();
         assert!(hook.name.ends_with("::tracer_hook"), "{}", hook.name);
-        let failure = (hook.start)().await.unwrap_err();
+        let failure = (hook.start)(horsies_core::ChildStartFacts::Handler)
+            .await
+            .unwrap_err();
         assert_eq!(failure.cause, "the tracer provider did not build");
         assert!(hooks.next().is_none());
     }

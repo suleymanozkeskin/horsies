@@ -34,6 +34,7 @@ use crate::core::config::queue::{CustomQueueConfig, QueueMode};
 use crate::core::config::worker_profile::{ProfileSelectionRefused, SelectedProfile};
 use crate::core::task::DeclaredErrorCodes;
 use crate::core::PostgresConfig;
+use crate::process_exit::ProcessExit;
 use crate::telemetry::listen::ListenAddress;
 use crate::worker::children::{ChildLaunch, PreloadProgram};
 use crate::worker::claim_pass::RegisteredClasses;
@@ -233,6 +234,10 @@ impl Worker {
     /// names) is not declared: its samples count in the fallback series, and
     /// one WARNING line names it.
     ///
+    /// The liveness and runner heartbeat watches of the worker end the
+    /// process through `exit` when they fail closed (exits 79 and 77): a
+    /// Rust binary and the Python bridge give [`ProcessExit::Standard`].
+    ///
     /// Errors: [`WorkerError::Broker`] when the broker config or the core
     /// handle is refused; [`WorkerError::Config`] as [`Worker::of_child_specs`],
     /// and with an endpoint when the core is built without the feature
@@ -241,6 +246,7 @@ impl Worker {
         plan: WorkerPlan,
         child_specs: Arc<dyn ChildSpecSource>,
         family: ClientFamily,
+        exit: ProcessExit,
     ) -> Result<Self, WorkerError> {
         let broker = worker_broker(&plan.broker_config, family).await?;
         let worker = Worker::of_child_specs(
@@ -251,7 +257,8 @@ impl Worker {
             plan.profile,
             plan.launch,
             plan.registered,
-        )?;
+        )?
+        .with_process_exit(exit);
         with_planned_telemetry(worker, &plan.telemetry, plan.metrics_endpoint)
     }
 }

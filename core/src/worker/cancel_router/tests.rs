@@ -497,6 +497,7 @@ async fn a_lost_notice_is_found_by_the_beat_miss_read() {
         held.live.clone(),
         beats_cancel.clone(),
         FailClosedStop::new(CancellationToken::new()),
+        crate::process_exit::ProcessExit::Standard,
     )
     .expect("start the beat loop");
     let reader = PoolReader(crate::broker::pools::core_pool_for_test_url(pool.url()));
