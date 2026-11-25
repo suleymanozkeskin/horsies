@@ -292,7 +292,7 @@ The rules of the table:
 Each step is a task with its own name and its own attempts. The Workflows surface of the [web UI](/horsies/monitoring/web-ui-overview/#workflows) shows the run as a graph with one node per step:
 
 - the status of each node, its node time, and its attempt count when the step ran more than once (`3 attempts`);
-- for a selected node: its error, its task, and the attempts of its task. Each attempt shows its outcome, its error code and its phase times, with the retry wait between two attempts. An attempt that a worker crash ended has a `worker lost` note. See [Attempt timing](/horsies/monitoring/web-ui-overview/#attempt-timing);
+- for a selected node: its error, its task, and the attempts of its task. Each attempt shows its outcome, its error code and its phase times, with the retry wait between two attempts. An attempt that a worker crash ended has a `worker lost` interval, and its tooltip says `recorded by recovery`. See [Attempt panel](/horsies/monitoring/web-ui-overview/#attempt-panel);
 - the Timeline view: one row per node on one time axis, which shows the order of the steps and the waits between them;
 - failure navigation, which moves through the `FAILED` nodes.
 
