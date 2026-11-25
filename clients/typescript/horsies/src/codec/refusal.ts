@@ -32,7 +32,9 @@ export type EncodeRefusalKind =
   /** A Temporal value of a calendar other than `iso8601`. */
   | "NotIsoCalendar"
   /** An `h.uuid()` value that is not the lower-case 8-4-4-4-12 form. */
-  | "NotCanonicalUuid";
+  | "NotCanonicalUuid"
+  /** A value that is not a member of a literal, an enum or a union, or a tag that names no union member. */
+  | "NotAMember";
 
 /** Why the reader refuses a stored text under the declared kind. */
 export type DecodeRefusalKind =
@@ -55,7 +57,9 @@ export type DecodeRefusalKind =
   /** A string that is not a finite decimal text. */
   | "BadDecimalText"
   /** A string that is not a UUID in the lower-case 8-4-4-4-12 form. */
-  | "BadUuidText";
+  | "BadUuidText"
+  /** A stored value that is not a member of a literal, an enum or a union, or a tag that names no union member. */
+  | "NotAMember";
 
 /** The writer refuses a value. */
 export type EncodeRefused = {

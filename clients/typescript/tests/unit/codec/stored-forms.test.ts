@@ -70,6 +70,7 @@ const TYPED_REFUSAL_KIND: Readonly<Record<string, DecodeRefusalKind>> = {
   string_for_integer: "WrongType",
   float_for_integer: "FloatForInteger",
   unknown_member: "UnknownMember",
+  unknown_enum_value: "NotAMember",
 };
 
 describe("task_input.json typed refused texts", () => {

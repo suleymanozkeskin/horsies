@@ -20,6 +20,7 @@ import {
   INSTANT_KIND,
   INT_KIND,
   type Kind,
+  type LiteralMember,
   type Member,
   NULL_KIND,
   type ObjectKind,
@@ -28,9 +29,16 @@ import {
   PLAIN_DATE_KIND,
   PLAIN_DATE_TIME_KIND,
   STRING_KIND,
+  taggedUnionKind,
   UUID_KIND,
 } from "./kinds.ts";
 import { kindOf, presenceOf, type Wire, wireOf } from "./wire-type.ts";
+
+/** A list with at least one item. */
+export type NonEmpty<T> = readonly [T, ...T[]];
+
+/** A wire type of an object value: a member of a tagged union. */
+export type ObjectWire = Wire<object, object, "required">;
 
 /** The builders of the wire types. */
 export interface WireBuilders {
@@ -63,6 +71,23 @@ export interface WireBuilders {
   plainDate(): Wire<Temporal.PlainDate>;
   /** An object with declared members, stored in declaration order. An undeclared key is refused. */
   object<const M extends WireMembers>(members: M): Wire<ObjectValue<M>, ObjectSent<M>>;
+  /** One of the listed values: strings, safe integers, booleans or `null`. Stored as the value. */
+  literal<const L extends NonEmpty<LiteralMember>>(...members: L): Wire<L[number]>;
+  /** One of the listed strings. Stored as the string. */
+  enum<const L extends NonEmpty<string>>(members: L): Wire<L[number]>;
+  /**
+   * A value of one of the member types, each a primitive type, at most one per stored JSON type (`Horsies.create`
+   * refuses `h.int()` with `h.float()`: one `number` cannot say which it is). Stored as the member's text.
+   */
+  union<const T extends NonEmpty<RequiredWire>>(members: T): Wire<ValueOf<T[number]>, SentOf<T[number]>>;
+  /**
+   * An object of one of the member types, told apart by the member `tag`, which each member declares as a string
+   * literal. Stored as the member object, in its declaration order.
+   */
+  union<const K extends string, const T extends NonEmpty<ObjectWire>>(
+    tag: K,
+    members: T,
+  ): Wire<ValueOf<T[number]>, SentOf<T[number]>>;
   /** A JSON array of one item type. */
   array<W extends RequiredWire>(item: W): Wire<ValueOf<W>[], SentOf<W>[]>;
   /** A JSON array with one value per item type. */
@@ -95,6 +120,69 @@ function membersOf(members: WireMembers): readonly Member[] {
   });
 }
 
+/** A primitive union of the members. */
+function primitiveUnion<const T extends NonEmpty<RequiredWire>>(
+  members: T,
+): Wire<ValueOf<T[number]>, SentOf<T[number]>> {
+  const kinds = Object.freeze(members.map((member) => requiredKindOf(member, "union")));
+
+  return wireOf(Object.freeze({ node: "union", members: kinds }));
+}
+
+/** A tagged union of object members. A member that is not an object is a defect that the static types refuse. */
+function taggedUnion<const K extends string, const T extends NonEmpty<ObjectWire>>(
+  tag: K,
+  members: T,
+): Wire<ValueOf<T[number]>, SentOf<T[number]>> {
+  const variants = members.map((member) => {
+    const kind = requiredKindOf(member, "union");
+
+    if (kind.node !== "object") {
+      throw new TypeError("h.union(tag, members): each member is an h.object");
+    }
+
+    return kind;
+  });
+
+  return wireOf(taggedUnionKind(tag, variants));
+}
+
+function union<const T extends NonEmpty<RequiredWire>>(members: T): Wire<ValueOf<T[number]>, SentOf<T[number]>>;
+function union<const K extends string, const T extends NonEmpty<ObjectWire>>(
+  tag: K,
+  members: T,
+): Wire<ValueOf<T[number]>, SentOf<T[number]>>;
+function union(
+  first: string | NonEmpty<RequiredWire>,
+  second: NonEmpty<ObjectWire> | readonly [] = [],
+): Wire<unknown, unknown> {
+  if (isWireList(first)) {
+    return primitiveUnion(first);
+  }
+
+  const [head, ...rest] = second;
+
+  if (head === undefined) {
+    throw new TypeError("h.union(tag, members): the members list is empty");
+  }
+
+  return taggedUnion(first, [head, ...rest]);
+}
+
+/** Whether the first argument of `h.union` is the member list (the form without a tag). */
+function isWireList(first: string | NonEmpty<RequiredWire>): first is NonEmpty<RequiredWire> {
+  return Array.isArray(first);
+}
+
+/** A literal kind of the members. An empty list is a defect that the static types refuse. */
+function literalWire<const L extends NonEmpty<LiteralMember>>(members: L): Wire<L[number]> {
+  if (members.length === 0) {
+    throw new TypeError("h.literal: give at least one member");
+  }
+
+  return wireOf(Object.freeze({ node: "literal", members: Object.freeze([...members]) }));
+}
+
 /** The kind of a task input: one member per parameter, in declaration order. */
 export function parametersKind(parameters: WireMembers): ObjectKind {
   return objectKind(membersOf(parameters));
@@ -113,6 +201,9 @@ export const h: WireBuilders = Object.freeze({
   offsetDateTime: (): Wire<Temporal.ZonedDateTime> => wireOf(OFFSET_DATE_TIME_KIND),
   plainDateTime: (): Wire<Temporal.PlainDateTime> => wireOf(PLAIN_DATE_TIME_KIND),
   plainDate: (): Wire<Temporal.PlainDate> => wireOf(PLAIN_DATE_KIND),
+  literal: <const L extends NonEmpty<LiteralMember>>(...members: L): Wire<L[number]> => literalWire(members),
+  enum: <const L extends NonEmpty<string>>(members: L): Wire<L[number]> => literalWire(members),
+  union,
   object: <const M extends WireMembers>(members: M): Wire<ObjectValue<M>, ObjectSent<M>> =>
     wireOf(objectKind(membersOf(members))),
   array: <W extends RequiredWire>(item: W): Wire<ValueOf<W>[], SentOf<W>[]> =>

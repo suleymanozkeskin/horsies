@@ -10,7 +10,15 @@
 // - Records are built with own data properties: a stored key `__proto__` never changes a prototype.
 
 import { Decimal } from "../wire/decimal.ts";
-import type { DefaultText, Kind, Member, MemberPresence, ObjectKind } from "../wire/kinds.ts";
+import type {
+  DefaultText,
+  Kind,
+  LiteralMember,
+  Member,
+  MemberPresence,
+  ObjectKind,
+  TaggedUnionKind,
+} from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { MAX_VALUE_JSON_DEPTH } from "./bounds.ts";
@@ -33,6 +41,7 @@ import {
   readPlainDateTime,
   type TemporalReadRefused,
 } from "./temporal-text.ts";
+import { isLiteralType, unionRefusal } from "./union.ts";
 import { isBigint, isBoolean, isNumber, isString, isUuidText, setOwn } from "./values.ts";
 
 /**
@@ -96,6 +105,12 @@ export function decodeNode(kind: Kind, node: TreeValue, path: string, depth: num
       return decodeText(node, path, readPlainDateTime);
     case "plainDate":
       return decodeText(node, path, readPlainDate);
+    case "literal":
+      return decodeLiteral(kind.members, node, path);
+    case "union":
+      return decodeUnion(kind.members, node, path, depth, form);
+    case "taggedUnion":
+      return decodeTagged(kind, node, path, depth, form);
     case "nullable":
       return node === null ? ok(null) : decodeNode(kind.inner, node, path, depth, form);
     case "array":
@@ -186,6 +201,57 @@ function decodeFloat(node: TreeValue, path: string): Decoded {
   const value = Number(node);
 
   return Number.isFinite(value) ? ok(value) : refuse("WrongType", path, "an integer outside the finite float range");
+}
+
+function decodeLiteral(members: readonly LiteralMember[], node: TreeValue, path: string): Decoded {
+  if (node instanceof IntegralFloat) {
+    return refuse("FloatForInteger", path, "a float text for an integer member");
+  }
+
+  if (!isLiteralType(node)) {
+    return isBigint(node)
+      ? refuse("NotAMember", path, "not one of the literal members")
+      : refuse("WrongType", path, "expected a string, a number, a boolean or null");
+  }
+
+  return members.includes(node) ? ok(node) : refuse("NotAMember", path, "not one of the literal members");
+}
+
+/** The value of the first member that reads the node. */
+function decodeUnion(
+  members: readonly Kind[],
+  node: TreeValue,
+  path: string,
+  depth: number,
+  form: DecodeForm,
+): Decoded {
+  const refusals: DecodeRefused[] = [];
+
+  for (const member of members) {
+    const decoded = decodeNode(member, node, path, depth, form);
+
+    if (decoded.ok) {
+      return decoded;
+    }
+
+    refusals.push(decoded.error);
+  }
+
+  return err(unionRefusal(refusals, decodeRefused("NotAMember", path, "no member of the union reads the value")));
+}
+
+/** The member object that the stored tag names. */
+function decodeTagged(kind: TaggedUnionKind, node: TreeValue, path: string, depth: number, form: DecodeForm): Decoded {
+  if (!isTreeObject(node)) {
+    return refuse("WrongType", path, "expected an object");
+  }
+
+  const tagValue = node[kind.tag];
+  const variant = isString(tagValue) ? kind.byTag.get(tagValue) : undefined;
+
+  return variant === undefined
+    ? refuse("NotAMember", memberPath(path, kind.tag), "the tag names no member of the union")
+    : decodeObject(variant, node, path, depth, form);
 }
 
 /** The depth of the arrays and objects inside a container at `depth`, or `TooDeep`. */

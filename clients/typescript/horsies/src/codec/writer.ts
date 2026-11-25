@@ -8,13 +8,14 @@
 // - An undeclared key, a key that only the engine writes, and a value deeper than the core's bound are refused.
 
 import { Decimal } from "../wire/decimal.ts";
-import type { Kind, Member, ObjectKind } from "../wire/kinds.ts";
+import type { Kind, LiteralMember, Member, ObjectKind, TaggedUnionKind } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { MAX_INT_DIGITS, MAX_VALUE_JSON_DEPTH } from "./bounds.ts";
 import { isEngineKey } from "./engine-keys.ts";
 import { pythonFloatText } from "./float-text.ts";
 import { type JsonText, writtenJsonText } from "./json-text.ts";
+import { isLiteralType, literalText, unionRefusal } from "./union.ts";
 import {
   encodeRefused,
   type EncodeRefusalKind,
@@ -129,6 +130,12 @@ function writeValue(kind: Kind, value: unknown, path: string, depth: number, sin
       return isPlainDate(value)
         ? writeTemporal(plainDateText(value), path, sink)
         : refuse("WrongType", path, "expected a Temporal.PlainDate");
+    case "literal":
+      return writeLiteral(kind.members, value, path, sink);
+    case "union":
+      return writeUnion(kind.members, value, path, depth, sink);
+    case "taggedUnion":
+      return writeTagged(kind, value, path, depth, sink);
     case "nullable":
       return value === null ? append(sink, "null") : writeValue(kind.inner, value, path, depth, sink);
     case "array":
@@ -203,6 +210,48 @@ function writeUuid(value: unknown, path: string, sink: Sink): Written {
 /** A date-time text as a JSON string; the text holds no character that JSON escapes. */
 function writeTemporal(text: Result<string, TemporalWriteRefused>, path: string, sink: Sink): Written {
   return text.ok ? append(sink, `"${text.value}"`) : refuse(text.error.kind, path, text.error.detail);
+}
+
+function writeLiteral(members: readonly LiteralMember[], value: unknown, path: string, sink: Sink): Written {
+  if (!isLiteralType(value)) {
+    return refuse("WrongType", path, "expected a string, a number, a boolean or null");
+  }
+
+  return members.includes(value)
+    ? append(sink, literalText(value))
+    : refuse("NotAMember", path, "not one of the literal members");
+}
+
+/** The text of the first member that takes the value. */
+function writeUnion(members: readonly Kind[], value: unknown, path: string, depth: number, sink: Sink): Written {
+  const refusals: EncodeRefused[] = [];
+
+  for (const member of members) {
+    const trial: Sink = { text: "" };
+    const written = writeValue(member, value, path, depth, trial);
+
+    if (written.ok) {
+      return append(sink, trial.text);
+    }
+
+    refusals.push(written.error);
+  }
+
+  return err(unionRefusal(refusals, encodeRefused("NotAMember", path, "no member of the union takes the value")));
+}
+
+/** The member object that the tag names. */
+function writeTagged(kind: TaggedUnionKind, value: unknown, path: string, depth: number, sink: Sink): Written {
+  if (!isPlainObject(value)) {
+    return notContainer(value, path, "an object");
+  }
+
+  const tagValue = value[kind.tag];
+  const variant = isString(tagValue) ? kind.byTag.get(tagValue) : undefined;
+
+  return variant === undefined
+    ? refuse("NotAMember", memberPath(path, kind.tag), "the tag names no member of the union")
+    : writeObject(variant, value, path, depth, sink);
 }
 
 /** The refusal of a value that is not the container that `expected` names. */

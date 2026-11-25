@@ -4,6 +4,7 @@
 
 import type { JsonText } from "../codec/json-text.ts";
 import type { EncodeRefused } from "../codec/refusal.ts";
+import { isString } from "../codec/values.ts";
 
 /** `null`. */
 export type NullKind = { readonly node: "null" };
@@ -40,6 +41,23 @@ export type PlainDateTimeKind = { readonly node: "plainDateTime" };
 
 /** A `Temporal.PlainDate`, stored as `YYYY-MM-DD`. */
 export type PlainDateKind = { readonly node: "plainDate" };
+
+/** A member of a literal kind: a string, a number (a safe integer), a boolean or `null`. */
+export type LiteralMember = string | number | boolean | null;
+
+/** One of the listed values, stored as its JSON text. */
+export type LiteralKind = { readonly node: "literal"; readonly members: readonly LiteralMember[] };
+
+/** A value of one of the member kinds, each a primitive kind; the first member that takes a value writes it. */
+export type UnionKind = { readonly node: "union"; readonly members: readonly Kind[] };
+
+/** An object of one of the variants, told apart by the string literal of the member `tag`. */
+export type TaggedUnionKind = {
+  readonly node: "taggedUnion";
+  readonly tag: string;
+  readonly variants: readonly ObjectKind[];
+  readonly byTag: ReadonlyMap<string, ObjectKind>;
+};
 
 /** `null`, or a value of `inner`. */
 export type NullableKind = { readonly node: "nullable"; readonly inner: Kind };
@@ -91,6 +109,9 @@ export type Kind =
   | OffsetDateTimeKind
   | PlainDateTimeKind
   | PlainDateKind
+  | LiteralKind
+  | UnionKind
+  | TaggedUnionKind
   | NullableKind
   | ArrayKind
   | TupleKind
@@ -126,4 +147,30 @@ export function objectKind(members: readonly Member[]): ObjectKind {
     members: frozen,
     byName: new Map(frozen.map((member) => [member.name, member])),
   });
+}
+
+/** The string values of the tag member of a variant, or an empty list when it has none. Pure. */
+export function tagValues(variant: ObjectKind, tag: string): readonly string[] {
+  const member = variant.byName.get(tag);
+
+  if (member === undefined || member.kind.node !== "literal") {
+    return [];
+  }
+
+  return member.kind.members.filter(isString);
+}
+
+/** A tagged union of the variants; a tag value maps to the first variant that names it. Pure. */
+export function taggedUnionKind(tag: string, variants: readonly ObjectKind[]): TaggedUnionKind {
+  const byTag = new Map<string, ObjectKind>();
+
+  for (const variant of variants) {
+    for (const value of tagValues(variant, tag)) {
+      if (!byTag.has(value)) {
+        byTag.set(value, variant);
+      }
+    }
+  }
+
+  return Object.freeze({ node: "taggedUnion", tag, variants: Object.freeze([...variants]), byTag });
 }

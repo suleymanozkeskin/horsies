@@ -47,6 +47,52 @@ describe("checkKind", () => {
     );
   });
 
+  test("AmbiguousUnion: an int-float union is refused at create, and a string with an instant", () => {
+    const intFloat = checkKind(kindOf(h.union([h.int(), h.float()])));
+
+    assert.deepEqual(intFloat, [{ rule: "AmbiguousUnion", path: "$", detail: "2 members store a JSON number" }]);
+    assert.equal(checkKind(kindOf(h.union([h.string(), h.instant()])))[0]?.rule, "AmbiguousUnion");
+    assert.equal(checkKind(kindOf(h.union([h.int().nullable(), h.null()])))[0]?.rule, "AmbiguousUnion");
+  });
+
+  test("a union of literals and of distinct stored types has no refusal", () => {
+    assert.deepEqual(checkKind(kindOf(h.union([h.literal("a"), h.literal("b")]))), []);
+    assert.deepEqual(checkKind(kindOf(h.union([h.literal("auto"), h.int(), h.string(), h.null()]))), []);
+  });
+
+  test("UnionMemberNotPrimitive: an object member of h.union([...])", () => {
+    assert.equal(checkKind(kindOf(h.union([h.object({}), h.int()])))[0]?.rule, "UnionMemberNotPrimitive");
+  });
+
+  test("LiteralNotSafeInteger: a float member and 2^53", () => {
+    assert.equal(checkKind(kindOf(h.literal(1.5)))[0]?.rule, "LiteralNotSafeInteger");
+    assert.equal(checkKind(kindOf(h.literal(2 ** 53)))[0]?.rule, "LiteralNotSafeInteger");
+  });
+
+  test("UnionTagInvalid: no tag, an optional tag, a tag that is not a string literal, a repeated tag value", () => {
+    const refusals = checkKind(
+      kindOf(
+        h.union("kind", [
+          h.object({ kind: h.literal("a") }),
+          h.object({ name: h.string() }),
+          h.object({ kind: h.literal("c").optional() }),
+          h.object({ kind: h.literal(4) }),
+          h.object({ kind: h.enum(["a", "e"]) }),
+        ]),
+      ),
+    );
+
+    assert.deepEqual(
+      refusals.map((refusal) => [refusal.rule, refusal.path]),
+      [
+        ["UnionTagInvalid", "$[1]"],
+        ["UnionTagInvalid", "$[2]"],
+        ["UnionTagInvalid", "$[3]"],
+        ["UnionTagInvalid", "$[4]"],
+      ],
+    );
+  });
+
   test("KindTooDeep: more arrays and objects than a stored value may have", () => {
     const refusals = checkKind(kindOf(nestedArrays(MAX_VALUE_JSON_DEPTH + 1)));
 

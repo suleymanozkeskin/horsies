@@ -113,6 +113,10 @@ export function declaredWires(type: string, notation: Notation | undefined): rea
       return [{ label: "plainDateTime", wire: h.plainDateTime() }];
     case "date":
       return [{ label: "plainDate", wire: h.plainDate() }];
+    case "str_enum":
+      return [{ label: "enum", wire: h.enum(["red", "green"]) }];
+    case "int_enum":
+      return [{ label: "literal", wire: h.literal(1, 3) }];
     case "optional_i64":
       return [{ label: "int.nullable", wire: h.int().nullable() }];
     case "list_i64":
@@ -157,7 +161,10 @@ export function valueOf(type: string, declared: Declared, notation: Notation | u
     case "bool":
     case "str":
     case "uuid":
+    case "str_enum":
       return notation;
+    case "int_enum":
+      return Number(notationText(notation));
     case "decimal":
       return decimalOf(notationText(notation));
     case "i64":

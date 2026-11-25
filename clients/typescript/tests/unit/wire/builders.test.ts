@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { h, parametersKind } from "../../../horsies/src/wire/builders.ts";
+import { h, type ObjectWire, parametersKind } from "../../../horsies/src/wire/builders.ts";
 import type { AnyWire, RequiredWire } from "../../../horsies/src/wire/infer.ts";
 import { kindOf, presenceOf } from "../../../horsies/src/wire/wire-type.ts";
 
@@ -43,6 +43,28 @@ describe("h.* builders", () => {
       items: [{ node: "int" }, { node: "string" }],
     });
     assert.deepEqual(kindOf(h.record(h.float())), { node: "record", value: { node: "float" } });
+  });
+
+  test("literal, enum and the two union forms", () => {
+    assert.deepEqual(kindOf(h.literal("a", 1)), { node: "literal", members: ["a", 1] });
+    assert.deepEqual(kindOf(h.enum(["red"])), { node: "literal", members: ["red"] });
+    assert.deepEqual(kindOf(h.union([h.int(), h.string()])), {
+      node: "union",
+      members: [{ node: "int" }, { node: "string" }],
+    });
+
+    const variants = [h.object({ kind: h.enum(["a", "b"]) }), h.object({ kind: h.literal("c") })] as const;
+    const tagged = kindOf(h.union("kind", variants));
+
+    assert(tagged.node === "taggedUnion");
+    assert.deepEqual([...tagged.byTag.keys()], ["a", "b", "c"]);
+  });
+
+  test("a tagged union member that is not an object is a defect that the static types refuse: TypeError", () => {
+    // SAFETY: the static types refuse this call; the test checks the run-time guard behind them.
+    const member = h.int() as AnyWire as ObjectWire;
+
+    assert.throws(() => h.union("kind", [member]), TypeError);
   });
 
   test("modifiers: optional and default set the presence; nullable wraps once and keeps the presence", () => {
