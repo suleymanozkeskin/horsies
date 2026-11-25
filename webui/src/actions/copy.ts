@@ -156,6 +156,16 @@ export function unavailableMessage(
   return `${ACTION_LABEL[action]} failed: ${reason}. The broker may be unreachable.`;
 }
 
+/** 500: the server cannot complete the request, for example because the
+ * database refused the change. A retry gives the same result. */
+export function refusedMessage(
+  action: ActionKind,
+  detail: string | null
+): string {
+  const reason = detail === null ? 'the server could not complete the request' : detail;
+  return `${ACTION_LABEL[action]} failed: ${reason}. A retry gives the same result.`;
+}
+
 export const FORBIDDEN_MESSAGE = 'Not authorized to perform actions.';
 
 /** 409 SCHEMA_INCOMPATIBLE — not a state conflict; actions stay off until the
