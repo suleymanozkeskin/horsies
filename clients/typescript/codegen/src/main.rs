@@ -23,6 +23,7 @@ mod events;
 mod manifest;
 mod model;
 mod output;
+mod producer_metrics;
 mod retention_class;
 mod task_code;
 mod ts_text;
