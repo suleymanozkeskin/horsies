@@ -188,4 +188,36 @@ impl FrameWriter {
             Err(_writer_gone) => Flushed::WriterGone,
         }
     }
+
+    /// A writer with no writer thread: its frames stay in the queue until
+    /// the test takes them from [`QueuedFrames`]. A send waits while `bound`
+    /// frames are queued.
+    #[cfg(test)]
+    pub(super) fn without_thread(bound: usize) -> (Self, QueuedFrames) {
+        let (frames, queued) = mpsc::channel(bound);
+        (Self { frames }, QueuedFrames { queued })
+    }
+}
+
+/// The queue of a [`FrameWriter`] with no writer thread.
+#[cfg(test)]
+pub(super) struct QueuedFrames {
+    queued: mpsc::Receiver<Outgoing>,
+}
+
+#[cfg(test)]
+impl QueuedFrames {
+    /// How many frames are queued now.
+    pub(super) fn count(&self) -> usize {
+        self.queued.len()
+    }
+
+    /// Take the next queued frame. A test of this queue sends no flush.
+    pub(super) async fn take(&mut self) -> ChildFrame {
+        match self.queued.recv().await {
+            Some(Outgoing::Frame(frame)) => frame,
+            Some(Outgoing::Flush(_)) => panic!("a test of the queued frames got a flush"),
+            None => panic!("every sender of the queued frames is gone"),
+        }
+    }
 }

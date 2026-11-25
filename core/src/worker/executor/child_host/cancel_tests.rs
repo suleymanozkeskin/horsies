@@ -56,8 +56,14 @@ const LONG_TIMEOUT_MS: u64 = 600_000;
 const SHORT_TIMEOUT_MS: u64 = 1_000;
 /// The smallest cancel grace.
 const SHORT_GRACE_MS: u64 = 100;
-/// The time a test gives the serve loop to read a frame that it sent.
+/// The time a test waits for a frame that must not come.
 const FRAME_READ_PAUSE: Duration = Duration::from_millis(300);
+/// The polls of a wait for the serve loop to read every frame sent to it,
+/// and the time between two: about 10 s.
+const READ_POLLS: u32 = 400;
+const READ_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// The dispatch of a cancel that names no run of these tests.
+const PROBE_DISPATCH: u64 = 99;
 
 /// What the bodies of one test saw: how many started, and the cancel state
 /// each read when it ended.
@@ -309,6 +315,40 @@ fn operator() -> RunCancelState {
     }
 }
 
+/// A cancel of an isolated task that no test runs.
+fn isolated_probe() -> CancelTarget {
+    CancelTarget::Isolated {
+        task_id: Uuid::new_v4(),
+    }
+}
+
+/// A cancel of a shared run that no test runs.
+fn shared_probe() -> CancelTarget {
+    CancelTarget::Shared(RunRef {
+        dispatch: dispatch(PROBE_DISPATCH),
+        task_id: Uuid::new_v4(),
+    })
+}
+
+/// Return once the serve loop handled every frame sent before this call.
+/// A serve loop handles its frames one at a time, in order, and reads a
+/// frame only after it handled the one before. `probe` is a cancel that
+/// names no run, which the serve loop ignores; it is sent last, so the
+/// channel is empty again only after every earlier frame was handled.
+async fn until_the_frames_are_handled(parent: &mpsc::Sender<ParentFrame>, probe: CancelTarget) {
+    parent
+        .send(ParentFrame::CancelRun(probe))
+        .await
+        .expect("the serve loop reads");
+    for _ in 0..READ_POLLS {
+        match parent.capacity() == parent.max_capacity() {
+            true => return,
+            false => tokio::time::sleep(READ_POLL_INTERVAL).await,
+        }
+    }
+    panic!("the serve loop did not read the frames sent to it");
+}
+
 /// An isolated async body gets the operator cancel as its signal; what it
 /// returns is dropped, `run_cancelled` replaces the result, and no marker
 /// is written.
@@ -420,7 +460,7 @@ async fn an_isolated_cancel_before_the_body_keeps_the_body_from_starting() {
             .send(ParentFrame::CancelRun(CancelTarget::Isolated { task_id }))
             .await
             .expect("the serve loop reads");
-        tokio::time::sleep(FRAME_READ_PAUSE).await;
+        until_the_frames_are_handled(&parent, isolated_probe()).await;
         lock_holder.rollback().await.expect("end the row lock");
         let frame = child.next().await;
         parent
@@ -864,7 +904,7 @@ async fn a_shared_cancel_before_the_body_keeps_the_body_from_starting(kind: Shar
             .send(ParentFrame::CancelRun(CancelTarget::Shared(run)))
             .await
             .expect("the serve loop reads");
-        tokio::time::sleep(FRAME_READ_PAUSE).await;
+        until_the_frames_are_handled(&parent, shared_probe()).await;
         lock_holder.rollback().await.expect("end the row lock");
         let fired = child.next().await;
         let ended = child.next().await;
