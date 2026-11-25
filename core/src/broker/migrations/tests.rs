@@ -63,9 +63,17 @@ impl MigrationTestDatabase {
 
     /// Applies the first `count` migrations of the embedded chain, in order,
     /// with `own` as the family ([`apply_chain`] on that start of the chain):
-    /// the database that a build whose chain ends there leaves, with the
-    /// family row that the last of them wrote.
+    /// the database that a build whose chain ends there leaves. The migration
+    /// of them that admits `own` writes the family row; when none admits
+    /// `own`, the database has no family row.
     async fn install_first_migrations(&self, own: ClientFamily, count: usize) {
+        self.apply_embedded(own, 0, count).await;
+    }
+
+    /// Applies the migrations of the embedded chain at positions `first` up
+    /// to `end` (not included), in order, with `own` as the family
+    /// ([`apply_chain`] on the first `end` migrations, from `first`).
+    async fn apply_embedded(&self, own: ClientFamily, first: usize, end: usize) {
         let handle = core_handle(self.database.url());
         let open = handle
             .pools()
@@ -78,13 +86,13 @@ impl MigrationTestDatabase {
             .expect("check out a connection");
         apply_chain(
             &mut connection,
-            &embedded_migrations()[..count],
-            0,
+            &embedded_migrations()[..end],
+            first,
             own,
             StatementLog::Off,
         )
         .await
-        .unwrap_or_else(|error| panic!("apply the first {count} migrations: {error}"));
+        .unwrap_or_else(|error| panic!("apply migrations {first} to {end}: {error}"));
         drop(connection);
         drop(open);
         let _closed = handle.close().await;
@@ -274,6 +282,10 @@ fn baseline_is_one_migration_built_from_every_listed_file() {
     let baseline = &embedded_migrations()[0];
     assert_eq!(baseline.version, BASELINE_MIGRATION_VERSION);
     assert_eq!(baseline.description, "baseline");
+    assert_eq!(
+        baseline.admitted_families,
+        [ClientFamily::Python, ClientFamily::Rust].as_slice()
+    );
     let on_disk: String = BASELINE_SQL_FILES
         .iter()
         .map(|name| {
@@ -382,27 +394,47 @@ fn every_family() -> [ClientFamily; 3] {
     families
 }
 
-/// The rule of the family row is the same for every client family: in the
-/// install of a chain, the transaction of its last migration writes this
-/// client's family row, and no other transaction does. A chain that ends
-/// earlier (the chain of an earlier build) writes the row with its own last
+/// The position of the one migration of the embedded chain that admits
+/// `family`. Each client family is in the admitted families of exactly one
 /// migration.
+fn admitting_position(family: ClientFamily) -> usize {
+    let admitting: Vec<usize> = embedded_migrations()
+        .iter()
+        .enumerate()
+        .filter(|(_, migration)| migration.admitted_families.contains(&family))
+        .map(|(position, _)| position)
+        .collect();
+    match admitting.as_slice() {
+        [position] => *position,
+        other => panic!("{family:?} is admitted by the migrations at {other:?}, not by one"),
+    }
+}
+
+/// The rule of the family row is the same for every client family: the
+/// transaction of the first migration of the chain that admits the family
+/// writes its row, and no other transaction does. PYTHON and RUST are
+/// admitted by migration 1000, TYPESCRIPT by migration 1006. A start of the
+/// chain that ends before that migration (the chain of an earlier build)
+/// writes no row.
 #[test]
-fn only_the_last_migration_of_the_chain_writes_the_family_row() {
+fn only_the_migration_that_admits_a_family_writes_its_row() {
     let chain = embedded_migrations();
+    assert_eq!(admitting_position(ClientFamily::Python), 0);
+    assert_eq!(admitting_position(ClientFamily::Rust), 0);
+    assert_eq!(
+        admitting_position(ClientFamily::TypeScript),
+        typescript_client_family_position()
+    );
     for own in every_family() {
+        let admitting = admitting_position(own);
         for end in 1..=chain.len() {
-            let rows: Vec<FamilyRow> = (0..end)
-                .map(|position| family_row_at(&chain[..end], position, own))
+            let written: Vec<usize> = (0..end)
+                .filter(|position| {
+                    family_row_at(&chain[..end], *position, own) == FamilyRow::Written(own)
+                })
                 .collect();
-            let (last, before) = rows
-                .split_last()
-                .expect("a chain holds at least the baseline");
-            assert_eq!(*last, FamilyRow::Written(own), "{own:?}, chain of {end}");
-            assert!(
-                before.iter().all(|row| *row == FamilyRow::NotWritten),
-                "{own:?}, chain of {end}: {rows:?}"
-            );
+            let expected: Vec<usize> = [admitting].into_iter().filter(|at| *at < end).collect();
+            assert_eq!(written, expected, "{own:?}, a chain of {end}");
         }
     }
 }
@@ -417,6 +449,7 @@ fn test_chain() -> Vec<EmbeddedMigration> {
             version,
             description: "test",
             script: SqlScript::new("test_migration", "SELECT 1"),
+            admitted_families: &[],
             readers: ReaderPublication::NotPublished,
             exact_indexes: &[],
             retired_indexes: &[],
@@ -1457,6 +1490,58 @@ async fn an_install_finished_by_another_installer_during_the_wait_is_not_repeate
     database.drop().await;
 }
 
+/// An installer that waits for the lock reads the state again under it. When
+/// an installer of another family finished the chain during the wait, the
+/// waiter is refused with the stored family and writes nothing: the read
+/// under the lock is the barrier against another family during an install.
+#[tokio::test]
+async fn an_installer_of_another_family_that_waits_for_the_lock_is_refused_after_the_wait() {
+    let database = MigrationTestDatabase::create().await;
+    let lock = InstallLockPlan {
+        key: rand::thread_rng().gen_range(1..i64::MAX),
+        wait: Duration::from_secs(60),
+    };
+    let holder = database.hold_lock(lock.key).await;
+    let other_installer = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        database
+            .install(ClientFamily::Rust, test_lock())
+            .await
+            .expect("the Rust installer installs the chain");
+        let installed = installed_on(&database).await;
+        let released: bool = holder
+            .query_one("SELECT pg_advisory_unlock($1)", &[&lock.key])
+            .await
+            .expect("release the lock")
+            .get(0);
+        assert!(released);
+        installed
+    };
+
+    let (waited, installed) = tokio::join!(
+        database.install(ClientFamily::TypeScript, lock),
+        other_installer
+    );
+
+    assert!(
+        matches!(
+            waited,
+            Err(SchemaInstallError::OtherFamily {
+                stored: ClientFamily::Rust,
+                own: ClientFamily::TypeScript,
+            })
+        ),
+        "{waited:?}"
+    );
+    assert_eq!(installed_on(&database).await, installed);
+    assert_eq!(
+        bookkeeping_rows(&database).await,
+        chain_rows(embedded_migrations().len())
+    );
+    assert_eq!(family_row(&database).await.as_deref(), Some("RUST"));
+    database.drop().await;
+}
+
 /// The polls of [`wait_for_a_lock_try`], 20 ms apart: at most 10 s.
 const LOCK_TRY_POLLS: u32 = 500;
 
@@ -2062,6 +2147,7 @@ fn step_chain(script: SqlScript) -> Vec<EmbeddedMigration> {
             version: BASELINE_MIGRATION_VERSION,
             description: "baseline",
             script: SqlScript::new("test_baseline", "SELECT 1"),
+            admitted_families: &[],
             readers: ReaderPublication::NotPublished,
             exact_indexes: &[],
             retired_indexes: &[],
@@ -2071,6 +2157,7 @@ fn step_chain(script: SqlScript) -> Vec<EmbeddedMigration> {
             version: 1001,
             description: "index steps",
             script,
+            admitted_families: &[],
             readers: ReaderPublication::NotPublished,
             exact_indexes: &STEP_EXACT,
             retired_indexes: &STEP_RETIRED,
@@ -2458,6 +2545,7 @@ fn the_lifecycle_record_is_the_second_migration_of_the_chain() {
     assert_eq!(version, LIFECYCLE_RECORD_MIGRATION_VERSION);
     assert_eq!(migration.version, 1001);
     assert_eq!(migration.description, "lifecycle record");
+    assert!(migration.admitted_families.is_empty());
     assert_eq!(migration.readers, ReaderPublication::NotPublished);
     assert!(migration.exact_indexes.is_empty());
     assert!(migration.retired_indexes.is_empty());
@@ -2503,6 +2591,7 @@ fn the_start_command_fingerprint_is_the_third_migration_of_the_chain() {
     assert_eq!(version, START_COMMAND_FINGERPRINT_MIGRATION_VERSION);
     assert_eq!(migration.version, 1002);
     assert_eq!(migration.description, "workflow start command fingerprint");
+    assert!(migration.admitted_families.is_empty());
     assert_eq!(migration.readers, ReaderPublication::NotPublished);
     assert!(migration.exact_indexes.is_empty());
     assert!(migration.retired_indexes.is_empty());
@@ -2541,6 +2630,7 @@ fn the_attempt_cancelled_is_the_fourth_migration_of_the_chain() {
     assert_eq!(version, ATTEMPT_CANCELLED_MIGRATION_VERSION);
     assert_eq!(migration.version, 1003);
     assert_eq!(migration.description, "attempt cancelled");
+    assert!(migration.admitted_families.is_empty());
     assert_eq!(migration.readers, ReaderPublication::NotPublished);
     assert!(migration.exact_indexes.is_empty());
     assert!(migration.retired_indexes.is_empty());
@@ -2579,6 +2669,7 @@ fn the_worker_profile_name_is_the_fifth_migration_of_the_chain() {
     assert_eq!(version, WORKER_PROFILE_NAME_MIGRATION_VERSION);
     assert_eq!(migration.version, 1004);
     assert_eq!(migration.description, "worker profile name");
+    assert!(migration.admitted_families.is_empty());
     assert_eq!(migration.readers, ReaderPublication::NotPublished);
     assert!(migration.exact_indexes.is_empty());
     assert!(migration.retired_indexes.is_empty());
@@ -2632,6 +2723,7 @@ fn the_claim_generation_by_status_is_the_sixth_migration_of_the_chain() {
     assert_eq!(version, CLAIM_GENERATION_BY_STATUS_MIGRATION_VERSION);
     assert_eq!(migration.version, 1005);
     assert_eq!(migration.description, "claim generation by status");
+    assert!(migration.admitted_families.is_empty());
     assert_eq!(migration.readers, ReaderPublication::NotPublished);
     assert!(migration.exact_indexes.is_empty());
     assert!(migration.retired_indexes.is_empty());
@@ -2670,9 +2762,10 @@ fn typescript_client_family_position() -> usize {
 /// Migration 1006 is the newest link of the chain: it publishes no reader,
 /// declares no index step, and its checksum is SHA-384 of its file.
 /// Its text names no schema and holds no transaction control.
-/// The file list of the harnesses ends with this file. As the last link, its
-/// transaction writes the family row of each client family, after its text
-/// admits `TYPESCRIPT`.
+/// The file list of the harnesses ends with this file. It admits
+/// `TYPESCRIPT`: in the install of a TypeScript client its transaction
+/// writes the row `TYPESCRIPT`, after its text; in the install of a Python or
+/// a Rust client it writes no family row.
 #[test]
 fn the_typescript_client_family_is_the_newest_migration() {
     let chain = embedded_migrations();
@@ -2680,16 +2773,22 @@ fn the_typescript_client_family_is_the_newest_migration() {
         .last()
         .expect("the chain has migrations after the baseline");
     let migration = chain.last().expect("the chain is not empty");
+    let position = typescript_client_family_position();
     assert_eq!(chain.len(), LATER_MIGRATION_FILES.len() + 1);
-    assert_eq!(typescript_client_family_position(), chain.len() - 1);
+    assert_eq!(position, chain.len() - 1);
     assert_eq!(version, TYPESCRIPT_CLIENT_FAMILY_MIGRATION_VERSION);
     assert_eq!(migration.version, 1006);
     assert_eq!(migration.description, "typescript client family");
-    for own in every_family() {
-        assert_eq!(
-            family_row_at(chain, typescript_client_family_position(), own),
-            FamilyRow::Written(own)
-        );
+    assert_eq!(
+        migration.admitted_families,
+        [ClientFamily::TypeScript].as_slice()
+    );
+    assert_eq!(
+        family_row_at(chain, position, ClientFamily::TypeScript),
+        FamilyRow::Written(ClientFamily::TypeScript)
+    );
+    for own in [ClientFamily::Python, ClientFamily::Rust] {
+        assert_eq!(family_row_at(chain, position, own), FamilyRow::NotWritten);
     }
     assert_eq!(migration.readers, ReaderPublication::NotPublished);
     assert!(migration.exact_indexes.is_empty());
@@ -3946,23 +4045,23 @@ async fn assert_a_fresh_install_records_its_family(own: ClientFamily) {
     database.drop().await;
 }
 
-/// A fresh install of the Python client records `PYTHON` and reaches the
-/// newest migration.
+/// A fresh install of the Python client records `PYTHON` in the transaction
+/// of migration 1000 and reaches the newest migration.
 #[tokio::test]
 async fn a_fresh_python_install_records_its_family_and_reaches_the_newest_migration() {
     assert_a_fresh_install_records_its_family(ClientFamily::Python).await;
 }
 
-/// A fresh install of the Rust client records `RUST` and reaches the newest
-/// migration.
+/// A fresh install of the Rust client records `RUST` in the transaction of
+/// migration 1000 and reaches the newest migration.
 #[tokio::test]
 async fn a_fresh_rust_install_records_its_family_and_reaches_the_newest_migration() {
     assert_a_fresh_install_records_its_family(ClientFamily::Rust).await;
 }
 
 /// A fresh install of the TypeScript client records `TYPESCRIPT` and reaches
-/// the newest migration: the row is written in the transaction of the last
-/// migration, after migration 1006 admits the value.
+/// the newest migration: the row is written in the transaction of migration
+/// 1006, after its text admits the value.
 #[tokio::test]
 async fn a_fresh_typescript_install_records_its_family_and_reaches_the_newest_migration() {
     assert_a_fresh_install_records_its_family(ClientFamily::TypeScript).await;
@@ -4039,30 +4138,26 @@ async fn a_database_installed_by_a_family_keeps_refusing_another_family() {
     }
 }
 
-/// An install into an empty database that stops before the transaction of
-/// the last migration commits keeps the migrations before it and writes no
-/// family row. No handle writes into a database with no family row, so the
-/// next install, of any client family, applies the rest of the chain and
-/// records its own family. An event trigger fails the DDL of the text of the
-/// last migration.
-#[tokio::test]
-async fn an_install_that_stops_before_the_last_migration_records_no_family() {
-    let database = MigrationTestDatabase::create().await;
-    let chain = embedded_migrations();
-    let last = chain.last().expect("the chain is not empty");
-    let first_line = last
+/// Makes the DDL of the text of the migration at `position` of the embedded
+/// chain fail with SQLSTATE P0001, through an event trigger: the install
+/// stops at that migration, and its transaction rolls back. The text of
+/// each migration starts with a line of its own (`-- horsies schema
+/// migration <version>: ...`), and the install sends the whole text as one
+/// query, so `current_query()` starts with that line.
+async fn fail_the_migration_at(database: &MigrationTestDatabase, position: usize) {
+    let first_line = embedded_migrations()[position]
         .script
         .sql()
         .lines()
         .next()
-        .expect("the text of the last migration has a first line");
+        .expect("the text of a migration has a first line");
     database
         .execute(&format!(
-            "CREATE FUNCTION install_last_migration_probe() RETURNS event_trigger
+            "CREATE FUNCTION install_migration_probe() RETURNS event_trigger
              LANGUAGE plpgsql AS $$
              BEGIN
                  IF starts_with(current_query(), {first_line}) THEN
-                     RAISE EXCEPTION 'injected failure of the last migration';
+                     RAISE EXCEPTION 'injected failure of a migration';
                  END IF;
              END
              $$",
@@ -4071,40 +4166,183 @@ async fn an_install_that_stops_before_the_last_migration_records_no_family() {
         .await;
     database
         .execute(
-            "CREATE EVENT TRIGGER install_last_migration_probe ON ddl_command_start
-             EXECUTE FUNCTION install_last_migration_probe()",
+            "CREATE EVENT TRIGGER install_migration_probe ON ddl_command_start
+             EXECUTE FUNCTION install_migration_probe()",
         )
         .await;
+}
 
-    let stopped = database
-        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+/// Removes the event trigger of [`fail_the_migration_at`].
+async fn stop_failing_the_migration(database: &MigrationTestDatabase) {
+    database
+        .execute(
+            "DROP EVENT TRIGGER install_migration_probe; \
+             DROP FUNCTION install_migration_probe()",
+        )
         .await;
+}
 
+/// Asserts that `stopped` is the refusal of the text of the migration at
+/// `position`, by [`fail_the_migration_at`].
+fn assert_stopped_at(stopped: Result<(), SchemaInstallError>, position: usize) {
     match stopped {
         Err(SchemaInstallError::Statement(StatementFailure::StatementRefused {
             statement,
             cause,
         })) => {
-            assert_eq!(statement, last.script.name());
+            assert_eq!(statement, embedded_migrations()[position].script.name());
             assert_eq!(cause.server_error().code(), &SqlState::RAISE_EXCEPTION);
         }
-        other => panic!("expected the refused last migration, got {other:?}"),
+        other => panic!("expected the refused migration at {position}, got {other:?}"),
     }
-    assert_eq!(
-        bookkeeping_rows(&database).await,
-        chain_rows(chain.len() - 1)
-    );
+}
+
+/// A Python or a Rust install into an empty database that stops after
+/// migration 1000 commits keeps the family row that migration 1000 wrote: the
+/// database belongs to the family that started the install. The install of
+/// each other family is refused before any write, and the next install of
+/// the same family applies the rest of the chain.
+#[tokio::test]
+async fn a_python_or_rust_install_that_stops_after_migration_1000_keeps_its_family() {
+    for stored in [ClientFamily::Python, ClientFamily::Rust] {
+        let database = MigrationTestDatabase::create().await;
+        fail_the_migration_at(&database, 1).await;
+
+        let stopped = database.install(stored, InstallLockPlan::fleet()).await;
+
+        assert_stopped_at(stopped, 1);
+        assert_eq!(bookkeeping_rows(&database).await, chain_rows(1));
+        assert_eq!(
+            family_row(&database).await.as_deref(),
+            Some(stored.as_str())
+        );
+
+        stop_failing_the_migration(&database).await;
+        assert_each_other_family_is_refused(&database, stored).await;
+        assert_eq!(bookkeeping_rows(&database).await, chain_rows(1));
+        database
+            .install(stored, InstallLockPlan::fleet())
+            .await
+            .unwrap_or_else(|error| panic!("{stored:?} completes its install: {error}"));
+        assert_eq!(
+            bookkeeping_rows(&database).await,
+            chain_rows(embedded_migrations().len())
+        );
+        assert_eq!(
+            family_row(&database).await.as_deref(),
+            Some(stored.as_str())
+        );
+        database.drop().await;
+    }
+}
+
+/// A TypeScript install into an empty database that stops before migration
+/// 1006 commits keeps the migrations before it and writes no family row. No
+/// handle writes into a database with no family row, so the next install, of
+/// any client family, applies the rest of the chain and records its own
+/// family: a Rust install applies migration 1006, then writes its row after
+/// the chain (`CompleteInstall`).
+#[tokio::test]
+async fn a_typescript_install_that_stops_before_migration_1006_records_no_family() {
+    let database = MigrationTestDatabase::create().await;
+    let admitting = admitting_position(ClientFamily::TypeScript);
+    fail_the_migration_at(&database, admitting).await;
+
+    let stopped = database
+        .install(ClientFamily::TypeScript, InstallLockPlan::fleet())
+        .await;
+
+    assert_stopped_at(stopped, admitting);
+    assert_eq!(bookkeeping_rows(&database).await, chain_rows(admitting));
     assert_eq!(family_row(&database).await, None);
 
+    stop_failing_the_migration(&database).await;
     database
-        .execute("DROP EVENT TRIGGER install_last_migration_probe")
-        .await;
-    database
-        .install(ClientFamily::TypeScript, InstallLockPlan::fleet())
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
-        .expect("the next install applies the last migration");
+        .expect("the next install applies the rest of the chain");
 
-    assert_eq!(bookkeeping_rows(&database).await, chain_rows(chain.len()));
-    assert_eq!(family_row(&database).await.as_deref(), Some("TYPESCRIPT"));
+    assert_eq!(
+        bookkeeping_rows(&database).await,
+        chain_rows(embedded_migrations().len())
+    );
+    assert_eq!(family_row(&database).await.as_deref(), Some("RUST"));
+    database.drop().await;
+}
+
+/// The family row commits in the transaction of the migration that admits
+/// its family, or neither commits: in the install of a TypeScript client, a
+/// family row that the database refuses rolls migration 1006 back with it
+/// (no bookkeeping row, the CHECK of migration 1005, no family row). A row
+/// trigger on `horsies_client_family` refuses the insert.
+#[tokio::test]
+async fn a_refused_family_row_rolls_back_the_migration_that_admits_its_family() {
+    let database = MigrationTestDatabase::create().await;
+    let admitting = admitting_position(ClientFamily::TypeScript);
+    database
+        .install_first_migrations(ClientFamily::TypeScript, admitting)
+        .await;
+    assert_eq!(family_row(&database).await, None);
+    let checks_before = family_checks(&database).await;
+    database
+        .execute(
+            "CREATE FUNCTION family_row_probe() RETURNS trigger
+             LANGUAGE plpgsql AS $$
+             BEGIN
+                 RAISE EXCEPTION 'injected refusal of the family row';
+             END
+             $$;
+             CREATE TRIGGER family_row_probe BEFORE INSERT ON horsies_client_family
+             FOR EACH ROW EXECUTE FUNCTION family_row_probe();",
+        )
+        .await;
+
+    let refused = database
+        .install(ClientFamily::TypeScript, InstallLockPlan::fleet())
+        .await;
+
+    match refused {
+        Err(SchemaInstallError::Statement(StatementFailure::StatementRefused {
+            statement,
+            cause,
+        })) => {
+            assert_eq!(statement, RECORD_CLIENT_FAMILY.name());
+            assert_eq!(cause.server_error().code(), &SqlState::RAISE_EXCEPTION);
+        }
+        other => panic!("expected the refused family row, got {other:?}"),
+    }
+    assert_eq!(bookkeeping_rows(&database).await, chain_rows(admitting));
+    assert_eq!(family_checks(&database).await, checks_before);
+    assert_eq!(family_row(&database).await, None);
+    database.drop().await;
+}
+
+/// The admitted families of the chain are the CHECK of the family row:
+/// after each migration, the CHECK `horsies_client_family_family_known`
+/// names exactly the families that the migrations up to it admit.
+#[tokio::test]
+async fn the_admitted_families_of_the_chain_are_the_family_check() {
+    let database = MigrationTestDatabase::create().await;
+    let chain = embedded_migrations();
+    for end in 1..=chain.len() {
+        database
+            .apply_embedded(ClientFamily::Rust, end - 1, end)
+            .await;
+
+        let checks = family_checks(&database).await;
+        let [(_, definition)] = checks.as_slice() else {
+            panic!("one family CHECK after {end} migrations: {checks:?}");
+        };
+        for family in every_family() {
+            let admitted = chain[..end]
+                .iter()
+                .any(|migration| migration.admitted_families.contains(&family));
+            assert_eq!(
+                definition.contains(&format!("'{}'", family.as_str())),
+                admitted,
+                "{family:?} after {end} migrations: {definition}"
+            );
+        }
+    }
     database.drop().await;
 }
