@@ -2,9 +2,12 @@
 //!
 //! Some fields and types of the model have Python names: `python_module`,
 //! `python_class`, `python_name`, `python_type`, `PythonValue` and
-//! `PythonItem`. This module is the only one that reads them. It gives the
-//! rest of the renderer neutral names, so a rename in the core changes this
-//! module only. The renderer reads every other part of the model directly.
+//! `PythonItem`. This module is the only renderer code that reads them. It
+//! gives the rest of the renderer neutral names, so a rename in the core
+//! changes this module's functions only. The renderer reads every other
+//! part of the model directly. A test module builds literal model values
+//! with the core's own field names, because a renderer test renders the
+//! core's types.
 //!
 //! A field name does not change a value: `python_module` holds a short
 //! group name (`broker`, `task_send_errors`), which is also the stem of the
