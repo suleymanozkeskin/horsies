@@ -99,8 +99,8 @@ mod timeout_order_tests;
 mod worker_children_tests;
 
 #[cfg(test)]
-pub use board::{ChildBaseline, ReadyChild, StartEnd};
-pub use board::{ChildLayout, ChildRss, DownState, PoolBoard, PoolFailure, PoolHealth, SlotPhase};
+pub use board::{ChildBaseline, PoolHealth, ReadyChild, StartEnd};
+pub use board::{ChildLayout, ChildRss, DownState, PoolBoard, PoolFailure, SlotPhase};
 #[cfg(test)]
 pub use budgets::{isolated_capacity, shared_capacity, BudgetCapacity, SlotService};
 pub use budgets::{FreeCapacity, PoolService, SharedSlotService};
