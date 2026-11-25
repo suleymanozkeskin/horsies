@@ -1,5 +1,5 @@
 // Minimal toast surface. Actions need a notification channel that can carry a
-// single affordance (Retry on a 503), and nothing more — so this is a provider,
+// single affordance (Retry on a 503; a 500 has none), and nothing more — so this is a provider,
 // a queue, and a fixed-position list rather than a dependency.
 
 import {

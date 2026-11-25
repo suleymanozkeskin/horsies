@@ -182,6 +182,27 @@ describe('distinct failure handling', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
   });
 
+  it('500 reports a permanent failure without a retry and releases the entity', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse(500, { detail: 'task action failed: row refused' })
+      )
+    );
+    const { result } = renderAction();
+
+    await submit(result);
+
+    expect(
+      await screen.findByText(
+        'Cancel failed: task action failed: row refused. A retry gives the same result.'
+      )
+    ).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    expect(screen.queryByText(/broker may be unreachable/)).toBeNull();
+    await waitFor(() => expect(result.current.state.phase).toBe('idle'));
+  });
+
   it('403 revokes the capability instead of retrying', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(403, { detail: 'no' })));
     const { result } = renderAction();

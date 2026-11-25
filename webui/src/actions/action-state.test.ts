@@ -29,6 +29,7 @@ const conflict: ActionState = {
 };
 const gone: ActionState = { phase: 'gone', action: ACTION };
 const failed: ActionState = { phase: 'failed', action: ACTION, detail: 'boom' };
+const refused: ActionState = { phase: 'refused', action: ACTION, detail: 'boom' };
 
 describe('idle', () => {
   it('enters confirming on click', () => {
@@ -44,6 +45,7 @@ describe('idle', () => {
       { type: 'conflict', currentStatus: 'RUNNING' },
       { type: 'not-found' },
       { type: 'unavailable', detail: null },
+      { type: 'refused', detail: null },
       { type: 'network-error' },
       { type: 'settled' },
     ];
@@ -158,6 +160,20 @@ describe('terminal display states', () => {
     expect(actionReducer(failed, { type: 'acknowledged' })).toEqual(IDLE);
   });
 
+  it('enters refused on 500, keeping the detail for the toast', () => {
+    expect(
+      actionReducer(submitting, { type: 'refused', detail: 'boom' })
+    ).toEqual(refused);
+  });
+
+  it('does not resubmit from refused: a retry gives the same result', () => {
+    expect(actionReducer(refused, { type: 'retry' })).toBe(refused);
+  });
+
+  it('leaves refused when acknowledged', () => {
+    expect(actionReducer(refused, { type: 'acknowledged' })).toEqual(IDLE);
+  });
+
   it('does not resubmit from a phase that never failed', () => {
     expect(actionReducer(settling, { type: 'retry' })).toBe(settling);
   });
@@ -178,6 +194,7 @@ describe('entity locking', () => {
       conflict,
       gone,
       failed,
+      refused,
     ]) {
       expect(isBusy(state)).toBe(true);
       expect(pendingAction(state)).toBe(ACTION);
