@@ -5,8 +5,10 @@
 import { Worker } from "node:worker_threads";
 
 import { envelopeValue } from "../../../horsies/src/native/call/envelope.ts";
+import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { ADDON_PATH_VARIABLE } from "../../../horsies/src/native/load.ts";
-import { environmentCount, setPanicRule } from "../../../horsies/src/native/process-core/process-core.ts";
+import { coreState, environmentCount, setPanicRule } from "../../../horsies/src/native/process-core/process-core.ts";
+import { manifestJson } from "./manifest.ts";
 
 /** Run the case that the first argument names. */
 async function runCase(name: string | undefined): Promise<string> {
@@ -21,6 +23,8 @@ async function runCase(name: string | undefined): Promise<string> {
       return defect();
     case "second-environment":
       return secondEnvironment();
+    case "never-connected-close":
+      return neverConnectedClose();
     default:
       return `unknown case ${String(name)}`;
   }
@@ -47,6 +51,14 @@ function defect(): string {
   } catch (cause) {
     return cause instanceof Error ? cause.name : String(cause);
   }
+}
+
+/** A handle that never connected closes at once, and the core does not start. */
+async function neverConnectedClose(): Promise<string> {
+  const handle = buildCoreHandle(manifestJson("postgresql://horsies@127.0.0.1:1/none", false), "PRODUCER");
+  const closed = envelopeValue(await handle.close());
+
+  return `${String(closed)} ${coreState()}`;
 }
 
 /** A worker thread opens the addon file itself; its registration must throw. */

@@ -91,6 +91,10 @@ describe("the process-wide rules, each in a child process", () => {
     assert.equal(child.stdout, "");
   });
 
+  test("a handle that never connected closes at once and starts no core", () => {
+    assert.equal(runChild("never-connected-close").stdout, "undefined not_started");
+  });
+
   test("a second environment that opens the addon itself is refused at registration", () => {
     assert.match(runChild("second-environment").stdout, /^1 2 .*ADDON_OUTSIDE_MAIN_THREAD/u);
   });

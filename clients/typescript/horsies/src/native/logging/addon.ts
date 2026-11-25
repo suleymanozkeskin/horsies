@@ -9,7 +9,7 @@ export interface LogRecordOut {
   readonly logger: LoggerName;
   readonly level: LogLevel;
   readonly message: string;
-  readonly fields: readonly LogFieldOut[];
+  readonly fields: LogFieldOut[];
   /** When the event was written, in epoch microseconds. */
   readonly epochMicros: bigint;
   readonly thread: string;
@@ -37,7 +37,7 @@ export type LogSourceOut =
 /** The thresholds that the package sets. */
 export interface LogLevelsArg {
   readonly defaultLevel: LogThreshold;
-  readonly loggers: readonly LoggerLevelArg[];
+  readonly loggers: LoggerLevelArg[];
 }
 
 /** The threshold of one logger. */

@@ -12,7 +12,7 @@ export type NativeOutcome<T> =
  */
 export interface RawCatalogError {
   readonly class: string;
-  readonly slots: readonly RawSlot[];
+  readonly slots: RawSlot[];
 }
 
 /** One instance slot of a catalog value. */
@@ -28,7 +28,7 @@ export type RawSlotValue =
   | { readonly kind: "integer"; readonly value: bigint }
   | { readonly kind: "uuid"; readonly text: string }
   | { readonly kind: "codeMember"; readonly catalog: string; readonly value: string }
-  | { readonly kind: "sendPayload"; readonly fields: readonly RawRecordField[] }
+  | { readonly kind: "sendPayload"; readonly fields: RawRecordField[] }
   | { readonly kind: "exception"; readonly exception: ExceptionRecord };
 
 /** One field of a generated record class, with its name. */
