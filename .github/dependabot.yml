@@ -67,7 +67,7 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     cooldown:
-      default-days: 7
+      default-days: 10
       semver-major-days: 14
     ignore:
       # The zod major is pinned: the adapter needs the codecs of zod 4.
