@@ -162,6 +162,115 @@ fn an_empty_context_list_is_stored_as_null() {
     );
 }
 
+/// The `args_from` text of a node is in key order, whatever order the map
+/// took its members in: the start command fingerprint takes the text byte
+/// for byte, so two equal starts must store one text.
+#[test]
+fn the_args_from_text_is_in_key_order() {
+    let keys: Vec<String> = (0..16).map(|key| format!("key_{key:02}")).collect();
+    let mut forward = task_node(1, vec![0]);
+    for key in &keys {
+        let _absent = forward.args_from.insert(key.clone(), 0);
+    }
+    let mut reverse = task_node(1, vec![0]);
+    for key in keys.iter().rev() {
+        let _absent = reverse.args_from.insert(key.clone(), 0);
+    }
+    let expected = format!(
+        "{{{}}}",
+        keys.iter()
+            .map(|key| format!(r#""{key}":0"#))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+
+    for node in [forward, reverse] {
+        let workflow_id = Uuid::new_v4();
+        let spec = spec_of("args_from_order", vec![task_node(0, vec![]), node]);
+        let arguments =
+            arguments_of(&spec, workflow_id, &TestChildSpecs::empty()).expect("arguments");
+        assert_eq!(
+            arguments.node_args_from[1].as_deref(),
+            Some(expected.as_str())
+        );
+    }
+}
+
+/// Two starts of one spec with `args_from` maps that took their members in
+/// other orders, and with other workflow ids, have one start command
+/// fingerprint: the id is not part of the command.
+#[test]
+fn equal_starts_have_one_fingerprint_whatever_the_args_from_order_and_the_id() {
+    let fingerprint_of = |members: &[(&str, usize)]| {
+        let mut dependent = task_node(2, vec![0, 1]);
+        for (key, source) in members {
+            let _absent = dependent.args_from.insert((*key).to_owned(), *source);
+        }
+        let spec = spec_of(
+            "fingerprint_order",
+            vec![task_node(0, vec![]), task_node(1, vec![]), dependent],
+        );
+        arguments_of(&spec, Uuid::new_v4(), &TestChildSpecs::empty())
+            .expect("arguments")
+            .top_start_command()
+            .fingerprint()
+    };
+
+    assert_eq!(
+        fingerprint_of(&[("left", 0), ("right", 1), ("middle", 0)]),
+        fingerprint_of(&[("middle", 0), ("right", 1), ("left", 0)]),
+    );
+    assert_ne!(
+        fingerprint_of(&[("left", 0), ("right", 1)]),
+        fingerprint_of(&[("left", 1), ("right", 0)]),
+    );
+}
+
+/// The start command holds the top row and its own nodes, in node index
+/// order, with their stored values. The pre-built child and its node are not
+/// in it.
+#[test]
+fn the_start_command_holds_the_top_row_and_its_nodes_only() {
+    let workflow_id = Uuid::new_v4();
+    let mut dependent = task_node(1, vec![0]);
+    dependent.args_from = HashMap::from([("value".to_owned(), 0)]);
+    dependent.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
+    let spec = spec_of(
+        "command_rows",
+        vec![dependent, task_node(0, vec![]), subworkflow_root(2)],
+    );
+
+    let arguments = arguments_of(&spec, workflow_id, &children_with_child()).expect("arguments");
+    let command = arguments.top_start_command();
+
+    assert_eq!(arguments.workflow_ids.len(), 2, "the top row and its child");
+    assert_eq!(command.name, "command_rows");
+    assert_eq!(
+        command.definition_key,
+        Some("tests.start_statement.command_rows.v1")
+    );
+    assert_eq!(command.on_error, "fail");
+    let indexes: Vec<i32> = command.nodes.iter().map(|node| node.task_index).collect();
+    assert_eq!(indexes, vec![0, 1, 2]);
+    let dependent = &command.nodes[1];
+    assert_eq!(dependent.task_name, "task_1");
+    assert_eq!(dependent.dependencies, "[0]");
+    assert_eq!(dependent.args_from, Some(r#"{"value":0}"#));
+    assert_eq!(dependent.workflow_ctx_from, Some(r#"["node_0"]"#));
+    assert_eq!(dependent.queue_name, "default");
+    assert_eq!(dependent.priority, 100);
+    assert!(dependent.retention_class_key.is_some());
+    let root = &command.nodes[2];
+    assert!(root.is_subworkflow);
+    assert_eq!(root.sub_definition_key, Some(CHILD_KEY));
+    assert_eq!(root.sub_workflow_params, Some("NOT_GIVEN"));
+    assert_eq!(root.retention_class_key, None);
+    assert!(command
+        .nodes
+        .iter()
+        .all(|node| node.task_name != "child_task"));
+}
+
 #[test]
 fn a_subworkflow_root_gets_a_prebuilt_child_after_its_parent() {
     let workflow_id = Uuid::new_v4();

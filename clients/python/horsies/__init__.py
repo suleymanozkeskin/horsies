@@ -67,6 +67,7 @@ from .core.workflows.engine import (
 from .core.workflows.start_types import (
     WorkflowStartAsyncContext,
     WorkflowStartBrokerNotConfigured,
+    WorkflowStartCommandConflict,
     WorkflowStartEnqueueFailed,
     WorkflowStartError,
     WorkflowStartErrorCode,
@@ -114,6 +115,16 @@ from .core.models.tracing import (
 )
 from .core.models.log_format import JsonLogs, TextLogs
 from .core.logging import JsonLogsFormatter, TaskContextFilter
+from .core.task_runtime import (
+    AttemptNumber,
+    AttemptNumberRefused,
+    CancelCause,
+    CancelNotRequested,
+    CancelRequested,
+    FencingToken,
+    RunCancelState,
+    TaskRuntime,
+)
 from .core.models.worker_profile import (
     ClaimLimits,
     ExecutorThreads,
@@ -204,8 +215,11 @@ from .core.models.health import (
     ClassCapacity,
     DatabasePing,
     DownSlot,
+    ProfileNamed,
+    ProfileNotRecorded,
     SlotHealth,
     SlotsDown,
+    SnapshotProfile,
     WorkerPong,
     WorkerStateSnapshot,
 )
@@ -275,6 +289,14 @@ __all__ = [
     'Execution',
     'TaskInfo',
     'TaskAttemptInfo',
+    'TaskRuntime',
+    'FencingToken',
+    'AttemptNumber',
+    'AttemptNumberRefused',
+    'CancelCause',
+    'CancelNotRequested',
+    'CancelRequested',
+    'RunCancelState',
     'QueueMode',
     'CustomQueueConfig',
     'TaskStatus',
@@ -323,6 +345,7 @@ __all__ = [
     'resume_workflow_sync',
     'WorkflowStartAsyncContext',
     'WorkflowStartBrokerNotConfigured',
+    'WorkflowStartCommandConflict',
     'WorkflowStartEnqueueFailed',
     'WorkflowStartError',
     'WorkflowStartErrorCode',
@@ -461,6 +484,9 @@ __all__ = [
     'ClassCapacity',
     'ClassBudgets',
     'ClassBudget',
+    'SnapshotProfile',
+    'ProfileNamed',
+    'ProfileNotRecorded',
     'WORKER_STATE_LIVE_WINDOW_S',
     'ClassCoverage',
     'StreamCoverage',

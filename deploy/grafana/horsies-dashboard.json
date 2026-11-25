@@ -974,13 +974,13 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (queue, task) (rate(horsies_task_attempts_total{outcome!=\"COMPLETED\", queue=~\"$queue\", task=~\"$task\"}[$__rate_interval])) / sum by (queue, task) (rate(horsies_task_attempts_total{queue=~\"$queue\", task=~\"$task\"}[$__rate_interval]))",
+          "expr": "sum by (queue, task) (rate(horsies_task_attempts_total{outcome=~\"FAILED|WORKER_FAILURE\", queue=~\"$queue\", task=~\"$task\"}[$__rate_interval])) / sum by (queue, task) (rate(horsies_task_attempts_total{queue=~\"$queue\", task=~\"$task\"}[$__rate_interval]))",
           "legendFormat": "{{queue}} {{task}}",
           "refId": "A",
           "range": true
         }
       ],
-      "title": "Not completed ratio by task",
+      "title": "Failed ratio by task",
       "type": "timeseries"
     },
     {
@@ -988,7 +988,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "The 10 error codes with the most attempts that did not complete, per second.",
+      "description": "The 10 error codes with the most attempts that ended FAILED or WORKER_FAILURE, per second.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1032,13 +1032,13 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "topk(10, sum by (error_code) (rate(horsies_task_attempts_total{outcome!=\"COMPLETED\", queue=~\"$queue\", task=~\"$task\"}[$__rate_interval])))",
+          "expr": "topk(10, sum by (error_code) (rate(horsies_task_attempts_total{outcome=~\"FAILED|WORKER_FAILURE\", queue=~\"$queue\", task=~\"$task\"}[$__rate_interval])))",
           "legendFormat": "{{error_code}}",
           "refId": "A",
           "range": true
         }
       ],
-      "title": "Not completed attempts by error code",
+      "title": "Failed attempts by error code",
       "type": "timeseries"
     },
     {

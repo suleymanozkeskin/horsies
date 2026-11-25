@@ -202,7 +202,7 @@ async fn cancel_moves_a_claimed_task_that_did_not_start_to_history() {
         .expect("the root has its task");
     sql::query(
         "UPDATE horsies_tasks
-         SET status = 'CLAIMED', claimed_at = NOW(), claimed_by_worker_id = 'test-worker',
+         SET status = 'CLAIMED', attempt_claims = 1, first_claimed_at = NOW(), claimed_at = NOW(), claimed_by_worker_id = 'test-worker',
              claim_expires_at = NOW() + INTERVAL '5 minutes', updated_at = NOW()
          WHERE id = $1",
     )
@@ -851,7 +851,7 @@ async fn a_resumed_node_receives_its_dependency_result() {
     .await;
     sql::query(
         "UPDATE horsies_tasks
-         SET status = 'CLAIMED', claimed_at = NOW(), claimed_by_worker_id = 'w-resume-test',
+         SET status = 'CLAIMED', attempt_claims = 1, first_claimed_at = NOW(), claimed_at = NOW(), claimed_by_worker_id = 'w-resume-test',
              claim_expires_at = NOW() + INTERVAL '60 seconds', updated_at = NOW()
          WHERE id = (SELECT task_id FROM horsies_workflow_tasks
                      WHERE workflow_id = $1 AND task_index = 1)",

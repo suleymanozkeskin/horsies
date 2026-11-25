@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, TypeGuard
+from uuid import UUID
 
 import pytest
 import pytest_asyncio
@@ -78,7 +79,9 @@ class TestWorkflowCtx:
                     SET status = 'CLAIMED',
                         claimed_at = NOW(),
                         claimed_by_worker_id = :worker_id,
-                        claim_expires_at = NOW() + INTERVAL '1 hour'
+                        claim_expires_at = NOW() + INTERVAL '1 hour',
+                        attempt_claims = 1,
+                        first_claimed_at = NOW()
                     WHERE id = :task_id
                     RETURNING claimed_at
                 """),
@@ -511,7 +514,7 @@ class TestWorkflowCtx:
             _run_task_entry(
                 task_name=task_name,
                 input_json=input_json,
-                task_id=task_id,
+                task_id=UUID(task_id),
                 master_worker_id='test-worker',
                 work=RunTheTask(),
                 claimed_at=claimed_at,
@@ -584,7 +587,7 @@ class TestWorkflowCtx:
             _run_task_entry(
                 task_name=task_name,
                 input_json=input_json,
-                task_id=task_id,
+                task_id=UUID(task_id),
                 master_worker_id='test-worker',
                 work=RunTheTask(),
                 claimed_at=claimed_at,
@@ -660,7 +663,7 @@ class TestWorkflowCtx:
             _run_task_entry(
                 task_name=task_name,
                 input_json=input_json,
-                task_id=task_id,
+                task_id=UUID(task_id),
                 master_worker_id='test-worker',
                 work=RunTheTask(),
                 claimed_at=claimed_at,
@@ -951,7 +954,7 @@ class TestWorkflowCtx:
             _run_task_entry(
                 task_name=task_name,
                 input_json=modified_kwargs_json,
-                task_id=task_id,
+                task_id=UUID(task_id),
                 master_worker_id='test-worker',
                 work=RunTheTask(),
                 claimed_at=claimed_at,

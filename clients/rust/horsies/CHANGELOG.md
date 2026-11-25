@@ -4,8 +4,9 @@ From 0.8.0, the `horsies` crate, `horsies-macros`, `horsies-core`,
 `horsies-core-derive` and the Python package carry one version and one
 changelog: the
 [`CHANGELOG.md`](https://github.com/suleymanozkeskin/horsies/blob/main/CHANGELOG.md)
-at the root of the repository. In its section `[0.8.0]`, the part "Rust
-client (crate `horsies`)" lists the changes of the Rust API.
+at the root of the repository. Its section of a release, from `[0.8.0]`
+on, lists the changes of that release, also the changes of the Rust API.
+In `[0.8.0]`, they are in the part "Rust client (crate `horsies`)".
 
 The entries below are the last releases of horsies-rust, `0.1.0-alpha.26`
 to `0.1.0-alpha.36`, before the crate moved onto `horsies-core`. They

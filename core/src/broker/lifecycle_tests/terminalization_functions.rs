@@ -44,6 +44,7 @@ fn fused_completion(task_id: Uuid) -> TerminalizationCommand {
         task_id,
         fence: owned_claim(),
         result_json: r#"{"ok": 2}"#.to_owned(),
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     }
 }
 
@@ -52,6 +53,7 @@ fn workflow_success(task_id: Uuid) -> FinishWorkflowSuccess {
         task_id,
         fence: owned_claim(),
         result_json: r#"{"ok": 1}"#.to_owned(),
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     }
 }
 
@@ -70,6 +72,7 @@ fn running_failure(task_id: Uuid, failed_reason: Option<&str>) -> FinishFailedAt
             error_message: Some("attempt raised".to_owned()),
             failed_reason: failed_reason.map(str::to_owned),
         },
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     }
 }
 

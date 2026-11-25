@@ -1,13 +1,15 @@
 """The frames of a worker child and of the preload process, on the core frame
-codec at version 3 (``horsies._core``).
+codec at version 4 (``horsies._core``).
 
 The parent frames come from the core as its classes: ``core.InitFrame``,
-``core.RunFrame``, ``core.SharedRunFrame``, ``core.EventsFrame`` and
-``core.StopFrame`` (``core.FrameReader``, ``core.decode_parent_frame``). The
-init frame keeps the database URL and the connection settings in the core;
-the child builds its core handle from it (``CoreChildHandle.from_init``). A
-task child takes no ``core.EventsFrame``: only a handler child does. The
-trace carrier of a run frame reads with ``run_trace_of``.
+``core.RunFrame``, ``core.SharedRunFrame``, ``core.CancelRunFrame``,
+``core.EventsFrame`` and ``core.StopFrame`` (``core.FrameReader``,
+``core.decode_parent_frame``). The init frame keeps the database URL and the
+connection settings in the core; the child builds its core handle from it
+(``CoreChildHandle.from_init``). A task child takes no ``core.EventsFrame``:
+only a handler child does. A ``core.CancelRunFrame`` names a run that an
+operator cancelled (``run_cancel``); a handler child ignores it. The trace
+carrier of a run frame reads with ``run_trace_of``.
 
 The frames that a child sends are the frozen values of this module. Child
 code builds and matches them; ``encode_child_frame`` and
@@ -40,6 +42,7 @@ from horsies.core.models.boot_failure import (
     describe_boot_cause,
 )
 from horsies.core.worker.run_return import (
+    CancelledBody,
     CoreStoppedAfterBody,
     CoreStoppedBeforeStart,
     ResultEnvelope,
@@ -89,12 +92,17 @@ MAX_HANDLER_NAME_CHARS: Final = PROTOCOL_NUMBERS.max_handler_name_chars
 character or more; the core refuses another name, never cuts it."""
 
 type ParentFrame = (
-    core.InitFrame | core.RunFrame | core.SharedRunFrame | core.EventsFrame | core.StopFrame
+    core.InitFrame
+    | core.RunFrame
+    | core.SharedRunFrame
+    | core.CancelRunFrame
+    | core.EventsFrame
+    | core.StopFrame
 )
 """A frame from the worker parent."""
 
-type WorkFrame = core.RunFrame | core.SharedRunFrame | core.StopFrame
-"""The parent frames after the init frame."""
+type WorkFrame = core.RunFrame | core.SharedRunFrame | core.CancelRunFrame | core.StopFrame
+"""The parent frames of a task child after the init frame."""
 
 type ThreadSeatWork = core.ThreadTaskWork | core.StoredOptionsRefused
 """The work of a run on a seat of a shared thread child."""
@@ -290,7 +298,16 @@ class SeatTimedOut:
     dropped: the outcome is the timeout."""
 
 
-type SeatEnd = RunEnd | SeatTimedOut
+@dataclass(frozen=True, slots=True)
+class SeatCancelled:
+    """An operator cancel reached the run before it ended, and the run has
+    ended. What the body returned is dropped: the cancel statement recorded
+    the attempt as ``CANCELLED``. The frame reports the start."""
+
+    body: CancelledBody
+
+
+type SeatEnd = RunEnd | SeatTimedOut | SeatCancelled
 """How a run of a shared child ended."""
 
 
@@ -324,6 +341,31 @@ class SecondCancelFrame:
 
     dispatch: int
     task_id: uuid.UUID
+
+
+@dataclass(frozen=True, slots=True)
+class CancelFiredFrame:
+    """A shared child applied the operator cancel of run ``dispatch``: it
+    gave the cancel to the task, or it does not start the body. Sent once
+    per run, before the ``SharedResultFrame`` with ``SeatCancelled``."""
+
+    dispatch: int
+    task_id: uuid.UUID
+
+
+@dataclass(frozen=True, slots=True)
+class RunCancelledFrame:
+    """An isolated run that an operator cancelled has ended, in place of
+    ``ResultFrame``. ``task_loop`` holds the work that the body left on the
+    task loop, if any: the child does not wait for it, and the parent
+    replaces the child. The start write returned, so the run started at
+    ``started_at``."""
+
+    task_id: uuid.UUID
+    body: CancelledBody
+    started_at: datetime
+    rss: RssReading
+    task_loop: TaskLoopReport
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,6 +530,8 @@ type ChildFrame = (
     | SharedResultFrame
     | DeadlineFiredFrame
     | SecondCancelFrame
+    | CancelFiredFrame
+    | RunCancelledFrame
     | RunStuckFrame
     | LeftoverCancelFrame
     | LeftoverStuckFrame
@@ -589,6 +633,28 @@ def _task_loop(task_loop: NoLeftWork) -> Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_
             assert_never(unreachable)
 
 
+def _cancelled_loop(
+    task_loop: TaskLoopReport,
+) -> core.LoopHoldsTasks | Literal['NO_TASK_LOOP', 'LOOP_HOLDS_NO_TASK']:
+    match task_loop:
+        case NoTaskLoop() | LoopHoldsNoTask():
+            return _task_loop(task_loop)
+        case LoopHoldsTasks():
+            return _left(task_loop)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _cancelled_body(body: CancelledBody) -> Literal['RAN', 'NOT_STARTED']:
+    match body:
+        case CancelledBody.RAN:
+            return 'RAN'
+        case CancelledBody.NOT_STARTED:
+            return 'NOT_STARTED'
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _returned(returned: ResultEnvelope) -> core.TaskResult:
     return core.TaskResult(envelope=returned.text)
 
@@ -616,7 +682,7 @@ def child_after_frame(end: SeatEnd) -> Literal['SERVES_ON', 'ENDS_ITSELF']:
     match end:
         case CoreStoppedBeforeStart() | CoreStoppedAfterBody():
             return 'ENDS_ITSELF'
-        case ResultEnvelope() | StoppedBeforeRunning() | SeatTimedOut():
+        case ResultEnvelope() | StoppedBeforeRunning() | SeatTimedOut() | SeatCancelled():
             return 'SERVES_ON'
         case _ as unreachable:
             assert_never(unreachable)
@@ -624,7 +690,7 @@ def child_after_frame(end: SeatEnd) -> Literal['SERVES_ON', 'ENDS_ITSELF']:
 
 def _seat_end(
     end: SeatEnd,
-) -> core.TaskResult | core.StoppedBeforeRunning | Literal['TIMED_OUT']:
+) -> core.TaskResult | core.StoppedBeforeRunning | core.SeatCancelled | Literal['TIMED_OUT']:
     match end:
         case (
             ResultEnvelope()
@@ -635,6 +701,8 @@ def _seat_end(
             return _run_end(end)
         case SeatTimedOut():
             return 'TIMED_OUT'
+        case SeatCancelled(body=body):
+            return core.SeatCancelled(body=_cancelled_body(body))
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -663,6 +731,8 @@ type CoreChildFrame = (
     | core.SharedResultFrame
     | core.DeadlineFiredFrame
     | core.SecondCancelFrame
+    | core.CancelFiredFrame
+    | core.RunCancelledFrame
     | core.RunStuckFrame
     | core.LeftoverCancelFrame
     | core.LeftoverStuckFrame
@@ -723,6 +793,19 @@ def core_child_frame(frame: ChildFrame) -> CoreChildFrame:
             return core.DeadlineFiredFrame(dispatch=dispatch, task_id=task_id)
         case SecondCancelFrame(dispatch=dispatch, task_id=task_id):
             return core.SecondCancelFrame(dispatch=dispatch, task_id=task_id)
+        case CancelFiredFrame(dispatch=dispatch, task_id=task_id):
+            return core.CancelFiredFrame(dispatch=dispatch, task_id=task_id)
+        case RunCancelledFrame(
+            task_id=task_id, body=body, started_at=started_at, rss=rss, task_loop=task_loop,
+        ):
+            return core.RunCancelledFrame(
+                task_id=task_id,
+                body=_cancelled_body(body),
+                started_at=started_at,
+                rss_mb=_rss(rss),
+                task_loop=_cancelled_loop(task_loop),
+                child='SERVES_ON',
+            )
         case RunStuckFrame(
             dispatch=dispatch,
             task_id=task_id,

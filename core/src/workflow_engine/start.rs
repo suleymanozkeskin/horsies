@@ -262,7 +262,9 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::broker::workflow_start::{ClientStartError, ClientStartOutcome};
+    use crate::broker::workflow_start::{
+        ClientStartError, ClientStartOutcome, ExistingRun, IdHolder,
+    };
     use crate::broker::PostgresBroker;
     use crate::core::config::retention::RetentionConfig;
     use crate::core::task::execution::Execution;
@@ -985,12 +987,12 @@ mod tests {
 
         for (spec, expected) in [
             (&first, ClientStartOutcome::Started),
-            (&first, ClientStartOutcome::Exists),
+            (&first, ClientStartOutcome::Exists(ExistingRun::SameCommand)),
             (
                 &other,
-                ClientStartOutcome::IdTaken {
+                ClientStartOutcome::IdHeld(IdHolder::OtherWorkflowName {
                     existing_name: "first_name".to_owned(),
-                },
+                }),
             ),
         ] {
             assert_eq!(

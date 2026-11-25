@@ -33,6 +33,10 @@ impl MigrationTestDatabase {
         self.database.client()
     }
 
+    fn url(&self) -> &str {
+        self.database.url()
+    }
+
     /// Runs the install for `own` with `lock` through a new core handle, and
     /// closes the handle.
     async fn install(
@@ -54,6 +58,13 @@ impl MigrationTestDatabase {
     /// Applies migration 1000 alone, with `own` as the family, as Python's
     /// install leaves a database.
     async fn install_baseline_only(&self, own: ClientFamily) {
+        self.install_first_migrations(own, 1).await;
+    }
+
+    /// Applies the first `count` migrations of the embedded chain, in order,
+    /// with `own` as the family: the database that a build whose chain ends
+    /// there leaves.
+    async fn install_first_migrations(&self, own: ClientFamily, count: usize) {
         let handle = core_handle(self.database.url());
         let open = handle
             .pools()
@@ -64,14 +75,11 @@ impl MigrationTestDatabase {
             .checkout(CheckoutClass::Batch)
             .await
             .expect("check out a connection");
-        apply_migration(
-            &mut connection,
-            &embedded_migrations()[0],
-            own,
-            StatementLog::Off,
-        )
-        .await
-        .expect("apply migration 1000");
+        for migration in &embedded_migrations()[..count] {
+            apply_migration(&mut connection, migration, own, StatementLog::Off)
+                .await
+                .unwrap_or_else(|error| panic!("apply migration {}: {error}", migration.version));
+        }
         drop(connection);
         drop(open);
         let _closed = handle.close().await;
@@ -521,7 +529,7 @@ fn a_start_of_the_chain_is_behind_and_the_whole_chain_is_current() {
 
 #[test]
 fn each_state_decides_its_action() {
-    use crate::broker::client_family::ClientFamily::{Python, Rust};
+    use crate::broker::client_family::ClientFamily::{Python, Rust, TypeScript};
 
     let refusal = SchemaRefusal::MigrationIncomplete { version: 1000 };
     let cases = [
@@ -605,6 +613,47 @@ fn each_state_decides_its_action() {
             InstallAction::Refuse(InstallRefusal::OtherFamily {
                 stored: Rust,
                 own: Python,
+            }),
+        ),
+        (
+            DatabaseState::Behind {
+                applied: 1,
+                family: RecordedFamily::Recorded(TypeScript),
+            },
+            Rust,
+            InstallAction::Refuse(InstallRefusal::OtherFamily {
+                stored: TypeScript,
+                own: Rust,
+            }),
+        ),
+        (
+            DatabaseState::Current {
+                family: RecordedFamily::Recorded(TypeScript),
+                readers: ReaderPresence::Published,
+            },
+            Python,
+            InstallAction::Refuse(InstallRefusal::OtherFamily {
+                stored: TypeScript,
+                own: Python,
+            }),
+        ),
+        (
+            DatabaseState::Current {
+                family: RecordedFamily::Recorded(TypeScript),
+                readers: ReaderPresence::Published,
+            },
+            TypeScript,
+            InstallAction::Ready,
+        ),
+        (
+            DatabaseState::Current {
+                family: RecordedFamily::Recorded(Rust),
+                readers: ReaderPresence::Published,
+            },
+            TypeScript,
+            InstallAction::Refuse(InstallRefusal::OtherFamily {
+                stored: Rust,
+                own: TypeScript,
             }),
         ),
         (
@@ -1633,7 +1682,7 @@ async fn install_through_a_new_broker(database: &MigrationTestDatabase) {
 
 /// A second install, by another broker, leaves the structure of the history
 /// parent, the forever history relation and the key reservation table
-/// unchanged, and the stored version stays the baseline version.
+/// unchanged, and the stored version stays the newest version of the chain.
 #[tokio::test]
 async fn a_second_install_leaves_the_history_relations_unchanged() {
     let database = MigrationTestDatabase::create().await;
@@ -1649,7 +1698,7 @@ async fn a_second_install_leaves_the_history_relations_unchanged() {
         .await
         .expect("read the stored version")
         .get(0);
-    assert_eq!(version, BASELINE_MIGRATION_VERSION);
+    assert_eq!(version, expected_schema_version());
     database.drop().await;
 }
 
@@ -2316,5 +2365,1516 @@ async fn an_index_name_held_by_another_relation_refuses_the_migration() {
         "{refused:?}"
     );
     assert_eq!(bookkeeping_rows(&database).await.len(), 1);
+    database.drop().await;
+}
+
+// ---- Migration 1001: the lifecycle record ----
+
+/// The folder of the SQL files of the migrations after the baseline.
+fn later_migration_folder() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations")
+}
+
+/// The list of later migrations holds every SQL file of `core/migrations/`,
+/// in name order, each with the text on disk and a name that starts with its
+/// version. A file added to the folder without a line in
+/// `LATER_MIGRATION_FILES` fails here.
+#[test]
+fn later_migration_list_is_the_whole_folder() {
+    let mut folder: Vec<String> = std::fs::read_dir(later_migration_folder())
+        .expect("read the migrations folder")
+        .map(|entry| {
+            entry
+                .expect("migrations folder entry")
+                .file_name()
+                .into_string()
+                .expect("UTF-8 file name")
+        })
+        .filter(|name| name.ends_with(".sql"))
+        .collect();
+    folder.sort();
+    let names: Vec<&str> = LATER_MIGRATION_FILES
+        .iter()
+        .map(|(_, name, _)| *name)
+        .collect();
+    assert_eq!(names, folder);
+    for (version, name, text) in LATER_MIGRATION_FILES {
+        let path = later_migration_folder().join(name);
+        let on_disk = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        assert_eq!(text, on_disk, "{name}");
+        assert!(name.starts_with(&format!("{version}_")), "{name}");
+    }
+}
+
+/// Migration 1001 is the second link of the chain: it writes no family row,
+/// publishes no reader, declares no index step, and its checksum is SHA-384
+/// of its file. Its text names no schema and holds no transaction control,
+/// as the baseline's. The file list of the harnesses is the baseline files at
+/// version 1000, then this file.
+#[test]
+fn the_lifecycle_record_is_the_second_migration_of_the_chain() {
+    let chain = embedded_migrations();
+    let (version, name, text) = LATER_MIGRATION_FILES[0];
+    let migration = &chain[1];
+    assert_eq!(version, LIFECYCLE_RECORD_MIGRATION_VERSION);
+    assert_eq!(migration.version, 1001);
+    assert_eq!(migration.description, "lifecycle record");
+    assert_eq!(migration.family_row, FamilyRow::NotWritten);
+    assert_eq!(migration.readers, ReaderPublication::NotPublished);
+    assert!(migration.exact_indexes.is_empty());
+    assert!(migration.retired_indexes.is_empty());
+    assert_eq!(migration.script.sql(), text);
+    assert_eq!(
+        migration.checksum.as_slice(),
+        Sha384::digest(text.as_bytes()).as_slice()
+    );
+    assert!(
+        !text.contains("public."),
+        "the migration names the public schema"
+    );
+    for line in text.lines() {
+        let statement = line.trim().to_uppercase();
+        assert!(
+            !["BEGIN;", "COMMIT;", "ROLLBACK;", "START TRANSACTION;"].contains(&statement.as_str()),
+            "the migration holds transaction control: {line}"
+        );
+    }
+    let files = migration_sql_file_texts();
+    for ((file_version, file_name, file_text), (baseline_name, baseline_text)) in
+        files.iter().zip(BASELINE_SQL_FILE_TEXTS)
+    {
+        assert_eq!(*file_version, BASELINE_MIGRATION_VERSION);
+        assert_eq!(file_name, baseline_name);
+        assert_eq!(file_text, baseline_text);
+    }
+    assert_eq!(
+        files.get(BASELINE_SQL_FILE_TEXTS.len()),
+        Some(&(version, name, text))
+    );
+}
+
+/// Migration 1002 is the third link of the chain: it writes no family row,
+/// publishes no reader, declares no index step, and its checksum is SHA-384
+/// of its file. Its text names no schema and holds no transaction control.
+/// The file list of the harnesses holds this file after the file of 1001.
+#[test]
+fn the_start_command_fingerprint_is_the_third_migration_of_the_chain() {
+    let chain = embedded_migrations();
+    let (version, name, text) = LATER_MIGRATION_FILES[1];
+    let migration = &chain[2];
+    assert_eq!(version, START_COMMAND_FINGERPRINT_MIGRATION_VERSION);
+    assert_eq!(migration.version, 1002);
+    assert_eq!(migration.description, "workflow start command fingerprint");
+    assert_eq!(migration.family_row, FamilyRow::NotWritten);
+    assert_eq!(migration.readers, ReaderPublication::NotPublished);
+    assert!(migration.exact_indexes.is_empty());
+    assert!(migration.retired_indexes.is_empty());
+    assert_eq!(migration.script.sql(), text);
+    assert_eq!(
+        migration.checksum.as_slice(),
+        Sha384::digest(text.as_bytes()).as_slice()
+    );
+    assert!(
+        !text.contains("public."),
+        "the migration names the public schema"
+    );
+    for line in text.lines() {
+        let statement = line.trim().to_uppercase();
+        assert!(
+            !["BEGIN;", "COMMIT;", "ROLLBACK;", "START TRANSACTION;"].contains(&statement.as_str()),
+            "the migration holds transaction control: {line}"
+        );
+    }
+    let files = migration_sql_file_texts();
+    assert_eq!(
+        files.get(BASELINE_SQL_FILE_TEXTS.len() + 1),
+        Some(&(version, name, text))
+    );
+}
+
+/// Migration 1003 is the fourth link of the chain: it writes no family row,
+/// publishes no reader, declares no index step, and its checksum is SHA-384
+/// of its file. Its text names no schema and holds no transaction control.
+/// The file list of the harnesses holds this file after the file of 1002.
+#[test]
+fn the_attempt_cancelled_is_the_fourth_migration_of_the_chain() {
+    let chain = embedded_migrations();
+    let (version, name, text) = LATER_MIGRATION_FILES[2];
+    let migration = &chain[3];
+    assert_eq!(version, ATTEMPT_CANCELLED_MIGRATION_VERSION);
+    assert_eq!(migration.version, 1003);
+    assert_eq!(migration.description, "attempt cancelled");
+    assert_eq!(migration.family_row, FamilyRow::NotWritten);
+    assert_eq!(migration.readers, ReaderPublication::NotPublished);
+    assert!(migration.exact_indexes.is_empty());
+    assert!(migration.retired_indexes.is_empty());
+    assert_eq!(migration.script.sql(), text);
+    assert_eq!(
+        migration.checksum.as_slice(),
+        Sha384::digest(text.as_bytes()).as_slice()
+    );
+    assert!(
+        !text.contains("public."),
+        "the migration names the public schema"
+    );
+    for line in text.lines() {
+        let statement = line.trim().to_uppercase();
+        assert!(
+            !["BEGIN;", "COMMIT;", "ROLLBACK;", "START TRANSACTION;"].contains(&statement.as_str()),
+            "the migration holds transaction control: {line}"
+        );
+    }
+    let files = migration_sql_file_texts();
+    assert_eq!(
+        files.get(BASELINE_SQL_FILE_TEXTS.len() + 2),
+        Some(&(version, name, text))
+    );
+}
+
+/// Migration 1004 is the fifth link of the chain: it writes no family row,
+/// publishes no reader, declares no index step, and its checksum is SHA-384
+/// of its file. Its text names no schema and holds no transaction control.
+/// The file list of the harnesses holds this file after the file of 1003.
+#[test]
+fn the_worker_profile_name_is_the_fifth_migration_of_the_chain() {
+    let chain = embedded_migrations();
+    let (version, name, text) = LATER_MIGRATION_FILES[3];
+    let migration = &chain[4];
+    assert_eq!(version, WORKER_PROFILE_NAME_MIGRATION_VERSION);
+    assert_eq!(migration.version, 1004);
+    assert_eq!(migration.description, "worker profile name");
+    assert_eq!(migration.family_row, FamilyRow::NotWritten);
+    assert_eq!(migration.readers, ReaderPublication::NotPublished);
+    assert!(migration.exact_indexes.is_empty());
+    assert!(migration.retired_indexes.is_empty());
+    assert_eq!(migration.script.sql(), text);
+    assert_eq!(
+        migration.checksum.as_slice(),
+        Sha384::digest(text.as_bytes()).as_slice()
+    );
+    assert!(
+        !text.contains("public."),
+        "the migration names the public schema"
+    );
+    for line in text.lines() {
+        let statement = line.trim().to_uppercase();
+        assert!(
+            !["BEGIN;", "COMMIT;", "ROLLBACK;", "START TRANSACTION;"].contains(&statement.as_str()),
+            "the migration holds transaction control: {line}"
+        );
+    }
+    let files = migration_sql_file_texts();
+    assert_eq!(
+        files.get(BASELINE_SQL_FILE_TEXTS.len() + 3),
+        Some(&(version, name, text))
+    );
+}
+
+/// The position of migration 1005 in the embedded chain: the number of
+/// migrations that a database before it holds.
+fn claim_generation_by_status_position() -> usize {
+    embedded_migrations()
+        .iter()
+        .position(|migration| migration.version == CLAIM_GENERATION_BY_STATUS_MIGRATION_VERSION)
+        .expect("migration 1005 is a link of the chain")
+}
+
+/// Migration 1005 is the sixth link of the chain: it writes no family row,
+/// publishes no reader, declares no index step, and its checksum is SHA-384
+/// of its file. Its text names no schema and holds no transaction control.
+/// The file list of the harnesses holds this file after the file of 1004,
+/// and migration 1006 follows it.
+#[test]
+fn the_claim_generation_by_status_is_the_sixth_migration_of_the_chain() {
+    let chain = embedded_migrations();
+    let (version, name, text) = LATER_MIGRATION_FILES[4];
+    let migration = &chain[5];
+    assert_eq!(claim_generation_by_status_position(), 5);
+    assert_eq!(
+        typescript_client_family_position(),
+        claim_generation_by_status_position() + 1
+    );
+    assert_eq!(version, CLAIM_GENERATION_BY_STATUS_MIGRATION_VERSION);
+    assert_eq!(migration.version, 1005);
+    assert_eq!(migration.description, "claim generation by status");
+    assert_eq!(migration.family_row, FamilyRow::NotWritten);
+    assert_eq!(migration.readers, ReaderPublication::NotPublished);
+    assert!(migration.exact_indexes.is_empty());
+    assert!(migration.retired_indexes.is_empty());
+    assert_eq!(migration.script.sql(), text);
+    assert_eq!(
+        migration.checksum.as_slice(),
+        Sha384::digest(text.as_bytes()).as_slice()
+    );
+    assert!(
+        !text.contains("public."),
+        "the migration names the public schema"
+    );
+    for line in text.lines() {
+        let statement = line.trim().to_uppercase();
+        assert!(
+            !["BEGIN;", "COMMIT;", "ROLLBACK;", "START TRANSACTION;"].contains(&statement.as_str()),
+            "the migration holds transaction control: {line}"
+        );
+    }
+    let files = migration_sql_file_texts();
+    assert_eq!(
+        files.get(BASELINE_SQL_FILE_TEXTS.len() + 4),
+        Some(&(version, name, text))
+    );
+}
+
+/// The position of migration 1006 in the embedded chain: the number of
+/// migrations that a database before it holds.
+fn typescript_client_family_position() -> usize {
+    embedded_migrations()
+        .iter()
+        .position(|migration| migration.version == TYPESCRIPT_CLIENT_FAMILY_MIGRATION_VERSION)
+        .expect("migration 1006 is a link of the chain")
+}
+
+/// Migration 1006 is the newest link of the chain: it writes no family row,
+/// publishes no reader, declares no index step, and its checksum is SHA-384
+/// of its file. Its text names no schema and holds no transaction control.
+/// The file list of the harnesses ends with this file.
+#[test]
+fn the_typescript_client_family_is_the_newest_migration() {
+    let chain = embedded_migrations();
+    let (version, name, text) = *LATER_MIGRATION_FILES
+        .last()
+        .expect("the chain has migrations after the baseline");
+    let migration = chain.last().expect("the chain is not empty");
+    assert_eq!(chain.len(), LATER_MIGRATION_FILES.len() + 1);
+    assert_eq!(typescript_client_family_position(), chain.len() - 1);
+    assert_eq!(version, TYPESCRIPT_CLIENT_FAMILY_MIGRATION_VERSION);
+    assert_eq!(migration.version, 1006);
+    assert_eq!(migration.description, "typescript client family");
+    assert_eq!(migration.family_row, FamilyRow::NotWritten);
+    assert_eq!(migration.readers, ReaderPublication::NotPublished);
+    assert!(migration.exact_indexes.is_empty());
+    assert!(migration.retired_indexes.is_empty());
+    assert_eq!(migration.script.sql(), text);
+    assert_eq!(
+        migration.checksum.as_slice(),
+        Sha384::digest(text.as_bytes()).as_slice()
+    );
+    assert_eq!(
+        expected_schema_version(),
+        TYPESCRIPT_CLIENT_FAMILY_MIGRATION_VERSION
+    );
+    assert!(
+        !text.contains("public."),
+        "the migration names the public schema"
+    );
+    for line in text.lines() {
+        let statement = line.trim().to_uppercase();
+        assert!(
+            !["BEGIN;", "COMMIT;", "ROLLBACK;", "START TRANSACTION;"].contains(&statement.as_str()),
+            "the migration holds transaction control: {line}"
+        );
+    }
+    let files = migration_sql_file_texts();
+    assert_eq!(
+        files.len(),
+        BASELINE_SQL_FILE_TEXTS.len() + LATER_MIGRATION_FILES.len()
+    );
+    assert_eq!(files.last(), Some(&(version, name, text)));
+}
+
+/// A build whose chain ends before migration 1006 meets a database that
+/// applied migration 1006: the classification refuses it as newer.
+#[test]
+fn a_chain_without_the_typescript_client_family_refuses_a_database_that_has_it() {
+    let chain = embedded_migrations();
+    let position = typescript_client_family_position();
+    let applied: Vec<AppliedMigration> = chain[..=position].iter().map(succeeded).collect();
+
+    assert_eq!(
+        classify(ledger(applied, RUST), &chain[..position]),
+        Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::SchemaNewer {
+            stored: TYPESCRIPT_CLIENT_FAMILY_MIGRATION_VERSION,
+            own: chain[position - 1].version,
+        })),
+    );
+}
+
+/// A build whose chain ends at migration 1004 meets a database that applied
+/// migration 1005: the classification refuses it as newer.
+#[test]
+fn a_chain_without_the_claim_generation_by_status_refuses_a_database_that_has_it() {
+    let chain = embedded_migrations();
+    let position = claim_generation_by_status_position();
+    let applied: Vec<AppliedMigration> = chain[..=position].iter().map(succeeded).collect();
+
+    assert_eq!(
+        classify(ledger(applied, RUST), &chain[..position]),
+        Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::SchemaNewer {
+            stored: CLAIM_GENERATION_BY_STATUS_MIGRATION_VERSION,
+            own: WORKER_PROFILE_NAME_MIGRATION_VERSION,
+        })),
+    );
+}
+
+/// A build whose chain ends at migration 1003 meets a database that applied
+/// migration 1004: the classification refuses it as newer.
+#[test]
+fn a_chain_without_the_worker_profile_name_refuses_a_database_that_has_it() {
+    let chain = embedded_migrations();
+    let applied: Vec<AppliedMigration> = chain[..5].iter().map(succeeded).collect();
+
+    assert_eq!(
+        classify(ledger(applied, RUST), &chain[..4]),
+        Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::SchemaNewer {
+            stored: 1004,
+            own: ATTEMPT_CANCELLED_MIGRATION_VERSION,
+        })),
+    );
+}
+
+/// A build whose chain ends at migration 1002 meets a database that applied
+/// migration 1003: the classification refuses it as newer.
+#[test]
+fn a_chain_without_the_attempt_cancelled_refuses_a_database_that_has_it() {
+    let chain = embedded_migrations();
+    let applied: Vec<AppliedMigration> = chain[..4].iter().map(succeeded).collect();
+
+    assert_eq!(
+        classify(ledger(applied, RUST), &chain[..3]),
+        Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::SchemaNewer {
+            stored: 1003,
+            own: START_COMMAND_FINGERPRINT_MIGRATION_VERSION,
+        })),
+    );
+}
+
+/// A build whose chain ends at migration 1001 meets a database that applied
+/// migration 1002: the classification refuses it as newer.
+#[test]
+fn a_chain_without_the_start_command_fingerprint_refuses_a_database_that_has_it() {
+    let chain = embedded_migrations();
+    let applied: Vec<AppliedMigration> = chain[..3].iter().map(succeeded).collect();
+
+    assert_eq!(
+        classify(ledger(applied, RUST), &chain[..2]),
+        Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::SchemaNewer {
+            stored: 1002,
+            own: LIFECYCLE_RECORD_MIGRATION_VERSION,
+        })),
+    );
+}
+
+/// A build whose chain ends at the baseline meets a database that applied
+/// migration 1001: the classification refuses it as newer.
+#[test]
+fn a_chain_without_the_lifecycle_record_refuses_a_database_that_has_it() {
+    let chain = embedded_migrations();
+    let applied: Vec<AppliedMigration> = chain[..2].iter().map(succeeded).collect();
+
+    assert_eq!(
+        classify(ledger(applied, RUST), &chain[..1]),
+        Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::SchemaNewer {
+            stored: 1001,
+            own: BASELINE_MIGRATION_VERSION,
+        })),
+    );
+}
+
+/// The live rows that a 0.8.0 process leaves: a PENDING, a CLAIMED and a
+/// RUNNING task, and an attempt row of an earlier attempt of the RUNNING
+/// task, each with every column of migration 1000 named.
+const ROWS_OF_A_0_8_0_DATABASE: &str = "
+INSERT INTO horsies_tasks (
+    id, task_name, queue_name, priority, input, task_options, execution, retention_class_key, sent_at,
+    created_at, command_fingerprint_version, command_fingerprint, idempotency_key_digest, status,
+    enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at, started_at, finalizing_at,
+    finalizing_by_worker_id, worker_pid, worker_hostname, worker_process_name, retry_count, max_retries,
+    next_retry_at, good_until, is_workflow_task, updated_at, retain_rerun_input, rerun_of_task_id,
+    rerun_root_task_id, trace_carrier, trace_id
+) VALUES
+    ('00000000-0000-4000-8000-00000000a001', 'upgrade.pending', 'default', 100, '{}', NULL,
+     'ISOLATED', 'forever', now(), now(), 1, sha256('pending'::bytea), NULL, 'PENDING',
+     now(), NULL, NULL, NULL, NULL, NULL,
+     NULL, NULL, NULL, NULL, 0, 0,
+     NULL, NULL, FALSE, now(), FALSE, NULL, NULL, NULL, NULL),
+    ('00000000-0000-4000-8000-00000000a002', 'upgrade.claimed', 'default', 100, '{}', NULL,
+     'ISOLATED', 'forever', now(), now(), 1, sha256('claimed'::bytea), NULL, 'CLAIMED',
+     now(), now(), 'worker-0.8.0', now() + interval '1 minute', NULL, NULL,
+     NULL, NULL, NULL, NULL, 0, 0,
+     NULL, NULL, FALSE, now(), FALSE, NULL, NULL, NULL, NULL),
+    ('00000000-0000-4000-8000-00000000a003', 'upgrade.running', 'default', 100, '{}', NULL,
+     'ISOLATED', 'forever', now(), now(), 1, sha256('running'::bytea), NULL, 'RUNNING',
+     now(), now(), 'worker-0.8.0', NULL, now(), now(),
+     'worker-0.8.0', 4242, 'host-0.8.0', 'process-0.8.0', 1, 3,
+     NULL, NULL, FALSE, now(), FALSE, NULL, NULL, NULL, NULL);
+INSERT INTO horsies_task_attempts (
+    task_id, attempt, outcome, will_retry, started_at, finished_at, error_code, error_message,
+    failed_reason, worker_id, worker_hostname, worker_pid, worker_process_name
+) VALUES (
+    '00000000-0000-4000-8000-00000000a003', 1, 'FAILED', TRUE, now() - interval '2 minutes',
+    now() - interval '1 minute', 'BOOM', 'boom', NULL, 'worker-0.8.0', 'host-0.8.0', 4242,
+    'process-0.8.0'
+);
+";
+
+/// A database at migration 1000 that holds live PENDING, CLAIMED and
+/// RUNNING rows and an attempt row gets migration 1001 from the install:
+/// every old row keeps NULL in each new column (claims not counted, no
+/// phase record), and both new CHECKs exist and are validated against the
+/// rows.
+#[tokio::test]
+async fn a_0_8_0_database_with_live_rows_gets_the_lifecycle_record() {
+    let database = MigrationTestDatabase::create().await;
+    database.install_baseline_only(ClientFamily::Rust).await;
+    database.execute(ROWS_OF_A_0_8_0_DATABASE).await;
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migration 1001 over the live rows");
+
+    assert_eq!(
+        bookkeeping_rows(&database).await,
+        chain_rows(embedded_migrations().len())
+    );
+    let tasks: Vec<(String, Option<i32>, bool)> = database
+        .client()
+        .query(
+            "SELECT status::text, attempt_claims, first_claimed_at IS NULL
+             FROM horsies_tasks ORDER BY id",
+            &[],
+        )
+        .await
+        .expect("read the live rows")
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    assert_eq!(
+        tasks,
+        vec![
+            ("PENDING".to_owned(), None, true),
+            ("CLAIMED".to_owned(), None, true),
+            ("RUNNING".to_owned(), None, true),
+        ]
+    );
+    let attempts: Vec<(i32, i32)> = database
+        .client()
+        .query(
+            "SELECT attempt, num_nonnulls(
+                 phase_record_version, enqueued_at, claimed_at, attempt_claims, first_claimed_at,
+                 placed_at, finalizing_at, recorded_by, last_seen_at
+             ) FROM horsies_task_attempts ORDER BY attempt",
+            &[],
+        )
+        .await
+        .expect("read the attempt rows")
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(attempts, vec![(1, 0)]);
+    let checks: Vec<(String, bool)> = database
+        .client()
+        .query(
+            "SELECT conname::text, convalidated FROM pg_constraint
+             WHERE conname IN (
+                 'horsies_tasks_attempt_claims_shape', 'horsies_task_attempts_phase_record_shape'
+             )
+             ORDER BY conname",
+            &[],
+        )
+        .await
+        .expect("read the new checks")
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(
+        checks,
+        vec![
+            ("horsies_task_attempts_phase_record_shape".to_owned(), true),
+            ("horsies_tasks_attempt_claims_shape".to_owned(), true),
+        ]
+    );
+    database.drop().await;
+}
+
+/// The shape of the horsies objects of a database, as one text: the columns
+/// of every `horsies_` relation (name, type, length, nullability, default,
+/// generation expression, in column order), every constraint definition,
+/// every index definition, every `horsies_` sequence (type, bounds, step,
+/// cycle), and every `horsies_` function (identity arguments, result, and the
+/// MD5 of its body).
+async fn schema_shape(database: &MigrationTestDatabase) -> String {
+    database
+        .client()
+        .query_one(
+            r#"SELECT jsonb_build_object(
+                 'columns', (
+                     SELECT jsonb_agg(jsonb_build_array(
+                         c.table_name, c.ordinal_position, c.column_name, c.data_type,
+                         c.character_maximum_length, c.is_nullable, c.column_default,
+                         c.generation_expression
+                     ) ORDER BY c.table_name, c.ordinal_position)
+                     FROM information_schema.columns AS c
+                     WHERE c.table_schema = current_schema() AND c.table_name LIKE 'horsies\_%'
+                 ),
+                 'constraints', (
+                     SELECT jsonb_agg(jsonb_build_array(
+                         r.relname, k.conname, k.convalidated, pg_get_constraintdef(k.oid)
+                     ) ORDER BY r.relname, k.conname)
+                     FROM pg_constraint AS k
+                     JOIN pg_class AS r ON r.oid = k.conrelid
+                     JOIN pg_namespace AS n ON n.oid = r.relnamespace
+                     WHERE n.nspname = current_schema() AND r.relname LIKE 'horsies\_%'
+                 ),
+                 'indexes', (
+                     SELECT jsonb_agg(jsonb_build_array(i.indexname, i.indexdef)
+                         ORDER BY i.indexname)
+                     FROM pg_indexes AS i
+                     WHERE i.schemaname = current_schema() AND i.tablename LIKE 'horsies\_%'
+                 ),
+                 'sequences', (
+                     SELECT jsonb_agg(jsonb_build_array(
+                         s.sequencename, s.data_type::text, s.start_value, s.min_value, s.max_value,
+                         s.increment_by, s.cycle
+                     ) ORDER BY s.sequencename)
+                     FROM pg_sequences AS s
+                     WHERE s.schemaname = current_schema() AND s.sequencename LIKE 'horsies\_%'
+                 ),
+                 'functions', (
+                     SELECT jsonb_agg(jsonb_build_array(
+                         p.proname, pg_get_function_identity_arguments(p.oid),
+                         pg_get_function_result(p.oid), md5(p.prosrc)
+                     ) ORDER BY p.proname, pg_get_function_identity_arguments(p.oid))
+                     FROM pg_proc AS p
+                     JOIN pg_namespace AS n ON n.oid = p.pronamespace
+                     WHERE n.nspname = current_schema() AND p.proname LIKE 'horsies\_%'
+                 )
+             )::text"#,
+            &[],
+        )
+        .await
+        .expect("read the schema shape")
+        .get(0)
+}
+
+/// The workflow rows that a 0.8.0 process leaves: a RUNNING workflow whose
+/// sub-workflow node links a RUNNING child workflow, each with every column
+/// of migration 1000 named.
+const WORKFLOWS_OF_A_0_8_0_DATABASE: &str = "
+INSERT INTO horsies_workflows (
+    id, name, definition_key, status, on_error, output_task_index, success_policy, result, error,
+    parent_workflow_id, parent_task_index, root_workflow_id, depth, sent_at, created_at, started_at,
+    completed_at, updated_at, trace_carrier, trace_id
+) VALUES
+    ('00000000-0000-4000-8000-00000000b001', 'upgrade.parent', NULL, 'RUNNING', 'fail', NULL, NULL, NULL, NULL,
+     NULL, NULL, '00000000-0000-4000-8000-00000000b001', 0, now(), now(), now(), NULL, now(), NULL, NULL),
+    ('00000000-0000-4000-8000-00000000b002', 'upgrade.child', NULL, 'RUNNING', 'fail', NULL, NULL, NULL, NULL,
+     '00000000-0000-4000-8000-00000000b001', 0, '00000000-0000-4000-8000-00000000b001', 1, now(), now(), now(),
+     NULL, now(), NULL, NULL);
+INSERT INTO horsies_workflow_tasks (
+    id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies, args_from,
+    workflow_ctx_from, allow_failed_deps, join_type, min_success, task_options, max_retries, execution,
+    good_until, retention_class_key, downstream_subworkflow, status, task_id, is_subworkflow, sub_workflow_id,
+    sub_workflow_name, sub_definition_key, sub_workflow_params, sub_workflow_summary, result, error,
+    created_at, started_at, completed_at
+) VALUES (
+    '00000000-0000-4000-8000-00000000b011', '00000000-0000-4000-8000-00000000b001', 0, 'n0', 'upgrade.sub', '{}',
+    'default', 50, '{}', NULL, NULL, FALSE, 'all', NULL, NULL, NULL, NULL, NULL, NULL, 'NONE', 'RUNNING', NULL,
+    TRUE, '00000000-0000-4000-8000-00000000b002', 'child.wf', 'child.key', 'NOT_GIVEN', NULL, NULL, NULL,
+    now(), now(), NULL
+);
+";
+
+/// A database at migration 1000 that holds a RUNNING workflow with a RUNNING
+/// child gets migration 1001 from the install: the event table is empty (the
+/// migration writes no event for a run that began before it), and its CHECK
+/// and its two foreign keys are validated. A pause after the upgrade writes
+/// one WORKFLOW_PAUSED for the workflow, then one for its child.
+#[tokio::test]
+async fn a_0_8_0_database_with_workflows_gets_the_event_table_with_no_event() {
+    let database = MigrationTestDatabase::create().await;
+    database.install_baseline_only(ClientFamily::Rust).await;
+    database.execute(WORKFLOWS_OF_A_0_8_0_DATABASE).await;
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migration 1001 over the workflow rows");
+
+    let events: i64 = database
+        .client()
+        .query_one("SELECT count(*) FROM horsies_workflow_events", &[])
+        .await
+        .expect("count the events")
+        .get(0);
+    assert_eq!(events, 0, "the migration writes no event");
+    let constraints: Vec<(String, bool)> = database
+        .client()
+        .query(
+            "SELECT conname::text, convalidated FROM pg_constraint
+             WHERE conrelid = 'horsies_workflow_events'::regclass AND contype IN ('c', 'f')
+             ORDER BY conname",
+            &[],
+        )
+        .await
+        .expect("read the constraints of the event table")
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(
+        constraints,
+        vec![
+            ("horsies_workflow_events_kind_shape".to_owned(), true),
+            ("horsies_workflow_events_node_fkey".to_owned(), true),
+            ("horsies_workflow_events_run_fkey".to_owned(), true),
+        ]
+    );
+
+    database
+        .execute("SELECT * FROM horsies_workflow_pause('00000000-0000-4000-8000-00000000b001')")
+        .await;
+    let paused: Vec<(String, String)> = database
+        .client()
+        .query(
+            "SELECT workflow_id::text, event_kind::text FROM horsies_workflow_events ORDER BY event_id",
+            &[],
+        )
+        .await
+        .expect("read the events of the pause")
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(
+        paused,
+        vec![
+            (
+                "00000000-0000-4000-8000-00000000b001".to_owned(),
+                "WORKFLOW_PAUSED".to_owned()
+            ),
+            (
+                "00000000-0000-4000-8000-00000000b002".to_owned(),
+                "WORKFLOW_PAUSED".to_owned()
+            ),
+        ]
+    );
+    database.drop().await;
+}
+
+/// A database at migration 1001 that holds a RUNNING workflow with a RUNNING
+/// child gets migration 1002 from the install: both rows keep NULL in the two
+/// new columns (the migration writes no start command), the new CHECK is
+/// validated, and an install again changes nothing.
+#[tokio::test]
+async fn a_1001_database_with_workflows_gets_the_start_command_columns_with_no_value() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install_first_migrations(ClientFamily::Rust, 2)
+        .await;
+    database.execute(WORKFLOWS_OF_A_0_8_0_DATABASE).await;
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migrations 1002 to 1006 over the workflow rows");
+
+    let installed = bookkeeping_rows(&database).await;
+    assert_eq!(installed, chain_rows(embedded_migrations().len()));
+    let workflows: Vec<(String, i32)> = database
+        .client()
+        .query(
+            "SELECT name::text, num_nonnulls(command_fingerprint_version, command_fingerprint)
+             FROM horsies_workflows ORDER BY name",
+            &[],
+        )
+        .await
+        .expect("read the workflow rows")
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(
+        workflows,
+        vec![
+            ("upgrade.child".to_owned(), 0),
+            ("upgrade.parent".to_owned(), 0),
+        ]
+    );
+    let validated: bool = database
+        .client()
+        .query_one(
+            "SELECT convalidated FROM pg_constraint
+             WHERE conname = 'horsies_workflows_command_fingerprint_by_origin'",
+            &[],
+        )
+        .await
+        .expect("read the new check")
+        .get(0);
+    assert!(validated);
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install again");
+    assert_eq!(bookkeeping_rows(&database).await, installed);
+    database.drop().await;
+}
+
+/// A fresh install, an upgrade from migration 1000 with live rows and
+/// workflow rows, an upgrade from migration 1001 with workflow rows, an
+/// upgrade from migration 1002 with live rows, an upgrade from migration
+/// 1003 with a worker snapshot, an upgrade from migration 1004 with live rows
+/// through migrations 1005 and 1006, and an upgrade from the migration before
+/// 1006 end in the same schema: the same columns, constraints, indexes,
+/// sequences and functions, and the same bookkeeping.
+#[tokio::test]
+async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
+    let fresh = MigrationTestDatabase::create().await;
+    fresh
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install into an empty database");
+    let upgraded = MigrationTestDatabase::create().await;
+    upgraded.install_baseline_only(ClientFamily::Rust).await;
+    upgraded.execute(ROWS_OF_A_0_8_0_DATABASE).await;
+    upgraded.execute(WORKFLOWS_OF_A_0_8_0_DATABASE).await;
+    upgraded
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migrations 1001 to 1006 over the live rows");
+    let from_1001 = MigrationTestDatabase::create().await;
+    from_1001
+        .install_first_migrations(ClientFamily::Rust, 2)
+        .await;
+    from_1001.execute(WORKFLOWS_OF_A_0_8_0_DATABASE).await;
+    from_1001
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migrations 1002 to 1006 over the workflow rows");
+    let from_1002 = MigrationTestDatabase::create().await;
+    from_1002
+        .install_first_migrations(ClientFamily::Rust, 3)
+        .await;
+    from_1002.execute(ROWS_OF_A_0_8_0_DATABASE).await;
+    from_1002
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migrations 1003 to 1006 over the live rows");
+    let from_1003 = MigrationTestDatabase::create().await;
+    from_1003
+        .install_first_migrations(ClientFamily::Rust, 4)
+        .await;
+    from_1003.execute(WORKER_STATE_OF_A_1003_DATABASE).await;
+    from_1003
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migrations 1004 to 1006 over the worker snapshot");
+    let from_1004 = MigrationTestDatabase::create().await;
+    from_1004
+        .install_first_migrations(ClientFamily::Rust, claim_generation_by_status_position())
+        .await;
+    from_1004.execute(ROWS_OF_A_0_8_0_DATABASE).await;
+    from_1004
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migrations 1005 and 1006 over the live rows");
+    let before_1006 = MigrationTestDatabase::create().await;
+    before_1006
+        .install_first_migrations(ClientFamily::Rust, typescript_client_family_position())
+        .await;
+    before_1006
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migration 1006");
+
+    let fresh_shape = schema_shape(&fresh).await;
+    assert_eq!(fresh_shape, schema_shape(&upgraded).await);
+    assert_eq!(fresh_shape, schema_shape(&from_1001).await);
+    assert_eq!(fresh_shape, schema_shape(&from_1002).await);
+    assert_eq!(fresh_shape, schema_shape(&from_1003).await);
+    assert_eq!(fresh_shape, schema_shape(&from_1004).await);
+    assert_eq!(fresh_shape, schema_shape(&before_1006).await);
+    let fresh_rows = bookkeeping_rows(&fresh).await;
+    assert_eq!(fresh_rows, bookkeeping_rows(&upgraded).await);
+    assert_eq!(fresh_rows, bookkeeping_rows(&from_1001).await);
+    assert_eq!(fresh_rows, bookkeeping_rows(&from_1002).await);
+    assert_eq!(fresh_rows, bookkeeping_rows(&from_1003).await);
+    assert_eq!(fresh_rows, bookkeeping_rows(&from_1004).await);
+    assert_eq!(fresh_rows, bookkeeping_rows(&before_1006).await);
+    fresh.drop().await;
+    upgraded.drop().await;
+    from_1001.drop().await;
+    from_1002.drop().await;
+    from_1003.drop().await;
+    from_1004.drop().await;
+    before_1006.drop().await;
+}
+
+/// A database at migration 1002 that holds live PENDING, CLAIMED and RUNNING
+/// rows and an attempt row with no phase record gets migration 1003 from the
+/// install: the attempt row does not change, both replaced CHECKs exist and
+/// are validated against the rows and name the new values (the outcome
+/// CANCELLED, the writer CANCEL), the cancel function and the read of the
+/// cancelled runs exist, and an install again changes nothing.
+#[tokio::test]
+async fn a_1002_database_with_live_rows_gets_the_cancelled_attempt() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install_first_migrations(ClientFamily::Rust, 3)
+        .await;
+    database.execute(ROWS_OF_A_0_8_0_DATABASE).await;
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migrations 1003 to 1006 over the live rows");
+
+    let installed = bookkeeping_rows(&database).await;
+    assert_eq!(installed, chain_rows(embedded_migrations().len()));
+    let attempts: Vec<(i32, String, i32)> = database
+        .client()
+        .query(
+            "SELECT attempt, outcome::text, num_nonnulls(phase_record_version, recorded_by)
+             FROM horsies_task_attempts ORDER BY attempt",
+            &[],
+        )
+        .await
+        .expect("read the attempt rows")
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    assert_eq!(attempts, vec![(1, "FAILED".to_owned(), 0)]);
+    let checks: Vec<(String, bool, String)> = database
+        .client()
+        .query(
+            "SELECT conname::text, convalidated, pg_get_constraintdef(oid) FROM pg_constraint
+             WHERE conname IN (
+                 'horsies_task_attempts_outcome_known', 'horsies_task_attempts_phase_record_shape'
+             )
+             ORDER BY conname",
+            &[],
+        )
+        .await
+        .expect("read the replaced checks")
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    let [(outcome_name, outcome_valid, outcome_text), (shape_name, shape_valid, shape_text)] =
+        checks.as_slice()
+    else {
+        panic!("two checks: {checks:?}");
+    };
+    assert_eq!(outcome_name, "horsies_task_attempts_outcome_known");
+    assert!(*outcome_valid);
+    assert!(outcome_text.contains("'CANCELLED'"), "{outcome_text}");
+    assert_eq!(shape_name, "horsies_task_attempts_phase_record_shape");
+    assert!(*shape_valid);
+    assert!(shape_text.contains("'CANCEL'"), "{shape_text}");
+    let functions: Vec<String> = database
+        .client()
+        .query(
+            "SELECT p.proname::text || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+             FROM pg_proc AS p
+             WHERE p.proname IN ('horsies_cancel_task', 'horsies_cancelled_runs')
+             ORDER BY p.proname",
+            &[],
+        )
+        .await
+        .expect("read the functions")
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(
+        functions,
+        vec![
+            "horsies_cancel_task(p_task_id uuid, p_include_running boolean)".to_owned(),
+            "horsies_cancelled_runs(p_task_ids uuid[], p_claimed_ats timestamp with time zone[])"
+                .to_owned(),
+        ]
+    );
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install again");
+    assert_eq!(bookkeeping_rows(&database).await, installed);
+    database.drop().await;
+}
+
+/// A worker snapshot that a worker of a build before migration 1004 leaves,
+/// with every column of migration 1000 named: it names no profile.
+const WORKER_STATE_OF_A_1003_DATABASE: &str = r#"
+INSERT INTO horsies_worker_states (
+    worker_id, snapshot_at, hostname, pid, processes, max_claim_batch, max_claim_per_worker,
+    cluster_wide_cap, queues, queue_priorities, queue_max_concurrency, recovery_config,
+    tasks_running, tasks_claimed, memory_usage_mb, memory_percent, cpu_percent,
+    children_memory_mb, worker_started_at, slots_down, class_capacity, telemetry
+) VALUES (
+    'worker-1003', now(), 'host-1003', 4242, 2, 0, 2,
+    NULL, ARRAY['default'], '{}', '{}', '{}',
+    0, 0, NULL, NULL, NULL,
+    NULL, now(), '[]', '{}', jsonb_build_object('endpoint', jsonb_build_object('state', 'off'))
+);
+"#;
+
+/// The names that the profile name rule and the CHECK of migration 1004 are
+/// compared on: each arm of the rule (the first character, the other
+/// characters, the length), a trailing newline and a non-ASCII letter.
+fn profile_name_samples() -> Vec<String> {
+    use crate::core::config::worker_profile::PROFILE_NAME_MAX_LENGTH;
+
+    let mut samples: Vec<String> = [
+        "default",
+        "batch-high-memory",
+        "v1.2",
+        "_internal",
+        "9lives",
+        "A",
+        "",
+        "-flag",
+        ".hidden",
+        "has space",
+        "a/b",
+        "a\n",
+        "caf\u{e9}",
+    ]
+    .iter()
+    .map(|name| (*name).to_owned())
+    .collect();
+    samples.push("x".repeat(PROFILE_NAME_MAX_LENGTH));
+    samples.push("x".repeat(PROFILE_NAME_MAX_LENGTH + 1));
+    samples
+}
+
+/// A database at migration 1003 that holds a worker snapshot gets migration
+/// 1004 from the install:
+/// - `profile_name` is `character varying(64)`, nullable, with no default;
+/// - the old row keeps NULL (the migration writes no name) and the worker
+///   state read gives it as `SnapshotProfile::NotRecorded`;
+/// - the CHECK `horsies_worker_states_profile_name_shape` is validated and
+///   accepts exactly the names that the profile name rule accepts
+///   (`is_valid_profile_name`): a refused name fails with 23514, or with
+///   22001 above the column length;
+/// - an install again changes nothing.
+#[tokio::test]
+async fn a_1003_database_with_a_worker_snapshot_gets_the_profile_name_with_no_value() {
+    use crate::broker::{PostgresBroker, SnapshotProfile};
+    use crate::core::config::worker_profile::is_valid_profile_name;
+
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install_first_migrations(ClientFamily::Rust, 4)
+        .await;
+    database.execute(WORKER_STATE_OF_A_1003_DATABASE).await;
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migrations 1004 to 1006 over the worker snapshot");
+
+    let installed = bookkeeping_rows(&database).await;
+    assert_eq!(installed, chain_rows(embedded_migrations().len()));
+    let column = database
+        .client()
+        .query_one(
+            "SELECT format_type(atttypid, atttypmod), attnotnull, atthasdef FROM pg_attribute
+             WHERE attrelid = 'horsies_worker_states'::regclass
+               AND attname = 'profile_name' AND NOT attisdropped",
+            &[],
+        )
+        .await
+        .expect("read the new column");
+    let (column_type, not_null, has_default): (String, bool, bool) =
+        (column.get(0), column.get(1), column.get(2));
+    assert_eq!(column_type, "character varying(64)");
+    assert!(!not_null, "a row of an earlier build holds no name");
+    assert!(!has_default, "the migration sets no default");
+    let stored: Option<String> = database
+        .client()
+        .query_one(
+            "SELECT profile_name FROM horsies_worker_states WHERE worker_id = 'worker-1003'",
+            &[],
+        )
+        .await
+        .expect("read the old row")
+        .get(0);
+    assert_eq!(stored, None, "the migration writes no name");
+    let check = database
+        .client()
+        .query_one(
+            "SELECT convalidated, pg_get_constraintdef(oid) FROM pg_constraint
+             WHERE conrelid = 'horsies_worker_states'::regclass
+               AND conname = 'horsies_worker_states_profile_name_shape'",
+            &[],
+        )
+        .await
+        .expect("read the new check");
+    let (validated, definition): (bool, String) = (check.get(0), check.get(1));
+    assert!(validated);
+    assert!(
+        definition.contains("'^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$'"),
+        "{definition}"
+    );
+
+    let broker = PostgresBroker::from_test_url(database.url(), ClientFamily::Rust);
+    let read = broker.get_worker_state("worker-1003").await;
+    broker.close().await;
+    let snapshot = read
+        .expect("the worker state read answers")
+        .expect("the worker reported");
+    assert_eq!(snapshot.profile, SnapshotProfile::NotRecorded);
+
+    let refused_codes = [
+        SqlState::CHECK_VIOLATION,
+        SqlState::STRING_DATA_RIGHT_TRUNCATION,
+    ];
+    for name in profile_name_samples() {
+        let written = database
+            .client()
+            .execute(
+                "UPDATE horsies_worker_states SET profile_name = $1
+                 WHERE worker_id = 'worker-1003'",
+                &[&name],
+            )
+            .await;
+        let accepted = match written {
+            Ok(rows) => {
+                assert_eq!(rows, 1, "{name:?}");
+                true
+            }
+            Err(error) => match error.code() {
+                Some(code) if refused_codes.contains(code) => false,
+                _ => panic!("{name:?}: {error}"),
+            },
+        };
+        assert_eq!(accepted, is_valid_profile_name(&name), "{name:?}");
+    }
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install again");
+    assert_eq!(bookkeeping_rows(&database).await, installed);
+    database.drop().await;
+}
+
+/// The CHECK of migration 1005 on `horsies_tasks`.
+const CLAIM_GENERATION_RULE: &str = "horsies_tasks_claim_generation_by_status";
+
+/// A CLAIMED row and a RUNNING row of `worker-1004` with no claim generation
+/// (`claimed_at` NULL). No writer leaves such a row; a statement written by
+/// hand does. Every column of migration 1000 is named.
+const ROWS_WITH_NO_CLAIM_GENERATION: &str = "
+INSERT INTO horsies_tasks (
+    id, task_name, queue_name, priority, input, task_options, execution, retention_class_key, sent_at,
+    created_at, command_fingerprint_version, command_fingerprint, idempotency_key_digest, status,
+    enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at, started_at, finalizing_at,
+    finalizing_by_worker_id, worker_pid, worker_hostname, worker_process_name, retry_count, max_retries,
+    next_retry_at, good_until, is_workflow_task, updated_at, retain_rerun_input, rerun_of_task_id,
+    rerun_root_task_id, trace_carrier, trace_id
+) VALUES
+    ('00000000-0000-4000-8000-00000000c001', 'upgrade.claimed_no_claim', 'default', 100, '{}', NULL,
+     'ISOLATED', 'forever', now(), now(), 1, sha256('c001'::bytea), NULL, 'CLAIMED',
+     now(), NULL, 'worker-1004', now() + interval '1 minute', NULL, NULL,
+     NULL, NULL, NULL, NULL, 0, 0,
+     NULL, NULL, FALSE, now(), FALSE, NULL, NULL, NULL, NULL),
+    ('00000000-0000-4000-8000-00000000c002', 'upgrade.running_no_claim', 'default', 100, '{}', NULL,
+     'ISOLATED', 'forever', now(), now(), 1, sha256('c002'::bytea), NULL, 'RUNNING',
+     now(), NULL, 'worker-1004', NULL, now(), NULL,
+     NULL, 4242, 'host-1004', 'process-1004', 0, 0,
+     NULL, NULL, FALSE, now(), FALSE, NULL, NULL, NULL, NULL);
+";
+
+/// The status and whether `claimed_at` is NULL, of each row of
+/// [`ROWS_WITH_NO_CLAIM_GENERATION`], in id order.
+async fn rows_with_no_claim_generation(database: &MigrationTestDatabase) -> Vec<(String, bool)> {
+    database
+        .client()
+        .query(
+            "SELECT status::text, claimed_at IS NULL FROM horsies_tasks
+             WHERE id IN (
+                 '00000000-0000-4000-8000-00000000c001', '00000000-0000-4000-8000-00000000c002'
+             )
+             ORDER BY id",
+            &[],
+        )
+        .await
+        .expect("read the rows with no claim generation")
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect()
+}
+
+/// The number of constraints of `horsies_tasks` named [`CLAIM_GENERATION_RULE`].
+async fn claim_generation_rules(database: &MigrationTestDatabase) -> i64 {
+    database
+        .client()
+        .query_one(
+            "SELECT count(*) FROM pg_constraint
+             WHERE conrelid = 'horsies_tasks'::regclass AND conname = $1",
+            &[&CLAIM_GENERATION_RULE],
+        )
+        .await
+        .expect("read the constraints of horsies_tasks")
+        .get(0)
+}
+
+/// A database at migration 1004 that holds a CLAIMED row and a RUNNING row
+/// with no claim generation stops at migration 1005:
+/// - the install fails with SQLSTATE 23514 and a message that names the
+///   table, the rule, the row count and the query that finds the rows;
+/// - migration 1005 has no bookkeeping row, the CHECK does not exist, and
+///   the rows do not change;
+/// - after the rows get a claim generation, the install applies migrations
+///   1005 and 1006.
+#[tokio::test]
+async fn a_1004_database_with_claimed_rows_with_no_claim_generation_stops_at_1005() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install_first_migrations(ClientFamily::Rust, claim_generation_by_status_position())
+        .await;
+    database.execute(ROWS_OF_A_0_8_0_DATABASE).await;
+    database.execute(ROWS_WITH_NO_CLAIM_GENERATION).await;
+
+    let stopped = database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await;
+
+    let refusal = match stopped {
+        Err(SchemaInstallError::Statement(StatementFailure::StatementRefused {
+            statement,
+            cause,
+        })) => {
+            assert_eq!(statement, "migration_1005_claim_generation_by_status");
+            cause.server_error().clone()
+        }
+        other => panic!("expected the refusal of migration 1005, got {other:?}"),
+    };
+    assert_eq!(refusal.code(), &SqlState::CHECK_VIOLATION, "{refusal}");
+    for fragment in [
+        "horsies_tasks holds CLAIMED or RUNNING rows with no claim generation",
+        CLAIM_GENERATION_RULE,
+        "Rows: 2.",
+        "SELECT id, status, claimed_by_worker_id FROM horsies_tasks \
+         WHERE status IN ('CLAIMED', 'RUNNING') AND claimed_at IS NULL.",
+    ] {
+        assert!(
+            refusal.message().contains(fragment),
+            "{fragment}: {refusal}"
+        );
+    }
+    assert_eq!(
+        bookkeeping_rows(&database).await,
+        chain_rows(claim_generation_by_status_position())
+    );
+    assert_eq!(claim_generation_rules(&database).await, 0);
+    assert_eq!(
+        rows_with_no_claim_generation(&database).await,
+        vec![("CLAIMED".to_owned(), true), ("RUNNING".to_owned(), true)]
+    );
+
+    database
+        .execute(
+            "UPDATE horsies_tasks SET claimed_at = now()
+             WHERE status IN ('CLAIMED', 'RUNNING') AND claimed_at IS NULL",
+        )
+        .await;
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migrations 1005 and 1006 after each row holds a claim generation");
+    assert_eq!(
+        bookkeeping_rows(&database).await,
+        chain_rows(embedded_migrations().len())
+    );
+    assert_eq!(claim_generation_rules(&database).await, 1);
+    database.drop().await;
+}
+
+/// A database at migration 1004 whose `horsies_tasks` holds a constraint of
+/// the name of the rule of migration 1005 with another predicate gets the
+/// rule of migration 1005: the install drops the old constraint and adds
+/// the CHECK, validated, which refuses a RUNNING row with no claim
+/// generation.
+#[tokio::test]
+async fn a_1004_database_with_another_constraint_of_the_rule_name_gets_the_rule_of_1005() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install_first_migrations(ClientFamily::Rust, claim_generation_by_status_position())
+        .await;
+    database.execute(ROWS_OF_A_0_8_0_DATABASE).await;
+    database
+        .execute(&format!(
+            "ALTER TABLE horsies_tasks ADD CONSTRAINT {CLAIM_GENERATION_RULE} CHECK (TRUE)"
+        ))
+        .await;
+
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migrations 1005 and 1006 over a constraint of the same name");
+
+    let rule = database
+        .client()
+        .query_one(
+            "SELECT convalidated, pg_get_constraintdef(oid) FROM pg_constraint
+             WHERE conrelid = 'horsies_tasks'::regclass AND conname = $1",
+            &[&CLAIM_GENERATION_RULE],
+        )
+        .await
+        .expect("read the rule");
+    let (validated, definition): (bool, String) = (rule.get(0), rule.get(1));
+    assert!(validated);
+    for fragment in ["'CLAIMED'", "'RUNNING'", "claimed_at IS NOT NULL"] {
+        assert!(definition.contains(fragment), "{fragment}: {definition}");
+    }
+    let cleared = database
+        .client()
+        .execute(
+            "UPDATE horsies_tasks SET claimed_at = NULL
+             WHERE id = '00000000-0000-4000-8000-00000000a003'",
+            &[],
+        )
+        .await
+        .expect_err("the rule refuses a RUNNING row with no claim generation");
+    let refusal = cleared
+        .as_db_error()
+        .unwrap_or_else(|| panic!("a server error: {cleared}"));
+    assert_eq!(refusal.code(), &SqlState::CHECK_VIOLATION, "{refusal}");
+    assert_eq!(
+        refusal.constraint(),
+        Some(CLAIM_GENERATION_RULE),
+        "{refusal}"
+    );
+    database.drop().await;
+}
+
+/// A database that applied another text of migration 1001 (its stored
+/// checksum differs from this build's) is refused as edited, and nothing is
+/// written.
+#[tokio::test]
+async fn a_changed_text_of_the_lifecycle_record_is_refused_as_edited() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install into an empty database");
+    database
+        .client()
+        .execute(
+            "UPDATE horsies_migrations SET checksum = '\\x01'::bytea WHERE version = $1",
+            &[&LIFECYCLE_RECORD_MIGRATION_VERSION],
+        )
+        .await
+        .expect("change the stored checksum");
+    let before = bookkeeping_rows(&database).await;
+
+    let refused = database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await;
+
+    match refused {
+        Err(SchemaInstallError::Refused(SchemaRefusal::MigrationEdited {
+            version,
+            stored_checksum,
+            own_checksum,
+        })) => {
+            assert_eq!(version, LIFECYCLE_RECORD_MIGRATION_VERSION);
+            assert_eq!(stored_checksum, vec![1_u8]);
+            assert_eq!(own_checksum, embedded_migrations()[1].checksum.to_vec());
+        }
+        other => panic!("expected an edited-migration refusal, got {other:?}"),
+    }
+    assert_eq!(bookkeeping_rows(&database).await, before);
+    database.drop().await;
+}
+
+// ---- Migration 1006: the client family TYPESCRIPT ----
+
+/// The CHECK `horsies_client_family_family_known` from migration 1006 on,
+/// as `pg_get_constraintdef` gives it.
+const FAMILY_CHECK_FROM_1006: &str =
+    "CHECK ((family = ANY (ARRAY['PYTHON'::text, 'RUST'::text, 'TYPESCRIPT'::text])))";
+
+/// Each CHECK named `horsies_client_family_family_known` on
+/// `horsies_client_family`: whether it is validated, and its definition.
+async fn family_checks(database: &MigrationTestDatabase) -> Vec<(bool, String)> {
+    database
+        .client()
+        .query(
+            "SELECT convalidated, pg_get_constraintdef(oid) FROM pg_constraint
+             WHERE conrelid = 'horsies_client_family'::regclass
+               AND conname = 'horsies_client_family_family_known'",
+            &[],
+        )
+        .await
+        .expect("read the family check")
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect()
+}
+
+/// Writes `family` into the one family row. `Err` holds the SQLSTATE of a
+/// refused write.
+async fn write_family(database: &MigrationTestDatabase, family: &str) -> Result<(), SqlState> {
+    match database
+        .client()
+        .execute("UPDATE horsies_client_family SET family = $1", &[&family])
+        .await
+    {
+        Ok(1) => Ok(()),
+        Ok(rows) => {
+            panic!("the family table holds one row; the write of {family:?} changed {rows}")
+        }
+        Err(error) => match error.code() {
+            Some(code) => Err(code.clone()),
+            None => panic!("write the family {family:?}: {error}"),
+        },
+    }
+}
+
+/// A database before migration 1006, of the family `PYTHON` and of the
+/// family `RUST`, gets migration 1006 from the install:
+/// - before it, the CHECK refuses `TYPESCRIPT` (23514);
+/// - after it, the family row keeps its value, and the CHECK exists once,
+///   validated, with the predicate of migration 1006: it accepts
+///   `TYPESCRIPT` and refuses `GO` and `typescript` (23514);
+/// - an install again changes nothing.
+#[tokio::test]
+async fn a_database_before_1006_of_each_family_gets_the_typescript_family_and_keeps_its_row() {
+    for own in [ClientFamily::Python, ClientFamily::Rust] {
+        let database = MigrationTestDatabase::create().await;
+        database
+            .install_first_migrations(own, typescript_client_family_position())
+            .await;
+        assert_eq!(
+            write_family(&database, "TYPESCRIPT").await,
+            Err(SqlState::CHECK_VIOLATION),
+            "{own:?}"
+        );
+
+        database
+            .install(own, InstallLockPlan::fleet())
+            .await
+            .expect("apply migration 1006");
+
+        let installed = bookkeeping_rows(&database).await;
+        assert_eq!(installed, chain_rows(embedded_migrations().len()));
+        assert_eq!(family_row(&database).await.as_deref(), Some(own.as_str()));
+        assert_eq!(
+            family_checks(&database).await,
+            vec![(true, FAMILY_CHECK_FROM_1006.to_owned())]
+        );
+        assert_eq!(write_family(&database, "TYPESCRIPT").await, Ok(()));
+        for refused in ["GO", "typescript"] {
+            assert_eq!(
+                write_family(&database, refused).await,
+                Err(SqlState::CHECK_VIOLATION),
+                "{refused:?}"
+            );
+        }
+        assert_eq!(write_family(&database, own.as_str()).await, Ok(()));
+
+        database
+            .install(own, InstallLockPlan::fleet())
+            .await
+            .expect("install again");
+        assert_eq!(bookkeeping_rows(&database).await, installed);
+        assert_eq!(family_row(&database).await.as_deref(), Some(own.as_str()));
+        database.drop().await;
+    }
+}
+
+/// Migration 1006 leaves the CHECK `horsies_client_family_family_known`
+/// with its own predicate whatever the database holds before it: no CHECK
+/// of that name (dropped out of band), or a CHECK of that name with another
+/// predicate.
+#[tokio::test]
+async fn migration_1006_gives_the_family_check_its_predicate_whatever_the_database_held() {
+    let changes = [
+        "ALTER TABLE horsies_client_family DROP CONSTRAINT horsies_client_family_family_known",
+        "ALTER TABLE horsies_client_family
+             DROP CONSTRAINT horsies_client_family_family_known,
+             ADD CONSTRAINT horsies_client_family_family_known CHECK (family IN ('RUST', 'GO'))",
+    ];
+    for change in changes {
+        let database = MigrationTestDatabase::create().await;
+        database
+            .install_first_migrations(ClientFamily::Rust, typescript_client_family_position())
+            .await;
+        database.execute(change).await;
+
+        database
+            .install(ClientFamily::Rust, InstallLockPlan::fleet())
+            .await
+            .expect("apply migration 1006");
+
+        assert_eq!(
+            family_checks(&database).await,
+            vec![(true, FAMILY_CHECK_FROM_1006.to_owned())],
+            "{change}"
+        );
+        assert_eq!(family_row(&database).await.as_deref(), Some("RUST"));
+        database.drop().await;
+    }
+}
+
+/// A database whose family row holds `TYPESCRIPT` is of the TypeScript
+/// client: the install of a Python and of a Rust client is refused with the
+/// stored family before any write, and the install of a TypeScript client
+/// finds it ready and writes nothing.
+#[tokio::test]
+async fn a_typescript_database_refuses_the_install_of_a_python_and_a_rust_client() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install into an empty database");
+    assert_eq!(write_family(&database, "TYPESCRIPT").await, Ok(()));
+    let before = installed_on(&database).await;
+
+    for own in [ClientFamily::Python, ClientFamily::Rust] {
+        let refused = database.install(own, InstallLockPlan::fleet()).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(SchemaInstallError::OtherFamily {
+                    stored: ClientFamily::TypeScript,
+                    own: refused_own,
+                }) if *refused_own == own
+            ),
+            "{refused:?}"
+        );
+        let message = BrokerError::from(refused.unwrap_err()).to_string();
+        assert!(message.contains("the TYPESCRIPT client"), "{message}");
+    }
+    database
+        .install(ClientFamily::TypeScript, InstallLockPlan::fleet())
+        .await
+        .expect("a TypeScript client installs into a TypeScript database");
+
+    assert_eq!(family_row(&database).await.as_deref(), Some("TYPESCRIPT"));
+    assert_eq!(installed_on(&database).await, before);
+    database.drop().await;
+}
+
+/// A database that holds the whole chain with no family row gets the row
+/// `TYPESCRIPT` from the install of a TypeScript client (Python
+/// `CompleteInstall`), and no migration runs again.
+#[tokio::test]
+async fn a_current_database_with_no_family_row_gets_the_typescript_row() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install into an empty database");
+    database.execute("DELETE FROM horsies_client_family").await;
+    let before = installed_on(&database).await;
+
+    database
+        .install(ClientFamily::TypeScript, InstallLockPlan::fleet())
+        .await
+        .expect("record the family");
+
+    assert_eq!(family_row(&database).await.as_deref(), Some("TYPESCRIPT"));
+    assert_eq!(installed_on(&database).await, before);
     database.drop().await;
 }

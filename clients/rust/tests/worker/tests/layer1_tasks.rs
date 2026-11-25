@@ -20,7 +20,7 @@ use horsies::{
 use horsies_test_support::{poll, rows};
 use horsies_test_worker::harness::{failed_code, outcome, succeeded, within, Suite};
 use horsies_test_worker::instance::{Instance, Profile};
-use horsies_test_worker::tasks::{basic, custom, retry};
+use horsies_test_worker::tasks::{basic, custom, fencing, retry};
 use serial_test::serial;
 use uuid::Uuid;
 
@@ -1148,4 +1148,86 @@ async fn test_send_suppressed() {
         rows::read_tasks_named(&client, "e2e_simple").await,
         Vec::new()
     );
+}
+
+/// The fencing token of an isolated run: the task id of the run and the
+/// value 1 on the first attempt, for an async body and for a blocking body.
+#[tokio::test]
+#[serial]
+async fn test_fencing_token_of_isolated_runs() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let async_run = suite
+        .function(fencing::fence_isolated_async::handle)
+        .send(())
+        .await
+        .expect("send e2e_fence_isolated_async");
+    let blocking_run = suite
+        .function(fencing::fence_isolated_blocking::handle)
+        .send(())
+        .await
+        .expect("send e2e_fence_isolated_blocking");
+    assert_eq!(
+        succeeded(&async_run, RESULT_WAIT).await,
+        fencing::Fence {
+            task_id: async_run.task_id().to_string(),
+            value: 1,
+        }
+    );
+    assert_eq!(
+        succeeded(&blocking_run, RESULT_WAIT).await,
+        fencing::Fence {
+            task_id: blocking_run.task_id().to_string(),
+            value: 1,
+        }
+    );
+}
+
+/// Two reads in one attempt, and a read in work that the body started with
+/// `TaskRuntime::spawn`, give the same token.
+#[tokio::test]
+#[serial]
+async fn test_fencing_token_is_the_same_within_one_attempt() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(fencing::fence_reads_twice::handle)
+        .send(())
+        .await
+        .expect("send e2e_fence_reads_twice");
+    let expected = fencing::Fence {
+        task_id: handle.task_id().to_string(),
+        value: 1,
+    };
+    assert_eq!(
+        succeeded(&handle, RESULT_WAIT).await,
+        vec![expected.clone(), expected.clone(), expected]
+    );
+}
+
+/// The retry of a task runs with a greater token: the second run, which
+/// the marker files count, reads the value 2 and the same task id.
+#[tokio::test]
+#[serial]
+async fn test_fencing_token_rises_on_retry() {
+    let suite = Suite::start(BIN, Instance::Default).await;
+    let _worker = suite.worker(Profile::Isolated1).await;
+    let handle = suite
+        .function(fencing::fence_retry::handle)
+        .send(fencing::fence_retry::Input {
+            marker: Uuid::new_v4().simple().to_string(),
+        })
+        .await
+        .expect("send e2e_fence_retry");
+    let run = succeeded(&handle, RESULT_WAIT).await;
+    assert_eq!(run.counted_run, 2);
+    assert_eq!(
+        run.fence,
+        fencing::Fence {
+            task_id: handle.task_id().to_string(),
+            value: 2,
+        }
+    );
+    let info = handle.info(ALL_PARTS).await.expect("read the info");
+    assert_eq!((info.status, info.retry_count), (TaskStatus::Completed, 1));
 }

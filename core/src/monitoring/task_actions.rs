@@ -263,9 +263,12 @@ fn stored_data_invalid(task_id: Uuid, cause: OutcomeDecodeError) -> TaskActionEr
 /// `horsies.monitoring.task_actions.cancel_task`).
 ///
 /// PENDING and CLAIMED are eligible. RUNNING is eligible only when
-/// `include_running` is true. A workflow task, live or finished, is
-/// `TaskIsWorkflowTask`; a finished plain task is `TaskNotCancellable` with
-/// its terminal status; a task held nowhere is `TaskNotFound`.
+/// `include_running` is true: the same statement records the running attempt
+/// with the outcome `CANCELLED`, and the worker that runs it gets the cancel
+/// notice and gives the cancel to the task code. A workflow task, live or
+/// finished, is `TaskIsWorkflowTask`; a finished plain task is
+/// `TaskNotCancellable` with its terminal status; a task held nowhere is
+/// `TaskNotFound`.
 ///
 /// Panics: as [`PostgresBroker::cancel_task`], on an outcome that
 /// contradicts the function.

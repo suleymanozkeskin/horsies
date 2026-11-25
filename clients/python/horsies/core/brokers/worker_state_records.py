@@ -25,6 +25,8 @@ from horsies._core import (
     NoneDueRecord,
     OldestWaitingRecord,
     PendingStreamRecord,
+    ProfileNamedRecord,
+    ProfileNotRecordedRecord,
     ResourceShortageRecord,
     SlotsDownRecord,
     StreamCoverageRecord,
@@ -61,8 +63,11 @@ from horsies.core.models.health import (
     ClassBudget,
     ClassBudgets,
     DownSlot,
+    ProfileNamed,
+    ProfileNotRecorded,
     SlotHealth,
     SlotsDown,
+    SnapshotProfile,
     WorkerStateSnapshot,
 )
 from horsies.core.models.tasks import Execution
@@ -97,6 +102,18 @@ def _slot_health(record: AllSlotsServingRecord | SlotsDownRecord) -> SlotHealth:
             return AllSlotsServing()
         case SlotsDownRecord(slots=slots):
             return SlotsDown(tuple(_down_slot(slot) for slot in slots))
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _snapshot_profile(
+    record: ProfileNamedRecord | ProfileNotRecordedRecord,
+) -> SnapshotProfile:
+    match record:
+        case ProfileNamedRecord(name=name):
+            return ProfileNamed(name=name)
+        case ProfileNotRecordedRecord():
+            return ProfileNotRecorded()
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -145,6 +162,7 @@ def worker_state_snapshot(record: WorkerStateRecord) -> WorkerStateSnapshot:
         class_capacity=ClassBudgets(
             tuple(_class_budget(budget) for budget in record.class_capacity),
         ),
+        profile=_snapshot_profile(record.profile),
     )
 
 

@@ -1,9 +1,10 @@
 //! Tests of the frame codec: byte examples of the Python codec, pinned
-//! version-3 metadata, every refusal, and the read buffer.
+//! version-4 metadata, every refusal, and the read buffer.
 
 mod field_checks;
 mod frame_steps;
 mod python_vectors;
+mod version_four;
 mod version_three;
 
 use std::num::NonZeroU64;
@@ -347,13 +348,13 @@ fn a_version_one_init_frame_is_a_protocol_mismatch() {
 #[test]
 fn another_version_is_named_before_the_fields_are_read() {
     let init = framed(
-        r#"{"kind":"init","protocol":4,"a_field_of_version_4":true}"#,
+        r#"{"kind":"init","protocol":5,"a_field_of_version_5":true}"#,
         b"",
     );
     assert_eq!(
         decode_parent_bytes(&init),
         Err(ParentFrameRefusal::ProtocolMismatch(ProtocolMismatch {
-            received: ReceivedProtocol::Named(4),
+            received: ReceivedProtocol::Named(5),
         })),
     );
     let ready = framed(r#"{"kind":"ready","protocol":1,"pid":5}"#, b"");
@@ -392,7 +393,7 @@ fn the_ready_frame_names_the_protocol() {
             rss: rss(27.25),
         }),
         &framed(
-            r#"{"kind":"ready","protocol":3,"pid":4242,"rss_mb":27.25}"#,
+            r#"{"kind":"ready","protocol":4,"pid":4242,"rss_mb":27.25}"#,
             b"",
         ),
     );
@@ -411,7 +412,7 @@ fn the_init_frame_of_a_rust_child() {
         }),
         &framed(
             concat!(
-                r#"{"kind":"init","protocol":3,"program":{"kind":"rust"},"log_level":"info","#,
+                r#"{"kind":"init","protocol":4,"program":{"kind":"rust"},"log_level":"info","#,
                 r#""database_url":"postgresql://u@h/db","#,
                 r#""connection":{"tcp_keepalives":{"kind":"on","idle_seconds":30,"#,
                 r#""interval_seconds":10,"probes":3},"tcp_user_timeout":{"kind":"after","#,
@@ -449,7 +450,7 @@ fn the_init_frame_of_a_python_child() {
         }),
         &framed(
             concat!(
-                r#"{"kind":"init","protocol":3,"program":{"kind":"python","#,
+                r#"{"kind":"init","protocol":4,"program":{"kind":"python","#,
                 r#""app_locator":"app:app","imports":["app.tasks"],"sys_path_roots":["/srv"],"#,
                 r#""parent_sys_path":["/srv","/usr/lib"],"parent_argv":["horsies","worker"]},"#,
                 r#""log_level":"warning","database_url":"postgresql://u@h/db","#,
@@ -494,7 +495,7 @@ fn the_init_frame_carries_keepalives_off_and_transaction_mode() {
         &ParentFrame::Init(init_with(transaction_mode_connection())),
         &framed(
             concat!(
-                r#"{"kind":"init","protocol":3,"program":{"kind":"rust"},"log_level":"info","#,
+                r#"{"kind":"init","protocol":4,"program":{"kind":"rust"},"log_level":"info","#,
                 r#""database_url":"postgresql://u@pooler/db","#,
                 r#""connection":{"tcp_keepalives":{"kind":"off"},"#,
                 r#""tcp_user_timeout":{"kind":"system_default"},"#,
@@ -545,7 +546,7 @@ fn init_bytes_with_connection(connection: &str) -> Vec<u8> {
     framed(
         &format!(
             concat!(
-                r#"{{"kind":"init","protocol":3,"program":{{"kind":"rust"}},"#,
+                r#"{{"kind":"init","protocol":4,"program":{{"kind":"rust"}},"#,
                 r#""log_level":"info","database_url":"postgresql://u@h/db","#,
                 r#""connection":{},"process_name":"c","#,
                 r#""child_kind":{{"kind":"isolated","pool":{{"min_size":0,"max_size":1,"#,
@@ -591,7 +592,7 @@ fn a_keepalive_value_outside_its_bounds_is_refused() {
 fn an_init_frame_without_its_connection_settings_is_refused() {
     let init = framed(
         concat!(
-            r#"{"kind":"init","protocol":3,"program":{"kind":"rust"},"log_level":"info","#,
+            r#"{"kind":"init","protocol":4,"program":{"kind":"rust"},"log_level":"info","#,
             r#""database_url":"postgresql://u@h/db","process_name":"c","#,
             r#""child_kind":{"kind":"isolated","pool":{"min_size":0,"max_size":1,"#,
             r#""check":true},"task_send_pool":2}}"#,
@@ -1419,7 +1420,7 @@ fn seat_work_outside_its_bounds_is_refused() {
 #[test]
 fn a_negative_or_fractional_number_is_refused() {
     let negative = framed(
-        r#"{"kind":"ready","protocol":3,"pid":-1,"rss_mb":null}"#,
+        r#"{"kind":"ready","protocol":4,"pid":-1,"rss_mb":null}"#,
         b"",
     );
     assert_eq!(
@@ -1429,7 +1430,7 @@ fn a_negative_or_fractional_number_is_refused() {
         },
     );
     let fraction = framed(
-        r#"{"kind":"ready","protocol":3,"pid":1.5,"rss_mb":null}"#,
+        r#"{"kind":"ready","protocol":4,"pid":1.5,"rss_mb":null}"#,
         b"",
     );
     assert_eq!(
@@ -1440,7 +1441,7 @@ fn a_negative_or_fractional_number_is_refused() {
         },
     );
     let negative_rss = framed(
-        r#"{"kind":"ready","protocol":3,"pid":1,"rss_mb":-1.0}"#,
+        r#"{"kind":"ready","protocol":4,"pid":1,"rss_mb":-1.0}"#,
         b"",
     );
     assert_eq!(

@@ -81,7 +81,7 @@ The Python client sets the window on the broker ([Make a Send Repeatable](/horsi
 
 The command compared on a repeat includes the task name, queue, priority, kwargs, `good_until`, delay and task options. A repeat with changed kwargs is a conflict, not a replay.
 
-A workflow start has no idempotency key. A start with a stable workflow id is best-effort idempotent by id and does not compare the payload. See [Workflow API](/horsies/concepts/workflows/workflow-api/) (Python).
+A workflow start has no idempotency key. A start with a fixed workflow id compares its start command with the stored one: the same command returns the existing workflow, and another command is a conflict (`WORKFLOW_COMMAND_CONFLICT`). The start command holds the workflow name, the nodes and their kwargs, queues, priorities and task options. See [Start a Workflow Once per Entity](/horsies/guides/start-workflow-once/).
 
 ## Things to Avoid
 

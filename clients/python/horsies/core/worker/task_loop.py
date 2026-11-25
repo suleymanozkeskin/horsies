@@ -27,7 +27,7 @@ import time
 from collections.abc import Coroutine, Set
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Final, TypeVar, assert_never
+from typing import Any, Final, Protocol, TypeVar, assert_never
 
 from horsies.core.logging import get_logger
 from horsies.core.models.boot_failure import (
@@ -189,6 +189,16 @@ class _CloseStep(Enum):
     PAST_DEADLINE = 'past_deadline'
 
 
+class BodyTaskWatch(Protocol):
+    """Who holds the asyncio task of the body of an isolated run, to give it
+    an operator cancel from another thread (``run_cancel.RunCancel``)."""
+
+    def watch_body_task(self, loop: asyncio.AbstractEventLoop, task: asyncio.Task[Any]) -> None:
+        """``task`` runs the body on ``loop``; the calling thread runs the
+        loop next."""
+        ...
+
+
 class TaskLoop:
     """One event loop for every async task of one child process."""
 
@@ -251,6 +261,37 @@ class TaskLoop:
             case LoopClosed():
                 coroutine.close()
                 raise AssertionError('TaskLoop.run was called after close')
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def run_watched(self, coroutine: Coroutine[Any, Any, R], watch: BodyTaskWatch) -> R:
+        """``run``, with the asyncio task of ``coroutine`` given to ``watch``
+        before the loop runs it, so that another thread can cancel it.
+
+        The task is created on the open loop, in a copy of the caller's
+        context, as ``run`` creates it. Its value comes back, and its
+        exception propagates unchanged; a cancel that leaves the coroutine
+        raises ``asyncio.CancelledError`` here. A call while an event loop
+        runs on this thread, or while the loop is not open, is a defect in
+        the caller: the coroutine is closed unrun and ``AssertionError`` is
+        raised.
+        """
+        if in_running_event_loop():
+            coroutine.close()
+            raise AssertionError(
+                'TaskLoop.run_watched was called while an event loop runs on this thread',
+            )
+        match self._state:
+            case LoopOpen(loop=loop):
+                task = loop.create_task(coroutine)
+                watch.watch_body_task(loop, task)
+                return loop.run_until_complete(task)
+            case LoopNotCreated():
+                coroutine.close()
+                raise AssertionError('TaskLoop.run_watched was called before open')
+            case LoopClosed():
+                coroutine.close()
+                raise AssertionError('TaskLoop.run_watched was called after close')
             case _ as unreachable:
                 assert_never(unreachable)
 

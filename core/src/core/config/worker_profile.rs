@@ -1098,8 +1098,9 @@ fn profile_error(message: String, notes: &[String], help: String) -> HorsiesErro
 /// A name that a `--profile` argument carries as it is: 1 to
 /// [`PROFILE_NAME_MAX_LENGTH`] characters, letters, digits, `_`, `.` and
 /// `-`, and the first is not `.` or `-`, so the name cannot read as a
-/// command-line option.
-fn is_valid_profile_name(name: &str) -> bool {
+/// command-line option. The CHECK `horsies_worker_states_profile_name_shape`
+/// (`core/migrations/1004_worker_profile_name.sql`) holds the same rule.
+pub(crate) fn is_valid_profile_name(name: &str) -> bool {
     let mut characters = name.chars();
     let first_is_valid = characters
         .next()

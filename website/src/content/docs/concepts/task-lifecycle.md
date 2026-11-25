@@ -2,7 +2,7 @@
 title: Task Lifecycle
 section: shared
 summary: Task states and transitions from submission to completion.
-related: [result-handling, ../../workers/heartbeats-recovery, ../../tasks/retry-policy]
+related: [result-handling, fencing-token, ../../workers/heartbeats-recovery, ../../tasks/retry-policy]
 tags: [concepts, tasks, states]
 ---
 
@@ -16,7 +16,7 @@ tags: [concepts, tasks, states]
 | `RUNNING` | Task is actively executing in a worker process |
 | `COMPLETED` | Task finished successfully |
 | `FAILED` | Task failed (error returned or exception) |
-| `CANCELLED` | Task was cancelled before execution |
+| `CANCELLED` | An operator cancelled the task: before it ran, or while it ran when the cancel asked for it |
 | `EXPIRED` | Task's `good_until` deadline passed before execution started |
 
 **Terminal states:** `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED`.
@@ -70,6 +70,9 @@ The Python client checks a status with `is_terminal` and holds the terminal stat
               └──────────────────────────────┘
 ```
 
+Not drawn: an operator cancel moves a `PENDING` or `CLAIMED` task to
+`CANCELLED`, and a `RUNNING` task when the cancel asks for it.
+
 ## Transition Details
 
 ### PENDING → CLAIMED
@@ -106,11 +109,28 @@ The Python client checks a status with `is_terminal` and holds the terminal stat
 - Worker/process failures synthesize a `TaskResult(err=TaskError(...))` where
   possible so downstream workflow completion and capacity notifications still run
 
+### PENDING or CLAIMED → CANCELLED
+
+- An operator cancel: `cancel_task`, or `POST /api/tasks/{id}/cancel`
+- The task moves to history with the error code `TASK_CANCELLED`
+- No attempt row is written: no task code ran. The child of a claimed task
+  stops at its start write with `CLAIM_LOST`
+
+### RUNNING → CANCELLED
+
+- An operator cancel with `include_running`
+- One statement writes the attempt row with outcome `CANCELLED` and moves the
+  task to history
+- The worker that holds the run gives the cancel to the task code. The code
+  stops at its next check; what it returns after the cancel is dropped
+- See [Action Semantics](/horsies/monitoring/action-semantics/#cancelling-a-running-task)
+
 ### RUNNING → PENDING (retry)
 
 - Only if retry policy configured and retries remaining
 - Sets `status=PENDING`, increments `retry_count`
 - Sets `next_retry_at` based on retry policy intervals
+- A RUNNING row goes back to PENDING only with `retry_count + 1`, so the next attempt that runs has a greater [fencing token](/horsies/concepts/fencing-token/)
 
 ### PENDING → EXPIRED
 

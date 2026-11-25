@@ -89,8 +89,10 @@ pub enum TimeoutRefusal {
     AboveMaximum,
 }
 
-/// The cancel grace a readable row stores. Only a `SHARED_ASYNC` row needs
-/// one; the dispatch route refuses such a row without a usable grace.
+/// The cancel grace a readable row stores. A `SHARED_ASYNC` row needs one;
+/// the dispatch route refuses such a row without a usable grace. An
+/// `ISOLATED` row may store one: the kill of its child that long after an
+/// operator cancel; the route refuses a grace outside the bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoredCancelGrace {
     /// No `cancel_grace_ms` key, or `null`.
@@ -302,8 +304,8 @@ fn read_timeout(raw: Option<&RawValue>) -> StoredTimeout {
 }
 
 /// Check the stored `cancel_grace_ms` against the enqueue rule of a
-/// `SHARED_ASYNC` row (Python `shared_async_grace_error`). An int of any
-/// size is compared with the bounds.
+/// `SHARED_ASYNC` or an `ISOLATED` row (Python `shared_async_grace_error`).
+/// An int of any size is compared with the bounds.
 fn read_cancel_grace(raw: Option<&RawValue>) -> StoredCancelGrace {
     match stored_int(raw) {
         StoredInt::Absent => StoredCancelGrace::NotStored,

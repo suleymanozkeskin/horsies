@@ -284,8 +284,8 @@ fn an_instrumented_function_of_an_async_body_nests_under_the_attempt_span() {
     assert_eq!(reserve.parent_span_id, attempt.span_context.span_id());
 }
 
-/// An error, a panic and a run past its deadline set the status ERROR
-/// with `error.type` the code; a returned value sets OK.
+/// An error, a panic, a run past its deadline and a cancelled run set the
+/// status ERROR with `error.type` the code; a returned value sets OK.
 #[test]
 fn the_end_of_the_body_sets_the_status_of_the_attempt_span() {
     let declined = TaskErrorCode::User(UserCode::parse("DECLINED").expect("a free user code"));
@@ -306,6 +306,7 @@ fn the_end_of_the_body_sets_the_status_of_the_attempt_span() {
             Some("UNHANDLED_EXCEPTION"),
         ),
         (BodyOutcome::TimedOut, Some("TASK_TIMEOUT")),
+        (BodyOutcome::Cancelled, Some("TASK_CANCELLED")),
         (BodyOutcome::Returned, None),
     ] {
         let spans = record_attempt(&run_with(Uuid::new_v4(), &carrier), &end, |span| {

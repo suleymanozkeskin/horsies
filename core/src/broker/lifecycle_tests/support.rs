@@ -535,10 +535,11 @@ pub(super) async fn archived_attempts(pool: &TestPool, task_id: Uuid) -> Vec<Att
         .collect()
 }
 
-/// The attempts that the history row archived, with every field. The
-/// baseline stores no codec or content type: archive format version 1
-/// implies the json-utf8 codec and the application/json content type, as in
-/// the production read (`core/history/reads/detail.rs`).
+/// The attempts that the history row archived, with every field. History
+/// stores no codec or content type: each attempt archive version (1, and 2
+/// from migration 1001) implies the json-utf8 codec and the
+/// application/json content type, as in the production read
+/// (`core/history/reads/detail.rs`).
 pub(super) async fn archived_attempt_records(pool: &TestPool, task_id: Uuid) -> Vec<AttemptRecord> {
     let (version, payload, digest): (i16, Vec<u8>, Vec<u8>) = sql::query_as(
         "SELECT attempt_archive_version, attempt_snapshot, attempt_snapshot_digest

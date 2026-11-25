@@ -1375,7 +1375,8 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
             .await
             .unwrap();
     let mut attempt_rows: serde_json::Value = serde_json::from_slice(&attempt_payload).unwrap();
-    attempt_rows[0][1] = serde_json::json!("FOREIGN_OUTCOME");
+    // Archive version 2: the outcome of the first attempt of `[attempts, open]`.
+    attempt_rows[0][0][1] = serde_json::json!("FOREIGN_OUTCOME");
     let corrupt_attempt_payload = serde_json::to_vec(&attempt_rows).unwrap();
     sql::query(
         "UPDATE horsies_task_history

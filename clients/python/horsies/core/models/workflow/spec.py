@@ -23,10 +23,13 @@ from typing import (
 
 
 from horsies.core.codec.kwargs import (
+    NoRuntimeParameter,
+    TakesRuntime,
     build_with_engine_parameters,
     resolve_build_with_hints,
     resolve_hints_and_sig,
     resolve_producer_kwarg_binding,
+    task_runtime_parameter,
     underlying_task_fn,
 )
 from horsies.core.codec.typed import (
@@ -1383,7 +1386,15 @@ class WorkflowSpec(Generic[OutT]):
             # Get the function to inspect (TaskNode vs SubWorkflowNode)
             if isinstance(node, TaskNode):
                 fn = node.fn
-                args_provided: list[object] = []
+                # The worker passes the TaskRuntime to the first parameter of
+                # a task that takes it, on each run.
+                match task_runtime_parameter(fn):
+                    case TakesRuntime():
+                        args_provided: list[object] = [object()]
+                    case NoRuntimeParameter():
+                        args_provided = []
+                    case _ as unreachable:
+                        assert_never(unreachable)
                 injected_kwargs: set[str] = set()
             else:
                 fn = getattr(
@@ -1872,9 +1883,12 @@ class WorkflowSpec(Generic[OutT]):
     ) -> 'WorkflowStartResult[WorkflowHandle[OutT]]':
         """Retry a failed workflow start using the stored workflow_id.
 
-        Best-effort idempotent by workflow_id (not payload-verified).
-        Safe for transient DB retries within the same deploy.  Cannot
-        detect spec changes on collision.
+        Idempotent by workflow_id and start command. The retry builds the
+        spec again: a workflow that the failed attempt committed with the
+        same start command comes back as the existing handle. A spec that
+        changed since the failed start (another deploy, a value computed
+        from the clock) is another start command and returns
+        ``WorkflowStartCommandConflict``.
 
         Accepts ``ENQUEUE_FAILED`` and ``ASYNC_CONTEXT`` errors
         (``WorkflowStartRetryable``). The start runs as in ``start()``.

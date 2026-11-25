@@ -28,6 +28,8 @@ from horsies._core import (
     NoneDueRecord,
     OldestWaitingRecord,
     PendingStreamRecord,
+    ProfileNamedRecord,
+    ProfileNotRecordedRecord,
     ResourceShortageRecord,
     SlotsDownRecord,
     StreamCoverageRecord,
@@ -73,7 +75,10 @@ from horsies.core.models.health import (
     ClassBudget,
     ClassBudgets,
     DownSlot,
+    ProfileNamed,
+    ProfileNotRecorded,
     SlotsDown,
+    SnapshotProfile,
     WorkerPong,
     WorkerStateSnapshot,
 )
@@ -111,7 +116,14 @@ def _broker_answering(method: str, answer: object) -> PostgresBroker:
     return broker
 
 
-def _state_record(worker_id: str, slot_health: object) -> MagicMock:
+_PROFILE_NAMED_RECORD: Final = _record(ProfileNamedRecord, name='batch')
+
+
+def _state_record(
+    worker_id: str,
+    slot_health: object,
+    profile: object = _PROFILE_NAMED_RECORD,
+) -> MagicMock:
     return _record(
         WorkerStateRecord,
         worker_id=worker_id,
@@ -142,6 +154,7 @@ def _state_record(worker_id: str, slot_health: object) -> MagicMock:
                 serves=['ISOLATED', 'SHARED_ASYNC'],
             ),
         ],
+        profile=profile,
     )
 
 
@@ -168,7 +181,11 @@ _SLOTS_DOWN_RECORD: Final = _record(
 )
 
 
-def _snapshot(worker_id: str, slot_health: AllSlotsServing | SlotsDown) -> WorkerStateSnapshot:
+def _snapshot(
+    worker_id: str,
+    slot_health: AllSlotsServing | SlotsDown,
+    profile: SnapshotProfile = ProfileNamed(name='batch'),
+) -> WorkerStateSnapshot:
     return WorkerStateSnapshot(
         worker_id=worker_id,
         snapshot_at=_AT,
@@ -199,6 +216,7 @@ def _snapshot(worker_id: str, slot_health: AllSlotsServing | SlotsDown) -> Worke
                 ),
             ),
         ),
+        profile=profile,
     )
 
 
@@ -241,6 +259,30 @@ class TestWorkerStates:
         assert result == Ok([
             _snapshot('w1', AllSlotsServing()),
             _snapshot('w2', _SLOTS_DOWN),
+        ])
+
+    @pytest.mark.asyncio
+    async def test_each_profile_record_becomes_its_snapshot_profile(self) -> None:
+        broker = _broker_answering(
+            'worker_states_async',
+            _record(
+                WorkerStatesRecord,
+                states=[
+                    _state_record('w1', _record(AllSlotsServingRecord)),
+                    _state_record(
+                        'w2',
+                        _record(AllSlotsServingRecord),
+                        _record(ProfileNotRecordedRecord),
+                    ),
+                ],
+            ),
+        )
+
+        result = await broker.list_worker_states_async()
+
+        assert result == Ok([
+            _snapshot('w1', AllSlotsServing(), ProfileNamed(name='batch')),
+            _snapshot('w2', AllSlotsServing(), ProfileNotRecorded()),
         ])
 
     @pytest.mark.asyncio

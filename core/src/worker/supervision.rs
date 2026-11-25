@@ -284,6 +284,7 @@ mod tests {
                 max_claim_batch: 0,
                 max_claim_per_worker: 1,
             },
+            "default".to_owned(),
             Utc::now(),
             crate::worker::metrics_endpoint::WorkerEndpoint::NoMetricsEndpoint,
             crate::worker::executor::handler_child::HandlerChildView::off(),

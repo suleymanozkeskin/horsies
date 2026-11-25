@@ -165,16 +165,21 @@ def as_utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
-def elapsed_s(start: datetime | None, end: datetime | None) -> int | None:
-    """Whole seconds between ``start`` and ``end``, using now when ``end`` is None."""
+def elapsed_s(start: datetime | None, end: datetime | None) -> float | None:
+    """Seconds between ``start`` and ``end``, using now when ``end`` is None.
+
+    The value is exact to the microsecond, as the duration fields of the
+    monitoring models are, and negative when ``end`` is before ``start``.
+    None when ``start`` is None.
+    """
     if start is None:
         return None
     finish = as_utc(end) if end is not None else datetime.now(timezone.utc)
-    return int((finish - as_utc(start)).total_seconds())
+    return (finish - as_utc(start)).total_seconds()
 
 
-def span_s(start: datetime | None, end: datetime | None, *, live: bool) -> int | None:
-    """Seconds between two timestamps.
+def span_s(start: datetime | None, end: datetime | None, *, live: bool) -> float | None:
+    """Seconds between two timestamps, exact to the microsecond.
 
     When ``end`` is missing, use now only if ``live`` says the span is still
     open; otherwise the span is unknowable and the result is None.

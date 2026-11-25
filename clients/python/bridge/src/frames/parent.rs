@@ -12,9 +12,9 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use horsies_core::events::RunTrace;
 use horsies_core::frame_protocol::{
-    ChildKind, ChildLogLevel, ChildPool, ChildProgram, EventsFrame, InitFrame, IsolatedWork,
-    MalformedFrame, ParentFrame, ParentFrameRefusal, ProtocolMismatch, ReceivedProtocol, RunFrame,
-    SharedRunFrame, SharedWork, StoredOptionsRefusal, PROTOCOL_VERSION,
+    CancelTarget, ChildKind, ChildLogLevel, ChildPool, ChildProgram, EventsFrame, InitFrame,
+    IsolatedWork, MalformedFrame, ParentFrame, ParentFrameRefusal, ProtocolMismatch,
+    ReceivedProtocol, RunFrame, SharedRunFrame, SharedWork, StoredOptionsRefusal, PROTOCOL_VERSION,
 };
 use horsies_core::OrphanSelfHeal;
 use pyo3::prelude::*;
@@ -178,6 +178,31 @@ pub struct SharedRunFrameRecord {
     input: Py<PyString>,
 }
 
+/// The run of an isolated child that a `CancelRunFrame` names, by its task.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+pub struct IsolatedCancelTarget {
+    task_id: Uuid,
+}
+
+/// The run on a seat of a shared child that a `CancelRunFrame` names, by its
+/// dispatch number and its task.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+pub struct SharedCancelTarget {
+    dispatch: u64,
+    task_id: Uuid,
+}
+
+/// An operator cancelled the task of a run: the cancel statement moved its
+/// row to history and recorded the attempt as `CANCELLED`. The child gives
+/// the cancel to the task code and reports the end of the run as cancelled.
+/// A cancel of a run that the child does not run now is ignored: the end of
+/// the run and the cancel can cross.
+#[pyclass(module = "horsies._core", name = "CancelRunFrame", frozen, get_all)]
+pub struct CancelRunFrameRecord {
+    /// `IsolatedCancelTarget` or `SharedCancelTarget`.
+    target: Py<PyAny>,
+}
+
 /// Lifecycle events for a handler child, in the order that the core emitted
 /// them. `events` holds the JSON text of each event; the generated decoder
 /// reads the value that `json.loads` gives for it.
@@ -221,6 +246,7 @@ pub fn parent_frame_object(py: Python<'_>, frame: ParentFrame) -> PyResult<Py<Py
         ParentFrame::Init(init) => init_object(py, init),
         ParentFrame::Run(run) => run_object(py, run),
         ParentFrame::SharedRun(run) => shared_run_object(py, run),
+        ParentFrame::CancelRun(target) => cancel_run_object(py, target),
         ParentFrame::Events(events) => events_object(py, &events),
         ParentFrame::Stop => StopFrameRecord {}.into_py_any(py),
     }
@@ -377,6 +403,18 @@ fn trace_object(py: Python<'_>, trace: RunTrace) -> PyResult<Py<PyAny>> {
     }
 }
 
+fn cancel_run_object(py: Python<'_>, target: CancelTarget) -> PyResult<Py<PyAny>> {
+    let target = match target {
+        CancelTarget::Isolated { task_id } => IsolatedCancelTarget { task_id }.into_py_any(py)?,
+        CancelTarget::Shared(run) => SharedCancelTarget {
+            dispatch: run.dispatch.get(),
+            task_id: run.task_id,
+        }
+        .into_py_any(py)?,
+    };
+    CancelRunFrameRecord { target }.into_py_any(py)
+}
+
 fn events_object(py: Python<'_>, events: &EventsFrame) -> PyResult<Py<PyAny>> {
     EventsFrameRecord {
         events: events.events.events().map(str::to_owned).collect(),
@@ -442,6 +480,9 @@ pub fn add_parent_frame_classes(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<AsyncTaskWork>()?;
     module.add_class::<ThreadTaskWork>()?;
     module.add_class::<SharedRunFrameRecord>()?;
+    module.add_class::<IsolatedCancelTarget>()?;
+    module.add_class::<SharedCancelTarget>()?;
+    module.add_class::<CancelRunFrameRecord>()?;
     module.add_class::<StoredTraceCarrier>()?;
     module.add_class::<EventsFrameRecord>()?;
     module.add_class::<StopFrameRecord>()?;

@@ -29,10 +29,12 @@ __all__ = [
     'AttemptErrorCodeUser',
     'AttemptErrorCodeUserOverBound',
     'AttemptErrorCode',
+    'OperatorCancelEnd',
     'ChildResultCompleted',
     'ChildResultFailed',
     'ChildResultWorkerFailure',
     'ChildResultTimedOut',
+    'ChildResultCancelled',
     'ChildResult',
     'AttemptStartReported',
     'AttemptStartNotReported',
@@ -52,6 +54,7 @@ __all__ = [
     'AttemptRecordClaimReleased',
     'AttemptRecordNothingOwed',
     'AttemptRecordNotHeld',
+    'AttemptRecordRecordedByCancel',
     'AttemptRecordLeftToRecovery',
     'AttemptRecordRetriesExhausted',
     'AttemptRecordWriteFailed',
@@ -81,7 +84,7 @@ __all__ = [
     'decode_event',
 ]
 
-EVENT_CONTRACT_VERSION: Final = 6
+EVENT_CONTRACT_VERSION: Final = 7
 """The version of the event contract that this module reads."""
 
 
@@ -184,6 +187,20 @@ type AttemptErrorCode = (
 """The error code of an attempt that ended with a task error."""
 
 
+type OperatorCancelEnd = Literal['RETURNED_AFTER_SIGNAL', 'DROPPED_AFTER_GRACE', 'BEFORE_BODY']
+"""How a run ended after an operator cancelled its task (`cancel_task` with
+`include_running`). The cancel statement recorded the attempt as
+`CANCELLED` and moved the task to history; what the body returned is
+dropped.
+
+`RETURNED_AFTER_SIGNAL`: The body and its work ended after the cancel signal, within the cancel grace.
+
+`DROPPED_AFTER_GRACE`: A shared async run was alive after the cancel grace: its child sent the second cancel and stopped it.
+
+`BEFORE_BODY`: The cancel came after the start write and before the body started: the body did not run.
+"""
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ChildResultCompleted:
     """The task returned a value. The attempt outcome is `COMPLETED`."""
@@ -213,11 +230,22 @@ class ChildResultTimedOut:
     """
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ChildResultCancelled:
+    """An operator cancelled the task while it ran, and the child ended the
+    run as `end` says. The attempt outcome is `CANCELLED`, with the code
+    `TASK_CANCELLED`.
+    """
+
+    end: OperatorCancelEnd
+
+
 type ChildResult = (
     ChildResultCompleted
     | ChildResultFailed
     | ChildResultWorkerFailure
     | ChildResultTimedOut
+    | ChildResultCancelled
 )
 """How the task ended a run that its child reported."""
 
@@ -245,8 +273,9 @@ RUNNING.
 """
 
 
-type WorkerDecision = Literal['TIMED_OUT', 'TASK_BLOCKED_LOOP', 'NEIGHBOUR_BLOCKED_LOOP', 'CHILD_LOST']
-"""Why the worker ended an attempt itself. The attempt outcome is `FAILED`.
+type WorkerDecision = Literal['TIMED_OUT', 'TASK_BLOCKED_LOOP', 'NEIGHBOUR_BLOCKED_LOOP', 'CHILD_LOST', 'KILLED_AFTER_CANCEL', 'LOST_AFTER_CANCEL']
+"""Why the worker ended an attempt itself. The attempt outcome is `FAILED`,
+except after an operator cancel: `CANCELLED`.
 
 `TIMED_OUT`: The task reached its timeout, and the worker killed its child. The code is `TASK_TIMEOUT`.
 
@@ -255,6 +284,10 @@ type WorkerDecision = Literal['TIMED_OUT', 'TASK_BLOCKED_LOOP', 'NEIGHBOUR_BLOCK
 `NEIGHBOUR_BLOCKED_LOOP`: Another task held the event loop of this task's shared async child past the block limit; the worker killed the child. The code is `NEIGHBOUR_BLOCKED_LOOP`.
 
 `CHILD_LOST`: The child was lost before it reported the end, and its exit was seen. The code is `WORKER_CRASHED`.
+
+`KILLED_AFTER_CANCEL`: An operator cancelled the task while it ran, and the worker killed the child before it reported the end: the hard stop after the cancel grace of an isolated task, its deadline, or the drain deadline. The attempt outcome is `CANCELLED`, with the code `TASK_CANCELLED`.
+
+`LOST_AFTER_CANCEL`: An operator cancelled the task while it ran, and the child was lost before it reported the end. The attempt outcome is `CANCELLED`, with the code `TASK_CANCELLED`.
 """
 
 
@@ -390,6 +423,14 @@ class AttemptRecordNotHeld:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class AttemptRecordRecordedByCancel:
+    """An operator cancelled the task while it ran: the cancel statement
+    recorded the attempt as `CANCELLED` and moved the task to history.
+    The worker owed no write.
+    """
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class AttemptRecordLeftToRecovery:
     """Nothing was written: stale recovery or the claim lease decides the
     task.
@@ -417,6 +458,7 @@ type AttemptRecord = (
     | AttemptRecordClaimReleased
     | AttemptRecordNothingOwed
     | AttemptRecordNotHeld
+    | AttemptRecordRecordedByCancel
     | AttemptRecordLeftToRecovery
     | AttemptRecordRetriesExhausted
     | AttemptRecordWriteFailed
@@ -1113,6 +1155,21 @@ def _read_attempt_error_code_user_over_bound(fields: list[object], here: _At) ->
     return Ok(AttemptErrorCodeUserOverBound())
 
 
+def _read_operator_cancel_end(value: object, at: _At) -> Result[OperatorCancelEnd, MalformedEvent]:
+    """A value of `OperatorCancelEnd`."""
+    match value:
+        case 'RETURNED_AFTER_SIGNAL':
+            return Ok('RETURNED_AFTER_SIGNAL')
+        case 'DROPPED_AFTER_GRACE':
+            return Ok('DROPPED_AFTER_GRACE')
+        case 'BEFORE_BODY':
+            return Ok('BEFORE_BODY')
+        case str():
+            return at.refuse(f'OperatorCancelEnd has no value {value[:_MAX_REFUSED_NAME_CHARS]!r}')
+        case _:
+            return at.refuse('expected a JSON string')
+
+
 def _read_child_result(value: object, at: _At) -> Result[ChildResult, MalformedEvent]:
     """A value of `ChildResult`: `[variant tag, field, ...]`."""
     match _read_variant(value, at, 'ChildResult'):
@@ -1129,6 +1186,8 @@ def _read_child_result(value: object, at: _At) -> Result[ChildResult, MalformedE
             return _read_child_result_worker_failure(fields, at.inside('WorkerFailure'))
         case 'TimedOut':
             return _read_child_result_timed_out(fields, at.inside('TimedOut'))
+        case 'Cancelled':
+            return _read_child_result_cancelled(fields, at.inside('Cancelled'))
         case _:
             return at.refuse(f'ChildResult has no value {tag[:_MAX_REFUSED_NAME_CHARS]!r}')
 
@@ -1182,6 +1241,27 @@ def _read_child_result_timed_out(fields: list[object], here: _At) -> Result[Chil
         case _:
             return here.refuse(f'expected 0 items, found {len(fields)}')
     return Ok(ChildResultTimedOut())
+
+
+def _read_child_result_cancelled(fields: list[object], here: _At) -> Result[ChildResultCancelled, MalformedEvent]:
+    """A variant `ChildResultCancelled` from the items of its fields."""
+    match fields:
+        case [
+            wire_end,
+        ]:
+            pass
+        case _:
+            return here.refuse(f'expected 1 items, found {len(fields)}')
+    match _read_operator_cancel_end(wire_end, here.inside('end')):
+        case Ok(value_end):
+            pass
+        case Err() as refused:
+            return refused
+    return Ok(
+        ChildResultCancelled(
+            end=value_end,
+        )
+    )
 
 
 def _read_attempt_start(value: object, at: _At) -> Result[AttemptStart, MalformedEvent]:
@@ -1242,6 +1322,10 @@ def _read_worker_decision(value: object, at: _At) -> Result[WorkerDecision, Malf
             return Ok('NEIGHBOUR_BLOCKED_LOOP')
         case 'CHILD_LOST':
             return Ok('CHILD_LOST')
+        case 'KILLED_AFTER_CANCEL':
+            return Ok('KILLED_AFTER_CANCEL')
+        case 'LOST_AFTER_CANCEL':
+            return Ok('LOST_AFTER_CANCEL')
         case str():
             return at.refuse(f'WorkerDecision has no value {value[:_MAX_REFUSED_NAME_CHARS]!r}')
         case _:
@@ -1458,6 +1542,8 @@ def _read_attempt_record(value: object, at: _At) -> Result[AttemptRecord, Malfor
             return _read_attempt_record_nothing_owed(fields, at.inside('NothingOwed'))
         case 'NotHeld':
             return _read_attempt_record_not_held(fields, at.inside('NotHeld'))
+        case 'RecordedByCancel':
+            return _read_attempt_record_recorded_by_cancel(fields, at.inside('RecordedByCancel'))
         case 'LeftToRecovery':
             return _read_attempt_record_left_to_recovery(fields, at.inside('LeftToRecovery'))
         case 'RetriesExhausted':
@@ -1544,6 +1630,16 @@ def _read_attempt_record_not_held(fields: list[object], here: _At) -> Result[Att
         case _:
             return here.refuse(f'expected 0 items, found {len(fields)}')
     return Ok(AttemptRecordNotHeld())
+
+
+def _read_attempt_record_recorded_by_cancel(fields: list[object], here: _At) -> Result[AttemptRecordRecordedByCancel, MalformedEvent]:
+    """A variant `AttemptRecordRecordedByCancel` from the items of its fields."""
+    match fields:
+        case []:
+            pass
+        case _:
+            return here.refuse(f'expected 0 items, found {len(fields)}')
+    return Ok(AttemptRecordRecordedByCancel())
 
 
 def _read_attempt_record_left_to_recovery(fields: list[object], here: _At) -> Result[AttemptRecordLeftToRecovery, MalformedEvent]:

@@ -1,4 +1,4 @@
-"""The end of a run of the version-3 child, for tests that call
+"""The end of a run of the version-4 child, for tests that call
 ``_run_task_entry``.
 
 ``envelope_of`` and ``stop_reason_of`` read the end of a run. ``wire_of``
@@ -16,6 +16,7 @@ from horsies.core.worker.run_return import (
     CoreStoppedBeforeStart,
     NotInWorkflow,
     ResultEnvelope,
+    RunCancelled,
     RunReturn,
     SetRunning,
     StartedRunning,
@@ -50,6 +51,8 @@ def envelope_of(returned: RunReturn) -> str:
             raise AssertionError(f'the run stopped before running: {reason}')
         case CoreStoppedBeforeStart(stopped=stopped):
             raise AssertionError(f'the core of the child stopped before the run: {stopped}')
+        case RunCancelled(body=body):
+            raise AssertionError(f'an operator cancelled the run: {body.value}')
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -64,7 +67,7 @@ def stop_reason_of(returned: RunReturn) -> StopReason:
             return reason
         case CoreStoppedBeforeStart():
             return 'OWNERSHIP_UNCONFIRMED'
-        case SetRunning():
+        case SetRunning() | RunCancelled():
             raise AssertionError('the run set its row RUNNING')
         case _ as unreachable:
             assert_never(unreachable)
@@ -97,5 +100,9 @@ def wire_of(returned: RunReturn) -> WireResult:
             return (False, '', _version_one_reason(reason))
         case CoreStoppedBeforeStart():
             return (False, '', _version_one_reason('OWNERSHIP_UNCONFIRMED'))
+        case RunCancelled(body=body):
+            raise AssertionError(
+                f'an operator cancelled the run ({body.value}); version 1 has no such end',
+            )
         case _ as unreachable:
             assert_never(unreachable)

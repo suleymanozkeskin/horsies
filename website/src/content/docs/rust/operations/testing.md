@@ -78,7 +78,7 @@ async fn welcome_reads_the_greeter() {
 ```
 
 - `Horsies::new` does no I/O, so the test needs no database.
-- In a direct call there is no run: `cancelled()` never completes, `is_cancelled()` is `false`, and `spawn` refuses with `RunSpawnRefused`.
+- In a direct call there is no run: `cancelled()` never completes, `is_cancelled()` is `false`, `cancel_state()` is `RunCancelState::NotInARun`, and `spawn` refuses with `RunSpawnRefused`.
 
 ## Pass a Dependency's Outcome
 

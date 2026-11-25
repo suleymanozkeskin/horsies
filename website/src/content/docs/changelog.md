@@ -2,9 +2,9 @@
 title: Changelog
 section: site
 summary: >-
-  Notable changes per release. 0.8.0 runs the Python and Rust clients on one core written in Rust, adds opt-in observability (metrics, traces, logs, events, a Grafana dashboard and Prometheus alert rules), takes the `HRS-nnn` error codes of both clients from one list, and starts on a new database with a new baseline schema (the core does not upgrade a 0.7 database). 0.7.0 runs tasks in three execution modes (isolated, shared async and shared thread children), starts each worker with a named profile (`--profile`), and takes fewer round trips per task (schema v61). 0.6.1 identifies a retention class by its period (`standard_<days>d`; queues with one period share one class; `retention_classes` becomes `retention_periods` and `with_options(retention_class_key=...)` becomes `with_options(retention=...)`; a period is whole days from 1 to 1825; no schema change) and makes the windowed monitoring reads take a bounded `MonitoringWindow`; 0.6.0 runs each task in a child process that the worker owns (a crash, an out-of-memory kill or a timeout ends only that task, and on Linux a preload parent forks each child in milliseconds), holds every value to its declared type from definition to read, makes the JSON boundary strict, closes the error types of the public API into unions of frozen variants, bounds `timeout_ms` at 4,294,967,295 ms, gives each startup error a code and a fix, and advances the schema to v52 (stop every process before the upgrade); 0.5.5 gives each open event loop its own broker resource set (at most 5 open loops besides the sync runner loop; a call from one more returns `EVENT_LOOP_LIMIT`), runs sync workflow calls on the broker's own sync runner, and replaces `PostgresBroker.session_factory`, `.async_engine` and `.listener` with `select_resources()`; 0.5.4 advances the schema from v36 to v51 (stop every process before the first 0.5.4 start; v37 refuses unknown workflow node statuses) — a FAILED workflow stores no result, enqueue validates the whole `retry_policy`, `tcp_user_timeout_ms` (default 30 s) bounds writes to a dead connection, partition maintenance works under any session time zone, a pause that races a resume no longer strands a node, worker start no longer fails on uneven child start times, and the claim, recovery, result-read, finalize and history-move paths run fewer and cheaper statements; 0.5.3 uses the session-capable database path for partition maintenance, bounds its lock waits, reduces healthy coverage to at most three statements, verifies exact partition and index conformance, bounds global recovery work with durable cursors and schema v36 indexes, and reduces fresh unkeyed enqueue to one SQL round trip; 0.5.2 requires an OFFLINE schema v35 upgrade for existing 0.5.0/0.5.1 databases (stop every unit; `forever` converts from an unbounded LIST leaf to a RANGE-partitioned parent, and the cutover attestation must commit before restart) — it also sets retention per queue (`AppConfig.retention.queue_retention`, resolved on every enqueue path and snapshotted at send), stops one missing history leaf from failing every finalize, bounds partition detach and finalize, and fixes monitoring pagination, facet totals and nullable sorting; 0.5.1 lets a deployment declare its own finite retention classes (`RecoveryConfig.retention_classes`, key plus duration, registered by the worker maintenance pass, immutable once registered, duration a minimum at daily partition granularity) and widens send-time retention validation to the declared set; 0.5.0 is the live/history split (schema v34) — terminal task records move to a partitioned history archive at terminalization, the live table holds only live rows, retention drops whole partitions driven by the worker maintenance pass, task and workflow identity become native UUIDv7, `retention_class_key` at enqueue chooses the retention class (30-day default; explicit None for forever), manual terminal retry is replaced by the rerun API with recorded lineage, monitoring reads resolve across live and history behind a bounded terminal window, `WorkflowStatus.EXPIRED` and opt-in paused-workflow auto-cancel land, and existing deployments require an offline cutover (or a fresh database); 0.4.7 makes terminal writers own the complete final-attempt summary (schema v26) — a stale `failed_reason` left by automatic retry is no longer carried onto completed, failed, or expired rows, effective fleet-wide once the first upgraded process migrates the schema; 0.4.6 consolidates terminal task transitions behind fifteen typed database functions (schema v25), records the operation that ended each task, enforces terminal timestamps after the required per-deployment 0.4.5 rolling rollout, and honors sub-second staleness thresholds exactly; 0.4.5 is a task lifecycle release (schema v17, additive) — workflow pause and cancellation stop terminalizing a task whose claim has been replaced (the abandon or cancel now applies only to the claim generation it was issued against, fenced per task on batches), and `horsies_tasks.terminal_at` records the canonical terminal instant on every terminal transition from this release forward, with the CHECK constraint tying it to terminal status deferred to 0.4.6 so a rolling restart cannot fail a pre-0.4.5 worker's finalize; 0.4.4 is a workflow-retention performance release — workflow-batched retention deletes with a once-per-statement live-task guard (a full backlog drain drops ~24x), clearer finalize logs, and a typed-path fix in the agent skill; 0.4.3 is a monitoring read-path performance release (schema v16) — task-list sort and facet indexes (`idx_horsies_tasks_enqueued_at`, `idx_horsies_tasks_task_name`), list pages stop fetching task payload columns, the unfiltered list total becomes a planner estimate, and the web UI refreshes aggregates on timers instead of per task event; 0.4.2 is a retention and payload-path performance release (schema v15) — per-queue terminal retention windows (`queue_terminal_record_retention_hours`, validated against declared queues), a payload-size guardrail (`AppConfig.payload`: warn at 1 MiB by default, optional enqueue reject with `PAYLOAD_TOO_LARGE`), configurable retention sweep cadence and batch size (defaults change from hourly/5,000-row to 5-minute/500-row), set-wise `task_attempts` purge replacing the per-row FK cascade in retention, a narrowed result-wait terminal fetch that stops shipping args/kwargs with result polls, and a ~60 s cadence for the scheduler's missing-row existence check; 0.4.1 stops a timeout kill during process-pool warmup from failing the executor restart and exiting the worker (a backlog of timeout-prone tasks could crash-loop it), publishes replacement pools only after they are fully warm, splits ensure-vs-replace so a dispatch request can no longer destroy a freshly built pool, and bounds kill-shaped warmup interruptions with a typed retry; 0.4.0 ships the web monitoring dashboard — the `horsies[web]` extra with a mountable FastAPI app and `horsies web` CLI (bundled SPA, fail-closed auth, no-DDL schema probing, SSE live updates), the typed `horsies.monitoring` query API with registry-free task cancel/retry, the Acme Clothing showcase application, and a codec fix so `args_from` envelopes decode for `TaskResult | None` targets under any/quorum joins; 0.3.1 makes the workflow retention deletes plan onto their index via whole-table expression statistics (schema v14) and raises the documented PostgreSQL floor to 14+; 0.3.0 fails sync send/schedule closed inside a running event loop (`ASYNC_CONTEXT`, payload-carrying, completable via `retry_*_async`), adds `schedule_async`/`retry_schedule_async`, makes service-loop death process-fatal, fixes the TASK_EXPIRED workflow finalize gap and the recycle spawn-failure pool wedge, and adds the workflows retention index (schema v13); 0.2.9 fixes the cancel/completion lock-order deadlock (40P01 under concurrent cancel) and fences finalize/recovery/ownership-confirm statements to the claim generation so a stale attempt cannot clobber a re-claimed one, schema v12 (`horsies_claim` returns `claimed_at`, heartbeat retention index); 0.2.8 replaces the latest-per-worker `DISTINCT ON` scan with a recursive skip-scan, adds retention eligibility indexes (schema v11), batches retention deletes, makes the worker-state snapshot cadence configurable (`worker_state_snapshot_interval_ms`, default 30s, was hardcoded 5s), enforces per-queue `max_concurrency` without `queue_priorities`, and accepts EXPIRED rows in workflow finalization phase-2 replay; 0.2.7 collapses the worker claim critical section into one server-side statement (the `horsies_claim` function, schema v10) so the cap-serialization advisory lock is held only across a single statement plus commit, removing the client-stall-while-holding-lock freeze, and changes the equal-queue-priority tie-break from configured queue order to a priority-then-FIFO band; 0.2.6 binds subworkflow tasks to their queue's configured priority so a parameterized child no longer claims at the default priority 100 on a CUSTOM queue; 0.2.5 adds default-on TCP keepalives for remote/pooled Postgres and gives the workflow reaper a grace window so it stops racing in-flight finalizers; 0.2.4 adds per-child memory recycling (`--max-memory-per-child-mb`, off by default), fixes a latent count-recycle hang (CPython gh-115634), and gates worker log color to TTYs; 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
+  Notable changes per release. 0.8.1 needs a stop-all upgrade (stop every worker, scheduler and producer, upgrade them all together), moves the schema from the 0.8.0 baseline through migrations 1001 to 1006 (1005 refuses an existing CLAIMED or RUNNING row with no `claimed_at` and stops with a named message), adds the cancel of a running task and a fencing token for task code, records the phase timing of each attempt and workflow run and draws it in the web UI, records the worker profile name, refuses a repeat workflow start with another start command (`WORKFLOW_COMMAND_CONFLICT`), and sends exact monitoring durations. 0.8.0 runs the Python and Rust clients on one core written in Rust, adds opt-in observability (metrics, traces, logs, events, a Grafana dashboard and Prometheus alert rules), takes the `HRS-nnn` error codes of both clients from one list, and starts on a new database with a new baseline schema (the core does not upgrade a 0.7 database). 0.7.0 runs tasks in three execution modes (isolated, shared async and shared thread children), starts each worker with a named profile (`--profile`), and takes fewer round trips per task (schema v61). 0.6.1 identifies a retention class by its period (`standard_<days>d`; queues with one period share one class; `retention_classes` becomes `retention_periods` and `with_options(retention_class_key=...)` becomes `with_options(retention=...)`; a period is whole days from 1 to 1825; no schema change) and makes the windowed monitoring reads take a bounded `MonitoringWindow`; 0.6.0 runs each task in a child process that the worker owns (a crash, an out-of-memory kill or a timeout ends only that task, and on Linux a preload parent forks each child in milliseconds), holds every value to its declared type from definition to read, makes the JSON boundary strict, closes the error types of the public API into unions of frozen variants, bounds `timeout_ms` at 4,294,967,295 ms, gives each startup error a code and a fix, and advances the schema to v52 (stop every process before the upgrade); 0.5.5 gives each open event loop its own broker resource set (at most 5 open loops besides the sync runner loop; a call from one more returns `EVENT_LOOP_LIMIT`), runs sync workflow calls on the broker's own sync runner, and replaces `PostgresBroker.session_factory`, `.async_engine` and `.listener` with `select_resources()`; 0.5.4 advances the schema from v36 to v51 (stop every process before the first 0.5.4 start; v37 refuses unknown workflow node statuses) — a FAILED workflow stores no result, enqueue validates the whole `retry_policy`, `tcp_user_timeout_ms` (default 30 s) bounds writes to a dead connection, partition maintenance works under any session time zone, a pause that races a resume no longer strands a node, worker start no longer fails on uneven child start times, and the claim, recovery, result-read, finalize and history-move paths run fewer and cheaper statements; 0.5.3 uses the session-capable database path for partition maintenance, bounds its lock waits, reduces healthy coverage to at most three statements, verifies exact partition and index conformance, bounds global recovery work with durable cursors and schema v36 indexes, and reduces fresh unkeyed enqueue to one SQL round trip; 0.5.2 requires an OFFLINE schema v35 upgrade for existing 0.5.0/0.5.1 databases (stop every unit; `forever` converts from an unbounded LIST leaf to a RANGE-partitioned parent, and the cutover attestation must commit before restart) — it also sets retention per queue (`AppConfig.retention.queue_retention`, resolved on every enqueue path and snapshotted at send), stops one missing history leaf from failing every finalize, bounds partition detach and finalize, and fixes monitoring pagination, facet totals and nullable sorting; 0.5.1 lets a deployment declare its own finite retention classes (`RecoveryConfig.retention_classes`, key plus duration, registered by the worker maintenance pass, immutable once registered, duration a minimum at daily partition granularity) and widens send-time retention validation to the declared set; 0.5.0 is the live/history split (schema v34) — terminal task records move to a partitioned history archive at terminalization, the live table holds only live rows, retention drops whole partitions driven by the worker maintenance pass, task and workflow identity become native UUIDv7, `retention_class_key` at enqueue chooses the retention class (30-day default; explicit None for forever), manual terminal retry is replaced by the rerun API with recorded lineage, monitoring reads resolve across live and history behind a bounded terminal window, `WorkflowStatus.EXPIRED` and opt-in paused-workflow auto-cancel land, and existing deployments require an offline cutover (or a fresh database); 0.4.7 makes terminal writers own the complete final-attempt summary (schema v26) — a stale `failed_reason` left by automatic retry is no longer carried onto completed, failed, or expired rows, effective fleet-wide once the first upgraded process migrates the schema; 0.4.6 consolidates terminal task transitions behind fifteen typed database functions (schema v25), records the operation that ended each task, enforces terminal timestamps after the required per-deployment 0.4.5 rolling rollout, and honors sub-second staleness thresholds exactly; 0.4.5 is a task lifecycle release (schema v17, additive) — workflow pause and cancellation stop terminalizing a task whose claim has been replaced (the abandon or cancel now applies only to the claim generation it was issued against, fenced per task on batches), and `horsies_tasks.terminal_at` records the canonical terminal instant on every terminal transition from this release forward, with the CHECK constraint tying it to terminal status deferred to 0.4.6 so a rolling restart cannot fail a pre-0.4.5 worker's finalize; 0.4.4 is a workflow-retention performance release — workflow-batched retention deletes with a once-per-statement live-task guard (a full backlog drain drops ~24x), clearer finalize logs, and a typed-path fix in the agent skill; 0.4.3 is a monitoring read-path performance release (schema v16) — task-list sort and facet indexes (`idx_horsies_tasks_enqueued_at`, `idx_horsies_tasks_task_name`), list pages stop fetching task payload columns, the unfiltered list total becomes a planner estimate, and the web UI refreshes aggregates on timers instead of per task event; 0.4.2 is a retention and payload-path performance release (schema v15) — per-queue terminal retention windows (`queue_terminal_record_retention_hours`, validated against declared queues), a payload-size guardrail (`AppConfig.payload`: warn at 1 MiB by default, optional enqueue reject with `PAYLOAD_TOO_LARGE`), configurable retention sweep cadence and batch size (defaults change from hourly/5,000-row to 5-minute/500-row), set-wise `task_attempts` purge replacing the per-row FK cascade in retention, a narrowed result-wait terminal fetch that stops shipping args/kwargs with result polls, and a ~60 s cadence for the scheduler's missing-row existence check; 0.4.1 stops a timeout kill during process-pool warmup from failing the executor restart and exiting the worker (a backlog of timeout-prone tasks could crash-loop it), publishes replacement pools only after they are fully warm, splits ensure-vs-replace so a dispatch request can no longer destroy a freshly built pool, and bounds kill-shaped warmup interruptions with a typed retry; 0.4.0 ships the web monitoring dashboard — the `horsies[web]` extra with a mountable FastAPI app and `horsies web` CLI (bundled SPA, fail-closed auth, no-DDL schema probing, SSE live updates), the typed `horsies.monitoring` query API with registry-free task cancel/retry, the Acme Clothing showcase application, and a codec fix so `args_from` envelopes decode for `TaskResult | None` targets under any/quorum joins; 0.3.1 makes the workflow retention deletes plan onto their index via whole-table expression statistics (schema v14) and raises the documented PostgreSQL floor to 14+; 0.3.0 fails sync send/schedule closed inside a running event loop (`ASYNC_CONTEXT`, payload-carrying, completable via `retry_*_async`), adds `schedule_async`/`retry_schedule_async`, makes service-loop death process-fatal, fixes the TASK_EXPIRED workflow finalize gap and the recycle spawn-failure pool wedge, and adds the workflows retention index (schema v13); 0.2.9 fixes the cancel/completion lock-order deadlock (40P01 under concurrent cancel) and fences finalize/recovery/ownership-confirm statements to the claim generation so a stale attempt cannot clobber a re-claimed one, schema v12 (`horsies_claim` returns `claimed_at`, heartbeat retention index); 0.2.8 replaces the latest-per-worker `DISTINCT ON` scan with a recursive skip-scan, adds retention eligibility indexes (schema v11), batches retention deletes, makes the worker-state snapshot cadence configurable (`worker_state_snapshot_interval_ms`, default 30s, was hardcoded 5s), enforces per-queue `max_concurrency` without `queue_priorities`, and accepts EXPIRED rows in workflow finalization phase-2 replay; 0.2.7 collapses the worker claim critical section into one server-side statement (the `horsies_claim` function, schema v10) so the cap-serialization advisory lock is held only across a single statement plus commit, removing the client-stall-while-holding-lock freeze, and changes the equal-queue-priority tie-break from configured queue order to a priority-then-FIFO band; 0.2.6 binds subworkflow tasks to their queue's configured priority so a parameterized child no longer claims at the default priority 100 on a CUSTOM queue; 0.2.5 adds default-on TCP keepalives for remote/pooled Postgres and gives the workflow reaper a grace window so it stops racing in-flight finalizers; 0.2.4 adds per-child memory recycling (`--max-memory-per-child-mb`, off by default), fixes a latent count-recycle hang (CPython gh-115634), and gates worker log color to TTYs; 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
 related: [./migrations/migration-to-0-8-0, ./migrations/migration-to-0-7-0, ./migrations/migration-to-0-6-0, ./migrations/migration-to-0-5-0, ./monitoring/worker-health, ./migrations/migration-to-0-1-2, ./internals/serialization]
-tags: [changelog, releases, breaking-changes, 0.8.0, 0.7.0, 0.6.1, 0.6.0, 0.5.5, 0.5.4, 0.5.3, 0.5.2, 0.5.1, 0.5.0, 0.4.7, 0.4.6, 0.4.5, 0.4.4, 0.4.3, 0.4.2, 0.4.1, 0.4.0, 0.3.1, 0.3.0, 0.2.9, 0.2.8, 0.2.7, 0.2.6, 0.2.5, 0.2.4, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
+tags: [changelog, releases, breaking-changes, 0.8.1, 0.8.0, 0.7.0, 0.6.1, 0.6.0, 0.5.5, 0.5.4, 0.5.3, 0.5.2, 0.5.1, 0.5.0, 0.4.7, 0.4.6, 0.4.5, 0.4.4, 0.4.3, 0.4.2, 0.4.1, 0.4.0, 0.3.1, 0.3.0, 0.2.9, 0.2.8, 0.2.7, 0.2.6, 0.2.5, 0.2.4, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
 ---
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -13,8 +13,468 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
+## 0.8.1 — 2026-11-25
+
+0.8.1 needs a stop-all upgrade: stop every worker, scheduler and producer,
+then upgrade them all together. The first start of 0.8.1 moves the schema
+from the 0.8.0 baseline (1000) through migrations 1001 to 1006. A process of
+an earlier build that starts after the migrations is refused, and one that
+runs on fails (for example a workflow start: SQLSTATE 42883). The database
+does not go back to an earlier build. Migration 1005 refuses an existing
+`CLAIMED` or `RUNNING` task row with no `claimed_at`: it stops with
+SQLSTATE 23514 and a message that names the table, the CHECK, the row count
+and the query that finds the rows, and the database stays at 1004. No
+horsies writer makes such a row. The release adds the cancel of a running
+task and a fencing token for task code in both clients, the phase timing of
+each attempt and of each workflow run in the monitoring API and the web UI,
+and the worker profile name in each worker snapshot. Breaking: a workflow
+start with a known `workflow_id` and another start command is refused
+(`WORKFLOW_COMMAND_CONFLICT`), and each monitoring duration is exact
+seconds as a float. Prebuilt wheels are for Linux x86_64 and aarch64
+(`manylinux_2_28`) and macOS arm64; on other platforms, pip and uv build
+horsies from the source distribution.
+
+### Added
+
+- **The cancel of a RUNNING task reaches its code, in both clients.**
+  `cancel_task` with `include_running` (and `POST /api/tasks/{id}/cancel`
+  with `{"include_running": true}`) keeps its signature, its answers and
+  its errors. The statement that moves the task to history as `CANCELLED`
+  now also writes the attempt row of the run and sends a notice on the
+  channel `horsies_task_cancel`. The worker that holds the run sends the
+  cancel to the child, and the child gives it to the task code:
+  - An async body (Python `async def`, isolated or shared async) gets
+    `asyncio.CancelledError` at its next `await`. A Rust async body sees
+    `TaskRuntime::cancelled()` complete.
+  - A sync body (Python `def`, Rust `#[blocking_task]`; isolated or shared
+    thread) reads the cancel state of its `TaskRuntime`.
+  - A cancel that comes after the start of the run and before the body
+    starts: the body does not run.
+  - What the body returns after the cancel is dropped; the task stays
+    `CANCELLED`. Side effects made before the code stopped stay.
+  - Code that does not stop: an isolated body runs until it returns or until
+    its `timeout_ms` kill, unless the task sets `cancel_grace_ms`; a shared
+    async body gets the second cancel and the cancel rounds after
+    `cancel_grace_ms`, as at the deadline, and a run that still does not stop
+    keeps its seat until no task in its child has time left; a shared thread
+    body runs until it returns.
+  - A lost notice (a listener reconnect, a full notice queue) is found by
+    one read of the cancels of the runs that the worker holds, after the
+    reconnect and when a runner heartbeat of a held run does not land: at
+    most one `runner_heartbeat_interval_ms` (default 30 s) later while the
+    heartbeat connection works.
+  - Workflow cancel and workflow pause do not change: the task of a node
+    that started runs on.
+- **The cancel state of a run, in both clients.**
+  - Python: `TaskRuntime.cancel_state()` returns `CancelNotRequested()` or
+    `CancelRequested(cause)`, with `CancelCause.OPERATOR` (an operator
+    cancel) or `CancelCause.DEADLINE` (the deadline of a `SHARED_ASYNC` or a
+    `SHARED_THREAD` run). The first cause stays. `TaskRuntime.for_test`
+    takes `cancel_state` (default `CancelNotRequested()`). `horsies` exports
+    `CancelCause`, `CancelNotRequested`, `CancelRequested` and
+    `RunCancelState`.
+  - Rust: `TaskRuntime::cancel_state()` returns `RunCancelState`:
+    `NotRequested`, `Requested { cause: CancelCause }` (`Operator`,
+    `Deadline`) or `NotInARun`. `TaskRuntime::cancelled()` and
+    `is_cancelled()` also fire at an operator cancel, in every execution
+    class, and at the deadline of a `shared_thread` run; `is_cancelled()`
+    and `cancel_state()` work in a blocking body. `horsies` and
+    `horsies::task` re-export `RunCancelState` and `CancelCause`;
+    `horsies-core` exports them with `run_cancel_state`.
+- **`cancel_grace_ms` on `ISOLATED` tasks: the kill after a cancel.** An
+  `ISOLATED` task can set `cancel_grace_ms` (100 to 10,000 ms). The worker
+  then kills the child, with the subprocesses in its session,
+  `cancel_grace_ms` after it sent an operator cancel, when the run has not
+  ended. With no value there is no such kill, and the stored options hold
+  no value. The deadline of an `ISOLATED` task still kills its child with no
+  grace. A `SHARED_ASYNC` row that runs in an isolated child uses its own
+  grace for the same kill. `SHARED_THREAD` keeps the refusal `HRS-110`; the
+  Python overloads and the Rust attribute accept `cancel_grace_ms` with
+  `ISOLATED`.
+- **A fencing token for task code, in both clients.** A task reads the
+  fencing token of its run: the task id and a value. Two reads in one
+  attempt give the same token. An attempt that runs after another attempt
+  of the same task gives a strictly greater value. The value depends on no
+  clock. Today the value is the attempt number, from 1; code compares the
+  values of one task id and does not depend on the number. No schema
+  change and no change of the child protocol. Task code writes the token
+  with each write to another system, and the system refuses a write whose
+  token is lower than the token that it holds for the task id. The page
+  [Fencing Token](https://suleymanozkeskin.github.io/horsies/concepts/fencing-token/)
+  gives the pattern and the limits: a rerun, and a workflow node that a
+  resume starts again, get a new task id, and their value starts again
+  at 1; a stale attempt with no later attempt (the task failed, was
+  cancelled or expired) is not refused.
+  - Python: a task whose first parameter is `runtime: TaskRuntime` gets
+    the `TaskRuntime` of each run from the worker, and reads
+    `runtime.fencing_token`, a frozen `FencingToken` (`task_id`, `value`).
+    The parameter comes before the `*`, is annotated exactly `TaskRuntime`
+    and has no default. It is not part of the wire contract: a send, a
+    schedule and a workflow node do not supply it, and a kwarg with its
+    name is refused. `TaskRuntime` in any other place of a task signature
+    raises `HRS-105`. The decorator gives a `RuntimeTaskFunction` or an
+    `AsyncRuntimeTaskFunction`, whose sends do not take the runtime. A test
+    that calls the task directly passes `TaskRuntime.for_test(task_id=...,
+    attempt=...)`. Its `attempt` is an `AttemptNumber` (default the first
+    attempt): `AttemptNumber.parse` returns `Err(AttemptNumberRefused)` for
+    a number outside 1 to 2^31, so `for_test` cannot fail. `horsies`
+    exports `TaskRuntime`, `FencingToken`, `AttemptNumber` and
+    `AttemptNumberRefused`.
+  - Rust: `TaskRuntime::fencing_token()` returns `Result<FencingToken,
+    FencingTokenRefused>`. `FencingToken::task_id()` gives the task id and
+    `FencingToken::value()` an `AttemptNumber`. The async body, work that
+    it starts with `TaskRuntime::spawn`, and the thread of a blocking body
+    read the token of the run; a direct call in a test, plain
+    `tokio::spawn` and a thread that the body starts get
+    `FencingTokenRefused::NotInARun`. `horsies-core` exports
+    `run_fencing_token`, `FencingToken` and `FencingTokenRefused`.
+- **Each attempt row keeps the phase times of its attempt.** Schema
+  migration 1001 adds a phase record to `horsies_task_attempts`: the due
+  time (`enqueued_at`), the claim that ran the attempt (`claimed_at`), the
+  claim count and the first claim of the attempt (`attempt_claims`,
+  `first_claimed_at`), the time a child of the worker took the task
+  (`placed_at`, the claim time plus the slot wait that the worker
+  measured), the finalizing marker (`finalizing_at`), the writer
+  (`recorded_by`: `WORKER` or `RECOVERY`) and, for a stale recovery, the
+  last time the attempt was known alive (`last_seen_at`). `horsies_tasks`
+  counts the claims of the current attempt (`attempt_claims`,
+  `first_claimed_at`). The statements that already write these rows write
+  the new values: no statement is added per task. A row written before the
+  migration keeps NULL in each new column. The Python worker records no
+  placement (`placed_at` NULL).
+- **Each workflow run keeps a record of its node and pause events.**
+  Migration 1001 adds the table `horsies_workflow_events`. The statement
+  that changes the state writes the event: `NODE_READY` (a node goes back
+  to `READY` with no work), `NODE_ENQUEUED` (a sub-workflow node waits for
+  its child start), `TASK_MOVED` (a task of a node moves to history; the
+  event holds the locator of the history row: retention class, terminal
+  time and task id), `WORKFLOW_PAUSED` and `WORKFLOW_RESUMED` (one for
+  each workflow of the tree that the pause or the resume moves). No
+  statement is added: a plain task writes no event, and a workflow task
+  writes its event in the statement of its move. The events go with their
+  workflow: the workflow retention deletes them, and the foreign keys
+  delete them with a deleted node or workflow. The migration writes no
+  event for a run that began before it.
+- **The monitoring API shows the phase timing of a workflow run and the
+  phase record of each attempt.** Each `TaskAttemptInfo` (task detail, node
+  detail, `GET /api/tasks/{id}`, `GET /api/workflows/{id}/tasks/{index}`)
+  has `phases`: the phase record of its attempt row, or `not_captured` for a
+  row written before migration 1001. The run read (`get_workflow_run`,
+  `GET /api/workflows/{id}`) has `timing` on the run and on each node. The
+  core composes the timing of each node from the attempt rows and the run
+  events: segments in order (`pending`, `ready`, `enqueued`, `retry_wait`,
+  `claimed`, `running`, `finalizing`, `advancing`, `unknown`), each with its
+  start, its end or `open`, and its node, task or attempt; a coverage label
+  (`exact`, `partial` with the reasons of its `unknown` segments,
+  `unavailable`, or `inconsistent` with the conflict that it names); and an
+  endpoint marker. The run timing holds the read time, the capture start,
+  the range of the run, its pauses and its coverage. A run that began before
+  migration 1001, or that has more than 100,000 events, is `unavailable`.
+  Times that the record holds in the wrong order make the node
+  `inconsistent`; the core does not reorder or guess them. One statement
+  reads the run, the events and the task rows (live, or in history at the
+  locator of each `TASK_MOVED` event); no statement runs per node or per
+  task. The Python models and the Rust types are in `horsies.monitoring`
+  and `horsies::monitoring`.
+- **The web UI draws the phase timing of a workflow run and of each
+  attempt.** The node time is the time of a node without its dependency
+  wait. The longest chain is the chain of nodes whose ends decided the end
+  of the run. Each mark has a tooltip, and each key entry highlights the
+  marks of its phase.
+  - Run summary, over the graph and the timeline: the status of the run, its
+    start and end, and the status counts, which filter the nodes; then the
+    duration of the run, the time of each phase on the longest chain (for a
+    run with no pause, these times add up to the duration) and the pause
+    time.
+  - Timeline: a first row for the run, with the phases along its longest
+    chain, then one row per node. A row has a linear cell on the time axis
+    of the run (the dependency wait as a thin line, the phase segments in
+    time order, and a diamond in the color of the terminal status at the
+    end of the node), a log cell with one bar for the total of each phase,
+    and the node time. A segment narrower than one pixel is not drawn; its
+    time is in the log cell. A pause is a band over every row. The arrow
+    keys move between rows and through the segments of a row. A node with
+    `unavailable` or `inconsistent` timing shows a hatched row with its
+    label and reason. An open segment grows on a local one-second clock with
+    no request per second. The timeline renders only the rows in view and 8
+    rows above and below them, whatever the node count.
+  - Graph: each card shows the node time, and states in words what a node
+    that ran once does not have: more than one attempt or task, and timing
+    that is partial, unavailable or inconsistent. The edges of the longest
+    chain are bold.
+  - Node detail: the node time, the end of the node, the parts of its time
+    (dependency wait, task or child run, its own engine steps) and the
+    dependency whose end ended the dependency wait.
+  - Attempt panel, in the task detail and in the node detail: the task name,
+    status and error code; the queue, the priority and `attempt n of m`; the
+    errors, with one message for each range of attempts with the same error;
+    a strip on a linear axis with the attempts and the retry waits in time
+    order and a key with the total of each phase; one bar for each phase of
+    each attempt on a log duration axis, grouped by phase or by attempt (the
+    browser keeps the choice); and closed details with the exact times, the
+    worker hosts, the task id and the trace link. An attempt that recovery
+    or a cancel wrote says so.
+  - The run detail polls in fallback mode also while a segment or a pause is
+    open.
+- **Each worker snapshot records the name of its worker profile.** Schema
+  migration 1004 adds `profile_name` to `horsies_worker_states`. The worker
+  writes the name of the profile that it runs (the `--profile` value of
+  `horsies worker`, the profile of `WorkerStart` in the Rust client) with
+  each snapshot, and the worker state reads return it:
+  - Python: `WorkerStateSnapshot.profile` is `ProfileNamed(name)` or
+    `ProfileNotRecorded()` (`SnapshotProfile`); `horsies` exports the three
+    names.
+  - Rust: `WorkerStateSnapshot::profile` is `SnapshotProfile::Named { name }`
+    or `SnapshotProfile::NotRecorded`; `horsies` and `horsies-core` export
+    `SnapshotProfile`.
+  - Web: each entry of `GET /api/workers` has `profile`, `{"kind": "named",
+    "name": ...}` or `{"kind": "not_recorded"}`: Python `ProfileNamedInfo`
+    and `ProfileNotRecordedInfo` (`SnapshotProfileInfo`) in
+    `horsies.monitoring`, Rust `horsies::monitoring::SnapshotProfileInfo`.
+    The web UI type `WorkerState` has `profile`.
+
+  A snapshot written before the migration holds no name: its profile is not
+  recorded. The worker history (`GET /api/workers/{id}/history`) does not
+  change.
+- **The Workers page of the web UI groups the live workers by worker
+  profile.** The page has one panel for each profile name of
+  `GET /api/workers`, in name order; the live workers whose snapshot holds no
+  profile name are one last panel. A panel shows the number of workers, the
+  seats in service and the down slots, the number of children per worker
+  and the budget classes of the profile, and for each budget a meter with
+  the rows in flight and the free capacity, summed over the workers of the
+  profile. It lists each shape when the workers of one profile do not have
+  the same number of children and the same budget classes. The focused
+  worker and the card of a stale worker name the profile. On the same page:
+  - Each column header of the schedule table sorts the table, on a click
+    and on Enter or Space with the keyboard focus. The header shows the
+    sorted column and its direction (`aria-sort`). A schedule that has not
+    run shows `never` and is last in a sort by last run.
+  - Each legend item of the two history charts is a button. A click draws
+    that series alone, and a click on a series that is alone draws the two
+    series again. The value axis fits the series that are drawn: the
+    percent axis of the second chart is no longer fixed at 0 to 100.
+  - The load chart draws `running` and `claimed` in the colors of the task
+    statuses. The second chart has the title "Worker process" and states
+    that the task children of the worker are not in its numbers.
+
 ### Changed
 
+- **The monitoring API sends exact durations.** Each duration of the
+  monitoring reads and of the web API is a JSON number of seconds, exact to
+  the microsecond (`"exec_s": 2.310417`). It was a whole number of seconds.
+  The field names stay; the type changes from integer to float:
+  - `queue_s` and `exec_s` of a task list row (`GET /api/tasks`) and of a
+    task leaf (`GET /api/tasks/{id}`, `GET /api/workflows/{id}/tasks/{index}`);
+  - `wall_s` of a workflow run (`GET /api/workflows`,
+    `GET /api/workflows/{id}`) and `exec_s` of a workflow node
+    (`GET /api/workflows/{id}`);
+  - `snapshot_age_s` and `uptime_s` of a worker state (`GET /api/workers`);
+  - `wait_s` of a waiting stream of the class report
+    (`GET /api/workers/classes`).
+
+  The core computes each value from the stored times, with no rounding. A
+  negative value keeps its sign. `live_window_s` stays a whole number of
+  seconds. `stale` of a worker state compares the exact snapshot age with
+  the live window of 120 s, the rule by which the fleet check counts a live
+  worker: a snapshot 120.5 s old is stale (it was stale from 121 s).
+  - Python: these fields of the `horsies.monitoring` models are
+    `float | None`, and `StreamWaitingInfo.wait_s` is `float`. The helpers
+    `elapsed_s` and `span_s` of `horsies.monitoring` return exact seconds as
+    `float | None`; they returned whole seconds as `int | None`.
+  - Rust: in `horsies-core` and `horsies::monitoring`, these fields are
+    `Option<chrono::TimeDelta>`, and `wait_s` of `StreamWaitInfo::Waiting`
+    is `TimeDelta`; each serializes as seconds. `monitoring::elapsed_s` and
+    `monitoring::span_s` are renamed `monitoring::elapsed` and
+    `monitoring::span`, and return `Option<TimeDelta>`. The old names are
+    removed.
+  - Web UI: each duration shows 3 significant digits below one minute
+    (`0.821ms`, `7.05ms`, `4.82s`), then minutes and seconds to 0.1 s
+    (`2m 3.9s`, `1h 2m 3.4s`). Relative times (`5m ago`) do not change.
+- **A cancel of a RUNNING task records its attempt.** The new attempt
+  outcome `CANCELLED` (`TaskAttemptOutcome.CANCELLED`,
+  `TaskAttemptOutcome::Cancelled`) has `will_retry` false, error code
+  `TASK_CANCELLED`, the start of the run, and `finished_at` at the time of
+  the cancel: from then on no write of the run lands. Its phase record has
+  the writer `CANCEL` (`recorded_by`), with no placement and no
+  `last_seen_at`; the monitoring models add `RecordedByCancelInfo()`
+  (Python) and `AttemptRecordedByInfo::Cancel` (Rust), and the web UI names
+  the cancel as the writer. A cancel of a `PENDING` or `CLAIMED` task writes
+  no attempt, as before. A Rust `match` on `TaskAttemptOutcome` needs the
+  new arm.
+- **Metrics and alerts: the outcome `CANCELLED`.** `horsies.task.attempts`
+  and `horsies.task.run.duration` take the `outcome` value `CANCELLED`
+  (`error_code` `TASK_CANCELLED`) when the worker sees the end of a
+  cancelled run; the run duration ends when the task code stopped. The
+  alert `HorsiesTaskFailureRatioHigh` and the dashboard panels of attempts
+  that did not complete count `FAILED` and `WORKER_FAILURE` only
+  (`outcome=~"FAILED|WORKER_FAILURE"`), so a cancel is not a failure.
+- **Lifecycle events: contract version 7.** `ChildResult::Cancelled { end }`
+  (Python `ChildResultCancelled`) with `end` `RETURNED_AFTER_SIGNAL`,
+  `DROPPED_AFTER_GRACE` or `BEFORE_BODY`; `WorkerDecision` gains
+  `KILLED_AFTER_CANCEL` and `LOST_AFTER_CANCEL` (error code
+  `TASK_CANCELLED`); `AttemptRecord::RecordedByCancel` (Python
+  `AttemptRecordRecordedByCancel`): the cancel statement wrote the attempt,
+  and the worker wrote nothing. A result that reached the worker before its
+  child got the cancel keeps `Completed` or `Failed` with the record
+  `NotHeld`. The snapshot is `core/tests/fixtures/event_contract/v7.txt`. A
+  Rust `match` on these enums needs the new arms.
+- **Schema migration 1003 and child protocol 4: stop every process and
+  upgrade together.** The first start of this build applies migration 1003
+  (`core/migrations/1003_attempt_cancelled.sql`) after migration 1002. It
+  replaces the CHECKs `horsies_task_attempts_outcome_known` and
+  `horsies_task_attempts_phase_record_shape`, replaces
+  `horsies_cancel_task` (same arguments and columns), and adds
+  `horsies_cancelled_runs`. Each CHECK reads `horsies_task_attempts`, which
+  holds the attempts of live tasks only, under `ACCESS EXCLUSIVE` until the
+  migration commits; no table is rewritten and no old row changes. A
+  process of an earlier build that starts after it is refused, because the
+  database holds a newer version; one that runs on fails when it reads a
+  `CANCELLED` attempt, and its workers do not get the cancel of a running
+  task. A database at 1003 does not go back to an earlier build. The child
+  protocol goes from version 3 to 4 (`cancel_run`, `cancel_fired`,
+  `run_cancelled`, the seat end `cancelled`); a parent and a child of one
+  build always match, and a mismatch is refused at the child start. The web
+  monitoring schema check expects version 1003.
+- **Schema migration 1004: stop every process and upgrade together.** The
+  first start of this build applies migration 1004
+  (`core/migrations/1004_worker_profile_name.sql`) after migration 1003. It
+  adds the nullable column `profile_name` (`varchar(64)`) and the CHECK
+  `horsies_worker_states_profile_name_shape` to `horsies_worker_states`,
+  under `ACCESS EXCLUSIVE` until it commits; no table is rewritten and no
+  old row changes. A process of an earlier build that starts after it is
+  refused, because the database holds a newer version; a worker of an
+  earlier build that runs on writes its snapshots with no profile name. A
+  database at 1004 does not go back to an earlier build. The web monitoring
+  schema check expects version 1004.
+- **Schema migration 1005: a CLAIMED or RUNNING task row holds its claim
+  generation. Stop every process and upgrade together.** The first start of
+  this build applies migration 1005
+  (`core/migrations/1005_claim_generation_by_status.sql`) after migration
+  1004. It adds the CHECK `horsies_tasks_claim_generation_by_status` to
+  `horsies_tasks`: a row with the status `CLAIMED` or `RUNNING` has
+  `claimed_at`. No horsies writer makes a row that breaks the rule. A
+  statement written by hand (for example a test seed) that inserts such a
+  row, or that clears `claimed_at` of such a row, now fails at once with
+  SQLSTATE 23514 and the name of the CHECK. Before, the row was accepted,
+  and the attempt writer that copies `claimed_at` refused it later. The
+  CHECK reads the table once, under `ACCESS EXCLUSIVE` until the migration
+  commits; no table is rewritten and no row changes. A database that holds
+  such a row stops the migration with SQLSTATE 23514: the message names the
+  table, the CHECK, the row count and the query that finds the rows, the
+  database stays at 1004, and the process does not start. Correct or delete
+  each row, then start again. A process of an earlier build that starts
+  after the migration is refused, because the database holds a newer
+  version. A database at 1005 does not go back to an earlier build. The web
+  monitoring schema check expects version 1005.
+- **Schema migration 1006: the client family `TYPESCRIPT` is reserved.**
+  The first start of this build applies migration 1006
+  (`core/migrations/1006_typescript_client_family.sql`) after migration
+  1005. It replaces the CHECK `horsies_client_family_family_known`: the
+  family row can hold `TYPESCRIPT` in addition to `PYTHON` and `RUST`. No
+  TypeScript client is released yet. The Python and Rust clients never write
+  `TYPESCRIPT`, and the migration does not change the family row. The
+  migration holds `ACCESS EXCLUSIVE` on `horsies_client_family` (one row)
+  until it commits; no table is rewritten. A process of an earlier build
+  that starts after it is refused, because the database holds a newer
+  version; one that runs on keeps writing. A database at 1006 does not go
+  back to an earlier build. The web monitoring schema check expects version
+  1006.
+  - A Python or a Rust client refuses a database whose family row holds
+    `TYPESCRIPT` as it refuses a database of the other client: the install,
+    each write and a rerun fail with the same errors and write nothing. The
+    message names the `TYPESCRIPT` client.
+  - Rust: `ClientFamily` of `horsies-core` gains `TypeScript` (stored as
+    `TYPESCRIPT`). `horsies::rerun::RecordedFamily::Recorded` can carry it
+    in `CallerRerunError::ClientFamilyMismatch`. A `match` on
+    `ClientFamily` needs the new arm.
+  - The message of `UnknownStoredFamily` (a family row that holds no client
+    family) names `PYTHON`, `RUST` and `TYPESCRIPT`.
+- **`WorkerStateSnapshot` has the field `profile`.** Code that builds a
+  Python `WorkerStateSnapshot` passes `profile`; a Rust struct literal of
+  `WorkerStateSnapshot` sets `profile`.
+- **A worker refuses a profile name that breaks the name rule.** In
+  `horsies-core`, `Worker::from_plan` refuses a `WorkerPlan` whose profile
+  name is not 1 to 64 characters of letters, digits, `_`, `.` and `-` (the
+  first not `.` or `-`), with a config error, before any work. The profile
+  selection of both clients never gives such a name.
+- **A workflow start with a known `workflow_id` must carry the same start
+  command.** When the id exists, the start compares its start command with
+  the stored one, in the same statement:
+  - same workflow name, same start command: the existing handle, as before;
+    nothing is written;
+  - same workflow name, another start command: the new error
+    `WorkflowStartCommandConflict` (Python) or
+    `WorkflowStartError::CommandConflict` (Rust), code
+    `WORKFLOW_COMMAND_CONFLICT`; nothing is written;
+  - the id holds a sub-workflow: `WORKFLOW_COMMAND_CONFLICT`;
+  - another workflow name: `WORKFLOW_ID_CONFLICT`, as before.
+
+  The new error has `message`, `workflow_name` and `workflow_id`. It is
+  never retryable, and `retry_start` / `retry_start_async` refuse it. The
+  start command is the workflow name, definition key, `on_error`, output
+  node, success policy, and each node of the top-level workflow: index,
+  node id, task name, input (as the client encoded it), queue, priority,
+  dependencies, `args_from`, `workflow_ctx_from`, `allow_failed_deps`, join
+  rule, `min_success`, task options (with `good_until`), retention class
+  and the sub-workflow facts. The workflow id, the call time, the trace and
+  the pre-built child workflows are not in it. The core computes the
+  SHA-256 of the start command (version 1); no client computes it. This is
+  a breaking change for a repeat start with other inputs: it returned the
+  first workflow and dropped the new inputs; now it is refused. Runs
+  started before this release have no stored start command and are not
+  checked: a start with their id and their name returns their handle, and
+  the core logs one warning. In `horsies-core`, `ClientStartOutcome` is
+  `Started | Exists(ExistingRun) | IdHeld(IdHolder)`, with
+  `ExistingRun::{SameCommand, FingerprintNotStored}` and
+  `IdHolder::{OtherWorkflowName { existing_name }, OtherCommand,
+  SubWorkflow}`; `WorkflowStartError::id_held(workflow_name, workflow_id,
+  holder)` builds the error of a held id. `WorkflowStartErrorCode` gains
+  `WorkflowCommandConflict` after `WorkflowIdConflict`; the crate `horsies`
+  re-exports both enums with the new members.
+- **Schema migration 1001: stop every 0.8.0 process before the upgrade.**
+  The first start of this build applies migration 1001
+  (`core/migrations/1001_lifecycle_record.sql`) after migration 1000. A
+  0.8.0 process that runs on after it calls functions whose argument list
+  changed (SQLSTATE 42883); a 0.8.0 process that starts after it is
+  refused, because the database holds a newer version. A database at 1001
+  does not go back to 0.8.0. The migration rewrites no table; it holds
+  `ACCESS EXCLUSIVE` on `horsies_tasks` and `horsies_task_attempts`, and
+  `SHARE ROW EXCLUSIVE` on `horsies_workflows` and `horsies_workflow_tasks`
+  (the foreign keys of the new event table), until it commits.
+- **Schema migration 1002: stop every process before the upgrade.** The
+  first start of this build applies migration 1002
+  (`core/migrations/1002_workflow_start_command_fingerprint.sql`) after
+  migration 1001. It adds `command_fingerprint_version` and
+  `command_fingerprint` to `horsies_workflows`, with the CHECK
+  `horsies_workflows_command_fingerprint_by_origin`, and replaces
+  `horsies_workflow_start` (40 arguments), `horsies_workflow_start_top_row`,
+  `horsies_workflow_start_child_row` and `horsies_workflow_child_start`. Upgrade every process together. A
+  process of an earlier build that runs on after the migration fails every
+  workflow start (SQLSTATE 42883); one that starts after it is refused,
+  because the database holds a newer version. A database at 1002 does not
+  go back to an earlier build. The migration rewrites no table and writes
+  no value into old rows; the new CHECK reads `horsies_workflows` once. The
+  web monitoring schema check expects version 1002.
+- **Task history: attempt archive version 2.** Each move to history from
+  migration 1001 stores the attempts of the task with their phase records,
+  and the open attempt of a task that ended with no attempt row (a cancel,
+  an expiry or a pause abandon): its claim count, its first claim and its
+  finalizing marker. The live branch of the monitoring task detail reads
+  the same form. History rows of version 1 stay as they are; the core reads
+  both versions.
+- **Workflow retention: a batch counts the event rows.** A batch of the
+  workflow retention counts the node rows and the event rows of its
+  workflows against `retention_delete_batch_size` (it counted the node rows
+  only), and deletes the events with their workflows.
+- **Rust crates: the attempt writes carry the placement of the attempt.**
+  In `horsies-core`, `PlainSuccess`, `FinishFailedAttempt`,
+  `FinishWorkflowSuccess` and `core::lifecycle::TerminalizationCommand::CompleteTaskFused`
+  gain the field `placement: core::lifecycle::AttemptPlacement`
+  (`Placed { slot_wait }` or `NotObserved`). Code that builds one of these
+  values sets it; a caller with no placement passes
+  `AttemptPlacement::NotObserved`. `migration_sql_file_texts()` lists every
+  SQL file of the migration chain, in run order.
 - **Rust crates: a large payload of an error or read type is boxed.** The
   field or variant holds the value in a `Box`, so the types that hold it
   are small. `Display`, `Debug`, the serde form, the error codes and the
@@ -43,6 +503,45 @@ there is no migration contract between pre-1.0 versions.
   `core::lifecycle::outcomes::decode_raw` and
   `HandleOperationError::connect_failed` take their first argument by
   reference.
+- **Web API: a database failure that stays answers 500.** A monitoring read
+  or action whose database operation failed answered 503 for every cause.
+  It now answers by the core's classification of the cause, the
+  classification that sets `retryable` on the error types of both clients:
+  - 503 when the cause may clear: a connect that the network refused or
+    that did not answer, a connection that closed, a pool checkout that
+    timed out, a statement whose reply was lost, and SQLSTATE classes 08,
+    40, 53, 55 and 57 (for example 40001, 55P03 and 57014).
+  - 500 when it stays: every other SQLSTATE class, also a class that the
+    core does not name (for example 23514 a CHECK constraint, 42P01 an
+    undefined table, XX000), a connection setting that the core refuses,
+    and a broker with no listener for `GET /api/workers/ping`.
+
+  The body stays `{"detail": ...}` with the same text. The rule applies to
+  the actions `POST /api/tasks/{id}/cancel` and
+  `POST /api/workflows/{id}/pause`, `/resume` and `/cancel` (also to the
+  status read after a workflow pause or cancel); to the reads
+  `GET /api/tasks`, `/api/tasks/{id}`, `/api/tasks/stats`,
+  `/api/tasks/facets`, `/api/tasks/breakdown`, `/api/workflows`,
+  `/api/workflows/names`, `/api/workflows/{id}`,
+  `/api/workflows/{id}/tasks/{index}` and `/api/workers/schedules`; to the
+  worker reads `GET /api/workers`, `/api/workers/{id}/history`,
+  `/api/workers/classes` and `/api/workers/ping`; and to the mount of each
+  client when its broker cannot be built (Python `create_monitoring_app`,
+  Rust `horsies::web::router`) and the workflow actions of
+  `horsies::monitoring` when the connect fails. In `horsies-core`,
+  `monitoring::connect_failed_action(subject, &error)` takes the subject
+  and the `BrokerError` in place of the cause text;
+  `monitoring::database_failure_status` and `db::Transience::of_retryable`
+  are new. The web UI shows a 500 answer to an action as a failure that a
+  retry does not fix ("A retry gives the same result."), with no Retry
+  action, and reads the task or workflow again; a 503 answer keeps the
+  Retry action.
+- **The web UI is restyled.** Each page is one window over a backdrop. The
+  top bar, the toolbars and the graph controls are capsules. In the light
+  theme, muted text has a contrast of at least 6.1:1. Without
+  `backdrop-filter`, or with `prefers-reduced-transparency: reduce`, each
+  surface is opaque. On the Tasks page, a facet button names its field
+  (`Worker: host-a`). No route, data flow or API call changes.
 
 - **Rust client: the general broker pool default is `pool_size` 5 and
   `max_overflow` 10, the same as the Python client.** It was 30 and 30.
@@ -85,6 +584,29 @@ there is no migration contract between pre-1.0 versions.
   is also the heartbeat window.** A heartbeat partition is dropped
   `heartbeat_leaf_horizon_hours` after its hour ends. The pages said that
   the setting controls only the partitions kept ahead.
+### Fixed
+
+- **A repeat workflow start no longer returns a handle to a deleted
+  workflow.** A start whose id existed inserted with `ON CONFLICT DO
+  NOTHING` and then read the stored name in a second statement. When
+  retention deleted the row between the two statements, the start returned
+  a handle to a workflow that no longer existed. The conflict now locks the
+  existing row (`ON CONFLICT (id) DO UPDATE ... WHERE false`), so the read
+  finds it. After retention deleted and committed the row, a start with the
+  same id starts a new workflow.
+- **Rust client: a shared child no longer exits when the worker uses a seat
+  at once after the end of its run.** A `shared_async` or `shared_thread`
+  seat sent the end of its run and only then freed the seat. When the
+  worker read that end and at once sent a new run to the seat, or a stop to
+  the child, before the seat was free, the child refused the frame and
+  exited with code 72, and the runs on its other seats ended with it. The
+  seat is now free before the end of its run goes out. The Python shared
+  child freed the seat first already.
+- **Linux: the waker pipe of the child spawner is close-on-exec from its
+  creation.** The worker created the pipe with `pipe` and then set
+  `FD_CLOEXEC` on each end. A process that another thread of the worker
+  process started between these calls kept both ends of the pipe. On Linux,
+  one `pipe2` call now sets both flags. Other platforms keep the two calls.
 
 ## 0.8.0 — 2026-11-21
 

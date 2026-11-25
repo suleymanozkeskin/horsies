@@ -250,6 +250,7 @@ match spec.start():
 | `WorkflowStartBrokerNotConfigured` | `BROKER_NOT_CONFIGURED` | – | `False` |
 | `WorkflowStartValidationFailed` | `VALIDATION_FAILED` | `exception: BaseException \| NoCause` | `False` |
 | `WorkflowStartIdConflict` | `WORKFLOW_ID_CONFLICT` | `existing_workflow_name: str` | `False` |
+| `WorkflowStartCommandConflict` | `WORKFLOW_COMMAND_CONFLICT` | – | `False` |
 | `WorkflowStartEnqueueFailed` | `ENQUEUE_FAILED` | `exception: BaseException` | the core's classification |
 | `WorkflowStartAsyncContext` | `ASYNC_CONTEXT` | – | `False` |
 
@@ -261,12 +262,26 @@ match spec.start():
 | `BROKER_NOT_CONFIGURED` | No | `spec.start()` called without broker |
 | `VALIDATION_FAILED` | No | A start check (`WorkflowValidationError`) refused the start, or a retry of another workflow's error. Any other exception in the start checks is a defect and propagates. In the start transaction, an exception that is not a database or driver error is a defect and propagates, also a `SerializationError` |
 | `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written — use another id |
+| `WORKFLOW_COMMAND_CONFLICT` | No | The workflow id holds a workflow of the same name that another start command started, or a sub-workflow; nothing was written — send the same start command, or use another id |
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error; any other exception in the start transaction propagates |
 | `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` called on a thread that runs an event loop; nothing was written — call `await spec.retry_start_async(err)` |
 
 ### Retry
 
-`retry_start()` / `retry_start_async()` take `WorkflowStartRetryable` = `WorkflowStartEnqueueFailed | WorkflowStartAsyncContext` and start again with the error's `workflow_id`. Another variant is a type error and fails an assertion at run time. An error of another workflow returns `Err(WorkflowStartValidationFailed)`. Best-effort idempotent by `workflow_id` (not payload-verified).
+`retry_start()` / `retry_start_async()` take `WorkflowStartRetryable` = `WorkflowStartEnqueueFailed | WorkflowStartAsyncContext` and start again with the error's `workflow_id`. Another variant is a type error and fails an assertion at run time. An error of another workflow returns `Err(WorkflowStartValidationFailed)`. The retry methods refuse `WorkflowStartCommandConflict` and `WorkflowStartIdConflict`.
+
+### Start with an existing `workflow_id`
+
+The core compares the start command of the start with the stored one:
+
+- Same name, same start command: `Ok(handle)` of the existing workflow; nothing written.
+- Same name, another start command: `Err(WorkflowStartCommandConflict)`; nothing written.
+- Another name: `Err(WorkflowStartIdConflict)`; nothing written.
+- The id holds a sub-workflow: `Err(WorkflowStartCommandConflict)`.
+- A run started before this release (no stored start command): `Ok(handle)`, no compare.
+- A row that retention deleted: a new workflow starts.
+
+The start command is the workflow name, `definition_key`, `on_error`, output, success policy, and each top-level node: index, `node_id`, task name, kwargs (byte for byte), queue, priority, dependencies, `args_from`, `workflow_ctx_from`, `allow_failed_deps`, join, `min_success`, task options (with `good_until`), retention class, sub-workflow facts. Not in it: `workflow_id`, `sent_at`, trace, `resend_on_transient_err`, pre-built child workflows. A value that changes per call (a `good_until` from now, a timestamp kwarg, a changed spec after a deploy) makes each repeat a conflict. `retry_start` rebuilds the same spec, so a committed first attempt comes back as the existing handle. See `/horsies/guides/start-workflow-once/`.
 
 ### Auto-retry
 
@@ -683,7 +698,7 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 - A child workflow has at most depth 32 (a top-level workflow has depth 0). A deeper child is not started: its `SubWorkflowNode` fails with `SUBWORKFLOW_DEPTH_LIMIT_REACHED`, and `on_error` applies.
 - A `WorkflowSpec` holds at most 10,000 nodes; more raises HRS-038 when the spec is built. Split larger work into `SubWorkflowNode`s.
 - `workflow_ctx_from` scope is per-task, does not propagate downstream.
-- `retry_start()` is best-effort idempotent by `workflow_id` only (no payload verification).
+- A start with an existing `workflow_id` must send the same start command; another command is `WorkflowStartCommandConflict`. Runs started before this release are not checked. The protection ends when retention deletes the workflow row.
 - WorkflowSpec and all nodes are frozen after construction. Reusing node objects across specs is safe (they are copied internally).
 - `PAUSED` is not terminal. `handle.get()` returns immediately with `WORKFLOW_PAUSED`; does not wait for resume.
 
@@ -711,7 +726,7 @@ from horsies import (
     # Start result types
     WorkflowStartResult, WorkflowStartError, WorkflowStartErrorCode,
     WorkflowStartRetryable, WorkflowStartBrokerNotConfigured,
-    WorkflowStartValidationFailed, WorkflowStartIdConflict,
+    WorkflowStartValidationFailed, WorkflowStartIdConflict, WorkflowStartCommandConflict,
     WorkflowStartEnqueueFailed, WorkflowStartAsyncContext,
     # Result primitives
     Result, Ok, Err, is_ok, is_err,

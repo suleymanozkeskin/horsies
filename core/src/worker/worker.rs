@@ -38,6 +38,7 @@ use crate::db::{
 use crate::telemetry::labels::{ClaimPassResult, ReleaseReason};
 use crate::telemetry::worker::{EventQueue, TelemetryOn, WorkerTelemetry};
 use crate::worker::backoff::RetryBackoff;
+use crate::worker::cancel_router::{spawn_cancel_router, CANCEL_CHANNEL};
 use crate::worker::children::{
     attempt_end, baseline_limits, exit_not_seen, handler_child_config, pending_task_limit,
     plan_placement, preload_plan, ChildLaunch, ChildrenStopped, PoolFacts, WorkerChildren,
@@ -55,9 +56,9 @@ use crate::worker::executor::protocol::TaskInputText;
 use crate::worker::executor::slots::outcome::EndWrites;
 use crate::worker::executor::slots::{
     describe_claim_plan, guard_new_kind_baselines, start_children, unserved_classes_line,
-    AttemptEnd, BaselineOverLimit, ChildrenStart, ChildrenStartFailed, ClaimRoute, Claimed,
-    ClaimedTask, NotRunCause, OrphanSelfHeal, OutcomeWriter, PlacementReceipt, PoolBoard,
-    PoolFailure, PoolStopReport, RetryFacts, Settlement, Submitted, TaskKind,
+    watched_placement, AttemptEnd, BaselineOverLimit, ChildrenStart, ChildrenStartFailed,
+    ClaimRoute, Claimed, ClaimedTask, NotRunCause, OrphanSelfHeal, OutcomeWriter, PlacementReceipt,
+    PoolBoard, PoolFailure, PoolStopReport, RetryFacts, Settlement, Submitted, TaskKind,
 };
 use crate::worker::executor::supervisor::{
     PreloadMode, PreloadStart, PreloadUnsupported, Spawner, SpawnerHandle, SpawnerStopReport,
@@ -811,7 +812,9 @@ fn claimed_of(row: ClaimedRow) -> Claimed {
 /// `AttemptNotStarted`, or `ClaimReleased` for a task that reached no
 /// child), then `AttemptRecorded`. The result envelope of a reported end is
 /// read once, by `writer`. `read` is when the worker read the claim result
-/// of the task. Returns how the write settled.
+/// of the task; the attempt row of the end keeps the slot wait from `read`
+/// to the placement (`ChildPlacement::attempt_placement`). Returns how the
+/// write settled.
 pub(crate) async fn follow_attempt<W: EndWrites>(
     writer: &W,
     telemetry: &WorkerTelemetry,
@@ -825,7 +828,9 @@ pub(crate) async fn follow_attempt<W: EndWrites>(
     let end = attempt_end(submitted).await;
     let read_end = writer.read_end(task, end);
     let noted = telemetry.attempt_ended(task, &placement, W::view(&read_end));
-    let settled = writer.write_end(task, read_end).await;
+    let settled = writer
+        .write_end(task, read_end, placement.attempt_placement(read))
+        .await;
     telemetry.attempt_recorded(task, noted, settled);
     settled
 }
@@ -918,10 +923,21 @@ fn spawn_ping_responder(
     })
 }
 
+/// The tasks and subscriptions of the broker's listener that the service
+/// loops take: the running ping responder, and the cancel notices for the
+/// cancel router.
+struct ServiceListeners {
+    ping_responder: JoinHandle<()>,
+    cancel_notices: PayloadSubscription,
+}
+
 /// The listener subscriptions of a running worker.
 struct WorkerSubscriptions {
     claim_wakes: ClaimWakes,
     pings: PayloadSubscription,
+    /// The cancel notices of RUNNING tasks ([`CANCEL_CHANNEL`]), for the
+    /// cancel router.
+    cancel_notices: PayloadSubscription,
 }
 
 /// The claim wake channel of a queue: `task_queue_<queue>`. A queue name
@@ -1009,8 +1025,11 @@ impl Worker {
     /// steps are built by `child_specs`, the child spec source of the client.
     ///
     /// Errors: [`WorkerError::Config`] for a worker config that does not
-    /// validate, or a profile that starts no child (AppConfig validation
-    /// refuses such a profile; Python `execution_settings`).
+    /// validate, a profile that starts no child (AppConfig validation
+    /// refuses such a profile; Python `execution_settings`), or a profile
+    /// name that breaks the profile name rule (the profile selection refuses
+    /// it; each worker snapshot stores the name, and the table refuses such
+    /// a name).
     pub(crate) fn of_child_specs(
         broker: Arc<PostgresBroker>,
         child_specs: Arc<dyn ChildSpecSource>,
@@ -1021,6 +1040,17 @@ impl Worker {
         registered: RegisteredClasses,
     ) -> Result<Self, WorkerError> {
         worker_config.validate().map_err(WorkerError::Config)?;
+        match crate::core::config::worker_profile::is_valid_profile_name(&profile.name) {
+            true => {}
+            false => {
+                return Err(WorkerError::Config(format!(
+                    "{}: the profile name is not valid; a name has 1 to {} characters: letters, \
+                     digits, '_', '.' and '-', and the first character is not '.' or '-'",
+                    crate::core::config::worker_profile::profile_path(&profile.name),
+                    crate::core::config::worker_profile::PROFILE_NAME_MAX_LENGTH,
+                )));
+            }
+        }
         if profile.profile.child_count() == 0 {
             return Err(WorkerError::Config(format!(
                 "{}: the profile starts no children; a worker needs at least one child to run \
@@ -1657,8 +1687,9 @@ impl Worker {
     /// `_capacity_released`). An admitted row of a capped queue counts in
     /// its queue's start check until the write ends (`count`). Never fails
     /// for a task: a task that reaches no child ends `NotDispatched`, and its
-    /// claim goes back to the queue. With telemetry on, the placement of the
-    /// task on a child is watched and is the `AttemptPlaced` point.
+    /// claim goes back to the queue. The placement of the task on a child is
+    /// always watched: the attempt row keeps it, and with telemetry on it is
+    /// the `AttemptPlaced` point.
     fn dispatch(
         &self,
         children: &WorkerChildren,
@@ -1671,7 +1702,7 @@ impl Worker {
         let claimed = claimed_of(row);
         let task = claimed.task.clone();
         let telemetry = self.telemetry.clone();
-        let (watch, receipt) = telemetry.placement_watch();
+        let (watch, receipt) = watched_placement();
         let submitted = children.submit_watched(claimed, watch);
         let writer = Arc::clone(writer);
         let released = Arc::clone(&self.capacity_released);
@@ -1813,23 +1844,26 @@ impl Worker {
         );
         self.log_claim_settings(&children);
 
-        // Check the session URL, then subscribe the claim wakes and the pings
-        // on the broker's listener, with resilience.
-        let WorkerSubscriptions { claim_wakes, pings } =
-            match self.connect_listener_with_resilience().await {
-                Ok(subscriptions) => subscriptions,
-                Err(error) => {
-                    RunningChildren {
-                        children,
-                        spawner,
-                        live,
-                        handler,
-                    }
-                    .stop_after_failed_start()
-                    .await;
-                    return Err(error);
+        // Check the session URL, then subscribe the claim wakes, the pings
+        // and the cancel notices on the broker's listener, with resilience.
+        let WorkerSubscriptions {
+            claim_wakes,
+            pings,
+            cancel_notices,
+        } = match self.connect_listener_with_resilience().await {
+            Ok(subscriptions) => subscriptions,
+            Err(error) => {
+                RunningChildren {
+                    children,
+                    spawner,
+                    live,
+                    handler,
                 }
-            };
+                .stop_after_failed_start()
+                .await;
+                return Err(error);
+            }
+        };
 
         // The liveness lock is held before the first claim, until every task
         // of the stop ended: a peer that finds it free in two passes far
@@ -1891,7 +1925,10 @@ impl Worker {
             &children,
             &live,
             &stops,
-            ping_responder,
+            ServiceListeners {
+                ping_responder,
+                cancel_notices,
+            },
             liveness_holder,
             handler.view(),
         ) {
@@ -2007,13 +2044,16 @@ impl Worker {
 
     /// Start the service loops: the claimer heartbeat, the reaper, the
     /// worker snapshot, the runner heartbeats of the tasks that children
-    /// hold, the watch of the pool failure and the new-kind baseline guard.
-    /// Each of them, `ping_responder` and `liveness_holder` (the holder of
-    /// the liveness lock) runs under a watchdog: one that ends
+    /// hold, the cancel router of the operator cancels of those tasks, the
+    /// watch of the pool failure and the new-kind baseline guard. Each of
+    /// them, the ping responder of `listeners` and `liveness_holder` (the
+    /// holder of the liveness lock) runs under a watchdog: one that ends
     /// with no stop request stops the worker with `ServiceLoopDied`
     /// (C11-inverse). With stale running recovery off, no task depends on a
     /// runner beat: a beat writer that dies is logged once and the worker
-    /// runs on ([`launch_runner_beats`]).
+    /// runs on ([`launch_runner_beats`]). The cancel router runs until the
+    /// runner beats stop, so a cancel reaches a task that runs while the
+    /// pools drain.
     ///
     /// Errors: [`WorkerError::Config`] when the runner heartbeat pool is
     /// refused, or its watchdog thread does not start.
@@ -2022,10 +2062,14 @@ impl Worker {
         children: &WorkerChildren,
         live: &LiveDispatches,
         stops: &ChildrenStopCell,
-        ping_responder: JoinHandle<()>,
+        listeners: ServiceListeners,
         liveness_holder: JoinHandle<()>,
         handler_child: HandlerChildView,
     ) -> Result<Services, WorkerError> {
+        let ServiceListeners {
+            ping_responder,
+            cancel_notices,
+        } = listeners;
         let claimer_interval =
             Duration::from_millis(self.app_config.recovery.claimer_heartbeat_interval_ms);
         let claimer_hb = spawn_claimer_heartbeat(
@@ -2050,6 +2094,7 @@ impl Worker {
             reaper_health,
             children.view(),
             ClaimColumns::of_profile(&self.profile.profile),
+            self.profile.name.clone(),
             Utc::now(),
             self.endpoint.clone(),
             handler_child,
@@ -2085,6 +2130,12 @@ impl Worker {
                 "the runner heartbeat watchdog thread did not start: {error}"
             ))
         })?;
+        let cancel_router = spawn_cancel_router(
+            cancel_notices,
+            live.clone(),
+            Arc::clone(&self.broker),
+            beats_cancel.clone(),
+        );
         let pool_failure = tokio::spawn(watch_pool_failure(
             Arc::clone(children.board()),
             stops.clone(),
@@ -2104,9 +2155,10 @@ impl Worker {
         // stopped listener ends it.
         let (fatal_tx, fatal_rx) =
             mpsc::unbounded_channel::<crate::worker::supervision::ServiceExit>();
-        let watched: [(&'static str, tokio::task::JoinHandle<()>); 8] = [
+        let watched: [(&'static str, tokio::task::JoinHandle<()>); 9] = [
             ("claimer-heartbeat", claimer_hb),
             ("runner-heartbeat", runner_beats),
+            ("cancel-router", cancel_router),
             ("reaper", reaper),
             ("worker-state", state_loop),
             ("ping-responder", ping_responder),
@@ -2183,8 +2235,9 @@ impl Worker {
         // can act on, while task_new wakes every worker for every insert
         // cluster-wide (thundering herd). The trigger still emits task_new for
         // external observers. Parity with horsies PR #101 cafc9200.
-        // Subscribe to the shared liveness-ping channel BEFORE any background
-        // loop is spawned, so a subscription failure cannot orphan running loops.
+        // Subscribe to the shared liveness-ping channel and to the cancel
+        // notices BEFORE any background loop is spawned, so a subscription
+        // failure cannot orphan running loops.
         let pings = listener
             .subscribe_payloads(
                 fixed_channel(WORKER_PING_CHANNEL),
@@ -2192,9 +2245,14 @@ impl Worker {
             )
             .await
             .map_err(WorkerError::Listener)?;
+        let cancel_notices = listener
+            .subscribe_payloads(fixed_channel(CANCEL_CHANNEL), default_payload_capacity())
+            .await
+            .map_err(WorkerError::Listener)?;
         Ok(WorkerSubscriptions {
             claim_wakes: ClaimWakes { subscriptions },
             pings,
+            cancel_notices,
         })
     }
 
@@ -2468,8 +2526,9 @@ mod tests {
         assert!(!refused.is_retryable());
     }
 
-    /// The boot check passes on a direct URL, and the claim wakes and the
-    /// ping replies both travel over the broker's one listener.
+    /// The boot check passes on a direct URL, and the claim wakes, the ping
+    /// replies and the cancel notices travel over the broker's one
+    /// listener.
     #[tokio::test]
     async fn a_booted_worker_wakes_on_its_queue_and_answers_pings() {
         let broker = Arc::new(PostgresBroker::from_test_url_and_session_url(
@@ -2485,10 +2544,26 @@ mod tests {
                 ..WorkerConfig::default()
             },
         );
-        let WorkerSubscriptions { claim_wakes, pings } = worker
+        let WorkerSubscriptions {
+            claim_wakes,
+            pings,
+            cancel_notices,
+        } = worker
             .try_connect_listener()
             .await
             .expect("the session check passes and the subscriptions start");
+
+        sql::query("SELECT pg_notify('horsies_task_cancel', 'listener-boot-notice')")
+            .execute(&test_pool().await)
+            .await
+            .expect("notify a cancel");
+        let notice = tokio::time::timeout(Duration::from_secs(5), cancel_notices.recv())
+            .await
+            .expect("the cancel notice reaches its subscription");
+        assert_eq!(
+            notice,
+            PayloadEvent::Payload("listener-boot-notice".to_owned())
+        );
 
         sql::query("SELECT pg_notify('task_queue_listener_boot_q', 'wake')")
             .execute(&test_pool().await)
@@ -2732,9 +2807,10 @@ mod tests {
         PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust)
     }
 
-    /// The claim generation of every row that `insert_claimed_task` seeds and
-    /// of every claimed task that `claimed_task` builds, so a test's dispatch
-    /// fences on the generation its row carries.
+    /// The claim generation of every row that `insert_claimed_task` and
+    /// `insert_running_task` seed and of every claimed task that
+    /// `claimed_task` builds, so a test's dispatch fences on the generation
+    /// its row carries.
     fn test_claim_generation() -> chrono::DateTime<Utc> {
         static GENERATION: std::sync::OnceLock<chrono::DateTime<Utc>> = std::sync::OnceLock::new();
         *GENERATION.get_or_init(Utc::now)
@@ -2802,7 +2878,7 @@ mod tests {
                     $1, 'finalize_test', $2, 100, 'null', $5, 'ISOLATED',
                     'standard_30d', NOW(), NOW(),
                     1, decode(repeat('00', 32), 'hex'), NULL,
-                    'RUNNING', NOW(), NULL, NULL, NULL,
+                    'RUNNING', NOW(), $6, NULL, NULL,
                     NOW(), NULL, NULL,
                     NULL, NULL, NULL,
                     $3, $4, NULL, NULL, FALSE,
@@ -2814,6 +2890,7 @@ mod tests {
         .bind(retry_count)
         .bind(max_retries)
         .bind(task_options)
+        .bind(test_claim_generation())
         .execute(pool)
         .await
         .unwrap();
@@ -3170,6 +3247,56 @@ mod tests {
             }
             Err(other) => panic!("another error: {other}"),
             Ok(_) => panic!("a worker with no child must be refused"),
+        }
+    }
+
+    /// A profile name that breaks the profile name rule is refused before
+    /// any work: each snapshot stores the name, and the table refuses it. A
+    /// plan built by hand can carry such a name; the profile selection never
+    /// gives one.
+    #[tokio::test]
+    async fn a_worker_whose_profile_name_breaks_the_rule_is_refused() {
+        use crate::worker::executor::protocol::{
+            ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
+        };
+        let url = "postgresql://horsies@127.0.0.1:1/horsies";
+        let pool = TestPoolOptions::new().connect_lazy(url);
+        for name in ["", "-flag", "has space"] {
+            let refused = Worker::of_child_specs(
+                Arc::new(PostgresBroker::from_test_url(
+                    pool.url(),
+                    crate::ClientFamily::Rust,
+                )),
+                crate::test_support::child_specs::no_child_specs(),
+                AppConfig::for_database_url(url),
+                WorkerConfig::default(),
+                SelectedProfile {
+                    name: name.to_owned(),
+                    profile: serde_json::from_value(serde_json::json!({
+                        "isolated": {"kind": "isolated_children", "count": 1}
+                    }))
+                    .expect("a valid test profile"),
+                },
+                ChildLaunch {
+                    command: crate::worker::executor::slots::scripted::idle_child_of_any_kind(),
+                    preload: crate::worker::children::PreloadProgram::NoPreloadProgram,
+                    program: ChildProgram::Rust,
+                    log_level: ChildLogLevel::Info,
+                    database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+                    connection: ChildConnection::default(),
+                },
+                RegisteredClasses::default(),
+            );
+            match refused {
+                Err(WorkerError::Config(message)) => {
+                    assert!(
+                        message.contains("the profile name is not valid"),
+                        "{name:?}: {message}"
+                    );
+                }
+                Err(other) => panic!("{name:?}: another error: {other}"),
+                Ok(_) => panic!("{name:?}: a worker with this name must be refused"),
+            }
         }
     }
 
@@ -4233,7 +4360,17 @@ mod tests {
         };
         let is_workflow_task = task.kind.is_workflow_task();
         let log = task.log();
-        match persist_ok_result(broker, task_id, log, &value, fence, is_workflow_task).await {
+        match persist_ok_result(
+            broker,
+            task_id,
+            log,
+            &value,
+            fence,
+            is_workflow_task,
+            crate::core::lifecycle::AttemptPlacement::NotObserved,
+        )
+        .await
+        {
             Ok(FinalizeOutcome::Terminal {
                 capacity_notified,
                 phase_two,

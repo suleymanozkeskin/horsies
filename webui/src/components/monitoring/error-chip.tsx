@@ -13,9 +13,10 @@ import {
 } from './error-taxonomy';
 
 /**
- * Error code rendered with its taxonomy category: a category-colored left bar,
- * the code in mono, and a tooltip explaining the family. `category` may be null
- * for codes that predate the taxonomy; we fall back to DOMAIN styling.
+ * Error code rendered with its taxonomy category: a flat pill with a
+ * category-colored dot, the code in mono, and a tooltip explaining the family.
+ * `category` may be null for codes that predate the taxonomy; we fall back to
+ * DOMAIN styling.
  */
 export function ErrorChip({
   code,
@@ -33,10 +34,12 @@ export function ErrorChip({
     <TooltipProvider>
       <Tooltip>
         <TooltipTrigger asChild>
-          <span
-            className="inline-flex max-w-full items-center gap-1.5 rounded border border-border py-0.5 pl-1.5 pr-2 text-xs"
-            style={{ borderLeftColor: color, borderLeftWidth: 3 }}
-          >
+          <span className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-glass-inset px-2 py-0.5 text-xs">
+            <span
+              className="size-2 shrink-0 rounded-full"
+              style={{ background: color }}
+              aria-hidden
+            />
             <span className="truncate font-mono text-11">{code}</span>
           </span>
         </TooltipTrigger>

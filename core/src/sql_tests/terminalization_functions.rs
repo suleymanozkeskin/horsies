@@ -175,22 +175,23 @@ const TASK_ROW_SQL: &str = "
     FROM horsies_task_history WHERE task_id = $1
 ";
 
-/// The writer of COMPLETE_LOCKED: phase 1 of the success of a workflow task.
-/// The ten columns are the outcome row that every writer returns first.
-/// Parameters: `$1` task id, `$2` worker id, `$3` claimed_at, `$4` result.
+/// The writer of COMPLETE_LOCKED: phase 1 of the success of a workflow task,
+/// with no placement observed. The ten columns are the outcome row that
+/// every writer returns first. Parameters: `$1` task id, `$2` worker id,
+/// `$3` claimed_at, `$4` result.
 const WORKFLOW_SUCCESS_SQL: &str = "
     SELECT task_id, ordinality, outcome, terminal_at, terminalization_kind,
            observed_status, observed_worker_id, observed_claimed_at,
            guard_kind, observed_guard
     FROM horsies_finish_workflow_success(
-        CAST($1 AS uuid), $2, CAST($3 AS TIMESTAMPTZ), $4
+        CAST($1 AS uuid), $2, CAST($3 AS TIMESTAMPTZ), $4, 'NOT_OBSERVED', NULL
     )
 ";
 
 /// The writer of FAIL_RUNNING: a failed attempt with no retry (retry kind
-/// NONE, a CLAIMED row refused). The attempt row records the failed reason
-/// too. Parameters: `$1` task id, `$2` worker id, `$3` claimed_at, `$4`
-/// result, `$5` error code, `$6` failed reason.
+/// NONE, a CLAIMED row refused) and no placement observed. The attempt row
+/// records the failed reason too. Parameters: `$1` task id, `$2` worker id,
+/// `$3` claimed_at, `$4` result, `$5` error code, `$6` failed reason.
 const FAILED_ATTEMPT_SQL: &str = "
     SELECT task_id, ordinality, outcome, terminal_at, terminalization_kind,
            observed_status, observed_worker_id, observed_claimed_at,
@@ -198,7 +199,7 @@ const FAILED_ATTEMPT_SQL: &str = "
     FROM horsies_finish_failed_attempt(
         CAST($1 AS uuid), $2, CAST($3 AS TIMESTAMPTZ),
         'NONE', NULL, NULL, NULL, $4, $5, $6,
-        'FAILED', NULL, $6, 'REFUSE', TRUE
+        'FAILED', NULL, $6, 'REFUSE', TRUE, 'NOT_OBSERVED', NULL
     )
 ";
 
@@ -792,8 +793,9 @@ async fn attempt_history(session: &Session, task_id: Uuid) -> Vec<AttemptSummary
 }
 
 /// The attempts of an attempt snapshot row ([`ARCHIVED_ATTEMPTS_SQL`]). The
-/// baseline stores no codec or content type: archive version 1 means the
-/// json-utf8 codec and the application/json content type.
+/// schema stores no codec or content type: each retained archive version
+/// (1, and 2 from migration 1001) means the json-utf8 codec and the
+/// application/json content type.
 fn archived_attempts(row: &Row) -> Vec<AttemptSummary> {
     let version: i16 = row.get(0);
     let payload: Vec<u8> = row.get(1);

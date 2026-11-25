@@ -48,7 +48,13 @@ from horsies.core.worker.child_runner import (
     DeadlineBeforeStart,
     StartAllowed,
 )
-from horsies.core.worker.run_return import CoreStoppedBeforeStart, MarkerDone, ResultEnvelope
+from horsies.core.worker.run_cancel import RunCancel
+from horsies.core.worker.run_return import (
+    CoreStoppedBeforeStart,
+    MarkerDone,
+    ResultEnvelope,
+    RunCancelled,
+)
 from horsies.core.worker.shared_child import (
     SeatReturn,
     SetRunning,
@@ -177,6 +183,7 @@ def _run(frame: core.SharedRunFrame) -> SeatReturn:
                 _seat_work(frame),
                 StartAllowed,
                 _body_first,
+                RunCancel(),
             )
             match returned:
                 case SetRunning() | StoppedBeforeRunning():
@@ -185,6 +192,8 @@ def _run(frame: core.SharedRunFrame) -> SeatReturn:
                     raise AssertionError('a start that is always allowed was refused')
                 case CoreStoppedBeforeStart(stopped=stopped):
                     raise AssertionError(f'the core of the test process stopped: {stopped}')
+                case RunCancelled():
+                    raise AssertionError('no operator cancel reached the run')
 
     seat = threading.Thread(target=body, name='horsies-seat-0')
     seat.start()
@@ -302,7 +311,7 @@ def test_a_body_that_the_stopped_core_ended_ends_the_child_with_no_report(
     with patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)):
         with pytest.raises(_Exited):
             thread_runner.run_thread_seat_task(
-                frame, _seat_work(frame), StartAllowed, _body_first,
+                frame, _seat_work(frame), StartAllowed, _body_first, RunCancel(),
             )
 
     assert codes == [child_main.CORE_STOPPED_EXIT_CODE]
@@ -416,8 +425,9 @@ def test_a_seat_that_gets_its_connection_after_the_deadline_does_not_start(
         deadlines.start()
         assert seats.start().is_ok()
         try:
-            table.add(frame, work)
-            seats.give(frame, work)
+            cancel = RunCancel()
+            table.add(frame, work, cancel)
+            seats.give(frame, work, cancel)
             ends_by = time.monotonic() + 10.0
             while not writer.results():
                 assert time.monotonic() < ends_by, 'the run did not end'

@@ -478,7 +478,7 @@ libraries accept the same declarations.
 """
 
 MIN_CANCEL_GRACE_MS: Final = 100
-"""The smallest `cancel_grace_ms` of a `SHARED_ASYNC` task.
+"""The smallest `cancel_grace_ms` of a `SHARED_ASYNC` or an `ISOLATED` task.
 
 A healthy cleanup after a cancel ended within 15.4 ms in the measured set
 (local network), so this is 6.5 times that. A lower value would send the
@@ -486,7 +486,7 @@ second cancel into healthy cleanups and drop their connections.
 """
 
 MAX_CANCEL_GRACE_MS: Final = 10_000
-"""The largest `cancel_grace_ms` of a `SHARED_ASYNC` task.
+"""The largest `cancel_grace_ms` of a `SHARED_ASYNC` or an `ISOLATED` task.
 
 The longest library cleanup with an end in the measured set took 10.0 s
 (psycopg 3.3.6 and later: a 5 s cancel request, then a 5 s drain). A larger
@@ -495,6 +495,7 @@ grace changes no measured outcome; it only keeps a seat longer.
 
 DEFAULT_CANCEL_GRACE_MS: Final = 1_000
 """The `cancel_grace_ms` that a `SHARED_ASYNC` task gets when it sets none.
+An `ISOLATED` task that sets none gets no grace: no hard stop.
 
 65 times the slowest healthy cleanup in the measured set. The task row
 stores the value in effect when the task was sent, so a change of this
@@ -511,8 +512,12 @@ class Execution(str, Enum):
       process. The task must set `timeout_ms`. `cancel_grace_ms` is the time
       the task gets to stop after its cancel.
     - `SHARED_THREAD`: many `def` tasks run on threads in one child process.
-      The task must set `timeout_ms`. A thread cannot be cancelled, so the
+      The task must set `timeout_ms`. A thread cannot be stopped, so the
       task cannot set `cancel_grace_ms`.
+
+    An `ISOLATED` task can set `cancel_grace_ms`: after an operator cancel,
+    the worker kills its child when the run has not ended that long after
+    the cancel. With none, the cancel is cooperative only.
     """
 
     ISOLATED = 'ISOLATED'

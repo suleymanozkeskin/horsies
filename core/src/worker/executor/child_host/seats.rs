@@ -22,9 +22,34 @@
 //!   child.
 //! - Shared thread: up to `seats` blocking bodies at once, each on a seat
 //!   thread. A thread cannot be stopped: at the deadline `deadline_fired` is
-//!   sent and the body runs on; when it returns, its value is dropped and
-//!   the run ends timed out. One atomic gate decides between the return and
-//!   the deadline.
+//!   sent, the run's cancel state reads the deadline, and the body runs on;
+//!   when it returns, its value is dropped and the run ends timed out. One
+//!   atomic gate decides between the return, the deadline and an operator
+//!   cancel.
+//!
+//! The operator cancel of a run (`cancel_run`, protocol version 4): the
+//! cancel statement has moved the row to history and recorded the attempt
+//! as `CANCELLED`. The child fires the run's cancel signal with the
+//! operator cause, and the run ends cancelled whatever the body returns:
+//!
+//! - A cancel that comes before the body starts (while the start write is
+//!   in flight) is kept; the body does not start, and the end is cancelled
+//!   with body `not_started`. A start that ends the run another way reports
+//!   that end, and the cancel is dropped.
+//! - Isolated: the serve loop reads the parent frames while the run runs.
+//!   When the body ends, the work it left is aborted in rounds, and
+//!   `run_cancelled` goes out in place of the result; work that holds its
+//!   thread past the rounds is reported `held`, and the parent replaces the
+//!   child.
+//! - Shared async: `cancel_fired`, then the cancel grace, `second_cancel`
+//!   and the rounds, and `run_stuck`, as after a deadline. The deadline adds
+//!   nothing after an operator cancel; a deadline that fired first keeps the
+//!   timeout, and the later cancel is ignored.
+//! - Shared thread: `cancel_fired`; the thread runs on, and its return ends
+//!   the run cancelled. A deadline that fired first keeps the timeout.
+//! - A cancel of a run that the child does not run (its end and the cancel
+//!   crossed) is ignored. No run marker is written for a cancelled run: its
+//!   row is in history.
 //!
 //! Work that a body starts with plain `tokio::spawn` is not tracked; work
 //! started with `spawn_in_run` belongs to the run (`run_work`).
@@ -37,10 +62,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinError;
+use uuid::Uuid;
 
 use super::body_scope::{BodyOutcome, OpenBody, SpanSource};
+use super::link::FrameWriter;
 use super::panic::PanicRecord;
 use super::rss::read_rss;
 use super::run::{
@@ -48,20 +75,21 @@ use super::run::{
     run_blocking_body, start_attempt, HostContext, Prepared, RunFacts, Started,
 };
 use super::run_work::{
-    left_report, millis_since, stuck_report, Alive, PollsNow, RoundsEnd, RunPolls, RunScope,
-    WorkWait, ISOLATED_LEFTOVER_GRACE,
+    left_report, millis_since, stuck_report, Alive, CancelCause, Fire, PollsNow, RoundsEnd,
+    RunCancelSignal, RunPolls, RunScope, SignalState, WorkWait, ISOLATED_LEFTOVER_GRACE,
 };
 use crate::core::task::error::{OperationalErrorCode, TaskError};
+use crate::core::task::fencing::FencingToken;
 use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, TaskModule};
 use crate::core::task::result::TaskResult;
 use crate::events::AttemptStart;
 use crate::worker::executor::protocol::{
-    BodyEnd, BodyReturnedFrame, CancelGraceMs, ChildAfterFrame, ChildFrame, DispatchNumber,
-    FailureDetail, IsolatedWork, LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame,
-    LeftoverCancelFrame, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit, NoLeftWork,
-    ParentFrame, ResultFrame, RunEnd, RunFrame, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame,
-    SharedRunFrame, SharedWork, StoredOptionsRefusal, TaskInputText, TaskTimeoutMs,
-    LOOP_BLOCK_LIMIT,
+    BodyEnd, BodyReturnedFrame, CancelGraceMs, CancelTarget, CancelledBody, CancelledLoop,
+    ChildAfterFrame, ChildFrame, DispatchNumber, FailureDetail, IsolatedWork, LeftWorkEnd,
+    LeftWorkEndedFrame, LeftWorkStuckFrame, LeftoverCancelFrame, LeftoverStuckFrame,
+    LoopBlockedFrame, LoopCulprit, NoLeftWork, ParentFrame, ResultFrame, RunCancelledFrame, RunEnd,
+    RunFrame, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame, SharedRunFrame, SharedWork,
+    StoredOptionsRefusal, TaskInputText, TaskTimeoutMs, LOOP_BLOCK_LIMIT,
 };
 use crate::Execution;
 
@@ -69,6 +97,23 @@ use crate::Execution;
 const POLL_WATCH_INTERVAL: Duration = Duration::from_millis(250);
 const POLL_WATCH_THREAD_NAME: &str = "horsies-child-poll-watch";
 const SEAT_THREAD_NAME: &str = "horsies-child-seat";
+
+/// The longest wait of a seat thread whose body returned after an operator
+/// cancel, for the serve loop to queue the `cancel_fired` frame of the run,
+/// so that the frame goes out before the end of the run. The serve loop
+/// queues it right after it marks the gate; only a writer that takes no
+/// frame makes the wait reach its bound.
+const CANCEL_REPORT_WAIT: Duration = Duration::from_secs(5);
+
+/// The rule that keeps the deadline out of an isolated child: the parent
+/// holds it and kills the child.
+const NO_DEADLINE_IN_ISOLATED: &str =
+    "the deadline of an isolated run never fires its cancel signal in the child";
+
+/// The rule that keeps the deadline after the start of a shared body: the
+/// seat starts the deadline with the body.
+const NO_DEADLINE_BEFORE_BODY: &str =
+    "the deadline of a shared run fires only after its body started";
 
 /// How a serve loop ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,14 +134,87 @@ pub(super) async fn serve_isolated(
     context: HostContext,
     frames: &mut mpsc::Receiver<ParentFrame>,
 ) -> ServeEnd {
+    let mut held: Option<ParentFrame> = None;
     loop {
-        match frames.recv().await {
+        let next = match held.take() {
+            Some(frame) => Some(frame),
+            None => frames.recv().await,
+        };
+        match next {
             None => return ServeEnd::ParentGone,
             Some(ParentFrame::Stop) => return ServeEnd::Stopped,
-            Some(ParentFrame::Run(run)) => run_isolated(&context, run).await,
-            Some(ParentFrame::Init(_) | ParentFrame::SharedRun(_) | ParentFrame::Events(_)) => {
-                return ServeEnd::BadParentFrame
+            Some(ParentFrame::Run(run)) => match serve_isolated_run(&context, run, frames).await {
+                AfterIsolatedRun::ReadOn => {}
+                AfterIsolatedRun::Held(frame) => held = Some(*frame),
+                AfterIsolatedRun::ParentGone => return ServeEnd::ParentGone,
+            },
+            Some(ParentFrame::CancelRun(CancelTarget::Isolated { task_id })) => {
+                tracing::debug!(
+                    task_id = %task_id,
+                    "a cancel_run came with no run in flight; the run ended first, and the cancel \
+                     is ignored",
+                );
             }
+            Some(
+                ParentFrame::CancelRun(CancelTarget::Shared(_))
+                | ParentFrame::Init(_)
+                | ParentFrame::SharedRun(_)
+                | ParentFrame::Events(_),
+            ) => return ServeEnd::BadParentFrame,
+        }
+    }
+}
+
+/// What the serve loop of an isolated child does after a run.
+enum AfterIsolatedRun {
+    /// Read the next frame.
+    ReadOn,
+    /// A frame other than a cancel came during the run: it is served after
+    /// the run, as it was before the child read frames during a run.
+    Held(Box<ParentFrame>),
+    /// The control thread ended during the run.
+    ParentGone,
+}
+
+/// One run of an isolated child, with the parent frames read while it runs:
+/// a `cancel_run` for its task fires the run's cancel signal with the
+/// operator cause; a `cancel_run` for another task is ignored (that run
+/// ended); any other frame is held until the run ends, and no later frame
+/// is read during the run.
+async fn serve_isolated_run(
+    context: &HostContext,
+    run: RunFrame,
+    frames: &mut mpsc::Receiver<ParentFrame>,
+) -> AfterIsolatedRun {
+    let task_id = run.task_id;
+    let scope = RunScope::new(FencingToken::new(run.task_id, run.attempt));
+    let ran = run_isolated(context, run, &scope);
+    tokio::pin!(ran);
+    loop {
+        tokio::select! {
+            () = &mut ran => return AfterIsolatedRun::ReadOn,
+            frame = frames.recv() => match frame {
+                Some(ParentFrame::CancelRun(CancelTarget::Isolated { task_id: target }))
+                    if target == task_id =>
+                {
+                    let _fired = scope.fire_cancel(CancelCause::Operator);
+                }
+                Some(ParentFrame::CancelRun(CancelTarget::Isolated { task_id: other })) => {
+                    tracing::debug!(
+                        task_id = %other,
+                        running = %task_id,
+                        "a cancel_run names a task that this child does not run; it is ignored",
+                    );
+                }
+                Some(other) => {
+                    ran.as_mut().await;
+                    return AfterIsolatedRun::Held(Box::new(other));
+                }
+                None => {
+                    ran.as_mut().await;
+                    return AfterIsolatedRun::ParentGone;
+                }
+            },
         }
     }
 }
@@ -139,8 +257,9 @@ async fn send_isolated_result(
     context.writer.send(frame).await;
 }
 
-/// One run of an isolated child and its report (Python `_report_run`).
-pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
+/// One run of an isolated child and its report (Python `_report_run`), with
+/// `scope` as its run: an operator cancel fires the signal of `scope`.
+pub(super) async fn run_isolated(context: &HostContext, run: RunFrame, scope: &RunScope) {
     let RunFrame {
         task_id,
         task_name,
@@ -173,7 +292,23 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
             return;
         }
     };
-    let scope = RunScope::new();
+    match scope.cancel_state() {
+        SignalState::NotFired => {}
+        SignalState::Fired {
+            cause: CancelCause::Operator,
+        } => {
+            // The cancel came while the start write was in flight: the body
+            // does not start.
+            scope.close();
+            let task_loop = CancelledLoop::NoLeftWork(NoLeftWork::NoTaskLoop);
+            let body = CancelledBody::NotStarted;
+            send_run_cancelled(context, task_id, body, started_at, task_loop).await;
+            return;
+        }
+        SignalState::Fired {
+            cause: CancelCause::Deadline,
+        } => unreachable!("{NO_DEADLINE_IN_ISOLATED}"),
+    }
     let end = match work {
         IsolatedWork::Refusal(refusal) => refusal_end(&refusal),
         IsolatedWork::Run => match prepare(&context.app, &facts.task_name, &input) {
@@ -187,7 +322,21 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
                         workflow,
                     },
                 );
-                result_end(isolated_body(&scope, &facts.task_name, *task, input, body).await)
+                let result = isolated_body(scope, &facts.task_name, *task, input, body).await;
+                match scope.cancel_state() {
+                    SignalState::NotFired => result_end(result),
+                    SignalState::Fired {
+                        cause: CancelCause::Operator,
+                    } => {
+                        // What the body returned is dropped: the task is
+                        // cancelled.
+                        end_cancelled_run(context, task_id, scope, started_at).await;
+                        return;
+                    }
+                    SignalState::Fired {
+                        cause: CancelCause::Deadline,
+                    } => unreachable!("{NO_DEADLINE_IN_ISOLATED}"),
+                }
             }
         },
     };
@@ -200,18 +349,20 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame) {
         }
         Alive::Work { count, names } => {
             let left = left_report(count, names);
-            end_left_work(context, &facts, &scope, &end, left, started_at).await;
+            end_left_work(context, &facts, scope, &end, left, started_at).await;
         }
     }
 }
 
 /// The body of an isolated run, inside the span of its open body scope
-/// `body`, which it closes with what the body returned. An async body runs
-/// inside the run, so the work it starts with `spawn_in_run` belongs to the
-/// run. A blocking body runs on a blocking thread of the runtime. A panic
-/// of either is `UNHANDLED_EXCEPTION` with its record. The parent ends a
-/// run past its timeout by killing the child, so the scope never sees a
-/// timeout here.
+/// `body`, which it closes with what the body returned, or as cancelled
+/// when an operator cancel fired on `scope` before the body ended. An async
+/// body runs inside the run, so the work it starts with `spawn_in_run`
+/// belongs to the run. A blocking body runs on a blocking thread of the
+/// runtime. A panic of either is `UNHANDLED_EXCEPTION` with its record.
+/// Both read the fencing token and the cancel signal of `scope`. The parent
+/// ends a run past its timeout by killing the child, so the scope never
+/// sees a timeout here.
 pub(super) async fn isolated_body(
     scope: &RunScope,
     task_name: &str,
@@ -230,8 +381,10 @@ pub(super) async fn isolated_body(
         ),
         RegisteredTask::Blocking { task, meta } => {
             let name = task_name.to_owned();
+            let token = scope.fencing_token();
+            let cancel = scope.cancel_signal();
             let thread = tokio::task::spawn_blocking(move || {
-                run_blocking_body(&task, &input, &name, meta.module, &span)
+                run_blocking_body(&task, &input, &name, meta.module, &span, token, cancel)
             });
             match thread.await {
                 Ok(result) => result,
@@ -244,8 +397,60 @@ pub(super) async fn isolated_body(
             }
         }
     };
-    body.close(&BodyOutcome::of_result(&result));
+    match scope.cancel_state() {
+        SignalState::NotFired => body.close(&BodyOutcome::of_result(&result)),
+        SignalState::Fired {
+            cause: CancelCause::Operator,
+        } => body.close(&BodyOutcome::Cancelled),
+        SignalState::Fired {
+            cause: CancelCause::Deadline,
+        } => unreachable!("{NO_DEADLINE_IN_ISOLATED}"),
+    }
     result
+}
+
+/// `run_cancelled` for the isolated run of task `task_id`, whose start write
+/// returned at `started_at`. No marker is written: the row is in history.
+async fn send_run_cancelled(
+    context: &HostContext,
+    task_id: Uuid,
+    body: CancelledBody,
+    started_at: DateTime<Utc>,
+    task_loop: CancelledLoop,
+) {
+    let frame = ChildFrame::RunCancelled(RunCancelledFrame {
+        task_id,
+        body,
+        started_at,
+        rss: read_rss(),
+        task_loop,
+        child: ChildAfterFrame::ServesOn,
+    });
+    context.writer.send(frame).await;
+}
+
+/// The body of an isolated run ended after an operator cancel: the work it
+/// left is aborted at once, in rounds, and `run_cancelled` reports the run.
+/// Work that holds its thread past the rounds is reported `held`: the
+/// parent replaces the child.
+async fn end_cancelled_run(
+    context: &HostContext,
+    task_id: Uuid,
+    scope: &RunScope,
+    started_at: DateTime<Utc>,
+) {
+    scope.close();
+    let no_left_work = CancelledLoop::NoLeftWork(NoLeftWork::NoTaskLoop);
+    let task_loop = match scope.alive() {
+        Alive::Nothing => no_left_work,
+        Alive::Work { .. } => match (scope.end_in_rounds().await, scope.alive()) {
+            (RoundsEnd::Ended, _) | (RoundsEnd::Stuck, Alive::Nothing) => no_left_work,
+            (RoundsEnd::Stuck, Alive::Work { count, names }) => {
+                CancelledLoop::WorkLeft(left_report(count, names))
+            }
+        },
+    };
+    send_run_cancelled(context, task_id, CancelledBody::Ran, started_at, task_loop).await;
 }
 
 /// The body returned with work alive (Python `_report_run`,
@@ -333,12 +538,127 @@ fn take_seat(in_flight: &AtomicUsize, seats: usize) -> bool {
         .is_ok()
 }
 
-/// The stop frame is valid only with no run in flight.
+/// The stop frame is valid only with no run in flight. A seat frees its run
+/// before the end of the run is queued ([`end_seat_run`]), so a stop that the
+/// parent sends after it read the last end finds no run in flight.
 fn stop_end(in_flight: &AtomicUsize) -> ServeEnd {
     match in_flight.load(Ordering::Acquire) {
         0 => ServeEnd::Stopped,
         _ => ServeEnd::BadParentFrame,
     }
+}
+
+/// Whether a shared child runs a run now, and what a cancel of it needs.
+enum RunLookup<C> {
+    InFlight(C),
+    NotInFlight,
+}
+
+/// One run in flight on a seat: its task, and what a cancel of it needs.
+struct InFlightRun<C> {
+    task_id: Uuid,
+    cancel: C,
+}
+
+/// The runs in flight of a shared child, by dispatch, with what a
+/// `cancel_run` for each needs. A seat enters its run before the start
+/// write and leaves it before it sends the end of the run, so a cancel
+/// that finds no run is a cancel of a run that ended. At most `seats` runs.
+pub(super) struct InFlightRuns<C> {
+    runs: Arc<Mutex<HashMap<DispatchNumber, InFlightRun<C>>>>,
+}
+
+impl<C> Clone for InFlightRuns<C> {
+    fn clone(&self) -> Self {
+        Self {
+            runs: Arc::clone(&self.runs),
+        }
+    }
+}
+
+impl<C: Clone> InFlightRuns<C> {
+    pub(super) fn new() -> Self {
+        Self {
+            runs: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, HashMap<DispatchNumber, InFlightRun<C>>> {
+        // A poisoned lock means a panic while it was held; the map is valid.
+        self.runs.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn enter(&self, run: RunRef, cancel: C) {
+        let _replaced = self.lock().insert(
+            run.dispatch,
+            InFlightRun {
+                task_id: run.task_id,
+                cancel,
+            },
+        );
+    }
+
+    fn leave(&self, dispatch: DispatchNumber) {
+        let _removed = self.lock().remove(&dispatch);
+    }
+
+    /// What a cancel of `run` needs, when the child runs it now: the
+    /// dispatch is in flight with the same task.
+    fn find(&self, run: RunRef) -> RunLookup<C> {
+        match self.lock().get(&run.dispatch) {
+            Some(in_flight) if in_flight.task_id == run.task_id => {
+                RunLookup::InFlight(in_flight.cancel.clone())
+            }
+            Some(_) | None => RunLookup::NotInFlight,
+        }
+    }
+}
+
+/// Log a cancel of a run that the child does not run.
+fn log_ignored_cancel(run: RunRef) {
+    tracing::debug!(
+        dispatch = run.dispatch.get(),
+        task_id = %run.task_id,
+        "a cancel_run names a run that this child does not run; the run ended first, and the \
+         cancel is ignored",
+    );
+}
+
+/// Free the seat of the run `dispatch`: the run leaves the runs that a
+/// cancel can reach, and the count of runs in flight drops.
+fn free_seat<C: Clone>(
+    in_flight: &AtomicUsize,
+    cancels: &InFlightRuns<C>,
+    dispatch: DispatchNumber,
+) {
+    cancels.leave(dispatch);
+    let _held_before = in_flight.fetch_sub(1, Ordering::AcqRel);
+}
+
+/// End a run on its seat: free the seat ([`free_seat`]), then queue `end`,
+/// the end of the run. The parent frees the seat when it reads the end, and
+/// may then send `stop` or a new run at once. The seat is free before the
+/// end can be read, so neither frame finds the seat still taken (Python
+/// `_send_end`).
+pub(super) async fn end_seat_run<C: Clone>(
+    writer: &FrameWriter,
+    in_flight: &AtomicUsize,
+    cancels: &InFlightRuns<C>,
+    end: SharedResultFrame,
+) {
+    free_seat(in_flight, cancels, end.run.dispatch);
+    writer.send(ChildFrame::SharedResult(end)).await;
+}
+
+/// [`end_seat_run`] on a seat thread, which is not a runtime thread.
+pub(super) fn end_seat_run_blocking<C: Clone>(
+    writer: &FrameWriter,
+    in_flight: &AtomicUsize,
+    cancels: &InFlightRuns<C>,
+    end: SharedResultFrame,
+) {
+    free_seat(in_flight, cancels, end.run.dispatch);
+    writer.send_blocking(ChildFrame::SharedResult(end));
 }
 
 // ---------------------------------------------------------------------------
@@ -361,14 +681,28 @@ pub(super) async fn serve_shared_async(
     seats: usize,
 ) -> ServeEnd {
     let in_flight = Arc::new(AtomicUsize::new(0));
+    let cancels: InFlightRuns<RunCancelSignal> = InFlightRuns::new();
     loop {
         let run = match frames.recv().await {
             None => return ServeEnd::ParentGone,
             Some(ParentFrame::Stop) => return stop_end(&in_flight),
             Some(ParentFrame::SharedRun(run)) => run,
-            Some(ParentFrame::Init(_) | ParentFrame::Run(_) | ParentFrame::Events(_)) => {
-                return ServeEnd::BadParentFrame
+            Some(ParentFrame::CancelRun(CancelTarget::Shared(target))) => {
+                match cancels.find(target) {
+                    RunLookup::InFlight(signal) => {
+                        // A deadline that fired first keeps its cause.
+                        let _fired = signal.fire(CancelCause::Operator);
+                    }
+                    RunLookup::NotInFlight => log_ignored_cancel(target),
+                }
+                continue;
             }
+            Some(
+                ParentFrame::CancelRun(CancelTarget::Isolated { .. })
+                | ParentFrame::Init(_)
+                | ParentFrame::Run(_)
+                | ParentFrame::Events(_),
+            ) => return ServeEnd::BadParentFrame,
         };
         let work = match run.work.clone() {
             SharedWork::AsyncTask {
@@ -384,23 +718,40 @@ pub(super) async fn serve_shared_async(
         if !take_seat(&in_flight, seats) {
             return ServeEnd::BadParentFrame;
         }
-        tokio::spawn(async_seat(
-            context.clone(),
-            watch.clone(),
-            run,
-            work,
-            Arc::clone(&in_flight),
-        ));
+        // The signal exists before the start write, so a cancel that comes
+        // before the body starts reaches the run.
+        let signal = RunCancelSignal::new();
+        cancels.enter(run_ref_of(&run), signal.clone());
+        let seat = AsyncSeat {
+            context: context.clone(),
+            watch: watch.clone(),
+            in_flight: Arc::clone(&in_flight),
+            cancels: cancels.clone(),
+            signal,
+        };
+        tokio::spawn(async_seat(seat, run, work));
     }
 }
 
-async fn async_seat(
+/// What one seat of a shared async child shares with its serve loop: the
+/// child's context and poll watch, the count of runs in flight, the runs
+/// that a cancel can reach, and the cancel signal of this run.
+struct AsyncSeat {
     context: HostContext,
     watch: PollWatch,
-    run: SharedRunFrame,
-    work: AsyncSeatWork,
     in_flight: Arc<AtomicUsize>,
-) {
+    cancels: InFlightRuns<RunCancelSignal>,
+    signal: RunCancelSignal,
+}
+
+async fn async_seat(seat: AsyncSeat, run: SharedRunFrame, work: AsyncSeatWork) {
+    let AsyncSeat {
+        context,
+        watch,
+        in_flight,
+        cancels,
+        signal,
+    } = seat;
     let run_ref = run_ref_of(&run);
     let facts = facts_of(&run);
     let (end, started) = match start_attempt(&context, &facts).await {
@@ -412,11 +763,23 @@ async fn async_seat(
             started_at,
             workflow,
         } => {
-            let (end, marker) = match work {
-                AsyncSeatWork::Refusal(refusal) => {
+            let (end, marker) = match (signal.state(), work) {
+                (
+                    SignalState::Fired {
+                        cause: CancelCause::Operator,
+                    },
+                    _,
+                ) => cancelled_before_body(&context, run_ref).await,
+                (
+                    SignalState::Fired {
+                        cause: CancelCause::Deadline,
+                    },
+                    _,
+                ) => unreachable!("{NO_DEADLINE_BEFORE_BODY}"),
+                (SignalState::NotFired, AsyncSeatWork::Refusal(refusal)) => {
                     (SeatEnd::Finished(refusal_end(&refusal)), Marker::Write)
                 }
-                AsyncSeatWork::Task { timeout, grace } => {
+                (SignalState::NotFired, AsyncSeatWork::Task { timeout, grace }) => {
                     let body = SeatBody {
                         run_ref,
                         facts: &facts,
@@ -427,7 +790,8 @@ async fn async_seat(
                         },
                         started_at,
                     };
-                    async_body(&context, &watch, body, timeout, grace).await
+                    let limits = SeatLimits { timeout, grace };
+                    async_body(&context, &watch, body, limits, signal).await
                 }
             };
             match marker {
@@ -437,15 +801,14 @@ async fn async_seat(
             (end, AttemptStart::Reported { started_at })
         }
     };
-    let frame = ChildFrame::SharedResult(SharedResultFrame {
+    let frame = SharedResultFrame {
         run: run_ref,
         end,
         started_at: started,
         rss: read_rss(),
         child: ChildAfterFrame::ServesOn,
-    });
-    context.writer.send(frame).await;
-    in_flight.fetch_sub(1, Ordering::AcqRel);
+    };
+    end_seat_run(&context.writer, &in_flight, &cancels, frame).await;
 }
 
 /// What the async body of task `task_name` (defined in `module`) ended
@@ -478,17 +841,33 @@ struct SeatBody<'a> {
     started_at: DateTime<Utc>,
 }
 
+/// The deadline and the cancel grace of a shared async run.
+#[derive(Debug, Clone, Copy)]
+struct SeatLimits {
+    timeout: TaskTimeoutMs,
+    grace: CancelGraceMs,
+}
+
+/// A cancel came after the start write and before the body started: the
+/// body does not start. `cancel_fired`, then the end.
+async fn cancelled_before_body(context: &HostContext, run_ref: RunRef) -> (SeatEnd, Marker) {
+    context.writer.send(ChildFrame::CancelFired(run_ref)).await;
+    (SeatEnd::Cancelled(CancelledBody::NotStarted), Marker::Skip)
+}
+
 /// The body of a shared async run, inside the span of its body scope. The
-/// scope is closed with what the body returned, or with `TimedOut` at the
-/// deadline: the body may run on in the cancel grace, and the span ends
-/// when the body ends or is dropped.
+/// scope is closed with what the body returned, with `TimedOut` at the
+/// deadline, or with `Cancelled` at an operator cancel (the signal `signal`
+/// of the run fired with the operator cause): the body may run on in the
+/// cancel grace, and the span ends when the body ends or is dropped.
 async fn async_body(
     context: &HostContext,
     watch: &PollWatch,
     body: SeatBody<'_>,
-    timeout: TaskTimeoutMs,
-    grace: CancelGraceMs,
+    limits: SeatLimits,
+    signal: RunCancelSignal,
 ) -> (SeatEnd, Marker) {
+    let SeatLimits { timeout, grace } = limits;
     let SeatBody {
         run_ref,
         facts,
@@ -509,7 +888,7 @@ async fn async_body(
                 }
             },
         };
-    let scope = RunScope::timed(watch.register(run_ref));
+    let scope = RunScope::timed(watch.register(run_ref), facts.fencing_token(), signal);
     let open = context
         .app
         .body_scope
@@ -518,20 +897,47 @@ async fn async_body(
     let mut handle = scope.spawn_body(&facts.task_name, body);
     let deadline = tokio::time::sleep(Duration::from_millis(timeout.get()));
     tokio::pin!(deadline);
+    let cancel = scope.cancel_signal();
     let outcome = tokio::select! {
         joined = &mut handle => {
             let result = joined_result(&facts.task_name, module, joined);
-            open.close(&BodyOutcome::of_result(&result));
-            let end = result_end(result);
-            after_return(context, run_ref, &scope, end, grace, started_at).await
+            match scope.cancel_state() {
+                SignalState::NotFired => {
+                    open.close(&BodyOutcome::of_result(&result));
+                    let end = result_end(result);
+                    after_return(context, run_ref, &scope, end, grace, started_at).await
+                }
+                SignalState::Fired { cause: CancelCause::Operator } => {
+                    // The body returned after the operator cancel: what it
+                    // returned is dropped.
+                    open.close(&BodyOutcome::Cancelled);
+                    stop_after_cancel(context, run_ref, &scope, grace).await
+                }
+                SignalState::Fired { cause: CancelCause::Deadline } => {
+                    unreachable!("the seat fires the deadline only after the deadline won")
+                }
+            }
         }
-        () = &mut deadline => {
-            open.close(&BodyOutcome::TimedOut);
-            // The body runs on: it sees the signal and has the grace to end.
-            scope.fire_cancel();
-            context.writer.send(ChildFrame::DeadlineFired(run_ref)).await;
-            stop_after_deadline(context, run_ref, &scope, grace).await;
-            (SeatEnd::TimedOut, Marker::Skip)
+        () = &mut deadline => match scope.fire_cancel(CancelCause::Deadline) {
+            Fire::Won => {
+                open.close(&BodyOutcome::TimedOut);
+                // The body runs on: it sees the signal and has the grace to
+                // end.
+                context.writer.send(ChildFrame::DeadlineFired(run_ref)).await;
+                stop_after_signal(context, run_ref, &scope, grace).await;
+                (SeatEnd::TimedOut, Marker::Skip)
+            }
+            Fire::AlreadyFired => {
+                // The operator cancel fired first: the deadline adds nothing.
+                open.close(&BodyOutcome::Cancelled);
+                stop_after_cancel(context, run_ref, &scope, grace).await
+            }
+        },
+        () = cancel.cancelled() => {
+            // Before the deadline branch fires it, only an operator cancel
+            // fires the signal.
+            open.close(&BodyOutcome::Cancelled);
+            stop_after_cancel(context, run_ref, &scope, grace).await
         }
     };
     scope.close();
@@ -587,12 +993,27 @@ async fn after_return(
     (SeatEnd::Finished(end), Marker::Skip)
 }
 
-/// After the run's cancel signal fired at its deadline: when anything of
-/// the run (the body or its work) is alive after the cancel grace, report the
-/// second cancel and drop it all in rounds; then report what is stuck, and
-/// wait for the end. A run that ended within the grace sends no second
-/// cancel, so the parent records that the body returned after the signal.
-async fn stop_after_deadline(
+/// After an operator cancel reached the body of a shared async run:
+/// `cancel_fired`, then the stop of [`stop_after_signal`]. The end is
+/// cancelled whatever the body returns.
+async fn stop_after_cancel(
+    context: &HostContext,
+    run_ref: RunRef,
+    scope: &RunScope,
+    grace: CancelGraceMs,
+) -> (SeatEnd, Marker) {
+    context.writer.send(ChildFrame::CancelFired(run_ref)).await;
+    stop_after_signal(context, run_ref, scope, grace).await;
+    (SeatEnd::Cancelled(CancelledBody::Ran), Marker::Skip)
+}
+
+/// After the run's cancel signal fired, at its deadline or at an operator
+/// cancel: when anything of the run (the body or its work) is alive after
+/// the cancel grace, report the second cancel and drop it all in rounds;
+/// then report what is stuck, and wait for the end. A run that ended within
+/// the grace sends no second cancel, so the parent records that the body
+/// returned after the signal.
+async fn stop_after_signal(
     context: &HostContext,
     run_ref: RunRef,
     scope: &RunScope,
@@ -616,7 +1037,7 @@ async fn stop_after_deadline(
             }))
             .await;
         // The run keeps its seat until all of it ends or the parent kills
-        // the child; the end is the timeout either way.
+        // the child; the end is the timeout or the cancel either way.
         scope.wait_all_ended().await;
     }
 }
@@ -736,21 +1157,57 @@ enum ThreadSeatWork {
     Refusal(StoredOptionsRefusal),
 }
 
+/// Whether the serve loop queued the `cancel_fired` frame of a thread run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancelReport {
+    NotQueued,
+    Queued,
+}
+
+/// What a cancel of one thread run needs: its gate, its cancel signal (the
+/// body reads it on its thread), and the mark that the serve loop queued
+/// `cancel_fired`.
+#[derive(Clone)]
+struct ThreadSeatCancel {
+    gate: Arc<RunGate>,
+    signal: RunCancelSignal,
+    report: Arc<watch::Sender<CancelReport>>,
+}
+
+impl ThreadSeatCancel {
+    fn new() -> Self {
+        let (report, _first_receiver) = watch::channel(CancelReport::NotQueued);
+        Self {
+            gate: Arc::new(RunGate::new()),
+            signal: RunCancelSignal::new(),
+            report: Arc::new(report),
+        }
+    }
+}
+
 pub(super) async fn serve_shared_thread(
     context: HostContext,
     frames: &mut mpsc::Receiver<ParentFrame>,
     seats: usize,
 ) -> ServeEnd {
     let in_flight = Arc::new(AtomicUsize::new(0));
+    let cancels: InFlightRuns<ThreadSeatCancel> = InFlightRuns::new();
     let runtime = tokio::runtime::Handle::current();
     loop {
         let run = match frames.recv().await {
             None => return ServeEnd::ParentGone,
             Some(ParentFrame::Stop) => return stop_end(&in_flight),
             Some(ParentFrame::SharedRun(run)) => run,
-            Some(ParentFrame::Init(_) | ParentFrame::Run(_) | ParentFrame::Events(_)) => {
-                return ServeEnd::BadParentFrame
+            Some(ParentFrame::CancelRun(CancelTarget::Shared(target))) => {
+                cancel_thread_run(&context, &cancels, target).await;
+                continue;
             }
+            Some(
+                ParentFrame::CancelRun(CancelTarget::Isolated { .. })
+                | ParentFrame::Init(_)
+                | ParentFrame::Run(_)
+                | ParentFrame::Events(_),
+            ) => return ServeEnd::BadParentFrame,
         };
         let work = match run.work.clone() {
             SharedWork::ThreadTask { timeout_ms } => ThreadSeatWork::Task {
@@ -763,18 +1220,21 @@ pub(super) async fn serve_shared_thread(
             return ServeEnd::BadParentFrame;
         }
         let run_ref = run_ref_of(&run);
-        let seat_context = context.clone();
-        let seat_runtime = runtime.clone();
-        let seat_in_flight = Arc::clone(&in_flight);
+        let seat_cancel = ThreadSeatCancel::new();
+        cancels.enter(run_ref, seat_cancel.clone());
+        let seat = ThreadSeat {
+            context: context.clone(),
+            runtime: runtime.clone(),
+            in_flight: Arc::clone(&in_flight),
+            cancels: cancels.clone(),
+            cancel: seat_cancel,
+        };
         let started = thread::Builder::new()
             .name(SEAT_THREAD_NAME.to_owned())
-            .spawn(move || {
-                thread_seat(&seat_context, &seat_runtime, &run, work);
-                seat_in_flight.fetch_sub(1, Ordering::AcqRel);
-            });
+            .spawn(move || thread_seat(&seat, &run, work));
         if let Err(error) = started {
             // No start was written: the row is still CLAIMED.
-            let frame = ChildFrame::SharedResult(SharedResultFrame {
+            let frame = SharedResultFrame {
                 run: run_ref,
                 end: SeatEnd::Finished(RunEnd::WorkerFailure(FailureDetail::cut(&format!(
                     "the OS refused a seat thread: {error}"
@@ -782,19 +1242,54 @@ pub(super) async fn serve_shared_thread(
                 started_at: AttemptStart::NotReported,
                 rss: read_rss(),
                 child: ChildAfterFrame::ServesOn,
-            });
-            context.writer.send(frame).await;
-            in_flight.fetch_sub(1, Ordering::AcqRel);
+            };
+            end_seat_run(&context.writer, &in_flight, &cancels, frame).await;
         }
     }
 }
 
-fn thread_seat(
+/// An operator cancel of the thread run `target`. A body that runs gets the
+/// cancel in its cancel state, and `cancel_fired` is queued at once; the
+/// thread runs on. A cancel before the body starts is kept for the seat,
+/// which sends `cancel_fired` itself. A run that ended, or whose deadline
+/// fired first, ignores the cancel.
+async fn cancel_thread_run(
     context: &HostContext,
-    runtime: &tokio::runtime::Handle,
-    run: &SharedRunFrame,
-    work: ThreadSeatWork,
+    cancels: &InFlightRuns<ThreadSeatCancel>,
+    target: RunRef,
 ) {
+    let RunLookup::InFlight(seat) = cancels.find(target) else {
+        log_ignored_cancel(target);
+        return;
+    };
+    match seat.gate.cancel() {
+        GateCancel::BodyRunning => {
+            let _fired = seat.signal.fire(CancelCause::Operator);
+            context.writer.send(ChildFrame::CancelFired(target)).await;
+            let _earlier = seat.report.send_replace(CancelReport::Queued);
+        }
+        GateCancel::BeforeBody => {
+            let _fired = seat.signal.fire(CancelCause::Operator);
+        }
+        GateCancel::RunEnded => log_ignored_cancel(target),
+    }
+}
+
+/// What one seat thread of a shared thread child shares with its serve
+/// loop: the child's context and runtime, the count of runs in flight, the
+/// runs that a cancel can reach, and the cancel of this run.
+struct ThreadSeat {
+    context: HostContext,
+    runtime: tokio::runtime::Handle,
+    in_flight: Arc<AtomicUsize>,
+    cancels: InFlightRuns<ThreadSeatCancel>,
+    cancel: ThreadSeatCancel,
+}
+
+fn thread_seat(seat: &ThreadSeat, run: &SharedRunFrame, work: ThreadSeatWork) {
+    let ThreadSeat {
+        context, runtime, ..
+    } = seat;
     let run_ref = run_ref_of(run);
     let facts = facts_of(run);
     let (end, started) = match runtime.block_on(start_attempt(context, &facts)) {
@@ -810,113 +1305,318 @@ fn thread_seat(
                 trace: &run.trace,
                 workflow,
             };
-            let end = match work {
-                ThreadSeatWork::Refusal(refusal) => SeatEnd::Finished(refusal_end(&refusal)),
+            let (end, marker) = match work {
+                ThreadSeatWork::Refusal(refusal) => {
+                    end_without_body(context, run_ref, &seat.cancel.gate, refusal_end(&refusal))
+                }
                 ThreadSeatWork::Task { timeout } => {
-                    thread_body(context, runtime, run_ref, &facts, &run.input, span, timeout)
+                    let body = ThreadBody {
+                        run_ref,
+                        facts: &facts,
+                        input: &run.input,
+                        span,
+                        timeout,
+                    };
+                    thread_body(seat, &body)
                 }
             };
-            runtime.block_on(mark_finalizing(context, &facts));
+            match marker {
+                Marker::Write => runtime.block_on(mark_finalizing(context, &facts)),
+                Marker::Skip => {}
+            }
             (end, AttemptStart::Reported { started_at })
         }
     };
-    context
-        .writer
-        .send_blocking(ChildFrame::SharedResult(SharedResultFrame {
-            run: run_ref,
-            end,
-            started_at: started,
-            rss: read_rss(),
-            child: ChildAfterFrame::ServesOn,
-        }));
+    let frame = SharedResultFrame {
+        run: run_ref,
+        end,
+        started_at: started,
+        rss: read_rss(),
+        child: ChildAfterFrame::ServesOn,
+    };
+    end_seat_run_blocking(&context.writer, &seat.in_flight, &seat.cancels, frame);
 }
 
-const GATE_OPEN: u8 = 0;
-const GATE_RETURNED: u8 = 1;
-const GATE_FIRED: u8 = 2;
+/// The body has not started.
+const GATE_STARTING: u8 = 0;
+/// The body runs.
+const GATE_RUNNING: u8 = 1;
+/// The body returned first.
+const GATE_RETURNED: u8 = 2;
+/// The deadline fired first.
+const GATE_DEADLINE_FIRED: u8 = 3;
+/// An operator cancel came before the body started.
+const GATE_CANCELLED_BEFORE_BODY: u8 = 4;
+/// An operator cancel came first while the body ran.
+const GATE_CANCEL_FIRED: u8 = 5;
 
-/// Which came first for a thread run: its return or its deadline.
+/// Which came first for a thread run whose body ran: its return, its
+/// deadline, or an operator cancel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GateEnd {
     Returned,
-    Fired,
+    DeadlineFired,
+    CancelFired,
 }
 
-/// One gate per run: exactly one of the return and the deadline wins.
-pub(super) struct DeadlineGate(AtomicU8);
+/// Whether the body of a thread run starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BodyStart {
+    Start,
+    /// An operator cancel came first: the body does not start.
+    CancelledBeforeBody,
+}
 
-impl DeadlineGate {
+/// Whether the deadline of a thread run won its gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DeadlineFire {
+    Won,
+    /// The body returned, or an operator cancel came, first.
+    Lost,
+}
+
+/// What an operator cancel found at the gate of a thread run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GateCancel {
+    /// The body runs: the cancel won; the body sees it in its cancel state.
+    BodyRunning,
+    /// The body has not started: it will not start.
+    BeforeBody,
+    /// The body returned, its deadline fired, or the run ended with no body:
+    /// the cancel changes nothing.
+    RunEnded,
+}
+
+/// One gate per thread run. The body starts once, unless an operator cancel
+/// came first; then exactly one of the return, the deadline and an operator
+/// cancel wins.
+pub(super) struct RunGate(AtomicU8);
+
+impl RunGate {
     pub(super) fn new() -> Self {
-        Self(AtomicU8::new(GATE_OPEN))
+        Self(AtomicU8::new(GATE_STARTING))
     }
 
-    /// The deadline: `true` when it won.
-    pub(super) fn fire(&self) -> bool {
-        self.0
-            .compare_exchange(GATE_OPEN, GATE_FIRED, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+    /// The body is about to start: `Start`, unless an operator cancel came
+    /// first.
+    pub(super) fn begin_body(&self) -> BodyStart {
+        match self.0.compare_exchange(
+            GATE_STARTING,
+            GATE_RUNNING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => BodyStart::Start,
+            Err(GATE_CANCELLED_BEFORE_BODY) => BodyStart::CancelledBeforeBody,
+            Err(other) => unreachable!("a thread run begins its body once, not in state {other}"),
+        }
     }
 
-    /// The return: which one won.
+    /// The run ends with no body (a refusal, a task that is not found, a
+    /// kind that does not fit): `Start` closes the gate to a later cancel,
+    /// unless an operator cancel came first.
+    pub(super) fn end_without_body(&self) -> BodyStart {
+        match self.0.compare_exchange(
+            GATE_STARTING,
+            GATE_RETURNED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => BodyStart::Start,
+            Err(GATE_CANCELLED_BEFORE_BODY) => BodyStart::CancelledBeforeBody,
+            Err(other) => unreachable!("a thread run with no body ends once, not in state {other}"),
+        }
+    }
+
+    /// The deadline: `Won` when the body still ran and no cancel came.
+    pub(super) fn fire_deadline(&self) -> DeadlineFire {
+        match self.0.compare_exchange(
+            GATE_RUNNING,
+            GATE_DEADLINE_FIRED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => DeadlineFire::Won,
+            Err(_) => DeadlineFire::Lost,
+        }
+    }
+
+    /// An operator cancel.
+    pub(super) fn cancel(&self) -> GateCancel {
+        let changed =
+            self.0
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| match state {
+                    GATE_STARTING => Some(GATE_CANCELLED_BEFORE_BODY),
+                    GATE_RUNNING => Some(GATE_CANCEL_FIRED),
+                    _ => None,
+                });
+        match changed {
+            Ok(GATE_STARTING) => GateCancel::BeforeBody,
+            Ok(GATE_RUNNING) => GateCancel::BodyRunning,
+            Ok(other) => unreachable!("a cancel changed the gate from state {other}"),
+            Err(_) => GateCancel::RunEnded,
+        }
+    }
+
+    /// The return of the body: which one won.
     pub(super) fn finish(&self) -> GateEnd {
         match self.0.compare_exchange(
-            GATE_OPEN,
+            GATE_RUNNING,
             GATE_RETURNED,
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
             Ok(_) => GateEnd::Returned,
-            Err(_) => GateEnd::Fired,
+            Err(GATE_DEADLINE_FIRED) => GateEnd::DeadlineFired,
+            Err(GATE_CANCEL_FIRED) => GateEnd::CancelFired,
+            Err(other) => unreachable!("the body of a thread run returned in state {other}"),
         }
     }
 }
 
-/// The body of a shared thread run on the seat thread, inside the span of
-/// its body scope. The scope is closed with what the body returned, or with
-/// `TimedOut` when the deadline came first: a thread cannot be stopped, so
-/// the body returns before the scope closes either way.
-fn thread_body(
+/// A cancel came after the start write and before the body started, on a
+/// seat thread: `cancel_fired`, then the end.
+fn cancelled_before_body_blocking(context: &HostContext, run_ref: RunRef) -> (SeatEnd, Marker) {
+    context
+        .writer
+        .send_blocking(ChildFrame::CancelFired(run_ref));
+    (SeatEnd::Cancelled(CancelledBody::NotStarted), Marker::Skip)
+}
+
+/// A thread run that ends with `end` and no body, unless an operator cancel
+/// came first.
+fn end_without_body(
     context: &HostContext,
-    runtime: &tokio::runtime::Handle,
     run_ref: RunRef,
-    facts: &RunFacts,
-    input: &TaskInputText,
-    span: SpanSource<'_>,
+    gate: &RunGate,
+    end: RunEnd,
+) -> (SeatEnd, Marker) {
+    match gate.end_without_body() {
+        BodyStart::Start => (SeatEnd::Finished(end), Marker::Write),
+        BodyStart::CancelledBeforeBody => cancelled_before_body_blocking(context, run_ref),
+    }
+}
+
+/// Wait until the serve loop queued the `cancel_fired` frame of a run whose
+/// body returned after an operator cancel, at most [`CANCEL_REPORT_WAIT`].
+fn wait_for_cancel_report(
+    runtime: &tokio::runtime::Handle,
+    report: &watch::Sender<CancelReport>,
+    run_ref: RunRef,
+) {
+    let mut queued = report.subscribe();
+    let waited = runtime.block_on(async move {
+        tokio::time::timeout(CANCEL_REPORT_WAIT, async {
+            queued
+                .wait_for(|report| *report == CancelReport::Queued)
+                .await
+                .map(|_seen| ())
+        })
+        .await
+    });
+    match waited {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) | Err(_) => tracing::warn!(
+            dispatch = run_ref.dispatch.get(),
+            task_id = %run_ref.task_id,
+            "the cancel_fired frame of a cancelled thread run was not queued within {} ms; the \
+             end of the run goes out now",
+            CANCEL_REPORT_WAIT.as_millis(),
+        ),
+    }
+}
+
+/// The facts of a thread body: its run, its input, its span source, and
+/// its deadline.
+struct ThreadBody<'a> {
+    run_ref: RunRef,
+    facts: &'a RunFacts,
+    input: &'a TaskInputText,
+    span: SpanSource<'a>,
     timeout: TaskTimeoutMs,
-) -> SeatEnd {
+}
+
+/// The body of a shared thread run on the seat thread, inside the span of
+/// its body scope. The scope is closed with what the body returned, with
+/// `TimedOut` when the deadline came first, or with `Cancelled` when an
+/// operator cancel came first: a thread cannot be stopped, so the body
+/// returns before the scope closes either way. The deadline also fires the
+/// run's cancel signal with the deadline cause, so the body reads it in
+/// its cancel state.
+fn thread_body(seat: &ThreadSeat, body: &ThreadBody<'_>) -> (SeatEnd, Marker) {
+    let ThreadSeat {
+        context,
+        runtime,
+        cancel,
+        ..
+    } = seat;
+    let ThreadBody {
+        run_ref,
+        facts,
+        input,
+        span,
+        timeout,
+    } = *body;
     let (task, module, input) = match prepare(&context.app, &facts.task_name, input) {
-        Prepared::Ended(end) => return SeatEnd::Finished(end),
+        Prepared::Ended(end) => return end_without_body(context, run_ref, &cancel.gate, end),
         Prepared::Body { task, input } => match *task {
             RegisteredTask::Blocking { task, meta } => (task, meta.module, input),
             RegisteredTask::Async { .. } => {
-                return SeatEnd::Finished(kind_mismatch_end(&facts.task_name, "shared thread"))
+                let end = kind_mismatch_end(&facts.task_name, "shared thread");
+                return end_without_body(context, run_ref, &cancel.gate, end);
             }
         },
     };
-    let gate = Arc::new(DeadlineGate::new());
-    let timer_gate = Arc::clone(&gate);
+    match cancel.gate.begin_body() {
+        BodyStart::Start => {}
+        BodyStart::CancelledBeforeBody => return cancelled_before_body_blocking(context, run_ref),
+    }
+    let timer_gate = Arc::clone(&cancel.gate);
+    let timer_signal = cancel.signal.clone();
     let writer = context.writer.clone();
     let timer = runtime.spawn(async move {
         tokio::time::sleep(Duration::from_millis(timeout.get())).await;
-        if timer_gate.fire() {
-            writer.send(ChildFrame::DeadlineFired(run_ref)).await;
+        match timer_gate.fire_deadline() {
+            DeadlineFire::Won => {
+                // The frame goes out first: a body that returns once it
+                // reads the deadline ends after it.
+                writer.send(ChildFrame::DeadlineFired(run_ref)).await;
+                let _fired = timer_signal.fire(CancelCause::Deadline);
+            }
+            DeadlineFire::Lost => {}
         }
     });
     let open = context
         .app
         .body_scope
         .open(facts, Execution::SharedThread, span);
-    let result = run_blocking_body(&task, &input, &facts.task_name, module, &open.span());
-    match gate.finish() {
+    let result = run_blocking_body(
+        &task,
+        &input,
+        &facts.task_name,
+        module,
+        &open.span(),
+        facts.fencing_token(),
+        cancel.signal.clone(),
+    );
+    match cancel.gate.finish() {
         GateEnd::Returned => {
             timer.abort();
             open.close(&BodyOutcome::of_result(&result));
-            SeatEnd::Finished(result_end(result))
+            (SeatEnd::Finished(result_end(result)), Marker::Write)
         }
         // The deadline came first: what the body returned is dropped.
-        GateEnd::Fired => {
+        GateEnd::DeadlineFired => {
             open.close(&BodyOutcome::TimedOut);
-            SeatEnd::TimedOut
+            (SeatEnd::TimedOut, Marker::Write)
+        }
+        // An operator cancel came first: what the body returned is dropped,
+        // and the row is in history, so no marker is written.
+        GateEnd::CancelFired => {
+            timer.abort();
+            open.close(&BodyOutcome::Cancelled);
+            wait_for_cancel_report(runtime, &cancel.report, run_ref);
+            (SeatEnd::Cancelled(CancelledBody::Ran), Marker::Skip)
         }
     }
 }

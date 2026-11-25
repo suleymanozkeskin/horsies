@@ -253,7 +253,12 @@ async fn writes_failing_past_the_window_stop_the_worker() {
     let live = LiveDispatches::default();
     let claimed_at = Utc::now();
     let _held = live
-        .hold(Uuid::new_v4(), claimed_at, child.clone())
+        .hold(
+            Uuid::new_v4(),
+            claimed_at,
+            AttemptLog::FIRST_UNTRACED,
+            child.clone(),
+        )
         .expect("the registry is open");
 
     let launched = launch(refusing_pool(), &live, recovery_on(SHORT_WINDOW));
@@ -271,7 +276,12 @@ async fn writes_failing_past_the_window_stop_the_worker() {
     );
     assert_eq!(kill_mark.read(), KillMark::KilledByParent);
     assert!(matches!(
-        live.hold(Uuid::new_v4(), claimed_at, child),
+        live.hold(
+            Uuid::new_v4(),
+            claimed_at,
+            AttemptLog::FIRST_UNTRACED,
+            child
+        ),
         Err(RegistryClosed)
     ));
     launched.stop().await;
@@ -287,7 +297,12 @@ async fn a_write_that_never_returns_stops_the_worker() {
     let (mut spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
     let _held = live
-        .hold(Uuid::new_v4(), Utc::now(), child)
+        .hold(
+            Uuid::new_v4(),
+            Utc::now(),
+            AttemptLog::FIRST_UNTRACED,
+            child,
+        )
         .expect("the registry is open");
 
     let launched = launch(silent_pool(&silent), &live, recovery_on(SHORT_WINDOW));
@@ -314,7 +329,12 @@ async fn a_dead_writer_stops_the_worker() {
     let (mut spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
     let _held = live
-        .hold(Uuid::new_v4(), Utc::now(), child)
+        .hold(
+            Uuid::new_v4(),
+            Utc::now(),
+            AttemptLog::FIRST_UNTRACED,
+            child,
+        )
         .expect("the registry is open");
 
     let launched = launch(refusing_pool(), &live, recovery_on(SHORT_WINDOW));
@@ -352,7 +372,12 @@ async fn a_failed_write_inside_the_window_recovers() {
     let (spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
     let _held = live
-        .hold(Uuid::new_v4(), Utc::now(), child)
+        .hold(
+            Uuid::new_v4(),
+            Utc::now(),
+            AttemptLog::FIRST_UNTRACED,
+            child,
+        )
         .expect("the registry is open");
 
     let launched = launch(pool, &live, recovery_on(Duration::from_secs(2)));
@@ -451,7 +476,12 @@ async fn with_recovery_off_failing_writes_never_stop_the_worker() {
     let (spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
     let _held = live
-        .hold(Uuid::new_v4(), Utc::now(), child.clone())
+        .hold(
+            Uuid::new_v4(),
+            Utc::now(),
+            AttemptLog::FIRST_UNTRACED,
+            child.clone(),
+        )
         .expect("the registry is open");
 
     let launched = launch(refusing_pool(), &live, StaleRunningRecovery::Off);
@@ -472,7 +502,14 @@ async fn with_recovery_off_failing_writes_never_stop_the_worker() {
     assert!(cause.contains("last error: "), "{cause}");
     launched.still_watching();
     assert_eq!(*spawned.exit.borrow(), ExitState::Running);
-    assert!(live.hold(Uuid::new_v4(), Utc::now(), child).is_ok());
+    assert!(live
+        .hold(
+            Uuid::new_v4(),
+            Utc::now(),
+            AttemptLog::FIRST_UNTRACED,
+            child
+        )
+        .is_ok());
     launched.stop().await;
     end_child(spawner, spawned).await;
 }
@@ -537,7 +574,12 @@ async fn with_recovery_off_a_dead_writer_is_logged_once_and_the_worker_runs() {
     let (spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
     let _held = live
-        .hold(Uuid::new_v4(), Utc::now(), child.clone())
+        .hold(
+            Uuid::new_v4(),
+            Utc::now(),
+            AttemptLog::FIRST_UNTRACED,
+            child.clone(),
+        )
         .expect("the registry is open");
 
     let Launched {
@@ -590,7 +632,14 @@ async fn with_recovery_off_a_dead_writer_is_logged_once_and_the_worker_runs() {
         "no service death is reported"
     );
     assert_eq!(*spawned.exit.borrow(), ExitState::Running);
-    assert!(live.hold(Uuid::new_v4(), Utc::now(), child).is_ok());
+    assert!(live
+        .hold(
+            Uuid::new_v4(),
+            Utc::now(),
+            AttemptLog::FIRST_UNTRACED,
+            child
+        )
+        .is_ok());
 
     // The stop of the worker: its token, then the beats after the drain.
     worker_stop.cancel();
@@ -680,7 +729,12 @@ async fn with_recovery_off_a_late_beat_names_the_unreturned_write() {
     let (spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
     let _held = live
-        .hold(Uuid::new_v4(), Utc::now(), child)
+        .hold(
+            Uuid::new_v4(),
+            Utc::now(),
+            AttemptLog::FIRST_UNTRACED,
+            child,
+        )
         .expect("the registry is open");
     let capture = LogCapture::new();
     let _default = capture.set_default();
@@ -783,7 +837,12 @@ async fn grace_probe_a_worker_that_does_not_stop() {
     let (_spawned, child) = sleeping_child(&spawner).await;
     let live = LiveDispatches::default();
     let _held = live
-        .hold(Uuid::new_v4(), Utc::now(), child)
+        .hold(
+            Uuid::new_v4(),
+            Utc::now(),
+            AttemptLog::FIRST_UNTRACED,
+            child,
+        )
         .expect("the registry is open");
     let launched = launch(refusing_pool(), &live, recovery_on(SHORT_WINDOW));
     tokio::time::sleep(FAIL_CLOSED_EXIT_GRACE + WAIT).await;

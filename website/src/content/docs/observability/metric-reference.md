@@ -89,7 +89,7 @@ Attempts that ended with a known outcome, by outcome and error code.
 | `task` / `horsies.task.name` | the declared task names; any other value is `(unregistered)` |
 | `queue` / `horsies.queue` | the declared queue names; any other value is `(unknown)` |
 | `execution` / `horsies.task.execution` | `ISOLATED`, `SHARED_ASYNC`, `SHARED_THREAD` |
-| `outcome` / `horsies.task.outcome` | `COMPLETED`, `FAILED`, `WORKER_FAILURE` |
+| `outcome` / `horsies.task.outcome` | `COMPLETED`, `FAILED`, `WORKER_FAILURE`, `CANCELLED` |
 | `error_code` / `error.type` | `""`, `UNHANDLED_EXCEPTION`, `TASK_EXCEPTION`, `WORKER_CRASHED`, `BROKER_ERROR`, `WORKER_RESOLUTION_ERROR`, `WORKER_SERIALIZATION_ERROR`, `RESULT_DESERIALIZATION_ERROR`, `WORKFLOW_ENQUEUE_FAILED`, `SUBWORKFLOW_LOAD_FAILED`, `WORKFLOW_RECOVERY_LIMIT_REACHED`, `SUBWORKFLOW_DEPTH_LIMIT_REACHED`, `TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`, `WORKFLOW_START_INCOMPLETE`, `RETURN_TYPE_MISMATCH`, `WORKFLOW_CTX_MISSING_ID`, `NO_TYPE_AVAILABLE`, `WAIT_TIMEOUT`, `TASK_NOT_FOUND`, `WORKFLOW_NOT_FOUND`, `RESULT_NOT_AVAILABLE`, `RESULT_NOT_READY`, `ASYNC_CONTEXT`, `INVALID_INPUT`, `WAIT_INSIDE_TASK`, `TASK_CANCELLED`, `TASK_EXPIRED`, `TASK_TIMEOUT`, `WORKFLOW_PAUSED`, `WORKFLOW_EXPIRED`, `WORKFLOW_FAILED`, `WORKFLOW_CANCELLED`, `UPSTREAM_SKIPPED`, `SUBWORKFLOW_FAILED`, `WORKFLOW_SUCCESS_CASE_NOT_MET`, `WORKFLOW_OUTPUT_SKIPPED`, then the declared user error codes; any other value is `undeclared` |
 
 ### horsies.task.attempts.end_not_known
@@ -124,7 +124,7 @@ Time from the placement of an attempt on a child to the end that the worker saw,
 | `task` / `horsies.task.name` | the declared task names; any other value is `(unregistered)` |
 | `queue` / `horsies.queue` | the declared queue names; any other value is `(unknown)` |
 | `execution` / `horsies.task.execution` | `ISOLATED`, `SHARED_ASYNC`, `SHARED_THREAD` |
-| `outcome` / `horsies.task.outcome` | `COMPLETED`, `FAILED`, `WORKER_FAILURE` |
+| `outcome` / `horsies.task.outcome` | `COMPLETED`, `FAILED`, `WORKER_FAILURE`, `CANCELLED` |
 
 ### horsies.task.queue.duration
 

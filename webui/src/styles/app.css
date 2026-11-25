@@ -49,11 +49,17 @@
 
   --color-overlay: var(--overlay);
   --color-surface-muted: var(--surface-muted);
-  --color-table-hover: var(--table-hover);
+  --color-surface-hover: var(--surface-hover);
+  --color-card-hover: var(--card-hover);
+  --color-hairline: var(--hairline);
+  --color-hairline-strong: var(--hairline-strong);
+  --color-tick: var(--tick);
+  --color-window-edge: var(--window-edge);
+  --color-nav-on: var(--nav-on);
+  --color-segment-on: var(--segment-on);
   --color-glass-field: var(--glass-field);
   --color-glass-inset: var(--glass-inset);
   --color-glass-table: var(--glass-table);
-  --color-glass-surface: var(--glass-surface);
   --color-glass-surface-strong: var(--glass-surface-strong);
 
   --text-9: 9px;
@@ -62,26 +68,105 @@
   --text-13: 13px;
 }
 
-/* Glass tiers. Engines without backdrop-filter and reduced-transparency users
-   fall back to the opaque surface token. */
-@utility glass {
-  background-color: var(--glass-surface);
-  -webkit-backdrop-filter: blur(var(--glass-blur-sm));
-  backdrop-filter: blur(var(--glass-blur-sm));
+/* Shell geometry. The top bar is --shell-header tall and sits on the
+   backdrop; the window starts under it and keeps --shell-gap from the other
+   viewport edges. The window's <main> is the scroll container, with
+   --shell-pad-* padding. --shell-block is the viewport height that a page
+   filling the window does not get. A capsule is --capsule-height tall, a
+   control inside it --capsule-item, a segment inside a track
+   --segment-item. */
+:root {
+  --shell-gap: 0.5rem;
+  --shell-header: 3.5rem;
+  --shell-pad-inline: 1.5rem;
+  --shell-pad-block: 1.25rem;
+  --shell-block: calc(
+    var(--shell-header) + var(--shell-gap) + 2 * var(--shell-pad-block)
+  );
+  --capsule-height: 2.5rem;
+  --capsule-item: calc(var(--capsule-height) - 0.5rem);
+  --segment-item: calc(var(--capsule-item) - 0.375rem);
+}
+
+@media (max-width: 40rem) {
+  :root {
+    --shell-pad-inline: 1rem;
+  }
+}
+
+/* Surface materials (the layer model is described in tokens.css).
+   - window-surface   the one near-opaque window that holds page content.
+   - content-surface  a solid box on the window, for a repeated item (a
+                      status tile, a worker card) or a floating panel. Never a
+                      frame around a page section: sections sit flat on the
+                      window, split by hairlines.
+   - liquid-glass     navigation glass: the top bar capsules and toolbar
+                      capsules. Inside the window it takes the brighter
+                      --liquid-fill-on-window.
+   - segment-track    the track of a segmented control.
+   - glass-menu       popovers, menus and select lists.
+   - glass-window     dialogs.
+   Engines without backdrop-filter and users who ask for reduced transparency
+   get opaque fills. Table rows never get backdrop-filter: that would create
+   one compositing layer per row. */
+@utility window-surface {
+  background-color: var(--window);
+  -webkit-backdrop-filter: blur(var(--window-blur))
+    saturate(var(--window-saturate));
+  backdrop-filter: blur(var(--window-blur)) saturate(var(--window-saturate));
+  box-shadow: var(--window-highlight), var(--window-shadow);
+  --liquid-fill: var(--liquid-fill-on-window);
   @supports not (backdrop-filter: blur(1px)) {
-    background-color: var(--card);
+    background-color: var(--background);
   }
   @media (prefers-reduced-transparency: reduce) {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
-    background-color: var(--card);
+    background-color: var(--background);
   }
+}
+
+@utility content-surface {
+  background-color: var(--card);
+  box-shadow:
+    inset 0 0 0 0.5px var(--card-edge),
+    var(--card-shadow);
+}
+
+@utility liquid-glass {
+  background-color: var(--liquid-fill);
+  background-image: radial-gradient(
+    140% 100% at 0% 0%,
+    var(--liquid-glint),
+    transparent 55%
+  );
+  -webkit-backdrop-filter: blur(var(--glass-blur-sm))
+    saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--glass-blur-sm)) saturate(var(--glass-saturate));
+  box-shadow: var(--liquid-rim), var(--liquid-glow), var(--liquid-drop);
+  @supports not (backdrop-filter: blur(1px)) {
+    background-color: var(--liquid-solid);
+    background-image: none;
+  }
+  @media (prefers-reduced-transparency: reduce) {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background-color: var(--liquid-solid);
+    background-image: none;
+  }
+}
+
+@utility segment-track {
+  background-color: var(--segment-track);
+  box-shadow: var(--segment-rim);
 }
 
 @utility glass-menu {
   background-color: var(--glass-surface-strong);
-  -webkit-backdrop-filter: blur(var(--glass-blur-sm));
-  backdrop-filter: blur(var(--glass-blur-sm));
+  -webkit-backdrop-filter: blur(var(--glass-blur-md))
+    saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--glass-blur-md)) saturate(var(--glass-saturate));
+  box-shadow: var(--liquid-rim), var(--menu-shadow);
   @supports not (backdrop-filter: blur(1px)) {
     background-color: var(--popover);
   }
@@ -94,8 +179,10 @@
 
 @utility glass-window {
   background-color: var(--glass-surface-strong);
-  -webkit-backdrop-filter: blur(var(--glass-blur-sm));
-  backdrop-filter: blur(var(--glass-blur-sm));
+  -webkit-backdrop-filter: blur(var(--glass-blur-lg))
+    saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--glass-blur-lg)) saturate(var(--glass-saturate));
+  box-shadow: var(--liquid-rim), var(--dialog-shadow);
   @supports not (backdrop-filter: blur(1px)) {
     background-color: var(--card);
   }
@@ -117,8 +204,14 @@
     height: 100%;
   }
 
+  /* The backdrop is a fixed element behind the app (`.app-backdrop`), so the
+     body stays transparent. The html color shows only until it paints. */
+  html {
+    background-color: var(--mesh-base-1);
+  }
+
   body {
-    background-color: var(--background);
+    background-color: transparent;
     color: var(--foreground);
     font-family:
       ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
@@ -132,24 +225,133 @@
   }
 }
 
+/* The backdrop: fixed behind the app and static. ::before paints the mesh,
+   `.app-backdrop-floor` draws the logo's grid floor in perspective, and
+   ::after lays a film grain over both, so the glass reads as frosted and the
+   gradients do not band. */
+.app-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: -10;
+  overflow: hidden;
+  pointer-events: none;
+  background: var(--mesh-base-1);
+}
+
+.app-backdrop::before,
+.app-backdrop::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+}
+
+.app-backdrop::before {
+  background:
+    radial-gradient(
+      40% 36% at 8% 4% in oklab,
+      var(--mesh-sun),
+      transparent 72%
+    ),
+    radial-gradient(
+      60% 44% at 50% -8% in oklab,
+      var(--mesh-halo),
+      transparent 70%
+    ),
+    radial-gradient(
+      90% 34% at 50% 106% in oklab,
+      var(--mesh-floor-glow),
+      transparent 72%
+    ),
+    radial-gradient(
+      50% 50% at 100% 60% in oklab,
+      var(--mesh-side),
+      transparent 72%
+    ),
+    linear-gradient(
+      170deg in oklab,
+      var(--mesh-base-1) 0%,
+      var(--mesh-base-2) 40%,
+      var(--mesh-base-3) 75%,
+      var(--mesh-base-4) 100%
+    );
+}
+
+.dark .app-backdrop::before {
+  background:
+    radial-gradient(
+      56% 40% at 50% -6% in oklab,
+      var(--mesh-halo),
+      transparent 70%
+    ),
+    radial-gradient(
+      86% 30% at 50% 104% in oklab,
+      var(--mesh-floor-glow),
+      transparent 72%
+    ),
+    radial-gradient(
+      40% 40% at 0% 40% in oklab,
+      var(--mesh-side),
+      transparent 70%
+    ),
+    linear-gradient(
+      180deg in oklab,
+      var(--mesh-base-1) 0%,
+      var(--mesh-base-2) 55%,
+      var(--mesh-base-3) 100%
+    );
+}
+
+/* The mask only reads alpha, so its color is not a palette color. */
+.app-backdrop-floor {
+  position: absolute;
+  left: -40%;
+  right: -40%;
+  bottom: -2%;
+  height: 46%;
+  transform-origin: 50% 100%;
+  transform: perspective(420px) rotateX(62deg);
+  background-image:
+    repeating-linear-gradient(
+      90deg,
+      var(--mesh-floor-line) 0 1.5px,
+      transparent 1.5px 72px
+    ),
+    repeating-linear-gradient(
+      0deg,
+      var(--mesh-floor-line) 0 1.5px,
+      transparent 1.5px 56px
+    );
+  -webkit-mask-image: linear-gradient(to top, black 10%, transparent 92%);
+  mask-image: linear-gradient(to top, black 10%, transparent 92%);
+}
+
+.app-backdrop::after {
+  z-index: 1;
+  background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20width%3D'200'%20height%3D'200'%3E%3Cfilter%20id%3D'n'%3E%3CfeTurbulence%20type%3D'fractalNoise'%20baseFrequency%3D'0.9'%20numOctaves%3D'2'%20stitchTiles%3D'stitch'%2F%3E%3CfeColorMatrix%20values%3D'0.33%200.33%200.33%200%200%200.33%200.33%200.33%200%200%200.33%200.33%200.33%200%200%200%200%200%200%201'%2F%3E%3C%2Ffilter%3E%3Crect%20width%3D'100%25'%20height%3D'100%25'%20filter%3D'url(%23n)'%2F%3E%3C%2Fsvg%3E");
+  background-size: 200px 200px;
+  mix-blend-mode: overlay;
+  opacity: var(--mesh-grain-opacity);
+}
+
 /* The DAG canvas draws its own chrome; keep it on the token palette. The
    xyflow dist stylesheet arrives in the route-split chunk AFTER this file,
    so equal-specificity rule overrides lose by order — its own theming
    variables cannot, because the dist rules consume them. */
 .react-flow {
-  --xy-controls-button-background-color: var(--card);
-  --xy-controls-button-background-color-hover: var(--accent-surface);
-  --xy-controls-button-border-color: var(--border);
+  --xy-controls-button-background-color: transparent;
+  --xy-controls-button-background-color-hover: var(--surface-hover);
+  --xy-controls-button-border-color: var(--hairline);
   --xy-controls-button-color: var(--foreground);
   --xy-controls-button-color-hover: var(--foreground);
-  --xy-controls-box-shadow: 0 1px 4px
-    color-mix(in oklab, var(--foreground) 12%, transparent);
+  --xy-controls-box-shadow: var(--liquid-rim), var(--liquid-glow),
+    var(--liquid-drop);
 }
 
-/* The dist sets no radius on the controls cluster, so this rule wins
-   regardless of load order. */
+/* The zoom controls are navigation glass: a vertical capsule. The dist sets
+   no fill, filter or radius on the cluster, so this rule wins regardless of
+   load order; its shadow comes through the variable above. */
 .react-flow__controls {
+  @apply liquid-glass;
   overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 9999px;
 }

@@ -5,7 +5,7 @@
 import type { WorkflowEdge, WorkflowNode } from '@/types/workflows';
 
 export const NODE_W = 200;
-export const NODE_H = 48;
+export const NODE_H = 60;
 
 const GAP_X = 64; // horizontal gap between layers
 const GAP_Y = 14; // vertical gap between stacked nodes

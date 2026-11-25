@@ -8,11 +8,12 @@ use std::ffi::CStr;
 use chrono::{TimeZone, Utc};
 use horsies_core::events::AttemptStart;
 use horsies_core::frame_protocol::{
-    decode_preload_frame, BodyEnd, ChildAfterFrame, ChildFrame, ChildFrameRefusal, LeftWorkEnd,
-    LoopCulprit, NoLeftWork, PreloadFrame, ReportedBootCause, RssReading, RunEnd, SeatEnd,
-    ShortageErrno, StopReason, BOOT_FAILED_EXIT_CODE, CORE_STOPPED_EXIT_CODE, HEADER_BYTES,
-    MAX_BODY_BYTES, MAX_BOOT_ERROR_NAME_CHARS, MAX_EVENT_HANDLERS, MAX_HANDLER_NAME_CHARS,
-    MAX_LEFTOVER_TASK_NAMES, PROTOCOL_MISMATCH_EXIT_CODE, PROTOCOL_VERSION, SPAWN_REQUEST_BYTE,
+    decode_preload_frame, BodyEnd, CancelledBody, CancelledLoop, ChildAfterFrame, ChildFrame,
+    ChildFrameRefusal, LeftWorkEnd, LoopCulprit, NoLeftWork, PreloadFrame, ReportedBootCause,
+    RssReading, RunEnd, SeatEnd, ShortageErrno, StopReason, BOOT_FAILED_EXIT_CODE,
+    CORE_STOPPED_EXIT_CODE, HEADER_BYTES, MAX_BODY_BYTES, MAX_BOOT_ERROR_NAME_CHARS,
+    MAX_EVENT_HANDLERS, MAX_HANDLER_NAME_CHARS, MAX_LEFTOVER_TASK_NAMES,
+    PROTOCOL_MISMATCH_EXIT_CODE, PROTOCOL_VERSION, SPAWN_REQUEST_BYTE,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyModule};
@@ -29,11 +30,19 @@ const REFUSED_RUN_META: &str = r#"{"kind":"run","task_id":"0190f2d8-7c1e-7a3b-9f
 
 const SHARED_RUN_META: &str = r#"{"kind":"shared_run","dispatch":7,"task_id":"0190f2d8-7c1e-7a3b-9f00-000000000001","task_name":"app.fetch","queue_name":"emails","attempt":2,"worker_id":"w-1","claimed_at":"2026-11-17T10:00:00Z","orphan_self_heal":false,"work":{"kind":"task","timeout_ms":5000,"cancel_grace_ms":250},"trace":{"kind":"no_carrier"}}"#;
 
-const INIT_META: &str = r#"{"kind":"init","protocol":3,"program":{"kind":"python","app_locator":"app.main:app","imports":["app.tasks"],"sys_path_roots":["/srv/app"],"parent_sys_path":["/srv/app"],"parent_argv":["horsies","worker"]},"log_level":"info","database_url":"postgresql://user:secret@db/app","connection":{"tcp_keepalives":{"kind":"off"},"tcp_user_timeout":{"kind":"system_default"},"server_sessions":{"kind":"kept"}},"process_name":"horsies-child-1","child_kind":{"kind":"shared_async","seats":4,"pool":{"min_size":0,"max_size":2,"check":false},"executor_threads":3,"task_send_pool":1}}"#;
+const INIT_META: &str = r#"{"kind":"init","protocol":4,"program":{"kind":"python","app_locator":"app.main:app","imports":["app.tasks"],"sys_path_roots":["/srv/app"],"parent_sys_path":["/srv/app"],"parent_argv":["horsies","worker"]},"log_level":"info","database_url":"postgresql://user:secret@db/app","connection":{"tcp_keepalives":{"kind":"off"},"tcp_user_timeout":{"kind":"system_default"},"server_sessions":{"kind":"kept"}},"process_name":"horsies-child-1","child_kind":{"kind":"shared_async","seats":4,"pool":{"min_size":0,"max_size":2,"check":false},"executor_threads":3,"task_send_pool":1}}"#;
 
 const VERSION_ONE_INIT_META: &str = r#"{"kind":"init","app_locator":"app.main:app"}"#;
 
-const HANDLER_INIT_META: &str = r#"{"kind":"init","protocol":3,"program":{"kind":"python","app_locator":"app.main:app","imports":[],"sys_path_roots":[],"parent_sys_path":[],"parent_argv":[]},"log_level":"info","database_url":"postgresql://user:secret@db/app","connection":{"tcp_keepalives":{"kind":"off"},"tcp_user_timeout":{"kind":"system_default"},"server_sessions":{"kind":"kept"}},"process_name":"horsies-handlers","child_kind":{"kind":"handler","task_send_pool":2}}"#;
+/// The init frame of a version 3 parent: the version before the operator
+/// cancel of a run.
+const VERSION_THREE_INIT_META: &str = r#"{"kind":"init","protocol":3,"program":{"kind":"python","app_locator":"app.main:app","imports":[],"sys_path_roots":[],"parent_sys_path":[],"parent_argv":[]},"log_level":"info","database_url":"postgresql://user:secret@db/app","connection":{"tcp_keepalives":{"kind":"off"},"tcp_user_timeout":{"kind":"system_default"},"server_sessions":{"kind":"kept"}},"process_name":"horsies-child-1","child_kind":{"kind":"isolated","pool":{"min_size":0,"max_size":2,"check":false},"task_send_pool":1}}"#;
+
+const ISOLATED_CANCEL_META: &str = r#"{"kind":"cancel_run","target":{"kind":"isolated","task_id":"0190f2d8-7c1e-7a3b-9f00-000000000001"}}"#;
+
+const SHARED_CANCEL_META: &str = r#"{"kind":"cancel_run","target":{"kind":"shared","dispatch":7,"task_id":"0190f2d8-7c1e-7a3b-9f00-000000000001"}}"#;
+
+const HANDLER_INIT_META: &str = r#"{"kind":"init","protocol":4,"program":{"kind":"python","app_locator":"app.main:app","imports":[],"sys_path_roots":[],"parent_sys_path":[],"parent_argv":[]},"log_level":"info","database_url":"postgresql://user:secret@db/app","connection":{"tcp_keepalives":{"kind":"off"},"tcp_user_timeout":{"kind":"system_default"},"server_sessions":{"kind":"kept"}},"process_name":"horsies-handlers","child_kind":{"kind":"handler","task_send_pool":2}}"#;
 
 /// Two event wire forms of `core/tests/fixtures/event_wire/vectors.json`.
 const CLAIM_RELEASED: &str = r#"["ClaimReleased",1700000000123456789,"0192f6a1-7b3c-7d4e-8f00-0123456789ab","send_email","default","QUEUE_FULL"]"#;
@@ -201,6 +210,194 @@ assert refused.expected == numbers.protocol_version
         Ok::<(), PyErr>(())
     })
     .expect("the checks pass");
+}
+
+#[test]
+fn an_init_frame_of_version_three_is_a_named_mismatch() {
+    Python::initialize();
+    let init = framed(VERSION_THREE_INIT_META, b"");
+    let (meta, body) = split_meta(&init);
+    Python::attach(|py| {
+        run_python(
+            py,
+            c"refused = core.decode_parent_frame(meta, body)
+assert isinstance(refused, core.ParentProtocolMismatch), refused
+assert refused.received == 3
+assert refused.expected == core.protocol_numbers().protocol_version
+assert refused.expected == 4
+",
+            &[("meta", meta), ("body", body)],
+        )
+        .map(drop)
+    })
+    .expect("the checks pass");
+}
+
+#[test]
+fn a_cancel_run_frame_gives_its_target() {
+    Python::initialize();
+    let isolated = framed(ISOLATED_CANCEL_META, b"");
+    let shared = framed(SHARED_CANCEL_META, b"");
+    let (isolated_meta, isolated_body) = split_meta(&isolated);
+    let (shared_meta, shared_body) = split_meta(&shared);
+    Python::attach(|py| {
+        run_python(
+            py,
+            c"task_id = uuid.UUID('0190f2d8-7c1e-7a3b-9f00-000000000001')
+isolated = core.decode_parent_frame(isolated_meta, isolated_body)
+assert isinstance(isolated, core.CancelRunFrame), isolated
+assert isinstance(isolated.target, core.IsolatedCancelTarget), isolated.target
+assert isolated.target.task_id == task_id
+shared = core.decode_parent_frame(shared_meta, shared_body)
+assert isinstance(shared, core.CancelRunFrame), shared
+assert isinstance(shared.target, core.SharedCancelTarget), shared.target
+assert (shared.target.dispatch, shared.target.task_id) == (7, task_id)
+reader = core.FrameReader()
+frames = reader.feed(isolated_frame + shared_frame)
+assert [type(frame).__name__ for frame in frames] == ['CancelRunFrame', 'CancelRunFrame']
+",
+            &[
+                ("isolated_meta", isolated_meta),
+                ("isolated_body", isolated_body),
+                ("shared_meta", shared_meta),
+                ("shared_body", shared_body),
+                ("isolated_frame", isolated.as_slice()),
+                ("shared_frame", shared.as_slice()),
+            ],
+        )
+        .map(drop)
+    })
+    .expect("the checks pass");
+}
+
+#[test]
+fn a_cancel_run_frame_with_a_body_or_an_unknown_target_is_refused() {
+    Python::initialize();
+    let with_body = framed(ISOLATED_CANCEL_META, b"{}");
+    let (body_meta, body_bytes) = split_meta(&with_body);
+    let unknown = framed(
+        r#"{"kind":"cancel_run","target":{"kind":"handler","task_id":"0190f2d8-7c1e-7a3b-9f00-000000000001"}}"#,
+        b"",
+    );
+    let (unknown_meta, unknown_body) = split_meta(&unknown);
+    Python::attach(|py| {
+        run_python(
+            py,
+            c"for meta, body in ((body_meta, body_bytes), (unknown_meta, unknown_body)):
+    refused = core.decode_parent_frame(meta, body)
+    assert isinstance(refused, core.FrameRefused), refused
+",
+            &[
+                ("body_meta", body_meta),
+                ("body_bytes", body_bytes),
+                ("unknown_meta", unknown_meta),
+                ("unknown_body", unknown_body),
+            ],
+        )
+        .map(drop)
+    })
+    .expect("both frames are refused");
+}
+
+#[test]
+fn the_frames_of_a_cancelled_run_reach_the_parent() {
+    Python::initialize();
+    let globals = Python::attach(|py| {
+        run_python(
+            py,
+            c"task_id = uuid.UUID('0190f2d8-7c1e-7a3b-9f00-000000000001')
+started_at = datetime.datetime(2026, 11, 17, 10, 0, 1, tzinfo=datetime.UTC)
+fired = core.encode_child_frame(core.CancelFiredFrame(dispatch=5, task_id=task_id))
+seat_ran = core.encode_child_frame(core.SharedResultFrame(
+    dispatch=5,
+    task_id=task_id,
+    end=core.SeatCancelled(body='RAN'),
+    started_at=started_at,
+    rss_mb=10.0,
+    child='SERVES_ON',
+))
+seat_not_started = core.encode_child_frame(core.SharedResultFrame(
+    dispatch=6,
+    task_id=task_id,
+    end=core.SeatCancelled(body='NOT_STARTED'),
+    started_at=started_at,
+    rss_mb=10.0,
+    child='SERVES_ON',
+))
+isolated_ran = core.encode_child_frame(core.RunCancelledFrame(
+    task_id=task_id,
+    body='RAN',
+    started_at=started_at,
+    rss_mb=20.0,
+    task_loop='LOOP_HOLDS_NO_TASK',
+    child='SERVES_ON',
+))
+isolated_left = core.encode_child_frame(core.RunCancelledFrame(
+    task_id=task_id,
+    body='RAN',
+    started_at=started_at,
+    rss_mb='UNREADABLE',
+    task_loop=core.LoopHoldsTasks(count=2, names=['a', 'b']),
+    child='SERVES_ON',
+))
+isolated_not_started = core.encode_child_frame(core.RunCancelledFrame(
+    task_id=task_id,
+    body='NOT_STARTED',
+    started_at=started_at,
+    rss_mb=20.0,
+    task_loop='NO_TASK_LOOP',
+    child='SERVES_ON',
+))
+",
+            &[],
+        )
+        .map(Bound::unbind)
+    })
+    .expect("every frame encodes");
+    let frame = |name: &str| {
+        let bytes = Python::attach(|py| bytes_named(globals.bind(py), name));
+        decoded_child(&bytes).unwrap_or_else(|refused| panic!("{name}: {refused}"))
+    };
+    let started_at = Utc.with_ymd_and_hms(2026, 11, 17, 10, 0, 1).unwrap();
+    assert!(matches!(
+        frame("fired"),
+        ChildFrame::CancelFired(run) if run.dispatch.get() == 5
+    ));
+    assert!(matches!(
+        frame("seat_ran"),
+        ChildFrame::SharedResult(result)
+            if result.end == SeatEnd::Cancelled(CancelledBody::Ran)
+                && result.started_at == AttemptStart::Reported { started_at }
+    ));
+    assert!(matches!(
+        frame("seat_not_started"),
+        ChildFrame::SharedResult(result)
+            if result.end == SeatEnd::Cancelled(CancelledBody::NotStarted)
+    ));
+    assert!(matches!(
+        frame("isolated_ran"),
+        ChildFrame::RunCancelled(cancelled)
+            if cancelled.body == CancelledBody::Ran
+                && cancelled.started_at == started_at
+                && cancelled.task_loop == CancelledLoop::NoLeftWork(NoLeftWork::LoopHoldsNoTask)
+                && cancelled.child == ChildAfterFrame::ServesOn
+    ));
+    match frame("isolated_left") {
+        ChildFrame::RunCancelled(cancelled) => match cancelled.task_loop {
+            CancelledLoop::WorkLeft(held) => {
+                assert_eq!(held.count().get(), 2);
+                assert_eq!(held.names().len(), 2);
+            }
+            other @ CancelledLoop::NoLeftWork(_) => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        frame("isolated_not_started"),
+        ChildFrame::RunCancelled(cancelled)
+            if cancelled.body == CancelledBody::NotStarted
+                && cancelled.task_loop == CancelledLoop::NoLeftWork(NoLeftWork::NoTaskLoop)
+    ));
 }
 
 #[test]
@@ -530,6 +727,32 @@ cases = [
         end='TIMED_OUT',
         started_at='LATER',
         rss_mb=1.0,
+        child='SERVES_ON',
+    ),
+    lambda: core.SeatCancelled(body='HALF'),
+    lambda: core.CancelFiredFrame(dispatch=0, task_id=task_id),
+    lambda: core.SharedResultFrame(
+        dispatch=1,
+        task_id=task_id,
+        end=core.SeatCancelled(body='RAN'),
+        started_at='NOT_REPORTED',
+        rss_mb=1.0,
+        child='SERVES_ON',
+    ),
+    lambda: core.RunCancelledFrame(
+        task_id=task_id,
+        body='RAN',
+        started_at=started_at,
+        rss_mb=1.0,
+        task_loop='HELD',
+        child='SERVES_ON',
+    ),
+    lambda: core.RunCancelledFrame(
+        task_id=task_id,
+        body='MAYBE',
+        started_at=started_at,
+        rss_mb=1.0,
+        task_loop='NO_TASK_LOOP',
         child='SERVES_ON',
     ),
     lambda: core.HandlerCounts(handler='', errors=0, dropped=0),

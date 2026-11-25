@@ -16,12 +16,11 @@ use uuid::Uuid;
 
 use super::{QueueLabel, TaskLabel, TelemetryOn, WorkerTelemetry};
 use crate::broker::claims::{ClaimRead, ClaimedRow};
+use crate::core::lifecycle::SlotWait;
 use crate::events::{self, AttemptPlaced, ClaimReleased, TaskClaimed};
 use crate::telemetry::labels::{ClaimPassResult, ReleaseReason};
 use crate::worker::executor::slots::dispatch::attempt_of;
-use crate::worker::executor::slots::{
-    watched_placement, ChildPlacement, ClaimedTask, Placed, PlacementReceipt, PlacementWatch,
-};
+use crate::worker::executor::slots::{ChildPlacement, ClaimedTask, Placed};
 
 impl WorkerTelemetry {
     /// The claim statement returned `rows`, read at `rows[..].read`: one
@@ -48,15 +47,6 @@ impl WorkerTelemetry {
         }
     }
 
-    /// The watch of the placement of one task: watched when telemetry is
-    /// on, so that [`WorkerTelemetry::attempt_placed`] gets the child.
-    pub(crate) fn placement_watch(&self) -> (PlacementWatch, PlacementReceipt) {
-        match self {
-            Self::Off => (PlacementWatch::Unwatched, PlacementReceipt::Unwatched),
-            Self::On(_) => watched_placement(),
-        }
-    }
-
     /// A child took `task`, whose claim result the worker read at `read`:
     /// one `AttemptPlaced` and one slot wait. A task that no child took
     /// records nothing here.
@@ -67,7 +57,7 @@ impl WorkerTelemetry {
         placement: &ChildPlacement,
     ) {
         match (self, placement) {
-            (Self::Off, _) | (_, ChildPlacement::NotWatched | ChildPlacement::NotPlaced) => {}
+            (Self::Off, _) | (_, ChildPlacement::NotPlaced) => {}
             (Self::On(on), ChildPlacement::Placed(placed)) => on.placed(task, read, placed),
         }
     }
@@ -118,7 +108,7 @@ impl TelemetryOn {
     }
 
     fn placed(&self, task: &ClaimedTask, read: ClaimRead, placed: &Placed) {
-        let slot_wait = placed.at.saturating_duration_since(read.at);
+        let slot_wait = SlotWait::between(read.at, placed.at).duration();
         let _recorded = self.metrics.slot_wait.observe((task.execution,), slot_wait);
         let _emitted = self.emit(|| AttemptPlaced {
             at: placed.wall,

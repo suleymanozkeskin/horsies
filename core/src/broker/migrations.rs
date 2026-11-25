@@ -12,9 +12,28 @@
 //!   UTF-8 bytes of the result. It creates [`MIGRATIONS_TABLE`], the 0.x guard
 //!   row of `horsies_schema_version` and the empty `horsies_client_family`
 //!   table itself. The Python package reads the same files through
-//!   `horsies._core` ([`BASELINE_SQL_FILE_TEXTS`]) and installs them as its
-//!   migration 1000 with the same checksum rule, so both write the same
-//!   bookkeeping row.
+//!   `horsies._core` ([`BASELINE_SQL_FILE_TEXTS`]).
+//! - Each later version is one file of `core/migrations/`
+//!   ([`LATER_MIGRATION_FILES`]), with the SHA-384 checksum of its text. It
+//!   writes no family row and does not publish the history readers. Version
+//!   1001 (`1001_lifecycle_record.sql`) adds the phase record of each attempt
+//!   and the event table of the workflow runs (`horsies_workflow_events`).
+//!   Version 1002 (`1002_workflow_start_command_fingerprint.sql`) adds the
+//!   start command fingerprint of each top-level workflow run, which a start
+//!   with an existing id compares. Version 1003 (`1003_attempt_cancelled.sql`)
+//!   adds the attempt outcome `CANCELLED`: the cancel of a RUNNING task
+//!   records its attempt and sends the cancel notice to its worker. Version
+//!   1004 (`1004_worker_profile_name.sql`) adds the name of the worker
+//!   profile to each worker snapshot. Version 1005
+//!   (`1005_claim_generation_by_status.sql`) adds the CHECK that a CLAIMED or
+//!   RUNNING task row holds its claim generation (`claimed_at`). Version 1006
+//!   (`1006_typescript_client_family.sql`) adds the client family
+//!   `TYPESCRIPT` to the CHECK of the family row.
+//!
+//! The released text of a migration never changes: a database that applied
+//! another text of it is refused ([`SchemaRefusal::MigrationEdited`]), so a
+//! schema change is a new migration. [`migration_sql_file_texts`] gives every
+//! file of the chain, in run order, to the test harnesses of both clients.
 //!
 //! The install ([`install_schema_on`]):
 //! 1. Read the state of the current schema on a session-work connection, with
@@ -23,7 +42,7 @@
 //!    readers exist).
 //! 2. Decide. A database that holds this build's chain and this client's
 //!    family gets no lock and no write. A database that this build does not
-//!    know is refused with a [`SchemaRefusal`], and a database of the other
+//!    know is refused with a [`SchemaRefusal`], and a database of another
 //!    client family is refused; neither is changed.
 //! 3. Otherwise take the install lock on a session-work connection, read the
 //!    state again on it (another installer may have finished during the
@@ -113,6 +132,89 @@ baseline_sql_files!(
     "0008_history_maintenance_functions.sql",
 );
 
+/// Version of the migration that adds the phase record of each attempt and
+/// the events of each workflow run
+/// (`core/migrations/1001_lifecycle_record.sql`).
+pub(crate) const LIFECYCLE_RECORD_MIGRATION_VERSION: i64 = 1001;
+
+/// Version of the migration that adds the start command fingerprint of each
+/// top-level workflow run
+/// (`core/migrations/1002_workflow_start_command_fingerprint.sql`).
+pub(crate) const START_COMMAND_FINGERPRINT_MIGRATION_VERSION: i64 = 1002;
+
+/// Version of the migration that adds the cancelled attempt of a running task
+/// and the cancel notice to its worker
+/// (`core/migrations/1003_attempt_cancelled.sql`).
+pub(crate) const ATTEMPT_CANCELLED_MIGRATION_VERSION: i64 = 1003;
+
+/// Version of the migration that adds the name of the worker profile to
+/// each worker snapshot (`core/migrations/1004_worker_profile_name.sql`).
+pub(crate) const WORKER_PROFILE_NAME_MIGRATION_VERSION: i64 = 1004;
+
+/// Version of the migration that adds the CHECK that a CLAIMED or RUNNING
+/// task row holds its claim generation
+/// (`core/migrations/1005_claim_generation_by_status.sql`).
+pub(crate) const CLAIM_GENERATION_BY_STATUS_MIGRATION_VERSION: i64 = 1005;
+
+/// Version of the migration that adds the client family `TYPESCRIPT` to the
+/// CHECK of the family row
+/// (`core/migrations/1006_typescript_client_family.sql`).
+pub(crate) const TYPESCRIPT_CLIENT_FAMILY_MIGRATION_VERSION: i64 = 1006;
+
+/// The files of `core/migrations/`, one per migration after the baseline,
+/// in apply order: the version of the migration, the file name and the text.
+/// The core includes them by relative path and keeps no copy. A file added to
+/// the folder without a line here fails
+/// `later_migration_list_is_the_whole_folder`.
+pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 6] = [
+    (
+        LIFECYCLE_RECORD_MIGRATION_VERSION,
+        "1001_lifecycle_record.sql",
+        include_str!("../../migrations/1001_lifecycle_record.sql"),
+    ),
+    (
+        START_COMMAND_FINGERPRINT_MIGRATION_VERSION,
+        "1002_workflow_start_command_fingerprint.sql",
+        include_str!("../../migrations/1002_workflow_start_command_fingerprint.sql"),
+    ),
+    (
+        ATTEMPT_CANCELLED_MIGRATION_VERSION,
+        "1003_attempt_cancelled.sql",
+        include_str!("../../migrations/1003_attempt_cancelled.sql"),
+    ),
+    (
+        WORKER_PROFILE_NAME_MIGRATION_VERSION,
+        "1004_worker_profile_name.sql",
+        include_str!("../../migrations/1004_worker_profile_name.sql"),
+    ),
+    (
+        CLAIM_GENERATION_BY_STATUS_MIGRATION_VERSION,
+        "1005_claim_generation_by_status.sql",
+        include_str!("../../migrations/1005_claim_generation_by_status.sql"),
+    ),
+    (
+        TYPESCRIPT_CLIENT_FAMILY_MIGRATION_VERSION,
+        "1006_typescript_client_family.sql",
+        include_str!("../../migrations/1006_typescript_client_family.sql"),
+    ),
+];
+
+/// Every SQL file of the embedded chain, in run order, with the version of
+/// its migration: the files of migration 1000
+/// ([`BASELINE_SQL_FILE_TEXTS`]), then the file of each later migration
+/// ([`LATER_MIGRATION_FILES`]). The text of one migration is its files,
+/// concatenated in this order with no separator. A test harness installs
+/// the schema of this build by running every text in this order; the
+/// Python package reads the list through `horsies._core`
+/// (`migration_sql_files`). Pure.
+pub fn migration_sql_file_texts() -> Vec<(i64, &'static str, &'static str)> {
+    BASELINE_SQL_FILE_TEXTS
+        .iter()
+        .map(|(name, text)| (BASELINE_MIGRATION_VERSION, *name, *text))
+        .chain(LATER_MIGRATION_FILES.iter().copied())
+        .collect()
+}
+
 /// The tables file of the baseline.
 #[cfg(test)]
 pub(crate) const BASELINE_TABLES_SQL: &str = include_str!("../../baseline/0001_tables.sql");
@@ -132,9 +234,7 @@ enum FamilyRow {
     /// row (Python `install_baseline`).
     WrittenWithMigration,
     /// The migration writes no family row: every migration after the
-    /// baseline. The chain holds the baseline only until the first migration
-    /// after it, so only tests construct this variant now.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// baseline.
     NotWritten,
 }
 
@@ -146,10 +246,8 @@ enum ReaderPublication {
     /// the publication function; its transaction publishes the readers, so a
     /// recorded version 1000 always has them.
     PublishedWithMigration,
-    /// The migration does not change what the readers read. As
-    /// [`FamilyRow::NotWritten`], only tests construct it while the chain
-    /// holds the baseline only.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The migration does not change what the readers read: every
+    /// migration after the baseline so far.
     NotPublished,
 }
 
@@ -170,17 +268,111 @@ struct MigrationSource {
     retired_indexes: &'static [RetiredIndex],
 }
 
-/// The embedded chain, in apply order: the baseline only, the chain that
-/// the Python client installs too.
-const MIGRATION_SOURCES: [MigrationSource; 1] = [MigrationSource {
-    version: BASELINE_MIGRATION_VERSION,
-    description: "baseline",
-    script: SqlScript::new("migration_1000_baseline", BASELINE_SQL),
-    family_row: FamilyRow::WrittenWithMigration,
-    readers: ReaderPublication::PublishedWithMigration,
-    exact_indexes: &[],
-    retired_indexes: &[],
-}];
+/// The embedded chain, in apply order: the baseline, then the migrations of
+/// [`LATER_MIGRATION_FILES`]. The Python client installs through the core,
+/// so both clients apply the same chain.
+const MIGRATION_SOURCES: [MigrationSource; 7] = [
+    MigrationSource {
+        version: BASELINE_MIGRATION_VERSION,
+        description: "baseline",
+        script: SqlScript::new("migration_1000_baseline", BASELINE_SQL),
+        family_row: FamilyRow::WrittenWithMigration,
+        readers: ReaderPublication::PublishedWithMigration,
+        exact_indexes: &[],
+        retired_indexes: &[],
+    },
+    // The new columns are nullable and the new constraints on the existing
+    // tables are CHECKs. The indexes that the migration builds are on its new
+    // table, which no other session can write before the commit, so they are
+    // built in the migration transaction: no exact or retired index step.
+    MigrationSource {
+        version: LATER_MIGRATION_FILES[0].0,
+        description: "lifecycle record",
+        script: SqlScript::new(
+            "migration_1001_lifecycle_record",
+            LATER_MIGRATION_FILES[0].2,
+        ),
+        family_row: FamilyRow::NotWritten,
+        readers: ReaderPublication::NotPublished,
+        exact_indexes: &[],
+        retired_indexes: &[],
+    },
+    // The new columns are nullable and the new constraint is a CHECK. The
+    // migration builds no index: the start reads the workflow row by its
+    // primary key.
+    MigrationSource {
+        version: LATER_MIGRATION_FILES[1].0,
+        description: "workflow start command fingerprint",
+        script: SqlScript::new(
+            "migration_1002_workflow_start_command_fingerprint",
+            LATER_MIGRATION_FILES[1].2,
+        ),
+        family_row: FamilyRow::NotWritten,
+        readers: ReaderPublication::NotPublished,
+        exact_indexes: &[],
+        retired_indexes: &[],
+    },
+    // The migration adds no column and builds no index: it replaces two CHECKs
+    // of horsies_task_attempts and the function horsies_cancel_task, and adds
+    // the read horsies_cancelled_runs.
+    MigrationSource {
+        version: LATER_MIGRATION_FILES[2].0,
+        description: "attempt cancelled",
+        script: SqlScript::new(
+            "migration_1003_attempt_cancelled",
+            LATER_MIGRATION_FILES[2].2,
+        ),
+        family_row: FamilyRow::NotWritten,
+        readers: ReaderPublication::NotPublished,
+        exact_indexes: &[],
+        retired_indexes: &[],
+    },
+    // The new column is nullable and the new constraint is a CHECK. The
+    // migration builds no index: the reads take a snapshot by its worker and
+    // its time.
+    MigrationSource {
+        version: LATER_MIGRATION_FILES[3].0,
+        description: "worker profile name",
+        script: SqlScript::new(
+            "migration_1004_worker_profile_name",
+            LATER_MIGRATION_FILES[3].2,
+        ),
+        family_row: FamilyRow::NotWritten,
+        readers: ReaderPublication::NotPublished,
+        exact_indexes: &[],
+        retired_indexes: &[],
+    },
+    // The migration adds no column and builds no index: it adds one CHECK to
+    // horsies_tasks. A CLAIMED or RUNNING row with no claim generation stops
+    // it with SQLSTATE 23514, and nothing of it stays.
+    MigrationSource {
+        version: LATER_MIGRATION_FILES[4].0,
+        description: "claim generation by status",
+        script: SqlScript::new(
+            "migration_1005_claim_generation_by_status",
+            LATER_MIGRATION_FILES[4].2,
+        ),
+        family_row: FamilyRow::NotWritten,
+        readers: ReaderPublication::NotPublished,
+        exact_indexes: &[],
+        retired_indexes: &[],
+    },
+    // The migration adds no column and builds no index: it replaces the CHECK
+    // of horsies_client_family, and it does not write or change the family
+    // row.
+    MigrationSource {
+        version: LATER_MIGRATION_FILES[5].0,
+        description: "typescript client family",
+        script: SqlScript::new(
+            "migration_1006_typescript_client_family",
+            LATER_MIGRATION_FILES[5].2,
+        ),
+        family_row: FamilyRow::NotWritten,
+        readers: ReaderPublication::NotPublished,
+        exact_indexes: &[],
+        retired_indexes: &[],
+    },
+];
 
 /// The most rows that one state read returns: `horsies_` table names, and
 /// bookkeeping rows (Python `CATALOG_NAME_LIMIT`).
@@ -620,7 +812,7 @@ pub enum SchemaInstallError {
     /// migrations before the refused one stay committed). Not retryable.
     #[error("schema install refused: {0}")]
     Refused(SchemaRefusal),
-    /// The database was installed by the other client family. Nothing was
+    /// The database was installed by another client family. Nothing was
     /// changed. Not retryable.
     #[error(
         "this database was installed by the {} client; this is the {} client, which installs \

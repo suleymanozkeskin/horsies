@@ -25,6 +25,7 @@ use crate::core::types::status::TaskStatus;
 use uuid::Uuid;
 
 use super::fences::{OwnedClaim, OwnedClaimBatch, TerminalFence, WorkerOwned};
+use super::placement::AttemptPlacement;
 use super::LifecycleValidationError;
 
 /// A discovery batch's bound, validated at construction.
@@ -57,11 +58,13 @@ pub enum TerminalizationCommand {
     /// round trip. The fence lives in the locking read ahead of the update,
     /// not in the update's predicate. The function builds the capacity wake
     /// from the locked row: channel `task_queue_<queue>`, payload
-    /// `capacity`.
+    /// `capacity`. The attempt row carries the phase record, with the
+    /// placement that the worker observed.
     CompleteTaskFused {
         task_id: Uuid,
         fence: OwnedClaim,
         result_json: String,
+        placement: AttemptPlacement,
     },
 
     /// A claimed task whose deadline passed before user code started.

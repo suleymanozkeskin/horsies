@@ -1,8 +1,8 @@
 ---
 title: Defining Tasks
-summary: Define a task with #[horsies::task] or #[horsies::blocking_task], choose its execution class and retry codes, and read the app's state with TaskRuntime.
-related: [errors, sending-tasks, ../configuration/app-config, ../../workers/execution-modes, ../../tasks/retry-policy]
-tags: [rust, task, macro, execution, retry, TaskRuntime]
+summary: Define a task with #[horsies::task] or #[horsies::blocking_task], choose its execution class and retry codes, and read the app's state, the cancel and the fencing token of its run with TaskRuntime.
+related: [errors, sending-tasks, ../configuration/app-config, ../../workers/execution-modes, ../../tasks/retry-policy, ../../concepts/fencing-token]
+tags: [rust, task, macro, execution, retry, TaskRuntime, cancel, RunCancelState, FencingToken, fencing token]
 ---
 
 # Defining Tasks
@@ -52,7 +52,7 @@ The task name comes first. The attributes after it:
 | `queue` | `"name"` | A queue of `Custom` queue mode; see [App Config](/horsies/rust/configuration/app-config/#queues) |
 | `execution` | `isolated` (default), `shared_async`, `shared_thread` | An `async fn` takes `isolated` or `shared_async`; a `fn` takes `isolated` or `shared_thread`. Another class is a compile error |
 | `timeout_ms` | `1000..=4294967295` | The deadline of a run. A shared class without `timeout_ms` is a compile error |
-| `cancel_grace_ms` | `100..=10000`, default 1,000 | `shared_async` only: the time from the cancel signal at the deadline to the drop of the body. On another class it is a compile error |
+| `cancel_grace_ms` | `100..=10000` | `shared_async`: the time from the cancel signal (the deadline, or an operator cancel) to the drop of the body; default 1,000. `isolated`: the time from an operator cancel to the kill of the child, when the body has not ended; no default, so no kill. On `shared_thread` it is a compile error |
 | `retry_policy` | a `RetryPolicy` expression | Goes with `auto_retry_for` |
 | `auto_retry_for` | `["CODE", ...]` | Goes with `retry_policy`, with at least one code |
 | `workflow_ctx` | no value | The input gets the workflow context |
@@ -122,7 +122,7 @@ A send before `register` in the process returns `TaskSendError::ValidationFailed
 
 ## Task Runtime
 
-A body whose first parameter is `horsies::TaskRuntime` reads the app's state, the cancel signal of its run, and starts work that belongs to its run.
+A body whose first parameter is `horsies::TaskRuntime` reads the app's state, the cancel and the fencing token of its run, and starts work that belongs to its run.
 
 ```rust
 use horsies::{task, TaskError, TaskRuntime, UserErrorCode};
@@ -148,7 +148,7 @@ async fn sync_feed(rt: TaskRuntime, feed_url: String) -> Result<u32, TaskError<F
         .map_err(|missing| TaskError::user(FeedCode::NotConfigured, missing.to_string()))?;
     tokio::select! {
         count = client.sync(&feed_url) => Ok(count),
-        () = rt.cancelled() => Err(TaskError::user(FeedCode::Interrupted, "cancelled at the deadline")),
+        () = rt.cancelled() => Err(TaskError::user(FeedCode::Interrupted, "cancelled")),
     }
 }
 ```
@@ -156,14 +156,136 @@ async fn sync_feed(rt: TaskRuntime, feed_url: String) -> Result<u32, TaskError<F
 | Method | Returns |
 |--------|---------|
 | `state::<T>()` | `Result<Arc<T>, StateNotProvided>`: the value that `Horsies::provide` gave. The first read freezes the app's state |
-| `cancelled()` | A future that completes when the run is cancelled at its deadline |
-| `is_cancelled()` | Whether the run is cancelled; `false` outside the async body of a run |
+| `cancelled()` | A future that completes when the run is cancelled: an operator cancel, or the deadline of a `shared_async` run |
+| `is_cancelled()` | Whether the run is cancelled. It works in the async body, in work started with `spawn`, and in a blocking body; `false` outside a run |
+| `cancel_state()` | `RunCancelState`: `NotRequested`, `Requested { cause }` with a `CancelCause` (`Operator` or `Deadline`), or `NotInARun` |
 | `spawn(name, future)` | `Result<JoinHandle<_>, RunSpawnRefused>`: starts `future` as work of the run |
+| `fencing_token()` | `Result<FencingToken, FencingTokenRefused>`: the task id and the value of the run. See [Fencing Token](#fencing-token) |
 | `task_handle::<A, T, E>(task_name)` | `Result<TaskFunction<A, T, E>, TaskFunctionNotFound>` (`NotRegistered`, `OtherTypes`) |
 
-The cancel signal fires only for a `SHARED_ASYNC` run, at its `timeout_ms`. The run then ends as `TASK_TIMEOUT` whatever the body returns. The body and the work it started with `spawn` have `cancel_grace_ms` to end before the child drops them. In an `ISOLATED` run the worker kills the child at the deadline, so the signal never fires. Outside the async body of a run (a blocking body, a direct call in a test) there is no deadline, and `cancelled()` never completes. The timeout behaviour is on [Shared Async Tasks](/horsies/workers/shared-async-tasks/#the-timeout).
+The cancel signal fires in two cases. The first cause stays: a later cause does not change it.
+
+- **An operator cancel** of the task (`cancel_task` with `include_running = true`, or the web UI), in every execution class: the cause is `CancelCause::Operator`. The task is `CANCELLED` at once, and what the body returns after the cancel is dropped. A cancel that comes before the body starts: the body does not run.
+- **The deadline** of a `shared_async` or a `shared_thread` run, at its `timeout_ms`: the cause is `CancelCause::Deadline`. The run then ends as `TASK_TIMEOUT` whatever the body returns. At its deadline an `isolated` run is killed with no signal.
+
+When the body does not stop:
+
+- `shared_async`: the body and the work it started with `spawn` have `cancel_grace_ms` to end before the child drops them.
+- `isolated`: the body runs until it returns, or until its `timeout_ms` kill. With `cancel_grace_ms` on the task, the worker kills the child `cancel_grace_ms` after an operator cancel.
+- `shared_thread`: the body runs until it returns.
+
+A blocking body reads `is_cancelled()` or `cancel_state()` between the steps of its work; `cancelled()` is a future, so it has no use there. Outside a run (a direct call in a test) `cancelled()` never completes, `is_cancelled()` is `false` and `cancel_state()` is `NotInARun`. The rules of each task status are on [Action Semantics](/horsies/monitoring/action-semantics/#cancelling-a-running-task), and the timeout behaviour is on [Shared Async Tasks](/horsies/workers/shared-async-tasks/#the-timeout).
+
+```rust
+use horsies::{blocking_task, RunCancelState, TaskError, TaskRuntime};
+
+fn import_batch(batch_id: &str) {
+    let _ = batch_id; // stands in for one step of the work
+}
+
+#[blocking_task("import_batches", timeout_ms = 600_000, cancel_grace_ms = 5_000)]
+fn import_batches(
+    rt: TaskRuntime,
+    batch_ids: Vec<String>,
+) -> Result<usize, TaskError<std::convert::Infallible>> {
+    let mut done = 0;
+    for batch_id in &batch_ids {
+        match rt.cancel_state() {
+            // What the task returns after an operator cancel is dropped.
+            RunCancelState::Requested { .. } => break,
+            RunCancelState::NotRequested | RunCancelState::NotInARun => {
+                import_batch(batch_id);
+                done += 1;
+            }
+        }
+    }
+    Ok(done)
+}
+```
 
 Work started with `spawn` belongs to the run: the child waits for it when the body returns, cancels it after the grace, and reports work that does not stop. Work started with plain `tokio::spawn` is not tracked. `spawn` refuses with `RunSpawnRefused` outside the async body of a run in a worker child, after the run ended, and past `MAX_RUN_WORK` pieces of live work; nothing starts then.
+
+### Fencing Token
+
+A stalled attempt can run on after the worker retries its task. horsies refuses the late writes of that attempt to its own tables. It cannot refuse its writes to your systems. Write the fencing token of the run with each such write, and make the store refuse a write whose token is lower than the token that it holds for the task id. The pattern and its limits are on [Fencing Token](/horsies/concepts/fencing-token/).
+
+`rt.fencing_token()` returns a `FencingToken`:
+
+| Method | Returns |
+|--------|---------|
+| `task_id()` | `Uuid`: the id of the task. The token orders the attempts of this task only |
+| `value()` | `AttemptNumber` (`horsies::events::AttemptNumber`); `value().get()` gives a `u32` |
+
+- Two reads in one attempt give the same token.
+- An attempt that runs after another attempt of the same task gives a greater value.
+- The value depends on no clock.
+- Today the value is the attempt number, 1 to 21. Compare the values of one task id; do not depend on the number itself.
+
+<!-- rust-check: alone -->
+```rust
+use horsies::{task, TaskError, TaskRuntime, UserErrorCode};
+use sqlx::PgPool;
+
+#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+enum PaymentCode {
+    NotConfigured,
+    NotInARun,
+    LaterAttempt,
+    StoreFailed,
+}
+
+// CREATE TABLE payments (task_id uuid PRIMARY KEY, fence bigint NOT NULL,
+//                        order_id text NOT NULL, cents bigint NOT NULL);
+#[task("record_payment")]
+async fn record_payment(
+    rt: TaskRuntime,
+    order_id: String,
+    cents: i64,
+) -> Result<String, TaskError<PaymentCode>> {
+    let pool = rt
+        .state::<PgPool>()
+        .map_err(|missing| TaskError::user(PaymentCode::NotConfigured, missing.to_string()))?;
+    let token = rt
+        .fencing_token()
+        .map_err(|refused| TaskError::user(PaymentCode::NotInARun, refused.to_string()))?;
+    // One conditional write: the row changes only when no later attempt of
+    // this task wrote it.
+    let written = sqlx::query(
+        "INSERT INTO payments (task_id, fence, order_id, cents) VALUES ($1, $2, $3, $4) \
+         ON CONFLICT (task_id) DO UPDATE \
+         SET fence = EXCLUDED.fence, order_id = EXCLUDED.order_id, cents = EXCLUDED.cents \
+         WHERE payments.fence <= EXCLUDED.fence",
+    )
+    .bind(token.task_id())
+    .bind(i64::from(token.value().get()))
+    .bind(&order_id)
+    .bind(cents)
+    .execute(&*pool)
+    .await
+    .map_err(|error| TaskError::user(PaymentCode::StoreFailed, error.to_string()))?;
+    match written.rows_affected() {
+        0 => Err(TaskError::user(
+            PaymentCode::LaterAttempt,
+            "a later attempt of this task holds the fence",
+        )),
+        _ => Ok(order_id),
+    }
+}
+```
+
+`fencing_token()` returns `Err(FencingTokenRefused::NotInARun)` outside a run:
+
+- a direct call of the function in a test;
+- work started with plain `tokio::spawn`, or with `spawn_blocking` from an async body;
+- a thread that a blocking body starts.
+
+The body of a run, work that an async body started with `rt.spawn`, and the thread of a blocking body read the token of the run. In other places, read the token in the body and pass it on.
+
+Limits:
+
+- A rerun, and a workflow node that a resume starts again, get a new task id. Their value starts again at 1.
+- A stale attempt with no later attempt (the task failed, was cancelled or expired) is not refused.
+- A stale attempt that writes before the later attempt took the fence is not refused. Take the fence at the start of the body.
 
 ## Register by Hand
 

@@ -360,6 +360,7 @@ pub(crate) fn stored_worker_state(
         worker_started_at: column(row, statement, "worker_started_at")?,
         slots_down: column(row, statement, "slots_down")?,
         class_capacity: column(row, statement, "class_capacity")?,
+        profile_name: column(row, statement, "profile_name")?,
     })
 }
 

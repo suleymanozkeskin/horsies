@@ -113,7 +113,8 @@ async fn seed_failed_source(database: &TestDatabase) -> Uuid {
         .query_one(
             "SELECT count(*) FROM horsies_finish_failed_attempt(
                  $1, $2, (SELECT t.claimed_at FROM horsies_tasks t WHERE t.id = $1),
-                 'NONE', NULL, NULL, NULL, $3, $4, $5, $6, $7, $8, 'REFUSE', TRUE)",
+                 'NONE', NULL, NULL, NULL, $3, $4, $5, $6, $7, $8, 'REFUSE', TRUE,
+                 'NOT_OBSERVED', NULL)",
             &[
                 &task_id,
                 &WORKER,

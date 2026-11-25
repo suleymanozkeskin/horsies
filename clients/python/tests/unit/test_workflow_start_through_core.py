@@ -2,8 +2,9 @@
 
 The spec crosses as workflow spec data in a ``WorkflowStartRequest``; the
 core answers ``WorkflowStarted`` or ``WorkflowExists``, or the generated
-``WorkflowStartIdConflict`` or ``WorkflowStartEnqueueFailed`` that it built,
-which the start returns as they are. Prevalidation stays in Python, before
+``WorkflowStartIdConflict``, ``WorkflowStartCommandConflict`` or
+``WorkflowStartEnqueueFailed`` that it built, which the start returns as they
+are. Prevalidation stays in Python, before
 any core call. The core writes the start and resends it
 (``core/src/broker/workflow_start.rs``).
 """
@@ -43,7 +44,9 @@ from horsies.core.workflows.registry import register_workflow_definition
 from horsies.core.workflows.spec_data import workflow_spec_data, workflow_spec_json
 from horsies.core.workflows.start_tree import top_node_rows
 from horsies.core.workflows.start_types import (
+    WorkflowStartCommandConflict,
     WorkflowStartEnqueueFailed,
+    WorkflowStartErrorCode,
     WorkflowStartIdConflict,
     WorkflowStartValidationFailed,
 )
@@ -251,6 +254,28 @@ class TestStartAnswers:
         assert error is conflict
         assert isinstance(error, WorkflowStartIdConflict)
         assert error.existing_workflow_name == 'other.flow'
+        assert error.workflow_id == WORKFLOW_ID
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_an_id_held_by_another_start_command_is_the_command_conflict(self) -> None:
+        conflict = WorkflowStartCommandConflict(
+            message=(
+                f"workflow_id '{WORKFLOW_ID}' already exists for workflow name "
+                "'start_core.flow' with another start command; a start with this id must "
+                'send the same command'
+            ),
+            workflow_name='start_core.flow',
+            workflow_id=WORKFLOW_ID,
+        )
+        broker = _broker(conflict)
+        result = await start_workflow_async(_spec(), broker, WORKFLOW_ID, SENT_AT)
+
+        assert is_err(result)
+        error = result.err_value
+        assert error is conflict
+        assert isinstance(error, WorkflowStartCommandConflict)
+        assert error.code is WorkflowStartErrorCode.WORKFLOW_COMMAND_CONFLICT
+        assert error.retryable is False
         assert error.workflow_id == WORKFLOW_ID
 
     @pytest.mark.asyncio(loop_scope='function')

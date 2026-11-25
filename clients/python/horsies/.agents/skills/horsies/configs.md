@@ -294,7 +294,8 @@ hooks do not run in the handler child. See website docs `workers/event-handlers`
 Worker-ended spans: with `OtelTracing()` (`worker_ended_spans=MAKE_SPANS`, the
 default) the handler child makes the span of each attempt that the worker
 ended (a timeout kill `TASK_TIMEOUT`, a blocked-loop kill, a lost child
-`WORKER_CRASHED`), whose child span never ended: `run <task_name>`, CONSUMER,
+`WORKER_CRASHED`, a kill or a loss of the child after an operator cancel
+`TASK_CANCELLED`), whose child span never ended: `run <task_name>`, CONSUMER,
 parent from the stored carrier, start at the placement, status ERROR with
 `error.type`, `horsies.span.source = "worker"`. A shared run that its child
 ended at the deadline is `AttemptEndReportedByChild` with

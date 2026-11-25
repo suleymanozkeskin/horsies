@@ -245,10 +245,12 @@ async fn migration_0038_monitoring_triggers_deliver_each_channel() {
         &task_id.to_string(),
     )
     .await;
-    // A CLAIMED row carries its lease (horsies_tasks_status_live).
+    // A CLAIMED row carries its lease (horsies_tasks_status_live) and its
+    // claim generation (horsies_tasks_claim_generation_by_status).
     sql::query(
         "UPDATE horsies_tasks
-         SET status = 'CLAIMED', claim_expires_at = NOW() + interval '1 minute'
+         SET status = 'CLAIMED', claim_expires_at = NOW() + interval '1 minute',
+             claimed_at = NOW()
          WHERE id = $1",
     )
     .bind(task_id)
@@ -356,12 +358,17 @@ async fn a_start_sends_no_status_event() {
     seed_task(&pool, task_id, "status_event_task").await;
     assert_notification(&mut listener, TASK_STATUS_CHANNEL, &task_id.to_string()).await;
 
+    // Each status change writes the claim columns as the lifecycle writers
+    // do: a claim sets its lease and its claim generation, the start keeps
+    // the generation, and the requeue to PENDING clears it.
     for (status, sends_event) in [("CLAIMED", true), ("RUNNING", false), ("PENDING", true)] {
         sql::query(
             "UPDATE horsies_tasks
              SET status = $2,
                  claim_expires_at = CASE WHEN $2 = 'CLAIMED'
-                     THEN NOW() + interval '1 minute' END
+                     THEN NOW() + interval '1 minute' END,
+                 claimed_at = CASE WHEN $2 = 'PENDING' THEN NULL
+                     ELSE COALESCE(claimed_at, NOW()) END
              WHERE id = $1",
         )
         .bind(task_id)

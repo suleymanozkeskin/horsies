@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use horsies_core::core::lifecycle::{
-    AttemptWriteRefusal, OwnedClaim, TerminalizationOutcome, WorkflowSuccessOutcome,
+    AttemptPlacement, AttemptWriteRefusal, OwnedClaim, TerminalizationOutcome,
+    WorkflowSuccessOutcome,
 };
 use horsies_core::db::Transience;
 use horsies_core::{
@@ -38,7 +39,9 @@ use crate::handle::BrokerConnection;
 /// The plain successes of one worker for one statement: 1 to 64 rows of
 /// `(task_id, claimed_at, result_json)`, each task once, in the order of
 /// their outcomes. A naive `claimed_at` raises `TypeError`; no row, more
-/// rows or a repeated task id raises `ValueError`.
+/// rows or a repeated task id raises `ValueError`. The Python worker does not
+/// follow the placement of a task on a child, so each attempt row records
+/// no placement (`AttemptPlacement::NotObserved`).
 #[pyclass(module = "horsies._core", frozen)]
 pub struct SuccessBatchRequest {
     worker_id: Arc<str>,
@@ -63,6 +66,7 @@ impl SuccessBatchRequest {
                     task_id,
                     claimed_at: utc_instant(&claimed_at)?,
                     result_json,
+                    placement: AttemptPlacement::NotObserved,
                 })
             })
             .collect::<PyResult<Vec<_>>>()?;
@@ -412,7 +416,9 @@ pub async fn finish_workflow_success_operation(
     )
 }
 
-/// The command of a workflow success from the call's arguments.
+/// The command of a workflow success from the call's arguments. The
+/// attempt row records no placement (`AttemptPlacement::NotObserved`): the
+/// call carries none.
 ///
 /// Errors: `TypeError` for a naive `claimed_at`.
 pub fn workflow_success_command(
@@ -428,6 +434,7 @@ pub fn workflow_success_command(
             claimed_at: utc_instant(claimed_at)?,
         },
         result_json,
+        placement: AttemptPlacement::NotObserved,
     })
 }
 

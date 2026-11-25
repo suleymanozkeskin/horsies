@@ -6,9 +6,9 @@
 //! The outcome is one class per answer: `WorkflowStarted` or
 //! `WorkflowExists`, or the generated class of the core's start catalog
 //! (`horsies._catalog.workflow_start_errors`, built in Rust):
-//! `WorkflowStartIdConflict` or `WorkflowStartEnqueueFailed`. The Python
-//! client returns the class as the error of the `WorkflowStartResult` of
-//! `start_workflow_async`.
+//! `WorkflowStartIdConflict`, `WorkflowStartCommandConflict` or
+//! `WorkflowStartEnqueueFailed`. The Python client returns the class as the
+//! error of the `WorkflowStartResult` of `start_workflow_async`.
 //! A build that raised rolls the start back and the same object is raised
 //! again: `KeyboardInterrupt` or `SystemExit`, or an `Exception` such as
 //! `SerializationError` for task options of a child root that do not parse,
@@ -91,8 +91,10 @@ pub struct WorkflowStarted {
     pub workflow_id: Uuid,
 }
 
-/// A workflow with this id and this name exists, or the row with the id was
-/// gone by the read of its name. Nothing was written.
+/// A workflow run with this id exists, and the start returns it: the run holds
+/// the start command of this start, or it has no stored start command (an
+/// earlier horsies version started it; the core logs a warning). Nothing was
+/// written.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct WorkflowExists {
@@ -106,12 +108,13 @@ const SUBJECT: &str = "start_workflow";
 pub enum WorkflowStartOutcome {
     Started(WorkflowStarted),
     Exists(WorkflowExists),
-    /// The id belongs to another workflow name (`IdConflict`), or the
-    /// connect, the schema install, the client family check, the statement
-    /// or an owed child start failed, or a child build did not run
-    /// (`EnqueueFailed`: nothing committed, or the commit outcome is
-    /// unknown, and a resend with the same id then finds the workflow).
-    /// Built as its generated class.
+    /// The id belongs to another workflow name (`IdConflict`), or to a run
+    /// of this name that another start command started, or to a sub-workflow
+    /// (`CommandConflict`); or the connect, the schema install, the client
+    /// family check, the statement or an owed child start failed, or a child
+    /// build did not run (`EnqueueFailed`: nothing committed, or the commit
+    /// outcome is unknown, and a resend with the same id then finds the
+    /// workflow). Built as its generated class.
     Refused(WorkflowStartError),
     /// A child build raised this `BaseException` (an interrupt or an
     /// `Exception`); the start rolled back.
@@ -151,14 +154,14 @@ fn start_outcome(
         Ok(ClientStartOutcome::Started) => {
             return WorkflowStartOutcome::Started(WorkflowStarted { workflow_id })
         }
-        Ok(ClientStartOutcome::Exists) => {
+        Ok(ClientStartOutcome::Exists(_)) => {
             return WorkflowStartOutcome::Exists(WorkflowExists { workflow_id })
         }
-        Ok(ClientStartOutcome::IdTaken { existing_name }) => {
-            return WorkflowStartOutcome::Refused(WorkflowStartError::id_conflict(
+        Ok(ClientStartOutcome::IdHeld(holder)) => {
+            return WorkflowStartOutcome::Refused(WorkflowStartError::id_held(
                 workflow_name,
                 workflow_id,
-                existing_name,
+                holder,
             ))
         }
         Err(error) => error,
@@ -252,7 +255,7 @@ fn connect_failed(
 #[cfg(test)]
 mod tests {
     use horsies_core::error_catalog::{ErrorClassValues, ExceptionValue, SlotData};
-    use horsies_core::FailureCause;
+    use horsies_core::{ExistingRun, FailureCause, IdHolder};
 
     use super::*;
 
@@ -285,16 +288,24 @@ mod tests {
             ),
             WorkflowStartOutcome::Started(_)
         ));
-        assert!(matches!(
-            start_outcome(NAME, id, Ok(ClientStartOutcome::Exists), no_raise, no_raise),
-            WorkflowStartOutcome::Exists(_)
-        ));
+        for existing in [ExistingRun::SameCommand, ExistingRun::FingerprintNotStored] {
+            assert!(matches!(
+                start_outcome(
+                    NAME,
+                    id,
+                    Ok(ClientStartOutcome::Exists(existing)),
+                    no_raise,
+                    no_raise
+                ),
+                WorkflowStartOutcome::Exists(_)
+            ));
+        }
         match start_outcome(
             NAME,
             id,
-            Ok(ClientStartOutcome::IdTaken {
+            Ok(ClientStartOutcome::IdHeld(IdHolder::OtherWorkflowName {
                 existing_name: "other".to_owned(),
-            }),
+            })),
             no_raise,
             no_raise,
         ) {
@@ -318,6 +329,50 @@ mod tests {
                 );
             }
             _ => panic!("an id taken under another name is WorkflowStartIdConflict"),
+        }
+    }
+
+    /// An id that a run of this name with another start command holds, or
+    /// that a sub-workflow holds, is `WorkflowStartCommandConflict` with the
+    /// id of that run, never retryable.
+    #[test]
+    fn an_id_held_by_another_command_or_a_sub_workflow_is_a_command_conflict() {
+        let id = Uuid::from_u128(6);
+        for (holder, message) in [
+            (
+                IdHolder::OtherCommand,
+                format!(
+                    "workflow_id '{id}' already exists for workflow name 'nightly' with another \
+                     start command; a start with this id must send the same command"
+                ),
+            ),
+            (
+                IdHolder::SubWorkflow,
+                format!(
+                    "workflow_id '{id}' belongs to a sub-workflow that another workflow started; \
+                     it has no start command"
+                ),
+            ),
+        ] {
+            match start_outcome(
+                NAME,
+                id,
+                Ok(ClientStartOutcome::IdHeld(holder)),
+                no_raise,
+                no_raise,
+            ) {
+                WorkflowStartOutcome::Refused(conflict) => {
+                    assert_eq!(
+                        conflict.code(),
+                        horsies_core::WorkflowStartErrorCode::WorkflowCommandConflict
+                    );
+                    assert_eq!(conflict.workflow_name(), NAME);
+                    assert_eq!(conflict.workflow_id(), id);
+                    assert!(!conflict.retryable());
+                    assert_eq!(conflict.message(), message);
+                }
+                _ => panic!("an id held by another command is WorkflowStartCommandConflict"),
+            }
         }
     }
 

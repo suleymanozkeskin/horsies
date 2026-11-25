@@ -29,7 +29,7 @@ groups:
       - alert: HorsiesTaskFailureRatioHigh
         expr: |
           (
-            sum by (queue, task) (rate(horsies_task_attempts_total{outcome!="COMPLETED"}[10m]))
+            sum by (queue, task) (rate(horsies_task_attempts_total{outcome=~"FAILED|WORKER_FAILURE"}[10m]))
             /
             sum by (queue, task) (rate(horsies_task_attempts_total[10m]))
           ) > 0.1
@@ -39,8 +39,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "{{ $value | humanizePercentage }} of the attempts of task {{ $labels.task }} on queue {{ $labels.queue }} did not complete in the last 10 minutes."
-          description: "More than 10% of at least 10 attempts ended FAILED or WORKER_FAILURE. horsies_task_attempts_total{outcome!=\"COMPLETED\"} by error_code shows the causes."
+          summary: "{{ $value | humanizePercentage }} of the attempts of task {{ $labels.task }} on queue {{ $labels.queue }} failed in the last 10 minutes."
+          description: "More than 10% of at least 10 attempts ended FAILED or WORKER_FAILURE; a CANCELLED attempt is not counted. horsies_task_attempts_total{outcome=~\"FAILED|WORKER_FAILURE\"} by error_code shows the causes."
 
       - alert: HorsiesNoLiveWorker
         expr: sum(max by (state) (horsies_fleet_workers)) == 0

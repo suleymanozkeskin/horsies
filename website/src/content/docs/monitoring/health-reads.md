@@ -92,6 +92,21 @@ if is_ok(result):
                     print(f"{snap.worker_id} {budget.budget.value}: {budget.capacity} in service, serves {served}")
 ```
 
+Match `profile` to see the worker profile of each worker:
+
+```python
+from horsies import ProfileNamed, ProfileNotRecorded, is_ok
+
+result = await app.list_worker_states_async()
+if is_ok(result):
+    for snap in result.ok_value:
+        match snap.profile:
+            case ProfileNamed(name=name):
+                print(f"{snap.worker_id} runs the profile {name}")
+            case ProfileNotRecorded():
+                print(f"{snap.worker_id}: the snapshot holds no profile name")
+```
+
 Read the snapshots of one worker, newest first:
 
 ```python
@@ -240,5 +255,6 @@ The meaning of each field is on [Snapshot Fields](/horsies/monitoring/worker-hea
 | `worker_started_at` | `datetime` |
 | `slot_health` | `AllSlotsServing()` or `SlotsDown(slots)`, where `slots` holds one `DownSlot` per slot that was down, in slot order |
 | `class_capacity` | `ClassBudgets(budgets)`, where `budgets` holds one `ClassBudget(budget, capacity, serves)` per budget, in `Execution` order |
+| `profile` | `ProfileNamed(name)` or `ProfileNotRecorded()` |
 
 `DownSlot` fields: `slot` (index), `cause` (`ResourceShortage(errno_name)` or `ThreadStartRefused()`), `detail` (`str`), `down_since` (aware `datetime`), `failed_boots` (`int`, at least 1).

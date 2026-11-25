@@ -342,9 +342,24 @@ async fn run_checkout(
 }
 ```
 
-- A start with an id that a workflow of the same name already has starts
-  nothing and returns its handle. An id of another workflow name is
-  `WORKFLOW_ID_CONFLICT`.
+- A start with an id that already exists starts nothing. The core compares
+  the start command of the start with the stored one:
+  - same name, same start command: the handle of that workflow;
+  - same name, another start command: `WORKFLOW_COMMAND_CONFLICT`;
+  - the id holds a sub-workflow: `WORKFLOW_COMMAND_CONFLICT`;
+  - another name: `WORKFLOW_ID_CONFLICT`;
+  - a run started before this release (no stored start command): the
+    handle of that workflow, with no compare.
+- The start command is the workflow name, definition key, `on_error`,
+  output, success policy, and each top-level node: index, node id, task
+  name, input (byte for byte), queue, priority, dependencies, `args_from`,
+  `workflow_ctx_from`, `allow_failed_deps`, join, `min_success`, task
+  options (with `good_until`), retention class and sub-workflow facts. The
+  workflow id, the start time, the trace and the pre-built child workflows
+  are not in it. A spec that changes between two starts with one id (a
+  value from the clock, a deploy) is a conflict. A task retry builds the
+  spec again, so the spec of `rt.start_with_id` must be the same on each
+  attempt.
 - `start_workflow` and `start_workflow_with` before the registration in the
   process return `VALIDATION_FAILED`.
 - With `AppConfig.resend_on_transient_err`, the core runs a retryable start
@@ -359,7 +374,8 @@ async fn run_checkout(
 
 An enum with one variant per state: `ValidationFailed { message,
 workflow_name, workflow_id, cause }`, `IdConflict { message,
-workflow_name, workflow_id, existing_workflow_name }`, `EnqueueFailed {
+workflow_name, workflow_id, existing_workflow_name }`, `CommandConflict {
+message, workflow_name, workflow_id }`, `EnqueueFailed {
 message, retryable, workflow_name, workflow_id, cause }` and `AsyncContext {
 message, workflow_name, workflow_id }`. The methods `code()`, `message()`,
 `retryable()`, `workflow_name()`, `workflow_id()` and `failure_cause()` read
@@ -374,6 +390,7 @@ is `WorkflowError::Broker`.
 |---|---|
 | `ValidationFailed` | Before any I/O: no definition key, an output type that is not the handle's (`HRS-025`), a sub-workflow node of a definition that is not registered (`HRS-020`), params given to a definition without params (`HRS-022`), a template build that refused, or a start before the registration in the process |
 | `WorkflowIdConflict` | The id belongs to another workflow name. Nothing was written |
+| `WorkflowCommandConflict` | The id holds a workflow of the same name that another start command started, or a sub-workflow. Nothing was written. Not retryable |
 | `EnqueueFailed` | The connect, the schema install or the start failed. `retryable` is the classification of the cause. A start again with the same id finds the workflow when the commit reply was lost |
 | `AsyncContext` | A blocking start (`horsies::blocking`) on a thread that runs a tokio runtime. Nothing was written; `workflow_id` is the id of the start. Not retryable |
 

@@ -224,21 +224,23 @@ _MOVED_TASK_SQL: Final[LiteralString] = """
 _COMPLETE_SQL: Final[LiteralString] = """
     SELECT outcome FROM horsies_complete_task_fused(
         %(task_id)s, %(worker_id)s, (SELECT claimed_at FROM horsies_tasks WHERE id = %(task_id)s),
-        '{"rows":12}', TRUE
+        '{"rows":12}', TRUE, 'NOT_OBSERVED', NULL
     )
 """
 
 _FAILED_ATTEMPT_SQL: Final[LiteralString] = """
     SELECT outcome FROM horsies_finish_failed_attempt(
         %(task_id)s, %(worker_id)s, (SELECT claimed_at FROM horsies_tasks WHERE id = %(task_id)s),
-        'RETRY', 0, 1.0, 'SAME_CLASS', '{"err":1}', 'E1', 'reason', 'FAILED', 'timed out', 'reason', 'REFUSE', TRUE
+        'RETRY', 0, 1.0, 'SAME_CLASS', '{"err":1}', 'E1', 'reason', 'FAILED', 'timed out', 'reason', 'REFUSE', TRUE,
+        'NOT_OBSERVED', NULL
     )
 """
 
 _RECLAIM_SQL: Final[LiteralString] = """
     UPDATE horsies_tasks
     SET status = 'RUNNING', claimed_at = now(), claimed_by_worker_id = %(worker_id)s, started_at = now(),
-        worker_pid = 7, worker_hostname = 'host-a', worker_process_name = 'proc-a', updated_at = now()
+        worker_pid = 7, worker_hostname = 'host-a', worker_process_name = 'proc-a', updated_at = now(),
+        attempt_claims = 1, first_claimed_at = now()
     WHERE id = %(task_id)s
 """
 

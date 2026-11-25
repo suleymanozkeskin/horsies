@@ -41,7 +41,9 @@ export interface TaskSummary {
   started_at: string | null;
   completed_at: string | null;
   failed_at: string | null;
+  /** Queue wait in seconds, exact to the microsecond. */
   queue_s: number | null;
+  /** Execution time in seconds, exact to the microsecond. */
   exec_s: number | null;
 }
 

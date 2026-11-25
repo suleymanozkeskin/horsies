@@ -168,9 +168,10 @@ fn protocol_numbers() -> ProtocolNumbers {
 }
 
 /// Decode one parent frame from its metadata and its body: `InitFrame`,
-/// `RunFrame`, `SharedRunFrame`, `EventsFrame`, `StopFrame`; `FrameRefused`
-/// for a malformed frame; `ParentProtocolMismatch` for an init frame of
-/// another protocol version. Pure.
+/// `RunFrame`, `SharedRunFrame`, `CancelRunFrame`, `EventsFrame`,
+/// `StopFrame`; `FrameRefused` for a malformed frame;
+/// `ParentProtocolMismatch` for an init frame of another protocol version.
+/// Pure.
 #[pyfunction]
 fn decode_parent_frame(py: Python<'_>, meta: &[u8], body: &[u8]) -> PyResult<Py<PyAny>> {
     refuse_by_fork_rule()?;

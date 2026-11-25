@@ -425,10 +425,11 @@ pub enum PrestartExpiry {
 // ownership CAS makes the claim-time snapshot provably equal to the row, so
 // self-incrementing removes the snapshot from the written value entirely.
 //
-// The written row is the retry row of the baseline retry write
-// (`core/baseline/0004_lifecycle_functions.sql:1479-1496`):
-// PENDING, retry_count + 1, enqueued_at = next_retry_at, and every claim and
-// run field cleared. The retry time is `$2`, or the database clock when `$2`
+// The written row is the retry row of the retry writes
+// (`horsies_finish_failed_attempt`, `core/migrations/1001_lifecycle_record.sql`):
+// PENDING, retry_count + 1, enqueued_at = next_retry_at, every claim and run
+// field cleared, and the claim count of the next attempt at 0 (attempt_claims
+// 0, first_claimed_at NULL). The retry time is `$2`, or the database clock when `$2`
 // is NULL (no delay): `enqueued_at` is NOT NULL in the baseline
 // (`0001_tables.sql:79`). A retry time at or after `good_until` is refused.
 const REQUEUE_SQL: &str = "\
@@ -449,6 +450,8 @@ SET status = 'PENDING',
     worker_process_name = NULL,
     finalizing_at = NULL,
     finalizing_by_worker_id = NULL,
+    attempt_claims = 0,
+    first_claimed_at = NULL,
     updated_at = NOW()
 FROM retry
 WHERE t.id = $1
@@ -559,7 +562,7 @@ WITH RECURSIVE latest AS (
             max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
             queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
             memory_usage_mb, memory_percent, cpu_percent, children_memory_mb,
-            worker_started_at, slots_down, class_capacity
+            worker_started_at, slots_down, class_capacity, profile_name
         FROM horsies_worker_states
         ORDER BY worker_id, snapshot_at DESC
         LIMIT 1
@@ -572,7 +575,7 @@ WITH RECURSIVE latest AS (
             w.max_claim_per_worker, w.cluster_wide_cap, w.queues, w.queue_priorities,
             w.queue_max_concurrency, w.recovery_config, w.tasks_running, w.tasks_claimed,
             w.memory_usage_mb, w.memory_percent, w.cpu_percent, w.children_memory_mb,
-            w.worker_started_at, w.slots_down, w.class_capacity
+            w.worker_started_at, w.slots_down, w.class_capacity, w.profile_name
         FROM horsies_worker_states w
         WHERE w.worker_id > l.worker_id
         ORDER BY w.worker_id, w.snapshot_at DESC
@@ -588,7 +591,7 @@ SELECT
     max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
     queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
     memory_usage_mb, memory_percent, cpu_percent, children_memory_mb,
-    worker_started_at, slots_down, class_capacity
+    worker_started_at, slots_down, class_capacity, profile_name
 FROM horsies_worker_states
 WHERE worker_id = $1
 ORDER BY snapshot_at DESC
@@ -602,7 +605,7 @@ SELECT
     max_claim_per_worker, cluster_wide_cap, queues, queue_priorities,
     queue_max_concurrency, recovery_config, tasks_running, tasks_claimed,
     memory_usage_mb, memory_percent, cpu_percent, children_memory_mb,
-    worker_started_at, slots_down, class_capacity
+    worker_started_at, slots_down, class_capacity, profile_name
 FROM horsies_worker_states
 WHERE worker_id = $1
 ORDER BY snapshot_at DESC
@@ -1251,7 +1254,7 @@ impl PostgresBroker {
     /// whose install ran in this process has passed it already. Nothing is
     /// written when the check does not pass:
     ///
-    /// - a database of the other family, or with no family row, is
+    /// - a database of another family, or with no family row, is
     ///   `BrokerError::ClientFamilyMismatch`, not retryable;
     /// - a family row whose value is not a client family (corrupt stored
     ///   data) is `BrokerError::UnknownStoredFamily`, not retryable;
@@ -3002,6 +3005,7 @@ fn parse_task_attempt_outcome(value: &str) -> Result<crate::core::TaskAttemptOut
         "COMPLETED" => Ok(crate::core::TaskAttemptOutcome::Completed),
         "FAILED" => Ok(crate::core::TaskAttemptOutcome::Failed),
         "WORKER_FAILURE" => Ok(crate::core::TaskAttemptOutcome::WorkerFailure),
+        "CANCELLED" => Ok(crate::core::TaskAttemptOutcome::Cancelled),
         other => Err(BrokerError::HistoryReadContract(format!(
             "unknown task-attempt outcome {other:?}"
         ))),
@@ -3349,6 +3353,7 @@ mod fused_finalize_tests {
                     claimed_at,
                 },
                 result_json: result_json.to_owned(),
+                placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
             },
         )
         .await
@@ -3441,10 +3446,14 @@ mod fused_finalize_tests {
         assert_eq!(status, "COMPLETED");
         assert_eq!(result.as_deref(), Some("{\"Ok\":7}"));
 
-        let attempt: serde_json::Value = serde_json::from_slice(&attempt_snapshot).unwrap();
+        // Archive version 2: `[attempts, open]`; the attempt ended with its
+        // row, so no attempt is open.
+        let archive: serde_json::Value = serde_json::from_slice(&attempt_snapshot).unwrap();
+        let attempt = &archive[0];
         assert_eq!(attempt[0][0], 2, "attempt = retry_count(1) + 1");
         assert_eq!(attempt[0][1], "COMPLETED");
         assert_eq!(attempt[0][2], false);
+        assert_eq!(archive[1], serde_json::Value::Null);
 
         cleanup(&pool, &id).await;
     }
@@ -4107,6 +4116,7 @@ mod terminal_at_stamp_tests {
                     claimed_at: generation,
                 },
                 result_json: "{\"Ok\":1}".to_owned(),
+                placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
             },
         )
         .await
@@ -4195,8 +4205,7 @@ mod terminal_at_stamp_tests {
 
     /// A requeue is a live transition: the row stays live as PENDING, writes
     /// no history row, counts the retry, and clears every claim and run
-    /// field, as the baseline retry write
-    /// (`core/baseline/0004_lifecycle_functions.sql:1479-1496`).
+    /// field, as the retry write of `horsies_finish_failed_attempt`.
     #[tokio::test]
     async fn requeue_keeps_the_row_live_and_writes_no_history_row() {
         let (broker, pool) = connect().await;
@@ -4271,6 +4280,43 @@ mod terminal_at_stamp_tests {
             before <= enqueued_at && enqueued_at <= after,
             "enqueued_at {enqueued_at} must be the requeue time, from {before} to {after}"
         );
+
+        cleanup(&pool, &id).await;
+    }
+
+    /// A requeue begins the next attempt with no claim: it sets
+    /// `attempt_claims` to 0 and `first_claimed_at` to NULL, from a counted
+    /// claim of the ended attempt.
+    #[tokio::test]
+    async fn requeue_resets_the_claim_count_of_the_next_attempt() {
+        let (broker, pool) = connect().await;
+        let id = Uuid::new_v4().to_string();
+        seed(&pool, &id, "RUNNING", Some("w1"), None).await;
+        sql::query(
+            "UPDATE horsies_tasks SET attempt_claims = 2, first_claimed_at = claimed_at
+             WHERE id = $1",
+        )
+        .bind(test_uuid(&id))
+        .execute(&pool)
+        .await
+        .expect("count two claims of the attempt");
+
+        let applied = broker
+            .requeue(Uuid::parse_str(&id).unwrap(), Some(Utc::now()), "w1")
+            .await
+            .expect("requeue");
+        assert!(applied);
+
+        let (attempt_claims, first_claimed_at): (Option<i32>, Option<DateTime<Utc>>) =
+            sql::query_as(
+                "SELECT attempt_claims, first_claimed_at FROM horsies_tasks WHERE id = $1",
+            )
+            .bind(test_uuid(&id))
+            .fetch_one(&pool)
+            .await
+            .expect("requeued row");
+        assert_eq!(attempt_claims, Some(0));
+        assert_eq!(first_claimed_at, None);
 
         cleanup(&pool, &id).await;
     }
@@ -4761,6 +4807,9 @@ mod stale_and_expired_list_tests {
         }
     }
 
+    /// A row of `status`, enqueued 20 minutes ago. A RUNNING row was claimed
+    /// and started 10 minutes ago: it holds its claim generation (CHECK
+    /// `horsies_tasks_claim_generation_by_status`).
     async fn seed(
         pool: &TestPool,
         task_name: &str,
@@ -4772,12 +4821,13 @@ mod stale_and_expired_list_tests {
             "INSERT INTO horsies_tasks (
                  id, task_name, queue_name, priority, input, task_options, execution,
                  retention_class_key, sent_at, created_at, command_fingerprint_version,
-                 command_fingerprint, status, enqueued_at, started_at, good_until,
+                 command_fingerprint, status, enqueued_at, claimed_at, started_at, good_until,
                  retry_count, max_retries, is_workflow_task, updated_at, retain_rerun_input
              ) VALUES (
                  $1, $2, 'default', 100, '{}', NULL, 'ISOLATED',
                  'forever', NOW(), NOW(), 1,
                  decode(repeat('0d', 32), 'hex'), $3, NOW() - INTERVAL '20 minutes',
+                 CASE WHEN $3 = 'RUNNING' THEN NOW() - INTERVAL '10 minutes' END,
                  CASE WHEN $3 = 'RUNNING' THEN NOW() - INTERVAL '10 minutes' END,
                  NOW() - $4 * INTERVAL '1 minute',
                  0, 0, FALSE, NOW(), FALSE
@@ -5358,6 +5408,65 @@ mod client_family_tests {
             assert_eq!(rows, 0);
         }
         assert_eq!(family_row(&pool).await.as_deref(), Some("GO"));
+    }
+
+    /// A database whose family row holds `TYPESCRIPT` (the CHECK admits it
+    /// from migration 1006 on) is of the TypeScript client. A Python and a
+    /// Rust handle are refused before the first write, at the install and
+    /// at the check, with the stored family named, not retryable; a
+    /// TypeScript handle passes the check. The family row does not change.
+    #[tokio::test]
+    async fn a_typescript_database_refuses_a_python_and_a_rust_handle_before_any_write() {
+        let pool = crate::test_support::migrated_pool().await;
+        sql::query("UPDATE horsies_client_family SET family = 'TYPESCRIPT'")
+            .execute(&pool)
+            .await
+            .expect("the family CHECK admits TYPESCRIPT");
+        let typescript =
+            crate::broker::client_family::RecordedFamily::Recorded(ClientFamily::TypeScript);
+
+        for family in [ClientFamily::Python, ClientFamily::Rust] {
+            let installing = PostgresBroker::from_test_url(pool.url(), family);
+            let refused = installing
+                .migrate()
+                .await
+                .expect_err("no install into a database of another family");
+            assert!(
+                matches!(
+                    &refused,
+                    BrokerError::ClientFamilyMismatch { stored, own }
+                        if *stored == typescript && *own == family
+                ),
+                "{refused:?}"
+            );
+            assert!(!refused.is_retryable());
+            assert!(
+                refused.to_string().contains("the TYPESCRIPT client"),
+                "{refused}"
+            );
+
+            let broker = PostgresBroker::from_test_url_observe_only(pool.url(), family);
+            let refused = broker
+                .ensure_client_family_for_write()
+                .await
+                .expect_err("no write into a database of another family");
+            assert!(
+                matches!(
+                    &refused,
+                    BrokerError::ClientFamilyMismatch { stored, own }
+                        if *stored == typescript && *own == family
+                ),
+                "{refused:?}"
+            );
+            assert!(!refused.is_retryable());
+        }
+        let broker =
+            PostgresBroker::from_test_url_observe_only(pool.url(), ClientFamily::TypeScript);
+        broker
+            .ensure_client_family_for_write()
+            .await
+            .expect("a TypeScript handle writes into a TypeScript database");
+        assert_eq!(family_row(&pool).await.as_deref(), Some("TYPESCRIPT"));
     }
 }
 

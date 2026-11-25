@@ -173,7 +173,7 @@ _PARTIAL_RETRY_SQL = """
         CAST(:id AS uuid), :worker,
         (SELECT claimed_at FROM horsies_tasks WHERE id = CAST(:id AS uuid)),
         :kind, CAST(:count AS integer), CAST(:delay AS double precision), :placement,
-        :result, 'BOOM', NULL, :outcome, 'message', NULL, 'REFUSE', TRUE
+        :result, 'BOOM', NULL, :outcome, 'message', NULL, 'REFUSE', TRUE, 'NOT_OBSERVED', NULL
     )
 """
 

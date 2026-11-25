@@ -232,7 +232,8 @@ class TestRerunEndToEnd:
                     "SET status = 'RUNNING', "
                     'claimed_by_worker_id = :worker, claimed_at = NOW(), '
                     'started_at = NOW(), worker_pid = 4242, '
-                    "worker_hostname = 'it-host', worker_process_name = 'it-proc' "
+                    "worker_hostname = 'it-host', worker_process_name = 'it-proc', "
+                    'attempt_claims = 1, first_claimed_at = NOW() '
                     'WHERE id = CAST(:task_id AS uuid)'
                 ),
                 {'task_id': str(outcome.new_task_id), 'worker': WORKER},
@@ -293,7 +294,8 @@ class TestRerunEndToEnd:
                     "SET status = 'RUNNING', "
                     'claimed_by_worker_id = :worker, claimed_at = NOW(), '
                     'started_at = NOW(), worker_pid = 4242, '
-                    "worker_hostname = 'it-host', worker_process_name = 'it-proc' "
+                    "worker_hostname = 'it-host', worker_process_name = 'it-proc', "
+                    'attempt_claims = 1, first_claimed_at = NOW() '
                     'WHERE id = CAST(:task_id AS uuid)'
                 ),
                 {'task_id': str(first.new_task_id), 'worker': WORKER},
@@ -453,7 +455,7 @@ class TestTypedRefusals:
                         'SELECT outcome FROM horsies_complete_task_fused('
                         'CAST(:task_id AS uuid), :worker, '
                         'COALESCE((SELECT claimed_at FROM horsies_tasks WHERE id = CAST(:task_id AS uuid)), NOW()), '
-                        ':result, TRUE)'
+                        ":result, TRUE, 'NOT_OBSERVED', NULL)"
                     ),
                     {
                         'task_id': task_id,
@@ -681,7 +683,7 @@ class TestStoredSourceDoesNotDecode:
 async def test_a_family_row_that_holds_no_client_family_raises_a_contract_violation(
     terminalization_schema: HistorySchema,
 ) -> None:
-    """A family value outside PYTHON and RUST is corrupt stored data.
+    """A family value outside PYTHON, RUST and TYPESCRIPT is corrupt stored data.
 
     The test writes it past the CHECK ``horsies_client_family_family_known``,
     which it drops first. The core answers ``RerunUnknownStoredFamily`` with

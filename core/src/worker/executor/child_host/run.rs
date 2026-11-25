@@ -15,6 +15,7 @@ use super::host::ChildApp;
 use super::link::FrameWriter;
 use super::panic::{catch_body_panic, panic_error, CatchPanic};
 use super::role::as_blocking_body;
+use super::run_work::{in_blocking_run, RunCancelSignal};
 use crate::broker::child_writes::{WriteDeadline, PRE_START_CONFIRM_ATTEMPTS};
 use crate::broker::claims::{
     release_claims_within, start_attempt as start_statement, ReleaseBatch, ReleaseClaims,
@@ -24,6 +25,7 @@ use crate::broker::workflow_stop_before_start::stop_before_start;
 use crate::broker::{BrokerError, OrphanSelfHeal, PostgresBroker, PrestartExpiry, StopBeforeStart};
 use crate::core::lifecycle::OwnedClaim;
 use crate::core::task::error::{OperationalErrorCode, TaskError};
+use crate::core::task::fencing::FencingToken;
 use crate::core::task::fn_trait::{RawTaskResult, RegisteredTask, TaskModule};
 use crate::core::task::result::TaskResult;
 use crate::events::{AttemptNumber, QueueName};
@@ -58,6 +60,13 @@ pub(super) struct RunFacts {
     /// Whether the stop before start cancels the task when no node links it
     /// live; the run frame carries it.
     pub(super) orphan_self_heal: OrphanSelfHeal,
+}
+
+impl RunFacts {
+    /// The fencing token of the run: the task id and the attempt number.
+    pub(super) fn fencing_token(&self) -> FencingToken {
+        FencingToken::new(self.task_id, self.attempt)
+    }
 }
 
 /// How the start write ended.
@@ -493,16 +502,22 @@ pub(super) fn result_end(result: TaskResult<Vec<u8>>) -> RunEnd {
 }
 
 /// The body of blocking task `task_name` (defined in `module`) on the
-/// calling thread, inside `span` (the span of the run's body scope). A
-/// panic is `UNHANDLED_EXCEPTION` with its record ([`panic_error`]).
+/// calling thread, inside `span` (the span of the run's body scope), with
+/// `token` as the fencing token and `cancel` as the cancel signal of the
+/// thread while the body runs ([`in_blocking_run`]): the body reads
+/// `run_cancel_state` and `run_cancel_signal` there. A panic is
+/// `UNHANDLED_EXCEPTION` with its record ([`panic_error`]).
 pub(super) fn run_blocking_body(
     task: &Arc<dyn crate::core::task::fn_trait::BlockingTaskFn>,
     input: &[u8],
     task_name: &str,
     module: TaskModule,
     span: &tracing::Span,
+    token: FencingToken,
+    cancel: RunCancelSignal,
 ) -> TaskResult<Vec<u8>> {
-    match span.in_scope(|| catch_body_panic(|| as_blocking_body(|| task.execute(input)))) {
+    let body = || in_blocking_run(token, cancel, || as_blocking_body(|| task.execute(input)));
+    match span.in_scope(|| catch_body_panic(body)) {
         Ok(result) => result,
         Err(record) => TaskResult::Err(panic_error(task_name, module, record)),
     }

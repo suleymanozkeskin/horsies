@@ -32,7 +32,10 @@ use crate::broker::terminalization::on_test_pool::{
     terminalize_in_transaction, InTransactionError,
 };
 use crate::broker::workflow_stop_before_start::{stop_before_start, OrphanSelfHeal};
-use crate::core::history::archive::attempts::{encode_attempt_snapshot, AttemptRecord};
+use crate::core::history::archive::attempts::{
+    encode_attempt_archive, AttemptPhases, AttemptRecord, ClaimRecord, Finalizing, OpenAttempt,
+    OpenAttemptFacts, OpenClaims, PhaseRecord, Placement, RecordedBy,
+};
 use crate::core::history::errors::HISTORY_LEAF_MISSING_SQLSTATE;
 use crate::core::lifecycle::{
     BatchSize, OwnedClaim, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
@@ -47,6 +50,7 @@ fn fused(task_id: Uuid) -> TerminalizationCommand {
         task_id,
         fence: owned_claim(),
         result_json: RESULT.to_owned(),
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     }
 }
 
@@ -78,8 +82,10 @@ fn database_error(result: Result<Vec<TerminalizationOutcome>, InTransactionError
 }
 
 /// Python `test_sql_attempt_encoder_matches_archive_codec_bytes`: the SQL
-/// attempt encoder of the move gives the bytes of the archive codec, also
-/// for quotes, a backslash and non-ASCII text.
+/// attempt encoder of the move (`horsies_encode_attempt_archive`, version 2)
+/// gives the bytes of the archive codec, also for quotes, a backslash and
+/// non-ASCII text. The attempt row has no phase record, and the attempt of
+/// the row ended with it, so the open attempt is `null`.
 #[tokio::test]
 async fn sql_attempt_encoder_matches_archive_codec_bytes() {
     let pool = pool().await;
@@ -104,29 +110,130 @@ async fn sql_attempt_encoder_matches_archive_codec_bytes() {
     .await
     .expect("seed the attempt");
 
-    let encoded: Vec<u8> = sql::query_scalar("SELECT horsies_encode_task_attempts($1)")
-        .bind(task_id)
-        .fetch_one(&pool)
-        .await
-        .expect("encode in SQL");
+    let encoded = encode_in_sql(&pool, task_id).await;
 
-    let expected = encode_attempt_snapshot(&[AttemptRecord::new(
-        1,
-        "FAILED",
-        false,
-        started_at,
-        finished_at,
-        Some("TASK_EXCEPTION".to_owned()),
-        Some(special.to_owned()),
-        Some("final attempt failed".to_owned()),
-        Some(WORKER.to_owned()),
-        Some(special.to_owned()),
-        Some(4242),
-        Some(special.to_owned()),
+    let expected = encode_attempt_archive(
+        &[AttemptRecord::new(
+            1,
+            "FAILED",
+            false,
+            started_at,
+            finished_at,
+            Some("TASK_EXCEPTION".to_owned()),
+            Some(special.to_owned()),
+            Some("final attempt failed".to_owned()),
+            Some(WORKER.to_owned()),
+            Some(special.to_owned()),
+            Some(4242),
+            Some(special.to_owned()),
+        )
+        .expect("attempt record")],
+        &OpenAttempt::Ended,
     )
-    .expect("attempt record")])
     .expect("encode in Rust");
     assert_eq!(encoded, expected.payload);
+    cleanup_tasks(&pool, &[task_id]).await;
+}
+
+/// The archive of the live row `task_id` as the SQL encoder writes it.
+async fn encode_in_sql(pool: &sql::TestPool, task_id: Uuid) -> Vec<u8> {
+    sql::query_scalar(
+        "SELECT horsies_encode_attempt_archive(t) FROM horsies_tasks AS t WHERE t.id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("encode in SQL")
+}
+
+/// The SQL encoder and the archive codec give the same version-2 bytes for a
+/// phase record of each value and for an open attempt: the first attempt is
+/// recorded by the worker with two claims, a placement and a finalizing
+/// marker; the second, which retry_count 1 runs, has no row yet and is
+/// open with one claim.
+#[tokio::test]
+async fn sql_attempt_encoder_matches_archive_codec_bytes_for_phases_and_an_open_attempt() {
+    let pool = pool().await;
+    let task_id = seed_task(
+        &pool,
+        &TaskSeed {
+            retry_count: 1,
+            max_retries: 3,
+            ..TaskSeed::running()
+        },
+    )
+    .await;
+    let at = |micros: i64| generation() + Duration::microseconds(micros);
+    sql::query("UPDATE horsies_tasks SET attempt_claims = 1, first_claimed_at = $2 WHERE id = $1")
+        .bind(task_id)
+        .bind(at(9_000))
+        .execute(&pool)
+        .await
+        .expect("count the claim of the open attempt");
+    sql::query(
+        "INSERT INTO horsies_task_attempts (
+            task_id, attempt, outcome, will_retry, started_at, finished_at,
+            error_code, error_message, failed_reason, worker_id,
+            worker_hostname, worker_pid, worker_process_name,
+            phase_record_version, enqueued_at, claimed_at, attempt_claims, first_claimed_at,
+            placed_at, finalizing_at, recorded_by, last_seen_at
+        ) VALUES ($1, 1, 'FAILED', TRUE, $2, $3, 'BOOM', NULL, NULL, $4, 'host', 4242, 'proc',
+                  1, $5, $6, 2, $7, $8, $9, 'WORKER', NULL)",
+    )
+    .bind(task_id)
+    .bind(at(400))
+    .bind(at(700))
+    .bind(WORKER)
+    .bind(at(100))
+    .bind(at(300))
+    .bind(at(200))
+    .bind(at(350))
+    .bind(at(600))
+    .execute(&pool)
+    .await
+    .expect("seed the attempt with its phase record");
+
+    let encoded = encode_in_sql(&pool, task_id).await;
+
+    let first = AttemptRecord::new(
+        1,
+        "FAILED",
+        true,
+        at(400),
+        at(700),
+        Some("BOOM".to_owned()),
+        None,
+        None,
+        Some(WORKER.to_owned()),
+        Some("host".to_owned()),
+        Some(4242),
+        Some("proc".to_owned()),
+    )
+    .expect("attempt record")
+    .with_phases(PhaseRecord::Captured(AttemptPhases::new(
+        at(100),
+        at(300),
+        ClaimRecord::Counted {
+            count: std::num::NonZeroU32::new(2).expect("two claims"),
+            first_claimed_at: at(200),
+        },
+        Finalizing::Marked { at: at(600) },
+        RecordedBy::Worker {
+            placement: Placement::Placed { at: at(350) },
+        },
+    )));
+    let open = OpenAttempt::Open(OpenAttemptFacts::new(
+        OpenClaims::Counted {
+            count: std::num::NonZeroU32::new(1).expect("one claim"),
+            first_claimed_at: at(9_000),
+        },
+        Finalizing::NotMarked,
+    ));
+    let expected = encode_attempt_archive(&[first], &open).expect("encode in Rust");
+    assert_eq!(
+        String::from_utf8(encoded).expect("the archive is UTF-8"),
+        String::from_utf8(expected.payload).expect("the archive is UTF-8")
+    );
     cleanup_tasks(&pool, &[task_id]).await;
 }
 
@@ -431,7 +538,7 @@ impl Boundary {
     fn fault(self) -> &'static str {
         match self {
             Self::AttemptCapture => {
-                "CREATE OR REPLACE FUNCTION horsies_encode_task_attempts(p_task_id uuid)
+                "CREATE OR REPLACE FUNCTION horsies_encode_attempt_archive(p_task horsies_tasks)
                  RETURNS bytea LANGUAGE plpgsql AS $f$
                  BEGIN RAISE EXCEPTION 'injected terminalization fault'; END $f$"
             }
@@ -584,6 +691,7 @@ async fn capacity_notification_failure_rolls_back_fused_completion() {
             task_id,
             fence: owned_claim(),
             result_json: RESULT.to_owned(),
+            placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
         },
     )
     .await
@@ -608,6 +716,7 @@ async fn completion_equivalence_replays_from_history() {
         task_id,
         fence: owned_claim(),
         result_json: RESULT.to_owned(),
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     };
 
     // Fused first, then the workflow-success writer (kind COMPLETE_LOCKED).

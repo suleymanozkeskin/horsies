@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+
 import { Monitor, Moon, Sun } from 'lucide-react';
 
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
@@ -9,16 +11,18 @@ const OPTIONS: { value: ThemePreference; label: string; icon: typeof Sun }[] = [
   { value: 'dark', label: 'Dark theme', icon: Moon },
 ];
 
-/** Three-state theme control: follow the OS, or pin light/dark. */
-export function ThemeToggle() {
+/** Three-state theme control: follow the OS, or pin light/dark. A segmented
+ * track, made to sit inside a top bar capsule. */
+export function ThemeToggle(): ReactNode {
   const { preference, setPreference } = useTheme();
   return (
     <ToggleGroup
       type="single"
       value={preference}
       onValueChange={next => next && setPreference(next as ThemePreference)}
-      variant="outline"
-      size="sm"
+      variant="segment"
+      size="segment"
+      className="segment-track gap-0.5 rounded-full p-0.75"
       aria-label="Theme"
     >
       {OPTIONS.map(option => (
@@ -28,7 +32,7 @@ export function ThemeToggle() {
           aria-label={option.label}
           title={option.label}
         >
-          <option.icon className="size-3.5" />
+          <option.icon />
         </ToggleGroupItem>
       ))}
     </ToggleGroup>

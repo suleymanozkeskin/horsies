@@ -62,6 +62,19 @@ pub struct WorkerPong {
     pub round_trip_ms: f64,
 }
 
+/// The worker profile that a snapshot names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotProfile {
+    /// The worker ran the profile `name` of `AppConfig.worker_profiles`: 1
+    /// to 64 characters, letters, digits, `_`, `.` and `-`, the first not
+    /// `.` or `-` (the table CHECK holds this rule).
+    Named { name: String },
+    /// The row holds no profile name: the worker that wrote it did not
+    /// record one. A worker of a build before schema migration 1004 wrote
+    /// it; every worker of this build records its profile name.
+    NotRecorded,
+}
+
 /// One `horsies_worker_states` row — a worker's state at a point in time.
 ///
 /// Mirrors Python's `WorkerStateSnapshot` (`clients/python/horsies/core/models/health.py:399-433`).
@@ -101,6 +114,8 @@ pub struct WorkerStateSnapshot {
     /// The claim budget of each execution class that the worker runs
     /// children for: its capacity in service and the classes it claims.
     pub class_capacity: ClassBudgets,
+    /// The worker profile that the worker ran.
+    pub profile: SnapshotProfile,
 }
 
 /// A `horsies_worker_states` row as stored, before its JSON columns are read.
@@ -128,6 +143,9 @@ pub(crate) struct StoredWorkerState {
     pub(crate) worker_started_at: DateTime<Utc>,
     pub(crate) slots_down: Value,
     pub(crate) class_capacity: Value,
+    /// `profile_name`: NULL in a row that a worker of a build before
+    /// migration 1004 wrote.
+    pub(crate) profile_name: Option<String>,
 }
 
 /// A row of the worker list statement: a stored worker state and
@@ -192,7 +210,10 @@ impl StoredWorkerState {
     ///
     /// `slots_down` and `class_capacity` are read first, in Python's order.
     /// The three map columns must be JSON objects; the queue maps hold whole
-    /// numbers. Any other value is [`WorkerStateUnreadable`]. Reads only.
+    /// numbers. Any other value is [`WorkerStateUnreadable`]. A
+    /// `profile_name` is [`SnapshotProfile::Named`]; NULL is
+    /// [`SnapshotProfile::NotRecorded`]. The table CHECK holds the name rule,
+    /// so the name is not checked again. Reads only.
     pub(crate) fn into_snapshot(self) -> Result<WorkerStateSnapshot, WorkerStateUnreadable> {
         let slot_health = parse_slot_health(&self.slots_down, self.processes)
             .map_err(|cause| self.unreadable(WorkerStateColumn::SlotsDown, cause.reason))?;
@@ -204,6 +225,10 @@ impl StoredWorkerState {
             .map_err(|reason| self.unreadable(WorkerStateColumn::QueueMaxConcurrency, reason))?;
         let recovery_config = json_object(&self.recovery_config)
             .map_err(|reason| self.unreadable(WorkerStateColumn::RecoveryConfig, reason))?;
+        let profile = match self.profile_name {
+            Some(name) => SnapshotProfile::Named { name },
+            None => SnapshotProfile::NotRecorded,
+        };
         Ok(WorkerStateSnapshot {
             worker_id: self.worker_id,
             snapshot_at: self.snapshot_at,
@@ -226,6 +251,7 @@ impl StoredWorkerState {
             worker_started_at: self.worker_started_at,
             slot_health,
             class_capacity,
+            profile,
         })
     }
 
@@ -535,6 +561,7 @@ mod tests {
             class_capacity: serde_json::json!({
                 "ISOLATED": {"capacity": 2, "serves": ["ISOLATED"]},
             }),
+            profile_name: Some("batch".to_owned()),
         }
     }
 
@@ -552,6 +579,27 @@ mod tests {
         assert_eq!(snapshot.queue_priorities.get("default"), Some(&1));
         assert!(snapshot.queue_max_concurrency.is_empty());
         assert!(snapshot.recovery_config.contains_key("phase2_recovery"));
+        assert_eq!(
+            snapshot.profile,
+            SnapshotProfile::Named {
+                name: "batch".to_owned()
+            }
+        );
+    }
+
+    /// A row with no profile name (written by a worker of a build before
+    /// migration 1004) reads as `NotRecorded`; the other columns read as in
+    /// a row with a name.
+    #[test]
+    fn a_stored_row_with_no_profile_name_reads_as_not_recorded() {
+        let mut row = stored_row();
+        row.profile_name = None;
+
+        let snapshot = row.into_snapshot().expect("readable row");
+
+        assert_eq!(snapshot.profile, SnapshotProfile::NotRecorded);
+        assert_eq!(snapshot.slot_health, SlotHealth::AllSlotsServing);
+        assert_eq!(snapshot.class_capacity.as_slice().len(), 1);
     }
 
     /// Python `test_worker_health_api.py::test_an_unreadable_slot_health_fails_the_read`:

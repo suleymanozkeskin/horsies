@@ -1093,11 +1093,13 @@ async fn worker_list_carries_the_slot_health() {
 }
 
 /// A listed state of a worker that started at `worker_started_at`, whose
-/// snapshot is at `snapshot_at`, read by a list statement at `read_at`.
+/// snapshot is at `snapshot_at` with the stored `profile_name`, read by a
+/// list statement at `read_at`.
 fn listed_worker(
     snapshot_at: chrono::DateTime<chrono::Utc>,
     worker_started_at: chrono::DateTime<chrono::Utc>,
     read_at: chrono::DateTime<chrono::Utc>,
+    profile_name: Option<String>,
 ) -> crate::broker::health::ListedWorkerState {
     let stored = crate::broker::health::StoredWorkerState {
         worker_id: "w-clock".to_owned(),
@@ -1121,6 +1123,7 @@ fn listed_worker(
         worker_started_at,
         slots_down: serde_json::json!([]),
         class_capacity: serde_json::json!({}),
+        profile_name,
     };
     crate::broker::health::ListedWorkerState {
         snapshot: stored.into_snapshot().expect("a readable stored row"),
@@ -1131,38 +1134,142 @@ fn listed_worker(
 /// The worker list measures the snapshot age, the staleness and the uptime
 /// to the database clock of the list statement, not to the web host clock
 /// (#765). The instants are days before any run of this test, so an age
-/// measured to the host clock is days long and stale.
+/// measured to the host clock is days long and stale. Each value is exact
+/// to the microsecond, and a snapshot one microsecond past the live window
+/// is stale.
 #[test]
 fn worker_list_ages_are_measured_to_the_read_time() {
     let snapshot_at = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 11, 10, 12, 0, 0)
         .single()
         .expect("a valid instant");
     let started_at = snapshot_at - chrono::TimeDelta::hours(1);
-    let threshold = crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S as i64;
+    let threshold =
+        chrono::TimeDelta::seconds(crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S as i64);
+    let one_microsecond = chrono::TimeDelta::microseconds(1);
+    let fresh_age = chrono::TimeDelta::microseconds(30_000_250);
 
     let fresh = super::routes::worker_state(listed_worker(
         snapshot_at,
         started_at,
-        snapshot_at + chrono::TimeDelta::seconds(30),
+        snapshot_at + fresh_age,
+        Some("default".to_owned()),
     ));
     let at_threshold = super::routes::worker_state(listed_worker(
         snapshot_at,
         started_at,
-        snapshot_at + chrono::TimeDelta::seconds(threshold),
+        snapshot_at + threshold,
+        Some("default".to_owned()),
     ));
     let past_threshold = super::routes::worker_state(listed_worker(
         snapshot_at,
         started_at,
-        snapshot_at + chrono::TimeDelta::seconds(threshold + 1),
+        snapshot_at + threshold + one_microsecond,
+        Some("default".to_owned()),
     ));
 
-    assert_eq!(fresh.snapshot_age_s, Some(30));
+    assert_eq!(fresh.snapshot_age_s, Some(fresh_age));
     assert!(!fresh.stale);
-    assert_eq!(fresh.uptime_s, Some(3_630));
+    assert_eq!(
+        fresh.uptime_s,
+        Some(chrono::TimeDelta::hours(1) + fresh_age)
+    );
     assert_eq!(at_threshold.snapshot_age_s, Some(threshold));
     assert!(!at_threshold.stale, "stale only past the live window");
-    assert_eq!(past_threshold.snapshot_age_s, Some(threshold + 1));
-    assert!(past_threshold.stale);
+    assert_eq!(
+        past_threshold.snapshot_age_s,
+        Some(threshold + one_microsecond)
+    );
+    assert!(
+        past_threshold.stale,
+        "stale one microsecond past the live window"
+    );
+    let encoded = serde_json::to_value(&fresh).expect("serialize the worker state");
+    assert_eq!(encoded["snapshot_age_s"], serde_json::json!(30.00025));
+    assert_eq!(encoded["uptime_s"], serde_json::json!(3630.00025));
+}
+
+/// The `profile` of a worker state is an object tagged by `kind`: a stored
+/// profile name is `named` with the name, and a row with no name (written by
+/// a worker of a build before migration 1004) is `not_recorded`.
+#[test]
+fn the_profile_of_a_worker_state_is_tagged_by_kind() {
+    let at = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 11, 10, 12, 0, 0)
+        .single()
+        .expect("a valid instant");
+
+    let named = super::routes::worker_state(listed_worker(at, at, at, Some("batch".to_owned())));
+    let not_recorded = super::routes::worker_state(listed_worker(at, at, at, None));
+
+    assert_eq!(
+        serde_json::to_value(&named).expect("serialize the worker state")["profile"],
+        serde_json::json!({"kind": "named", "name": "batch"})
+    );
+    assert_eq!(
+        serde_json::to_value(&not_recorded).expect("serialize the worker state")["profile"],
+        serde_json::json!({"kind": "not_recorded"})
+    );
+}
+
+/// `GET /api/workers` returns the profile of the latest snapshot of each
+/// worker: the stored name, or `not_recorded` for a row with no name.
+#[tokio::test]
+async fn worker_list_carries_the_profile_of_each_worker() {
+    let state = migrated_state().await;
+    let pool = migrated_pool().await;
+    let named_id = format!("itest-{}", Uuid::new_v4().simple());
+    let unnamed_id = format!("itest-{}", Uuid::new_v4().simple());
+    for (worker_id, profile_name) in [(&named_id, Some("batch")), (&unnamed_id, None)] {
+        sql::query(
+            "INSERT INTO horsies_worker_states (
+                worker_id, snapshot_at, hostname, pid, processes,
+                max_claim_batch, max_claim_per_worker, queues,
+                queue_priorities, queue_max_concurrency, recovery_config,
+                tasks_running, tasks_claimed, worker_started_at,
+                slots_down, class_capacity, telemetry, profile_name
+            ) VALUES (
+                $1, now(), 'itest-host', 4242, 2, 0, 2,
+                ARRAY['default'], '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+                0, 0, now(),
+                '[]'::jsonb, '{}'::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off')),
+                $2
+            )",
+        )
+        .bind(worker_id)
+        .bind(profile_name)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let response = build_router(state)
+        .oneshot(request(Method::GET, "/api/workers"))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json(response).await;
+    sql::query("DELETE FROM horsies_worker_states WHERE worker_id = ANY($1)")
+        .bind(vec![named_id.clone(), unnamed_id.clone()])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    let listed = body.as_array().expect("the worker list is a JSON array");
+    let profile_of = |worker_id: &str| -> serde_json::Value {
+        let entry = listed
+            .iter()
+            .find(|entry| entry["worker_id"] == worker_id)
+            .unwrap_or_else(|| panic!("{worker_id} is listed"));
+        entry["profile"].clone()
+    };
+    assert_eq!(
+        profile_of(named_id.as_str()),
+        serde_json::json!({"kind": "named", "name": "batch"})
+    );
+    assert_eq!(
+        profile_of(unnamed_id.as_str()),
+        serde_json::json!({"kind": "not_recorded"})
+    );
 }
 
 /// A snapshot written ten minutes before the read in database time is stale,
@@ -1213,12 +1320,16 @@ async fn a_snapshot_ten_minutes_old_in_database_time_is_stale() {
         .find(|entry| entry["worker_id"] == worker_id.as_str())
         .expect("the worker is listed");
     assert_eq!(worker["stale"], true);
+    assert!(
+        worker["snapshot_age_s"].is_f64() && worker["uptime_s"].is_f64(),
+        "the durations are JSON floats: {worker}"
+    );
     let age = worker["snapshot_age_s"]
-        .as_i64()
+        .as_f64()
         .expect("an age in seconds");
-    assert!(age >= 600, "snapshot_age_s {age}");
-    let uptime = worker["uptime_s"].as_i64().expect("an uptime in seconds");
-    assert!(uptime >= 3_600, "uptime_s {uptime}");
+    assert!(age >= 600.0, "snapshot_age_s {age}");
+    let uptime = worker["uptime_s"].as_f64().expect("an uptime in seconds");
+    assert!(uptime >= 3_600.0, "uptime_s {uptime}");
 }
 
 /// Python `test_web_api.py::TestWorkerReads::test_class_report_answers_with_streams_and_budgets`.
@@ -1916,6 +2027,109 @@ async fn a_task_detail_read_that_fails_is_not_a_not_found() {
     assert_eq!(read.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+/// Each read kind that a database failure ends, with the start of its
+/// detail: monitoring queries, and the worker reads of the broker.
+const FAILING_READS: [(&str, &str); 4] = [
+    ("/api/workflows/names", "Workflow names query failed: "),
+    ("/api/workers", "Worker state query failed: "),
+    ("/api/workers/classes", "Class report query failed: "),
+    ("/api/workers/w1/history", "Worker history query failed: "),
+];
+
+/// The four action paths, on a task id and a workflow id that no row has.
+fn failing_actions() -> [String; 4] {
+    let task_id = Uuid::new_v4();
+    let workflow_id = Uuid::new_v4();
+    [
+        format!("/api/tasks/{task_id}/cancel"),
+        format!("/api/workflows/{workflow_id}/pause"),
+        format!("/api/workflows/{workflow_id}/resume"),
+        format!("/api/workflows/{workflow_id}/cancel"),
+    ]
+}
+
+/// Assert that every read of [`FAILING_READS`] and every action of
+/// [`failing_actions`] answers `expected` with a `detail` text.
+async fn assert_failures_answer(router: &Router, expected: StatusCode) {
+    for (path, detail_start) in FAILING_READS {
+        let response = router
+            .clone()
+            .oneshot(request(Method::GET, path))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = json(response).await;
+        assert_eq!(status, expected, "{path}: {body}");
+        assert!(
+            body["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.starts_with(detail_start)),
+            "{path}: {body}"
+        );
+    }
+    for path in failing_actions() {
+        let response = router.clone().oneshot(action_request(&path)).await.unwrap();
+        let status = response.status();
+        let body = json(response).await;
+        assert_eq!(status, expected, "{path}: {body}");
+        assert!(body["detail"].is_string(), "{path}: {body}");
+    }
+}
+
+/// A database that refuses the connect (nothing listens on its port): a
+/// cause that may clear. Every read kind and every action answers 503.
+#[tokio::test]
+async fn a_database_failure_that_may_clear_is_503_on_every_route_kind() {
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Match, Some(crate::expected_schema_version())),
+        true,
+    );
+
+    assert_failures_answer(&router, StatusCode::SERVICE_UNAVAILABLE).await;
+}
+
+/// A database with no horsies relation or function: each read statement,
+/// and the client family check of each action, is refused with an SQLSTATE
+/// of class 42 (undefined table or function), a cause that stays. Every read
+/// kind and every action answers 500: a repeat fails until the schema
+/// changes. The schema probe reads a matching schema, so each action reaches
+/// its first statement.
+#[tokio::test]
+async fn a_database_failure_that_stays_is_500_on_every_route_kind() {
+    let database = crate::test_support::TestDatabase::create_empty().await;
+    let pool = TestPoolOptions::new().connect_lazy(database.url());
+    let state = test_state(
+        &pool,
+        Arc::new(AllowAll),
+        fixed_probe(status(
+            SchemaState::Match,
+            Some(crate::expected_schema_version()),
+        )),
+        true,
+        MemoryAssets::standard(),
+    );
+    let broker = Arc::clone(&state.broker);
+    let router = build_router(state);
+
+    assert_failures_answer(&router, StatusCode::INTERNAL_SERVER_ERROR).await;
+    // The test broker has no listener, so a worker ping cannot run: that
+    // stays too.
+    let ping = router
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            "/api/workers/ping?timeout_seconds=0.1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(ping.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    drop(router);
+    broker.close().await;
+    database.drop().await;
+}
+
 /// A UUIDv7 whose embedded birth is `birth`, with random tail bits.
 fn uuid7_born_at(birth: chrono::DateTime<chrono::Utc>) -> Uuid {
     let milliseconds =
@@ -2102,6 +2316,103 @@ async fn the_run_route_answers_the_run_its_failed_indices_and_its_edges() {
     assert_eq!(body["run"]["id"], run_id.to_string());
     assert_eq!(body["failed_indices"], serde_json::json!([0]));
     assert_eq!(body["edges"], serde_json::json!([]));
+    // The run and each node carry their timing. The run began 120 s before
+    // the read, so it is before or after the start of the lifecycle record
+    // (the install of the shared database). After it, the FAILED node with
+    // no completion time contradicts itself.
+    match body["timing"]["kind"].as_str() {
+        Some("unavailable") => assert_eq!(
+            body["nodes"][0]["timing"],
+            serde_json::json!({"kind": "unavailable", "reason": "RUN_BEFORE_CAPTURE"})
+        ),
+        Some("composed") => assert_eq!(
+            body["nodes"][0]["timing"],
+            serde_json::json!({
+                "kind": "inconsistent",
+                "conflict": {"kind": "missing_record", "record": "COMPLETION_TIME"}
+            })
+        ),
+        other => panic!("the run carries its timing, not {other:?}: {body}"),
+    }
+}
+
+/// The task route answers the phase record of each attempt: a task that
+/// failed through the terminal write of a run, whose row counted no claim
+/// and whose writer observed no placement.
+#[tokio::test]
+async fn the_task_route_answers_the_phase_record_of_each_attempt() {
+    let state = migrated_state().await;
+    let pool = migrated_pool().await;
+    let task_id = Uuid::new_v4();
+    sql::query(
+        "INSERT INTO horsies_tasks (
+            id, task_name, queue_name, priority, input, task_options, execution,
+            retention_class_key, sent_at, created_at,
+            command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+            status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+            started_at, finalizing_at, finalizing_by_worker_id,
+            worker_pid, worker_hostname, worker_process_name,
+            retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+            updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+        ) VALUES (
+            $1, 'web_phases_task', 'default', 100, '{}', NULL, 'ISOLATED',
+            'forever', NOW(), NOW(),
+            1, decode(repeat('0f', 32), 'hex'), NULL,
+            'RUNNING', NOW() - interval '60 seconds', NOW(), 'web-phases-worker', NULL,
+            NOW() - interval '30 seconds', NULL, NULL,
+            4242, 'web-phases-host', 'web-phases-process',
+            0, 0, NULL, NULL, FALSE,
+            NOW(), FALSE, NULL, NULL
+        )",
+    )
+    .bind(task_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let failed = crate::test_support::terminal_writes::fail_running_task(
+        &pool,
+        task_id,
+        "web-phases-worker",
+        &crate::test_support::terminal_writes::TerminalFailure::of_task(
+            r#"{"err": {"error_code": "TASK_EXCEPTION"}}"#,
+            Some("TASK_EXCEPTION"),
+            None,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            failed.as_slice(),
+            [crate::core::lifecycle::TerminalizationOutcome::Applied { .. }]
+        ),
+        "{failed:?}"
+    );
+
+    let response = build_router(state)
+        .oneshot(request(Method::GET, &format!("/api/tasks/{task_id}")))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json(response).await;
+    sql::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    let phases = &body["attempts"][0]["phases"];
+    assert_eq!(phases["kind"], "captured", "{body}");
+    assert_eq!(phases["claims"], serde_json::json!({"kind": "not_counted"}));
+    assert_eq!(
+        phases["finalizing"],
+        serde_json::json!({"kind": "not_marked"})
+    );
+    assert_eq!(
+        phases["recorded_by"],
+        serde_json::json!({"kind": "worker", "placement": {"kind": "not_observed"}})
+    );
 }
 
 /// Python `test_web_api.py::TestTaskActionMapping::test_stored_data_that_does_not_parse_is_a_server_error`,
