@@ -8,13 +8,25 @@ import { SUMMARY_COUNT_MAX, SUMMARY_COUNT_MIN, SUMMARY_OUTPUT_DEPTH_LIMIT, WORKF
 import { decodeJsonNode } from "./json-value.ts";
 import { isTreeObject, type TreeObject, type TreeValue } from "./number-text.ts";
 import { type DecodeRefused, type EnvelopeRefused, envelopeRefused, type EnvelopeRule, memberPath } from "./refusal.ts";
-import { isNumber, isString, isUuidText } from "./values.ts";
+import { isNumber, isString } from "./values.ts";
 
 const SUB_WORKFLOW_ID_KEY = "sub_workflow_id";
 const SUB_WORKFLOW_SUMMARY_KEY = "sub_workflow_summary";
 const COUNT_KEYS = ["total_tasks", "completed_tasks", "failed_tasks", "skipped_tasks"] as const;
 
 const STATUSES: ReadonlySet<string> = new Set(WORKFLOW_STATUSES);
+
+/**
+ * The forms of a UUID that the core reads (the `uuid` crate's `Uuid::parse_str`): 32 hex digits, the hyphenated
+ * 8-4-4-4-12 form, the hyphenated form in braces, and the hyphenated form after `urn:uuid:` (any case). Hex digits
+ * of either case.
+ */
+const UUID_FORMS: readonly RegExp[] = [
+  /^([0-9a-f]{8})([0-9a-f]{4})([0-9a-f]{4})([0-9a-f]{4})([0-9a-f]{12})$/i,
+  /^([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{12})$/i,
+  /^\{([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{12})\}$/i,
+  /^urn:uuid:([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{12})$/i,
+];
 
 function refuse(rule: EnvelopeRule, path: string, detail: string): Result<never, EnvelopeRefused> {
   return err(envelopeRefused(rule, path, detail));
@@ -29,8 +41,10 @@ export function readSubWorkflow(
   const idPath = memberPath(path, SUB_WORKFLOW_ID_KEY);
   const summaryPath = memberPath(path, SUB_WORKFLOW_SUMMARY_KEY);
 
-  if (!isString(idNode) || !isUuidText(idNode)) {
-    return refuse("ErrorFieldInvalid", idPath, "not a UUID in the lower-case 8-4-4-4-12 form");
+  const workflowId = uuidText(idNode, idPath);
+
+  if (!workflowId.ok) {
+    return workflowId;
   }
 
   if (summaryNode === undefined) {
@@ -39,7 +53,22 @@ export function readSubWorkflow(
 
   const summary = readSummary(summaryNode, summaryPath);
 
-  return summary.ok ? ok(Object.freeze({ workflowId: idNode, summary: summary.value })) : summary;
+  return summary.ok ? ok(Object.freeze({ workflowId: workflowId.value, summary: summary.value })) : summary;
+}
+
+/** The lower-case 8-4-4-4-12 form of a UUID text in a form that the core reads. */
+function uuidText(node: TreeValue | undefined, path: string): Result<string, EnvelopeRefused> {
+  if (isString(node)) {
+    for (const form of UUID_FORMS) {
+      const match = form.exec(node);
+
+      if (match !== null) {
+        return ok(match.slice(1).join("-").toLowerCase());
+      }
+    }
+  }
+
+  return refuse("ErrorFieldInvalid", path, "not a UUID in a form that the core reads");
 }
 
 function isWorkflowStatus(text: string): text is WorkflowStatus {

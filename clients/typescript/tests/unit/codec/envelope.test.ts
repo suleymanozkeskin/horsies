@@ -326,6 +326,31 @@ describe("stored task error rules", () => {
     assert.equal(errorRule(`${head},"sub_workflow_summary":${engineKeyOutput}}`), "ErrorDataRefused");
   });
 
+  test("the sub-workflow id: each form that the core reads gives the lower-case hyphenated form", () => {
+    const summary = '{"status":"FAILED","total_tasks":1,"completed_tasks":0,"failed_tasks":1,"skipped_tasks":0}';
+    const canonical = "0192f3b4-5c6d-7e8f-9a0b-1c2d3e4f5a6b";
+
+    for (const id of [
+      canonical,
+      canonical.toUpperCase(),
+      canonical.replaceAll("-", ""),
+      `{${canonical}}`,
+      `URN:UUID:${canonical}`,
+    ]) {
+      const error = `{"error_code":"X","sub_workflow_id":"${id}","sub_workflow_summary":${summary}}`;
+      const outcome = outcomeOf(JSON_KIND, `${ERROR_HEAD}${error}}`);
+
+      assert(outcome.kind === "failed", id);
+      assert.equal(outcome.error.subWorkflow?.workflowId, canonical, id);
+    }
+
+    for (const id of [`{${canonical}`, `${canonical}0`, canonical.replace("-", ""), `urn:${canonical}`]) {
+      const error = `{"error_code":"X","sub_workflow_id":"${id}","sub_workflow_summary":${summary}}`;
+
+      assert.equal(errorRule(error), "ErrorFieldInvalid", id);
+    }
+  });
+
   test("sub-workflow keys on an error without sub_workflow_id are unknown", () => {
     assert.equal(errorRule('{"error_code":"X","sub_workflow_summary":{}}'), "ErrorUnknownKey");
   });
