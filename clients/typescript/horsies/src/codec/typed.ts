@@ -13,11 +13,15 @@ export function encodeWire<W extends AnyWire>(wire: W, value: SentOf<W>): Result
   return encodeValue(kindOf(wire), value);
 }
 
-/** The value of a stored text under a wire type. Pure; see `decodeValue`. */
+/**
+ * The value of a stored text under a wire type, in the worker form (each defaulted member is filled), which is the
+ * value type `ValueOf<W>`. The stored form can leave a defaulted member out, which `ValueOf<W>` does not allow: read
+ * it with `decodeValue`. Pure; see `decodeValue`.
+ */
 export function decodeWire<W extends AnyWire>(
   wire: W,
   text: JsonText,
-  form: DecodeForm,
+  form: Extract<DecodeForm, "worker">,
 ): Result<ValueOf<W>, DecodeRefused> {
   const decoded = decodeValue(kindOf(wire), text, form);
 
