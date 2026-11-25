@@ -42,6 +42,10 @@ pub enum CallbackProbe {
     AnswerRefused {
         cause: String,
     },
+    NodeApiRefused {
+        status: String,
+    },
+    OnJavaScriptThread,
 }
 
 impl CallbackProbe {
@@ -61,6 +65,10 @@ impl CallbackProbe {
             },
             Err(CallbackFailure::Panicked { cause }) => Self::Panicked { cause },
             Err(CallbackFailure::AnswerRefused { cause }) => Self::AnswerRefused { cause },
+            Err(CallbackFailure::NodeApiRefused { status }) => Self::NodeApiRefused {
+                status: status.to_string(),
+            },
+            Err(CallbackFailure::OnJavaScriptThread) => Self::OnJavaScriptThread,
         }
     }
 }
@@ -133,6 +141,18 @@ mod tests {
             CallbackProbe::AnswerRefused {
                 cause: "not a string".to_owned()
             }
+        );
+        assert_eq!(
+            CallbackProbe::of(Err(CallbackFailure::NodeApiRefused {
+                status: napi::Status::GenericFailure
+            })),
+            CallbackProbe::NodeApiRefused {
+                status: "GenericFailure".to_owned()
+            }
+        );
+        assert_eq!(
+            CallbackProbe::of(Err(CallbackFailure::OnJavaScriptThread)),
+            CallbackProbe::OnJavaScriptThread
         );
     }
 }

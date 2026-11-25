@@ -11,11 +11,17 @@
 //! - A refusal (the core cannot start, is stopped, or the bound is reached)
 //!   resolves the Promise at once with its thrown code; the operation does
 //!   not start.
+//! - Steps 1 and 2 after the deferred run on the JavaScript thread inside
+//!   `catch_unwind`: a panic there (in the start of the core, or in the
+//!   area's build of the operation) resolves the Promise with
+//!   `CORE_PANIC`, which the package raises under the defect rule. A panic
+//!   that unwinds through Node-API would abort the process with no record.
 //! - The deferred is a referenced threadsafe function until it settles, so
 //!   the Promise keeps the event loop alive while the operation runs.
 //! - Rust never rejects the Promise: it resolves with an envelope.
 
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use napi::bindgen_prelude::{Object, ToNapiValue};
@@ -23,6 +29,7 @@ use napi::{Env, JsDeferred};
 
 use crate::call::guard::{guard, CallKind};
 use crate::call::thrown::{Envelope, NativeThrown};
+use crate::process_core::panic_rule::take_panic_cause;
 use crate::process_core::runtime::{core_for_call, Core};
 
 /// Most core operations in flight per process. Only the main thread of a
@@ -78,21 +85,63 @@ where
     Operation: Future<Output = T> + Send + 'static,
 {
     let (deferred, promise) = env.create_deferred::<Envelope<T>, EnvelopeResolver<T>>()?;
-    match core_for_call().map_err(|refusal| refusal.thrown()) {
+    match guarded_start(subject, || start_operation(subject, build)) {
         Err(thrown) => resolve(deferred, Envelope::Thrown(thrown)),
-        Ok(core) => match reserve_slot(subject) {
-            Err(thrown) => resolve(deferred, Envelope::Thrown(thrown)),
-            Ok(slot) => {
-                let operation = build(core);
-                let _detached = core.runtime_handle().spawn(async move {
-                    let guarded = guard(core, subject, operation).await;
-                    drop(slot);
-                    resolve(deferred, guarded.envelope(subject, kind));
-                });
-            }
-        },
+        Ok(Started {
+            core,
+            slot,
+            operation,
+        }) => {
+            let _detached = core.runtime_handle().spawn(async move {
+                let guarded = guard(core, subject, operation).await;
+                drop(slot);
+                resolve(deferred, guarded.envelope(subject, kind));
+            });
+        }
     }
     Ok(promise)
+}
+
+/// An operation that may run: its core, its slot, and its future.
+pub struct Started<Operation> {
+    core: &'static Core,
+    slot: CallSlot,
+    operation: Operation,
+}
+
+/// The steps of an operation on the JavaScript thread: the core, a slot, and
+/// the area's build of the future.
+fn start_operation<Build, Operation>(
+    subject: &'static str,
+    build: Build,
+) -> Result<Started<Operation>, NativeThrown>
+where
+    Build: FnOnce(&'static Core) -> Operation,
+{
+    let core = core_for_call().map_err(|refusal| refusal.thrown())?;
+    let slot = reserve_slot(subject)?;
+    let operation = build(core);
+    Ok(Started {
+        core,
+        slot,
+        operation,
+    })
+}
+
+/// Run the JavaScript-thread steps of a call inside `catch_unwind`: a panic
+/// there is `CORE_PANIC` with `subject` and the cause, not an unwind through
+/// Node-API.
+pub fn guarded_start<Value>(
+    subject: &'static str,
+    start: impl FnOnce() -> Result<Value, NativeThrown>,
+) -> Result<Value, NativeThrown> {
+    match std::panic::catch_unwind(AssertUnwindSafe(start)) {
+        Ok(started) => started,
+        Err(payload) => Err(NativeThrown::CorePanic {
+            subject: subject.to_owned(),
+            cause: take_panic_cause(payload.as_ref()),
+        }),
+    }
 }
 
 /// Resolve `deferred` with `envelope`, on any thread.
@@ -113,6 +162,44 @@ mod tests {
         let slot = reserve_slot("ping_database").expect("a slot below the bound");
         assert_eq!(CALLS_IN_FLIGHT.load(Ordering::Acquire), before + 1);
         drop(slot);
+        assert_eq!(CALLS_IN_FLIGHT.load(Ordering::Acquire), before);
+    }
+
+    #[test]
+    fn a_start_that_returns_gives_its_value() {
+        assert_eq!(guarded_start("ping_database", || Ok(3_u32)), Ok(3));
+    }
+
+    #[test]
+    fn a_start_that_refuses_gives_its_thrown_code() {
+        let refused = NativeThrown::CoreStartFailed {
+            cause: "no threads".to_owned(),
+        };
+        assert_eq!(
+            guarded_start::<u32>("ping_database", || Err(refused.clone())),
+            Err(refused)
+        );
+    }
+
+    #[test]
+    fn a_start_that_panics_gives_core_panic_with_the_subject() {
+        match guarded_start::<u32>("ping_database", || panic!("planned start panic")) {
+            Err(NativeThrown::CorePanic { subject, cause }) => {
+                assert_eq!(subject, "ping_database");
+                assert!(cause.starts_with("planned start panic"), "{cause}");
+            }
+            other => panic!("a panic is CORE_PANIC, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_slot_of_a_start_that_panics_is_freed() {
+        let before = CALLS_IN_FLIGHT.load(Ordering::Acquire);
+        let ended = guarded_start::<u32>("ping_database", || {
+            let _slot = reserve_slot("ping_database")?;
+            panic!("planned panic after the slot")
+        });
+        assert!(matches!(ended, Err(NativeThrown::CorePanic { .. })));
         assert_eq!(CALLS_IN_FLIGHT.load(Ordering::Acquire), before);
     }
 

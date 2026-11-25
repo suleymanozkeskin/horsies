@@ -9,9 +9,10 @@
 //!   on the thread of the first one.
 //! - The first environment registers one cleanup hook. When the environment
 //!   ends, the hook marks the environment closing (a later core call into
-//!   JavaScript is not run) and switches the log forwarder to stderr. It does
-//!   not stop the core runtime: the runtime lives in a static, and a drop
-//!   would wait for its threads.
+//!   JavaScript is not run), ends every pending call into JavaScript with
+//!   `NotRun { envClosing }`, and switches the log forwarder to stderr. It
+//!   does not stop the core runtime: the runtime lives in a static, and a
+//!   drop would wait for its threads.
 //! - This is the one `#[napi(module_exports)]` function of the addon: napi-rs
 //!   keeps one such hook, the last one registered.
 
@@ -88,9 +89,12 @@ fn refusal_text(registration: LaterRegistration, count: u32) -> String {
     }
 }
 
-/// The cleanup hook of the main environment.
-fn environment_closed() {
+/// The cleanup hook of the main environment: no later call into JavaScript
+/// runs, every pending call ends with `NotRun { envClosing }`, and the log
+/// forwarder writes to stderr.
+pub fn environment_closed() {
     ENVIRONMENT_CLOSING.store(true, Ordering::SeqCst);
+    crate::call::callback::end_pending_calls();
     if let Some(log) = running_log() {
         log.sink().switch_to_stderr();
     }

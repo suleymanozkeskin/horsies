@@ -7,7 +7,14 @@
 //!   the loop alive through its own Promise.
 //! - A call uses the mode `NonBlocking` with a queue bound per callback
 //!   kind. A full queue, or an environment that is closing, is the transient
-//!   failure `NotRun`: the caller's step rolls back and runs again.
+//!   failure `NotRun`: the caller's step rolls back and runs again. Any other
+//!   status of Node-API is the defect `NodeApiRefused` (`call::node_api`).
+//! - A call on the JavaScript thread of its registration is refused
+//!   (`OnJavaScriptThread`): that thread must run the function, so a
+//!   blocking wait there could never end.
+//! - At the end of the environment, the cleanup hook ends every pending
+//!   call ([`end_pending_calls`]): each waiting call answers
+//!   `NotRun { envClosing }`.
 //! - The settle form: the call passes a call id and the argument. The
 //!   package's wrapper runs the user function, sync or async, and calls
 //!   `settleCallbackReturned(callId, value)` or
@@ -26,6 +33,7 @@ use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, PoisonError};
+use std::thread::ThreadId;
 
 use napi::bindgen_prelude::{sys, BigInt, FnArgs, FromNapiValue, Function, ToNapiValue};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -34,6 +42,7 @@ use napi_derive::napi;
 use tokio::sync::oneshot;
 
 use crate::call::guard::sync_call;
+use crate::call::node_api::{call_status, CallStatus};
 use crate::call::thrown::Envelope;
 use crate::process_core::environment::environment_closing;
 use crate::process_core::panic_rule::take_panic_cause;
@@ -72,6 +81,12 @@ pub enum CallbackFailure {
     Panicked { cause: String },
     /// The answer does not read as the answer type: a defect of the package.
     AnswerRefused { cause: String },
+    /// Node-API refused the call with `status`: a defect, not a transient
+    /// state.
+    NodeApiRefused { status: Status },
+    /// The call ran on the JavaScript thread of its registration, which
+    /// must run the function: a defect of the caller.
+    OnJavaScriptThread,
 }
 
 /// The threadsafe function of one registration: weak, never throws into
@@ -90,6 +105,8 @@ pub type CallbackFunction<Argument, const QUEUE: usize> = ThreadsafeFunction<
 /// `Argument` and that answers an `Answer`.
 pub struct JsCallback<Argument: ToNapiValue + 'static, Answer, const QUEUE: usize> {
     function: CallbackFunction<Argument, QUEUE>,
+    /// The JavaScript thread of the registration.
+    javascript_thread: ThreadId,
     answer: PhantomData<fn() -> Answer>,
 }
 
@@ -111,6 +128,7 @@ where
             .build()?;
         Ok(Self {
             function,
+            javascript_thread: std::thread::current().id(),
             answer: PhantomData,
         })
     }
@@ -120,41 +138,70 @@ where
     /// drops the future at its bound, and a late settle call then finds no
     /// pending call.
     pub async fn call(&self, argument: Argument) -> Result<Answer, CallbackFailure> {
-        if environment_closing() {
-            return Err(CallbackFailure::NotRun {
-                cause: NotRunCause::EnvClosing,
-            });
-        }
+        admit(self.javascript_thread, std::thread::current().id())?;
         let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
         let _pending = PendingCall::insert(call_id, settler::<Answer>(call_id, sender))?;
-        let status = self.function.call(
+        queued(self.function.call(
             FnArgs::from((bigint_of_u64(call_id), argument)),
             ThreadsafeFunctionCallMode::NonBlocking,
-        );
-        if let Some(cause) = not_run_cause(status) {
-            return Err(CallbackFailure::NotRun { cause });
-        }
-        match receiver.await {
-            Ok(answer) => answer,
-            // The settler was dropped without a settle call: the environment
-            // dropped the call at its end.
-            Err(_dropped) => Err(CallbackFailure::NotRun {
-                cause: NotRunCause::EnvClosing,
-            }),
-        }
+        ))?;
+        answer_of(receiver.await)
     }
 }
 
-/// The cause of a call that Node-API did not queue, or `None` for a queued
-/// call. A status other than a full queue or a closing environment means the
-/// threadsafe function is no longer usable: it is closing. Pure.
-fn not_run_cause(status: Status) -> Option<NotRunCause> {
-    match status {
-        Status::Ok => None,
-        Status::QueueFull => Some(NotRunCause::QueueFull),
-        _closing_or_refused => Some(NotRunCause::EnvClosing),
+/// Whether a call on `this_thread` may run: not after the end of the
+/// environment, and not on the JavaScript thread of its registration.
+fn admit(javascript_thread: ThreadId, this_thread: ThreadId) -> Result<(), CallbackFailure> {
+    match (environment_closing(), this_thread == javascript_thread) {
+        (true, _) => Err(CallbackFailure::NotRun {
+            cause: NotRunCause::EnvClosing,
+        }),
+        (false, true) => Err(CallbackFailure::OnJavaScriptThread),
+        (false, false) => Ok(()),
     }
+}
+
+/// Whether Node-API queued the call, by its status. Pure.
+fn queued(status: Status) -> Result<(), CallbackFailure> {
+    match call_status(status) {
+        CallStatus::Queued => Ok(()),
+        CallStatus::QueueFull => Err(CallbackFailure::NotRun {
+            cause: NotRunCause::QueueFull,
+        }),
+        CallStatus::Closing => Err(CallbackFailure::NotRun {
+            cause: NotRunCause::EnvClosing,
+        }),
+        CallStatus::Refused { status } => Err(CallbackFailure::NodeApiRefused { status }),
+    }
+}
+
+/// The answer of a call from what its channel received. A settler that was
+/// dropped with no settle call means the end of the environment
+/// ([`end_pending_calls`]). Pure.
+fn answer_of<Answer>(
+    received: Result<Result<Answer, CallbackFailure>, oneshot::error::RecvError>,
+) -> Result<Answer, CallbackFailure> {
+    match received {
+        Ok(answer) => answer,
+        Err(_settler_dropped) => Err(CallbackFailure::NotRun {
+            cause: NotRunCause::EnvClosing,
+        }),
+    }
+}
+
+/// End every pending call: drop its settler, so its caller gets
+/// `NotRun { envClosing }`. The cleanup hook of the environment calls it:
+/// Node-API drops a queued call at the end of the environment with no answer.
+/// The settlers are dropped after the lock is released.
+pub fn end_pending_calls() {
+    let ended: Vec<Settler> = PENDING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .drain()
+        .map(|(_call_id, settler)| settler)
+        .collect();
+    drop(ended);
 }
 
 /// What the settle call of the package brings.
@@ -324,29 +371,160 @@ pub fn settle_callback_threw(
 mod tests {
     use super::*;
 
+    /// The child test to run, set in the environment of a child process. The
+    /// table of pending calls and the end of the environment are per
+    /// process, so the tests that fill or end them run in a child process.
+    const CHILD_TEST_ENV: &str = "HORSIES_TYPESCRIPT_CALLBACK_CHILD_TEST";
+
+    fn in_child(test: &str) -> bool {
+        std::env::var(CHILD_TEST_ENV).is_ok_and(|name| name == test)
+    }
+
+    /// Run one test of this binary in a child process and check that it
+    /// passed.
+    fn assert_child_passed(test: &str) {
+        let binary = std::env::current_exe().expect("the test binary has a path");
+        let output = std::process::Command::new(binary)
+            .args([test, "--exact", "--nocapture", "--test-threads=1"])
+            .env(CHILD_TEST_ENV, test)
+            .output()
+            .expect("the child test process runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(stdout.contains(&format!("test {test} ... ok")), "{stdout}");
+    }
+
+    /// A pending call of a `String` answer, with its receiver.
+    fn pending_call() -> (
+        PendingCall,
+        oneshot::Receiver<Result<String, CallbackFailure>>,
+    ) {
+        let (sender, receiver) = oneshot::channel();
+        let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed);
+        let pending = PendingCall::insert(call_id, settler::<String>(call_id, sender))
+            .expect("the table has room");
+        (pending, receiver)
+    }
+
     #[test]
-    fn a_queued_call_has_no_not_run_cause() {
-        assert_eq!(not_run_cause(Status::Ok), None);
+    fn a_queued_call_passes() {
+        assert_eq!(queued(Status::Ok), Ok(()));
     }
 
     #[test]
     fn a_full_queue_is_not_run_queue_full() {
         assert_eq!(
-            not_run_cause(Status::QueueFull),
-            Some(NotRunCause::QueueFull)
+            queued(Status::QueueFull),
+            Err(CallbackFailure::NotRun {
+                cause: NotRunCause::QueueFull
+            })
         );
     }
 
     #[test]
     fn a_closing_function_is_not_run_env_closing() {
         assert_eq!(
-            not_run_cause(Status::Closing),
-            Some(NotRunCause::EnvClosing)
+            queued(Status::Closing),
+            Err(CallbackFailure::NotRun {
+                cause: NotRunCause::EnvClosing
+            })
         );
+    }
+
+    #[test]
+    fn another_status_is_a_node_api_refusal_not_a_retry() {
         assert_eq!(
-            not_run_cause(Status::GenericFailure),
-            Some(NotRunCause::EnvClosing)
+            queued(Status::GenericFailure),
+            Err(CallbackFailure::NodeApiRefused {
+                status: Status::GenericFailure
+            })
         );
+    }
+
+    #[test]
+    fn a_call_on_the_javascript_thread_is_refused() {
+        let this_thread = std::thread::current().id();
+        assert_eq!(
+            admit(this_thread, this_thread),
+            Err(CallbackFailure::OnJavaScriptThread)
+        );
+    }
+
+    #[test]
+    fn a_call_on_another_thread_is_admitted() {
+        let javascript_thread = std::thread::spawn(|| std::thread::current().id())
+            .join()
+            .expect("the thread ends");
+        assert_eq!(
+            admit(javascript_thread, std::thread::current().id()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn closed_environment_child() {
+        if !in_child("call::callback::tests::closed_environment_child") {
+            return;
+        }
+        let (pending, receiver) = pending_call();
+        crate::process_core::environment::environment_closed();
+        let javascript_thread = std::thread::spawn(|| std::thread::current().id())
+            .join()
+            .expect("the thread ends");
+        assert_eq!(
+            admit(javascript_thread, std::thread::current().id()),
+            Err(CallbackFailure::NotRun {
+                cause: NotRunCause::EnvClosing
+            })
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a test runtime starts");
+        assert_eq!(
+            answer_of(runtime.block_on(receiver)),
+            Err(CallbackFailure::NotRun {
+                cause: NotRunCause::EnvClosing
+            })
+        );
+        assert!(PENDING
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty());
+        drop(pending);
+    }
+
+    #[test]
+    fn the_end_of_the_environment_ends_every_pending_call_with_env_closing() {
+        assert_child_passed("call::callback::tests::closed_environment_child");
+    }
+
+    #[test]
+    fn table_bound_child() {
+        if !in_child("call::callback::tests::table_bound_child") {
+            return;
+        }
+        let pending: Vec<PendingCall> = (0..MAX_PENDING_CALLBACKS)
+            .map(|_| pending_call().0)
+            .collect();
+        let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed);
+        let (sender, _receiver) = oneshot::channel::<Result<String, CallbackFailure>>();
+        assert_eq!(
+            PendingCall::insert(call_id, settler::<String>(call_id, sender)).err(),
+            Some(CallbackFailure::NotRun {
+                cause: NotRunCause::QueueFull
+            })
+        );
+        drop(pending);
+        assert!(PENDING
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty());
+    }
+
+    #[test]
+    fn the_table_past_its_bound_refuses_with_queue_full() {
+        assert_child_passed("call::callback::tests::table_bound_child");
     }
 
     #[test]

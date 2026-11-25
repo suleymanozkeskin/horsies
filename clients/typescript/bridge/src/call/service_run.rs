@@ -21,7 +21,7 @@ use napi::bindgen_prelude::{Object, ToNapiValue};
 use napi::Env;
 
 use crate::call::guard::{guard, CallKind};
-use crate::call::operation::{resolve, EnvelopeResolver};
+use crate::call::operation::{guarded_start, resolve, EnvelopeResolver};
 use crate::call::thrown::Envelope;
 use crate::process_core::runtime::{core_for_call, Core};
 
@@ -78,24 +78,91 @@ where
     Run: Future<Output = T> + Send + 'static,
 {
     let (deferred, promise) = env.create_deferred::<Envelope<T>, EnvelopeResolver<T>>()?;
-    match core_for_call() {
-        Err(refusal) => resolve(deferred, Envelope::Thrown(refusal.thrown())),
-        Ok(core) => {
-            let run = build(core);
+    let started = guarded_start(subject, || {
+        let core = core_for_call().map_err(|refusal| refusal.thrown())?;
+        Ok((core, build(core)))
+    });
+    match started {
+        Err(thrown) => resolve(deferred, Envelope::Thrown(thrown)),
+        Ok((core, run)) => {
             let _detached = core.runtime_handle().spawn(async move {
-                let guarded = guard(core, subject, run).await;
-                resolve(deferred, guarded.envelope(subject, CallKind::Write));
+                resolve(deferred, run_to_envelope(core, subject, run).await);
             });
         }
     }
     Ok(promise)
 }
 
+/// Run `run` inside `guard` to its end: its value, `CORE_PANIC`, or
+/// `CORE_STOPPED` with an unknown outcome (a run writes).
+#[allow(
+    dead_code,
+    reason = "spawn_service_run, which the worker and scheduler areas call, runs it"
+)]
+async fn run_to_envelope<T, Run>(
+    core: &'static Core,
+    subject: &'static str,
+    run: Run,
+) -> Envelope<T>
+where
+    Run: Future<Output = T> + Send,
+{
+    guard(core, subject, run)
+        .await
+        .envelope(subject, CallKind::Write)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    use tokio::sync::watch;
+
     use super::*;
+    use crate::call::thrown::{NativeThrown, StateAfter};
+    use crate::process_core::panic_rule::PanicReport;
+    use crate::process_core::runtime::standalone_core_for_tests;
+
+    #[test]
+    fn a_run_ends_with_its_value_after_a_stop_request() {
+        let core = standalone_core_for_tests();
+        let (asked, mut seen) = watch::channel(false);
+        let stop = StopSignal::new(move || {
+            let _previous = asked.send_replace(true);
+        });
+        let run = async move {
+            let _asked_or_closed: bool = seen.wait_for(|asked| *asked).await.is_ok();
+            "drained"
+        };
+        stop.request();
+        assert_eq!(
+            core.runtime_handle()
+                .block_on(run_to_envelope(core, "worker_run", run)),
+            Envelope::Value("drained")
+        );
+    }
+
+    #[test]
+    fn a_stop_of_the_core_ends_a_run_with_an_unknown_outcome() {
+        let core = standalone_core_for_tests();
+        core.stop(PanicReport {
+            subject: "thread horsies-log-forwarder".to_owned(),
+            cause: "planned background panic".to_owned(),
+        });
+        let ended: Envelope<u32> = core.runtime_handle().block_on(run_to_envelope(
+            core,
+            "worker_run",
+            std::future::pending::<u32>(),
+        ));
+        assert_eq!(
+            ended,
+            Envelope::Thrown(NativeThrown::CoreStopped {
+                subject: "thread horsies-log-forwarder".to_owned(),
+                cause: "planned background panic".to_owned(),
+                state_after: StateAfter::OutcomeUnknown,
+            })
+        );
+    }
 
     #[test]
     fn every_request_reaches_the_run_and_returns_at_once() {

@@ -11,7 +11,9 @@ export type CallbackProbe =
   | { readonly kind: "notRun"; readonly cause: NotRunCause }
   | { readonly kind: "threw"; readonly callId: bigint; readonly name: string; readonly message: string }
   | { readonly kind: "panicked"; readonly cause: string }
-  | { readonly kind: "answerRefused"; readonly cause: string };
+  | { readonly kind: "answerRefused"; readonly cause: string }
+  | { readonly kind: "nodeApiRefused"; readonly status: string }
+  | { readonly kind: "onJavaScriptThread" };
 
 /** The test functions of the addon. */
 export interface ProbeAddon {
