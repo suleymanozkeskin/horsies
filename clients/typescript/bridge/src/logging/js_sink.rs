@@ -12,8 +12,9 @@
 //!   aborts from the JavaScript thread).
 //! - At the bound, a batch that the JavaScript thread has not taken yet is
 //!   abandoned: its records count as dropped, and a late call gives the sink
-//!   an empty batch, so no record arrives twice. A batch that the sink holds
-//!   already is the sink's; the forwarder goes on.
+//!   an empty batch, so no record arrives twice. At the stderr switch, such a
+//!   batch goes to stderr. A batch that the sink holds already is the sink's;
+//!   the forwarder goes on.
 //! - The package's wrapper of the user's sink never throws: it answers
 //!   `true` when the sink took the batch and `false` when the sink threw.
 //!   A batch that the sink did not take goes to stderr.
@@ -294,8 +295,9 @@ pub enum Handed {
     /// No answer came within [`SINK_ANSWER_BOUND`], and the JavaScript thread
     /// had not taken the batch: its records count as dropped.
     Abandoned,
-    /// No answer came within [`SINK_ANSWER_BOUND`], and the sink holds the
-    /// batch: the records are the sink's, and the forwarder goes on.
+    /// No answer came within [`SINK_ANSWER_BOUND`] or before the stderr
+    /// switch, and the sink holds the batch: the records are the sink's, and
+    /// the forwarder goes on.
     InSinkUnanswered,
     /// The sink did not take the batch, so it goes to stderr.
     NotTaken(NotTaken),
@@ -311,8 +313,9 @@ pub enum NotTaken {
     AnswerUnreadable { cause: String },
     /// Node-API dropped the call with its answer channel.
     CallDropped,
-    /// The forwarder switched to stderr while it waited: the environment
-    /// ends, or the process aborts from the JavaScript thread.
+    /// The forwarder switched to stderr while it waited, and the JavaScript
+    /// thread had not taken the batch: the environment ends, or the process
+    /// aborts from the JavaScript thread.
     ProcessEnds,
     /// The threadsafe function of the sink is closing.
     EnvironmentClosing,
@@ -412,7 +415,12 @@ fn wait_for_answer(
             Err(RecvTimeoutError::Disconnected) => return Handed::NotTaken(NotTaken::CallDropped),
             Err(RecvTimeoutError::Timeout) => {
                 match (log.stderr_only(), started.elapsed() >= bound) {
-                    (true, _) => return Handed::NotTaken(NotTaken::ProcessEnds),
+                    (true, _) => {
+                        return match state.abandon() {
+                            Abandon::Abandoned => Handed::NotTaken(NotTaken::ProcessEnds),
+                            Abandon::InSink => Handed::InSinkUnanswered,
+                        }
+                    }
                     (false, true) => {
                         return match state.abandon() {
                             Abandon::Abandoned => Handed::Abandoned,
@@ -486,6 +494,19 @@ mod tests {
         assert_eq!(
             wait_for_answer(&log, &receiver, &BatchState::new(), LONG_BOUND),
             Handed::NotTaken(NotTaken::ProcessEnds)
+        );
+    }
+
+    #[test]
+    fn the_stderr_switch_leaves_a_batch_in_the_sink_to_the_sink() {
+        let (log, _records) = LogSink::new(1);
+        let (_sender, receiver) = std::sync::mpsc::sync_channel::<napi::Result<bool>>(1);
+        let state = BatchState::new();
+        assert_eq!(state.take_for_sink(), SinkTake::Records);
+        log.switch_to_stderr();
+        assert_eq!(
+            wait_for_answer(&log, &receiver, &state, LONG_BOUND),
+            Handed::InSinkUnanswered
         );
     }
 
