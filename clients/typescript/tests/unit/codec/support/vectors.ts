@@ -132,9 +132,9 @@ function isSafeIntegerText(notation: Notation | undefined): boolean {
 }
 
 /**
- * The wire types that a TypeScript user declares for a vector type (the wire-type table of the task model). An
- * integer in the safe range has two: `h.int()` and `h.bigint()` store the same text. A type with no wire type (only
- * `bytes`, on rows marked `typescript_cannot_express`) is a failure of the test that asks for it.
+ * The wire types that a TypeScript user declares for a vector type. An integer in the safe range has two: `h.int()`
+ * and `h.bigint()` store the same text. A type with no wire type (only `bytes`, on rows marked
+ * `typescript_cannot_express`) is a failure of the test that asks for it.
  */
 export function declaredWires(type: string, notation: Notation | undefined): readonly Declared[] {
   switch (type) {
