@@ -9,6 +9,10 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::ts_text::GENERATED_HEADER;
+use crate::{
+    catalogs, constants, error_catalogs, error_detail, manifest, retention_class, task_code,
+    wire_json,
+};
 
 /// The folder of the generated modules, inside the package folder.
 pub const CATALOG_FOLDER: &str = "src/_catalog";
@@ -114,9 +118,22 @@ pub struct WriteReport {
     pub removed: Vec<PathBuf>,
 }
 
-/// Every generated file, in a fixed order. Pure.
+/// Every generated file, in a fixed order: the files of each area, areas
+/// in this order. Pure.
 pub fn render_all() -> Vec<GeneratedFile> {
-    Vec::new()
+    [
+        catalogs::generated_files(),
+        task_code::generated_files(),
+        error_detail::generated_files(),
+        retention_class::generated_files(),
+        error_catalogs::generated_files(),
+        wire_json::generated_files(),
+        manifest::generated_files(),
+        constants::generated_files(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// Write every file under `package_dir`, and remove the modules of
@@ -298,6 +315,52 @@ mod tests {
             );
             assert!(file.relative_path().starts_with(CATALOG_FOLDER));
         }
+    }
+
+    #[test]
+    fn the_output_set_is_every_module_of_the_catalog_folder() {
+        let stems: BTreeSet<String> = render_all()
+            .iter()
+            .map(|file| {
+                file.relative_path()
+                    .file_stem()
+                    .expect("a generated file has a name")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        let expected: BTreeSet<String> = [
+            "broker",
+            "broker_bounds",
+            "broker_errors",
+            "error_codes",
+            "error_detail",
+            "event_bounds",
+            "exit_codes",
+            "history",
+            "manifest",
+            "monitoring",
+            "monitoring_bounds",
+            "monitoring_errors",
+            "retention_class",
+            "scheduler_manifest",
+            "status",
+            "task_code",
+            "task_codes",
+            "task_send",
+            "task_send_errors",
+            "wire_json",
+            "worker_manifest",
+            "workflow_handle",
+            "workflow_handle_errors",
+            "workflow_spec",
+            "workflow_start",
+            "workflow_start_errors",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(stems, expected);
     }
 
     #[test]
