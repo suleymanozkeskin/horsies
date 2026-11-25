@@ -1,7 +1,7 @@
 ---
 title: Database Schema
 section: shared
-summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (migration chain 1000, 1001, 1002, 1003 and 1004).
+summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (migration chain 1000, 1001, 1002, 1003, 1004 and 1006).
 related: [../../configuration/broker-config]
 tags: [internals, database, schema, PostgreSQL, task-history]
 ---
@@ -17,6 +17,7 @@ The schema is a chain of migrations. Each migration runs in its own transaction,
 | 1002 | `core/migrations/1002_workflow_start_command_fingerprint.sql` | The start command fingerprint of each top-level workflow: two columns and one `CHECK` on `horsies_workflows`, and the workflow start functions that write and compare it (`horsies_workflow_start`, `horsies_workflow_start_top_row`, `horsies_workflow_start_child_row`, `horsies_workflow_child_start`) |
 | 1003 | `core/migrations/1003_attempt_cancelled.sql` | The cancel of a running task: the attempt outcome `CANCELLED` and the writer `CANCEL` in the two `CHECK`s of `horsies_task_attempts`, `horsies_cancel_task` (it writes the `CANCELLED` attempt of a `RUNNING` task and sends the cancel notice), and `horsies_cancelled_runs` (the read of a worker after a lost notice) |
 | 1004 | `core/migrations/1004_worker_profile_name.sql` | The name of the worker profile in each worker snapshot: the column `profile_name` and one `CHECK` on `horsies_worker_states` |
+| 1006 | `core/migrations/1006_typescript_client_family.sql` | The client family `TYPESCRIPT`: the `CHECK` `horsies_client_family_family_known` admits `PYTHON`, `RUST` and `TYPESCRIPT` |
 
 The files of migration 1000:
 
@@ -49,8 +50,8 @@ enqueue, result wait, task info read, workflow start or scheduler start):
 4. Any other database is refused with `SCHEMA_INIT_FAILED`, and nothing is changed. The refusal names what the
    database holds: a horsies 0.x schema, `horsies_` tables with no bookkeeping, a newer version, a migration
    recorded as failed, a migration applied from another text (checksum), migration versions this build does not
-   ship, or the other client family.
-5. A family row whose value is neither `PYTHON` nor `RUST` is corrupt stored data: the CHECK
+   ship, or another client family (`RUST` or `TYPESCRIPT`).
+5. A family row whose value is not `PYTHON`, `RUST` or `TYPESCRIPT` is corrupt stored data: the CHECK
    `horsies_client_family_family_known` refuses such a value. The install, every write and a rerun are refused
    with `CoreContractViolation`, whose message names the stored value, and nothing is changed.
 
@@ -106,6 +107,20 @@ Upgrade from version 1003 to version 1004 (also from an earlier version, after t
   new `CHECK` reads the table once, under `ACCESS EXCLUSIVE` until the migration commits.
 - The migration writes no value into old rows. A snapshot written before it has `profile_name` NULL: the reads
   give its profile as not recorded.
+
+Upgrade to version 1006 (also from an earlier version, after the migrations before it):
+
+- Stop every process of an earlier build before the first start of this build, and upgrade every process
+  together. The first start applies migration 1006. A process of an earlier build that starts after it is
+  refused, because the database holds a newer version. A process of an earlier build that runs on after it keeps
+  writing: the migration changes only the `CHECK` of `horsies_client_family`.
+- A database at version 1006 does not go back to an earlier build.
+- The migration replaces the `CHECK` `horsies_client_family_family_known`. After it, the `CHECK` admits `PYTHON`,
+  `RUST` and `TYPESCRIPT`, also when the database held no `CHECK` of that name or one with another predicate. The
+  new `CHECK` reads the one family row, under `ACCESS EXCLUSIVE` until the migration commits. A family row that
+  the new `CHECK` refuses stops the migration, and nothing changes.
+- The migration does not change the family row. `TYPESCRIPT` is reserved for a TypeScript client; the Python and
+  Rust clients never write it, and refuse a database that records it.
 
 `horsies_migrations` has the sqlx form: `version`, `description`, `installed_on`, `success`, `checksum`
 (SHA-384 of the migration text) and `execution_time` (nanoseconds). The text of a released migration never

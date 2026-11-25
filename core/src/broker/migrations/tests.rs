@@ -529,7 +529,7 @@ fn a_start_of_the_chain_is_behind_and_the_whole_chain_is_current() {
 
 #[test]
 fn each_state_decides_its_action() {
-    use crate::broker::client_family::ClientFamily::{Python, Rust};
+    use crate::broker::client_family::ClientFamily::{Python, Rust, TypeScript};
 
     let refusal = SchemaRefusal::MigrationIncomplete { version: 1000 };
     let cases = [
@@ -613,6 +613,47 @@ fn each_state_decides_its_action() {
             InstallAction::Refuse(InstallRefusal::OtherFamily {
                 stored: Rust,
                 own: Python,
+            }),
+        ),
+        (
+            DatabaseState::Behind {
+                applied: 1,
+                family: RecordedFamily::Recorded(TypeScript),
+            },
+            Rust,
+            InstallAction::Refuse(InstallRefusal::OtherFamily {
+                stored: TypeScript,
+                own: Rust,
+            }),
+        ),
+        (
+            DatabaseState::Current {
+                family: RecordedFamily::Recorded(TypeScript),
+                readers: ReaderPresence::Published,
+            },
+            Python,
+            InstallAction::Refuse(InstallRefusal::OtherFamily {
+                stored: TypeScript,
+                own: Python,
+            }),
+        ),
+        (
+            DatabaseState::Current {
+                family: RecordedFamily::Recorded(TypeScript),
+                readers: ReaderPresence::Published,
+            },
+            TypeScript,
+            InstallAction::Ready,
+        ),
+        (
+            DatabaseState::Current {
+                family: RecordedFamily::Recorded(Rust),
+                readers: ReaderPresence::Published,
+            },
+            TypeScript,
+            InstallAction::Refuse(InstallRefusal::OtherFamily {
+                stored: Rust,
+                own: TypeScript,
             }),
         ),
         (
@@ -2491,16 +2532,15 @@ fn the_attempt_cancelled_is_the_fourth_migration_of_the_chain() {
     );
 }
 
-/// Migration 1004 is the fifth link of the chain and the newest: it writes
-/// no family row, publishes no reader, declares no index step, and its
-/// checksum is SHA-384 of its file. Its text names no schema and holds no
-/// transaction control. The file list of the harnesses ends with this file.
+/// Migration 1004 is the fifth link of the chain: it writes no family row,
+/// publishes no reader, declares no index step, and its checksum is SHA-384
+/// of its file. Its text names no schema and holds no transaction control.
+/// The file list of the harnesses holds this file after the file of 1003.
 #[test]
-fn the_worker_profile_name_is_the_fifth_migration_and_the_newest() {
+fn the_worker_profile_name_is_the_fifth_migration_of_the_chain() {
     let chain = embedded_migrations();
     let (version, name, text) = LATER_MIGRATION_FILES[3];
     let migration = &chain[4];
-    assert_eq!(chain.len(), 5);
     assert_eq!(version, WORKER_PROFILE_NAME_MIGRATION_VERSION);
     assert_eq!(migration.version, 1004);
     assert_eq!(migration.description, "worker profile name");
@@ -2512,10 +2552,6 @@ fn the_worker_profile_name_is_the_fifth_migration_and_the_newest() {
     assert_eq!(
         migration.checksum.as_slice(),
         Sha384::digest(text.as_bytes()).as_slice()
-    );
-    assert_eq!(
-        expected_schema_version(),
-        WORKER_PROFILE_NAME_MIGRATION_VERSION
     );
     assert!(
         !text.contains("public."),
@@ -2529,8 +2565,84 @@ fn the_worker_profile_name_is_the_fifth_migration_and_the_newest() {
         );
     }
     let files = migration_sql_file_texts();
-    assert_eq!(files.len(), BASELINE_SQL_FILE_TEXTS.len() + 4);
+    assert_eq!(
+        files.get(BASELINE_SQL_FILE_TEXTS.len() + 3),
+        Some(&(version, name, text))
+    );
+}
+
+/// The position of migration 1006 in the embedded chain: the number of
+/// migrations that a database before it holds.
+fn typescript_client_family_position() -> usize {
+    embedded_migrations()
+        .iter()
+        .position(|migration| migration.version == TYPESCRIPT_CLIENT_FAMILY_MIGRATION_VERSION)
+        .expect("migration 1006 is a link of the chain")
+}
+
+/// Migration 1006 is the newest link of the chain: it writes no family row,
+/// publishes no reader, declares no index step, and its checksum is SHA-384
+/// of its file. Its text names no schema and holds no transaction control.
+/// The file list of the harnesses ends with this file.
+#[test]
+fn the_typescript_client_family_is_the_newest_migration() {
+    let chain = embedded_migrations();
+    let (version, name, text) = *LATER_MIGRATION_FILES
+        .last()
+        .expect("the chain has migrations after the baseline");
+    let migration = chain.last().expect("the chain is not empty");
+    assert_eq!(chain.len(), LATER_MIGRATION_FILES.len() + 1);
+    assert_eq!(typescript_client_family_position(), chain.len() - 1);
+    assert_eq!(version, TYPESCRIPT_CLIENT_FAMILY_MIGRATION_VERSION);
+    assert_eq!(migration.version, 1006);
+    assert_eq!(migration.description, "typescript client family");
+    assert_eq!(migration.family_row, FamilyRow::NotWritten);
+    assert_eq!(migration.readers, ReaderPublication::NotPublished);
+    assert!(migration.exact_indexes.is_empty());
+    assert!(migration.retired_indexes.is_empty());
+    assert_eq!(migration.script.sql(), text);
+    assert_eq!(
+        migration.checksum.as_slice(),
+        Sha384::digest(text.as_bytes()).as_slice()
+    );
+    assert_eq!(
+        expected_schema_version(),
+        TYPESCRIPT_CLIENT_FAMILY_MIGRATION_VERSION
+    );
+    assert!(
+        !text.contains("public."),
+        "the migration names the public schema"
+    );
+    for line in text.lines() {
+        let statement = line.trim().to_uppercase();
+        assert!(
+            !["BEGIN;", "COMMIT;", "ROLLBACK;", "START TRANSACTION;"].contains(&statement.as_str()),
+            "the migration holds transaction control: {line}"
+        );
+    }
+    let files = migration_sql_file_texts();
+    assert_eq!(
+        files.len(),
+        BASELINE_SQL_FILE_TEXTS.len() + LATER_MIGRATION_FILES.len()
+    );
     assert_eq!(files.last(), Some(&(version, name, text)));
+}
+
+/// A build whose chain ends before migration 1006 meets a database that
+/// applied migration 1006: the classification refuses it as newer.
+#[test]
+fn a_chain_without_the_typescript_client_family_refuses_a_database_that_has_it() {
+    let chain = embedded_migrations();
+    let position = typescript_client_family_position();
+    let applied: Vec<AppliedMigration> = chain[..=position].iter().map(succeeded).collect();
+
+    assert_eq!(
+        classify(ledger(applied, RUST), &chain[..position]),
+        Classification::Settled(DatabaseState::Unsupported(SchemaRefusal::SchemaNewer {
+            stored: TYPESCRIPT_CLIENT_FAMILY_MIGRATION_VERSION,
+            own: chain[position - 1].version,
+        })),
+    );
 }
 
 /// A build whose chain ends at migration 1003 meets a database that applied
@@ -2937,9 +3049,10 @@ async fn a_1001_database_with_workflows_gets_the_start_command_columns_with_no_v
 
 /// A fresh install, an upgrade from migration 1000 with live rows and
 /// workflow rows, an upgrade from migration 1001 with workflow rows, an
-/// upgrade from migration 1002 with live rows, and an upgrade from migration
-/// 1003 with a worker snapshot end in the same schema: the same columns,
-/// constraints, indexes, sequences and functions, and the same bookkeeping.
+/// upgrade from migration 1002 with live rows, an upgrade from migration
+/// 1003 with a worker snapshot, and an upgrade from the migration before
+/// 1006 end in the same schema: the same columns, constraints, indexes,
+/// sequences and functions, and the same bookkeeping.
 #[tokio::test]
 async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
     let fresh = MigrationTestDatabase::create().await;
@@ -2982,22 +3095,33 @@ async fn a_fresh_install_and_an_upgraded_database_end_in_the_same_shape() {
         .install(ClientFamily::Rust, InstallLockPlan::fleet())
         .await
         .expect("apply migration 1004 over the worker snapshot");
+    let before_1006 = MigrationTestDatabase::create().await;
+    before_1006
+        .install_first_migrations(ClientFamily::Rust, typescript_client_family_position())
+        .await;
+    before_1006
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("apply migration 1006");
 
     let fresh_shape = schema_shape(&fresh).await;
     assert_eq!(fresh_shape, schema_shape(&upgraded).await);
     assert_eq!(fresh_shape, schema_shape(&from_1001).await);
     assert_eq!(fresh_shape, schema_shape(&from_1002).await);
     assert_eq!(fresh_shape, schema_shape(&from_1003).await);
+    assert_eq!(fresh_shape, schema_shape(&before_1006).await);
     let fresh_rows = bookkeeping_rows(&fresh).await;
     assert_eq!(fresh_rows, bookkeeping_rows(&upgraded).await);
     assert_eq!(fresh_rows, bookkeeping_rows(&from_1001).await);
     assert_eq!(fresh_rows, bookkeeping_rows(&from_1002).await);
     assert_eq!(fresh_rows, bookkeeping_rows(&from_1003).await);
+    assert_eq!(fresh_rows, bookkeeping_rows(&before_1006).await);
     fresh.drop().await;
     upgraded.drop().await;
     from_1001.drop().await;
     from_1002.drop().await;
     from_1003.drop().await;
+    before_1006.drop().await;
 }
 
 /// A database at migration 1002 that holds live PENDING, CLAIMED and RUNNING
@@ -3285,5 +3409,197 @@ async fn a_changed_text_of_the_lifecycle_record_is_refused_as_edited() {
         other => panic!("expected an edited-migration refusal, got {other:?}"),
     }
     assert_eq!(bookkeeping_rows(&database).await, before);
+    database.drop().await;
+}
+
+// ---- Migration 1006: the client family TYPESCRIPT ----
+
+/// The CHECK `horsies_client_family_family_known` from migration 1006 on,
+/// as `pg_get_constraintdef` gives it.
+const FAMILY_CHECK_FROM_1006: &str =
+    "CHECK ((family = ANY (ARRAY['PYTHON'::text, 'RUST'::text, 'TYPESCRIPT'::text])))";
+
+/// Each CHECK named `horsies_client_family_family_known` on
+/// `horsies_client_family`: whether it is validated, and its definition.
+async fn family_checks(database: &MigrationTestDatabase) -> Vec<(bool, String)> {
+    database
+        .client()
+        .query(
+            "SELECT convalidated, pg_get_constraintdef(oid) FROM pg_constraint
+             WHERE conrelid = 'horsies_client_family'::regclass
+               AND conname = 'horsies_client_family_family_known'",
+            &[],
+        )
+        .await
+        .expect("read the family check")
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect()
+}
+
+/// Writes `family` into the one family row. `Err` holds the SQLSTATE of a
+/// refused write.
+async fn write_family(database: &MigrationTestDatabase, family: &str) -> Result<(), SqlState> {
+    match database
+        .client()
+        .execute("UPDATE horsies_client_family SET family = $1", &[&family])
+        .await
+    {
+        Ok(1) => Ok(()),
+        Ok(rows) => {
+            panic!("the family table holds one row; the write of {family:?} changed {rows}")
+        }
+        Err(error) => match error.code() {
+            Some(code) => Err(code.clone()),
+            None => panic!("write the family {family:?}: {error}"),
+        },
+    }
+}
+
+/// A database before migration 1006, of the family `PYTHON` and of the
+/// family `RUST`, gets migration 1006 from the install:
+/// - before it, the CHECK refuses `TYPESCRIPT` (23514);
+/// - after it, the family row keeps its value, and the CHECK exists once,
+///   validated, with the predicate of migration 1006: it accepts
+///   `TYPESCRIPT` and refuses `GO` and `typescript` (23514);
+/// - an install again changes nothing.
+#[tokio::test]
+async fn a_database_before_1006_of_each_family_gets_the_typescript_family_and_keeps_its_row() {
+    for own in [ClientFamily::Python, ClientFamily::Rust] {
+        let database = MigrationTestDatabase::create().await;
+        database
+            .install_first_migrations(own, typescript_client_family_position())
+            .await;
+        assert_eq!(
+            write_family(&database, "TYPESCRIPT").await,
+            Err(SqlState::CHECK_VIOLATION),
+            "{own:?}"
+        );
+
+        database
+            .install(own, InstallLockPlan::fleet())
+            .await
+            .expect("apply migration 1006");
+
+        let installed = bookkeeping_rows(&database).await;
+        assert_eq!(installed, chain_rows(embedded_migrations().len()));
+        assert_eq!(family_row(&database).await.as_deref(), Some(own.as_str()));
+        assert_eq!(
+            family_checks(&database).await,
+            vec![(true, FAMILY_CHECK_FROM_1006.to_owned())]
+        );
+        assert_eq!(write_family(&database, "TYPESCRIPT").await, Ok(()));
+        for refused in ["GO", "typescript"] {
+            assert_eq!(
+                write_family(&database, refused).await,
+                Err(SqlState::CHECK_VIOLATION),
+                "{refused:?}"
+            );
+        }
+        assert_eq!(write_family(&database, own.as_str()).await, Ok(()));
+
+        database
+            .install(own, InstallLockPlan::fleet())
+            .await
+            .expect("install again");
+        assert_eq!(bookkeeping_rows(&database).await, installed);
+        assert_eq!(family_row(&database).await.as_deref(), Some(own.as_str()));
+        database.drop().await;
+    }
+}
+
+/// Migration 1006 leaves the CHECK `horsies_client_family_family_known`
+/// with its own predicate whatever the database holds before it: no CHECK
+/// of that name (dropped out of band), or a CHECK of that name with another
+/// predicate.
+#[tokio::test]
+async fn migration_1006_gives_the_family_check_its_predicate_whatever_the_database_held() {
+    let changes = [
+        "ALTER TABLE horsies_client_family DROP CONSTRAINT horsies_client_family_family_known",
+        "ALTER TABLE horsies_client_family
+             DROP CONSTRAINT horsies_client_family_family_known,
+             ADD CONSTRAINT horsies_client_family_family_known CHECK (family IN ('RUST', 'GO'))",
+    ];
+    for change in changes {
+        let database = MigrationTestDatabase::create().await;
+        database
+            .install_first_migrations(ClientFamily::Rust, typescript_client_family_position())
+            .await;
+        database.execute(change).await;
+
+        database
+            .install(ClientFamily::Rust, InstallLockPlan::fleet())
+            .await
+            .expect("apply migration 1006");
+
+        assert_eq!(
+            family_checks(&database).await,
+            vec![(true, FAMILY_CHECK_FROM_1006.to_owned())],
+            "{change}"
+        );
+        assert_eq!(family_row(&database).await.as_deref(), Some("RUST"));
+        database.drop().await;
+    }
+}
+
+/// A database whose family row holds `TYPESCRIPT` is of the TypeScript
+/// client: the install of a Python and of a Rust client is refused with the
+/// stored family before any write, and the install of a TypeScript client
+/// finds it ready and writes nothing.
+#[tokio::test]
+async fn a_typescript_database_refuses_the_install_of_a_python_and_a_rust_client() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install into an empty database");
+    assert_eq!(write_family(&database, "TYPESCRIPT").await, Ok(()));
+    let before = installed_on(&database).await;
+
+    for own in [ClientFamily::Python, ClientFamily::Rust] {
+        let refused = database.install(own, InstallLockPlan::fleet()).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(SchemaInstallError::OtherFamily {
+                    stored: ClientFamily::TypeScript,
+                    own: refused_own,
+                }) if *refused_own == own
+            ),
+            "{refused:?}"
+        );
+        let message = BrokerError::from(refused.unwrap_err()).to_string();
+        assert!(message.contains("the TYPESCRIPT client"), "{message}");
+    }
+    database
+        .install(ClientFamily::TypeScript, InstallLockPlan::fleet())
+        .await
+        .expect("a TypeScript client installs into a TypeScript database");
+
+    assert_eq!(family_row(&database).await.as_deref(), Some("TYPESCRIPT"));
+    assert_eq!(installed_on(&database).await, before);
+    database.drop().await;
+}
+
+/// A database that holds the whole chain with no family row gets the row
+/// `TYPESCRIPT` from the install of a TypeScript client (Python
+/// `CompleteInstall`), and no migration runs again.
+#[tokio::test]
+async fn a_current_database_with_no_family_row_gets_the_typescript_row() {
+    let database = MigrationTestDatabase::create().await;
+    database
+        .install(ClientFamily::Rust, InstallLockPlan::fleet())
+        .await
+        .expect("install into an empty database");
+    database.execute("DELETE FROM horsies_client_family").await;
+    let before = installed_on(&database).await;
+
+    database
+        .install(ClientFamily::TypeScript, InstallLockPlan::fleet())
+        .await
+        .expect("record the family");
+
+    assert_eq!(family_row(&database).await.as_deref(), Some("TYPESCRIPT"));
+    assert_eq!(installed_on(&database).await, before);
     database.drop().await;
 }

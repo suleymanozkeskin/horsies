@@ -3246,9 +3246,9 @@ const HISTORY_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "RerunClientFamilyMismatch",
-        doc: "The database records the other client family, or none (stored is None). Nothing\nwritten. message names both.",
+        doc: "The database records another client family, or none (stored is None). Nothing\nwritten. message names both.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("stored", "Literal['PYTHON', 'RUST'] | None"), property("message", "str"), property("exception", CORE_FAILURE_EXCEPTION)],
+        properties: &[property("stored", "Literal['PYTHON', 'RUST', 'TYPESCRIPT'] | None"), property("message", "str"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
