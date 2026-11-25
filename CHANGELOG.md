@@ -83,6 +83,13 @@ and there is no migration contract between pre-1.0 versions.
   else no run is named. An isolated child watches no host loop. Code that
   builds a `ChildApp` sets the new field; the Rust client sets
   `RuntimeOnly`, and its poll watch does not change.
+- **Child host: start facts for start hooks.** `NamedChildStartHook::start`
+  takes a `ChildStartFacts`: `Isolated`, `SharedAsync { seats }`,
+  `SharedThread { seats }` or `Handler`, read from the init frame before
+  the first hook. A host that starts its own seats in a start hook reads
+  the seat count there. Code that builds a `NamedChildStartHook` takes the
+  argument. The Rust client's `on_child_start` and
+  `on_handler_child_start` do not change: their hooks take no argument.
 
 ## [0.8.1] - 2026-11-25
 

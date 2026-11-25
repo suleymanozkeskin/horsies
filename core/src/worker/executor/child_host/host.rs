@@ -34,10 +34,11 @@ use crate::process_runtime::{
     ShapeOutcome, ThreadStart,
 };
 use crate::worker::executor::protocol::{
-    decode_parent_frame, BootDetail, BootErrorName, BootFailedFrame, ChildConnection,
+    decode_parent_frame, AsyncSeats, BootDetail, BootErrorName, BootFailedFrame, ChildConnection,
     ChildExitCode, ChildFrame, ChildKind, ChildLogLevel, ChildPool, ChildProgram, FrameReader,
     InitFrame, IsolatedChild, ParentFrame, ParentFrameRefusal, ProcessId, ReadyFrame,
     ReportedBootCause, ServerSessions, SharedAsyncChild, SharedThreadChild, ShortageErrno,
+    ThreadSeats,
 };
 use crate::worker::executor::supervisor::{ChildCommand, MailboxBound};
 
@@ -120,12 +121,12 @@ pub type ChildStartFuture = Pin<Box<dyn Future<Output = Result<(), ChildHookFail
 /// `on_shared_async_child_start`). They run once in every child, a
 /// replacement child included, on the child's runtime: after the child
 /// connected its pool, before it reports ready, one after the other in
-/// registration order, each for at most [`CHILD_START_HOOK_BOUND`]. A hook
-/// that returns an error, panics or runs longer ends the child with exit
-/// code 173 and runs no later hook, and the worker stops with
-/// `ChildHookFailed`. The logged cause names the hook. Work that a hook
-/// starts and leaves running is not the work of any task. `Run` with an
-/// empty list runs nothing, as `NoHook`.
+/// registration order, each with the child's [`ChildStartFacts`] and for at
+/// most [`CHILD_START_HOOK_BOUND`]. A hook that returns an error, panics or
+/// runs longer ends the child with exit code 173 and runs no later hook,
+/// and the worker stops with `ChildHookFailed`. The logged cause names the
+/// hook. Work that a hook starts and leaves running is not the work of any
+/// task. `Run` with an empty list runs nothing, as `NoHook`.
 pub enum ChildStartHook {
     NoHook,
     Run(Vec<NamedChildStartHook>),
@@ -134,10 +135,36 @@ pub enum ChildStartHook {
 /// One start hook of a child and the name that its failure cause gives
 /// (Python logs the hook's `__qualname__`). The hook is `Sync` because the
 /// child shares its [`ChildApp`] between threads; the child takes it out
-/// and calls it once.
+/// and calls it once, with the facts of the child ([`ChildStartFacts`]).
 pub struct NamedChildStartHook {
     pub name: String,
-    pub start: Box<dyn FnOnce() -> ChildStartFuture + Send + Sync>,
+    pub start: Box<dyn FnOnce(ChildStartFacts) -> ChildStartFuture + Send + Sync>,
+}
+
+/// The kind of the child that a start hook runs in, read from its init
+/// frame before the first hook: a host that starts its own seats in a hook
+/// (for example one isolate per seat of a shared thread child) reads the
+/// seat count here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildStartFacts {
+    /// An isolated child: one run at a time.
+    Isolated,
+    /// A shared async child with `seats` runs at once.
+    SharedAsync { seats: AsyncSeats },
+    /// A shared thread child with `seats` runs at once.
+    SharedThread { seats: ThreadSeats },
+    /// The handler child: it runs the app's event handlers and no task.
+    Handler,
+}
+
+/// The start facts of a task child of `kind`. The handler host gives
+/// [`ChildStartFacts::Handler`] itself. Pure.
+fn task_start_facts(kind: TaskChild) -> ChildStartFacts {
+    match kind {
+        TaskChild::Isolated(_) => ChildStartFacts::Isolated,
+        TaskChild::SharedAsync(child) => ChildStartFacts::SharedAsync { seats: child.seats },
+        TaskChild::SharedThread(child) => ChildStartFacts::SharedThread { seats: child.seats },
+    }
 }
 
 /// How a child ends. The binary exits with [`Self::code`].
@@ -609,14 +636,15 @@ impl AfterHookFailure {
     }
 }
 
-/// Run the start hooks on `runtime` in their order, each bounded by
-/// `bound` alone (the child passes [`CHILD_START_HOOK_BOUND`]). The first
-/// failure ends the run: no later hook runs. A failure is logged with the
-/// hook's position, its name, the cause and `after`, and gives
-/// [`ChildHostExit::ChildHookFailed`].
+/// Run the start hooks on `runtime` in their order, each with `facts` and
+/// each bounded by `bound` alone (the child passes
+/// [`CHILD_START_HOOK_BOUND`]). The first failure ends the run: no later
+/// hook runs. A failure is logged with the hook's position, its name, the
+/// cause and `after`, and gives [`ChildHostExit::ChildHookFailed`].
 pub(super) fn run_start_hook(
     runtime: &tokio::runtime::Runtime,
     hook: ChildStartHook,
+    facts: ChildStartFacts,
     bound: Duration,
     after: AfterHookFailure,
 ) -> Result<(), ChildHostExit> {
@@ -627,7 +655,7 @@ pub(super) fn run_start_hook(
     let count = hooks.len();
     for (index, hook) in hooks.into_iter().enumerate() {
         let name = hook.name;
-        if let Err(cause) = run_one_start_hook(runtime, hook.start, bound) {
+        if let Err(cause) = run_one_start_hook(runtime, hook.start, facts, bound) {
             tracing::error!(
                 pid = std::process::id(),
                 "start hook {} of {count} '{name}' of the child failed: {cause}; {}",
@@ -657,20 +685,21 @@ enum StartHookFailure {
     NoOutcome,
 }
 
-/// Run one start hook on `runtime`, bounded by `bound`. The bound is kept by
-/// this thread, not by a runtime timer, so a hook that holds every runtime
-/// thread still passes it. A hook that runs past the bound is left running:
-/// the child exits.
+/// Run one start hook on `runtime` with `facts`, bounded by `bound`. The
+/// bound is kept by this thread, not by a runtime timer, so a hook that
+/// holds every runtime thread still passes it. A hook that runs past the
+/// bound is left running: the child exits.
 ///
 /// Errors: [`StartHookFailure`].
 fn run_one_start_hook(
     runtime: &tokio::runtime::Runtime,
-    start: Box<dyn FnOnce() -> ChildStartFuture + Send + Sync>,
+    start: Box<dyn FnOnce(ChildStartFacts) -> ChildStartFuture + Send + Sync>,
+    facts: ChildStartFacts,
     bound: Duration,
 ) -> Result<(), StartHookFailure> {
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let _hook_task = runtime.spawn(async move {
-        let outcome = CatchPanic::new(async move { start().await }).await;
+        let outcome = CatchPanic::new(async move { start(facts).await }).await;
         // The receiver is gone only after the bound passed.
         let _sent = sender.send(outcome);
     });
@@ -704,7 +733,7 @@ fn boot_and_serve(
 }
 
 /// Boot a task child of `kind` and serve its runs until the stop frame or
-/// the end of the parent.
+/// the end of the parent. Its start hooks get the facts of `kind`.
 fn boot_and_serve_tasks(
     mut app: ChildApp,
     socket: &UnixStream,
@@ -734,6 +763,7 @@ fn boot_and_serve_tasks(
     if let Err(exit) = run_start_hook(
         runtime,
         start_hook,
+        task_start_facts(kind),
         CHILD_START_HOOK_BOUND,
         AfterHookFailure::WorkerStops,
     ) {
@@ -826,9 +856,13 @@ mod tests {
     {
         NamedChildStartHook {
             name: name.to_owned(),
-            start: Box::new(move || -> ChildStartFuture { Box::pin(make()) }),
+            start: Box::new(move |_facts| -> ChildStartFuture { Box::pin(make()) }),
         }
     }
+
+    /// The facts of an isolated child, for the tests of the hook order and
+    /// bound.
+    const FACTS: ChildStartFacts = ChildStartFacts::Isolated;
 
     /// A hook that records `name` in `calls`, sleeps `sleep` on the runtime
     /// and then returns `Ok`.
@@ -856,6 +890,7 @@ mod tests {
             run_start_hook(
                 &runtime,
                 ChildStartHook::NoHook,
+                FACTS,
                 SHORT_BOUND,
                 AfterHookFailure::WorkerStops
             ),
@@ -865,6 +900,7 @@ mod tests {
             run_start_hook(
                 &runtime,
                 hook(|| async { Ok(()) }),
+                FACTS,
                 SHORT_BOUND,
                 AfterHookFailure::WorkerStops
             ),
@@ -894,7 +930,13 @@ mod tests {
             Ok(())
         });
         for start in [failing, panicking, hanging] {
-            let ended = run_start_hook(&runtime, start, SHORT_BOUND, AfterHookFailure::WorkerStops);
+            let ended = run_start_hook(
+                &runtime,
+                start,
+                FACTS,
+                SHORT_BOUND,
+                AfterHookFailure::WorkerStops,
+            );
             assert_eq!(ended, Err(ChildHostExit::ChildHookFailed));
             assert_eq!(ChildHostExit::ChildHookFailed.code(), 173);
         }
@@ -916,7 +958,7 @@ mod tests {
         ]);
         let started = std::time::Instant::now();
         assert_eq!(
-            run_start_hook(&runtime, hooks, bound, AfterHookFailure::WorkerStops),
+            run_start_hook(&runtime, hooks, FACTS, bound, AfterHookFailure::WorkerStops),
             Ok(())
         );
         assert!(started.elapsed() > bound);
@@ -944,7 +986,13 @@ mod tests {
             recording(&calls, "third", Duration::ZERO),
         ]);
         assert_eq!(
-            run_start_hook(&runtime, hooks, SHORT_BOUND, AfterHookFailure::WorkerStops),
+            run_start_hook(
+                &runtime,
+                hooks,
+                FACTS,
+                SHORT_BOUND,
+                AfterHookFailure::WorkerStops
+            ),
             Err(ChildHostExit::ChildHookFailed)
         );
         assert_eq!(*calls.lock().expect("the test lock"), vec!["first"]);
@@ -959,6 +1007,7 @@ mod tests {
             run_start_hook(
                 &runtime,
                 ChildStartHook::Run(Vec::new()),
+                FACTS,
                 SHORT_BOUND,
                 AfterHookFailure::WorkerStops
             ),
@@ -977,7 +1026,7 @@ mod tests {
                 cause: "the cache did not open".to_owned(),
             })
         });
-        let returned = run_one_start_hook(&runtime, failing.start, SHORT_BOUND).unwrap_err();
+        let returned = run_one_start_hook(&runtime, failing.start, FACTS, SHORT_BOUND).unwrap_err();
         assert_eq!(
             returned.to_string(),
             "it returned an error: the cache did not open"
@@ -988,7 +1037,8 @@ mod tests {
             }
             Ok(())
         });
-        let panicked = run_one_start_hook(&runtime, panicking.start, SHORT_BOUND).unwrap_err();
+        let panicked =
+            run_one_start_hook(&runtime, panicking.start, FACTS, SHORT_BOUND).unwrap_err();
         assert!(
             matches!(&panicked, StartHookFailure::Panicked(text) if text.contains("the hook panicked")),
             "{panicked:?}"
@@ -997,7 +1047,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(60)).await;
             Ok(())
         });
-        let ran_past = run_one_start_hook(&runtime, hanging.start, SHORT_BOUND).unwrap_err();
+        let ran_past = run_one_start_hook(&runtime, hanging.start, FACTS, SHORT_BOUND).unwrap_err();
         assert_eq!(ran_past, StartHookFailure::RanPastBound(SHORT_BOUND));
         assert_eq!(ran_past.to_string(), "it ran longer than 200 ms");
         runtime.shutdown_background();
@@ -1017,6 +1067,7 @@ mod tests {
             run_start_hook(
                 &runtime,
                 holding,
+                FACTS,
                 SHORT_BOUND,
                 AfterHookFailure::WorkerStops
             ),
@@ -1037,6 +1088,85 @@ mod tests {
         assert!(AfterHookFailure::HandlerChildStaysDown
             .text()
             .contains("the worker runs on"));
+    }
+
+    /// The start facts of each task child: its kind, and the seats of a
+    /// shared child.
+    #[test]
+    fn the_start_facts_name_the_kind_and_the_seats_of_a_task_child() {
+        let task_send_pool = TaskSendPool::new(1).expect("1 is a task-send pool");
+        let isolated = TaskChild::Isolated(IsolatedChild {
+            pool: child_pool(2, false),
+            task_send_pool,
+        });
+        let fifty = AsyncSeats::new(50).expect("50 async seats");
+        let shared_async = TaskChild::SharedAsync(SharedAsyncChild {
+            seats: fifty,
+            pool: child_pool(3, true),
+            executor_threads: ExecutorThreads::new(4).expect("4 executor threads"),
+            task_send_pool,
+        });
+        let four = ThreadSeats::new(4).expect("4 thread seats");
+        let shared_thread = TaskChild::SharedThread(SharedThreadChild {
+            seats: four,
+            pool: child_pool(3, true),
+            task_send_pool,
+        });
+        assert_eq!(task_start_facts(isolated), ChildStartFacts::Isolated);
+        assert_eq!(
+            task_start_facts(shared_async),
+            ChildStartFacts::SharedAsync { seats: fifty }
+        );
+        assert_eq!(fifty.get(), 50);
+        assert_eq!(
+            task_start_facts(shared_thread),
+            ChildStartFacts::SharedThread { seats: four }
+        );
+        assert_eq!(four.get(), 4);
+    }
+
+    /// Each start hook gets the facts that the child passes: every hook of
+    /// the list, in its order.
+    #[test]
+    fn each_start_hook_gets_the_facts_of_its_child() {
+        let runtime = small_runtime();
+        let four = ThreadSeats::new(4).expect("4 thread seats");
+        let fifty = AsyncSeats::new(50).expect("50 async seats");
+        for facts in [
+            ChildStartFacts::Isolated,
+            ChildStartFacts::SharedAsync { seats: fifty },
+            ChildStartFacts::SharedThread { seats: four },
+        ] {
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recording = |name: &'static str| {
+                let seen = Arc::clone(&seen);
+                NamedChildStartHook {
+                    name: name.to_owned(),
+                    start: Box::new(move |facts| -> ChildStartFuture {
+                        Box::pin(async move {
+                            seen.lock().expect("the test lock").push((name, facts));
+                            Ok(())
+                        })
+                    }),
+                }
+            };
+            let hooks = ChildStartHook::Run(vec![recording("first"), recording("second")]);
+            assert_eq!(
+                run_start_hook(
+                    &runtime,
+                    hooks,
+                    facts,
+                    SHORT_BOUND,
+                    AfterHookFailure::WorkerStops
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                *seen.lock().expect("the test lock"),
+                vec![("first", facts), ("second", facts)]
+            );
+        }
+        runtime.shutdown_background();
     }
 
     /// The handler kind boots a handler child; each task kind boots a task

@@ -4,7 +4,8 @@
 //! Boot, after the log setup and the producer handle of the child:
 //!
 //! 1. the child's runtime;
-//! 2. the start hooks of the handler child, each bounded by
+//! 2. the start hooks of the handler child, each with the facts
+//!    [`ChildStartFacts::Handler`] and bounded by
 //!    [`CHILD_START_HOOK_BOUND`]; a failure ends the child with exit code
 //!    173, and the worker keeps the handler child down and runs on;
 //! 3. the thread and the queue of each handler ([`HANDLER_QUEUE_EVENTS`]
@@ -45,7 +46,7 @@ use super::handlers::{
 };
 use super::host::{
     boot_failed, run_start_hook, shortage_or, start_child_runtime, AfterHookFailure, ChildHostExit,
-    CHILD_START_HOOK_BOUND,
+    ChildStartFacts, CHILD_START_HOOK_BOUND,
 };
 use super::link::{start_control_thread, Flushed, FrameWriter};
 use super::rss::read_rss;
@@ -127,6 +128,7 @@ pub(super) fn boot_and_serve_handlers_on(
     if let Err(exit) = run_start_hook(
         runtime,
         start_hook,
+        ChildStartFacts::Handler,
         CHILD_START_HOOK_BOUND,
         AfterHookFailure::HandlerChildStaysDown,
     ) {

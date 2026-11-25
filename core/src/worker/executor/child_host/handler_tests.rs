@@ -23,7 +23,8 @@ use super::handlers::{
     HANDLER_ERROR_LOG_EVERY,
 };
 use super::host::{
-    ChildHookFailure, ChildHostExit, ChildStartFuture, ChildStartHook, NamedChildStartHook,
+    ChildHookFailure, ChildHostExit, ChildStartFacts, ChildStartFuture, ChildStartHook,
+    NamedChildStartHook,
 };
 use super::link::{read_frame, FrameWriter};
 use super::panic::install_panic_hook;
@@ -526,7 +527,7 @@ fn the_start_hooks_of_the_handler_child_run_in_order_and_a_failure_exits_173() {
         let calls = Arc::clone(&calls);
         NamedChildStartHook {
             name: name.to_owned(),
-            start: Box::new(move || -> ChildStartFuture {
+            start: Box::new(move |_facts| -> ChildStartFuture {
                 Box::pin(async move {
                     calls.lock().unwrap().push(name);
                     Ok(())
@@ -536,7 +537,7 @@ fn the_start_hooks_of_the_handler_child_run_in_order_and_a_failure_exits_173() {
     };
     let failing = NamedChildStartHook {
         name: "exporter".to_owned(),
-        start: Box::new(|| -> ChildStartFuture {
+        start: Box::new(|_facts| -> ChildStartFuture {
             Box::pin(async {
                 Err(ChildHookFailure {
                     cause: "the exporter did not start".to_owned(),
@@ -558,6 +559,43 @@ fn the_start_hooks_of_the_handler_child_run_in_order_and_a_failure_exits_173() {
     assert_eq!(exit, ChildHostExit::ChildHookFailed);
     assert_eq!(exit.code(), 173);
     assert_eq!(*calls.lock().unwrap(), vec!["first"]);
+    runtime.shutdown_background();
+}
+
+/// A start hook of the handler child gets the facts of a handler child.
+#[test]
+fn a_start_hook_of_the_handler_child_gets_the_handler_facts() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recording = {
+        let seen = Arc::clone(&seen);
+        NamedChildStartHook {
+            name: "exporter".to_owned(),
+            start: Box::new(move |facts| -> ChildStartFuture {
+                Box::pin(async move {
+                    seen.lock().unwrap().push(facts);
+                    // The failure ends the boot here, so the test needs no
+                    // parent.
+                    Err(ChildHookFailure {
+                        cause: "the test stops the boot".to_owned(),
+                    })
+                })
+            }),
+        }
+    };
+    let app = HandlerChildApp {
+        handlers: EventHandlerSet::new(),
+        start_hook: ChildStartHook::Run(vec![recording]),
+        ended_spans: EndedSpanScope::NoSpans,
+    };
+    let (ours, _theirs) = UnixStream::pair().unwrap();
+    let exit = boot_and_serve_handlers_on(&runtime, app, &ours, FrameReader::new());
+    assert_eq!(exit, ChildHostExit::ChildHookFailed);
+    assert_eq!(*seen.lock().unwrap(), vec![ChildStartFacts::Handler]);
     runtime.shutdown_background();
 }
 

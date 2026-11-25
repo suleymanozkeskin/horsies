@@ -152,7 +152,8 @@ pub use crate::worker::finalize_batch::{
 // code as host-held work (`RunHandle::register_host_work`), which the cancel
 // rounds ask to stop (`HostWork::stop_requested`); a host that runs it on an
 // event loop of its own gives the child its `HostLoop`
-// (`ChildApp::event_loop`). A result wait reads
+// (`ChildApp::event_loop`). Each start hook of a child gets the kind and
+// the seats of the child (`ChildStartFacts`). A result wait reads
 // `process_role` first: a process that runs task bodies refuses it. The
 // event handlers of the app (`EventHandlerSet`) run in the handler child of
 // the same binary (`HandlerChildApp`), which also makes the span of each
@@ -162,11 +163,11 @@ pub use crate::worker::executor::child_host::{
     run_cancel_signal, run_cancel_state, run_child_host, run_fencing_token, spawn_in_run,
     thread_role, wait_inside_task_message, BodyCarrier, BodyOutcome, BodyRun, BodyScope, BodySpans,
     CancelCause, ChildApp, ChildArgs, ChildArgsError, ChildHandleSetup, ChildHookFailure,
-    ChildHostExit, ChildLogSetup, ChildMode, ChildProducer, ChildStartFuture, ChildStartHook,
-    EndedAttempt, EndedSpanMaker, EndedSpanScope, EndedWorkflow, EventHandlerRefused,
-    EventHandlerSet, EventLoopWatch, HandlerChildApp, HandlerChildHasNoHandle, HandlerError,
-    HostLoop, HostStopState, HostWork, HostWorkRefused, NamedChildStartHook, ProcessRole,
-    RunCancelSignal, RunCancelState, RunHandle, RunHandleRefused, RunSignalRefused,
+    ChildHostExit, ChildLogSetup, ChildMode, ChildProducer, ChildStartFacts, ChildStartFuture,
+    ChildStartHook, EndedAttempt, EndedSpanMaker, EndedSpanScope, EndedWorkflow,
+    EventHandlerRefused, EventHandlerSet, EventLoopWatch, HandlerChildApp, HandlerChildHasNoHandle,
+    HandlerError, HostLoop, HostStopState, HostWork, HostWorkRefused, NamedChildStartHook,
+    ProcessRole, RunCancelSignal, RunCancelState, RunHandle, RunHandleRefused, RunSignalRefused,
     RunSpawnRefused, ThreadRole, WorkStopCause, CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND,
     HANDLER_DRAIN, HANDLER_ERROR_LOG_EVERY, HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS,
     HANDLER_STATS_INTERVAL, HOST_LOOP_TURN_TICK, MAX_RUN_WORK, NODE_READER_STOP_BOUND,
