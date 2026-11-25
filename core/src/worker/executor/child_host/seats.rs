@@ -67,6 +67,7 @@ use tokio::task::JoinError;
 use uuid::Uuid;
 
 use super::body_scope::{BodyOutcome, OpenBody, SpanSource};
+use super::link::FrameWriter;
 use super::panic::PanicRecord;
 use super::rss::read_rss;
 use super::run::{
@@ -537,7 +538,9 @@ fn take_seat(in_flight: &AtomicUsize, seats: usize) -> bool {
         .is_ok()
 }
 
-/// The stop frame is valid only with no run in flight.
+/// The stop frame is valid only with no run in flight. A seat frees its run
+/// before the end of the run is queued ([`end_seat_run`]), so a stop that the
+/// parent sends after it read the last end finds no run in flight.
 fn stop_end(in_flight: &AtomicUsize) -> ServeEnd {
     match in_flight.load(Ordering::Acquire) {
         0 => ServeEnd::Stopped,
@@ -561,7 +564,7 @@ struct InFlightRun<C> {
 /// `cancel_run` for each needs. A seat enters its run before the start
 /// write and leaves it before it sends the end of the run, so a cancel
 /// that finds no run is a cancel of a run that ended. At most `seats` runs.
-struct InFlightRuns<C> {
+pub(super) struct InFlightRuns<C> {
     runs: Arc<Mutex<HashMap<DispatchNumber, InFlightRun<C>>>>,
 }
 
@@ -574,7 +577,7 @@ impl<C> Clone for InFlightRuns<C> {
 }
 
 impl<C: Clone> InFlightRuns<C> {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             runs: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -619,6 +622,43 @@ fn log_ignored_cancel(run: RunRef) {
         "a cancel_run names a run that this child does not run; the run ended first, and the \
          cancel is ignored",
     );
+}
+
+/// Free the seat of the run `dispatch`: the run leaves the runs that a
+/// cancel can reach, and the count of runs in flight drops.
+fn free_seat<C: Clone>(
+    in_flight: &AtomicUsize,
+    cancels: &InFlightRuns<C>,
+    dispatch: DispatchNumber,
+) {
+    cancels.leave(dispatch);
+    let _held_before = in_flight.fetch_sub(1, Ordering::AcqRel);
+}
+
+/// End a run on its seat: free the seat ([`free_seat`]), then queue `end`,
+/// the end of the run. The parent frees the seat when it reads the end, and
+/// may then send `stop` or a new run at once. The seat is free before the
+/// end can be read, so neither frame finds the seat still taken (Python
+/// `_send_end`).
+pub(super) async fn end_seat_run<C: Clone>(
+    writer: &FrameWriter,
+    in_flight: &AtomicUsize,
+    cancels: &InFlightRuns<C>,
+    end: SharedResultFrame,
+) {
+    free_seat(in_flight, cancels, end.run.dispatch);
+    writer.send(ChildFrame::SharedResult(end)).await;
+}
+
+/// [`end_seat_run`] on a seat thread, which is not a runtime thread.
+pub(super) fn end_seat_run_blocking<C: Clone>(
+    writer: &FrameWriter,
+    in_flight: &AtomicUsize,
+    cancels: &InFlightRuns<C>,
+    end: SharedResultFrame,
+) {
+    free_seat(in_flight, cancels, end.run.dispatch);
+    writer.send_blocking(ChildFrame::SharedResult(end));
 }
 
 // ---------------------------------------------------------------------------
@@ -761,16 +801,14 @@ async fn async_seat(seat: AsyncSeat, run: SharedRunFrame, work: AsyncSeatWork) {
             (end, AttemptStart::Reported { started_at })
         }
     };
-    cancels.leave(run_ref.dispatch);
-    let frame = ChildFrame::SharedResult(SharedResultFrame {
+    let frame = SharedResultFrame {
         run: run_ref,
         end,
         started_at: started,
         rss: read_rss(),
         child: ChildAfterFrame::ServesOn,
-    });
-    context.writer.send(frame).await;
-    in_flight.fetch_sub(1, Ordering::AcqRel);
+    };
+    end_seat_run(&context.writer, &in_flight, &cancels, frame).await;
 }
 
 /// What the async body of task `task_name` (defined in `module`) ended
@@ -1187,20 +1225,16 @@ pub(super) async fn serve_shared_thread(
         let seat = ThreadSeat {
             context: context.clone(),
             runtime: runtime.clone(),
+            in_flight: Arc::clone(&in_flight),
             cancels: cancels.clone(),
             cancel: seat_cancel,
         };
-        let seat_in_flight = Arc::clone(&in_flight);
         let started = thread::Builder::new()
             .name(SEAT_THREAD_NAME.to_owned())
-            .spawn(move || {
-                thread_seat(&seat, &run, work);
-                seat_in_flight.fetch_sub(1, Ordering::AcqRel);
-            });
+            .spawn(move || thread_seat(&seat, &run, work));
         if let Err(error) = started {
             // No start was written: the row is still CLAIMED.
-            cancels.leave(run_ref.dispatch);
-            let frame = ChildFrame::SharedResult(SharedResultFrame {
+            let frame = SharedResultFrame {
                 run: run_ref,
                 end: SeatEnd::Finished(RunEnd::WorkerFailure(FailureDetail::cut(&format!(
                     "the OS refused a seat thread: {error}"
@@ -1208,9 +1242,8 @@ pub(super) async fn serve_shared_thread(
                 started_at: AttemptStart::NotReported,
                 rss: read_rss(),
                 child: ChildAfterFrame::ServesOn,
-            });
-            context.writer.send(frame).await;
-            in_flight.fetch_sub(1, Ordering::AcqRel);
+            };
+            end_seat_run(&context.writer, &in_flight, &cancels, frame).await;
         }
     }
 }
@@ -1243,11 +1276,12 @@ async fn cancel_thread_run(
 }
 
 /// What one seat thread of a shared thread child shares with its serve
-/// loop: the child's context and runtime, the runs that a cancel can reach,
-/// and the cancel of this run.
+/// loop: the child's context and runtime, the count of runs in flight, the
+/// runs that a cancel can reach, and the cancel of this run.
 struct ThreadSeat {
     context: HostContext,
     runtime: tokio::runtime::Handle,
+    in_flight: Arc<AtomicUsize>,
     cancels: InFlightRuns<ThreadSeatCancel>,
     cancel: ThreadSeatCancel,
 }
@@ -1293,16 +1327,14 @@ fn thread_seat(seat: &ThreadSeat, run: &SharedRunFrame, work: ThreadSeatWork) {
             (end, AttemptStart::Reported { started_at })
         }
     };
-    seat.cancels.leave(run_ref.dispatch);
-    context
-        .writer
-        .send_blocking(ChildFrame::SharedResult(SharedResultFrame {
-            run: run_ref,
-            end,
-            started_at: started,
-            rss: read_rss(),
-            child: ChildAfterFrame::ServesOn,
-        }));
+    let frame = SharedResultFrame {
+        run: run_ref,
+        end,
+        started_at: started,
+        rss: read_rss(),
+        child: ChildAfterFrame::ServesOn,
+    };
+    end_seat_run_blocking(&context.writer, &seat.in_flight, &seat.cancels, frame);
 }
 
 /// The body has not started.
