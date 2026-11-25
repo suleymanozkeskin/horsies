@@ -7,6 +7,13 @@
     // Node API types only: the package runs on Node and on Bun through the Node API.
     "types": ["node"],
     "strict": true,
+    // Checks that `strict` does not turn on.
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
     "isolatedDeclarations": true,
     "declaration": true,
     "verbatimModuleSyntax": true,
