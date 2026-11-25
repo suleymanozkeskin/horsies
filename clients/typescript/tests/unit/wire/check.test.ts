@@ -62,6 +62,7 @@ describe("checkKind", () => {
 
   test("UnionMemberNotPrimitive: an object member of h.union([...])", () => {
     assert.equal(checkKind(kindOf(h.union([h.object({}), h.int()])))[0]?.rule, "UnionMemberNotPrimitive");
+    assert.equal(checkKind(kindOf(h.union([h.json(), h.int()])))[0]?.rule, "UnionMemberNotPrimitive");
   });
 
   test("LiteralNotSafeInteger: a float member and 2^53", () => {

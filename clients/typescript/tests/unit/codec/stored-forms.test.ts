@@ -51,6 +51,7 @@ const REFUSED_VALUE_KIND: Readonly<Record<string, EncodeRefusalKind>> = {
   f64_nan: "NonFiniteFloat",
   f64_infinity: "NonFiniteFloat",
   f64_negative_infinity: "NonFiniteFloat",
+  json_engine_key: "EngineKey",
 };
 
 describe("task_input.json refused values", () => {

@@ -24,6 +24,7 @@ import { unreachable } from "../wire/unreachable.ts";
 import { MAX_VALUE_JSON_DEPTH } from "./bounds.ts";
 import { isEngineKey } from "./engine-keys.ts";
 import type { JsonText } from "./json-text.ts";
+import { decodeJsonNode } from "./json-value.ts";
 import { IntegralFloat, isTreeArray, isTreeObject, readTree, type TreeObject, type TreeValue } from "./number-text.ts";
 import {
   decodeRefused,
@@ -121,6 +122,8 @@ export function decodeNode(kind: Kind, node: TreeValue, path: string, depth: num
       return decodeRecord(kind.value, node, path, depth, form);
     case "object":
       return decodeObject(kind, node, path, depth, form);
+    case "json":
+      return decodeJsonNode(node, path, depth, MAX_VALUE_JSON_DEPTH);
     default:
       return unreachable(kind, "decodeNode");
   }

@@ -62,6 +62,7 @@ function walk(kind: Kind, path: string, level: number, refusals: KindRefused[]):
     case "offsetDateTime":
     case "plainDateTime":
     case "plainDate":
+    case "json":
       return;
     case "literal":
       return walkLiteral(kind.members, path, refusals);
@@ -186,6 +187,7 @@ function storedClasses(kind: Kind): readonly StoredClass[] {
     case "record":
     case "object":
     case "taggedUnion":
+    case "json":
       return ["container"];
     default:
       return unreachable(kind, "storedClasses");

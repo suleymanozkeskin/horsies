@@ -59,6 +59,9 @@ export type TaggedUnionKind = {
   readonly byTag: ReadonlyMap<string, ObjectKind>;
 };
 
+/** Untyped JSON that the type names explicitly: a `JsonValue`. */
+export type JsonKind = { readonly node: "json" };
+
 /** `null`, or a value of `inner`. */
 export type NullableKind = { readonly node: "nullable"; readonly inner: Kind };
 
@@ -116,7 +119,8 @@ export type Kind =
   | ArrayKind
   | TupleKind
   | RecordKind
-  | ObjectKind;
+  | ObjectKind
+  | JsonKind;
 
 export const NULL_KIND: NullKind = Object.freeze({ node: "null" });
 export const BOOLEAN_KIND: BooleanKind = Object.freeze({ node: "boolean" });
@@ -130,6 +134,7 @@ export const INSTANT_KIND: InstantKind = Object.freeze({ node: "instant" });
 export const OFFSET_DATE_TIME_KIND: OffsetDateTimeKind = Object.freeze({ node: "offsetDateTime" });
 export const PLAIN_DATE_TIME_KIND: PlainDateTimeKind = Object.freeze({ node: "plainDateTime" });
 export const PLAIN_DATE_KIND: PlainDateKind = Object.freeze({ node: "plainDate" });
+export const JSON_KIND: JsonKind = Object.freeze({ node: "json" });
 export const REQUIRED: MemberPresence = Object.freeze({ mode: "required" });
 export const OPTIONAL: MemberPresence = Object.freeze({ mode: "optional" });
 

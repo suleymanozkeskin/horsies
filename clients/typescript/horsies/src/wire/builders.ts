@@ -1,5 +1,6 @@
 // The `h.*` builders of the wire types.
 
+import type { JsonValue } from "../codec/json-value.ts";
 import type { Decimal } from "./decimal.ts";
 import type {
   AnyWire,
@@ -19,6 +20,7 @@ import {
   FLOAT_KIND,
   INSTANT_KIND,
   INT_KIND,
+  JSON_KIND,
   type Kind,
   type LiteralMember,
   type Member,
@@ -71,6 +73,11 @@ export interface WireBuilders {
   plainDate(): Wire<Temporal.PlainDate>;
   /** An object with declared members, stored in declaration order. An undeclared key is refused. */
   object<const M extends WireMembers>(members: M): Wire<ObjectValue<M>, ObjectSent<M>>;
+  /**
+   * Untyped JSON that the type names explicitly. A `bigint` and a safe integer are stored as integers; any other
+   * `number` in Python's float text. A key that only the engine writes is refused at every depth.
+   */
+  json(): Wire<JsonValue>;
   /** One of the listed values: strings, safe integers, booleans or `null`. Stored as the value. */
   literal<const L extends NonEmpty<LiteralMember>>(...members: L): Wire<L[number]>;
   /** One of the listed strings. Stored as the string. */
@@ -201,6 +208,7 @@ export const h: WireBuilders = Object.freeze({
   offsetDateTime: (): Wire<Temporal.ZonedDateTime> => wireOf(OFFSET_DATE_TIME_KIND),
   plainDateTime: (): Wire<Temporal.PlainDateTime> => wireOf(PLAIN_DATE_TIME_KIND),
   plainDate: (): Wire<Temporal.PlainDate> => wireOf(PLAIN_DATE_KIND),
+  json: (): Wire<JsonValue> => wireOf(JSON_KIND),
   literal: <const L extends NonEmpty<LiteralMember>>(...members: L): Wire<L[number]> => literalWire(members),
   enum: <const L extends NonEmpty<string>>(members: L): Wire<L[number]> => literalWire(members),
   union,

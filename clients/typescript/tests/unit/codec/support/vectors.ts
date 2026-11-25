@@ -125,6 +125,8 @@ export function declaredWires(type: string, notation: Notation | undefined): rea
       return [{ label: "record(int)", wire: h.record(h.int()) }];
     case "record_order":
       return [{ label: "object", wire: h.object({ id: h.int(), amount: h.float() }) }];
+    case "json":
+      return [{ label: "json", wire: h.json() }];
     default:
       return [];
   }
@@ -162,6 +164,7 @@ export function valueOf(type: string, declared: Declared, notation: Notation | u
     case "str":
     case "uuid":
     case "str_enum":
+    case "json":
       return notation;
     case "int_enum":
       return Number(notationText(notation));

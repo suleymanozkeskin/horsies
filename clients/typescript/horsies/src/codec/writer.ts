@@ -11,10 +11,11 @@ import { Decimal } from "../wire/decimal.ts";
 import type { Kind, LiteralMember, Member, ObjectKind, TaggedUnionKind } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import { MAX_INT_DIGITS, MAX_VALUE_JSON_DEPTH } from "./bounds.ts";
+import { MAX_VALUE_JSON_DEPTH } from "./bounds.ts";
 import { isEngineKey } from "./engine-keys.ts";
-import { pythonFloatText } from "./float-text.ts";
 import { type JsonText, writtenJsonText } from "./json-text.ts";
+import { jsonValueText } from "./json-value.ts";
+import { bigintText, floatText, type ScalarRefused, stringText } from "./scalar-text.ts";
 import { isLiteralType, literalText, unionRefusal } from "./union.ts";
 import {
   encodeRefused,
@@ -103,11 +104,17 @@ function writeValue(kind: Kind, value: unknown, path: string, depth: number, sin
     case "int":
       return writeInt(value, path, sink);
     case "bigint":
-      return isBigint(value) ? writeBigint(value, path, sink) : refuse("WrongType", path, "expected a bigint");
+      return isBigint(value)
+        ? writeScalar(bigintText(value), path, sink)
+        : refuse("WrongType", path, "expected a bigint");
     case "float":
-      return isNumber(value) ? writeFloat(value, path, sink) : refuse("WrongType", path, "expected a number");
+      return isNumber(value)
+        ? writeScalar(floatText(value), path, sink)
+        : refuse("WrongType", path, "expected a number");
     case "string":
-      return isString(value) ? writeString(value, path, sink) : refuse("WrongType", path, "expected a string");
+      return isString(value)
+        ? writeScalar(stringText(value), path, sink)
+        : refuse("WrongType", path, "expected a string");
     case "uuid":
       return writeUuid(value, path, sink);
     case "decimal":
@@ -146,6 +153,8 @@ function writeValue(kind: Kind, value: unknown, path: string, depth: number, sin
       return writeRecord(kind.value, value, path, depth, sink);
     case "object":
       return writeObject(kind, value, path, depth, sink);
+    case "json":
+      return writeJsonText(jsonValueText(value, path, depth, MAX_VALUE_JSON_DEPTH), sink);
     default:
       return unreachable(kind, "writeValue");
   }
@@ -163,37 +172,14 @@ function writeInt(value: unknown, path: string, sink: Sink): Written {
   return append(sink, String(value));
 }
 
-/** An integer of at most `MAX_INT_DIGITS` digits. */
-function writeBigint(value: bigint, path: string, sink: Sink): Written {
-  const text = value.toString();
-  const digits = value < 0n ? text.length - 1 : text.length;
-
-  if (digits > MAX_INT_DIGITS) {
-    return refuse("IntegerTooLong", path, `more than ${MAX_INT_DIGITS} digits`);
-  }
-
-  return append(sink, text);
+/** The text of a scalar, or its refusal at `path`. */
+function writeScalar(text: Result<string, ScalarRefused>, path: string, sink: Sink): Written {
+  return text.ok ? append(sink, text.value) : refuse(text.error.kind, path, text.error.detail);
 }
 
-/** Python's float text of a finite number. */
-function writeFloat(value: number, path: string, sink: Sink): Written {
-  if (!Number.isFinite(value)) {
-    return refuse("NonFiniteFloat", path, "NaN and the infinities are not stored");
-  }
-
-  return append(sink, pythonFloatText(value));
-}
-
-/**
- * A well-formed string as `JSON.stringify` writes it, which is Python's text: `"`, `\` and U+0000 to U+001F are
- * escaped (`\b`, `\f`, `\n`, `\r`, `\t`, else `\u00xx`); other characters are written as they are.
- */
-function writeString(value: string, path: string, sink: Sink): Written {
-  if (!value.isWellFormed()) {
-    return refuse("LoneSurrogate", path, "a string holds a lone surrogate");
-  }
-
-  return append(sink, JSON.stringify(value));
+/** The text of a JSON value, or the JSON writer's refusal, which names its own path. */
+function writeJsonText(text: Result<string, EncodeRefused>, sink: Sink): Written {
+  return text.ok ? append(sink, text.value) : text;
 }
 
 /** A UUID text in the lower-case 8-4-4-4-12 form, as it is. */
@@ -333,7 +319,7 @@ function writeKey(key: string, path: string, sink: Sink): Written {
     return refuse("EngineKey", path, "a key that only the engine writes");
   }
 
-  return writeString(key, path, sink);
+  return writeScalar(stringText(key), path, sink);
 }
 
 function writeRecord(entryKind: Kind, value: unknown, path: string, depth: number, sink: Sink): Written {

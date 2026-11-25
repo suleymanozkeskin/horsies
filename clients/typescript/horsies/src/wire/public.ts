@@ -10,6 +10,8 @@ export type {
 
 export type { DecimalRefused } from "../codec/decimal-text.ts";
 
+export type { JsonValue } from "../codec/json-value.ts";
+
 export { h, type WireBuilders } from "./builders.ts";
 
 export { Decimal } from "./decimal.ts";
