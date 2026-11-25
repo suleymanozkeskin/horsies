@@ -24,8 +24,9 @@
 //!   last statement that confirmed the lock. Past [`LIVENESS_REGAIN_BOUND`],
 //!   with stale running recovery on and a task held, the worker fails closed
 //!   as for a lost heartbeat: it kills every child that holds a task and ends
-//!   the process with [`LIVENESS_LOCK_LOST_EXIT_CODE`], with no drain, before
-//!   a peer can judge it gone. With no task held, no task is at risk: it runs
+//!   the process with [`LIVENESS_LOCK_LOST_EXIT_CODE`], with no drain of its
+//!   tasks, before a peer can judge it gone. The process ends through the
+//!   worker's [`ProcessExit`]. With no task held, no task is at risk: it runs
 //!   on and keeps taking the lock again; a task that it starts while the
 //!   lock is still not held makes it fail closed at the next watch.
 //! - Peers judge an owner gone when two reaper reads at least
@@ -52,6 +53,7 @@ use crate::db::{
     LockSession, LockTake, SessionLockFailure, Transience, UrlError, SESSION_LOCK_RECONNECT_FIRST,
     SESSION_LOCK_RECONNECT_LIMIT, SESSION_LOCK_STATEMENT_BOUND,
 };
+use crate::process_exit::ProcessExit;
 use crate::worker::runner_beats::{kill_held_children, LiveDispatches};
 use crate::worker::thread_dispatch::with_starter_dispatch;
 
@@ -385,6 +387,8 @@ struct WatchContext {
     shared: SharedConfirmation,
     rule: LivenessRule,
     live: LiveDispatches,
+    /// How the watchdog ends the process when it fails closed.
+    exit: ProcessExit,
 }
 
 /// A running liveness lock: its holder task, its watchdog thread, and the
@@ -408,7 +412,8 @@ pub(crate) struct StartedLivenessLock {
 
 /// Take the liveness lock of `worker_id` on a new connection of `plan` (one
 /// attempt), then start its holder on the current runtime and its watchdog
-/// on its own thread. The watchdog acts by `rule` on the tasks of `live`.
+/// on its own thread. The watchdog acts by `rule` on the tasks of `live`,
+/// and ends the process through `exit` when it fails closed.
 ///
 /// Errors: [`LivenessStartError::Lock`] when the connection or the lock
 /// statement failed (its transience tells whether a later attempt can
@@ -419,6 +424,7 @@ pub(crate) async fn start_liveness_lock(
     worker_id: &str,
     rule: LivenessRule,
     live: LiveDispatches,
+    exit: ProcessExit,
 ) -> Result<StartedLivenessLock, LivenessStartError> {
     let started = Instant::now();
     let (session, take) = LockSession::open(&plan, LIVENESS_LOCK_SQL, worker_id.to_owned())
@@ -436,6 +442,7 @@ pub(crate) async fn start_liveness_lock(
         shared: shared.clone(),
         rule,
         live,
+        exit,
     };
     let watch = std::thread::Builder::new()
         .name(WATCH_THREAD_NAME.to_owned())
@@ -714,8 +721,8 @@ fn describe(hold: &Hold) -> String {
 /// The lock was not confirmed for `unconfirmed`, past the regain bound,
 /// while a task is held: a peer may judge this worker gone and recover the
 /// task. Close the registry, kill every child that holds a task, and end
-/// the process at once, with no drain. A panic while killing also ends the
-/// process.
+/// the process at once through the worker's [`ProcessExit`], with no drain
+/// of its tasks. A panic while killing also ends the process.
 fn fail_closed(context: &WatchContext, unconfirmed: Duration, hold: &Hold) -> ! {
     tracing::error!(
         exit_code = LIVENESS_LOCK_LOST_EXIT_CODE,
@@ -732,7 +739,7 @@ fn fail_closed(context: &WatchContext, unconfirmed: Duration, hold: &Hold) -> ! 
             tracing::error!("killing the children panicked; ending the process");
         }
     }
-    std::process::exit(LIVENESS_LOCK_LOST_EXIT_CODE)
+    context.exit.end(LIVENESS_LOCK_LOST_EXIT_CODE)
 }
 
 #[cfg(test)]

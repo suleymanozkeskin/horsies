@@ -176,8 +176,8 @@ pub enum CancelEnd {
     /// The task and its work ended within the cancel grace after the cancel
     /// at the deadline: the child sent no `second_cancel`.
     ReturnedAfterSignal,
-    /// Something of the run was alive after the cancel grace: the child sent
-    /// `second_cancel` and stopped it (a Rust child drops the future).
+    /// Something of the run was alive after the cancel grace, and the child
+    /// sent `second_cancel`.
     DroppedAfterGrace,
     /// The run ended when the worker killed its child, before the child
     /// reported its end.
