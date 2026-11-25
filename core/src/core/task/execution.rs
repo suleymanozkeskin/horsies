@@ -140,7 +140,8 @@ impl<'de> serde::Deserialize<'de> for ExecutionClass {
     }
 }
 
-/// Task options whose `execution` or `cancel_grace_ms` does not validate.
+/// Task options whose `execution` or `cancel_grace_ms` does not validate, or
+/// whose shared class has no `timeout_ms` (`check_shared_timeout`).
 ///
 /// `detail` names the field and the cause. It holds no option value.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -160,7 +161,8 @@ pub struct InvalidExecution {
 ///   operator cancel to the kill of the child; none means no kill); absent
 ///   or `null` for `SHARED_THREAD`, whose thread cannot be stopped.
 ///
-/// Other option fields are not checked. Does no I/O.
+/// Other option fields are not checked: a new send checks the `timeout_ms`
+/// of a shared class with `check_shared_timeout`. Does no I/O.
 pub fn stored_execution(
     options: Option<&Map<String, Value>>,
 ) -> Result<Execution, InvalidExecution> {
@@ -227,6 +229,39 @@ fn bounded_grace_error(raw: &Value) -> Option<String> {
             "cancel_grace_ms is a JSON {}, not an int",
             json_type_name(other)
         )),
+    }
+}
+
+/// The `timeout_ms` rule of the class `execution` at a new send
+/// (`CheckedSend::check`): `SHARED_ASYNC` and `SHARED_THREAD` need a timeout,
+/// because a shared child runs other tasks next to this one and the timeout
+/// ends a task that does not return. `ISOLATED` runs with or without one.
+/// The Rust task macro and the Python task decorator refuse the same
+/// declaration at registration. A schedule and a rerun do not apply this
+/// rule: they write such options, and the worker refuses the run.
+///
+/// `timeout_ms` is the raw member of the decoded options: absent (`None`)
+/// and `null` are no timeout. A present value is not judged here; the
+/// dispatch read of the stored options (`read_stored_options`) checks its
+/// type and its bounds. Does no I/O.
+///
+/// Errors: [`InvalidExecution`] for a shared class with no timeout.
+pub(crate) fn check_shared_timeout(
+    execution: Execution,
+    timeout_ms: Option<&Value>,
+) -> Result<(), InvalidExecution> {
+    match (execution, timeout_ms) {
+        (Execution::SharedAsync | Execution::SharedThread, None | Some(Value::Null)) => {
+            Err(InvalidExecution {
+                detail: format!(
+                    "timeout_ms is absent for execution {execution}; a shared class requires \
+                     timeout_ms"
+                ),
+            })
+        }
+        (Execution::SharedAsync | Execution::SharedThread, Some(_)) | (Execution::Isolated, _) => {
+            Ok(())
+        }
     }
 }
 
@@ -358,6 +393,56 @@ mod tests {
                     .to_owned()
             })
         );
+    }
+
+    /// A shared class with no `timeout_ms` is refused: an absent member and
+    /// `null` are both no timeout.
+    #[test]
+    fn a_shared_class_without_a_timeout_is_refused() {
+        let null = Value::Null;
+        for (execution, detail) in [
+            (
+                Execution::SharedAsync,
+                "timeout_ms is absent for execution SHARED_ASYNC; a shared class requires \
+                 timeout_ms",
+            ),
+            (
+                Execution::SharedThread,
+                "timeout_ms is absent for execution SHARED_THREAD; a shared class requires \
+                 timeout_ms",
+            ),
+        ] {
+            for timeout_ms in [None, Some(&null)] {
+                assert_eq!(
+                    check_shared_timeout(execution, timeout_ms),
+                    Err(InvalidExecution {
+                        detail: detail.to_owned()
+                    }),
+                    "{execution} {timeout_ms:?}"
+                );
+            }
+        }
+    }
+
+    /// `ISOLATED` runs with or without a timeout, and a shared class with a
+    /// timeout passes the rule.
+    #[test]
+    fn an_isolated_class_or_a_shared_class_with_a_timeout_passes() {
+        let null = Value::Null;
+        let timeout = serde_json::json!(30_000);
+        for (execution, timeout_ms) in [
+            (Execution::Isolated, None),
+            (Execution::Isolated, Some(&null)),
+            (Execution::Isolated, Some(&timeout)),
+            (Execution::SharedAsync, Some(&timeout)),
+            (Execution::SharedThread, Some(&timeout)),
+        ] {
+            assert_eq!(
+                check_shared_timeout(execution, timeout_ms),
+                Ok(()),
+                "{execution} {timeout_ms:?}"
+            );
+        }
     }
 
     #[test]

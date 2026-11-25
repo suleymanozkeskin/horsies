@@ -25,6 +25,20 @@ and there is no migration contract between pre-1.0 versions.
   `CRON_NUMERIC_STEP`, `CRON_ENUM_STEP`, `CRON_MONTH_SPAN`,
   `CRON_WEEKDAY_SPAN`). The pattern rules read them; their messages do not
   change.
+- **Child host: the run handle and host-held work.**
+  `horsies_core::current_run()` gives the `RunHandle` of the current async
+  run, or `RunHandleRefused::NotInAnAsyncRun` outside an async body and on
+  the thread of a blocking body. `RunHandle` is `Clone + Send + Sync`.
+  `RunHandle::register_host_work(name)` registers a piece of work that a
+  host program runs outside the Rust runtime; it counts toward
+  `MAX_RUN_WORK` and is refused with `HostWorkRefused::RunEnded` or
+  `TooMuchWork { bound }`. A cancel round asks a `HostWork` to stop
+  (`HostWork::stop_requested`, `HostWork::stop_state`) with a
+  `WorkStopCause`, `RunCancelled { cause }` or `LeftWork`, and does not
+  remove it. The piece leaves the run at `HostWork::end` or at a drop. A
+  piece alive after the rounds is named in `left_work_stuck`,
+  `leftover_stuck` or `run_stuck`, and the run keeps its seat until the
+  piece ends. Work of `spawn_in_run` and the Rust client do not change.
 
 ### Changed
 
@@ -56,6 +70,64 @@ and there is no migration contract between pre-1.0 versions.
   new field and takes the new variants. `HourlySchedule.second` reads its
   default from `default_hourly_second` (0), as before. The generated Python
   package does not change.
+- **Child host: the host loop watch.** `ChildApp` has a new field
+  `event_loop: EventLoopWatch`, `RuntimeOnly` or `Host(Arc<HostLoop>)`. A
+  host program that runs task code on an event loop of its own gives the
+  child a `HostLoop`: its timer calls `HostLoop::turned` every
+  `HOST_LOOP_TURN_TICK` (100 ms), and it marks the run whose code the loop
+  runs with `HostLoop::hold(task_id)` and `HostLoop::release`. The watch
+  thread of a shared async child, and of a shared thread child for its
+  main thread, sends one `loop_blocked` frame when the loop has not turned
+  for `LOOP_BLOCK_LIMIT` (5 s). The culprit is the held run when every
+  sample of the block saw it (a sample counts after 200 ms with no turn);
+  else no run is named. An isolated child watches no host loop. Code that
+  builds a `ChildApp` sets the new field; the Rust client sets
+  `RuntimeOnly`, and its poll watch does not change.
+- **Child host: start facts for start hooks.** `NamedChildStartHook::start`
+  takes a `ChildStartFacts`: `Isolated`, `SharedAsync { seats }`,
+  `SharedThread { seats }` or `Handler`, read from the init frame before
+  the first hook. A host that starts its own seats in a start hook reads
+  the seat count there. Code that builds a `NamedChildStartHook` takes the
+  argument. The Rust client's `on_child_start` and
+  `on_handler_child_start` do not change: their hooks take no argument.
+- **Exits from core threads: `ProcessExit`.** `horsies_core::ProcessExit`
+  names how the core ends the process from its own threads: the control
+  and writer threads of a child (exit codes 71 and 72) and the fail-closed
+  liveness and runner heartbeat watches of a worker (79 and 77).
+  `Standard` is `std::process::exit`, as before. `Immediate(ExitDrain)`
+  runs the drain (with `ExitDrain::WithHost` the host's own drain, then a
+  flush of Rust's standard output and standard error) for at most
+  `EXIT_DRAIN_BOUND` (2 s), then ends the process with `libc::_exit`, so
+  no exit handler of the host runtime runs. `ChildApp` has a new field
+  `exit`, and `Worker::from_plan` takes the exit as its fourth argument.
+  The Rust client and the Python bridge pass `Standard`; their exits do
+  not change.
+
+### Fixed
+
+- **A schema install of the `TYPESCRIPT` client family into an empty
+  database records its family row.** The install writes the family row in
+  the transaction of the first migration whose `CHECK`
+  `horsies_client_family_family_known` admits the value: migration 1000 for
+  `PYTHON` and `RUST`, as before, and migration 1006 for `TYPESCRIPT`.
+  Before, every install wrote the row in the transaction of migration 1000,
+  whose `CHECK` admits only `PYTHON` and `RUST`: an install with
+  `ClientFamily::TypeScript` into an empty database failed with SQLSTATE
+  23514 and wrote nothing. A Python or a Rust install does not change. A
+  `TYPESCRIPT` install into an empty database that stops before migration
+  1006 commits leaves no family row. No handle writes into a database with
+  no family row, and the next install, of any client family, applies the
+  rest of the chain and records its own family.
+- **A send refuses a shared task with no `timeout_ms`.** A send of a
+  `SHARED_ASYNC` or `SHARED_THREAD` task whose task options have no
+  `timeout_ms` (absent or `null`) is refused before any statement, and
+  nothing is written: the send gives `VALIDATION_FAILED`, and a broker
+  enqueue gives `INVALID_TASK_OPTIONS`. Before, the send wrote the task, and
+  each worker failed its run with `WORKER_SERIALIZATION_ERROR`. A schedule
+  and a rerun do not change: they write the task, and the worker refuses
+  its run as before. The Rust task macro and the Python task decorator
+  refuse such a task at registration, so the tasks that they register do not
+  change.
 
 ## [0.8.1] - 2026-11-25
 

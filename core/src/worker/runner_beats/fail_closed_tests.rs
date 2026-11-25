@@ -170,6 +170,7 @@ fn launch(
         live.clone(),
         beats_cancel.clone(),
         fail_closed_stop.clone(),
+        ProcessExit::Standard,
     )
     .expect("the watchdog thread starts");
     Launched {
@@ -532,6 +533,7 @@ fn launch_defective(live: &LiveDispatches, stale_running: StaleRunningRecovery) 
         live.clone(),
         beats_cancel.clone(),
         fail_closed_stop.clone(),
+        ProcessExit::Standard,
         |_coverage| defective_writer(),
     )
     .expect("the watchdog thread starts");
@@ -873,6 +875,73 @@ fn a_worker_that_does_not_stop_within_the_grace_is_exited() {
     assert_eq!(status.code(), Some(RUNNER_HEARTBEAT_LOST_EXIT_CODE));
     assert!(elapsed >= FAIL_CLOSED_EXIT_GRACE, "{elapsed:?}");
     assert!(elapsed < FAIL_CLOSED_EXIT_GRACE + WAIT, "{elapsed:?}");
+}
+
+/// Set only in the process that
+/// [`an_immediate_exit_after_a_worker_that_did_not_stop_gives_77`] starts.
+const IMMEDIATE_EXIT_PROBE_ENV: &str = "HORSIES_TEST_RUNNER_BEATS_IMMEDIATE_EXIT_PROBE";
+const IMMEDIATE_EXIT_PROBE_TEST: &str =
+    "worker::runner_beats::fail_closed_tests::immediate_exit_probe";
+
+/// The body of the immediate exit probe: after a fail-closed request, a
+/// worker that did not stop (the outcome of the grace), or steps that
+/// panicked, end the process through the immediate exit from the watchdog
+/// thread, while the main thread spins. The probe variable names the case;
+/// without it this test returns at once.
+#[test]
+fn immediate_exit_probe() {
+    let Some(case) = std::env::var_os(IMMEDIATE_EXIT_PROBE_ENV) else {
+        return;
+    };
+    let stopped: std::thread::Result<WorkerStop> =
+        match case.to_str() {
+            Some("not-stopped") => Ok(WorkerStop::NotStopped),
+            Some("panicked") => Err(Box::new("scripted panic of the fail-closed steps")
+                as Box<dyn std::any::Any + Send>),
+            other => panic!("unknown probe case {other:?}"),
+        };
+    let exit = ProcessExit::Immediate(crate::process_exit::ExitDrain::OutputOnly);
+    let _watch = std::thread::spawn(move || exit_unless_stopped(&exit, &stopped));
+    let until = Instant::now() + WAIT;
+    while Instant::now() < until {
+        std::hint::spin_loop();
+    }
+    panic!("the watchdog did not end the process");
+}
+
+/// A worker whose exit is immediate: when it did not stop within the grace
+/// after its watchdog failed closed, or the fail-closed steps panicked, the
+/// watchdog ends the process with 77 (`RUNNER_HEARTBEAT_LOST_EXIT_CODE`)
+/// from its own thread while the main thread is busy.
+#[test]
+fn an_immediate_exit_after_a_worker_that_did_not_stop_gives_77() {
+    for case in ["not-stopped", "panicked"] {
+        let status = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+            .args([
+                "--exact",
+                IMMEDIATE_EXIT_PROBE_TEST,
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(IMMEDIATE_EXIT_PROBE_ENV, case)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("the probe process runs");
+        assert_eq!(
+            status.code(),
+            Some(RUNNER_HEARTBEAT_LOST_EXIT_CODE),
+            "{case}"
+        );
+    }
+    assert_eq!(RUNNER_HEARTBEAT_LOST_EXIT_CODE, 77);
+}
+
+/// A worker that stopped within the grace: nothing ends the process.
+#[test]
+fn a_worker_that_stopped_after_a_fail_closed_request_is_not_exited() {
+    let exit = ProcessExit::Immediate(crate::process_exit::ExitDrain::OutputOnly);
+    exit_unless_stopped(&exit, &Ok(WorkerStop::Stopped));
 }
 
 // ---------------------------------------------------------------------------
