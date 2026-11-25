@@ -23,6 +23,17 @@ import {
   memberPath,
   ROOT_PATH,
 } from "./refusal.ts";
+import {
+  instantText,
+  isInstant,
+  isPlainDate,
+  isPlainDateTime,
+  isZonedDateTime,
+  offsetDateTimeText,
+  plainDateText,
+  plainDateTimeText,
+  type TemporalWriteRefused,
+} from "./temporal-text.ts";
 import { isArray, isBigint, isBoolean, isNumber, isObjectLike, isPlainObject, isString } from "./values.ts";
 
 /** The text that one call builds. Never shared between calls. */
@@ -86,6 +97,22 @@ function writeValue(kind: Kind, value: unknown, path: string, depth: number, sin
       return isNumber(value) ? writeFloat(value, path, sink) : refuse("WrongType", path, "expected a number");
     case "string":
       return isString(value) ? writeString(value, path, sink) : refuse("WrongType", path, "expected a string");
+    case "instant":
+      return isInstant(value)
+        ? writeTemporal(instantText(value), path, sink)
+        : refuse("WrongType", path, "expected a Temporal.Instant");
+    case "offsetDateTime":
+      return isZonedDateTime(value)
+        ? writeTemporal(offsetDateTimeText(value), path, sink)
+        : refuse("WrongType", path, "expected a Temporal.ZonedDateTime");
+    case "plainDateTime":
+      return isPlainDateTime(value)
+        ? writeTemporal(plainDateTimeText(value), path, sink)
+        : refuse("WrongType", path, "expected a Temporal.PlainDateTime");
+    case "plainDate":
+      return isPlainDate(value)
+        ? writeTemporal(plainDateText(value), path, sink)
+        : refuse("WrongType", path, "expected a Temporal.PlainDate");
     case "nullable":
       return value === null ? append(sink, "null") : writeValue(kind.inner, value, path, depth, sink);
     case "array":
@@ -144,6 +171,11 @@ function writeString(value: string, path: string, sink: Sink): Written {
   }
 
   return append(sink, JSON.stringify(value));
+}
+
+/** A date-time text as a JSON string; the text holds no character that JSON escapes. */
+function writeTemporal(text: Result<string, TemporalWriteRefused>, path: string, sink: Sink): Written {
+  return text.ok ? append(sink, `"${text.value}"`) : refuse(text.error.kind, path, text.error.detail);
 }
 
 /** The refusal of a value that is not the container that `expected` names. */

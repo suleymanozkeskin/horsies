@@ -25,6 +25,13 @@ import {
   memberPath,
   ROOT_PATH,
 } from "./refusal.ts";
+import {
+  readInstant,
+  readOffsetDateTime,
+  readPlainDate,
+  readPlainDateTime,
+  type TemporalReadRefused,
+} from "./temporal-text.ts";
 import { isBigint, isBoolean, isNumber, isString, setOwn } from "./values.ts";
 
 /**
@@ -76,6 +83,14 @@ export function decodeNode(kind: Kind, node: TreeValue, path: string, depth: num
       return decodeFloat(node, path);
     case "string":
       return isString(node) ? ok(node) : refuse("WrongType", path, "expected a string");
+    case "instant":
+      return decodeText(node, path, readInstant);
+    case "offsetDateTime":
+      return decodeText(node, path, readOffsetDateTime);
+    case "plainDateTime":
+      return decodeText(node, path, readPlainDateTime);
+    case "plainDate":
+      return decodeText(node, path, readPlainDate);
     case "nullable":
       return node === null ? ok(null) : decodeNode(kind.inner, node, path, depth, form);
     case "array":
@@ -89,6 +104,21 @@ export function decodeNode(kind: Kind, node: TreeValue, path: string, depth: num
     default:
       return unreachable(kind, "decodeNode");
   }
+}
+
+/** A value stored as a JSON string with its own text form. */
+function decodeText<T>(
+  node: TreeValue,
+  path: string,
+  read: (text: string) => Result<T, TemporalReadRefused>,
+): Decoded {
+  if (!isString(node)) {
+    return refuse("WrongType", path, "expected a string");
+  }
+
+  const value = read(node);
+
+  return value.ok ? value : refuse(value.error.kind, path, value.error.detail);
 }
 
 function decodeInt(node: TreeValue, path: string): Decoded {

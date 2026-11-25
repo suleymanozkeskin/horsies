@@ -23,6 +23,18 @@ export type FloatKind = { readonly node: "float" };
 /** A well-formed string. */
 export type StringKind = { readonly node: "string" };
 
+/** A `Temporal.Instant`, stored as a UTC date-time: `YYYY-MM-DDTHH:MM:SS[.f]Z`. */
+export type InstantKind = { readonly node: "instant" };
+
+/** A `Temporal.ZonedDateTime` with a fixed-offset zone, stored with its offset (`Z` for offset 0). */
+export type OffsetDateTimeKind = { readonly node: "offsetDateTime" };
+
+/** A `Temporal.PlainDateTime`, stored without an offset. */
+export type PlainDateTimeKind = { readonly node: "plainDateTime" };
+
+/** A `Temporal.PlainDate`, stored as `YYYY-MM-DD`. */
+export type PlainDateKind = { readonly node: "plainDate" };
+
 /** `null`, or a value of `inner`. */
 export type NullableKind = { readonly node: "nullable"; readonly inner: Kind };
 
@@ -67,6 +79,10 @@ export type Kind =
   | BigintKind
   | FloatKind
   | StringKind
+  | InstantKind
+  | OffsetDateTimeKind
+  | PlainDateTimeKind
+  | PlainDateKind
   | NullableKind
   | ArrayKind
   | TupleKind
@@ -79,6 +95,10 @@ export const INT_KIND: IntKind = Object.freeze({ node: "int" });
 export const BIGINT_KIND: BigintKind = Object.freeze({ node: "bigint" });
 export const FLOAT_KIND: FloatKind = Object.freeze({ node: "float" });
 export const STRING_KIND: StringKind = Object.freeze({ node: "string" });
+export const INSTANT_KIND: InstantKind = Object.freeze({ node: "instant" });
+export const OFFSET_DATE_TIME_KIND: OffsetDateTimeKind = Object.freeze({ node: "offsetDateTime" });
+export const PLAIN_DATE_TIME_KIND: PlainDateTimeKind = Object.freeze({ node: "plainDateTime" });
+export const PLAIN_DATE_KIND: PlainDateKind = Object.freeze({ node: "plainDate" });
 export const REQUIRED: MemberPresence = Object.freeze({ mode: "required" });
 export const OPTIONAL: MemberPresence = Object.freeze({ mode: "optional" });
 

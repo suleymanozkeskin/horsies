@@ -36,6 +36,10 @@ function walk(kind: Kind, path: string, level: number, refusals: KindRefused[]):
     case "bigint":
     case "float":
     case "string":
+    case "instant":
+    case "offsetDateTime":
+    case "plainDateTime":
+    case "plainDate":
       return;
     case "nullable":
       return walk(kind.inner, path, level, refusals);

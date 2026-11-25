@@ -13,6 +13,10 @@ describe("h.* builders", () => {
     assert.equal(kindOf(h.int()).node, "int");
     assert.equal(kindOf(h.bigint()).node, "bigint");
     assert.equal(kindOf(h.float()).node, "float");
+    assert.equal(kindOf(h.instant()).node, "instant");
+    assert.equal(kindOf(h.offsetDateTime()).node, "offsetDateTime");
+    assert.equal(kindOf(h.plainDateTime()).node, "plainDateTime");
+    assert.equal(kindOf(h.plainDate()).node, "plainDate");
   });
 
   test("h.object keeps the declaration order and the presence of each member", () => {

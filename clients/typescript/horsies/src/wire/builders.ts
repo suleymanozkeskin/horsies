@@ -15,12 +15,16 @@ import {
   BIGINT_KIND,
   BOOLEAN_KIND,
   FLOAT_KIND,
+  INSTANT_KIND,
   INT_KIND,
   type Kind,
   type Member,
   NULL_KIND,
   type ObjectKind,
   objectKind,
+  OFFSET_DATE_TIME_KIND,
+  PLAIN_DATE_KIND,
+  PLAIN_DATE_TIME_KIND,
   STRING_KIND,
 } from "./kinds.ts";
 import { kindOf, presenceOf, type Wire, wireOf } from "./wire-type.ts";
@@ -39,6 +43,17 @@ export interface WireBuilders {
   bigint(): Wire<bigint>;
   /** A finite float, stored in Python's float text: `7.0`, `1e-05`, `1e+16`, `-0.0`. */
   float(): Wire<number>;
+  /** A `Temporal.Instant`, stored in UTC: `2026-08-12T09:10:12.654321Z`. */
+  instant(): Wire<Temporal.Instant>;
+  /**
+   * A `Temporal.ZonedDateTime` whose zone is a fixed offset, stored with the offset:
+   * `2026-08-12T09:10:12.654321+02:00` (`Z` for offset 0). A named zone, `UTC` too, is refused.
+   */
+  offsetDateTime(): Wire<Temporal.ZonedDateTime>;
+  /** A `Temporal.PlainDateTime`, stored without an offset: `2026-08-12T09:10:12.654321`. */
+  plainDateTime(): Wire<Temporal.PlainDateTime>;
+  /** A `Temporal.PlainDate`, stored as `2026-08-12`. */
+  plainDate(): Wire<Temporal.PlainDate>;
   /** An object with declared members, stored in declaration order. An undeclared key is refused. */
   object<const M extends WireMembers>(members: M): Wire<ObjectValue<M>, ObjectSent<M>>;
   /** A JSON array of one item type. */
@@ -85,6 +100,10 @@ export const h: WireBuilders = Object.freeze({
   int: (): Wire<number> => wireOf(INT_KIND),
   bigint: (): Wire<bigint> => wireOf(BIGINT_KIND),
   float: (): Wire<number> => wireOf(FLOAT_KIND),
+  instant: (): Wire<Temporal.Instant> => wireOf(INSTANT_KIND),
+  offsetDateTime: (): Wire<Temporal.ZonedDateTime> => wireOf(OFFSET_DATE_TIME_KIND),
+  plainDateTime: (): Wire<Temporal.PlainDateTime> => wireOf(PLAIN_DATE_TIME_KIND),
+  plainDate: (): Wire<Temporal.PlainDate> => wireOf(PLAIN_DATE_KIND),
   object: <const M extends WireMembers>(members: M): Wire<ObjectValue<M>, ObjectSent<M>> =>
     wireOf(objectKind(membersOf(members))),
   array: <W extends RequiredWire>(item: W): Wire<ValueOf<W>[], SentOf<W>[]> =>

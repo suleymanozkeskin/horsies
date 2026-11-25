@@ -24,7 +24,13 @@ export type EncodeRefusalKind =
   /** The value is nested deeper than the core's bound of a user value. */
   | "TooDeep"
   /** The value is not data: a `Date`, `Map`, `Set`, function, class instance, or an object with a symbol key. */
-  | "NotJsonNative";
+  | "NotJsonNative"
+  /** A date-time outside the years 1 to 9999 (Python's `datetime` range). */
+  | "YearOutOfRange"
+  /** An `h.offsetDateTime()` value whose zone is named, not a fixed offset. */
+  | "NamedTimeZone"
+  /** A Temporal value of a calendar other than `iso8601`. */
+  | "NotIsoCalendar";
 
 /** Why the reader refuses a stored text under the declared kind. */
 export type DecodeRefusalKind =
@@ -41,7 +47,9 @@ export type DecodeRefusalKind =
   /** A key that only the engine writes. */
   | "EngineKey"
   /** The value is nested deeper than the core's bound of a user value. */
-  | "TooDeep";
+  | "TooDeep"
+  /** A string that is not the stored text of its date-time kind. */
+  | "BadTemporalText";
 
 /** The writer refuses a value. */
 export type EncodeRefused = {

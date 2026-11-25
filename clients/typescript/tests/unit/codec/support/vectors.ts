@@ -3,6 +3,12 @@
 
 import { readFileSync } from "node:fs";
 
+import {
+  isInstant,
+  isPlainDate,
+  isPlainDateTime,
+  isZonedDateTime,
+} from "../../../../horsies/src/codec/temporal-text.ts";
 import { isArray, isBigint, isNumber, isPlainObject, isString } from "../../../../horsies/src/codec/values.ts";
 import { h } from "../../../../horsies/src/wire/builders.ts";
 import type { AnyWire } from "../../../../horsies/src/wire/infer.ts";
@@ -87,6 +93,14 @@ export function declaredWires(type: string, notation: Notation | undefined): rea
       return [{ label: "float", wire: h.float() }];
     case "str":
       return [{ label: "string", wire: h.string() }];
+    case "datetime_utc":
+      return [{ label: "instant", wire: h.instant() }];
+    case "datetime_offset":
+      return [{ label: "offsetDateTime", wire: h.offsetDateTime() }];
+    case "datetime_naive":
+      return [{ label: "plainDateTime", wire: h.plainDateTime() }];
+    case "date":
+      return [{ label: "plainDate", wire: h.plainDate() }];
     case "optional_i64":
       return [{ label: "int.nullable", wire: h.int().nullable() }];
     case "list_i64":
@@ -139,6 +153,14 @@ export function valueOf(type: string, declared: Declared, notation: Notation | u
       return declared.label === "int" ? Number(notationText(notation)) : BigInt(notationText(notation));
     case "f64":
       return floatOf(notation);
+    case "datetime_utc":
+      return Temporal.Instant.from(notationText(notation));
+    case "datetime_offset":
+      return zonedOf(notationText(notation));
+    case "datetime_naive":
+      return Temporal.PlainDateTime.from(notationText(notation));
+    case "date":
+      return Temporal.PlainDate.from(notationText(notation));
     case "optional_i64":
       return notation === null ? null : Number(notationText(notation));
     case "list_i64":
@@ -154,6 +176,11 @@ export function valueOf(type: string, declared: Declared, notation: Notation | u
     default:
       throw new TypeError(`no value for the vector type ${type}`);
   }
+}
+
+/** A date-time text with a `±HH:MM` offset, as a value whose zone is that fixed offset. */
+function zonedOf(text: string): Temporal.ZonedDateTime {
+  return Temporal.ZonedDateTime.from(`${text}[${text.slice(-6)}]`);
 }
 
 function notationList(notation: Notation | undefined): readonly Notation[] {
@@ -230,6 +257,22 @@ export function parameterCases(parameters: readonly Parameter[]): readonly Param
 
 /** Strict equality of decoded values: `-0`, `bigint`, key order, and the class of each value. */
 export function sameValue<A, E>(actual: A, expected: E): boolean {
+  if (isInstant(expected)) {
+    return isInstant(actual) && actual.equals(expected);
+  }
+
+  if (isZonedDateTime(expected)) {
+    return isZonedDateTime(actual) && actual.equals(expected);
+  }
+
+  if (isPlainDateTime(expected)) {
+    return isPlainDateTime(actual) && actual.equals(expected);
+  }
+
+  if (isPlainDate(expected)) {
+    return isPlainDate(actual) && actual.equals(expected);
+  }
+
   if (isNumber(expected) || !isArray(expected) && !isPlainObject(expected)) {
     return Object.is(actual, expected);
   }
