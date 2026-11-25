@@ -90,6 +90,18 @@ and there is no migration contract between pre-1.0 versions.
   the seat count there. Code that builds a `NamedChildStartHook` takes the
   argument. The Rust client's `on_child_start` and
   `on_handler_child_start` do not change: their hooks take no argument.
+- **Exits from core threads: `ProcessExit`.** `horsies_core::ProcessExit`
+  names how the core ends the process from its own threads: the control
+  and writer threads of a child (exit codes 71 and 72) and the fail-closed
+  liveness and runner heartbeat watches of a worker (79 and 77).
+  `Standard` is `std::process::exit`, as before. `Immediate(ExitDrain)`
+  runs the drain (a flush of Rust's standard output and standard error,
+  and with `ExitDrain::WithHost` the host's own drain) for at most
+  `EXIT_DRAIN_BOUND` (2 s), then ends the process with `libc::_exit`, so
+  no exit handler of the host runtime runs. `ChildApp` has a new field
+  `exit`, and `Worker::from_plan` takes the exit as its fourth argument.
+  The Rust client and the Python bridge pass `Standard`; their exits do
+  not change.
 
 ## [0.8.1] - 2026-11-25
 

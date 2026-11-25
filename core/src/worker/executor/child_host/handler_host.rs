@@ -52,6 +52,7 @@ use super::link::{start_control_thread, Flushed, FrameWriter};
 use super::rss::read_rss;
 use super::seats::ServeEnd;
 use crate::events::{decode_event, Event, EventDecodeError, WireValue};
+use crate::process_exit::ProcessExit;
 use crate::worker::executor::protocol::{
     ChildFrame, FrameReader, HandlerStatsFrame, ParentFrame, ProcessId, ReadyFrame,
     ReportedBootCause,
@@ -98,11 +99,13 @@ impl HandlerChildTimes {
 }
 
 /// Boot a handler child on `socket`, whose init frame `reader` read, and
-/// serve it until the stop frame or the end of the parent.
+/// serve it until the stop frame or the end of the parent. Its writer and
+/// control threads end the process through `exit`.
 pub(super) fn boot_and_serve_handlers(
     app: HandlerChildApp,
     socket: &UnixStream,
     reader: FrameReader,
+    exit: ProcessExit,
 ) -> ChildHostExit {
     let runtime = match start_child_runtime(HANDLER_RUNTIME_THREADS) {
         Ok(runtime) => runtime,
@@ -110,7 +113,7 @@ pub(super) fn boot_and_serve_handlers(
             return boot_failed(socket, cause, "RuntimeStartFailed", &detail);
         }
     };
-    boot_and_serve_handlers_on(runtime, app, socket, reader)
+    boot_and_serve_handlers_on(runtime, app, socket, reader, exit)
 }
 
 /// [`boot_and_serve_handlers`] on `runtime`, the runtime of the child.
@@ -119,6 +122,7 @@ pub(super) fn boot_and_serve_handlers_on(
     app: HandlerChildApp,
     socket: &UnixStream,
     reader: FrameReader,
+    exit: ProcessExit,
 ) -> ChildHostExit {
     let HandlerChildApp {
         handlers,
@@ -141,7 +145,7 @@ pub(super) fn boot_and_serve_handlers_on(
             return boot_failed(socket, cause, "ThreadStartFailed", &failed.to_string());
         }
     };
-    let (writer, mut frames) = match start_links(socket, reader) {
+    let (writer, mut frames) = match start_links(socket, reader, exit) {
         Ok(links) => links,
         Err(error) => {
             let cause = shortage_or(&error, ReportedBootCause::ThreadStartRefused);
@@ -171,13 +175,24 @@ pub(super) fn boot_and_serve_handlers_on(
     }
 }
 
-/// Start the writer thread and the control thread of `socket`.
+/// Start the writer thread and the control thread of `socket`; both end the
+/// process through `exit`.
 fn start_links(
     socket: &UnixStream,
     reader: FrameReader,
+    exit: ProcessExit,
 ) -> io::Result<(FrameWriter, mpsc::Receiver<ParentFrame>)> {
-    let writer = FrameWriter::start(socket.try_clone()?, HANDLER_CHILD_FRAMES.get())?;
-    let frames = start_control_thread(socket.try_clone()?, reader, HANDLER_CHILD_FRAMES.get())?;
+    let writer = FrameWriter::start(
+        socket.try_clone()?,
+        HANDLER_CHILD_FRAMES.get(),
+        exit.clone(),
+    )?;
+    let frames = start_control_thread(
+        socket.try_clone()?,
+        reader,
+        HANDLER_CHILD_FRAMES.get(),
+        exit,
+    )?;
     Ok((writer, frames))
 }
 

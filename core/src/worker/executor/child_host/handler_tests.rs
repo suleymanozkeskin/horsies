@@ -33,6 +33,7 @@ use crate::core::config::bounded::BoundedU32;
 use crate::core::error::ErrorCode;
 use crate::core::task::Execution;
 use crate::events::{Event, EventDecodeError, EventTypeName, SlotRecovered, TaskClaimed};
+use crate::process_exit::ProcessExit;
 use crate::worker::executor::protocol::{
     decode_child_frame, BoundedText, ChildConnection, ChildFrame, ChildKind, ChildLogLevel,
     ChildProgram, DatabaseUrl, EventBatch, EventsFrame, FrameReader, HandlerChild, HandlerCounts,
@@ -423,7 +424,7 @@ async fn the_service_hands_out_the_events_and_reports_the_totals_of_each_handler
         }
         frames
     });
-    let writer = FrameWriter::start(ours, 8).unwrap();
+    let writer = FrameWriter::start(ours, 8, ProcessExit::Standard).unwrap();
     let (slots_seen, slots) = channel::<u32>();
     let mut set = EventHandlerSet::new();
     set.add_blocking::<SlotRecovered>("slots".to_owned(), move |event| {
@@ -487,7 +488,7 @@ async fn the_service_hands_out_the_events_and_reports_the_totals_of_each_handler
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_init_frame_after_the_boot_ends_the_service_as_a_bad_frame() {
     let (ours, _theirs) = UnixStream::pair().unwrap();
-    let writer = FrameWriter::start(ours, 8).unwrap();
+    let writer = FrameWriter::start(ours, 8, ProcessExit::Standard).unwrap();
     let mut set = EventHandlerSet::new();
     set.add_blocking::<SlotRecovered>("slots".to_owned(), ignore_slot)
         .unwrap();
@@ -555,7 +556,13 @@ fn the_start_hooks_of_the_handler_child_run_in_order_and_a_failure_exits_173() {
         ended_spans: EndedSpanScope::NoSpans,
     };
     let (ours, _theirs) = UnixStream::pair().unwrap();
-    let exit = boot_and_serve_handlers_on(&runtime, app, &ours, FrameReader::new());
+    let exit = boot_and_serve_handlers_on(
+        &runtime,
+        app,
+        &ours,
+        FrameReader::new(),
+        ProcessExit::Standard,
+    );
     assert_eq!(exit, ChildHostExit::ChildHookFailed);
     assert_eq!(exit.code(), 173);
     assert_eq!(*calls.lock().unwrap(), vec!["first"]);
@@ -593,7 +600,13 @@ fn a_start_hook_of_the_handler_child_gets_the_handler_facts() {
         ended_spans: EndedSpanScope::NoSpans,
     };
     let (ours, _theirs) = UnixStream::pair().unwrap();
-    let exit = boot_and_serve_handlers_on(&runtime, app, &ours, FrameReader::new());
+    let exit = boot_and_serve_handlers_on(
+        &runtime,
+        app,
+        &ours,
+        FrameReader::new(),
+        ProcessExit::Standard,
+    );
     assert_eq!(exit, ChildHostExit::ChildHookFailed);
     assert_eq!(*seen.lock().unwrap(), vec![ChildStartFacts::Handler]);
     runtime.shutdown_background();

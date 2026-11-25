@@ -29,6 +29,7 @@ use crate::core::config::PostgresConfig;
 use crate::core::TaskRegistry;
 use crate::db::KeptOpen;
 use crate::manifest::{PoolRecycle, ProducerManifest};
+use crate::process_exit::ProcessExit;
 use crate::process_runtime::{
     process_runtime, shape_process_runtime, OsErrorCode, ProcessRuntimeRefusal, RuntimeShape,
     ShapeOutcome, ThreadStart,
@@ -92,6 +93,10 @@ pub struct ChildApp {
     /// watches it for its main thread; an isolated child and a handler
     /// child watch no loop.
     pub event_loop: EventLoopWatch,
+    /// How the child's control and writer threads end the process: at the
+    /// end of the parent and at a bad parent frame. A Rust binary gives
+    /// [`ProcessExit::Standard`].
+    pub exit: ProcessExit,
 }
 
 /// What a child does with the log level of its init frame (the worker's
@@ -578,12 +583,14 @@ fn host_loop_watched(kind: TaskChild, event_loop: &EventLoopWatch) -> HostLoopWa
 
 /// Start the writer thread, the watch thread (the poll watch of a shared
 /// async child; the host loop watch of a shared thread child whose app
-/// gives a host loop), and the control thread.
+/// gives a host loop), and the control thread. The writer and the control
+/// thread end the process through `exit`.
 fn start_threads(
     socket: &UnixStream,
     reader: FrameReader,
     kind: TaskChild,
     event_loop: &EventLoopWatch,
+    exit: &ProcessExit,
 ) -> io::Result<(
     FrameWriter,
     Serving,
@@ -592,7 +599,7 @@ fn start_threads(
     let seats = seats_of(kind);
     let bound =
         MailboxBound::for_seats(NonZeroUsize::new(seats).unwrap_or(NonZeroUsize::MIN)).get();
-    let writer = FrameWriter::start(socket.try_clone()?, bound)?;
+    let writer = FrameWriter::start(socket.try_clone()?, bound, exit.clone())?;
     let serving = match (kind, host_loop_watched(kind, event_loop)) {
         (TaskChild::Isolated(_), _) => Serving::Isolated,
         (TaskChild::SharedAsync(_), host) => Serving::SharedAsync {
@@ -609,7 +616,7 @@ fn start_threads(
             Serving::SharedThread { seats }
         }
     };
-    let frames = start_control_thread(socket.try_clone()?, reader, bound)?;
+    let frames = start_control_thread(socket.try_clone()?, reader, bound, exit.clone())?;
     Ok((writer, serving, frames))
 }
 
@@ -728,7 +735,9 @@ fn boot_and_serve(
     );
     match hosted_child(init.child_kind) {
         HostedChild::Task(kind) => boot_and_serve_tasks(app, socket, reader, init, kind),
-        HostedChild::Handler => boot_and_serve_handlers(app.handler_child, socket, reader),
+        HostedChild::Handler => {
+            boot_and_serve_handlers(app.handler_child, socket, reader, app.exit)
+        }
     }
 }
 
@@ -769,13 +778,14 @@ fn boot_and_serve_tasks(
     ) {
         return exit;
     }
-    let (writer, serving, mut frames) = match start_threads(socket, reader, kind, &app.event_loop) {
-        Ok(threads) => threads,
-        Err(error) => {
-            let cause = shortage_or(&error, ReportedBootCause::ThreadStartRefused);
-            return boot_failed(socket, cause, "ThreadStartFailed", &error.to_string());
-        }
-    };
+    let (writer, serving, mut frames) =
+        match start_threads(socket, reader, kind, &app.event_loop, &app.exit) {
+            Ok(threads) => threads,
+            Err(error) => {
+                let cause = shortage_or(&error, ReportedBootCause::ThreadStartRefused);
+                return boot_failed(socket, cause, "ThreadStartFailed", &error.to_string());
+            }
+        };
     let pid = std::process::id();
     let own_pid =
         ProcessId::new(pid).expect("the OS gives a process a pid from 1 to the largest pid_t");

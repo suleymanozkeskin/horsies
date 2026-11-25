@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use super::event_loop::{HostCulprit, HostLoopWatched};
-use super::link::{read_frame, FrameWriter, QueuedFrames, ReadEnd};
+use super::link::{read_frame, start_control_thread, FrameWriter, QueuedFrames, ReadEnd};
 use super::run::{refusal_end, result_end};
 use super::seats::{
     end_seat_run, end_seat_run_blocking, BodyStart, DeadlineFire, GateCancel, GateEnd,
@@ -20,10 +20,11 @@ use super::*;
 use crate::core::task::error::{OperationalErrorCode, TaskError};
 use crate::core::task::result::TaskResult;
 use crate::events::AttemptStart;
+use crate::process_exit::{ExitDrain, ProcessExit};
 use crate::worker::executor::protocol::{
     encode_parent_frame, ChildAfterFrame, ChildFrame, DispatchNumber, FrameReader, LoopCulprit,
     ParentFrame, RefusalReason, RssReading, RunEnd, RunRef, SeatEnd, SharedResultFrame,
-    StoredOptionsRefusal, LOOP_BLOCK_LIMIT,
+    StoredOptionsRefusal, BAD_PARENT_FRAME_EXIT_CODE, LOOP_BLOCK_LIMIT, PARENT_GONE_EXIT_CODE,
 };
 
 /// The polls of a wait for a seat to free its run, and the time between two.
@@ -442,4 +443,97 @@ fn the_parent_waits_past_the_end_of_left_work_and_the_marker() {
         crate::worker::executor::slots::isolated::ISOLATED_LEFTOVER_BACKSTOP > child_end,
         "{child_end:?}"
     );
+}
+
+/// Set only in the process that
+/// [`an_immediate_child_exit_gives_its_code_while_a_body_thread_is_blocked`]
+/// starts; names the case.
+const CHILD_EXIT_PROBE_ENV: &str = "HORSIES_TEST_CHILD_EXIT_PROBE";
+const CHILD_EXIT_PROBE_TEST: &str = "worker::executor::child_host::tests::child_exit_probe";
+/// The longest run of a child exit probe.
+const CHILD_EXIT_PROBE_WAIT: Duration = Duration::from_secs(20);
+
+/// The body of the child exit probe: the control thread and the writer
+/// thread of a child whose exit is immediate, and a body thread that is
+/// blocked. The case of the probe variable ends the parent's side: its end
+/// (EOF), a bad frame, or a write that fails. Without the variable this
+/// test returns at once.
+#[test]
+fn child_exit_probe() {
+    let Some(case) = std::env::var_os(CHILD_EXIT_PROBE_ENV) else {
+        return;
+    };
+    let exit = ProcessExit::Immediate(ExitDrain::OutputOnly);
+    let (ours, theirs) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
+    let _blocked_body = std::thread::spawn(|| std::thread::sleep(Duration::from_secs(600)));
+    let _frames = start_control_thread(
+        ours.try_clone().expect("a second handle of the socket"),
+        FrameReader::new(),
+        4,
+        exit.clone(),
+    )
+    .expect("the control thread starts");
+    let writer = FrameWriter::start(ours, 4, exit).expect("the writer thread starts");
+    match case.to_str() {
+        Some("eof") => drop(theirs),
+        Some("bad-frame") => {
+            use std::io::Write;
+            let mut parent = &theirs;
+            parent
+                .write_all(&[0xff; 64])
+                .expect("the parent side writes");
+        }
+        Some("write-fails") => {
+            drop(theirs);
+            writer.send_blocking(ChildFrame::CancelFired(RunRef {
+                dispatch: DispatchNumber::new(1).unwrap(),
+                task_id: Uuid::nil(),
+            }));
+        }
+        other => panic!("unknown probe case {other:?}"),
+    }
+    std::thread::sleep(CHILD_EXIT_PROBE_WAIT);
+    panic!("the child did not end the process");
+}
+
+/// The exit code of the child exit probe for `case`.
+fn child_exit_code(case: &str) -> Option<i32> {
+    std::process::Command::new(std::env::current_exe().expect("the test binary"))
+        .args([
+            "--exact",
+            CHILD_EXIT_PROBE_TEST,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD_EXIT_PROBE_ENV, case)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("the probe process runs")
+        .code()
+}
+
+/// A child whose exit is immediate: at the end of its parent (EOF on the
+/// control thread) it exits 71 while a body thread is blocked.
+#[test]
+fn an_immediate_child_exit_gives_its_code_while_a_body_thread_is_blocked() {
+    assert_eq!(child_exit_code("eof"), Some(PARENT_GONE_EXIT_CODE));
+    assert_eq!(PARENT_GONE_EXIT_CODE, 71);
+}
+
+/// A bad parent frame ends the child through its immediate exit with the
+/// bad-frame code.
+#[test]
+fn an_immediate_child_exit_at_a_bad_parent_frame_gives_the_bad_frame_code() {
+    assert_eq!(
+        child_exit_code("bad-frame"),
+        Some(BAD_PARENT_FRAME_EXIT_CODE)
+    );
+}
+
+/// A frame that the writer thread cannot write (the parent is gone) ends
+/// the child through its immediate exit with 71.
+#[test]
+fn an_immediate_child_exit_at_a_failed_write_gives_71() {
+    assert_eq!(child_exit_code("write-fails"), Some(PARENT_GONE_EXIT_CODE));
 }

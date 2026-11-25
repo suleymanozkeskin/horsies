@@ -24,6 +24,7 @@ pub mod log_targets;
 pub mod manifest;
 pub mod manifest_schema;
 pub mod monitoring;
+pub mod process_exit;
 pub mod process_runtime;
 pub mod scheduler_manifest;
 #[cfg(test)]
@@ -179,6 +180,11 @@ pub use crate::core::task::{FencingToken, FencingTokenRefused};
 // The parent-child frame codec, for the Python child program and the
 // preload process: they speak it through `horsies._core`.
 pub use crate::worker::executor::protocol as frame_protocol;
+
+// How the core ends the process from its own threads (a child at the end of
+// its parent, a worker that fails closed): `ChildApp::exit` and
+// `Worker::from_plan` take it.
+pub use crate::process_exit::{ExitDrain, ProcessExit, EXIT_DRAIN_BOUND};
 
 // worker re-exports
 // The exit codes of the worker process (the codes of a child are in

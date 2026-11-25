@@ -39,6 +39,7 @@ use crate::core::task::fn_trait::{
 };
 use crate::core::task::result::TaskResult;
 use crate::events::{AttemptNumber, AttemptStart, QueueName, RunTrace};
+use crate::process_exit::ProcessExit;
 use crate::test_support::migrated_pool;
 use crate::test_support::sql::{self, TestPool};
 use crate::worker::executor::protocol::{
@@ -370,7 +371,8 @@ fn context_with(pool: &TestPool, task: RegisteredTask) -> (HostContext, ChildFra
         .register(TASK_NAME, task)
         .expect("one task registers");
     let (ours, theirs) = UnixStream::pair().expect("a socket pair");
-    let writer = FrameWriter::start(ours, 16).expect("the frame writer starts");
+    let writer =
+        FrameWriter::start(ours, 16, ProcessExit::Standard).expect("the frame writer starts");
     let context = HostContext {
         broker: Arc::new(PostgresBroker::from_test_url(
             pool.url(),
@@ -386,6 +388,7 @@ fn context_with(pool: &TestPool, task: RegisteredTask) -> (HostContext, ChildFra
             body_scope: super::BodyScope::NoScope,
             handler_child: super::HandlerChildApp::without_handlers(),
             event_loop: super::EventLoopWatch::RuntimeOnly,
+            exit: ProcessExit::Standard,
         }),
         pid: 4242,
         writer,

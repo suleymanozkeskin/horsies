@@ -32,8 +32,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use horsies_core::worker_manifest::parse_worker_manifest;
 use horsies_core::{
     run_end_of, ChildSpecFuture, ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable,
-    ClientFamily, OnStarted, RunPhase, Worker, WorkerPlan, WorkerPlanRefused, WorkerRunEnd,
-    WorkerStop,
+    ClientFamily, OnStarted, ProcessExit, RunPhase, Worker, WorkerPlan, WorkerPlanRefused,
+    WorkerRunEnd, WorkerStop,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -256,7 +256,10 @@ async fn run_operation(
         stop: stop.clone(),
     });
     let shared = Arc::clone(&source);
-    let end = match Worker::from_plan(plan, shared, ClientFamily::Python).await {
+    // The fail-closed exits 77 and 79 run the exit handlers of the process,
+    // as before.
+    let built = Worker::from_plan(plan, shared, ClientFamily::Python, ProcessExit::Standard).await;
+    let end = match built {
         Ok(worker) => {
             worker
                 .with_stop(&stop)
