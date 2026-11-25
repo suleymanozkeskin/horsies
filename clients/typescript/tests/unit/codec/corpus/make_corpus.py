@@ -1,15 +1,20 @@
+# pyright: strict
 '''Write the corpus files of the TypeScript codec tests: Python's stored text of floats, decimals, date-times
 and times of day.
 
-Run from the repository root, with a Python that has pydantic:
+Run from the repository root. The command installs only pydantic, in a cached environment; it builds no part
+of the repository:
 
-    uv run --project clients/python python -I -B \
-        clients/typescript/tests/unit/codec/corpus/make_corpus.py clients/typescript/tests/unit/codec/corpus
+    uv run --no-project --python 3.13 --with pydantic==2.13.4 --with pydantic-core==2.46.4 \
+        python -I -B clients/typescript/tests/unit/codec/corpus/make_corpus.py clients/typescript/tests/unit/codec/corpus
 
 The steps are those of the Python client's typed encode (`clients/python/horsies/core/codec/typed.py`):
 `TypeAdapter(T).validate_python`, `dump_python(mode='json')`, then the text of `dumps_json`
 (`json.dumps(ensure_ascii=False, separators=(',', ':'), allow_nan=False)`). The script does not import horsies.
-One fixed seed: the same pydantic version writes the same files.
+One fixed seed: the same Python and pydantic versions write the same files.
+
+Exit status: 0 when the files are written; 1 when pydantic and `str(Decimal)` disagree on a corpus text (no
+file is written then); 2 for a usage error.
 '''
 
 import datetime as dt
@@ -17,29 +22,32 @@ import json
 import random
 import struct
 import sys
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Final, Literal, TypedDict
 
 import pydantic
 import pydantic_core
 from pydantic import TypeAdapter
 
-SEED = 20261125
-FLOAT_COUNT = 10_000
-RANDOM_BITS_UNTIL = 6_250
-SHORT_DECIMALS_UNTIL = 7_500
-LARGE_INTEGERS_UNTIL = 8_750
-NEIGHBOUR_STEPS = 20
-DECIMAL_COUNT = 2_000
-DATETIME_COUNT = 2_000
-TIME_COUNT = 1_000
+SEED: Final = 20261125
+FLOAT_COUNT: Final = 10_000
+RANDOM_BITS_UNTIL: Final = 6_250
+SHORT_DECIMALS_UNTIL: Final = 7_500
+LARGE_INTEGERS_UNTIL: Final = 8_750
+NEIGHBOUR_STEPS: Final = 20
+DECIMAL_COUNT: Final = 2_000
+DATETIME_COUNT: Final = 2_000
+TIME_COUNT: Final = 1_000
+FLOAT_BYTES: Final = 8
 
-FLOAT = TypeAdapter(float)
-DECIMAL = TypeAdapter(Decimal)
-DATETIME = TypeAdapter(dt.datetime)
-TIME = TypeAdapter(dt.time)
+FLOAT: Final = TypeAdapter(float)
+DECIMAL: Final = TypeAdapter(Decimal)
+DATETIME: Final = TypeAdapter(dt.datetime)
+TIME: Final = TypeAdapter(dt.time)
 
-NAMED_FLOATS = [
+NAMED_FLOATS: Final = [
     0.0,
     -0.0,
     5e-324,
@@ -57,8 +65,8 @@ NAMED_FLOATS = [
     0.1,
     0.30000000000000004,
 ]
-BOUNDARY_FLOATS = [1e-5, 1e-4, 1e15, 1e16, 1e-7, 1e22]
-NAMED_DECIMALS = [
+BOUNDARY_FLOATS: Final = [1e-5, 1e-4, 1e15, 1e16, 1e-7, 1e22]
+NAMED_DECIMALS: Final = [
     '1.10',
     '1E+3',
     '-0',
@@ -79,8 +87,38 @@ NAMED_DECIMALS = [
     '-1.0E-10',
 ]
 
+type ZoneLabel = Literal['naive', 'utc'] | int
 
-def stored_text(adapter: TypeAdapter, value: object) -> str:
+
+class DateTimeRow(TypedDict):
+    y: int
+    mo: int
+    d: int
+    h: int
+    mi: int
+    s: int
+    us: int
+    tz: ZoneLabel
+    text: str
+
+
+class TimeRow(TypedDict):
+    h: int
+    mi: int
+    s: int
+    us: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class CorpusRefused:
+    '''Pydantic and `str(Decimal)` disagree on a corpus text: the corpus would not pin one text.'''
+
+    reason: str
+
+
+def stored_text[T](adapter: TypeAdapter[T], value: object) -> str:
+    '''Python's stored text of `value` under the adapter's type.'''
     validated = adapter.validate_python(value)
     dumped = adapter.dump_python(validated, mode='json')
     return json.dumps(
@@ -93,12 +131,15 @@ def float_bits(value: float) -> str:
 
 
 def float_of_bits(bits: int) -> float:
-    return struct.unpack('>d', struct.pack('>Q', bits))[0]
+    (value,) = struct.unpack('>d', bits.to_bytes(FLOAT_BYTES, 'big'))
+    return float(value)
 
 
 def neighbour(base: float, step: int) -> float:
-    bits = struct.unpack('>q', struct.pack('>d', base))[0] + step
-    return struct.unpack('>d', struct.pack('>q', bits))[0]
+    '''The float `step` representable values away from `base`, by the signed bit pattern.'''
+    bits = int.from_bytes(struct.pack('>d', base), 'big', signed=True) + step
+    (value,) = struct.unpack('>d', bits.to_bytes(FLOAT_BYTES, 'big', signed=True))
+    return float(value)
 
 
 def float_values(rng: random.Random) -> list[float]:
@@ -161,18 +202,21 @@ def decimal_texts(rng: random.Random) -> list[str]:
     return texts
 
 
-def zone_of(rng: random.Random) -> tuple[object, dt.tzinfo | None]:
-    choice = rng.random()
-    if choice < 0.4:
-        return 'naive', None
-    if choice < 0.55:
-        return 'utc', dt.timezone.utc
-    minutes = 0 if rng.random() < 0.05 else rng.randint(-(23 * 60 + 59), 23 * 60 + 59)
-    return minutes, dt.timezone(dt.timedelta(minutes=minutes))
+def zone_of(rng: random.Random) -> tuple[ZoneLabel, dt.tzinfo | None]:
+    match rng.random():
+        case choice if choice < 0.4:
+            return 'naive', None
+        case choice if choice < 0.55:
+            return 'utc', dt.timezone.utc
+        case _:
+            minutes = (
+                0 if rng.random() < 0.05 else rng.randint(-(23 * 60 + 59), 23 * 60 + 59)
+            )
+            return minutes, dt.timezone(dt.timedelta(minutes=minutes))
 
 
-def datetime_rows(rng: random.Random) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
+def datetime_rows(rng: random.Random) -> list[DateTimeRow]:
+    rows: list[DateTimeRow] = []
     years = [1, 9999] + [rng.randint(1, 9999) for _ in range(DATETIME_COUNT - 2)]
     for year in years:
         month = rng.randint(1, 12)
@@ -209,8 +253,8 @@ def datetime_rows(rng: random.Random) -> list[dict[str, object]]:
     return rows
 
 
-def time_rows(rng: random.Random) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
+def time_rows(rng: random.Random) -> list[TimeRow]:
+    rows: list[TimeRow] = []
     for _ in range(TIME_COUNT):
         microsecond = 0 if rng.random() < 0.5 else rng.randint(1, 999_999)
         value = dt.time(
@@ -228,17 +272,17 @@ def time_rows(rng: random.Random) -> list[dict[str, object]]:
     return rows
 
 
-def decimal_lines(rng: random.Random) -> list[str]:
-    '''Each text with Python's `str(Decimal(text))`. Pydantic must write the same text for each.'''
+def decimal_lines(rng: random.Random) -> list[str] | CorpusRefused:
+    '''Each text with Python's `str(Decimal(text))`. Pydantic must accept it and write the same text.'''
     lines: list[str] = []
     for text in decimal_texts(rng):
         try:
             python = str(Decimal(text))
         except InvalidOperation:
-            raise SystemExit(f'Decimal refused the corpus text {text!r}') from None
+            return CorpusRefused(f'Decimal refused the corpus text {text!r}')
         pydantic_text = json.loads(stored_text(DECIMAL, text))
         if pydantic_text != python:
-            raise SystemExit(
+            return CorpusRefused(
                 f'pydantic writes {pydantic_text!r} and str(Decimal) writes {python!r}'
             )
         lines.append(json.dumps([text, python]))
@@ -249,18 +293,21 @@ def write_lines(path: Path, lines: list[str]) -> None:
     path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
 
-def main(folder: Path) -> None:
+def write_corpus(folder: Path) -> CorpusRefused | None:
+    '''Write the corpus files to `folder`. Returns the refusal, and writes no file, when the texts disagree.'''
     rng = random.Random(SEED)
     floats = float_values(rng)
+    decimals = decimal_lines(rng)
+    if isinstance(decimals, CorpusRefused):
+        return decimals
+    datetimes = datetime_rows(rng)
+    times = time_rows(rng)
     write_lines(
         folder / 'floats.txt',
         [f'{float_bits(value)} {stored_text(FLOAT, value)}' for value in floats],
     )
-    decimals = decimal_lines(rng)
     write_lines(folder / 'decimals.jsonl', decimals)
-    datetimes = datetime_rows(rng)
     write_lines(folder / 'datetimes.jsonl', [json.dumps(row) for row in datetimes])
-    times = time_rows(rng)
     write_lines(folder / 'times.jsonl', [json.dumps(row) for row in times])
     facts = {
         'python': sys.version.split()[0],
@@ -276,7 +323,21 @@ def main(folder: Path) -> None:
         json.dumps(facts, indent=1) + '\n', encoding='utf-8'
     )
     print(json.dumps(facts))
+    return None
+
+
+def main(arguments: list[str]) -> int:
+    match arguments:
+        case [folder]:
+            refused = write_corpus(Path(folder))
+            if refused is None:
+                return 0
+            print(f'make_corpus: {refused.reason}', file=sys.stderr)
+            return 1
+        case _:
+            print('usage: make_corpus.py <output folder>', file=sys.stderr)
+            return 2
 
 
 if __name__ == '__main__':
-    main(Path(sys.argv[1]))
+    sys.exit(main(sys.argv[1:]))
