@@ -82,3 +82,14 @@ describe("result_envelope.json user errors", () => {
     });
   }
 });
+
+describe("task error data: the check in front of the reader", () => {
+  test("the error data writer makes a JsonText of strict JSON only", () => {
+    for (const data of [Number.NaN, { a: "\ud800" }, nested(MAX_JSON_DEPTH + 1), 10n ** 4300n, new Date(0)]) {
+      const stored = errorDataText(data);
+
+      assert.equal(stored.state, "replaced");
+      assert.equal(JSON.stringify(JSON.parse(stored.text)), stored.text);
+    }
+  });
+});

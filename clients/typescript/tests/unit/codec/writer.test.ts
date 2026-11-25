@@ -248,3 +248,27 @@ describe("writer: each refusal", () => {
     assert.equal(refused(h.record(h.int()), { [Symbol("k")]: 1 }).kind, "NotJsonNative");
   });
 });
+
+describe("writer: the check in front of the reader", () => {
+  test("the writer makes no JsonText for a value whose text breaks the strict read rule", () => {
+    const deep = MAX_VALUE_JSON_DEPTH + 1;
+
+    const cases: readonly (readonly [AnyWire, unknown])[] = [
+      [h.float(), Number.NaN],
+      [h.float(), Number.POSITIVE_INFINITY],
+      [h.json(), { a: Number.NEGATIVE_INFINITY }],
+      [h.string(), "\ud800"],
+      [h.record(h.int()), { "\udc00": 1 }],
+      [h.bigint(), 10n ** 4300n],
+      [h.json(), 10n ** 4300n],
+      [nestedArrays(deep), nestedValue(deep)],
+      [h.json(), nestedValue(deep)],
+    ];
+
+    for (const [wire, value] of cases) {
+      const result = encodeValue(kindOf(wire), value);
+
+      assert(!result.ok, "the writer gave a text");
+    }
+  });
+});
