@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 use crate::core::history::archive::results::decode_result_envelope_text;
 use crate::core::history::enqueue::{
-    parse_optional_object, prepare_enqueue_facts, PreparedEnqueueFacts, SendPart,
+    parse_optional_object, prepare_enqueue_facts, EnqueuePreparationError, PreparedEnqueueFacts,
+    SendPart,
 };
 use crate::core::history::identity::keys::{
     reservation_window_micros, IDEMPOTENCY_WINDOW_DEFAULT_HOURS, IDEMPOTENCY_WINDOW_DEFAULT_MICROS,
@@ -727,6 +728,9 @@ impl SendCommand {
     /// Errors: `EnqueueContract`, the refusals of `enqueue` before its
     /// write: an input that the rules refuse, options that do not parse or
     /// whose retry policy does not fit, a value the fingerprint refuses.
+    /// It takes a shared class with no `timeout_ms`, which only a new send
+    /// refuses (`check_new_send_timeout`): a schedule keeps such options,
+    /// and the worker refuses the run.
     pub fn prepare(
         task_name: &str,
         queue_name: &str,
@@ -805,7 +809,8 @@ impl<'a> CheckedSend<'a> {
     /// or whose retry limit does not fit; a `sent_at` with no
     /// whole-microsecond form; and the facts of the row
     /// (`prepare_enqueue_facts`): the strict JSON rule, the execution
-    /// class, the command fingerprint and the scope of the idempotency key.
+    /// class, the command fingerprint and the scope of the idempotency key;
+    /// then a shared class with no `timeout_ms` (`check_new_send_timeout`).
     /// A send with no id mints it here. `retain_rerun_input` is resolved:
     /// the send's choice, or the default of the handle. Touches no
     /// database; reads the clock.
@@ -851,7 +856,7 @@ impl<'a> CheckedSend<'a> {
         };
         // The options are read with the strict rule before the retry limit,
         // so a text that does not read names its reader's error.
-        let _options = parse_optional_object(task_options)
+        let options = parse_optional_object(task_options)
             .map_err(|error| BrokerError::EnqueueContract(EnqueueRefusal::from(error)))?;
         let max_retries = enqueue_max_retries(task_name, task_options)?;
         let sent_at = sent_at_at_stored_precision(sent_at.unwrap_or_else(Utc::now))?;
@@ -869,6 +874,7 @@ impl<'a> CheckedSend<'a> {
             idempotency_key,
         )
         .map_err(|error| BrokerError::EnqueueContract(EnqueueRefusal::from(error)))?;
+        check_new_send_timeout(facts.execution, options.as_ref())?;
         Ok(Self {
             task_id,
             task_name,
@@ -3126,6 +3132,26 @@ fn enqueue_max_retries(task_name: &str, task_options: Option<&str>) -> Result<i3
     })
 }
 
+/// The `timeout_ms` rule of a shared class (`check_shared_timeout`) for the
+/// decoded options `options` of a new send of the class `execution`, as the
+/// task options refusal (`InvalidExecution`). Only a new send applies it: a
+/// schedule (`SendCommand::prepare`) and a rerun write such options, and
+/// the worker refuses the run, as before this rule. Pure.
+fn check_new_send_timeout(
+    execution: crate::core::task::execution::Execution,
+    options: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<(), BrokerError> {
+    crate::core::task::execution::check_shared_timeout(
+        execution,
+        options.and_then(|object| object.get("timeout_ms")),
+    )
+    .map_err(|invalid| {
+        BrokerError::EnqueueContract(EnqueueRefusal::from(
+            EnqueuePreparationError::InvalidExecution(invalid),
+        ))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Result wait
 // ---------------------------------------------------------------------------
@@ -5001,8 +5027,10 @@ mod enqueue_task_options_tests {
     fn a_send_command_holds_the_values_that_a_send_of_its_texts_binds() {
         let options = policy(4, "")
             .replace("\"ISOLATED\"", "\"SHARED_ASYNC\"")
-            .replace("\"cancel_grace_ms\": null", "\"cancel_grace_ms\": 5000");
+            .replace("\"cancel_grace_ms\": null", "\"cancel_grace_ms\": 5000")
+            .replace("\"timeout_ms\": null", "\"timeout_ms\": 30000");
         assert!(options.contains("\"cancel_grace_ms\": 5000"), "{options}");
+        assert!(options.contains("\"timeout_ms\": 30000"), "{options}");
         for (retention, retain_rerun_input) in [
             (EnqueueRetention::Default, false),
             (EnqueueRetention::Forever, true),
@@ -5107,6 +5135,57 @@ mod enqueue_task_options_tests {
                 }
                 other => panic!("{path}: an empty text gave {other:?}"),
             }
+        }
+    }
+
+    /// Only a new send refuses a shared class with no `timeout_ms`. A send
+    /// command (the command of a schedule) keeps such options, and the
+    /// worker refuses the run.
+    #[test]
+    fn only_a_new_send_refuses_a_shared_class_with_no_timeout() {
+        let options = r#"{"execution": "SHARED_THREAD", "timeout_ms": null}"#;
+        let command = SendCommand::prepare(
+            "tasks.report",
+            "default",
+            100,
+            "{}",
+            Some(options),
+            EnqueueRetention::Forever,
+            false,
+        )
+        .expect("a send command takes a shared class with no timeout");
+        assert_eq!(
+            command.execution,
+            crate::core::task::execution::Execution::SharedThread
+        );
+        assert_eq!(command.task_options.as_deref(), Some(options));
+
+        let send = CheckedSend::check(
+            "tasks.report",
+            "{}",
+            "default",
+            100,
+            None,
+            None,
+            None,
+            Some(options),
+            Some(Uuid::from_u128(7)),
+            None,
+            None,
+            EnqueueRetention::Forever,
+            false,
+        )
+        .map(|_send| ());
+        let expected = EnqueueRefusal {
+            part: SendPart::TaskOptions,
+            message: "task_options refused: timeout_ms is absent for execution SHARED_THREAD; \
+                      a shared class requires timeout_ms"
+                .to_owned(),
+            cause: crate::broker::error::EnqueueRefusalCause::RuleRefused,
+        };
+        match send {
+            Err(BrokerError::EnqueueContract(refusal)) => assert_eq!(refusal, expected),
+            other => panic!("a new send of a shared class with no timeout gave {other:?}"),
         }
     }
 

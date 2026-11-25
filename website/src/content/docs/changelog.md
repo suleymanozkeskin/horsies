@@ -77,6 +77,16 @@ there is no migration contract between pre-1.0 versions.
   1006 commits leaves no family row. No handle writes into a database with
   no family row, and the next install, of any client family, applies the
   rest of the chain and records its own family.
+- **A send refuses a shared task with no `timeout_ms`.** A send of a
+  `SHARED_ASYNC` or `SHARED_THREAD` task whose task options have no
+  `timeout_ms` (absent or `null`) is refused before any statement, and
+  nothing is written: the send gives `VALIDATION_FAILED`, and a broker
+  enqueue gives `INVALID_TASK_OPTIONS`. Before, the send wrote the task, and
+  each worker failed its run with `WORKER_SERIALIZATION_ERROR`. A schedule
+  and a rerun do not change: they write the task, and the worker refuses
+  its run as before. The Rust task macro and the Python task decorator
+  refuse such a task at registration, so the tasks that they register do not
+  change.
 
 ## 0.8.1 — 2026-11-25
 
