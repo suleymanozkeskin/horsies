@@ -28,6 +28,7 @@ pub enum WorkflowStartErrorCode {
     EnqueueFailed,
     /// A sync or blocking start was called on a thread that runs an event loop or a tokio
     /// runtime; its wait would stall that loop, so nothing was written. `retry_start` accepts it.
+    #[code_catalog(blocking_form_only)]
     AsyncContext,
 }
 
