@@ -290,6 +290,10 @@ fn settle(call_id: &BigInt, settlement: Settlement) -> Envelope<SettleOutcome> {
     ts_args_type = "callId: bigint, value: unknown",
     ts_return_type = "NativeEnvelope<SettleOutcome>"
 )]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi-rs passes the arguments of a JavaScript call by value"
+)]
 pub fn settle_callback_returned(call_id: BigInt, value: Unknown) -> Envelope<SettleOutcome> {
     sync_call("settle_callback_returned", || {
         let raw = value.value();
@@ -306,6 +310,10 @@ pub fn settle_callback_returned(call_id: BigInt, value: Unknown) -> Envelope<Set
 /// The function of the call `callId` threw, or its Promise rejected. The
 /// thrown value stays in the package.
 #[napi(ts_return_type = "NativeEnvelope<SettleOutcome>")]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi-rs passes the arguments of a JavaScript call by value"
+)]
 pub fn settle_callback_threw(
     call_id: BigInt,
     name: String,
