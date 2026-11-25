@@ -68,11 +68,13 @@ function readBack(
     return err(changed(`the read value does not write again: ${refusalText(again.error)}`));
   }
 
+  if (again.value === written.value) {
+    return written;
+  }
+
   const offset = firstDifference(written.value, again.value);
 
-  return again.value === written.value
-    ? written
-    : err(changed(`the read value writes another text; first difference at offset ${offset}`));
+  return err(changed(`the read value writes another text; first difference at offset ${offset}`));
 }
 
 function refused(cause: DecodeRefused): ReadBackRefused {

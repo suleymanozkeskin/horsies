@@ -94,6 +94,21 @@ describe("conversions and checks", () => {
     );
   });
 
+  test("CheckFailed: a conversion refuses a stored value at decode, in both forms", () => {
+    const refusing = conversionKind(INT_KIND, () => err(NOT_A_NUMBER), (value) => ok(value));
+    const text = jsonTextCheckedByCore("7");
+
+    for (const form of ["worker", "stored"] as const) {
+      const read = decodeValue(refusing, text, form);
+
+      assert(!read.ok);
+      assert.deepEqual(
+        [read.error.kind, read.error.detail],
+        ["CheckFailed", "the conversion refused the stored value: $ invalid_type"],
+      );
+    }
+  });
+
   test("CheckFailed: a conversion refuses a value", () => {
     const written = encodeValue(intConversion((stored) => stored), "7");
 
