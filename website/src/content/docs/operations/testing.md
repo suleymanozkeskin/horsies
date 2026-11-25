@@ -3,7 +3,7 @@ title: Testing
 section: python
 summary: How to test tasks and workflow tasks without a database, and how HORSIES_SUPPRESS_SENDS stops sends in code that calls .send().
 related: [../tasks/defining-tasks, ../tasks/sending-tasks, ../tasks/retrieving-results, ../concepts/workflows/workflow-semantics, ../configuration/broker-config]
-tags: [testing, pytest, HORSIES_SUPPRESS_SENDS, WorkflowContext, from_serialized, TaskSendSuppressed, direct call]
+tags: [testing, pytest, HORSIES_SUPPRESS_SENDS, WorkflowContext, from_serialized, TaskRuntime, for_test, AttemptNumber, TaskSendSuppressed, direct call]
 ---
 
 # Testing
@@ -120,6 +120,42 @@ def test_workflow_context() -> None:
 
 `result_for(node)` raises `KeyError` for a node whose id is not in `results_by_id`.
 
+### Pass a Task Runtime
+
+A task whose first parameter is `runtime: TaskRuntime` takes the runtime first in a direct call. `TaskRuntime.for_test(...)` builds the runtime that a worker gives to an attempt of a task.
+
+```python
+import uuid
+
+from horsies import AttemptNumber, Err, FencingToken, Ok, TaskError, TaskResult, TaskRuntime
+
+
+@app.task('stamp')
+def stamp(runtime: TaskRuntime, *, label: str) -> TaskResult[str, TaskError]:
+    token = runtime.fencing_token
+    return TaskResult(ok=f'{label}:{token.value}')
+
+
+def test_task_runtime() -> None:
+    match AttemptNumber.parse(2):
+        case Ok(ok_value=second_attempt):
+            pass
+        case Err(err_value=refused):
+            raise AssertionError(refused.reason)
+    task_id = uuid.uuid4()
+    runtime = TaskRuntime.for_test(task_id=task_id, attempt=second_attempt)
+    assert runtime.fencing_token == FencingToken(task_id=task_id, value=2)
+    assert stamp(runtime, label='order').unwrap() == 'order:2'
+```
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `task_id` | `uuid.UUID` | The task id of the token |
+| `attempt` | `AttemptNumber` | The attempt number. Default: the first attempt (1). A test of a retry passes 2 |
+| `cancel_state` | `RunCancelState` | The cancel state of the run for the whole call. Default: `CancelNotRequested()`. A test of the stop path passes `CancelRequested(cause=CancelCause.OPERATOR)`. See [Cancellation](/horsies/tasks/defining-tasks/#cancellation) |
+
+`AttemptNumber.parse(number)` returns `Ok(AttemptNumber)` for a number from 1 to `2**31`, and `Err(AttemptNumberRefused)` for another number. `AttemptNumberRefused.reason` names the number and the bounds. `for_test` cannot fail. `.send()` does not take the runtime; the worker passes it on each run.
+
 ### Refuse a TaskResult Kwarg on `.send()`
 
 The workflow engine fills `TaskResult` parameters. A producer must not send them. `.send()` returns `Err(TaskSendValidationFailed)` and writes nothing.
@@ -136,7 +172,7 @@ def test_send_refuses_task_result() -> None:
     assert isinstance(sent.err_value, TaskSendValidationFailed)
 ```
 
-The same check applies to `workflow_ctx` and `workflow_meta`. The engine fills those parameters, and a producer must not send them.
+The same check applies to `workflow_ctx` and `workflow_meta`, and to the parameter that takes the `TaskRuntime`. The engine fills `workflow_ctx` and `workflow_meta`, and the worker passes the `TaskRuntime`. A producer must not send them.
 
 ## Suppress Sends
 
