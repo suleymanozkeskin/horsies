@@ -57,6 +57,22 @@ and there is no migration contract between pre-1.0 versions.
   default from `default_hourly_second` (0), as before. The generated Python
   package does not change.
 
+### Fixed
+
+- **A schema install of the `TYPESCRIPT` client family into an empty
+  database records its family row.** The install writes the family row in
+  the transaction of the first migration whose `CHECK`
+  `horsies_client_family_family_known` admits the value: migration 1000 for
+  `PYTHON` and `RUST`, as before, and migration 1006 for `TYPESCRIPT`.
+  Before, every install wrote the row in the transaction of migration 1000,
+  whose `CHECK` admits only `PYTHON` and `RUST`: an install with
+  `ClientFamily::TypeScript` into an empty database failed with SQLSTATE
+  23514 and wrote nothing. A Python or a Rust install does not change. A
+  `TYPESCRIPT` install into an empty database that stops before migration
+  1006 commits leaves no family row. No handle writes into a database with
+  no family row, and the next install, of any client family, applies the
+  rest of the chain and records its own family.
+
 ## [0.8.1] - 2026-11-25
 
 0.8.1 needs a stop-all upgrade: stop every worker, scheduler and producer,
