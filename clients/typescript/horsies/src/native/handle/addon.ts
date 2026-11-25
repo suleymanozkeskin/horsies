@@ -31,7 +31,7 @@ export interface SchemaStatusRecord {
   readonly expectedVersion: bigint;
 }
 
-/** The values of the coverage pass that a schema install runs. */
+/** The values of the coverage pass that a schema install runs. Each count is a whole number from 0 to 4294967295. */
 export interface InstallCoverageArg {
   readonly historyHorizonDays: number;
   readonly heartbeatHorizonHours: number;
@@ -40,7 +40,7 @@ export interface InstallCoverageArg {
 
 /** The core handle of one producer manifest. */
 export interface NativeCoreHandle {
-  readonly manifestVersion: number;
+  manifestVersion(): NativeEnvelope<number>;
   withInstallCoverage(coverage: InstallCoverageArg): NativeEnvelope<NativeCoreHandle>;
   close(): Promise<NativeEnvelope<undefined>>;
   pingDatabase(): Promise<NativeEnvelope<NativeOutcome<DatabasePingRecord>>>;

@@ -60,7 +60,7 @@ function defect(): string {
 /** A handle that never connected closes at once, and the core does not start. */
 async function neverConnectedClose(): Promise<string> {
   const handle = buildCoreHandle(manifestJson("postgresql://horsies@127.0.0.1:1/none", false), "PRODUCER");
-  const closed = envelopeValue(await handle.close());
+  const closed = await handle.close();
 
   return `${String(closed)} ${coreState()}`;
 }

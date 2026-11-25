@@ -62,14 +62,14 @@ async function throwingSink(): Promise<string> {
   });
 
   const handle = buildCoreHandle(manifestJson(testDatabaseUrl(), true), "PRODUCER");
-  const ping = envelopeValue(await handle.pingDatabase());
+  const ping = await handle.pingDatabase();
 
   for (let waited = 0; waited < SINK_CALL_WAIT_MS && calls === 0; waited += SINK_CALL_POLL_MS) {
     await sleep(SINK_CALL_POLL_MS);
   }
 
   await sleep(STDERR_WRITE_WAIT_MS);
-  envelopeValue(await handle.close());
+  await handle.close();
 
   return `pinged ${ping.kind}; sink calls ${calls > 0 ? "some" : "none"}`;
 }

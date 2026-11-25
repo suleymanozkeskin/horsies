@@ -14,8 +14,16 @@ export function testDatabaseUrl(): string {
   return url;
 }
 
-/** The JSON text of a producer manifest for `databaseUrl`. `echo` turns on the statement log. */
+/** The schema modes of a producer manifest. */
+export type ManifestSchemaMode = "MIGRATE_AND_VALIDATE" | "OBSERVE_ONLY" | "ASSUME_INITIALIZED";
+
+/** The JSON text of a producer manifest for `databaseUrl` that installs the schema. `echo` turns on the statement log. */
 export function manifestJson(databaseUrl: string, echo: boolean): string {
+  return manifestJsonWithSchema(databaseUrl, echo, "MIGRATE_AND_VALIDATE");
+}
+
+/** The JSON text of a producer manifest for `databaseUrl` with the schema mode `schema`. */
+export function manifestJsonWithSchema(databaseUrl: string, echo: boolean, schema: ManifestSchemaMode): string {
   return JSON.stringify({
     manifest_version: 1,
     database: {
@@ -31,7 +39,7 @@ export function manifestJson(databaseUrl: string, echo: boolean): string {
       tcp_keepalives: { kind: "ON", idle_seconds: 30, interval_seconds: 10, probes: 3 },
       tcp_user_timeout: { kind: "AFTER", milliseconds: 30_000 },
     },
-    schema: "MIGRATE_AND_VALIDATE",
+    schema,
     send: { retain_rerun_input_default: false, idempotency_reservation_window: 86_400_000_000 },
   });
 }

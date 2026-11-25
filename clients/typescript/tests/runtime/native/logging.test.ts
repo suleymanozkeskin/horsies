@@ -8,7 +8,6 @@ import { describe, test } from "node:test";
 
 import { configureLogging } from "../../../horsies/src/logging.ts";
 import type { LogRecord } from "../../../horsies/src/logging.ts";
-import { envelopeValue } from "../../../horsies/src/native/call/envelope.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { runChildCase } from "./child-process.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
@@ -52,7 +51,7 @@ describe("the JavaScript log sink", () => {
 
     const handle = buildCoreHandle(manifestJson(testDatabaseUrl(), true), "PRODUCER");
 
-    envelopeValue(await handle.pingDatabase());
+    await handle.pingDatabase();
 
     await waitUntil(() => records.some((record) => record.logger === "horsies.sql"));
 
@@ -65,7 +64,7 @@ describe("the JavaScript log sink", () => {
       records.every((record) => record.logger === "horsies.sql" || WARNING_AND_ABOVE.has(record.level)),
       records.map((record) => `${record.level} ${record.logger}`).join(", "),
     );
-    envelopeValue(await handle.close());
+    await handle.close();
     configureLogging({ sink: "stderr" });
   });
 

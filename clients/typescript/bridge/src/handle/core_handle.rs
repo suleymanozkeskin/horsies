@@ -11,6 +11,7 @@
 //!   take `&CoreHandle`: they use [`CoreHandle::connection`] and the child
 //!   spec source slot, and never change this file.
 
+use std::fmt;
 use std::sync::{Arc, OnceLock};
 
 use horsies_core::handle::{CoreHandle as LazyHandle, HandleConnection};
@@ -27,6 +28,7 @@ use crate::call::guard::{sync_call, CallKind};
 use crate::call::operation::{resolve, spawn_operation, EnvelopeResolver};
 use crate::call::thrown::{Envelope, NativeThrown};
 use crate::handle::schema::{install_operation, schema_status_operation};
+use crate::values::boundary::{u32_of_number, BoundaryRefusal};
 use crate::values::records::Outcome;
 
 /// The pool profile of the process of a handle.
@@ -164,13 +166,37 @@ impl CoreHandle {
 }
 
 /// The values of the coverage pass that a schema install runs: the client's
-/// retention config.
+/// retention config. Each count crosses as a number and is checked as a
+/// whole number from 0 to 4294967295 (`u32_of_number`).
 #[napi(object, object_to_js = false)]
 pub struct InstallCoverageArg {
-    pub history_horizon_days: u32,
-    pub heartbeat_horizon_hours: u32,
+    pub history_horizon_days: f64,
+    pub heartbeat_horizon_hours: f64,
     /// The declared retention periods, in whole days.
-    pub declared_period_days: Vec<u32>,
+    pub declared_period_days: Vec<f64>,
+}
+
+/// Why the coverage values do not make a request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CoverageRefusal {
+    /// A count is not a whole number from 0 to 4294967295.
+    Number(BoundaryRefusal),
+    /// The core refuses a declared period of `days` days.
+    Period { days: u32, cause: String },
+    /// The core refuses the horizons.
+    Request { cause: String },
+}
+
+impl fmt::Display for CoverageRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Number(refusal) => write!(formatter, "{}: {}", refusal.subject, refusal.rule),
+            Self::Period { days, cause } => {
+                write!(formatter, "declared period of {days} days: {cause}")
+            }
+            Self::Request { cause } => formatter.write_str(cause),
+        }
+    }
 }
 
 /// One round trip of a database ping.
@@ -206,9 +232,11 @@ pub fn build_core_handle(manifest_json: String, profile: HandleProfile) -> Envel
 #[napi]
 impl CoreHandle {
     /// The version of the manifest this handle was built from.
-    #[napi(getter)]
-    pub fn manifest_version(&self) -> u32 {
-        self.connection.handle.manifest().manifest_version.get()
+    #[napi(ts_return_type = "NativeEnvelope<number>")]
+    pub fn manifest_version(&self) -> Envelope<u32> {
+        sync_call("manifest_version", || {
+            Envelope::Value(self.connection.handle.manifest().manifest_version.get())
+        })
     }
 
     /// A new handle of the same manifest and profile whose schema install
@@ -227,9 +255,9 @@ impl CoreHandle {
                 Ok(request) => Envelope::Value(CoreHandle::of(
                     self.connection.with_install_coverage(request),
                 )),
-                Err(rule) => Envelope::Thrown(NativeThrown::ClientDefect {
+                Err(refusal) => Envelope::Thrown(NativeThrown::ClientDefect {
                     subject: "installCoverage".to_owned(),
-                    rule,
+                    rule: refusal.to_string(),
                 }),
             }
         })
@@ -289,22 +317,31 @@ impl CoreHandle {
     }
 }
 
-/// The checked request of the coverage values, or the refusal as text. Pure.
-fn coverage_request(coverage: &InstallCoverageArg) -> Result<CoverageRequest, String> {
+/// The checked request of the coverage values, or the refusal. Pure.
+fn coverage_request(coverage: &InstallCoverageArg) -> Result<CoverageRequest, CoverageRefusal> {
+    let history_days = u32_of_number("historyHorizonDays", coverage.history_horizon_days)
+        .map_err(CoverageRefusal::Number)?;
+    let heartbeat_hours = u32_of_number("heartbeatHorizonHours", coverage.heartbeat_horizon_hours)
+        .map_err(CoverageRefusal::Number)?;
     let periods = coverage
         .declared_period_days
         .iter()
         .map(|days| {
-            RetentionDays::parse_period(chrono::Duration::days(i64::from(*days)))
-                .map_err(|refused| format!("declared period of {days} days: {refused}"))
+            let days =
+                u32_of_number("declaredPeriodDays", *days).map_err(CoverageRefusal::Number)?;
+            RetentionDays::parse_period(chrono::Duration::days(i64::from(days))).map_err(
+                |refused| CoverageRefusal::Period {
+                    days,
+                    cause: refused.to_string(),
+                },
+            )
         })
-        .collect::<Result<Vec<_>, String>>()?;
-    CoverageRequest::new(
-        coverage.history_horizon_days,
-        coverage.heartbeat_horizon_hours,
-        &periods,
-    )
-    .map_err(|refused| refused.to_string())
+        .collect::<Result<Vec<_>, CoverageRefusal>>()?;
+    CoverageRequest::new(history_days, heartbeat_hours, &periods).map_err(|refused| {
+        CoverageRefusal::Request {
+            cause: refused.to_string(),
+        }
+    })
 }
 
 async fn ping_database_operation(connection: BrokerConnection) -> Outcome<DatabasePingRecord> {
@@ -372,7 +409,7 @@ mod tests {
             handle.connection.connect_state(),
             HandleConnection::NeverConnected
         ));
-        assert_eq!(handle.manifest_version(), 1);
+        assert_eq!(handle.manifest_version(), Envelope::Value(1));
     }
 
     #[test]
@@ -394,9 +431,9 @@ mod tests {
     fn a_handle_with_an_install_request_keeps_its_inputs_and_starts_nothing() {
         let handle = built(HandleProfile::Worker);
         let covered = match handle.with_install_coverage(InstallCoverageArg {
-            history_horizon_days: 3,
-            heartbeat_horizon_hours: 6,
-            declared_period_days: vec![7],
+            history_horizon_days: 3.0,
+            heartbeat_horizon_hours: 6.0,
+            declared_period_days: vec![7.0],
         }) {
             Envelope::Value(covered) => covered,
             Envelope::Thrown(thrown) => panic!("a request in bounds, got {thrown:?}"),
@@ -417,8 +454,8 @@ mod tests {
     fn coverage_values_that_the_core_refuses_are_a_client_defect() {
         let handle = built(HandleProfile::Producer);
         let envelope = handle.with_install_coverage(InstallCoverageArg {
-            history_horizon_days: 0,
-            heartbeat_horizon_hours: 6,
+            history_horizon_days: 0.0,
+            heartbeat_horizon_hours: 6.0,
             declared_period_days: vec![],
         });
         match envelope {
@@ -428,6 +465,51 @@ mod tests {
             Envelope::Thrown(other) => panic!("a client defect, got {other:?}"),
             Envelope::Value(_) => panic!("a client defect, got a handle"),
         }
+    }
+
+    #[test]
+    fn a_count_that_is_not_a_whole_number_is_refused_with_its_field() {
+        let refused = coverage_request(&InstallCoverageArg {
+            history_horizon_days: 3.0,
+            heartbeat_horizon_hours: 6.0,
+            declared_period_days: vec![7.5],
+        });
+        assert!(
+            matches!(
+                refused,
+                Err(CoverageRefusal::Number(ref refusal)) if refusal.subject == "declaredPeriodDays"
+            ),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_horizon_past_u32_is_refused_not_wrapped() {
+        let refused = coverage_request(&InstallCoverageArg {
+            history_horizon_days: 4_294_967_299.0,
+            heartbeat_horizon_hours: 6.0,
+            declared_period_days: vec![],
+        });
+        assert!(
+            matches!(
+                refused,
+                Err(CoverageRefusal::Number(ref refusal)) if refusal.subject == "historyHorizonDays"
+            ),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_period_that_the_core_refuses_names_its_days() {
+        let refused = coverage_request(&InstallCoverageArg {
+            history_horizon_days: 3.0,
+            heartbeat_horizon_hours: 6.0,
+            declared_period_days: vec![0.0],
+        });
+        assert!(
+            matches!(refused, Err(CoverageRefusal::Period { days: 0, .. })),
+            "{refused:?}"
+        );
     }
 
     #[test]

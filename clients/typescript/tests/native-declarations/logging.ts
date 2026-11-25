@@ -1,11 +1,15 @@
-// The generated declarations of the `logging` area match the hand-kept ones.
+// The generated declarations of the `logging` area match the hand-kept ones, function by function
+// (arguments and result) and type by type.
 
 import type * as Generated from "../../bridge/index.js";
 import type { LoggerName, LogLevel, LogThreshold } from "../../horsies/src/logging.ts";
 import type { LogLevelsArg, LogRecordOut, LoggingAddon } from "../../horsies/src/native/logging/addon.ts";
-import type { Mutual } from "./mutual.ts";
+import type { Mutual, SameFunction } from "./mutual.ts";
 
-export const functionsMatch: Mutual<Pick<typeof Generated, keyof LoggingAddon>, LoggingAddon> = true;
+export const setLogLevelsMatches: SameFunction<typeof Generated.setLogLevels, LoggingAddon["setLogLevels"]> = true;
+export const setLogSinkMatches: SameFunction<typeof Generated.setLogSink, LoggingAddon["setLogSink"]> = true;
+export const resetLogSinkMatches: SameFunction<typeof Generated.resetLogSink, LoggingAddon["resetLogSink"]> = true;
+
 export const loggerNameMatches: Mutual<Generated.LoggerName, LoggerName> = true;
 export const levelMatches: Mutual<Generated.RecordLevel, LogLevel> = true;
 export const thresholdMatches: Mutual<Generated.LogThreshold, LogThreshold> = true;
