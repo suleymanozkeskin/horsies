@@ -580,11 +580,12 @@ const DEFAULT_SORT_LIST: &str = "SELECT * FROM horsies_monitoring_task_list(
 /// over five task names and a backlog of 2,000 PENDING rows, each with its
 /// own enqueue time, then sampled. With only a few PENDING rows, a sort over
 /// another index costs the same as the ordered index and the planner's pick
-/// between them is arbitrary.
+/// between them is arbitrary. A RUNNING row holds its claim generation
+/// (CHECK `horsies_tasks_claim_generation_by_status`) and no owner.
 async fn seed_plan_population(pool: &TestPool) {
-    for (status, task_name, started_at, rows) in [
-        ("RUNNING", "'plan_task_' || (g % 5)", "NOW()", 500_i32),
-        ("PENDING", "'plan_task_pending'", "NULL", 2_000_i32),
+    for (status, task_name, claimed_at, started_at, rows) in [
+        ("RUNNING", "'plan_task_' || (g % 5)", "NOW()", "NOW()", 500_i32),
+        ("PENDING", "'plan_task_pending'", "NULL", "NULL", 2_000_i32),
     ] {
         sql::query(&format!(
             "INSERT INTO horsies_tasks (
@@ -600,7 +601,7 @@ async fn seed_plan_population(pool: &TestPool) {
             SELECT gen_random_uuid(), {task_name}, 'default', 100, '{{}}', NULL,
                    'ISOLATED', 'standard_30d', NOW(), NOW(),
                    1, sha256(convert_to(gen_random_uuid()::text, 'UTF8')), NULL,
-                   '{status}', NOW() - make_interval(secs => g), NULL, NULL, NULL,
+                   '{status}', NOW() - make_interval(secs => g), {claimed_at}, NULL, NULL,
                    {started_at}, NULL, NULL,
                    NULL, NULL, NULL,
                    0, 0, NULL, NULL, FALSE,

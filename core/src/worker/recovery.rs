@@ -2750,6 +2750,8 @@ mod tests {
         .unwrap();
 
         // A still-live (RUNNING) backing task row + its workflow_task linkage.
+        // The RUNNING row holds its claim generation (CHECK
+        // horsies_tasks_claim_generation_by_status).
         sql::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, input, task_options, execution,
@@ -2764,7 +2766,7 @@ mod tests {
                 $1, 'ret_task', 'default', 100, 'null', NULL, 'ISOLATED',
                 'standard_30d', NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours',
                 1, decode(repeat('00', 32), 'hex'), NULL,
-                'RUNNING', NOW() - INTERVAL '2 hours', NULL, NULL, NULL,
+                'RUNNING', NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours', NULL, NULL,
                 NOW() - INTERVAL '2 hours', NULL, NULL,
                 NULL, NULL, NULL,
                 0, 0, NULL, NULL, FALSE,

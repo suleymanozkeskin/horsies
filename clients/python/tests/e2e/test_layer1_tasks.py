@@ -1328,6 +1328,8 @@ async def test_legacy_pydantic_result_envelope_rejected(
     })
     sent_at, fingerprint = compute_test_command_fingerprint(task_name='e2e_simple')
     async with current_resources(broker).session_factory() as session:
+        # A RUNNING row holds its claim generation
+        # (CHECK horsies_tasks_claim_generation_by_status).
         await session.execute(
             text("""
                 INSERT INTO horsies_tasks
@@ -1336,13 +1338,13 @@ async def test_legacy_pydantic_result_envelope_rejected(
                         retry_count, max_retries, retention_class_key,
                         command_fingerprint_version, command_fingerprint,
                         retain_rerun_input, execution, enqueued_at, created_at,
-                        updated_at, is_workflow_task, worker_pid, worker_hostname,
-                        worker_process_name
+                        updated_at, is_workflow_task, claimed_at, worker_pid,
+                        worker_hostname, worker_process_name
                     ) VALUES (
                         :tid, 'e2e_simple', 'default', 'RUNNING', 100, '{}', :sent_at,
                         0, 0, 'standard_30d', 1, :command_fingerprint, FALSE,
-                        'ISOLATED', NOW(), NOW(), NOW(), FALSE, 4242, 'host-1',
-                        'child-1'
+                        'ISOLATED', NOW(), NOW(), NOW(), FALSE, NOW(), 4242,
+                        'host-1', 'child-1'
                     )
             """),
             {'tid': str(task_id), 'sent_at': sent_at, 'command_fingerprint': fingerprint},
