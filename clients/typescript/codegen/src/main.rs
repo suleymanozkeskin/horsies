@@ -22,6 +22,7 @@ mod error_detail;
 mod events;
 mod manifest;
 mod model;
+mod monitoring_models;
 mod output;
 mod producer_metrics;
 mod retention_class;
