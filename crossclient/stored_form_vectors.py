@@ -20,6 +20,7 @@ decimal text, so that a reader of the file never rounds one. The type names:
 - ``str``: a JSON string.
 - ``datetime_utc``, ``datetime_offset``, ``datetime_naive``: ISO 8601 text.
 - ``date``: ISO 8601 date text.
+- ``time``: ISO 8601 time of day text, with no offset.
 - ``uuid``: hyphenated UUID text.
 - ``decimal``: decimal text.
 - ``bytes``: the bytes as UTF-8 text.
@@ -38,6 +39,10 @@ A task error is written as ``{"error_code": {"built_in": <name>} | {"user":
 <the five texts of a flattened exception, or null>}``, with ``"sub_workflow":
 {"id": <UUID text>, "summary": <the summary's fields>}`` for a sub-workflow
 error.
+
+A row's marks for another client (``rust_cannot_express``, ``rust_drift``,
+``typescript_cannot_express``, ``typescript_drift``) are not read here: Python's
+text is the reference, so every row is a Python case.
 
 This module is pure. It does no I/O but in ``load_form``.
 """
@@ -154,6 +159,8 @@ def annotation_of(type_name: str) -> object:
             return dt.datetime
         case 'date':
             return dt.date
+        case 'time':
+            return dt.time
         case 'uuid':
             return UUID
         case 'decimal':
@@ -198,6 +205,8 @@ def value_of(type_name: str, notation: Notation) -> object:
             return _datetime(notation)
         case 'date':
             return dt.date.fromisoformat(_decimal_text(notation))
+        case 'time':
+            return dt.time.fromisoformat(_decimal_text(notation))
         case 'uuid':
             return UUID(_decimal_text(notation))
         case 'decimal':

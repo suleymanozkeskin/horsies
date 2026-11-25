@@ -14,9 +14,9 @@
 //!   table itself. The Python package reads the same files through
 //!   `horsies._core` ([`BASELINE_SQL_FILE_TEXTS`]).
 //! - Each later version is one file of `core/migrations/`
-//!   ([`LATER_MIGRATION_FILES`]), with the SHA-384 checksum of its text. It
-//!   writes no family row and does not publish the history readers. Version
-//!   1001 (`1001_lifecycle_record.sql`) adds the phase record of each attempt
+//!   ([`LATER_MIGRATION_FILES`]), with the SHA-384 checksum of its text. Its
+//!   text writes no family row and does not publish the history readers.
+//!   Version 1001 (`1001_lifecycle_record.sql`) adds the phase record of each attempt
 //!   and the event table of the workflow runs (`horsies_workflow_events`).
 //!   Version 1002 (`1002_workflow_start_command_fingerprint.sql`) adds the
 //!   start command fingerprint of each top-level workflow run, which a start
@@ -49,16 +49,20 @@
 //!    wait), and act until the state is current or refused:
 //!    - each pending migration runs in its own READ COMMITTED transaction
 //!      with its bookkeeping row; the transaction of migration 1000 also
-//!      publishes the history readers (`horsies_publish_history_readers`)
-//!      and writes this client's family row. A migration that declares
+//!      publishes the history readers (`horsies_publish_history_readers`),
+//!      and the transaction of the first migration that admits this
+//!      client's family also writes this client's family row when the
+//!      database has none ([`family_row_at`]). A migration that declares
 //!      index steps first gives its exact indexes their form outside a
 //!      transaction (concurrent builds), and after its transaction commits
 //!      the retired indexes are dropped concurrently ([`apply_chain`]);
 //!    - a database that holds this build's chain with a history reader
-//!      missing or no family row (an install that stopped before them, or a
-//!      reader dropped out of band) gets the readers published in one READ
-//!      COMMITTED transaction, then this client's family row (Python
-//!      `CompleteInstall`).
+//!      missing or no family row (an install that stopped before the
+//!      publication; an install of another family that stopped before the
+//!      migration that admits its family, completed by this install; or a
+//!      reader or the family row removed out of band) gets the readers
+//!      published in one READ COMMITTED transaction, then this client's
+//!      family row (Python `CompleteInstall`).
 //! 4. Release the lock and check the release.
 //!
 //! A deadlock (SQLSTATE 40P01) runs the whole install again, at most
@@ -227,15 +231,38 @@ pub(crate) const BASELINE_INTERIM_FUNCTIONS_SQL: &str =
 const CHECKSUM_BYTES: usize = 48;
 
 /// Whether the transaction of a migration also writes this client's family
-/// row.
+/// row. The install decides it from the families that the migrations of the
+/// chain admit ([`family_row_at`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FamilyRow {
-    /// Migration 1000 creates the family table; its transaction writes the
-    /// row (Python `install_baseline`).
-    WrittenWithMigration,
-    /// The migration writes no family row: every migration after the
-    /// baseline.
+    /// After the text and the bookkeeping row, the transaction writes the
+    /// row of this family when the table has none ([`RECORD_CLIENT_FAMILY`]).
+    Written(ClientFamily),
+    /// The transaction writes no family row.
     NotWritten,
+}
+
+/// The family row of the transaction of the migration at `position` of
+/// `chain`, in the install of a client of family `own`. Pure.
+///
+/// One rule for every client family: the transaction of the first migration
+/// of `chain` whose `admitted_families` holds `own` writes the row, after
+/// the text that makes the CHECK `horsies_client_family_family_known` admit
+/// the value; no other transaction writes it. So the row commits with that
+/// migration, or neither commits.
+///
+/// No transaction writes the row when `chain` has no such migration (the
+/// chain of an earlier build), or when an install applies `chain` from a
+/// later position (a database that passed that migration with no row): the
+/// install then writes the row after the chain (`CompleteInstall`).
+fn family_row_at(chain: &[EmbeddedMigration], position: usize, own: ClientFamily) -> FamilyRow {
+    let first_admitting = chain
+        .iter()
+        .position(|migration| migration.admitted_families.contains(&own));
+    match first_admitting {
+        Some(admitting) if admitting == position => FamilyRow::Written(own),
+        Some(_) | None => FamilyRow::NotWritten,
+    }
 }
 
 /// Whether the transaction of a migration publishes the history readers
@@ -256,7 +283,13 @@ struct MigrationSource {
     version: i64,
     description: &'static str,
     script: SqlScript,
-    family_row: FamilyRow,
+    /// The client families whose value the CHECK
+    /// `horsies_client_family_family_known` admits from this migration on
+    /// and not before it: the families that the text of this migration adds
+    /// to the CHECK. Each client family is in the list of one migration of
+    /// the chain. The install writes the family row of a client in the
+    /// transaction of this migration ([`family_row_at`]).
+    admitted_families: &'static [ClientFamily],
     readers: ReaderPublication,
     /// The indexes that the migration gives their declared form outside a
     /// transaction, before its transaction ([`install_exact_indexes`]). The
@@ -272,11 +305,14 @@ struct MigrationSource {
 /// [`LATER_MIGRATION_FILES`]. The Python client installs through the core,
 /// so both clients apply the same chain.
 const MIGRATION_SOURCES: [MigrationSource; 7] = [
+    // The baseline creates horsies_client_family with the CHECK
+    // horsies_client_family_family_known: family IN ('PYTHON', 'RUST')
+    // (baseline `0001_tables.sql`).
     MigrationSource {
         version: BASELINE_MIGRATION_VERSION,
         description: "baseline",
         script: SqlScript::new("migration_1000_baseline", BASELINE_SQL),
-        family_row: FamilyRow::WrittenWithMigration,
+        admitted_families: &[ClientFamily::Python, ClientFamily::Rust],
         readers: ReaderPublication::PublishedWithMigration,
         exact_indexes: &[],
         retired_indexes: &[],
@@ -292,7 +328,7 @@ const MIGRATION_SOURCES: [MigrationSource; 7] = [
             "migration_1001_lifecycle_record",
             LATER_MIGRATION_FILES[0].2,
         ),
-        family_row: FamilyRow::NotWritten,
+        admitted_families: &[],
         readers: ReaderPublication::NotPublished,
         exact_indexes: &[],
         retired_indexes: &[],
@@ -307,7 +343,7 @@ const MIGRATION_SOURCES: [MigrationSource; 7] = [
             "migration_1002_workflow_start_command_fingerprint",
             LATER_MIGRATION_FILES[1].2,
         ),
-        family_row: FamilyRow::NotWritten,
+        admitted_families: &[],
         readers: ReaderPublication::NotPublished,
         exact_indexes: &[],
         retired_indexes: &[],
@@ -322,7 +358,7 @@ const MIGRATION_SOURCES: [MigrationSource; 7] = [
             "migration_1003_attempt_cancelled",
             LATER_MIGRATION_FILES[2].2,
         ),
-        family_row: FamilyRow::NotWritten,
+        admitted_families: &[],
         readers: ReaderPublication::NotPublished,
         exact_indexes: &[],
         retired_indexes: &[],
@@ -337,7 +373,7 @@ const MIGRATION_SOURCES: [MigrationSource; 7] = [
             "migration_1004_worker_profile_name",
             LATER_MIGRATION_FILES[3].2,
         ),
-        family_row: FamilyRow::NotWritten,
+        admitted_families: &[],
         readers: ReaderPublication::NotPublished,
         exact_indexes: &[],
         retired_indexes: &[],
@@ -352,14 +388,14 @@ const MIGRATION_SOURCES: [MigrationSource; 7] = [
             "migration_1005_claim_generation_by_status",
             LATER_MIGRATION_FILES[4].2,
         ),
-        family_row: FamilyRow::NotWritten,
+        admitted_families: &[],
         readers: ReaderPublication::NotPublished,
         exact_indexes: &[],
         retired_indexes: &[],
     },
     // The migration adds no column and builds no index: it replaces the CHECK
-    // of horsies_client_family, and it does not write or change the family
-    // row.
+    // of horsies_client_family with family IN ('PYTHON', 'RUST',
+    // 'TYPESCRIPT'). Its text does not write or change the family row.
     MigrationSource {
         version: LATER_MIGRATION_FILES[5].0,
         description: "typescript client family",
@@ -367,7 +403,7 @@ const MIGRATION_SOURCES: [MigrationSource; 7] = [
             "migration_1006_typescript_client_family",
             LATER_MIGRATION_FILES[5].2,
         ),
-        family_row: FamilyRow::NotWritten,
+        admitted_families: &[ClientFamily::TypeScript],
         readers: ReaderPublication::NotPublished,
         exact_indexes: &[],
         retired_indexes: &[],
@@ -389,7 +425,7 @@ pub(crate) struct EmbeddedMigration {
     version: i64,
     description: &'static str,
     script: SqlScript,
-    family_row: FamilyRow,
+    admitted_families: &'static [ClientFamily],
     readers: ReaderPublication,
     exact_indexes: &'static [ExactIndex],
     retired_indexes: &'static [RetiredIndex],
@@ -404,7 +440,7 @@ impl EmbeddedMigration {
             version: source.version,
             description: source.description,
             script: source.script,
-            family_row: source.family_row,
+            admitted_families: source.admitted_families,
             readers: source.readers,
             exact_indexes: source.exact_indexes,
             retired_indexes: source.retired_indexes,
@@ -1635,8 +1671,10 @@ async fn claim_in(
 /// the steps of the module documentation.
 ///
 /// Writes only under the install lock; each migration commits with its
-/// bookkeeping row. Does not check the family before the writes of other
-/// operations (`PostgresBroker::ensure_client_family_for_write` does).
+/// bookkeeping row, and the first migration that admits this client's
+/// family also with this client's family row ([`family_row_at`]). Does not
+/// check the family before the writes of other operations
+/// (`PostgresBroker::ensure_client_family_for_write` does).
 ///
 /// Errors ([`SchemaInstallError`]):
 /// - `Refused`, `OtherFamily`: nothing was changed; not retryable.
@@ -1645,7 +1683,10 @@ async fn claim_in(
 /// - `Lock(OwnershipLost)`: the install completed and the release found no
 ///   lock; not retryable.
 /// - `Statement`: a statement failed, a deadlock on the last run included.
-///   Migrations committed before the failure stay.
+///   Migrations committed before the failure stay. On a database with no
+///   family row, a failure before the migration that admits this client's
+///   family commits leaves none; the next install, of any client family,
+///   applies the rest of the chain and writes its own row.
 /// - `RowDecode`: a row of the state read has another shape; not retryable.
 pub(crate) async fn install_schema_on(
     pool: &CorePool,
@@ -1880,7 +1921,9 @@ async fn apply_pending(
 /// Applies the migrations of `chain` from index `first` on, in order
 /// (Python 0.7.0 `_run_schema_upgrade`). For each migration:
 /// 1. its exact indexes, outside a transaction ([`install_exact_indexes`]);
-/// 2. its transaction with its bookkeeping row ([`apply_migration`]);
+/// 2. its transaction with its bookkeeping row, and for the first migration
+///    of `chain` that admits `own` this client's family row
+///    ([`apply_migration`], [`family_row_at`]);
 /// 3. after that commit, the retired indexes of every migration of `chain`
 ///    up to it, outside a transaction ([`remove_retired_indexes`]). A
 ///    removal that a failure stopped runs again with the next migration that
@@ -1890,7 +1933,8 @@ async fn apply_pending(
 /// committed. A failure in step 1 or 2 leaves the bookkeeping row of the
 /// migration unwritten, so the next install applies it again: an exact
 /// index that matches is kept, and the build and claim indexes that the
-/// failure left are dropped.
+/// failure left are dropped. A failure before the transaction of the
+/// migration that admits `own` commits writes no family row.
 async fn apply_chain(
     connection: &mut PooledConnection,
     chain: &[EmbeddedMigration],
@@ -1905,7 +1949,8 @@ async fn apply_chain(
             "installing schema migration",
         );
         install_exact_indexes(connection, migration, log).await?;
-        apply_migration(connection, migration, own, log).await?;
+        let family_row = family_row_at(chain, position, own);
+        apply_migration(connection, migration, family_row, log).await?;
         remove_retired_indexes(connection, &chain[..=position], log).await?;
     }
     Ok(())
@@ -1913,18 +1958,19 @@ async fn apply_chain(
 
 /// Runs one migration in one READ COMMITTED transaction (Python
 /// `install_baseline`): its text, then for migration 1000 the publication of
-/// the history readers, then its bookkeeping row, then for migration 1000
-/// this client's family row. READ COMMITTED is named, not taken from the
-/// server default, because the publication refuses any other isolation. On a
-/// failure nothing of the migration stays; the failure is returned.
+/// the history readers, then its bookkeeping row, then, for
+/// `FamilyRow::Written`, the family row when the table has none. READ
+/// COMMITTED is named, not taken from the server default, because the
+/// publication refuses any other isolation. On a failure nothing of the
+/// migration stays; the failure is returned.
 async fn apply_migration(
     connection: &mut PooledConnection,
     migration: &EmbeddedMigration,
-    own: ClientFamily,
+    family_row: FamilyRow,
     log: StatementLog,
 ) -> Result<(), SchemaInstallError> {
     let mut transaction = connection.begin(IsolationLevel::ReadCommitted).await?;
-    match migration_statements(&mut transaction, migration, own, log).await {
+    match migration_statements(&mut transaction, migration, family_row, log).await {
         Ok(()) => Ok(transaction.commit().await?),
         Err(failure) => {
             // The failure is the answer. A failed ROLLBACK discards the
@@ -1939,7 +1985,7 @@ async fn apply_migration(
 async fn migration_statements(
     transaction: &mut Transaction<'_>,
     migration: &EmbeddedMigration,
-    own: ClientFamily,
+    family_row: FamilyRow,
     log: StatementLog,
 ) -> Result<(), SchemaInstallError> {
     let started = Instant::now();
@@ -1971,8 +2017,8 @@ async fn migration_statements(
             .finish(),
     )
     .await?;
-    match migration.family_row {
-        FamilyRow::WrittenWithMigration => {
+    match family_row {
+        FamilyRow::Written(own) => {
             let family = own.as_str();
             let _recorded = execute_in(
                 transaction,
