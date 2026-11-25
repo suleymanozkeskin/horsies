@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use crate::ts_text::GENERATED_HEADER;
 use crate::{
-    catalogs, constants, error_catalogs, error_detail, manifest, retention_class, task_code,
-    wire_json,
+    catalogs, constants, error_catalogs, error_detail, events, manifest, producer_metrics,
+    retention_class, task_code, wire_json,
 };
 
 /// The folder of the generated modules, inside the package folder.
@@ -130,6 +130,9 @@ pub fn render_all() -> Vec<GeneratedFile> {
         wire_json::generated_files(),
         manifest::generated_files(),
         constants::generated_files(),
+        events::generated_files(),
+        producer_metrics::generated_files(),
+        manifest::schedule_pattern_files(),
     ]
     .into_iter()
     .flatten()
@@ -336,13 +339,16 @@ mod tests {
             "error_codes",
             "error_detail",
             "event_bounds",
+            "events",
             "exit_codes",
             "history",
             "manifest",
             "monitoring",
             "monitoring_bounds",
             "monitoring_errors",
+            "producer_metrics",
             "retention_class",
+            "schedule_pattern",
             "scheduler_manifest",
             "status",
             "task_code",
