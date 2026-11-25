@@ -162,7 +162,13 @@ describe("date-time reader", () => {
   });
 });
 
-type TimeRow = { readonly h: number; readonly mi: number; readonly s: number; readonly us: number; readonly text: string };
+type TimeRow = {
+  readonly h: number;
+  readonly mi: number;
+  readonly s: number;
+  readonly us: number;
+  readonly text: string;
+};
 
 describe("time of day", () => {
   test("the fraction: none, 6 digits for a microsecond or a millisecond, 9 below the microsecond", () => {
