@@ -1050,7 +1050,7 @@ dependencies = [
  "owo-colors",
  "percent-encoding",
  "proc-macro2",
- "rand 0.8.8",
+ "rand 0.10.4",
  "rustls",
  "rustls-native-certs",
  "schemars",
