@@ -261,13 +261,21 @@ fn module_sections(contents: &ErrorModule) -> Vec<String> {
 fn assert_payload_records_in_module(classes: &[&ErrorClass], records: &[RecordClass]) {
     for class in classes {
         for slot in class_slots(class) {
-            let holds_payload = matches!(
-                slot,
-                ClassSlot::Field {
-                    slot_type: SlotType::TaskSendPayload,
-                    ..
-                }
-            );
+            let holds_payload = match slot {
+                ClassSlot::Field { slot_type, .. } => match slot_type {
+                    SlotType::TaskSendPayload => true,
+                    SlotType::Str
+                    | SlotType::Bool
+                    | SlotType::Int
+                    | SlotType::Uuid
+                    | SlotType::UuidText
+                    | SlotType::TaskStatus => false,
+                },
+                ClassSlot::CodeMember { .. }
+                | ClassSlot::CodeSubset { .. }
+                | ClassSlot::NeverRetryable
+                | ClassSlot::Cause { .. } => false,
+            };
             assert!(
                 !holds_payload || records.contains(&TASK_SEND_PAYLOAD),
                 "the class {} holds {}, which is not a record of its module",
